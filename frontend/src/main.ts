@@ -1,6 +1,8 @@
 import { StateManager } from './state-manager.js';
 import { SimulationState } from './types.js';
 import { CanvasRenderer } from './canvas-renderer.js';
+import { NetworkManager } from './network.js';
+import { serializeSimulationState } from './serialization.js';
 
 console.log("BlastDaemon SSOT Initializing...");
 
@@ -24,5 +26,20 @@ if (canvas) {
 } else {
     console.error("Could not find simulation-canvas element.");
 }
+
+// Initialize Networking
+const networkManager = new NetworkManager('ws://localhost:8080');
+networkManager.connect().then(() => {
+    console.log("Network connected, sending initial state...");
+    const state = stateManager.getCurrentState();
+    if (state) {
+        const payload = serializeSimulationState(state);
+        console.log("Payload to send:", payload);
+        networkManager.send(payload);
+        console.log("Initial state sent to BlastDaemon.");
+    }
+}).catch(err => {
+    console.error("Failed to connect to BlastDaemon:", err);
+});
 
 console.log("SSOT Verification complete.");
