@@ -21,6 +21,7 @@ add_executable(BlastDaemon backend/BlastDaemon/main.cpp)
 # Solver (Worker)
 add_executable(BlastSolver
     backend/BlastSolver/main.cpp
+    backend/BlastSolver/cfd_solver.cpp
     backend/BlastSolver/HDF5Writer.cpp
     backend/BlastSolver/XDMFWriter.cpp
 )

@@ -6,7 +6,7 @@
 class XDMFWriter {
 public:
     static bool writeXDMF(const std::string& xmfFilename, const std::string& h5Filename,
-                         int numPoints, float dx);
+                         int numPoints, double dx);
 };
 
 #endif // XDMF_WRITER_HPP
