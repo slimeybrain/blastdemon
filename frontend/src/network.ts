@@ -1,6 +1,7 @@
 export class NetworkManager {
     private socket: WebSocket | null = null;
     private url: string;
+    private messageCallbacks: ((data: string) => void)[] = [];
 
     constructor(url: string) {
         this.url = url;
@@ -22,6 +23,7 @@ export class NetworkManager {
 
             this.socket.onmessage = (event) => {
                 console.log('Message from server:', event.data);
+                this.messageCallbacks.forEach(callback => callback(event.data));
             };
 
             this.socket.onclose = () => {
@@ -36,5 +38,9 @@ export class NetworkManager {
         } else {
             console.error('WebSocket is not open');
         }
+    }
+
+    onMessage(callback: (data: string) => void): void {
+        this.messageCallbacks.push(callback);
     }
 }

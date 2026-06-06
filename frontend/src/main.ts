@@ -3,6 +3,7 @@ import { SimulationState } from './types.js';
 import { CanvasRenderer } from './canvas-renderer.js';
 import { NetworkManager } from './network.js';
 import { serializeSimulationState } from './serialization.js';
+import { TelemetryRenderer } from './telemetry-renderer.js';
 
 console.log("BlastDaemon SSOT Initializing...");
 
@@ -27,8 +28,22 @@ if (canvas) {
     console.error("Could not find simulation-canvas element.");
 }
 
+const telemetryCanvas = document.getElementById('telemetry-canvas') as HTMLCanvasElement;
+let telemetryRenderer: TelemetryRenderer | null = null;
+if (telemetryCanvas) {
+    telemetryRenderer = new TelemetryRenderer(telemetryCanvas);
+    console.log("TelemetryRenderer initialized.");
+}
+
 // Initialize Networking
 const networkManager = new NetworkManager('ws://localhost:8080');
+
+if (telemetryRenderer) {
+    networkManager.onMessage((data) => {
+        telemetryRenderer!.handleMessage(data);
+    });
+}
+
 networkManager.connect().then(() => {
     console.log("Network connected, sending initial state...");
     const state = stateManager.getCurrentState();
