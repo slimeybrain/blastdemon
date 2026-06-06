@@ -1,13 +1,13 @@
 :root {
-    --bg-main: #1e1e1e;
-    --bg-panel: #252526;
+    --bg-main: #111111;
+    --bg-panel: #1e1e1e;
     --border-color: #333333;
     --text-color: #cccccc;
     --header-text-color: #ffffff;
     --accent-color: #007acc;
 
-    --font-ui: system-ui, -apple-system, "Segoe UI", sans-serif;
-    --font-mono: "Consolas", "Monaco", "Courier New", monospace;
+    --font-ui: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --font-mono: Consolas, "Fira Code", monospace;
 }
 
 * {
@@ -34,22 +34,24 @@ body {
     grid-template-rows: 1fr 250px;
     height: 100vh;
     width: 100vw;
-    gap: 0;
+    gap: 4px;
+    background-color: var(--bg-main);
 }
 
 .panel {
     background-color: var(--bg-panel);
     border: 1px solid var(--border-color);
+    border-radius: 4px;
     display: flex;
     flex-direction: column;
     overflow: hidden;
 }
 
 .panel-header {
-    background-color: var(--bg-main);
-    padding: 4px 8px;
+    background-color: transparent;
+    padding: 6px 8px;
     border-bottom: 1px solid var(--border-color);
-    font-weight: bold;
+    font-weight: 600;
     font-size: 0.85rem;
     color: var(--header-text-color);
     user-select: none;
@@ -91,7 +93,7 @@ textarea {
 }
 
 #outliner li {
-    padding: 4px 12px;
+    padding: 4px 8px;
     cursor: pointer;
     font-size: 0.85rem;
     border-bottom: 1px solid transparent;
