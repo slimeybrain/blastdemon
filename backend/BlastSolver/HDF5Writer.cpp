@@ -46,3 +46,38 @@ bool HDF5Writer::writePressure(const std::string& filename, const std::vector<fl
 
     return status >= 0;
 }
+
+bool HDF5Writer::writeFrame(const std::string& filename,
+                          const std::vector<double>& rho,
+                          const std::vector<double>& p,
+                          const std::vector<double>& u,
+                          const std::vector<double>& alpha1,
+                          const std::vector<double>& alpha2) {
+    hid_t file_id, dataspace_id;
+    hsize_t dims[1];
+    dims[0] = rho.size();
+
+    file_id = H5Fcreate(filename.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
+    if (file_id < 0) return false;
+
+    dataspace_id = H5Screate_simple(1, dims, NULL);
+
+    auto writeDataset = [&](const char* name, const std::vector<double>& data) {
+        hid_t dataset_id = H5Dcreate2(file_id, name, H5T_NATIVE_DOUBLE, dataspace_id,
+                                    H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+        if (dataset_id >= 0) {
+            H5Dwrite(dataset_id, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, data.data());
+            H5Dclose(dataset_id);
+        }
+    };
+
+    writeDataset("/Density", rho);
+    writeDataset("/Pressure", p);
+    writeDataset("/Velocity", u);
+    writeDataset("/Alpha1", alpha1);
+    writeDataset("/Alpha2", alpha2);
+
+    H5Sclose(dataspace_id);
+    H5Fclose(file_id);
+    return true;
+}
