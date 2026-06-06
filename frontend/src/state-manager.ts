@@ -1,4 +1,4 @@
-import { SimulationState } from './types';
+import { SimulationState } from './types.js';
 
 export class StateManager {
     private history: SimulationState[] = [];

@@ -4,9 +4,35 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>BlastDaemon Frontend</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+        h1 {
+            margin: 10px;
+        }
+        #canvas-container {
+            flex-grow: 1;
+            background-color: #e0e0e0;
+            position: relative;
+        }
+        canvas {
+            display: block;
+            background-color: white;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+    </style>
 </head>
 <body>
     <h1>BlastDaemon Frontend</h1>
+    <div id="canvas-container">
+        <canvas id="simulation-canvas" width="1200" height="800"></canvas>
+    </div>
     <script type="module" src="dist/main.js"></script>
 </body>
 </html>
