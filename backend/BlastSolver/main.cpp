@@ -5,6 +5,9 @@
 #include <thread>
 #include <chrono>
 #include <sstream>
+#include <iomanip>
+#include "HDF5Writer.hpp"
+#include "XDMFWriter.hpp"
 
 void run1DSolver() {
     const int num_points = 100;
@@ -26,6 +29,22 @@ void run1DSolver() {
         }
 
         std::cout << "{\"telemetry\": \"" << ss.str() << "\"}" << std::endl;
+
+        // Perform I/O every 10 steps
+        if (step % 10 == 0) {
+            std::stringstream frame_ss;
+            frame_ss << "frame_" << std::setw(4) << std::setfill('0') << (step / 10);
+            std::string base_name = frame_ss.str();
+            std::string h5_filename = base_name + ".h5";
+            std::string xmf_filename = base_name + ".xmf";
+
+            if (HDF5Writer::writePressure(h5_filename, pressure)) {
+                if (XDMFWriter::writeXDMF(xmf_filename, h5_filename, num_points, dx)) {
+                    std::cout << "{\"type\": \"IO_SUCCESS\", \"file\": \"" << xmf_filename << "\"}" << std::endl;
+                }
+            }
+        }
+
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 }
