@@ -3,8 +3,12 @@ import { SimulationState } from './types.js';
 import { CanvasRenderer } from './canvas-renderer.js';
 import { NetworkManager } from './network.js';
 import { serializeSimulationState } from './serialization.js';
-import { TelemetryRenderer } from './telemetry-renderer.js';
 import { LayoutManager } from './layout-manager.js';
+
+// Extend HTMLCanvasElement for TypeScript if it's missing transferControlToOffscreen
+interface TransferableCanvas extends HTMLCanvasElement {
+    transferControlToOffscreen(): any;
+}
 
 console.log("BlastDaemon Workspace Initializing...");
 
@@ -38,12 +42,25 @@ if (canvas && canvasContainer) {
     console.error("Could not find simulation-canvas or container.");
 }
 
-const telemetryCanvas = document.getElementById('telemetry-canvas') as HTMLCanvasElement;
+// Telemetry Worker Initialization
+const telemetryCanvas = document.getElementById('telemetry-canvas') as TransferableCanvas;
 const telemetryContainer = document.getElementById('telemetry-container') as HTMLElement;
-let telemetryRenderer: TelemetryRenderer | null = null;
+
+let chartWorker: Worker | null = null;
+
 if (telemetryCanvas && telemetryContainer) {
-    telemetryRenderer = new TelemetryRenderer(telemetryCanvas);
-    console.log("TelemetryRenderer initialized.");
+    // Transfer control to OffscreenCanvas
+    const offscreen = telemetryCanvas.transferControlToOffscreen();
+
+    // Create worker using standard ES6 module
+    chartWorker = new Worker(new URL('./ChartWorker.js', import.meta.url), { type: 'module' });
+
+    chartWorker.postMessage({
+        type: 'init',
+        canvas: offscreen
+    }, [offscreen] as any);
+
+    console.log("Telemetry ChartWorker initialized.");
 }
 
 // Outliner Population
@@ -68,10 +85,13 @@ const resizeObserver = new ResizeObserver(entries => {
             canvas.width = entry.contentRect.width;
             canvas.height = entry.contentRect.height;
             renderer.render();
-        } else if (entry.target === telemetryContainer && telemetryCanvas && telemetryRenderer) {
-            telemetryCanvas.width = entry.contentRect.width;
-            telemetryCanvas.height = entry.contentRect.height;
-            // Telemetry might need a re-draw if it has data
+        } else if (entry.target === telemetryContainer && telemetryCanvas && chartWorker) {
+            // Send resize message to worker
+            chartWorker.postMessage({
+                type: 'resize',
+                width: entry.contentRect.width,
+                height: entry.contentRect.height
+            });
         }
     }
 });
@@ -82,11 +102,14 @@ if (telemetryContainer) resizeObserver.observe(telemetryContainer);
 // Initialize Networking
 const networkManager = new NetworkManager('ws://localhost:8080');
 
-if (telemetryRenderer) {
-    networkManager.onMessage((data) => {
-        telemetryRenderer!.handleMessage(data);
-    });
-}
+networkManager.onMessage((data) => {
+    if (chartWorker) {
+        chartWorker.postMessage({
+            type: 'data',
+            telemetry: data
+        });
+    }
+});
 
 networkManager.connect().then(() => {
     console.log("Network connected, sending initial state...");
