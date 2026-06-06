@@ -157,6 +157,29 @@ std::string get_websocket_accept(const std::string& key) {
     return base64_encode(sha1::compute(key + magic));
 }
 
+void send_websocket_frame(SOCKET_TYPE client_fd, const std::string& message) {
+    std::vector<uint8_t> frame;
+    frame.push_back(0x81); // FIN + Text frame
+
+    size_t len = message.length();
+    if (len <= 125) {
+        frame.push_back((uint8_t)len);
+    } else if (len <= 65535) {
+        frame.push_back(126);
+        frame.push_back((uint8_t)((len >> 8) & 0xFF));
+        frame.push_back((uint8_t)(len & 0xFF));
+    } else {
+        // Very large payloads not handled for simplicity, but we could add 127 case
+        frame.push_back(127);
+        for (int i = 7; i >= 0; --i) {
+            frame.push_back((uint8_t)((len >> (8 * i)) & 0xFF));
+        }
+    }
+
+    frame.insert(frame.end(), message.begin(), message.end());
+    send(client_fd, (const char*)frame.data(), (int)frame.size(), 0);
+}
+
 // --- Native Structures ---
 struct Node {
     std::string id;
@@ -206,10 +229,42 @@ std::string get_json_value(const std::string& json, const std::string& key) {
     }
 }
 
-void process_json(const std::string& json) {
+void process_json(const std::string& json, SOCKET_TYPE client_fd) {
     std::cout << "--- EXECUTE COMMAND RECEIVED ---" << std::endl;
     std::string command = get_json_value(json, "command");
     if (command != "EXECUTE") return;
+
+    // Start a thread to run the solver and relay telemetry
+    std::thread([client_fd]() {
+        std::cout << "Starting BlastSolver..." << std::endl;
+#ifdef _WIN32
+        FILE* pipe = _popen("BlastSolver.exe", "r");
+#else
+        FILE* pipe = popen("./BlastSolver", "r");
+#endif
+        if (!pipe) {
+            std::cerr << "Failed to start BlastSolver" << std::endl;
+            return;
+        }
+
+        char buffer[16384];
+        while (fgets(buffer, sizeof(buffer), pipe) != NULL) {
+            std::string line(buffer);
+            // Remove newline if present
+            if (!line.empty() && line.back() == '\n') line.pop_back();
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+
+            if (!line.empty()) {
+                send_websocket_frame(client_fd, line);
+            }
+        }
+#ifdef _WIN32
+        _pclose(pipe);
+#else
+        pclose(pipe);
+#endif
+        std::cout << "BlastSolver execution complete." << std::endl;
+    }).detach();
 
     SimulationState state;
     size_t nodes_pos = json.find("\"nodes\"");
@@ -311,7 +366,7 @@ void handle_client(SOCKET_TYPE client_fd) {
 
                 if (opcode == 0x1) {
                     std::string message(payload.begin(), payload.end());
-                    process_json(message);
+                    process_json(message, client_fd);
                 }
             }
         }
