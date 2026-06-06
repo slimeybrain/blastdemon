@@ -7,6 +7,8 @@
 #include <cstring>
 #include <thread>
 #include <map>
+#include <memory>
+#include "ProcessManager.hpp"
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -229,42 +231,59 @@ std::string get_json_value(const std::string& json, const std::string& key) {
     }
 }
 
-void process_json(const std::string& json, SOCKET_TYPE client_fd) {
-    std::cout << "--- EXECUTE COMMAND RECEIVED ---" << std::endl;
+void process_json(const std::string& json, SOCKET_TYPE client_fd, std::shared_ptr<Process>& active_process) {
     std::string command = get_json_value(json, "command");
+
+    if (command == "STOP") {
+        std::cout << "--- STOP COMMAND RECEIVED ---" << std::endl;
+        if (active_process) {
+            active_process->terminate();
+            active_process.reset();
+            std::cout << "Process terminated by user." << std::endl;
+        }
+        return;
+    }
+
     if (command != "EXECUTE") return;
+    std::cout << "--- EXECUTE COMMAND RECEIVED ---" << std::endl;
 
-    // Start a thread to run the solver and relay telemetry
-    std::thread([client_fd]() {
-        std::cout << "Starting BlastSolver..." << std::endl;
+    if (active_process) {
+        active_process->terminate();
+        active_process.reset();
+    }
+
+    active_process = std::make_shared<Process>();
+    std::string solver_path = "./BlastSolver";
 #ifdef _WIN32
-        FILE* pipe = _popen("BlastSolver.exe", "r");
-#else
-        FILE* pipe = popen("./BlastSolver", "r");
+    solver_path = "BlastSolver.exe";
 #endif
-        if (!pipe) {
-            std::cerr << "Failed to start BlastSolver" << std::endl;
-            return;
-        }
 
-        char buffer[16384];
-        while (fgets(buffer, sizeof(buffer), pipe) != NULL) {
-            std::string line(buffer);
-            // Remove newline if present
-            if (!line.empty() && line.back() == '\n') line.pop_back();
-            if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (active_process->start(solver_path)) {
+        std::cout << "Starting BlastSolver via ProcessManager..." << std::endl;
+        std::thread([client_fd, proc = active_process]() {
+            char buffer[4096];
+            std::string line_accum;
+            while (true) {
+                int n = proc->readStdout(buffer, sizeof(buffer) - 1);
+                if (n <= 0) break;
+                buffer[n] = '\0';
+                line_accum += buffer;
 
-            if (!line.empty()) {
-                send_websocket_frame(client_fd, line);
+                size_t pos;
+                while ((pos = line_accum.find('\n')) != std::string::npos) {
+                    std::string line = line_accum.substr(0, pos);
+                    if (!line.empty() && line.back() == '\r') line.pop_back();
+                    if (!line.empty()) {
+                        send_websocket_frame(client_fd, line);
+                    }
+                    line_accum.erase(0, pos + 1);
+                }
             }
-        }
-#ifdef _WIN32
-        _pclose(pipe);
-#else
-        pclose(pipe);
-#endif
-        std::cout << "BlastSolver execution complete." << std::endl;
-    }).detach();
+            std::cout << "Telemetry relay thread finished." << std::endl;
+        }).detach();
+    } else {
+        std::cerr << "Failed to start BlastSolver" << std::endl;
+    }
 
     SimulationState state;
     size_t nodes_pos = json.find("\"nodes\"");
@@ -306,6 +325,7 @@ void process_json(const std::string& json, SOCKET_TYPE client_fd) {
 }
 
 void handle_client(SOCKET_TYPE client_fd) {
+    std::shared_ptr<Process> active_process = nullptr;
     char handshake_buffer[8192];
     int bytes_read = recv(client_fd, handshake_buffer, sizeof(handshake_buffer) - 1, 0);
     if (bytes_read <= 0) {
@@ -366,11 +386,16 @@ void handle_client(SOCKET_TYPE client_fd) {
 
                 if (opcode == 0x1) {
                     std::string message(payload.begin(), payload.end());
-                    process_json(message, client_fd);
+                    process_json(message, client_fd, active_process);
                 }
             }
         }
     }
+
+    if (active_process) {
+        active_process->terminate();
+    }
+
     std::cout << "Client disconnected" << std::endl;
     CLOSE_SOCKET(client_fd);
 }
