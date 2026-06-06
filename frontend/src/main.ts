@@ -5,7 +5,7 @@ import { NetworkManager } from './network.js';
 import { serializeSimulationState } from './serialization.js';
 import { TelemetryRenderer } from './telemetry-renderer.js';
 
-console.log("BlastDaemon SSOT Initializing...");
+console.log("BlastDaemon Workspace Initializing...");
 
 const initialState: SimulationState = {
     nodes: [
@@ -19,21 +19,56 @@ const initialState: SimulationState = {
 
 const stateManager = new StateManager(initialState);
 const canvas = document.getElementById('simulation-canvas') as HTMLCanvasElement;
+const canvasContainer = document.getElementById('canvas-container') as HTMLElement;
 
-if (canvas) {
-    const renderer = new CanvasRenderer(canvas, stateManager);
-    renderer.render();
-    console.log("CanvasRenderer initialized and initial state rendered.");
+let renderer: CanvasRenderer | null = null;
+if (canvas && canvasContainer) {
+    renderer = new CanvasRenderer(canvas, stateManager);
+    console.log("CanvasRenderer initialized.");
 } else {
-    console.error("Could not find simulation-canvas element.");
+    console.error("Could not find simulation-canvas or container.");
 }
 
 const telemetryCanvas = document.getElementById('telemetry-canvas') as HTMLCanvasElement;
+const telemetryContainer = document.getElementById('telemetry-container') as HTMLElement;
 let telemetryRenderer: TelemetryRenderer | null = null;
-if (telemetryCanvas) {
+if (telemetryCanvas && telemetryContainer) {
     telemetryRenderer = new TelemetryRenderer(telemetryCanvas);
     console.log("TelemetryRenderer initialized.");
 }
+
+// Outliner Population
+const outliner = document.getElementById('outliner');
+if (outliner) {
+    const updateOutliner = (state: SimulationState) => {
+        outliner.innerHTML = '';
+        state.nodes.forEach(node => {
+            const li = document.createElement('li');
+            li.textContent = `${node.type} (${node.id})`;
+            outliner.appendChild(li);
+        });
+    };
+    stateManager.onStateChange(updateOutliner);
+    updateOutliner(initialState);
+}
+
+// Resize Observer
+const resizeObserver = new ResizeObserver(entries => {
+    for (const entry of entries) {
+        if (entry.target === canvasContainer && canvas && renderer) {
+            canvas.width = entry.contentRect.width;
+            canvas.height = entry.contentRect.height;
+            renderer.render();
+        } else if (entry.target === telemetryContainer && telemetryCanvas && telemetryRenderer) {
+            telemetryCanvas.width = entry.contentRect.width;
+            telemetryCanvas.height = entry.contentRect.height;
+            // Telemetry might need a re-draw if it has data
+        }
+    }
+});
+
+if (canvasContainer) resizeObserver.observe(canvasContainer);
+if (telemetryContainer) resizeObserver.observe(telemetryContainer);
 
 // Initialize Networking
 const networkManager = new NetworkManager('ws://localhost:8080');
@@ -49,7 +84,6 @@ networkManager.connect().then(() => {
     const state = stateManager.getCurrentState();
     if (state) {
         const payload = serializeSimulationState(state);
-        console.log("Payload to send:", payload);
         networkManager.send(payload);
         console.log("Initial state sent to BlastDaemon.");
     }
@@ -57,4 +91,4 @@ networkManager.connect().then(() => {
     console.error("Failed to connect to BlastDaemon:", err);
 });
 
-console.log("SSOT Verification complete.");
+console.log("Workspace ready.");

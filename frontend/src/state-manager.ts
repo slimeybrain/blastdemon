@@ -3,6 +3,7 @@ import { SimulationState } from './types.js';
 export class StateManager {
     private history: SimulationState[] = [];
     private currentIndex: number = -1;
+    private listeners: ((state: SimulationState) => void)[] = [];
 
     constructor(initialState?: SimulationState) {
         if (initialState) {
@@ -24,6 +25,7 @@ export class StateManager {
 
         this.history.push(stateCopy);
         this.currentIndex++;
+        this.notifyListeners();
     }
 
     /**
@@ -32,7 +34,9 @@ export class StateManager {
     undo(): SimulationState | null {
         if (this.currentIndex > 0) {
             this.currentIndex--;
-            return this.getCurrentState();
+            const state = this.getCurrentState();
+            this.notifyListeners();
+            return state;
         }
         return null;
     }
@@ -43,7 +47,9 @@ export class StateManager {
     redo(): SimulationState | null {
         if (this.currentIndex < this.history.length - 1) {
             this.currentIndex++;
-            return this.getCurrentState();
+            const state = this.getCurrentState();
+            this.notifyListeners();
+            return state;
         }
         return null;
     }
@@ -65,5 +71,19 @@ export class StateManager {
 
     getCurrentIndex(): number {
         return this.currentIndex;
+    }
+
+    /**
+     * Registers a listener to be called when the state changes.
+     */
+    onStateChange(listener: (state: SimulationState) => void): void {
+        this.listeners.push(listener);
+    }
+
+    private notifyListeners(): void {
+        const currentState = this.getCurrentState();
+        if (currentState) {
+            this.listeners.forEach(listener => listener(currentState));
+        }
     }
 }

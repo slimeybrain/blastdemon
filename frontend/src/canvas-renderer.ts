@@ -9,6 +9,18 @@ export class CanvasRenderer {
     private draggedNode: Node | null = null;
     private dragOffset = { x: 0, y: 0 };
 
+    // Theme constants
+    private readonly COLORS = {
+        bg: '#1e1e1e',
+        grid: '#2a2a2a',
+        nodeBg: '#333333',
+        nodeBorder: '#555555',
+        nodeHeader: '#007acc',
+        text: '#cccccc',
+        textHeader: '#ffffff',
+        edge: '#888888'
+    };
+
     constructor(canvas: HTMLCanvasElement, stateManager: StateManager) {
         this.canvas = canvas;
         const context = canvas.getContext('2d');
@@ -38,7 +50,6 @@ export class CanvasRenderer {
         const nodeWidth = 150;
         const nodeHeight = 80;
 
-        // Iterate backwards to select the top-most node
         for (let i = state.nodes.length - 1; i >= 0; i--) {
             const node = state.nodes[i];
             if (mouseX >= node.x && mouseX <= node.x + nodeWidth &&
@@ -67,7 +78,6 @@ export class CanvasRenderer {
             const nodeIndex = state.nodes.findIndex(n => n.id === this.draggedNode!.id);
             if (nodeIndex !== -1) {
                 state.nodes[nodeIndex] = this.draggedNode;
-                // Render with temporary state without pushing to StateManager
                 this.renderWithState(state);
             }
         }
@@ -95,38 +105,74 @@ export class CanvasRenderer {
         this.renderWithState(state);
     }
 
+    private drawGrid(): void {
+        const gridSize = 20;
+        this.ctx.strokeStyle = this.COLORS.grid;
+        this.ctx.lineWidth = 1;
+
+        this.ctx.beginPath();
+        for (let x = 0; x <= this.canvas.width; x += gridSize) {
+            this.ctx.moveTo(x, 0);
+            this.ctx.lineTo(x, this.canvas.height);
+        }
+        for (let y = 0; y <= this.canvas.height; y += gridSize) {
+            this.ctx.moveTo(0, y);
+            this.ctx.lineTo(this.canvas.width, y);
+        }
+        this.ctx.stroke();
+    }
+
     private renderWithState(state: SimulationState): void {
-        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+        this.ctx.fillStyle = this.COLORS.bg;
+        this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
 
-        // Draw edges first
+        this.drawGrid();
+
         state.edges.forEach(edge => this.drawEdge(edge, state));
-
-        // Draw nodes on top
         state.nodes.forEach(node => this.drawNode(node));
     }
 
     private drawNode(node: Node): void {
         const width = 150;
         const height = 80;
+        const headerHeight = 25;
 
-        this.ctx.fillStyle = '#f0f0f0';
-        this.ctx.strokeStyle = '#333';
-        this.ctx.lineWidth = 2;
+        // Shadow/Glow
+        this.ctx.shadowBlur = 10;
+        this.ctx.shadowColor = 'rgba(0,0,0,0.5)';
 
-        // Draw rectangle
+        // Node Body
+        this.ctx.fillStyle = this.COLORS.nodeBg;
+        this.ctx.strokeStyle = this.COLORS.nodeBorder;
+        this.ctx.lineWidth = 1;
         this.ctx.beginPath();
-        this.ctx.rect(node.x, node.y, width, height);
+        this.ctx.roundRect(node.x, node.y, width, height, 4);
         this.ctx.fill();
         this.ctx.stroke();
 
-        // Draw type
-        this.ctx.fillStyle = '#000';
-        this.ctx.font = 'bold 14px Arial';
-        this.ctx.fillText(node.type, node.x + 10, node.y + 25);
+        this.ctx.shadowBlur = 0;
 
-        // Draw parameters
-        this.ctx.font = '12px Arial';
-        let offsetY = 45;
+        // Node Header
+        this.ctx.fillStyle = this.COLORS.nodeHeader;
+        this.ctx.beginPath();
+        this.ctx.roundRect(node.x, node.y, width, headerHeight, [4, 4, 0, 0]);
+        this.ctx.fill();
+
+        // Node Title
+        this.ctx.fillStyle = this.COLORS.textHeader;
+        this.ctx.font = 'bold 12px system-ui';
+        this.ctx.fillText(node.type, node.x + 10, node.y + 17);
+
+        // Node ID
+        this.ctx.fillStyle = 'rgba(255,255,255,0.5)';
+        this.ctx.font = '10px Consolas';
+        const idWidth = this.ctx.measureText(node.id).width;
+        this.ctx.fillText(node.id, node.x + width - idWidth - 10, node.y + 17);
+
+        // Parameters
+        this.ctx.fillStyle = this.COLORS.text;
+        this.ctx.font = '11px system-ui';
+        let offsetY = headerHeight + 20;
         for (const [key, value] of Object.entries(node.parameters)) {
             this.ctx.fillText(`${key}: ${value}`, node.x + 10, node.y + offsetY);
             offsetY += 15;
@@ -142,7 +188,6 @@ export class CanvasRenderer {
         const nodeWidth = 150;
         const nodeHeight = 80;
 
-        // Ports positions (simplified: right middle for output, left middle for input)
         const startX = fromNode.x + nodeWidth;
         const startY = fromNode.y + nodeHeight / 2;
         const endX = toNode.x;
@@ -153,7 +198,7 @@ export class CanvasRenderer {
         const cp2x = startX + (endX - startX) / 2;
         const cp2y = endY;
 
-        this.ctx.strokeStyle = '#666';
+        this.ctx.strokeStyle = this.COLORS.edge;
         this.ctx.lineWidth = 2;
         this.ctx.beginPath();
         this.ctx.moveTo(startX, startY);

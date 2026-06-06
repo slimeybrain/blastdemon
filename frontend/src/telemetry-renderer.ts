@@ -1,6 +1,15 @@
 export class TelemetryRenderer {
     private canvas: HTMLCanvasElement;
     private ctx: CanvasRenderingContext2D;
+    private lastValues: number[] = [];
+
+    private readonly COLORS = {
+        bg: '#1a1a1a',
+        line: '#007acc',
+        axis: '#444444',
+        text: '#888888',
+        grid: '#252525'
+    };
 
     constructor(canvas: HTMLCanvasElement) {
         this.canvas = canvas;
@@ -15,26 +24,43 @@ export class TelemetryRenderer {
         try {
             const json = JSON.parse(data);
             if (json.telemetry) {
-                const values = json.telemetry.split(',').map(Number);
-                this.draw(values);
+                this.lastValues = json.telemetry.split(',').map(Number);
+                this.draw(this.lastValues);
             }
         } catch (e) {
-            // Not a telemetry message or malformed JSON
+            // Not a telemetry message
         }
     }
 
-    private draw(values: number[]): void {
-        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    public draw(values: number[] = this.lastValues): void {
+        this.ctx.fillStyle = this.COLORS.bg;
+        this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
 
-        if (values.length < 2) return;
+        if (values.length < 2) {
+            this.drawAxes();
+            return;
+        }
 
-        this.ctx.beginPath();
-        this.ctx.strokeStyle = '#007bff';
-        this.ctx.lineWidth = 2;
-
-        const margin = 20;
+        const margin = 30;
         const width = this.canvas.width - 2 * margin;
         const height = this.canvas.height - 2 * margin;
+
+        // Draw Grid
+        this.ctx.strokeStyle = this.COLORS.grid;
+        this.ctx.lineWidth = 1;
+        this.ctx.beginPath();
+        for (let i = 1; i < 4; i++) {
+            const y = margin + (i / 4) * height;
+            this.ctx.moveTo(margin, y);
+            this.ctx.lineTo(this.canvas.width - margin, y);
+        }
+        this.ctx.stroke();
+
+        // Draw Line
+        this.ctx.beginPath();
+        this.ctx.strokeStyle = this.COLORS.line;
+        this.ctx.lineWidth = 2;
+        this.ctx.lineJoin = 'round';
 
         for (let i = 0; i < values.length; i++) {
             const x = margin + (i / (values.length - 1)) * width;
@@ -46,25 +72,30 @@ export class TelemetryRenderer {
                 this.ctx.lineTo(x, y);
             }
         }
-
         this.ctx.stroke();
 
-        // Draw axes
+        this.drawAxes();
+    }
+
+    private drawAxes(): void {
+        const margin = 30;
         this.ctx.beginPath();
-        this.ctx.strokeStyle = '#333';
+        this.ctx.strokeStyle = this.COLORS.axis;
         this.ctx.lineWidth = 1;
+
         // X-axis
         this.ctx.moveTo(margin, this.canvas.height - margin);
         this.ctx.lineTo(this.canvas.width - margin, this.canvas.height - margin);
+
         // Y-axis
         this.ctx.moveTo(margin, margin);
         this.ctx.lineTo(margin, this.canvas.height - margin);
         this.ctx.stroke();
 
         // Labels
-        this.ctx.fillStyle = '#333';
-        this.ctx.font = '12px Arial';
-        this.ctx.fillText('Pressure', margin + 5, margin + 10);
-        this.ctx.fillText('Radius (Index)', this.canvas.width - 100, this.canvas.height - margin + 15);
+        this.ctx.fillStyle = this.COLORS.text;
+        this.ctx.font = '10px Consolas';
+        this.ctx.fillText('Pressure', margin, margin - 10);
+        this.ctx.fillText('Radius', this.canvas.width - margin - 35, this.canvas.height - margin + 15);
     }
 }

@@ -3,36 +3,44 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BlastDaemon Frontend</title>
-    <style>
-        body {
-            margin: 0;
-            padding: 0;
-            display: flex;
-            flex-direction: column;
-            height: 100vh;
-            overflow: hidden;
-        }
-        h1 {
-            margin: 10px;
-        }
-        #canvas-container {
-            flex-grow: 1;
-            background-color: #e0e0e0;
-            position: relative;
-        }
-        canvas {
-            display: block;
-            background-color: white;
-            box-shadow: 0 0 10px rgba(0,0,0,0.1);
-        }
-    </style>
+    <title>BlastDaemon | Professional Engineering Workspace</title>
+    <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-    <h1>BlastDaemon Frontend</h1>
-    <div id="canvas-container">
-        <canvas id="simulation-canvas" width="1200" height="800"></canvas>
-        <canvas id="telemetry-canvas" width="600" height="300" style="position: absolute; top: 10px; right: 10px; border: 2px solid #333; background: #fff;"></canvas>
+    <div id="app-container">
+        <!-- Outliner Sidebar -->
+        <aside id="left-sidebar" class="panel">
+            <div class="panel-header">Outliner</div>
+            <div class="panel-content">
+                <ul id="outliner">
+                    <!-- Populated by main.ts -->
+                </ul>
+            </div>
+        </aside>
+
+        <!-- Node Graph Viewport -->
+        <main id="center-viewport" class="panel">
+            <div class="panel-header">Node Graph</div>
+            <div id="canvas-container" class="panel-content">
+                <canvas id="simulation-canvas"></canvas>
+            </div>
+        </main>
+
+        <!-- Telemetry Sidebar -->
+        <aside id="right-sidebar" class="panel">
+            <div class="panel-header">Live Telemetry</div>
+            <div id="telemetry-container" class="panel-content">
+                <canvas id="telemetry-canvas"></canvas>
+            </div>
+        </aside>
+
+        <!-- Command & Log Panel -->
+        <footer id="bottom-panel" class="panel">
+            <div class="panel-header">Command Editor</div>
+            <div class="panel-content">
+                <textarea id="command-editor" spellcheck="false" placeholder="Enter simulation script..."></textarea>
+            </div>
+        </footer>
     </div>
     <script type="module" src="dist/main.js"></script>
 </body>
