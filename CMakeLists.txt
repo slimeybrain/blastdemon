@@ -12,8 +12,17 @@ else()
     add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
+# Find HDF5
+find_package(HDF5 REQUIRED COMPONENTS C)
+
 # Daemon (Broker)
 add_executable(BlastDaemon backend/BlastDaemon/main.cpp)
 
 # Solver (Worker)
-add_executable(BlastSolver backend/BlastSolver/main.cpp)
+add_executable(BlastSolver
+    backend/BlastSolver/main.cpp
+    backend/BlastSolver/HDF5Writer.cpp
+    backend/BlastSolver/XDMFWriter.cpp
+)
+target_include_directories(BlastSolver PRIVATE ${HDF5_INCLUDE_DIRS})
+target_link_libraries(BlastSolver PRIVATE ${HDF5_LIBRARIES})
