@@ -36,6 +36,21 @@ body {
     width: 100vw;
     gap: 4px;
     background-color: var(--bg-main);
+    position: relative;
+}
+
+.splitter {
+    position: absolute;
+    z-index: 100;
+    background-color: transparent;
+}
+
+.splitter.vertical {
+    cursor: col-resize;
+}
+
+.splitter.horizontal {
+    cursor: row-resize;
 }
 
 .panel {

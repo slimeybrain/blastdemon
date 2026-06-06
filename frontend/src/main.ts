@@ -4,6 +4,7 @@ import { CanvasRenderer } from './canvas-renderer.js';
 import { NetworkManager } from './network.js';
 import { serializeSimulationState } from './serialization.js';
 import { TelemetryRenderer } from './telemetry-renderer.js';
+import { LayoutManager } from './layout-manager.js';
 
 console.log("BlastDaemon Workspace Initializing...");
 
@@ -18,6 +19,14 @@ const initialState: SimulationState = {
 };
 
 const stateManager = new StateManager(initialState);
+
+// Initialize Layout Manager
+const layoutManager = new LayoutManager('app-container');
+layoutManager.init();
+
+// Expose for debugging/testing
+(window as any).layoutManager = layoutManager;
+
 const canvas = document.getElementById('simulation-canvas') as HTMLCanvasElement;
 const canvasContainer = document.getElementById('canvas-container') as HTMLElement;
 
