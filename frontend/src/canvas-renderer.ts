@@ -146,7 +146,12 @@ export class CanvasRenderer {
         this.ctx.strokeStyle = this.COLORS.nodeBorder;
         this.ctx.lineWidth = 1;
         this.ctx.beginPath();
-        this.ctx.roundRect(node.x, node.y, width, height, 4);
+        // Fallback for roundRect if not available in current TS environment
+        if ((this.ctx as any).roundRect) {
+            (this.ctx as any).roundRect(node.x, node.y, width, height, 4);
+        } else {
+            this.ctx.rect(node.x, node.y, width, height);
+        }
         this.ctx.fill();
         this.ctx.stroke();
 
@@ -155,7 +160,11 @@ export class CanvasRenderer {
         // Node Header
         this.ctx.fillStyle = this.COLORS.nodeHeader;
         this.ctx.beginPath();
-        this.ctx.roundRect(node.x, node.y, width, headerHeight, [4, 4, 0, 0]);
+        if ((this.ctx as any).roundRect) {
+            (this.ctx as any).roundRect(node.x, node.y, width, headerHeight, [4, 4, 0, 0]);
+        } else {
+            this.ctx.rect(node.x, node.y, width, headerHeight);
+        }
         this.ctx.fill();
 
         // Node Title
