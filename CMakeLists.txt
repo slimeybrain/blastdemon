@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(BlastDaemon CXX)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -16,7 +16,7 @@ endif()
 find_package(HDF5 REQUIRED COMPONENTS C)
 
 # Daemon (Broker)
-add_executable(BlastDaemon backend/BlastDaemon/main.cpp)
+add_executable(Broker backend/BlastDaemon/Broker.cpp)
 
 # Solver (Worker)
 add_executable(BlastSolver
