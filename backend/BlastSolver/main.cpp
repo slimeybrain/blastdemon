@@ -6,34 +6,10 @@
 #include <algorithm>
 #include <cmath>
 
+#include <nlohmann/json.hpp>
 #include "cfd_solver.hpp"
 #include "HDF5Writer.hpp"
 #include "XDMFWriter.hpp"
-
-/**
- * Lightweight JSON value extractor for basic simulation configuration.
- * Handles simple key-value pairs in a flat or nested structure.
- */
-std::string get_json_value(const std::string& json, const std::string& key) {
-    size_t pos = json.find("\"" + key + "\"");
-    if (pos == std::string::npos) return "";
-
-    pos = json.find(":", pos);
-    if (pos == std::string::npos) return "";
-
-    pos = json.find_first_not_of(" \t\n\r", pos + 1);
-    if (pos == std::string::npos) return "";
-
-    if (json[pos] == '"') {
-        size_t end = json.find("\"", pos + 1);
-        if (end == std::string::npos) return "";
-        return json.substr(pos + 1, end - pos - 1);
-    } else {
-        size_t end = json.find_first_of(",}] \t\n\r", pos);
-        if (end == std::string::npos) return json.substr(pos);
-        return json.substr(pos, end - pos);
-    }
-}
 
 int main() {
     std::string input_json;
@@ -50,36 +26,29 @@ int main() {
         input_json = "{}";
     }
 
+    nlohmann::json config = nlohmann::json::parse(input_json);
+
     // --- 1. The JSON Setup Bridge ---
 
     // Domain & EOS Parameters
     int num_cells = 1000;
+    if (config.contains("num_cells")) num_cells = config["num_cells"];
+    else if (config.contains("n_cells")) num_cells = config["n_cells"];
+
     double domain_radius = 10.0;
+    if (config.contains("domain_radius")) domain_radius = config["domain_radius"];
+    else if (config.contains("radius")) domain_radius = config["radius"];
+
     double gamma = 1.4;
-
-    std::string s_num_cells = get_json_value(input_json, "num_cells");
-    if (s_num_cells.empty()) s_num_cells = get_json_value(input_json, "n_cells");
-    if (!s_num_cells.empty()) num_cells = std::stoi(s_num_cells);
-
-    std::string s_radius = get_json_value(input_json, "domain_radius");
-    if (s_radius.empty()) s_radius = get_json_value(input_json, "radius");
-    if (!s_radius.empty()) domain_radius = std::stod(s_radius);
-
-    std::string s_gamma = get_json_value(input_json, "gamma");
-    if (!s_gamma.empty()) gamma = std::stod(s_gamma);
+    if (config.contains("gamma")) gamma = config["gamma"];
 
     // Instantiate the solver
     CFDSolver solver(num_cells, domain_radius, gamma);
 
     // Solver configuration
-    std::string flux_scheme = get_json_value(input_json, "flux_scheme");
-    if (!flux_scheme.empty()) solver.setFluxScheme(flux_scheme);
-
-    std::string s_spatial = get_json_value(input_json, "spatial_order");
-    if (!s_spatial.empty()) solver.setSpatialOrder(std::stoi(s_spatial));
-
-    std::string s_temporal = get_json_value(input_json, "temporal_order");
-    if (!s_temporal.empty()) solver.setTemporalOrder(std::stoi(s_temporal));
+    if (config.contains("flux_scheme")) solver.setFluxScheme(config["flux_scheme"]);
+    if (config.contains("spatial_order")) solver.setSpatialOrder(config["spatial_order"]);
+    if (config.contains("temporal_order")) solver.setTemporalOrder(config["temporal_order"]);
 
     // Initial Condition (TNT Blast)
     double explosive_radius = 0.5;
@@ -87,24 +56,16 @@ int main() {
     double ambient_rho = 1.225;
     double ambient_p = 101325.0;
 
-    std::string s_exp_rad = get_json_value(input_json, "explosive_radius");
-    if (!s_exp_rad.empty()) explosive_radius = std::stod(s_exp_rad);
-
-    std::string s_high_rho = get_json_value(input_json, "high_rho");
-    if (!s_high_rho.empty()) high_rho = std::stod(s_high_rho);
-
-    std::string s_amb_rho = get_json_value(input_json, "ambient_rho");
-    if (!s_amb_rho.empty()) ambient_rho = std::stod(s_amb_rho);
-
-    std::string s_amb_p = get_json_value(input_json, "ambient_p");
-    if (!s_amb_p.empty()) ambient_p = std::stod(s_amb_p);
+    if (config.contains("explosive_radius")) explosive_radius = config["explosive_radius"];
+    if (config.contains("high_rho")) high_rho = config["high_rho"];
+    if (config.contains("ambient_rho")) ambient_rho = config["ambient_rho"];
+    if (config.contains("ambient_p")) ambient_p = config["ambient_p"];
 
     solver.setInitialConditionTNT(explosive_radius, high_rho, ambient_rho, ambient_p);
 
     // Global execution params
     double duration = 0.01;
-    std::string s_duration = get_json_value(input_json, "duration");
-    if (!s_duration.empty()) duration = std::stod(s_duration);
+    if (config.contains("duration")) duration = config["duration"];
 
     // --- 2. Loop Unrolling (Inversion of Control) ---
 
@@ -140,20 +101,20 @@ int main() {
 
         // --- 4. Heavy I/O Hook ---
         if (step_count % io_interval == 0) {
-            const std::vector<State>& states = solver.getStates();
-            std::vector<double> rho, p, u, alpha1, alpha2;
-            rho.reserve(states.size());
-            p.reserve(states.size());
-            u.reserve(states.size());
-            alpha1.reserve(states.size());
-            alpha2.reserve(states.size());
+            const auto& current_states = solver.getStates();
+            std::vector<double> rho_vec, p_vec, u_vec, alpha1_vec, alpha2_vec;
+            rho_vec.reserve(current_states.size());
+            p_vec.reserve(current_states.size());
+            u_vec.reserve(current_states.size());
+            alpha1_vec.reserve(current_states.size());
+            alpha2_vec.reserve(current_states.size());
 
-            for (const auto& s : states) {
-                rho.push_back(s.rho);
-                p.push_back(s.p);
-                u.push_back(s.u);
-                alpha1.push_back(s.alpha1);
-                alpha2.push_back(s.alpha2);
+            for(const auto& s : current_states) {
+                rho_vec.push_back(s.rho);
+                p_vec.push_back(s.p);
+                u_vec.push_back(s.u);
+                alpha1_vec.push_back(s.alpha1);
+                alpha2_vec.push_back(s.alpha2);
             }
 
             std::stringstream frame_ss;
@@ -163,10 +124,10 @@ int main() {
             std::string xmf_filename = base_name + ".xmf";
 
             // Pass vectors to HDF5Writer (Phase 7) and XDMFWriter
-            if (HDF5Writer::writeFrame(h5_filename, rho, p, u, alpha1, alpha2)) {
+            if (HDF5Writer::writeFrame(h5_filename, rho_vec, p_vec, u_vec, alpha1_vec, alpha2_vec)) {
                 if (XDMFWriter::writeXDMF(xmf_filename, h5_filename, solver.getNumCells(), solver.getCellSize())) {
                     // Output IO_SUCCESS notification for the Broker
-                    std::cout << "{\"type\": \"IO_SUCCESS\", \"file\": \"" << xmf_filename << "\"}" << std::endl;
+                    std::cout << "{\"type\": \"IO_SUCCESS\", \"time\": " << elapsed << "}" << std::endl;
                 }
             }
         }
