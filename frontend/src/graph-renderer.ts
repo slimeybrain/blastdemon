@@ -14,6 +14,9 @@ export class GraphRenderer {
     private isPanning: boolean = false;
     private isDraggingNode: boolean = false;
     private draggedNodeId: string | null = null;
+    private dragOffsetX: number = 0;
+    private dragOffsetY: number = 0;
+    private nodeElements: Map<string, HTMLElement> = new Map();
     private lastMouseX: number = 0;
     private lastMouseY: number = 0;
 
@@ -92,17 +95,6 @@ export class GraphRenderer {
             this.viewport.style.cursor = 'grabbing';
             return;
         }
-
-        // Check if we clicked on a node header
-        const target = e.target as HTMLElement;
-        const nodeHeader = target.closest('.node-header');
-        if (nodeHeader) {
-            const nodeEl = nodeHeader.parentElement as HTMLElement;
-            this.draggedNodeId = nodeEl.dataset.id || null;
-            this.isDraggingNode = true;
-            this.selectNode(this.draggedNodeId);
-            e.stopPropagation();
-        }
     }
 
     private onMouseMove(e: MouseEvent): void {
@@ -120,16 +112,13 @@ export class GraphRenderer {
             if (state) {
                 const node = state.nodes.find(n => n.id === this.draggedNodeId);
                 if (node) {
-                    node.x += dx / this.zoom;
-                    node.y += dy / this.zoom;
+                    const pt = new DOMPoint(e.clientX, e.clientY);
+                    const worldPoint = pt.matrixTransform(this.svg.getScreenCTM()!.inverse());
 
-                    // Direct update for performance
-                    const nodeEl = this.container.querySelector(`[data-id="${node.id}"]`) as HTMLElement;
-                    if (nodeEl) {
-                        nodeEl.style.left = `${node.x}px`;
-                        nodeEl.style.top = `${node.y}px`;
-                    }
-                    this.updateEdges(state);
+                    node.x = worldPoint.x - this.dragOffsetX;
+                    node.y = worldPoint.y - this.dragOffsetY;
+
+                    this.stateManager.updateState(state, false);
                 }
             }
         }
@@ -139,16 +128,7 @@ export class GraphRenderer {
         if (this.isDraggingNode && this.draggedNodeId) {
             const state = this.stateManager.getCurrentState();
             if (state) {
-                // Sync the actual state back to manager
-                const nodeEl = this.container.querySelector(`[data-id="${this.draggedNodeId}"]`) as HTMLElement;
-                if (nodeEl) {
-                    const node = state.nodes.find(n => n.id === this.draggedNodeId);
-                    if (node) {
-                        node.x = parseFloat(nodeEl.style.left);
-                        node.y = parseFloat(nodeEl.style.top);
-                        this.stateManager.pushState(state);
-                    }
-                }
+                this.stateManager.pushState(state);
             }
         }
         this.isPanning = false;
@@ -298,17 +278,19 @@ export class GraphRenderer {
     }
 
     private syncNodes(state: SimulationState): void {
-        const existingNodeEls = Array.from(this.container.querySelectorAll('.node')) as HTMLElement[];
         const nodeIdsInState = new Set(state.nodes.map(n => n.id));
 
         // Remove old nodes
-        existingNodeEls.forEach(el => {
-            if (!nodeIdsInState.has(el.dataset.id!)) el.remove();
-        });
+        for (const [id, el] of this.nodeElements.entries()) {
+            if (!nodeIdsInState.has(id)) {
+                el.remove();
+                this.nodeElements.delete(id);
+            }
+        }
 
         // Update or Create nodes
         state.nodes.forEach(node => {
-            let nodeEl = this.container.querySelector(`[data-id="${node.id}"]`) as HTMLElement;
+            let nodeEl = this.nodeElements.get(node.id);
             if (!nodeEl) {
                 nodeEl = document.createElement('div');
                 nodeEl.className = 'node';
@@ -317,6 +299,26 @@ export class GraphRenderer {
                 const header = document.createElement('div');
                 header.className = 'node-header';
                 header.textContent = node.type === 'ThePainter' ? 'INITIALIZER' : node.type.toUpperCase();
+
+                header.addEventListener('mousedown', (e) => {
+                    if (this.spacePressed || e.button !== 0) return;
+                    const currentState = this.stateManager.getCurrentState();
+                    if (!currentState) return;
+                    const latestNode = currentState.nodes.find(n => n.id === node.id);
+                    if (!latestNode) return;
+
+                    e.stopPropagation();
+                    this.isDraggingNode = true;
+                    this.draggedNodeId = node.id;
+                    this.selectNode(node.id);
+
+                    const pt = new DOMPoint(e.clientX, e.clientY);
+                    const worldPoint = pt.matrixTransform(this.svg.getScreenCTM()!.inverse());
+
+                    this.dragOffsetX = worldPoint.x - latestNode.x;
+                    this.dragOffsetY = worldPoint.y - latestNode.y;
+                });
+
                 nodeEl.appendChild(header);
 
                 const ports = document.createElement('div');
@@ -338,6 +340,7 @@ export class GraphRenderer {
 
                 nodeEl.appendChild(ports);
                 this.container.appendChild(nodeEl);
+                this.nodeElements.set(node.id, nodeEl);
             }
 
             nodeEl.style.left = `${node.x}px`;
