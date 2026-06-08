@@ -1,6 +1,6 @@
 import { StateManager } from './state-manager.js';
 import { SimulationState } from './types.js';
-import { CanvasRenderer } from './canvas-renderer.js';
+import { GraphRenderer } from './graph-renderer.js';
 import { NetworkManager } from './NetworkManager.js';
 import { serializeSimulationState, serializeForSolver } from './serialization.js';
 import { LayoutManager } from './layout-manager.js';
@@ -110,18 +110,19 @@ layoutManager.init();
 // Expose for debugging/testing
 (window as any).layoutManager = layoutManager;
 
-const canvas = document.getElementById('simulation-canvas') as HTMLCanvasElement;
+const viewport = document.getElementById('graph-viewport') as HTMLElement;
 const canvasContainer = document.getElementById('canvas-container') as HTMLElement;
+const edgeSvg = document.getElementById('edge-svg') as unknown as SVGSVGElement;
 
-let renderer: CanvasRenderer | null = null;
-if (canvas && canvasContainer) {
-    renderer = new CanvasRenderer(canvas, stateManager);
+let renderer: GraphRenderer | null = null;
+if (viewport && canvasContainer && edgeSvg) {
+    renderer = new GraphRenderer(viewport, canvasContainer, edgeSvg, stateManager);
     renderer.onNodeSelected = (nodeId) => {
         propertyEditor.setSelectedNode(nodeId);
     };
-    console.log("CanvasRenderer initialized.");
+    console.log("GraphRenderer initialized.");
 } else {
-    console.error("Could not find simulation-canvas or container.");
+    console.error("Could not find graph viewport components.");
 }
 
 // Telemetry Worker Initialization
@@ -197,6 +198,14 @@ networkManager.onOpen(() => {
         console.log("Initial state sent to BlastDaemon.");
     }
 });
+
+// Auto-Arrange Button
+const autoArrangeBtn = document.getElementById('auto-arrange-btn');
+if (autoArrangeBtn && renderer) {
+    autoArrangeBtn.addEventListener('click', () => {
+        renderer?.autoArrange();
+    });
+}
 
 // Run Simulation Button
 const runBtn = document.getElementById('run-simulation-btn');

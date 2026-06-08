@@ -1,0 +1,414 @@
+import { SimulationState, Node, Edge, Port, NodeType } from './types.js';
+import { StateManager } from './state-manager.js';
+
+export class GraphRenderer {
+    private viewport: HTMLElement;
+    private container: HTMLElement;
+    private svg: SVGSVGElement;
+    private stateManager: StateManager;
+
+    private zoom: number = 1.0;
+    private panX: number = 0;
+    private panY: number = 0;
+
+    private isPanning: boolean = false;
+    private isDraggingNode: boolean = false;
+    private draggedNodeId: string | null = null;
+    private lastMouseX: number = 0;
+    private lastMouseY: number = 0;
+
+    private selectedNodeId: string | null = null;
+    private spacePressed: boolean = false;
+
+    public onNodeSelected: ((nodeId: string | null) => void) | null = null;
+
+    constructor(viewport: HTMLElement, container: HTMLElement, svg: SVGSVGElement, stateManager: StateManager) {
+        this.viewport = viewport;
+        this.container = container;
+        this.svg = svg;
+        this.stateManager = stateManager;
+
+        this.initEventListeners();
+        this.stateManager.onStateChange(() => this.render());
+        this.render();
+    }
+
+    private initEventListeners(): void {
+        // Zooming
+        this.viewport.addEventListener('wheel', this.onWheel.bind(this), { passive: false });
+
+        // Panning and Dragging
+        this.viewport.addEventListener('mousedown', this.onMouseDown.bind(this));
+        window.addEventListener('mousemove', this.onMouseMove.bind(this));
+        window.addEventListener('mouseup', this.onMouseUp.bind(this));
+
+        // Selection / Background Click
+        this.viewport.addEventListener('click', (e) => {
+            if (e.target === this.viewport || e.target === this.container || e.target === this.svg) {
+                this.selectNode(null);
+            }
+        });
+
+        // Deletion & Space Panning
+        window.addEventListener('keydown', this.onKeyDown.bind(this));
+        window.addEventListener('keyup', this.onKeyUp.bind(this));
+
+        // Context Menu
+        this.viewport.addEventListener('contextmenu', this.onContextMenu.bind(this));
+    }
+
+    private onWheel(e: WheelEvent): void {
+        e.preventDefault();
+        const delta = -e.deltaY;
+        const factor = delta > 0 ? 1.1 : 0.9;
+        const newZoom = Math.min(Math.max(this.zoom * factor, 0.2), 2.0);
+
+        if (newZoom !== this.zoom) {
+            const rect = this.viewport.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+
+            // Adjust pan to zoom towards mouse
+            const worldX = (mouseX - this.panX) / this.zoom;
+            const worldY = (mouseY - this.panY) / this.zoom;
+
+            this.zoom = newZoom;
+            this.panX = mouseX - worldX * this.zoom;
+            this.panY = mouseY - worldY * this.zoom;
+
+            this.updateTransform();
+        }
+    }
+
+    private onMouseDown(e: MouseEvent): void {
+        this.lastMouseX = e.clientX;
+        this.lastMouseY = e.clientY;
+
+        const isMiddleMouse = e.button === 1;
+        const isSpaceLeft = e.button === 0 && this.spacePressed;
+
+        if (isMiddleMouse || isSpaceLeft) {
+            this.isPanning = true;
+            this.viewport.style.cursor = 'grabbing';
+            return;
+        }
+
+        // Check if we clicked on a node header
+        const target = e.target as HTMLElement;
+        const nodeHeader = target.closest('.node-header');
+        if (nodeHeader) {
+            const nodeEl = nodeHeader.parentElement as HTMLElement;
+            this.draggedNodeId = nodeEl.dataset.id || null;
+            this.isDraggingNode = true;
+            this.selectNode(this.draggedNodeId);
+            e.stopPropagation();
+        }
+    }
+
+    private onMouseMove(e: MouseEvent): void {
+        const dx = e.clientX - this.lastMouseX;
+        const dy = e.clientY - this.lastMouseY;
+        this.lastMouseX = e.clientX;
+        this.lastMouseY = e.clientY;
+
+        if (this.isPanning) {
+            this.panX += dx;
+            this.panY += dy;
+            this.updateTransform();
+        } else if (this.isDraggingNode && this.draggedNodeId) {
+            const state = this.stateManager.getCurrentState();
+            if (state) {
+                const node = state.nodes.find(n => n.id === this.draggedNodeId);
+                if (node) {
+                    node.x += dx / this.zoom;
+                    node.y += dy / this.zoom;
+
+                    // Direct update for performance
+                    const nodeEl = this.container.querySelector(`[data-id="${node.id}"]`) as HTMLElement;
+                    if (nodeEl) {
+                        nodeEl.style.left = `${node.x}px`;
+                        nodeEl.style.top = `${node.y}px`;
+                    }
+                    this.updateEdges(state);
+                }
+            }
+        }
+    }
+
+    private onMouseUp(): void {
+        if (this.isDraggingNode && this.draggedNodeId) {
+            const state = this.stateManager.getCurrentState();
+            if (state) {
+                // Sync the actual state back to manager
+                const nodeEl = this.container.querySelector(`[data-id="${this.draggedNodeId}"]`) as HTMLElement;
+                if (nodeEl) {
+                    const node = state.nodes.find(n => n.id === this.draggedNodeId);
+                    if (node) {
+                        node.x = parseFloat(nodeEl.style.left);
+                        node.y = parseFloat(nodeEl.style.top);
+                        this.stateManager.pushState(state);
+                    }
+                }
+            }
+        }
+        this.isPanning = false;
+        this.isDraggingNode = false;
+        this.draggedNodeId = null;
+        this.viewport.style.cursor = 'crosshair';
+    }
+
+    private onKeyDown(e: KeyboardEvent): void {
+        if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) return;
+
+        if (e.code === 'Space') {
+            this.spacePressed = true;
+            if (!this.isDraggingNode) this.viewport.style.cursor = 'grab';
+        }
+
+        if ((e.key === 'Delete' || e.key === 'Backspace') && this.selectedNodeId) {
+            const state = this.stateManager.getCurrentState();
+            if (state) {
+                state.nodes = state.nodes.filter(n => n.id !== this.selectedNodeId);
+                state.edges = state.edges.filter(edge => edge.fromNode !== this.selectedNodeId && edge.toNode !== this.selectedNodeId);
+                this.selectedNodeId = null;
+                if (this.onNodeSelected) this.onNodeSelected(null);
+                this.stateManager.pushState(state);
+            }
+        }
+    }
+
+    private onKeyUp(e: KeyboardEvent): void {
+        if (e.code === 'Space') {
+            this.spacePressed = false;
+            if (!this.isPanning) this.viewport.style.cursor = 'crosshair';
+        }
+    }
+
+    private onContextMenu(e: MouseEvent): void {
+        e.preventDefault();
+        const rect = this.viewport.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+
+        const worldX = (mouseX - this.panX) / this.zoom;
+        const worldY = (mouseY - this.panY) / this.zoom;
+
+        this.showContextMenu(e.clientX, e.clientY, worldX, worldY);
+    }
+
+    private showContextMenu(x: number, y: number, wx: number, wy: number): void {
+        const existingMenu = document.querySelector('.context-menu');
+        if (existingMenu) existingMenu.remove();
+
+        const menu = document.createElement('div');
+        menu.className = 'context-menu';
+        menu.style.left = `${x}px`;
+        menu.style.top = `${y}px`;
+        menu.onmousedown = (e) => e.stopPropagation();
+
+        const nodeTypes: { label: string, type: NodeType }[] = [
+            { label: 'Domain Mesh', type: 'DomainMesh' },
+            { label: 'Material - Air', type: 'MaterialAir' },
+            { label: 'Material - Explosive', type: 'MaterialExplosive' },
+            { label: 'Initializer', type: 'ThePainter' },
+            { label: 'CFD Solver', type: 'CFDSolver' }
+        ];
+
+        nodeTypes.forEach(nt => {
+            const item = document.createElement('div');
+            item.className = 'context-menu-item';
+            item.textContent = nt.label;
+            item.onclick = () => {
+                this.addNode(nt.type, wx, wy);
+                menu.remove();
+            };
+            menu.appendChild(item);
+        });
+
+        document.body.appendChild(menu);
+        const closeMenu = () => {
+            menu.remove();
+            window.removeEventListener('mousedown', closeMenu);
+        };
+        setTimeout(() => window.addEventListener('mousedown', closeMenu), 0);
+    }
+
+    private addNode(type: NodeType, x: number, y: number): void {
+        const state = this.stateManager.getCurrentState();
+        if (!state) return;
+
+        const id = `node-${type.toLowerCase()}-${Date.now()}`;
+        const newNode: Node = {
+            id,
+            type,
+            x,
+            y,
+            inputs: this.getDefaultInputs(type),
+            outputs: this.getDefaultOutputs(type),
+            parameters: this.getDefaultParameters(type)
+        };
+
+        state.nodes.push(newNode);
+        this.stateManager.pushState(state);
+    }
+
+    private getDefaultInputs(type: NodeType): Port[] {
+        switch (type) {
+            case 'ThePainter': return [{ id: 'mesh', label: 'Mesh' }, { id: 'air', label: 'Air' }, { id: 'explosive', label: 'Explosive' }];
+            case 'CFDSolver': return [{ id: 'in', label: 'Initial State' }];
+            default: return [];
+        }
+    }
+
+    private getDefaultOutputs(type: NodeType): Port[] {
+        switch (type) {
+            case 'DomainMesh': return [{ id: 'out', label: 'Mesh' }];
+            case 'MaterialAir': return [{ id: 'out', label: 'Material' }];
+            case 'MaterialExplosive': return [{ id: 'out', label: 'Material' }];
+            case 'ThePainter': return [{ id: 'out', label: 'State' }];
+            default: return [];
+        }
+    }
+
+    private getDefaultParameters(type: NodeType): any {
+        switch (type) {
+            case 'DomainMesh': return { domain_radius: 1.0, cell_size: 0.001, left_bc: 'Reflecting', right_bc: 'Terminate' };
+            case 'MaterialAir': return { atm_pressure: 101325, atm_temperature: 298.15 };
+            case 'MaterialExplosive': return { charge_mass: 1.0, composition: 'TNT', rho: 1630, detonation_energy: 4520000 };
+            case 'CFDSolver': return { cfl: 0.4, flux_scheme: 'AUSM+', spatial_order: 2, temporal_order: 2, output_mode: 'By Time', output_interval: 0.0001 };
+            default: return {};
+        }
+    }
+
+    private updateTransform(): void {
+        this.container.style.transform = `translate(${this.panX}px, ${this.panY}px) scale(${this.zoom})`;
+    }
+
+    private selectNode(nodeId: string | null): void {
+        this.selectedNodeId = nodeId;
+        if (this.onNodeSelected) this.onNodeSelected(nodeId);
+        this.render();
+    }
+
+    public render(): void {
+        const state = this.stateManager.getCurrentState();
+        if (!state) return;
+        this.syncNodes(state);
+        this.updateEdges(state);
+    }
+
+    private syncNodes(state: SimulationState): void {
+        const existingNodeEls = Array.from(this.container.querySelectorAll('.node')) as HTMLElement[];
+        const nodeIdsInState = new Set(state.nodes.map(n => n.id));
+
+        // Remove old nodes
+        existingNodeEls.forEach(el => {
+            if (!nodeIdsInState.has(el.dataset.id!)) el.remove();
+        });
+
+        // Update or Create nodes
+        state.nodes.forEach(node => {
+            let nodeEl = this.container.querySelector(`[data-id="${node.id}"]`) as HTMLElement;
+            if (!nodeEl) {
+                nodeEl = document.createElement('div');
+                nodeEl.className = 'node';
+                nodeEl.dataset.id = node.id;
+
+                const header = document.createElement('div');
+                header.className = 'node-header';
+                header.textContent = node.type === 'ThePainter' ? 'INITIALIZER' : node.type.toUpperCase();
+                nodeEl.appendChild(header);
+
+                const ports = document.createElement('div');
+                ports.className = 'node-ports';
+
+                node.inputs.forEach(input => {
+                    const port = document.createElement('div');
+                    port.className = 'port input';
+                    port.innerHTML = `<div class="port-bullet"></div><span class="port-label">${input.label}</span>`;
+                    ports.appendChild(port);
+                });
+
+                node.outputs.forEach(output => {
+                    const port = document.createElement('div');
+                    port.className = 'port output';
+                    port.innerHTML = `<span class="port-label">${output.label}</span><div class="port-bullet"></div>`;
+                    ports.appendChild(port);
+                });
+
+                nodeEl.appendChild(ports);
+                this.container.appendChild(nodeEl);
+            }
+
+            nodeEl.style.left = `${node.x}px`;
+            nodeEl.style.top = `${node.y}px`;
+            nodeEl.classList.toggle('selected', node.id === this.selectedNodeId);
+        });
+    }
+
+    private updateEdges(state: SimulationState): void {
+        this.svg.innerHTML = '';
+        state.edges.forEach(edge => {
+            const fromNode = state.nodes.find(n => n.id === edge.fromNode);
+            const toNode = state.nodes.find(n => n.id === edge.toNode);
+            if (!fromNode || !toNode) return;
+
+            const fromPos = this.getPortPosition(fromNode, edge.fromPort, false);
+            const toPos = this.getPortPosition(toNode, edge.toPort, true);
+
+            const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            const d = `M ${fromPos.x} ${fromPos.y} C ${fromPos.x + 50} ${fromPos.y}, ${toPos.x - 50} ${toPos.y}, ${toPos.x} ${toPos.y}`;
+            path.setAttribute('d', d);
+            path.setAttribute('class', 'edge-path');
+            this.svg.appendChild(path);
+        });
+    }
+
+    private getPortPosition(node: Node, portId: string, isInput: boolean): { x: number, y: number } {
+        const ports = isInput ? node.inputs : node.outputs;
+        const index = ports.findIndex(p => p.id === portId);
+
+        const portY = 25 + 8 + 10 + (index * 20); // Header + Padding + Half-Port-Height + Index * Port-Height
+        const portX = isInput ? 0 : 180;
+
+        return {
+            x: node.x + portX,
+            y: node.y + portY
+        };
+    }
+
+    public autoArrange(): void {
+        const state = this.stateManager.getCurrentState();
+        if (!state) return;
+
+        let meshY = 50, airY = 200, explosiveY = 350;
+
+        // Apply transition to node elements
+        const nodes = Array.from(this.container.querySelectorAll('.node')) as HTMLElement[];
+        nodes.forEach(n => n.style.transition = 'left 0.5s ease-in-out, top 0.5s ease-in-out');
+
+        state.nodes.forEach(node => {
+            if (node.type === 'DomainMesh') { node.x = 50; node.y = meshY; }
+            else if (node.type === 'MaterialAir') { node.x = 50; node.y = airY; }
+            else if (node.type === 'MaterialExplosive') { node.x = 50; node.y = explosiveY; }
+            else if (node.type === 'ThePainter') { node.x = 400; node.y = 200; }
+            else if (node.type === 'CFDSolver') { node.x = 700; node.y = 200; }
+        });
+
+        // Use a small timeout to let the edges update during animation
+        let frames = 0;
+        const animateEdges = () => {
+            // Re-read current positions from DOM for edges if possible,
+            // or just update state and re-render edges.
+            // Since we use CSS transitions, we need to periodically update edges.
+            this.updateEdges(state);
+            frames++;
+            if (frames < 30) requestAnimationFrame(animateEdges);
+            else {
+                nodes.forEach(n => n.style.transition = '');
+                this.stateManager.pushState(state);
+            }
+        };
+        requestAnimationFrame(animateEdges);
+    }
+}

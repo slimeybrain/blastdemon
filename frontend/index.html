@@ -24,10 +24,18 @@
         <main id="center-viewport" class="panel">
             <div class="panel-header">
                 <span>Node Graph</span>
-                <button id="run-simulation-btn" class="header-button">Run Simulation</button>
+                <div class="header-actions">
+                    <button id="auto-arrange-btn" class="header-button secondary">Auto-Arrange</button>
+                    <button id="run-simulation-btn" class="header-button">Run Simulation</button>
+                </div>
             </div>
-            <div id="canvas-container" class="panel-content">
-                <canvas id="simulation-canvas"></canvas>
+            <div id="graph-viewport" class="panel-content" style="overflow: hidden; cursor: crosshair;">
+                <div id="canvas-container">
+                    <svg id="edge-svg" style="position: absolute; top: 0; left: 0; width: 10000px; height: 10000px; pointer-events: none;">
+                        <!-- Edges rendered here -->
+                    </svg>
+                    <!-- Nodes rendered here as DOM elements -->
+                </div>
             </div>
         </main>
 
