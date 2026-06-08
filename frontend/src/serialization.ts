@@ -13,16 +13,19 @@ export function serializeSimulationState(state: SimulationState): string {
 }
 
 export function serializeForSolver(state: SimulationState): string {
-    const domainNode = state.nodes.find(n => n.type === 'Domain1D');
-    const icNode = state.nodes.find(n => n.type === 'InitialCondition');
-
     const strippedNodes = state.nodes.map(({ x, y, ...rest }) => rest);
+
+    // Flatten all parameters from all nodes into a single configuration object
+    const flattenedParams: Record<string, any> = {};
+    state.nodes.forEach(node => {
+        Object.entries(node.parameters).forEach(([key, value]) => {
+            flattenedParams[key] = value;
+        });
+    });
 
     return JSON.stringify({
         command: "START",
-        // Flat parameters for BlastSolver
-        n_cells: domainNode?.parameters.size || 1000,
-        explosive_radius: icNode?.parameters.value || 0.5,
+        ...flattenedParams,
         // Full DAG for Broker tracking
         nodes: strippedNodes,
         edges: state.edges

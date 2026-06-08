@@ -4,6 +4,7 @@ import { CanvasRenderer } from './canvas-renderer.js';
 import { NetworkManager } from './NetworkManager.js';
 import { serializeSimulationState, serializeForSolver } from './serialization.js';
 import { LayoutManager } from './layout-manager.js';
+import { PropertyEditor } from './property-editor.js';
 
 // Extend HTMLCanvasElement for TypeScript if it's missing transferControlToOffscreen
 interface TransferableCanvas extends HTMLCanvasElement {
@@ -14,15 +15,93 @@ console.log("BlastDaemon Workspace Initializing...");
 
 const initialState: SimulationState = {
     nodes: [
-        { id: '1', type: 'Domain1D', x: 50, y: 50, parameters: { size: 100 } },
-        { id: '2', type: 'InitialCondition', x: 300, y: 50, parameters: { value: 0.5 } }
+        {
+            id: 'node-mesh',
+            type: 'DomainMesh',
+            x: 50,
+            y: 50,
+            inputs: [],
+            outputs: [{ id: 'out', label: 'Mesh' }],
+            parameters: {
+                domain_radius: 1.0,
+                cell_size: 0.001,
+                left_bc: 'Reflecting',
+                right_bc: 'Terminate'
+            }
+        },
+        {
+            id: 'node-air',
+            type: 'MaterialAir',
+            x: 50,
+            y: 200,
+            inputs: [],
+            outputs: [{ id: 'out', label: 'Material' }],
+            parameters: {
+                atm_pressure: 101325,
+                atm_temperature: 298.15
+            }
+        },
+        {
+            id: 'node-explosive',
+            type: 'MaterialExplosive',
+            x: 50,
+            y: 350,
+            inputs: [],
+            outputs: [{ id: 'out', label: 'Material' }],
+            parameters: {
+                charge_mass: 1.0,
+                composition: 'TNT',
+                rho: 1630,
+                detonation_energy: 4520000,
+                jwl_A: 3.7377e11,
+                jwl_B: 3.7471e9,
+                jwl_R1: 4.15,
+                jwl_R2: 0.9,
+                jwl_omega: 0.35
+            }
+        },
+        {
+            id: 'node-painter',
+            type: 'ThePainter',
+            x: 300,
+            y: 200,
+            inputs: [
+                { id: 'mesh', label: 'Mesh' },
+                { id: 'air', label: 'Air' },
+                { id: 'explosive', label: 'Explosive' }
+            ],
+            outputs: [{ id: 'out', label: 'State' }],
+            parameters: {}
+        },
+        {
+            id: 'node-solver',
+            type: 'CFDSolver',
+            x: 550,
+            y: 200,
+            inputs: [{ id: 'in', label: 'Initial State' }],
+            outputs: [],
+            parameters: {
+                cfl: 0.4,
+                flux_scheme: 'AUSM+',
+                spatial_order: '2',
+                temporal_order: '2',
+                output_mode: 'By Time',
+                output_interval: 0.0001
+            }
+        }
     ],
     edges: [
-        { fromNode: '1', fromPort: 'out', toNode: '2', toPort: 'in' }
+        { fromNode: 'node-mesh', fromPort: 'out', toNode: 'node-painter', toPort: 'mesh' },
+        { fromNode: 'node-air', fromPort: 'out', toNode: 'node-painter', toPort: 'air' },
+        { fromNode: 'node-explosive', fromPort: 'out', toNode: 'node-painter', toPort: 'explosive' },
+        { fromNode: 'node-painter', fromPort: 'out', toNode: 'node-solver', toPort: 'in' }
     ]
 };
 
 const stateManager = new StateManager(initialState);
+
+// Initialize Property Editor
+const propertyEditor = new PropertyEditor('property-editor-container', stateManager);
 
 // Initialize Layout Manager
 const layoutManager = new LayoutManager('app-container');
@@ -37,6 +116,9 @@ const canvasContainer = document.getElementById('canvas-container') as HTMLEleme
 let renderer: CanvasRenderer | null = null;
 if (canvas && canvasContainer) {
     renderer = new CanvasRenderer(canvas, stateManager);
+    renderer.onNodeSelected = (nodeId) => {
+        propertyEditor.setSelectedNode(nodeId);
+    };
     console.log("CanvasRenderer initialized.");
 } else {
     console.error("Could not find simulation-canvas or container.");

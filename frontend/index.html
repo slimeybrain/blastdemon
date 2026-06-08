@@ -31,11 +31,16 @@
             </div>
         </main>
 
-        <!-- Telemetry Sidebar -->
+        <!-- Telemetry & Properties Sidebar -->
         <aside id="right-sidebar" class="panel">
             <div class="panel-header">Live Telemetry</div>
-            <div id="telemetry-container" class="panel-content">
+            <div id="telemetry-container" class="panel-content" style="flex-grow: 0; height: 200px; border-bottom: 1px solid var(--border-color);">
                 <canvas id="telemetry-canvas"></canvas>
+            </div>
+            <div class="panel-header">Property Editor</div>
+            <div id="property-editor-container" class="panel-content">
+                <!-- Populated by PropertyEditor.ts -->
+                <div style="padding: 20px; color: #666;">No node selected</div>
             </div>
         </aside>
 

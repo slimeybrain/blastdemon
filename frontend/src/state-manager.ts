@@ -74,6 +74,20 @@ export class StateManager {
     }
 
     /**
+     * Updates parameters for a specific node and pushes a new state.
+     */
+    updateNodeParameters(nodeId: string, parameters: Record<string, any>): void {
+        const state = this.getCurrentState();
+        if (!state) return;
+
+        const node = state.nodes.find(n => n.id === nodeId);
+        if (node) {
+            node.parameters = { ...node.parameters, ...parameters };
+            this.pushState(state);
+        }
+    }
+
+    /**
      * Registers a listener to be called when the state changes.
      */
     onStateChange(listener: (state: SimulationState) => void): void {

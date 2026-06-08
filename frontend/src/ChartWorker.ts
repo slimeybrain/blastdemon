@@ -10,8 +10,8 @@ self.onmessage = (event) => {
 
     // 1. Initialization Phase
     if (data.type === 'init') {
-        canvas = data.canvas;
-        ctx = canvas.getContext('2d');
+        canvas = data.canvas as OffscreenCanvas;
+        ctx = canvas.getContext('2d') as OffscreenCanvasRenderingContext2D;
         width = canvas.width;
         height = canvas.height;
         console.log(`[Worker] Initialized with dimensions: ${width}x${height}`);
