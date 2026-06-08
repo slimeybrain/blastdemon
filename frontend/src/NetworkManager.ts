@@ -6,6 +6,7 @@ export class NetworkManager {
     private openCallbacks: (() => void)[] = [];
     private reconnectTimeout: number = 3000;
     private isManuallyClosed: boolean = false;
+    private worker: Worker | null = null;
 
     constructor(url: string, terminalId: string = 'terminal-output') {
         this.url = url;
@@ -23,10 +24,17 @@ export class NetworkManager {
         };
 
         this.socket.onmessage = (event) => {
-            // For now, just stringify and append to terminal
             try {
                 const data = JSON.parse(event.data);
-                this.log(JSON.stringify(data), 'default');
+                if (data.type === 'TELEMETRY') {
+                    if (this.worker) {
+                        this.worker.postMessage({ type: 'data', telemetry: data.data || data.telemetry });
+                    }
+                } else if (data.type === 'IO_SUCCESS') {
+                    this.log(`[System] Frame written to disk at t=${data.time.toFixed(3)}s`, 'system');
+                } else {
+                    this.log(JSON.stringify(data), 'default');
+                }
             } catch (e) {
                 this.log(event.data, 'default');
             }
@@ -62,6 +70,10 @@ export class NetworkManager {
 
     public onOpen(callback: () => void): void {
         this.openCallbacks.push(callback);
+    }
+
+    public setWorker(worker: Worker): void {
+        this.worker = worker;
     }
 
     public close(): void {

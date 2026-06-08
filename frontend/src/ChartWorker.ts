@@ -17,7 +17,7 @@ interface OffscreenCanvasRenderingContext2D extends CanvasState, CanvasTransform
 
 interface DataPayload {
     type: 'data';
-    telemetry: string;
+    telemetry: any;
 }
 
 interface ResizePayload {
@@ -34,28 +34,29 @@ interface InitPayload {
 type WorkerMessage = DataPayload | ResizePayload | InitPayload;
 
 class AutoRanger {
-    public min: number = Infinity;
-    public max: number = -Infinity;
+    public min: number = 0;
+    public max: number = 1;
 
     public update(values: number[]) {
+        let vMin = Infinity;
+        let vMax = -Infinity;
         for (let i = 0; i < values.length; i++) {
-            if (values[i] < this.min) this.min = values[i];
-            if (values[i] > this.max) this.max = values[i];
+            if (values[i] < vMin) vMin = values[i];
+            if (values[i] > vMax) vMax = values[i];
         }
+
+        if (vMin === Infinity) return;
+
+        const range = vMax - vMin;
+        const padding = range === 0 ? 0.5 : range * 0.1;
+        this.min = vMin - padding;
+        this.max = vMax + padding;
     }
 
-    public getScale(height: number, margin: number): { scaleY: number, offset: number } {
+    public transform(value: number, height: number): number {
         const range = this.max - this.min;
-        if (range === 0) return { scaleY: 1, offset: margin };
-        const availableHeight = height - 2 * margin;
-        const scaleY = availableHeight / range;
-        return { scaleY, offset: margin };
-    }
-
-    public transform(value: number, height: number, margin: number): number {
-        const { scaleY } = this.getScale(height, margin);
-        // Flip Y for canvas coordinates
-        return (height - margin) - (value - this.min) * scaleY;
+        if (range === 0) return height / 2;
+        return height - ((value - this.min) / range) * height;
     }
 }
 
@@ -66,7 +67,7 @@ let lastData: number[][] = []; // Store multiple curves
 
 const COLORS = {
     bg: '#111111',
-    curves: ['#00ffff', '#ff8c00', '#adff2f', '#ff00ff'], // Neon colors
+    curves: ['#00ffff', '#ff8c00', '#00ff00', '#ff00ff'], // Neon Cyan, Bright Orange, Neon Green, Neon Magenta
     grid: '#333333',
     text: '#888888'
 };
@@ -133,13 +134,13 @@ function render() {
         const decimated = decimateData(curve, width);
 
         ctx!.strokeStyle = color;
-        ctx!.lineWidth = 1.5;
+        ctx!.lineWidth = 2;
         ctx!.beginPath();
 
         decimated.forEach((point, i) => {
             const x = MARGIN + i;
-            const yMin = autoRanger.transform(point.min, height, MARGIN);
-            const yMax = autoRanger.transform(point.max, height, MARGIN);
+            const yMin = autoRanger.transform(point.min, height);
+            const yMax = autoRanger.transform(point.max, height);
 
             if (i === 0) {
                 ctx!.moveTo(x, yMin);
@@ -150,7 +151,7 @@ function render() {
 
             // Connect to next chunk
             if (i < decimated.length - 1) {
-                const nextYMin = autoRanger.transform(decimated[i+1].min, height, MARGIN);
+                const nextYMin = autoRanger.transform(decimated[i+1].min, height);
                 ctx!.lineTo(x + 1, nextYMin);
             }
         });
@@ -183,20 +184,24 @@ self.onmessage = (evt: MessageEvent<WorkerMessage>) => {
             break;
 
         case 'data':
-            try {
-                const json = JSON.parse(msg.telemetry);
-                if (json.telemetry) {
-                    const values = json.telemetry.split(',').map(Number);
-                    autoRanger.update(values);
-
-                    // For now, let's assume one curve or update logic for multiple
-                    // Simple replacement for demo
-                    lastData = [values];
-
-                    render();
+            let values: number[] = [];
+            if (Array.isArray(msg.telemetry)) {
+                values = msg.telemetry;
+            } else if (typeof msg.telemetry === 'string') {
+                if (msg.telemetry.includes(',')) {
+                    values = msg.telemetry.split(',').map(Number);
+                } else {
+                    try {
+                        const parsed = JSON.parse(msg.telemetry);
+                        values = Array.isArray(parsed) ? parsed : (parsed.telemetry ? parsed.telemetry.split(',').map(Number) : []);
+                    } catch (e) { }
                 }
-            } catch (e) {
-                // Ignore non-json or non-telemetry
+            }
+
+            if (values.length > 0) {
+                autoRanger.update(values);
+                lastData = [values];
+                render();
             }
             break;
     }

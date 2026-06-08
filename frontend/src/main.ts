@@ -63,6 +63,12 @@ if (telemetryCanvas && telemetryContainer) {
     console.log("Telemetry ChartWorker initialized.");
 }
 
+// Initialize Networking
+const networkManager = new NetworkManager('ws://localhost:8080');
+if (chartWorker) {
+    networkManager.setWorker(chartWorker);
+}
+
 // Outliner Population
 const outliner = document.getElementById('outliner');
 if (outliner) {
@@ -99,17 +105,6 @@ const resizeObserver = new ResizeObserver(entries => {
 if (canvasContainer) resizeObserver.observe(canvasContainer);
 if (telemetryContainer) resizeObserver.observe(telemetryContainer);
 
-// Initialize Networking
-const networkManager = new NetworkManager('ws://localhost:8080');
-
-networkManager.onMessage((data) => {
-    if (chartWorker) {
-        chartWorker.postMessage({
-            type: 'data',
-            telemetry: data
-        });
-    }
-});
 
 networkManager.onOpen(() => {
     console.log("Network connected, sending initial state...");
