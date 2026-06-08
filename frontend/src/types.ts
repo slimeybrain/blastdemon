@@ -1,4 +1,9 @@
-export type NodeType = 'Domain1D' | 'InitialCondition' | 'Solver1D' | 'OutputNode';
+export type NodeType = 'DomainMesh' | 'MaterialAir' | 'MaterialExplosive' | 'ThePainter' | 'CFDSolver';
+
+export interface Port {
+    id: string;
+    label: string;
+}
 
 export interface Node {
     id: string;
@@ -6,6 +11,8 @@ export interface Node {
     x: number;
     y: number;
     parameters: Record<string, any>;
+    inputs: Port[];
+    outputs: Port[];
 }
 
 export interface Edge {
