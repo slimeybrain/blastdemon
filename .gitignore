@@ -1,2 +1,11 @@
+# Build artifacts
 build/
+.cache/
+
+# Simulation output data
+*.h5
+*.xmf
+
+# Frontend artifacts
 frontend/dist/
+node_modules/
