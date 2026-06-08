@@ -89,7 +89,7 @@ int main() {
             const std::vector<State>& states = solver.getStates();
             std::stringstream ss;
             ss << std::fixed << std::setprecision(4);
-            for (size_t i = 0; i < states.size(); ++i) {
+            for (int i = 0; i < solver.getNumCells(); ++i) {
                 ss << (i == 0 ? "" : ",") << states[i].p;
             }
 
