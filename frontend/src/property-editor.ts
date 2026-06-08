@@ -67,6 +67,13 @@ export class PropertyEditor {
     }
 
     private createInputElement(node: Node, key: string, value: any): HTMLElement {
+        const numericKeys = [
+            'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature',
+            'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
+            'jwl_R1', 'jwl_R2', 'jwl_omega', 'cfl', 'output_interval',
+            'spatial_order', 'temporal_order'
+        ];
+
         // Dropdown handling
         const dropdowns: Record<string, string[]> = {
             'left_bc': ['Reflecting', 'Transmitting', 'Terminate'],
@@ -96,7 +103,7 @@ export class PropertyEditor {
 
             select.addEventListener('change', () => {
                 let val: any = select.value;
-                if (key === 'spatial_order' || key === 'temporal_order') val = parseInt(val);
+                if (numericKeys.includes(key)) val = Number(val);
                 this.updateParameter(key, val);
             });
             return select;
@@ -104,7 +111,8 @@ export class PropertyEditor {
 
         // Default to number/text input
         const input = document.createElement('input');
-        input.type = typeof value === 'number' ? 'number' : 'text';
+        const isNumeric = numericKeys.includes(key) || typeof value === 'number';
+        input.type = isNumeric ? 'number' : 'text';
         if (input.type === 'number') input.step = 'any';
         input.value = value;
         input.style.width = '100%';
@@ -115,7 +123,9 @@ export class PropertyEditor {
 
         input.addEventListener('change', () => {
             let newVal: any = input.value;
-            if (input.type === 'number') newVal = parseFloat(input.value);
+            if (input.type === 'number') {
+                newVal = Number(input.value);
+            }
             this.updateParameter(key, newVal);
         });
 

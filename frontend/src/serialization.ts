@@ -15,11 +15,22 @@ export function serializeSimulationState(state: SimulationState): string {
 export function serializeForSolver(state: SimulationState): string {
     const strippedNodes = state.nodes.map(({ x, y, ...rest }) => rest);
 
+    const numericKeys = [
+        'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature',
+        'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
+        'jwl_R1', 'jwl_R2', 'jwl_omega', 'cfl', 'output_interval',
+        'spatial_order', 'temporal_order'
+    ];
+
     // Flatten all parameters from all nodes into a single configuration object
     const flattenedParams: Record<string, any> = {};
     state.nodes.forEach(node => {
         Object.entries(node.parameters).forEach(([key, value]) => {
-            flattenedParams[key] = value;
+            if (numericKeys.includes(key)) {
+                flattenedParams[key] = Number(value);
+            } else {
+                flattenedParams[key] = value;
+            }
         });
     });
 
