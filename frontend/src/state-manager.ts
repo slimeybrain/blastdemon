@@ -55,6 +55,25 @@ export class StateManager {
     }
 
     /**
+     * Updates the current state. If pushToHistory is true, it acts like pushState.
+     * If false, it updates the current history entry in place and notifies listeners.
+     */
+    updateState(state: SimulationState, pushToHistory: boolean = true): void {
+        if (pushToHistory) {
+            this.pushState(state);
+        } else {
+            // For dragging, we update the reference directly to avoid cloning overhead
+            if (this.currentIndex === -1) {
+                this.history.push(state);
+                this.currentIndex = 0;
+            } else {
+                this.history[this.currentIndex] = state;
+            }
+            this.notifyListeners();
+        }
+    }
+
+    /**
      * Gets the current active state.
      */
     getCurrentState(): SimulationState | null {
