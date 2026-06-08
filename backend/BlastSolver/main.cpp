@@ -4,18 +4,26 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+#include <cmath>
+
 #include "cfd_solver.hpp"
 #include "HDF5Writer.hpp"
 #include "XDMFWriter.hpp"
 
-// Lightweight JSON value extractor
+/**
+ * Lightweight JSON value extractor for basic simulation configuration.
+ * Handles simple key-value pairs in a flat or nested structure.
+ */
 std::string get_json_value(const std::string& json, const std::string& key) {
     size_t pos = json.find("\"" + key + "\"");
     if (pos == std::string::npos) return "";
+
     pos = json.find(":", pos);
     if (pos == std::string::npos) return "";
+
     pos = json.find_first_not_of(" \t\n\r", pos + 1);
     if (pos == std::string::npos) return "";
+
     if (json[pos] == '"') {
         size_t end = json.find("\"", pos + 1);
         if (end == std::string::npos) return "";
@@ -30,7 +38,9 @@ std::string get_json_value(const std::string& json, const std::string& key) {
 int main() {
     std::string input_json;
     std::string line;
-    // Read JSON configuration from stdin
+
+    // Read JSON configuration from stdin.
+    // The Broker sends the JSON followed by a double newline.
     while (std::getline(std::cin, line)) {
         if (line.empty()) break;
         input_json += line;
@@ -40,24 +50,28 @@ int main() {
         input_json = "{}";
     }
 
-    // Extract Domain parameters
+    // --- 1. The JSON Setup Bridge ---
+
+    // Domain & EOS Parameters
     int num_cells = 1000;
-    double radius = 10.0;
+    double domain_radius = 10.0;
     double gamma = 1.4;
 
     std::string s_num_cells = get_json_value(input_json, "num_cells");
+    if (s_num_cells.empty()) s_num_cells = get_json_value(input_json, "n_cells");
     if (!s_num_cells.empty()) num_cells = std::stoi(s_num_cells);
 
-    std::string s_radius = get_json_value(input_json, "radius");
-    if (!s_radius.empty()) radius = std::stod(s_radius);
+    std::string s_radius = get_json_value(input_json, "domain_radius");
+    if (s_radius.empty()) s_radius = get_json_value(input_json, "radius");
+    if (!s_radius.empty()) domain_radius = std::stod(s_radius);
 
     std::string s_gamma = get_json_value(input_json, "gamma");
     if (!s_gamma.empty()) gamma = std::stod(s_gamma);
 
-    // Initialize Solver
-    CFDSolver solver(num_cells, radius, gamma);
+    // Instantiate the solver
+    CFDSolver solver(num_cells, domain_radius, gamma);
 
-    // Extract Solver parameters
+    // Solver configuration
     std::string flux_scheme = get_json_value(input_json, "flux_scheme");
     if (!flux_scheme.empty()) solver.setFluxScheme(flux_scheme);
 
@@ -67,7 +81,7 @@ int main() {
     std::string s_temporal = get_json_value(input_json, "temporal_order");
     if (!s_temporal.empty()) solver.setTemporalOrder(std::stoi(s_temporal));
 
-    // Extract Initial Condition parameters
+    // Initial Condition (TNT Blast)
     double explosive_radius = 0.5;
     double high_rho = 1630.0;
     double ambient_rho = 1.225;
@@ -87,39 +101,46 @@ int main() {
 
     solver.setInitialConditionTNT(explosive_radius, high_rho, ambient_rho, ambient_p);
 
-    // Execution parameters
+    // Global execution params
     double duration = 0.01;
     std::string s_duration = get_json_value(input_json, "duration");
     if (!s_duration.empty()) duration = std::stod(s_duration);
 
-    // Simulation Loop
-    double elapsed = 0;
+    // --- 2. Loop Unrolling (Inversion of Control) ---
+
+    double elapsed = 0.0;
     int step_count = 0;
-    int telemetry_interval = 10;
-    int io_interval = 50;
+    const int telemetry_interval = 10;
+    const int io_interval = 50;
 
     while (elapsed < duration) {
+        // Compute adaptive time step
         double dt = solver.computeStepSize(0.4);
         if (elapsed + dt > duration) dt = duration - elapsed;
 
+        // Take a single solver step
         solver.step(dt);
         elapsed += dt;
         step_count++;
 
-        // Live Telemetry Hook (Pressure)
+        // --- 3. Live Telemetry Hook ---
         if (step_count % telemetry_interval == 0) {
-            const auto& states = solver.getStates();
+            const std::vector<State>& states = solver.getStates();
             std::stringstream ss;
             ss << std::fixed << std::setprecision(4);
             for (size_t i = 0; i < states.size(); ++i) {
                 ss << (i == 0 ? "" : ",") << states[i].p;
             }
-            std::cout << "{\"telemetry\": \"" << ss.str() << "\", \"time\": " << elapsed << "}" << std::endl;
+
+            // Format into compact JSON string envelope
+            std::cout << "{\"type\": \"TELEMETRY\", \"time\": " << elapsed
+                      << ", \"telemetry\": \"" << ss.str() << "\""
+                      << ", \"data\": [" << ss.str() << "]}" << std::endl;
         }
 
-        // Heavy I/O Hook
+        // --- 4. Heavy I/O Hook ---
         if (step_count % io_interval == 0) {
-            const auto& states = solver.getStates();
+            const std::vector<State>& states = solver.getStates();
             std::vector<double> rho, p, u, alpha1, alpha2;
             rho.reserve(states.size());
             p.reserve(states.size());
@@ -141,13 +162,18 @@ int main() {
             std::string h5_filename = base_name + ".h5";
             std::string xmf_filename = base_name + ".xmf";
 
+            // Pass vectors to HDF5Writer (Phase 7) and XDMFWriter
             if (HDF5Writer::writeFrame(h5_filename, rho, p, u, alpha1, alpha2)) {
                 if (XDMFWriter::writeXDMF(xmf_filename, h5_filename, solver.getNumCells(), solver.getCellSize())) {
+                    // Output IO_SUCCESS notification for the Broker
                     std::cout << "{\"type\": \"IO_SUCCESS\", \"file\": \"" << xmf_filename << "\"}" << std::endl;
                 }
             }
         }
     }
+
+    // Ensure final state is printed
+    std::cout.flush();
 
     return 0;
 }

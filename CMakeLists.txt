@@ -19,6 +19,7 @@ find_package(HDF5 REQUIRED COMPONENTS C)
 add_executable(Broker backend/BlastDaemon/Broker.cpp)
 
 # Solver (Worker)
+# CFDSolver integration: Linking cfd_solver.cpp (unity build) directly.
 add_executable(BlastSolver
     backend/BlastSolver/main.cpp
     backend/BlastSolver/cfd_solver.cpp
