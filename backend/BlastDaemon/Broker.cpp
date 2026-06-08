@@ -244,8 +244,8 @@ void process_json(const std::string& json, SOCKET_TYPE client_fd, std::shared_pt
         return;
     }
 
-    if (command != "EXECUTE") return;
-    std::cout << "--- EXECUTE COMMAND RECEIVED ---" << std::endl;
+    if (command != "START") return;
+    std::cout << "--- START COMMAND RECEIVED ---" << std::endl;
 
     if (active_process) {
         active_process->terminate();
@@ -260,6 +260,7 @@ void process_json(const std::string& json, SOCKET_TYPE client_fd, std::shared_pt
 
     if (active_process->start(solver_path)) {
         std::cout << "Starting BlastSolver via ProcessManager..." << std::endl;
+        active_process->writeStdin(json + "\n\n");
         std::thread([client_fd, proc = active_process]() {
             char buffer[4096];
             std::string line_accum;
