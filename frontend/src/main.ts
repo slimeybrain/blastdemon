@@ -83,8 +83,8 @@ const initialState: SimulationState = {
             parameters: {
                 cfl: 0.4,
                 flux_scheme: 'AUSM+',
-                spatial_order: '2',
-                temporal_order: '2',
+                spatial_order: 2,
+                temporal_order: 2,
                 output_mode: 'By Time',
                 output_interval: 0.0001
             }
