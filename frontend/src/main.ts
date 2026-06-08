@@ -53,7 +53,7 @@ if (telemetryCanvas && telemetryContainer) {
     const offscreen = telemetryCanvas.transferControlToOffscreen();
 
     // Create worker using standard ES6 module
-    chartWorker = new Worker(new URL('./ChartWorker.js', import.meta.url), { type: 'module' });
+    chartWorker = new Worker(new URL('./ChartWorker.ts', import.meta.url), { type: 'module' });
 
     chartWorker.postMessage({
         type: 'init',
