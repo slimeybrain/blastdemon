@@ -327,6 +327,7 @@ export class GraphRenderer {
                 node.inputs.forEach(input => {
                     const port = document.createElement('div');
                     port.className = 'port input';
+                    port.dataset.portId = input.id;
                     port.innerHTML = `<div class="port-bullet"></div><span class="port-label">${input.label}</span>`;
                     ports.appendChild(port);
                 });
@@ -334,6 +335,7 @@ export class GraphRenderer {
                 node.outputs.forEach(output => {
                     const port = document.createElement('div');
                     port.className = 'port output';
+                    port.dataset.portId = output.id;
                     port.innerHTML = `<span class="port-label">${output.label}</span><div class="port-bullet"></div>`;
                     ports.appendChild(port);
                 });
@@ -360,7 +362,8 @@ export class GraphRenderer {
             const toPos = this.getPortPosition(toNode, edge.toPort, true);
 
             const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-            const d = `M ${fromPos.x} ${fromPos.y} C ${fromPos.x + 50} ${fromPos.y}, ${toPos.x - 50} ${toPos.y}, ${toPos.x} ${toPos.y}`;
+            const dx = Math.max(Math.abs(toPos.x - fromPos.x) * 0.5, 50);
+            const d = `M ${fromPos.x} ${fromPos.y} C ${fromPos.x + dx} ${fromPos.y}, ${toPos.x - dx} ${toPos.y}, ${toPos.x} ${toPos.y}`;
             path.setAttribute('d', d);
             path.setAttribute('class', 'edge-path');
             this.svg.appendChild(path);
@@ -368,16 +371,27 @@ export class GraphRenderer {
     }
 
     private getPortPosition(node: Node, portId: string, isInput: boolean): { x: number, y: number } {
+        const nodeEl = this.nodeElements.get(node.id);
+        if (nodeEl) {
+            const portEl = nodeEl.querySelector(`.port.${isInput ? 'input' : 'output'}[data-port-id="${portId}"]`);
+            const bullet = portEl?.querySelector('.port-bullet');
+            if (bullet) {
+                const rect = bullet.getBoundingClientRect();
+                const screenX = rect.left + rect.width / 2;
+                const screenY = rect.top + rect.height / 2;
+
+                const pt = new DOMPoint(screenX, screenY);
+                const worldPoint = pt.matrixTransform(this.svg.getScreenCTM()!.inverse());
+                return { x: worldPoint.x, y: worldPoint.y };
+            }
+        }
+
+        // Fallback to manual calculation if DOM is not ready
         const ports = isInput ? node.inputs : node.outputs;
         const index = ports.findIndex(p => p.id === portId);
-
-        const portY = 25 + 8 + 10 + (index * 20); // Header + Padding + Half-Port-Height + Index * Port-Height
+        const portY = 25 + 8 + 10 + (index * 20);
         const portX = isInput ? 0 : 180;
-
-        return {
-            x: node.x + portX,
-            y: node.y + portY
-        };
+        return { x: node.x + portX, y: node.y + portY };
     }
 
     public autoArrange(): void {
