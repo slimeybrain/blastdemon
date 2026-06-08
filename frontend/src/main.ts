@@ -1,7 +1,7 @@
 import { StateManager } from './state-manager.js';
 import { SimulationState } from './types.js';
 import { CanvasRenderer } from './canvas-renderer.js';
-import { NetworkManager } from './network.js';
+import { NetworkManager } from './NetworkManager.js';
 import { serializeSimulationState } from './serialization.js';
 import { LayoutManager } from './layout-manager.js';
 
@@ -111,7 +111,7 @@ networkManager.onMessage((data) => {
     }
 });
 
-networkManager.connect().then(() => {
+networkManager.onOpen(() => {
     console.log("Network connected, sending initial state...");
     const state = stateManager.getCurrentState();
     if (state) {
@@ -119,8 +119,6 @@ networkManager.connect().then(() => {
         networkManager.send(payload);
         console.log("Initial state sent to BlastDaemon.");
     }
-}).catch(err => {
-    console.error("Failed to connect to BlastDaemon:", err);
 });
 
 console.log("Workspace ready.");
