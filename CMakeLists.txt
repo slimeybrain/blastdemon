@@ -21,10 +21,13 @@ add_executable(Broker backend/BlastDaemon/Broker.cpp)
 # Solver (Worker)
 # CFDSolver integration: Linking cfd_solver.cpp (unity build) directly.
 add_executable(BlastSolver
-    backend/BlastSolver/main.cpp
     backend/BlastSolver/cfd_solver.cpp
+    backend/BlastSolver/main.cpp
     backend/BlastSolver/HDF5Writer.cpp
     backend/BlastSolver/XDMFWriter.cpp
 )
-target_include_directories(BlastSolver PRIVATE ${HDF5_INCLUDE_DIRS})
+target_include_directories(BlastSolver PRIVATE
+    ${HDF5_INCLUDE_DIRS}
+    backend/BlastSolver/include
+)
 target_link_libraries(BlastSolver PRIVATE ${HDF5_LIBRARIES})
