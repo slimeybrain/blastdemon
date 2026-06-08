@@ -2,7 +2,7 @@ import { StateManager } from './state-manager.js';
 import { SimulationState } from './types.js';
 import { CanvasRenderer } from './canvas-renderer.js';
 import { NetworkManager } from './NetworkManager.js';
-import { serializeSimulationState } from './serialization.js';
+import { serializeSimulationState, serializeForSolver } from './serialization.js';
 import { LayoutManager } from './layout-manager.js';
 
 // Extend HTMLCanvasElement for TypeScript if it's missing transferControlToOffscreen
@@ -120,5 +120,18 @@ networkManager.onOpen(() => {
         console.log("Initial state sent to BlastDaemon.");
     }
 });
+
+// Run Simulation Button
+const runBtn = document.getElementById('run-simulation-btn');
+if (runBtn) {
+    runBtn.addEventListener('click', () => {
+        networkManager.log('[System] Sending simulation config to Broker...', 'system');
+        const state = stateManager.getCurrentState();
+        if (state) {
+            const payload = serializeForSolver(state);
+            networkManager.send(payload);
+        }
+    });
+}
 
 console.log("Workspace ready.");
