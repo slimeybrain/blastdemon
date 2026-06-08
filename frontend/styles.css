@@ -70,6 +70,29 @@ body {
     font-size: 0.85rem;
     color: var(--header-text-color);
     user-select: none;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.header-button {
+    background-color: var(--accent-color);
+    color: white;
+    border: none;
+    border-radius: 2px;
+    padding: 2px 8px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+.header-button:hover {
+    background-color: #005fa3;
+}
+
+.header-button:active {
+    background-color: #004a80;
 }
 
 .panel-content {

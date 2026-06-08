@@ -71,7 +71,7 @@ export class NetworkManager {
         }
     }
 
-    private log(message: string, type: 'success' | 'error' | 'system' | 'default'): void {
+    public log(message: string, type: 'success' | 'error' | 'system' | 'default'): void {
         if (!this.terminal) return;
 
         const line = document.createElement('div');
