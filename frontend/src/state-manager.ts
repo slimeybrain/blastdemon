@@ -1,9 +1,11 @@
-import { SimulationState } from './types.js';
+import { SimulationState, SimulationStatus } from './types.js';
 
 export class StateManager {
     private history: SimulationState[] = [];
     private currentIndex: number = -1;
     private listeners: ((state: SimulationState) => void)[] = [];
+    private simulationStatus: SimulationStatus = 'UNINITIALIZED';
+    private statusListeners: ((status: SimulationStatus) => void)[] = [];
 
     constructor(initialState?: SimulationState) {
         if (initialState) {
@@ -25,6 +27,7 @@ export class StateManager {
 
         this.history.push(stateCopy);
         this.currentIndex++;
+        this.setStatus('UNINITIALIZED');
         this.notifyListeners();
     }
 
@@ -69,6 +72,7 @@ export class StateManager {
             } else {
                 this.history[this.currentIndex] = state;
             }
+            this.setStatus('UNINITIALIZED');
             this.notifyListeners();
         }
     }
@@ -111,6 +115,25 @@ export class StateManager {
      */
     onStateChange(listener: (state: SimulationState) => void): void {
         this.listeners.push(listener);
+    }
+
+    getStatus(): SimulationStatus {
+        return this.simulationStatus;
+    }
+
+    setStatus(status: SimulationStatus): void {
+        if (this.simulationStatus !== status) {
+            this.simulationStatus = status;
+            this.notifyStatusListeners();
+        }
+    }
+
+    onStatusChange(listener: (status: SimulationStatus) => void): void {
+        this.statusListeners.push(listener);
+    }
+
+    private notifyStatusListeners(): void {
+        this.statusListeners.forEach(listener => listener(this.simulationStatus));
     }
 
     private notifyListeners(): void {

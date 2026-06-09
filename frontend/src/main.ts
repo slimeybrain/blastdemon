@@ -210,11 +210,41 @@ if (autoArrangeBtn && renderer) {
 // Execution Transport Bar Logic
 let playInterval: number | null = null;
 
-const initBtn = document.getElementById('init-btn');
-const stepBtn = document.getElementById('step-btn');
-const playBtn = document.getElementById('play-btn');
-const pauseBtn = document.getElementById('pause-btn');
-const terminateBtn = document.getElementById('terminate-btn');
+const statusBadge = document.getElementById('status-badge');
+const initBtn = document.getElementById('init-btn') as HTMLButtonElement;
+const exec1Btn = document.getElementById('exec-1-btn') as HTMLButtonElement;
+const exec10Btn = document.getElementById('exec-10-btn') as HTMLButtonElement;
+const exec100Btn = document.getElementById('exec-100-btn') as HTMLButtonElement;
+const exec1000Btn = document.getElementById('exec-1000-btn') as HTMLButtonElement;
+const execEndBtn = document.getElementById('exec-end-btn') as HTMLButtonElement;
+const playBtn = document.getElementById('play-btn') as HTMLButtonElement;
+const pauseBtn = document.getElementById('pause-btn') as HTMLButtonElement;
+const terminateBtn = document.getElementById('terminate-btn') as HTMLButtonElement;
+
+function updateTransportUI(status: string) {
+    if (statusBadge) {
+        statusBadge.textContent = status;
+        statusBadge.className = `status-badge badge-${status.toLowerCase()}`;
+    }
+
+    const isLive = (status === 'INITIALIZED' || status === 'PAUSED');
+    const isRunning = (status === 'RUNNING');
+
+    if (exec1Btn) exec1Btn.disabled = !isLive;
+    if (exec10Btn) exec10Btn.disabled = !isLive;
+    if (exec100Btn) exec100Btn.disabled = !isLive;
+    if (exec1000Btn) exec1000Btn.disabled = !isLive;
+    if (execEndBtn) execEndBtn.disabled = !isLive;
+    if (playBtn) playBtn.disabled = !isLive;
+    if (pauseBtn) pauseBtn.disabled = !isRunning;
+}
+
+stateManager.onStatusChange((status) => {
+    updateTransportUI(status);
+});
+
+// Initial UI sync
+updateTransportUI(stateManager.getStatus());
 
 if (initBtn) {
     initBtn.addEventListener('click', () => {
@@ -223,13 +253,40 @@ if (initBtn) {
         if (state) {
             const payload = serializeForSolver(state, "INIT");
             networkManager.send(payload);
+            stateManager.setStatus('INITIALIZED');
         }
     });
 }
 
-if (stepBtn) {
-    stepBtn.addEventListener('click', () => {
+if (exec1Btn) {
+    exec1Btn.addEventListener('click', () => {
         networkManager.send({ command: "STEP", steps: 1 });
+    });
+}
+
+if (exec10Btn) {
+    exec10Btn.addEventListener('click', () => {
+        networkManager.send({ command: "STEP", steps: 10 });
+    });
+}
+
+if (exec100Btn) {
+    exec100Btn.addEventListener('click', () => {
+        networkManager.send({ command: "STEP", steps: 100 });
+    });
+}
+
+if (exec1000Btn) {
+    exec1000Btn.addEventListener('click', () => {
+        networkManager.send({ command: "STEP", steps: 1000 });
+    });
+}
+
+if (execEndBtn) {
+    execEndBtn.addEventListener('click', () => {
+        networkManager.log('[System] Executing until termination boundary...', 'system');
+        networkManager.send({ command: "EXEC_END" });
+        stateManager.setStatus('RUNNING');
     });
 }
 
@@ -237,6 +294,7 @@ if (playBtn) {
     playBtn.addEventListener('click', () => {
         if (playInterval) return;
         networkManager.log('[System] Playback started', 'success');
+        stateManager.setStatus('RUNNING');
         playInterval = window.setInterval(() => {
             networkManager.send({ command: "STEP", steps: 10 });
         }, 16);
@@ -248,8 +306,9 @@ if (pauseBtn) {
         if (playInterval) {
             clearInterval(playInterval);
             playInterval = null;
-            networkManager.log('[System] Playback paused', 'system');
         }
+        stateManager.setStatus('PAUSED');
+        networkManager.log('[System] Playback paused', 'system');
     });
 }
 
@@ -261,7 +320,25 @@ if (terminateBtn) {
         }
         networkManager.log('[System] Terminating solver...', 'error');
         networkManager.send({ command: "TERMINATE" });
+        stateManager.setStatus('TERMINATED');
     });
 }
+
+// Global WebSocket listener for termination flag
+networkManager.onMessage((dataString) => {
+    try {
+        const data = JSON.parse(dataString);
+        if (data.type === 'TELEMETRY' && data.is_terminated === true) {
+            if (playInterval) {
+                clearInterval(playInterval);
+                playInterval = null;
+            }
+            if (stateManager.getStatus() !== 'TERMINATED') {
+                stateManager.setStatus('TERMINATED');
+                networkManager.log('[System] Simulation reached termination boundary.', 'error');
+            }
+        }
+    } catch (e) {}
+});
 
 console.log("Workspace ready.");

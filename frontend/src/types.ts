@@ -22,6 +22,8 @@ export interface Edge {
     toPort: string;
 }
 
+export type SimulationStatus = 'UNINITIALIZED' | 'INITIALIZED' | 'RUNNING' | 'PAUSED' | 'TERMINATED';
+
 export interface SimulationState {
     nodes: Node[];
     edges: Edge[];
