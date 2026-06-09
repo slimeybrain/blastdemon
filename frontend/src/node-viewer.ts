@@ -16,6 +16,9 @@ export class NodeViewer {
     private lastType: NodeType | null = null;
     private lastId: string | null = null;
 
+    private telemetryBuffer: any = null;
+    private renderRequestId: number | null = null;
+
     constructor(parent: HTMLElement, stateManager: StateManager) {
         this.container = document.createElement('div');
         this.container.className = 'node-viewer-container';
@@ -42,6 +45,7 @@ export class NodeViewer {
     }
 
     public destroy(): void {
+        this.stopRenderLoop();
         this.stateManager.offStateChange(this.stateListener);
         this.stateManager.offTelemetryUpdate(this.telemetryListener);
         if (this.chartWorker) this.chartWorker.terminate();
@@ -50,6 +54,7 @@ export class NodeViewer {
 
     public setNode(nodeId: string | null): void {
         if (this.currentNodeId === nodeId) return;
+        this.stopRenderLoop();
         this.currentNodeId = nodeId;
         this.render();
     }
@@ -98,6 +103,7 @@ export class NodeViewer {
     }
 
     private renderExpandedText(node: Node): void {
+        this.stopRenderLoop();
         if (this.chartWorker) {
             this.chartWorker.terminate();
             this.chartWorker = null;
@@ -151,6 +157,8 @@ export class NodeViewer {
     }
 
     private renderExpandedGraph(node: Node): void {
+        this.stopRenderLoop();
+        this.telemetryBuffer = null;
         if (this.chartWorker) {
             this.chartWorker.terminate();
             this.chartWorker = null;
@@ -233,6 +241,8 @@ export class NodeViewer {
 
         const initialData = this.stateManager.getTelemetry(node.id);
         if (initialData) this.handleTelemetry(node.id, initialData);
+
+        this.startRenderLoop();
     }
 
     private renderStandardNode(node: Node): void {
@@ -247,6 +257,28 @@ export class NodeViewer {
     private handleTelemetry(nodeId: string, data: any): void {
         if (nodeId !== this.currentNodeId) return;
         this.updateNodeViewerData(nodeId, data);
+    }
+
+    private startRenderLoop(): void {
+        if (this.renderRequestId !== null) return;
+        const loop = () => {
+            if (this.telemetryBuffer && this.chartWorker) {
+                this.chartWorker.postMessage({
+                    type: 'frame',
+                    data: this.telemetryBuffer.data
+                });
+                this.telemetryBuffer = null;
+            }
+            this.renderRequestId = requestAnimationFrame(loop);
+        };
+        this.renderRequestId = requestAnimationFrame(loop);
+    }
+
+    private stopRenderLoop(): void {
+        if (this.renderRequestId !== null) {
+            cancelAnimationFrame(this.renderRequestId);
+            this.renderRequestId = null;
+        }
     }
 
     private updateNodeViewerData(nodeId: string, data: any): void {
@@ -277,11 +309,8 @@ export class NodeViewer {
                 }
                 terminal.scrollTop = terminal.scrollHeight;
             }
-        } else if (node.type === 'TelemetryGraph' && this.chartWorker) {
-            this.chartWorker.postMessage({
-                type: 'frame',
-                data: data.data
-            });
+        } else if (node.type === 'TelemetryGraph') {
+            this.telemetryBuffer = data;
         }
         // Standard nodes (PropertyEditor) ignore high-frequency telemetry
     }

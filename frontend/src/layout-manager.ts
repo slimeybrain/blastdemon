@@ -143,7 +143,7 @@ export class LayoutManager {
 
         const select = document.createElement('select');
         select.className = 'header-select';
-        const types: PanelType[] = ['OUTLINER', 'NODE_GRAPH', 'PROPERTIES', 'TELEMETRY_GRAPH', 'TELEMETRY_TEXT', 'NODE_VIEWER'];
+        const types: PanelType[] = ['OUTLINER', 'NODE_GRAPH', 'PROPERTIES', 'NODE_VIEWER'];
         types.forEach(t => {
             const opt = document.createElement('option');
             opt.value = t;
@@ -162,10 +162,16 @@ export class LayoutManager {
 
             const state = this.stateManager.getCurrentState();
             if (state) {
+                const placeholder = document.createElement('option');
+                placeholder.value = "";
+                placeholder.textContent = "-- Select Node --";
+                if (!node.targetNodeId) placeholder.selected = true;
+                subSelect.appendChild(placeholder);
+
                 state.nodes.forEach(n => {
                     const opt = document.createElement('option');
                     opt.value = n.id;
-                    opt.textContent = n.id;
+                    opt.textContent = `${n.type}: ${n.id}`;
                     if (n.id === node.targetNodeId) opt.selected = true;
                     subSelect.appendChild(opt);
                 });
