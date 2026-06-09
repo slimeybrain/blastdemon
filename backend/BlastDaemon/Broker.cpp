@@ -244,46 +244,52 @@ void process_json(const std::string& json, SOCKET_TYPE client_fd, std::shared_pt
         return;
     }
 
-    if (command != "START") return;
-    std::cout << "--- START COMMAND RECEIVED ---" << std::endl;
+    if (command == "INIT" || command == "START") {
+        std::cout << "--- " << command << " COMMAND RECEIVED ---" << std::endl;
+        if (active_process) {
+            active_process->terminate();
+            active_process.reset();
+        }
 
-    if (active_process) {
-        active_process->terminate();
-        active_process.reset();
-    }
-
-    active_process = std::make_shared<Process>();
-    std::string solver_path = "./BlastSolver";
+        active_process = std::make_shared<Process>();
+        std::string solver_path = "./BlastSolver";
 #ifdef _WIN32
-    solver_path = "BlastSolver.exe";
+        solver_path = "BlastSolver.exe";
 #endif
 
-    if (active_process->start(solver_path)) {
-        std::cout << "Starting BlastSolver via ProcessManager..." << std::endl;
-        active_process->writeStdin(json + "\n\n");
-        std::thread([client_fd, proc = active_process]() {
-            char buffer[4096];
-            std::string line_accum;
-            while (true) {
-                int n = proc->readStdout(buffer, sizeof(buffer) - 1);
-                if (n <= 0) break;
-                buffer[n] = '\0';
-                line_accum += buffer;
+        if (active_process->start(solver_path)) {
+            std::cout << "Starting BlastSolver for initialization..." << std::endl;
+            active_process->writeStdin(json + "\n\n");
+            std::thread([client_fd, proc = active_process]() {
+                char buffer[4096];
+                std::string line_accum;
+                while (true) {
+                    int n = proc->readStdout(buffer, sizeof(buffer) - 1);
+                    if (n <= 0) break;
+                    buffer[n] = '\0';
+                    line_accum += buffer;
 
-                size_t pos;
-                while ((pos = line_accum.find('\n')) != std::string::npos) {
-                    std::string line = line_accum.substr(0, pos);
-                    if (!line.empty() && line.back() == '\r') line.pop_back();
-                    if (!line.empty()) {
-                        send_websocket_frame(client_fd, line);
+                    size_t pos;
+                    while ((pos = line_accum.find('\n')) != std::string::npos) {
+                        std::string line = line_accum.substr(0, pos);
+                        if (!line.empty() && line.back() == '\r') line.pop_back();
+                        if (!line.empty()) {
+                            send_websocket_frame(client_fd, line);
+                        }
+                        line_accum.erase(0, pos + 1);
                     }
-                    line_accum.erase(0, pos + 1);
                 }
-            }
-            std::cout << "Telemetry relay thread finished." << std::endl;
-        }).detach();
-    } else {
-        std::cerr << "Failed to start BlastSolver" << std::endl;
+                std::cout << "Telemetry relay thread finished." << std::endl;
+            }).detach();
+        } else {
+            std::cerr << "Failed to start BlastSolver" << std::endl;
+        }
+    } else if (command == "STEP" || command == "TERMINATE") {
+        if (active_process && active_process->isRunning()) {
+            active_process->writeStdin(json + "\n\n");
+        } else {
+            std::cerr << "Command " << command << " ignored: Solver not running." << std::endl;
+        }
     }
 
     SimulationState state;
