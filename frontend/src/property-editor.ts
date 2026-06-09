@@ -5,14 +5,25 @@ export class PropertyEditor {
     private container: HTMLElement;
     private stateManager: StateManager;
     private currentNodeId: string | null = null;
+    private listener: ((state: any) => void) | null = null;
 
-    constructor(containerId: string, stateManager: StateManager) {
-        const container = document.getElementById(containerId);
-        if (!container) {
-            throw new Error(`Property editor container #${containerId} not found`);
-        }
-        this.container = container;
+    constructor(parent: HTMLElement, stateManager: StateManager) {
+        this.container = document.createElement('div');
+        this.container.id = 'property-editor-container';
+        this.container.className = 'panel-content';
+        parent.appendChild(this.container);
+
         this.stateManager = stateManager;
+        this.listener = () => this.render();
+        this.stateManager.onStateChange(this.listener);
+        this.render();
+    }
+
+    public destroy(): void {
+        if (this.listener) {
+            this.stateManager.offStateChange(this.listener);
+        }
+        this.container.remove();
     }
 
     public setSelectedNode(nodeId: string | null): void {
@@ -74,7 +85,6 @@ export class PropertyEditor {
             'spatial_order', 'temporal_order'
         ];
 
-        // Dropdown handling
         const dropdowns: Record<string, string[]> = {
             'left_bc': ['Reflecting', 'Transmitting', 'Terminate'],
             'right_bc': ['Reflecting', 'Transmitting', 'Terminate'],
@@ -109,7 +119,6 @@ export class PropertyEditor {
             return select;
         }
 
-        // Default to number/text input
         const input = document.createElement('input');
         const isNumeric = numericKeys.includes(key) || typeof value === 'number';
         input.type = isNumeric ? 'number' : 'text';
@@ -141,7 +150,6 @@ export class PropertyEditor {
 
         const updates: Record<string, any> = { [key]: value };
 
-        // Explosive Node Logic: "Auto-switch to Custom"
         if (node.type === 'MaterialExplosive') {
             const physicalParams = ['rho', 'detonation_energy', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
             if (physicalParams.includes(key) && node.parameters['composition'] !== 'Custom') {
@@ -150,6 +158,6 @@ export class PropertyEditor {
         }
 
         this.stateManager.updateNodeParameters(this.currentNodeId, updates);
-        this.render(); // Re-render to reflect changes (especially if composition changed)
+        this.render();
     }
 }

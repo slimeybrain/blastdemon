@@ -1,71 +1,15 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BlastDaemon | Professional Engineering Workspace</title>
+    <title>BlastDaemon | Recursive Workspace</title>
     <link rel="stylesheet" href="styles.css">
 </head>
-
 <body>
     <div id="app-container">
-        <!-- Outliner Sidebar -->
-        <aside id="left-sidebar" class="panel">
-            <div class="panel-header">Outliner</div>
-            <div class="panel-content">
-                <ul id="outliner">
-                    <!-- Populated by main.ts -->
-                </ul>
-            </div>
-        </aside>
-
-        <!-- Node Graph Viewport -->
-        <main id="center-viewport" class="panel">
-            <div class="panel-header">
-                <div style="display: flex; align-items: center; gap: 12px;">
-                    <span>Node Graph</span>
-                    <div id="status-badge" class="status-badge badge-uninitialized">UNINITIALIZED</div>
-                </div>
-                <div class="header-actions">
-                    <button id="auto-arrange-btn" class="header-button secondary">Auto-Arrange</button>
-                    <button id="init-btn" class="header-button">Initialize</button>
-                    <div class="button-group">
-                        <button id="exec-1-btn" class="header-button secondary">Exec 1</button>
-                        <button id="exec-10-btn" class="header-button secondary">10</button>
-                        <button id="exec-100-btn" class="header-button secondary">100</button>
-                        <button id="exec-1000-btn" class="header-button secondary">1000</button>
-                        <button id="exec-end-btn" class="header-button secondary">End</button>
-                    </div>
-                    <button id="play-btn" class="header-button success">Play</button>
-                    <button id="pause-btn" class="header-button warning">Pause</button>
-                    <button id="terminate-btn" class="header-button danger">Terminate</button>
-                </div>
-                <div id="progress-container" class="progress-container">
-                    <div id="progress-bar" class="progress-bar"></div>
-                </div>
-            </div>
-            <div id="graph-viewport" class="panel-content" style="overflow: hidden; cursor: crosshair;">
-                <div id="canvas-container">
-                    <svg id="edge-svg">
-                        <!-- Edges rendered here -->
-                    </svg>
-                    <!-- Nodes rendered here as DOM elements -->
-                </div>
-            </div>
-        </main>
-
-        <!-- Telemetry & Properties Sidebar -->
-        <aside id="right-sidebar" class="panel">
-            <div class="panel-header">Property Editor</div>
-            <div id="property-editor-container" class="panel-content">
-                <!-- Populated by PropertyEditor.ts -->
-                <div style="padding: 20px; color: #666;">No node selected</div>
-            </div>
-        </aside>
+        <!-- Managed by LayoutManager -->
     </div>
-    <!-- <script type="module" src="dist/main.js"></script> -->
     <script type="module" src="/src/main.ts"></script>
 </body>
-
 </html>

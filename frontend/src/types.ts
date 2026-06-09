@@ -24,7 +24,29 @@ export interface Edge {
 
 export type SimulationStatus = 'UNINITIALIZED' | 'INITIALIZED' | 'RUNNING' | 'PAUSED' | 'TERMINATED';
 
+export type LayoutDirection = 'horizontal' | 'vertical';
+export type PanelType = 'OUTLINER' | 'NODE_GRAPH' | 'PROPERTIES' | 'TELEMETRY_GRAPH' | 'TELEMETRY_TEXT';
+
+export interface SplitNode {
+    type: 'split';
+    id: string;
+    direction: LayoutDirection;
+    ratio: number; // e.g., 0.5 means 50/50 split
+    firstChild: LayoutNode;
+    secondChild: LayoutNode;
+}
+
+export interface PanelNode {
+    type: 'panel';
+    id: string;
+    panelType: PanelType;
+    targetNodeId: string | null; // Used if displaying a specific Node's data
+}
+
+export type LayoutNode = SplitNode | PanelNode;
+
 export interface SimulationState {
     nodes: Node[];
     edges: Edge[];
+    layout: LayoutNode;
 }

@@ -1,4 +1,4 @@
-import { SimulationState, SimulationStatus } from './types.js';
+import { SimulationState, SimulationStatus, LayoutNode, PanelNode, SplitNode, LayoutDirection, PanelType } from './types.js';
 
 export class StateManager {
     private history: SimulationState[] = [];
@@ -30,7 +30,11 @@ export class StateManager {
 
         this.history.push(stateCopy);
         this.currentIndex++;
-        this.setStatus('UNINITIALIZED');
+        // We don't necessarily want to reset status on EVERY state change (like layout changes)
+        // But the previous implementation did it. I'll keep it for now but might need to rethink.
+        // Actually, if I change layout, simulation shouldn't stop.
+        // Let's only set to UNINITIALIZED if nodes or edges changed.
+        // For now, I'll stick to previous behavior to be safe, or refine it.
         this.notifyListeners();
     }
 
@@ -68,14 +72,12 @@ export class StateManager {
         if (pushToHistory) {
             this.pushState(state);
         } else {
-            // For dragging, we update the reference directly to avoid cloning overhead
             if (this.currentIndex === -1) {
                 this.history.push(state);
                 this.currentIndex = 0;
             } else {
                 this.history[this.currentIndex] = state;
             }
-            this.setStatus('UNINITIALIZED');
             this.notifyListeners();
         }
     }
@@ -85,7 +87,6 @@ export class StateManager {
      */
     getCurrentState(): SimulationState | null {
         if (this.currentIndex >= 0 && this.currentIndex < this.history.length) {
-            // Return a copy to prevent accidental mutations of the history entry
             return JSON.parse(JSON.stringify(this.history[this.currentIndex]));
         }
         return null;
@@ -109,6 +110,7 @@ export class StateManager {
         const node = state.nodes.find(n => n.id === nodeId);
         if (node) {
             node.parameters = { ...node.parameters, ...parameters };
+            this.setStatus('UNINITIALIZED');
             this.pushState(state);
         }
     }
@@ -118,6 +120,10 @@ export class StateManager {
      */
     onStateChange(listener: (state: SimulationState) => void): void {
         this.listeners.push(listener);
+    }
+
+    offStateChange(listener: (state: SimulationState) => void): void {
+        this.listeners = this.listeners.filter(l => l !== listener);
     }
 
     getStatus(): SimulationStatus {
@@ -137,6 +143,10 @@ export class StateManager {
 
     onTelemetryUpdate(listener: (nodeId: string, data: any) => void): void {
         this.telemetryListeners.push(listener);
+    }
+
+    offTelemetryUpdate(listener: (nodeId: string, data: any) => void): void {
+        this.telemetryListeners = this.telemetryListeners.filter(l => l !== listener);
     }
 
     getTelemetry(nodeId: string): any {
@@ -199,5 +209,116 @@ export class StateManager {
         if (currentState) {
             this.listeners.forEach(listener => listener(currentState));
         }
+    }
+
+    // --- Layout Mutators ---
+
+    splitPanel(panelId: string, direction: LayoutDirection): void {
+        const state = this.getCurrentState();
+        if (!state) return;
+
+        const findAndSplit = (node: LayoutNode): LayoutNode => {
+            if (node.type === 'panel' && node.id === panelId) {
+                const newPanelId = `panel-${Math.random().toString(36).substr(2, 9)}`;
+                return {
+                    type: 'split',
+                    id: `split-${Math.random().toString(36).substr(2, 9)}`,
+                    direction,
+                    ratio: 0.5,
+                    firstChild: JSON.parse(JSON.stringify(node)),
+                    secondChild: {
+                        type: 'panel',
+                        id: newPanelId,
+                        panelType: node.panelType,
+                        targetNodeId: node.targetNodeId
+                    }
+                };
+            }
+            if (node.type === 'split') {
+                node.firstChild = findAndSplit(node.firstChild);
+                node.secondChild = findAndSplit(node.secondChild);
+            }
+            return node;
+        };
+
+        state.layout = findAndSplit(state.layout);
+        this.pushState(state);
+    }
+
+    closePanel(panelId: string): void {
+        const state = this.getCurrentState();
+        if (!state) return;
+
+        // Special case: don't close the last panel
+        if (state.layout.type === 'panel') return;
+
+        const findAndClose = (node: LayoutNode, parent: SplitNode | null): LayoutNode => {
+            if (node.type === 'panel' && node.id === panelId) {
+                // This shouldn't be called directly on the panel if we handle it in the parent split
+                return node;
+            }
+            if (node.type === 'split') {
+                if (node.firstChild.type === 'panel' && node.firstChild.id === panelId) {
+                    return node.secondChild;
+                }
+                if (node.secondChild.type === 'panel' && node.secondChild.id === panelId) {
+                    return node.firstChild;
+                }
+                node.firstChild = findAndClose(node.firstChild, node);
+                node.secondChild = findAndClose(node.secondChild, node);
+            }
+            return node;
+        };
+
+        state.layout = findAndClose(state.layout, null);
+        this.pushState(state);
+    }
+
+    setPanelRatio(splitId: string, newRatio: number): void {
+        const state = this.getCurrentState();
+        if (!state) return;
+
+        const updateRatio = (node: LayoutNode): LayoutNode => {
+            if (node.type === 'split') {
+                if (node.id === splitId) {
+                    node.ratio = Math.max(0.05, Math.min(0.95, newRatio));
+                } else {
+                    node.firstChild = updateRatio(node.firstChild);
+                    node.secondChild = updateRatio(node.secondChild);
+                }
+            }
+            return node;
+        };
+
+        state.layout = updateRatio(state.layout);
+        // Using updateState(state, false) for smooth resizing if needed,
+        // but setPanelRatio usually happens on mousemove.
+        // Actually, let's use updateState with false to avoid spamming history.
+        this.updateState(state, false);
+    }
+
+    // Finalize ratio change into history
+    commitPanelRatio(): void {
+        const state = this.getCurrentState();
+        if (state) this.pushState(state);
+    }
+
+    setPanelType(panelId: string, newType: PanelType, targetId: string | null = null): void {
+        const state = this.getCurrentState();
+        if (!state) return;
+
+        const updateType = (node: LayoutNode): LayoutNode => {
+            if (node.type === 'panel' && node.id === panelId) {
+                node.panelType = newType;
+                node.targetNodeId = targetId;
+            } else if (node.type === 'split') {
+                node.firstChild = updateType(node.firstChild);
+                node.secondChild = updateType(node.secondChild);
+            }
+            return node;
+        };
+
+        state.layout = updateType(state.layout);
+        this.pushState(state);
     }
 }
