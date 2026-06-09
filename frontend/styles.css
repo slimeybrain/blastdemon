@@ -175,12 +175,14 @@ canvas {
 #canvas-container {
     position: relative;
     transform-origin: 0 0;
-    width: 0;
-    height: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 0;
 }
 
 .node {
     position: absolute;
+    z-index: 10;
     width: 180px;
     background: #333;
     border: 1px solid #555;
@@ -243,6 +245,7 @@ canvas {
 
 /* Edge Styles */
 #edge-svg {
+    z-index: 1;
     overflow: visible !important;
     position: absolute;
     top: 0;
