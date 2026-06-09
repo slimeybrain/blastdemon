@@ -229,12 +229,13 @@ function updateTransportUI(status: string) {
 
     const isLive = (status === 'INITIALIZED' || status === 'PAUSED');
     const isRunning = (status === 'RUNNING');
+    const canExec = (status === 'INITIALIZED' || status === 'RUNNING' || status === 'PAUSED');
 
-    if (exec1Btn) exec1Btn.disabled = !isLive;
-    if (exec10Btn) exec10Btn.disabled = !isLive;
-    if (exec100Btn) exec100Btn.disabled = !isLive;
-    if (exec1000Btn) exec1000Btn.disabled = !isLive;
-    if (execEndBtn) execEndBtn.disabled = !isLive;
+    if (exec1Btn) exec1Btn.disabled = !canExec;
+    if (exec10Btn) exec10Btn.disabled = !canExec;
+    if (exec100Btn) exec100Btn.disabled = !canExec;
+    if (exec1000Btn) exec1000Btn.disabled = !canExec;
+    if (execEndBtn) execEndBtn.disabled = !canExec;
     if (playBtn) playBtn.disabled = !isLive;
     if (pauseBtn) pauseBtn.disabled = !isRunning;
 }
@@ -260,35 +261,52 @@ if (initBtn) {
 
 if (exec1Btn) {
     exec1Btn.addEventListener('click', () => {
-        stateManager.setStatus('RUNNING');
-        networkManager.send({ command: "STEP", steps: 1 });
+        stateManager.addPendingSteps(1);
+        if (stateManager.getStatus() !== 'RUNNING') {
+            networkManager.send({ command: "STEP", steps: stateManager.getPendingSteps() });
+            stateManager.clearPendingSteps();
+            stateManager.setStatus('RUNNING');
+        }
     });
 }
 
 if (exec10Btn) {
     exec10Btn.addEventListener('click', () => {
-        stateManager.setStatus('RUNNING');
-        networkManager.send({ command: "STEP", steps: 10 });
+        stateManager.addPendingSteps(10);
+        if (stateManager.getStatus() !== 'RUNNING') {
+            networkManager.send({ command: "STEP", steps: stateManager.getPendingSteps() });
+            stateManager.clearPendingSteps();
+            stateManager.setStatus('RUNNING');
+        }
     });
 }
 
 if (exec100Btn) {
     exec100Btn.addEventListener('click', () => {
-        stateManager.setStatus('RUNNING');
-        networkManager.send({ command: "STEP", steps: 100 });
+        stateManager.addPendingSteps(100);
+        if (stateManager.getStatus() !== 'RUNNING') {
+            networkManager.send({ command: "STEP", steps: stateManager.getPendingSteps() });
+            stateManager.clearPendingSteps();
+            stateManager.setStatus('RUNNING');
+        }
     });
 }
 
 if (exec1000Btn) {
     exec1000Btn.addEventListener('click', () => {
-        stateManager.setStatus('RUNNING');
-        networkManager.send({ command: "STEP", steps: 1000 });
+        stateManager.addPendingSteps(1000);
+        if (stateManager.getStatus() !== 'RUNNING') {
+            networkManager.send({ command: "STEP", steps: stateManager.getPendingSteps() });
+            stateManager.clearPendingSteps();
+            stateManager.setStatus('RUNNING');
+        }
     });
 }
 
 if (execEndBtn) {
     execEndBtn.addEventListener('click', () => {
         networkManager.log('[System] Executing until termination boundary...', 'system');
+        stateManager.clearPendingSteps();
         networkManager.send({ command: "EXEC_END" });
         stateManager.setStatus('RUNNING');
     });
@@ -312,6 +330,7 @@ if (pauseBtn) {
             clearInterval(playInterval);
             playInterval = null;
         }
+        stateManager.clearPendingSteps();
         networkManager.send({ command: "PAUSE" });
         stateManager.setStatus('PAUSED');
         networkManager.log('[System] Playback paused', 'system');
@@ -324,6 +343,7 @@ if (terminateBtn) {
             clearInterval(playInterval);
             playInterval = null;
         }
+        stateManager.clearPendingSteps();
         networkManager.log('[System] Terminating solver...', 'error');
         networkManager.send({ command: "TERMINATE" });
         stateManager.setStatus('TERMINATED');
@@ -351,10 +371,17 @@ networkManager.onMessage((dataString) => {
 
             // Set status back to INITIALIZED or PAUSED if it was RUNNING and not terminated
             if (stateManager.getStatus() === 'RUNNING' && data.is_terminated !== true) {
-                stateManager.setStatus('PAUSED');
+                const pending = stateManager.getPendingSteps();
+                if (pending > 0) {
+                    networkManager.send({ command: "STEP", steps: pending });
+                    stateManager.clearPendingSteps();
+                } else {
+                    stateManager.setStatus('PAUSED');
+                }
             }
 
             if (data.is_terminated === true) {
+                stateManager.clearPendingSteps();
                 if (playInterval) {
                     clearInterval(playInterval);
                     playInterval = null;
