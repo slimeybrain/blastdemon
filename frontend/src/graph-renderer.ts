@@ -377,14 +377,6 @@ export class GraphRenderer {
     private handleSelectionChange(nodeId: string | null): void {
         this.selectedNodeId = nodeId;
         if (this.onNodeSelected) this.onNodeSelected(nodeId);
-
-        if (nodeId) {
-            const state = this.stateManager.getCurrentState();
-            const node = state?.nodes.find(n => n.id === nodeId);
-            if (node) {
-                this.centerNode(node);
-            }
-        }
         this.render();
     }
 
