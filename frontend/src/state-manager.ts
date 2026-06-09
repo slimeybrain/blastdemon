@@ -149,6 +149,34 @@ export class StateManager {
         this.statusListeners.forEach(listener => listener(this.simulationStatus));
     }
 
+    pushTelemetry(data: any): void {
+        const state = this.getCurrentState();
+        if (!state) return;
+
+        const solverNode = state.nodes.find(n => n.type === 'CFDSolver');
+        if (!solverNode) return;
+
+        solverNode.latestTelemetry = data;
+
+        // Propagate to connected nodes
+        const telemetryEdges = state.edges.filter(e => e.fromNode === solverNode.id && e.fromPort === 'telemetry');
+        telemetryEdges.forEach(edge => {
+            const targetNode = state.nodes.find(n => n.id === edge.toNode);
+            if (targetNode) {
+                if (targetNode.type === 'TelemetryGraph') {
+                    targetNode.latestTelemetry = data;
+                } else if (targetNode.type === 'TelemetryText') {
+                    if (!targetNode.latestLog) targetNode.latestLog = [];
+                    const logMsg = typeof data === 'string' ? data : JSON.stringify(data);
+                    targetNode.latestLog.push(logMsg);
+                    if (targetNode.latestLog.length > 50) targetNode.latestLog.shift();
+                }
+            }
+        });
+
+        this.updateState(state, false);
+    }
+
     private notifyListeners(): void {
         const currentState = this.getCurrentState();
         if (currentState) {

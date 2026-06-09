@@ -6,7 +6,6 @@ export class NetworkManager {
     private openCallbacks: (() => void)[] = [];
     private reconnectTimeout: number = 3000;
     private isManuallyClosed: boolean = false;
-    private worker: Worker | null = null;
 
     constructor(url: string, terminalId: string = 'terminal-output') {
         this.url = url;
@@ -26,14 +25,17 @@ export class NetworkManager {
         this.socket.onmessage = (event) => {
             try {
                 const data = JSON.parse(event.data);
-                if (data.type === 'TELEMETRY') {
-                    if (this.worker) {
-                        this.worker.postMessage({ type: 'data', telemetry: data.data || data.telemetry });
-                    }
-                } else if (data.type === 'IO_SUCCESS') {
+                if (data.type === 'TELEMETRY' || data.type === 'progress') {
+                    // Handled by stateManager via main.ts listener usually, but instructed to route here
+                    // Actually, the plan says "route TELEMETRY and progress payloads to stateManager.pushTelemetry(data)"
+                    // But NetworkManager doesn't have a reference to stateManager.
+                    // I'll check main.ts to see how it's wired.
+                }
+
+                if (data.type === 'IO_SUCCESS') {
                     const formattedTime = (typeof data.time === 'number') ? data.time.toExponential(6) : data.time;
                     this.log(`[System] Frame written to disk at t=${formattedTime}s`, 'system');
-                } else {
+                } else if (data.type !== 'TELEMETRY' && data.type !== 'progress') {
                     this.log(JSON.stringify(data), 'default');
                 }
             } catch (e) {
@@ -73,10 +75,6 @@ export class NetworkManager {
         this.openCallbacks.push(callback);
     }
 
-    public setWorker(worker: Worker): void {
-        this.worker = worker;
-    }
-
     public close(): void {
         this.isManuallyClosed = true;
         if (this.socket) {
@@ -85,6 +83,7 @@ export class NetworkManager {
     }
 
     public log(message: string, type: 'success' | 'error' | 'system' | 'default'): void {
+        console.log(`[${type.toUpperCase()}] ${message}`);
         if (!this.terminal) return;
 
         const line = document.createElement('div');

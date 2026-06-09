@@ -28,10 +28,9 @@ body {
 #app-container {
     display: grid;
     grid-template-areas:
-        "left-sidebar center-viewport right-sidebar"
-        "left-sidebar bottom-panel right-sidebar";
+        "left-sidebar center-viewport right-sidebar";
     grid-template-columns: 250px 1fr 350px;
-    grid-template-rows: 1fr 250px;
+    grid-template-rows: 1fr;
     height: 100vh;
     width: 100vw;
     gap: 4px;
@@ -251,13 +250,15 @@ canvas {
 .node {
     position: absolute;
     z-index: 10;
-    width: 180px;
+    min-width: 180px;
     background: #333;
     border: 1px solid #555;
     border-radius: 4px;
     box-shadow: 0 4px 10px rgba(0,0,0,0.5);
     user-select: none;
     z-index: 10;
+    display: flex;
+    flex-direction: column;
 }
 
 .node.selected {
@@ -309,6 +310,39 @@ canvas {
 
 .port-label {
     padding: 0 10px;
+}
+
+/* Specialized Node Bodies */
+.node-body-text {
+    background: #000;
+    color: #0f0;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    height: 120px;
+    overflow-y: auto;
+    padding: 4px;
+    border-top: 1px solid #444;
+    border-bottom: 1px solid #444;
+}
+
+.log-line {
+    border-bottom: 1px solid #222;
+    padding: 2px 0;
+}
+
+.node-body-graph {
+    width: 300px;
+    height: 150px;
+    background: #050505;
+    border-top: 1px solid #444;
+    border-bottom: 1px solid #444;
+    position: relative;
+}
+
+.telemetry-node-canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
 }
 
 /* Edge Styles */

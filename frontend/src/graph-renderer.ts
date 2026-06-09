@@ -23,6 +23,7 @@ export class GraphRenderer {
     private mouseWorldPosition: { x: number, y: number } = { x: 0, y: 0 };
 
     private nodeElements: Map<string, HTMLElement> = new Map();
+    private nodeWorkers: Map<string, Worker> = new Map();
     private lastMouseX: number = 0;
     private lastMouseY: number = 0;
 
@@ -212,7 +213,9 @@ export class GraphRenderer {
             { label: 'Material - Air', type: 'MaterialAir' },
             { label: 'Material - Explosive', type: 'MaterialExplosive' },
             { label: 'Initializer', type: 'ThePainter' },
-            { label: 'CFD Solver', type: 'CFDSolver' }
+            { label: 'CFD Solver', type: 'CFDSolver' },
+            { label: 'Telemetry - Text', type: 'TelemetryText' },
+            { label: 'Telemetry - Graph', type: 'TelemetryGraph' }
         ];
 
         nodeTypes.forEach(nt => {
@@ -257,6 +260,8 @@ export class GraphRenderer {
         switch (type) {
             case 'ThePainter': return [{ id: 'mesh', label: 'Mesh' }, { id: 'air', label: 'Air' }, { id: 'explosive', label: 'Explosive' }];
             case 'CFDSolver': return [{ id: 'in', label: 'Initial State' }];
+            case 'TelemetryText':
+            case 'TelemetryGraph': return [{ id: 'in', label: 'Data Stream' }];
             default: return [];
         }
     }
@@ -267,6 +272,7 @@ export class GraphRenderer {
             case 'MaterialAir': return [{ id: 'out', label: 'Material' }];
             case 'MaterialExplosive': return [{ id: 'out', label: 'Material' }];
             case 'ThePainter': return [{ id: 'out', label: 'State' }];
+            case 'CFDSolver': return [{ id: 'telemetry', label: 'Telemetry' }];
             default: return [];
         }
     }
@@ -345,6 +351,37 @@ export class GraphRenderer {
 
                 nodeEl.appendChild(header);
 
+                // Add body for telemetry nodes
+                if (node.type === 'TelemetryText') {
+                    const body = document.createElement('div');
+                    body.className = 'node-body-text';
+                    nodeEl.appendChild(body);
+                } else if (node.type === 'TelemetryGraph') {
+                    const body = document.createElement('div');
+                    body.className = 'node-body-graph';
+                    const canvas = document.createElement('canvas');
+                    canvas.className = 'telemetry-node-canvas';
+                    body.appendChild(canvas);
+                    nodeEl.appendChild(body);
+
+                    // Initialize worker
+                    const offscreen = canvas.transferControlToOffscreen();
+                    const worker = new Worker(new URL('./ChartWorker.ts', import.meta.url), { type: 'module' });
+                    this.nodeWorkers.set(node.id, worker);
+                    worker.postMessage({ type: 'init', canvas: offscreen }, [offscreen] as any);
+
+                    const ro = new ResizeObserver(entries => {
+                        for (const entry of entries) {
+                            worker.postMessage({
+                                type: 'resize',
+                                width: entry.contentRect.width,
+                                height: entry.contentRect.height
+                            });
+                        }
+                    });
+                    ro.observe(body);
+                }
+
                 const ports = document.createElement('div');
                 ports.className = 'node-ports';
 
@@ -415,6 +452,20 @@ export class GraphRenderer {
             nodeEl.style.left = `${node.x}px`;
             nodeEl.style.top = `${node.y}px`;
             nodeEl.classList.toggle('selected', node.id === this.selectedNodeId);
+
+            // Update telemetry content
+            if (node.type === 'TelemetryText' && node.latestLog) {
+                const body = nodeEl.querySelector('.node-body-text');
+                if (body) {
+                    body.innerHTML = node.latestLog.map(line => `<div class="log-line">${line}</div>`).join('');
+                    body.scrollTop = body.scrollHeight;
+                }
+            } else if (node.type === 'TelemetryGraph' && node.latestTelemetry) {
+                const worker = this.nodeWorkers.get(node.id);
+                if (worker) {
+                    worker.postMessage({ type: 'data', telemetry: node.latestTelemetry.data || node.latestTelemetry.telemetry || node.latestTelemetry.percent });
+                }
+            }
         });
     }
 
