@@ -1,4 +1,4 @@
-export type NodeType = 'DomainMesh' | 'MaterialAir' | 'MaterialExplosive' | 'ThePainter' | 'CFDSolver';
+export type NodeType = 'DomainMesh' | 'MaterialAir' | 'MaterialExplosive' | 'ThePainter' | 'CFDSolver' | 'TelemetryText' | 'TelemetryGraph';
 
 export interface Port {
     id: string;
@@ -13,6 +13,8 @@ export interface Node {
     parameters: Record<string, any>;
     inputs: Port[];
     outputs: Port[];
+    latestTelemetry?: any;
+    latestLog?: string[];
 }
 
 export interface Edge {

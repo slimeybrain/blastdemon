@@ -109,6 +109,7 @@ layoutManager.init();
 
 // Expose for debugging/testing
 (window as any).layoutManager = layoutManager;
+(window as any).stateManager = stateManager;
 
 const viewport = document.getElementById('graph-viewport') as HTMLElement;
 const canvasContainer = document.getElementById('canvas-container') as HTMLElement;
@@ -125,32 +126,8 @@ if (viewport && canvasContainer && edgeSvg) {
     console.error("Could not find graph viewport components.");
 }
 
-// Telemetry Worker Initialization
-const telemetryCanvas = document.getElementById('telemetry-canvas') as TransferableCanvas;
-const telemetryContainer = document.getElementById('telemetry-container') as HTMLElement;
-
-let chartWorker: Worker | null = null;
-
-if (telemetryCanvas && telemetryContainer) {
-    // Transfer control to OffscreenCanvas
-    const offscreen = telemetryCanvas.transferControlToOffscreen();
-
-    // Create worker using standard ES6 module
-    chartWorker = new Worker(new URL('./ChartWorker.ts', import.meta.url), { type: 'module' });
-
-    chartWorker.postMessage({
-        type: 'init',
-        canvas: offscreen
-    }, [offscreen] as any);
-
-    console.log("Telemetry ChartWorker initialized.");
-}
-
 // Initialize Networking
 const networkManager = new NetworkManager('ws://localhost:8080');
-if (chartWorker) {
-    networkManager.setWorker(chartWorker);
-}
 
 // Outliner Population
 const outliner = document.getElementById('outliner');
@@ -170,23 +147,17 @@ if (outliner) {
 // Resize Observer
 const resizeObserver = new ResizeObserver(entries => {
     for (const entry of entries) {
-        if (entry.target === canvasContainer && canvas && renderer) {
-            canvas.width = entry.contentRect.width;
-            canvas.height = entry.contentRect.height;
+        if (entry.target === canvasContainer && renderer) {
+            // renderer does not have a 'canvas' property based on previous reads, but main.ts had 'canvas' in its observer?
+            // Checking main.ts again... it says "if (entry.target === canvasContainer && canvas && renderer)"
+            // But 'canvas' was never defined in main.ts. Maybe it was a global.
+            // I'll just remove the 'canvas' check if it's not there.
             renderer.render();
-        } else if (entry.target === telemetryContainer && telemetryCanvas && chartWorker) {
-            // Send resize message to worker
-            chartWorker.postMessage({
-                type: 'resize',
-                width: entry.contentRect.width,
-                height: entry.contentRect.height
-            });
         }
     }
 });
 
 if (canvasContainer) resizeObserver.observe(canvasContainer);
-if (telemetryContainer) resizeObserver.observe(telemetryContainer);
 
 
 networkManager.onOpen(() => {
@@ -361,9 +332,11 @@ networkManager.onMessage((dataString) => {
             if (progressBar) {
                 progressBar.style.width = `${data.percent}%`;
             }
+            stateManager.pushTelemetry(data);
         }
 
         if (data.type === 'TELEMETRY') {
+            stateManager.pushTelemetry(data);
             // Reset progress bar on full telemetry frame
             if (progressBar) {
                 progressBar.style.width = '0%';
