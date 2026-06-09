@@ -6,7 +6,6 @@ export interface PanelState {
 export interface PanelConfig {
     leftSidebar: PanelState;
     rightSidebar: PanelState;
-    bottomPanel: PanelState;
 }
 
 export class LayoutManager {
@@ -21,8 +20,7 @@ export class LayoutManager {
         this.container = container;
         this.config = {
             leftSidebar: { visible: true, size: 250 },
-            rightSidebar: { visible: true, size: 350 },
-            bottomPanel: { visible: true, size: 250 }
+            rightSidebar: { visible: true, size: 350 }
         };
     }
 
@@ -32,7 +30,7 @@ export class LayoutManager {
     }
 
     public updateGridStructure(): void {
-        const { leftSidebar, rightSidebar, bottomPanel } = this.config;
+        const { leftSidebar, rightSidebar } = this.config;
 
         const colSpecs = [];
         if (leftSidebar.visible) colSpecs.push(`${leftSidebar.size}px`);
@@ -40,36 +38,21 @@ export class LayoutManager {
         if (rightSidebar.visible) colSpecs.push(`${rightSidebar.size}px`);
         this.container.style.gridTemplateColumns = colSpecs.join(" ");
 
-        const rowSpecs = ["1fr"];
-        if (bottomPanel.visible) rowSpecs.push(`${bottomPanel.size}px`);
-        this.container.style.gridTemplateRows = rowSpecs.join(" ");
+        this.container.style.gridTemplateRows = "1fr";
 
         const topRow = [];
         if (leftSidebar.visible) topRow.push("left-sidebar");
         topRow.push("center-viewport");
         if (rightSidebar.visible) topRow.push("right-sidebar");
 
-        const bottomRow = [];
-        if (leftSidebar.visible) bottomRow.push("left-sidebar");
-        if (bottomPanel.visible) {
-            bottomRow.push("bottom-panel");
-        } else {
-            bottomRow.push("center-viewport");
-        }
-        if (rightSidebar.visible) bottomRow.push("right-sidebar");
-
-        let areaTemplate = "";
-        if (bottomPanel.visible) {
-            areaTemplate = `"${topRow.join(" ")}" "${bottomRow.join(" ")}"`;
-        } else {
-            areaTemplate = `"${topRow.join(" ")}"`;
-        }
-        this.container.style.gridTemplateAreas = areaTemplate;
+        this.container.style.gridTemplateAreas = `"${topRow.join(" ")}"`;
 
         // Also toggle visibility of panel elements for clean layout
-        document.getElementById('left-sidebar')!.style.display = leftSidebar.visible ? 'flex' : 'none';
-        document.getElementById('right-sidebar')!.style.display = rightSidebar.visible ? 'flex' : 'none';
-        document.getElementById('bottom-panel')!.style.display = bottomPanel.visible ? 'flex' : 'none';
+        const leftEl = document.getElementById('left-sidebar');
+        if (leftEl) leftEl.style.display = leftSidebar.visible ? 'flex' : 'none';
+
+        const rightEl = document.getElementById('right-sidebar');
+        if (rightEl) rightEl.style.display = rightSidebar.visible ? 'flex' : 'none';
 
         this.syncSplitters();
     }
@@ -95,11 +78,6 @@ export class LayoutManager {
         rightSplitter.className = 'splitter vertical';
         this.container.appendChild(rightSplitter);
 
-        const bottomSplitter = document.createElement('div');
-        bottomSplitter.id = 'bottom-splitter';
-        bottomSplitter.className = 'splitter horizontal';
-        this.container.appendChild(bottomSplitter);
-
         this.setupResizing();
         this.syncSplitters();
     }
@@ -107,11 +85,10 @@ export class LayoutManager {
     private setupResizing(): void {
         const leftSplitter = document.getElementById('left-splitter')!;
         const rightSplitter = document.getElementById('right-splitter')!;
-        const bottomSplitter = document.getElementById('bottom-splitter')!;
 
         const onMouseDown = (e: MouseEvent, panelId: keyof PanelConfig) => {
             e.preventDefault();
-            const startPos = panelId === 'bottomPanel' ? e.clientY : e.clientX;
+            const startPos = e.clientX;
             const startSize = this.config[panelId].size;
 
             const onMouseMove = (moveEvent: MouseEvent) => {
@@ -122,9 +99,6 @@ export class LayoutManager {
                 } else if (panelId === 'rightSidebar') {
                     delta = startPos - moveEvent.clientX;
                     this.config[panelId].size = Math.max(100, startSize + delta);
-                } else if (panelId === 'bottomPanel') {
-                    delta = startPos - moveEvent.clientY;
-                    this.config[panelId].size = Math.max(50, startSize + delta);
                 }
                 this.updateGridStructure();
             };
@@ -137,19 +111,17 @@ export class LayoutManager {
 
             document.addEventListener('mousemove', onMouseMove);
             document.addEventListener('mouseup', onMouseUp);
-            document.body.style.cursor = panelId === 'bottomPanel' ? 'row-resize' : 'col-resize';
+            document.body.style.cursor = 'col-resize';
         };
 
         leftSplitter.addEventListener('mousedown', (e) => onMouseDown(e as MouseEvent, 'leftSidebar'));
         rightSplitter.addEventListener('mousedown', (e) => onMouseDown(e as MouseEvent, 'rightSidebar'));
-        bottomSplitter.addEventListener('mousedown', (e) => onMouseDown(e as MouseEvent, 'bottomPanel'));
     }
 
     private syncSplitters(): void {
-        const { leftSidebar, rightSidebar, bottomPanel } = this.config;
+        const { leftSidebar, rightSidebar } = this.config;
         const leftSplitter = document.getElementById('left-splitter') as HTMLElement;
         const rightSplitter = document.getElementById('right-splitter') as HTMLElement;
-        const bottomSplitter = document.getElementById('bottom-splitter') as HTMLElement;
 
         if (leftSplitter) {
             leftSplitter.style.display = leftSidebar.visible ? 'block' : 'none';
@@ -165,19 +137,6 @@ export class LayoutManager {
             rightSplitter.style.top = '0';
             rightSplitter.style.bottom = '0';
             rightSplitter.style.width = '4px';
-        }
-
-        if (bottomSplitter) {
-            bottomSplitter.style.display = bottomPanel.visible ? 'block' : 'none';
-            bottomSplitter.style.bottom = `${bottomPanel.size}px`;
-
-            // Bottom splitter should span between left and right sidebars if they are visible
-            const leftOffset = leftSidebar.visible ? leftSidebar.size + 4 : 0;
-            const rightOffset = rightSidebar.visible ? rightSidebar.size + 4 : 0;
-
-            bottomSplitter.style.left = `${leftOffset}px`;
-            bottomSplitter.style.right = `${rightOffset}px`;
-            bottomSplitter.style.height = '4px';
         }
     }
 }
