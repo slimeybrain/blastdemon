@@ -21,49 +21,68 @@
 std::atomic<bool> cancel_flag{false};
 std::atomic<int> step_progress{0};
 std::atomic<bool> is_running{false};
+std::atomic<int> target_steps_remaining{0};
+std::atomic<bool> exec_until_end{false};
 std::mutex cout_mutex;
 
 // Forward declaration of telemetry helper
 void emit_telemetry(const CFDSolver& solver, double elapsed, bool is_terminated = false);
 
-void worker_thread_func(CFDSolver* solver, int steps, double cfl, double* t_ptr, bool until_end) {
+void worker_thread_func(CFDSolver* solver, double cfl, double* t_ptr) {
     is_running = true;
     cancel_flag = false;
     step_progress = 0;
 
-    if (until_end) {
-        int initial_idx = solver->getActiveIndex();
-        int total_range = solver->getNumCells() - initial_idx;
+    int initial_steps = target_steps_remaining.load();
+    int initial_idx = solver->getActiveIndex();
+    int total_range = solver->getNumCells() - initial_idx;
 
-        while (solver->getActiveIndex() < solver->getNumCells()) {
-            if (cancel_flag.load()) break;
+    while (true) {
+        if (cancel_flag.load()) break;
 
-            double dt = solver->computeStepSize(cfl);
-            solver->step(dt);
-            *t_ptr += dt;
+        bool done = false;
+        if (exec_until_end.load()) {
+            if (solver->getActiveIndex() >= solver->getNumCells()) {
+                done = true;
+            }
+        } else {
+            if (target_steps_remaining.load() <= 0) {
+                done = true;
+            }
+        }
 
+        if (done) break;
+
+        double dt = solver->computeStepSize(cfl);
+        solver->step(dt);
+        *t_ptr += dt;
+
+        if (exec_until_end.load()) {
             if (total_range > 0) {
                 int current_range = solver->getActiveIndex() - initial_idx;
                 step_progress = std::clamp((int)((current_range * 100) / total_range), 0, 100);
             }
-        }
-    } else {
-        for (int i = 0; i < steps; ++i) {
-            if (cancel_flag.load()) break;
-
-            double dt = solver->computeStepSize(cfl);
-            solver->step(dt);
-            *t_ptr += dt;
-
-            step_progress = (int)(((i + 1) * 100) / steps);
+        } else {
+            target_steps_remaining--;
+            int current_target = target_steps_remaining.load();
+            if (initial_steps > 0) {
+                // This is a bit tricky if steps are added while running, but it's okay for progress bar
+                int completed = initial_steps - current_target;
+                step_progress = std::clamp((int)((completed * 100) / initial_steps), 0, 100);
+            } else {
+                step_progress = 100;
+            }
         }
     }
 
     if (!cancel_flag.load()) {
         step_progress = 100;
-        emit_telemetry(*solver, *t_ptr, until_end && solver->getActiveIndex() >= solver->getNumCells());
+        bool term = exec_until_end.load() && solver->getActiveIndex() >= solver->getNumCells();
+        emit_telemetry(*solver, *t_ptr, term);
     }
 
+    target_steps_remaining = 0;
+    exec_until_end = false;
     is_running = false;
 }
 
@@ -126,25 +145,35 @@ int main() {
                 emit_telemetry(*solver, t);
 
             } else if (command == "STEP") {
-                if (!solver || is_running) continue;
+                if (!solver) continue;
                 int steps = msg.value("steps", 1);
                 double cfl = msg.value("cfl", 0.4);
 
-                if (worker.joinable()) worker.join();
-                worker = std::thread(worker_thread_func, solver.get(), steps, cfl, &t, false);
+                target_steps_remaining += steps;
+                if (!is_running) {
+                    if (worker.joinable()) worker.join();
+                    worker = std::thread(worker_thread_func, solver.get(), cfl, &t);
+                }
 
             } else if (command == "EXEC_END") {
-                if (!solver || is_running) continue;
+                if (!solver) continue;
                 double cfl = msg.value("cfl", 0.4);
 
-                if (worker.joinable()) worker.join();
-                worker = std::thread(worker_thread_func, solver.get(), 0, cfl, &t, true);
+                exec_until_end = true;
+                if (!is_running) {
+                    if (worker.joinable()) worker.join();
+                    worker = std::thread(worker_thread_func, solver.get(), cfl, &t);
+                }
 
             } else if (command == "PAUSE") {
                 cancel_flag = true;
+                target_steps_remaining = 0;
+                exec_until_end = false;
 
             } else if (command == "TERMINATE") {
                 cancel_flag = true;
+                target_steps_remaining = 0;
+                exec_until_end = false;
                 if (worker.joinable()) worker.join();
 
                 if (solver) {

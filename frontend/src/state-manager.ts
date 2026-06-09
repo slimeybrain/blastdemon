@@ -6,6 +6,7 @@ export class StateManager {
     private listeners: ((state: SimulationState) => void)[] = [];
     private simulationStatus: SimulationStatus = 'UNINITIALIZED';
     private statusListeners: ((status: SimulationStatus) => void)[] = [];
+    private pendingSteps: number = 0;
 
     constructor(initialState?: SimulationState) {
         if (initialState) {
@@ -130,6 +131,18 @@ export class StateManager {
 
     onStatusChange(listener: (status: SimulationStatus) => void): void {
         this.statusListeners.push(listener);
+    }
+
+    addPendingSteps(steps: number): void {
+        this.pendingSteps += steps;
+    }
+
+    getPendingSteps(): number {
+        return this.pendingSteps;
+    }
+
+    clearPendingSteps(): void {
+        this.pendingSteps = 0;
     }
 
     private notifyStatusListeners(): void {
