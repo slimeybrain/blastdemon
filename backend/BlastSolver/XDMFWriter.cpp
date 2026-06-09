@@ -4,6 +4,10 @@
 
 bool XDMFWriter::writeXDMF(const std::string& xmfFilename, const std::string& h5Filename,
                           int numPoints, double dx) {
+#ifdef NO_HDF5
+    (void)xmfFilename; (void)h5Filename; (void)numPoints; (void)dx;
+    return true;
+#else
     std::ofstream xmf(xmfFilename);
     if (!xmf.is_open()) {
         std::cerr << "Failed to open XDMF file for writing: " << xmfFilename << std::endl;
@@ -45,4 +49,5 @@ bool XDMFWriter::writeXDMF(const std::string& xmfFilename, const std::string& h5
 
     xmf.close();
     return true;
+#endif
 }

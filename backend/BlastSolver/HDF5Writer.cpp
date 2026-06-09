@@ -1,8 +1,14 @@
 #include "HDF5Writer.hpp"
+#ifndef NO_HDF5
 #include <hdf5.h>
+#endif
 #include <iostream>
 
 bool HDF5Writer::writePressure(const std::string& filename, const std::vector<float>& data) {
+#ifdef NO_HDF5
+    (void)filename; (void)data;
+    return true;
+#else
     hid_t file_id, dataset_id, dataspace_id;
     hsize_t dims[1];
     herr_t status;
@@ -45,6 +51,7 @@ bool HDF5Writer::writePressure(const std::string& filename, const std::vector<fl
     H5Fclose(file_id);
 
     return status >= 0;
+#endif
 }
 
 bool HDF5Writer::writeFrame(const std::string& filename,
@@ -53,6 +60,10 @@ bool HDF5Writer::writeFrame(const std::string& filename,
                           const std::vector<double>& u,
                           const std::vector<double>& alpha1,
                           const std::vector<double>& alpha2) {
+#ifdef NO_HDF5
+    (void)filename; (void)rho; (void)p; (void)u; (void)alpha1; (void)alpha2;
+    return true;
+#else
     hid_t file_id, dataspace_id;
     hsize_t dims[1];
     dims[0] = rho.size();
@@ -80,4 +91,5 @@ bool HDF5Writer::writeFrame(const std::string& filename,
     H5Sclose(dataspace_id);
     H5Fclose(file_id);
     return true;
+#endif
 }

@@ -12,7 +12,7 @@ export function serializeSimulationState(state: SimulationState): string {
     });
 }
 
-export function serializeForSolver(state: SimulationState): string {
+export function serializeForSolver(state: SimulationState, command: string = "INIT"): string {
     const strippedNodes = state.nodes.map(({ x, y, ...rest }) => rest);
 
     const numericKeys = [
@@ -35,7 +35,7 @@ export function serializeForSolver(state: SimulationState): string {
     });
 
     return JSON.stringify({
-        command: "START",
+        command: command,
         ...flattenedParams,
         // Full DAG for Broker tracking
         nodes: strippedNodes,

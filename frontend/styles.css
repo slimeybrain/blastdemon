@@ -103,6 +103,15 @@ body {
     background-color: #555555;
 }
 
+.header-button.success { background-color: #28a745; }
+.header-button.success:hover { background-color: #218838; }
+
+.header-button.warning { background-color: #eab308; color: #000; }
+.header-button.warning:hover { background-color: #ca8a04; }
+
+.header-button.danger { background-color: #dc3545; }
+.header-button.danger:hover { background-color: #c82333; }
+
 .header-actions {
     display: flex;
     gap: 8px;

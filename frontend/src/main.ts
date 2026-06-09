@@ -207,16 +207,60 @@ if (autoArrangeBtn && renderer) {
     });
 }
 
-// Run Simulation Button
-const runBtn = document.getElementById('run-simulation-btn');
-if (runBtn) {
-    runBtn.addEventListener('click', () => {
-        networkManager.log('[System] Sending simulation config to Broker...', 'system');
+// Execution Transport Bar Logic
+let playInterval: number | null = null;
+
+const initBtn = document.getElementById('init-btn');
+const stepBtn = document.getElementById('step-btn');
+const playBtn = document.getElementById('play-btn');
+const pauseBtn = document.getElementById('pause-btn');
+const terminateBtn = document.getElementById('terminate-btn');
+
+if (initBtn) {
+    initBtn.addEventListener('click', () => {
+        networkManager.log('[System] Initializing simulation engine...', 'system');
         const state = stateManager.getCurrentState();
         if (state) {
-            const payload = serializeForSolver(state);
+            const payload = serializeForSolver(state, "INIT");
             networkManager.send(payload);
         }
+    });
+}
+
+if (stepBtn) {
+    stepBtn.addEventListener('click', () => {
+        networkManager.send({ command: "STEP", steps: 1 });
+    });
+}
+
+if (playBtn) {
+    playBtn.addEventListener('click', () => {
+        if (playInterval) return;
+        networkManager.log('[System] Playback started', 'success');
+        playInterval = window.setInterval(() => {
+            networkManager.send({ command: "STEP", steps: 10 });
+        }, 16);
+    });
+}
+
+if (pauseBtn) {
+    pauseBtn.addEventListener('click', () => {
+        if (playInterval) {
+            clearInterval(playInterval);
+            playInterval = null;
+            networkManager.log('[System] Playback paused', 'system');
+        }
+    });
+}
+
+if (terminateBtn) {
+    terminateBtn.addEventListener('click', () => {
+        if (playInterval) {
+            clearInterval(playInterval);
+            playInterval = null;
+        }
+        networkManager.log('[System] Terminating solver...', 'error');
+        networkManager.send({ command: "TERMINATE" });
     });
 }
 
