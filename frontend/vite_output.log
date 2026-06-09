@@ -3,7 +3,8 @@
 > vite
 
 
-  VITE v5.4.21  ready in 235 ms
+  VITE v5.4.21  ready in 376 ms
 
   ➜  Local:   http://localhost:5173/
   ➜  Network: use --host to expose
+3:16:46 PM [vite] page reload src/property-editor.ts

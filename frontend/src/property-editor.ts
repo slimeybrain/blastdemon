@@ -2,7 +2,7 @@ import { StateManager } from './state-manager.js';
 import { Node } from './types.js';
 
 export class PropertyEditor {
-    private container: HTMLElement;
+    public container: HTMLElement;
     private stateManager: StateManager;
     private currentNodeId: string | null = null;
     private listener: ((state: any) => void) | null = null;
