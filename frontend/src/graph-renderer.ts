@@ -32,16 +32,71 @@ export class GraphRenderer {
 
     public onNodeSelected: ((nodeId: string | null) => void) | null = null;
 
-    constructor(viewport: HTMLElement, container: HTMLElement, svg: SVGSVGElement, stateManager: StateManager) {
-        this.viewport = viewport;
-        this.container = container;
-        this.svg = svg;
+    private eventListeners: { target: EventTarget, type: string, listener: EventListener }[] = [];
+    private resizeObserver: ResizeObserver | null = null;
+
+    private stateListener = () => this.render();
+    private telemetryListener = (nodeId: string, data: any) => this.handleTelemetryUpdate(nodeId, data);
+
+    constructor(parent: HTMLElement, stateManager: StateManager) {
         this.stateManager = stateManager;
 
+        // Create DOM structure
+        this.viewport = document.createElement('div');
+        this.viewport.id = 'graph-viewport';
+        this.viewport.className = 'panel-content';
+        this.viewport.style.overflow = 'hidden';
+        this.viewport.style.cursor = 'crosshair';
+        this.viewport.style.flex = '1';
+        this.viewport.style.position = 'relative';
+
+        this.container = document.createElement('div');
+        this.container.id = 'canvas-container';
+        this.container.style.position = 'relative';
+        this.container.style.transformOrigin = '0 0';
+        this.container.style.width = '100%';
+        this.container.style.height = '100%';
+        this.container.style.zIndex = '0';
+
+        this.svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg') as unknown as SVGSVGElement;
+        this.svg.id = 'edge-svg';
+        this.svg.style.zIndex = '1';
+        this.svg.style.overflow = 'visible';
+        this.svg.style.position = 'absolute';
+        this.svg.style.top = '0';
+        this.svg.style.left = '0';
+        this.svg.style.width = '100%';
+        this.svg.style.height = '100%';
+        this.svg.style.pointerEvents = 'none';
+
+        this.container.appendChild(this.svg);
+        this.viewport.appendChild(this.container);
+        parent.appendChild(this.viewport);
+
         this.initEventListeners();
-        this.stateManager.onStateChange(() => this.render());
-        this.stateManager.onTelemetryUpdate(this.handleTelemetryUpdate.bind(this));
+        this.stateManager.onStateChange(this.stateListener);
+        this.stateManager.onTelemetryUpdate(this.telemetryListener);
+
+        this.resizeObserver = new ResizeObserver(() => this.render());
+        this.resizeObserver.observe(this.viewport);
+
         this.render();
+    }
+
+    public destroy(): void {
+        this.eventListeners.forEach(({ target, type, listener }) => {
+            target.removeEventListener(type, listener);
+        });
+        this.stateManager.offStateChange(this.stateListener);
+        this.stateManager.offTelemetryUpdate(this.telemetryListener);
+        this.nodeWorkers.forEach(worker => worker.terminate());
+        if (this.resizeObserver) this.resizeObserver.disconnect();
+        this.viewport.remove();
+    }
+
+    private addManagedEventListener(target: EventTarget, type: string, listener: any, options?: AddEventListenerOptions): void {
+        target.addEventListener(type, listener, options);
+        this.eventListeners.push({ target, type, listener });
     }
 
     private handleTelemetryUpdate(nodeId: string, data: any): void {
@@ -55,7 +110,7 @@ export class GraphRenderer {
         if (node.type === 'TelemetryText' && Array.isArray(data)) {
             const body = nodeEl.querySelector('.node-body-text') as HTMLElement;
             if (body) {
-                body.innerHTML = ''; // Clear current
+                body.innerHTML = '';
                 data.forEach(line => {
                     const lineEl = document.createElement('div');
                     lineEl.className = 'log-line';
@@ -76,27 +131,20 @@ export class GraphRenderer {
     }
 
     private initEventListeners(): void {
-        // Zooming
-        this.viewport.addEventListener('wheel', this.onWheel.bind(this), { passive: false });
+        this.addManagedEventListener(this.viewport, 'wheel', this.onWheel.bind(this), { passive: false });
+        this.addManagedEventListener(this.viewport, 'mousedown', this.onMouseDown.bind(this));
+        this.addManagedEventListener(window, 'mousemove', this.onMouseMove.bind(this));
+        this.addManagedEventListener(window, 'mouseup', this.onMouseUp.bind(this));
 
-        // Panning and Dragging
-        this.viewport.addEventListener('mousedown', this.onMouseDown.bind(this));
-        window.addEventListener('mousemove', this.onMouseMove.bind(this));
-        window.addEventListener('mouseup', this.onMouseUp.bind(this));
-
-        // Selection / Background Click
-        this.viewport.addEventListener('click', (e) => {
+        this.addManagedEventListener(this.viewport, 'click', (e: MouseEvent) => {
             if (e.target === this.viewport || e.target === this.container || e.target === this.svg) {
                 this.selectNode(null);
             }
         });
 
-        // Deletion & Space Panning
-        window.addEventListener('keydown', this.onKeyDown.bind(this));
-        window.addEventListener('keyup', this.onKeyUp.bind(this));
-
-        // Context Menu
-        this.viewport.addEventListener('contextmenu', this.onContextMenu.bind(this));
+        this.addManagedEventListener(window, 'keydown', this.onKeyDown.bind(this));
+        this.addManagedEventListener(window, 'keyup', this.onKeyUp.bind(this));
+        this.addManagedEventListener(this.viewport, 'contextmenu', this.onContextMenu.bind(this));
     }
 
     private onWheel(e: WheelEvent): void {
@@ -110,7 +158,6 @@ export class GraphRenderer {
             const mouseX = e.clientX - rect.left;
             const mouseY = e.clientY - rect.top;
 
-            // Adjust pan to zoom towards mouse
             const worldX = (mouseX - this.panX) / this.zoom;
             const worldY = (mouseY - this.panY) / this.zoom;
 
@@ -204,8 +251,7 @@ export class GraphRenderer {
             if (state) {
                 state.nodes = state.nodes.filter(n => n.id !== this.selectedNodeId);
                 state.edges = state.edges.filter(edge => edge.fromNode !== this.selectedNodeId && edge.toNode !== this.selectedNodeId);
-                this.selectedNodeId = null;
-                if (this.onNodeSelected) this.onNodeSelected(null);
+                this.selectNode(null);
                 this.stateManager.pushState(state);
             }
         }
@@ -275,10 +321,7 @@ export class GraphRenderer {
 
         const id = `node-${type.toLowerCase()}-${Date.now()}`;
         const newNode: Node = {
-            id,
-            type,
-            x,
-            y,
+            id, type, x, y,
             inputs: this.getDefaultInputs(type),
             outputs: this.getDefaultOutputs(type),
             parameters: this.getDefaultParameters(type)
@@ -338,16 +381,18 @@ export class GraphRenderer {
 
     private syncNodes(state: SimulationState): void {
         const nodeIdsInState = new Set(state.nodes.map(n => n.id));
-
-        // Remove old nodes
         for (const [id, el] of this.nodeElements.entries()) {
             if (!nodeIdsInState.has(id)) {
                 el.remove();
                 this.nodeElements.delete(id);
+                const worker = this.nodeWorkers.get(id);
+                if (worker) {
+                    worker.terminate();
+                    this.nodeWorkers.delete(id);
+                }
             }
         }
 
-        // Update or Create nodes
         state.nodes.forEach(node => {
             let nodeEl = this.nodeElements.get(node.id);
             if (!nodeEl) {
@@ -383,7 +428,6 @@ export class GraphRenderer {
 
                 nodeEl.appendChild(header);
 
-                // Add body for telemetry nodes
                 if (node.type === 'TelemetryText') {
                     const body = document.createElement('div');
                     body.className = 'node-body-text';
@@ -396,8 +440,7 @@ export class GraphRenderer {
                     body.appendChild(canvas);
                     nodeEl.appendChild(body);
 
-                    // Initialize worker
-                    const offscreen = canvas.transferControlToOffscreen();
+                    const offscreen = (canvas as any).transferControlToOffscreen();
                     const worker = new Worker(new URL('./ChartWorker.ts', import.meta.url), { type: 'module' });
                     this.nodeWorkers.set(node.id, worker);
                     worker.postMessage({ type: 'init', canvas: offscreen }, [offscreen] as any);
@@ -422,12 +465,10 @@ export class GraphRenderer {
                     port.className = 'port input';
                     port.dataset.portId = input.id;
                     port.innerHTML = `<div class="port-bullet"></div><span class="port-label">${input.label}</span>`;
-
-                    port.addEventListener('mouseup', (e) => {
+                    port.addEventListener('mouseup', () => {
                         if (this.isDraggingWire && this.dragSourceNodeId && this.dragSourcePortId) {
                             const state = this.stateManager.getCurrentState();
                             if (state) {
-                                // Check if connection already exists to avoid duplicates
                                 const exists = state.edges.some(edge =>
                                     edge.fromNode === this.dragSourceNodeId &&
                                     edge.fromPort === this.dragSourcePortId &&
@@ -445,10 +486,8 @@ export class GraphRenderer {
                                     this.stateManager.pushState(state);
                                 }
                             }
-                            // Let the global mouseup handler reset isDraggingWire and re-render
                         }
                     });
-
                     ports.appendChild(port);
                 });
 
@@ -457,13 +496,11 @@ export class GraphRenderer {
                     port.className = 'port output';
                     port.dataset.portId = output.id;
                     port.innerHTML = `<span class="port-label">${output.label}</span><div class="port-bullet"></div>`;
-
                     port.addEventListener('mousedown', (e) => {
                         e.stopPropagation();
                         this.isDraggingWire = true;
                         this.dragSourceNodeId = node.id;
                         this.dragSourcePortId = output.id;
-
                         const ctm = this.svg.getScreenCTM();
                         if (ctm) {
                             const pt = new DOMPoint(e.clientX, e.clientY);
@@ -472,7 +509,6 @@ export class GraphRenderer {
                         }
                         this.render();
                     });
-
                     ports.appendChild(port);
                 });
 
@@ -485,7 +521,6 @@ export class GraphRenderer {
             nodeEl.style.top = `${node.y}px`;
             nodeEl.classList.toggle('selected', node.id === this.selectedNodeId);
 
-            // Initial telemetry sync if data exists in store
             const initialData = this.stateManager.getTelemetry(node.id);
             if (initialData) {
                 this.handleTelemetryUpdate(node.id, initialData);
@@ -499,10 +534,8 @@ export class GraphRenderer {
             const fromNode = state.nodes.find(n => n.id === edge.fromNode);
             const toNode = state.nodes.find(n => n.id === edge.toNode);
             if (!fromNode || !toNode) return;
-
             const fromPos = this.getPortPosition(fromNode, edge.fromPort, false);
             const toPos = this.getPortPosition(toNode, edge.toPort, true);
-
             if (!fromPos || !toPos) return;
 
             const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
@@ -521,7 +554,6 @@ export class GraphRenderer {
                     const toPos = this.mouseWorldPosition;
                     const dx = Math.max(Math.abs(toPos.x - fromPos.x) * 0.5, 50);
                     const d = `M ${fromPos.x} ${fromPos.y} C ${fromPos.x + dx} ${fromPos.y}, ${toPos.x - dx} ${toPos.y}, ${toPos.x} ${toPos.y}`;
-
                     const ghostPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
                     ghostPath.setAttribute('d', d);
                     ghostPath.setAttribute('class', 'edge-path');
@@ -542,21 +574,16 @@ export class GraphRenderer {
                 const rect = bullet.getBoundingClientRect();
                 const screenX = rect.left + rect.width / 2;
                 const screenY = rect.top + rect.height / 2;
-
                 const ctm = this.svg.getScreenCTM();
                 if (!ctm) return null;
-
                 const pt = new DOMPoint(screenX, screenY);
                 const worldPoint = pt.matrixTransform(ctm.inverse());
                 return { x: worldPoint.x, y: worldPoint.y };
             }
         }
-
-        // Fallback to manual calculation if DOM is not ready
         const ports = isInput ? node.inputs : node.outputs;
         const index = ports.findIndex(p => p.id === portId);
         if (index === -1) return null;
-
         const portY = 25 + 8 + 10 + (index * 20);
         const portX = isInput ? 0 : 180;
         return { x: node.x + portX, y: node.y + portY };
@@ -565,10 +592,7 @@ export class GraphRenderer {
     public autoArrange(): void {
         const state = this.stateManager.getCurrentState();
         if (!state) return;
-
         let meshY = 50, airY = 200, explosiveY = 350;
-
-        // Apply transition to node elements
         const nodes = Array.from(this.container.querySelectorAll('.node')) as HTMLElement[];
         nodes.forEach(n => n.style.transition = 'left 0.5s ease-in-out, top 0.5s ease-in-out');
 
@@ -580,12 +604,8 @@ export class GraphRenderer {
             else if (node.type === 'CFDSolver') { node.x = 700; node.y = 200; }
         });
 
-        // Use a small timeout to let the edges update during animation
         let frames = 0;
         const animateEdges = () => {
-            // Re-read current positions from DOM for edges if possible,
-            // or just update state and re-render edges.
-            // Since we use CSS transitions, we need to periodically update edges.
             this.updateEdges(state);
             frames++;
             if (frames < 30) requestAnimationFrame(animateEdges);
