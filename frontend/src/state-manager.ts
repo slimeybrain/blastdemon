@@ -7,6 +7,8 @@ export class StateManager {
     private simulationStatus: SimulationStatus = 'UNINITIALIZED';
     private statusListeners: ((status: SimulationStatus) => void)[] = [];
     private pendingSteps: number = 0;
+    private telemetryStore: Map<string, any> = new Map();
+    private telemetryListeners: ((nodeId: string, data: any) => void)[] = [];
 
     constructor(initialState?: SimulationState) {
         if (initialState) {
@@ -133,6 +135,14 @@ export class StateManager {
         this.statusListeners.push(listener);
     }
 
+    onTelemetryUpdate(listener: (nodeId: string, data: any) => void): void {
+        this.telemetryListeners.push(listener);
+    }
+
+    getTelemetry(nodeId: string): any {
+        return this.telemetryStore.get(nodeId);
+    }
+
     addPendingSteps(steps: number): void {
         this.pendingSteps += steps;
     }
@@ -149,6 +159,10 @@ export class StateManager {
         this.statusListeners.forEach(listener => listener(this.simulationStatus));
     }
 
+    private notifyTelemetryUpdate(nodeId: string, data: any): void {
+        this.telemetryListeners.forEach(listener => listener(nodeId, data));
+    }
+
     pushTelemetry(data: any): void {
         const state = this.getCurrentState();
         if (!state) return;
@@ -156,7 +170,8 @@ export class StateManager {
         const solverNode = state.nodes.find(n => n.type === 'CFDSolver');
         if (!solverNode) return;
 
-        solverNode.latestTelemetry = data;
+        this.telemetryStore.set(solverNode.id, data);
+        this.notifyTelemetryUpdate(solverNode.id, data);
 
         // Propagate to connected nodes
         const telemetryEdges = state.edges.filter(e => e.fromNode === solverNode.id && e.fromPort === 'telemetry');
@@ -164,17 +179,19 @@ export class StateManager {
             const targetNode = state.nodes.find(n => n.id === edge.toNode);
             if (targetNode) {
                 if (targetNode.type === 'TelemetryGraph') {
-                    targetNode.latestTelemetry = data;
+                    this.telemetryStore.set(targetNode.id, data);
+                    this.notifyTelemetryUpdate(targetNode.id, data);
                 } else if (targetNode.type === 'TelemetryText') {
-                    if (!targetNode.latestLog) targetNode.latestLog = [];
+                    let log = this.telemetryStore.get(targetNode.id);
+                    if (!Array.isArray(log)) log = [];
                     const logMsg = typeof data === 'string' ? data : JSON.stringify(data);
-                    targetNode.latestLog.push(logMsg);
-                    if (targetNode.latestLog.length > 50) targetNode.latestLog.shift();
+                    log.push(logMsg);
+                    if (log.length > 50) log.shift();
+                    this.telemetryStore.set(targetNode.id, log);
+                    this.notifyTelemetryUpdate(targetNode.id, log);
                 }
             }
         });
-
-        this.updateState(state, false);
     }
 
     private notifyListeners(): void {

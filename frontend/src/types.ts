@@ -13,8 +13,6 @@ export interface Node {
     parameters: Record<string, any>;
     inputs: Port[];
     outputs: Port[];
-    latestTelemetry?: any;
-    latestLog?: string[];
 }
 
 export interface Edge {

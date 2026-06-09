@@ -40,7 +40,39 @@ export class GraphRenderer {
 
         this.initEventListeners();
         this.stateManager.onStateChange(() => this.render());
+        this.stateManager.onTelemetryUpdate(this.handleTelemetryUpdate.bind(this));
         this.render();
+    }
+
+    private handleTelemetryUpdate(nodeId: string, data: any): void {
+        const nodeEl = this.nodeElements.get(nodeId);
+        if (!nodeEl) return;
+
+        const state = this.stateManager.getCurrentState();
+        const node = state?.nodes.find(n => n.id === nodeId);
+        if (!node) return;
+
+        if (node.type === 'TelemetryText' && Array.isArray(data)) {
+            const body = nodeEl.querySelector('.node-body-text') as HTMLElement;
+            if (body) {
+                body.innerHTML = ''; // Clear current
+                data.forEach(line => {
+                    const lineEl = document.createElement('div');
+                    lineEl.className = 'log-line';
+                    lineEl.textContent = line;
+                    body.appendChild(lineEl);
+                });
+                body.scrollTop = body.scrollHeight;
+            }
+        } else if (node.type === 'TelemetryGraph' && data) {
+            const worker = this.nodeWorkers.get(node.id);
+            if (worker) {
+                worker.postMessage({
+                    type: 'data',
+                    telemetry: data.data || data.telemetry || data.percent
+                });
+            }
+        }
     }
 
     private initEventListeners(): void {
@@ -453,18 +485,10 @@ export class GraphRenderer {
             nodeEl.style.top = `${node.y}px`;
             nodeEl.classList.toggle('selected', node.id === this.selectedNodeId);
 
-            // Update telemetry content
-            if (node.type === 'TelemetryText' && node.latestLog) {
-                const body = nodeEl.querySelector('.node-body-text');
-                if (body) {
-                    body.innerHTML = node.latestLog.map(line => `<div class="log-line">${line}</div>`).join('');
-                    body.scrollTop = body.scrollHeight;
-                }
-            } else if (node.type === 'TelemetryGraph' && node.latestTelemetry) {
-                const worker = this.nodeWorkers.get(node.id);
-                if (worker) {
-                    worker.postMessage({ type: 'data', telemetry: node.latestTelemetry.data || node.latestTelemetry.telemetry || node.latestTelemetry.percent });
-                }
+            // Initial telemetry sync if data exists in store
+            const initialData = this.stateManager.getTelemetry(node.id);
+            if (initialData) {
+                this.handleTelemetryUpdate(node.id, initialData);
             }
         });
     }
