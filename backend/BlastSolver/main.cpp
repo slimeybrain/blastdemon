@@ -118,6 +118,12 @@ int main() {
                     if (worker.joinable()) worker.join();
                 }
 
+                // Explicit reset of execution control variables
+                cancel_flag = false;
+                target_steps_remaining = 0;
+                step_progress = 0;
+                exec_until_end = false;
+
                 // Extract parameters
                 int num_cells = msg.value("num_cells", msg.value("n_cells", 1000));
                 double domain_radius = msg.value("domain_radius", msg.value("radius", 1.0));
@@ -141,8 +147,8 @@ int main() {
 
                 solver->setInitialConditionTNT(explosive_radius, high_rho, ambient_rho, ambient_p);
 
-                // Emit initial telemetry
-                emit_telemetry(*solver, t);
+                // Emit initial telemetry frame (explicitly marked as not terminated)
+                emit_telemetry(*solver, t, false);
 
             } else if (command == "STEP") {
                 if (!solver) continue;

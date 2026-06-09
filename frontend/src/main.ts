@@ -223,6 +223,7 @@ if (initBtn) {
         networkManager.log('[System] Initializing simulation engine...', 'system');
         const state = stateManager.getCurrentState();
         if (state) {
+            stateManager.clearPendingSteps();
             const payload = serializeForSolver(state, "INIT");
             networkManager.send(payload);
             stateManager.setStatus('INITIALIZED');
@@ -342,6 +343,11 @@ networkManager.onMessage((dataString) => {
                 progressBar.style.width = '0%';
             }
 
+            // Set status strictly to INITIALIZED on t=0
+            if (data.time === 0) {
+                stateManager.setStatus('INITIALIZED');
+            }
+
             // Set status back to INITIALIZED or PAUSED if it was RUNNING and not terminated
             if (stateManager.getStatus() === 'RUNNING' && data.is_terminated !== true) {
                 const pending = stateManager.getPendingSteps();
@@ -353,7 +359,8 @@ networkManager.onMessage((dataString) => {
                 }
             }
 
-            if (data.is_terminated === true) {
+            // Only terminate if we're actually running and not at t=0
+            if (data.is_terminated === true && data.time > 0) {
                 stateManager.clearPendingSteps();
                 if (playInterval) {
                     clearInterval(playInterval);

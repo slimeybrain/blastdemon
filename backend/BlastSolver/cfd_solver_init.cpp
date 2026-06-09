@@ -58,7 +58,7 @@ void CFDSolver::setInitialConditionTNT(double explosive_radius, double high_rho,
         }
     }
     active_r_idx = static_cast<int>(explosive_radius / dr) + 8;
-    if (active_r_idx > n_cells) active_r_idx = n_cells;
+    if (active_r_idx >= n_cells) active_r_idx = n_cells - 1;
     if (active_r_idx < 5) active_r_idx = 5;
     updateConservativeFromPrimitive(states, U);
 }
@@ -83,7 +83,7 @@ void CFDSolver::setInitialConditionIdealGas(double explosive_radius, double high
         }
     }
     active_r_idx = static_cast<int>(explosive_radius / dr) + 8;
-    if (active_r_idx > n_cells) active_r_idx = n_cells;
+    if (active_r_idx >= n_cells) active_r_idx = n_cells - 1;
     if (active_r_idx < 5) active_r_idx = 5;
     updateConservativeFromPrimitive(states, U);
 }
@@ -111,7 +111,7 @@ void CFDSolver::setInitialConditionRoseTNT(double explosive_radius, double high_
         }
     }
     active_r_idx = static_cast<int>(explosive_radius / dr) + 8;
-    if (active_r_idx > n_cells) active_r_idx = n_cells;
+    if (active_r_idx >= n_cells) active_r_idx = n_cells - 1;
     if (active_r_idx < 5) active_r_idx = 5;
     updateConservativeFromPrimitive(states, U);
 }
