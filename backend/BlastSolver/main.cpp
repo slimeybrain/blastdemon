@@ -188,7 +188,7 @@ int main() {
                 t = 0.0;
                 // Emit empty/zeroed telemetry frame with termination flag
                 std::lock_guard<std::mutex> lock(cout_mutex);
-                std::cout << "{\"type\": \"TELEMETRY\", \"time\": 0.0, \"telemetry\": \"\", \"data\": [], \"is_terminated\": true}" << std::endl;
+                std::cout << "{\"type\": \"TELEMETRY\", \"time\": 0.0, \"is_terminated\": true}" << std::endl;
             }
 
         } catch (const std::exception& e) {
@@ -205,22 +205,21 @@ void emit_telemetry(const CFDSolver& solver, double elapsed, bool is_terminated)
     const std::vector<State>& states = solver.getStates();
     int n = solver.getNumCells();
 
-    std::stringstream ss;
-    ss << std::fixed << std::setprecision(4);
-
-    nlohmann::json data_arr = nlohmann::json::array();
-
-    for (int i = 0; i < n; ++i) {
-        ss << (i == 0 ? "" : ",") << states[i].p;
-        data_arr.push_back(states[i].p);
-    }
-
+    // 1. Emit Metadata JSON
     nlohmann::json envelope;
     envelope["type"] = "TELEMETRY";
     envelope["time"] = elapsed;
-    envelope["telemetry"] = ss.str();
-    envelope["data"] = data_arr;
     envelope["is_terminated"] = is_terminated;
-
     std::cout << envelope.dump() << std::endl;
+
+    // 2. Emit Binary Frame (Pressure only)
+    std::vector<float> p_data(n);
+    for (int i = 0; i < n; ++i) {
+        p_data[i] = (float)states[i].p;
+    }
+
+    size_t total_bytes = p_data.size() * sizeof(float);
+    std::cout << "BIN_FRAME " << total_bytes << "\n";
+    std::cout.write(reinterpret_cast<const char*>(p_data.data()), total_bytes);
+    std::cout.flush();
 }

@@ -257,16 +257,24 @@ export class NodeViewer {
     private handleTelemetry(nodeId: string, data: any): void {
         if (nodeId !== this.currentNodeId) return;
         this.updateNodeViewerData(nodeId, data);
+        if (data instanceof ArrayBuffer && this.renderRequestId === null) {
+             // If we don't have a loop yet, force one frame if it's the only way
+             // but startRenderLoop should be running for TelemetryGraph
+        }
     }
 
     private startRenderLoop(): void {
         if (this.renderRequestId !== null) return;
         const loop = () => {
             if (this.telemetryBuffer && this.chartWorker) {
-                this.chartWorker.postMessage({
-                    type: 'frame',
-                    data: this.telemetryBuffer.data
-                });
+                if (this.telemetryBuffer instanceof ArrayBuffer) {
+                    this.chartWorker.postMessage(this.telemetryBuffer, [this.telemetryBuffer]);
+                } else {
+                    this.chartWorker.postMessage({
+                        type: 'frame',
+                        data: this.telemetryBuffer.data
+                    });
+                }
                 this.telemetryBuffer = null;
             }
             this.renderRequestId = requestAnimationFrame(loop);
