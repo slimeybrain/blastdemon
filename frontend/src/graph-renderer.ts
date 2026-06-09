@@ -16,6 +16,12 @@ export class GraphRenderer {
     private draggedNodeId: string | null = null;
     private dragOffsetX: number = 0;
     private dragOffsetY: number = 0;
+
+    private isDraggingWire: boolean = false;
+    private dragSourceNodeId: string | null = null;
+    private dragSourcePortId: string | null = null;
+    private mouseWorldPosition: { x: number, y: number } = { x: 0, y: 0 };
+
     private nodeElements: Map<string, HTMLElement> = new Map();
     private lastMouseX: number = 0;
     private lastMouseY: number = 0;
@@ -107,6 +113,14 @@ export class GraphRenderer {
             this.panX += dx;
             this.panY += dy;
             this.updateTransform();
+        } else if (this.isDraggingWire) {
+            const ctm = this.svg.getScreenCTM();
+            if (ctm) {
+                const pt = new DOMPoint(e.clientX, e.clientY);
+                const worldPoint = pt.matrixTransform(ctm.inverse());
+                this.mouseWorldPosition = { x: worldPoint.x, y: worldPoint.y };
+                this.render();
+            }
         } else if (this.isDraggingNode && this.draggedNodeId) {
             const state = this.stateManager.getCurrentState();
             const ctm = this.svg.getScreenCTM();
@@ -132,6 +146,12 @@ export class GraphRenderer {
                 this.stateManager.pushState(state);
             }
         }
+
+        if (this.isDraggingWire) {
+            this.isDraggingWire = false;
+            this.render();
+        }
+
         this.isPanning = false;
         this.isDraggingNode = false;
         this.draggedNodeId = null;
@@ -333,6 +353,33 @@ export class GraphRenderer {
                     port.className = 'port input';
                     port.dataset.portId = input.id;
                     port.innerHTML = `<div class="port-bullet"></div><span class="port-label">${input.label}</span>`;
+
+                    port.addEventListener('mouseup', (e) => {
+                        if (this.isDraggingWire && this.dragSourceNodeId && this.dragSourcePortId) {
+                            const state = this.stateManager.getCurrentState();
+                            if (state) {
+                                // Check if connection already exists to avoid duplicates
+                                const exists = state.edges.some(edge =>
+                                    edge.fromNode === this.dragSourceNodeId &&
+                                    edge.fromPort === this.dragSourcePortId &&
+                                    edge.toNode === node.id &&
+                                    edge.toPort === input.id
+                                );
+
+                                if (!exists) {
+                                    state.edges.push({
+                                        fromNode: this.dragSourceNodeId,
+                                        fromPort: this.dragSourcePortId,
+                                        toNode: node.id,
+                                        toPort: input.id
+                                    });
+                                    this.stateManager.pushState(state);
+                                }
+                            }
+                            // Let the global mouseup handler reset isDraggingWire and re-render
+                        }
+                    });
+
                     ports.appendChild(port);
                 });
 
@@ -341,6 +388,22 @@ export class GraphRenderer {
                     port.className = 'port output';
                     port.dataset.portId = output.id;
                     port.innerHTML = `<span class="port-label">${output.label}</span><div class="port-bullet"></div>`;
+
+                    port.addEventListener('mousedown', (e) => {
+                        e.stopPropagation();
+                        this.isDraggingWire = true;
+                        this.dragSourceNodeId = node.id;
+                        this.dragSourcePortId = output.id;
+
+                        const ctm = this.svg.getScreenCTM();
+                        if (ctm) {
+                            const pt = new DOMPoint(e.clientX, e.clientY);
+                            const worldPoint = pt.matrixTransform(ctm.inverse());
+                            this.mouseWorldPosition = { x: worldPoint.x, y: worldPoint.y };
+                        }
+                        this.render();
+                    });
+
                     ports.appendChild(port);
                 });
 
@@ -374,6 +437,25 @@ export class GraphRenderer {
             path.setAttribute('class', 'edge-path');
             this.svg.appendChild(path);
         });
+
+        if (this.isDraggingWire && this.dragSourceNodeId && this.dragSourcePortId) {
+            const sourceNode = state.nodes.find(n => n.id === this.dragSourceNodeId);
+            if (sourceNode) {
+                const fromPos = this.getPortPosition(sourceNode, this.dragSourcePortId, false);
+                if (fromPos) {
+                    const toPos = this.mouseWorldPosition;
+                    const dx = Math.max(Math.abs(toPos.x - fromPos.x) * 0.5, 50);
+                    const d = `M ${fromPos.x} ${fromPos.y} C ${fromPos.x + dx} ${fromPos.y}, ${toPos.x - dx} ${toPos.y}, ${toPos.x} ${toPos.y}`;
+
+                    const ghostPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                    ghostPath.setAttribute('d', d);
+                    ghostPath.setAttribute('class', 'edge-path');
+                    ghostPath.setAttribute('stroke-dasharray', '5,5');
+                    ghostPath.setAttribute('stroke-opacity', '0.5');
+                    this.svg.appendChild(ghostPath);
+                }
+            }
+        }
     }
 
     private getPortPosition(node: Node, portId: string, isInput: boolean): { x: number, y: number } | null {
