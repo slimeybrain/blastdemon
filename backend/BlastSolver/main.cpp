@@ -6,19 +6,85 @@
 #include <algorithm>
 #include <cmath>
 #include <memory>
+#include <thread>
+#include <atomic>
+#include <future>
+#include <mutex>
+#include <chrono>
 
 #include <nlohmann/json.hpp>
 #include "cfd_solver.hpp"
 #include "HDF5Writer.hpp"
 #include "XDMFWriter.hpp"
 
+// Global shared state
+std::atomic<bool> cancel_flag{false};
+std::atomic<int> step_progress{0};
+std::atomic<bool> is_running{false};
+std::mutex cout_mutex;
+
 // Forward declaration of telemetry helper
 void emit_telemetry(const CFDSolver& solver, double elapsed, bool is_terminated = false);
+
+void worker_thread_func(CFDSolver* solver, int steps, double cfl, double* t_ptr, bool until_end) {
+    is_running = true;
+    cancel_flag = false;
+    step_progress = 0;
+
+    if (until_end) {
+        int initial_idx = solver->getActiveIndex();
+        int total_range = solver->getNumCells() - initial_idx;
+
+        while (solver->getActiveIndex() < solver->getNumCells()) {
+            if (cancel_flag.load()) break;
+
+            double dt = solver->computeStepSize(cfl);
+            solver->step(dt);
+            *t_ptr += dt;
+
+            if (total_range > 0) {
+                int current_range = solver->getActiveIndex() - initial_idx;
+                step_progress = std::clamp((int)((current_range * 100) / total_range), 0, 100);
+            }
+        }
+    } else {
+        for (int i = 0; i < steps; ++i) {
+            if (cancel_flag.load()) break;
+
+            double dt = solver->computeStepSize(cfl);
+            solver->step(dt);
+            *t_ptr += dt;
+
+            step_progress = (int)(((i + 1) * 100) / steps);
+        }
+    }
+
+    if (!cancel_flag.load()) {
+        step_progress = 100;
+        emit_telemetry(*solver, *t_ptr, until_end && solver->getActiveIndex() >= solver->getNumCells());
+    }
+
+    is_running = false;
+}
 
 int main() {
     std::string line;
     std::unique_ptr<CFDSolver> solver = nullptr;
     double t = 0.0;
+
+    // Progress emitter thread
+    std::thread progress_emitter([]() {
+        while (true) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            if (is_running) {
+                std::lock_guard<std::mutex> lock(cout_mutex);
+                std::cout << "{\"type\": \"progress\", \"percent\": " << step_progress.load() << "}" << std::endl;
+            }
+        }
+    });
+    progress_emitter.detach();
+
+    std::thread worker;
 
     while (std::getline(std::cin, line)) {
         if (line.empty()) continue;
@@ -28,6 +94,11 @@ int main() {
             std::string command = msg.value("command", "");
 
             if (command == "INIT" || command == "START") {
+                if (is_running) {
+                    cancel_flag = true;
+                    if (worker.joinable()) worker.join();
+                }
+
                 // Extract parameters
                 int num_cells = msg.value("num_cells", msg.value("n_cells", 1000));
                 double domain_radius = msg.value("domain_radius", msg.value("radius", 1.0));
@@ -35,6 +106,7 @@ int main() {
 
                 // Instantiate/Reset the solver
                 solver = std::make_unique<CFDSolver>(num_cells, domain_radius, gamma);
+                solver->setCancelFlag(&cancel_flag);
                 t = 0.0;
 
                 // Solver configuration
@@ -54,40 +126,33 @@ int main() {
                 emit_telemetry(*solver, t);
 
             } else if (command == "STEP") {
-                if (!solver) continue;
+                if (!solver || is_running) continue;
                 int steps = msg.value("steps", 1);
                 double cfl = msg.value("cfl", 0.4);
 
-                for (int i = 0; i < steps; ++i) {
-                    double dt = solver->computeStepSize(cfl);
-                    solver->step(dt);
-                    t += dt;
-                }
-
-                // Emit one telemetry frame after the steps
-                emit_telemetry(*solver, t);
+                if (worker.joinable()) worker.join();
+                worker = std::thread(worker_thread_func, solver.get(), steps, cfl, &t, false);
 
             } else if (command == "EXEC_END") {
-                if (!solver) continue;
+                if (!solver || is_running) continue;
                 double cfl = msg.value("cfl", 0.4);
 
-                // Run until shock reaches the end (active_r_idx == n_cells)
-                while (solver->getActiveIndex() < solver->getNumCells()) {
-                    double dt = solver->computeStepSize(cfl);
-                    solver->step(dt);
-                    t += dt;
-                }
+                if (worker.joinable()) worker.join();
+                worker = std::thread(worker_thread_func, solver.get(), 0, cfl, &t, true);
 
-                // Emit final telemetry frame with termination flag
-                emit_telemetry(*solver, t, true);
+            } else if (command == "PAUSE") {
+                cancel_flag = true;
 
             } else if (command == "TERMINATE") {
+                cancel_flag = true;
+                if (worker.joinable()) worker.join();
+
                 if (solver) {
-                    // Clear solver (implicitly by resetting pointer or explicitly if needed)
                     solver.reset();
                 }
                 t = 0.0;
                 // Emit empty/zeroed telemetry frame with termination flag
+                std::lock_guard<std::mutex> lock(cout_mutex);
                 std::cout << "{\"type\": \"TELEMETRY\", \"time\": 0.0, \"telemetry\": \"\", \"data\": [], \"is_terminated\": true}" << std::endl;
             }
 
@@ -101,6 +166,7 @@ int main() {
 }
 
 void emit_telemetry(const CFDSolver& solver, double elapsed, bool is_terminated) {
+    std::lock_guard<std::mutex> lock(cout_mutex);
     const std::vector<State>& states = solver.getStates();
     int n = solver.getNumCells();
 

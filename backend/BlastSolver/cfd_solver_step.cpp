@@ -9,6 +9,7 @@
 
 void CFDSolver::updateConservativeFromPrimitive(const std::vector<State>& states_vec, std::vector<ConservativeState>& U_vec) {
     for (int i = 0; i < n_cells; ++i) {
+        if (cancel_flag && cancel_flag->load()) return;
         U_vec[i].rho = states_vec[i].rho;
         U_vec[i].rhou = states_vec[i].rho * states_vec[i].u;
         U_vec[i].E = states_vec[i].E;
@@ -23,6 +24,7 @@ void CFDSolver::updatePrimitiveFromConservative(std::vector<ConservativeState>& 
     const double p_floor = 1e-8;
 
     for (int i = 0; i < limit; ++i) {
+        if (cancel_flag && cancel_flag->load()) return;
         bool bad = false;
         if (std::isnan(U_vec[i].rho) || std::isinf(U_vec[i].rho) || U_vec[i].rho < rho_floor) bad = true;
         if (std::isnan(U_vec[i].rhou) || std::isinf(U_vec[i].rhou)) bad = true;
@@ -248,6 +250,7 @@ ConservativeState CFDSolver::computedUdt(const std::vector<ConservativeState>& U
 void CFDSolver::step(double dt) {
     auto applySourceTerms = [&](double dt_step, double t_step) {
         for (int i = 0; i < active_r_idx; ++i) {
+            if (cancel_flag && cancel_flag->load()) return;
             double r_c = (i + 0.5) * dr;
 
             double dF = MultiMat::computeProgrammedBurn(
@@ -272,6 +275,7 @@ void CFDSolver::step(double dt) {
     if (temporalOrder == 1) {
         std::vector<ConservativeState> next_U = U;
         for (int i = 0; i < active_r_idx; ++i) {
+            if (cancel_flag && cancel_flag->load()) return;
             ConservativeState dU = computedUdt(U, states, i, dt);
             next_U[i].rho  = U[i].rho  + dt * dU.rho;
             next_U[i].rhou = U[i].rhou + dt * dU.rhou;
@@ -286,6 +290,7 @@ void CFDSolver::step(double dt) {
         std::vector<ConservativeState> U1 = U;
         std::vector<State> states1 = states;
         for (int i = 0; i < active_r_idx; ++i) {
+            if (cancel_flag && cancel_flag->load()) return;
             ConservativeState dU = computedUdt(U, states, i, dt);
             U1[i].rho  = U[i].rho  + dt * dU.rho;
             U1[i].rhou = U[i].rhou + dt * dU.rhou;
@@ -296,7 +301,9 @@ void CFDSolver::step(double dt) {
             U1[i].arho2  = U[i].arho2  + dt * dU.arho2;
         }
         updatePrimitiveFromConservative(U1, states1);
+        if (cancel_flag && cancel_flag->load()) return;
         for (int i = 0; i < active_r_idx; ++i) {
+            if (cancel_flag && cancel_flag->load()) return;
             ConservativeState dU0 = computedUdt(U, states, i, dt);
             ConservativeState dU1 = computedUdt(U1, states1, i, dt);
             U[i].rho  += 0.5 * dt * (dU0.rho  + dU1.rho);
@@ -313,6 +320,7 @@ void CFDSolver::step(double dt) {
 
         // Stage 1
         for (int i = 0; i < active_r_idx; ++i) {
+            if (cancel_flag && cancel_flag->load()) return;
             ConservativeState dU = computedUdt(U, states, i, dt);
             U1[i].rho  = U[i].rho  + dt * dU.rho;
             U1[i].rhou = U[i].rhou + dt * dU.rhou;
@@ -323,9 +331,11 @@ void CFDSolver::step(double dt) {
             U1[i].arho2  = U[i].arho2  + dt * dU.arho2;
         }
         updatePrimitiveFromConservative(U1, states1);
+        if (cancel_flag && cancel_flag->load()) return;
 
         // Stage 2
         for (int i = 0; i < active_r_idx; ++i) {
+            if (cancel_flag && cancel_flag->load()) return;
             ConservativeState dU = computedUdt(U1, states1, i, dt);
             U2[i].rho  = 0.75 * U[i].rho  + 0.25 * U1[i].rho  + 0.25 * dt * dU.rho;
             U2[i].rhou = 0.75 * U[i].rhou + 0.25 * U1[i].rhou + 0.25 * dt * dU.rhou;
@@ -336,9 +346,11 @@ void CFDSolver::step(double dt) {
             U2[i].arho2  = 0.75 * U[i].arho2  + 0.25 * U1[i].arho2  + 0.25 * dt * dU.arho2;
         }
         updatePrimitiveFromConservative(U2, states2);
+        if (cancel_flag && cancel_flag->load()) return;
 
         // Stage 3
         for (int i = 0; i < active_r_idx; ++i) {
+            if (cancel_flag && cancel_flag->load()) return;
             ConservativeState dU = computedUdt(U2, states2, i, dt);
             U[i].rho  = (1.0/3.0) * U[i].rho  + (2.0/3.0) * U2[i].rho  + (2.0/3.0) * dt * dU.rho;
             U[i].rhou = (1.0/3.0) * U[i].rhou + (2.0/3.0) * U2[i].rhou + (2.0/3.0) * dt * dU.rhou;
@@ -355,6 +367,7 @@ void CFDSolver::step(double dt) {
 
         // Stage 1
         for (int i = 0; i < active_r_idx; ++i) {
+            if (cancel_flag && cancel_flag->load()) return;
             ConservativeState dU = computedUdt(U, states, i, dt);
             U1[i].rho  = U[i].rho  + 0.39175222700392 * dt * dU.rho;
             U1[i].rhou = U[i].rhou + 0.39175222700392 * dt * dU.rhou;
@@ -365,9 +378,11 @@ void CFDSolver::step(double dt) {
             U1[i].arho2  = U[i].arho2  + 0.39175222700392 * dt * dU.arho2;
         }
         updatePrimitiveFromConservative(U1, states1);
+        if (cancel_flag && cancel_flag->load()) return;
 
         // Stage 2
         for (int i = 0; i < active_r_idx; ++i) {
+            if (cancel_flag && cancel_flag->load()) return;
             ConservativeState dU = computedUdt(U1, states1, i, dt);
             U2[i].rho  = 0.44437049406734 * U[i].rho  + 0.55562950593266 * U1[i].rho  + 0.36841059262959 * dt * dU.rho;
             U2[i].rhou = 0.44437049406734 * U[i].rhou + 0.55562950593266 * U1[i].rhou + 0.36841059262959 * dt * dU.rhou;
@@ -378,9 +393,11 @@ void CFDSolver::step(double dt) {
             U2[i].arho2  = 0.44437049406734 * U[i].arho2  + 0.55562950593266 * U1[i].arho2  + 0.36841059262959 * dt * dU.arho2;
         }
         updatePrimitiveFromConservative(U2, states2);
+        if (cancel_flag && cancel_flag->load()) return;
 
         // Stage 3
         for (int i = 0; i < active_r_idx; ++i) {
+            if (cancel_flag && cancel_flag->load()) return;
             ConservativeState dU = computedUdt(U2, states2, i, dt);
             U3[i].rho  = 0.62010185138540 * U[i].rho  + 0.37989814861460 * U2[i].rho  + 0.25189177424738 * dt * dU.rho;
             U3[i].rhou = 0.62010185138540 * U[i].rhou + 0.37989814861460 * U2[i].rhou + 0.25189177424738 * dt * dU.rhou;
@@ -391,9 +408,11 @@ void CFDSolver::step(double dt) {
             U3[i].arho2  = 0.62010185138540 * U[i].arho2  + 0.37989814861460 * U2[i].arho2  + 0.25189177424738 * dt * dU.arho2;
         }
         updatePrimitiveFromConservative(U3, states3);
+        if (cancel_flag && cancel_flag->load()) return;
 
         // Stage 4
         for (int i = 0; i < active_r_idx; ++i) {
+            if (cancel_flag && cancel_flag->load()) return;
             ConservativeState dU = computedUdt(U3, states3, i, dt);
             U4[i].rho  = 0.17807995410773 * U[i].rho  + 0.82192004589227 * U3[i].rho  + 0.54468824602744 * dt * dU.rho;
             U4[i].rhou = 0.17807995410773 * U[i].rhou + 0.82192004589227 * U3[i].rhou + 0.54468824602744 * dt * dU.rhou;
@@ -404,9 +423,11 @@ void CFDSolver::step(double dt) {
             U4[i].arho2  = 0.17807995410773 * U[i].arho2  + 0.82192004589227 * U3[i].arho2  + 0.54468824602744 * dt * dU.arho2;
         }
         updatePrimitiveFromConservative(U4, states4);
+        if (cancel_flag && cancel_flag->load()) return;
 
         // Stage 5
         for (int i = 0; i < active_r_idx; ++i) {
+            if (cancel_flag && cancel_flag->load()) return;
             ConservativeState dU = computedUdt(U4, states4, i, dt);
             U[i].rho  = 0.00683325884039 * U[i].rho  + 0.51723167208978 * U2[i].rho  + 0.12759831133288 * U3[i].rho  + 0.34833675773694 * U4[i].rho  + 0.22994065600216 * dt * dU.rho;
             U[i].rhou = 0.00683325884039 * U[i].rhou + 0.51723167208978 * U2[i].rhou + 0.12759831133288 * U3[i].rhou + 0.34833675773694 * U4[i].rhou + 0.22994065600216 * dt * dU.rhou;
