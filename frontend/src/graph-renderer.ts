@@ -37,6 +37,7 @@ export class GraphRenderer {
 
     private stateListener = () => this.render();
     private telemetryListener = (nodeId: string, data: any) => this.handleTelemetryUpdate(nodeId, data);
+    private selectionListener = (nodeId: string | null) => this.handleSelectionChange(nodeId);
 
     constructor(parent: HTMLElement, stateManager: StateManager) {
         this.stateManager = stateManager;
@@ -76,6 +77,7 @@ export class GraphRenderer {
         this.initEventListeners();
         this.stateManager.onStateChange(this.stateListener);
         this.stateManager.onTelemetryUpdate(this.telemetryListener);
+        this.stateManager.onSelectionChange(this.selectionListener);
 
         this.resizeObserver = new ResizeObserver(() => this.render());
         this.resizeObserver.observe(this.viewport);
@@ -89,6 +91,7 @@ export class GraphRenderer {
         });
         this.stateManager.offStateChange(this.stateListener);
         this.stateManager.offTelemetryUpdate(this.telemetryListener);
+        this.stateManager.offSelectionChange(this.selectionListener);
         this.nodeWorkers.forEach(worker => worker.terminate());
         if (this.resizeObserver) this.resizeObserver.disconnect();
         this.viewport.remove();
@@ -367,9 +370,29 @@ export class GraphRenderer {
     }
 
     private selectNode(nodeId: string | null): void {
+        this.stateManager.setSelectedNode(nodeId);
+        this.handleSelectionChange(nodeId);
+    }
+
+    private handleSelectionChange(nodeId: string | null): void {
         this.selectedNodeId = nodeId;
         if (this.onNodeSelected) this.onNodeSelected(nodeId);
+
+        if (nodeId) {
+            const state = this.stateManager.getCurrentState();
+            const node = state?.nodes.find(n => n.id === nodeId);
+            if (node) {
+                this.centerNode(node);
+            }
+        }
         this.render();
+    }
+
+    private centerNode(node: Node): void {
+        const rect = this.viewport.getBoundingClientRect();
+        this.panX = (rect.width / 2) - (node.x * this.zoom) - (90 * this.zoom); // 90 is half NODE_WIDTH (approx)
+        this.panY = (rect.height / 2) - (node.y * this.zoom) - (60 * this.zoom); // 60 is half NODE_HEIGHT (approx)
+        this.updateTransform();
     }
 
     public render(): void {

@@ -73,12 +73,17 @@ export class NodeViewer {
         }
 
         if (this.lastId === node.id && this.lastType === node.type) {
+            // Already rendered this node type, just update if it's a standard node (property editor)
             if (node.type !== 'TelemetryText' && node.type !== 'TelemetryGraph') {
                 this.renderStandardNode(node);
             }
             return;
         }
 
+        this.renderNodeViewer(node);
+    }
+
+    private renderNodeViewer(node: Node): void {
         this.lastId = node.id;
         this.lastType = node.type;
         this.container.innerHTML = '';
@@ -241,7 +246,10 @@ export class NodeViewer {
 
     private handleTelemetry(nodeId: string, data: any): void {
         if (nodeId !== this.currentNodeId) return;
+        this.updateNodeViewerData(nodeId, data);
+    }
 
+    private updateNodeViewerData(nodeId: string, data: any): void {
         const state = this.stateManager.getCurrentState();
         const node = state?.nodes.find(n => n.id === nodeId);
         if (!node) return;
@@ -249,12 +257,24 @@ export class NodeViewer {
         if (node.type === 'TelemetryText') {
             const terminal = this.container.querySelector('.expanded-terminal');
             if (terminal && Array.isArray(data)) {
-                terminal.innerHTML = '';
-                data.forEach(line => {
-                    const div = document.createElement('div');
-                    div.textContent = line;
-                    terminal.appendChild(div);
-                });
+                // To avoid focus/selection issues and for performance, we only append new lines
+                // or update smartly. For now, let's at least minimize recreation.
+                const currentCount = terminal.children.length;
+                if (data.length < currentCount) {
+                    terminal.innerHTML = ''; // Full reset if data shrank
+                    data.forEach(line => {
+                        const div = document.createElement('div');
+                        div.textContent = line;
+                        terminal.appendChild(div);
+                    });
+                } else {
+                    // Append only new ones
+                    for (let i = currentCount; i < data.length; i++) {
+                        const div = document.createElement('div');
+                        div.textContent = data[i];
+                        terminal.appendChild(div);
+                    }
+                }
                 terminal.scrollTop = terminal.scrollHeight;
             }
         } else if (node.type === 'TelemetryGraph' && this.chartWorker) {
@@ -263,5 +283,6 @@ export class NodeViewer {
                 data: data.data
             });
         }
+        // Standard nodes (PropertyEditor) ignore high-frequency telemetry
     }
 }

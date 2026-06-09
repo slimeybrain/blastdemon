@@ -9,6 +9,8 @@ export class StateManager {
     private pendingSteps: number = 0;
     private telemetryStore: Map<string, any> = new Map();
     private telemetryListeners: ((nodeId: string, data: any) => void)[] = [];
+    public selectedNodeId: string | null = null;
+    private selectionListeners: ((nodeId: string | null) => void)[] = [];
 
     constructor(initialState?: SimulationState) {
         if (initialState) {
@@ -147,6 +149,25 @@ export class StateManager {
 
     offTelemetryUpdate(listener: (nodeId: string, data: any) => void): void {
         this.telemetryListeners = this.telemetryListeners.filter(l => l !== listener);
+    }
+
+    onSelectionChange(listener: (nodeId: string | null) => void): void {
+        this.selectionListeners.push(listener);
+    }
+
+    offSelectionChange(listener: (nodeId: string | null) => void): void {
+        this.selectionListeners = this.selectionListeners.filter(l => l !== listener);
+    }
+
+    setSelectedNode(nodeId: string | null): void {
+        if (this.selectedNodeId !== nodeId) {
+            this.selectedNodeId = nodeId;
+            this.selectionListeners.forEach(l => l(nodeId));
+        }
+    }
+
+    getSelectedNodeId(): string | null {
+        return this.selectedNodeId;
     }
 
     getTelemetry(nodeId: string): any {
