@@ -25,7 +25,7 @@ export interface Edge {
 export type SimulationStatus = 'UNINITIALIZED' | 'INITIALIZED' | 'RUNNING' | 'PAUSED' | 'TERMINATED';
 
 export type LayoutDirection = 'horizontal' | 'vertical';
-export type PanelType = 'OUTLINER' | 'NODE_GRAPH' | 'PROPERTIES' | 'TELEMETRY_GRAPH' | 'TELEMETRY_TEXT';
+export type PanelType = 'OUTLINER' | 'NODE_GRAPH' | 'PROPERTIES' | 'TELEMETRY_GRAPH' | 'TELEMETRY_TEXT' | 'NODE_VIEWER';
 
 export interface SplitNode {
     type: 'split';
