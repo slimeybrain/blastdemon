@@ -3,6 +3,7 @@
 
 #include <vector>
 #include <string>
+#include <atomic>
 #include "materials.hpp"
 #include "cfd_states.hpp"
 
@@ -21,6 +22,8 @@ public:
     void setSpatialOrder(int order) { spatialOrder = order; }
     void setTemporalOrder(int order) { temporalOrder = order; }
     void setMaterialParameters(const MultiMat::MaterialSet& materials) { currentMaterials = materials; }
+    void setCancelFlag(std::atomic<bool>* flag) { cancel_flag = flag; }
+    void setProgressRef(std::atomic<int>* ref) { progress_ref = ref; }
 
     void step(double dt);
     void run(double duration);
@@ -68,6 +71,9 @@ private:
 
     std::vector<double> geom_V;
     std::vector<double> geom_A;
+
+    std::atomic<bool>* cancel_flag = nullptr;
+    std::atomic<int>* progress_ref = nullptr;
 
     void updatePrimitiveFromConservative(std::vector<ConservativeState>& U_vec, std::vector<State>& states_vec);
     void updateConservativeFromPrimitive(const std::vector<State>& states_vec, std::vector<ConservativeState>& U_vec);

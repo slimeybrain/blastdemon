@@ -260,24 +260,28 @@ if (initBtn) {
 
 if (exec1Btn) {
     exec1Btn.addEventListener('click', () => {
+        stateManager.setStatus('RUNNING');
         networkManager.send({ command: "STEP", steps: 1 });
     });
 }
 
 if (exec10Btn) {
     exec10Btn.addEventListener('click', () => {
+        stateManager.setStatus('RUNNING');
         networkManager.send({ command: "STEP", steps: 10 });
     });
 }
 
 if (exec100Btn) {
     exec100Btn.addEventListener('click', () => {
+        stateManager.setStatus('RUNNING');
         networkManager.send({ command: "STEP", steps: 100 });
     });
 }
 
 if (exec1000Btn) {
     exec1000Btn.addEventListener('click', () => {
+        stateManager.setStatus('RUNNING');
         networkManager.send({ command: "STEP", steps: 1000 });
     });
 }
@@ -295,9 +299,10 @@ if (playBtn) {
         if (playInterval) return;
         networkManager.log('[System] Playback started', 'success');
         stateManager.setStatus('RUNNING');
-        playInterval = window.setInterval(() => {
-            networkManager.send({ command: "STEP", steps: 10 });
-        }, 16);
+        // Now that backend is async, we can just send a large number of steps or
+        // keep the interval but it might be better to just let the backend run.
+        // For 'Play', we'll send a large step count.
+        networkManager.send({ command: "STEP", steps: 10000 });
     });
 }
 
@@ -307,6 +312,7 @@ if (pauseBtn) {
             clearInterval(playInterval);
             playInterval = null;
         }
+        networkManager.send({ command: "PAUSE" });
         stateManager.setStatus('PAUSED');
         networkManager.log('[System] Playback paused', 'system');
     });
@@ -324,18 +330,39 @@ if (terminateBtn) {
     });
 }
 
-// Global WebSocket listener for termination flag
+// Global WebSocket listener for telemetry and progress
+const progressBar = document.getElementById('progress-bar') as HTMLElement;
+
 networkManager.onMessage((dataString) => {
     try {
         const data = JSON.parse(dataString);
-        if (data.type === 'TELEMETRY' && data.is_terminated === true) {
-            if (playInterval) {
-                clearInterval(playInterval);
-                playInterval = null;
+
+        if (data.type === 'progress') {
+            if (progressBar) {
+                progressBar.style.width = `${data.percent}%`;
             }
-            if (stateManager.getStatus() !== 'TERMINATED') {
-                stateManager.setStatus('TERMINATED');
-                networkManager.log('[System] Simulation reached termination boundary.', 'error');
+        }
+
+        if (data.type === 'TELEMETRY') {
+            // Reset progress bar on full telemetry frame
+            if (progressBar) {
+                progressBar.style.width = '0%';
+            }
+
+            // Set status back to INITIALIZED or PAUSED if it was RUNNING and not terminated
+            if (stateManager.getStatus() === 'RUNNING' && data.is_terminated !== true) {
+                stateManager.setStatus('PAUSED');
+            }
+
+            if (data.is_terminated === true) {
+                if (playInterval) {
+                    clearInterval(playInterval);
+                    playInterval = null;
+                }
+                if (stateManager.getStatus() !== 'TERMINATED') {
+                    stateManager.setStatus('TERMINATED');
+                    networkManager.log('[System] Simulation reached termination boundary.', 'error');
+                }
             }
         }
     } catch (e) {}
