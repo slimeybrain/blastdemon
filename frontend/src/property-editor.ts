@@ -27,13 +27,12 @@ export class PropertyEditor {
     }
 
     public setSelectedNode(nodeId: string | null): void {
+        if (this.currentNodeId === nodeId) return;
         this.currentNodeId = nodeId;
-        this.render();
+        this.render(true);
     }
 
-    private render(): void {
-        this.container.innerHTML = '';
-
+    private render(forceFull: boolean = false): void {
         if (!this.currentNodeId) {
             this.container.innerHTML = '<div style="padding: 20px; color: #666;">No node selected</div>';
             return;
@@ -47,6 +46,19 @@ export class PropertyEditor {
             return;
         }
 
+        if (!forceFull && this.container.querySelector('form')) {
+            // Update existing values to prevent focus loss
+            for (const [key, value] of Object.entries(node.parameters)) {
+                const input = this.container.querySelector(`[data-key="${key}"]`) as HTMLInputElement | HTMLSelectElement;
+                if (input && document.activeElement !== input) {
+                    input.value = value.toString();
+                }
+            }
+            return;
+        }
+
+        this.container.innerHTML = '';
+
         const editorHeader = document.createElement('div');
         editorHeader.style.padding = '10px';
         editorHeader.style.borderBottom = '1px solid #333';
@@ -54,8 +66,9 @@ export class PropertyEditor {
         editorHeader.innerHTML = `${node.type} (${node.id})`;
         this.container.appendChild(editorHeader);
 
-        const form = document.createElement('div');
+        const form = document.createElement('form');
         form.style.padding = '10px';
+        form.onsubmit = (e) => e.preventDefault();
 
         for (const [key, value] of Object.entries(node.parameters)) {
             const row = document.createElement('div');
@@ -70,6 +83,7 @@ export class PropertyEditor {
             row.appendChild(label);
 
             const input = this.createInputElement(node, key, value);
+            input.dataset.key = key;
             row.appendChild(input);
             form.appendChild(row);
         }
@@ -158,6 +172,6 @@ export class PropertyEditor {
         }
 
         this.stateManager.updateNodeParameters(this.currentNodeId, updates);
-        this.render();
+        this.render(false);
     }
 }

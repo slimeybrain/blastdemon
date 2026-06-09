@@ -2,6 +2,7 @@ import { StateManager } from './state-manager.js';
 import { LayoutNode, SplitNode, PanelNode, SimulationState, PanelType } from './types.js';
 import { GraphRenderer } from './graph-renderer.js';
 import { PropertyEditor } from './property-editor.js';
+import { NodeViewer } from './node-viewer.js';
 
 export class LayoutManager {
     private container: HTMLElement;
@@ -19,11 +20,16 @@ export class LayoutManager {
     }
 
     public render(state: SimulationState): void {
-        // Simple optimization: only re-render if layout structure changed or it's the first render
+        // Optimization: only re-render if layout structure OR nodes (for dropdowns) changed
         const layoutJson = JSON.stringify(state.layout);
-        const lastLayoutJson = this.lastState ? JSON.stringify(this.lastState.layout) : null;
+        const nodesJson = JSON.stringify(state.nodes.map(n => n.id));
+        const currentData = layoutJson + nodesJson;
 
-        if (layoutJson !== lastLayoutJson) {
+        const lastLayoutJson = this.lastState ? JSON.stringify(this.lastState.layout) : '';
+        const lastNodesJson = this.lastState ? JSON.stringify(this.lastState.nodes.map(n => n.id)) : '';
+        const lastData = lastLayoutJson + lastNodesJson;
+
+        if (currentData !== lastData) {
             this.container.innerHTML = '';
             this.renderNode(state.layout, this.container);
         }
@@ -137,7 +143,7 @@ export class LayoutManager {
 
         const select = document.createElement('select');
         select.className = 'header-select';
-        const types: PanelType[] = ['OUTLINER', 'NODE_GRAPH', 'PROPERTIES', 'TELEMETRY_GRAPH', 'TELEMETRY_TEXT'];
+        const types: PanelType[] = ['OUTLINER', 'NODE_GRAPH', 'PROPERTIES', 'TELEMETRY_GRAPH', 'TELEMETRY_TEXT', 'NODE_VIEWER'];
         types.forEach(t => {
             const opt = document.createElement('option');
             opt.value = t;
@@ -147,6 +153,26 @@ export class LayoutManager {
         });
         select.onchange = () => this.stateManager.setPanelType(node.id, select.value as PanelType);
         leftSide.appendChild(select);
+
+        if (node.panelType === 'NODE_VIEWER') {
+            const subSelect = document.createElement('select');
+            subSelect.className = 'node-sub-select';
+            subSelect.style.marginLeft = '4px';
+            subSelect.style.maxWidth = '120px';
+
+            const state = this.stateManager.getCurrentState();
+            if (state) {
+                state.nodes.forEach(n => {
+                    const opt = document.createElement('option');
+                    opt.value = n.id;
+                    opt.textContent = n.id;
+                    if (n.id === node.targetNodeId) opt.selected = true;
+                    subSelect.appendChild(opt);
+                });
+            }
+            subSelect.onchange = () => this.stateManager.setPanelType(node.id, 'NODE_VIEWER', subSelect.value);
+            leftSide.appendChild(subSelect);
+        }
 
         if (node.panelType === 'NODE_GRAPH') {
             const statusBadge = document.createElement('div');
@@ -208,6 +234,9 @@ export class LayoutManager {
             case 'PROPERTIES':
                 this.renderProperties(node, container);
                 break;
+            case 'NODE_VIEWER':
+                this.renderNodeViewer(node, container);
+                break;
             case 'TELEMETRY_TEXT':
                 container.innerHTML = '<div style="padding:10px">Telemetry Text (Move to Node Graph to see per-node logs)</div>';
                 break;
@@ -224,13 +253,19 @@ export class LayoutManager {
 
         const update = (state: SimulationState) => {
             outliner.innerHTML = '';
+            const selectedId = this.stateManager.getSelectedNodeId();
             state.nodes.forEach(node => {
                 const li = document.createElement('li');
                 li.textContent = `${node.type} (${node.id})`;
+                li.onclick = () => this.stateManager.setSelectedNode(node.id);
+                if (node.id === selectedId) {
+                    li.className = 'selected';
+                }
                 outliner.appendChild(li);
             });
         };
         this.stateManager.onStateChange(update);
+        this.stateManager.onSelectionChange(() => update(this.stateManager.getCurrentState()!));
         update(this.stateManager.getCurrentState()!);
     }
 
@@ -240,10 +275,7 @@ export class LayoutManager {
         if (!comp) {
             const renderer = new GraphRenderer(container, this.stateManager);
             renderer.onNodeSelected = (nodeId) => {
-                // Find properties panel and set selected node
-                // This is a bit tricky with multiple panels.
-                // For now, let's just update a global "selectedNode" in StateManager maybe?
-                // Or just find ANY properties panel.
+                this.stateManager.setSelectedNode(nodeId);
                 this.setSelectedNodeOnAllPropertiesPanels(nodeId);
             };
             comp = { type: 'NODE_GRAPH', instance: renderer };
@@ -267,6 +299,18 @@ export class LayoutManager {
         } else {
             container.appendChild(comp.instance.container);
         }
+    }
+
+    private renderNodeViewer(node: PanelNode, container: HTMLElement): void {
+        let comp = this.components.get(node.id);
+        if (!comp) {
+            const viewer = new NodeViewer(container, this.stateManager);
+            comp = { type: 'NODE_VIEWER', instance: viewer };
+            this.components.set(node.id, comp);
+        } else {
+            container.appendChild(comp.instance.container);
+        }
+        comp.instance.setNode(node.targetNodeId);
     }
 
     private setSelectedNodeOnAllPropertiesPanels(nodeId: string | null): void {
@@ -310,7 +354,6 @@ export class LayoutManager {
         group.appendChild(createBtn('exec-end-btn', 'End', 'header-button secondary'));
         simActions.appendChild(group);
 
-        simActions.appendChild(createBtn('play-btn', 'Play', 'header-button success'));
         simActions.appendChild(createBtn('pause-btn', 'Pause', 'header-button warning'));
         simActions.appendChild(createBtn('terminate-btn', 'Term', 'header-button danger'));
 

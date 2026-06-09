@@ -40,7 +40,7 @@ export interface PanelNode {
     type: 'panel';
     id: string;
     panelType: PanelType;
-    targetNodeId: string | null; // Used if displaying a specific Node's data
+    targetNodeId?: string | null; // Used if displaying a specific Node's data
 }
 
 export type LayoutNode = SplitNode | PanelNode;
