@@ -13,7 +13,7 @@
 #include "XDMFWriter.hpp"
 
 // Forward declaration of telemetry helper
-void emit_telemetry(const CFDSolver& solver, double elapsed);
+void emit_telemetry(const CFDSolver& solver, double elapsed, bool is_terminated = false);
 
 int main() {
     std::string line;
@@ -67,14 +67,28 @@ int main() {
                 // Emit one telemetry frame after the steps
                 emit_telemetry(*solver, t);
 
+            } else if (command == "EXEC_END") {
+                if (!solver) continue;
+                double cfl = msg.value("cfl", 0.4);
+
+                // Run until shock reaches the end (active_r_idx == n_cells)
+                while (solver->getActiveIndex() < solver->getNumCells()) {
+                    double dt = solver->computeStepSize(cfl);
+                    solver->step(dt);
+                    t += dt;
+                }
+
+                // Emit final telemetry frame with termination flag
+                emit_telemetry(*solver, t, true);
+
             } else if (command == "TERMINATE") {
                 if (solver) {
                     // Clear solver (implicitly by resetting pointer or explicitly if needed)
                     solver.reset();
                 }
                 t = 0.0;
-                // Emit empty/zeroed telemetry frame
-                std::cout << "{\"type\": \"TELEMETRY\", \"time\": 0.0, \"telemetry\": \"\", \"data\": []}" << std::endl;
+                // Emit empty/zeroed telemetry frame with termination flag
+                std::cout << "{\"type\": \"TELEMETRY\", \"time\": 0.0, \"telemetry\": \"\", \"data\": [], \"is_terminated\": true}" << std::endl;
             }
 
         } catch (const std::exception& e) {
@@ -86,7 +100,7 @@ int main() {
     return 0;
 }
 
-void emit_telemetry(const CFDSolver& solver, double elapsed) {
+void emit_telemetry(const CFDSolver& solver, double elapsed, bool is_terminated) {
     const std::vector<State>& states = solver.getStates();
     int n = solver.getNumCells();
 
@@ -105,6 +119,7 @@ void emit_telemetry(const CFDSolver& solver, double elapsed) {
     envelope["time"] = elapsed;
     envelope["telemetry"] = ss.str();
     envelope["data"] = data_arr;
+    envelope["is_terminated"] = is_terminated;
 
     std::cout << envelope.dump() << std::endl;
 }

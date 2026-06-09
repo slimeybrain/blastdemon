@@ -31,7 +31,8 @@ export class NetworkManager {
                         this.worker.postMessage({ type: 'data', telemetry: data.data || data.telemetry });
                     }
                 } else if (data.type === 'IO_SUCCESS') {
-                    this.log(`[System] Frame written to disk at t=${data.time.toFixed(3)}s`, 'system');
+                    const formattedTime = (typeof data.time === 'number') ? data.time.toExponential(6) : data.time;
+                    this.log(`[System] Frame written to disk at t=${formattedTime}s`, 'system');
                 } else {
                     this.log(JSON.stringify(data), 'default');
                 }

@@ -27,6 +27,7 @@ public:
     double computeStepSize(double cfl = 0.4) const;
 
     int getNumCells() const { return n_cells; }
+    int getActiveIndex() const { return active_r_idx; }
     double getRadius() const { return radius; }
     double getCellSize() const { return dr; }
     double getTime() const { return currentTime; }
