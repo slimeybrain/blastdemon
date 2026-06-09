@@ -184,36 +184,9 @@ body {
 #left-sidebar { grid-area: left-sidebar; }
 #center-viewport { grid-area: center-viewport; }
 #right-sidebar { grid-area: right-sidebar; }
-#bottom-panel { grid-area: bottom-panel; }
 
 canvas {
     display: block;
-}
-
-.terminal-content {
-    background-color: #0c0c0c;
-    color: #d4d4d4;
-    font-family: var(--font-mono);
-    font-size: 0.85rem;
-    padding: 8px;
-    white-space: pre-wrap;
-    overflow-y: auto;
-}
-
-.terminal-line {
-    margin-bottom: 2px;
-}
-
-.terminal-success {
-    color: #4caf50;
-}
-
-.terminal-error {
-    color: #f44336;
-}
-
-.terminal-system {
-    color: #2196f3;
 }
 
 #outliner {
