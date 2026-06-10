@@ -23,10 +23,33 @@ std::atomic<int> step_progress{0};
 std::atomic<bool> is_running{false};
 std::atomic<int> target_steps_remaining{0};
 std::atomic<bool> exec_until_end{false};
+std::atomic<int> global_num_cells{0};
 std::mutex cout_mutex;
 
-// Forward declaration of telemetry helper
+// Forward declaration of telemetry helpers
 void emit_telemetry(const CFDSolver& solver, double elapsed, bool is_terminated = false);
+
+void emit_kernel_log(const std::string& level, const std::string& msg, double t) {
+    std::lock_guard<std::mutex> lock(cout_mutex);
+    std::cout << "[" << std::fixed << std::setprecision(4) << t << "s] [" << level << "] " << msg << std::endl;
+}
+
+void emit_resource_pulse() {
+    std::lock_guard<std::mutex> lock(cout_mutex);
+    int n = global_num_cells.load();
+    nlohmann::json pulse;
+    pulse["type"] = "resource_pulse";
+
+    // Mathematical mock data calculated against active mesh cell count
+    double load_factor = std::min(100.0, (double)n / 5000.0 * 100.0);
+    pulse["cpu"] = 15.0 + (load_factor * 0.2);
+    pulse["ram"] = 512 * 1024 * 1024 + (n * 1024ULL);
+    pulse["gpu_util"] = 20.0 + (load_factor * 0.7);
+    pulse["vram_util"] = 10.0 + (load_factor * 0.5);
+    pulse["gpu_temp"] = 35 + (int)(load_factor * 0.4);
+
+    std::cout << pulse.dump() << std::endl;
+}
 
 // Robust JSON value extraction helpers
 float get_robust_float(const nlohmann::json& j, const std::string& key, float default_val) {
@@ -64,6 +87,10 @@ void worker_thread_func(CFDSolver* solver, double cfl, double* t_ptr) {
     int initial_idx = solver->getActiveIndex();
     int total_range = solver->getNumCells() - initial_idx;
 
+    auto last_telemetry_time = std::chrono::steady_clock::now();
+
+    emit_kernel_log("INFO", "Solver step initialized.", *t_ptr);
+
     while (true) {
         if (cancel_flag.load()) break;
 
@@ -84,16 +111,31 @@ void worker_thread_func(CFDSolver* solver, double cfl, double* t_ptr) {
         solver->step(dt);
         *t_ptr += dt;
 
+        // 30Hz Telemetry Throttle
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_telemetry_time).count();
+        if (elapsed_ms >= 33) {
+            emit_telemetry(*solver, *t_ptr, false);
+            last_telemetry_time = now;
+        }
+
         if (exec_until_end.load()) {
             if (total_range > 0) {
                 int current_range = solver->getActiveIndex() - initial_idx;
-                step_progress = std::clamp((int)((current_range * 100) / total_range), 0, 100);
+                int p = std::clamp((int)((current_range * 100) / total_range), 0, 100);
+                if (p != step_progress.load()) {
+                    step_progress = p;
+                    if (p % 10 == 0) {
+                        std::stringstream ss;
+                        ss << p << "% complete...";
+                        emit_kernel_log("PROGRESS", ss.str(), *t_ptr);
+                    }
+                }
             }
         } else {
             target_steps_remaining--;
             int current_target = target_steps_remaining.load();
             if (initial_steps > 0) {
-                // This is a bit tricky if steps are added while running, but it's okay for progress bar
                 int completed = initial_steps - current_target;
                 step_progress = std::clamp((int)((completed * 100) / initial_steps), 0, 100);
             } else {
@@ -102,10 +144,12 @@ void worker_thread_func(CFDSolver* solver, double cfl, double* t_ptr) {
         }
     }
 
+    // Guarantee Frame: Final precise telemetry bypasses throttle
     if (!cancel_flag.load()) {
         step_progress = 100;
         bool term = exec_until_end.load() && solver->getActiveIndex() >= solver->getNumCells();
         emit_telemetry(*solver, *t_ptr, term);
+        emit_kernel_log("INFO", "Execution block completed.", *t_ptr);
     }
 
     target_steps_remaining = 0;
@@ -118,11 +162,13 @@ int main() {
     std::unique_ptr<CFDSolver> solver = nullptr;
     double t = 0.0;
 
-    // Progress emitter thread
+    // Heartbeat & Progress emitter thread
     std::thread progress_emitter([]() {
         while (true) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            emit_resource_pulse();
             if (is_running) {
+                // We now use kernel logs for progress, but we keep this for the progress bar
                 std::lock_guard<std::mutex> lock(cout_mutex);
                 std::cout << "{\"type\": \"progress\", \"percent\": " << step_progress.load() << "}" << std::endl;
             }
@@ -153,6 +199,7 @@ int main() {
 
                 // Extract parameters
                 int num_cells = get_robust_int(msg, "num_cells", get_robust_int(msg, "n_cells", 1000));
+                global_num_cells = num_cells;
                 double domain_radius = get_robust_float(msg, "domain_radius", get_robust_float(msg, "radius", 1.0));
                 double gamma = get_robust_float(msg, "gamma", 1.4);
 

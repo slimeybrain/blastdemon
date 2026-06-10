@@ -466,10 +466,19 @@ export class GraphRenderer {
                     const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
                     circle.setAttribute('cx', pos.x.toString());
                     circle.setAttribute('cy', pos.y.toString());
-                    circle.setAttribute('r', '6');
-                    circle.setAttribute('fill', 'yellow');
+                    circle.setAttribute('r', '8');
+                    circle.setAttribute('fill', 'none');
+                    circle.setAttribute('stroke', '#00f0ff');
+                    circle.setAttribute('stroke-width', '2');
                     circle.setAttribute('class', 'port-highlight');
                     circle.setAttribute('pointer-events', 'none');
+
+                    const glow = circle.cloneNode() as SVGCircleElement;
+                    glow.setAttribute('stroke-width', '4');
+                    glow.setAttribute('stroke-opacity', '0.5');
+                    glow.setAttribute('filter', 'blur(2px)');
+
+                    this.svg.appendChild(glow);
                     this.svg.appendChild(circle);
                 }
             }
@@ -501,7 +510,20 @@ export class GraphRenderer {
                 header.className = 'node-header';
 
                 const title = document.createElement('span');
-                title.textContent = node.type === 'ThePainter' ? 'INITIALIZER' : node.type.toUpperCase();
+                title.style.display = 'flex';
+                title.style.alignItems = 'center';
+                title.style.gap = '6px';
+
+                const icon = document.createElement('div');
+                icon.style.width = '14px';
+                icon.style.height = '14px';
+                icon.innerHTML = this.getNodeIcon(node.type);
+                title.appendChild(icon);
+
+                const label = document.createElement('span');
+                label.textContent = node.type === 'ThePainter' ? 'INITIALIZER' : node.type.toUpperCase();
+                title.appendChild(label);
+
                 header.appendChild(title);
 
                 const collapseBtn = document.createElement('button');
@@ -584,7 +606,8 @@ export class GraphRenderer {
                     const port = document.createElement('div');
                     port.className = 'port input';
                     port.dataset.portId = input.id;
-                    port.innerHTML = `<div class="port-bullet"></div><span class="port-label">${input.label}</span>`;
+                    const portColor = this.getPortColor(node.type, input.id, true);
+                    port.innerHTML = `<div class="port-bullet" style="background-color: ${portColor}"></div><span class="port-label">${input.label}</span>`;
                     port.addEventListener('mouseup', () => {
                         if (this.isDraggingWire && this.dragSourceNodeId && this.dragSourcePortId) {
                             const state = this.stateManager.getCurrentState();
@@ -615,7 +638,8 @@ export class GraphRenderer {
                     const port = document.createElement('div');
                     port.className = 'port output';
                     port.dataset.portId = output.id;
-                    port.innerHTML = `<span class="port-label">${output.label}</span><div class="port-bullet"></div>`;
+                    const portColor = this.getPortColor(node.type, output.id, false);
+                    port.innerHTML = `<span class="port-label">${output.label}</span><div class="port-bullet" style="background-color: ${portColor}"></div>`;
                     port.addEventListener('mousedown', (e) => {
                         e.stopPropagation();
                         this.isDraggingWire = true;
@@ -693,6 +717,31 @@ export class GraphRenderer {
                 }
             }
         }
+    }
+
+    private getNodeIcon(type: NodeType): string {
+        switch (type) {
+            case 'DomainMesh':
+                return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3h18v18H3zM3 9h18M3 15h18M9 3v18M15 3v18"/></svg>`;
+            case 'MaterialAir':
+                return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12h10M2 8h15M2 16h12M17 12h5M19 8h3M15 16h7"/></svg>`;
+            case 'MaterialExplosive':
+                return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3 6 7 1-5 5 1 7-6-3-6 3 1-7-5-5 7-1 3-6z"/></svg>`;
+            case 'TelemetryGraph':
+                return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18M18 9l-5 5-3-3-4 4"/></svg>`;
+            case 'CFDSolver':
+                return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v8M8 12h8"/></svg>`;
+            default:
+                return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/></svg>`;
+        }
+    }
+
+    private getPortColor(nodeType: NodeType, portId: string, isInput: boolean): string {
+        if (nodeType === 'DomainMesh' || portId === 'mesh') return '#2563eb'; // Deep Blue
+        if (nodeType === 'MaterialAir' || portId === 'air' || (nodeType === 'ThePainter' && portId === 'out')) return '#64748b'; // Slate Gray
+        if (nodeType === 'MaterialExplosive' || portId === 'explosive') return '#dc2626'; // Crimson Red
+        if (nodeType === 'CFDSolver' || nodeType === 'TelemetryGraph' || nodeType === 'TelemetryText' || portId === 'telemetry') return '#16a34a'; // Vibrant Green
+        return '#aaa';
     }
 
     private getPortPosition(node: Node, portId: string, isInput: boolean): { x: number, y: number } | null {
