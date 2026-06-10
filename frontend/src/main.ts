@@ -150,6 +150,13 @@ document.addEventListener('click', (e) => {
         networkManager.send({ command: "STEP", steps: 10000 });
     }
 
+
+    if (target.id === 'resume-btn') {
+        stateManager.clearPendingSteps();
+        networkManager.send({ command: "RESUME" });
+        stateManager.setStatus('RUNNING');
+    }
+
     if (target.id === 'pause-btn') {
         stateManager.clearPendingSteps();
         networkManager.send({ command: "PAUSE" });
