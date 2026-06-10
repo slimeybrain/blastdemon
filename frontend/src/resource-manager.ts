@@ -1,7 +1,7 @@
 import { StateManager } from './state-manager.js';
 
 export class ResourceManager {
-    private container: HTMLElement;
+    public container: HTMLElement;
     private stateManager: StateManager;
     private telemetryListener: (nodeId: string, data: any) => void;
 
@@ -9,12 +9,17 @@ export class ResourceManager {
     private ramHistory: number[] = [];
     private historyLimit = 100;
 
-    constructor(parent: HTMLElement, stateManager: StateManager) {
-        this.container = document.createElement('div');
-        this.container.className = 'resource-manager-grid';
-        parent.appendChild(this.container);
+    constructor(container: HTMLElement, stateManager: StateManager) {
+        if (!container) {
+            throw new Error("[RESOURCE MANAGER] Initialization failed: Target container is undefined.");
+        }
 
         this.stateManager = stateManager;
+
+        // Now safely perform your DOM appending
+        this.container = document.createElement('div');
+        this.container.className = 'resource-grid';
+        container.appendChild(this.container);
         this.telemetryListener = (_nodeId, data) => {
             if (data && data.type === 'resource_pulse') {
                 this.update(data);
