@@ -21,6 +21,7 @@ export class GraphRenderer {
     private dragSourceNodeId: string | null = null;
     private dragSourcePortId: string | null = null;
     private mouseWorldPosition: { x: number, y: number } = { x: 0, y: 0 };
+    private hoveredPort: { nodeId: string, portId: string, isInput: boolean } | null = null;
 
     private nodeElements: Map<string, HTMLElement> = new Map();
     private nodeWorkers: Map<string, Worker> = new Map();
@@ -109,6 +110,8 @@ export class GraphRenderer {
         const state = this.stateManager.getCurrentState();
         const node = state?.nodes.find(n => n.id === nodeId);
         if (!node) return;
+
+        if (node.displayMode === 'collapsed') return;
 
         if (node.type === 'TelemetryText' && Array.isArray(data)) {
             const body = nodeEl.querySelector('.node-body-text') as HTMLElement;
@@ -202,6 +205,27 @@ export class GraphRenderer {
                 const pt = new DOMPoint(e.clientX, e.clientY);
                 const worldPoint = pt.matrixTransform(ctm.inverse());
                 this.mouseWorldPosition = { x: worldPoint.x, y: worldPoint.y };
+
+                // Snapping Logic
+                this.hoveredPort = null;
+                const state = this.stateManager.getCurrentState();
+                if (state) {
+                    for (const node of state.nodes) {
+                        for (const input of node.inputs) {
+                            const pos = this.getPortPosition(node, input.id, true);
+                            if (pos) {
+                                const dist = Math.sqrt(Math.pow(pos.x - worldPoint.x, 2) + Math.pow(pos.y - worldPoint.y, 2));
+                                if (dist < 15) {
+                                    this.mouseWorldPosition = { x: pos.x, y: pos.y };
+                                    this.hoveredPort = { nodeId: node.id, portId: input.id, isInput: true };
+                                    break;
+                                }
+                            }
+                        }
+                        if (this.hoveredPort) break;
+                    }
+                }
+
                 this.render();
             }
         } else if (this.isDraggingNode && this.draggedNodeId) {
@@ -217,6 +241,34 @@ export class GraphRenderer {
                     node.y = worldPoint.y - this.dragOffsetY;
 
                     this.stateManager.updateState(state, false);
+                }
+            }
+        } else {
+            // Hover detection for ports
+            const ctm = this.svg.getScreenCTM();
+            if (ctm) {
+                const pt = new DOMPoint(e.clientX, e.clientY);
+                const worldPoint = pt.matrixTransform(ctm.inverse());
+                const state = this.stateManager.getCurrentState();
+                let found = null;
+                if (state) {
+                    for (const node of state.nodes) {
+                        for (const port of [...node.inputs.map(p => ({...p, isInput: true})), ...node.outputs.map(p => ({...p, isInput: false}))]) {
+                            const pos = this.getPortPosition(node, port.id, port.isInput);
+                            if (pos) {
+                                const dist = Math.sqrt(Math.pow(pos.x - worldPoint.x, 2) + Math.pow(pos.y - worldPoint.y, 2));
+                                if (dist < 10) {
+                                    found = { nodeId: node.id, portId: port.id, isInput: port.isInput };
+                                    break;
+                                }
+                            }
+                        }
+                        if (found) break;
+                    }
+                }
+                if (JSON.stringify(found) !== JSON.stringify(this.hoveredPort)) {
+                    this.hoveredPort = found;
+                    this.render();
                 }
             }
         }
@@ -392,6 +444,31 @@ export class GraphRenderer {
         if (!state) return;
         this.syncNodes(state);
         this.updateEdges(state);
+        this.renderHoverHighlights();
+    }
+
+    private renderHoverHighlights(): void {
+        // Clear previous highlights
+        const existing = this.svg.querySelectorAll('.port-highlight');
+        existing.forEach(e => e.remove());
+
+        if (this.hoveredPort) {
+            const state = this.stateManager.getCurrentState();
+            const node = state?.nodes.find(n => n.id === this.hoveredPort!.nodeId);
+            if (node) {
+                const pos = this.getPortPosition(node, this.hoveredPort!.portId, this.hoveredPort!.isInput);
+                if (pos) {
+                    const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                    circle.setAttribute('cx', pos.x.toString());
+                    circle.setAttribute('cy', pos.y.toString());
+                    circle.setAttribute('r', '6');
+                    circle.setAttribute('fill', 'yellow');
+                    circle.setAttribute('class', 'port-highlight');
+                    circle.setAttribute('pointer-events', 'none');
+                    this.svg.appendChild(circle);
+                }
+            }
+        }
     }
 
     private syncNodes(state: SimulationState): void {
@@ -417,7 +494,24 @@ export class GraphRenderer {
 
                 const header = document.createElement('div');
                 header.className = 'node-header';
-                header.textContent = node.type === 'ThePainter' ? 'INITIALIZER' : node.type.toUpperCase();
+
+                const title = document.createElement('span');
+                title.textContent = node.type === 'ThePainter' ? 'INITIALIZER' : node.type.toUpperCase();
+                header.appendChild(title);
+
+                const collapseBtn = document.createElement('button');
+                collapseBtn.className = 'node-collapse-btn';
+                collapseBtn.textContent = node.displayMode === 'collapsed' ? '[>]' : '[v]';
+                collapseBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    const state = this.stateManager.getCurrentState();
+                    const n = state?.nodes.find(n => n.id === node.id);
+                    if (n) {
+                        n.displayMode = n.displayMode === 'collapsed' ? 'compact' : 'collapsed';
+                        this.stateManager.pushState(state!);
+                    }
+                };
+                header.appendChild(collapseBtn);
 
                 header.addEventListener('mousedown', (e) => {
                     if (this.spacePressed || e.button !== 0) return;
@@ -443,17 +537,23 @@ export class GraphRenderer {
 
                 nodeEl.appendChild(header);
 
+                const content = document.createElement('div');
+                content.className = 'node-content';
+                if (node.displayMode === 'collapsed') {
+                    content.style.display = 'none';
+                }
+
                 if (node.type === 'TelemetryText') {
                     const body = document.createElement('div');
                     body.className = 'node-body-text';
-                    nodeEl.appendChild(body);
+                    content.appendChild(body);
                 } else if (node.type === 'TelemetryGraph') {
                     const body = document.createElement('div');
                     body.className = 'node-body-graph';
                     const canvas = document.createElement('canvas');
                     canvas.className = 'telemetry-node-canvas';
                     body.appendChild(canvas);
-                    nodeEl.appendChild(body);
+                    content.appendChild(body);
 
                     const offscreen = (canvas as any).transferControlToOffscreen();
                     const worker = new Worker(new URL('./ChartWorker.ts', import.meta.url), { type: 'module' });
@@ -527,6 +627,7 @@ export class GraphRenderer {
                     ports.appendChild(port);
                 });
 
+                nodeEl.appendChild(content);
                 nodeEl.appendChild(ports);
                 this.container.appendChild(nodeEl);
                 this.nodeElements.set(node.id, nodeEl);
@@ -535,6 +636,15 @@ export class GraphRenderer {
             nodeEl.style.left = `${node.x}px`;
             nodeEl.style.top = `${node.y}px`;
             nodeEl.classList.toggle('selected', node.id === this.selectedNodeId);
+
+            const contentEl = nodeEl.querySelector('.node-content') as HTMLElement;
+            if (contentEl) {
+                contentEl.style.display = node.displayMode === 'collapsed' ? 'none' : 'block';
+            }
+            const collapseBtn = nodeEl.querySelector('.node-collapse-btn');
+            if (collapseBtn) {
+                collapseBtn.textContent = node.displayMode === 'collapsed' ? '[>]' : '[v]';
+            }
 
             const initialData = this.stateManager.getTelemetry(node.id);
             if (initialData) {

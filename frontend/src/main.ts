@@ -48,10 +48,22 @@ const initialState: SimulationState = {
         direction: 'horizontal',
         ratio: 0.2,
         firstChild: {
-            type: 'panel',
-            id: 'panel-outliner',
-            panelType: 'OUTLINER',
-            targetNodeId: null
+            type: 'split',
+            id: 'split-left',
+            direction: 'vertical',
+            ratio: 0.5,
+            firstChild: {
+                type: 'panel',
+                id: 'panel-outliner',
+                panelType: 'OUTLINER',
+                targetNodeId: null
+            },
+            secondChild: {
+                type: 'panel',
+                id: 'panel-execution',
+                panelType: 'EXECUTION_MANAGER',
+                targetNodeId: null
+            }
         },
         secondChild: {
             type: 'split',

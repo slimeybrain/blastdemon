@@ -135,6 +135,7 @@ export class NodeViewer {
 
         const terminal = document.createElement('div');
         terminal.className = 'expanded-terminal';
+        terminal.id = `viewer-text-${node.id}`;
         terminal.style.flex = '1';
         terminal.style.background = '#000';
         terminal.style.color = '#0f0';
@@ -295,7 +296,7 @@ export class NodeViewer {
         if (!node) return;
 
         if (node.type === 'TelemetryText') {
-            const terminal = this.container.querySelector('.expanded-terminal');
+            const terminal = document.getElementById(`viewer-text-${nodeId}`);
             if (terminal && Array.isArray(data)) {
                 // To avoid focus/selection issues and for performance, we only append new lines
                 // or update smartly. For now, let's at least minimize recreation.

@@ -10,6 +10,9 @@ export interface Node {
     type: NodeType;
     x: number;
     y: number;
+    width?: number;
+    height?: number;
+    displayMode?: 'compact' | 'collapsed';
     parameters: Record<string, any>;
     inputs: Port[];
     outputs: Port[];
@@ -25,7 +28,7 @@ export interface Edge {
 export type SimulationStatus = 'UNINITIALIZED' | 'INITIALIZED' | 'RUNNING' | 'PAUSED' | 'TERMINATED';
 
 export type LayoutDirection = 'horizontal' | 'vertical';
-export type PanelType = 'OUTLINER' | 'NODE_GRAPH' | 'PROPERTIES' | 'TELEMETRY_GRAPH' | 'TELEMETRY_TEXT' | 'NODE_VIEWER';
+export type PanelType = 'OUTLINER' | 'NODE_GRAPH' | 'PROPERTIES' | 'TELEMETRY_GRAPH' | 'TELEMETRY_TEXT' | 'NODE_VIEWER' | 'EXECUTION_MANAGER';
 
 export interface SplitNode {
     type: 'split';

@@ -143,7 +143,7 @@ export class LayoutManager {
 
         const select = document.createElement('select');
         select.className = 'header-select';
-        const types: PanelType[] = ['OUTLINER', 'NODE_GRAPH', 'PROPERTIES', 'NODE_VIEWER'];
+        const types: PanelType[] = ['OUTLINER', 'NODE_GRAPH', 'PROPERTIES', 'NODE_VIEWER', 'EXECUTION_MANAGER'];
         types.forEach(t => {
             const opt = document.createElement('option');
             opt.value = t;
@@ -243,6 +243,9 @@ export class LayoutManager {
             case 'NODE_VIEWER':
                 this.renderNodeViewer(node, container);
                 break;
+            case 'EXECUTION_MANAGER':
+                this.renderExecutionManager(container);
+                break;
             case 'TELEMETRY_TEXT':
                 container.innerHTML = '<div style="padding:10px">Telemetry Text (Move to Node Graph to see per-node logs)</div>';
                 break;
@@ -286,13 +289,9 @@ export class LayoutManager {
             };
             comp = { type: 'NODE_GRAPH', instance: renderer };
             this.components.set(node.id, comp);
-
-            // Add simulation controls
-            this.injectSimulationControls(container);
         } else {
             // Re-append viewport if reusing
             container.appendChild(comp.instance.viewport);
-            this.injectSimulationControls(container);
         }
     }
 
@@ -327,53 +326,111 @@ export class LayoutManager {
         });
     }
 
-    private injectSimulationControls(container: HTMLElement): void {
-        // Check if controls already exist in this container
-        if (container.querySelector('.header-actions-sim')) return;
-
+    private renderExecutionManager(container: HTMLElement): void {
         const simActions = document.createElement('div');
-        simActions.className = 'header-actions-sim';
-        simActions.style.padding = '4px';
-        simActions.style.borderBottom = '1px solid #333';
+        simActions.className = 'execution-manager-panel';
+        simActions.style.padding = '12px';
         simActions.style.display = 'flex';
-        simActions.style.gap = '4px';
-        simActions.style.flexWrap = 'wrap';
-        simActions.style.alignItems = 'center';
+        simActions.style.flexDirection = 'column';
+        simActions.style.gap = '10px';
+
+        const statusRow = document.createElement('div');
+        statusRow.style.display = 'flex';
+        statusRow.style.alignItems = 'center';
+        statusRow.style.gap = '8px';
+        statusRow.style.marginBottom = '10px';
+
+        const statusLabel = document.createElement('span');
+        statusLabel.textContent = 'Status:';
+        statusLabel.style.fontSize = '0.8rem';
+        statusRow.appendChild(statusLabel);
+
+        const statusBadge = document.createElement('div');
+        statusBadge.className = `status-badge badge-${this.stateManager.getStatus().toLowerCase()}`;
+        statusBadge.textContent = this.stateManager.getStatus();
+        statusRow.appendChild(statusBadge);
+
+        this.stateManager.onStatusChange((status) => {
+            statusBadge.textContent = status;
+            statusBadge.className = `status-badge badge-${status.toLowerCase()}`;
+        });
+
+        simActions.appendChild(statusRow);
 
         const createBtn = (id: string, text: string, className: string = 'header-button') => {
             const btn = document.createElement('button');
             btn.id = id;
             btn.textContent = text;
             btn.className = className;
+            btn.style.width = '100%';
+            btn.style.padding = '8px';
+            btn.style.marginBottom = '4px';
             return btn;
         };
 
-        simActions.appendChild(createBtn('auto-arrange-btn', 'Auto', 'header-button secondary'));
-        simActions.appendChild(createBtn('init-btn', 'Init'));
+        const controlsRow = document.createElement('div');
+        controlsRow.style.display = 'grid';
+        controlsRow.style.gridTemplateColumns = '1fr 1fr';
+        controlsRow.style.gap = '8px';
 
-        const group = document.createElement('div');
-        group.className = 'button-group';
-        group.appendChild(createBtn('exec-1-btn', '1', 'header-button secondary'));
-        group.appendChild(createBtn('exec-10-btn', '10', 'header-button secondary'));
-        group.appendChild(createBtn('exec-100-btn', '100', 'header-button secondary'));
-        group.appendChild(createBtn('exec-1000-btn', '1k', 'header-button secondary'));
-        group.appendChild(createBtn('exec-end-btn', 'End', 'header-button secondary'));
-        simActions.appendChild(group);
+        controlsRow.appendChild(createBtn('init-btn', 'Initialize', 'header-button'));
+        controlsRow.appendChild(createBtn('auto-arrange-btn', 'Auto Layout', 'header-button secondary'));
 
-        simActions.appendChild(createBtn('pause-btn', 'Pause', 'header-button warning'));
-        simActions.appendChild(createBtn('terminate-btn', 'Term', 'header-button danger'));
+        simActions.appendChild(controlsRow);
+
+        const stepsLabel = document.createElement('div');
+        stepsLabel.textContent = 'Execute Steps:';
+        stepsLabel.style.fontSize = '0.75rem';
+        stepsLabel.style.marginTop = '10px';
+        simActions.appendChild(stepsLabel);
+
+        const stepsGrid = document.createElement('div');
+        stepsGrid.style.display = 'grid';
+        stepsGrid.style.gridTemplateColumns = '1fr 1fr 1fr';
+        stepsGrid.style.gap = '4px';
+
+        stepsGrid.appendChild(createBtn('exec-1-btn', '1', 'header-button secondary'));
+        stepsGrid.appendChild(createBtn('exec-10-btn', '10', 'header-button secondary'));
+        stepsGrid.appendChild(createBtn('exec-100-btn', '100', 'header-button secondary'));
+        stepsGrid.appendChild(createBtn('exec-1000-btn', '1k', 'header-button secondary'));
+        stepsGrid.appendChild(createBtn('exec-end-btn', 'End', 'header-button success'));
+
+        simActions.appendChild(stepsGrid);
+
+        const safetyLabel = document.createElement('div');
+        safetyLabel.textContent = 'Control:';
+        safetyLabel.style.fontSize = '0.75rem';
+        safetyLabel.style.marginTop = '10px';
+        simActions.appendChild(safetyLabel);
+
+        const safetyGrid = document.createElement('div');
+        safetyGrid.style.display = 'grid';
+        safetyGrid.style.gridTemplateColumns = '1fr 1fr';
+        safetyGrid.style.gap = '8px';
+
+        safetyGrid.appendChild(createBtn('pause-btn', 'Pause', 'header-button warning'));
+        safetyGrid.appendChild(createBtn('terminate-btn', 'Terminate', 'header-button danger'));
+
+        simActions.appendChild(safetyGrid);
+
+        const progressLabel = document.createElement('div');
+        progressLabel.textContent = 'Solver Progress:';
+        progressLabel.style.fontSize = '0.75rem';
+        progressLabel.style.marginTop = '10px';
+        simActions.appendChild(progressLabel);
 
         const progressCont = document.createElement('div');
         progressCont.className = 'progress-container';
         progressCont.style.position = 'relative';
-        progressCont.style.width = '100px';
-        progressCont.style.height = '10px';
+        progressCont.style.width = '100%';
+        progressCont.style.height = '12px';
+        progressCont.style.background = '#333';
         const progressBar = document.createElement('div');
         progressBar.id = 'progress-bar';
         progressBar.className = 'progress-bar';
         progressCont.appendChild(progressBar);
         simActions.appendChild(progressCont);
 
-        container.prepend(simActions);
+        container.appendChild(simActions);
     }
 }
