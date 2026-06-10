@@ -28,6 +28,33 @@ std::mutex cout_mutex;
 // Forward declaration of telemetry helper
 void emit_telemetry(const CFDSolver& solver, double elapsed, bool is_terminated = false);
 
+// Robust JSON value extraction helpers
+float get_robust_float(const nlohmann::json& j, const std::string& key, float default_val) {
+    if (!j.contains(key)) return default_val;
+    if (j[key].is_number()) return j[key].get<float>();
+    if (j[key].is_string()) {
+        try {
+            return std::stof(j[key].get<std::string>());
+        } catch (...) {
+            return default_val;
+        }
+    }
+    return default_val;
+}
+
+int get_robust_int(const nlohmann::json& j, const std::string& key, int default_val) {
+    if (!j.contains(key)) return default_val;
+    if (j[key].is_number()) return j[key].get<int>();
+    if (j[key].is_string()) {
+        try {
+            return std::stoi(j[key].get<std::string>());
+        } catch (...) {
+            return default_val;
+        }
+    }
+    return default_val;
+}
+
 void worker_thread_func(CFDSolver* solver, double cfl, double* t_ptr) {
     is_running = true;
     cancel_flag = false;
@@ -125,9 +152,9 @@ int main() {
                 exec_until_end = false;
 
                 // Extract parameters
-                int num_cells = msg.value("num_cells", msg.value("n_cells", 1000));
-                double domain_radius = msg.value("domain_radius", msg.value("radius", 1.0));
-                double gamma = msg.value("gamma", 1.4);
+                int num_cells = get_robust_int(msg, "num_cells", get_robust_int(msg, "n_cells", 1000));
+                double domain_radius = get_robust_float(msg, "domain_radius", get_robust_float(msg, "radius", 1.0));
+                double gamma = get_robust_float(msg, "gamma", 1.4);
 
                 // Instantiate/Reset the solver
                 solver = std::make_unique<CFDSolver>(num_cells, domain_radius, gamma);
@@ -152,8 +179,8 @@ int main() {
 
             } else if (command == "STEP") {
                 if (!solver) continue;
-                int steps = msg.value("steps", 1);
-                double cfl = msg.value("cfl", 0.4);
+                int steps = get_robust_int(msg, "steps", 1);
+                double cfl = get_robust_float(msg, "cfl", 0.4);
 
                 target_steps_remaining += steps;
                 if (!is_running) {
@@ -163,7 +190,7 @@ int main() {
 
             } else if (command == "EXEC_END") {
                 if (!solver) continue;
-                double cfl = msg.value("cfl", 0.4);
+                double cfl = get_robust_float(msg, "cfl", 0.4);
 
                 exec_until_end = true;
                 if (!is_running) {

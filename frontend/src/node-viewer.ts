@@ -220,20 +220,19 @@ export class NodeViewer {
         canvasCont.className = 'expanded-graph-container';
         canvasCont.style.flex = "1";
         canvasCont.style.position = "relative";
-        canvasCont.style.width = "100%";
-        canvasCont.style.height = "100%";
-        canvasCont.style.display = "flex";
-        canvasCont.style.flexDirection = "column";
         canvasCont.style.overflow = "hidden";
-        canvasCont.style.minWidth = "0";
-        canvasCont.style.minHeight = "0";
         this.container.appendChild(canvasCont);
+
+        const wrapper = document.createElement('div');
+        wrapper.style.position = "absolute";
+        wrapper.style.inset = "0";
+        canvasCont.appendChild(wrapper);
 
         this.chartCanvas = document.createElement('canvas');
         this.chartCanvas.style.width = "100%";
         this.chartCanvas.style.height = "100%";
         this.chartCanvas.style.display = "block";
-        canvasCont.appendChild(this.chartCanvas);
+        wrapper.appendChild(this.chartCanvas);
 
         this.chartWorker = new Worker(new URL('./ChartWorker.ts', import.meta.url), { type: 'module' });
 
