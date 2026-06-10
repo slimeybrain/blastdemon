@@ -194,18 +194,32 @@ export class StateManager {
         this.telemetryListeners.forEach(listener => listener(nodeId, data));
     }
 
-    pushTelemetry(data: any): void {
+    pushTelemetry(nodeIdOrData: any, optionalData?: any): void {
+        let nodeId: string | null = null;
+        let data: any = null;
+
+        if (typeof nodeIdOrData === 'string') {
+            nodeId = nodeIdOrData;
+            data = optionalData;
+        } else {
+            const state = this.getCurrentState();
+            if (!state) return;
+            const solverNode = state.nodes.find(n => n.type === 'CFDSolver');
+            if (!solverNode) return;
+            nodeId = solverNode.id;
+            data = nodeIdOrData;
+        }
+
+        if (!nodeId) return;
+
+        this.telemetryStore.set(nodeId, data);
+        this.notifyTelemetryUpdate(nodeId, data);
+
         const state = this.getCurrentState();
         if (!state) return;
 
-        const solverNode = state.nodes.find(n => n.type === 'CFDSolver');
-        if (!solverNode) return;
-
-        this.telemetryStore.set(solverNode.id, data);
-        this.notifyTelemetryUpdate(solverNode.id, data);
-
         // Propagate to connected nodes
-        const telemetryEdges = state.edges.filter(e => e.fromNode === solverNode.id && e.fromPort === 'telemetry');
+        const telemetryEdges = state.edges.filter(e => e.fromNode === nodeId);
         telemetryEdges.forEach(edge => {
             const targetNode = state.nodes.find(n => n.id === edge.toNode);
             if (targetNode) {
