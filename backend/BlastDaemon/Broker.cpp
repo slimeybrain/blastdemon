@@ -286,21 +286,21 @@ void process_json(const std::string& json, SOCKET_TYPE client_fd, std::shared_pt
                             auto nl_it = std::find(accumulator.begin(), accumulator.end(), (uint8_t)'\n');
                             if (nl_it == accumulator.end()) break; // Need more data
 
-                            std::string size_str(reinterpret_cast<char*>(accumulator.data() + marker.size()),
-                                                std::distance(accumulator.begin() + marker.size(), nl_it));
-                            size_t payload_size = 0;
                             try {
-                                payload_size = std::stoul(size_str);
-                            } catch (...) {
+                                std::string size_str(reinterpret_cast<char*>(accumulator.data() + marker.size()),
+                                                    std::distance(accumulator.begin() + marker.size(), nl_it));
+                                size_t payload_size = std::stoul(size_str);
+                                size_t header_size = std::distance(accumulator.begin(), nl_it) + 1;
+
+                                if (accumulator.size() < header_size + payload_size) break; // Need more data
+
+                                send_websocket_binary(client_fd, accumulator.data() + header_size, payload_size);
+                                accumulator.erase(accumulator.begin(), accumulator.begin() + header_size + payload_size);
+                            } catch (const std::exception& e) {
+                                std::cout << "Malformed binary frame size" << std::endl;
                                 accumulator.erase(accumulator.begin(), nl_it + 1);
                                 continue;
                             }
-                            size_t header_size = std::distance(accumulator.begin(), nl_it) + 1;
-
-                            if (accumulator.size() < header_size + payload_size) break; // Need more data
-
-                            send_websocket_binary(client_fd, accumulator.data() + header_size, payload_size);
-                            accumulator.erase(accumulator.begin(), accumulator.begin() + header_size + payload_size);
                         } else {
                             // Standard text line
                             auto nl_it = std::find(accumulator.begin(), accumulator.end(), (uint8_t)'\n');

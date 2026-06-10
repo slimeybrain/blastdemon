@@ -15,8 +15,9 @@ export class NetworkManager {
 
     public connect(): void {
         this.isManuallyClosed = false;
-        this.socket = new WebSocket(this.url);
-        this.socket.binaryType = "arraybuffer";
+        const ws = new WebSocket(this.url);
+        ws.binaryType = "arraybuffer";
+        this.socket = ws;
 
         this.socket.onopen = () => {
             this.log('[System] WebSocket Connected to ' + this.url, 'success');

@@ -145,6 +145,7 @@ document.addEventListener('click', (e) => {
 });
 
 networkManager.onMessage((dataString) => {
+    if (typeof dataString !== 'string') return;
     try {
         const data = JSON.parse(dataString);
         const progressBar = document.getElementById('progress-bar'); // Might find only one of them
