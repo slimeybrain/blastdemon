@@ -9,6 +9,7 @@
 #include <map>
 #include <memory>
 #include <algorithm>
+#include <nlohmann/json.hpp>
 #include "ProcessManager.hpp"
 
 #ifdef _WIN32
@@ -239,10 +240,18 @@ std::string get_json_value(const std::string& json, const std::string& key) {
     }
 }
 
-void process_json(const std::string& json, SOCKET_TYPE client_fd, std::shared_ptr<Process>& active_process) {
-    std::string command = get_json_value(json, "command");
+void process_json(const std::string& json_str, SOCKET_TYPE client_fd, std::shared_ptr<Process>& active_process) {
+    nlohmann::json payload;
+    try {
+        payload = nlohmann::json::parse(json_str);
+    } catch (const std::exception& e) {
+        std::cerr << "[JSON PARSE ERROR] " << e.what() << std::endl;
+        return;
+    }
+
+    std::string command = payload.value("command", "");
     if (command == "INIT") {
-        std::cout << "[DEBUG] RAW BROKER RECEIVE: " << json << std::endl;
+        std::cout << "[DEBUG] RAW BROKER RECEIVE: " << json_str << std::endl;
     }
 
     if (command == "STOP") {
@@ -270,7 +279,7 @@ void process_json(const std::string& json, SOCKET_TYPE client_fd, std::shared_pt
 
         if (active_process->start(solver_path)) {
             std::cout << "Starting BlastSolver for initialization..." << std::endl;
-            active_process->writeStdin(json + "\n\n");
+            active_process->writeStdin(json_str + "\n\n");
             std::thread([client_fd, proc = active_process]() {
                 std::vector<uint8_t> buffer(8192);
                 std::vector<uint8_t> accumulator;
@@ -326,67 +335,45 @@ void process_json(const std::string& json, SOCKET_TYPE client_fd, std::shared_pt
         }
     } else if (command == "STEP" || command == "TERMINATE") {
         if (active_process && active_process->isRunning()) {
-            active_process->writeStdin(json + "\n\n");
+            active_process->writeStdin(json_str + "\n\n");
         } else {
             std::cerr << "Command " << command << " ignored: Solver not running." << std::endl;
         }
     }
 
     SimulationState state;
-    size_t nodes_pos = json.find("\"nodes\"");
-    if (nodes_pos != std::string::npos) {
-        size_t pos = nodes_pos;
-        while ((pos = json.find("{", pos)) != std::string::npos) {
-            size_t end_obj = json.find("}", pos);
-            if (end_obj == std::string::npos) break;
-            std::string node_json = json.substr(pos, end_obj - pos + 1);
-
+    int mapped_count = 0;
+    if (payload.contains("nodes") && payload["nodes"].is_array()) {
+        for (const auto& node : payload["nodes"]) {
             try {
                 Node n;
-                n.id = get_json_value(node_json, "id");
-                n.type = get_json_value(node_json, "type");
+                n.id = node.value("id", "unknown_" + std::to_string(mapped_count));
+                n.type = node.value("type", "Unknown");
 
-                if (n.id.empty()) {
-                    // Try to find any ID if the key was slightly different or missing
-                    n.id = "unknown_" + std::to_string(state.nodes.size());
-                }
-
-                // Extract parameters - robust extraction for multiple keys
-                size_t param_pos = node_json.find("\"parameters\"");
-                if (param_pos != std::string::npos) {
-                    size_t p_start = node_json.find("{", param_pos);
-                    size_t p_end = node_json.find("}", p_start);
-                    if (p_start != std::string::npos && p_end != std::string::npos) {
-                        std::string p_json = node_json.substr(p_start + 1, p_end - p_start - 1);
-                        size_t k_pos = 0;
-                        while ((k_pos = p_json.find("\"", k_pos)) != std::string::npos) {
-                            size_t k_end = p_json.find("\"", k_pos + 1);
-                            if (k_end == std::string::npos) break;
-                            std::string key = p_json.substr(k_pos + 1, k_end - k_pos - 1);
-                            n.parameters[key] = get_json_value(node_json, key);
-                            k_pos = k_end + 1;
-
-                            size_t next_comma = p_json.find(",", k_pos);
-                            if (next_comma == std::string::npos) break;
-                            k_pos = next_comma + 1;
+                if (node.contains("parameters") && node["parameters"].is_object()) {
+                    for (auto it = node["parameters"].begin(); it != node["parameters"].end(); ++it) {
+                        if (it.value().is_string()) {
+                            n.parameters[it.key()] = it.value().get<std::string>();
+                        } else if (it.value().is_number()) {
+                            n.parameters[it.key()] = it.value().dump();
                         }
                     }
                 }
-                state.nodes.push_back(n);
-                std::cout << "Mapped Node: ID=" << n.id << ", Type=" << n.type << std::endl;
-            } catch (const std::exception& e) {
-                std::cerr << "[JSON ERROR] Failed to map node at pos " << pos << ": " << e.what() << std::endl;
-                pos = end_obj + 1;
-                continue;
-            }
 
-            pos = end_obj + 1;
-            size_t next_open = json.find("{", pos);
-            size_t next_close_array = json.find("]", pos);
-            if (next_close_array != std::string::npos && (next_open == std::string::npos || next_close_array < next_open)) break;
+                if (n.type == "DomainMesh") { /* map mesh */ }
+                else if (n.type == "MaterialAir") { /* map air */ }
+                else if (n.type == "MaterialExplosive") { /* map explosive */ }
+                else if (n.type == "CFDSolver") { /* map solver */ }
+
+                std::cout << "Mapped Node: " << n.id << std::endl;
+                state.nodes.push_back(n);
+                mapped_count++;
+            } catch (const std::exception& e) {
+                std::cerr << "[JSON ERROR] Node failed: " << e.what() << std::endl;
+            }
         }
     }
-    std::cout << "Successfully mapped " << state.nodes.size() << " nodes to native structures." << std::endl;
+    std::cout << "Successfully mapped " << mapped_count << " nodes to native structures." << std::endl;
     std::cout << "--------------------------------" << std::endl;
 }
 

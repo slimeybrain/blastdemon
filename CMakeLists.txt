@@ -17,6 +17,9 @@ find_package(HDF5 COMPONENTS C)
 
 # Daemon (Broker)
 add_executable(Broker backend/BlastDaemon/Broker.cpp)
+target_include_directories(Broker PRIVATE
+    backend/BlastSolver/include
+)
 # Broker is explicitly restricted to C++17
 set_target_properties(Broker PROPERTIES CXX_STANDARD 17)
 
