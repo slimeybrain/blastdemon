@@ -11,7 +11,8 @@ let displayMin = 0;
 let displayMax = 1;
 let range = 1;
 
-// Polyfill requestAnimationFrame for Worker if needed
+const padding = 40; // Requirement 9: Strict 40-pixel padding
+
 const rAF = typeof requestAnimationFrame !== 'undefined'
     ? requestAnimationFrame
     : (cb: Function) => setTimeout(() => cb(Date.now()), 1000 / 60);
@@ -33,7 +34,6 @@ function updateAutoScale() {
     }
 
     if (hasValidData) {
-        // Add 10% padding so the line doesn't touch the top/bottom
         const rawRange = maxY_raw - minY_raw === 0 ? 1 : maxY_raw - minY_raw;
         displayMin = minY_raw - (rawRange * 0.1);
         displayMax = maxY_raw + (rawRange * 0.1);
@@ -48,26 +48,49 @@ function updateAutoScale() {
 
 function render() {
     try {
-        if (!ctx || !canvas || width <= 0 || height <= 0 || !rawData || rawData.length === 0) {
+        if (!ctx || !canvas || width <= 0 || height <= 0) {
+            rAF(render);
+            return;
+        }
+
+        ctx.clearRect(0, 0, width, height);
+
+        // Draw Axes (Requirement 9)
+        ctx.strokeStyle = '#475569';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        // Vertical axis
+        ctx.moveTo(padding, 0);
+        ctx.lineTo(padding, height - padding);
+        // Horizontal axis
+        ctx.lineTo(width, height - padding);
+        ctx.stroke();
+
+        // Labels
+        ctx.fillStyle = '#94a3b8';
+        ctx.font = '10px monospace';
+        ctx.fillText(displayMax.toExponential(1), 2, 10);
+        ctx.fillText(displayMin.toExponential(1), 2, height - padding - 2);
+
+        if (!rawData || rawData.length === 0) {
             rAF(render);
             return;
         }
 
         const pressureArray = rawData;
         const numPoints = pressureArray.length;
-        ctx.clearRect(0, 0, width, height);
 
-        // Neon Styling
-        ctx.strokeStyle = '#00ff00'; // Force Bright Green
+        const drawWidth = width - padding;
+        const drawHeight = height - padding;
+
+        ctx.strokeStyle = '#00ff00';
         ctx.lineWidth = 2;
         ctx.beginPath();
 
-        // Min/Max Decimation (Pixel Binning)
-        // We assume rawData is purely Y values.
         let first = true;
-        for (let x = 0; x < width; x++) {
-            const start = Math.floor(x * numPoints / width);
-            const end = Math.max(start + 1, Math.floor((x + 1) * numPoints / width));
+        for (let x = 0; x < drawWidth; x++) {
+            const start = Math.floor(x * numPoints / drawWidth);
+            const end = Math.max(start + 1, Math.floor((x + 1) * numPoints / drawWidth));
             if (start >= numPoints) break;
 
             let minY = pressureArray[start];
@@ -80,26 +103,20 @@ function render() {
                 if (val > maxY) maxY = val;
             }
 
-            // Handle possible Infinity or NaN from empty chunks or bad data
             if (!isFinite(minY) || !isFinite(maxY)) continue;
 
-            // Coordinate mapping math using dynamic bounds
-            const yTop = height - ((maxY - displayMin) / (range || 1)) * height;
-            const yBottom = height - ((minY - displayMin) / (range || 1)) * height;
+            const yTop = drawHeight - ((maxY - displayMin) / (range || 1)) * drawHeight;
+            const yBottom = drawHeight - ((minY - displayMin) / (range || 1)) * drawHeight;
 
-            if (isNaN(x) || isNaN(yTop) || isNaN(yBottom)) {
-                console.error("[WORKER] Calculated NaN coordinate!", { x, yTop, yBottom });
-                ctx.stroke(); // Finish current path
-                return;
-            }
+            const canvasX = padding + x;
 
             if (first) {
-                ctx.moveTo(x, yTop);
+                ctx.moveTo(canvasX, yTop);
                 first = false;
             } else {
-                ctx.lineTo(x, yTop);
+                ctx.lineTo(canvasX, yTop);
             }
-            ctx.lineTo(x, yBottom);
+            ctx.lineTo(canvasX, yBottom);
         }
         ctx.stroke();
     } catch (err) {
@@ -116,17 +133,10 @@ self.onmessage = (event) => {
 
     if (data instanceof ArrayBuffer) {
         rawData = new Float32Array(data);
-
-        console.warn(`[WORKER] Received ArrayBuffer. Length: ${rawData.length}`);
-        if (rawData.length > 0) {
-            console.warn(`[WORKER] First 4 bytes: ${rawData[0]}, ${rawData[1]}, ${rawData[2]}, ${rawData[3]}`);
-        }
-
         updateAutoScale();
         return;
     }
 
-    // 1. Initialization Phase
     if (data.type === 'init') {
         canvas = data.canvas as OffscreenCanvas;
         ctx = canvas.getContext('2d') as OffscreenCanvasRenderingContext2D;
@@ -135,14 +145,11 @@ self.onmessage = (event) => {
         return;
     }
 
-    // 2. Resize Phase
     if (data.type === 'resize' && canvas) {
         canvas.width = data.width;
         canvas.height = data.height;
         width = data.width;
         height = data.height;
-        // Immediate redraw for smooth scaling
-        requestAnimationFrame(render);
         return;
     }
 
@@ -154,7 +161,6 @@ self.onmessage = (event) => {
         return;
     }
 
-    // Compatibility for legacy JSON frames if still needed during transition
     const isTelemetryEvent = data.type === 'telemetry' || data.type === 'TELEMETRY' || data.type === 'frame' || data.type === 'data';
     if (isTelemetryEvent) {
         const pressureData = data.data || data.telemetry || data.percent;
@@ -162,7 +168,6 @@ self.onmessage = (event) => {
             rawData = new Float32Array(pressureData);
             updateAutoScale();
         } else if (typeof pressureData === 'number') {
-            // Some events might just send a single number (e.g. progress)
             rawData = new Float32Array([pressureData]);
             updateAutoScale();
         }

@@ -2,7 +2,7 @@ import { SimulationState, Node, Connection, Port, NodeType } from './types.js';
 import { StateManager } from './state-manager.js';
 
 export class GraphRenderer {
-    private viewport: HTMLElement;
+    public viewport: HTMLElement;
     private container: HTMLElement;
     private svg: SVGSVGElement;
     private stateManager: StateManager;
@@ -30,11 +30,13 @@ export class GraphRenderer {
 
     private selectedNodeId: string | null = null;
     private spacePressed: boolean = false;
+    private layoutOrientation: 'HORIZ' | 'VERT' = 'HORIZ';
 
     public onNodeSelected: ((nodeId: string | null) => void) | null = null;
 
     private eventListeners: { target: EventTarget, type: string, listener: EventListener }[] = [];
     private resizeObserver: ResizeObserver | null = null;
+    private nodeResizeObserver: ResizeObserver | null = null;
 
     private stateListener = () => this.render();
     private telemetryListener = (nodeId: string, data: any) => this.handleTelemetryUpdate(nodeId, data);
@@ -43,7 +45,6 @@ export class GraphRenderer {
     constructor(parent: HTMLElement, stateManager: StateManager) {
         this.stateManager = stateManager;
 
-        // Create DOM structure
         this.viewport = document.createElement('div');
         this.viewport.id = 'graph-viewport';
         this.viewport.className = 'panel-content';
@@ -83,6 +84,13 @@ export class GraphRenderer {
         this.resizeObserver = new ResizeObserver(() => this.render());
         this.resizeObserver.observe(this.viewport);
 
+        this.nodeResizeObserver = new ResizeObserver(() => this.render());
+
+        this.render();
+    }
+
+    public setLayoutOrientation(o: 'HORIZ' | 'VERT') {
+        this.layoutOrientation = o;
         this.render();
     }
 
@@ -95,6 +103,7 @@ export class GraphRenderer {
         this.stateManager.offSelectionChange(this.selectionListener);
         this.nodeWorkers.forEach(worker => worker.terminate());
         if (this.resizeObserver) this.resizeObserver.disconnect();
+        if (this.nodeResizeObserver) this.nodeResizeObserver.disconnect();
         this.viewport.remove();
     }
 
@@ -249,7 +258,6 @@ export class GraphRenderer {
                 }
             }
         } else {
-            // Hover detection for ports
             const ctm = this.svg.getScreenCTM();
             if (ctm) {
                 const pt = new DOMPoint(e.clientX, e.clientY);
@@ -437,13 +445,6 @@ export class GraphRenderer {
         this.render();
     }
 
-    private centerNode(node: Node): void {
-        const rect = this.viewport.getBoundingClientRect();
-        this.panX = (rect.width / 2) - (node.x * this.zoom) - (90 * this.zoom); // 90 is half NODE_WIDTH (approx)
-        this.panY = (rect.height / 2) - (node.y * this.zoom) - (60 * this.zoom); // 60 is half NODE_HEIGHT (approx)
-        this.updateTransform();
-    }
-
     public render(): void {
         const state = this.stateManager.getCurrentState();
         if (!state) return;
@@ -453,7 +454,6 @@ export class GraphRenderer {
     }
 
     private renderHoverHighlights(): void {
-        // Clear previous highlights
         const existing = this.svg.querySelectorAll('.port-highlight');
         existing.forEach(e => e.remove());
 
@@ -472,13 +472,6 @@ export class GraphRenderer {
                     circle.setAttribute('stroke-width', '2');
                     circle.setAttribute('class', 'port-highlight');
                     circle.setAttribute('pointer-events', 'none');
-
-                    const glow = circle.cloneNode() as SVGCircleElement;
-                    glow.setAttribute('stroke-width', '4');
-                    glow.setAttribute('stroke-opacity', '0.5');
-                    glow.setAttribute('filter', 'blur(2px)');
-
-                    this.svg.appendChild(glow);
                     this.svg.appendChild(circle);
                 }
             }
@@ -491,11 +484,7 @@ export class GraphRenderer {
             if (!nodeIdsInState.has(id)) {
                 el.remove();
                 this.nodeElements.delete(id);
-                const worker = this.nodeWorkers.get(id);
-                if (worker) {
-                    worker.terminate();
-                    this.nodeWorkers.delete(id);
-                }
+                this.nodeResizeObserver?.unobserve(el);
             }
         }
 
@@ -508,177 +497,84 @@ export class GraphRenderer {
 
                 const header = document.createElement('div');
                 header.className = 'node-header';
-
-                const title = document.createElement('span');
-                title.style.display = 'flex';
-                title.style.alignItems = 'center';
-                title.style.gap = '6px';
-
-                const icon = document.createElement('div');
-                icon.style.width = '14px';
-                icon.style.height = '14px';
-                icon.innerHTML = this.getNodeIcon(node.type);
-                title.appendChild(icon);
-
-                const label = document.createElement('span');
-                label.textContent = node.type === 'ThePainter' ? 'INITIALIZER' : node.type.toUpperCase();
-                title.appendChild(label);
-
-                header.appendChild(title);
+                header.innerHTML = `<span>${node.type.toUpperCase()}</span>`;
 
                 const collapseBtn = document.createElement('button');
                 collapseBtn.className = 'node-collapse-btn';
-                collapseBtn.textContent = node.displayMode === 'collapsed' ? '[>]' : '[v]';
-                collapseBtn.onclick = (e) => {
-                    e.stopPropagation();
-                    const state = this.stateManager.getCurrentState();
-                    const n = state?.nodes.find(n => n.id === node.id);
-                    if (n) {
-                        n.displayMode = n.displayMode === 'collapsed' ? 'compact' : 'collapsed';
-                        this.stateManager.pushState(state!);
-                    }
-                };
+                collapseBtn.textContent = '[v]';
                 header.appendChild(collapseBtn);
 
                 header.addEventListener('mousedown', (e) => {
                     if (this.spacePressed || e.button !== 0) return;
-                    const currentState = this.stateManager.getCurrentState();
-                    if (!currentState) return;
-                    const latestNode = currentState.nodes.find(n => n.id === node.id);
-                    if (!latestNode) return;
-
                     e.stopPropagation();
-                    const ctm = this.svg.getScreenCTM();
-                    if (!ctm) return;
-
                     this.isDraggingNode = true;
                     this.draggedNodeId = node.id;
                     this.selectNode(node.id);
-
+                    const ctm = this.svg.getScreenCTM()!;
                     const pt = new DOMPoint(e.clientX, e.clientY);
                     const worldPoint = pt.matrixTransform(ctm.inverse());
-
-                    this.dragOffsetX = worldPoint.x - latestNode.x;
-                    this.dragOffsetY = worldPoint.y - latestNode.y;
+                    this.dragOffsetX = worldPoint.x - node.x;
+                    this.dragOffsetY = worldPoint.y - node.y;
                 });
-
                 nodeEl.appendChild(header);
 
                 const content = document.createElement('div');
                 content.className = 'node-content';
-                if (node.displayMode === 'collapsed') {
-                    content.style.display = 'none';
-                }
-
-                if (node.type === 'TelemetryText') {
-                    const body = document.createElement('div');
-                    body.className = 'node-body-text';
-                    content.appendChild(body);
-                } else if (node.type === 'TelemetryGraph') {
-                    const body = document.createElement('div');
-                    body.className = 'node-body-graph';
+                if (node.type === 'TelemetryGraph') {
                     const canvas = document.createElement('canvas');
-                    canvas.className = 'telemetry-node-canvas';
-                    body.appendChild(canvas);
-                    content.appendChild(body);
-
-                    const offscreen = (canvas as any).transferControlToOffscreen();
+                    canvas.style.width = '100%';
+                    canvas.style.height = '100px';
+                    content.appendChild(canvas);
                     const worker = new Worker(new URL('./ChartWorker.ts', import.meta.url), { type: 'module' });
                     this.nodeWorkers.set(node.id, worker);
+                    const offscreen = (canvas as any).transferControlToOffscreen();
                     worker.postMessage({ type: 'init', canvas: offscreen }, [offscreen] as any);
-
-                    const ro = new ResizeObserver(entries => {
-                        for (const entry of entries) {
-                            worker.postMessage({
-                                type: 'resize',
-                                width: entry.contentRect.width,
-                                height: entry.contentRect.height
-                            });
-                        }
-                    });
-                    ro.observe(body);
                 }
+                nodeEl.appendChild(content);
 
                 const ports = document.createElement('div');
                 ports.className = 'node-ports';
-
                 node.inputs.forEach(input => {
-                    const port = document.createElement('div');
-                    port.className = 'port input';
-                    port.dataset.portId = input.id;
-                    const portColor = this.getPortColor(node.type, input.id, true);
-                    port.innerHTML = `<div class="port-bullet" style="background-color: ${portColor}"></div><span class="port-label">${input.label}</span>`;
-                    port.addEventListener('mouseup', () => {
-                        if (this.isDraggingWire && this.dragSourceNodeId && this.dragSourcePortId) {
-                            const state = this.stateManager.getCurrentState();
-                            if (state) {
-                                const exists = state.connections.some(edge =>
-                                    edge.fromNode === this.dragSourceNodeId &&
-                                    edge.fromPort === this.dragSourcePortId &&
-                                    edge.toNode === node.id &&
-                                    edge.toPort === input.id
-                                );
-
-                                if (!exists) {
-                                    state.connections.push({
-                                        fromNode: this.dragSourceNodeId,
-                                        fromPort: this.dragSourcePortId,
-                                        toNode: node.id,
-                                        toPort: input.id
-                                    });
-                                    this.stateManager.pushState(state);
-                                }
-                            }
+                    const p = document.createElement('div');
+                    p.className = 'port input';
+                    p.dataset.portId = input.id;
+                    p.innerHTML = `<div class="port-bullet" id="port-in-${node.id}-${input.id}"></div><span>${input.label}</span>`;
+                    p.addEventListener('mouseup', () => {
+                        if (this.isDraggingWire) {
+                            state.connections.push({
+                                fromNode: this.dragSourceNodeId!,
+                                fromPort: this.dragSourcePortId!,
+                                toNode: node.id,
+                                toPort: input.id
+                            });
+                            this.stateManager.pushState(state);
                         }
                     });
-                    ports.appendChild(port);
+                    ports.appendChild(p);
                 });
-
                 node.outputs.forEach(output => {
-                    const port = document.createElement('div');
-                    port.className = 'port output';
-                    port.dataset.portId = output.id;
-                    const portColor = this.getPortColor(node.type, output.id, false);
-                    port.innerHTML = `<span class="port-label">${output.label}</span><div class="port-bullet" style="background-color: ${portColor}"></div>`;
-                    port.addEventListener('mousedown', (e) => {
+                    const p = document.createElement('div');
+                    p.className = 'port output';
+                    p.dataset.portId = output.id;
+                    p.innerHTML = `<span>${output.label}</span><div class="port-bullet" id="port-out-${node.id}-${output.id}"></div>`;
+                    p.addEventListener('mousedown', (e) => {
                         e.stopPropagation();
                         this.isDraggingWire = true;
                         this.dragSourceNodeId = node.id;
                         this.dragSourcePortId = output.id;
-                        const ctm = this.svg.getScreenCTM();
-                        if (ctm) {
-                            const pt = new DOMPoint(e.clientX, e.clientY);
-                            const worldPoint = pt.matrixTransform(ctm.inverse());
-                            this.mouseWorldPosition = { x: worldPoint.x, y: worldPoint.y };
-                        }
-                        this.render();
                     });
-                    ports.appendChild(port);
+                    ports.appendChild(p);
                 });
-
-                nodeEl.appendChild(content);
                 nodeEl.appendChild(ports);
+
                 this.container.appendChild(nodeEl);
                 this.nodeElements.set(node.id, nodeEl);
+                this.nodeResizeObserver?.observe(nodeEl);
             }
 
             nodeEl.style.left = `${node.x}px`;
             nodeEl.style.top = `${node.y}px`;
             nodeEl.classList.toggle('selected', node.id === this.selectedNodeId);
-
-            const contentEl = nodeEl.querySelector('.node-content') as HTMLElement;
-            if (contentEl) {
-                contentEl.style.display = node.displayMode === 'collapsed' ? 'none' : 'block';
-            }
-            const collapseBtn = nodeEl.querySelector('.node-collapse-btn');
-            if (collapseBtn) {
-                collapseBtn.textContent = node.displayMode === 'collapsed' ? '[>]' : '[v]';
-            }
-
-            const initialData = this.stateManager.getTelemetry(node.id);
-            if (initialData) {
-                this.handleTelemetryUpdate(node.id, initialData);
-            }
         });
     }
 
@@ -693,106 +589,65 @@ export class GraphRenderer {
             if (!fromPos || !toPos) return;
 
             const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-            const dx = Math.max(Math.abs(toPos.x - fromPos.x) * 0.5, 50);
-            const d = `M ${fromPos.x} ${fromPos.y} C ${fromPos.x + dx} ${fromPos.y}, ${toPos.x - dx} ${toPos.y}, ${toPos.x} ${toPos.y}`;
+            let d = "";
+            if (this.layoutOrientation === 'HORIZ') {
+                const dx = Math.max(Math.abs(toPos.x - fromPos.x) * 0.5, 50);
+                d = `M ${fromPos.x} ${fromPos.y} C ${fromPos.x + dx} ${fromPos.y}, ${toPos.x - dx} ${toPos.y}, ${toPos.x} ${toPos.y}`;
+            } else {
+                const dy = Math.max(Math.abs(toPos.y - fromPos.y) * 0.5, 50);
+                d = `M ${fromPos.x} ${fromPos.y} C ${fromPos.x} ${fromPos.y + dy}, ${toPos.x} ${toPos.y - dy}, ${toPos.x} ${toPos.y}`;
+            }
             path.setAttribute('d', d);
             path.setAttribute('class', 'edge-path');
+            path.setAttribute('stroke', '#475569');
+            path.setAttribute('stroke-width', '2');
+            path.setAttribute('fill', 'none');
             this.svg.appendChild(path);
         });
 
-        if (this.isDraggingWire && this.dragSourceNodeId && this.dragSourcePortId) {
+        if (this.isDraggingWire && this.dragSourceNodeId) {
             const sourceNode = state.nodes.find(n => n.id === this.dragSourceNodeId);
-            if (sourceNode) {
-                const fromPos = this.getPortPosition(sourceNode, this.dragSourcePortId, false);
-                if (fromPos) {
-                    const toPos = this.mouseWorldPosition;
-                    const dx = Math.max(Math.abs(toPos.x - fromPos.x) * 0.5, 50);
-                    const d = `M ${fromPos.x} ${fromPos.y} C ${fromPos.x + dx} ${fromPos.y}, ${toPos.x - dx} ${toPos.y}, ${toPos.x} ${toPos.y}`;
-                    const ghostPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-                    ghostPath.setAttribute('d', d);
-                    ghostPath.setAttribute('class', 'edge-path');
-                    ghostPath.setAttribute('stroke-dasharray', '5,5');
-                    ghostPath.setAttribute('stroke-opacity', '0.5');
-                    this.svg.appendChild(ghostPath);
-                }
+            const fromPos = this.getPortPosition(sourceNode!, this.dragSourcePortId!, false);
+            if (fromPos) {
+                const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                const toPos = this.mouseWorldPosition;
+                const dx = Math.max(Math.abs(toPos.x - fromPos.x) * 0.5, 50);
+                const d = `M ${fromPos.x} ${fromPos.y} C ${fromPos.x + dx} ${fromPos.y}, ${toPos.x - dx} ${toPos.y}, ${toPos.x} ${toPos.y}`;
+                path.setAttribute('d', d);
+                path.setAttribute('stroke', '#00f0ff');
+                path.setAttribute('stroke-dasharray', '5,5');
+                path.setAttribute('fill', 'none');
+                this.svg.appendChild(path);
             }
         }
-    }
-
-    private getNodeIcon(type: NodeType): string {
-        switch (type) {
-            case 'DomainMesh':
-                return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3h18v18H3zM3 9h18M3 15h18M9 3v18M15 3v18"/></svg>`;
-            case 'MaterialAir':
-                return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12h10M2 8h15M2 16h12M17 12h5M19 8h3M15 16h7"/></svg>`;
-            case 'MaterialExplosive':
-                return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3 6 7 1-5 5 1 7-6-3-6 3 1-7-5-5 7-1 3-6z"/></svg>`;
-            case 'TelemetryGraph':
-                return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18M18 9l-5 5-3-3-4 4"/></svg>`;
-            case 'CFDSolver':
-                return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v8M8 12h8"/></svg>`;
-            default:
-                return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/></svg>`;
-        }
-    }
-
-    private getPortColor(nodeType: NodeType, portId: string, isInput: boolean): string {
-        if (nodeType === 'DomainMesh' || portId === 'mesh') return '#2563eb'; // Deep Blue
-        if (nodeType === 'MaterialAir' || portId === 'air' || (nodeType === 'ThePainter' && portId === 'out')) return '#64748b'; // Slate Gray
-        if (nodeType === 'MaterialExplosive' || portId === 'explosive') return '#dc2626'; // Crimson Red
-        if (nodeType === 'CFDSolver' || nodeType === 'TelemetryGraph' || nodeType === 'TelemetryText' || portId === 'telemetry') return '#16a34a'; // Vibrant Green
-        return '#aaa';
     }
 
     private getPortPosition(node: Node, portId: string, isInput: boolean): { x: number, y: number } | null {
-        const nodeEl = this.nodeElements.get(node.id);
-        if (nodeEl) {
-            const portEl = nodeEl.querySelector(`.port.${isInput ? 'input' : 'output'}[data-port-id="${portId}"]`);
-            const bullet = portEl?.querySelector('.port-bullet');
-            if (bullet) {
-                const rect = bullet.getBoundingClientRect();
-                const screenX = rect.left + rect.width / 2;
-                const screenY = rect.top + rect.height / 2;
-                const ctm = this.svg.getScreenCTM();
-                if (!ctm) return null;
-                const pt = new DOMPoint(screenX, screenY);
-                const worldPoint = pt.matrixTransform(ctm.inverse());
-                return { x: worldPoint.x, y: worldPoint.y };
-            }
+        const bulletId = isInput ? `port-in-${node.id}-${portId}` : `port-out-${node.id}-${portId}`;
+        const bullet = document.getElementById(bulletId);
+        if (bullet) {
+            const rect = bullet.getBoundingClientRect();
+            const centerX = rect.left + rect.width / 2;
+            const centerY = rect.top + rect.height / 2;
+
+            const ctm = this.svg.getScreenCTM();
+            if (!ctm) return null;
+            const pt = new DOMPoint(centerX, centerY);
+            const worldPoint = pt.matrixTransform(ctm.inverse());
+            return { x: worldPoint.x, y: worldPoint.y };
         }
-        const ports = isInput ? node.inputs : node.outputs;
-        const index = ports.findIndex(p => p.id === portId);
-        if (index === -1) return null;
-        const portY = 25 + 8 + 10 + (index * 20);
-        const portX = isInput ? 0 : 180;
-        return { x: node.x + portX, y: node.y + portY };
+        return { x: node.x + (isInput ? 0 : 200), y: node.y + 50 };
     }
 
     public autoArrange(): void {
         const state = this.stateManager.getCurrentState();
         if (!state) return;
-        let meshY = 50, airY = 200, explosiveY = 350;
-        const nodes = Array.from(this.container.querySelectorAll('.node')) as HTMLElement[];
-        nodes.forEach(n => n.style.transition = 'left 0.5s ease-in-out, top 0.5s ease-in-out');
 
-        state.nodes.forEach(node => {
-            if (node.type === 'DomainMesh') { node.x = 50; node.y = meshY; }
-            else if (node.type === 'MaterialAir') { node.x = 50; node.y = airY; }
-            else if (node.type === 'MaterialExplosive') { node.x = 50; node.y = explosiveY; }
-            else if (node.type === 'ThePainter') { node.x = 400; node.y = 200; }
-            else if (node.type === 'CFDSolver') { node.x = 700; node.y = 200; }
-        });
-
-        let frames = 0;
-        const animateConnections = () => {
-            this.updateConnections(state);
-            frames++;
-            if (frames < 30) requestAnimationFrame(animateConnections);
-            else {
-                nodes.forEach(n => n.style.transition = '');
-                this.stateManager.pushState(state);
-            }
-        };
-        requestAnimationFrame(animateConnections);
+        if (this.layoutOrientation === 'HORIZ') {
+            state.nodes.forEach((n, i) => { n.x = i * 250 + 50; n.y = 100; });
+        } else {
+            state.nodes.forEach((n, i) => { n.x = 100; n.y = i * 150 + 50; });
+        }
+        this.stateManager.pushState(state);
     }
 }
