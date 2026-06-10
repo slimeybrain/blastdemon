@@ -110,6 +110,10 @@ export class NodeViewer {
             this.chartWorker.terminate();
             this.chartWorker = null;
         }
+
+        this.container.style.position = 'relative';
+        this.container.style.overflow = 'hidden';
+
         const header = document.createElement('div');
         header.className = 'viewer-header';
         header.style.display = 'flex';
@@ -135,10 +139,17 @@ export class NodeViewer {
 
         this.container.appendChild(header);
 
+        const terminalCont = document.createElement('div');
+        terminalCont.style.flex = '1';
+        terminalCont.style.position = 'relative';
+        terminalCont.style.overflow = 'hidden';
+        this.container.appendChild(terminalCont);
+
         const terminal = document.createElement('div');
         terminal.className = 'expanded-terminal';
         terminal.id = `viewer-text-${node.id}`;
-        terminal.style.flex = '1';
+        terminal.style.position = 'absolute';
+        terminal.style.inset = '0';
         terminal.style.background = '#000';
         terminal.style.color = '#0f0';
         terminal.style.fontFamily = 'var(--font-mono)';
@@ -155,7 +166,7 @@ export class NodeViewer {
             terminal.appendChild(div);
         });
 
-        this.container.appendChild(terminal);
+        terminalCont.appendChild(terminal);
         terminal.scrollTop = terminal.scrollHeight;
     }
 
