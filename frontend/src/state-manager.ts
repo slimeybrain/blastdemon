@@ -359,4 +359,36 @@ export class StateManager {
         state.layout = updateType(state.layout);
         this.pushState(state);
     }
+
+    // --- Persistence ---
+
+    saveWorkspace(): void {
+        const state = this.getCurrentState();
+        if (state) {
+            localStorage.setItem('blast_workspace', JSON.stringify(state));
+            console.log('[System] Workspace saved to localStorage');
+        }
+    }
+
+    loadWorkspace(): SimulationState | null {
+        const saved = localStorage.getItem('blast_workspace');
+        if (saved) {
+            try {
+                const state = JSON.parse(saved);
+                this.history = [state];
+                this.currentIndex = 0;
+                this.notifyListeners();
+                console.log('[System] Workspace loaded from localStorage');
+                return state;
+            } catch (e) {
+                console.error('[System] Failed to load workspace:', e);
+            }
+        }
+        return null;
+    }
+
+    clearWorkspace(): void {
+        localStorage.removeItem('blast_workspace');
+        console.log('[System] Saved workspace cleared');
+    }
 }

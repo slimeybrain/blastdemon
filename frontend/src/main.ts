@@ -87,6 +87,11 @@ const initialState: SimulationState = {
 };
 
 const stateManager = new StateManager(initialState);
+
+// Hydrate from localStorage if available
+const savedState = stateManager.loadWorkspace();
+const activeState = savedState || initialState;
+
 const layoutManager = new LayoutManager('app-container', stateManager);
 
 (window as any).stateManager = stateManager;
@@ -156,6 +161,14 @@ document.addEventListener('click', (e) => {
         networkManager.send({ command: "TERMINATE" });
         stateManager.setStatus('TERMINATED');
     }
+
+    if (target.id === 'save-workspace-btn') {
+        stateManager.saveWorkspace();
+    }
+
+    if (target.id === 'clear-save-btn') {
+        stateManager.clearWorkspace();
+    }
 });
 
 networkManager.onMessage((data) => {
@@ -165,14 +178,21 @@ networkManager.onMessage((data) => {
     }
 
     if (typeof data !== 'string') return;
+
+    // Handle Resource Pulse and other non-JSON or custom JSON
     try {
-        const dataString = data;
-        const dataJson = JSON.parse(dataString);
-        const progressBar = document.getElementById('progress-bar'); // Might find only one of them
+        const dataJson = JSON.parse(data);
+        const progressBar = document.getElementById('progress-bar');
+
+        if (dataJson.type === 'resource_pulse') {
+            stateManager.pushTelemetry('system', dataJson);
+            return;
+        }
 
         if (dataJson.type === 'progress') {
             if (progressBar) progressBar.style.width = `${dataJson.percent}%`;
             stateManager.pushTelemetry(dataJson);
+            return;
         }
 
         if (dataJson.type === 'TELEMETRY') {
@@ -196,9 +216,15 @@ networkManager.onMessage((data) => {
                     stateManager.setStatus('TERMINATED');
                 }
             }
+            return;
         }
-    } catch (e) {}
+    } catch (e) {
+        // If not JSON, it's likely a kernel log string
+        if (data.startsWith('[') && data.includes(']')) {
+            stateManager.pushTelemetry(data);
+        }
+    }
 });
 
-layoutManager.render(initialState);
+layoutManager.render(activeState);
 console.log("Workspace ready.");

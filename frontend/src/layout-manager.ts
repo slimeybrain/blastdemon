@@ -3,6 +3,7 @@ import { LayoutNode, SplitNode, PanelNode, SimulationState, PanelType } from './
 import { GraphRenderer } from './graph-renderer.js';
 import { PropertyEditor } from './property-editor.js';
 import { NodeViewer } from './node-viewer.js';
+import { ResourceManager } from './resource-manager.js';
 
 export class LayoutManager {
     private container: HTMLElement;
@@ -143,7 +144,7 @@ export class LayoutManager {
 
         const select = document.createElement('select');
         select.className = 'header-select';
-        const types: PanelType[] = ['OUTLINER', 'NODE_GRAPH', 'PROPERTIES', 'NODE_VIEWER', 'EXECUTION_MANAGER'];
+        const types: PanelType[] = ['OUTLINER', 'NODE_GRAPH', 'PROPERTIES', 'NODE_VIEWER', 'EXECUTION_MANAGER', 'RESOURCE_MANAGER'];
         types.forEach(t => {
             const opt = document.createElement('option');
             opt.value = t;
@@ -246,6 +247,9 @@ export class LayoutManager {
             case 'EXECUTION_MANAGER':
                 this.renderExecutionManager(container);
                 break;
+            case 'RESOURCE_MANAGER':
+                this.renderResourceManager(container);
+                break;
             case 'TELEMETRY_TEXT':
                 container.innerHTML = '<div style="padding:10px">Telemetry Text (Move to Node Graph to see per-node logs)</div>';
                 break;
@@ -324,6 +328,17 @@ export class LayoutManager {
                 comp.instance.setSelectedNode(nodeId);
             }
         });
+    }
+
+    private renderResourceManager(node: PanelNode, container: HTMLElement): void {
+        let comp = this.components.get(node.id);
+        if (!comp) {
+            const manager = new ResourceManager(container, this.stateManager);
+            comp = { type: 'RESOURCE_MANAGER', instance: manager };
+            this.components.set(node.id, comp);
+        } else {
+            container.appendChild(comp.instance.container);
+        }
     }
 
     private renderExecutionManager(container: HTMLElement): void {
@@ -412,6 +427,22 @@ export class LayoutManager {
         safetyGrid.appendChild(createBtn('terminate-btn', 'Terminate', 'header-button danger'));
 
         simActions.appendChild(safetyGrid);
+
+        const persistenceLabel = document.createElement('div');
+        persistenceLabel.textContent = 'Workspace:';
+        persistenceLabel.style.fontSize = '0.75rem';
+        persistenceLabel.style.marginTop = '10px';
+        simActions.appendChild(persistenceLabel);
+
+        const persistenceGrid = document.createElement('div');
+        persistenceGrid.style.display = 'grid';
+        persistenceGrid.style.gridTemplateColumns = '1fr 1fr';
+        persistenceGrid.style.gap = '8px';
+
+        persistenceGrid.appendChild(createBtn('save-workspace-btn', 'Save Workspace', 'header-button success'));
+        persistenceGrid.appendChild(createBtn('clear-save-btn', 'Clear Save', 'header-button secondary'));
+
+        simActions.appendChild(persistenceGrid);
 
         const progressLabel = document.createElement('div');
         progressLabel.textContent = 'Solver Progress:';
