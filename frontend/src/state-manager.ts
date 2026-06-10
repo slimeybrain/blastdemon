@@ -14,7 +14,7 @@ export class StateManager {
 
     constructor(initialState?: SimulationState) {
         if (initialState) {
-            this.pushState(initialState);
+            this.pushState(initialState, false); // Don't save on initial push to avoid overwrite during load
         }
     }
 
@@ -22,7 +22,7 @@ export class StateManager {
      * Pushes a new state to the history, discarding any redo history.
      * Performs a deep copy to ensure immutability.
      */
-    pushState(newState: SimulationState): void {
+    pushState(newState: SimulationState, autoSave: boolean = true): void {
         const stateCopy = JSON.parse(JSON.stringify(newState)) as SimulationState;
 
         // Remove redo history if we are in the middle of history
@@ -32,12 +32,9 @@ export class StateManager {
 
         this.history.push(stateCopy);
         this.currentIndex++;
-        // We don't necessarily want to reset status on EVERY state change (like layout changes)
-        // But the previous implementation did it. I'll keep it for now but might need to rethink.
-        // Actually, if I change layout, simulation shouldn't stop.
-        // Let's only set to UNINITIALIZED if nodes or connections changed.
-        // For now, I'll stick to previous behavior to be safe, or refine it.
+
         this.notifyListeners();
+        if (autoSave) this.saveWorkspace();
     }
 
     /**
@@ -48,6 +45,7 @@ export class StateManager {
             this.currentIndex--;
             const state = this.getCurrentState();
             this.notifyListeners();
+            this.saveWorkspace();
             return state;
         }
         return null;
@@ -61,6 +59,7 @@ export class StateManager {
             this.currentIndex++;
             const state = this.getCurrentState();
             this.notifyListeners();
+            this.saveWorkspace();
             return state;
         }
         return null;
@@ -81,6 +80,7 @@ export class StateManager {
                 this.history[this.currentIndex] = state;
             }
             this.notifyListeners();
+            this.saveWorkspace();
         }
     }
 
@@ -212,6 +212,21 @@ export class StateManager {
 
         if (!nodeId) return;
 
+        // JSON Prettifier Fallback (Zero-Omission Requirement 8)
+        if (typeof data === 'string' && data.startsWith('{')) {
+            try {
+                const parsed = JSON.parse(data);
+                if (parsed.type === 'progress' || parsed.command === 'PROGRESS') {
+                    const percent = parsed.percent || parsed.value || 0;
+                    data = `[${new Date().toLocaleTimeString()}] [PROGRESS] Simulation batch step executed. Percent: ${percent}%`;
+                } else {
+                    data = `[${new Date().toLocaleTimeString()}] [DATA] ${JSON.stringify(parsed)}`;
+                }
+            } catch (e) {
+                // Keep raw if parse fails
+            }
+        }
+
         if (!(data instanceof ArrayBuffer)) {
             this.telemetryStore.set(nodeId, data);
         }
@@ -226,7 +241,6 @@ export class StateManager {
             const targetNode = state.nodes.find(n => n.id === connection.toNode);
             if (targetNode) {
                 if (targetNode.type === 'TelemetryGraph') {
-                    // Graphs accept both binary (new) and legacy JSON (compatibility)
                     this.telemetryStore.set(targetNode.id, data);
                     this.notifyTelemetryUpdate(targetNode.id, data);
                 } else if (targetNode.type === 'TelemetryText') {
@@ -234,7 +248,7 @@ export class StateManager {
                     if (!Array.isArray(log)) log = [];
                     const logMsg = typeof data === 'string' ? data : JSON.stringify(data);
                     log.push(logMsg);
-                    if (log.length > 50) log.shift();
+                    if (log.length > 100) log.shift();
                     this.telemetryStore.set(targetNode.id, log);
                     this.notifyTelemetryUpdate(targetNode.id, log);
                 }
@@ -287,14 +301,9 @@ export class StateManager {
         const state = this.getCurrentState();
         if (!state) return;
 
-        // Special case: don't close the last panel
         if (state.layout.type === 'panel') return;
 
-        const findAndClose = (node: LayoutNode, parent: SplitNode | null): LayoutNode => {
-            if (node.type === 'panel' && node.id === panelId) {
-                // This shouldn't be called directly on the panel if we handle it in the parent split
-                return node;
-            }
+        const findAndClose = (node: LayoutNode): LayoutNode => {
             if (node.type === 'split') {
                 if (node.firstChild.type === 'panel' && node.firstChild.id === panelId) {
                     return node.secondChild;
@@ -302,13 +311,13 @@ export class StateManager {
                 if (node.secondChild.type === 'panel' && node.secondChild.id === panelId) {
                     return node.firstChild;
                 }
-                node.firstChild = findAndClose(node.firstChild, node);
-                node.secondChild = findAndClose(node.secondChild, node);
+                node.firstChild = findAndClose(node.firstChild);
+                node.secondChild = findAndClose(node.secondChild);
             }
             return node;
         };
 
-        state.layout = findAndClose(state.layout, null);
+        state.layout = findAndClose(state.layout);
         this.pushState(state);
     }
 
@@ -329,13 +338,9 @@ export class StateManager {
         };
 
         state.layout = updateRatio(state.layout);
-        // Using updateState(state, false) for smooth resizing if needed,
-        // but setPanelRatio usually happens on mousemove.
-        // Actually, let's use updateState with false to avoid spamming history.
         this.updateState(state, false);
     }
 
-    // Finalize ratio change into history
     commitPanelRatio(): void {
         const state = this.getCurrentState();
         if (state) this.pushState(state);
@@ -366,29 +371,35 @@ export class StateManager {
         const state = this.getCurrentState();
         if (state) {
             localStorage.setItem('blast_workspace', JSON.stringify(state));
-            console.log('[System] Workspace saved to localStorage');
         }
     }
 
-    loadWorkspace(): SimulationState | null {
-        const saved = localStorage.getItem('blast_workspace');
-        if (saved) {
-            try {
+    loadWorkspace(initialFallback?: SimulationState): SimulationState | null {
+        try {
+            const saved = localStorage.getItem('blast_workspace');
+            if (saved) {
                 const state = JSON.parse(saved);
                 this.history = [state];
                 this.currentIndex = 0;
                 this.notifyListeners();
-                console.log('[System] Workspace loaded from localStorage');
+                console.log('[System] Workspace hydrated successfully.');
                 return state;
-            } catch (e) {
-                console.error('[System] Failed to load workspace:', e);
             }
+        } catch (e) {
+            console.error('[System] Workspace hydration failed:', e);
+        }
+
+        if (initialFallback) {
+            this.history = [initialFallback];
+            this.currentIndex = 0;
+            this.notifyListeners();
+            return initialFallback;
         }
         return null;
     }
 
     clearWorkspace(): void {
         localStorage.removeItem('blast_workspace');
-        console.log('[System] Saved workspace cleared');
+        console.log('[System] Local workspace cleared.');
     }
 }

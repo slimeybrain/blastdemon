@@ -47,7 +47,6 @@ export class PropertyEditor {
         }
 
         if (!forceFull && this.container.querySelector('form')) {
-            // Update existing values to prevent focus loss
             for (const [key, value] of Object.entries(node.parameters)) {
                 const input = this.container.querySelector(`[data-key="${key}"]`) as HTMLInputElement | HTMLSelectElement;
                 if (input && document.activeElement !== input) {
@@ -66,6 +65,7 @@ export class PropertyEditor {
         editorHeader.innerHTML = `${node.type} (${node.id})`;
         this.container.appendChild(editorHeader);
 
+        // Parameters Section
         const form = document.createElement('form');
         form.style.padding = '10px';
         form.onsubmit = (e) => e.preventDefault();
@@ -87,8 +87,68 @@ export class PropertyEditor {
             row.appendChild(input);
             form.appendChild(row);
         }
-
         this.container.appendChild(form);
+
+        // I/O Connections Sector (Phase 16.0 Requirement 6)
+        const ioSection = document.createElement('div');
+        ioSection.style.padding = '10px';
+        ioSection.style.borderTop = '1px solid #333';
+        ioSection.style.marginTop = '10px';
+
+        const ioTitle = document.createElement('div');
+        ioTitle.style.fontSize = '0.75rem';
+        ioTitle.style.color = '#888';
+        ioTitle.style.marginBottom = '8px';
+        ioTitle.style.fontWeight = 'bold';
+        ioTitle.textContent = 'I/O CONNECTIONS';
+        ioSection.appendChild(ioTitle);
+
+        const list = document.createElement('div');
+        list.style.fontSize = '0.7rem';
+        list.style.color = '#ccc';
+
+        // Inputs
+        const inputs = state!.connections.filter(c => c.toNode === node.id);
+        if (inputs.length > 0) {
+            const inputTitle = document.createElement('div');
+            inputTitle.style.color = '#569cd6';
+            inputTitle.style.marginTop = '4px';
+            inputTitle.textContent = 'Inputs:';
+            list.appendChild(inputTitle);
+            inputs.forEach(c => {
+                const item = document.createElement('div');
+                item.style.paddingLeft = '8px';
+                item.textContent = `← [${c.fromNode}] : ${c.toPort}`;
+                list.appendChild(item);
+            });
+        }
+
+        // Outputs
+        const outputs = state!.connections.filter(c => c.fromNode === node.id);
+        if (outputs.length > 0) {
+            const outputTitle = document.createElement('div');
+            outputTitle.style.color = '#4ec9b0';
+            outputTitle.style.marginTop = '8px';
+            outputTitle.textContent = 'Outputs:';
+            list.appendChild(outputTitle);
+            outputs.forEach(c => {
+                const item = document.createElement('div');
+                item.style.paddingLeft = '8px';
+                item.textContent = `→ ${c.fromPort} : [${c.toNode}]`;
+                list.appendChild(item);
+            });
+        }
+
+        if (inputs.length === 0 && outputs.length === 0) {
+            const empty = document.createElement('div');
+            empty.style.fontStyle = 'italic';
+            empty.style.opacity = '0.5';
+            empty.textContent = 'No active connections.';
+            list.appendChild(empty);
+        }
+
+        ioSection.appendChild(list);
+        this.container.appendChild(ioSection);
     }
 
     private createInputElement(node: Node, key: string, value: any): HTMLElement {

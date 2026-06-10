@@ -4,7 +4,7 @@ import os
 
 def verify_ui_features(page: Page):
     # 1. Arrange: Go to the app.
-    page.goto("http://localhost:3000")
+    page.goto("http://localhost:5173")
     time.sleep(5) # Wait for initial render and vite warmup
 
     # Check for EXECUTION_MANAGER panel
@@ -36,8 +36,8 @@ def verify_ui_features(page: Page):
             id: 'node-graph', type: 'TelemetryGraph', x: 800, y: 300,
             inputs: [{ id: 'in', label: 'Data Stream' }], outputs: [], parameters: {}
         });
-        state.edges.push({ fromNode: 'node-solver', fromPort: 'telemetry', toNode: 'node-text', toPort: 'in' });
-        state.edges.push({ fromNode: 'node-solver', fromPort: 'telemetry', toNode: 'node-graph', toPort: 'in' });
+        state.connections.push({ fromNode: 'node-solver', fromPort: 'telemetry', toNode: 'node-text', toPort: 'in' });
+        state.connections.push({ fromNode: 'node-solver', fromPort: 'telemetry', toNode: 'node-graph', toPort: 'in' });
         window.stateManager.pushState(state);
     """)
     time.sleep(1)

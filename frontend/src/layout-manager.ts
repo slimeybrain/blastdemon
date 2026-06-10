@@ -8,7 +8,7 @@ import { ResourceManager } from './resource-manager.js';
 export class LayoutManager {
     private container: HTMLElement;
     private stateManager: StateManager;
-    private components: Map<string, any> = new Map();
+    public components: Map<string, any> = new Map();
     private lastState: SimulationState | null = null;
 
     constructor(containerId: string, stateManager: StateManager) {
@@ -29,7 +29,6 @@ export class LayoutManager {
     }
 
     public render(state: SimulationState): void {
-        // Optimization: only re-render if layout structure OR nodes (for dropdowns) changed
         const layoutJson = JSON.stringify(state.layout);
         const nodesJson = JSON.stringify(state.nodes.map(n => n.id));
         const currentData = layoutJson + nodesJson;
@@ -190,13 +189,29 @@ export class LayoutManager {
         }
 
         if (node.panelType === 'NODE_GRAPH') {
+            const layoutToggle = document.createElement('select');
+            layoutToggle.className = 'header-select';
+            layoutToggle.style.width = '60px';
+            ['HORIZ', 'VERT'].forEach(l => {
+                const opt = document.createElement('option');
+                opt.value = l;
+                opt.textContent = l;
+                layoutToggle.appendChild(opt);
+            });
+            layoutToggle.onchange = () => {
+                const comp = this.components.get(node.id);
+                if (comp && comp.type === 'NODE_GRAPH') {
+                    comp.instance.setLayoutOrientation(layoutToggle.value);
+                }
+            };
+            leftSide.appendChild(layoutToggle);
+
             const statusBadge = document.createElement('div');
             statusBadge.id = 'status-badge';
             statusBadge.className = `status-badge badge-${this.stateManager.getStatus().toLowerCase()}`;
             statusBadge.textContent = this.stateManager.getStatus();
             leftSide.appendChild(statusBadge);
 
-            // Re-sync status badge on change
             this.stateManager.onStatusChange((status) => {
                 statusBadge.textContent = status;
                 statusBadge.className = `status-badge badge-${status.toLowerCase()}`;
@@ -232,7 +247,6 @@ export class LayoutManager {
     }
 
     private renderPanelContent(node: PanelNode, container: HTMLElement): void {
-        // Cleanup existing component for this panel if it exists but is of different type
         const existing = this.components.get(node.id);
         if (existing && existing.type !== node.panelType) {
             existing.instance.destroy?.();
@@ -258,40 +272,75 @@ export class LayoutManager {
             case 'RESOURCE_MANAGER':
                 this.renderResourceManager(node, container);
                 break;
-            case 'TELEMETRY_TEXT':
-                container.innerHTML = '<div style="padding:10px">Telemetry Text (Move to Node Graph to see per-node logs)</div>';
-                break;
-            case 'TELEMETRY_GRAPH':
-                container.innerHTML = '<div style="padding:10px">Telemetry Graph (Move to Node Graph to see per-node charts)</div>';
-                break;
+            default:
+                container.innerHTML = `<div style="padding:10px">Panel: ${node.panelType}</div>`;
         }
     }
 
     private renderOutliner(container: HTMLElement): void {
         const outliner = document.createElement('ul');
         outliner.id = 'outliner';
+        outliner.className = 'outliner-container';
+        outliner.style.listStyle = 'none';
+        outliner.style.padding = '0';
+        outliner.style.margin = '0';
         container.appendChild(outliner);
+
+        const renderNodeTree = (state: SimulationState, nodeId: string, parentEl: HTMLElement, level: number, visited: Set<string>) => {
+            if (visited.has(nodeId)) return;
+            visited.add(nodeId);
+
+            const node = state.nodes.find(n => n.id === nodeId);
+            if (!node) return;
+
+            const li = document.createElement('li');
+            li.className = this.stateManager.getSelectedNodeId() === nodeId ? 'selected' : '';
+            li.style.paddingLeft = `${level * 16 + 8}px`;
+            li.style.cursor = 'pointer';
+            li.textContent = `${node.type} (${node.id})`;
+            li.onclick = (e) => {
+                e.stopPropagation();
+                this.stateManager.setSelectedNode(node.id);
+            };
+            parentEl.appendChild(li);
+
+            const children = state.connections
+                .filter(c => c.fromNode === nodeId)
+                .map(c => c.toNode);
+
+            if (children.length > 0) {
+                const subUl = document.createElement('ul');
+                subUl.style.listStyle = 'none';
+                subUl.style.padding = '0';
+                subUl.style.margin = '0';
+                parentEl.appendChild(subUl);
+                children.forEach(childId => renderNodeTree(state, childId, subUl, level + 1, visited));
+            }
+        };
 
         const update = (state: SimulationState) => {
             outliner.innerHTML = '';
-            const selectedId = this.stateManager.getSelectedNodeId();
+            const visited = new Set<string>();
+
+            const rootNodes = state.nodes.filter(node =>
+                !state.connections.some(conn => conn.toNode === node.id)
+            );
+
+            rootNodes.forEach(root => renderNodeTree(state, root.id, outliner, 0, visited));
+
             state.nodes.forEach(node => {
-                const li = document.createElement('li');
-                li.textContent = `${node.type} (${node.id})`;
-                li.onclick = () => this.stateManager.setSelectedNode(node.id);
-                if (node.id === selectedId) {
-                    li.className = 'selected';
+                if (!visited.has(node.id)) {
+                    renderNodeTree(state, node.id, outliner, 0, visited);
                 }
-                outliner.appendChild(li);
             });
         };
+
         this.stateManager.onStateChange(update);
         this.stateManager.onSelectionChange(() => update(this.stateManager.getCurrentState()!));
         update(this.stateManager.getCurrentState()!);
     }
 
     private renderNodeGraph(node: PanelNode, container: HTMLElement): void {
-        // Reuse or create GraphRenderer
         let comp = this.components.get(node.id);
         if (!comp) {
             const renderer = new GraphRenderer(container, this.stateManager);
@@ -302,7 +351,6 @@ export class LayoutManager {
             comp = { type: 'NODE_GRAPH', instance: renderer };
             this.components.set(node.id, comp);
         } else {
-            // Re-append viewport if reusing
             container.appendChild(comp.instance.viewport);
         }
     }
@@ -341,9 +389,7 @@ export class LayoutManager {
     private renderResourceManager(node: PanelNode, container: HTMLElement): void {
         let comp = this.components.get(node.id);
         if (!comp) {
-            // Clear any loading text safely
             container.innerHTML = '';
-            // Pass the container strictly to the constructor
             const resourceManager = new ResourceManager(container, this.stateManager, node.id);
             comp = { type: 'RESOURCE_MANAGER', instance: resourceManager };
             this.components.set(node.id, comp);
@@ -360,29 +406,6 @@ export class LayoutManager {
         simActions.style.flexDirection = 'column';
         simActions.style.gap = '10px';
 
-        const statusRow = document.createElement('div');
-        statusRow.style.display = 'flex';
-        statusRow.style.alignItems = 'center';
-        statusRow.style.gap = '8px';
-        statusRow.style.marginBottom = '10px';
-
-        const statusLabel = document.createElement('span');
-        statusLabel.textContent = 'Status:';
-        statusLabel.style.fontSize = '0.8rem';
-        statusRow.appendChild(statusLabel);
-
-        const statusBadge = document.createElement('div');
-        statusBadge.className = `status-badge badge-${this.stateManager.getStatus().toLowerCase()}`;
-        statusBadge.textContent = this.stateManager.getStatus();
-        statusRow.appendChild(statusBadge);
-
-        this.stateManager.onStatusChange((status) => {
-            statusBadge.textContent = status;
-            statusBadge.className = `status-badge badge-${status.toLowerCase()}`;
-        });
-
-        simActions.appendChild(statusRow);
-
         const createBtn = (id: string, text: string, className: string = 'header-button') => {
             const btn = document.createElement('button');
             btn.id = id;
@@ -390,86 +413,74 @@ export class LayoutManager {
             btn.className = className;
             btn.style.width = '100%';
             btn.style.padding = '8px';
-            btn.style.marginBottom = '4px';
             return btn;
         };
 
-        const controlsRow = document.createElement('div');
-        controlsRow.style.display = 'grid';
-        controlsRow.style.gridTemplateColumns = '1fr 1fr';
-        controlsRow.style.gap = '8px';
+        const statusRow = document.createElement('div');
+        statusRow.style.display = 'flex';
+        statusRow.style.justifyContent = 'space-between';
+        statusRow.style.alignItems = 'center';
+        statusRow.innerHTML = `<span>Status:</span><div id="exec-status-badge" class="status-badge badge-${this.stateManager.getStatus().toLowerCase()}">${this.stateManager.getStatus()}</div>`;
+        simActions.appendChild(statusRow);
 
-        controlsRow.appendChild(createBtn('init-btn', 'Initialize', 'header-button'));
-        controlsRow.appendChild(createBtn('auto-arrange-btn', 'Auto Layout', 'header-button secondary'));
+        this.stateManager.onStatusChange((status) => {
+            const badge = simActions.querySelector('#exec-status-badge');
+            if (badge) {
+                badge.textContent = status;
+                badge.className = `status-badge badge-${status.toLowerCase()}`;
+            }
+        });
 
-        simActions.appendChild(controlsRow);
+        const mainControls = document.createElement('div');
+        mainControls.style.display = 'grid';
+        mainControls.style.gridTemplateColumns = '1fr 1fr';
+        mainControls.style.gap = '8px';
+        mainControls.appendChild(createBtn('init-btn', 'Initialize', 'header-button'));
+        mainControls.appendChild(createBtn('auto-arrange-btn', 'Auto Layout', 'header-button secondary'));
+        simActions.appendChild(mainControls);
 
-        const stepsLabel = document.createElement('div');
-        stepsLabel.textContent = 'Execute Steps:';
-        stepsLabel.style.fontSize = '0.75rem';
-        stepsLabel.style.marginTop = '10px';
-        simActions.appendChild(stepsLabel);
+        const stepControls = document.createElement('div');
+        stepControls.style.display = 'grid';
+        stepControls.style.gridTemplateColumns = 'repeat(3, 1fr)';
+        stepControls.style.gap = '4px';
+        stepControls.appendChild(createBtn('exec-1-btn', '1 Step', 'header-button secondary'));
+        stepControls.appendChild(createBtn('exec-100-btn', '100', 'header-button secondary'));
+        stepControls.appendChild(createBtn('exec-end-btn', 'ToEnd', 'header-button success'));
+        simActions.appendChild(stepControls);
 
-        const stepsGrid = document.createElement('div');
-        stepsGrid.style.display = 'grid';
-        stepsGrid.style.gridTemplateColumns = '1fr 1fr 1fr';
-        stepsGrid.style.gap = '4px';
+        const runControls = document.createElement('div');
+        runControls.style.display = 'grid';
+        runControls.style.gridTemplateColumns = '1fr 1fr';
+        runControls.style.gap = '8px';
+        runControls.appendChild(createBtn('pause-btn', 'Pause', 'header-button warning'));
+        runControls.appendChild(createBtn('terminate-btn', 'Terminate', 'header-button danger'));
+        simActions.appendChild(runControls);
 
-        stepsGrid.appendChild(createBtn('exec-1-btn', '1', 'header-button secondary'));
-        stepsGrid.appendChild(createBtn('exec-10-btn', '10', 'header-button secondary'));
-        stepsGrid.appendChild(createBtn('exec-100-btn', '100', 'header-button secondary'));
-        stepsGrid.appendChild(createBtn('exec-1000-btn', '1k', 'header-button secondary'));
-        stepsGrid.appendChild(createBtn('exec-end-btn', 'End', 'header-button success'));
+        const persistenceControls = document.createElement('div');
+        persistenceControls.style.display = 'grid';
+        persistenceControls.style.gridTemplateColumns = '1fr 1fr';
+        persistenceControls.style.gap = '8px';
+        persistenceControls.appendChild(createBtn('save-workspace-btn', 'Save', 'header-button success'));
 
-        simActions.appendChild(stepsGrid);
-
-        const safetyLabel = document.createElement('div');
-        safetyLabel.textContent = 'Control:';
-        safetyLabel.style.fontSize = '0.75rem';
-        safetyLabel.style.marginTop = '10px';
-        simActions.appendChild(safetyLabel);
-
-        const safetyGrid = document.createElement('div');
-        safetyGrid.style.display = 'grid';
-        safetyGrid.style.gridTemplateColumns = '1fr 1fr';
-        safetyGrid.style.gap = '8px';
-
-        safetyGrid.appendChild(createBtn('pause-btn', 'Pause', 'header-button warning'));
-        safetyGrid.appendChild(createBtn('terminate-btn', 'Terminate', 'header-button danger'));
-
-        simActions.appendChild(safetyGrid);
-
-        const persistenceLabel = document.createElement('div');
-        persistenceLabel.textContent = 'Workspace:';
-        persistenceLabel.style.fontSize = '0.75rem';
-        persistenceLabel.style.marginTop = '10px';
-        simActions.appendChild(persistenceLabel);
-
-        const persistenceGrid = document.createElement('div');
-        persistenceGrid.style.display = 'grid';
-        persistenceGrid.style.gridTemplateColumns = '1fr 1fr';
-        persistenceGrid.style.gap = '8px';
-
-        persistenceGrid.appendChild(createBtn('save-workspace-btn', 'Save Workspace', 'header-button success'));
-        persistenceGrid.appendChild(createBtn('clear-save-btn', 'Clear Save', 'header-button secondary'));
-
-        simActions.appendChild(persistenceGrid);
-
-        const progressLabel = document.createElement('div');
-        progressLabel.textContent = 'Solver Progress:';
-        progressLabel.style.fontSize = '0.75rem';
-        progressLabel.style.marginTop = '10px';
-        simActions.appendChild(progressLabel);
+        const resetBtn = createBtn('reset-workspace-btn', 'Reset System', 'header-button danger');
+        resetBtn.onclick = () => {
+            if (window.confirm("CRITICAL: This will flush all local storage and reload the application. Proceed?")) {
+                this.stateManager.clearWorkspace();
+                window.location.reload();
+            }
+        };
+        persistenceControls.appendChild(resetBtn);
+        simActions.appendChild(persistenceControls);
 
         const progressCont = document.createElement('div');
         progressCont.className = 'progress-container';
-        progressCont.style.position = 'relative';
-        progressCont.style.width = '100%';
-        progressCont.style.height = '12px';
+        progressCont.style.height = '10px';
         progressCont.style.background = '#333';
+        progressCont.style.marginTop = '10px';
         const progressBar = document.createElement('div');
         progressBar.id = 'progress-bar';
         progressBar.className = 'progress-bar';
+        progressBar.style.width = '0%';
         progressCont.appendChild(progressBar);
         simActions.appendChild(progressCont);
 

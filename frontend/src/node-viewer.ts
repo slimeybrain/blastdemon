@@ -80,7 +80,6 @@ export class NodeViewer {
         }
 
         if (this.lastId === node.id && this.lastType === node.type) {
-            // Already rendered this node type, just update if it's a standard node (property editor)
             if (node.type !== 'TelemetryText' && node.type !== 'TelemetryGraph') {
                 this.renderStandardNode(node);
             }
@@ -264,7 +263,6 @@ export class NodeViewer {
             }
         };
 
-        // Wait a microtask for the DOM to apply the inline styles
         setTimeout(() => {
             if (!this.chartCanvas || !this.chartWorker) return;
             const rect = canvasCont.getBoundingClientRect();
@@ -289,12 +287,51 @@ export class NodeViewer {
     }
 
     private renderStandardNode(node: Node): void {
-        if (!this.propertyEditor) {
-            this.propertyEditor = new PropertyEditor(this.container, this.stateManager);
-        } else if (!this.container.contains(this.propertyEditor.container)) {
-            this.container.appendChild(this.propertyEditor.container);
+        this.container.innerHTML = '';
+        this.container.style.padding = '10px';
+        this.container.style.overflowY = 'auto';
+
+        const title = document.createElement('h3');
+        title.textContent = `CONFIG: ${node.type} (${node.id})`;
+        title.style.margin = '0 0 15px 0';
+        title.style.fontSize = '14px';
+        title.style.borderBottom = '1px solid #444';
+        title.style.paddingBottom = '5px';
+        this.container.appendChild(title);
+
+        const grid = document.createElement('div');
+        grid.style.display = 'grid';
+        grid.style.gridTemplateColumns = '120px 1fr';
+        grid.style.gap = '10px';
+        grid.style.alignItems = 'center';
+
+        for (const [key, value] of Object.entries(node.parameters)) {
+            const label = document.createElement('label');
+            label.textContent = key.replace(/_/g, ' ').toUpperCase();
+            label.style.fontSize = '12px';
+            label.style.color = '#888';
+            grid.appendChild(label);
+
+            const input = document.createElement('input');
+            const isNumeric = typeof value === 'number';
+            input.type = isNumeric ? 'number' : 'text';
+            if (isNumeric) input.step = '0.01';
+            input.value = value.toString();
+            input.style.background = '#252526';
+            input.style.color = '#ccc';
+            input.style.border = '1px solid #444';
+            input.style.padding = '4px';
+            input.style.fontSize = '12px';
+
+            input.onchange = () => {
+                const newVal = isNumeric ? Number(input.value) : input.value;
+                this.stateManager.updateNodeParameters(node.id, { [key]: newVal });
+            };
+
+            grid.appendChild(input);
         }
-        this.propertyEditor.setSelectedNode(node.id);
+
+        this.container.appendChild(grid);
     }
 
     private handleTelemetry(nodeId: string, data: any): void {
@@ -341,18 +378,15 @@ export class NodeViewer {
         if (node.type === 'TelemetryText') {
             const terminal = document.getElementById(`viewer-text-${nodeId}`);
             if (terminal && Array.isArray(data)) {
-                // To avoid focus/selection issues and for performance, we only append new lines
-                // or update smartly. For now, let's at least minimize recreation.
                 const currentCount = terminal.children.length;
                 if (data.length < currentCount) {
-                    terminal.innerHTML = ''; // Full reset if data shrank
+                    terminal.innerHTML = '';
                     data.forEach(line => {
                         const div = document.createElement('div');
                         div.textContent = line;
                         terminal.appendChild(div);
                     });
                 } else {
-                    // Append only new ones
                     for (let i = currentCount; i < data.length; i++) {
                         const div = document.createElement('div');
                         div.textContent = data[i];
@@ -364,6 +398,5 @@ export class NodeViewer {
         } else if (node.type === 'TelemetryGraph') {
             this.telemetryBuffer = data;
         }
-        // Standard nodes (PropertyEditor) ignore high-frequency telemetry
     }
 }
