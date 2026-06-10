@@ -179,9 +179,34 @@ body {
 }
 
 .panel-content {
-    flex-grow: 1;
     position: relative;
-    overflow: auto;
+    flex: 1;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+.node-viewer-container {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.expanded-graph-container {
+    width: 100%;
+    height: 100%;
+    display: block;
+    position: relative;
+    flex: 1;
+    background: #050505;
+}
+
+.expanded-graph-container canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
 }
 
 #outliner {

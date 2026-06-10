@@ -123,6 +123,8 @@ self.onmessage = (event) => {
         canvas.height = data.height;
         width = data.width;
         height = data.height;
+        // Immediate redraw for smooth scaling
+        render();
         return;
     }
 
