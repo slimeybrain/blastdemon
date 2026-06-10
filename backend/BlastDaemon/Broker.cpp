@@ -8,6 +8,7 @@
 #include <thread>
 #include <map>
 #include <memory>
+#include <algorithm>
 #include "ProcessManager.hpp"
 
 #ifdef _WIN32
@@ -159,11 +160,10 @@ std::string get_websocket_accept(const std::string& key) {
     return base64_encode(sha1::compute(key + magic));
 }
 
-void send_websocket_frame(SOCKET_TYPE client_fd, const std::string& message) {
+void send_websocket_frame(SOCKET_TYPE client_fd, const void* data, size_t len, uint8_t opcode = 0x01) {
     std::vector<uint8_t> frame;
-    frame.push_back(0x81); // FIN + Text frame
+    frame.push_back(0x80 | (opcode & 0x0F)); // FIN + opcode
 
-    size_t len = message.length();
     if (len <= 125) {
         frame.push_back((uint8_t)len);
     } else if (len <= 65535) {
@@ -171,15 +171,23 @@ void send_websocket_frame(SOCKET_TYPE client_fd, const std::string& message) {
         frame.push_back((uint8_t)((len >> 8) & 0xFF));
         frame.push_back((uint8_t)(len & 0xFF));
     } else {
-        // Very large payloads not handled for simplicity, but we could add 127 case
         frame.push_back(127);
         for (int i = 7; i >= 0; --i) {
             frame.push_back((uint8_t)((len >> (8 * i)) & 0xFF));
         }
     }
 
-    frame.insert(frame.end(), message.begin(), message.end());
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(data);
+    frame.insert(frame.end(), p, p + len);
     send(client_fd, (const char*)frame.data(), (int)frame.size(), 0);
+}
+
+void send_websocket_text(SOCKET_TYPE client_fd, const std::string& message) {
+    send_websocket_frame(client_fd, message.data(), message.length(), 0x01);
+}
+
+void send_websocket_binary(SOCKET_TYPE client_fd, const void* data, size_t len) {
+    send_websocket_frame(client_fd, data, len, 0x02);
 }
 
 // --- Native Structures ---
@@ -261,22 +269,51 @@ void process_json(const std::string& json, SOCKET_TYPE client_fd, std::shared_pt
             std::cout << "Starting BlastSolver for initialization..." << std::endl;
             active_process->writeStdin(json + "\n\n");
             std::thread([client_fd, proc = active_process]() {
-                char buffer[4096];
-                std::string line_accum;
+                std::vector<uint8_t> buffer(8192);
+                std::vector<uint8_t> accumulator;
                 while (true) {
-                    int n = proc->readStdout(buffer, sizeof(buffer) - 1);
+                    int n = proc->readStdout(reinterpret_cast<char*>(buffer.data()), buffer.size());
                     if (n <= 0) break;
-                    buffer[n] = '\0';
-                    line_accum += buffer;
+                    accumulator.insert(accumulator.end(), buffer.begin(), buffer.begin() + n);
 
-                    size_t pos;
-                    while ((pos = line_accum.find('\n')) != std::string::npos) {
-                        std::string line = line_accum.substr(0, pos);
-                        if (!line.empty() && line.back() == '\r') line.pop_back();
-                        if (!line.empty()) {
-                            send_websocket_frame(client_fd, line);
+                    while (!accumulator.empty()) {
+                        // Check for BIN_FRAME marker
+                        const std::string marker = "BIN_FRAME ";
+                        if (accumulator.size() >= marker.size() &&
+                            std::equal(marker.begin(), marker.end(), accumulator.begin())) {
+
+                            // Find the newline after the size
+                            auto nl_it = std::find(accumulator.begin(), accumulator.end(), (uint8_t)'\n');
+                            if (nl_it == accumulator.end()) break; // Need more data
+
+                            std::string size_str(reinterpret_cast<char*>(accumulator.data() + marker.size()),
+                                                std::distance(accumulator.begin() + marker.size(), nl_it));
+                            size_t payload_size = 0;
+                            try {
+                                payload_size = std::stoul(size_str);
+                            } catch (...) {
+                                accumulator.erase(accumulator.begin(), nl_it + 1);
+                                continue;
+                            }
+                            size_t header_size = std::distance(accumulator.begin(), nl_it) + 1;
+
+                            if (accumulator.size() < header_size + payload_size) break; // Need more data
+
+                            send_websocket_binary(client_fd, accumulator.data() + header_size, payload_size);
+                            accumulator.erase(accumulator.begin(), accumulator.begin() + header_size + payload_size);
+                        } else {
+                            // Standard text line
+                            auto nl_it = std::find(accumulator.begin(), accumulator.end(), (uint8_t)'\n');
+                            if (nl_it == accumulator.end()) break; // Need more data
+
+                            std::string line(reinterpret_cast<char*>(accumulator.data()),
+                                             std::distance(accumulator.begin(), nl_it));
+                            if (!line.empty() && line.back() == '\r') line.pop_back();
+                            if (!line.empty()) {
+                                send_websocket_text(client_fd, line);
+                            }
+                            accumulator.erase(accumulator.begin(), nl_it + 1);
                         }
-                        line_accum.erase(0, pos + 1);
                     }
                 }
                 std::cout << "Telemetry relay thread finished." << std::endl;
