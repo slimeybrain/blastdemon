@@ -19,28 +19,26 @@ const rAF = typeof requestAnimationFrame !== 'undefined'
 function updateAutoScale() {
     if (!rawData || rawData.length === 0) return;
 
-    let min = Infinity;
-    let max = -Infinity;
+    let minY_raw = Infinity;
+    let maxY_raw = -Infinity;
     let hasValidData = false;
 
     for (let i = 0; i < rawData.length; i++) {
         const val = rawData[i];
         if (isFinite(val)) {
-            if (val < min) min = val;
-            if (val > max) max = val;
+            if (val < minY_raw) minY_raw = val;
+            if (val > maxY_raw) maxY_raw = val;
             hasValidData = true;
         }
     }
 
     if (hasValidData) {
-        if (min === max) {
-            min -= 1;
-            max += 1;
-        }
-        const padding = (max - min) * 0.1 || 1;
-        displayMin = min - padding;
-        displayMax = max + padding;
+        // Add 10% padding so the line doesn't touch the top/bottom
+        const rawRange = maxY_raw - minY_raw === 0 ? 1 : maxY_raw - minY_raw;
+        displayMin = minY_raw - (rawRange * 0.1);
+        displayMax = maxY_raw + (rawRange * 0.1);
         range = displayMax - displayMin;
+        self.postMessage({ type: 'bounds', minY: displayMin, maxY: displayMax });
     } else {
         displayMin = 0;
         displayMax = 1;
@@ -85,11 +83,9 @@ function render() {
             // Handle possible Infinity or NaN from empty chunks or bad data
             if (!isFinite(minY) || !isFinite(maxY)) continue;
 
-            const normMinY = (minY - displayMin) / (range || 1);
-            const normMaxY = (maxY - displayMin) / (range || 1);
-
-            const yTop = height - (normMaxY * height);
-            const yBottom = height - (normMinY * height);
+            // Coordinate mapping math using dynamic bounds
+            const yTop = height - ((maxY - displayMin) / (range || 1)) * height;
+            const yBottom = height - ((minY - displayMin) / (range || 1)) * height;
 
             if (isNaN(x) || isNaN(yTop) || isNaN(yBottom)) {
                 console.error("[WORKER] Calculated NaN coordinate!", { x, yTop, yBottom });

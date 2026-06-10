@@ -158,23 +158,29 @@ document.addEventListener('click', (e) => {
     }
 });
 
-networkManager.onMessage((dataString) => {
-    if (typeof dataString !== 'string') return;
+networkManager.onMessage((data) => {
+    if (data instanceof ArrayBuffer) {
+        stateManager.pushTelemetry(data);
+        return;
+    }
+
+    if (typeof data !== 'string') return;
     try {
-        const data = JSON.parse(dataString);
+        const dataString = data;
+        const dataJson = JSON.parse(dataString);
         const progressBar = document.getElementById('progress-bar'); // Might find only one of them
 
-        if (data.type === 'progress') {
-            if (progressBar) progressBar.style.width = `${data.percent}%`;
-            stateManager.pushTelemetry(data);
+        if (dataJson.type === 'progress') {
+            if (progressBar) progressBar.style.width = `${dataJson.percent}%`;
+            stateManager.pushTelemetry(dataJson);
         }
 
-        if (data.type === 'TELEMETRY') {
-            stateManager.pushTelemetry(data);
+        if (dataJson.type === 'TELEMETRY') {
+            stateManager.pushTelemetry(dataJson);
             if (progressBar) progressBar.style.width = '0%';
-            if (data.time === 0) stateManager.setStatus('INITIALIZED');
+            if (dataJson.time === 0) stateManager.setStatus('INITIALIZED');
 
-            if (stateManager.getStatus() === 'RUNNING' && data.is_terminated !== true) {
+            if (stateManager.getStatus() === 'RUNNING' && dataJson.is_terminated !== true) {
                 const pending = stateManager.getPendingSteps();
                 if (pending > 0) {
                     networkManager.send({ command: "STEP", steps: pending });
@@ -184,7 +190,7 @@ networkManager.onMessage((dataString) => {
                 }
             }
 
-            if (data.is_terminated === true && data.time > 0) {
+            if (dataJson.is_terminated === true && dataJson.time > 0) {
                 stateManager.clearPendingSteps();
                 if (stateManager.getStatus() !== 'TERMINATED') {
                     stateManager.setStatus('TERMINATED');

@@ -128,10 +128,15 @@ export class GraphRenderer {
         } else if (node.type === 'TelemetryGraph' && data) {
             const worker = this.nodeWorkers.get(node.id);
             if (worker) {
-                worker.postMessage({
-                    type: 'data',
-                    telemetry: data.data || data.telemetry || data.percent
-                });
+                if (data instanceof ArrayBuffer) {
+                    const bufferCopy = data.slice(0);
+                    worker.postMessage(bufferCopy, [bufferCopy]);
+                } else {
+                    worker.postMessage({
+                        type: 'data',
+                        telemetry: data.data || data.telemetry || data.percent
+                    });
+                }
             }
         }
     }

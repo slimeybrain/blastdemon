@@ -212,7 +212,9 @@ export class StateManager {
 
         if (!nodeId) return;
 
-        this.telemetryStore.set(nodeId, data);
+        if (!(data instanceof ArrayBuffer)) {
+            this.telemetryStore.set(nodeId, data);
+        }
         this.notifyTelemetryUpdate(nodeId, data);
 
         const state = this.getCurrentState();
