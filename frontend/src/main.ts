@@ -141,7 +141,7 @@ document.addEventListener('click', (e) => {
 
     if (target.id === 'exec-end-btn') {
         stateManager.clearPendingSteps();
-        networkManager.send({ command: "EXEC_END" });
+        networkManager.send({ command: "EXEC_ALL" });
         stateManager.setStatus('RUNNING');
     }
 
@@ -185,7 +185,7 @@ networkManager.onMessage((data) => {
         const progressBar = document.getElementById('progress-bar');
 
         if (dataJson.type === 'resource_pulse') {
-            stateManager.pushTelemetry('system', dataJson);
+            layoutManager.broadcastResourceData(dataJson);
             return;
         }
 

@@ -3,146 +3,83 @@ import { StateManager } from './state-manager.js';
 export class ResourceManager {
     public container: HTMLElement;
     private stateManager: StateManager;
-    private telemetryListener: (nodeId: string, data: any) => void;
+    private panelId: string;
 
-    private cpuHistory: number[] = [];
-    private ramHistory: number[] = [];
-    private historyLimit = 100;
-
-    constructor(container: HTMLElement, stateManager: StateManager) {
+    constructor(container: HTMLElement, stateManager: StateManager, panelId: string) {
         if (!container) {
             throw new Error("[RESOURCE MANAGER] Initialization failed: Target container is undefined.");
         }
 
         this.stateManager = stateManager;
+        this.panelId = panelId;
 
         // Now safely perform your DOM appending
         this.container = document.createElement('div');
         this.container.className = 'resource-grid';
         container.appendChild(this.container);
-        this.telemetryListener = (_nodeId, data) => {
-            if (data && data.type === 'resource_pulse') {
-                this.update(data);
-            }
-        };
 
-        this.stateManager.onTelemetryUpdate(this.telemetryListener);
         this.initUI();
     }
 
     public destroy(): void {
-        this.stateManager.offTelemetryUpdate(this.telemetryListener);
         this.container.remove();
     }
 
     private initUI(): void {
         this.container.innerHTML = `
-            <div class="resource-card" id="res-gpu">
-                <div class="resource-label">GPU LOAD</div>
-                <div class="meter-container">
-                    <svg class="meter-svg" width="80" height="80">
-                        <circle class="meter-bg" cx="40" cy="40" r="35"></circle>
-                        <circle class="meter-fill" cx="40" cy="40" r="35" stroke-dasharray="219.9" stroke-dashoffset="219.9"></circle>
-                    </svg>
-                    <div class="meter-value">0%</div>
-                </div>
+    <div class="resource-panel-inner" style="padding: 12px; display: flex; flex-direction: column; gap: 12px; min-width: 0; min-height: 0; box-sizing: border-box; height: 100%; overflow-y: auto;">
+        <div class="metric-row" style="display: flex; flex-direction: column; gap: 4px;">
+            <div style="display: flex; justify-content: space-between; font-size: 11px; font-weight: bold; color: #94a3b8;">
+                <span>GPU UTILIZATION</span>
+                <span id="${this.panelId}-gpu-txt">0%</span>
             </div>
-            <div class="resource-card" id="res-vram">
-                <div class="resource-label">VRAM LOAD</div>
-                <div class="meter-container">
-                    <svg class="meter-svg" width="80" height="80">
-                        <circle class="meter-bg" cx="40" cy="40" r="35"></circle>
-                        <circle class="meter-fill" cx="40" cy="40" r="35" stroke-dasharray="219.9" stroke-dashoffset="219.9"></circle>
-                    </svg>
-                    <div class="meter-value">0%</div>
-                </div>
+            <div style="width: 100%; height: 6px; background: #1e293b; border-radius: 3px; overflow: hidden;">
+                <div id="${this.panelId}-gpu-bar" style="width: 0%; height: 100%; background: #3b82f6; transition: width 0.1s ease;"></div>
             </div>
-            <div class="resource-card" id="res-temp">
-                <div class="resource-label">CORE TEMP</div>
-                <div class="meter-container">
-                    <svg class="meter-svg" width="80" height="80">
-                        <circle class="meter-bg" cx="40" cy="40" r="35"></circle>
-                        <circle class="meter-fill" cx="40" cy="40" r="35" stroke-dasharray="219.9" stroke-dashoffset="219.9" style="stroke: #ef4444"></circle>
-                    </svg>
-                    <div class="meter-value">0°C</div>
-                </div>
+        </div>
+        <div class="metric-row" style="display: flex; flex-direction: column; gap: 4px;">
+            <div style="display: flex; justify-content: space-between; font-size: 11px; font-weight: bold; color: #94a3b8;">
+                <span>VRAM ALLOCATION</span>
+                <span id="${this.panelId}-vram-txt">0%</span>
             </div>
-            <div class="resource-card">
-                <div class="resource-label">CPU & RAM HISTORY</div>
-                <div class="sparkline-container">
-                    <canvas id="resource-sparkline" class="sparkline-canvas"></canvas>
-                </div>
+            <div style="width: 100%; height: 6px; background: #1e293b; border-radius: 3px; overflow: hidden;">
+                <div id="${this.panelId}-vram-bar" style="width: 0%; height: 100%; background: #10b981; transition: width 0.1s ease;"></div>
             </div>
-        `;
+        </div>
+        <div class="metric-row" style="display: flex; flex-direction: column; gap: 4px;">
+            <div style="display: flex; justify-content: space-between; font-size: 11px; font-weight: bold; color: #94a3b8;">
+                <span>CORE TEMPERATURE</span>
+                <span id="${this.panelId}-temp-txt">0°C</span>
+            </div>
+            <div style="width: 100%; height: 6px; background: #1e293b; border-radius: 3px; overflow: hidden;">
+                <div id="${this.panelId}-temp-bar" style="width: 0%; height: 100%; background: #ef4444; transition: width 0.1s ease;"></div>
+            </div>
+        </div>
+    </div>
+  `;
     }
 
-    private update(data: any): void {
-        this.updateMeter('res-gpu', data.gpu_util, '%');
-        this.updateMeter('res-vram', data.vram_util, '%');
-        this.updateMeter('res-temp', data.gpu_temp, '°C', 90);
+    public updateMetrics(data: { gpu_util: number, vram_util: number, gpu_temp: number }) {
+        const gpuBar = document.getElementById(`${this.panelId}-gpu-bar`);
+        const gpuTxt = document.getElementById(`${this.panelId}-gpu-txt`);
+        const vramBar = document.getElementById(`${this.panelId}-vram-bar`);
+        const vramTxt = document.getElementById(`${this.panelId}-vram-txt`);
+        const tempBar = document.getElementById(`${this.panelId}-temp-bar`);
+        const tempTxt = document.getElementById(`${this.panelId}-temp-txt`);
 
-        this.cpuHistory.push(data.cpu);
-        this.ramHistory.push(data.ram / (1024 * 1024 * 1024)); // GB
-
-        if (this.cpuHistory.length > this.historyLimit) this.cpuHistory.shift();
-        if (this.ramHistory.length > this.historyLimit) this.ramHistory.shift();
-
-        this.drawSparkline();
-    }
-
-    private updateMeter(id: string, value: number, unit: string, stressThreshold: number = 90): void {
-        const card = document.getElementById(id);
-        if (!card) return;
-
-        const fill = card.querySelector('.meter-fill') as SVGCircleElement;
-        const text = card.querySelector('.meter-value') as HTMLElement;
-
-        if (fill) {
-            const circumference = 2 * Math.PI * 35;
-            const offset = circumference - (value / 100) * circumference;
-            fill.style.strokeDashoffset = offset.toString();
+        if (gpuBar && gpuTxt) {
+            gpuBar.style.width = `${Math.min(100, Math.max(0, data.gpu_util))}%`;
+            gpuTxt.innerText = `${Math.round(data.gpu_util)}%`;
         }
-
-        if (text) {
-            text.textContent = `${Math.round(value)}${unit}`;
+        if (vramBar && vramTxt) {
+            vramBar.style.width = `${Math.min(100, Math.max(0, data.vram_util))}%`;
+            vramTxt.innerText = `${Math.round(data.vram_util)}%`;
         }
-
-        card.classList.toggle('is-stressed', value >= stressThreshold);
+        if (tempBar && tempTxt) {
+            // Map assuming standard 100°C visual maximum threshold
+            tempBar.style.width = `${Math.min(100, Math.max(0, data.gpu_temp))}%`;
+            tempTxt.innerText = `${Math.round(data.gpu_temp)}°C`;
+        }
     }
 
-    private drawSparkline(): void {
-        const canvas = document.getElementById('resource-sparkline') as HTMLCanvasElement;
-        if (!canvas) return;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return;
-
-        // Auto-resize
-        if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) {
-            canvas.width = canvas.clientWidth;
-            canvas.height = canvas.clientHeight;
-        }
-
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-        // Draw CPU (Cyan)
-        this.drawPath(ctx, this.cpuHistory, 100, '#00f0ff');
-        // Draw RAM (Green) - Normalized to 16GB for mock visualization
-        this.drawPath(ctx, this.ramHistory, 16, '#16a34a');
-    }
-
-    private drawPath(ctx: CanvasRenderingContext2D, data: number[], max: number, color: string): void {
-        if (data.length < 2) return;
-        ctx.beginPath();
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1.5;
-
-        const step = ctx.canvas.width / (this.historyLimit - 1);
-        for (let i = 0; i < data.length; i++) {
-            const x = i * step;
-            const y = ctx.canvas.height - (data[i] / max) * ctx.canvas.height;
-            if (i === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-        }
-        ctx.stroke();
-    }
 }

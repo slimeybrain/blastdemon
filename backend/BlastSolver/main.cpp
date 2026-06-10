@@ -245,6 +245,27 @@ int main() {
                     worker = std::thread(worker_thread_func, solver.get(), cfl, &t);
                 }
 
+            } else if (command == "EXEC_ALL") {
+                if (!solver) continue;
+                std::cout << "[SYSTEM] Processing full simulation path..." << std::endl;
+                auto last_telemetry_time = std::chrono::steady_clock::now();
+                while (!solver->is_terminated()) {
+                    double cfl = get_robust_float(msg, "cfl", 0.4);
+                    double dt = solver->computeStepSize(cfl);
+                    solver->step(dt);
+                    t += dt;
+
+                    auto now = std::chrono::steady_clock::now();
+                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_telemetry_time).count();
+                    if (elapsed >= 33) {
+                        emit_telemetry(*solver, t, false);
+                        emit_resource_pulse();
+                        last_telemetry_time = now;
+                    }
+                }
+                emit_telemetry(*solver, t, true); // Final frame safety catch
+                std::cout << "[SUCCESS] Simulation cycle complete." << std::endl;
+
             } else if (command == "PAUSE") {
                 cancel_flag = true;
                 target_steps_remaining = 0;

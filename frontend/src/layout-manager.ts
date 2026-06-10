@@ -20,6 +20,14 @@ export class LayoutManager {
         this.stateManager.onStateChange((state) => this.render(state));
     }
 
+    public broadcastResourceData(data: any): void {
+        this.components.forEach(comp => {
+            if (comp.type === 'RESOURCE_MANAGER') {
+                comp.instance.updateMetrics(data);
+            }
+        });
+    }
+
     public render(state: SimulationState): void {
         // Optimization: only re-render if layout structure OR nodes (for dropdowns) changed
         const layoutJson = JSON.stringify(state.layout);
@@ -336,7 +344,7 @@ export class LayoutManager {
             // Clear any loading text safely
             container.innerHTML = '';
             // Pass the container strictly to the constructor
-            const resourceManager = new ResourceManager(container, this.stateManager);
+            const resourceManager = new ResourceManager(container, this.stateManager, node.id);
             comp = { type: 'RESOURCE_MANAGER', instance: resourceManager };
             this.components.set(node.id, comp);
         } else {
