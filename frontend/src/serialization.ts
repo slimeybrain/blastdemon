@@ -4,7 +4,7 @@ export function serializeSimulationState(state: SimulationState): string {
     const strippedNodes = state.nodes.map(({ x, y, ...rest }) => rest);
     const dag = {
         nodes: strippedNodes,
-        edges: state.edges
+        connections: state.connections
     };
     return JSON.stringify({
         command: "EXECUTE",
@@ -39,6 +39,6 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         ...flattenedParams,
         // Full DAG for Broker tracking
         nodes: strippedNodes,
-        edges: state.edges
+        connections: state.connections
     });
 }

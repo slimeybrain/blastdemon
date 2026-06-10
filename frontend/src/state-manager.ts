@@ -35,7 +35,7 @@ export class StateManager {
         // We don't necessarily want to reset status on EVERY state change (like layout changes)
         // But the previous implementation did it. I'll keep it for now but might need to rethink.
         // Actually, if I change layout, simulation shouldn't stop.
-        // Let's only set to UNINITIALIZED if nodes or edges changed.
+        // Let's only set to UNINITIALIZED if nodes or connections changed.
         // For now, I'll stick to previous behavior to be safe, or refine it.
         this.notifyListeners();
     }
@@ -219,9 +219,9 @@ export class StateManager {
         if (!state) return;
 
         // Propagate to connected nodes
-        const telemetryEdges = state.edges.filter(e => e.fromNode === nodeId);
-        telemetryEdges.forEach(edge => {
-            const targetNode = state.nodes.find(n => n.id === edge.toNode);
+        const telemetryConnections = state.connections.filter(e => e.fromNode === nodeId);
+        telemetryConnections.forEach(connection => {
+            const targetNode = state.nodes.find(n => n.id === connection.toNode);
             if (targetNode) {
                 if (targetNode.type === 'TelemetryGraph') {
                     // Graphs accept both binary (new) and legacy JSON (compatibility)

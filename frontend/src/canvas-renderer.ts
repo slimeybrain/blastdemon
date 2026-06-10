@@ -1,4 +1,4 @@
-import { SimulationState, Node, Edge, Port } from './types.js';
+import { SimulationState, Node, Connection, Port } from './types.js';
 import { StateManager } from './state-manager.js';
 
 export class CanvasRenderer {
@@ -147,7 +147,7 @@ export class CanvasRenderer {
 
         this.drawGrid();
 
-        state.edges.forEach(edge => this.drawEdge(edge, state));
+        state.connections.forEach(edge => this.drawConnection(edge, state));
         state.nodes.forEach(node => this.drawNode(node));
     }
 
@@ -235,7 +235,7 @@ export class CanvasRenderer {
         this.ctx.textAlign = 'left'; // Reset
     }
 
-    private drawEdge(edge: Edge, state: SimulationState): void {
+    private drawConnection(edge: Connection, state: SimulationState): void {
         const fromNode = state.nodes.find(n => n.id === edge.fromNode);
         const toNode = state.nodes.find(n => n.id === edge.toNode);
 

@@ -1,4 +1,4 @@
-import { SimulationState, Node, Edge, Port, NodeType } from './types.js';
+import { SimulationState, Node, Connection, Port, NodeType } from './types.js';
 import { StateManager } from './state-manager.js';
 
 export class GraphRenderer {
@@ -305,7 +305,7 @@ export class GraphRenderer {
             const state = this.stateManager.getCurrentState();
             if (state) {
                 state.nodes = state.nodes.filter(n => n.id !== this.selectedNodeId);
-                state.edges = state.edges.filter(edge => edge.fromNode !== this.selectedNodeId && edge.toNode !== this.selectedNodeId);
+                state.connections = state.connections.filter(edge => edge.fromNode !== this.selectedNodeId && edge.toNode !== this.selectedNodeId);
                 this.selectNode(null);
                 this.stateManager.pushState(state);
             }
@@ -443,7 +443,7 @@ export class GraphRenderer {
         const state = this.stateManager.getCurrentState();
         if (!state) return;
         this.syncNodes(state);
-        this.updateEdges(state);
+        this.updateConnections(state);
         this.renderHoverHighlights();
     }
 
@@ -584,7 +584,7 @@ export class GraphRenderer {
                         if (this.isDraggingWire && this.dragSourceNodeId && this.dragSourcePortId) {
                             const state = this.stateManager.getCurrentState();
                             if (state) {
-                                const exists = state.edges.some(edge =>
+                                const exists = state.connections.some(edge =>
                                     edge.fromNode === this.dragSourceNodeId &&
                                     edge.fromPort === this.dragSourcePortId &&
                                     edge.toNode === node.id &&
@@ -592,7 +592,7 @@ export class GraphRenderer {
                                 );
 
                                 if (!exists) {
-                                    state.edges.push({
+                                    state.connections.push({
                                         fromNode: this.dragSourceNodeId,
                                         fromPort: this.dragSourcePortId,
                                         toNode: node.id,
@@ -653,9 +653,9 @@ export class GraphRenderer {
         });
     }
 
-    private updateEdges(state: SimulationState): void {
+    private updateConnections(state: SimulationState): void {
         this.svg.innerHTML = '';
-        state.edges.forEach(edge => {
+        state.connections.forEach(edge => {
             const fromNode = state.nodes.find(n => n.id === edge.fromNode);
             const toNode = state.nodes.find(n => n.id === edge.toNode);
             if (!fromNode || !toNode) return;
@@ -730,15 +730,15 @@ export class GraphRenderer {
         });
 
         let frames = 0;
-        const animateEdges = () => {
-            this.updateEdges(state);
+        const animateConnections = () => {
+            this.updateConnections(state);
             frames++;
-            if (frames < 30) requestAnimationFrame(animateEdges);
+            if (frames < 30) requestAnimationFrame(animateConnections);
             else {
                 nodes.forEach(n => n.style.transition = '');
                 this.stateManager.pushState(state);
             }
         };
-        requestAnimationFrame(animateEdges);
+        requestAnimationFrame(animateConnections);
     }
 }
