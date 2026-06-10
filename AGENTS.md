@@ -1,3 +1,5 @@
+# Master Agent Directives. All AI coding assistants (Jules, Copilot, etc.) MUST adhere to these architectural rules before modifying any code.
+
 # Project Name: BlastDaemon (Enterprise CFD Framework)
 # Core Architecture: Zero-Dependency Broker/Worker & SSOT Node-Graph
 
