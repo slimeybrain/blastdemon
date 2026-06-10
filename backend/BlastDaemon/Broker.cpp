@@ -333,7 +333,7 @@ void process_json(const std::string& json_str, SOCKET_TYPE client_fd, std::share
         } else {
             std::cerr << "Failed to start BlastSolver" << std::endl;
         }
-    } else if (command == "STEP" || command == "TERMINATE") {
+    } else if (command == "STEP" || command == "TERMINATE" || command == "EXEC_ALL" || command == "EXEC_END") {
         if (active_process && active_process->isRunning()) {
             active_process->writeStdin(json_str + "\n\n");
         } else {
