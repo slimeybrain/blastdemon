@@ -16,6 +16,38 @@ const rAF = typeof requestAnimationFrame !== 'undefined'
     ? requestAnimationFrame
     : (cb: Function) => setTimeout(() => cb(Date.now()), 1000 / 60);
 
+function updateAutoScale() {
+    if (!rawData || rawData.length === 0) return;
+
+    let min = Infinity;
+    let max = -Infinity;
+    let hasValidData = false;
+
+    for (let i = 0; i < rawData.length; i++) {
+        const val = rawData[i];
+        if (isFinite(val)) {
+            if (val < min) min = val;
+            if (val > max) max = val;
+            hasValidData = true;
+        }
+    }
+
+    if (hasValidData) {
+        if (min === max) {
+            min -= 1;
+            max += 1;
+        }
+        const padding = (max - min) * 0.1 || 1;
+        displayMin = min - padding;
+        displayMax = max + padding;
+        range = displayMax - displayMin;
+    } else {
+        displayMin = 0;
+        displayMax = 1;
+        range = 1;
+    }
+}
+
 function render() {
     try {
         if (!ctx || !canvas || width <= 0 || height <= 0 || !rawData || rawData.length === 0) {
@@ -28,17 +60,16 @@ function render() {
         ctx.clearRect(0, 0, width, height);
 
         // Neon Styling
-        ctx.strokeStyle = chartColor;
-        ctx.lineWidth = 1;
+        ctx.strokeStyle = '#00ff00'; // Force Bright Green
+        ctx.lineWidth = 2;
+        ctx.beginPath();
 
         // Min/Max Decimation (Pixel Binning)
         // We assume rawData is purely Y values.
-        const chunkSize = Math.max(1, Math.floor(numPoints / width));
-
-        ctx.beginPath();
+        let first = true;
         for (let x = 0; x < width; x++) {
-            const start = x * chunkSize;
-            const end = Math.min(start + chunkSize, numPoints);
+            const start = Math.floor(x * numPoints / width);
+            const end = Math.max(start + 1, Math.floor((x + 1) * numPoints / width));
             if (start >= numPoints) break;
 
             let minY = pressureArray[start];
@@ -46,7 +77,7 @@ function render() {
 
             for (let i = start + 1; i < end; i++) {
                 const val = pressureArray[i];
-                if (isNaN(val)) continue;
+                if (!isFinite(val)) continue;
                 if (val < minY) minY = val;
                 if (val > maxY) maxY = val;
             }
@@ -60,7 +91,18 @@ function render() {
             const yTop = height - (normMaxY * height);
             const yBottom = height - (normMinY * height);
 
-            ctx.moveTo(x, yTop);
+            if (isNaN(x) || isNaN(yTop) || isNaN(yBottom)) {
+                console.error("[WORKER] Calculated NaN coordinate!", { x, yTop, yBottom });
+                ctx.stroke(); // Finish current path
+                return;
+            }
+
+            if (first) {
+                ctx.moveTo(x, yTop);
+                first = false;
+            } else {
+                ctx.lineTo(x, yTop);
+            }
             ctx.lineTo(x, yBottom);
         }
         ctx.stroke();
@@ -79,32 +121,12 @@ self.onmessage = (event) => {
     if (data instanceof ArrayBuffer) {
         rawData = new Float32Array(data);
 
-        // Calculate auto-scaling ONCE per data update
+        console.warn(`[WORKER] Received ArrayBuffer. Length: ${rawData.length}`);
         if (rawData.length > 0) {
-            let min = Infinity;
-            let max = -Infinity;
-            let hasValidData = false;
-
-            for (let i = 0; i < rawData.length; i++) {
-                const val = rawData[i];
-                if (isFinite(val)) {
-                    if (val < min) min = val;
-                    if (val > max) max = val;
-                    hasValidData = true;
-                }
-            }
-
-            if (hasValidData) {
-                const padding = (max - min) * 0.1 || 1;
-                displayMin = min - padding;
-                displayMax = max + padding;
-                range = displayMax - displayMin;
-            } else {
-                displayMin = 0;
-                displayMax = 1;
-                range = 1;
-            }
+            console.warn(`[WORKER] First 4 bytes: ${rawData[0]}, ${rawData[1]}, ${rawData[2]}, ${rawData[3]}`);
         }
+
+        updateAutoScale();
         return;
     }
 
@@ -142,9 +164,11 @@ self.onmessage = (event) => {
         const pressureData = data.data || data.telemetry || data.percent;
         if (pressureData && Array.isArray(pressureData)) {
             rawData = new Float32Array(pressureData);
+            updateAutoScale();
         } else if (typeof pressureData === 'number') {
             // Some events might just send a single number (e.g. progress)
             rawData = new Float32Array([pressureData]);
+            updateAutoScale();
         }
     }
 };
