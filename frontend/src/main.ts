@@ -36,7 +36,7 @@ const initialState: SimulationState = {
             parameters: { cfl: 0.4, flux_scheme: 'AUSM+', spatial_order: 2, temporal_order: 2, output_mode: 'By Time', output_interval: 0.0001 }
         }
     ],
-    edges: [
+    connections: [
         { fromNode: 'node-mesh', fromPort: 'out', toNode: 'node-painter', toPort: 'mesh' },
         { fromNode: 'node-air', fromPort: 'out', toNode: 'node-painter', toPort: 'air' },
         { fromNode: 'node-explosive', fromPort: 'out', toNode: 'node-painter', toPort: 'explosive' },
@@ -116,7 +116,9 @@ document.addEventListener('click', (e) => {
         const state = stateManager.getCurrentState();
         if (state) {
             stateManager.clearPendingSteps();
-            networkManager.send(serializeForSolver(state, "INIT"));
+            const payload = serializeForSolver(state, "INIT");
+            console.log("Sending INIT payload:", payload);
+            networkManager.send(payload);
             stateManager.setStatus('INITIALIZED');
         }
     }

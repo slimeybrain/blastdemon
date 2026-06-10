@@ -18,7 +18,7 @@ export interface Node {
     outputs: Port[];
 }
 
-export interface Edge {
+export interface Connection {
     fromNode: string;
     fromPort: string;
     toNode: string;
@@ -50,6 +50,6 @@ export type LayoutNode = SplitNode | PanelNode;
 
 export interface SimulationState {
     nodes: Node[];
-    edges: Edge[];
+    connections: Connection[];
     layout: LayoutNode;
 }

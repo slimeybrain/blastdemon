@@ -216,19 +216,32 @@ export class NodeViewer {
 
         const canvasCont = document.createElement('div');
         canvasCont.className = 'expanded-graph-container';
+        canvasCont.style.flex = "1";
+        canvasCont.style.position = "relative";
+        canvasCont.style.width = "100%";
+        canvasCont.style.height = "100%";
+        canvasCont.style.display = "flex";
+        canvasCont.style.flexDirection = "column";
+        canvasCont.style.overflow = "hidden";
         this.container.appendChild(canvasCont);
 
         this.chartCanvas = document.createElement('canvas');
+        this.chartCanvas.style.width = "100%";
+        this.chartCanvas.style.height = "100%";
+        this.chartCanvas.style.display = "block";
         canvasCont.appendChild(this.chartCanvas);
 
-        // Initialize internal resolution before transfer
-        const rect = canvasCont.getBoundingClientRect();
-        this.chartCanvas.width = rect.width || 800;
-        this.chartCanvas.height = rect.height || 600;
-
-        const offscreen = (this.chartCanvas as any).transferControlToOffscreen();
         this.chartWorker = new Worker(new URL('./ChartWorker.ts', import.meta.url), { type: 'module' });
-        this.chartWorker.postMessage({ type: 'init', canvas: offscreen }, [offscreen] as any);
+
+        // Wait a microtask for the DOM to apply the inline styles
+        setTimeout(() => {
+            if (!this.chartCanvas || !this.chartWorker) return;
+            const rect = canvasCont.getBoundingClientRect();
+            this.chartCanvas.width = rect.width || 800;
+            this.chartCanvas.height = rect.height || 600;
+            const offscreen = (this.chartCanvas as any).transferControlToOffscreen();
+            this.chartWorker.postMessage({ type: 'init', canvas: offscreen }, [offscreen] as any);
+        }, 0);
 
         const ro = new ResizeObserver(entries => {
             for (const entry of entries) {
