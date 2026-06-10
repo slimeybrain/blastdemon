@@ -217,8 +217,8 @@ int main() {
 
             } else if (command == "STEP") {
                 if (!global_solver) continue;
-                global_target_steps = msg.at("steps").get<int>();
-                global_cfl = msg.at("cfl").get<double>();
+                global_target_steps = msg.value("steps", 1);
+                global_cfl = msg.value("cfl", global_cfl.load());
                 global_exec_until_end = false;
 
                 if (!sim_running) {
@@ -232,7 +232,7 @@ int main() {
 
             } else if (command == "EXEC_ALL" || command == "EXEC_END") {
                 if (!global_solver) continue;
-                global_cfl = msg.at("cfl").get<double>();
+                global_cfl = msg.value("cfl", global_cfl.load());
                 global_exec_until_end = true;
 
                 if (!sim_running) {
