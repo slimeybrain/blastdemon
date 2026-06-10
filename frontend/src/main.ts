@@ -104,6 +104,13 @@ networkManager.onOpen(() => {
     if (state) networkManager.send(serializeSimulationState(state));
 });
 
+const getCFL = () => {
+    const state = stateManager.getCurrentState();
+    if (!state) return 0.4;
+    const solverNode = state.nodes.find(n => n.type === 'CFDSolver');
+    return solverNode ? Number(solverNode.parameters.cfl || 0.4) : 0.4;
+};
+
 // Event Delegation for Simulation Controls (since they are injected dynamically)
 document.addEventListener('click', (e) => {
     const target = e.target as HTMLElement;
@@ -129,11 +136,12 @@ document.addEventListener('click', (e) => {
     }
 
     const stepMatch = target.id.match(/exec-(\d+)-btn/);
+
     if (stepMatch) {
         const steps = parseInt(stepMatch[1]);
         stateManager.addPendingSteps(steps);
         if (stateManager.getStatus() !== 'RUNNING') {
-            networkManager.send({ command: "STEP", steps: stateManager.getPendingSteps() });
+            networkManager.send({ command: "STEP", steps: stateManager.getPendingSteps(), cfl: getCFL() });
             stateManager.clearPendingSteps();
             stateManager.setStatus('RUNNING');
         }
@@ -141,13 +149,13 @@ document.addEventListener('click', (e) => {
 
     if (target.id === 'exec-end-btn') {
         stateManager.clearPendingSteps();
-        networkManager.send({ command: "EXEC_ALL" });
+        networkManager.send({ command: "EXEC_ALL", cfl: getCFL() });
         stateManager.setStatus('RUNNING');
     }
 
     if (target.id === 'play-btn') {
         stateManager.setStatus('RUNNING');
-        networkManager.send({ command: "STEP", steps: 10000 });
+        networkManager.send({ command: "STEP", steps: 10000, cfl: getCFL() });
     }
 
     if (target.id === 'pause-btn') {
@@ -203,7 +211,7 @@ networkManager.onMessage((data) => {
             if (stateManager.getStatus() === 'RUNNING' && dataJson.is_terminated !== true) {
                 const pending = stateManager.getPendingSteps();
                 if (pending > 0) {
-                    networkManager.send({ command: "STEP", steps: pending });
+                    networkManager.send({ command: "STEP", steps: pending, cfl: getCFL() });
                     stateManager.clearPendingSteps();
                 } else {
                     stateManager.setStatus('PAUSED');
