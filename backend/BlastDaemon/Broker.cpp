@@ -241,6 +241,9 @@ std::string get_json_value(const std::string& json, const std::string& key) {
 
 void process_json(const std::string& json, SOCKET_TYPE client_fd, std::shared_ptr<Process>& active_process) {
     std::string command = get_json_value(json, "command");
+    if (command == "INIT") {
+        std::cout << "[DEBUG] RAW BROKER RECEIVE: " << json << std::endl;
+    }
 
     if (command == "STOP") {
         std::cout << "--- STOP COMMAND RECEIVED ---" << std::endl;
@@ -373,6 +376,8 @@ void process_json(const std::string& json, SOCKET_TYPE client_fd, std::shared_pt
                 std::cout << "Mapped Node: ID=" << n.id << ", Type=" << n.type << std::endl;
             } catch (const std::exception& e) {
                 std::cerr << "[JSON ERROR] Failed to map node at pos " << pos << ": " << e.what() << std::endl;
+                pos = end_obj + 1;
+                continue;
             }
 
             pos = end_obj + 1;
