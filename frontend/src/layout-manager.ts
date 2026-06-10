@@ -248,7 +248,7 @@ export class LayoutManager {
                 this.renderExecutionManager(container);
                 break;
             case 'RESOURCE_MANAGER':
-                this.renderResourceManager(container);
+                this.renderResourceManager(node, container);
                 break;
             case 'TELEMETRY_TEXT':
                 container.innerHTML = '<div style="padding:10px">Telemetry Text (Move to Node Graph to see per-node logs)</div>';
@@ -333,8 +333,11 @@ export class LayoutManager {
     private renderResourceManager(node: PanelNode, container: HTMLElement): void {
         let comp = this.components.get(node.id);
         if (!comp) {
-            const manager = new ResourceManager(container, this.stateManager);
-            comp = { type: 'RESOURCE_MANAGER', instance: manager };
+            // Clear any loading text safely
+            container.innerHTML = '';
+            // Pass the container strictly to the constructor
+            const resourceManager = new ResourceManager(container, this.stateManager);
+            comp = { type: 'RESOURCE_MANAGER', instance: resourceManager };
             this.components.set(node.id, comp);
         } else {
             container.appendChild(comp.instance.container);
