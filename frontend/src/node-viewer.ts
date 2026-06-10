@@ -215,15 +215,16 @@ export class NodeViewer {
         this.container.appendChild(header);
 
         const canvasCont = document.createElement('div');
-        canvasCont.style.flex = '1';
-        canvasCont.style.background = '#050505';
-        canvasCont.style.position = 'relative';
+        canvasCont.className = 'expanded-graph-container';
+        this.container.appendChild(canvasCont);
 
         this.chartCanvas = document.createElement('canvas');
-        this.chartCanvas.style.width = '100%';
-        this.chartCanvas.style.height = '100%';
         canvasCont.appendChild(this.chartCanvas);
-        this.container.appendChild(canvasCont);
+
+        // Initialize internal resolution before transfer
+        const rect = canvasCont.getBoundingClientRect();
+        this.chartCanvas.width = rect.width || 800;
+        this.chartCanvas.height = rect.height || 600;
 
         const offscreen = (this.chartCanvas as any).transferControlToOffscreen();
         this.chartWorker = new Worker(new URL('./ChartWorker.ts', import.meta.url), { type: 'module' });
@@ -231,11 +232,8 @@ export class NodeViewer {
 
         const ro = new ResizeObserver(entries => {
             for (const entry of entries) {
-                this.chartWorker?.postMessage({
-                    type: 'resize',
-                    width: entry.contentRect.width,
-                    height: entry.contentRect.height
-                });
+                const { width, height } = entry.contentRect;
+                this.chartWorker?.postMessage({ type: 'resize', width, height });
             }
         });
         ro.observe(canvasCont);
