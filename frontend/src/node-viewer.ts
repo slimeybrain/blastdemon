@@ -213,8 +213,16 @@ export class NodeViewer {
             return div;
         };
 
-        header.appendChild(createControl('Min Y:', 'number', '0', (v) => this.chartWorker?.postMessage({ type: 'setConfig', min: Number(v) })));
-        header.appendChild(createControl('Max Y:', 'number', '1000000', (v) => this.chartWorker?.postMessage({ type: 'setConfig', max: Number(v) })));
+        const minControl = createControl('Min Y:', 'number', '0', (v) => this.chartWorker?.postMessage({ type: 'setConfig', min: Number(v) }));
+        const minIn = minControl.querySelector('input')!;
+        minIn.id = `viewer-min-y-${node.id}`;
+        header.appendChild(minControl);
+
+        const maxControl = createControl('Max Y:', 'number', '1000000', (v) => this.chartWorker?.postMessage({ type: 'setConfig', max: Number(v) }));
+        const maxIn = maxControl.querySelector('input')!;
+        maxIn.id = `viewer-max-y-${node.id}`;
+        header.appendChild(maxControl);
+
         header.appendChild(createControl('Color:', 'color', '#00f0ff', (v) => this.chartWorker?.postMessage({ type: 'setConfig', color: v })));
 
         const gridLabel = document.createElement('label');
@@ -246,6 +254,15 @@ export class NodeViewer {
         wrapper.appendChild(this.chartCanvas);
 
         this.chartWorker = new Worker(new URL('./ChartWorker.ts', import.meta.url), { type: 'module' });
+
+        this.chartWorker.onmessage = (e) => {
+            if (e.data.type === 'bounds') {
+                const minInputEl = document.getElementById(`viewer-min-y-${node.id}`) as HTMLInputElement;
+                const maxInputEl = document.getElementById(`viewer-max-y-${node.id}`) as HTMLInputElement;
+                if (minInputEl) minInputEl.value = e.data.minY.toExponential(2);
+                if (maxInputEl) maxInputEl.value = e.data.maxY.toExponential(2);
+            }
+        };
 
         // Wait a microtask for the DOM to apply the inline styles
         setTimeout(() => {
@@ -282,10 +299,11 @@ export class NodeViewer {
 
     private handleTelemetry(nodeId: string, data: any): void {
         if (nodeId !== this.currentNodeId) return;
-        this.updateNodeViewerData(nodeId, data);
-        if (data instanceof ArrayBuffer && this.renderRequestId === null) {
-             // If we don't have a loop yet, force one frame if it's the only way
-             // but startRenderLoop should be running for TelemetryGraph
+        if (data instanceof ArrayBuffer) {
+            const bufferCopy = data.slice(0);
+            this.updateNodeViewerData(nodeId, bufferCopy);
+        } else {
+            this.updateNodeViewerData(nodeId, data);
         }
     }
 
