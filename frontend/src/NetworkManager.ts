@@ -57,6 +57,9 @@ export class NetworkManager {
     public send(message: string | object): void {
         if (this.socket && this.socket.readyState === WebSocket.OPEN) {
             const payload = typeof message === 'string' ? message : JSON.stringify(message);
+            if (payload.includes('"command":"INIT"')) {
+                console.warn("[DEBUG] RAW INIT PAYLOAD:", payload);
+            }
             this.socket.send(payload);
         } else {
             this.log('[System] Cannot send message: WebSocket is not connected.', 'error');
