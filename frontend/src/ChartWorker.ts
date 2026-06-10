@@ -124,7 +124,7 @@ self.onmessage = (event) => {
         width = data.width;
         height = data.height;
         // Immediate redraw for smooth scaling
-        render();
+        requestAnimationFrame(render);
         return;
     }
 

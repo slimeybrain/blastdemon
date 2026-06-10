@@ -27,6 +27,8 @@ export class NodeViewer {
         this.container.style.height = '100%';
         this.container.style.width = '100%';
         this.container.style.overflow = 'hidden';
+        this.container.style.minWidth = '0';
+        this.container.style.minHeight = '0';
         parent.appendChild(this.container);
 
         this.stateManager = stateManager;
@@ -223,6 +225,8 @@ export class NodeViewer {
         canvasCont.style.display = "flex";
         canvasCont.style.flexDirection = "column";
         canvasCont.style.overflow = "hidden";
+        canvasCont.style.minWidth = "0";
+        canvasCont.style.minHeight = "0";
         this.container.appendChild(canvasCont);
 
         this.chartCanvas = document.createElement('canvas');

@@ -338,30 +338,47 @@ void process_json(const std::string& json, SOCKET_TYPE client_fd, std::shared_pt
             if (end_obj == std::string::npos) break;
             std::string node_json = json.substr(pos, end_obj - pos + 1);
 
-            Node n;
-            n.id = get_json_value(node_json, "id");
-            n.type = get_json_value(node_json, "type");
+            try {
+                Node n;
+                n.id = get_json_value(node_json, "id");
+                n.type = get_json_value(node_json, "type");
 
-            // Extract parameters - very basic extraction
-            size_t param_pos = node_json.find("\"parameters\"");
-            if (param_pos != std::string::npos) {
-                size_t p_start = node_json.find("{", param_pos);
-                size_t p_end = node_json.find("}", p_start);
-                if (p_start != std::string::npos && p_end != std::string::npos) {
-                    std::string p_json = node_json.substr(p_start + 1, p_end - p_start - 1);
-                    // Just one parameter for demonstration
-                    size_t key_start = p_json.find("\"");
-                    if (key_start != std::string::npos) {
-                        size_t key_end = p_json.find("\"", key_start + 1);
-                        std::string key = p_json.substr(key_start + 1, key_end - key_start - 1);
-                        n.parameters[key] = get_json_value(node_json, key);
+                if (n.id.empty()) {
+                    // Try to find any ID if the key was slightly different or missing
+                    n.id = "unknown_" + std::to_string(state.nodes.size());
+                }
+
+                // Extract parameters - robust extraction for multiple keys
+                size_t param_pos = node_json.find("\"parameters\"");
+                if (param_pos != std::string::npos) {
+                    size_t p_start = node_json.find("{", param_pos);
+                    size_t p_end = node_json.find("}", p_start);
+                    if (p_start != std::string::npos && p_end != std::string::npos) {
+                        std::string p_json = node_json.substr(p_start + 1, p_end - p_start - 1);
+                        size_t k_pos = 0;
+                        while ((k_pos = p_json.find("\"", k_pos)) != std::string::npos) {
+                            size_t k_end = p_json.find("\"", k_pos + 1);
+                            if (k_end == std::string::npos) break;
+                            std::string key = p_json.substr(k_pos + 1, k_end - k_pos - 1);
+                            n.parameters[key] = get_json_value(node_json, key);
+                            k_pos = k_end + 1;
+
+                            size_t next_comma = p_json.find(",", k_pos);
+                            if (next_comma == std::string::npos) break;
+                            k_pos = next_comma + 1;
+                        }
                     }
                 }
+                state.nodes.push_back(n);
+                std::cout << "Mapped Node: ID=" << n.id << ", Type=" << n.type << std::endl;
+            } catch (const std::exception& e) {
+                std::cerr << "[JSON ERROR] Failed to map node at pos " << pos << ": " << e.what() << std::endl;
             }
-            state.nodes.push_back(n);
-            std::cout << "Mapped Node: ID=" << n.id << ", Type=" << n.type << std::endl;
+
             pos = end_obj + 1;
-            if (json.find("]", pos) < json.find("{", pos)) break;
+            size_t next_open = json.find("{", pos);
+            size_t next_close_array = json.find("]", pos);
+            if (next_close_array != std::string::npos && (next_open == std::string::npos || next_close_array < next_open)) break;
         }
     }
     std::cout << "Successfully mapped " << state.nodes.size() << " nodes to native structures." << std::endl;
