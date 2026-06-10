@@ -210,6 +210,7 @@ export class StateManager {
             const targetNode = state.nodes.find(n => n.id === edge.toNode);
             if (targetNode) {
                 if (targetNode.type === 'TelemetryGraph') {
+                    // Graphs accept both binary (new) and legacy JSON (compatibility)
                     this.telemetryStore.set(targetNode.id, data);
                     this.notifyTelemetryUpdate(targetNode.id, data);
                 } else if (targetNode.type === 'TelemetryText') {

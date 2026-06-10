@@ -2,7 +2,7 @@ export class NetworkManager {
     private socket: WebSocket | null = null;
     private url: string;
     private terminal: HTMLElement | null;
-    private messageCallbacks: ((data: string) => void)[] = [];
+    private messageCallbacks: ((data: string | ArrayBuffer) => void)[] = [];
     private openCallbacks: (() => void)[] = [];
     private reconnectTimeout: number = 3000;
     private isManuallyClosed: boolean = false;
@@ -16,6 +16,7 @@ export class NetworkManager {
     public connect(): void {
         this.isManuallyClosed = false;
         this.socket = new WebSocket(this.url);
+        this.socket.binaryType = "arraybuffer";
 
         this.socket.onopen = () => {
             this.log('[System] WebSocket Connected to ' + this.url, 'success');
@@ -23,25 +24,19 @@ export class NetworkManager {
         };
 
         this.socket.onmessage = (event) => {
-            try {
-                const data = JSON.parse(event.data);
-                if (data.type === 'TELEMETRY' || data.type === 'progress') {
-                    // Handled by stateManager via main.ts listener usually, but instructed to route here
-                    // Actually, the plan says "route TELEMETRY and progress payloads to stateManager.pushTelemetry(data)"
-                    // But NetworkManager doesn't have a reference to stateManager.
-                    // I'll check main.ts to see how it's wired.
+            if (typeof event.data === "string") {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'IO_SUCCESS') {
+                        const formattedTime = (typeof data.time === 'number') ? data.time.toExponential(6) : data.time;
+                        this.log(`[System] Frame written to disk at t=${formattedTime}s`, 'system');
+                    } else if (data.type !== 'TELEMETRY' && data.type !== 'progress') {
+                        this.log(JSON.stringify(data), 'default');
+                    }
+                } catch (e) {
+                    this.log(event.data, 'default');
                 }
-
-                if (data.type === 'IO_SUCCESS') {
-                    const formattedTime = (typeof data.time === 'number') ? data.time.toExponential(6) : data.time;
-                    this.log(`[System] Frame written to disk at t=${formattedTime}s`, 'system');
-                } else if (data.type !== 'TELEMETRY' && data.type !== 'progress') {
-                    this.log(JSON.stringify(data), 'default');
-                }
-            } catch (e) {
-                this.log(event.data, 'default');
             }
-
             this.messageCallbacks.forEach(callback => callback(event.data));
         };
 
@@ -67,7 +62,7 @@ export class NetworkManager {
         }
     }
 
-    public onMessage(callback: (data: string) => void): void {
+    public onMessage(callback: (data: string | ArrayBuffer) => void): void {
         this.messageCallbacks.push(callback);
     }
 

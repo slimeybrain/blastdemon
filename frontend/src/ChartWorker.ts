@@ -5,8 +5,83 @@ let ctx: OffscreenCanvasRenderingContext2D | null = null;
 let width = 0;
 let height = 0;
 
+let rawData: Float32Array | null = null;
+let chartColor = '#00f0ff';
+let displayMin = 0;
+let displayMax = 1;
+let range = 1;
+
+// Polyfill requestAnimationFrame for Worker if needed
+const rAF = typeof requestAnimationFrame !== 'undefined'
+    ? requestAnimationFrame
+    : (cb: Function) => setTimeout(() => cb(Date.now()), 1000 / 60);
+
+function render() {
+    if (!ctx || !canvas || width <= 0 || height <= 0 || !rawData || rawData.length === 0) {
+        rAF(render);
+        return;
+    }
+
+    const pressureArray = rawData;
+    const numPoints = pressureArray.length;
+    ctx.clearRect(0, 0, width, height);
+
+    // Neon Styling
+    ctx.strokeStyle = chartColor;
+    ctx.lineWidth = 1;
+    // Min/Max Decimation (Pixel Binning)
+    const chunkSize = Math.max(1, Math.floor(numPoints / width));
+
+    ctx.beginPath();
+    for (let x = 0; x < width; x++) {
+        const start = x * chunkSize;
+        const end = Math.min(start + chunkSize, numPoints);
+        if (start >= numPoints) break;
+
+        let minY = pressureArray[start];
+        let maxY = pressureArray[start];
+
+        for (let i = start + 1; i < end; i++) {
+            if (pressureArray[i] < minY) minY = pressureArray[i];
+            if (pressureArray[i] > maxY) maxY = pressureArray[i];
+        }
+
+        const normMinY = (minY - displayMin) / range;
+        const normMaxY = (maxY - displayMin) / range;
+        const yTop = height - (normMaxY * height);
+        const yBottom = height - (normMinY * height);
+
+        ctx.moveTo(x, yTop);
+        ctx.lineTo(x, yBottom);
+    }
+    ctx.stroke();
+
+    rAF(render);
+}
+
+rAF(render);
+
 self.onmessage = (event) => {
     const data = event.data;
+
+    if (data instanceof ArrayBuffer) {
+        rawData = new Float32Array(data);
+
+        // Calculate auto-scaling ONCE per data update
+        if (rawData.length > 0) {
+            let min = rawData[0];
+            let max = rawData[0];
+            for (let i = 1; i < rawData.length; i++) {
+                if (rawData[i] < min) min = rawData[i];
+                if (rawData[i] > max) max = rawData[i];
+            }
+            const padding = (max - min) * 0.1;
+            displayMin = min - padding;
+            displayMax = max + padding;
+            range = displayMax - displayMin || 1;
+        }
+        return;
+    }
 
     // 1. Initialization Phase
     if (data.type === 'init') {
@@ -14,7 +89,6 @@ self.onmessage = (event) => {
         ctx = canvas.getContext('2d') as OffscreenCanvasRenderingContext2D;
         width = canvas.width;
         height = canvas.height;
-        console.log(`[Worker] Initialized with dimensions: ${width}x${height}`);
         return;
     }
 
@@ -24,64 +98,20 @@ self.onmessage = (event) => {
         canvas.height = data.height;
         width = data.width;
         height = data.height;
-        console.log(`[Worker] Resized to: ${width}x${height}`);
         return;
     }
 
-    // --- THE FIX IS HERE ---
-    // Catch 'telemetry', 'TELEMETRY', or 'data' (based on your TS interfaces)
-    const isTelemetryEvent = data.type === 'telemetry' || data.type === 'TELEMETRY' || data.type === 'data';
+    if (data.type === 'setConfig') {
+        if (data.color) chartColor = data.color;
+        return;
+    }
 
-    // 3. Telemetry Rendering Phase
+    // Compatibility for legacy JSON frames if still needed during transition
+    const isTelemetryEvent = data.type === 'telemetry' || data.type === 'TELEMETRY' || data.type === 'frame' || data.type === 'data';
     if (isTelemetryEvent) {
-        // Ensure we actually have the canvas and dimensions ready
-        if (!ctx || !canvas || width <= 0 || height <= 0) {
-            console.warn(`[Worker] Ignored frame: Canvas not ready. W:${width}, H:${height}`);
-            return;
+        const pressureData = data.data || data.telemetry;
+        if (pressureData && Array.isArray(pressureData)) {
+            rawData = new Float32Array(pressureData);
         }
-
-        // Catch the array whether you named the property 'data' or 'telemetry'
-        const pressureArray: number[] = data.data || data.telemetry;
-
-        if (!pressureArray || pressureArray.length === 0) {
-            console.error("[Worker] Array is empty or missing! Raw data received:", data);
-            return;
-        }
-
-        const numPoints = pressureArray.length;
-        ctx.clearRect(0, 0, width, height);
-
-        let min = pressureArray[0];
-        let max = pressureArray[0];
-        for (let i = 1; i < numPoints; i++) {
-            if (pressureArray[i] < min) min = pressureArray[i];
-            if (pressureArray[i] > max) max = pressureArray[i];
-        }
-
-        const padding = (max - min) * 0.1;
-        const displayMin = min - padding;
-        const displayMax = max + padding;
-        const range = displayMax - displayMin || 1;
-
-        // Neon Cyan styling
-        ctx.strokeStyle = '#00f0ff';
-        ctx.lineWidth = 2;
-        ctx.lineJoin = 'round';
-
-        ctx.beginPath();
-
-        for (let i = 0; i < numPoints; i++) {
-            const x = (i / (numPoints - 1)) * width;
-            const normalizedY = (pressureArray[i] - displayMin) / range;
-            const y = height - (normalizedY * height);
-
-            if (i === 0) {
-                ctx.moveTo(x, y);
-            } else {
-                ctx.lineTo(x, y);
-            }
-        }
-
-        ctx.stroke();
     }
 };
