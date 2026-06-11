@@ -618,10 +618,15 @@ export class GraphRenderer {
                 if (node.width !== undefined) {
                     const newWidth = `${node.width}px`;
                     if (nodeEl.style.width !== newWidth) nodeEl.style.width = newWidth;
+                } else {
+                    nodeEl.style.width = '';
                 }
+
                 if (node.height !== undefined) {
                     const newHeight = `${node.height}px`;
                     if (nodeEl.style.height !== newHeight) nodeEl.style.height = newHeight;
+                } else {
+                    nodeEl.style.height = '';
                 }
 
                 if (nodeEl.classList.contains('selected') !== (node.id === this.selectedNodeId)) {
@@ -639,6 +644,10 @@ export class GraphRenderer {
                     nodeEl.dataset.lastMode = displayMode;
                     nodeEl.dataset.lastType = node.type;
 
+                    // Update mode classes
+                    nodeEl.classList.remove('mode-normal', 'mode-expanded', 'mode-full-panel', 'mode-compact');
+                    nodeEl.classList.add(`mode-${displayMode}`);
+
                     const collapseBtn = nodeEl.querySelector('.node-collapse-btn') as HTMLButtonElement;
                     if (collapseBtn) {
                         const icons = { 'normal': '[N]', 'expanded': '[E]', 'full-panel': '[F]', 'compact': '[C]' };
@@ -652,7 +661,8 @@ export class GraphRenderer {
                         if (node.inputs.length > 0) {
                             const p = document.createElement('div');
                             p.className = 'port input representative';
-                            p.innerHTML = `<div class="port-bullet material" id="port-in-${node.id}-representative"></div>`;
+                            const colorClass = this.getPortColorClass(node.type, node.inputs[0].id);
+                            p.innerHTML = `<div class="port-bullet ${colorClass}" id="port-in-${node.id}-representative"></div>`;
                             p.addEventListener('mouseup', () => {
                                 if (this.isDraggingWire) {
                                     state.connections.push({
@@ -669,7 +679,8 @@ export class GraphRenderer {
                         if (node.outputs.length > 0) {
                             const p = document.createElement('div');
                             p.className = 'port output representative';
-                            p.innerHTML = `<div class="port-bullet material" id="port-out-${node.id}-representative"></div>`;
+                            const colorClass = this.getPortColorClass(node.type, node.outputs[0].id);
+                            p.innerHTML = `<div class="port-bullet ${colorClass}" id="port-out-${node.id}-representative"></div>`;
                             p.addEventListener('mousedown', (e) => {
                                 e.stopPropagation();
                                 this.isDraggingWire = true;
@@ -811,7 +822,23 @@ export class GraphRenderer {
             const worldPoint = pt.matrixTransform(ctm.inverse());
             return { x: worldPoint.x, y: worldPoint.y };
         }
-        return { x: node.x + (isInput ? 0 : 200), y: node.y + 50 };
+
+        // Fallback for hidden ports (e.g., full-panel mode)
+        const el = this.nodeElements.get(node.id);
+        const w = el ? el.offsetWidth : (node.width || 200);
+        const h = el ? el.offsetHeight : (node.height || 100);
+
+        if (this.layoutOrientation === 'HORIZ') {
+            return {
+                x: node.x + (isInput ? 0 : w),
+                y: node.y + h / 2
+            };
+        } else {
+            return {
+                x: node.x + w / 2,
+                y: node.y + (isInput ? 0 : h)
+            };
+        }
     }
 
     private renderTelemetryContent(node: Node, container: HTMLElement): void {
