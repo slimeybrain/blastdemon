@@ -517,6 +517,19 @@ export class GraphRenderer {
                     this.dragOffsetX = worldPoint.x - node.x;
                     this.dragOffsetY = worldPoint.y - node.y;
                 });
+
+                collapseBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    const state = this.stateManager.getCurrentState();
+                    if (state) {
+                        const n = state.nodes.find(item => item.id === node.id);
+                        if (n) {
+                            n.displayMode = n.displayMode === 'collapsed' ? 'compact' : 'collapsed';
+                            this.stateManager.pushState(state);
+                        }
+                    }
+                };
+
                 nodeEl.appendChild(header);
 
                 const content = document.createElement('div');
@@ -530,6 +543,19 @@ export class GraphRenderer {
                     this.nodeWorkers.set(node.id, worker);
                     const offscreen = (canvas as any).transferControlToOffscreen();
                     worker.postMessage({ type: 'init', canvas: offscreen }, [offscreen] as any);
+                } else if (node.type === 'TelemetryText') {
+                    const body = document.createElement('div');
+                    body.className = 'node-body-text';
+                    content.appendChild(body);
+
+                    const logs = this.stateManager.getTelemetry(node.id) || [];
+                    logs.forEach((line: string) => {
+                        const lineEl = document.createElement('div');
+                        lineEl.className = 'log-line';
+                        lineEl.textContent = line;
+                        body.appendChild(lineEl);
+                    });
+                    body.scrollTop = body.scrollHeight;
                 }
                 nodeEl.appendChild(content);
 
@@ -577,8 +603,22 @@ export class GraphRenderer {
 
                 nodeEl.style.left = `${node.x}px`;
                 nodeEl.style.top = `${node.y}px`;
-                if (node.width !== undefined) nodeEl.style.width = `${node.width}px`;
+
+                if (node.width !== undefined) {
+                    nodeEl.style.width = `${node.width}px`;
+                } else if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph') {
+                    nodeEl.style.width = '250px';
+                }
+
                 if (node.height !== undefined) nodeEl.style.height = `${node.height}px`;
+
+                const isCollapsed = node.displayMode === 'collapsed';
+                const contentEl = nodeEl.querySelector('.node-content') as HTMLElement;
+                const portsEl = nodeEl.querySelector('.node-ports') as HTMLElement;
+                if (contentEl) contentEl.style.display = isCollapsed ? 'none' : 'block';
+                if (portsEl) portsEl.style.display = isCollapsed ? 'none' : 'block';
+                nodeEl.querySelector('.node-collapse-btn')!.textContent = isCollapsed ? '[^]' : '[v]';
+
                 nodeEl.classList.toggle('selected', node.id === this.selectedNodeId);
             } catch (e) {
                 console.error(`Failed to render node ${node.id}:`, e);
