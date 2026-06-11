@@ -244,6 +244,21 @@ int main() {
                     sim_paused = false;
                 }
 
+            } else if (command == "EXEC_1K") {
+                if (!global_solver) continue;
+                global_target_steps = 1000;
+                global_cfl = msg.value("cfl", 0.4);
+                global_exec_until_end = false;
+
+                if (!sim_running) {
+                    sim_running = true;
+                    sim_paused = false;
+                    sim_terminate = false;
+                    std::thread(worker_thread_func).detach();
+                } else {
+                    sim_paused = false;
+                }
+
             } else if (command == "PAUSE") {
                 sim_paused = true;
                 emit_kernel_log("SYSTEM", "Execution Paused.", global_t);
