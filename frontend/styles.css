@@ -274,6 +274,15 @@ body {
     padding: 4px 0;
 }
 
+.node-params-form input {
+    font-family: var(--font-mono);
+    outline: none;
+}
+
+.node-params-form input:focus {
+    border-color: var(--accent-color);
+}
+
 .port {
     display: flex;
     align-items: center;
