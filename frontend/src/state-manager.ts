@@ -140,6 +140,20 @@ export class StateManager {
         }
     }
 
+    toggleNodeDisplayMode(nodeId: string): void {
+        const state = this.getCurrentState();
+        if (!state) return;
+
+        const node = state.nodes.find(n => n.id === nodeId);
+        if (node) {
+            const modes: ('expanded' | 'compact' | 'collapsed')[] = ['expanded', 'compact', 'collapsed'];
+            const currentMode = node.displayMode || 'compact';
+            const nextIndex = (modes.indexOf(currentMode) + 1) % modes.length;
+            node.displayMode = modes[nextIndex];
+            this.pushState(state);
+        }
+    }
+
     /**
      * Registers a listener to be called when the state changes.
      */
