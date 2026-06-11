@@ -141,10 +141,13 @@ export class GraphRenderer {
                     const bufferCopy = data.slice(0);
                     worker.postMessage(bufferCopy, [bufferCopy]);
                 } else {
-                    worker.postMessage({
-                        type: 'data',
-                        telemetry: data.data || data.telemetry || data.percent
-                    });
+                    const pressureData = data.data || data.telemetry;
+                    if (pressureData && (Array.isArray(pressureData) || pressureData instanceof Float32Array)) {
+                        worker.postMessage({
+                            type: 'data',
+                            telemetry: pressureData
+                        });
+                    }
                 }
             }
         }
@@ -485,6 +488,12 @@ export class GraphRenderer {
                 el.remove();
                 this.nodeElements.delete(id);
                 this.nodeResizeObserver?.unobserve(el);
+
+                const worker = this.nodeWorkers.get(id);
+                if (worker) {
+                    worker.terminate();
+                    this.nodeWorkers.delete(id);
+                }
             }
         }
 

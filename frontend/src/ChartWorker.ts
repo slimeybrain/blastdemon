@@ -163,12 +163,9 @@ self.onmessage = (event) => {
 
     const isTelemetryEvent = data.type === 'telemetry' || data.type === 'TELEMETRY' || data.type === 'frame' || data.type === 'data';
     if (isTelemetryEvent) {
-        const pressureData = data.data || data.telemetry || data.percent;
-        if (pressureData && Array.isArray(pressureData)) {
+        const pressureData = data.data || data.telemetry;
+        if (pressureData && (Array.isArray(pressureData) || pressureData instanceof Float32Array)) {
             rawData = new Float32Array(pressureData);
-            updateAutoScale();
-        } else if (typeof pressureData === 'number') {
-            rawData = new Float32Array([pressureData]);
             updateAutoScale();
         }
     }

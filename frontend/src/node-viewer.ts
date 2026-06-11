@@ -351,10 +351,13 @@ export class NodeViewer {
                 if (this.telemetryBuffer instanceof ArrayBuffer) {
                     this.chartWorker.postMessage(this.telemetryBuffer, [this.telemetryBuffer]);
                 } else {
-                    this.chartWorker.postMessage({
-                        type: 'frame',
-                        data: this.telemetryBuffer.data
-                    });
+                    const pressureData = this.telemetryBuffer.data || this.telemetryBuffer.telemetry;
+                    if (pressureData && (Array.isArray(pressureData) || pressureData instanceof Float32Array)) {
+                        this.chartWorker.postMessage({
+                            type: 'frame',
+                            data: pressureData
+                        });
+                    }
                 }
                 this.telemetryBuffer = null;
             }
