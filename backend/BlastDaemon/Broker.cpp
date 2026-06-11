@@ -334,6 +334,8 @@ void process_json(const std::string& json_str, SOCKET_TYPE client_fd, std::share
             std::cerr << "Failed to start BlastSolver" << std::endl;
         }
     } else if (command == "STEP" || command == "TERMINATE" || command == "EXEC_ALL" || command == "EXEC_END" || command == "PAUSE" || command == "RESUME") {
+        if (command == "PAUSE") std::cout << "[DEBUG] PAUSE COMMAND RECEIVED\n";
+        if (command == "TERMINATE") std::cout << "[DEBUG] TERMINATE COMMAND RECEIVED\n";
         if (active_process && active_process->isRunning()) {
             active_process->writeStdin(json_str + "\n\n");
         } else {

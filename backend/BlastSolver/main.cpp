@@ -1,3 +1,5 @@
+#include <poll.h>
+#include <unistd.h>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -175,109 +177,124 @@ int main() {
     });
     pulse_thread.detach();
 
-    while (std::getline(std::cin, line)) {
-        if (line.empty()) continue;
+    // Dedicated stdin listener thread using poll()
+    std::thread stdin_listener_thread([]() {
+        std::string line;
+        struct pollfd pfd;
+        pfd.fd = STDIN_FILENO;
+        pfd.events = POLLIN;
 
-        try {
-            nlohmann::json msg = nlohmann::json::parse(line);
-            std::string command = msg.value("command", "");
-
-            if (command == "INIT") {
-                // Signal termination and wait for worker to clear
-                sim_terminate = true;
-                sim_running = false;
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-                sim_terminate = false;
-                sim_paused = false;
-                step_progress = 0;
-
-                // Live Parameter Binding (Zero-Omission)
-                int n_cells = msg.at("n_cells").get<int>();
-                double radius = msg.at("domain_radius").get<double>();
-                double gamma = msg.at("gamma").get<double>();
-
-                global_num_cells = n_cells;
-                global_solver = std::make_unique<CFDSolver>(n_cells, radius, gamma);
-                global_t = 0.0;
-
-                global_solver->setFluxScheme(msg.at("flux_scheme").get<std::string>());
-                global_solver->setSpatialOrder(msg.at("spatial_order").get<int>());
-                global_solver->setTemporalOrder(msg.at("temporal_order").get<int>());
-
-                double explosive_radius = msg.at("explosive_radius").get<double>();
-                double high_rho = msg.at("rho").get<double>();
-                double ambient_rho = msg.at("ambient_rho").get<double>();
-                double ambient_p = msg.at("atm_pressure").get<double>();
-
-                global_solver->setInitialConditionTNT(explosive_radius, high_rho, ambient_rho, ambient_p);
-
-                emit_telemetry(*global_solver, global_t, false);
-                emit_kernel_log("SYSTEM", "Solver Initialized via Zero-Omission Binding.", global_t);
-
-            } else if (command == "STEP") {
-                if (!global_solver) continue;
-                global_target_steps = msg.at("steps").get<int>();
-                global_cfl = msg.at("cfl").get<double>();
-                global_exec_until_end = false;
-
-                if (!sim_running) {
-                    sim_running = true;
-                    sim_paused = false;
-                    sim_terminate = false;
-                    std::thread(worker_thread_func).detach();
-                } else {
-                    sim_paused = false; // Resume if was paused
+        while (true) {
+            int ret = std::cin.rdbuf()->in_avail() > 0 ? 1 : poll(&pfd, 1, 50);
+            if (ret > 0 && (std::cin.rdbuf()->in_avail() > 0 || (pfd.revents & POLLIN))) {
+                if (!std::getline(std::cin, line)) {
+                    break; // EOF or error
                 }
+                if (line.empty()) continue;
 
-            } else if (command == "EXEC_ALL" || command == "EXEC_END") {
-                if (!global_solver) continue;
-                global_cfl = msg.at("cfl").get<double>();
-                global_exec_until_end = true;
+                try {
+                    nlohmann::json msg = nlohmann::json::parse(line);
+                    std::string command = msg.value("command", "");
 
-                if (!sim_running) {
-                    sim_running = true;
-                    sim_paused = false;
-                    sim_terminate = false;
-                    std::thread(worker_thread_func).detach();
-                } else {
-                    sim_paused = false;
+                    if (command == "INIT") {
+                        // Signal termination and wait for worker to clear
+                        sim_terminate = true;
+                        sim_running = false;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+                        sim_terminate = false;
+                        sim_paused = false;
+                        step_progress = 0;
+
+                        // Live Parameter Binding (Zero-Omission)
+                        int n_cells = msg.at("n_cells").get<int>();
+                        double radius = msg.at("domain_radius").get<double>();
+                        double gamma = msg.at("gamma").get<double>();
+
+                        global_num_cells = n_cells;
+                        global_solver = std::make_unique<CFDSolver>(n_cells, radius, gamma);
+                        global_t = 0.0;
+
+                        global_solver->setFluxScheme(msg.at("flux_scheme").get<std::string>());
+                        global_solver->setSpatialOrder(msg.at("spatial_order").get<int>());
+                        global_solver->setTemporalOrder(msg.at("temporal_order").get<int>());
+
+                        double explosive_radius = msg.at("explosive_radius").get<double>();
+                        double high_rho = msg.at("rho").get<double>();
+                        double ambient_rho = msg.at("ambient_rho").get<double>();
+                        double ambient_p = msg.at("atm_pressure").get<double>();
+
+                        global_solver->setInitialConditionTNT(explosive_radius, high_rho, ambient_rho, ambient_p);
+
+                        emit_telemetry(*global_solver, global_t, false);
+                        emit_kernel_log("SYSTEM", "Solver Initialized via Zero-Omission Binding.", global_t);
+
+                    } else if (command == "STEP") {
+                        if (!global_solver) continue;
+                        global_target_steps = msg.at("steps").get<int>();
+                        global_cfl = msg.at("cfl").get<double>();
+                        global_exec_until_end = false;
+
+                        if (!sim_running) {
+                            sim_running = true;
+                            sim_paused = false;
+                            sim_terminate = false;
+                            std::thread(worker_thread_func).detach();
+                        } else {
+                            sim_paused = false; // Resume if was paused
+                        }
+
+                    } else if (command == "EXEC_ALL" || command == "EXEC_END") {
+                        if (!global_solver) continue;
+                        global_cfl = msg.at("cfl").get<double>();
+                        global_exec_until_end = true;
+
+                        if (!sim_running) {
+                            sim_running = true;
+                            sim_paused = false;
+                            sim_terminate = false;
+                            std::thread(worker_thread_func).detach();
+                        } else {
+                            sim_paused = false;
+                        }
+
+                    } else if (command == "EXEC_1K") {
+                        if (!global_solver) continue;
+                        global_target_steps = 1000;
+                        global_cfl = msg.value("cfl", 0.4);
+                        global_exec_until_end = false;
+
+                        if (!sim_running) {
+                            sim_running = true;
+                            sim_paused = false;
+                            sim_terminate = false;
+                            std::thread(worker_thread_func).detach();
+                        } else {
+                            sim_paused = false;
+                        }
+
+                    } else if (command == "PAUSE") {
+                        sim_paused = true;
+                        emit_kernel_log("SYSTEM", "Execution Paused.", global_t);
+
+                    } else if (command == "RESUME") {
+                        sim_paused = false;
+                        emit_kernel_log("SYSTEM", "Execution Resumed.", global_t);
+
+                    } else if (command == "TERMINATE") {
+                        sim_terminate = true;
+                        sim_running = false;
+                        emit_kernel_log("SYSTEM", "Execution Terminated.", global_t);
+                    }
+
+                } catch (const std::exception& e) {
+                    std::lock_guard<std::mutex> lock(cout_mutex);
+                    std::cout << "[ERROR] JSON/Binding Error: " << e.what() << std::endl;
                 }
-
-            } else if (command == "EXEC_1K") {
-                if (!global_solver) continue;
-                global_target_steps = 1000;
-                global_cfl = msg.value("cfl", 0.4);
-                global_exec_until_end = false;
-
-                if (!sim_running) {
-                    sim_running = true;
-                    sim_paused = false;
-                    sim_terminate = false;
-                    std::thread(worker_thread_func).detach();
-                } else {
-                    sim_paused = false;
-                }
-
-            } else if (command == "PAUSE") {
-                sim_paused = true;
-                emit_kernel_log("SYSTEM", "Execution Paused.", global_t);
-
-            } else if (command == "RESUME") {
-                sim_paused = false;
-                emit_kernel_log("SYSTEM", "Execution Resumed.", global_t);
-
-            } else if (command == "TERMINATE") {
-                sim_terminate = true;
-                sim_running = false;
-                emit_kernel_log("SYSTEM", "Execution Terminated.", global_t);
             }
-
-        } catch (const std::exception& e) {
-            std::lock_guard<std::mutex> lock(cout_mutex);
-            std::cout << "[ERROR] JSON/Binding Error: " << e.what() << std::endl;
         }
-    }
+    });
+    stdin_listener_thread.join();
 
     return 0;
 }
