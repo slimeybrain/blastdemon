@@ -502,8 +502,13 @@ export class GraphRenderer {
 
                     const collapseBtn = document.createElement('button');
                     collapseBtn.className = 'node-collapse-btn';
-                    collapseBtn.textContent = '[v]';
                     header.appendChild(collapseBtn);
+
+                    collapseBtn.addEventListener('mousedown', (e) => e.stopPropagation());
+                    collapseBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        this.stateManager.toggleNodeDisplayMode(node.id);
+                    });
 
                 header.addEventListener('mousedown', (e) => {
                     if (this.spacePressed || e.button !== 0) return;
@@ -620,6 +625,41 @@ export class GraphRenderer {
                 nodeEl.querySelector('.node-collapse-btn')!.textContent = isCollapsed ? '[^]' : '[v]';
 
                 nodeEl.classList.toggle('selected', node.id === this.selectedNodeId);
+
+                // Update visibility and content based on displayMode
+                const displayMode = node.displayMode || 'compact';
+                const collapseBtn = nodeEl.querySelector('.node-collapse-btn') as HTMLButtonElement;
+                if (collapseBtn) {
+                    collapseBtn.textContent = displayMode === 'expanded' ? '[−]' : (displayMode === 'compact' ? '[+]' : '[^]');
+                }
+
+                const contentEl = nodeEl.querySelector('.node-content') as HTMLElement;
+                const portsEl = nodeEl.querySelector('.node-ports') as HTMLElement;
+
+                if (displayMode === 'collapsed') {
+                    contentEl.style.display = 'none';
+                    portsEl.style.display = 'none';
+                } else if (displayMode === 'compact') {
+                    contentEl.style.display = 'none';
+                    portsEl.style.display = 'block';
+                } else {
+                    contentEl.style.display = 'block';
+                    portsEl.style.display = 'block';
+                    this.renderNodeParameters(node, contentEl);
+                }
+
+                if (node.type === 'TelemetryGraph' && displayMode !== 'collapsed') {
+                    if (!contentEl.querySelector('canvas')) {
+                        const canvas = document.createElement('canvas');
+                        canvas.style.width = '100%';
+                        canvas.style.height = '100px';
+                        contentEl.appendChild(canvas);
+                        const worker = new Worker(new URL('./ChartWorker.ts', import.meta.url), { type: 'module' });
+                        this.nodeWorkers.set(node.id, worker);
+                        const offscreen = (canvas as any).transferControlToOffscreen();
+                        worker.postMessage({ type: 'init', canvas: offscreen }, [offscreen] as any);
+                    }
+                }
             } catch (e) {
                 console.error(`Failed to render node ${node.id}:`, e);
             }
@@ -692,6 +732,97 @@ export class GraphRenderer {
             return { x: worldPoint.x, y: worldPoint.y };
         }
         return { x: node.x + (isInput ? 0 : 200), y: node.y + 50 };
+    }
+
+    private renderNodeParameters(node: Node, container: HTMLElement): void {
+        let form = container.querySelector('.node-params-form') as HTMLFormElement;
+        if (form) {
+            for (const [key, value] of Object.entries(node.parameters)) {
+                const input = form.querySelector(`[data-key="${key}"]`) as HTMLInputElement;
+                if (input && document.activeElement !== input) {
+                    input.value = value.toString();
+                }
+            }
+            return;
+        }
+
+        container.innerHTML = '';
+        form = document.createElement('form');
+        form.className = 'node-params-form';
+        form.style.padding = '4px 8px';
+        form.onsubmit = (e) => e.preventDefault();
+
+        for (const [key, value] of Object.entries(node.parameters)) {
+            const row = document.createElement('div');
+            row.style.marginBottom = '4px';
+            row.style.display = 'flex';
+            row.style.flexDirection = 'column';
+
+            const label = document.createElement('label');
+            label.style.fontSize = '8px';
+            label.style.color = '#888';
+            label.textContent = key.replace(/_/g, ' ').toUpperCase();
+            row.appendChild(label);
+
+            const dropdowns: Record<string, string[]> = {
+                'left_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+                'right_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+                'composition': ['TNT', 'IdealGas', 'Custom'],
+                'flux_scheme': ['AUSM+', 'Rusanov'],
+                'spatial_order': ['1', '2', '3'],
+                'temporal_order': ['1', '2', '3', '4'],
+                'output_mode': ['By Step', 'By Time']
+            };
+
+            let inputEl: HTMLElement;
+            if (dropdowns[key]) {
+                const select = document.createElement('select');
+                select.dataset.key = key;
+                select.style.width = '100%';
+                select.style.fontSize = '9px';
+                select.style.background = '#222';
+                select.style.color = '#ccc';
+                select.style.border = '1px solid #444';
+                select.style.padding = '1px 2px';
+
+                dropdowns[key].forEach(opt => {
+                    const option = document.createElement('option');
+                    option.value = opt;
+                    option.text = opt;
+                    if (opt === value.toString()) option.selected = true;
+                    select.appendChild(option);
+                });
+
+                select.addEventListener('change', () => {
+                    this.stateManager.updateNodeParameters(node.id, { [key]: select.value });
+                });
+                inputEl = select;
+            } else {
+                const input = document.createElement('input');
+                const isNumeric = typeof value === 'number';
+                input.type = isNumeric ? 'number' : 'text';
+                if (isNumeric) input.step = 'any';
+                input.value = value.toString();
+                input.dataset.key = key;
+                input.style.width = '100%';
+                input.style.fontSize = '9px';
+                input.style.background = '#222';
+                input.style.color = '#ccc';
+                input.style.border = '1px solid #444';
+                input.style.padding = '1px 2px';
+
+                input.addEventListener('change', () => {
+                    const newVal = isNumeric ? Number(input.value) : input.value;
+                    this.stateManager.updateNodeParameters(node.id, { [key]: newVal });
+                });
+                inputEl = input;
+            }
+
+            inputEl.addEventListener('mousedown', (e) => e.stopPropagation());
+            row.appendChild(inputEl);
+            form.appendChild(row);
+        }
+        container.appendChild(form);
     }
 
     public autoArrange(): void {

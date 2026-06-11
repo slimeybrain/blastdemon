@@ -12,7 +12,7 @@ export interface Node {
     y: number;
     width?: number;
     height?: number;
-    displayMode?: 'compact' | 'collapsed';
+    displayMode?: 'expanded' | 'compact' | 'collapsed';
     parameters: Record<string, any>;
     inputs: Port[];
     outputs: Port[];
