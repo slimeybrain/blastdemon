@@ -489,20 +489,21 @@ export class GraphRenderer {
         }
 
         state.nodes.forEach(node => {
-            let nodeEl = this.nodeElements.get(node.id);
-            if (!nodeEl) {
-                nodeEl = document.createElement('div');
-                nodeEl.className = 'node';
-                nodeEl.dataset.id = node.id;
+            try {
+                let nodeEl = this.nodeElements.get(node.id);
+                if (!nodeEl) {
+                    nodeEl = document.createElement('div');
+                    nodeEl.className = 'node';
+                    nodeEl.dataset.id = node.id;
 
-                const header = document.createElement('div');
-                header.className = 'node-header';
-                header.innerHTML = `<span>${node.type.toUpperCase()}</span>`;
+                    const header = document.createElement('div');
+                    header.className = 'node-header';
+                    header.innerHTML = `<span>${node.type.toUpperCase()}</span>`;
 
-                const collapseBtn = document.createElement('button');
-                collapseBtn.className = 'node-collapse-btn';
-                collapseBtn.textContent = '[v]';
-                header.appendChild(collapseBtn);
+                    const collapseBtn = document.createElement('button');
+                    collapseBtn.className = 'node-collapse-btn';
+                    collapseBtn.textContent = '[v]';
+                    header.appendChild(collapseBtn);
 
                 header.addEventListener('mousedown', (e) => {
                     if (this.spacePressed || e.button !== 0) return;
@@ -572,9 +573,14 @@ export class GraphRenderer {
                 this.nodeResizeObserver?.observe(nodeEl);
             }
 
-            nodeEl.style.left = `${node.x}px`;
-            nodeEl.style.top = `${node.y}px`;
-            nodeEl.classList.toggle('selected', node.id === this.selectedNodeId);
+                nodeEl.style.left = `${node.x}px`;
+                nodeEl.style.top = `${node.y}px`;
+                if (node.width !== undefined) nodeEl.style.width = `${node.width}px`;
+                if (node.height !== undefined) nodeEl.style.height = `${node.height}px`;
+                nodeEl.classList.toggle('selected', node.id === this.selectedNodeId);
+            } catch (e) {
+                console.error(`Failed to render node ${node.id}:`, e);
+            }
         });
     }
 
