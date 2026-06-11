@@ -171,8 +171,15 @@ export class StateManager {
 
     setStatus(status: SimulationStatus): void {
         if (this.simulationStatus !== status) {
+            const oldStatus = this.simulationStatus;
             this.simulationStatus = status;
             this.notifyStatusListeners();
+
+            if (status === 'PAUSED' && oldStatus === 'RUNNING') {
+                this.pushTelemetry('Simulation Interrupted/Paused');
+            } else if (status === 'TERMINATED') {
+                this.pushTelemetry('Simulation Terminated');
+            }
         }
     }
 
@@ -274,11 +281,17 @@ export class StateManager {
         const state = this.getCurrentState();
         if (!state) return;
 
-        if (typeof nodeIdOrData === 'string') {
+        if (typeof nodeIdOrData === 'string' && optionalData !== undefined) {
             nodeId = nodeIdOrData;
             data = optionalData;
-        } else {
+        } else if (typeof nodeIdOrData === 'string') {
+            // It's a raw log message for the solver
             const solverNode = state.nodes.find(n => n.type === 'CFDSolver');
+            if (!solverNode) return;
+            nodeId = solverNode.id;
+            data = nodeIdOrData;
+        } else {
+            const solverNode = state.nodes.find(n => n.id === 'node-solver') || state.nodes.find(n => n.type === 'CFDSolver');
             if (!solverNode) return;
             nodeId = solverNode.id;
             data = nodeIdOrData;
@@ -286,14 +299,25 @@ export class StateManager {
 
         if (!nodeId) return;
 
+        // Filter repetitive data for TelemetryText
+        if (data && typeof data === 'object' && (data.type === 'progress' || data.type === 'resource_pulse')) {
+            // Only allow progress/resource data for specific consumers, usually TelemetryText doesn't want them repeated if it already shows status
+            // Actually, let's just make it not store progress/resource pulses in the TelemetryText log history.
+        }
+
         const targetNode = state.nodes.find(n => n.id === nodeId);
         let telemetryToStore = data;
         if (targetNode?.type === 'TelemetryText' && !(data instanceof ArrayBuffer)) {
-            let log = this.telemetryStore.get(nodeId);
-            if (!Array.isArray(log)) log = [];
-            log.push(this.formatTelemetry(data));
-            if (log.length > 100) log.shift();
-            telemetryToStore = log;
+            // Avoid logging progress/resource pulse in text logs
+            if (data && typeof data === 'object' && (data.type === 'progress' || data.type === 'resource_pulse')) {
+                 // Skip
+            } else {
+                let log = this.telemetryStore.get(nodeId);
+                if (!Array.isArray(log)) log = [];
+                log.push(this.formatTelemetry(data));
+                if (log.length > 100) log.shift();
+                telemetryToStore = log;
+            }
         }
 
         if (!(data instanceof ArrayBuffer)) {
@@ -307,13 +331,23 @@ export class StateManager {
             const connectedNode = state.nodes.find(n => n.id === connection.toNode);
             if (connectedNode) {
                 if (connectedNode.type === 'TelemetryGraph') {
-                    this.telemetryStore.set(connectedNode.id, data);
-                    this.notifyTelemetryUpdate(connectedNode.id, data);
+                    if (data instanceof ArrayBuffer || (data && data.type === 'TELEMETRY')) {
+                         this.telemetryStore.set(connectedNode.id, data);
+                         this.notifyTelemetryUpdate(connectedNode.id, data);
+                    }
                 } else if (connectedNode.type === 'TelemetryText') {
+                    // Filter repetitive progress/resource messages in connected LOG nodes
+                    if (data && typeof data === 'object' && (data.type === 'progress' || data.type === 'resource_pulse')) {
+                        return;
+                    }
+
                     let log = this.telemetryStore.get(connectedNode.id);
                     if (!Array.isArray(log)) log = [];
 
                     const formattedMsg = this.formatTelemetry(data);
+                    // Avoid duplicate consecutive messages (e.g. "Paused... waiting")
+                    if (log.length > 0 && log[log.length - 1] === formattedMsg) return;
+
                     log.push(formattedMsg);
 
                     if (log.length > 100) log.shift();
