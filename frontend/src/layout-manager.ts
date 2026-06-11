@@ -206,6 +206,13 @@ export class LayoutManager {
             };
             leftSide.appendChild(layoutToggle);
 
+            const arrangeBtn = document.createElement('button');
+            arrangeBtn.dataset.panelId = node.id;
+            arrangeBtn.textContent = 'Arrange';
+            arrangeBtn.className = 'header-button secondary auto-arrange-btn';
+            arrangeBtn.style.marginLeft = '4px';
+            leftSide.appendChild(arrangeBtn);
+
             const statusBadge = document.createElement('div');
             statusBadge.id = 'status-badge';
             statusBadge.className = `status-badge badge-${this.stateManager.getStatus().toLowerCase()}`;
@@ -433,10 +440,9 @@ export class LayoutManager {
 
         const mainControls = document.createElement('div');
         mainControls.style.display = 'grid';
-        mainControls.style.gridTemplateColumns = '1fr 1fr';
+        mainControls.style.gridTemplateColumns = '1fr';
         mainControls.style.gap = '8px';
         mainControls.appendChild(createBtn('init-btn', 'Initialize', 'header-button'));
-        mainControls.appendChild(createBtn('auto-arrange-btn', 'Auto Layout', 'header-button secondary'));
         simActions.appendChild(mainControls);
 
         const stepControls = document.createElement('div');
@@ -520,6 +526,15 @@ export class LayoutManager {
         progressBar.style.width = '0%';
         progressCont.appendChild(progressBar);
         simActions.appendChild(progressCont);
+
+        const progressLabel = document.createElement('div');
+        progressLabel.id = 'progress-label';
+        progressLabel.style.fontSize = '10px';
+        progressLabel.style.textAlign = 'center';
+        progressLabel.style.marginTop = '4px';
+        progressLabel.style.color = '#888';
+        progressLabel.textContent = 'Ready';
+        simActions.appendChild(progressLabel);
 
         container.appendChild(simActions);
     }

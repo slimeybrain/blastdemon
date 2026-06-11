@@ -91,17 +91,31 @@ void worker_thread_func() {
             last_telemetry_time = now;
 
             // Update progress metrics
+            nlohmann::json progress_msg;
+            progress_msg["type"] = "progress";
+            progress_msg["sim_time"] = global_t;
+
             if (global_exec_until_end.load()) {
                 if (total_range > 0) {
                     int current_range = global_solver->getActiveIndex() - initial_idx;
-                    step_progress = std::clamp((int)((current_range * 100) / total_range), 0, 100);
+                    int percent = std::clamp((int)((current_range * 100) / total_range), 0, 100);
+                    step_progress = percent;
+                    progress_msg["percent"] = percent;
+                    progress_msg["mode"] = "EXEC_ALL";
                 }
             } else {
                 if (initial_steps > 0) {
                     int completed = initial_steps - global_target_steps.load();
-                    step_progress = std::clamp((int)((completed * 100) / initial_steps), 0, 100);
+                    int percent = std::clamp((int)((completed * 100) / initial_steps), 0, 100);
+                    step_progress = percent;
+                    progress_msg["percent"] = percent;
+                    progress_msg["completed"] = completed;
+                    progress_msg["total"] = initial_steps;
+                    progress_msg["mode"] = "STEP";
                 }
             }
+            std::lock_guard<std::mutex> lock(cout_mutex);
+            std::cout << progress_msg.dump() << std::endl;
         }
     }
 
@@ -169,10 +183,6 @@ int main() {
         while (true) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             emit_resource_pulse();
-            if (sim_running) {
-                std::lock_guard<std::mutex> lock(cout_mutex);
-                std::cout << "{\"type\": \"progress\", \"percent\": " << step_progress.load() << "}" << std::endl;
-            }
         }
     });
     pulse_thread.detach();
@@ -275,7 +285,8 @@ int main() {
 
                     } else if (command == "PAUSE") {
                         sim_paused = true;
-                        emit_kernel_log("SYSTEM", "Execution Paused.", global_t);
+                        global_target_steps = 0; // Cancel remaining steps on pause/interrupt
+                        emit_kernel_log("SYSTEM", "Execution Paused/Interrupted.", global_t);
 
                     } else if (command == "RESUME") {
                         sim_paused = false;

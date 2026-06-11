@@ -115,12 +115,14 @@ document.addEventListener('click', (e) => {
     const target = e.target as HTMLElement;
     if (!target) return;
 
-    if (target.id === 'auto-arrange-btn') {
-        // This is tricky because we might have multiple graphs.
-        // For now, let's find the first graph renderer and call it.
-        (layoutManager as any).components.forEach((comp: any) => {
-            if (comp.type === 'NODE_GRAPH') comp.instance.autoArrange();
-        });
+    if (target.classList.contains('auto-arrange-btn')) {
+        const panelId = target.dataset.panelId;
+        if (panelId) {
+            const comp = layoutManager.components.get(panelId);
+            if (comp && comp.type === 'NODE_GRAPH') {
+                comp.instance.autoArrange();
+            }
+        }
     }
 
     if (target.id === 'init-btn') {
@@ -193,7 +195,17 @@ networkManager.onMessage((data) => {
         }
 
         if (dataJson.type === 'progress') {
+            const progressLabel = document.getElementById('progress-label');
             if (progressBar) progressBar.style.width = `${dataJson.percent}%`;
+            if (progressLabel) {
+                if (dataJson.mode === 'STEP') {
+                    progressLabel.textContent = `Steps: ${dataJson.completed} / ${dataJson.total} (${dataJson.percent}%) | Time: ${dataJson.sim_time.toFixed(6)}s`;
+                } else if (dataJson.mode === 'EXEC_ALL') {
+                    progressLabel.textContent = `Progress: ${dataJson.percent}% | Time: ${dataJson.sim_time.toFixed(6)}s`;
+                } else {
+                    progressLabel.textContent = `Progress: ${dataJson.percent}%`;
+                }
+            }
             stateManager.pushTelemetry(dataJson);
             return;
         }
@@ -201,6 +213,10 @@ networkManager.onMessage((data) => {
         if (dataJson.type === 'TELEMETRY') {
             stateManager.pushTelemetry(dataJson);
             if (progressBar) progressBar.style.width = '0%';
+            const progressLabel = document.getElementById('progress-label');
+            if (progressLabel && dataJson.time > 0) {
+                progressLabel.textContent = `Time: ${dataJson.time.toFixed(6)}s ${dataJson.is_terminated ? '(Terminated)' : ''}`;
+            }
             if (dataJson.time === 0) stateManager.setStatus('INITIALIZED');
 
             if (stateManager.getStatus() === 'RUNNING' && dataJson.is_terminated !== true) {
