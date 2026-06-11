@@ -305,8 +305,10 @@ body {
 .port-bullet.telemetry { background: #16a34a; }
 
 .port.input .port-bullet { left: -3px; }
+.port.input.representative { height: 10px; margin-top: 4px; }
 .port.output { justify-content: flex-end; }
 .port.output .port-bullet { right: -3px; }
+.port.output.representative { height: 10px; margin-bottom: 4px; }
 
 .port-label { padding: 0 12px; }
 
