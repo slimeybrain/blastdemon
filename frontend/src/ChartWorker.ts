@@ -10,6 +10,7 @@ let chartColor = '#00f0ff';
 let displayMin = 0;
 let displayMax = 1;
 let range = 1;
+let showAxes = true;
 
 const padding = 40; // Requirement 9: Strict 40-pixel padding
 
@@ -53,24 +54,28 @@ function render() {
             return;
         }
 
+        const currentPadding = showAxes ? padding : 0;
+
         ctx.clearRect(0, 0, width, height);
 
-        // Draw Axes (Requirement 9)
-        ctx.strokeStyle = '#475569';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        // Vertical axis
-        ctx.moveTo(padding, 0);
-        ctx.lineTo(padding, height - padding);
-        // Horizontal axis
-        ctx.lineTo(width, height - padding);
-        ctx.stroke();
+        if (showAxes) {
+            // Draw Axes (Requirement 9)
+            ctx.strokeStyle = '#475569';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            // Vertical axis
+            ctx.moveTo(currentPadding, 0);
+            ctx.lineTo(currentPadding, height - currentPadding);
+            // Horizontal axis
+            ctx.lineTo(width, height - currentPadding);
+            ctx.stroke();
 
-        // Labels
-        ctx.fillStyle = '#94a3b8';
-        ctx.font = '10px monospace';
-        ctx.fillText(displayMax.toExponential(1), 2, 10);
-        ctx.fillText(displayMin.toExponential(1), 2, height - padding - 2);
+            // Labels
+            ctx.fillStyle = '#94a3b8';
+            ctx.font = '10px monospace';
+            ctx.fillText(displayMax.toExponential(1), 2, 10);
+            ctx.fillText(displayMin.toExponential(1), 2, height - currentPadding - 2);
+        }
 
         if (!rawData || rawData.length === 0) {
             rAF(render);
@@ -80,10 +85,10 @@ function render() {
         const pressureArray = rawData;
         const numPoints = pressureArray.length;
 
-        const drawWidth = width - padding;
-        const drawHeight = height - padding;
+        const drawWidth = width - currentPadding;
+        const drawHeight = height - currentPadding;
 
-        ctx.strokeStyle = '#00ff00';
+        ctx.strokeStyle = chartColor;
         ctx.lineWidth = 2;
         ctx.beginPath();
 
@@ -108,7 +113,7 @@ function render() {
             const yTop = drawHeight - ((maxY - displayMin) / (range || 1)) * drawHeight;
             const yBottom = drawHeight - ((minY - displayMin) / (range || 1)) * drawHeight;
 
-            const canvasX = padding + x;
+            const canvasX = currentPadding + x;
 
             if (first) {
                 ctx.moveTo(canvasX, yTop);
@@ -157,6 +162,7 @@ self.onmessage = (event) => {
         if (data.color) chartColor = data.color;
         if (typeof data.min === 'number') displayMin = data.min;
         if (typeof data.max === 'number') displayMax = data.max;
+        if (typeof data.showAxes === 'boolean') showAxes = data.showAxes;
         range = displayMax - displayMin || 1;
         return;
     }

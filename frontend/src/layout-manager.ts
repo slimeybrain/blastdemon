@@ -350,7 +350,7 @@ export class LayoutManager {
     private renderNodeGraph(node: PanelNode, container: HTMLElement): void {
         let comp = this.components.get(node.id);
         if (!comp) {
-            const renderer = new GraphRenderer(container, this.stateManager);
+            const renderer = new GraphRenderer(container, this.stateManager, node.id);
             renderer.onNodeSelected = (nodeId) => {
                 this.stateManager.setSelectedNode(nodeId);
                 this.setSelectedNodeOnAllPropertiesPanels(nodeId);

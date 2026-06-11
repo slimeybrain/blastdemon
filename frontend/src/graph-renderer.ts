@@ -6,6 +6,7 @@ export class GraphRenderer {
     private container: HTMLElement;
     private svg: SVGSVGElement;
     private stateManager: StateManager;
+    private panelId: string;
 
     private zoom: number = 1.0;
     private panX: number = 0;
@@ -42,8 +43,9 @@ export class GraphRenderer {
     private telemetryListener = (nodeId: string, data: any) => this.handleTelemetryUpdate(nodeId, data);
     private selectionListener = (nodeId: string | null) => this.handleSelectionChange(nodeId);
 
-    constructor(parent: HTMLElement, stateManager: StateManager) {
+    constructor(parent: HTMLElement, stateManager: StateManager, panelId: string) {
         this.stateManager = stateManager;
+        this.panelId = panelId;
 
         this.viewport = document.createElement('div');
         this.viewport.id = 'graph-viewport';
@@ -105,6 +107,17 @@ export class GraphRenderer {
                     node.width = newWidth;
                     node.height = newHeight;
                     changed = true;
+
+                    // Automatic mode switching for telemetry nodes
+                    if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph') {
+                        let targetMode: 'compact' | 'normal' | 'expanded' = 'normal';
+                        if (newHeight < 60) targetMode = 'compact';
+                        else if (newHeight >= 180) targetMode = 'expanded';
+
+                        if (node.displayMode !== targetMode) {
+                            node.displayMode = targetMode;
+                        }
+                    }
 
                     // Notify worker of resize if it's a TelemetryGraph
                     if (node.type === 'TelemetryGraph') {
@@ -650,8 +663,8 @@ export class GraphRenderer {
 
                     const collapseBtn = nodeEl.querySelector('.node-collapse-btn') as HTMLButtonElement;
                     if (collapseBtn) {
-                        const icons = { 'normal': '[N]', 'expanded': '[E]', 'full-panel': '[F]', 'compact': '[C]' };
-                        collapseBtn.textContent = icons[displayMode] || '[?]';
+                        const icons = { 'normal': '[N]', 'expanded': '[E]', 'compact': '[C]' };
+                        collapseBtn.textContent = (icons as any)[displayMode] || '[?]';
                     }
 
                     // Configure Ports
@@ -662,7 +675,7 @@ export class GraphRenderer {
                             const p = document.createElement('div');
                             p.className = 'port input representative';
                             const colorClass = this.getPortColorClass(node.type, node.inputs[0].id);
-                            p.innerHTML = `<div class="port-bullet ${colorClass}" id="port-in-${node.id}-representative"></div>`;
+                            p.innerHTML = `<div class="port-bullet ${colorClass}" id="${this.panelId}-port-in-${node.id}-representative"></div>`;
                             p.addEventListener('mouseup', () => {
                                 if (this.isDraggingWire) {
                                     state.connections.push({
@@ -680,7 +693,7 @@ export class GraphRenderer {
                             const p = document.createElement('div');
                             p.className = 'port output representative';
                             const colorClass = this.getPortColorClass(node.type, node.outputs[0].id);
-                            p.innerHTML = `<div class="port-bullet ${colorClass}" id="port-out-${node.id}-representative"></div>`;
+                            p.innerHTML = `<div class="port-bullet ${colorClass}" id="${this.panelId}-port-out-${node.id}-representative"></div>`;
                             p.addEventListener('mousedown', (e) => {
                                 e.stopPropagation();
                                 this.isDraggingWire = true;
@@ -697,7 +710,7 @@ export class GraphRenderer {
                             const p = document.createElement('div');
                             p.className = 'port input';
                             const colorClass = this.getPortColorClass(node.type, input.id);
-                            p.innerHTML = `<div class="port-bullet ${colorClass}" id="port-in-${node.id}-${input.id}"></div><span class="port-label">${input.label}</span>`;
+                            p.innerHTML = `<div class="port-bullet ${colorClass}" id="${this.panelId}-port-in-${node.id}-${input.id}"></div><span class="port-label">${input.label}</span>`;
                             p.addEventListener('mouseup', () => {
                                 if (this.isDraggingWire) {
                                     state.connections.push({
@@ -715,7 +728,7 @@ export class GraphRenderer {
                             const p = document.createElement('div');
                             p.className = 'port output';
                             const colorClass = this.getPortColorClass(node.type, output.id);
-                            p.innerHTML = `<span class="port-label">${output.label}</span><div class="port-bullet ${colorClass}" id="port-out-${node.id}-${output.id}"></div>`;
+                            p.innerHTML = `<span class="port-label">${output.label}</span><div class="port-bullet ${colorClass}" id="${this.panelId}-port-out-${node.id}-${output.id}"></div>`;
                             p.addEventListener('mousedown', (e) => {
                                 e.stopPropagation();
                                 this.isDraggingWire = true;
@@ -807,8 +820,8 @@ export class GraphRenderer {
 
     private getPortPosition(node: Node, portId: string, isInput: boolean): { x: number, y: number } | null {
         const bulletId = node.displayMode === 'compact'
-            ? (isInput ? `port-in-${node.id}-representative` : `port-out-${node.id}-representative`)
-            : (isInput ? `port-in-${node.id}-${portId}` : `port-out-${node.id}-${portId}`);
+            ? (isInput ? `${this.panelId}-port-in-${node.id}-representative` : `${this.panelId}-port-out-${node.id}-representative`)
+            : (isInput ? `${this.panelId}-port-in-${node.id}-${portId}` : `${this.panelId}-port-out-${node.id}-${portId}`);
 
         const bullet = document.getElementById(bulletId);
         if (bullet) {
@@ -862,6 +875,14 @@ export class GraphRenderer {
                 body.scrollTop = body.scrollHeight;
             }
         } else if (node.type === 'TelemetryGraph') {
+            const worker = this.nodeWorkers.get(node.id);
+            if (worker) {
+                worker.postMessage({
+                    type: 'setConfig',
+                    showAxes: node.displayMode === 'expanded'
+                });
+            }
+
             if (!container.querySelector('canvas')) {
                 const graphBody = document.createElement('div');
                 graphBody.className = 'node-body-graph';
@@ -1095,7 +1116,7 @@ export class GraphRenderer {
 
     private getNodeEstimatedHeight(node: Node): number {
         if (node.displayMode === 'compact') return 40;
-        if (node.height !== undefined) return node.height + 30; // 30 for header
+        if (node.height !== undefined) return node.height;
 
         let base = 30; // Header
         if (node.displayMode === 'normal') {
@@ -1107,10 +1128,6 @@ export class GraphRenderer {
             if (node.type === 'TelemetryText') base += 100;
             if (node.type === 'TelemetryGraph') base += 120;
             base += Math.max(node.inputs.length, node.outputs.length) * 20;
-        } else if (node.displayMode === 'full-panel') {
-            base += Object.keys(node.parameters).length * 25;
-            if (node.type === 'TelemetryText') base += 100;
-            if (node.type === 'TelemetryGraph') base += 120;
         }
         return Math.max(base, 60);
     }

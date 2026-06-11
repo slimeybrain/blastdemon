@@ -146,8 +146,8 @@ export class StateManager {
 
         const node = state.nodes.find(n => n.id === nodeId);
         if (node) {
-            const modes: ('compact' | 'normal' | 'expanded' | 'full-panel')[] = ['normal', 'expanded', 'full-panel', 'compact'];
-            const currentMode = node.displayMode || 'normal';
+            const modes: ('compact' | 'normal' | 'expanded')[] = ['normal', 'expanded', 'compact'];
+            const currentMode = (node.displayMode === 'full-panel' ? 'expanded' : node.displayMode) || 'normal';
             const nextIndex = (modes.indexOf(currentMode) + 1) % modes.length;
             node.displayMode = modes[nextIndex];
 
