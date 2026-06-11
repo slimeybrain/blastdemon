@@ -150,6 +150,11 @@ export class StateManager {
             const currentMode = node.displayMode || 'normal';
             const nextIndex = (modes.indexOf(currentMode) + 1) % modes.length;
             node.displayMode = modes[nextIndex];
+
+            // Clear explicit dimensions to allow node to resize to its natural content size
+            delete node.width;
+            delete node.height;
+
             this.pushState(state);
         }
     }
