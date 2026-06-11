@@ -324,13 +324,19 @@ body {
 }
 
 .port.input .port-bullet { left: -3px; top: calc(50% - 3px); }
+.port-bullet.domain { background: #2563eb; }
+.port-bullet.material { background: #64748b; }
+.port-bullet.explosive { background: #dc2626; }
+.port-bullet.telemetry { background: #16a34a; }
+
+.port.input .port-bullet { left: -3px; }
 .port.output { justify-content: flex-end; }
 .port.output .port-bullet { right: -3px; top: calc(50% - 3px); }
 
 .port.input-top .port-bullet { top: -3px; left: calc(50% - 3px); }
 .port.output-bottom .port-bullet { bottom: -3px; left: calc(50% - 3px); }
 
-.port-label { padding: 0 8px; }
+.port-label { padding: 0 12px; }
 
 .node-content {
     overflow: hidden;

@@ -542,6 +542,7 @@ export class GraphRenderer {
                 }
                 nodeEl.appendChild(content);
 
+
                 if ((node.orientation || 'HORIZ') === 'HORIZ') {
                     const ports = document.createElement('div');
                     ports.className = 'node-ports';
@@ -707,6 +708,13 @@ export class GraphRenderer {
                 this.svg.appendChild(path);
             }
         }
+    }
+
+    private getPortColorClass(nodeType: string, portId: string): string {
+        if (nodeType === 'DomainMesh' || portId === 'mesh') return 'domain';
+        if (nodeType === 'MaterialExplosive' || portId === 'explosive') return 'explosive';
+        if (portId === 'telemetry' || (portId === 'in' && (nodeType === 'TelemetryText' || nodeType === 'TelemetryGraph'))) return 'telemetry';
+        return 'material';
     }
 
     private getPortPosition(node: Node, portId: string, isInput: boolean): { x: number, y: number } | null {
