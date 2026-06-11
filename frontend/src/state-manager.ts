@@ -146,8 +146,8 @@ export class StateManager {
 
         const node = state.nodes.find(n => n.id === nodeId);
         if (node) {
-            const modes: ('expanded' | 'compact' | 'collapsed')[] = ['expanded', 'compact', 'collapsed'];
-            const currentMode = node.displayMode || 'compact';
+            const modes: ('compact' | 'normal' | 'expanded' | 'full-panel')[] = ['normal', 'expanded', 'full-panel', 'compact'];
+            const currentMode = node.displayMode || 'normal';
             const nextIndex = (modes.indexOf(currentMode) + 1) % modes.length;
             node.displayMode = modes[nextIndex];
             this.pushState(state);
@@ -231,16 +231,53 @@ export class StateManager {
         this.telemetryListeners.forEach(listener => listener(nodeId, data));
     }
 
+    private formatTelemetry(data: any): string {
+        const timestamp = new Date().toLocaleTimeString();
+
+        if (data instanceof ArrayBuffer) {
+            return `[${timestamp}] [BINARY] ArrayBuffer(${data.byteLength})`;
+        }
+
+        if (typeof data === 'string') {
+            if (data.startsWith('{')) {
+                try {
+                    const parsed = JSON.parse(data);
+                    return this.formatTelemetry(parsed);
+                } catch (e) {
+                    return `[${timestamp}] [TEXT] ${data}`;
+                }
+            }
+            return `[${timestamp}] [TEXT] ${data}`;
+        }
+
+        if (typeof data === 'object' && data !== null) {
+            if (data.type === 'progress' || data.command === 'PROGRESS') {
+                const percent = data.percent !== undefined ? data.percent : (data.value || 0);
+                return `[${timestamp}] [PROGRESS] ${percent}% complete`;
+            }
+            if (data.type === 'TELEMETRY') {
+                return `[${timestamp}] [SOLVER] Time: ${data.time?.toFixed(6) || '0'}, Terminated: ${data.is_terminated || false}`;
+            }
+            if (data.type === 'resource_pulse') {
+                return `[${timestamp}] [RESOURCES] CPU: ${data.metrics?.cpu?.toFixed(1)}%, RAM: ${data.metrics?.ram?.toFixed(1)}%`;
+            }
+            return `[${timestamp}] [JSON] ${JSON.stringify(data, null, 2)}`;
+        }
+
+        return `[${timestamp}] [DATA] ${String(data)}`;
+    }
+
     pushTelemetry(nodeIdOrData: any, optionalData?: any): void {
         let nodeId: string | null = null;
         let data: any = null;
+
+        const state = this.getCurrentState();
+        if (!state) return;
 
         if (typeof nodeIdOrData === 'string') {
             nodeId = nodeIdOrData;
             data = optionalData;
         } else {
-            const state = this.getCurrentState();
-            if (!state) return;
             const solverNode = state.nodes.find(n => n.type === 'CFDSolver');
             if (!solverNode) return;
             nodeId = solverNode.id;
@@ -249,45 +286,39 @@ export class StateManager {
 
         if (!nodeId) return;
 
-        // JSON Prettifier Fallback (Zero-Omission Requirement 8)
-        if (typeof data === 'string' && data.startsWith('{')) {
-            try {
-                const parsed = JSON.parse(data);
-                if (parsed.type === 'progress' || parsed.command === 'PROGRESS') {
-                    const percent = parsed.percent || parsed.value || 0;
-                    data = `[${new Date().toLocaleTimeString()}] [PROGRESS] Simulation batch step executed. Percent: ${percent}%`;
-                } else {
-                    data = `[${new Date().toLocaleTimeString()}] [DATA] ${JSON.stringify(parsed)}`;
-                }
-            } catch (e) {
-                // Keep raw if parse fails
-            }
+        const targetNode = state.nodes.find(n => n.id === nodeId);
+        let telemetryToStore = data;
+        if (targetNode?.type === 'TelemetryText' && !(data instanceof ArrayBuffer)) {
+            let log = this.telemetryStore.get(nodeId);
+            if (!Array.isArray(log)) log = [];
+            log.push(this.formatTelemetry(data));
+            if (log.length > 100) log.shift();
+            telemetryToStore = log;
         }
 
         if (!(data instanceof ArrayBuffer)) {
-            this.telemetryStore.set(nodeId, data);
+            this.telemetryStore.set(nodeId, telemetryToStore);
         }
-        this.notifyTelemetryUpdate(nodeId, data);
-
-        const state = this.getCurrentState();
-        if (!state) return;
+        this.notifyTelemetryUpdate(nodeId, telemetryToStore);
 
         // Propagate to connected nodes
         const telemetryConnections = state.connections.filter(e => e.fromNode === nodeId);
         telemetryConnections.forEach(connection => {
-            const targetNode = state.nodes.find(n => n.id === connection.toNode);
-            if (targetNode) {
-                if (targetNode.type === 'TelemetryGraph') {
-                    this.telemetryStore.set(targetNode.id, data);
-                    this.notifyTelemetryUpdate(targetNode.id, data);
-                } else if (targetNode.type === 'TelemetryText') {
-                    let log = this.telemetryStore.get(targetNode.id);
+            const connectedNode = state.nodes.find(n => n.id === connection.toNode);
+            if (connectedNode) {
+                if (connectedNode.type === 'TelemetryGraph') {
+                    this.telemetryStore.set(connectedNode.id, data);
+                    this.notifyTelemetryUpdate(connectedNode.id, data);
+                } else if (connectedNode.type === 'TelemetryText') {
+                    let log = this.telemetryStore.get(connectedNode.id);
                     if (!Array.isArray(log)) log = [];
-                    const logMsg = typeof data === 'string' ? data : JSON.stringify(data);
-                    log.push(logMsg);
+
+                    const formattedMsg = this.formatTelemetry(data);
+                    log.push(formattedMsg);
+
                     if (log.length > 100) log.shift();
-                    this.telemetryStore.set(targetNode.id, log);
-                    this.notifyTelemetryUpdate(targetNode.id, log);
+                    this.telemetryStore.set(connectedNode.id, log);
+                    this.notifyTelemetryUpdate(connectedNode.id, log);
                 }
             }
         });

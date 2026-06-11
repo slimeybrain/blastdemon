@@ -9,28 +9,28 @@ console.log("BlastDaemon Workspace Initializing (Recursive Layout)...");
 const initialState: SimulationState = {
     nodes: [
         {
-            id: 'node-mesh', type: 'DomainMesh', x: 50, y: 50,
+            id: 'node-mesh', type: 'DomainMesh', x: 50, y: 50, displayMode: 'normal',
             inputs: [], outputs: [{ id: 'out', label: 'Mesh' }],
             parameters: { domain_radius: 1.0, cell_size: 0.001, left_bc: 'Reflecting', right_bc: 'Terminate' }
         },
         {
-            id: 'node-air', type: 'MaterialAir', x: 50, y: 200,
+            id: 'node-air', type: 'MaterialAir', x: 50, y: 200, displayMode: 'normal',
             inputs: [], outputs: [{ id: 'out', label: 'Material' }],
             parameters: { atm_pressure: 101325, atm_temperature: 298.15 }
         },
         {
-            id: 'node-explosive', type: 'MaterialExplosive', x: 50, y: 350,
+            id: 'node-explosive', type: 'MaterialExplosive', x: 50, y: 350, displayMode: 'normal',
             inputs: [], outputs: [{ id: 'out', label: 'Material' }],
             parameters: { charge_mass: 1.0, composition: 'TNT', rho: 1630, detonation_energy: 4520000 }
         },
         {
-            id: 'node-painter', type: 'ThePainter', x: 300, y: 200,
+            id: 'node-painter', type: 'ThePainter', x: 300, y: 200, displayMode: 'normal',
             inputs: [{ id: 'mesh', label: 'Mesh' }, { id: 'air', label: 'Air' }, { id: 'explosive', label: 'Explosive' }],
             outputs: [{ id: 'out', label: 'State' }],
             parameters: {}
         },
         {
-            id: 'node-solver', type: 'CFDSolver', x: 550, y: 200,
+            id: 'node-solver', type: 'CFDSolver', x: 550, y: 200, displayMode: 'normal',
             inputs: [{ id: 'in', label: 'Initial State' }],
             outputs: [{ id: 'telemetry', label: 'Telemetry' }],
             parameters: { cfl: 0.4, flux_scheme: 'AUSM+', spatial_order: 2, temporal_order: 2, output_mode: 'By Time', output_interval: 0.0001 }

@@ -381,22 +381,15 @@ export class NodeViewer {
         if (node.type === 'TelemetryText') {
             const terminal = document.getElementById(`viewer-text-${nodeId}`);
             if (terminal && Array.isArray(data)) {
-                const currentCount = terminal.children.length;
-                if (data.length < currentCount) {
+                if (terminal.children.length !== data.length) {
                     terminal.innerHTML = '';
                     data.forEach(line => {
                         const div = document.createElement('div');
                         div.textContent = line;
                         terminal.appendChild(div);
                     });
-                } else {
-                    for (let i = currentCount; i < data.length; i++) {
-                        const div = document.createElement('div');
-                        div.textContent = data[i];
-                        terminal.appendChild(div);
-                    }
+                    terminal.scrollTop = terminal.scrollHeight;
                 }
-                terminal.scrollTop = terminal.scrollHeight;
             }
         } else if (node.type === 'TelemetryGraph') {
             this.telemetryBuffer = data;
