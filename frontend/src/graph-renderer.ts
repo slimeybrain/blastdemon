@@ -90,15 +90,18 @@ export class GraphRenderer {
             let changed = false;
 
             for (const entry of entries) {
-                const nodeId = (entry.target as HTMLElement).dataset.id;
+                const target = entry.target as HTMLElement;
+                const nodeId = target.dataset.id;
                 if (!nodeId) continue;
                 const node = state.nodes.find(n => n.id === nodeId);
                 if (!node) continue;
 
-                const newWidth = Math.round(entry.contentRect.width);
-                const newHeight = Math.round(entry.contentRect.height);
+                // Use offsetWidth/Height for border-box dimensions, consistent with CSS sizing
+                const newWidth = Math.round(target.offsetWidth);
+                const newHeight = Math.round(target.offsetHeight);
 
-                if (node.width !== newWidth || node.height !== newHeight) {
+                // Guard against zero-size updates and unnecessary state noise
+                if (newWidth > 0 && newHeight > 0 && (node.width !== newWidth || node.height !== newHeight)) {
                     node.width = newWidth;
                     node.height = newHeight;
                     changed = true;
@@ -107,7 +110,7 @@ export class GraphRenderer {
                     if (node.type === 'TelemetryGraph') {
                         const worker = this.nodeWorkers.get(nodeId);
                         if (worker) {
-                            const canvas = (entry.target as HTMLElement).querySelector('canvas');
+                            const canvas = target.querySelector('canvas');
                             if (canvas) {
                                 worker.postMessage({
                                     type: 'resize',
