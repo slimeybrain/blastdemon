@@ -539,7 +539,8 @@ export class GraphRenderer {
                     const p = document.createElement('div');
                     p.className = 'port input';
                     p.dataset.portId = input.id;
-                    p.innerHTML = `<div class="port-bullet" id="port-in-${node.id}-${input.id}"></div><span>${input.label}</span>`;
+                    const colorClass = this.getPortColorClass(node.type, input.id);
+                    p.innerHTML = `<div class="port-bullet ${colorClass}" id="port-in-${node.id}-${input.id}"></div><span class="port-label">${input.label}</span>`;
                     p.addEventListener('mouseup', () => {
                         if (this.isDraggingWire) {
                             state.connections.push({
@@ -557,7 +558,8 @@ export class GraphRenderer {
                     const p = document.createElement('div');
                     p.className = 'port output';
                     p.dataset.portId = output.id;
-                    p.innerHTML = `<span>${output.label}</span><div class="port-bullet" id="port-out-${node.id}-${output.id}"></div>`;
+                    const colorClass = this.getPortColorClass(node.type, output.id);
+                    p.innerHTML = `<span class="port-label">${output.label}</span><div class="port-bullet ${colorClass}" id="port-out-${node.id}-${output.id}"></div>`;
                     p.addEventListener('mousedown', (e) => {
                         e.stopPropagation();
                         this.isDraggingWire = true;
@@ -626,6 +628,13 @@ export class GraphRenderer {
                 this.svg.appendChild(path);
             }
         }
+    }
+
+    private getPortColorClass(nodeType: string, portId: string): string {
+        if (nodeType === 'DomainMesh' || portId === 'mesh') return 'domain';
+        if (nodeType === 'MaterialExplosive' || portId === 'explosive') return 'explosive';
+        if (portId === 'telemetry' || (portId === 'in' && (nodeType === 'TelemetryText' || nodeType === 'TelemetryGraph'))) return 'telemetry';
+        return 'material';
     }
 
     private getPortPosition(node: Node, portId: string, isInput: boolean): { x: number, y: number } | null {
