@@ -84,7 +84,47 @@ export class GraphRenderer {
         this.resizeObserver = new ResizeObserver(() => this.render());
         this.resizeObserver.observe(this.viewport);
 
-        this.nodeResizeObserver = new ResizeObserver(() => this.render());
+        this.nodeResizeObserver = new ResizeObserver((entries) => {
+            const state = this.stateManager.getCurrentState();
+            if (!state) return;
+            let changed = false;
+
+            for (const entry of entries) {
+                const nodeId = (entry.target as HTMLElement).dataset.id;
+                if (!nodeId) continue;
+                const node = state.nodes.find(n => n.id === nodeId);
+                if (!node) continue;
+
+                const newWidth = Math.round(entry.contentRect.width);
+                const newHeight = Math.round(entry.contentRect.height);
+
+                if (node.width !== newWidth || node.height !== newHeight) {
+                    node.width = newWidth;
+                    node.height = newHeight;
+                    changed = true;
+
+                    // Notify worker of resize if it's a TelemetryGraph
+                    if (node.type === 'TelemetryGraph') {
+                        const worker = this.nodeWorkers.get(nodeId);
+                        if (worker) {
+                            const canvas = (entry.target as HTMLElement).querySelector('canvas');
+                            if (canvas) {
+                                worker.postMessage({
+                                    type: 'resize',
+                                    width: canvas.clientWidth,
+                                    height: canvas.clientHeight
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (changed) {
+                this.stateManager.updateState(state, false);
+                this.render();
+            }
+        });
 
         this.render();
     }
@@ -247,15 +287,15 @@ export class GraphRenderer {
             }
         } else if (this.isDraggingNode && this.draggedNodeId) {
             const state = this.stateManager.getCurrentState();
-            const ctm = this.svg.getScreenCTM();
-            if (state && ctm) {
+            if (state) {
                 const node = state.nodes.find(n => n.id === this.draggedNodeId);
                 if (node) {
-                    const pt = new DOMPoint(e.clientX, e.clientY);
-                    const worldPoint = pt.matrixTransform(ctm.inverse());
+                    const rect = this.viewport.getBoundingClientRect();
+                    const worldX = (e.clientX - rect.left - this.panX) / this.zoom;
+                    const worldY = (e.clientY - rect.top - this.panY) / this.zoom;
 
-                    node.x = worldPoint.x - this.dragOffsetX;
-                    node.y = worldPoint.y - this.dragOffsetY;
+                    node.x = Math.round(worldX - this.dragOffsetX);
+                    node.y = Math.round(worldY - this.dragOffsetY);
 
                     this.stateManager.updateState(state, false);
                 }
@@ -491,7 +531,7 @@ export class GraphRenderer {
             case 'CFDSolver': return 'SOLVER';
             case 'TelemetryText': return 'LOG';
             case 'TelemetryGraph': return 'CHART';
-            default: return type.toUpperCase();
+            default: return (type as string).toUpperCase();
         }
     }
 
@@ -517,6 +557,11 @@ export class GraphRenderer {
                 if (!nodeEl) {
                     nodeEl = document.createElement('div');
                     nodeEl.className = 'node';
+                    if (node.type === 'TelemetryGraph' || node.type === 'TelemetryText') {
+                        nodeEl.classList.add('resizable');
+                        if (node.width === undefined) node.width = 250;
+                        if (node.height === undefined) node.height = node.type === 'TelemetryGraph' ? 150 : 130;
+                    }
                     nodeEl.dataset.id = node.id;
 
                     const header = document.createElement('div');
@@ -539,11 +584,13 @@ export class GraphRenderer {
                         this.isDraggingNode = true;
                         this.draggedNodeId = node.id;
                         this.selectNode(node.id);
-                        const ctm = this.svg.getScreenCTM()!;
-                        const pt = new DOMPoint(e.clientX, e.clientY);
-                        const worldPoint = pt.matrixTransform(ctm.inverse());
-                        this.dragOffsetX = worldPoint.x - node.x;
-                        this.dragOffsetY = worldPoint.y - node.y;
+
+                        const rect = this.viewport.getBoundingClientRect();
+                        const worldX = (e.clientX - rect.left - this.panX) / this.zoom;
+                        const worldY = (e.clientY - rect.top - this.panY) / this.zoom;
+
+                        this.dragOffsetX = worldX - node.x;
+                        this.dragOffsetY = worldY - node.y;
                     });
                     nodeEl.appendChild(header);
 
@@ -770,6 +817,7 @@ export class GraphRenderer {
             if (!body) {
                 body = document.createElement('div');
                 body.className = 'node-body-text';
+                body.style.height = '100%';
                 container.appendChild(body);
             }
             const logs = this.stateManager.getTelemetry(node.id) || [];
@@ -785,10 +833,15 @@ export class GraphRenderer {
             }
         } else if (node.type === 'TelemetryGraph') {
             if (!container.querySelector('canvas')) {
+                const graphBody = document.createElement('div');
+                graphBody.className = 'node-body-graph';
+                graphBody.style.height = '100%';
+                container.appendChild(graphBody);
+
                 const canvas = document.createElement('canvas');
                 canvas.style.width = '100%';
-                canvas.style.height = '100px';
-                container.appendChild(canvas);
+                canvas.style.height = '100%';
+                graphBody.appendChild(canvas);
                 const worker = new Worker(new URL('./ChartWorker.ts', import.meta.url), { type: 'module' });
                 this.nodeWorkers.set(node.id, worker);
                 const offscreen = (canvas as any).transferControlToOffscreen();
@@ -905,11 +958,130 @@ export class GraphRenderer {
         const state = this.stateManager.getCurrentState();
         if (!state) return;
 
-        if (this.layoutOrientation === 'HORIZ') {
-            state.nodes.forEach((n, i) => { n.x = i * 250 + 50; n.y = 100; });
-        } else {
-            state.nodes.forEach((n, i) => { n.x = 100; n.y = i * 150 + 50; });
+        const nodes = state.nodes;
+        const connections = state.connections;
+
+        // 1. Assign Ranks (Topological Sort / Layering)
+        const ranks: Map<string, number> = new Map();
+        const inDegree: Map<string, number> = new Map();
+
+        nodes.forEach(n => {
+            ranks.set(n.id, 0);
+            inDegree.set(n.id, 0);
+        });
+
+        connections.forEach(c => {
+            inDegree.set(c.toNode, (inDegree.get(c.toNode) || 0) + 1);
+        });
+
+        const queue: string[] = [];
+        nodes.forEach(n => {
+            if (inDegree.get(n.id) === 0) queue.push(n.id);
+        });
+
+        while (queue.length > 0) {
+            const uId = queue.shift()!;
+            const uRank = ranks.get(uId)!;
+
+            connections.filter(c => c.fromNode === uId).forEach(c => {
+                const vId = c.toNode;
+                ranks.set(vId, Math.max(ranks.get(vId)!, uRank + 1));
+                inDegree.set(vId, inDegree.get(vId)! - 1);
+                if (inDegree.get(vId) === 0) queue.push(vId);
+            });
         }
+
+        // Handle cycles by assigning remaining nodes to next rank
+        nodes.forEach(n => {
+            if (inDegree.get(n.id)! > 0) {
+                const maxRank = Math.max(0, ...Array.from(ranks.values()));
+                ranks.set(n.id, maxRank + 1);
+            }
+        });
+
+        // 2. Group by Rank
+        const layers: Map<number, string[]> = new Map();
+        ranks.forEach((rank, id) => {
+            if (!layers.has(rank)) layers.set(rank, []);
+            layers.get(rank)!.push(id);
+        });
+
+        const sortedRanks = Array.from(layers.keys()).sort((a, b) => a - b);
+
+        // 3. Position Nodes
+        const horizontalGap = 300;
+        const verticalGap = 50;
+        const startX = 50;
+        const startY = 50;
+
+        sortedRanks.forEach((rank, layerIndex) => {
+            const nodeIds = layers.get(rank)!;
+
+            // Sort nodes within layer by average predecessor Y position to minimize crossings
+            if (layerIndex > 0) {
+                nodeIds.sort((a, b) => {
+                    const avgA = this.getAveragePredecessorY(a, connections, nodes);
+                    const avgB = this.getAveragePredecessorY(b, connections, nodes);
+                    return avgA - avgB;
+                });
+            }
+
+            let currentY = startY;
+            nodeIds.forEach(id => {
+                const node = nodes.find(n => n.id === id)!;
+
+                if (this.layoutOrientation === 'HORIZ') {
+                    const nodeHeight = this.getNodeEstimatedHeight(node);
+                    node.x = startX + layerIndex * horizontalGap;
+                    node.y = currentY;
+                    currentY += nodeHeight + verticalGap;
+                } else {
+                    const nodeWidth = this.getNodeEstimatedWidth(node);
+                    node.x = currentY;
+                    node.y = startY + layerIndex * horizontalGap;
+                    currentY += nodeWidth + verticalGap;
+                }
+            });
+        });
+
         this.stateManager.pushState(state);
+    }
+
+    private getAveragePredecessorY(nodeId: string, connections: Connection[], nodes: Node[]): number {
+        const preds = connections.filter(c => c.toNode === nodeId).map(c => c.fromNode);
+        if (preds.length === 0) return 0;
+        const sumY = preds.reduce((sum, id) => {
+            const n = nodes.find(node => node.id === id);
+            return sum + (n ? n.y : 0);
+        }, 0);
+        return sumY / preds.length;
+    }
+
+    private getNodeEstimatedWidth(node: Node): number {
+        if (node.displayMode === 'compact') return 100;
+        if (node.width !== undefined) return node.width;
+        return 200;
+    }
+
+    private getNodeEstimatedHeight(node: Node): number {
+        if (node.displayMode === 'compact') return 40;
+        if (node.height !== undefined) return node.height + 30; // 30 for header
+
+        let base = 30; // Header
+        if (node.displayMode === 'normal') {
+            if (node.type === 'TelemetryText') return 130;
+            if (node.type === 'TelemetryGraph') return 150;
+            base += Math.max(node.inputs.length, node.outputs.length) * 20;
+        } else if (node.displayMode === 'expanded') {
+            base += Object.keys(node.parameters).length * 25;
+            if (node.type === 'TelemetryText') base += 100;
+            if (node.type === 'TelemetryGraph') base += 120;
+            base += Math.max(node.inputs.length, node.outputs.length) * 20;
+        } else if (node.displayMode === 'full-panel') {
+            base += Object.keys(node.parameters).length * 25;
+            if (node.type === 'TelemetryText') base += 100;
+            if (node.type === 'TelemetryGraph') base += 120;
+        }
+        return Math.max(base, 60);
     }
 }
