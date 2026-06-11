@@ -139,6 +139,15 @@ document.addEventListener('click', (e) => {
         }
     }
 
+    if (target.id === 'exec-1k-btn') {
+        const state = stateManager.getCurrentState();
+        const solver = state?.nodes.find(n => n.type === 'CFDSolver');
+        const cfl = solver?.parameters?.cfl || 0.4;
+        stateManager.clearPendingSteps();
+        networkManager.send({ command: "EXEC_1K", cfl: cfl });
+        stateManager.setStatus('RUNNING');
+    }
+
     if (target.id === 'exec-end-btn') {
         stateManager.clearPendingSteps();
         networkManager.send({ command: "EXEC_ALL" });

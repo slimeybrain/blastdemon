@@ -12,10 +12,29 @@ export class StateManager {
     public selectedNodeId: string | null = null;
     private selectionListeners: ((nodeId: string | null) => void)[] = [];
 
+    public workspaces: SimulationState[] = [];
+    public activeWorkspaceIndex: number = 0;
+
     constructor(initialState?: SimulationState) {
         if (initialState) {
+            this.workspaces = [initialState];
             this.pushState(initialState, false); // Don't save on initial push to avoid overwrite during load
         }
+    }
+
+    switchWorkspace(index: number) {
+        if (index >= 0 && index < this.workspaces.length) {
+            this.activeWorkspaceIndex = index;
+            this.history = [JSON.parse(JSON.stringify(this.workspaces[index]))];
+            this.currentIndex = 0;
+            this.notifyListeners();
+        }
+    }
+
+    createWorkspace() {
+        this.workspaces.push(JSON.parse(JSON.stringify(this.workspaces[this.activeWorkspaceIndex])));
+        this.switchWorkspace(this.workspaces.length - 1);
+        this.saveWorkspace();
     }
 
     /**
@@ -32,6 +51,10 @@ export class StateManager {
 
         this.history.push(stateCopy);
         this.currentIndex++;
+
+        if (this.workspaces.length > 0) {
+            this.workspaces[this.activeWorkspaceIndex] = JSON.parse(JSON.stringify(stateCopy));
+        }
 
         this.notifyListeners();
         if (autoSave) this.saveWorkspace();
@@ -368,9 +391,11 @@ export class StateManager {
     // --- Persistence ---
 
     saveWorkspace(): void {
-        const state = this.getCurrentState();
-        if (state) {
-            localStorage.setItem('blast_workspace', JSON.stringify(state));
+        if (this.workspaces.length > 0) {
+            localStorage.setItem('blast_workspace', JSON.stringify({
+                workspaces: this.workspaces,
+                activeIndex: this.activeWorkspaceIndex
+            }));
         }
     }
 
@@ -378,18 +403,34 @@ export class StateManager {
         try {
             const saved = localStorage.getItem('blast_workspace');
             if (saved) {
-                const state = JSON.parse(saved);
-                this.history = [state];
-                this.currentIndex = 0;
-                this.notifyListeners();
-                console.log('[System] Workspace hydrated successfully.');
-                return state;
+                const parsed = JSON.parse(saved);
+                if (parsed.workspaces) {
+                    this.workspaces = parsed.workspaces;
+                    this.activeWorkspaceIndex = parsed.activeIndex || 0;
+                    const state = this.workspaces[this.activeWorkspaceIndex];
+                    this.history = [JSON.parse(JSON.stringify(state))];
+                    this.currentIndex = 0;
+                    this.notifyListeners();
+                    console.log('[System] Workspace hydrated successfully.');
+                    return state;
+                } else {
+                    const state = parsed as SimulationState;
+                    this.workspaces = [state];
+                    this.activeWorkspaceIndex = 0;
+                    this.history = [state];
+                    this.currentIndex = 0;
+                    this.notifyListeners();
+                    console.log('[System] Legacy Workspace hydrated successfully.');
+                    return state;
+                }
             }
         } catch (e) {
             console.error('[System] Workspace hydration failed:', e);
         }
 
         if (initialFallback) {
+            this.workspaces = [initialFallback];
+            this.activeWorkspaceIndex = 0;
             this.history = [initialFallback];
             this.currentIndex = 0;
             this.notifyListeners();

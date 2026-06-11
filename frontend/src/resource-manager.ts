@@ -60,12 +60,12 @@ export class ResourceManager {
     }
 
     public updateMetrics(data: { gpu_util: number, vram_util: number, gpu_temp: number }) {
-        const gpuBar = document.getElementById(`${this.panelId}-gpu-bar`);
-        const gpuTxt = document.getElementById(`${this.panelId}-gpu-txt`);
-        const vramBar = document.getElementById(`${this.panelId}-vram-bar`);
-        const vramTxt = document.getElementById(`${this.panelId}-vram-txt`);
-        const tempBar = document.getElementById(`${this.panelId}-temp-bar`);
-        const tempTxt = document.getElementById(`${this.panelId}-temp-txt`);
+        const gpuBar = this.container.querySelector<HTMLElement>(`#${this.panelId}-gpu-bar`);
+        const gpuTxt = this.container.querySelector<HTMLElement>(`#${this.panelId}-gpu-txt`);
+        const vramBar = this.container.querySelector<HTMLElement>(`#${this.panelId}-vram-bar`);
+        const vramTxt = this.container.querySelector<HTMLElement>(`#${this.panelId}-vram-txt`);
+        const tempBar = this.container.querySelector<HTMLElement>(`#${this.panelId}-temp-bar`);
+        const tempTxt = this.container.querySelector<HTMLElement>(`#${this.panelId}-temp-txt`);
 
         if (gpuBar && gpuTxt) {
             gpuBar.style.width = `${Math.min(100, Math.max(0, data.gpu_util))}%`;

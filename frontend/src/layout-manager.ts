@@ -444,7 +444,7 @@ export class LayoutManager {
         stepControls.style.gridTemplateColumns = 'repeat(3, 1fr)';
         stepControls.style.gap = '4px';
         stepControls.appendChild(createBtn('exec-1-btn', '1 Step', 'header-button secondary'));
-        stepControls.appendChild(createBtn('exec-100-btn', '100', 'header-button secondary'));
+        stepControls.appendChild(createBtn('exec-1k-btn', '1k Steps', 'header-button secondary'));
         stepControls.appendChild(createBtn('exec-end-btn', 'ToEnd', 'header-button success'));
         simActions.appendChild(stepControls);
 
@@ -456,6 +456,41 @@ export class LayoutManager {
         runControls.appendChild(createBtn('pause-btn', 'Pause', 'header-button warning'));
         runControls.appendChild(createBtn('terminate-btn', 'Terminate', 'header-button danger'));
         simActions.appendChild(runControls);
+
+        const workspaceControls = document.createElement('div');
+        workspaceControls.style.display = 'flex';
+        workspaceControls.style.gap = '8px';
+        workspaceControls.style.alignItems = 'center';
+
+        const wsSelect = document.createElement('select');
+        wsSelect.className = 'header-select';
+        wsSelect.style.flex = '1';
+        (this.stateManager as any).workspaces.forEach((_: any, i: number) => {
+            const opt = document.createElement('option');
+            opt.value = i.toString();
+            opt.textContent = `Workspace ${i + 1}`;
+            opt.selected = i === (this.stateManager as any).activeWorkspaceIndex;
+            wsSelect.appendChild(opt);
+        });
+
+        wsSelect.onchange = () => {
+            this.components.clear();
+            this.container.innerHTML = '';
+            (this.stateManager as any).switchWorkspace(parseInt(wsSelect.value));
+        };
+
+        workspaceControls.appendChild(wsSelect);
+
+        const newWsBtn = createBtn('new-workspace-btn', 'New Page', 'header-button success');
+        newWsBtn.style.width = 'auto';
+        newWsBtn.onclick = () => {
+            this.components.clear();
+            this.container.innerHTML = '';
+            (this.stateManager as any).createWorkspace();
+        };
+        workspaceControls.appendChild(newWsBtn);
+
+        simActions.appendChild(workspaceControls);
 
         const persistenceControls = document.createElement('div');
         persistenceControls.style.display = 'grid';
