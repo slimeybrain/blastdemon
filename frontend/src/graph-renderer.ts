@@ -30,7 +30,6 @@ export class GraphRenderer {
 
     private selectedNodeId: string | null = null;
     private spacePressed: boolean = false;
-    private layoutOrientation: 'HORIZ' | 'VERT' = 'HORIZ';
 
     public onNodeSelected: ((nodeId: string | null) => void) | null = null;
 
@@ -86,11 +85,6 @@ export class GraphRenderer {
 
         this.nodeResizeObserver = new ResizeObserver(() => this.render());
 
-        this.render();
-    }
-
-    public setLayoutOrientation(o: 'HORIZ' | 'VERT') {
-        this.layoutOrientation = o;
         this.render();
     }
 
@@ -500,10 +494,25 @@ export class GraphRenderer {
                     header.className = 'node-header';
                     header.innerHTML = `<span>${node.type.toUpperCase()}</span>`;
 
+                    const btnGroup = document.createElement('div');
+                    btnGroup.className = 'node-header-btns';
+
+                    const orientBtn = document.createElement('button');
+                    orientBtn.className = 'node-orient-btn';
+                    orientBtn.textContent = (node.orientation || 'HORIZ') === 'HORIZ' ? 'H' : 'V';
+                    orientBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        node.orientation = (node.orientation || 'HORIZ') === 'HORIZ' ? 'VERT' : 'HORIZ';
+                        this.stateManager.pushState(state);
+                    };
+                    btnGroup.appendChild(orientBtn);
+
                     const collapseBtn = document.createElement('button');
                     collapseBtn.className = 'node-collapse-btn';
                     collapseBtn.textContent = '[v]';
-                    header.appendChild(collapseBtn);
+                    btnGroup.appendChild(collapseBtn);
+
+                    header.appendChild(btnGroup);
 
                 header.addEventListener('mousedown', (e) => {
                     if (this.spacePressed || e.button !== 0) return;
@@ -533,40 +542,81 @@ export class GraphRenderer {
                 }
                 nodeEl.appendChild(content);
 
-                const ports = document.createElement('div');
-                ports.className = 'node-ports';
-                node.inputs.forEach(input => {
-                    const p = document.createElement('div');
-                    p.className = 'port input';
-                    p.dataset.portId = input.id;
-                    p.innerHTML = `<div class="port-bullet" id="port-in-${node.id}-${input.id}"></div><span>${input.label}</span>`;
-                    p.addEventListener('mouseup', () => {
-                        if (this.isDraggingWire) {
-                            state.connections.push({
-                                fromNode: this.dragSourceNodeId!,
-                                fromPort: this.dragSourcePortId!,
-                                toNode: node.id,
-                                toPort: input.id
-                            });
-                            this.stateManager.pushState(state);
-                        }
+                if ((node.orientation || 'HORIZ') === 'HORIZ') {
+                    const ports = document.createElement('div');
+                    ports.className = 'node-ports';
+                    node.inputs.forEach(input => {
+                        const p = document.createElement('div');
+                        p.className = 'port input';
+                        p.dataset.portId = input.id;
+                        p.innerHTML = `<div class="port-bullet" id="port-in-${node.id}-${input.id}"></div><span>${input.label}</span>`;
+                        p.addEventListener('mouseup', () => {
+                            if (this.isDraggingWire) {
+                                state.connections.push({
+                                    fromNode: this.dragSourceNodeId!,
+                                    fromPort: this.dragSourcePortId!,
+                                    toNode: node.id,
+                                    toPort: input.id
+                                });
+                                this.stateManager.pushState(state);
+                            }
+                        });
+                        ports.appendChild(p);
                     });
-                    ports.appendChild(p);
-                });
-                node.outputs.forEach(output => {
-                    const p = document.createElement('div');
-                    p.className = 'port output';
-                    p.dataset.portId = output.id;
-                    p.innerHTML = `<span>${output.label}</span><div class="port-bullet" id="port-out-${node.id}-${output.id}"></div>`;
-                    p.addEventListener('mousedown', (e) => {
-                        e.stopPropagation();
-                        this.isDraggingWire = true;
-                        this.dragSourceNodeId = node.id;
-                        this.dragSourcePortId = output.id;
+                    node.outputs.forEach(output => {
+                        const p = document.createElement('div');
+                        p.className = 'port output';
+                        p.dataset.portId = output.id;
+                        p.innerHTML = `<span>${output.label}</span><div class="port-bullet" id="port-out-${node.id}-${output.id}"></div>`;
+                        p.addEventListener('mousedown', (e) => {
+                            e.stopPropagation();
+                            this.isDraggingWire = true;
+                            this.dragSourceNodeId = node.id;
+                            this.dragSourcePortId = output.id;
+                        });
+                        ports.appendChild(p);
                     });
-                    ports.appendChild(p);
-                });
-                nodeEl.appendChild(ports);
+                    nodeEl.appendChild(ports);
+                } else {
+                    const inputPorts = document.createElement('div');
+                    inputPorts.className = 'node-ports-top';
+                    node.inputs.forEach(input => {
+                        const p = document.createElement('div');
+                        p.className = 'port input-top';
+                        p.dataset.portId = input.id;
+                        p.innerHTML = `<div class="port-bullet" id="port-in-${node.id}-${input.id}"></div><span>${input.label}</span>`;
+                        p.addEventListener('mouseup', () => {
+                            if (this.isDraggingWire) {
+                                state.connections.push({
+                                    fromNode: this.dragSourceNodeId!,
+                                    fromPort: this.dragSourcePortId!,
+                                    toNode: node.id,
+                                    toPort: input.id
+                                });
+                                this.stateManager.pushState(state);
+                            }
+                        });
+                        inputPorts.appendChild(p);
+                    });
+                    nodeEl.insertBefore(inputPorts, content);
+
+                    const outputPorts = document.createElement('div');
+                    outputPorts.className = 'node-ports-bottom';
+                    node.outputs.forEach(output => {
+                        const p = document.createElement('div');
+                        p.className = 'port output-bottom';
+                        p.dataset.portId = output.id;
+                        p.innerHTML = `<span>${output.label}</span><div class="port-bullet" id="port-out-${node.id}-${output.id}"></div>`;
+                        p.addEventListener('mousedown', (e) => {
+                            e.stopPropagation();
+                            this.isDraggingWire = true;
+                            this.dragSourceNodeId = node.id;
+                            this.dragSourcePortId = output.id;
+                        });
+                        outputPorts.appendChild(p);
+                    });
+                    nodeEl.appendChild(outputPorts);
+                }
 
                 this.container.appendChild(nodeEl);
                 this.nodeElements.set(node.id, nodeEl);
@@ -578,6 +628,8 @@ export class GraphRenderer {
                 if (node.width !== undefined) nodeEl.style.width = `${node.width}px`;
                 if (node.height !== undefined) nodeEl.style.height = `${node.height}px`;
                 nodeEl.classList.toggle('selected', node.id === this.selectedNodeId);
+                nodeEl.classList.toggle('node-vert', node.orientation === 'VERT');
+                nodeEl.classList.toggle('node-horiz', (node.orientation || 'HORIZ') === 'HORIZ');
             } catch (e) {
                 console.error(`Failed to render node ${node.id}:`, e);
             }
@@ -595,14 +647,28 @@ export class GraphRenderer {
             if (!fromPos || !toPos) return;
 
             const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-            let d = "";
-            if (this.layoutOrientation === 'HORIZ') {
-                const dx = Math.max(Math.abs(toPos.x - fromPos.x) * 0.5, 50);
-                d = `M ${fromPos.x} ${fromPos.y} C ${fromPos.x + dx} ${fromPos.y}, ${toPos.x - dx} ${toPos.y}, ${toPos.x} ${toPos.y}`;
+
+            const fromOrient = fromNode.orientation || 'HORIZ';
+            const toOrient = toNode.orientation || 'HORIZ';
+
+            let cp1x = fromPos.x;
+            let cp1y = fromPos.y;
+            if (fromOrient === 'HORIZ') {
+                cp1x += Math.max(Math.abs(toPos.x - fromPos.x) * 0.5, 50);
             } else {
-                const dy = Math.max(Math.abs(toPos.y - fromPos.y) * 0.5, 50);
-                d = `M ${fromPos.x} ${fromPos.y} C ${fromPos.x} ${fromPos.y + dy}, ${toPos.x} ${toPos.y - dy}, ${toPos.x} ${toPos.y}`;
+                cp1y += Math.max(Math.abs(toPos.y - fromPos.y) * 0.5, 50);
             }
+
+            let cp2x = toPos.x;
+            let cp2y = toPos.y;
+            if (toOrient === 'HORIZ') {
+                cp2x -= Math.max(Math.abs(toPos.x - fromPos.x) * 0.5, 50);
+            } else {
+                cp2y -= Math.max(Math.abs(toPos.y - fromPos.y) * 0.5, 50);
+            }
+
+            const d = `M ${fromPos.x} ${fromPos.y} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${toPos.x} ${toPos.y}`;
+
             path.setAttribute('d', d);
             path.setAttribute('class', 'edge-path');
             path.setAttribute('stroke', '#475569');
@@ -617,8 +683,23 @@ export class GraphRenderer {
             if (fromPos) {
                 const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
                 const toPos = this.mouseWorldPosition;
+
+                const fromOrient = sourceNode!.orientation || 'HORIZ';
+                let cp1x = fromPos.x;
+                let cp1y = fromPos.y;
+                if (fromOrient === 'HORIZ') {
+                    cp1x += Math.max(Math.abs(toPos.x - fromPos.x) * 0.5, 50);
+                } else {
+                    cp1y += Math.max(Math.abs(toPos.y - fromPos.y) * 0.5, 50);
+                }
+
+                // For dragging wire, we don't know the target orientation, assume default or opposite of source?
+                // Lets just use simple logic for the end point when dragging
                 const dx = Math.max(Math.abs(toPos.x - fromPos.x) * 0.5, 50);
-                const d = `M ${fromPos.x} ${fromPos.y} C ${fromPos.x + dx} ${fromPos.y}, ${toPos.x - dx} ${toPos.y}, ${toPos.x} ${toPos.y}`;
+                const cp2x = toPos.x - dx;
+                const cp2y = toPos.y;
+
+                const d = `M ${fromPos.x} ${fromPos.y} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${toPos.x} ${toPos.y}`;
                 path.setAttribute('d', d);
                 path.setAttribute('stroke', '#00f0ff');
                 path.setAttribute('stroke-dasharray', '5,5');
@@ -642,18 +723,20 @@ export class GraphRenderer {
             const worldPoint = pt.matrixTransform(ctm.inverse());
             return { x: worldPoint.x, y: worldPoint.y };
         }
-        return { x: node.x + (isInput ? 0 : 200), y: node.y + 50 };
+
+        // Fallback logic
+        if ((node.orientation || 'HORIZ') === 'HORIZ') {
+            return { x: node.x + (isInput ? 0 : 200), y: node.y + 50 };
+        } else {
+            return { x: node.x + 100, y: node.y + (isInput ? 0 : 150) };
+        }
     }
 
     public autoArrange(): void {
         const state = this.stateManager.getCurrentState();
         if (!state) return;
 
-        if (this.layoutOrientation === 'HORIZ') {
-            state.nodes.forEach((n, i) => { n.x = i * 250 + 50; n.y = 100; });
-        } else {
-            state.nodes.forEach((n, i) => { n.x = 100; n.y = i * 150 + 50; });
-        }
+        state.nodes.forEach((n, i) => { n.x = i * 250 + 50; n.y = 100; });
         this.stateManager.pushState(state);
     }
 }

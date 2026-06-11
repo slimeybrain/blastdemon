@@ -189,23 +189,6 @@ export class LayoutManager {
         }
 
         if (node.panelType === 'NODE_GRAPH') {
-            const layoutToggle = document.createElement('select');
-            layoutToggle.className = 'header-select';
-            layoutToggle.style.width = '60px';
-            ['HORIZ', 'VERT'].forEach(l => {
-                const opt = document.createElement('option');
-                opt.value = l;
-                opt.textContent = l;
-                layoutToggle.appendChild(opt);
-            });
-            layoutToggle.onchange = () => {
-                const comp = this.components.get(node.id);
-                if (comp && comp.type === 'NODE_GRAPH') {
-                    comp.instance.setLayoutOrientation(layoutToggle.value);
-                }
-            };
-            leftSide.appendChild(layoutToggle);
-
             const statusBadge = document.createElement('div');
             statusBadge.id = 'status-badge';
             statusBadge.className = `status-badge badge-${this.stateManager.getStatus().toLowerCase()}`;

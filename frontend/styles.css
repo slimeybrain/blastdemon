@@ -255,15 +255,28 @@ body {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 10px;
 }
 
+.node-header-btns {
+    display: flex;
+    gap: 4px;
+}
+
+.node-orient-btn,
 .node-collapse-btn {
-    background: none;
-    border: none;
+    background: #555;
+    border: 1px solid #666;
+    border-radius: 2px;
     color: #ccc;
     cursor: pointer;
-    font-size: 10px;
-    padding: 0 2px;
+    font-size: 9px;
+    padding: 0 4px;
+    min-width: 16px;
+    height: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .node-collapse-btn:hover {
@@ -274,12 +287,32 @@ body {
     padding: 4px 0;
 }
 
+.node-ports-top {
+    padding: 0 4px;
+    display: flex;
+    justify-content: space-around;
+    border-bottom: 1px solid #444;
+}
+
+.node-ports-bottom {
+    padding: 0 4px;
+    display: flex;
+    justify-content: space-around;
+    border-top: 1px solid #444;
+}
+
 .port {
     display: flex;
     align-items: center;
     height: 18px;
     font-size: 9px;
     position: relative;
+}
+
+.port.input-top, .port.output-bottom {
+    flex-direction: column;
+    height: auto;
+    padding: 4px 0;
 }
 
 .port-bullet {
@@ -290,9 +323,12 @@ body {
     position: absolute;
 }
 
-.port.input .port-bullet { left: -3px; }
+.port.input .port-bullet { left: -3px; top: calc(50% - 3px); }
 .port.output { justify-content: flex-end; }
-.port.output .port-bullet { right: -3px; }
+.port.output .port-bullet { right: -3px; top: calc(50% - 3px); }
+
+.port.input-top .port-bullet { top: -3px; left: calc(50% - 3px); }
+.port.output-bottom .port-bullet { bottom: -3px; left: calc(50% - 3px); }
 
 .port-label { padding: 0 8px; }
 

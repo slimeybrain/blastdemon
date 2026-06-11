@@ -13,6 +13,7 @@ export interface Node {
     width?: number;
     height?: number;
     displayMode?: 'compact' | 'collapsed';
+    orientation?: 'HORIZ' | 'VERT';
     parameters: Record<string, any>;
     inputs: Port[];
     outputs: Port[];
