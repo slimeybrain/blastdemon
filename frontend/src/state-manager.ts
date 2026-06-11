@@ -231,11 +231,46 @@ export class StateManager {
         this.telemetryListeners.forEach(listener => listener(nodeId, data));
     }
 
+    private formatTelemetry(data: any): string {
+        if (typeof data === 'string') {
+            if (data.startsWith('{')) {
+                try {
+                    const parsed = JSON.parse(data);
+                    return this.formatTelemetryObject(parsed);
+                } catch (e) {
+                    return data;
+                }
+            }
+            return data;
+        }
+        return this.formatTelemetryObject(data);
+    }
+
+    private formatTelemetryObject(obj: any): string {
+        if (!obj) return '[NULL DATA]';
+        const time = new Date().toLocaleTimeString();
+        if (obj.type === 'progress' || obj.command === 'PROGRESS') {
+            const percent = (obj.percent !== undefined ? obj.percent : (obj.value !== undefined ? obj.value : 0));
+            return `[${time}] [PROGRESS] ${percent}%`;
+        }
+        if (obj.type === 'TELEMETRY') {
+            const t = typeof obj.time === 'number' ? obj.time.toFixed(6) : '0.000000';
+            const term = obj.is_terminated !== undefined ? obj.is_terminated : 'false';
+            return `[${time}] [FRAME] t=${t}s, term=${term}`;
+        }
+        if (obj.type === 'resource_pulse') {
+            const cpu = typeof obj.cpu === 'number' ? obj.cpu.toFixed(1) : '0.0';
+            const gpu = typeof obj.gpu_util === 'number' ? obj.gpu_util.toFixed(1) : '0.0';
+            return `[${time}] [RESOURCES] CPU: ${cpu}%, GPU: ${gpu}%`;
+        }
+        return `[${time}] [DATA] ${JSON.stringify(obj)}`;
+    }
+
     pushTelemetry(nodeIdOrData: any, optionalData?: any): void {
         let nodeId: string | null = null;
         let data: any = null;
 
-        if (typeof nodeIdOrData === 'string') {
+        if (typeof nodeIdOrData === 'string' && optionalData !== undefined) {
             nodeId = nodeIdOrData;
             data = optionalData;
         } else {
@@ -248,21 +283,6 @@ export class StateManager {
         }
 
         if (!nodeId) return;
-
-        // JSON Prettifier Fallback (Zero-Omission Requirement 8)
-        if (typeof data === 'string' && data.startsWith('{')) {
-            try {
-                const parsed = JSON.parse(data);
-                if (parsed.type === 'progress' || parsed.command === 'PROGRESS') {
-                    const percent = parsed.percent || parsed.value || 0;
-                    data = `[${new Date().toLocaleTimeString()}] [PROGRESS] Simulation batch step executed. Percent: ${percent}%`;
-                } else {
-                    data = `[${new Date().toLocaleTimeString()}] [DATA] ${JSON.stringify(parsed)}`;
-                }
-            } catch (e) {
-                // Keep raw if parse fails
-            }
-        }
 
         if (!(data instanceof ArrayBuffer)) {
             this.telemetryStore.set(nodeId, data);
@@ -283,7 +303,7 @@ export class StateManager {
                 } else if (targetNode.type === 'TelemetryText') {
                     let log = this.telemetryStore.get(targetNode.id);
                     if (!Array.isArray(log)) log = [];
-                    const logMsg = typeof data === 'string' ? data : JSON.stringify(data);
+                    const logMsg = this.formatTelemetry(data);
                     log.push(logMsg);
                     if (log.length > 100) log.shift();
                     this.telemetryStore.set(targetNode.id, log);
