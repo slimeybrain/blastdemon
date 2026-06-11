@@ -138,6 +138,8 @@ document.addEventListener('click', (e) => {
     if (stepMatch) {
         const steps = parseInt(stepMatch[1]);
         stateManager.addPendingSteps(steps);
+
+        // Immediate Execution: Always send command if not already running (Resumes automatically)
         if (stateManager.getStatus() !== 'RUNNING') {
             networkManager.send({ command: "STEP", steps: stateManager.getPendingSteps(), cfl: getCflFromSolver() });
             stateManager.clearPendingSteps();
@@ -151,19 +153,7 @@ document.addEventListener('click', (e) => {
         stateManager.setStatus('RUNNING');
     }
 
-    if (target.id === 'play-btn') {
-        stateManager.setStatus('RUNNING');
-        networkManager.send({ command: "STEP", steps: 10000, cfl: getCflFromSolver() });
-    }
-
-
-    if (target.id === 'resume-btn') {
-        stateManager.clearPendingSteps();
-        networkManager.send({ command: "RESUME" });
-        stateManager.setStatus('RUNNING');
-    }
-
-    if (target.id === 'pause-btn') {
+    if (target.id === 'interrupt-btn') {
         stateManager.clearPendingSteps();
         networkManager.send({ command: "PAUSE" });
         stateManager.setStatus('PAUSED');

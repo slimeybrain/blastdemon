@@ -19,7 +19,8 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature',
         'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
         'jwl_R1', 'jwl_R2', 'jwl_omega', 'cfl', 'output_interval',
-        'spatial_order', 'temporal_order'
+        'spatial_order', 'temporal_order',
+        'n_cells', 'gamma', 'explosive_radius', 'ambient_rho'
     ];
 
     // Flatten all parameters from all nodes into a single configuration object
@@ -33,6 +34,23 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             }
         });
     });
+
+    // Derived parameters for backend (Zero-Omission Phase)
+    if (command === "INIT") {
+        const radius = flattenedParams['domain_radius'] || 1.0;
+        const dx = flattenedParams['cell_size'] || 0.001;
+        flattenedParams['n_cells'] = Math.round(radius / dx);
+
+        flattenedParams['gamma'] = 1.4; // Default air
+
+        const mass = flattenedParams['charge_mass'] || 1.0;
+        const rho = flattenedParams['rho'] || 1630.0;
+        flattenedParams['explosive_radius'] = Math.pow((3.0 * mass) / (4.0 * Math.PI * rho), 1.0/3.0);
+
+        const p = flattenedParams['atm_pressure'] || 101325.0;
+        const t = flattenedParams['atm_temperature'] || 298.15;
+        flattenedParams['ambient_rho'] = p / (287.058 * t);
+    }
 
     return JSON.stringify({
         command: command,

@@ -452,10 +452,9 @@ export class LayoutManager {
 
         const runControls = document.createElement('div');
         runControls.style.display = 'grid';
-        runControls.style.gridTemplateColumns = '1fr 1fr 1fr';
+        runControls.style.gridTemplateColumns = '1fr 1fr';
         runControls.style.gap = '8px';
-        runControls.appendChild(createBtn('resume-btn', 'Resume', 'header-button success'));
-        runControls.appendChild(createBtn('pause-btn', 'Pause', 'header-button warning'));
+        runControls.appendChild(createBtn('interrupt-btn', 'Interrupt', 'header-button warning'));
         runControls.appendChild(createBtn('terminate-btn', 'Terminate', 'header-button danger'));
         simActions.appendChild(runControls);
 
