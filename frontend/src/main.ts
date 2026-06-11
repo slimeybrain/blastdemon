@@ -94,6 +94,12 @@ const activeState = savedState || initialState;
 
 const layoutManager = new LayoutManager('app-container', stateManager);
 
+function getCflFromSolver(): number {
+    const state = stateManager.getCurrentState();
+    const solver = state?.nodes?.find(n => n.type === 'CFDSolver');
+    return solver?.parameters?.cfl || 0.4;
+}
+
 (window as any).stateManager = stateManager;
 (window as any).layoutManager = layoutManager;
 
@@ -133,30 +139,21 @@ document.addEventListener('click', (e) => {
         const steps = parseInt(stepMatch[1]);
         stateManager.addPendingSteps(steps);
         if (stateManager.getStatus() !== 'RUNNING') {
-            networkManager.send({ command: "STEP", steps: stateManager.getPendingSteps() });
+            networkManager.send({ command: "STEP", steps: stateManager.getPendingSteps(), cfl: getCflFromSolver() });
             stateManager.clearPendingSteps();
             stateManager.setStatus('RUNNING');
         }
     }
 
-    if (target.id === 'exec-1k-btn') {
-        const state = stateManager.getCurrentState();
-        const solver = state?.nodes.find(n => n.type === 'CFDSolver');
-        const cfl = solver?.parameters?.cfl || 0.4;
-        stateManager.clearPendingSteps();
-        networkManager.send({ command: "EXEC_1K", cfl: cfl });
-        stateManager.setStatus('RUNNING');
-    }
-
     if (target.id === 'exec-end-btn') {
         stateManager.clearPendingSteps();
-        networkManager.send({ command: "EXEC_ALL" });
+        networkManager.send({ command: "EXEC_ALL", cfl: getCflFromSolver() });
         stateManager.setStatus('RUNNING');
     }
 
     if (target.id === 'play-btn') {
         stateManager.setStatus('RUNNING');
-        networkManager.send({ command: "STEP", steps: 10000 });
+        networkManager.send({ command: "STEP", steps: 10000, cfl: getCflFromSolver() });
     }
 
 
@@ -219,7 +216,7 @@ networkManager.onMessage((data) => {
             if (stateManager.getStatus() === 'RUNNING' && dataJson.is_terminated !== true) {
                 const pending = stateManager.getPendingSteps();
                 if (pending > 0) {
-                    networkManager.send({ command: "STEP", steps: pending });
+                    networkManager.send({ command: "STEP", steps: pending, cfl: getCflFromSolver() });
                     stateManager.clearPendingSteps();
                 } else {
                     stateManager.setStatus('PAUSED');

@@ -441,11 +441,13 @@ export class LayoutManager {
 
         const stepControls = document.createElement('div');
         stepControls.style.display = 'grid';
-        stepControls.style.gridTemplateColumns = 'repeat(3, 1fr)';
+        stepControls.style.gridTemplateColumns = 'repeat(5, 1fr)';
         stepControls.style.gap = '4px';
-        stepControls.appendChild(createBtn('exec-1-btn', '1 Step', 'header-button secondary'));
-        stepControls.appendChild(createBtn('exec-1k-btn', '1k Steps', 'header-button secondary'));
-        stepControls.appendChild(createBtn('exec-end-btn', 'ToEnd', 'header-button success'));
+        stepControls.appendChild(createBtn('exec-1-btn', '1', 'header-button secondary'));
+        stepControls.appendChild(createBtn('exec-10-btn', '10', 'header-button secondary'));
+        stepControls.appendChild(createBtn('exec-100-btn', '100', 'header-button secondary'));
+        stepControls.appendChild(createBtn('exec-1000-btn', '1000', 'header-button secondary'));
+        stepControls.appendChild(createBtn('exec-end-btn', 'End', 'header-button success'));
         simActions.appendChild(stepControls);
 
         const runControls = document.createElement('div');
