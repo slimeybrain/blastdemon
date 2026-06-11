@@ -263,7 +263,7 @@ export class StateManager {
                 return `[${timestamp}] [PROGRESS] ${percent}% complete`;
             }
             if (data.type === 'TELEMETRY') {
-                return `[${timestamp}] [SOLVER] Time: ${data.time?.toFixed(6) || '0'}, Terminated: ${data.is_terminated || false}`;
+                return `[${timestamp}] [SOLVER] Time: ${data.time?.toExponential(6) || '0'}, Terminated: ${data.is_terminated || false}`;
             }
             if (data.type === 'resource_pulse') {
                 return `[${timestamp}] [RESOURCES] CPU: ${data.metrics?.cpu?.toFixed(1)}%, RAM: ${data.metrics?.ram?.toFixed(1)}%`;

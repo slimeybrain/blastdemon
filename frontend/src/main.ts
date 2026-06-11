@@ -199,9 +199,9 @@ networkManager.onMessage((data) => {
             if (progressBar) progressBar.style.width = `${dataJson.percent}%`;
             if (progressLabel) {
                 if (dataJson.mode === 'STEP') {
-                    progressLabel.textContent = `Steps: ${dataJson.completed} / ${dataJson.total} (${dataJson.percent}%) | Time: ${dataJson.sim_time.toFixed(6)}s`;
+                    progressLabel.textContent = `Steps: ${dataJson.completed} / ${dataJson.total} (${dataJson.percent}%) | Time: ${dataJson.sim_time.toExponential(6)}s`;
                 } else if (dataJson.mode === 'EXEC_ALL') {
-                    progressLabel.textContent = `Progress: ${dataJson.percent}% | Time: ${dataJson.sim_time.toFixed(6)}s`;
+                    progressLabel.textContent = `Progress: ${dataJson.percent}% | Time: ${dataJson.sim_time.toExponential(6)}s`;
                 } else {
                     progressLabel.textContent = `Progress: ${dataJson.percent}%`;
                 }
@@ -215,7 +215,7 @@ networkManager.onMessage((data) => {
             if (progressBar) progressBar.style.width = '0%';
             const progressLabel = document.getElementById('progress-label');
             if (progressLabel && dataJson.time > 0) {
-                progressLabel.textContent = `Time: ${dataJson.time.toFixed(6)}s ${dataJson.is_terminated ? '(Terminated)' : ''}`;
+                progressLabel.textContent = `Time: ${dataJson.time.toExponential(6)}s ${dataJson.is_terminated ? '(Terminated)' : ''}`;
             }
             if (dataJson.time === 0) stateManager.setStatus('INITIALIZED');
 
