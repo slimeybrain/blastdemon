@@ -19,6 +19,13 @@ export class NodeViewer {
     private telemetryBuffer: any = null;
     private renderRequestId: number | null = null;
 
+    private lastColor: string | null = null;
+    private lastMinY: number | null = null;
+    private lastMaxY: number | null = null;
+    private lastChannel: number | null = null;
+    private lastShowGridVal: boolean | null = null;
+    private lastXAxisModeVal: string | null = null;
+
     constructor(parent: HTMLElement, stateManager: StateManager) {
         this.container = document.createElement('div');
         this.container.className = 'node-viewer-container';
@@ -82,6 +89,63 @@ export class NodeViewer {
         if (this.lastId === node.id && this.lastType === node.type) {
             if (node.type !== 'TelemetryText' && node.type !== 'TelemetryGraph') {
                 this.renderStandardNode(node);
+            } else if (node.type === 'TelemetryGraph') {
+                // Sync settings from the node parameters (e.g. after model load)
+                const currentChannel = Number(node.parameters?.telemetry_channel ?? 0);
+                const meshNode = this.stateManager.getCurrentState()?.nodes.find(n => n.type === 'DomainMesh');
+                const is1D = (meshNode?.parameters?.dimension ?? '1D') === '1D';
+                const xAxisMode = is1D ? (node.parameters?.x_axis_mode ?? 'radius') : 'cell_id';
+                const domainRadius = Number(meshNode?.parameters?.domain_radius ?? 1.0);
+                const minVal = Number(node.parameters?.min_y ?? 0);
+                const maxVal = Number(node.parameters?.max_y ?? 1000000);
+                const colorVal = node.parameters?.color ?? '#00f0ff';
+                const showGridVal = node.parameters?.show_grid !== false;
+
+                if (this.lastChannel !== currentChannel || this.lastColor !== colorVal) {
+                    this.lastChannel = currentChannel;
+                    this.lastColor = colorVal;
+                    const channelSelect = this.container.querySelector('.viewer-channel-select') as HTMLSelectElement;
+                    if (channelSelect) channelSelect.value = String(currentChannel);
+                    const colorIn = this.container.querySelector('.viewer-header input[type="color"]') as HTMLInputElement;
+                    if (colorIn) colorIn.value = colorVal;
+                    this.chartWorker?.postMessage({
+                        type: 'setConfig',
+                        channel: currentChannel,
+                        color: colorVal
+                    });
+                }
+
+                if (this.lastMinY !== minVal) {
+                    this.lastMinY = minVal;
+                    const minInput = this.container.querySelector(`#viewer-min-y-${node.id}`) as HTMLInputElement;
+                    if (minInput) minInput.value = String(minVal);
+                    this.chartWorker?.postMessage({ type: 'setConfig', min: minVal });
+                }
+
+                if (this.lastMaxY !== maxVal) {
+                    this.lastMaxY = maxVal;
+                    const maxInput = this.container.querySelector(`#viewer-max-y-${node.id}`) as HTMLInputElement;
+                    if (maxInput) maxInput.value = String(maxVal);
+                    this.chartWorker?.postMessage({ type: 'setConfig', max: maxVal });
+                }
+
+                if (this.lastShowGridVal !== showGridVal) {
+                    this.lastShowGridVal = showGridVal;
+                    const gridCheckbox = this.container.querySelector('.viewer-header input[type="checkbox"]') as HTMLInputElement;
+                    if (gridCheckbox) gridCheckbox.checked = showGridVal;
+                    this.chartWorker?.postMessage({ type: 'setConfig', showGrid: showGridVal });
+                }
+
+                if (this.lastXAxisModeVal !== xAxisMode) {
+                    this.lastXAxisModeVal = xAxisMode;
+                    const xSelect = this.container.querySelector('.viewer-x-axis-select') as HTMLSelectElement;
+                    if (xSelect) xSelect.value = xAxisMode;
+                    this.chartWorker?.postMessage({
+                        type: 'setConfig',
+                        xAxisMode: xAxisMode,
+                        domainRadius: domainRadius
+                    });
+                }
             }
             return;
         }
@@ -152,7 +216,7 @@ export class NodeViewer {
         terminal.style.background = '#000';
         terminal.style.color = '#0f0';
         terminal.style.fontFamily = 'var(--font-mono)';
-        terminal.style.fontSize = '12px';
+        terminal.style.fontSize = 'var(--font-sm)';
         terminal.style.padding = '10px';
         terminal.style.overflowY = 'auto';
         terminal.style.whiteSpace = 'pre-wrap';
@@ -176,6 +240,31 @@ export class NodeViewer {
             this.chartWorker.terminate();
             this.chartWorker = null;
         }
+
+        const CHANNELS: { label: string; color: string }[] = [
+            { label: 'Pressure',        color: '#00f0ff' },
+            { label: 'Density',         color: '#f0a000' },
+            { label: 'Velocity',        color: '#a0f000' },
+            { label: 'Int. Energy',     color: '#f000a0' },
+        ];
+        const currentChannel = Number(node.parameters?.telemetry_channel ?? 0);
+        const initialColor = node.parameters?.color ?? CHANNELS[currentChannel]?.color ?? '#00f0ff';
+        const initialMinY = node.parameters?.min_y !== undefined ? Number(node.parameters.min_y) : 0;
+        const initialMaxY = node.parameters?.max_y !== undefined ? Number(node.parameters.max_y) : 1000000;
+        const showGridVal = node.parameters?.show_grid !== false;
+ 
+        this.lastColor = null;
+        this.lastMinY = null;
+        this.lastMaxY = null;
+        this.lastChannel = null;
+        this.lastShowGridVal = null;
+        this.lastXAxisModeVal = null;
+
+        const meshNode = this.stateManager.getCurrentState()?.nodes.find(n => n.type === 'DomainMesh');
+        const is1D = (meshNode?.parameters?.dimension ?? '1D') === '1D';
+        const domainRadius = Number(meshNode?.parameters?.domain_radius ?? 1.0);
+        const xAxisMode = is1D ? (node.parameters?.x_axis_mode ?? 'radius') : 'cell_id';
+
         const header = document.createElement('div');
         header.className = 'viewer-header';
         header.style.display = 'flex';
@@ -197,12 +286,12 @@ export class NodeViewer {
             div.style.gap = '4px';
             const lb = document.createElement('label');
             lb.textContent = label;
-            lb.style.fontSize = '10px';
+            lb.style.fontSize = 'var(--font-xs)';
             const input = document.createElement('input');
             input.type = type;
             input.value = value;
             input.style.width = type === 'number' ? '60px' : '30px';
-            input.style.fontSize = '10px';
+            input.style.fontSize = 'var(--font-xs)';
             input.style.background = '#333';
             input.style.color = '#ccc';
             input.style.border = '1px solid #444';
@@ -212,25 +301,110 @@ export class NodeViewer {
             return div;
         };
 
-        const minControl = createControl('Min Y:', 'number', '0', (v) => this.chartWorker?.postMessage({ type: 'setConfig', min: Number(v) }));
+        const minControl = createControl('Min Y:', 'number', String(initialMinY), (v) => this.stateManager.updateNodeParameters(node.id, { min_y: Number(v) }));
         const minIn = minControl.querySelector('input')!;
         minIn.id = `viewer-min-y-${node.id}`;
         header.appendChild(minControl);
 
-        const maxControl = createControl('Max Y:', 'number', '1000000', (v) => this.chartWorker?.postMessage({ type: 'setConfig', max: Number(v) }));
+        const maxControl = createControl('Max Y:', 'number', String(initialMaxY), (v) => this.stateManager.updateNodeParameters(node.id, { max_y: Number(v) }));
         const maxIn = maxControl.querySelector('input')!;
         maxIn.id = `viewer-max-y-${node.id}`;
         header.appendChild(maxControl);
 
-        header.appendChild(createControl('Color:', 'color', '#00f0ff', (v) => this.chartWorker?.postMessage({ type: 'setConfig', color: v })));
+        const colorControl = createControl('Color:', 'color', initialColor, (v) => this.stateManager.updateNodeParameters(node.id, { color: v }));
+        const colorIn = colorControl.querySelector('input')!;
+        header.appendChild(colorControl);
 
         const gridLabel = document.createElement('label');
-        gridLabel.style.fontSize = '10px';
-        gridLabel.innerHTML = '<input type="checkbox" checked> Grid';
+        gridLabel.style.fontSize = 'var(--font-xs)';
+        gridLabel.innerHTML = `<input type="checkbox" ${showGridVal ? 'checked' : ''}> Grid`;
         gridLabel.querySelector('input')!.onchange = (e) => {
-            this.chartWorker?.postMessage({ type: 'setConfig', showGrid: (e.target as HTMLInputElement).checked });
+            this.stateManager.updateNodeParameters(node.id, { show_grid: (e.target as HTMLInputElement).checked });
         };
         header.appendChild(gridLabel);
+
+        // Add Channel control
+        const channelSelect = document.createElement('select');
+        channelSelect.className = 'viewer-channel-select';
+        channelSelect.style.fontSize = 'var(--font-xs)';
+        channelSelect.style.background = '#333';
+        channelSelect.style.color = '#ccc';
+        channelSelect.style.border = '1px solid #444';
+        channelSelect.style.padding = '2px 4px';
+        channelSelect.style.borderRadius = '3px';
+
+        CHANNELS.forEach((ch, idx) => {
+            const opt = document.createElement('option');
+            opt.value = String(idx);
+            opt.textContent = ch.label;
+            if (idx === currentChannel) opt.selected = true;
+            channelSelect.appendChild(opt);
+        });
+
+        channelSelect.onchange = () => {
+            const chIdx = Number(channelSelect.value);
+            const newColor = CHANNELS[chIdx]?.color ?? '#00f0ff';
+            colorIn.value = newColor;
+            this.stateManager.updateNodeParameters(node.id, {
+                telemetry_channel: chIdx,
+                color: newColor
+            });
+        };
+
+        const channelControl = document.createElement('div');
+        channelControl.style.display = 'flex';
+        channelControl.style.alignItems = 'center';
+        channelControl.style.gap = '4px';
+        const channelLabel = document.createElement('label');
+        channelLabel.textContent = 'Channel:';
+        channelLabel.style.fontSize = 'var(--font-xs)';
+        channelControl.appendChild(channelLabel);
+        channelControl.appendChild(channelSelect);
+        header.appendChild(channelControl);
+
+        // Add X-Axis selector control if 1D model
+        if (is1D) {
+            const xSelect = document.createElement('select');
+            xSelect.className = 'viewer-x-axis-select';
+            xSelect.style.fontSize = 'var(--font-xs)';
+            xSelect.style.background = '#333';
+            xSelect.style.color = '#ccc';
+            xSelect.style.border = '1px solid #444';
+            xSelect.style.padding = '2px 4px';
+            xSelect.style.borderRadius = '3px';
+
+            const optRadius = document.createElement('option');
+            optRadius.value = 'radius';
+            optRadius.textContent = 'Radius';
+            if (xAxisMode === 'radius') optRadius.selected = true;
+            xSelect.appendChild(optRadius);
+
+            const optCell = document.createElement('option');
+            optCell.value = 'cell_id';
+            optCell.textContent = 'Cell ID';
+            if (xAxisMode === 'cell_id') optCell.selected = true;
+            xSelect.appendChild(optCell);
+
+            xSelect.onchange = () => {
+                const newMode = xSelect.value;
+                this.stateManager.updateNodeParameters(node.id, { x_axis_mode: newMode });
+                this.chartWorker?.postMessage({
+                    type: 'setConfig',
+                    xAxisMode: newMode
+                });
+            };
+
+            const xControl = document.createElement('div');
+            xControl.style.display = 'flex';
+            xControl.style.alignItems = 'center';
+            xControl.style.gap = '4px';
+            const xLabel = document.createElement('label');
+            xLabel.textContent = 'X-Axis:';
+            xLabel.style.fontSize = 'var(--font-xs)';
+            xControl.appendChild(xLabel);
+            xControl.appendChild(xSelect);
+            header.appendChild(xControl);
+        }
 
         this.container.appendChild(header);
 
@@ -260,22 +434,45 @@ export class NodeViewer {
                 const maxInputEl = document.getElementById(`viewer-max-y-${node.id}`) as HTMLInputElement;
                 if (minInputEl) minInputEl.value = e.data.minY.toExponential(2);
                 if (maxInputEl) maxInputEl.value = e.data.maxY.toExponential(2);
+                
+                this.stateManager.updateNodeParametersInPlace(node.id, {
+                    min_y: e.data.minY,
+                    max_y: e.data.maxY
+                });
             }
         };
 
         setTimeout(() => {
             if (!this.chartCanvas || !this.chartWorker) return;
             const rect = canvasCont.getBoundingClientRect();
-            this.chartCanvas.width = rect.width || 800;
-            this.chartCanvas.height = rect.height || 600;
+            // Set canvas to logical (CSS) pixel size — the worker scales for DPR
+            const cssW = Math.round(rect.width)  || 800;
+            const cssH = Math.round(rect.height) || 600;
+            this.chartCanvas.width  = cssW;
+            this.chartCanvas.height = cssH;
             const offscreen = (this.chartCanvas as any).transferControlToOffscreen();
-            this.chartWorker.postMessage({ type: 'init', canvas: offscreen }, [offscreen] as any);
+            this.chartWorker.postMessage(
+                { type: 'init', canvas: offscreen, dpr: window.devicePixelRatio || 1 },
+                [offscreen] as any
+            );
+            this.chartWorker.postMessage({
+                type: 'setConfig',
+                channel: currentChannel,
+                color: initialColor,
+                min: initialMinY,
+                max: initialMaxY,
+                showGrid: showGridVal,
+                showAxes: true,
+                xAxisMode: xAxisMode,
+                domainRadius: domainRadius
+            });
         }, 0);
 
         const ro = new ResizeObserver(entries => {
             for (const entry of entries) {
+                // Send logical CSS dimensions; worker knows dpr and resizes internally
                 const { width, height } = entry.contentRect;
-                this.chartWorker?.postMessage({ type: 'resize', width, height });
+                this.chartWorker?.postMessage({ type: 'resize', width: Math.round(width), height: Math.round(height) });
             }
         });
         ro.observe(canvasCont);
@@ -294,7 +491,7 @@ export class NodeViewer {
         const title = document.createElement('h3');
         title.textContent = `CONFIG: ${node.type} (${node.id})`;
         title.style.margin = '0 0 15px 0';
-        title.style.fontSize = '14px';
+        title.style.fontSize = 'var(--font-md)';
         title.style.borderBottom = '1px solid #444';
         title.style.paddingBottom = '5px';
         this.container.appendChild(title);
@@ -308,26 +505,11 @@ export class NodeViewer {
         for (const [key, value] of Object.entries(node.parameters)) {
             const label = document.createElement('label');
             label.textContent = key.replace(/_/g, ' ').toUpperCase();
-            label.style.fontSize = '12px';
+            label.style.fontSize = 'var(--font-sm)';
             label.style.color = '#888';
             grid.appendChild(label);
 
-            const input = document.createElement('input');
-            const isNumeric = typeof value === 'number';
-            input.type = isNumeric ? 'number' : 'text';
-            if (isNumeric) input.step = '0.01';
-            input.value = value.toString();
-            input.style.background = '#252526';
-            input.style.color = '#ccc';
-            input.style.border = '1px solid #444';
-            input.style.padding = '4px';
-            input.style.fontSize = '12px';
-
-            input.onchange = () => {
-                const newVal = isNumeric ? Number(input.value) : input.value;
-                this.stateManager.updateNodeParameters(node.id, { [key]: newVal });
-            };
-
+            const input = this.createInputElement(node, key, value);
             grid.appendChild(input);
         }
 
@@ -394,5 +576,78 @@ export class NodeViewer {
         } else if (node.type === 'TelemetryGraph') {
             this.telemetryBuffer = data;
         }
+    }
+
+    private createInputElement(node: Node, key: string, value: any): HTMLElement {
+        const numericKeys = [
+            'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature',
+            'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
+            'jwl_R1', 'jwl_R2', 'jwl_omega', 'cfl', 'output_interval',
+            'spatial_order', 'temporal_order'
+        ];
+
+        const dropdowns: Record<string, string[]> = {
+            'dimension': ['1D', '2D', '3D'],
+            'x_min_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+            'x_max_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+            'y_min_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+            'y_max_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+            'z_min_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+            'z_max_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+            'left_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+            'right_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+            'composition': ['TNT', 'IdealGas', 'Custom'],
+            'flux_scheme': ['AUSM+', 'Rusanov'],
+            'spatial_order': ['1', '2', '3'],
+            'temporal_order': ['1', '2', '3', '4'],
+            'output_mode': ['By Step', 'By Time']
+        };
+
+        if (dropdowns[key]) {
+            const select = document.createElement('select');
+            select.style.width = '100%';
+            select.style.background = '#252526';
+            select.style.color = '#ccc';
+            select.style.border = '1px solid #444';
+            select.style.padding = '4px';
+            select.style.fontSize = 'var(--font-sm)';
+
+            dropdowns[key].forEach(opt => {
+                const option = document.createElement('option');
+                option.value = opt;
+                option.text = opt;
+                if (opt === value.toString()) option.selected = true;
+                select.appendChild(option);
+            });
+
+            select.addEventListener('change', () => {
+                let val: any = select.value;
+                if (numericKeys.includes(key)) val = Number(val);
+                this.stateManager.updateNodeParameters(node.id, { [key]: val });
+            });
+            return select;
+        }
+
+        const input = document.createElement('input');
+        const isNumeric = numericKeys.includes(key) || typeof value === 'number';
+        input.type = isNumeric ? 'number' : 'text';
+        if (input.type === 'number') input.step = 'any';
+        input.value = value;
+        input.style.width = '100%';
+        input.style.background = '#252526';
+        input.style.color = '#ccc';
+        input.style.border = '1px solid #444';
+        input.style.padding = '4px';
+        input.style.fontSize = 'var(--font-sm)';
+
+        input.addEventListener('change', () => {
+            let newVal: any = input.value;
+            if (input.type === 'number') {
+                newVal = Number(input.value);
+            }
+            this.stateManager.updateNodeParameters(node.id, { [key]: newVal });
+        });
+
+        return input;
     }
 }

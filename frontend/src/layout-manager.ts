@@ -10,6 +10,7 @@ export class LayoutManager {
     private stateManager: StateManager;
     public components: Map<string, any> = new Map();
     private lastState: SimulationState | null = null;
+    private collapseState: Map<string, { collapsed: boolean; orientation: 'h' | 'v' }> = new Map();
 
     constructor(containerId: string, stateManager: StateManager) {
         const container = document.getElementById(containerId);
@@ -60,36 +61,65 @@ export class LayoutManager {
         splitEl.style.width = '100%';
         splitEl.style.height = '100%';
         splitEl.style.flex = '1';
+        splitEl.style.overflow = 'visible';
+
+        const isMenuSplit = (node.firstChild.type === 'panel' && node.firstChild.panelType === 'MENU_BAR');
 
         const firstChildWrapper = document.createElement('div');
-        firstChildWrapper.style.flex = `${node.ratio}`;
+        if (isMenuSplit) {
+            firstChildWrapper.style.flex = '0 0 30px';
+            firstChildWrapper.style.overflow = 'visible';
+            firstChildWrapper.style.zIndex = '1000';
+        } else {
+            firstChildWrapper.style.flex = `${node.ratio}`;
+            firstChildWrapper.style.overflow = 'visible';
+        }
         firstChildWrapper.style.position = 'relative';
         firstChildWrapper.style.display = 'flex';
         firstChildWrapper.style.minWidth = '0';
         firstChildWrapper.style.minHeight = '0';
-        this.renderNode(node.firstChild, firstChildWrapper);
+        // Store original flex so collapse/expand can restore the split ratio
+        firstChildWrapper.dataset.originalFlex = firstChildWrapper.style.flex;
 
         const splitter = document.createElement('div');
         splitter.className = `splitter ${node.direction}`;
         splitter.style.backgroundColor = '#333';
-        splitter.style.flex = '0 0 4px';
-        splitter.style.cursor = node.direction === 'horizontal' ? 'col-resize' : 'row-resize';
-
-        this.setupSplitterDrag(splitter, node);
+        if (isMenuSplit) {
+            splitter.style.flex = '0 0 1px';
+            splitter.style.cursor = 'default';
+        } else {
+            splitter.style.flex = '0 0 4px';
+            splitter.style.cursor = node.direction === 'horizontal' ? 'col-resize' : 'row-resize';
+            this.setupSplitterDrag(splitter, node);
+        }
 
         const secondChildWrapper = document.createElement('div');
-        secondChildWrapper.style.flex = `${1 - node.ratio}`;
+        if (isMenuSplit) {
+            secondChildWrapper.style.flex = '1';
+        } else {
+            secondChildWrapper.style.flex = `${1 - node.ratio}`;
+        }
+        secondChildWrapper.style.overflow = 'visible';
         secondChildWrapper.style.position = 'relative';
         secondChildWrapper.style.display = 'flex';
         secondChildWrapper.style.minWidth = '0';
         secondChildWrapper.style.minHeight = '0';
-        this.renderNode(node.secondChild, secondChildWrapper);
+        // Store original flex so collapse/expand can restore the split ratio
+        secondChildWrapper.dataset.originalFlex = secondChildWrapper.style.flex;
 
+        // IMPORTANT: Append the full skeleton to the live DOM BEFORE rendering children.
+        // applyCollapse (called during child renderNode) needs parent.parentElement to be
+        // valid so it can find sibling wrappers and the adjacent splitter.
         splitEl.appendChild(firstChildWrapper);
         splitEl.appendChild(splitter);
         splitEl.appendChild(secondChildWrapper);
         parent.appendChild(splitEl);
+
+        // Render children after the skeleton is in the live tree
+        this.renderNode(node.firstChild, firstChildWrapper);
+        this.renderNode(node.secondChild, secondChildWrapper);
     }
+
 
     private setupSplitterDrag(splitter: HTMLElement, node: SplitNode): void {
         const onMouseDown = (e: MouseEvent) => {
@@ -120,6 +150,8 @@ export class LayoutManager {
     }
 
     private renderPanel(node: PanelNode, parent: HTMLElement): void {
+        parent.dataset.panelId = node.id;
+        parent.dataset.panelType = node.panelType;
         const panelEl = document.createElement('div');
         panelEl.className = 'panel';
         panelEl.style.display = 'flex';
@@ -128,33 +160,347 @@ export class LayoutManager {
         panelEl.style.height = '100%';
         panelEl.style.minWidth = '0';
         panelEl.style.minHeight = '0';
-        panelEl.style.overflow = 'hidden';
+        if (node.panelType === 'MENU_BAR') {
+            panelEl.style.overflow = 'visible';
+            panelEl.style.zIndex = '1000';
+        } else {
+            panelEl.style.overflow = 'hidden';
+        }
 
-        const header = this.createPanelHeader(node);
+        const state = this.collapseState.get(node.id) ?? { collapsed: false, orientation: 'h' as 'h' | 'v' };
+
+        // Apply collapse state to DOM elements
+        const applyCollapse = (s: { collapsed: boolean; orientation: 'h' | 'v' }) => {
+            const splitContainer = parent.parentElement;
+
+            /** All non-splitter sibling wrappers in the same split container */
+            const siblingWrappers = splitContainer
+                ? (Array.from(splitContainer.children) as HTMLElement[])
+                    .filter(el => !el.classList.contains('splitter') && el !== parent)
+                : [];
+
+            /** The splitter element(s) immediately adjacent to this wrapper */
+            const adjacentSplitters = (): HTMLElement[] => {
+                if (!splitContainer) return [];
+                const children = Array.from(splitContainer.children) as HTMLElement[];
+                const idx = children.indexOf(parent);
+                const result: HTMLElement[] = [];
+                if (idx > 0 && children[idx - 1].classList.contains('splitter'))
+                    result.push(children[idx - 1] as HTMLElement);
+                if (idx < children.length - 1 && children[idx + 1].classList.contains('splitter'))
+                    result.push(children[idx + 1] as HTMLElement);
+                return result;
+            };
+
+            if (!s.collapsed) {
+                // ── EXPANDED ──
+                header.style.display = '';
+                content.style.display = 'flex';
+                vStrip.style.display = 'none';
+                // Restore this wrapper to its original split ratio
+                parent.style.flex = parent.dataset.originalFlex || '';
+                panelEl.style.height = '100%';
+                panelEl.style.flex = '1';
+                panelEl.style.width = '';
+                // Restore siblings to their pre-collapse flex values
+                siblingWrappers.forEach(sib => {
+                    if (sib.dataset.savedFlex !== undefined) {
+                        sib.style.flex = sib.dataset.savedFlex || sib.dataset.originalFlex || '';
+                        delete sib.dataset.savedFlex;
+                    }
+                });
+                // Restore adjacent splitters
+                adjacentSplitters().forEach(sp => { sp.style.display = ''; });
+                // Propagate expand upward in both directions to restore parent/grandparent wrappers
+                this.propagateExpandUpward(splitContainer, 'h');
+                this.propagateExpandUpward(splitContainer, 'v');
+
+            } else if (s.orientation === 'h') {
+                // ── HORIZONTAL COLLAPSE: thin header bar ──
+                header.style.display = '';
+                content.style.display = 'none';
+                vStrip.style.display = 'none';
+                
+                panelEl.style.height = 'auto';
+                panelEl.style.flex = '0 0 auto';
+                panelEl.style.width = '';
+
+                const isHorizontalSplit = splitContainer ? splitContainer.classList.contains('horizontal') : true;
+                if (!isHorizontalSplit) {
+                    // Match: parent split is vertical (column), so collapsing height collapses wrapper main axis
+                    parent.style.flex = '0 0 auto';
+                    
+                    // Give uncollapsed siblings all freed space
+                    siblingWrappers.forEach(sib => {
+                        const f = sib.style.flex;
+                        if (f !== '0 0 30px' && f !== '0 0 auto') {
+                            sib.dataset.savedFlex = f;
+                            sib.style.flex = '1';
+                        }
+                    });
+                    // Hide adjacent splitter
+                    adjacentSplitters().forEach(sp => { sp.style.display = 'none'; });
+                    // Propagate upward
+                    this.propagateCollapseUpward(splitContainer, 'h');
+                } else {
+                    // Mismatch: parent split is horizontal (row), keep wrapper width, only collapse panel height
+                    parent.style.flex = parent.dataset.originalFlex || '';
+                    // Check if this collapse propagates a horizontal collapse to ancestors
+                    this.propagateCollapseUpward(splitContainer, 'h');
+                }
+
+            } else {
+                // ── VERTICAL COLLAPSE: thin sidebar strip ──
+                header.style.display = 'none';
+                content.style.display = 'none';
+                vStrip.style.display = 'flex';
+                
+                panelEl.style.flex = '1';
+                panelEl.style.height = '100%';
+                panelEl.style.width = '30px';
+
+                const isHorizontalSplit = splitContainer ? splitContainer.classList.contains('horizontal') : true;
+                if (isHorizontalSplit) {
+                    // Match: parent split is horizontal (row), so collapsing width collapses wrapper main axis
+                    parent.style.flex = '0 0 30px';
+                    
+                    // Give uncollapsed siblings all freed space
+                    siblingWrappers.forEach(sib => {
+                        const f = sib.style.flex;
+                        if (f !== '0 0 30px' && f !== '0 0 auto') {
+                            sib.dataset.savedFlex = f;
+                            sib.style.flex = '1';
+                        }
+                    });
+                    // Hide adjacent splitter
+                    adjacentSplitters().forEach(sp => { sp.style.display = 'none'; });
+                    // Propagate upward
+                    this.propagateCollapseUpward(splitContainer, 'v');
+                } else {
+                    // Mismatch: parent split is vertical (column), keep wrapper height, only collapse panel width
+                    parent.style.flex = parent.dataset.originalFlex || '';
+                    // Check if this collapse propagates a vertical collapse to ancestors
+                    this.propagateCollapseUpward(splitContainer, 'v');
+                }
+            }
+        };
+
+        const header = this.createPanelHeader(node, state, (newState) => {
+            this.collapseState.set(node.id, newState);
+            applyCollapse(newState);
+        });
         panelEl.appendChild(header);
 
         const content = document.createElement('div');
         content.className = 'panel-content';
-        if (node.panelType !== 'NODE_GRAPH') {
+        if (node.panelType !== 'NODE_GRAPH' && node.panelType !== 'MENU_BAR') {
             content.classList.add('scrollable');
         }
         content.style.flex = '1';
-        content.style.display = 'flex';
         content.style.flexDirection = 'column';
         if (node.panelType === 'NODE_GRAPH') {
             content.style.overflow = 'hidden';
+        } else if (node.panelType === 'MENU_BAR') {
+            content.style.overflow = 'visible';
         } else {
             content.style.overflowY = 'auto';
             content.style.overflowX = 'hidden';
         }
         panelEl.appendChild(content);
 
+        // Vertical strip — shown only when collapsed vertically
+        const vStrip = this.createVerticalStrip(node, () => {
+            const expanded = { collapsed: false, orientation: 'v' as 'h' | 'v' };
+            this.collapseState.set(node.id, expanded);
+            applyCollapse(expanded);
+        });
+        panelEl.appendChild(vStrip);
+
+        // Apply initial state
+        applyCollapse(state);
+
         parent.appendChild(panelEl);
 
         this.renderPanelContent(node, content);
     }
 
-    private createPanelHeader(node: PanelNode): HTMLElement {
+    /** Thin vertical strip shown when a panel is collapsed to the v-orientation. */
+    private createVerticalStrip(node: PanelNode, onExpand: () => void): HTMLElement {
+        const strip = document.createElement('div');
+        strip.className = 'panel-v-strip';
+        strip.style.display = 'none'; // hidden until v-collapse is active
+
+        const expandBtn = document.createElement('button');
+        expandBtn.textContent = '▶';
+        expandBtn.title = 'Expand Panel';
+        expandBtn.onclick = (e) => { e.stopPropagation(); onExpand(); };
+        strip.appendChild(expandBtn);
+
+        const label = document.createElement('span');
+        label.className = 'panel-v-strip-label';
+        label.textContent = node.panelType.replace(/_/g, ' ');
+        strip.appendChild(label);
+
+        // Clicking the strip itself also expands
+        strip.onclick = () => onExpand();
+
+        return strip;
+    }
+
+    private isWrapperCollapsed(wrapper: HTMLElement, dir: 'h' | 'v'): boolean {
+        const panelEl = wrapper.querySelector(':scope > .panel') as HTMLElement | null;
+        if (panelEl) {
+            const panelType = wrapper.dataset.panelType;
+            if (panelType === 'MENU_BAR') return true;
+
+            const panelId = wrapper.dataset.panelId;
+            if (!panelId) return false;
+            const state = this.collapseState.get(panelId);
+            return !!(state && state.collapsed && state.orientation === dir);
+        }
+
+        const splitEl = wrapper.querySelector(':scope > .split-container') as HTMLElement | null;
+        if (splitEl) {
+            const innerWrappers = (Array.from(splitEl.children) as HTMLElement[])
+                .filter(el => !el.classList.contains('splitter'));
+            return innerWrappers.length > 0 && innerWrappers.every(w => this.isWrapperCollapsed(w, dir));
+        }
+
+        return false;
+    }
+
+    /**
+     * Called after a panel collapses.
+     * Collapses ancestors if all children in their child splits are collapsed in the direction
+     * demanded by the grandparent split. Recurses upward.
+     */
+    private propagateCollapseUpward(splitEl: HTMLElement | null, dir: 'h' | 'v'): void {
+        if (!splitEl) return;
+        const outerWrapper = splitEl.parentElement as HTMLElement | null;
+        // Only managed wrappers (created by renderSplit) carry dataset.originalFlex
+        if (!outerWrapper?.dataset.originalFlex) return;
+
+        // Check if all children of splitEl are collapsed in dir
+        const innerWrappers = (Array.from(splitEl.children) as HTMLElement[])
+            .filter(el => !el.classList.contains('splitter'));
+        const allCollapsed = innerWrappers.length > 0 && innerWrappers.every(
+            w => this.isWrapperCollapsed(w, dir)
+        );
+        if (!allCollapsed) return;
+
+        const outerSplitEl = outerWrapper.parentElement as HTMLElement | null;
+        if (!outerSplitEl) return;
+
+        const isOuterHorizontal = outerSplitEl.classList.contains('horizontal');
+        const outerMainAxisMatchesDir = (dir === 'v' && isOuterHorizontal) || (dir === 'h' && !isOuterHorizontal);
+
+        if (outerMainAxisMatchesDir) {
+            // Skip if already propagation-collapsed (avoid double-processing)
+            if (!outerWrapper.dataset.propCollapsed) {
+                const outerChildren = Array.from(outerSplitEl.children) as HTMLElement[];
+                const outerIdx = outerChildren.indexOf(outerWrapper);
+                const outerSiblings = outerChildren.filter(
+                    el => !el.classList.contains('splitter') && el !== outerWrapper
+                ) as HTMLElement[];
+
+                // Save & collapse the outer wrapper
+                outerWrapper.dataset.propSavedFlex = outerWrapper.style.flex;
+                outerWrapper.dataset.propCollapsed = '1';
+                outerWrapper.style.flex = dir === 'v' ? '0 0 30px' : '0 0 auto';
+
+                // Hide adjacent splitters at the outer level
+                if (outerIdx > 0 && outerChildren[outerIdx - 1].classList.contains('splitter'))
+                    (outerChildren[outerIdx - 1] as HTMLElement).style.display = 'none';
+                if (outerIdx < outerChildren.length - 1 && outerChildren[outerIdx + 1].classList.contains('splitter'))
+                    (outerChildren[outerIdx + 1] as HTMLElement).style.display = 'none';
+
+                // Give uncollapsed outer siblings the freed space
+                outerSiblings.forEach(sib => {
+                    const f = sib.style.flex;
+                    if (f !== '0 0 auto' && f !== '0 0 30px') {
+                        sib.dataset.propSibSavedFlex = f;
+                        sib.style.flex = '1';
+                    }
+                });
+            }
+        }
+
+        // Recurse upward in the same collapse direction
+        this.propagateCollapseUpward(outerSplitEl, dir);
+    }
+
+    /**
+     * Called after a panel expands.
+     * Restores parent wrappers if their child splits contain at least one expanded child.
+     * Recurses upward.
+     */
+    private propagateExpandUpward(splitEl: HTMLElement | null, dir: 'h' | 'v'): void {
+        if (!splitEl) return;
+        const outerWrapper = splitEl.parentElement as HTMLElement | null;
+        if (!outerWrapper) return;
+
+        if (outerWrapper.dataset.propCollapsed) {
+            const outerSplitEl = outerWrapper.parentElement as HTMLElement | null;
+            if (outerSplitEl) {
+                const isOuterHorizontal = outerSplitEl.classList.contains('horizontal');
+                const outerMainAxisMatchesDir = (dir === 'v' && isOuterHorizontal) || (dir === 'h' && !isOuterHorizontal);
+
+                if (outerMainAxisMatchesDir) {
+                    // Check if any child wrapper of splitEl is NOT collapsed in dir
+                    const innerWrappers = (Array.from(splitEl.children) as HTMLElement[])
+                        .filter(el => !el.classList.contains('splitter'));
+                    const anyExpanded = innerWrappers.some(
+                        w => !this.isWrapperCollapsed(w, dir)
+                    );
+
+                    if (anyExpanded) {
+                        const outerChildren = Array.from(outerSplitEl.children) as HTMLElement[];
+                        const outerIdx = outerChildren.indexOf(outerWrapper);
+                        const outerSiblings = outerChildren.filter(
+                            el => !el.classList.contains('splitter') && el !== outerWrapper
+                        ) as HTMLElement[];
+
+                        // Restore the outer wrapper
+                        outerWrapper.style.flex = outerWrapper.dataset.propSavedFlex || outerWrapper.dataset.originalFlex || '';
+                        delete outerWrapper.dataset.propSavedFlex;
+                        delete outerWrapper.dataset.propCollapsed;
+
+                        // Show adjacent outer splitters
+                        if (outerIdx > 0 && outerChildren[outerIdx - 1].classList.contains('splitter'))
+                            (outerChildren[outerIdx - 1] as HTMLElement).style.display = '';
+                        if (outerIdx < outerChildren.length - 1 && outerChildren[outerIdx + 1].classList.contains('splitter'))
+                            (outerChildren[outerIdx + 1] as HTMLElement).style.display = '';
+
+                        // Restore outer sibling flex values
+                        outerSiblings.forEach(sib => {
+                            if (sib.dataset.propSibSavedFlex !== undefined) {
+                                sib.style.flex = sib.dataset.propSibSavedFlex || sib.dataset.originalFlex || '';
+                                delete sib.dataset.propSibSavedFlex;
+                            }
+                        });
+
+                        // Recurse upward
+                        this.propagateExpandUpward(outerSplitEl, dir);
+                    }
+                }
+            }
+        } else {
+            // Recurse upward to check outer ancestors
+            this.propagateExpandUpward(outerWrapper.parentElement, dir);
+        }
+    }
+
+    private createPanelHeader(
+        node: PanelNode,
+        state: { collapsed: boolean; orientation: 'h' | 'v' } = { collapsed: false, orientation: 'h' },
+        onToggleCollapse?: (newState: { collapsed: boolean; orientation: 'h' | 'v' }) => void
+    ): HTMLElement {
+        if (node.panelType === 'MENU_BAR') {
+            const emptyHeader = document.createElement('div');
+            emptyHeader.style.display = 'none';
+            return emptyHeader;
+        }
+
         const header = document.createElement('div');
         header.className = 'panel-header';
 
@@ -203,6 +549,11 @@ export class LayoutManager {
         }
 
         if (node.panelType === 'NODE_GRAPH') {
+            const currentOrientation = node.options?.layoutOrientation ?? 'HORIZ';
+            const showGridVal = node.options?.showGrid !== false;
+            const snapToGridVal = node.options?.snapToGrid !== false;
+            const gridSpacingVal = node.options?.gridSpacing ?? 20;
+
             const layoutToggle = document.createElement('select');
             layoutToggle.className = 'header-select';
             layoutToggle.style.width = '60px';
@@ -210,6 +561,7 @@ export class LayoutManager {
                 const opt = document.createElement('option');
                 opt.value = l;
                 opt.textContent = l;
+                if (l === currentOrientation) opt.selected = true;
                 layoutToggle.appendChild(opt);
             });
             layoutToggle.onchange = () => {
@@ -231,10 +583,11 @@ export class LayoutManager {
             gridLabel.style.display = 'flex';
             gridLabel.style.alignItems = 'center';
             gridLabel.style.gap = '2px';
-            gridLabel.style.fontSize = '9px';
+            gridLabel.style.fontSize = 'var(--font-xs)';
             gridLabel.style.marginLeft = '6px';
-            gridLabel.innerHTML = '<input type="checkbox" checked> Grid';
+            gridLabel.innerHTML = '<input type="checkbox"> Grid';
             const gridCheckbox = gridLabel.querySelector('input')!;
+            gridCheckbox.checked = showGridVal;
             gridCheckbox.onchange = () => {
                 const comp = this.components.get(node.id);
                 if (comp && comp.type === 'NODE_GRAPH') {
@@ -247,10 +600,11 @@ export class LayoutManager {
             snapLabel.style.display = 'flex';
             snapLabel.style.alignItems = 'center';
             snapLabel.style.gap = '2px';
-            snapLabel.style.fontSize = '9px';
+            snapLabel.style.fontSize = 'var(--font-xs)';
             snapLabel.style.marginLeft = '6px';
-            snapLabel.innerHTML = '<input type="checkbox" checked> Snap';
+            snapLabel.innerHTML = '<input type="checkbox"> Snap';
             const snapCheckbox = snapLabel.querySelector('input')!;
+            snapCheckbox.checked = snapToGridVal;
             snapCheckbox.onchange = () => {
                 const comp = this.components.get(node.id);
                 if (comp && comp.type === 'NODE_GRAPH') {
@@ -267,7 +621,7 @@ export class LayoutManager {
                 const opt = document.createElement('option');
                 opt.value = sz.toString();
                 opt.textContent = `${sz}px`;
-                if (sz === 20) opt.selected = true;
+                if (sz === gridSpacingVal) opt.selected = true;
                 spacingSelect.appendChild(opt);
             });
             spacingSelect.onchange = () => {
@@ -294,6 +648,44 @@ export class LayoutManager {
 
         const actions = document.createElement('div');
         actions.className = 'header-actions';
+
+        // Fold horizontal — collapses to a thin header bar
+        const btnCollapseH = document.createElement('button');
+        btnCollapseH.className = 'panel-collapse-btn';
+        btnCollapseH.title = state.collapsed && state.orientation === 'h' ? 'Expand Panel' : 'Collapse Horizontal';
+        btnCollapseH.textContent = state.collapsed && state.orientation === 'h' ? '▲' : '▼';
+        btnCollapseH.onclick = () => {
+            const currentState = this.collapseState.get(node.id) ?? { collapsed: false, orientation: 'h' as 'h' | 'v' };
+            const isHCollapsed = currentState.collapsed && currentState.orientation === 'h';
+            const newState = isHCollapsed
+                ? { collapsed: false, orientation: 'h' as 'h' | 'v' }
+                : { collapsed: true, orientation: 'h' as 'h' | 'v' };
+            btnCollapseH.textContent = newState.collapsed ? '▲' : '▼';
+            btnCollapseH.title = newState.collapsed ? 'Expand Panel' : 'Collapse Horizontal';
+            // Reset the v button if switching from v-collapse
+            btnCollapseV.textContent = '◀';
+            btnCollapseV.title = 'Collapse Vertical';
+            onToggleCollapse?.(newState);
+        };
+        // Fold vertical — collapses to a thin sidebar strip
+        const btnCollapseV = document.createElement('button');
+        btnCollapseV.className = 'panel-collapse-btn';
+        btnCollapseV.title = 'Collapse Vertical';
+        btnCollapseV.textContent = '◀';
+        btnCollapseV.onclick = () => {
+            const currentState = this.collapseState.get(node.id) ?? { collapsed: false, orientation: 'h' as 'h' | 'v' };
+            const isVCollapsed = currentState.collapsed && currentState.orientation === 'v';
+            const newState = isVCollapsed
+                ? { collapsed: false, orientation: 'v' as 'h' | 'v' }
+                : { collapsed: true, orientation: 'v' as 'h' | 'v' };
+            // When collapsing vertically the header disappears anyway, so no icon update needed
+            btnCollapseH.textContent = '▼';
+            btnCollapseH.title = 'Collapse Horizontal';
+            onToggleCollapse?.(newState);
+        };
+
+        actions.appendChild(btnCollapseH);
+        actions.appendChild(btnCollapseV);
 
         const btnSplitV = document.createElement('button');
         btnSplitV.textContent = '|';
@@ -326,6 +718,9 @@ export class LayoutManager {
         }
 
         switch (node.panelType) {
+            case 'MENU_BAR':
+                this.renderMenuBar(container);
+                break;
             case 'OUTLINER':
                 this.renderOutliner(container);
                 break;
@@ -347,6 +742,25 @@ export class LayoutManager {
             default:
                 container.innerHTML = `<div style="padding:10px">Panel: ${node.panelType}</div>`;
         }
+    }
+
+    private renderMenuBar(container: HTMLElement): void {
+        container.innerHTML = `
+            <div id="global-menu-bar">
+                <div class="menu-item dropdown">
+                    <span class="menu-title">File</span>
+                    <div class="dropdown-content">
+                        <div id="menu-new-model">New Model</div>
+                        <div class="menu-separator"></div>
+                        <div id="menu-load-json">Load Model (JSON)...</div>
+                        <div id="menu-save-json">Save Model (JSON)</div>
+                        <div class="menu-separator"></div>
+                        <div id="menu-load-binary">Load Model (Binary)...</div>
+                        <div id="menu-save-binary">Save Model (Binary)</div>
+                    </div>
+                </div>
+            </div>
+        `;
     }
 
     private renderOutliner(container: HTMLElement): void {
@@ -594,7 +1008,7 @@ export class LayoutManager {
 
         const progressLabel = document.createElement('div');
         progressLabel.id = 'progress-label';
-        progressLabel.style.fontSize = '10px';
+        progressLabel.style.fontSize = 'var(--font-sm)';
         progressLabel.style.textAlign = 'center';
         progressLabel.style.marginTop = '4px';
         progressLabel.style.color = '#888';

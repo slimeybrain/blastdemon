@@ -8,10 +8,19 @@
 
     --font-ui: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     --font-mono: Consolas, "Fira Code", monospace;
+
+    --font-xs: 9px;
+    --font-sm: 11px;
+    --font-md: 13px;
 }
 
 * {
     box-sizing: border-box;
+}
+
+input, select, textarea, button {
+    font-family: inherit;
+    font-size: inherit;
 }
 
 body {
@@ -23,6 +32,7 @@ body {
     background-color: var(--bg-main);
     color: var(--text-color);
     font-family: var(--font-ui);
+    font-size: var(--font-sm);
 }
 
 #main-layout {
@@ -31,38 +41,42 @@ body {
     height: 100vh;
     width: 100vw;
     overflow: hidden;
+    position: relative;
 }
 
 #global-menu-bar {
-    height: 32px;
+    position: relative;
     background: #18181c;
-    border-bottom: 1px solid #2d2d30;
+    border-bottom: 1px solid var(--border-color);
     display: flex;
+    flex-direction: row;
     align-items: center;
-    padding: 0 12px;
-    font-size: 12px;
-    gap: 16px;
+    padding: 0 8px;
+    font-size: var(--font-sm);
+    gap: 2px;
     color: #ccc;
-    z-index: 1000;
     user-select: none;
     box-sizing: border-box;
+    height: 100%;
+    width: 100%;
+    overflow: visible;
 }
 
 .menu-brand {
-    margin-left: auto;
-    font-size: 11px;
-    color: #666;
-    font-family: var(--font-mono);
+    display: none;
 }
 
 .menu-item {
     position: relative;
     cursor: pointer;
+    display: flex;
+    align-items: center;
 }
 
 .menu-title {
-    padding: 4px 8px;
+    padding: 3px 8px;
     border-radius: 3px;
+    font-size: var(--font-sm);
 }
 
 .menu-title:hover {
@@ -79,9 +93,8 @@ body {
     border: 1px solid #3c3c3c;
     box-shadow: 0 4px 10px rgba(0,0,0,0.5);
     border-radius: 3px;
-    min-width: 160px;
+    min-width: 180px;
     z-index: 1010;
-    margin-top: 4px;
 }
 
 .dropdown-content div {
@@ -114,7 +127,7 @@ body {
 }
 
 .split-container {
-    overflow: hidden;
+    overflow: visible;
 }
 
 .splitter {
@@ -150,7 +163,7 @@ body {
     padding: 4px 8px;
     border-bottom: 1px solid var(--border-color);
     font-weight: 600;
-    font-size: 0.75rem;
+    font-size: var(--font-md);
     color: var(--header-text-color);
     user-select: none;
     display: flex;
@@ -163,7 +176,7 @@ body {
     background: #333;
     color: #ccc;
     border: 1px solid #444;
-    font-size: 0.7rem;
+    font-size: var(--font-xs);
     padding: 2px 4px;
 }
 
@@ -173,7 +186,7 @@ body {
     border: none;
     border-radius: 2px;
     padding: 2px 8px;
-    font-size: 0.7rem;
+    font-size: var(--font-xs);
     font-weight: 600;
     cursor: pointer;
     transition: background-color 0.2s;
@@ -211,7 +224,7 @@ body {
 .status-badge {
     padding: 2px 6px;
     border-radius: 4px;
-    font-size: 0.65rem;
+    font-size: var(--font-xs);
     font-weight: 800;
 }
 
@@ -237,11 +250,86 @@ body {
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    font-size: 0.8rem;
+    font-size: var(--font-sm);
 }
 
 .header-actions button:hover {
     background: #444;
+}
+
+.panel-collapse-btn {
+    font-size: 8px !important;
+    color: #888 !important;
+    transition: color 0.15s, background 0.15s !important;
+}
+
+.panel-collapse-btn:hover {
+    background: #1a2a2a !important;
+    color: #00f0ff !important;
+}
+
+/* Vertical collapsed strip */
+.panel-v-strip {
+    flex-direction: column;
+    align-items: center;
+    width: 30px;
+    height: 100%;
+    padding: 6px 0;
+    gap: 6px;
+    background: #252526;
+    border-right: 1px solid var(--border-color);
+    cursor: pointer;
+    transition: background 0.15s;
+    overflow: hidden;
+    user-select: none;
+}
+
+.panel-v-strip:hover {
+    background: #1a2a2a;
+}
+
+.panel-v-strip:hover .panel-v-strip-label {
+    color: #00f0ff;
+}
+
+.panel-v-strip button {
+    background: #333;
+    color: #888;
+    border: 1px solid #444;
+    border-radius: 2px;
+    width: 20px;
+    height: 20px;
+    min-height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-size: 8px;
+    padding: 0;
+    flex-shrink: 0;
+    transition: color 0.15s, background 0.15s;
+}
+
+.panel-v-strip button:hover {
+    background: #1a2a2a;
+    color: #00f0ff;
+    border-color: #00f0ff;
+}
+
+.panel-v-strip-label {
+    writing-mode: vertical-lr;
+    transform: rotate(180deg);
+    font-size: var(--font-xs);
+    color: #666;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    overflow: hidden;
+    flex: 1;
+    text-align: center;
+    transition: color 0.15s;
+    white-space: nowrap;
+    text-overflow: ellipsis;
 }
 
 .progress-container {
@@ -303,7 +391,7 @@ body {
 #outliner li {
     padding: 4px 8px;
     cursor: pointer;
-    font-size: 0.8rem;
+    font-size: var(--font-sm);
     border-bottom: 1px solid #222;
 }
 
@@ -330,7 +418,7 @@ body {
 .node-header {
     background: #444;
     padding: 4px 8px;
-    font-size: 10px;
+    font-size: var(--font-sm);
     font-weight: bold;
     border-radius: 4px 4px 0 0;
     cursor: move;
@@ -346,7 +434,7 @@ body {
     border: none;
     color: #ccc;
     cursor: pointer;
-    font-size: 10px;
+    font-size: var(--font-sm);
     padding: 0 2px;
 }
 
@@ -371,7 +459,7 @@ body {
     display: flex;
     align-items: center;
     height: 18px;
-    font-size: 9px;
+    font-size: var(--font-xs);
     position: relative;
 }
 
@@ -407,7 +495,7 @@ body {
     background: #000;
     color: #0f0;
     font-family: var(--font-mono);
-    font-size: 9px;
+    font-size: var(--font-xs);
     height: 100%;
     overflow-y: auto;
     padding: 4px;
@@ -415,10 +503,12 @@ body {
 
 .node-body-graph {
     width: 100%;
-    height: 100%;
+    flex: 1;
+    min-height: 0;
     background: #050505;
     overflow: hidden;
 }
+
 
 .node.resizable {
     resize: both;
@@ -448,7 +538,7 @@ body {
 
 .context-menu-item {
     padding: 4px 12px;
-    font-size: 11px;
+    font-size: var(--font-sm);
     cursor: pointer;
 }
 
@@ -517,7 +607,7 @@ canvas {
     align-items: center;
     justify-content: center;
     position: relative;
-    font-size: 8px;
+    font-size: var(--font-xs);
     height: 0;
     pointer-events: none;
 }
@@ -543,7 +633,7 @@ canvas {
     border: none;
     color: #ccc;
     cursor: pointer;
-    font-size: 10px;
+    font-size: var(--font-sm);
     padding: 0 2px;
 }
 .node-orient-btn:hover {
@@ -586,7 +676,7 @@ canvas {
 }
 
 .resource-label {
-    font-size: 0.7rem;
+    font-size: var(--font-xs);
     font-weight: bold;
     margin-bottom: 8px;
     color: #888;
@@ -621,7 +711,7 @@ canvas {
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
-    font-size: 0.8rem;
+    font-size: var(--font-sm);
     font-weight: bold;
     color: #fff;
 }
@@ -651,39 +741,165 @@ canvas {
 
 .node-info-btn {
     background: none;
-    border: none;
-    color: #ccc;
+    border: 1px solid #555;
+    color: #aaa;
     cursor: pointer;
-    font-size: 10px;
-    padding: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    font-size: var(--font-xs);
+    font-weight: 700;
+    font-family: var(--font-ui);
+    letter-spacing: 0.04em;
+    padding: 1px 5px;
+    border-radius: 2px;
+    line-height: 1;
+    margin-right: 4px;
+    text-transform: uppercase;
+    transition: color 0.15s, border-color 0.15s;
 }
 .node-info-btn:hover {
-    color: #fff;
+    color: #00f0ff;
+    border-color: #00f0ff;
 }
 .node-info-overlay {
     position: absolute;
-    top: 24px;
-    left: 4px;
-    right: 4px;
-    background: #1e1e1e;
-    border: 1px solid #444;
-    border-radius: 4px;
-    padding: 8px;
-    z-index: 100;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.8);
+    max-width: 200px;
+    background: #1a1a22;
+    border: 1px solid #555;
+    border-radius: 5px;
+    padding: 10px 12px;
+    z-index: 9999;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.9);
     font-family: var(--font-ui);
     color: #ccc;
+    pointer-events: auto;
+    white-space: normal;
+    min-width: 140px;
+}
+.node-info-overlay-title {
+    font-weight: 700;
+    font-size: var(--font-md);
+    color: #fff;
+    margin-bottom: 6px;
+    padding-bottom: 5px;
+    border-bottom: 1px solid #444;
+    letter-spacing: 0.03em;
+}
+.node-info-overlay-body {
+    font-size: var(--font-sm);
+    line-height: 1.5;
+    color: #bbb;
 }
 .infr-icon {
     color: #00f0ff;
     margin-left: 4px;
     cursor: help;
-    font-size: 8px;
+    font-size: var(--font-xs);
     font-weight: 800;
     border: 1px solid #00f0ff;
     border-radius: 2px;
     padding: 0px 2px;
 }
+
+/* Telemetry Graph — channel selector bar */
+.telemetry-channel-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 8px;
+    background: #151520;
+    border-bottom: 1px solid #222;
+    flex-shrink: 0;
+    height: 20px;
+    overflow: visible;
+}
+.telemetry-channel-label {
+    font-size: var(--font-xs);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #666;
+    white-space: nowrap;
+}
+.telemetry-channel-select {
+    background: #252530;
+    color: #ccc;
+    border: 1px solid #444;
+    border-radius: 2px;
+    font-size: var(--font-xs);
+    font-family: var(--font-ui);
+    padding: 0 3px;
+    height: 14px;
+    cursor: pointer;
+    outline: none;
+    flex: 1;
+    min-width: 0;
+}
+.telemetry-channel-select:hover {
+    border-color: #00f0ff;
+    color: #fff;
+}
+
+/* Custom Select Dropdowns */
+.custom-select-container {
+    position: relative;
+    width: 100%;
+    user-select: none;
+    font-family: var(--font-mono);
+    font-size: var(--font-xs);
+}
+
+.custom-select-trigger {
+    background: #222;
+    color: #ccc;
+    border: 1px solid #444;
+    padding: 2px 4px;
+    border-radius: 2px;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    min-height: 16px;
+    box-sizing: border-box;
+}
+
+.custom-select-trigger::after {
+    content: "▼";
+    font-size: 7px;
+    color: #888;
+    margin-left: 6px;
+}
+
+.custom-select-trigger:hover {
+    border-color: #00f0ff;
+    color: #fff;
+}
+
+.custom-select-options {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: #1e1e1e;
+    border: 1px solid #444;
+    z-index: 100;
+    max-height: 150px;
+    overflow-y: auto;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+}
+
+.custom-select-option {
+    padding: 3px 6px;
+    cursor: pointer;
+    color: #aaa;
+}
+
+.custom-select-option:hover {
+    background: #333;
+    color: #fff;
+}
+
+.custom-select-option.selected {
+    background: #00f0ff;
+    color: #000;
+}
+
+

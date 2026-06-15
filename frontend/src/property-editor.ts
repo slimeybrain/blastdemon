@@ -67,7 +67,7 @@ export class PropertyEditor {
 
         const descBlock = document.createElement('div');
         descBlock.style.padding = '8px 10px';
-        descBlock.style.fontSize = '0.75rem';
+        descBlock.style.fontSize = 'var(--font-sm)';
         descBlock.style.color = '#aaa';
         descBlock.style.background = '#252526';
         descBlock.style.borderBottom = '1px solid #333';
@@ -91,7 +91,7 @@ export class PropertyEditor {
 
             const label = document.createElement('label');
             label.style.display = 'block';
-            label.style.fontSize = '0.75rem';
+            label.style.fontSize = 'var(--font-sm)';
             label.style.color = '#888';
             label.style.marginBottom = '4px';
             label.textContent = key.replace(/_/g, ' ').toUpperCase();
@@ -111,7 +111,7 @@ export class PropertyEditor {
         ioSection.style.marginTop = '10px';
 
         const ioTitle = document.createElement('div');
-        ioTitle.style.fontSize = '0.75rem';
+        ioTitle.style.fontSize = 'var(--font-sm)';
         ioTitle.style.color = '#888';
         ioTitle.style.marginBottom = '8px';
         ioTitle.style.fontWeight = 'bold';
@@ -119,7 +119,7 @@ export class PropertyEditor {
         ioSection.appendChild(ioTitle);
 
         const list = document.createElement('div');
-        list.style.fontSize = '0.7rem';
+        list.style.fontSize = 'var(--font-xs)';
         list.style.color = '#ccc';
 
         // Inputs
@@ -182,6 +182,8 @@ export class PropertyEditor {
             'y_max_bc': ['Reflecting', 'Transmitting', 'Terminate'],
             'z_min_bc': ['Reflecting', 'Transmitting', 'Terminate'],
             'z_max_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+            'left_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+            'right_bc': ['Reflecting', 'Transmitting', 'Terminate'],
             'composition': ['TNT', 'IdealGas', 'Custom'],
             'flux_scheme': ['AUSM+', 'Rusanov'],
             'spatial_order': ['1', '2', '3'],

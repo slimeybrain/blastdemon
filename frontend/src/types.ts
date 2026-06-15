@@ -29,7 +29,7 @@ export interface Connection {
 export type SimulationStatus = 'UNINITIALIZED' | 'INITIALIZED' | 'RUNNING' | 'PAUSED' | 'TERMINATED';
 
 export type LayoutDirection = 'horizontal' | 'vertical';
-export type PanelType = 'OUTLINER' | 'NODE_GRAPH' | 'PROPERTIES' | 'TELEMETRY_GRAPH' | 'TELEMETRY_TEXT' | 'NODE_VIEWER' | 'EXECUTION_MANAGER' | 'RESOURCE_MANAGER';
+export type PanelType = 'MENU_BAR' | 'OUTLINER' | 'NODE_GRAPH' | 'PROPERTIES' | 'TELEMETRY_GRAPH' | 'TELEMETRY_TEXT' | 'NODE_VIEWER' | 'EXECUTION_MANAGER' | 'RESOURCE_MANAGER';
 
 export interface SplitNode {
     type: 'split';
@@ -45,6 +45,7 @@ export interface PanelNode {
     id: string;
     panelType: PanelType;
     targetNodeId?: string | null; // Used if displaying a specific Node's data
+    options?: Record<string, any>;
 }
 
 export type LayoutNode = SplitNode | PanelNode;

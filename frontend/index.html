@@ -8,23 +8,8 @@
 </head>
 <body>
     <div id="main-layout">
-        <div id="global-menu-bar">
-            <div class="menu-item dropdown">
-                <span class="menu-title">File</span>
-                <div class="dropdown-content">
-                    <div id="menu-new-model">New Model</div>
-                    <div class="menu-separator"></div>
-                    <div id="menu-load-json">Load Model (JSON)...</div>
-                    <div id="menu-save-json">Save Model (JSON)</div>
-                    <div class="menu-separator"></div>
-                    <div id="menu-load-binary">Load Model (Binary)...</div>
-                    <div id="menu-save-binary">Save Model (Binary)</div>
-                </div>
-            </div>
-            <div class="menu-brand">BlastDaemon CFD Framework</div>
-            <input type="file" id="load-json-file" style="display:none;" accept=".json">
-            <input type="file" id="load-binary-file" style="display:none;" accept=".bin,.model">
-        </div>
+        <input type="file" id="load-json-file" style="display:none;" accept=".json">
+        <input type="file" id="load-binary-file" style="display:none;" accept=".bin,.model">
         <div id="app-container">
             <!-- Managed by LayoutManager -->
         </div>

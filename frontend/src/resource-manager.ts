@@ -29,7 +29,7 @@ export class ResourceManager {
         this.container.innerHTML = `
     <div class="resource-panel-inner" style="padding: 12px; display: flex; flex-direction: column; gap: 12px; min-width: 0; min-height: 0; box-sizing: border-box; height: 100%; overflow-y: auto;">
         <div class="metric-row" style="display: flex; flex-direction: column; gap: 4px;">
-            <div style="display: flex; justify-content: space-between; font-size: 11px; font-weight: bold; color: #94a3b8;">
+            <div style="display: flex; justify-content: space-between; font-size: var(--font-sm); font-weight: bold; color: #94a3b8;">
                 <span>GPU UTILIZATION</span>
                 <span id="${this.panelId}-gpu-txt">0%</span>
             </div>
@@ -38,7 +38,7 @@ export class ResourceManager {
             </div>
         </div>
         <div class="metric-row" style="display: flex; flex-direction: column; gap: 4px;">
-            <div style="display: flex; justify-content: space-between; font-size: 11px; font-weight: bold; color: #94a3b8;">
+            <div style="display: flex; justify-content: space-between; font-size: var(--font-sm); font-weight: bold; color: #94a3b8;">
                 <span>VRAM ALLOCATION</span>
                 <span id="${this.panelId}-vram-txt">0%</span>
             </div>
@@ -47,7 +47,7 @@ export class ResourceManager {
             </div>
         </div>
         <div class="metric-row" style="display: flex; flex-direction: column; gap: 4px;">
-            <div style="display: flex; justify-content: space-between; font-size: 11px; font-weight: bold; color: #94a3b8;">
+            <div style="display: flex; justify-content: space-between; font-size: var(--font-sm); font-weight: bold; color: #94a3b8;">
                 <span>CORE TEMPERATURE</span>
                 <span id="${this.panelId}-temp-txt">0°C</span>
             </div>

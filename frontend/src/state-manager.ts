@@ -43,6 +43,7 @@ export class StateManager {
      */
     pushState(newState: SimulationState, autoSave: boolean = true): void {
         const stateCopy = JSON.parse(JSON.stringify(newState)) as SimulationState;
+        stateCopy.layout = ensureMenuBar(stateCopy.layout);
 
         // Remove redo history if we are in the middle of history
         if (this.currentIndex < this.history.length - 1) {
@@ -137,6 +138,17 @@ export class StateManager {
             node.parameters = { ...node.parameters, ...parameters };
             this.setStatus('UNINITIALIZED');
             this.pushState(state);
+        }
+    }
+
+    updateNodeParametersInPlace(nodeId: string, parameters: Record<string, any>): void {
+        const state = this.getCurrentState();
+        if (!state) return;
+
+        const node = state.nodes.find(n => n.id === nodeId);
+        if (node) {
+            node.parameters = { ...node.parameters, ...parameters };
+            this.updateState(state, false);
         }
     }
 
@@ -422,6 +434,8 @@ export class StateManager {
         const state = this.getCurrentState();
         if (!state) return;
 
+        if (panelId === 'panel-menu-bar') return; // Cannot close menu bar!
+
         if (state.layout.type === 'panel') return;
 
         const findAndClose = (node: LayoutNode): LayoutNode => {
@@ -486,6 +500,24 @@ export class StateManager {
         this.pushState(state);
     }
 
+    updatePanelOptions(panelId: string, options: Record<string, any>): void {
+        const state = this.getCurrentState();
+        if (!state) return;
+
+        const updateOpts = (node: LayoutNode): LayoutNode => {
+            if (node.type === 'panel' && node.id === panelId) {
+                node.options = { ...node.options, ...options };
+            } else if (node.type === 'split') {
+                node.firstChild = updateOpts(node.firstChild);
+                node.secondChild = updateOpts(node.secondChild);
+            }
+            return node;
+        };
+
+        state.layout = updateOpts(state.layout);
+        this.pushState(state);
+    }
+
     // --- Persistence ---
 
     saveWorkspace(): void {
@@ -506,6 +538,7 @@ export class StateManager {
                     this.workspaces = parsed.workspaces;
                     this.activeWorkspaceIndex = parsed.activeIndex || 0;
                     const state = this.workspaces[this.activeWorkspaceIndex];
+                    state.layout = ensureMenuBar(state.layout);
                     this.history = [JSON.parse(JSON.stringify(state))];
                     this.currentIndex = 0;
                     this.notifyListeners();
@@ -513,6 +546,7 @@ export class StateManager {
                     return state;
                 } else {
                     const state = parsed as SimulationState;
+                    state.layout = ensureMenuBar(state.layout);
                     this.workspaces = [state];
                     this.activeWorkspaceIndex = 0;
                     this.history = [state];
@@ -541,4 +575,60 @@ export class StateManager {
         localStorage.removeItem('blast_workspace');
         console.log('[System] Local workspace cleared.');
     }
+}
+
+function hasPanelType(node: LayoutNode, type: PanelType): boolean {
+    if (node.type === 'panel') {
+        return node.panelType === type;
+    }
+    return hasPanelType(node.firstChild, type) || hasPanelType(node.secondChild, type);
+}
+
+function ensureMenuBar(node: LayoutNode): LayoutNode {
+    if (hasPanelType(node, 'MENU_BAR')) {
+        return node;
+    }
+    
+    const traverseAndInsert = (n: LayoutNode): LayoutNode => {
+        if (n.type === 'panel') {
+            if (n.panelType === 'OUTLINER') {
+                return {
+                    type: 'split',
+                    id: 'split-menu-outliner',
+                    direction: 'vertical',
+                    ratio: 0.1,
+                    firstChild: {
+                        type: 'panel',
+                        id: 'panel-menu-bar',
+                        panelType: 'MENU_BAR',
+                        targetNodeId: null
+                    },
+                    secondChild: n
+                };
+            }
+            return n;
+        } else {
+            n.firstChild = traverseAndInsert(n.firstChild);
+            n.secondChild = traverseAndInsert(n.secondChild);
+            return n;
+        }
+    };
+    
+    const result = traverseAndInsert(node);
+    if (!hasPanelType(result, 'MENU_BAR')) {
+        return {
+            type: 'split',
+            id: 'split-menu-root',
+            direction: 'vertical',
+            ratio: 0.05,
+            firstChild: {
+                type: 'panel',
+                id: 'panel-menu-bar',
+                panelType: 'MENU_BAR',
+                targetNodeId: null
+            },
+            secondChild: result
+        };
+    }
+    return result;
 }

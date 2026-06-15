@@ -46,16 +46,19 @@ export class GraphRenderer {
 
     public setSnapToGrid(enabled: boolean): void {
         this.snapToGrid = enabled;
+        this.stateManager.updatePanelOptions(this.panelId, { snapToGrid: enabled });
     }
 
     public setShowGrid(enabled: boolean): void {
         this.showGrid = enabled;
         this.updateGridBackground();
+        this.stateManager.updatePanelOptions(this.panelId, { showGrid: enabled });
     }
 
     public setGridSpacing(spacing: number): void {
         this.gridSpacing = spacing;
         this.updateGridBackground();
+        this.stateManager.updatePanelOptions(this.panelId, { gridSpacing: spacing });
     }
 
     private updateGridBackground(): void {
@@ -121,6 +124,23 @@ export class GraphRenderer {
         parent.appendChild(this.viewport);
 
         this.initEventListeners();
+        
+        // Load settings from panel options state
+        const state = this.stateManager.getCurrentState();
+        if (state) {
+            const findPanelNode = (layout: any, id: string): any => {
+                if (layout.type === 'panel') return layout.id === id ? layout : null;
+                return findPanelNode(layout.firstChild, id) || findPanelNode(layout.secondChild, id);
+            };
+            const panel = findPanelNode(state.layout, this.panelId);
+            if (panel && panel.options) {
+                if (panel.options.layoutOrientation !== undefined) this.layoutOrientation = panel.options.layoutOrientation;
+                if (panel.options.showGrid !== undefined) this.showGrid = panel.options.showGrid;
+                if (panel.options.snapToGrid !== undefined) this.snapToGrid = panel.options.snapToGrid;
+                if (panel.options.gridSpacing !== undefined) this.gridSpacing = panel.options.gridSpacing;
+            }
+        }
+        
         this.updateGridBackground();
         this.stateManager.onStateChange(this.stateListener);
         this.stateManager.onTelemetryUpdate(this.telemetryListener);
@@ -193,6 +213,7 @@ export class GraphRenderer {
 
     public setLayoutOrientation(o: 'HORIZ' | 'VERT') {
         this.layoutOrientation = o;
+        this.stateManager.updatePanelOptions(this.panelId, { layoutOrientation: o });
         const state = this.stateManager.getCurrentState();
         if (state) {
             state.nodes.forEach(n => {
@@ -273,6 +294,11 @@ export class GraphRenderer {
             const target = e.target as HTMLElement;
             if (!target.closest('.node-info-btn') && !target.closest('.node-info-overlay')) {
                 document.querySelectorAll('.node-info-overlay').forEach(el => el.remove());
+            }
+            if (!target.closest('.custom-select-container')) {
+                document.querySelectorAll('.custom-select-options').forEach(el => {
+                    (el as HTMLElement).style.display = 'none';
+                });
             }
         });
 
@@ -603,6 +629,7 @@ export class GraphRenderer {
             case 'MaterialAir': return { atm_pressure: 101325, atm_temperature: 298.15 };
             case 'MaterialExplosive': return { charge_mass: 1.0, composition: 'TNT', rho: 1630, detonation_energy: 4520000 };
             case 'CFDSolver': return { cfl: 0.4, flux_scheme: 'AUSM+', spatial_order: 2, temporal_order: 2, output_mode: 'By Time', output_interval: 0.0001 };
+            case 'TelemetryGraph': return { telemetry_channel: 0, x_axis_mode: 'radius' };
             default: return {};
         }
     }
@@ -717,7 +744,7 @@ export class GraphRenderer {
 
                     const infoBtn = document.createElement('button');
                     infoBtn.className = 'node-info-btn';
-                    infoBtn.innerHTML = SVG_ICONS.info;
+                    infoBtn.textContent = 'Info';
 
                     const collapseBtn = document.createElement('button');
                     collapseBtn.className = 'node-collapse-btn';
@@ -738,26 +765,36 @@ export class GraphRenderer {
                         }
                     });
 
-                    const targetNodeEl = nodeEl;
                     infoBtn.addEventListener('mousedown', (e) => e.stopPropagation());
                     infoBtn.addEventListener('click', (e) => {
                         e.stopPropagation();
-                        let infoOverlay = targetNodeEl.querySelector('.node-info-overlay') as HTMLElement;
-                        if (infoOverlay) {
-                            infoOverlay.remove();
-                        } else {
-                            infoOverlay = document.createElement('div');
-                            infoOverlay.className = 'node-info-overlay';
-                            infoOverlay.innerHTML = `
-                                <div style="font-weight:bold;margin-bottom:4px;font-size:9px;color:#fff;">${node.type} Info</div>
-                                <div style="font-size:8px;line-height:1.2;color:#ccc;">${this.getNodeDescription(node.type)}</div>
-                            `;
-                            infoOverlay.addEventListener('click', (ev) => {
-                                ev.stopPropagation();
-                                infoOverlay.remove();
-                            });
-                            targetNodeEl.appendChild(infoOverlay);
+                        // Remove any existing overlay
+                        const existing = document.querySelector('.node-info-overlay') as HTMLElement;
+                        if (existing) {
+                            existing.remove();
+                            // If it belonged to this same button click, just toggle off
+                            if (existing.dataset.nodeId === node.id) return;
                         }
+                        const infoOverlay = document.createElement('div');
+                        infoOverlay.className = 'node-info-overlay';
+                        infoOverlay.dataset.nodeId = node.id;
+                        infoOverlay.innerHTML = `
+                            <div class="node-info-overlay-title">${node.type} Info</div>
+                            <div class="node-info-overlay-body">${this.getNodeDescription(node.type)}</div>
+                        `;
+                        // Convert client coords → world coords so overlay scales with canvas
+                        const rect = this.viewport.getBoundingClientRect();
+                        const OFFSET = 12;
+                        const worldX = (e.clientX - rect.left - this.panX) / this.zoom + OFFSET;
+                        const worldY = (e.clientY - rect.top  - this.panY) / this.zoom + OFFSET;
+                        infoOverlay.style.left = `${worldX}px`;
+                        infoOverlay.style.top  = `${worldY}px`;
+                        infoOverlay.addEventListener('click', (ev) => {
+                            ev.stopPropagation();
+                            infoOverlay.remove();
+                        });
+                        // Append to world-space container so it zooms/pans with the graph
+                        this.container.appendChild(infoOverlay);
                     });
 
                     collapseBtn.addEventListener('mousedown', (e) => e.stopPropagation());
@@ -945,7 +982,72 @@ export class GraphRenderer {
                             }
                         }
                     } else if (displayMode === 'full-panel') {
-                        // Ports hidden
+                        // Render representative port bullets so wires can anchor correctly
+                        if (nodeOrientation === 'VERT') {
+                            if (node.inputs.length > 0) {
+                                const p = document.createElement('div');
+                                p.className = 'port input vertical representative';
+                                const colorClass = this.getPortColorClass(node.type, node.inputs[0].id);
+                                p.innerHTML = `<div class="port-bullet vertical ${colorClass}" id="${this.panelId}-port-in-${node.id}-representative"></div>`;
+                                p.addEventListener('mouseup', () => {
+                                    if (this.isDraggingWire) {
+                                        state.connections.push({
+                                            fromNode: this.dragSourceNodeId!,
+                                            fromPort: this.dragSourcePortId!,
+                                            toNode: node.id,
+                                            toPort: node.inputs[0].id
+                                        });
+                                        this.stateManager.pushState(state);
+                                    }
+                                });
+                                portsTopEl.appendChild(p);
+                            }
+                            if (node.outputs.length > 0) {
+                                const p = document.createElement('div');
+                                p.className = 'port output vertical representative';
+                                const colorClass = this.getPortColorClass(node.type, node.outputs[0].id);
+                                p.innerHTML = `<div class="port-bullet vertical ${colorClass}" id="${this.panelId}-port-out-${node.id}-representative"></div>`;
+                                p.addEventListener('mousedown', (e) => {
+                                    e.stopPropagation();
+                                    this.isDraggingWire = true;
+                                    this.dragSourceNodeId = node.id;
+                                    this.dragSourcePortId = node.outputs[0].id;
+                                });
+                                portsBottomEl.appendChild(p);
+                            }
+                        } else {
+                            if (node.inputs.length > 0) {
+                                const p = document.createElement('div');
+                                p.className = 'port input representative';
+                                const colorClass = this.getPortColorClass(node.type, node.inputs[0].id);
+                                p.innerHTML = `<div class="port-bullet ${colorClass}" id="${this.panelId}-port-in-${node.id}-representative"></div>`;
+                                p.addEventListener('mouseup', () => {
+                                    if (this.isDraggingWire) {
+                                        state.connections.push({
+                                            fromNode: this.dragSourceNodeId!,
+                                            fromPort: this.dragSourcePortId!,
+                                            toNode: node.id,
+                                            toPort: node.inputs[0].id
+                                        });
+                                        this.stateManager.pushState(state);
+                                    }
+                                });
+                                portsEl.appendChild(p);
+                            }
+                            if (node.outputs.length > 0) {
+                                const p = document.createElement('div');
+                                p.className = 'port output representative';
+                                const colorClass = this.getPortColorClass(node.type, node.outputs[0].id);
+                                p.innerHTML = `<div class="port-bullet ${colorClass}" id="${this.panelId}-port-out-${node.id}-representative"></div>`;
+                                p.addEventListener('mousedown', (e) => {
+                                    e.stopPropagation();
+                                    this.isDraggingWire = true;
+                                    this.dragSourceNodeId = node.id;
+                                    this.dragSourcePortId = node.outputs[0].id;
+                                });
+                                portsEl.appendChild(p);
+                            }
+                        }
                     } else {
                         if (nodeOrientation === 'VERT') {
                             node.inputs.forEach(input => {
@@ -1023,13 +1125,13 @@ export class GraphRenderer {
                     contentEl.style.display = 'none';
                 } else if (displayMode === 'normal') {
                     if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph') {
-                        contentEl.style.display = 'block';
+                        contentEl.style.display = 'flex';
                         this.renderTelemetryContent(node, contentEl);
                     } else {
                         contentEl.style.display = 'none';
                     }
                 } else {
-                    contentEl.style.display = 'block';
+                    contentEl.style.display = 'flex';
                     this.renderNodeParameters(node, contentEl);
                     if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph') {
                         this.renderTelemetryContent(node, contentEl);
@@ -1108,21 +1210,25 @@ export class GraphRenderer {
     }
 
     private getPortPosition(node: Node, portId: string, isInput: boolean): { x: number, y: number } | null {
-        const bulletId = node.displayMode === 'compact'
+        // Both compact and full-panel render representative bullets (single anchor per side)
+        const useRepresentative = node.displayMode === 'compact' || node.displayMode === 'full-panel';
+        const bulletId = useRepresentative
             ? (isInput ? `${this.panelId}-port-in-${node.id}-representative` : `${this.panelId}-port-out-${node.id}-representative`)
             : (isInput ? `${this.panelId}-port-in-${node.id}-${portId}` : `${this.panelId}-port-out-${node.id}-${portId}`);
 
         const bullet = document.getElementById(bulletId);
         if (bullet) {
             const rect = bullet.getBoundingClientRect();
-            const centerX = rect.left + rect.width / 2;
-            const centerY = rect.top + rect.height / 2;
+            if (rect.width > 0 && rect.height > 0) {
+                const centerX = rect.left + rect.width / 2;
+                const centerY = rect.top + rect.height / 2;
 
-            const ctm = this.svg.getScreenCTM();
-            if (!ctm) return null;
-            const pt = new DOMPoint(centerX, centerY);
-            const worldPoint = pt.matrixTransform(ctm.inverse());
-            return { x: worldPoint.x, y: worldPoint.y };
+                const ctm = this.svg.getScreenCTM();
+                if (!ctm) return null;
+                const pt = new DOMPoint(centerX, centerY);
+                const worldPoint = pt.matrixTransform(ctm.inverse());
+                return { x: worldPoint.x, y: worldPoint.y };
+            }
         }
 
         // Fallback for hidden ports (e.g., full-panel mode)
@@ -1165,38 +1271,131 @@ export class GraphRenderer {
                 body.scrollTop = body.scrollHeight;
             }
         } else if (node.type === 'TelemetryGraph') {
+            // Channel metadata
+            const CHANNELS: { label: string; color: string }[] = [
+                { label: 'Pressure',        color: '#00f0ff' },
+                { label: 'Density',         color: '#f0a000' },
+                { label: 'Velocity',        color: '#a0f000' },
+                { label: 'Int. Energy',     color: '#f000a0' },
+            ];
+            const currentChannel = Number(node.parameters?.telemetry_channel ?? 0);
+
+            const meshNode = this.stateManager.getCurrentState()?.nodes.find(n => n.type === 'DomainMesh');
+            const is1D = (meshNode?.parameters?.dimension ?? '1D') === '1D';
+            const domainRadius = Number(meshNode?.parameters?.domain_radius ?? 1.0);
+            const xAxisMode = is1D ? (node.parameters?.x_axis_mode ?? 'radius') : 'cell_id';
+
             const worker = this.nodeWorkers.get(node.id);
             if (worker) {
+                // Sync channel, colour, bounds, grid, and x-axis mode on every render pass
                 worker.postMessage({
                     type: 'setConfig',
-                    showAxes: node.displayMode === 'expanded'
+                    showAxes: node.displayMode === 'expanded',
+                    channel: currentChannel,
+                    color: node.parameters?.color ?? CHANNELS[currentChannel]?.color ?? '#00f0ff',
+                    min: node.parameters?.min_y !== undefined ? Number(node.parameters.min_y) : 0,
+                    max: node.parameters?.max_y !== undefined ? Number(node.parameters.max_y) : 1000000,
+                    showGrid: node.parameters?.show_grid !== false,
+                    xAxisMode: xAxisMode,
+                    domainRadius: domainRadius
                 });
             }
 
             if (!container.querySelector('canvas')) {
+                // --- Channel selector bar ---
+                const selectorBar = document.createElement('div');
+                selectorBar.className = 'telemetry-channel-bar';
+                selectorBar.innerHTML = '<span class="telemetry-channel-label">Channel:</span>';
+
+                const select = this.createCustomDropdown(
+                    CHANNELS.map((ch, idx) => ({ value: String(idx), label: ch.label })),
+                    String(currentChannel),
+                    (val) => {
+                        const ch = parseInt(val, 10);
+                        const newColor = CHANNELS[ch]?.color ?? '#00f0ff';
+                        this.stateManager.updateNodeParameters(node.id, {
+                            telemetry_channel: ch,
+                            color: newColor
+                        });
+                    },
+                    'telemetry-channel-select'
+                );
+
+                selectorBar.appendChild(select);
+                container.appendChild(selectorBar);
+
+                // --- Graph canvas ---
                 const graphBody = document.createElement('div');
                 graphBody.className = 'node-body-graph';
-                graphBody.style.height = '100%';
+                graphBody.style.flex = '1';
                 container.appendChild(graphBody);
 
                 const canvas = document.createElement('canvas');
                 canvas.style.width = '100%';
                 canvas.style.height = '100%';
                 graphBody.appendChild(canvas);
-                const worker = new Worker(new URL('./ChartWorker.ts', import.meta.url), { type: 'module' });
-                this.nodeWorkers.set(node.id, worker);
+
+                const newWorker = new Worker(new URL('./ChartWorker.ts', import.meta.url), { type: 'module' });
+                this.nodeWorkers.set(node.id, newWorker);
+                newWorker.onmessage = (e) => {
+                    if (e.data.type === 'bounds') {
+                        this.stateManager.updateNodeParametersInPlace(node.id, {
+                            min_y: e.data.minY,
+                            max_y: e.data.maxY
+                        });
+                    }
+                };
                 const offscreen = (canvas as any).transferControlToOffscreen();
-                worker.postMessage({ type: 'init', canvas: offscreen }, [offscreen] as any);
+                newWorker.postMessage({ type: 'init', canvas: offscreen }, [offscreen] as any);
+                newWorker.postMessage({
+                    type: 'setConfig',
+                    channel: currentChannel,
+                    color: node.parameters?.color ?? CHANNELS[currentChannel]?.color ?? '#00f0ff',
+                    min: node.parameters?.min_y !== undefined ? Number(node.parameters.min_y) : 0,
+                    max: node.parameters?.max_y !== undefined ? Number(node.parameters.max_y) : 1000000,
+                    showGrid: node.parameters?.show_grid !== false,
+                    showAxes: node.displayMode === 'expanded',
+                    xAxisMode: xAxisMode,
+                    domainRadius: domainRadius
+                });
+
+                requestAnimationFrame(() => {
+                    newWorker.postMessage({
+                        type: 'resize',
+                        width: canvas.clientWidth || 300,
+                        height: canvas.clientHeight || 150
+                    });
+                });
 
                 const initialData = this.stateManager.getTelemetry(node.id);
                 if (initialData) {
                     if (initialData instanceof ArrayBuffer) {
                         const bufferCopy = initialData.slice(0);
-                        worker.postMessage(bufferCopy, [bufferCopy]);
+                        newWorker.postMessage(bufferCopy, [bufferCopy]);
                     } else {
                         const pressureData = initialData.data || initialData.telemetry;
                         if (pressureData && (Array.isArray(pressureData) || pressureData instanceof Float32Array)) {
-                            worker.postMessage({ type: 'data', telemetry: pressureData });
+                            newWorker.postMessage({ type: 'data', telemetry: pressureData });
+                        }
+                    }
+                }
+            } else {
+                // Sync selector value if it was changed programmatically
+                const select = container.querySelector('.telemetry-channel-select') as HTMLElement;
+                if (select) {
+                    const trigger = select.querySelector('.custom-select-trigger');
+                    if (trigger) {
+                        const currentOpt = CHANNELS[currentChannel];
+                        if (currentOpt && trigger.textContent !== currentOpt.label) {
+                            trigger.textContent = currentOpt.label;
+                            select.querySelectorAll('.custom-select-option').forEach(opt => {
+                                const optEl = opt as HTMLElement;
+                                if (optEl.dataset.value === String(currentChannel)) {
+                                    optEl.classList.add('selected');
+                                } else {
+                                    optEl.classList.remove('selected');
+                                }
+                            });
                         }
                     }
                 }
@@ -1205,15 +1404,48 @@ export class GraphRenderer {
     }
 
     private renderNodeParameters(node: Node, container: HTMLElement): void {
+        if (node.type === 'TelemetryGraph') {
+            const form = container.querySelector('.node-params-form');
+            if (form) form.remove();
+            return;
+        }
+        container.style.overflow = 'visible';
         let form = container.querySelector('.node-params-form') as HTMLFormElement;
         if (form) {
-            for (const [key, value] of Object.entries(node.parameters)) {
-                const input = form.querySelector(`[data-key="${key}"]`) as HTMLInputElement;
-                if (input && document.activeElement !== input) {
-                    input.value = value.toString();
+            let needsRebuild = false;
+            if (node.type === 'DomainMesh') {
+                const dim = node.parameters['dimension'] || '1D';
+                if (form.dataset.renderedDimension !== dim.toString()) {
+                    needsRebuild = true;
                 }
             }
-            return;
+            if (!needsRebuild) {
+                for (const [key, value] of Object.entries(node.parameters)) {
+                    const el = form.querySelector(`[data-key="${key}"]`) as HTMLElement;
+                    if (el) {
+                        if (el.classList.contains('custom-select-container')) {
+                            const trigger = el.querySelector('.custom-select-trigger');
+                            if (trigger) {
+                                trigger.textContent = value.toString();
+                            }
+                            el.querySelectorAll('.custom-select-option').forEach(opt => {
+                                const optEl = opt as HTMLElement;
+                                if (optEl.dataset.value === value.toString()) {
+                                    optEl.classList.add('selected');
+                                } else {
+                                    optEl.classList.remove('selected');
+                                }
+                            });
+                        } else {
+                            const input = el as HTMLInputElement;
+                            if (document.activeElement !== input) {
+                                input.value = value.toString();
+                            }
+                        }
+                    }
+                }
+                return;
+            }
         }
 
         container.innerHTML = '';
@@ -1221,6 +1453,11 @@ export class GraphRenderer {
         form.className = 'node-params-form';
         form.style.padding = '4px 8px';
         form.onsubmit = (e) => e.preventDefault();
+
+        if (node.type === 'DomainMesh') {
+            const dim = node.parameters['dimension'] || '1D';
+            form.dataset.renderedDimension = dim.toString();
+        }
 
         for (const [key, value] of Object.entries(node.parameters)) {
             if (node.type === 'DomainMesh') {
@@ -1235,7 +1472,7 @@ export class GraphRenderer {
             row.style.flexDirection = 'column';
 
             const label = document.createElement('label');
-            label.style.fontSize = '8px';
+            label.style.fontSize = 'var(--font-xs)';
             label.style.color = '#888';
             label.textContent = key.replace(/_/g, ' ').toUpperCase();
             row.appendChild(label);
@@ -1248,6 +1485,8 @@ export class GraphRenderer {
                 'y_max_bc': ['Reflecting', 'Transmitting', 'Terminate'],
                 'z_min_bc': ['Reflecting', 'Transmitting', 'Terminate'],
                 'z_max_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+                'left_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+                'right_bc': ['Reflecting', 'Transmitting', 'Terminate'],
                 'composition': ['TNT', 'IdealGas', 'Custom'],
                 'flux_scheme': ['AUSM+', 'Rusanov'],
                 'spatial_order': ['1', '2', '3'],
@@ -1257,27 +1496,14 @@ export class GraphRenderer {
 
             let inputEl: HTMLElement;
             if (dropdowns[key]) {
-                const select = document.createElement('select');
-                select.dataset.key = key;
-                select.style.width = '100%';
-                select.style.fontSize = '9px';
-                select.style.background = '#222';
-                select.style.color = '#ccc';
-                select.style.border = '1px solid #444';
-                select.style.padding = '1px 2px';
-
-                dropdowns[key].forEach(opt => {
-                    const option = document.createElement('option');
-                    option.value = opt;
-                    option.text = opt;
-                    if (opt === value.toString()) option.selected = true;
-                    select.appendChild(option);
-                });
-
-                select.addEventListener('change', () => {
-                    this.stateManager.updateNodeParameters(node.id, { [key]: select.value });
-                });
-                inputEl = select;
+                inputEl = this.createCustomDropdown(
+                    dropdowns[key].map(opt => ({ value: opt, label: opt })),
+                    value.toString(),
+                    (newVal) => {
+                        this.stateManager.updateNodeParameters(node.id, { [key]: newVal });
+                    },
+                    key
+                );
             } else {
                 const input = document.createElement('input');
                 const isNumeric = typeof value === 'number';
@@ -1286,7 +1512,7 @@ export class GraphRenderer {
                 input.value = value.toString();
                 input.dataset.key = key;
                 input.style.width = '100%';
-                input.style.fontSize = '9px';
+                input.style.fontSize = 'var(--font-xs)';
                 input.style.background = '#222';
                 input.style.color = '#ccc';
                 input.style.border = '1px solid #444';
@@ -1304,6 +1530,68 @@ export class GraphRenderer {
             form.appendChild(row);
         }
         container.appendChild(form);
+    }
+
+    private createCustomDropdown(
+        options: { value: string; label: string }[],
+        currentValue: string,
+        onChange: (val: string) => void,
+        dataKey?: string
+    ): HTMLElement {
+        const container = document.createElement('div');
+        container.className = 'custom-select-container';
+        if (dataKey) container.dataset.key = dataKey;
+
+        const trigger = document.createElement('div');
+        trigger.className = 'custom-select-trigger';
+        const currentOpt = options.find(opt => opt.value === currentValue);
+        trigger.textContent = currentOpt ? currentOpt.label : currentValue;
+        container.appendChild(trigger);
+
+        const optionsDiv = document.createElement('div');
+        optionsDiv.className = 'custom-select-options';
+        optionsDiv.style.display = 'none';
+
+        options.forEach(opt => {
+            const optDiv = document.createElement('div');
+            optDiv.className = 'custom-select-option';
+            optDiv.dataset.value = opt.value;
+            optDiv.textContent = opt.label;
+            if (opt.value === currentValue) {
+                optDiv.classList.add('selected');
+            }
+
+            optDiv.addEventListener('click', (e) => {
+                e.stopPropagation();
+                optionsDiv.style.display = 'none';
+                trigger.textContent = opt.label;
+                
+                optionsDiv.querySelectorAll('.custom-select-option').forEach(o => {
+                    o.classList.remove('selected');
+                });
+                optDiv.classList.add('selected');
+
+                onChange(opt.value);
+            });
+            optionsDiv.appendChild(optDiv);
+        });
+
+        container.appendChild(optionsDiv);
+
+        ['mousedown', 'mouseup', 'click'].forEach(evtType => {
+            container.addEventListener(evtType, (e) => e.stopPropagation());
+        });
+
+        trigger.addEventListener('click', (e) => {
+            e.stopPropagation();
+            document.querySelectorAll('.custom-select-options').forEach(el => {
+                if (el !== optionsDiv) (el as HTMLElement).style.display = 'none';
+            });
+            const isOpen = optionsDiv.style.display === 'block';
+            optionsDiv.style.display = isOpen ? 'none' : 'block';
+        });
+
+        return container;
     }
 
     private getNodeDescription(type: string): string {

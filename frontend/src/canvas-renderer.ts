@@ -203,7 +203,7 @@ export class CanvasRenderer {
         this.ctx.fillText(node.type.toUpperCase(), node.x + 10, node.y + 17);
 
         // Ports
-        this.ctx.font = '10px system-ui';
+        this.ctx.font = '9px system-ui';
         const portSpacing = 20;
 
         // Input Ports
