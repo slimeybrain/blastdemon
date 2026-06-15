@@ -65,6 +65,8 @@ export class LayoutManager {
         firstChildWrapper.style.flex = `${node.ratio}`;
         firstChildWrapper.style.position = 'relative';
         firstChildWrapper.style.display = 'flex';
+        firstChildWrapper.style.minWidth = '0';
+        firstChildWrapper.style.minHeight = '0';
         this.renderNode(node.firstChild, firstChildWrapper);
 
         const splitter = document.createElement('div');
@@ -79,6 +81,8 @@ export class LayoutManager {
         secondChildWrapper.style.flex = `${1 - node.ratio}`;
         secondChildWrapper.style.position = 'relative';
         secondChildWrapper.style.display = 'flex';
+        secondChildWrapper.style.minWidth = '0';
+        secondChildWrapper.style.minHeight = '0';
         this.renderNode(node.secondChild, secondChildWrapper);
 
         splitEl.appendChild(firstChildWrapper);
@@ -122,6 +126,8 @@ export class LayoutManager {
         panelEl.style.flexDirection = 'column';
         panelEl.style.flex = '1';
         panelEl.style.height = '100%';
+        panelEl.style.minWidth = '0';
+        panelEl.style.minHeight = '0';
         panelEl.style.overflow = 'hidden';
 
         const header = this.createPanelHeader(node);
@@ -129,10 +135,18 @@ export class LayoutManager {
 
         const content = document.createElement('div');
         content.className = 'panel-content';
+        if (node.panelType !== 'NODE_GRAPH') {
+            content.classList.add('scrollable');
+        }
         content.style.flex = '1';
         content.style.display = 'flex';
         content.style.flexDirection = 'column';
-        content.style.overflow = 'hidden';
+        if (node.panelType === 'NODE_GRAPH') {
+            content.style.overflow = 'hidden';
+        } else {
+            content.style.overflowY = 'auto';
+            content.style.overflowX = 'hidden';
+        }
         panelEl.appendChild(content);
 
         parent.appendChild(panelEl);
@@ -212,6 +226,57 @@ export class LayoutManager {
             arrangeBtn.className = 'header-button secondary auto-arrange-btn';
             arrangeBtn.style.marginLeft = '4px';
             leftSide.appendChild(arrangeBtn);
+
+            const gridLabel = document.createElement('label');
+            gridLabel.style.display = 'flex';
+            gridLabel.style.alignItems = 'center';
+            gridLabel.style.gap = '2px';
+            gridLabel.style.fontSize = '9px';
+            gridLabel.style.marginLeft = '6px';
+            gridLabel.innerHTML = '<input type="checkbox" checked> Grid';
+            const gridCheckbox = gridLabel.querySelector('input')!;
+            gridCheckbox.onchange = () => {
+                const comp = this.components.get(node.id);
+                if (comp && comp.type === 'NODE_GRAPH') {
+                    comp.instance.setShowGrid(gridCheckbox.checked);
+                }
+            };
+            leftSide.appendChild(gridLabel);
+
+            const snapLabel = document.createElement('label');
+            snapLabel.style.display = 'flex';
+            snapLabel.style.alignItems = 'center';
+            snapLabel.style.gap = '2px';
+            snapLabel.style.fontSize = '9px';
+            snapLabel.style.marginLeft = '6px';
+            snapLabel.innerHTML = '<input type="checkbox" checked> Snap';
+            const snapCheckbox = snapLabel.querySelector('input')!;
+            snapCheckbox.onchange = () => {
+                const comp = this.components.get(node.id);
+                if (comp && comp.type === 'NODE_GRAPH') {
+                    comp.instance.setSnapToGrid(snapCheckbox.checked);
+                }
+            };
+            leftSide.appendChild(snapLabel);
+
+            const spacingSelect = document.createElement('select');
+            spacingSelect.className = 'header-select';
+            spacingSelect.style.width = '48px';
+            spacingSelect.style.marginLeft = '6px';
+            [10, 20, 40, 50].forEach(sz => {
+                const opt = document.createElement('option');
+                opt.value = sz.toString();
+                opt.textContent = `${sz}px`;
+                if (sz === 20) opt.selected = true;
+                spacingSelect.appendChild(opt);
+            });
+            spacingSelect.onchange = () => {
+                const comp = this.components.get(node.id);
+                if (comp && comp.type === 'NODE_GRAPH') {
+                    comp.instance.setGridSpacing(parseInt(spacingSelect.value));
+                }
+            };
+            leftSide.appendChild(spacingSelect);
 
             const statusBadge = document.createElement('div');
             statusBadge.id = 'status-badge';

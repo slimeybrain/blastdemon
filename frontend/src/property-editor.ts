@@ -10,7 +10,7 @@ export class PropertyEditor {
     constructor(parent: HTMLElement, stateManager: StateManager) {
         this.container = document.createElement('div');
         this.container.id = 'property-editor-container';
-        this.container.className = 'panel-content';
+        this.container.className = 'panel-content scrollable';
         parent.appendChild(this.container);
 
         this.stateManager = stateManager;
@@ -65,12 +65,27 @@ export class PropertyEditor {
         editorHeader.innerHTML = `${node.type} (${node.id})`;
         this.container.appendChild(editorHeader);
 
+        const descBlock = document.createElement('div');
+        descBlock.style.padding = '8px 10px';
+        descBlock.style.fontSize = '0.75rem';
+        descBlock.style.color = '#aaa';
+        descBlock.style.background = '#252526';
+        descBlock.style.borderBottom = '1px solid #333';
+        descBlock.textContent = this.getNodeDescription(node.type);
+        this.container.appendChild(descBlock);
+
         // Parameters Section
         const form = document.createElement('form');
         form.style.padding = '10px';
         form.onsubmit = (e) => e.preventDefault();
 
         for (const [key, value] of Object.entries(node.parameters)) {
+            if (node.type === 'DomainMesh') {
+                const dim = node.parameters['dimension'] || '1D';
+                if ((key === 'y_min_bc' || key === 'y_max_bc') && dim === '1D') continue;
+                if ((key === 'z_min_bc' || key === 'z_max_bc') && (dim === '1D' || dim === '2D')) continue;
+            }
+
             const row = document.createElement('div');
             row.style.marginBottom = '10px';
 
@@ -160,8 +175,13 @@ export class PropertyEditor {
         ];
 
         const dropdowns: Record<string, string[]> = {
-            'left_bc': ['Reflecting', 'Transmitting', 'Terminate'],
-            'right_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+            'dimension': ['1D', '2D', '3D'],
+            'x_min_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+            'x_max_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+            'y_min_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+            'y_max_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+            'z_min_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+            'z_max_bc': ['Reflecting', 'Transmitting', 'Terminate'],
             'composition': ['TNT', 'IdealGas', 'Custom'],
             'flux_scheme': ['AUSM+', 'Rusanov'],
             'spatial_order': ['1', '2', '3'],
@@ -233,5 +253,26 @@ export class PropertyEditor {
 
         this.stateManager.updateNodeParameters(this.currentNodeId, updates);
         this.render(false);
+    }
+
+    private getNodeDescription(type: string): string {
+        switch (type) {
+            case 'DomainMesh':
+                return 'Cartesian grid with structured uniform mesh. Defines the spatial domain boundary conditions and discretization sizing.';
+            case 'MaterialAir':
+                return 'Air material initialization. Configures ambient atmospheric pressure and temperature coefficients.';
+            case 'MaterialExplosive':
+                return 'High-explosive chemical charge initialization. Configures composition, charge mass, density, and JWL state properties.';
+            case 'ThePainter':
+                return 'Initial conditions painter. Maps mesh cells to physical material states for the simulation starting phase.';
+            case 'CFDSolver':
+                return 'High-order CFD simulation engine. Solves Euler equations using high-resolution reconstruction and flux splitting schemes.';
+            case 'TelemetryText':
+                return 'Live text stream telemetry logger. Outputs simulator event timelines, iteration milestones, and system states.';
+            case 'TelemetryGraph':
+                return 'Real-time chart telemetry viewer. Plots grid spatial properties, cell pressure profiles, and simulation telemetry histories.';
+            default:
+                return 'Simulation graph node.';
+        }
     }
 }

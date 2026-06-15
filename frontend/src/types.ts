@@ -16,6 +16,7 @@ export interface Node {
     parameters: Record<string, any>;
     inputs: Port[];
     outputs: Port[];
+    orientation?: 'HORIZ' | 'VERT';
 }
 
 export interface Connection {

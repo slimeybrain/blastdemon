@@ -60,3 +60,83 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         connections: state.connections
     });
 }
+
+export function serializeToBinary(state: SimulationState): ArrayBuffer {
+    const jsonString = JSON.stringify(state);
+    const encoder = new TextEncoder();
+    const jsonBytes = encoder.encode(jsonString);
+    
+    const buffer = new ArrayBuffer(4 + 1 + 1 + 4 + jsonBytes.length + 4);
+    const view = new DataView(buffer);
+    const uint8 = new Uint8Array(buffer);
+    
+    // Magic: 'BLST'
+    view.setUint8(0, 0x42); // B
+    view.setUint8(1, 0x4c); // L
+    view.setUint8(2, 0x53); // S
+    view.setUint8(3, 0x54); // T
+    
+    // Version: 1
+    view.setUint8(4, 1);
+    
+    // Flags: 0
+    view.setUint8(5, 0);
+    
+    // JSON Length (Big Endian)
+    view.setUint32(6, jsonBytes.length, false);
+    
+    // JSON Bytes
+    uint8.set(jsonBytes, 10);
+    
+    // Simple sum checksum
+    let checksum = 0;
+    for (let i = 0; i < jsonBytes.length; i++) {
+        checksum = (checksum + jsonBytes[i]) & 0xFFFFFFFF;
+    }
+    view.setUint32(10 + jsonBytes.length, checksum, false);
+    
+    return buffer;
+}
+
+export function deserializeFromBinary(buffer: ArrayBuffer): SimulationState {
+    const view = new DataView(buffer);
+    if (buffer.byteLength < 14) {
+        throw new Error("Invalid model: buffer too short");
+    }
+    
+    // Verify Magic
+    const m0 = view.getUint8(0);
+    const m1 = view.getUint8(1);
+    const m2 = view.getUint8(2);
+    const m3 = view.getUint8(3);
+    if (m0 !== 0x42 || m1 !== 0x4c || m2 !== 0x53 || m3 !== 0x54) {
+        throw new Error("Invalid model: missing magic header");
+    }
+    
+    const version = view.getUint8(4);
+    if (version !== 1) {
+        throw new Error(`Unsupported model version: ${version}`);
+    }
+    
+    const jsonLength = view.getUint32(6, false);
+    if (buffer.byteLength < 10 + jsonLength + 4) {
+        throw new Error("Invalid model: payload truncated");
+    }
+    
+    const uint8 = new Uint8Array(buffer);
+    const jsonBytes = uint8.subarray(10, 10 + jsonLength);
+    
+    // Verify checksum
+    let checksum = 0;
+    for (let i = 0; i < jsonBytes.length; i++) {
+        checksum = (checksum + jsonBytes[i]) & 0xFFFFFFFF;
+    }
+    const savedChecksum = view.getUint32(10 + jsonLength, false);
+    if (checksum !== savedChecksum) {
+        throw new Error("Invalid model: checksum mismatch");
+    }
+    
+    const decoder = new TextDecoder();
+    const jsonString = decoder.decode(jsonBytes);
+    return JSON.parse(jsonString) as SimulationState;
+}

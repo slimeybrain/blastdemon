@@ -1,6 +1,15 @@
 import { SimulationState, Node, Connection, Port, NodeType } from './types.js';
 import { StateManager } from './state-manager.js';
 
+const SVG_ICONS = {
+    horiz: `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="display:block;"><rect x="1" y="4" width="5" height="8" rx="1"/><rect x="10" y="4" width="5" height="8" rx="1"/><path d="M6 8h4"/></svg>`,
+    vert: `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="display:block;"><rect x="4" y="1" width="8" height="5" rx="1"/><rect x="4" y="10" width="8" height="5" rx="1"/><path d="M8 6v4"/></svg>`,
+    info: `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" style="display:block;"><rect x="2" y="2" width="12" height="12" rx="1.5"/><path d="M8 7v4" stroke-width="1.5"/><circle cx="8" cy="4.5" r="0.75" fill="currentColor"/></svg>`,
+    compact: `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" style="display:block;"><rect x="2" y="6" width="12" height="4" rx="1"/></svg>`,
+    normal: `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" style="display:block;"><rect x="2" y="4" width="12" height="8" rx="1"/><path d="M2 7h12"/></svg>`,
+    expanded: `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" style="display:block;"><rect x="2" y="2" width="12" height="12" rx="1.5"/><path d="M2 5h12M2 9h12"/></svg>`
+};
+
 export class GraphRenderer {
     public viewport: HTMLElement;
     private container: HTMLElement;
@@ -31,6 +40,39 @@ export class GraphRenderer {
 
     private selectedNodeId: string | null = null;
     private spacePressed: boolean = false;
+    private snapToGrid: boolean = true;
+    private showGrid: boolean = true;
+    private gridSpacing: number = 20;
+
+    public setSnapToGrid(enabled: boolean): void {
+        this.snapToGrid = enabled;
+    }
+
+    public setShowGrid(enabled: boolean): void {
+        this.showGrid = enabled;
+        this.updateGridBackground();
+    }
+
+    public setGridSpacing(spacing: number): void {
+        this.gridSpacing = spacing;
+        this.updateGridBackground();
+    }
+
+    private updateGridBackground(): void {
+        if (this.showGrid) {
+            this.viewport.style.backgroundImage = `
+                linear-gradient(to right, rgba(255, 255, 255, 0.05) 1px, transparent 1px),
+                linear-gradient(to bottom, rgba(255, 255, 255, 0.05) 1px, transparent 1px)
+            `;
+            this.viewport.style.backgroundSize = `${this.gridSpacing * this.zoom}px ${this.gridSpacing * this.zoom}px`;
+            this.viewport.style.backgroundPosition = `${this.panX}px ${this.panY}px`;
+        } else {
+            this.viewport.style.backgroundImage = '';
+            this.viewport.style.backgroundSize = '';
+            this.viewport.style.backgroundPosition = '';
+        }
+    }
+
     private layoutOrientation: 'HORIZ' | 'VERT' = 'HORIZ';
 
     public onNodeSelected: ((nodeId: string | null) => void) | null = null;
@@ -79,6 +121,7 @@ export class GraphRenderer {
         parent.appendChild(this.viewport);
 
         this.initEventListeners();
+        this.updateGridBackground();
         this.stateManager.onStateChange(this.stateListener);
         this.stateManager.onTelemetryUpdate(this.telemetryListener);
         this.stateManager.onSelectionChange(this.selectionListener);
@@ -104,9 +147,12 @@ export class GraphRenderer {
 
                 // Guard against zero-size updates and unnecessary state noise
                 if (newWidth > 0 && newHeight > 0 && (node.width !== newWidth || node.height !== newHeight)) {
-                    node.width = newWidth;
-                    node.height = newHeight;
-                    changed = true;
+                    const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText';
+                    if (isTelemetry && node.displayMode !== 'compact') {
+                        node.width = newWidth;
+                        node.height = newHeight;
+                        changed = true;
+                    }
 
                     // Automatic mode switching for telemetry nodes
                     if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph') {
@@ -147,7 +193,15 @@ export class GraphRenderer {
 
     public setLayoutOrientation(o: 'HORIZ' | 'VERT') {
         this.layoutOrientation = o;
-        this.render();
+        const state = this.stateManager.getCurrentState();
+        if (state) {
+            state.nodes.forEach(n => {
+                n.orientation = o;
+            });
+            this.stateManager.pushState(state);
+        } else {
+            this.render();
+        }
     }
 
     public destroy(): void {
@@ -214,6 +268,13 @@ export class GraphRenderer {
         this.addManagedEventListener(this.viewport, 'mousedown', this.onMouseDown.bind(this));
         this.addManagedEventListener(window, 'mousemove', this.onMouseMove.bind(this));
         this.addManagedEventListener(window, 'mouseup', this.onMouseUp.bind(this));
+
+        this.addManagedEventListener(window, 'mousedown', (e: MouseEvent) => {
+            const target = e.target as HTMLElement;
+            if (!target.closest('.node-info-btn') && !target.closest('.node-info-overlay')) {
+                document.querySelectorAll('.node-info-overlay').forEach(el => el.remove());
+            }
+        });
 
         this.addManagedEventListener(this.viewport, 'click', (e: MouseEvent) => {
             if (e.target === this.viewport || e.target === this.container || e.target === this.svg) {
@@ -310,8 +371,14 @@ export class GraphRenderer {
                     const worldX = (e.clientX - rect.left - this.panX) / this.zoom;
                     const worldY = (e.clientY - rect.top - this.panY) / this.zoom;
 
-                    node.x = Math.round(worldX - this.dragOffsetX);
-                    node.y = Math.round(worldY - this.dragOffsetY);
+                    let targetX = worldX - this.dragOffsetX;
+                    let targetY = worldY - this.dragOffsetY;
+                    if (this.snapToGrid) {
+                        targetX = Math.round(targetX / this.gridSpacing) * this.gridSpacing;
+                        targetY = Math.round(targetY / this.gridSpacing) * this.gridSpacing;
+                    }
+                    node.x = Math.round(targetX);
+                    node.y = Math.round(targetY);
 
                     this.stateManager.updateState(state, false);
                 }
@@ -355,7 +422,28 @@ export class GraphRenderer {
         }
 
         if (this.isDraggingWire) {
+            if (this.hoveredPort && this.hoveredPort.isInput) {
+                const state = this.stateManager.getCurrentState();
+                if (state) {
+                    const exists = state.connections.some(conn =>
+                        conn.fromNode === this.dragSourceNodeId &&
+                        conn.fromPort === this.dragSourcePortId &&
+                        conn.toNode === this.hoveredPort!.nodeId &&
+                        conn.toPort === this.hoveredPort!.portId
+                    );
+                    if (!exists) {
+                        state.connections.push({
+                            fromNode: this.dragSourceNodeId!,
+                            fromPort: this.dragSourcePortId!,
+                            toNode: this.hoveredPort.nodeId,
+                            toPort: this.hoveredPort.portId
+                        });
+                        this.stateManager.pushState(state);
+                    }
+                }
+            }
             this.isDraggingWire = false;
+            this.hoveredPort = null;
             this.render();
         }
 
@@ -446,7 +534,26 @@ export class GraphRenderer {
         const state = this.stateManager.getCurrentState();
         if (!state) return;
 
-        const id = `node-${type.toLowerCase()}-${Date.now()}`;
+        const prefixMap: Record<NodeType, string> = {
+            'DomainMesh': 'node-mesh',
+            'MaterialAir': 'node-air',
+            'MaterialExplosive': 'node-explosive',
+            'ThePainter': 'node-painter',
+            'CFDSolver': 'node-solver',
+            'TelemetryText': 'node-log',
+            'TelemetryGraph': 'node-chart'
+        };
+        const prefix = prefixMap[type] || `node-${type.toLowerCase()}`;
+
+        let index = 1;
+        if (state.nodes.some(n => n.id === prefix)) {
+            index = 2;
+        }
+        while (state.nodes.some(n => n.id === `${prefix}-${index}`)) {
+            index++;
+        }
+        const id = index === 1 && !state.nodes.some(n => n.id === prefix) ? prefix : `${prefix}-${index}`;
+
         const newNode: Node = {
             id, type, x, y,
             displayMode: 'normal',
@@ -482,7 +589,17 @@ export class GraphRenderer {
 
     private getDefaultParameters(type: NodeType): any {
         switch (type) {
-            case 'DomainMesh': return { domain_radius: 1.0, cell_size: 0.001, left_bc: 'Reflecting', right_bc: 'Terminate' };
+            case 'DomainMesh': return {
+                dimension: '1D',
+                domain_radius: 1.0,
+                cell_size: 0.001,
+                x_min_bc: 'Reflecting',
+                x_max_bc: 'Terminate',
+                y_min_bc: 'Reflecting',
+                y_max_bc: 'Reflecting',
+                z_min_bc: 'Reflecting',
+                z_max_bc: 'Reflecting'
+            };
             case 'MaterialAir': return { atm_pressure: 101325, atm_temperature: 298.15 };
             case 'MaterialExplosive': return { charge_mass: 1.0, composition: 'TNT', rho: 1630, detonation_energy: 4520000 };
             case 'CFDSolver': return { cfl: 0.4, flux_scheme: 'AUSM+', spatial_order: 2, temporal_order: 2, output_mode: 'By Time', output_interval: 0.0001 };
@@ -580,13 +697,68 @@ export class GraphRenderer {
                     }
                     nodeEl.dataset.id = node.id;
 
+                    const portsTop = document.createElement('div');
+                    portsTop.className = 'node-ports-top';
+                    nodeEl.appendChild(portsTop);
+
                     const header = document.createElement('div');
                     header.className = 'node-header';
-                    header.innerHTML = `<span>${this.getCompactName(node.type)}</span>`;
+                    
+                    let titleHTML = `<span>${this.getCompactName(node.type)}</span>`;
+                    header.innerHTML = titleHTML;
+
+                    const buttonGroup = document.createElement('div');
+                    buttonGroup.style.display = 'flex';
+                    buttonGroup.style.gap = '4px';
+
+                    const orientBtn = document.createElement('button');
+                    orientBtn.className = 'node-orient-btn';
+                    buttonGroup.appendChild(orientBtn);
+
+                    const infoBtn = document.createElement('button');
+                    infoBtn.className = 'node-info-btn';
+                    infoBtn.innerHTML = SVG_ICONS.info;
 
                     const collapseBtn = document.createElement('button');
                     collapseBtn.className = 'node-collapse-btn';
-                    header.appendChild(collapseBtn);
+                    buttonGroup.appendChild(collapseBtn);
+
+                    header.appendChild(buttonGroup);
+
+                    orientBtn.addEventListener('mousedown', (e) => e.stopPropagation());
+                    orientBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        const stateCopy = this.stateManager.getCurrentState();
+                        if (stateCopy) {
+                            const n = stateCopy.nodes.find(x => x.id === node.id);
+                            if (n) {
+                                n.orientation = (n.orientation === 'VERT' ? 'HORIZ' : 'VERT');
+                                this.stateManager.pushState(stateCopy);
+                            }
+                        }
+                    });
+
+                    const targetNodeEl = nodeEl;
+                    infoBtn.addEventListener('mousedown', (e) => e.stopPropagation());
+                    infoBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        let infoOverlay = targetNodeEl.querySelector('.node-info-overlay') as HTMLElement;
+                        if (infoOverlay) {
+                            infoOverlay.remove();
+                        } else {
+                            infoOverlay = document.createElement('div');
+                            infoOverlay.className = 'node-info-overlay';
+                            infoOverlay.innerHTML = `
+                                <div style="font-weight:bold;margin-bottom:4px;font-size:9px;color:#fff;">${node.type} Info</div>
+                                <div style="font-size:8px;line-height:1.2;color:#ccc;">${this.getNodeDescription(node.type)}</div>
+                            `;
+                            infoOverlay.addEventListener('click', (ev) => {
+                                ev.stopPropagation();
+                                infoOverlay.remove();
+                            });
+                            targetNodeEl.appendChild(infoOverlay);
+                        }
+                    });
 
                     collapseBtn.addEventListener('mousedown', (e) => e.stopPropagation());
                     collapseBtn.addEventListener('click', (e) => {
@@ -605,8 +777,13 @@ export class GraphRenderer {
                         const worldX = (e.clientX - rect.left - this.panX) / this.zoom;
                         const worldY = (e.clientY - rect.top - this.panY) / this.zoom;
 
-                        this.dragOffsetX = worldX - node.x;
-                        this.dragOffsetY = worldY - node.y;
+                        const currentState = this.stateManager.getCurrentState();
+                        const currentNode = currentState?.nodes.find(n => n.id === node.id);
+                        const nodeX = currentNode ? currentNode.x : node.x;
+                        const nodeY = currentNode ? currentNode.y : node.y;
+
+                        this.dragOffsetX = worldX - nodeX;
+                        this.dragOffsetY = worldY - nodeY;
                     });
                     nodeEl.appendChild(header);
 
@@ -618,6 +795,15 @@ export class GraphRenderer {
                     ports.className = 'node-ports';
                     nodeEl.appendChild(ports);
 
+                    const portsBottom = document.createElement('div');
+                    portsBottom.className = 'node-ports-bottom';
+                    nodeEl.appendChild(portsBottom);
+
+                    const footer = document.createElement('div');
+                    footer.className = 'node-footer';
+                    footer.appendChild(infoBtn);
+                    nodeEl.appendChild(footer);
+
                     this.container.appendChild(nodeEl);
                     this.nodeElements.set(node.id, nodeEl);
                     this.nodeResizeObserver?.observe(nodeEl);
@@ -628,14 +814,19 @@ export class GraphRenderer {
                 if (nodeEl.style.left !== newLeft) nodeEl.style.left = newLeft;
                 if (nodeEl.style.top !== newTop) nodeEl.style.top = newTop;
 
-                if (node.width !== undefined) {
+                const displayMode = node.displayMode || 'normal';
+                const nodeOrientation = node.orientation || 'HORIZ';
+
+                const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText';
+
+                if (node.width !== undefined && displayMode !== 'compact' && isTelemetry) {
                     const newWidth = `${node.width}px`;
                     if (nodeEl.style.width !== newWidth) nodeEl.style.width = newWidth;
                 } else {
                     nodeEl.style.width = '';
                 }
 
-                if (node.height !== undefined) {
+                if (node.height !== undefined && displayMode !== 'compact' && isTelemetry) {
                     const newHeight = `${node.height}px`;
                     if (nodeEl.style.height !== newHeight) nodeEl.style.height = newHeight;
                 } else {
@@ -646,16 +837,32 @@ export class GraphRenderer {
                     nodeEl.classList.toggle('selected', node.id === this.selectedNodeId);
                 }
 
-                const displayMode = node.displayMode || 'normal';
+                nodeEl.classList.toggle('orientation-horiz', nodeOrientation === 'HORIZ');
+                nodeEl.classList.toggle('orientation-vert', nodeOrientation === 'VERT');
+
+                const orientBtn = nodeEl.querySelector('.node-orient-btn') as HTMLButtonElement;
+                if (orientBtn) {
+                    orientBtn.innerHTML = nodeOrientation === 'VERT' ? SVG_ICONS.vert : SVG_ICONS.horiz;
+                }
+
+                const footer = nodeEl.querySelector('.node-footer') as HTMLElement;
+                if (footer) {
+                    footer.style.display = displayMode === 'compact' ? 'none' : 'flex';
+                }
+
                 const lastMode = nodeEl.dataset.lastMode;
                 const lastType = nodeEl.dataset.lastType;
+                const lastOrient = nodeEl.dataset.lastOrient;
 
                 const contentEl = nodeEl.querySelector('.node-content') as HTMLElement;
                 const portsEl = nodeEl.querySelector('.node-ports') as HTMLElement;
+                const portsTopEl = nodeEl.querySelector('.node-ports-top') as HTMLElement;
+                const portsBottomEl = nodeEl.querySelector('.node-ports-bottom') as HTMLElement;
 
-                if (lastMode !== displayMode || lastType !== node.type) {
+                if (lastMode !== displayMode || lastType !== node.type || lastOrient !== nodeOrientation) {
                     nodeEl.dataset.lastMode = displayMode;
                     nodeEl.dataset.lastType = node.type;
+                    nodeEl.dataset.lastOrient = nodeOrientation;
 
                     // Update mode classes
                     nodeEl.classList.remove('mode-normal', 'mode-expanded', 'mode-full-panel', 'mode-compact');
@@ -663,80 +870,148 @@ export class GraphRenderer {
 
                     const collapseBtn = nodeEl.querySelector('.node-collapse-btn') as HTMLButtonElement;
                     if (collapseBtn) {
-                        const icons = { 'normal': '[N]', 'expanded': '[E]', 'compact': '[C]' };
-                        collapseBtn.textContent = (icons as any)[displayMode] || '[?]';
+                        collapseBtn.innerHTML = (SVG_ICONS as any)[displayMode] || '';
                     }
 
                     // Configure Ports
                     portsEl.innerHTML = '';
+                    portsTopEl.innerHTML = '';
+                    portsBottomEl.innerHTML = '';
+
                     if (displayMode === 'compact') {
-                        portsEl.style.display = 'block';
-                        if (node.inputs.length > 0) {
-                            const p = document.createElement('div');
-                            p.className = 'port input representative';
-                            const colorClass = this.getPortColorClass(node.type, node.inputs[0].id);
-                            p.innerHTML = `<div class="port-bullet ${colorClass}" id="${this.panelId}-port-in-${node.id}-representative"></div>`;
-                            p.addEventListener('mouseup', () => {
-                                if (this.isDraggingWire) {
-                                    state.connections.push({
-                                        fromNode: this.dragSourceNodeId!,
-                                        fromPort: this.dragSourcePortId!,
-                                        toNode: node.id,
-                                        toPort: node.inputs[0].id
-                                    });
-                                    this.stateManager.pushState(state);
-                                }
-                            });
-                            portsEl.appendChild(p);
-                        }
-                        if (node.outputs.length > 0) {
-                            const p = document.createElement('div');
-                            p.className = 'port output representative';
-                            const colorClass = this.getPortColorClass(node.type, node.outputs[0].id);
-                            p.innerHTML = `<div class="port-bullet ${colorClass}" id="${this.panelId}-port-out-${node.id}-representative"></div>`;
-                            p.addEventListener('mousedown', (e) => {
-                                e.stopPropagation();
-                                this.isDraggingWire = true;
-                                this.dragSourceNodeId = node.id;
-                                this.dragSourcePortId = node.outputs[0].id;
-                            });
-                            portsEl.appendChild(p);
+                        if (nodeOrientation === 'VERT') {
+                            if (node.inputs.length > 0) {
+                                const p = document.createElement('div');
+                                p.className = 'port input vertical representative';
+                                const colorClass = this.getPortColorClass(node.type, node.inputs[0].id);
+                                p.innerHTML = `<div class="port-bullet vertical ${colorClass}" id="${this.panelId}-port-in-${node.id}-representative"></div>`;
+                                p.addEventListener('mouseup', () => {
+                                    if (this.isDraggingWire) {
+                                        state.connections.push({
+                                            fromNode: this.dragSourceNodeId!,
+                                            fromPort: this.dragSourcePortId!,
+                                            toNode: node.id,
+                                            toPort: node.inputs[0].id
+                                        });
+                                        this.stateManager.pushState(state);
+                                    }
+                                });
+                                portsTopEl.appendChild(p);
+                            }
+                            if (node.outputs.length > 0) {
+                                const p = document.createElement('div');
+                                p.className = 'port output vertical representative';
+                                const colorClass = this.getPortColorClass(node.type, node.outputs[0].id);
+                                p.innerHTML = `<div class="port-bullet vertical ${colorClass}" id="${this.panelId}-port-out-${node.id}-representative"></div>`;
+                                p.addEventListener('mousedown', (e) => {
+                                    e.stopPropagation();
+                                    this.isDraggingWire = true;
+                                    this.dragSourceNodeId = node.id;
+                                    this.dragSourcePortId = node.outputs[0].id;
+                                });
+                                portsBottomEl.appendChild(p);
+                            }
+                        } else {
+                            if (node.inputs.length > 0) {
+                                const p = document.createElement('div');
+                                p.className = 'port input representative';
+                                const colorClass = this.getPortColorClass(node.type, node.inputs[0].id);
+                                p.innerHTML = `<div class="port-bullet ${colorClass}" id="${this.panelId}-port-in-${node.id}-representative"></div>`;
+                                p.addEventListener('mouseup', () => {
+                                    if (this.isDraggingWire) {
+                                        state.connections.push({
+                                            fromNode: this.dragSourceNodeId!,
+                                            fromPort: this.dragSourcePortId!,
+                                            toNode: node.id,
+                                            toPort: node.inputs[0].id
+                                        });
+                                        this.stateManager.pushState(state);
+                                    }
+                                });
+                                portsEl.appendChild(p);
+                            }
+                            if (node.outputs.length > 0) {
+                                const p = document.createElement('div');
+                                p.className = 'port output representative';
+                                const colorClass = this.getPortColorClass(node.type, node.outputs[0].id);
+                                p.innerHTML = `<div class="port-bullet ${colorClass}" id="${this.panelId}-port-out-${node.id}-representative"></div>`;
+                                p.addEventListener('mousedown', (e) => {
+                                    e.stopPropagation();
+                                    this.isDraggingWire = true;
+                                    this.dragSourceNodeId = node.id;
+                                    this.dragSourcePortId = node.outputs[0].id;
+                                });
+                                portsEl.appendChild(p);
+                            }
                         }
                     } else if (displayMode === 'full-panel') {
-                        portsEl.style.display = 'none';
+                        // Ports hidden
                     } else {
-                        portsEl.style.display = 'block';
-                        node.inputs.forEach(input => {
-                            const p = document.createElement('div');
-                            p.className = 'port input';
-                            const colorClass = this.getPortColorClass(node.type, input.id);
-                            p.innerHTML = `<div class="port-bullet ${colorClass}" id="${this.panelId}-port-in-${node.id}-${input.id}"></div><span class="port-label">${input.label}</span>`;
-                            p.addEventListener('mouseup', () => {
-                                if (this.isDraggingWire) {
-                                    state.connections.push({
-                                        fromNode: this.dragSourceNodeId!,
-                                        fromPort: this.dragSourcePortId!,
-                                        toNode: node.id,
-                                        toPort: input.id
-                                    });
-                                    this.stateManager.pushState(state);
-                                }
+                        if (nodeOrientation === 'VERT') {
+                            node.inputs.forEach(input => {
+                                const p = document.createElement('div');
+                                p.className = 'port input vertical';
+                                const colorClass = this.getPortColorClass(node.type, input.id);
+                                p.innerHTML = `<div class="port-bullet vertical ${colorClass}" id="${this.panelId}-port-in-${node.id}-${input.id}"></div><span class="port-label vertical">${input.label}</span>`;
+                                p.addEventListener('mouseup', () => {
+                                    if (this.isDraggingWire) {
+                                        state.connections.push({
+                                            fromNode: this.dragSourceNodeId!,
+                                            fromPort: this.dragSourcePortId!,
+                                            toNode: node.id,
+                                            toPort: input.id
+                                        });
+                                        this.stateManager.pushState(state);
+                                    }
+                                });
+                                portsTopEl.appendChild(p);
                             });
-                            portsEl.appendChild(p);
-                        });
-                        node.outputs.forEach(output => {
-                            const p = document.createElement('div');
-                            p.className = 'port output';
-                            const colorClass = this.getPortColorClass(node.type, output.id);
-                            p.innerHTML = `<span class="port-label">${output.label}</span><div class="port-bullet ${colorClass}" id="${this.panelId}-port-out-${node.id}-${output.id}"></div>`;
-                            p.addEventListener('mousedown', (e) => {
-                                e.stopPropagation();
-                                this.isDraggingWire = true;
-                                this.dragSourceNodeId = node.id;
-                                this.dragSourcePortId = output.id;
+                            node.outputs.forEach(output => {
+                                const p = document.createElement('div');
+                                p.className = 'port output vertical';
+                                const colorClass = this.getPortColorClass(node.type, output.id);
+                                p.innerHTML = `<span class="port-label vertical">${output.label}</span><div class="port-bullet vertical ${colorClass}" id="${this.panelId}-port-out-${node.id}-${output.id}"></div>`;
+                                p.addEventListener('mousedown', (e) => {
+                                    e.stopPropagation();
+                                    this.isDraggingWire = true;
+                                    this.dragSourceNodeId = node.id;
+                                    this.dragSourcePortId = output.id;
+                                });
+                                portsBottomEl.appendChild(p);
                             });
-                            portsEl.appendChild(p);
-                        });
+                        } else {
+                            node.inputs.forEach(input => {
+                                const p = document.createElement('div');
+                                p.className = 'port input';
+                                const colorClass = this.getPortColorClass(node.type, input.id);
+                                p.innerHTML = `<div class="port-bullet ${colorClass}" id="${this.panelId}-port-in-${node.id}-${input.id}"></div><span class="port-label">${input.label}</span>`;
+                                p.addEventListener('mouseup', () => {
+                                    if (this.isDraggingWire) {
+                                        state.connections.push({
+                                            fromNode: this.dragSourceNodeId!,
+                                            fromPort: this.dragSourcePortId!,
+                                            toNode: node.id,
+                                            toPort: input.id
+                                        });
+                                        this.stateManager.pushState(state);
+                                    }
+                                });
+                                portsEl.appendChild(p);
+                            });
+                            node.outputs.forEach(output => {
+                                const p = document.createElement('div');
+                                p.className = 'port output';
+                                const colorClass = this.getPortColorClass(node.type, output.id);
+                                p.innerHTML = `<span class="port-label">${output.label}</span><div class="port-bullet ${colorClass}" id="${this.panelId}-port-out-${node.id}-${output.id}"></div>`;
+                                p.addEventListener('mousedown', (e) => {
+                                    e.stopPropagation();
+                                    this.isDraggingWire = true;
+                                    this.dragSourceNodeId = node.id;
+                                    this.dragSourcePortId = output.id;
+                                });
+                                portsEl.appendChild(p);
+                            });
+                        }
                     }
 
                     // Clear content if mode/type changed
@@ -777,15 +1052,20 @@ export class GraphRenderer {
             const toPos = this.getPortPosition(toNode, edge.toPort, true);
             if (!fromPos || !toPos) return;
 
+            const dist = Math.sqrt(Math.pow(toPos.x - fromPos.x, 2) + Math.pow(toPos.y - fromPos.y, 2));
+            const strength = Math.max(dist * 0.5, 50);
+
+            const fromOrient = fromNode.orientation || 'HORIZ';
+            const toOrient = toNode.orientation || 'HORIZ';
+
+            const cp1X = fromOrient === 'VERT' ? fromPos.x : fromPos.x + strength;
+            const cp1Y = fromOrient === 'VERT' ? fromPos.y + strength : fromPos.y;
+
+            const cp2X = toOrient === 'VERT' ? toPos.x : toPos.x - strength;
+            const cp2Y = toOrient === 'VERT' ? toPos.y - strength : toPos.y;
+
             const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-            let d = "";
-            if (this.layoutOrientation === 'HORIZ') {
-                const dx = Math.max(Math.abs(toPos.x - fromPos.x) * 0.5, 50);
-                d = `M ${fromPos.x} ${fromPos.y} C ${fromPos.x + dx} ${fromPos.y}, ${toPos.x - dx} ${toPos.y}, ${toPos.x} ${toPos.y}`;
-            } else {
-                const dy = Math.max(Math.abs(toPos.y - fromPos.y) * 0.5, 50);
-                d = `M ${fromPos.x} ${fromPos.y} C ${fromPos.x} ${fromPos.y + dy}, ${toPos.x} ${toPos.y - dy}, ${toPos.x} ${toPos.y}`;
-            }
+            const d = `M ${fromPos.x} ${fromPos.y} C ${cp1X} ${cp1Y}, ${cp2X} ${cp2Y}, ${toPos.x} ${toPos.y}`;
             path.setAttribute('d', d);
             path.setAttribute('class', 'edge-path');
             path.setAttribute('stroke', '#475569');
@@ -800,8 +1080,17 @@ export class GraphRenderer {
             if (fromPos) {
                 const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
                 const toPos = this.mouseWorldPosition;
-                const dx = Math.max(Math.abs(toPos.x - fromPos.x) * 0.5, 50);
-                const d = `M ${fromPos.x} ${fromPos.y} C ${fromPos.x + dx} ${fromPos.y}, ${toPos.x - dx} ${toPos.y}, ${toPos.x} ${toPos.y}`;
+                const dist = Math.sqrt(Math.pow(toPos.x - fromPos.x, 2) + Math.pow(toPos.y - fromPos.y, 2));
+                const strength = Math.max(dist * 0.5, 50);
+
+                const fromOrient = sourceNode!.orientation || 'HORIZ';
+                const cp1X = fromOrient === 'VERT' ? fromPos.x : fromPos.x + strength;
+                const cp1Y = fromOrient === 'VERT' ? fromPos.y + strength : fromPos.y;
+
+                const cp2X = this.layoutOrientation === 'VERT' ? toPos.x : toPos.x - strength;
+                const cp2Y = this.layoutOrientation === 'VERT' ? toPos.y - strength : toPos.y;
+
+                const d = `M ${fromPos.x} ${fromPos.y} C ${cp1X} ${cp1Y}, ${cp2X} ${cp2Y}, ${toPos.x} ${toPos.y}`;
                 path.setAttribute('d', d);
                 path.setAttribute('stroke', '#00f0ff');
                 path.setAttribute('stroke-dasharray', '5,5');
@@ -841,7 +1130,8 @@ export class GraphRenderer {
         const w = el ? el.offsetWidth : (node.width || 200);
         const h = el ? el.offsetHeight : (node.height || 100);
 
-        if (this.layoutOrientation === 'HORIZ') {
+        const nodeOrient = node.orientation || 'HORIZ';
+        if (nodeOrient === 'HORIZ') {
             return {
                 x: node.x + (isInput ? 0 : w),
                 y: node.y + h / 2
@@ -933,6 +1223,12 @@ export class GraphRenderer {
         form.onsubmit = (e) => e.preventDefault();
 
         for (const [key, value] of Object.entries(node.parameters)) {
+            if (node.type === 'DomainMesh') {
+                const dim = node.parameters['dimension'] || '1D';
+                if ((key === 'y_min_bc' || key === 'y_max_bc') && dim === '1D') continue;
+                if ((key === 'z_min_bc' || key === 'z_max_bc') && (dim === '1D' || dim === '2D')) continue;
+            }
+
             const row = document.createElement('div');
             row.style.marginBottom = '4px';
             row.style.display = 'flex';
@@ -945,8 +1241,13 @@ export class GraphRenderer {
             row.appendChild(label);
 
             const dropdowns: Record<string, string[]> = {
-                'left_bc': ['Reflecting', 'Transmitting', 'Terminate'],
-                'right_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+                'dimension': ['1D', '2D', '3D'],
+                'x_min_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+                'x_max_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+                'y_min_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+                'y_max_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+                'z_min_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+                'z_max_bc': ['Reflecting', 'Transmitting', 'Terminate'],
                 'composition': ['TNT', 'IdealGas', 'Custom'],
                 'flux_scheme': ['AUSM+', 'Rusanov'],
                 'spatial_order': ['1', '2', '3'],
@@ -1005,9 +1306,34 @@ export class GraphRenderer {
         container.appendChild(form);
     }
 
+    private getNodeDescription(type: string): string {
+        switch (type) {
+            case 'DomainMesh':
+                return 'Cartesian grid with structured uniform mesh. Defines the spatial domain boundary conditions and discretization sizing.';
+            case 'MaterialAir':
+                return 'Air material initialization. Configures ambient atmospheric pressure and temperature coefficients.';
+            case 'MaterialExplosive':
+                return 'High-explosive chemical charge initialization. Configures composition, charge mass, density, and JWL state properties.';
+            case 'ThePainter':
+                return 'Initial conditions painter. Maps mesh cells to physical material states for the simulation starting phase.';
+            case 'CFDSolver':
+                return 'High-order CFD simulation engine. Solves Euler equations using high-resolution reconstruction and flux splitting schemes.';
+            case 'TelemetryText':
+                return 'Live text stream telemetry logger. Outputs simulator event timelines, iteration milestones, and system states.';
+            case 'TelemetryGraph':
+                return 'Real-time chart telemetry viewer. Plots grid spatial properties, cell pressure profiles, and simulation telemetry histories.';
+            default:
+                return 'Simulation graph node.';
+        }
+    }
+
     public autoArrange(): void {
         const state = this.stateManager.getCurrentState();
         if (!state) return;
+
+        state.nodes.forEach(n => {
+            n.orientation = this.layoutOrientation;
+        });
 
         const nodes = state.nodes;
         const connections = state.connections;

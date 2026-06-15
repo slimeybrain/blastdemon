@@ -1,7 +1,7 @@
 import { StateManager } from './state-manager.js';
 import { SimulationState } from './types.js';
 import { NetworkManager } from './NetworkManager.js';
-import { serializeSimulationState, serializeForSolver } from './serialization.js';
+import { serializeSimulationState, serializeForSolver, serializeToBinary, deserializeFromBinary } from './serialization.js';
 import { LayoutManager } from './layout-manager.js';
 
 console.log("BlastDaemon Workspace Initializing (Recursive Layout)...");
@@ -11,7 +11,17 @@ const initialState: SimulationState = {
         {
             id: 'node-mesh', type: 'DomainMesh', x: 50, y: 50, displayMode: 'normal',
             inputs: [], outputs: [{ id: 'out', label: 'Mesh' }],
-            parameters: { domain_radius: 1.0, cell_size: 0.001, left_bc: 'Reflecting', right_bc: 'Terminate' }
+            parameters: {
+                dimension: '1D',
+                domain_radius: 1.0,
+                cell_size: 0.001,
+                x_min_bc: 'Reflecting',
+                x_max_bc: 'Terminate',
+                y_min_bc: 'Reflecting',
+                y_max_bc: 'Reflecting',
+                z_min_bc: 'Reflecting',
+                z_max_bc: 'Reflecting'
+            }
         },
         {
             id: 'node-air', type: 'MaterialAir', x: 50, y: 200, displayMode: 'normal',
@@ -139,6 +149,10 @@ document.addEventListener('click', (e) => {
     const stepMatch = target.id.match(/exec-(\d+)-btn/);
     if (stepMatch) {
         const steps = parseInt(stepMatch[1]);
+        if (stateManager.getStatus() === 'UNINITIALIZED' || stateManager.getStatus() === 'TERMINATED') {
+            stateManager.pushTelemetry("[WARNING] Cannot execute simulation steps: System is uninitialized. Please click 'Initialize' first.");
+            return;
+        }
         stateManager.addPendingSteps(steps);
 
         // Immediate Execution: Always send command if not already running (Resumes automatically)
@@ -150,6 +164,10 @@ document.addEventListener('click', (e) => {
     }
 
     if (target.id === 'exec-end-btn') {
+        if (stateManager.getStatus() === 'UNINITIALIZED' || stateManager.getStatus() === 'TERMINATED') {
+            stateManager.pushTelemetry("[WARNING] Cannot execute simulation: System is uninitialized. Please click 'Initialize' first.");
+            return;
+        }
         stateManager.clearPendingSteps();
         networkManager.send({ command: "EXEC_ALL", cfl: getCflFromSolver() });
         stateManager.setStatus('RUNNING');
@@ -247,3 +265,182 @@ networkManager.onMessage((data) => {
 
 layoutManager.render(activeState);
 console.log("Workspace ready.");
+
+// Global Top Menu Bar Event Handlers
+document.getElementById('menu-new-model')?.addEventListener('click', () => {
+    if (confirm("Reset current model and start clean?")) {
+        stateManager.pushState(initialState);
+        layoutManager.render(initialState);
+    }
+});
+
+document.getElementById('menu-load-json')?.addEventListener('click', async () => {
+    if ('showOpenFilePicker' in window) {
+        try {
+            const [handle] = await (window as any).showOpenFilePicker({
+                types: [{
+                    description: 'BlastDemon Model (JSON)',
+                    accept: { 'application/json': ['.json'] }
+                }]
+            });
+            const file = await handle.getFile();
+            const text = await file.text();
+            const state = JSON.parse(text) as SimulationState;
+            stateManager.pushState(state);
+            layoutManager.render(state);
+            console.log("Model loaded successfully from JSON via FileSystem API.");
+        } catch (err) {
+            if ((err as Error).name !== 'AbortError') {
+                console.error("FileSystem API load failed, using fallback:", err);
+                document.getElementById('load-json-file')?.click();
+            }
+        }
+    } else {
+        document.getElementById('load-json-file')?.click();
+    }
+});
+
+document.getElementById('load-json-file')?.addEventListener('change', (e) => {
+    const input = e.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+        try {
+            const state = JSON.parse(event.target?.result as string) as SimulationState;
+            stateManager.pushState(state);
+            layoutManager.render(state);
+            console.log("Model loaded successfully from JSON.");
+        } catch (err) {
+            alert("Failed to parse JSON file: " + err);
+        }
+    };
+    reader.readAsText(file);
+    input.value = ''; // Reset file input
+});
+
+document.getElementById('menu-save-json')?.addEventListener('click', async () => {
+    const state = stateManager.getCurrentState();
+    if (!state) return;
+    const jsonString = JSON.stringify(state, null, 2);
+    
+    if ('showSaveFilePicker' in window) {
+        try {
+            const handle = await (window as any).showSaveFilePicker({
+                suggestedName: 'model.json',
+                types: [{
+                    description: 'BlastDemon Model (JSON)',
+                    accept: { 'application/json': ['.json'] }
+                }]
+            });
+            const writable = await handle.createWritable();
+            await writable.write(jsonString);
+            await writable.close();
+            console.log("Model saved to JSON via FileSystem API.");
+        } catch (err) {
+            if ((err as Error).name !== 'AbortError') {
+                console.error("FileSystem API save failed, using fallback:", err);
+                fallbackSaveJson(jsonString);
+            }
+        }
+    } else {
+        fallbackSaveJson(jsonString);
+    }
+});
+
+function fallbackSaveJson(jsonString: string) {
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(jsonString);
+    const downloadAnchor = document.createElement('a');
+    downloadAnchor.setAttribute("href", dataStr);
+    downloadAnchor.setAttribute("download", "model.json");
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    downloadAnchor.remove();
+}
+
+document.getElementById('menu-load-binary')?.addEventListener('click', async () => {
+    if ('showOpenFilePicker' in window) {
+        try {
+            const [handle] = await (window as any).showOpenFilePicker({
+                types: [{
+                    description: 'BlastDemon Binary Model',
+                    accept: { 'application/octet-stream': ['.bin', '.model'] }
+                }]
+            });
+            const file = await handle.getFile();
+            const buffer = await file.arrayBuffer();
+            const state = deserializeFromBinary(buffer);
+            stateManager.pushState(state);
+            layoutManager.render(state);
+            console.log("Model loaded successfully from Binary via FileSystem API.");
+        } catch (err) {
+            if ((err as Error).name !== 'AbortError') {
+                console.error("FileSystem API binary load failed, using fallback:", err);
+                document.getElementById('load-binary-file')?.click();
+            }
+        }
+    } else {
+        document.getElementById('load-binary-file')?.click();
+    }
+});
+
+document.getElementById('load-binary-file')?.addEventListener('change', (e) => {
+    const input = e.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+        try {
+            const buffer = event.target?.result as ArrayBuffer;
+            const state = deserializeFromBinary(buffer);
+            stateManager.pushState(state);
+            layoutManager.render(state);
+            console.log("Model loaded successfully from Binary.");
+        } catch (err) {
+            alert("Failed to parse Binary file: " + err);
+        }
+    };
+    reader.readAsArrayBuffer(file);
+    input.value = ''; // Reset file input
+});
+
+document.getElementById('menu-save-binary')?.addEventListener('click', async () => {
+    const state = stateManager.getCurrentState();
+    if (!state) return;
+    const buffer = serializeToBinary(state);
+    
+    if ('showSaveFilePicker' in window) {
+        try {
+            const handle = await (window as any).showSaveFilePicker({
+                suggestedName: 'model.bin',
+                types: [{
+                    description: 'BlastDemon Binary Model',
+                    accept: { 'application/octet-stream': ['.bin', '.model'] }
+                }]
+            });
+            const writable = await handle.createWritable();
+            await writable.write(buffer);
+            await writable.close();
+            console.log("Model saved to Binary via FileSystem API.");
+        } catch (err) {
+            if ((err as Error).name !== 'AbortError') {
+                console.error("FileSystem API binary save failed, using fallback:", err);
+                fallbackSaveBinary(buffer);
+            }
+        }
+    } else {
+        fallbackSaveBinary(buffer);
+    }
+});
+
+function fallbackSaveBinary(buffer: ArrayBuffer) {
+    const blob = new Blob([buffer], { type: "application/octet-stream" });
+    const url = URL.createObjectURL(blob);
+    const downloadAnchor = document.createElement('a');
+    downloadAnchor.setAttribute("href", url);
+    downloadAnchor.setAttribute("download", "model.bin");
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    downloadAnchor.remove();
+    URL.revokeObjectURL(url);
+}

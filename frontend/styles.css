@@ -25,9 +25,89 @@ body {
     font-family: var(--font-ui);
 }
 
-#app-container {
+#main-layout {
+    display: flex;
+    flex-direction: column;
     height: 100vh;
     width: 100vw;
+    overflow: hidden;
+}
+
+#global-menu-bar {
+    height: 32px;
+    background: #18181c;
+    border-bottom: 1px solid #2d2d30;
+    display: flex;
+    align-items: center;
+    padding: 0 12px;
+    font-size: 12px;
+    gap: 16px;
+    color: #ccc;
+    z-index: 1000;
+    user-select: none;
+    box-sizing: border-box;
+}
+
+.menu-brand {
+    margin-left: auto;
+    font-size: 11px;
+    color: #666;
+    font-family: var(--font-mono);
+}
+
+.menu-item {
+    position: relative;
+    cursor: pointer;
+}
+
+.menu-title {
+    padding: 4px 8px;
+    border-radius: 3px;
+}
+
+.menu-title:hover {
+    background: #2d2d30;
+    color: #fff;
+}
+
+.dropdown-content {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    background: #1e1e24;
+    border: 1px solid #3c3c3c;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+    border-radius: 3px;
+    min-width: 160px;
+    z-index: 1010;
+    margin-top: 4px;
+}
+
+.dropdown-content div {
+    padding: 6px 12px;
+    color: #ccc;
+    cursor: pointer;
+}
+
+.dropdown-content div:hover {
+    background: #007acc;
+    color: #fff;
+}
+
+.dropdown-content .menu-separator {
+    height: 1px;
+    background: #3c3c3c;
+    margin: 4px 0;
+    padding: 0;
+}
+
+.menu-item.dropdown:hover .dropdown-content {
+    display: block;
+}
+
+#app-container {
+    flex: 1;
     background-color: var(--bg-main);
     position: relative;
     overflow: hidden;
@@ -186,6 +266,11 @@ body {
     flex-direction: column;
 }
 
+.panel-content.scrollable {
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
 .node-viewer-container {
     width: 100%;
     height: 100%;
@@ -252,6 +337,8 @@ body {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    white-space: nowrap;
+    gap: 8px;
 }
 
 .node-collapse-btn {
@@ -379,12 +466,90 @@ body {
 }
 
 .node.mode-compact {
-    min-width: 80px !important;
+    min-width: 95px !important;
 }
 canvas {
     max-width: 100% !important;
     max-height: 100% !important;
 }
+
+/* Node Orientation Layouts */
+.node.orientation-vert .node-ports-top,
+.node.orientation-vert .node-ports-bottom {
+    display: flex;
+}
+.node.orientation-vert .node-ports {
+    display: none;
+}
+
+.node.orientation-horiz .node-ports-top,
+.node.orientation-horiz .node-ports-bottom {
+    display: none;
+}
+.node.orientation-horiz .node-ports {
+    display: block;
+}
+
+.node-ports-top, .node-ports-bottom {
+    display: flex;
+    flex-direction: row;
+    justify-content: space-around;
+    align-items: center;
+    height: 0;
+    position: absolute;
+    left: 0;
+    right: 0;
+    background: transparent;
+    z-index: 10;
+    pointer-events: none;
+}
+.node-ports-top {
+    top: 0;
+    border-bottom: none;
+}
+.node-ports-bottom {
+    bottom: 0;
+    border-top: none;
+}
+.port.vertical {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    font-size: 8px;
+    height: 0;
+    pointer-events: none;
+}
+.port.vertical .port-bullet {
+    pointer-events: auto;
+}
+.port.vertical.input .port-bullet {
+    top: -3px;
+    left: 50%;
+    transform: translateX(-50%);
+}
+.port.vertical.output .port-bullet {
+    bottom: -3px;
+    left: 50%;
+    transform: translateX(-50%);
+}
+.port-label.vertical {
+    display: none;
+}
+
+.node-orient-btn {
+    background: none;
+    border: none;
+    color: #ccc;
+    cursor: pointer;
+    font-size: 10px;
+    padding: 0 2px;
+}
+.node-orient-btn:hover {
+    color: #fff;
+}
+
 
 /* Resource Manager Styles */
 .resource-grid {
@@ -471,4 +636,54 @@ canvas {
 .sparkline-canvas {
     width: 100%;
     height: 100%;
+}
+
+.node-footer {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    padding: 2px 6px;
+    height: 14px;
+    border-top: 1px solid #444;
+    background: #252526;
+    border-radius: 0 0 4px 4px;
+}
+
+.node-info-btn {
+    background: none;
+    border: none;
+    color: #ccc;
+    cursor: pointer;
+    font-size: 10px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.node-info-btn:hover {
+    color: #fff;
+}
+.node-info-overlay {
+    position: absolute;
+    top: 24px;
+    left: 4px;
+    right: 4px;
+    background: #1e1e1e;
+    border: 1px solid #444;
+    border-radius: 4px;
+    padding: 8px;
+    z-index: 100;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.8);
+    font-family: var(--font-ui);
+    color: #ccc;
+}
+.infr-icon {
+    color: #00f0ff;
+    margin-left: 4px;
+    cursor: help;
+    font-size: 8px;
+    font-weight: 800;
+    border: 1px solid #00f0ff;
+    border-radius: 2px;
+    padding: 0px 2px;
 }

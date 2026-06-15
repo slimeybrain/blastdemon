@@ -149,11 +149,25 @@ export class StateManager {
             const modes: ('compact' | 'normal' | 'expanded')[] = ['normal', 'expanded', 'compact'];
             const currentMode = (node.displayMode === 'full-panel' ? 'expanded' : node.displayMode) || 'normal';
             const nextIndex = (modes.indexOf(currentMode) + 1) % modes.length;
-            node.displayMode = modes[nextIndex];
+            const nextMode = modes[nextIndex];
+            node.displayMode = nextMode;
 
-            // Clear explicit dimensions to allow node to resize to its natural content size
-            delete node.width;
-            delete node.height;
+            if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph') {
+                if (nextMode === 'compact') {
+                    node.width = 180;
+                    node.height = 40;
+                } else if (nextMode === 'normal') {
+                    node.width = 250;
+                    node.height = node.type === 'TelemetryGraph' ? 150 : 130;
+                } else if (nextMode === 'expanded') {
+                    node.width = 350;
+                    node.height = 220;
+                }
+            } else {
+                // Clear explicit dimensions to allow node to resize to its natural content size
+                delete node.width;
+                delete node.height;
+            }
 
             this.pushState(state);
         }
