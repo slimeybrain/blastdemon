@@ -456,6 +456,7 @@ void handle_client(SOCKET_TYPE client_fd) {
 }
 
 int main() {
+    std::cout << "[SYSTEM] Booting Broker..." << std::endl;
 #ifdef _WIN32
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) return 1;
@@ -474,10 +475,17 @@ int main() {
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(8080);
 
-    if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) return 1;
-    if (listen(server_fd, 3) < 0) return 1;
+    std::cout << "[SYSTEM] Attempting to bind to Port 8080..." << std::endl;
+    if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
+        std::cerr << "[FATAL] Failed to listen on port 8080. Is the port already in use?" << std::endl;
+        exit(1);
+    }
+    if (listen(server_fd, 3) < 0) {
+        std::cerr << "[FATAL] Failed to listen on port 8080. Is the port already in use?" << std::endl;
+        exit(1);
+    }
 
-    std::cout << "Broker listening on 0.0.0.0:8080" << std::endl;
+    std::cout << "[SUCCESS] Listening on port 8080" << std::endl;
 
     while (true) {
         struct sockaddr_in client_addr;
