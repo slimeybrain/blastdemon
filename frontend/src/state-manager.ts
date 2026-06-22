@@ -1,154 +1,468 @@
-import { SimulationState, SimulationStatus, LayoutNode, PanelNode, SplitNode, LayoutDirection, PanelType } from './types.js';
+import { SimulationState, SimulationStatus, LayoutNode, PanelNode, SplitNode, LayoutDirection, PanelType, Model, Workspace, AppState, Node, Connection } from './types.js';
 
 export class StateManager {
-    private history: SimulationState[] = [];
+    private appState: AppState;
+    private history: AppState[] = [];
     private currentIndex: number = -1;
     private listeners: ((state: SimulationState) => void)[] = [];
     private simulationStatus: SimulationStatus = 'UNINITIALIZED';
     private statusListeners: ((status: SimulationStatus) => void)[] = [];
     private pendingSteps: number = 0;
-    private telemetryStore: Map<string, any> = new Map();
+    public telemetryStore: Map<string, any> = new Map();
     private telemetryListeners: ((nodeId: string, data: any) => void)[] = [];
     public selectedNodeId: string | null = null;
     private selectionListeners: ((nodeId: string | null) => void)[] = [];
 
-    public workspaces: SimulationState[] = [];
-    public activeWorkspaceIndex: number = 0;
+    // Run target selection (either a model ID or 'all' for merged)
+    private runTargetId: string | 'all' = 'all';
+    private runTargetListeners: ((targetId: string | 'all') => void)[] = [];
 
     constructor(initialState?: SimulationState) {
-        if (initialState) {
-            this.workspaces = [initialState];
-            this.pushState(initialState, false); // Don't save on initial push to avoid overwrite during load
-        }
+        const defaultModelId = 'model-default';
+        const defaultModel: Model = {
+            id: defaultModelId,
+            name: 'Default Model',
+            filename: null,
+            nodes: initialState ? JSON.parse(JSON.stringify(initialState.nodes)) : [],
+            connections: initialState ? JSON.parse(JSON.stringify(initialState.connections)) : []
+        };
+        const defaultWorkspaceId = 'ws-default';
+        const defaultWorkspace: Workspace = {
+            id: defaultWorkspaceId,
+            name: 'Workspace 1',
+            modelIds: [defaultModelId],
+            activeModelId: defaultModelId,
+            layout: initialState ? JSON.parse(JSON.stringify(initialState.layout)) : {
+                type: 'panel',
+                id: 'panel-graph',
+                panelType: 'NODE_GRAPH',
+                targetNodeId: null
+            },
+            connections: []
+        };
+
+        this.appState = {
+            models: { [defaultModelId]: defaultModel },
+            workspaces: [defaultWorkspace],
+            activeWorkspaceId: defaultWorkspaceId,
+            workspaceCounter: 1
+        };
+
+        this.pushAppState(this.appState, false);
     }
 
-    switchWorkspace(index: number) {
-        if (index >= 0 && index < this.workspaces.length) {
-            this.activeWorkspaceIndex = index;
-            this.history = [JSON.parse(JSON.stringify(this.workspaces[index]))];
-            this.currentIndex = 0;
-            this.notifyListeners();
+    // Shims for legacy/external code
+    get workspaces(): SimulationState[] {
+        return this.appState.workspaces.map(ws => this.synthesizeWorkspaceState(ws));
+    }
+
+    get activeWorkspaceIndex(): number {
+        return this.appState.workspaces.findIndex(ws => ws.id === this.appState.activeWorkspaceId);
+    }
+
+    // Run target management
+    getRunTarget(): string | 'all' {
+        return this.runTargetId;
+    }
+
+    setRunTarget(targetId: string | 'all'): void {
+        this.runTargetId = targetId;
+        this.runTargetListeners.forEach(l => l(targetId));
+    }
+
+    onRunTargetChange(listener: (targetId: string | 'all') => void): void {
+        this.runTargetListeners.push(listener);
+    }
+
+    // Workspace management
+    getActiveWorkspace(): Workspace {
+        return this.appState.workspaces.find(ws => ws.id === this.appState.activeWorkspaceId) || this.appState.workspaces[0];
+    }
+
+    getWorkspaceModels(wsId?: string): Model[] {
+        const targetId = wsId || this.appState.activeWorkspaceId;
+        const ws = this.appState.workspaces.find(w => w.id === targetId);
+        if (!ws) return [];
+        return ws.modelIds.map(id => this.appState.models[id]).filter(m => !!m);
+    }
+
+    getAllModels(): Model[] {
+        return Object.values(this.appState.models);
+    }
+
+    getAllWorkspaces(): Workspace[] {
+        return this.appState.workspaces;
+    }
+
+    switchWorkspace(idOrIndex: string | number) {
+        let targetWorkspace: Workspace | undefined;
+        if (typeof idOrIndex === 'number') {
+            targetWorkspace = this.appState.workspaces[idOrIndex];
+        } else {
+            targetWorkspace = this.appState.workspaces.find(ws => ws.id === idOrIndex);
+        }
+
+        if (targetWorkspace) {
+            this.appState.activeWorkspaceId = targetWorkspace.id;
+            // Reset run target if model not present
+            if (this.runTargetId !== 'all' && !targetWorkspace.modelIds.includes(this.runTargetId)) {
+                this.runTargetId = 'all';
+            }
+            this.pushAppState(this.appState);
         }
     }
 
     createWorkspace() {
-        this.workspaces.push(JSON.parse(JSON.stringify(this.workspaces[this.activeWorkspaceIndex])));
-        this.switchWorkspace(this.workspaces.length - 1);
-        this.saveWorkspace();
+        this.appState.workspaceCounter++;
+        const newId = `ws-${Math.random().toString(36).substr(2, 9)}`;
+        const activeWs = this.getActiveWorkspace();
+        
+        const defaultLayout: LayoutNode = {
+            type: 'split',
+            id: `split-root-${newId}`,
+            direction: 'horizontal',
+            ratio: 0.2,
+            firstChild: {
+                type: 'split',
+                id: `split-left-${newId}`,
+                direction: 'vertical',
+                ratio: 0.5,
+                firstChild: {
+                    type: 'split',
+                    id: `split-menu-outliner-${newId}`,
+                    direction: 'vertical',
+                    ratio: 0.1,
+                    firstChild: {
+                        type: 'panel',
+                        id: `panel-menu-bar-${newId}`,
+                        panelType: 'MENU_BAR',
+                        targetNodeId: null
+                    },
+                    secondChild: {
+                        type: 'panel',
+                        id: `panel-outliner-${newId}`,
+                        panelType: 'OUTLINER',
+                        targetNodeId: null
+                    }
+                },
+                secondChild: {
+                    type: 'panel',
+                    id: `panel-execution-${newId}`,
+                    panelType: 'EXECUTION_MANAGER',
+                    targetNodeId: null
+                }
+            },
+            secondChild: {
+                type: 'split',
+                id: `split-main-${newId}`,
+                direction: 'horizontal',
+                ratio: 0.75,
+                firstChild: {
+                    type: 'panel',
+                    id: `panel-graph-${newId}`,
+                    panelType: 'NODE_GRAPH',
+                    targetNodeId: null
+                },
+                secondChild: {
+                    type: 'panel',
+                    id: `panel-properties-${newId}`,
+                    panelType: 'PROPERTIES',
+                    targetNodeId: null
+                }
+            }
+        };
+
+        const newWorkspace: Workspace = {
+            id: newId,
+            name: `Workspace ${this.appState.workspaceCounter}`,
+            modelIds: [],
+            activeModelId: null,
+            layout: defaultLayout,
+            connections: []
+        };
+
+        this.appState.workspaces.push(newWorkspace);
+        this.appState.activeWorkspaceId = newId;
+        this.pushAppState(this.appState);
     }
 
-    /**
-     * Pushes a new state to the history, discarding any redo history.
-     * Performs a deep copy to ensure immutability.
-     */
-    pushState(newState: SimulationState, autoSave: boolean = true): void {
-        const stateCopy = JSON.parse(JSON.stringify(newState)) as SimulationState;
-        stateCopy.layout = ensureMenuBar(stateCopy.layout);
+    deleteWorkspace(wsId: string): void {
+        if (this.appState.workspaces.length <= 1) return;
+        const index = this.appState.workspaces.findIndex(ws => ws.id === wsId);
+        if (index !== -1) {
+            this.appState.workspaces = this.appState.workspaces.filter(ws => ws.id !== wsId);
+            if (this.appState.activeWorkspaceId === wsId) {
+                const nextActiveIdx = Math.max(0, index - 1);
+                this.appState.activeWorkspaceId = this.appState.workspaces[nextActiveIdx].id;
+            }
+            this.pushAppState(this.appState);
+        }
+    }
 
-        // Remove redo history if we are in the middle of history
+
+    renameWorkspace(id: string, name: string): void {
+        const ws = this.appState.workspaces.find(w => w.id === id);
+        if (ws) {
+            ws.name = name;
+            this.pushAppState(this.appState);
+        }
+    }
+
+    // Model management
+    createModel(name?: string): Model {
+        const modelId = `model-${Math.random().toString(36).substr(2, 9)}`;
+        const newModel: Model = {
+            id: modelId,
+            name: name || `Model ${Object.keys(this.appState.models).length + 1}`,
+            filename: null,
+            nodes: [],
+            connections: []
+        };
+        this.appState.models[modelId] = newModel;
+        
+        const activeWs = this.getActiveWorkspace();
+        activeWs.modelIds.push(modelId);
+        activeWs.activeModelId = modelId;
+
+        this.pushAppState(this.appState);
+        return newModel;
+    }
+
+    addModelToWorkspace(model: Model, wsId?: string): void {
+        const targetWsId = wsId || this.appState.activeWorkspaceId;
+        const ws = this.appState.workspaces.find(w => w.id === targetWsId);
+        if (ws) {
+            if (!this.appState.models[model.id]) {
+                this.appState.models[model.id] = model;
+            }
+            if (!ws.modelIds.includes(model.id)) {
+                ws.modelIds.push(model.id);
+            }
+            if (!ws.activeModelId) {
+                ws.activeModelId = model.id;
+            }
+            this.pushAppState(this.appState);
+        }
+    }
+
+    removeModelFromWorkspace(modelId: string, wsId?: string): void {
+        const targetWsId = wsId || this.appState.activeWorkspaceId;
+        const ws = this.appState.workspaces.find(w => w.id === targetWsId);
+        if (ws) {
+            ws.modelIds = ws.modelIds.filter(id => id !== modelId);
+            if (ws.activeModelId === modelId) {
+                ws.activeModelId = ws.modelIds.length > 0 ? ws.modelIds[0] : null;
+            }
+            // Clean up workspace level connections that referenced this model's nodes
+            const model = this.appState.models[modelId];
+            if (model) {
+                const nodeIds = new Set(model.nodes.map(n => n.id));
+                ws.connections = ws.connections.filter(c => !nodeIds.has(c.fromNode) && !nodeIds.has(c.toNode));
+            }
+            this.pushAppState(this.appState);
+        }
+    }
+
+    setActiveModel(modelId: string): void {
+        const ws = this.getActiveWorkspace();
+        if (ws && ws.modelIds.includes(modelId)) {
+            ws.activeModelId = modelId;
+            this.pushAppState(this.appState);
+        }
+    }
+
+    renameModel(modelId: string, name: string): void {
+        const model = this.appState.models[modelId];
+        if (model) {
+            model.name = name;
+            this.pushAppState(this.appState);
+        }
+    }
+
+    // Core state sync and history
+    getCurrentState(): SimulationState | null {
+        const ws = this.getActiveWorkspace();
+        if (!ws) return null;
+        return this.synthesizeWorkspaceState(ws);
+    }
+
+    getSimulationState(targetModelId: string | 'all'): SimulationState | null {
+        if (targetModelId === 'all') {
+            return this.getCurrentState();
+        }
+        const model = this.appState.models[targetModelId];
+        const ws = this.getActiveWorkspace();
+        if (!ws) return null;
+        return {
+            nodes: model ? JSON.parse(JSON.stringify(model.nodes)) : [],
+            connections: model ? JSON.parse(JSON.stringify(model.connections)) : [],
+            layout: JSON.parse(JSON.stringify(ws.layout))
+        };
+    }
+
+
+    private synthesizeWorkspaceState(ws: Workspace): SimulationState {
+        const nodes: Node[] = [];
+        const connections: Connection[] = [];
+
+        ws.modelIds.forEach(mId => {
+            const model = this.appState.models[mId];
+            if (model) {
+                nodes.push(...JSON.parse(JSON.stringify(model.nodes)));
+                connections.push(...JSON.parse(JSON.stringify(model.connections)));
+            }
+        });
+
+        connections.push(...JSON.parse(JSON.stringify(ws.connections)));
+
+        return {
+            nodes,
+            connections,
+            layout: JSON.parse(JSON.stringify(ws.layout))
+        };
+    }
+
+    pushAppState(newAppState: AppState, autoSave: boolean = true): void {
+        const stateCopy = JSON.parse(JSON.stringify(newAppState)) as AppState;
+        
+        // Ensure menu bar exists on all layouts
+        stateCopy.workspaces.forEach(ws => {
+            ws.layout = ensureMenuBar(ws.layout);
+            ws.modelIds = Array.from(new Set(ws.modelIds));
+        });
+
         if (this.currentIndex < this.history.length - 1) {
             this.history = this.history.slice(0, this.currentIndex + 1);
         }
 
         this.history.push(stateCopy);
         this.currentIndex++;
-
-        if (this.workspaces.length > 0) {
-            this.workspaces[this.activeWorkspaceIndex] = JSON.parse(JSON.stringify(stateCopy));
-        }
+        this.appState = stateCopy;
 
         this.notifyListeners();
         if (autoSave) this.saveWorkspace();
     }
 
-    /**
-     * Moves back in history.
-     */
-    undo(): SimulationState | null {
-        if (this.currentIndex > 0) {
-            this.currentIndex--;
-            const state = this.getCurrentState();
-            this.notifyListeners();
-            this.saveWorkspace();
-            return state;
-        }
-        return null;
+    pushState(newState: SimulationState, autoSave: boolean = true): void {
+        // Construct new AppState from the SimulationState
+        const appStateCopy = JSON.parse(JSON.stringify(this.appState)) as AppState;
+        const ws = appStateCopy.workspaces.find(w => w.id === appStateCopy.activeWorkspaceId);
+        if (!ws) return;
+
+        ws.layout = JSON.parse(JSON.stringify(newState.layout));
+
+        // Sync nodes and connections back to models and workspace
+        const modelsInWs = ws.modelIds.map(id => appStateCopy.models[id]).filter(m => !!m);
+
+        // Track node membership
+        const nodeToModelMap: Record<string, string> = {};
+        modelsInWs.forEach(model => {
+            model.nodes.forEach(n => {
+                nodeToModelMap[n.id] = model.id;
+            });
+        });
+
+        // Clear existing nodes in the workspace models so we can rebuild
+        modelsInWs.forEach(model => {
+            model.nodes = [];
+            model.connections = [];
+        });
+        ws.connections = [];
+
+        // Distribute nodes
+        newState.nodes.forEach(node => {
+            let modelId = nodeToModelMap[node.id];
+            if (!modelId || !appStateCopy.models[modelId]) {
+                // New node goes to active model
+                modelId = ws.activeModelId || Object.keys(appStateCopy.models)[0];
+            }
+            if (modelId && appStateCopy.models[modelId]) {
+                appStateCopy.models[modelId].nodes.push(node);
+            }
+        });
+
+        // Distribute connections
+        newState.connections.forEach(conn => {
+            const fromModelId = appStateCopy.models[ws.modelIds.find(id => appStateCopy.models[id].nodes.some(n => n.id === conn.fromNode)) || '']?.id;
+            const toModelId = appStateCopy.models[ws.modelIds.find(id => appStateCopy.models[id].nodes.some(n => n.id === conn.toNode)) || '']?.id;
+
+            if (fromModelId && toModelId && fromModelId === toModelId) {
+                // Internal connection
+                appStateCopy.models[fromModelId].connections.push(conn);
+            } else {
+                // Cross-model connection
+                ws.connections.push(conn);
+            }
+        });
+
+        this.pushAppState(appStateCopy, autoSave);
     }
 
-    /**
-     * Moves forward in history.
-     */
-    redo(): SimulationState | null {
-        if (this.currentIndex < this.history.length - 1) {
-            this.currentIndex++;
-            const state = this.getCurrentState();
-            this.notifyListeners();
-            this.saveWorkspace();
-            return state;
-        }
-        return null;
-    }
-
-    /**
-     * Updates the current state. If pushToHistory is true, it acts like pushState.
-     * If false, it updates the current history entry in place and notifies listeners.
-     */
     updateState(state: SimulationState, pushToHistory: boolean = true): void {
         if (pushToHistory) {
             this.pushState(state);
         } else {
-            if (this.currentIndex === -1) {
-                this.history.push(state);
-                this.currentIndex = 0;
-            } else {
-                this.history[this.currentIndex] = state;
-            }
-            this.notifyListeners();
-            this.saveWorkspace();
+            this.pushState(state, false);
         }
     }
 
-    /**
-     * Gets the current active state.
-     */
-    getCurrentState(): SimulationState | null {
-        if (this.currentIndex >= 0 && this.currentIndex < this.history.length) {
-            return JSON.parse(JSON.stringify(this.history[this.currentIndex]));
+    undo(): SimulationState | null {
+        if (this.currentIndex > 0) {
+            this.currentIndex--;
+            this.appState = JSON.parse(JSON.stringify(this.history[this.currentIndex]));
+            this.notifyListeners();
+            this.saveWorkspace();
+            return this.getCurrentState();
         }
         return null;
     }
 
-    getHistoryLength(): number {
-        return this.history.length;
+    redo(): SimulationState | null {
+        if (this.currentIndex < this.history.length - 1) {
+            this.currentIndex++;
+            this.appState = JSON.parse(JSON.stringify(this.history[this.currentIndex]));
+            this.notifyListeners();
+            this.saveWorkspace();
+            return this.getCurrentState();
+        }
+        return null;
     }
 
-    getCurrentIndex(): number {
-        return this.currentIndex;
-    }
-
-    /**
-     * Updates parameters for a specific node and pushes a new state.
-     */
     updateNodeParameters(nodeId: string, parameters: Record<string, any>): void {
-        const state = this.getCurrentState();
-        if (!state) return;
+        const appStateCopy = JSON.parse(JSON.stringify(this.appState)) as AppState;
+        let found = false;
+        
+        for (const model of Object.values(appStateCopy.models)) {
+            const node = model.nodes.find(n => n.id === nodeId);
+            if (node) {
+                node.parameters = { ...node.parameters, ...parameters };
+                found = true;
+                break;
+            }
+        }
 
-        const node = state.nodes.find(n => n.id === nodeId);
-        if (node) {
-            node.parameters = { ...node.parameters, ...parameters };
+        if (found) {
             this.setStatus('UNINITIALIZED');
-            this.pushState(state);
+            this.pushAppState(appStateCopy);
         }
     }
 
     updateNodeParametersInPlace(nodeId: string, parameters: Record<string, any>): void {
-        const state = this.getCurrentState();
-        if (!state) return;
+        const appStateCopy = JSON.parse(JSON.stringify(this.appState)) as AppState;
+        let found = false;
+        
+        for (const model of Object.values(appStateCopy.models)) {
+            const node = model.nodes.find(n => n.id === nodeId);
+            if (node) {
+                node.parameters = { ...node.parameters, ...parameters };
+                found = true;
+                break;
+            }
+        }
 
-        const node = state.nodes.find(n => n.id === nodeId);
-        if (node) {
-            node.parameters = { ...node.parameters, ...parameters };
-            this.updateState(state, false);
+        if (found) {
+            this.appState = appStateCopy;
+            this.notifyListeners();
         }
     }
 
@@ -176,7 +490,6 @@ export class StateManager {
                     node.height = 220;
                 }
             } else {
-                // Clear explicit dimensions to allow node to resize to its natural content size
                 delete node.width;
                 delete node.height;
             }
@@ -185,9 +498,6 @@ export class StateManager {
         }
     }
 
-    /**
-     * Registers a listener to be called when the state changes.
-     */
     onStateChange(listener: (state: SimulationState) => void): void {
         this.listeners.push(listener);
     }
@@ -216,6 +526,10 @@ export class StateManager {
 
     onStatusChange(listener: (status: SimulationStatus) => void): void {
         this.statusListeners.push(listener);
+    }
+
+    offStatusChange(listener: (status: SimulationStatus) => void): void {
+        this.statusListeners = this.statusListeners.filter(l => l !== listener);
     }
 
     onTelemetryUpdate(listener: (nodeId: string, data: any) => void): void {
@@ -316,7 +630,6 @@ export class StateManager {
             nodeId = nodeIdOrData;
             data = optionalData;
         } else if (typeof nodeIdOrData === 'string') {
-            // It's a raw log message for the solver
             const solverNode = state.nodes.find(n => n.type === 'CFDSolver');
             if (!solverNode) return;
             nodeId = solverNode.id;
@@ -330,16 +643,9 @@ export class StateManager {
 
         if (!nodeId) return;
 
-        // Filter repetitive data for TelemetryText
-        if (data && typeof data === 'object' && (data.type === 'progress' || data.type === 'resource_pulse')) {
-            // Only allow progress/resource data for specific consumers, usually TelemetryText doesn't want them repeated if it already shows status
-            // Actually, let's just make it not store progress/resource pulses in the TelemetryText log history.
-        }
-
         const targetNode = state.nodes.find(n => n.id === nodeId);
         let telemetryToStore = data;
         if (targetNode?.type === 'TelemetryText' && !(data instanceof ArrayBuffer)) {
-            // Avoid logging progress/resource pulse in text logs
             if (data && typeof data === 'object' && (data.type === 'progress' || data.type === 'resource_pulse')) {
                  // Skip
             } else {
@@ -356,7 +662,6 @@ export class StateManager {
         }
         this.notifyTelemetryUpdate(nodeId, telemetryToStore);
 
-        // Propagate to connected nodes
         const telemetryConnections = state.connections.filter(e => e.fromNode === nodeId);
         telemetryConnections.forEach(connection => {
             const connectedNode = state.nodes.find(n => n.id === connection.toNode);
@@ -367,7 +672,6 @@ export class StateManager {
                          this.notifyTelemetryUpdate(connectedNode.id, data);
                     }
                 } else if (connectedNode.type === 'TelemetryText') {
-                    // Filter repetitive progress/resource messages in connected LOG nodes
                     if (data && typeof data === 'object' && (data.type === 'progress' || data.type === 'resource_pulse')) {
                         return;
                     }
@@ -376,7 +680,6 @@ export class StateManager {
                     if (!Array.isArray(log)) log = [];
 
                     const formattedMsg = this.formatTelemetry(data);
-                    // Avoid duplicate consecutive messages (e.g. "Paused... waiting")
                     if (log.length > 0 && log[log.length - 1] === formattedMsg) return;
 
                     log.push(formattedMsg);
@@ -397,7 +700,6 @@ export class StateManager {
     }
 
     // --- Layout Mutators ---
-
     splitPanel(panelId: string, direction: LayoutDirection): void {
         const state = this.getCurrentState();
         if (!state) return;
@@ -434,8 +736,7 @@ export class StateManager {
         const state = this.getCurrentState();
         if (!state) return;
 
-        if (panelId === 'panel-menu-bar') return; // Cannot close menu bar!
-
+        if (panelId === 'panel-menu-bar') return;
         if (state.layout.type === 'panel') return;
 
         const findAndClose = (node: LayoutNode): LayoutNode => {
@@ -519,63 +820,126 @@ export class StateManager {
     }
 
     // --- Persistence ---
-
     saveWorkspace(): void {
-        if (this.workspaces.length > 0) {
-            localStorage.setItem('blast_workspace', JSON.stringify({
-                workspaces: this.workspaces,
-                activeIndex: this.activeWorkspaceIndex
-            }));
-        }
+        localStorage.setItem('blast_app_state', JSON.stringify(this.appState));
     }
 
     loadWorkspace(initialFallback?: SimulationState): SimulationState | null {
         try {
-            const saved = localStorage.getItem('blast_workspace');
+            const saved = localStorage.getItem('blast_app_state');
             if (saved) {
-                const parsed = JSON.parse(saved);
-                if (parsed.workspaces) {
-                    this.workspaces = parsed.workspaces;
-                    this.activeWorkspaceIndex = parsed.activeIndex || 0;
-                    const state = this.workspaces[this.activeWorkspaceIndex];
-                    state.layout = ensureMenuBar(state.layout);
-                    this.history = [JSON.parse(JSON.stringify(state))];
+                this.appState = JSON.parse(saved);
+                this.history = [JSON.parse(JSON.stringify(this.appState))];
+                this.currentIndex = 0;
+                this.notifyListeners();
+                console.log('[System] AppState hydrated successfully.');
+                return this.getCurrentState();
+            }
+            
+            // Legacy fallback
+            const legacy = localStorage.getItem('blast_workspace');
+            if (legacy) {
+                const parsed = JSON.parse(legacy);
+                if (parsed.workspaces && parsed.workspaces.length > 0) {
+                    const ws1 = parsed.workspaces[0];
+                    const defaultModelId = 'model-default';
+                    this.appState = {
+                        models: {
+                            [defaultModelId]: {
+                                id: defaultModelId,
+                                name: 'Default Model',
+                                filename: null,
+                                nodes: ws1.nodes || [],
+                                connections: ws1.connections || []
+                            }
+                        },
+                        workspaces: parsed.workspaces.map((ws: any, idx: number) => ({
+                            id: `ws-${idx}`,
+                            name: ws.name || `Workspace ${idx + 1}`,
+                            modelIds: [defaultModelId],
+                            activeModelId: defaultModelId,
+                            layout: ws.layout,
+                            connections: []
+                        })),
+                        activeWorkspaceId: `ws-${parsed.activeIndex || 0}`,
+                        workspaceCounter: parsed.workspaces.length
+                    };
+                    this.history = [JSON.parse(JSON.stringify(this.appState))];
                     this.currentIndex = 0;
                     this.notifyListeners();
-                    console.log('[System] Workspace hydrated successfully.');
-                    return state;
-                } else {
-                    const state = parsed as SimulationState;
-                    state.layout = ensureMenuBar(state.layout);
-                    this.workspaces = [state];
-                    this.activeWorkspaceIndex = 0;
-                    this.history = [state];
-                    this.currentIndex = 0;
-                    this.notifyListeners();
-                    console.log('[System] Legacy Workspace hydrated successfully.');
-                    return state;
+                    console.log('[System] Legacy workspace converted.');
+                    return this.getCurrentState();
                 }
             }
         } catch (e) {
-            console.error('[System] Workspace hydration failed:', e);
+            console.error('[System] AppState hydration failed:', e);
         }
 
         if (initialFallback) {
-            this.workspaces = [initialFallback];
-            this.activeWorkspaceIndex = 0;
-            this.history = [initialFallback];
+            const defaultModelId = 'model-default';
+            const defaultModel: Model = {
+                id: defaultModelId,
+                name: 'Default Model',
+                filename: null,
+                nodes: JSON.parse(JSON.stringify(initialFallback.nodes)),
+                connections: JSON.parse(JSON.stringify(initialFallback.connections))
+            };
+            const defaultWorkspaceId = 'ws-default';
+            const defaultWorkspace: Workspace = {
+                id: defaultWorkspaceId,
+                name: 'Workspace 1',
+                modelIds: [defaultModelId],
+                activeModelId: defaultModelId,
+                layout: JSON.parse(JSON.stringify(initialFallback.layout)),
+                connections: []
+            };
+
+            this.appState = {
+                models: { [defaultModelId]: defaultModel },
+                workspaces: [defaultWorkspace],
+                activeWorkspaceId: defaultWorkspaceId,
+                workspaceCounter: 1
+            };
+            this.history = [JSON.parse(JSON.stringify(this.appState))];
             this.currentIndex = 0;
             this.notifyListeners();
-            return initialFallback;
+            return this.getCurrentState();
         }
         return null;
     }
 
+    duplicateWorkspaceLayout(): void {
+        const activeWs = this.getActiveWorkspace();
+        this.appState.workspaceCounter++;
+        const newId = `ws-${Math.random().toString(36).substr(2, 9)}`;
+        const duplicatedWs: Workspace = {
+            id: newId,
+            name: `${activeWs.name} (Copy)`,
+            modelIds: [...activeWs.modelIds],
+            activeModelId: activeWs.activeModelId,
+            layout: JSON.parse(JSON.stringify(activeWs.layout)),
+            connections: JSON.parse(JSON.stringify(activeWs.connections))
+        };
+        this.appState.workspaces.push(duplicatedWs);
+        this.appState.activeWorkspaceId = newId;
+        this.pushAppState(this.appState);
+    }
+
+    getAppState(): AppState {
+        return this.appState;
+    }
+
+    loadAppState(newAppState: AppState): void {
+        this.pushAppState(newAppState);
+    }
+
     clearWorkspace(): void {
+        localStorage.removeItem('blast_app_state');
         localStorage.removeItem('blast_workspace');
-        console.log('[System] Local workspace cleared.');
+        console.log('[System] Local workspace and AppState cleared.');
     }
 }
+
 
 function hasPanelType(node: LayoutNode, type: PanelType): boolean {
     if (node.type === 'panel') {

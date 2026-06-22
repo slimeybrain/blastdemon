@@ -35,8 +35,12 @@ export class GraphRenderer {
 
     private nodeElements: Map<string, HTMLElement> = new Map();
     private nodeWorkers: Map<string, Worker> = new Map();
+    /** Set of node IDs whose resize handle is currently being dragged by the user. */
+    private nodeUserResizing: Set<string> = new Set();
     private lastMouseX: number = 0;
     private lastMouseY: number = 0;
+    /** Pending requestAnimationFrame handle for deferred wire redraws. */
+    private connectionRafId: number | null = null;
 
     private selectedNodeId: string | null = null;
     private spacePressed: boolean = false;
@@ -85,6 +89,7 @@ export class GraphRenderer {
     private nodeResizeObserver: ResizeObserver | null = null;
 
     private stateListener = () => this.render();
+    private resizeTimeout: any = null;
     private telemetryListener = (nodeId: string, data: any) => this.handleTelemetryUpdate(nodeId, data);
     private selectionListener = (nodeId: string | null) => this.handleSelectionChange(nodeId);
 
@@ -161,17 +166,31 @@ export class GraphRenderer {
                 const node = state.nodes.find(n => n.id === nodeId);
                 if (!node) continue;
 
-                // Use offsetWidth/Height for border-box dimensions, consistent with CSS sizing
-                const newWidth = Math.round(target.offsetWidth);
-                const newHeight = Math.round(target.offsetHeight);
+                // Use bounding client rect divided by zoom to get unscaled dimensions,
+                // preventing subpixel rounding feedback loops inside the zoomed container.
+                const rect = target.getBoundingClientRect();
+                const newWidth = Math.round(rect.width / this.zoom);
+                const newHeight = Math.round(rect.height / this.zoom);
 
                 // Guard against zero-size updates and unnecessary state noise
-                if (newWidth > 0 && newHeight > 0 && (node.width !== newWidth || node.height !== newHeight)) {
+                // Use a threshold (> 4) to completely ignore subpixel rounding fluctuations
+                const widthDiff = Math.abs((node.width || 0) - newWidth);
+                const heightDiff = Math.abs((node.height || 0) - newHeight);
+                if (newWidth > 0 && newHeight > 0 && (widthDiff > 4 || heightDiff > 4)) {
                     const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText';
                     if (isTelemetry && node.displayMode !== 'compact') {
-                        node.width = newWidth;
-                        node.height = newHeight;
-                        changed = true;
+                        // For TelemetryText, only persist new dimensions when the user is
+                        // actively dragging the native resize handle. Text arriving in the
+                        // log body can briefly expand the flex layout before overflow:hidden
+                        // clips it, which would otherwise write a permanently larger height
+                        // into state and slide the port downward.
+                        const isTelemetryText = node.type === 'TelemetryText';
+                        const userIsResizing = this.nodeUserResizing.has(nodeId);
+                        if (!isTelemetryText || userIsResizing) {
+                            node.width = newWidth;
+                            node.height = newHeight;
+                            changed = true;
+                        }
                     }
 
                     // Automatic mode switching for telemetry nodes
@@ -182,6 +201,7 @@ export class GraphRenderer {
 
                         if (node.displayMode !== targetMode) {
                             node.displayMode = targetMode;
+                            changed = true;
                         }
                     }
 
@@ -193,8 +213,8 @@ export class GraphRenderer {
                             if (canvas) {
                                 worker.postMessage({
                                     type: 'resize',
-                                    width: canvas.clientWidth,
-                                    height: canvas.clientHeight
+                                    width: newWidth,
+                                    height: newHeight
                                 });
                             }
                         }
@@ -203,8 +223,15 @@ export class GraphRenderer {
             }
 
             if (changed) {
-                this.stateManager.updateState(state, false);
-                this.render();
+                // Update connections immediately to align with the visual resize
+                this.updateConnections(state);
+                this.renderHoverHighlights();
+
+                // Debounce saving the layout to state manager/localStorage to avoid layout loop thrashing
+                if (this.resizeTimeout) clearTimeout(this.resizeTimeout);
+                this.resizeTimeout = setTimeout(() => {
+                    this.stateManager.pushState(state, true);
+                }, 400);
             }
         });
 
@@ -226,6 +253,10 @@ export class GraphRenderer {
     }
 
     public destroy(): void {
+        if (this.connectionRafId !== null) {
+            cancelAnimationFrame(this.connectionRafId);
+            this.connectionRafId = null;
+        }
         this.eventListeners.forEach(({ target, type, listener }) => {
             target.removeEventListener(type, listener);
         });
@@ -264,6 +295,18 @@ export class GraphRenderer {
                     body.appendChild(lineEl);
                 });
                 body.scrollTop = body.scrollHeight;
+                
+                // Force connection update to handle any layout shifts or height modifications
+                if (this.connectionRafId === null) {
+                    this.connectionRafId = requestAnimationFrame(() => {
+                        this.connectionRafId = null;
+                        const s = this.stateManager.getCurrentState();
+                        if (s) {
+                            this.updateConnections(s);
+                            this.renderHoverHighlights();
+                        }
+                    });
+                }
             }
         } else if (node.type === 'TelemetryGraph' && data) {
             const worker = this.nodeWorkers.get(node.id);
@@ -653,8 +696,34 @@ export class GraphRenderer {
         const state = this.stateManager.getCurrentState();
         if (!state) return;
         this.syncNodes(state);
+
+        // During an active wire-drag we need the wire preview to update every
+        // frame without a delay, so redraw connections immediately.
+        if (this.isDraggingWire) {
+            this.updateConnections(state);
+            return;
+        }
+
+        // For all other state updates (node moves, display-mode changes, layout
+        // reflows etc.) we defer the SVG wire pass to the next animation frame.
+        // This guarantees that any DOM mutations made during this synchronous
+        // render call (new port elements, viewport re-parents, flexbox ratio
+        // changes) have been fully committed and laid out before we call
+        // getBoundingClientRect() / getScreenCTM() on the port bullets.
+        if (this.connectionRafId !== null) {
+            cancelAnimationFrame(this.connectionRafId);
+        }
+        this.connectionRafId = requestAnimationFrame(() => {
+            this.connectionRafId = null;
+            const s = this.stateManager.getCurrentState();
+            if (s) {
+                this.updateConnections(s);
+                this.renderHoverHighlights();
+            }
+        });
+        
+        // Also perform an immediate synchronous connection update to prevent any frame lag
         this.updateConnections(state);
-        this.renderHoverHighlights();
     }
 
     private renderHoverHighlights(): void {
@@ -721,6 +790,26 @@ export class GraphRenderer {
                         nodeEl.classList.add('resizable');
                         if (node.width === undefined) node.width = 250;
                         if (node.height === undefined) node.height = node.type === 'TelemetryGraph' ? 150 : 130;
+
+                        // Track when the user is actively using the native resize handle so the
+                        // ResizeObserver can distinguish user-driven resizes from content-driven
+                        // layout changes (e.g. text filling the log body).
+                        const nodeId = node.id;
+                        nodeEl.addEventListener('mousedown', (e) => {
+                            // The native resize handle sits at the bottom-right corner. A click
+                            // within ~18 px of that corner is almost certainly the resize handle.
+                            const r = nodeEl!.getBoundingClientRect();
+                            const fromRight  = r.right  - e.clientX;
+                            const fromBottom = r.bottom - e.clientY;
+                            if (fromRight <= 18 && fromBottom <= 18) {
+                                this.nodeUserResizing.add(nodeId);
+                                const onUp = () => {
+                                    this.nodeUserResizing.delete(nodeId);
+                                    window.removeEventListener('mouseup', onUp);
+                                };
+                                window.addEventListener('mouseup', onUp);
+                            }
+                        });
                     }
                     nodeEl.dataset.id = node.id;
 
@@ -851,23 +940,38 @@ export class GraphRenderer {
                 if (nodeEl.style.left !== newLeft) nodeEl.style.left = newLeft;
                 if (nodeEl.style.top !== newTop) nodeEl.style.top = newTop;
 
+                // Color code the node left border
+                const modelId = this.stateManager.getAllModels().find(m => m.nodes.some(n => n.id === node.id))?.id || '';
+                if (modelId) {
+                    const colors = this.getModelColors(modelId);
+                    nodeEl.style.borderLeft = `4px solid ${colors.base}`;
+                }
+
+
                 const displayMode = node.displayMode || 'normal';
                 const nodeOrientation = node.orientation || 'HORIZ';
 
                 const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText';
 
-                if (node.width !== undefined && displayMode !== 'compact' && isTelemetry) {
-                    const newWidth = `${node.width}px`;
-                    if (nodeEl.style.width !== newWidth) nodeEl.style.width = newWidth;
-                } else {
-                    nodeEl.style.width = '';
-                }
+                // Only override the element's inline width/height from state when the
+                // user is NOT actively dragging the native resize handle. Mid-drag, the
+                // browser owns those inline styles; writing from state here would jump
+                // the node back to the previously-stored (stale) size.
+                const isBeingResized = this.nodeUserResizing.has(node.id);
+                if (!isBeingResized) {
+                    if (node.width !== undefined && displayMode !== 'compact' && isTelemetry) {
+                        const newWidth = `${node.width}px`;
+                        if (nodeEl.style.width !== newWidth) nodeEl.style.width = newWidth;
+                    } else {
+                        nodeEl.style.width = '';
+                    }
 
-                if (node.height !== undefined && displayMode !== 'compact' && isTelemetry) {
-                    const newHeight = `${node.height}px`;
-                    if (nodeEl.style.height !== newHeight) nodeEl.style.height = newHeight;
-                } else {
-                    nodeEl.style.height = '';
+                    if (node.height !== undefined && displayMode !== 'compact' && isTelemetry) {
+                        const newHeight = `${node.height}px`;
+                        if (nodeEl.style.height !== newHeight) nodeEl.style.height = newHeight;
+                    } else {
+                        nodeEl.style.height = '';
+                    }
                 }
 
                 if (nodeEl.classList.contains('selected') !== (node.id === this.selectedNodeId)) {
@@ -1081,6 +1185,43 @@ export class GraphRenderer {
                                 });
                                 portsBottomEl.appendChild(p);
                             });
+                        } else if (node.type === 'TelemetryText') {
+                            // TelemetryText (HORIZ, normal/expanded): use a representative
+                            // anchor that sits at the node's left-centre, identical to what
+                            // compact mode uses. Because the representative port is NOT part
+                            // of the flex-content flow, it cannot be pushed out of place when
+                            // the log body fills with text.
+                            if (node.inputs.length > 0) {
+                                const p = document.createElement('div');
+                                p.className = 'port input representative';
+                                const colorClass = this.getPortColorClass(node.type, node.inputs[0].id);
+                                p.innerHTML = `<div class="port-bullet ${colorClass}" id="${this.panelId}-port-in-${node.id}-representative"></div>`;
+                                p.addEventListener('mouseup', () => {
+                                    if (this.isDraggingWire) {
+                                        state.connections.push({
+                                            fromNode: this.dragSourceNodeId!,
+                                            fromPort: this.dragSourcePortId!,
+                                            toNode: node.id,
+                                            toPort: node.inputs[0].id
+                                        });
+                                        this.stateManager.pushState(state);
+                                    }
+                                });
+                                portsEl.appendChild(p);
+                            }
+                            if (node.outputs.length > 0) {
+                                const p = document.createElement('div');
+                                p.className = 'port output representative';
+                                const colorClass = this.getPortColorClass(node.type, node.outputs[0].id);
+                                p.innerHTML = `<div class="port-bullet ${colorClass}" id="${this.panelId}-port-out-${node.id}-representative"></div>`;
+                                p.addEventListener('mousedown', (e) => {
+                                    e.stopPropagation();
+                                    this.isDraggingWire = true;
+                                    this.dragSourceNodeId = node.id;
+                                    this.dragSourcePortId = node.outputs[0].id;
+                                });
+                                portsEl.appendChild(p);
+                            }
                         } else {
                             node.inputs.forEach(input => {
                                 const p = document.createElement('div');
@@ -1144,8 +1285,91 @@ export class GraphRenderer {
         });
     }
 
+    private getModelColors(modelId: string): { base: string, faint: string } {
+        let hash = 0;
+        for (let i = 0; i < modelId.length; i++) {
+            hash = modelId.charCodeAt(i) + ((hash << 5) - hash);
+        }
+        const h = Math.abs(hash) % 360;
+        return {
+            base: `hsl(${h}, 75%, 60%)`,
+            faint: `hsla(${h}, 75%, 60%, 0.04)`
+        };
+    }
+
+    private updateModelRegions(): void {
+        const activeWs = this.stateManager.getActiveWorkspace();
+        if (!activeWs) return;
+
+        const models = this.stateManager.getWorkspaceModels();
+        if (models.length === 0) return;
+
+        const regionsGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        regionsGroup.setAttribute('class', 'model-region-group');
+        this.svg.appendChild(regionsGroup);
+
+        models.forEach(model => {
+            const nodes = model.nodes;
+            if (nodes.length === 0) return;
+
+            let minX = Infinity;
+            let minY = Infinity;
+            let maxX = -Infinity;
+            let maxY = -Infinity;
+
+            nodes.forEach(node => {
+                const w = node.width || 180;
+                const h = node.height || 150;
+                if (node.x < minX) minX = node.x;
+                if (node.y < minY) minY = node.y;
+                if (node.x + w > maxX) maxX = node.x + w;
+                if (node.y + h > maxY) maxY = node.y + h;
+            });
+
+            const padding = 30;
+            minX -= padding;
+            minY -= padding;
+            maxX += padding;
+            maxY += padding;
+
+            const width = maxX - minX;
+            const height = maxY - minY;
+
+            const colors = this.getModelColors(model.id);
+
+            const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+            rect.setAttribute('x', minX.toString());
+            rect.setAttribute('y', minY.toString());
+            rect.setAttribute('width', width.toString());
+            rect.setAttribute('height', height.toString());
+            rect.setAttribute('fill', colors.faint);
+            rect.setAttribute('stroke', colors.base);
+            rect.setAttribute('stroke-width', '1.5');
+            rect.setAttribute('stroke-dasharray', '4, 4');
+            rect.setAttribute('class', 'model-region-rect');
+            regionsGroup.appendChild(rect);
+
+            const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            label.setAttribute('x', (minX + 10).toString());
+            label.setAttribute('y', (minY + 20).toString());
+            label.setAttribute('fill', colors.base);
+            label.setAttribute('class', 'model-region-label');
+            
+            let labelText = model.name;
+            if (model.filename) {
+                labelText += ` (${model.filename})`;
+            }
+            if (activeWs.activeModelId === model.id) {
+                labelText += ' ✏';
+            }
+            label.textContent = labelText;
+            regionsGroup.appendChild(label);
+        });
+    }
+
     private updateConnections(state: SimulationState): void {
         this.svg.innerHTML = '';
+        this.updateModelRegions();
         state.connections.forEach(edge => {
             const fromNode = state.nodes.find(n => n.id === edge.fromNode);
             const toNode = state.nodes.find(n => n.id === edge.toNode);
@@ -1170,11 +1394,22 @@ export class GraphRenderer {
             const d = `M ${fromPos.x} ${fromPos.y} C ${cp1X} ${cp1Y}, ${cp2X} ${cp2Y}, ${toPos.x} ${toPos.y}`;
             path.setAttribute('d', d);
             path.setAttribute('class', 'edge-path');
-            path.setAttribute('stroke', '#475569');
+            
+            const fromModelId = this.stateManager.getAllModels().find(m => m.nodes.some(n => n.id === edge.fromNode))?.id;
+            const toModelId = this.stateManager.getAllModels().find(m => m.nodes.some(n => n.id === edge.toNode))?.id;
+
+            if (fromModelId && toModelId && fromModelId === toModelId) {
+                const colors = this.getModelColors(fromModelId);
+                path.setAttribute('stroke', colors.base);
+            } else {
+                path.setAttribute('stroke', '#a855f7');
+                path.setAttribute('stroke-dasharray', '2, 2');
+            }
             path.setAttribute('stroke-width', '2');
             path.setAttribute('fill', 'none');
             this.svg.appendChild(path);
         });
+
 
         if (this.isDraggingWire && this.dragSourceNodeId) {
             const sourceNode = state.nodes.find(n => n.id === this.dragSourceNodeId);
@@ -1210,8 +1445,9 @@ export class GraphRenderer {
     }
 
     private getPortPosition(node: Node, portId: string, isInput: boolean): { x: number, y: number } | null {
-        // Both compact and full-panel render representative bullets (single anchor per side)
-        const useRepresentative = node.displayMode === 'compact' || node.displayMode === 'full-panel';
+        // compact, full-panel, and TelemetryText (all HORIZ modes) use representative bullets
+        const useRepresentative = node.displayMode === 'compact' || node.displayMode === 'full-panel'
+            || (node.type === 'TelemetryText' && (node.orientation || 'HORIZ') === 'HORIZ');
         const bulletId = useRepresentative
             ? (isInput ? `${this.panelId}-port-in-${node.id}-representative` : `${this.panelId}-port-out-${node.id}-representative`)
             : (isInput ? `${this.panelId}-port-in-${node.id}-${portId}` : `${this.panelId}-port-out-${node.id}-${portId}`);
@@ -1256,7 +1492,8 @@ export class GraphRenderer {
             if (!body) {
                 body = document.createElement('div');
                 body.className = 'node-body-text';
-                body.style.height = '100%';
+                body.style.flex = '1';
+                body.style.minHeight = '0';
                 container.appendChild(body);
             }
             const logs = this.stateManager.getTelemetry(node.id) || [];

@@ -54,6 +54,10 @@ export class NetworkManager {
         };
     }
 
+    public isConnected(): boolean {
+        return this.socket !== null && this.socket.readyState === WebSocket.OPEN;
+    }
+
     public send(message: string | object): void {
         if (this.socket && this.socket.readyState === WebSocket.OPEN) {
             const payload = typeof message === 'string' ? message : JSON.stringify(message);

@@ -29,20 +29,92 @@ export class LayoutManager {
         });
     }
 
+    /** Fingerprint that captures only the *structural* shape of the layout (node
+     *  IDs, panel types, split directions) but NOT ratio values or options.
+     *  This lets us skip full DOM rebuilds when only ratios change (e.g. during
+     *  splitter drag) and instead patch the flex values in-place.
+     */
+    private structuralFingerprint(layout: LayoutNode): string {
+        if (layout.type === 'panel') {
+            return `P:${layout.id}:${layout.panelType}:${layout.targetNodeId ?? ''}`;
+        }
+        return `S:${layout.id}:${layout.direction}|${this.structuralFingerprint(layout.firstChild)}|${this.structuralFingerprint(layout.secondChild)}`;
+    }
+
+    private getLayoutPanelIds(layout: LayoutNode): Set<string> {
+        const ids = new Set<string>();
+        const traverse = (node: LayoutNode) => {
+            if (node.type === 'panel') {
+                ids.add(node.id);
+            } else if (node.type === 'split') {
+                traverse(node.firstChild);
+                traverse(node.secondChild);
+            }
+        };
+        traverse(layout);
+        return ids;
+    }
+
     public render(state: SimulationState): void {
-        const layoutJson = JSON.stringify(state.layout);
+        const structFingerprint = this.structuralFingerprint(state.layout);
         const nodesJson = JSON.stringify(state.nodes.map(n => n.id));
-        const currentData = layoutJson + nodesJson;
+        const currentStructural = structFingerprint + nodesJson;
 
-        const lastLayoutJson = this.lastState ? JSON.stringify(this.lastState.layout) : '';
-        const lastNodesJson = this.lastState ? JSON.stringify(this.lastState.nodes.map(n => n.id)) : '';
-        const lastData = lastLayoutJson + lastNodesJson;
+        const lastStructural = this.lastState
+            ? this.structuralFingerprint(this.lastState.layout) + JSON.stringify(this.lastState.nodes.map(n => n.id))
+            : '';
 
-        if (currentData !== lastData) {
+        if (currentStructural !== lastStructural) {
+            // Destroy any components not in the new layout
+            const activePanelIds = this.getLayoutPanelIds(state.layout);
+            for (const [id, comp] of this.components.entries()) {
+                if (!activePanelIds.has(id)) {
+                    comp.instance.destroy?.();
+                    this.components.delete(id);
+                }
+            }
+
+            // Structure changed — full DOM rebuild required.
             this.container.innerHTML = '';
             this.renderNode(state.layout, this.container);
+        } else {
+            // Structure is the same; only ratios/options may have changed.
+            // Patch the flex ratios in-place to avoid destroying the DOM.
+            this.patchRatios(state.layout);
         }
         this.lastState = state;
+    }
+
+
+    /**
+     * Walk the live DOM and update the flex values of split wrappers to match
+     * the new ratio, without tearing down any elements.
+     */
+    private patchRatios(layout: LayoutNode): void {
+        if (layout.type !== 'split') return;
+
+        const splitEl = this.container.querySelector(`[data-split-id="${layout.id}"]`) as HTMLElement | null;
+        if (splitEl) {
+            const wrappers = Array.from(splitEl.children).filter(
+                el => !(el as HTMLElement).classList.contains('splitter')
+            ) as HTMLElement[];
+            if (wrappers.length === 2) {
+                const isMenuSplit = (
+                    layout.firstChild.type === 'panel' &&
+                    layout.firstChild.panelType === 'MENU_BAR'
+                );
+                if (!isMenuSplit) {
+                    wrappers[0].style.flex = `${layout.ratio}`;
+                    wrappers[1].style.flex = `${1 - layout.ratio}`;
+                    // Keep dataset in sync so collapse/expand can restore them.
+                    wrappers[0].dataset.originalFlex = wrappers[0].style.flex;
+                    wrappers[1].dataset.originalFlex = wrappers[1].style.flex;
+                }
+            }
+        }
+
+        this.patchRatios(layout.firstChild);
+        this.patchRatios(layout.secondChild);
     }
 
     private renderNode(node: LayoutNode, parent: HTMLElement): void {
@@ -56,6 +128,7 @@ export class LayoutManager {
     private renderSplit(node: SplitNode, parent: HTMLElement): void {
         const splitEl = document.createElement('div');
         splitEl.className = `split-container ${node.direction}`;
+        splitEl.dataset.splitId = node.id;
         splitEl.style.display = 'flex';
         splitEl.style.flexDirection = node.direction === 'horizontal' ? 'row' : 'column';
         splitEl.style.width = '100%';
@@ -719,10 +792,10 @@ export class LayoutManager {
 
         switch (node.panelType) {
             case 'MENU_BAR':
-                this.renderMenuBar(container);
+                this.renderMenuBar(node, container);
                 break;
             case 'OUTLINER':
-                this.renderOutliner(container);
+                this.renderOutliner(node, container);
                 break;
             case 'NODE_GRAPH':
                 this.renderNodeGraph(node, container);
@@ -734,7 +807,7 @@ export class LayoutManager {
                 this.renderNodeViewer(node, container);
                 break;
             case 'EXECUTION_MANAGER':
-                this.renderExecutionManager(container);
+                this.renderExecutionManager(node, container);
                 break;
             case 'RESOURCE_MANAGER':
                 this.renderResourceManager(node, container);
@@ -744,91 +817,52 @@ export class LayoutManager {
         }
     }
 
-    private renderMenuBar(container: HTMLElement): void {
-        container.innerHTML = `
-            <div id="global-menu-bar">
-                <div class="menu-item dropdown">
-                    <span class="menu-title">File</span>
-                    <div class="dropdown-content">
-                        <div id="menu-new-model">New Model</div>
-                        <div class="menu-separator"></div>
-                        <div id="menu-load-json">Load Model (JSON)...</div>
-                        <div id="menu-save-json">Save Model (JSON)</div>
-                        <div class="menu-separator"></div>
-                        <div id="menu-load-binary">Load Model (Binary)...</div>
-                        <div id="menu-save-binary">Save Model (Binary)</div>
-                    </div>
-                </div>
-            </div>
-        `;
-    }
-
-    private renderOutliner(container: HTMLElement): void {
-        const outliner = document.createElement('ul');
-        outliner.id = 'outliner';
-        outliner.className = 'outliner-container';
-        outliner.style.listStyle = 'none';
-        outliner.style.padding = '0';
-        outliner.style.margin = '0';
-        container.appendChild(outliner);
-
-        const renderNodeTree = (state: SimulationState, nodeId: string, parentEl: HTMLElement, level: number, visited: Set<string>) => {
-            if (visited.has(nodeId)) return;
-            visited.add(nodeId);
-
-            const node = state.nodes.find(n => n.id === nodeId);
-            if (!node) return;
-
-            const li = document.createElement('li');
-            li.className = this.stateManager.getSelectedNodeId() === nodeId ? 'selected' : '';
-            li.style.paddingLeft = `${level * 16 + 8}px`;
-            li.style.cursor = 'pointer';
-            li.textContent = `${node.type} (${node.id})`;
-            li.onclick = (e) => {
-                e.stopPropagation();
-                this.stateManager.setSelectedNode(node.id);
-            };
-            parentEl.appendChild(li);
-
-            const children = state.connections
-                .filter(c => c.fromNode === nodeId)
-                .map(c => c.toNode);
-
-            if (children.length > 0) {
-                const subUl = document.createElement('ul');
-                subUl.style.listStyle = 'none';
-                subUl.style.padding = '0';
-                subUl.style.margin = '0';
-                parentEl.appendChild(subUl);
-                children.forEach(childId => renderNodeTree(state, childId, subUl, level + 1, visited));
-            }
-        };
-
-        const update = (state: SimulationState) => {
-            outliner.innerHTML = '';
-            const visited = new Set<string>();
-
-            const rootNodes = state.nodes.filter(node =>
-                !state.connections.some(conn => conn.toNode === node.id)
-            );
-
-            rootNodes.forEach(root => renderNodeTree(state, root.id, outliner, 0, visited));
-
-            state.nodes.forEach(node => {
-                if (!visited.has(node.id)) {
-                    renderNodeTree(state, node.id, outliner, 0, visited);
-                }
-            });
-        };
-
-        this.stateManager.onStateChange(update);
-        this.stateManager.onSelectionChange(() => update(this.stateManager.getCurrentState()!));
-        update(this.stateManager.getCurrentState()!);
-    }
-
-    private renderNodeGraph(node: PanelNode, container: HTMLElement): void {
+    private renderMenuBar(node: PanelNode, container: HTMLElement): void {
         let comp = this.components.get(node.id);
         if (!comp) {
+            const menuBar = new MenuBarComponent(container, this.stateManager);
+            comp = { type: 'MENU_BAR', instance: menuBar };
+            this.components.set(node.id, comp);
+        } else {
+            container.appendChild(comp.instance.container);
+            comp.instance.render();
+        }
+    }
+
+    private renderOutliner(node: PanelNode, container: HTMLElement): void {
+        let comp = this.components.get(node.id);
+        if (!comp) {
+            const outliner = new OutlinerComponent(container, this.stateManager);
+            comp = { type: 'OUTLINER', instance: outliner };
+            this.components.set(node.id, comp);
+        } else {
+            container.appendChild(comp.instance.container);
+            comp.instance.render();
+        }
+    }
+
+
+    private renderNodeGraph(node: PanelNode, container: HTMLElement): void {
+        const models = this.stateManager.getWorkspaceModels();
+        if (models.length === 0) {
+            const existing = this.components.get(node.id);
+            if (existing) {
+                existing.instance.destroy?.();
+                this.components.delete(node.id);
+            }
+            container.innerHTML = `
+                <div style="flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; background:#111; color:#888; font-family:var(--font-ui); font-size:13px; text-align:center; padding:20px; height:100%;">
+                    <div style="font-size:24px; margin-bottom:12px;">✏</div>
+                    <div>No models in this workspace.</div>
+                    <div style="margin-top:8px; font-size:11px; opacity:0.7;">Go to the <b>Workspace</b> menu to add/load models.</div>
+                </div>
+            `;
+            return;
+        }
+
+        let comp = this.components.get(node.id);
+        if (!comp) {
+            container.innerHTML = '';
             const renderer = new GraphRenderer(container, this.stateManager, node.id);
             renderer.onNodeSelected = (nodeId) => {
                 this.stateManager.setSelectedNode(nodeId);
@@ -837,9 +871,13 @@ export class LayoutManager {
             comp = { type: 'NODE_GRAPH', instance: renderer };
             this.components.set(node.id, comp);
         } else {
-            container.appendChild(comp.instance.viewport);
+            if (!container.contains(comp.instance.viewport)) {
+                container.innerHTML = '';
+                container.appendChild(comp.instance.viewport);
+            }
         }
     }
+
 
     private renderProperties(node: PanelNode, container: HTMLElement): void {
         let comp = this.components.get(node.id);
@@ -884,13 +922,386 @@ export class LayoutManager {
         }
     }
 
-    private renderExecutionManager(container: HTMLElement): void {
-        const simActions = document.createElement('div');
-        simActions.className = 'execution-manager-panel';
-        simActions.style.padding = '12px';
-        simActions.style.display = 'flex';
-        simActions.style.flexDirection = 'column';
-        simActions.style.gap = '10px';
+    private renderExecutionManager(node: PanelNode, container: HTMLElement): void {
+        let comp = this.components.get(node.id);
+        if (!comp) {
+            container.innerHTML = '';
+            const execMgr = new ExecutionManagerComponent(container, this.stateManager);
+            comp = { type: 'EXECUTION_MANAGER', instance: execMgr };
+            this.components.set(node.id, comp);
+        } else {
+            container.appendChild(comp.instance.container);
+            comp.instance.updateTargets();
+        }
+    }
+}
+
+// --- Managed Component Classes ---
+
+class MenuBarComponent {
+    public container: HTMLElement;
+    private stateManager: StateManager;
+    private listener: () => void;
+
+    constructor(parent: HTMLElement, stateManager: StateManager) {
+        this.container = document.createElement('div');
+        this.container.style.width = '100%';
+        this.container.style.height = '100%';
+        this.container.style.overflow = 'visible';
+        parent.appendChild(this.container);
+        this.stateManager = stateManager;
+        this.listener = () => this.render();
+        this.stateManager.onStateChange(this.listener);
+        this.render();
+    }
+
+    destroy() {
+        this.stateManager.offStateChange(this.listener);
+        this.container.remove();
+    }
+
+    render() {
+        const activeWs = this.stateManager.getActiveWorkspace();
+        const workspaces = this.stateManager.getAllWorkspaces();
+        
+        let fileMenuHTML = `
+            <div class="menu-item dropdown">
+                <span class="menu-title">File</span>
+                <div class="dropdown-content">
+                    <div id="menu-new-model">New Model</div>
+                    <div class="menu-separator"></div>
+                    <div id="menu-load-json">Load Model (JSON)...</div>
+                    <div id="menu-save-json">Save Model (JSON)</div>
+                    <div class="menu-separator"></div>
+                    <div id="menu-load-binary">Load Model (Binary)...</div>
+                    <div id="menu-save-binary">Save Model (Binary)</div>
+                </div>
+            </div>
+        `;
+
+        let wsMenuHTML = `
+            <div class="menu-item dropdown">
+                <span class="menu-title">Workspace</span>
+                <div class="dropdown-content">
+                    <div id="menu-new-workspace">New Workspace</div>
+                    <div id="menu-dup-layout">Duplicate Layout</div>
+                    <div class="menu-separator"></div>
+                    <div id="menu-add-model">Add Model to Workspace...</div>
+                    <div id="menu-remove-model">Remove Model...</div>
+                    <div class="menu-separator"></div>
+                    <div id="menu-save-workspace">Save All</div>
+                    <div id="menu-export-workspace">Export Workspace (JSON)...</div>
+                    <div id="menu-import-workspace">Import Workspace (JSON)...</div>
+                    <div class="menu-separator"></div>
+                    <div id="menu-reset-all" style="color:#ef4444">Reset All (Danger)</div>
+                </div>
+            </div>
+        `;
+
+        let tabsHTML = `<div class="workspace-tabs-container">`;
+        workspaces.forEach((ws) => {
+            const isActive = ws.id === activeWs.id;
+            const modelCount = ws.modelIds.length;
+            const badgeText = modelCount === 0 ? 'empty' : `${modelCount} model${modelCount > 1 ? 's' : ''}`;
+            const closeBtnHTML = workspaces.length > 1 ? `<span class="workspace-tab-close" data-ws-id="${ws.id}" title="Close Workspace">×</span>` : '';
+            
+            tabsHTML += `
+                <div class="workspace-tab ${isActive ? 'active' : ''}" data-ws-id="${ws.id}">
+                    <span class="workspace-tab-name" data-ws-id="${ws.id}">${ws.name}</span>
+                    <span class="workspace-tab-badge">${badgeText}</span>
+                    ${closeBtnHTML}
+                </div>
+            `;
+        });
+        tabsHTML += `
+            <button class="add-workspace-btn" id="btn-add-workspace" title="New Workspace">+</button>
+        </div>`;
+
+        this.container.innerHTML = `
+            <div id="global-menu-bar">
+                ${fileMenuHTML}
+                ${wsMenuHTML}
+                ${tabsHTML}
+            </div>
+        `;
+
+        this.container.querySelectorAll('.workspace-tab').forEach(tab => {
+            tab.addEventListener('click', (e) => {
+                const target = e.currentTarget as HTMLElement;
+                const wsId = target.dataset.wsId;
+                if (wsId) this.stateManager.switchWorkspace(wsId);
+            });
+
+            const closeBtn = tab.querySelector('.workspace-tab-close');
+            if (closeBtn) {
+                closeBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const wsId = (closeBtn as HTMLElement).dataset.wsId;
+                    if (wsId && confirm("Close this workspace? All its unsaved layouts will be discarded.")) {
+                        this.stateManager.deleteWorkspace(wsId);
+                    }
+                });
+            }
+
+            const nameEl = tab.querySelector('.workspace-tab-name') as HTMLElement;
+            if (nameEl) {
+                nameEl.addEventListener('dblclick', (e) => {
+                    e.stopPropagation();
+                    const wsId = nameEl.dataset.wsId;
+                    const oldName = nameEl.textContent || '';
+                    const input = document.createElement('input');
+                    input.type = 'text';
+                    input.value = oldName;
+                    input.style.fontSize = '11px';
+                    input.style.background = '#1e1e24';
+                    input.style.border = '1px solid #00f0ff';
+                    input.style.color = '#fff';
+                    input.style.padding = '0 2px';
+                    input.style.outline = 'none';
+                    input.style.width = '100px';
+
+                    const finishRename = () => {
+                        const newName = input.value.trim();
+                        if (newName && wsId) {
+                            this.stateManager.renameWorkspace(wsId, newName);
+                        } else {
+                            nameEl.textContent = oldName;
+                        }
+                    };
+
+                    input.addEventListener('blur', finishRename);
+                    input.addEventListener('keydown', (ev) => {
+                        if (ev.key === 'Enter') finishRename();
+                        if (ev.key === 'Escape') {
+                            nameEl.textContent = oldName;
+                        }
+                    });
+
+                    nameEl.innerHTML = '';
+                    nameEl.appendChild(input);
+                    input.focus();
+                    input.select();
+                });
+            }
+        });
+
+        const addBtn = this.container.querySelector('#btn-add-workspace');
+        if (addBtn) {
+            addBtn.addEventListener('click', () => {
+                this.stateManager.createWorkspace();
+            });
+        }
+    }
+}
+
+class OutlinerComponent {
+    public container: HTMLElement;
+    private stateManager: StateManager;
+    private listener: () => void;
+    private selectionListener: () => void;
+
+    constructor(parent: HTMLElement, stateManager: StateManager) {
+        this.container = document.createElement('div');
+        this.container.id = 'outliner';
+        this.container.className = 'outliner-container';
+        this.container.style.padding = '8px';
+        this.container.style.fontFamily = 'var(--font-ui)';
+        this.container.style.fontSize = '12px';
+        this.container.style.height = '100%';
+        this.container.style.overflowY = 'auto';
+        parent.appendChild(this.container);
+
+        this.stateManager = stateManager;
+        this.listener = () => this.render();
+        this.selectionListener = () => this.render();
+        this.stateManager.onStateChange(this.listener);
+        this.stateManager.onSelectionChange(this.selectionListener);
+        this.render();
+    }
+
+    destroy() {
+        this.stateManager.offStateChange(this.listener);
+        this.stateManager.offSelectionChange(this.selectionListener);
+        this.container.remove();
+    }
+
+    render() {
+        this.container.innerHTML = '';
+        const ws = this.stateManager.getActiveWorkspace();
+        if (!ws) return;
+
+        const models = this.stateManager.getWorkspaceModels();
+        if (models.length === 0) {
+            this.container.innerHTML = `
+                <div style="color:#666; font-style:italic; text-align:center; padding:20px;">
+                    No models loaded.
+                </div>
+            `;
+            return;
+        }
+
+        models.forEach(model => {
+            const modelSection = document.createElement('div');
+            modelSection.style.marginBottom = '12px';
+
+            const header = document.createElement('div');
+            header.className = 'outliner-model-header';
+            header.style.display = 'flex';
+            header.style.alignItems = 'center';
+            header.style.justifyContent = 'space-between';
+            header.style.cursor = 'pointer';
+            header.style.padding = '4px 6px';
+            header.style.borderRadius = '3px';
+            header.style.background = '#252526';
+            header.style.border = '1px solid #333';
+
+            const getColors = (id: string) => {
+                let hash = 0;
+                for (let i = 0; i < id.length; i++) {
+                    hash = id.charCodeAt(i) + ((hash << 5) - hash);
+                }
+                const h = Math.abs(hash) % 360;
+                return `hsl(${h}, 75%, 60%)`;
+            };
+
+            const accentColor = getColors(model.id);
+            const isActive = ws.activeModelId === model.id;
+
+            const left = document.createElement('div');
+            left.style.display = 'flex';
+            left.style.alignItems = 'center';
+            left.style.gap = '6px';
+
+            const radio = document.createElement('span');
+            radio.innerHTML = isActive ? '●' : '○';
+            radio.style.color = isActive ? '#00f0ff' : '#888';
+            radio.style.fontSize = '12px';
+            left.appendChild(radio);
+
+            const info = document.createElement('div');
+            info.style.display = 'flex';
+            info.style.flexDirection = 'column';
+            
+            const nameSpan = document.createElement('span');
+            nameSpan.textContent = model.name;
+            nameSpan.style.fontWeight = 'bold';
+            nameSpan.style.color = accentColor;
+            info.appendChild(nameSpan);
+
+            const fileSpan = document.createElement('span');
+            fileSpan.textContent = model.filename || 'unsaved.json';
+            fileSpan.style.fontSize = '10px';
+            fileSpan.style.color = '#888';
+            fileSpan.style.fontStyle = 'italic';
+            info.appendChild(fileSpan);
+
+            left.appendChild(info);
+            header.appendChild(left);
+
+            const right = document.createElement('div');
+            right.style.display = 'flex';
+            right.style.alignItems = 'center';
+            
+            const closeModelBtn = document.createElement('button');
+            closeModelBtn.innerHTML = '×';
+            closeModelBtn.title = 'Close Model';
+            closeModelBtn.style.background = 'none';
+            closeModelBtn.style.border = 'none';
+            closeModelBtn.style.color = '#888';
+            closeModelBtn.style.cursor = 'pointer';
+            closeModelBtn.style.fontSize = '14px';
+            closeModelBtn.style.padding = '0 4px';
+            closeModelBtn.style.lineHeight = '1';
+            closeModelBtn.onmouseenter = () => closeModelBtn.style.color = '#ef4444';
+            closeModelBtn.onmouseleave = () => closeModelBtn.style.color = '#888';
+            closeModelBtn.onclick = (e) => {
+                e.stopPropagation();
+                if (confirm(`Close model "${model.name}" in this workspace?`)) {
+                    this.stateManager.removeModelFromWorkspace(model.id);
+                }
+            };
+            right.appendChild(closeModelBtn);
+            header.appendChild(right);
+
+            header.addEventListener('click', () => {
+                this.stateManager.setActiveModel(model.id);
+            });
+
+            modelSection.appendChild(header);
+
+            const list = document.createElement('ul');
+            list.style.listStyle = 'none';
+            list.style.padding = '0';
+            list.style.margin = '4px 0 0 12px';
+
+            const renderNodeTree = (nodeId: string, parentEl: HTMLElement, level: number, visited: Set<string>) => {
+                if (visited.has(nodeId)) return;
+                visited.add(nodeId);
+
+                const node = model.nodes.find(n => n.id === nodeId);
+                if (!node) return;
+
+                const li = document.createElement('li');
+                li.className = this.stateManager.getSelectedNodeId() === node.id ? 'selected' : '';
+                li.style.padding = '4px 8px';
+                li.style.cursor = 'pointer';
+                li.style.borderBottom = '1px solid #222';
+                li.textContent = `${node.type} (${node.id})`;
+                li.onclick = (e) => {
+                    e.stopPropagation();
+                    this.stateManager.setSelectedNode(node.id);
+                };
+                parentEl.appendChild(li);
+
+                const children = model.connections
+                    .filter(c => c.fromNode === nodeId)
+                    .map(c => c.toNode);
+
+                if (children.length > 0) {
+                    const subUl = document.createElement('ul');
+                    subUl.style.listStyle = 'none';
+                    subUl.style.padding = '0';
+                    subUl.style.margin = '0';
+                    parentEl.appendChild(subUl);
+                    children.forEach(childId => renderNodeTree(childId, subUl, level + 1, visited));
+                }
+            };
+
+            const visited = new Set<string>();
+            const rootNodes = model.nodes.filter(node =>
+                !model.connections.some(conn => conn.toNode === node.id)
+            );
+
+            rootNodes.forEach(root => renderNodeTree(root.id, list, 0, visited));
+            model.nodes.forEach(node => {
+                if (!visited.has(node.id)) {
+                    renderNodeTree(node.id, list, 0, visited);
+                }
+            });
+
+            modelSection.appendChild(list);
+            this.container.appendChild(modelSection);
+        });
+    }
+}
+
+class ExecutionManagerComponent {
+    public container: HTMLElement;
+    private stateManager: StateManager;
+    private statusListener: (status: any) => void;
+    private stateListener: () => void;
+    private targetSelect: HTMLSelectElement;
+
+    constructor(parent: HTMLElement, stateManager: StateManager) {
+        this.container = document.createElement('div');
+        this.container.className = 'execution-manager-panel';
+        this.container.style.padding = '12px';
+        this.container.style.display = 'flex';
+        this.container.style.flexDirection = 'column';
+        this.container.style.gap = '10px';
+        parent.appendChild(this.container);
+
+        this.stateManager = stateManager;
 
         const createBtn = (id: string, text: string, className: string = 'header-button') => {
             const btn = document.createElement('button');
@@ -907,22 +1318,48 @@ export class LayoutManager {
         statusRow.style.justifyContent = 'space-between';
         statusRow.style.alignItems = 'center';
         statusRow.innerHTML = `<span>Status:</span><div id="exec-status-badge" class="status-badge badge-${this.stateManager.getStatus().toLowerCase()}">${this.stateManager.getStatus()}</div>`;
-        simActions.appendChild(statusRow);
+        this.container.appendChild(statusRow);
 
-        this.stateManager.onStatusChange((status) => {
-            const badge = simActions.querySelector('#exec-status-badge');
+        this.statusListener = (status) => {
+            const badge = this.container.querySelector('#exec-status-badge');
             if (badge) {
                 badge.textContent = status;
                 badge.className = `status-badge badge-${status.toLowerCase()}`;
             }
-        });
+        };
+        this.stateManager.onStatusChange(this.statusListener);
+
+        const targetRow = document.createElement('div');
+        targetRow.style.display = 'flex';
+        targetRow.style.flexDirection = 'column';
+        targetRow.style.gap = '4px';
+
+        const targetLabel = document.createElement('span');
+        targetLabel.textContent = 'Execution Target:';
+        targetLabel.style.fontSize = '11px';
+        targetLabel.style.color = '#888';
+        targetLabel.style.fontWeight = 'bold';
+        targetRow.appendChild(targetLabel);
+
+        this.targetSelect = document.createElement('select');
+        this.targetSelect.className = 'header-select';
+        this.targetSelect.style.width = '100%';
+
+        this.targetSelect.onchange = () => {
+            this.stateManager.setRunTarget(this.targetSelect.value);
+        };
+        targetRow.appendChild(this.targetSelect);
+        this.container.appendChild(targetRow);
+
+        this.stateListener = () => this.updateTargets();
+        this.stateManager.onStateChange(this.stateListener);
 
         const mainControls = document.createElement('div');
         mainControls.style.display = 'grid';
         mainControls.style.gridTemplateColumns = '1fr';
         mainControls.style.gap = '8px';
         mainControls.appendChild(createBtn('init-btn', 'Initialize', 'header-button'));
-        simActions.appendChild(mainControls);
+        this.container.appendChild(mainControls);
 
         const stepControls = document.createElement('div');
         stepControls.style.display = 'grid';
@@ -933,7 +1370,7 @@ export class LayoutManager {
         stepControls.appendChild(createBtn('exec-100-btn', '100', 'header-button secondary'));
         stepControls.appendChild(createBtn('exec-1000-btn', '1000', 'header-button secondary'));
         stepControls.appendChild(createBtn('exec-end-btn', 'End', 'header-button success'));
-        simActions.appendChild(stepControls);
+        this.container.appendChild(stepControls);
 
         const runControls = document.createElement('div');
         runControls.style.display = 'grid';
@@ -941,58 +1378,7 @@ export class LayoutManager {
         runControls.style.gap = '8px';
         runControls.appendChild(createBtn('interrupt-btn', 'Interrupt', 'header-button warning'));
         runControls.appendChild(createBtn('terminate-btn', 'Terminate', 'header-button danger'));
-        simActions.appendChild(runControls);
-
-        const workspaceControls = document.createElement('div');
-        workspaceControls.style.display = 'flex';
-        workspaceControls.style.gap = '8px';
-        workspaceControls.style.alignItems = 'center';
-
-        const wsSelect = document.createElement('select');
-        wsSelect.className = 'header-select';
-        wsSelect.style.flex = '1';
-        (this.stateManager as any).workspaces.forEach((_: any, i: number) => {
-            const opt = document.createElement('option');
-            opt.value = i.toString();
-            opt.textContent = `Workspace ${i + 1}`;
-            opt.selected = i === (this.stateManager as any).activeWorkspaceIndex;
-            wsSelect.appendChild(opt);
-        });
-
-        wsSelect.onchange = () => {
-            this.components.clear();
-            this.container.innerHTML = '';
-            (this.stateManager as any).switchWorkspace(parseInt(wsSelect.value));
-        };
-
-        workspaceControls.appendChild(wsSelect);
-
-        const newWsBtn = createBtn('new-workspace-btn', 'New Page', 'header-button success');
-        newWsBtn.style.width = 'auto';
-        newWsBtn.onclick = () => {
-            this.components.clear();
-            this.container.innerHTML = '';
-            (this.stateManager as any).createWorkspace();
-        };
-        workspaceControls.appendChild(newWsBtn);
-
-        simActions.appendChild(workspaceControls);
-
-        const persistenceControls = document.createElement('div');
-        persistenceControls.style.display = 'grid';
-        persistenceControls.style.gridTemplateColumns = '1fr 1fr';
-        persistenceControls.style.gap = '8px';
-        persistenceControls.appendChild(createBtn('save-workspace-btn', 'Save', 'header-button success'));
-
-        const resetBtn = createBtn('reset-workspace-btn', 'Reset System', 'header-button danger');
-        resetBtn.onclick = () => {
-            if (window.confirm("CRITICAL: This will flush all local storage and reload the application. Proceed?")) {
-                this.stateManager.clearWorkspace();
-                window.location.reload();
-            }
-        };
-        persistenceControls.appendChild(resetBtn);
-        simActions.appendChild(persistenceControls);
+        this.container.appendChild(runControls);
 
         const progressCont = document.createElement('div');
         progressCont.className = 'progress-container';
@@ -1004,7 +1390,7 @@ export class LayoutManager {
         progressBar.className = 'progress-bar';
         progressBar.style.width = '0%';
         progressCont.appendChild(progressBar);
-        simActions.appendChild(progressCont);
+        this.container.appendChild(progressCont);
 
         const progressLabel = document.createElement('div');
         progressLabel.id = 'progress-label';
@@ -1013,8 +1399,33 @@ export class LayoutManager {
         progressLabel.style.marginTop = '4px';
         progressLabel.style.color = '#888';
         progressLabel.textContent = 'Ready';
-        simActions.appendChild(progressLabel);
+        this.container.appendChild(progressLabel);
 
-        container.appendChild(simActions);
+        this.updateTargets();
+    }
+
+    destroy() {
+        this.stateManager.offStatusChange(this.statusListener);
+        this.stateManager.offStateChange(this.stateListener);
+        this.container.remove();
+    }
+
+    updateTargets() {
+        this.targetSelect.innerHTML = '';
+        
+        const optAll = document.createElement('option');
+        optAll.value = 'all';
+        optAll.textContent = 'All Models (Merged)';
+        optAll.selected = this.stateManager.getRunTarget() === 'all';
+        this.targetSelect.appendChild(optAll);
+
+        const models = this.stateManager.getWorkspaceModels();
+        models.forEach(model => {
+            const opt = document.createElement('option');
+            opt.value = model.id;
+            opt.textContent = model.name;
+            opt.selected = this.stateManager.getRunTarget() === model.id;
+            this.targetSelect.appendChild(opt);
+        });
     }
 }

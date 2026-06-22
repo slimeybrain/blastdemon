@@ -55,3 +55,28 @@ export interface SimulationState {
     connections: Connection[];
     layout: LayoutNode;
 }
+
+export interface Model {
+    id: string;
+    name: string;
+    filename: string | null;
+    nodes: Node[];
+    connections: Connection[];
+}
+
+export interface Workspace {
+    id: string;
+    name: string;
+    modelIds: string[];
+    activeModelId: string | null;
+    layout: LayoutNode;
+    connections: Connection[];
+}
+
+export interface AppState {
+    models: Record<string, Model>;
+    workspaces: Workspace[];
+    activeWorkspaceId: string;
+    workspaceCounter: number;
+}
+

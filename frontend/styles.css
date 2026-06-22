@@ -408,6 +408,9 @@ body {
     user-select: none;
     display: flex;
     flex-direction: column;
+    /* Always clip content so filling text/charts can never push the node
+       taller than its explicitly-set height, keeping port anchors stable. */
+    overflow: hidden;
 }
 
 .node.selected {
@@ -444,6 +447,11 @@ body {
 
 .node-ports {
     padding: 4px 0;
+    /* Never let the ports row grow or shrink based on content pressure;
+       it must stay at its natural height so port bullets stay at a
+       predictable vertical position within the node. */
+    flex-shrink: 0;
+    flex-grow: 0;
 }
 
 .node-params-form input {
@@ -487,6 +495,9 @@ body {
 .node-content {
     overflow: hidden;
     flex: 1;
+    /* min-height: 0 is required so this flex item can shrink below its
+       content size; without it the text body can overflow the node bounds. */
+    min-height: 0;
     display: flex;
     flex-direction: column;
 }
@@ -496,7 +507,8 @@ body {
     color: #0f0;
     font-family: var(--font-mono);
     font-size: var(--font-xs);
-    height: 100%;
+    flex: 1;
+    min-height: 0;
     overflow-y: auto;
     padding: 4px;
 }
@@ -901,5 +913,106 @@ canvas {
     background: #00f0ff;
     color: #000;
 }
+
+/* Model visual regions */
+.model-region-rect {
+    pointer-events: none;
+    rx: 6px;
+    ry: 6px;
+    transition: all 0.2s ease;
+}
+
+.model-region-label {
+    font-family: var(--font-ui);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    pointer-events: none;
+    user-select: none;
+}
+
+.model-active-indicator {
+    font-size: 10px;
+    fill: #00f0ff;
+}
+
+.node {
+    border-left-width: 4px !important;
+}
+
+/* Workspace tab bar styles */
+.workspace-tabs-container {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 4px;
+    height: 100%;
+    margin-left: 12px;
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+.workspace-tabs-container::-webkit-scrollbar {
+    display: none;
+}
+.workspace-tab {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: #252526;
+    border: 1px solid #333;
+    border-bottom: none;
+    border-radius: 4px 4px 0 0;
+    padding: 3px 10px;
+    font-size: 11px;
+    color: #888;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+    height: calc(100% - 4px);
+    margin-top: 4px;
+}
+.workspace-tab:hover {
+    background: #2d2d30;
+    color: #ccc;
+}
+.workspace-tab.active {
+    background: #1e1e24;
+    border-color: #444;
+    color: #00f0ff;
+    font-weight: 600;
+    border-top: 2px solid #00f0ff;
+}
+.workspace-tab-badge {
+    background: #333;
+    color: #aaa;
+    border-radius: 10px;
+    padding: 0px 5px;
+    font-size: 9px;
+}
+.workspace-tab.active .workspace-tab-badge {
+    background: #00f0ff;
+    color: #000;
+}
+.add-workspace-btn {
+    background: #252526;
+    border: 1px solid #333;
+    color: #aaa;
+    cursor: pointer;
+    width: 20px;
+    height: 20px;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: bold;
+    font-size: 12px;
+}
+.add-workspace-btn:hover {
+    background: #007acc;
+    color: #fff;
+    border-color: #007acc;
+}
+
 
 

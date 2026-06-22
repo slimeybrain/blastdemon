@@ -132,128 +132,154 @@ networkManager.onOpen(() => {
     if (state) networkManager.send(serializeSimulationState(state));
 });
 
-// Event Delegation for Simulation Controls (since they are injected dynamically)
+// Event Delegation for Simulation Controls and Menus (since they are injected dynamically)
 document.addEventListener('click', async (e) => {
     const target = e.target as HTMLElement;
     if (!target) return;
 
+    // --- File Menu Actions (Model-level) ---
     if (target.id === 'menu-new-model') {
-        if (confirm("Reset current model and start clean?")) {
-            stateManager.pushState(initialState);
-            layoutManager.render(initialState);
+        const name = prompt("Enter name for the new model:", `Model ${stateManager.getAllModels().length + 1}`);
+        if (name !== null) {
+            stateManager.createModel(name.trim() || undefined);
         }
     }
 
     if (target.id === 'menu-load-json') {
-        if ('showOpenFilePicker' in window) {
-            try {
-                const [handle] = await (window as any).showOpenFilePicker({
-                    types: [{
-                        description: 'BlastDemon Model (JSON)',
-                        accept: { 'application/json': ['.json'] }
-                    }]
-                });
-                const file = await handle.getFile();
-                const text = await file.text();
-                const state = JSON.parse(text) as SimulationState;
-                stateManager.pushState(state);
-                layoutManager.render(state);
-                console.log("Model loaded successfully from JSON via FileSystem API.");
-            } catch (err) {
-                if ((err as Error).name !== 'AbortError') {
-                    console.error("FileSystem API load failed, using fallback:", err);
-                    document.getElementById('load-json-file')?.click();
-                }
-            }
-        } else {
-            document.getElementById('load-json-file')?.click();
-        }
+        const fileInput = document.getElementById('load-json-file');
+        if (fileInput) fileInput.click();
     }
 
     if (target.id === 'menu-save-json') {
-        const state = stateManager.getCurrentState();
-        if (state) {
-            const jsonString = JSON.stringify(state, null, 2);
-            if ('showSaveFilePicker' in window) {
-                try {
-                    const handle = await (window as any).showSaveFilePicker({
-                        suggestedName: 'model.json',
-                        types: [{
-                            description: 'BlastDemon Model (JSON)',
-                            accept: { 'application/json': ['.json'] }
-                        }]
-                    });
-                    const writable = await handle.createWritable();
-                    await writable.write(jsonString);
-                    await writable.close();
-                    console.log("Model saved to JSON via FileSystem API.");
-                } catch (err) {
-                    if ((err as Error).name !== 'AbortError') {
-                        console.error("FileSystem API save failed, using fallback:", err);
-                        fallbackSaveJson(jsonString);
-                    }
-                }
-            } else {
-                fallbackSaveJson(jsonString);
+        const activeWs = stateManager.getActiveWorkspace();
+        if (activeWs.activeModelId) {
+            const model = stateManager.getWorkspaceModels().find(m => m.id === activeWs.activeModelId);
+            if (model) {
+                const jsonString = JSON.stringify({
+                    name: model.name,
+                    nodes: model.nodes,
+                    connections: model.connections
+                }, null, 2);
+                fallbackSaveJson(jsonString, `${model.name.toLowerCase().replace(/\s+/g, '_')}.json`);
             }
+        } else {
+            alert("No active model to save.");
         }
     }
 
     if (target.id === 'menu-load-binary') {
-        if ('showOpenFilePicker' in window) {
-            try {
-                const [handle] = await (window as any).showOpenFilePicker({
-                    types: [{
-                        description: 'BlastDemon Binary Model',
-                        accept: { 'application/octet-stream': ['.bin', '.model'] }
-                    }]
-                });
-                const file = await handle.getFile();
-                const buffer = await file.arrayBuffer();
-                const state = deserializeFromBinary(buffer);
-                stateManager.pushState(state);
-                layoutManager.render(state);
-                console.log("Model loaded successfully from Binary via FileSystem API.");
-            } catch (err) {
-                if ((err as Error).name !== 'AbortError') {
-                    console.error("FileSystem API binary load failed, using fallback:", err);
-                    document.getElementById('load-binary-file')?.click();
-                }
-            }
-        } else {
-            document.getElementById('load-binary-file')?.click();
-        }
+        const fileInput = document.getElementById('load-binary-file');
+        if (fileInput) fileInput.click();
     }
 
     if (target.id === 'menu-save-binary') {
-        const state = stateManager.getCurrentState();
-        if (state) {
-            const buffer = serializeToBinary(state);
-            if ('showSaveFilePicker' in window) {
-                try {
-                    const handle = await (window as any).showSaveFilePicker({
-                        suggestedName: 'model.bin',
-                        types: [{
-                            description: 'BlastDemon Binary Model',
-                            accept: { 'application/octet-stream': ['.bin', '.model'] }
-                        }]
-                    });
-                    const writable = await handle.createWritable();
-                    await writable.write(buffer);
-                    await writable.close();
-                    console.log("Model saved to Binary via FileSystem API.");
-                } catch (err) {
-                    if ((err as Error).name !== 'AbortError') {
-                        console.error("FileSystem API binary save failed, using fallback:", err);
-                        fallbackSaveBinary(buffer);
-                    }
-                }
-            } else {
-                fallbackSaveBinary(buffer);
+        const activeWs = stateManager.getActiveWorkspace();
+        if (activeWs.activeModelId) {
+            const model = stateManager.getWorkspaceModels().find(m => m.id === activeWs.activeModelId);
+            if (model) {
+                // Synthesize SimulationState wrapper just to use the binary serializer
+                const dummyState: SimulationState = {
+                    nodes: model.nodes,
+                    connections: model.connections,
+                    layout: activeWs.layout
+                };
+                const buffer = serializeToBinary(dummyState);
+                fallbackSaveBinary(buffer, `${model.name.toLowerCase().replace(/\s+/g, '_')}.bin`);
+            }
+        } else {
+            alert("No active model to save.");
+        }
+    }
+
+    // --- Workspace Menu Actions ---
+    if (target.id === 'menu-new-workspace') {
+        stateManager.createWorkspace();
+    }
+
+    if (target.id === 'menu-dup-layout') {
+        stateManager.duplicateWorkspaceLayout();
+    }
+
+    if (target.id === 'menu-add-model') {
+        const activeWs = stateManager.getActiveWorkspace();
+        const otherModels = stateManager.getAllModels().filter(m => !activeWs.modelIds.includes(m.id));
+        if (otherModels.length === 0) {
+            alert("No other models available. Use 'File -> New Model' to create a new model first.");
+        } else {
+            const modelNames = otherModels.map((m, idx) => `${idx + 1}. ${m.name}`).join('\n');
+            const choice = prompt(`Select a model to add to this workspace (enter number 1-${otherModels.length}):\n${modelNames}`);
+            const idx = parseInt(choice || '') - 1;
+            if (idx >= 0 && idx < otherModels.length) {
+                stateManager.addModelToWorkspace(otherModels[idx]);
             }
         }
     }
 
+    if (target.id === 'menu-remove-model') {
+        const wsModels = stateManager.getWorkspaceModels();
+        if (wsModels.length === 0) {
+            alert("No models in this workspace to remove.");
+        } else {
+            const modelNames = wsModels.map((m, idx) => `${idx + 1}. ${m.name}`).join('\n');
+            const choice = prompt(`Select a model to remove from this workspace (enter number 1-${wsModels.length}):\n${modelNames}`);
+            const idx = parseInt(choice || '') - 1;
+            if (idx >= 0 && idx < wsModels.length) {
+                stateManager.removeModelFromWorkspace(wsModels[idx].id);
+            }
+        }
+    }
+
+    if (target.id === 'menu-save-workspace') {
+        stateManager.saveWorkspace();
+        alert("Workspace and all models saved successfully to browser local storage.");
+    }
+
+    if (target.id === 'menu-export-workspace') {
+        const appState = stateManager.getAppState();
+        const jsonString = JSON.stringify(appState, null, 2);
+        fallbackSaveJson(jsonString, 'workspace_project.json');
+    }
+
+    if (target.id === 'menu-import-workspace') {
+        const fileInput = document.getElementById('import-workspace-file');
+        if (fileInput) {
+            fileInput.click();
+        } else {
+            // Dynamically create a temporary file input
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = 'application/json';
+            input.onchange = (ev) => {
+                const file = (ev.target as HTMLInputElement).files?.[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    try {
+                        const parsed = JSON.parse(event.target?.result as string);
+                        if (parsed.models && parsed.workspaces && parsed.activeWorkspaceId) {
+                            stateManager.loadAppState(parsed);
+                            console.log("Workspace state imported successfully.");
+                        } else {
+                            alert("Invalid workspace project file.");
+                        }
+                    } catch (err) {
+                        alert("Failed to parse workspace project file: " + err);
+                    }
+                };
+                reader.readAsText(file);
+            };
+            input.click();
+        }
+    }
+
+    if (target.id === 'menu-reset-all') {
+        if (confirm("CRITICAL: This will flush all local storage and reload the application. Proceed?")) {
+            stateManager.clearWorkspace();
+            window.location.reload();
+        }
+    }
+
+    // --- Graph Actions & Simulation Buttons ---
     if (target.classList.contains('auto-arrange-btn')) {
         const panelId = target.dataset.panelId;
         if (panelId) {
@@ -264,8 +290,23 @@ document.addEventListener('click', async (e) => {
         }
     }
 
+    const isExecutionBtn = target.id === 'init-btn' || 
+                           target.id === 'exec-end-btn' || 
+                           target.id === 'interrupt-btn' || 
+                           target.id === 'terminate-btn' || 
+                           target.id.match(/exec-(\d+)-btn/) !== null;
+
+    if (isExecutionBtn) {
+        if (!networkManager.isConnected()) {
+            stateManager.pushTelemetry("[ERROR] WebSocket is not connected to the Broker backend. Please ensure the Broker daemon is running on port 8080.");
+            alert("Error: WebSocket is not connected to the Broker backend. Please ensure the Broker daemon is running.");
+            return;
+        }
+    }
+
     if (target.id === 'init-btn') {
-        const state = stateManager.getCurrentState();
+        const runTarget = stateManager.getRunTarget();
+        const state = stateManager.getSimulationState(runTarget);
         if (state) {
             stateManager.clearPendingSteps();
             const payload = serializeForSolver(state, "INIT");
@@ -284,7 +325,6 @@ document.addEventListener('click', async (e) => {
         }
         stateManager.addPendingSteps(steps);
 
-        // Immediate Execution: Always send command if not already running (Resumes automatically)
         if (stateManager.getStatus() !== 'RUNNING') {
             networkManager.send({ command: "STEP", steps: stateManager.getPendingSteps(), cfl: getCflFromSolver() });
             stateManager.clearPendingSteps();
@@ -313,15 +353,8 @@ document.addEventListener('click', async (e) => {
         networkManager.send({ command: "TERMINATE" });
         stateManager.setStatus('TERMINATED');
     }
-
-    if (target.id === 'save-workspace-btn') {
-        stateManager.saveWorkspace();
-    }
-
-    if (target.id === 'clear-save-btn') {
-        stateManager.clearWorkspace();
-    }
 });
+
 
 networkManager.onMessage((data) => {
     if (data instanceof ArrayBuffer) {
@@ -434,24 +467,26 @@ document.getElementById('load-binary-file')?.addEventListener('change', (e) => {
     input.value = ''; // Reset file input
 });
 
-function fallbackSaveJson(jsonString: string) {
+function fallbackSaveJson(jsonString: string, filename: string = "model.json") {
     const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(jsonString);
     const downloadAnchor = document.createElement('a');
     downloadAnchor.setAttribute("href", dataStr);
-    downloadAnchor.setAttribute("download", "model.json");
+    downloadAnchor.setAttribute("download", filename);
     document.body.appendChild(downloadAnchor);
     downloadAnchor.click();
     downloadAnchor.remove();
 }
 
-function fallbackSaveBinary(buffer: ArrayBuffer) {
+// Fallback to trigger downloads when Filesystem Access API isn't available
+function fallbackSaveBinary(buffer: ArrayBuffer, filename: string = "model.bin") {
     const blob = new Blob([buffer], { type: "application/octet-stream" });
     const url = URL.createObjectURL(blob);
     const downloadAnchor = document.createElement('a');
     downloadAnchor.setAttribute("href", url);
-    downloadAnchor.setAttribute("download", "model.bin");
+    downloadAnchor.setAttribute("download", filename);
     document.body.appendChild(downloadAnchor);
     downloadAnchor.click();
     downloadAnchor.remove();
     URL.revokeObjectURL(url);
 }
+
