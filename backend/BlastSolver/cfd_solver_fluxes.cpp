@@ -1,37 +1,69 @@
 #include "cfd_solver.hpp"
 #include <cmath>
 #include <algorithm>
+#include <array>
 
-ConservativeState CFDSolver::flux(const State& s) {
-    ConservativeState f;
+template <bool IsMultiMaterial>
+inline double getPressure(double E_internal, double rho, const typename StateTypes<IsMultiMaterial>::PrimitiveState& s, double gamma, const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted) {
+    if constexpr (IsMultiMaterial) {
+        return MultiMat::getMixturePressure(E_internal, rho, s.alpha1, s.alpha2, s.arho1, s.arho2, gamma, products, unreacted);
+    } else {
+        return E_internal * (gamma - 1.0);
+    }
+}
+
+template <bool IsMultiMaterial>
+inline double getSoundSpeed(double p, double rho, const typename StateTypes<IsMultiMaterial>::PrimitiveState& s, double gamma, const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted) {
+    if constexpr (IsMultiMaterial) {
+        return MultiMat::getMixtureSoundSpeed(p, rho, s.alpha1, s.alpha2, s.arho1, s.arho2, gamma, products, unreacted);
+    } else {
+        return std::sqrt(gamma * p / rho);
+    }
+}
+
+template <bool IsMultiMaterial>
+inline double getEnergy(double p, double rho, const typename StateTypes<IsMultiMaterial>::PrimitiveState& s, double gamma, const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted) {
+    if constexpr (IsMultiMaterial) {
+        return MultiMat::getMixtureEnergy(p, rho, s.alpha1, s.alpha2, s.arho1, s.arho2, gamma, products, unreacted);
+    } else {
+        return p / (gamma - 1.0);
+    }
+}
+
+template <bool IsMultiMaterial>
+typename CFDSolverImpl<IsMultiMaterial>::ConservedState CFDSolverImpl<IsMultiMaterial>::flux(const PrimitiveState& s) {
+    ConservedState f;
     f.rho = s.rho * s.u;
     f.rhou = s.rho * s.u * s.u + s.p;
     f.E = s.u * (s.E + s.p);
-    f.alpha1 = s.alpha1 * s.u; f.alpha2 = s.alpha2 * s.u;
-    f.arho1 = s.arho1 * s.u; f.arho2 = s.arho2 * s.u;
+    if constexpr (IsMultiMaterial) {
+        f.alpha1 = s.alpha1 * s.u; f.alpha2 = s.alpha2 * s.u;
+        f.arho1 = s.arho1 * s.u; f.arho2 = s.arho2 * s.u;
+    }
     return f;
 }
 
-ConservativeState CFDSolver::getFlux(const State& sL, const State& sR, const ConservativeState& uL, const ConservativeState& uR, double dt, double& v_face) {
-    ConservativeState f;
+template <bool IsMultiMaterial>
+typename CFDSolverImpl<IsMultiMaterial>::ConservedState CFDSolverImpl<IsMultiMaterial>::getFlux(const PrimitiveState& sL, const PrimitiveState& sR, const ConservedState& uL, const ConservedState& uR, double dt, double& v_face) {
+    ConservedState f;
     if (currentScheme == AUSM_PLUS) {
         f = getFluxAUSMPlus(sL, sR, v_face);
     } else {
         f = getFluxRusanov(sL, sR, uL, uR, v_face);
     }
-
     return f;
 }
 
-ConservativeState CFDSolver::getFluxRusanov(const State& sL, const State& sR, const ConservativeState& uL, const ConservativeState& uR, double& v_face) {
-    ConservativeState fL = flux(sL);
-    ConservativeState fR = flux(sR);
+template <bool IsMultiMaterial>
+typename CFDSolverImpl<IsMultiMaterial>::ConservedState CFDSolverImpl<IsMultiMaterial>::getFluxRusanov(const PrimitiveState& sL, const PrimitiveState& sR, const ConservedState& uL, const ConservedState& uR, double& v_face) {
+    ConservedState fL = flux(sL);
+    ConservedState fR = flux(sR);
 
-    double cL = MultiMat::getMixtureSoundSpeed(sL.p, sL.rho, sL.alpha1, sL.alpha2, sL.arho1, sL.arho2, gamma, currentMaterials.products, currentMaterials.unreacted);
-    double cR = MultiMat::getMixtureSoundSpeed(sR.p, sR.rho, sR.alpha1, sR.alpha2, sR.arho1, sR.arho2, gamma, currentMaterials.products, currentMaterials.unreacted);
+    double cL = getSoundSpeed<IsMultiMaterial>(sL.p, sL.rho, sL, gamma, currentMaterials.products, currentMaterials.unreacted);
+    double cR = getSoundSpeed<IsMultiMaterial>(sR.p, sR.rho, sR, gamma, currentMaterials.products, currentMaterials.unreacted);
     double s_max = std::max(std::abs(sL.u) + cL, std::abs(sR.u) + cR);
 
-    ConservativeState f;
+    ConservedState f;
     f.rho  = 0.5 * (fL.rho + fR.rho)   - 0.5 * s_max * (uR.rho - uL.rho);
     f.rhou = 0.5 * (fL.rhou + fR.rhou) - 0.5 * s_max * (uR.rhou - uL.rhou);
     f.E    = 0.5 * (fL.E + fR.E)       - 0.5 * s_max * (uR.E - uL.E);
@@ -39,28 +71,30 @@ ConservativeState CFDSolver::getFluxRusanov(const State& sL, const State& sR, co
     // Mass Fraction Consistency
     double u_int = 0.5 * (sL.u + sR.u);
     v_face = u_int;
-    if (u_int >= 0) {
-        f.alpha1 = sL.alpha1 * u_int;
-        f.alpha2 = sL.alpha2 * u_int;
-        // Upwind partial density based on exactly computed global density flux to maintain unity
-        double Y1 = sL.arho1 / fmax(1e-12, sL.rho);
-        double Y2 = sL.arho2 / fmax(1e-12, sL.rho);
-        f.arho1 = f.rho * Y1;
-        f.arho2 = f.rho * Y2;
-    } else {
-        f.alpha1 = sR.alpha1 * u_int;
-        f.alpha2 = sR.alpha2 * u_int;
-        double Y1 = sR.arho1 / fmax(1e-12, sR.rho);
-        double Y2 = sR.arho2 / fmax(1e-12, sR.rho);
-        f.arho1 = f.rho * Y1;
-        f.arho2 = f.rho * Y2;
+    if constexpr (IsMultiMaterial) {
+        if (u_int >= 0) {
+            f.alpha1 = sL.alpha1 * u_int;
+            f.alpha2 = sL.alpha2 * u_int;
+            double Y1 = sL.arho1 / fmax(1e-12, sL.rho);
+            double Y2 = sL.arho2 / fmax(1e-12, sL.rho);
+            f.arho1 = f.rho * Y1;
+            f.arho2 = f.rho * Y2;
+        } else {
+            f.alpha1 = sR.alpha1 * u_int;
+            f.alpha2 = sR.alpha2 * u_int;
+            double Y1 = sR.arho1 / fmax(1e-12, sR.rho);
+            double Y2 = sR.arho2 / fmax(1e-12, sR.rho);
+            f.arho1 = f.rho * Y1;
+            f.arho2 = f.rho * Y2;
+        }
     }
     return f;
 }
 
-ConservativeState CFDSolver::getFluxAUSMPlus(const State& sL, const State& sR, double& v_face) {
-    double aL = MultiMat::getMixtureSoundSpeed(sL.p, sL.rho, sL.alpha1, sL.alpha2, sL.arho1, sL.arho2, gamma, currentMaterials.products, currentMaterials.unreacted);
-    double aR = MultiMat::getMixtureSoundSpeed(sR.p, sR.rho, sR.alpha1, sR.alpha2, sR.arho1, sR.arho2, gamma, currentMaterials.products, currentMaterials.unreacted);
+template <bool IsMultiMaterial>
+typename CFDSolverImpl<IsMultiMaterial>::ConservedState CFDSolverImpl<IsMultiMaterial>::getFluxAUSMPlus(const PrimitiveState& sL, const PrimitiveState& sR, double& v_face) {
+    double aL = getSoundSpeed<IsMultiMaterial>(sL.p, sL.rho, sL, gamma, currentMaterials.products, currentMaterials.unreacted);
+    double aR = getSoundSpeed<IsMultiMaterial>(sR.p, sR.rho, sR, gamma, currentMaterials.products, currentMaterials.unreacted);
     double a_half = 0.5 * (aL + aR);
 
     double ML = sL.u / a_half;
@@ -110,37 +144,43 @@ ConservativeState CFDSolver::getFluxAUSMPlus(const State& sL, const State& sR, d
 
     v_face = M_half * a_half;
 
-    ConservativeState F;
+    ConservedState F;
     if (M_half >= 0.0) {
         F.rho  = M_half * a_half * sL.rho;
         F.rhou = M_half * a_half * sL.rho * sL.u + p_half;
         F.E    = M_half * a_half * (sL.E + sL.p);
-        F.alpha1 = M_half * a_half * sL.alpha1;
-        F.alpha2 = M_half * a_half * sL.alpha2;
-        F.arho1 = M_half * a_half * sL.arho1;
-        F.arho2 = M_half * a_half * sL.arho2;
+        if constexpr (IsMultiMaterial) {
+            F.alpha1 = M_half * a_half * sL.alpha1;
+            F.alpha2 = M_half * a_half * sL.alpha2;
+            F.arho1 = M_half * a_half * sL.arho1;
+            F.arho2 = M_half * a_half * sL.arho2;
+        }
     } else {
         F.rho  = M_half * a_half * sR.rho;
         F.rhou = M_half * a_half * sR.rho * sR.u + p_half;
         F.E    = M_half * a_half * (sR.E + sR.p);
-        F.alpha1 = M_half * a_half * sR.alpha1;
-        F.alpha2 = M_half * a_half * sR.alpha2;
-        F.arho1 = M_half * a_half * sR.arho1;
-        F.arho2 = M_half * a_half * sR.arho2;
+        if constexpr (IsMultiMaterial) {
+            F.alpha1 = M_half * a_half * sR.alpha1;
+            F.alpha2 = M_half * a_half * sR.alpha2;
+            F.arho1 = M_half * a_half * sR.arho1;
+            F.arho2 = M_half * a_half * sR.arho2;
+        }
     }
 
     // Robust Entropy Fix (Harten entropy fix for expansion shocks)
-    double cL = MultiMat::getMixtureSoundSpeed(sL.p, sL.rho, sL.alpha1, sL.alpha2, sL.arho1, sL.arho2, gamma, currentMaterials.products, currentMaterials.unreacted);
-    double cR = MultiMat::getMixtureSoundSpeed(sR.p, sR.rho, sR.alpha1, sR.alpha2, sR.arho1, sR.arho2, gamma, currentMaterials.products, currentMaterials.unreacted);
+    double cL = getSoundSpeed<IsMultiMaterial>(sL.p, sL.rho, sL, gamma, currentMaterials.products, currentMaterials.unreacted);
+    double cR = getSoundSpeed<IsMultiMaterial>(sR.p, sR.rho, sR, gamma, currentMaterials.products, currentMaterials.unreacted);
 
     double lambda_L = sL.u - cL;
     double lambda_R = sR.u - cR;
 
-    ConservativeState uL, uR;
+    ConservedState uL, uR;
     uL.rho = sL.rho; uL.rhou = sL.rho * sL.u; uL.E = sL.E;
-    uL.arho1 = sL.arho1; uL.arho2 = sL.arho2;
     uR.rho = sR.rho; uR.rhou = sR.rho * sR.u; uR.E = sR.E;
-    uR.arho1 = sR.arho1; uR.arho2 = sR.arho2;
+    if constexpr (IsMultiMaterial) {
+        uL.arho1 = sL.arho1; uL.arho2 = sL.arho2;
+        uR.arho1 = sR.arho1; uR.arho2 = sR.arho2;
+    }
 
     // Left-going acoustic wave: u - c crosses zero (rarefaction fan)
     if (lambda_L < 0.0 && lambda_R > 0.0) {
@@ -150,8 +190,10 @@ ConservativeState CFDSolver::getFluxAUSMPlus(const State& sL, const State& sR, d
         F.rho   -= diss * (uR.rho   - uL.rho);
         F.rhou  -= diss * (uR.rhou  - uL.rhou);
         F.E     -= diss * (uR.E     - uL.E);
-        F.arho1 -= diss * (uR.arho1 - uL.arho1);
-        F.arho2 -= diss * (uR.arho2 - uL.arho2);
+        if constexpr (IsMultiMaterial) {
+            F.arho1 -= diss * (uR.arho1 - uL.arho1);
+            F.arho2 -= diss * (uR.arho2 - uL.arho2);
+        }
     }
 
     // Right-going acoustic wave: u + c crosses zero
@@ -164,14 +206,17 @@ ConservativeState CFDSolver::getFluxAUSMPlus(const State& sL, const State& sR, d
         F.rho   -= diss * (uR.rho   - uL.rho);
         F.rhou  -= diss * (uR.rhou  - uL.rhou);
         F.E     -= diss * (uR.E     - uL.E);
-        F.arho1 -= diss * (uR.arho1 - uL.arho1);
-        F.arho2 -= diss * (uR.arho2 - uL.arho2);
+        if constexpr (IsMultiMaterial) {
+            F.arho1 -= diss * (uR.arho1 - uL.arho1);
+            F.arho2 -= diss * (uR.arho2 - uL.arho2);
+        }
     }
 
     return F;
 }
 
-void CFDSolver::reconstruct(const std::vector<State>& states_current, int i, State& s_L, State& s_R, double dt) {
+template <bool IsMultiMaterial>
+void CFDSolverImpl<IsMultiMaterial>::reconstruct(const std::vector<PrimitiveState>& states_current, int i, PrimitiveState& s_L, PrimitiveState& s_R, double dt) {
     auto minmod = [](double a, double b) {
         if (a * b <= 0) return 0.0;
         return (std::abs(a) < std::abs(b)) ? a : b;
@@ -185,11 +230,9 @@ void CFDSolver::reconstruct(const std::vector<State>& states_current, int i, Sta
         return (a > 0) ? s2 : -s2;
     };
 
-
-
     auto get_state = [&](int idx) {
         if (idx < 0) {
-            State s = states_current[-idx]; // Fix ghost cell reflecting index
+            PrimitiveState s = states_current[-idx]; // Fix ghost cell reflecting index
             s.u = -s.u;
             return s;
         }
@@ -197,33 +240,42 @@ void CFDSolver::reconstruct(const std::vector<State>& states_current, int i, Sta
         return states_current[idx];
     };
 
-    auto diff = [](const State& a, const State& b) {
-        std::vector<double> d(7);
+    constexpr size_t num_eq = IsMultiMaterial ? 7 : 3;
+    using DiffArray = std::array<double, num_eq>;
+
+    auto diff = [](const PrimitiveState& a, const PrimitiveState& b) {
+        DiffArray d;
         d[0] = a.rho - b.rho;
         d[1] = a.u - b.u;
         d[2] = a.p - b.p;
-        d[3] = a.alpha1 - b.alpha1;
-        d[4] = a.alpha2 - b.alpha2;
-        d[5] = a.arho1 - b.arho1;
-        d[6] = a.arho2 - b.arho2;
+        if constexpr (IsMultiMaterial) {
+            d[3] = a.alpha1 - b.alpha1;
+            d[4] = a.alpha2 - b.alpha2;
+            d[5] = a.arho1 - b.arho1;
+            d[6] = a.arho2 - b.arho2;
+        }
         return d;
     };
 
-    auto project_to_char = [](const State& ref, double c, const std::vector<double>& dV) {
-        std::vector<double> dW(7);
+    auto project_to_char = [](const PrimitiveState& ref, double c, const DiffArray& dV) {
+        DiffArray dW;
         dW[0] = dV[0] - dV[2] / (c * c);
         dW[1] = dV[1] + dV[2] / (ref.rho * c);
         dW[2] = dV[1] - dV[2] / (ref.rho * c);
-        dW[3] = dV[3]; dW[4] = dV[4]; dW[5] = dV[5]; dW[6] = dV[6];
+        if constexpr (IsMultiMaterial) {
+            dW[3] = dV[3]; dW[4] = dV[4]; dW[5] = dV[5]; dW[6] = dV[6];
+        }
         return dW;
     };
 
-    auto project_to_prim = [](const State& ref, double c, const std::vector<double>& dW) {
-        std::vector<double> dV(7);
+    auto project_to_prim = [](const PrimitiveState& ref, double c, const DiffArray& dW) {
+        DiffArray dV;
         dV[2] = 0.5 * ref.rho * c * (dW[1] - dW[2]); // dp
         dV[1] = 0.5 * (dW[1] + dW[2]); // du
         dV[0] = dW[0] + dV[2] / (c * c); // drho
-        dV[3] = dW[3]; dV[4] = dW[4]; dV[5] = dW[5]; dV[6] = dW[6];
+        if constexpr (IsMultiMaterial) {
+            dV[3] = dW[3]; dV[4] = dW[4]; dV[5] = dW[5]; dV[6] = dW[6];
+        }
         return dV;
     };
 
@@ -244,52 +296,58 @@ void CFDSolver::reconstruct(const std::vector<State>& states_current, int i, Sta
             return near_shock ? minmod(a, b) : mc(a, b);
         };
 
-        State sm1 = get_state(i - 2);
-        State s0  = get_state(i - 1);
-        State sp1 = get_state(i);
-        State sp2 = get_state(i + 1);
+        PrimitiveState sm1 = get_state(i - 2);
+        PrimitiveState s0  = get_state(i - 1);
+        PrimitiveState sp1 = get_state(i);
+        PrimitiveState sp2 = get_state(i + 1);
 
         // Reconstruction in cell i-1 (for s_L)
-        double c0 = MultiMat::getMixtureSoundSpeed(s0.p, s0.rho, s0.alpha1, s0.alpha2, s0.arho1, s0.arho2, gamma, currentMaterials.products, currentMaterials.unreacted);
+        double c0 = getSoundSpeed<IsMultiMaterial>(s0.p, s0.rho, s0, gamma, currentMaterials.products, currentMaterials.unreacted);
         auto dV_m1 = diff(s0, sm1);
         auto dV_0  = diff(sp1, s0);
         auto dW_m1 = project_to_char(s0, c0, dV_m1);
         auto dW_0  = project_to_char(s0, c0, dV_0);
-        std::vector<double> dW_L(7);
-        for(int k=0; k<7; ++k) dW_L[k] = limiter(dW_m1[k], dW_0[k]);
+        DiffArray dW_L;
+        for(size_t k=0; k<num_eq; ++k) dW_L[k] = limiter(dW_m1[k], dW_0[k]);
         auto dV_L = project_to_prim(s0, c0, dW_L);
 
         s_L = s0;
         s_L.rho += 0.5 * dV_L[0]; s_L.u += 0.5 * dV_L[1]; s_L.p += 0.5 * dV_L[2];
-        s_L.alpha1 += 0.5 * dV_L[3]; s_L.alpha2 += 0.5 * dV_L[4];
-        s_L.arho1 += 0.5 * dV_L[5]; s_L.arho2 += 0.5 * dV_L[6];
+        if constexpr (IsMultiMaterial) {
+            s_L.alpha1 += 0.5 * dV_L[3]; s_L.alpha2 += 0.5 * dV_L[4];
+            s_L.arho1 += 0.5 * dV_L[5]; s_L.arho2 += 0.5 * dV_L[6];
+        }
 
         // Reconstruction in cell i (for s_R)
-        double cp1 = MultiMat::getMixtureSoundSpeed(sp1.p, sp1.rho, sp1.alpha1, sp1.alpha2, sp1.arho1, sp1.arho2, gamma, currentMaterials.products, currentMaterials.unreacted);
+        double cp1 = getSoundSpeed<IsMultiMaterial>(sp1.p, sp1.rho, sp1, gamma, currentMaterials.products, currentMaterials.unreacted);
         auto dV_p1 = diff(sp2, sp1);
         auto dW_p1 = project_to_char(sp1, cp1, dV_p1);
         auto dW_0_R  = project_to_char(sp1, cp1, dV_0);
-        std::vector<double> dW_R(7);
-        for(int k=0; k<7; ++k) dW_R[k] = limiter(dW_0_R[k], dW_p1[k]);
+        DiffArray dW_R;
+        for(size_t k=0; k<num_eq; ++k) dW_R[k] = limiter(dW_0_R[k], dW_p1[k]);
         auto dV_R = project_to_prim(sp1, cp1, dW_R);
 
         s_R = sp1;
         s_R.rho -= 0.5 * dV_R[0]; s_R.u -= 0.5 * dV_R[1]; s_R.p -= 0.5 * dV_R[2];
-        s_R.alpha1 -= 0.5 * dV_R[3]; s_R.alpha2 -= 0.5 * dV_R[4];
-        s_R.arho1 -= 0.5 * dV_R[5]; s_R.arho2 -= 0.5 * dV_R[6];
+        if constexpr (IsMultiMaterial) {
+            s_R.alpha1 -= 0.5 * dV_R[3]; s_R.alpha2 -= 0.5 * dV_R[4];
+            s_R.arho1 -= 0.5 * dV_R[5]; s_R.arho2 -= 0.5 * dV_R[6];
+        }
 
         // Clamp reconstructed volume fractions
-        s_L.alpha1 = fmax(0.0, fmin(1.0, s_L.alpha1));
-        s_L.alpha2 = fmax(0.0, fmin(1.0, s_L.alpha2));
-        s_R.alpha1 = fmax(0.0, fmin(1.0, s_R.alpha1));
-        s_R.alpha2 = fmax(0.0, fmin(1.0, s_R.alpha2));
+        if constexpr (IsMultiMaterial) {
+            s_L.alpha1 = fmax(0.0, fmin(1.0, s_L.alpha1));
+            s_L.alpha2 = fmax(0.0, fmin(1.0, s_L.alpha2));
+            s_R.alpha1 = fmax(0.0, fmin(1.0, s_R.alpha1));
+            s_R.alpha2 = fmax(0.0, fmin(1.0, s_R.alpha2));
+        }
 
         if (s_L.rho < 1e-10 || s_L.p < 1e-10 || s_R.rho < 1e-10 || s_R.p < 1e-10) {
             s_L = states_current[i-1];
             s_R = states_current[i];
         } else {
-            s_L.E = MultiMat::getMixtureEnergy(s_L.p, s_L.rho, s_L.alpha1, s_L.alpha2, s_L.arho1, s_L.arho2, gamma, currentMaterials.products, currentMaterials.unreacted) + 0.5 * s_L.rho * s_L.u * s_L.u;
-            s_R.E = MultiMat::getMixtureEnergy(s_R.p, s_R.rho, s_R.alpha1, s_R.alpha2, s_R.arho1, s_R.arho2, gamma, currentMaterials.products, currentMaterials.unreacted) + 0.5 * s_R.rho * s_R.u * s_R.u;
+            s_L.E = getEnergy<IsMultiMaterial>(s_L.p, s_L.rho, s_L, gamma, currentMaterials.products, currentMaterials.unreacted) + 0.5 * s_L.rho * s_L.u * s_L.u;
+            s_R.E = getEnergy<IsMultiMaterial>(s_R.p, s_R.rho, s_R, gamma, currentMaterials.products, currentMaterials.unreacted) + 0.5 * s_R.rho * s_R.u * s_R.u;
         }
     }
 }

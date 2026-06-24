@@ -652,6 +652,13 @@ export class LayoutManager {
             arrangeBtn.style.marginLeft = '4px';
             leftSide.appendChild(arrangeBtn);
 
+            const fitBtn = document.createElement('button');
+            fitBtn.dataset.panelId = node.id;
+            fitBtn.textContent = 'Fit';
+            fitBtn.className = 'header-button secondary fit-view-btn';
+            fitBtn.style.marginLeft = '4px';
+            leftSide.appendChild(fitBtn);
+
             const gridLabel = document.createElement('label');
             gridLabel.style.display = 'flex';
             gridLabel.style.alignItems = 'center';

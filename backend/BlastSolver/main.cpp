@@ -153,7 +153,6 @@ void emit_resource_pulse() {
 
 void emit_telemetry(const CFDSolver& solver, double elapsed, bool is_terminated) {
     std::lock_guard<std::mutex> lock(cout_mutex);
-    const std::vector<State>& states = solver.getStates();
     int n = solver.getNumCells();
 
     // 1. Emit Metadata JSON envelope
@@ -166,38 +165,10 @@ void emit_telemetry(const CFDSolver& solver, double elapsed, bool is_terminated)
     // 2. Emit structured multi-channel binary frame
     //    Header: [uint32 n_cells][uint32 n_channels=7]
     //    Payload channels (each n floats): [pressure][density][velocity][internal_energy][mass_frac_burned][mass_frac_unburnt][mass_frac_air]
-    //    Internal energy: e_int = E/rho - 0.5*u*u  (specific internal energy, J/kg)
     const uint32_t n_cells    = static_cast<uint32_t>(n);
     const uint32_t n_channels = 7;
 
-    std::vector<float> frame;
-    frame.reserve(n * n_channels);
-
-    // Channel 0: Pressure
-    for (int i = 0; i < n; ++i) frame.push_back(static_cast<float>(states[i].p));
-    // Channel 1: Density
-    for (int i = 0; i < n; ++i) frame.push_back(static_cast<float>(states[i].rho));
-    // Channel 2: Velocity
-    for (int i = 0; i < n; ++i) frame.push_back(static_cast<float>(states[i].u));
-    // Channel 3: Specific internal energy  e_int = E/rho - 0.5*u^2
-    for (int i = 0; i < n; ++i) {
-        double rho = states[i].rho;
-        double e_int = (rho > 0.0) ? (states[i].E / rho - 0.5 * states[i].u * states[i].u) : 0.0;
-        frame.push_back(static_cast<float>(e_int));
-    }
-    // Channel 4: Volume Fraction (burned products)  alpha1
-    for (int i = 0; i < n; ++i) {
-        frame.push_back(static_cast<float>(std::clamp(states[i].alpha1, 0.0, 1.0)));
-    }
-    // Channel 5: Volume Fraction (unburnt reactant)  alpha2
-    for (int i = 0; i < n; ++i) {
-        frame.push_back(static_cast<float>(std::clamp(states[i].alpha2, 0.0, 1.0)));
-    }
-    // Channel 6: Volume Fraction (air)  1.0 - alpha1 - alpha2
-    for (int i = 0; i < n; ++i) {
-        double air_frac = 1.0 - states[i].alpha1 - states[i].alpha2;
-        frame.push_back(static_cast<float>(std::clamp(air_frac, 0.0, 1.0)));
-    }
+    std::vector<float> frame = solver.getTelemetryChannels();
 
     // Prefix with 8-byte header then raw float data
     size_t header_bytes  = sizeof(uint32_t) * 2;
@@ -259,8 +230,18 @@ int main() {
                         double gamma = msg.at("gamma").get<double>();
 
                         global_num_cells = n_cells;
-                        global_solver = std::make_unique<CFDSolver>(n_cells, radius, gamma);
                         global_t = 0.0;
+
+                        // --- Initialisation mode selection ---
+                        std::string init_mode   = msg.value("init_mode",   "Multi-Material JWL");
+                        std::string composition  = msg.value("composition", "TNT");
+                        std::string explosive_type = msg.value("explosive_type", "");
+
+                        if (init_mode == "Ideal Gas" || explosive_type == "MaterialIdealGas") {
+                            global_solver = std::make_unique<CFDSolverImpl<false>>(n_cells, radius, gamma);
+                        } else {
+                            global_solver = std::make_unique<CFDSolverImpl<true>>(n_cells, radius, gamma);
+                        }
 
                         global_solver->setFluxScheme(msg.at("flux_scheme").get<std::string>());
                         global_solver->setSpatialOrder(msg.at("spatial_order").get<int>());
@@ -270,10 +251,6 @@ int main() {
                         double high_rho         = msg.at("rho").get<double>();
                         double ambient_rho      = msg.at("ambient_rho").get<double>();
                         double ambient_p        = msg.at("atm_pressure").get<double>();
-
-                        // --- Initialisation mode selection ---
-                        std::string init_mode   = msg.value("init_mode",   "Multi-Material JWL");
-                        std::string composition  = msg.value("composition", "TNT");
 
                         // Select JWL material set from composition string
                         MultiMat::MaterialSet matSet = MultiMat::TNT;
@@ -295,7 +272,7 @@ int main() {
                         }
                         global_solver->setMaterialParameters(matSet);
 
-                        if (init_mode == "Ideal Gas") {
+                        if (init_mode == "Ideal Gas" || explosive_type == "MaterialIdealGas") {
                             // Single-material ideal gas burst.
                             // detonation_energy is the specific internal energy (J/kg) of the charge.
                             double det_energy = msg.value("detonation_energy", 4520000.0);

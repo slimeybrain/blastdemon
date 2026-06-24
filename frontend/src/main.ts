@@ -301,6 +301,16 @@ document.addEventListener('click', async (e) => {
         }
     }
 
+    if (target.classList.contains('fit-view-btn')) {
+        const panelId = target.dataset.panelId;
+        if (panelId) {
+            const comp = layoutManager.components.get(panelId);
+            if (comp && comp.type === 'NODE_GRAPH') {
+                comp.instance.fitToView();
+            }
+        }
+    }
+
     const isExecutionBtn = target.id === 'init-btn' || 
                            target.id === 'exec-end-btn' || 
                            target.id === 'interrupt-btn' || 

@@ -20,6 +20,9 @@ export class GraphRenderer {
     private zoom: number = 1.25;
     private panX: number = 0;
     private panY: number = 0;
+    private hasInitializedViewport: boolean = false;
+    private hasSavedZoomPan: boolean = false;
+    private viewportSaveTimeout: any = null;
 
     private isPanning: boolean = false;
     private isDraggingNode: boolean = false;
@@ -146,6 +149,12 @@ export class GraphRenderer {
                 if (panel.options.showGrid !== undefined) this.showGrid = panel.options.showGrid;
                 if (panel.options.snapToGrid !== undefined) this.snapToGrid = panel.options.snapToGrid;
                 if (panel.options.gridSpacing !== undefined) this.gridSpacing = panel.options.gridSpacing;
+                if (panel.options.zoom !== undefined) {
+                    this.zoom = panel.options.zoom;
+                    this.hasSavedZoomPan = true;
+                }
+                if (panel.options.panX !== undefined) this.panX = panel.options.panX;
+                if (panel.options.panY !== undefined) this.panY = panel.options.panY;
             }
         }
         
@@ -155,7 +164,16 @@ export class GraphRenderer {
         this.stateManager.onTelemetryUpdate(this.telemetryListener);
         this.stateManager.onSelectionChange(this.selectionListener);
 
-        this.resizeObserver = new ResizeObserver(() => this.render());
+        this.resizeObserver = new ResizeObserver(() => {
+            const rect = this.viewport.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0 && !this.hasInitializedViewport) {
+                this.hasInitializedViewport = true;
+                if (!this.hasSavedZoomPan) {
+                    this.fitToView();
+                }
+            }
+            this.render();
+        });
         this.resizeObserver.observe(this.viewport);
 
         this.nodeResizeObserver = new ResizeObserver((entries) => {
@@ -392,6 +410,7 @@ export class GraphRenderer {
             this.panY = mouseY - worldY * this.zoom;
 
             this.updateTransform();
+            this.saveViewportState();
         }
     }
 
@@ -419,6 +438,7 @@ export class GraphRenderer {
             this.panX += dx;
             this.panY += dy;
             this.updateTransform();
+            this.saveViewportState();
         } else if (this.isDraggingWire) {
             const ctm = this.svg.getScreenCTM();
             if (ctm) {
@@ -532,6 +552,15 @@ export class GraphRenderer {
             this.hoveredPort = null;
             this.detachedConnection = null;
             this.render();
+        }
+
+        if (this.isPanning) {
+            if (this.viewportSaveTimeout) clearTimeout(this.viewportSaveTimeout);
+            this.stateManager.updatePanelOptions(this.panelId, {
+                zoom: this.zoom,
+                panX: this.panX,
+                panY: this.panY
+            });
         }
 
         this.isPanning = false;
@@ -803,6 +832,7 @@ export class GraphRenderer {
 
     private updateTransform(): void {
         this.container.style.transform = `translate(${this.panX}px, ${this.panY}px) scale(${this.zoom})`;
+        this.updateGridBackground();
     }
 
     private selectNode(nodeId: string | null): void {
@@ -907,6 +937,7 @@ export class GraphRenderer {
     }
 
     private syncNodes(state: SimulationState): void {
+        const valResults = this.validateGraph(state);
         const nodeIdsInState = new Set(state.nodes.map(n => n.id));
         for (const [id, el] of this.nodeElements.entries()) {
             if (!nodeIdsInState.has(id)) {
@@ -1091,6 +1122,33 @@ export class GraphRenderer {
                     const colors = this.getModelColors(modelId);
                     nodeEl.style.borderLeft = `4px solid ${colors.base}`;
                 }
+
+                // Update validation status classes and tooltips
+                const valStatus = valResults.nodeStatus[node.id] || { state: 'valid', messages: [] };
+                nodeEl.classList.toggle('has-error', valStatus.state === 'error');
+                nodeEl.classList.toggle('has-warning', valStatus.state === 'warning');
+
+                const header = nodeEl.querySelector('.node-header') as HTMLElement;
+                if (header) {
+                    let errorBadge = header.querySelector('.node-validation-icon.error') as HTMLElement;
+                    if (!errorBadge) {
+                        errorBadge = document.createElement('span');
+                        errorBadge.className = 'node-validation-icon error';
+                        errorBadge.textContent = '❌';
+                        header.appendChild(errorBadge);
+                    }
+                    let warningBadge = header.querySelector('.node-validation-icon.warning') as HTMLElement;
+                    if (!warningBadge) {
+                        warningBadge = document.createElement('span');
+                        warningBadge.className = 'node-validation-icon warning';
+                        warningBadge.textContent = '⚠️';
+                        header.appendChild(warningBadge);
+                    }
+                    const tooltipText = valStatus.messages.join('\n');
+                    errorBadge.setAttribute('title', tooltipText);
+                    warningBadge.setAttribute('title', tooltipText);
+                }
+
 
 
                 const displayMode = node.displayMode || 'normal';
@@ -1795,6 +1853,8 @@ export class GraphRenderer {
     private updateConnections(state: SimulationState): void {
         this.svg.innerHTML = '';
         this.updateModelRegions();
+        const valResults = this.validateGraph(state);
+
         state.connections.forEach(edge => {
             const fromNode = state.nodes.find(n => n.id === edge.fromNode);
             const toNode = state.nodes.find(n => n.id === edge.toNode);
@@ -1827,23 +1887,44 @@ export class GraphRenderer {
                 group.classList.add('selected');
             }
 
+            const connKey = `${edge.fromNode}:${edge.fromPort}->${edge.toNode}:${edge.toPort}`;
+            const flawMsg = valResults.flawedConnections.get(connKey);
+            const isFlawed = flawMsg !== undefined;
+
+            if (isFlawed) {
+                group.classList.add('flawed');
+            }
+
             const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
             const d = `M ${fromPos.x} ${fromPos.y} C ${cp1X} ${cp1Y}, ${cp2X} ${cp2Y}, ${toPos.x} ${toPos.y}`;
             path.setAttribute('d', d);
-            path.setAttribute('class', 'edge-path');
+            
+            if (isFlawed) {
+                path.setAttribute('class', 'edge-path flawed');
+                const titleEl = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+                titleEl.textContent = `Warning: ${flawMsg}`;
+                group.appendChild(titleEl);
+            } else {
+                path.setAttribute('class', 'edge-path');
+            }
 
             const fromModelId = this.stateManager.getAllModels().find(m => m.nodes.some(n => n.id === edge.fromNode))?.id;
             const toModelId = this.stateManager.getAllModels().find(m => m.nodes.some(n => n.id === edge.toNode))?.id;
 
-            if (fromModelId && toModelId && fromModelId === toModelId) {
+            if (isFlawed) {
+                path.setAttribute('stroke', '#ef4444');
+                path.setAttribute('stroke-width', '3');
+            } else if (fromModelId && toModelId && fromModelId === toModelId) {
                 const colors = this.getModelColors(fromModelId);
                 path.setAttribute('stroke', colors.base);
+                path.setAttribute('stroke-width', '2');
             } else {
                 path.setAttribute('stroke', '#a855f7');
                 path.setAttribute('stroke-dasharray', '2, 2');
+                path.setAttribute('stroke-width', '2');
             }
-            path.setAttribute('stroke-width', '2');
             path.setAttribute('fill', 'none');
+
 
             const interactivePath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
             interactivePath.setAttribute('d', d);
@@ -2530,6 +2611,79 @@ export class GraphRenderer {
         });
 
         this.stateManager.pushState(state);
+        this.fitToView();
+    }
+
+    private saveViewportState(): void {
+        if (this.viewportSaveTimeout) clearTimeout(this.viewportSaveTimeout);
+        this.viewportSaveTimeout = setTimeout(() => {
+            this.stateManager.updatePanelOptions(this.panelId, {
+                zoom: this.zoom,
+                panX: this.panX,
+                panY: this.panY
+            });
+        }, 300);
+    }
+
+    public fitToView(): void {
+        const state = this.stateManager.getCurrentState();
+        if (!state || state.nodes.length === 0) {
+            this.zoom = 1.0;
+            this.panX = 0;
+            this.panY = 0;
+            this.updateTransform();
+            return;
+        }
+
+        // Calculate bounding box of all nodes
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+
+        state.nodes.forEach(node => {
+            const w = this.getNodeEstimatedWidth(node);
+            const h = this.getNodeEstimatedHeight(node);
+            if (node.x < minX) minX = node.x;
+            if (node.y < minY) minY = node.y;
+            if (node.x + w > maxX) maxX = node.x + w;
+            if (node.y + h > maxY) maxY = node.y + h;
+        });
+
+        const modelW = maxX - minX;
+        const modelH = maxY - minY;
+
+        const viewRect = this.viewport.getBoundingClientRect();
+        const viewW = viewRect.width || this.viewport.offsetWidth || 800;
+        const viewH = viewRect.height || this.viewport.offsetHeight || 600;
+
+        const padding = 40;
+        const availW = viewW - padding * 2;
+        const availH = viewH - padding * 2;
+
+        let newZoom = 1.0;
+        if (modelW > 0 && modelH > 0 && availW > 0 && availH > 0) {
+            newZoom = Math.min(availW / modelW, availH / modelH);
+        }
+        
+        // Clamp zoom level to the same bounds as onWheel
+        this.zoom = Math.min(Math.max(newZoom, 0.2), 1.5);
+
+        const modelCenterX = minX + modelW / 2;
+        const modelCenterY = minY + modelH / 2;
+
+        this.panX = viewW / 2 - modelCenterX * this.zoom;
+        this.panY = viewH / 2 - modelCenterY * this.zoom;
+
+        this.updateTransform();
+        
+        // Save immediately
+        if (this.viewportSaveTimeout) clearTimeout(this.viewportSaveTimeout);
+        this.stateManager.updatePanelOptions(this.panelId, {
+            zoom: this.zoom,
+            panX: this.panX,
+            panY: this.panY
+        });
     }
 
     private getAveragePredecessorY(nodeId: string, connections: Connection[], nodes: Node[]): number {
@@ -2565,4 +2719,145 @@ export class GraphRenderer {
         }
         return Math.max(base, 60);
     }
+
+    private validateGraph(state: SimulationState): {
+        nodeStatus: Record<string, { state: 'error' | 'warning' | 'valid'; messages: string[] }>;
+        flawedConnections: Map<string, string>;
+    } {
+        const nodeStatus: Record<string, { state: 'error' | 'warning' | 'valid'; messages: string[] }> = {};
+        const flawedConnections = new Map<string, string>();
+
+        // Initialize node status
+        state.nodes.forEach(node => {
+            nodeStatus[node.id] = { state: 'valid', messages: [] };
+        });
+
+        const solverNode = state.nodes.find(n => n.type === 'CFDSolver');
+        const initMode = solverNode?.parameters['init_mode'] || 'Multi-Material JWL';
+
+        // 1. CFD Solver Validation
+        if (solverNode) {
+            const painterConn = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'in');
+            if (!painterConn) {
+                nodeStatus[solverNode.id].state = 'error';
+                nodeStatus[solverNode.id].messages.push("CFD Solver is not connected to the Initializer (ThePainter).");
+            } else {
+                const painterNode = state.nodes.find(n => n.id === painterConn.fromNode);
+                if (!painterNode || painterNode.type !== 'ThePainter') {
+                    flawedConnections.set(
+                        `${painterConn.fromNode}:${painterConn.fromPort}->${painterConn.toNode}:${painterConn.toPort}`,
+                        "CFD Solver 'Initial State' port must be connected to the Initializer (ThePainter)."
+                    );
+                    nodeStatus[solverNode.id].state = 'error';
+                    nodeStatus[solverNode.id].messages.push("CFD Solver 'Initial State' port must be connected to the Initializer (ThePainter).");
+                }
+            }
+        }
+
+        // 2. ThePainter Validation
+        const painterNodes = state.nodes.filter(n => n.type === 'ThePainter');
+        painterNodes.forEach(painterNode => {
+            // Mesh connection check
+            const meshConn = state.connections.find(c => c.toNode === painterNode.id && c.toPort === 'mesh');
+            if (!meshConn) {
+                nodeStatus[painterNode.id].state = 'error';
+                nodeStatus[painterNode.id].messages.push("No Mesh node connected to Initializer. A DomainMesh node is required.");
+            } else {
+                const fromNode = state.nodes.find(n => n.id === meshConn.fromNode);
+                if (!fromNode || fromNode.type !== 'DomainMesh') {
+                    flawedConnections.set(
+                        `${meshConn.fromNode}:${meshConn.fromPort}->${meshConn.toNode}:${meshConn.toPort}`,
+                        "Only DomainMesh node can be connected to the Mesh input."
+                    );
+                    nodeStatus[painterNode.id].state = 'error';
+                    nodeStatus[painterNode.id].messages.push("Only DomainMesh node can be connected to the Mesh input.");
+                }
+            }
+
+            // Air connection check
+            const airConn = state.connections.find(c => c.toNode === painterNode.id && c.toPort === 'air');
+            if (!airConn) {
+                nodeStatus[painterNode.id].state = 'error';
+                nodeStatus[painterNode.id].messages.push("No Air node connected to Initializer. A MaterialAir node is required.");
+            } else {
+                const fromNode = state.nodes.find(n => n.id === airConn.fromNode);
+                if (!fromNode || fromNode.type !== 'MaterialAir') {
+                    flawedConnections.set(
+                        `${airConn.fromNode}:${airConn.fromPort}->${airConn.toNode}:${airConn.toPort}`,
+                        "Only MaterialAir node can be connected to the Air input."
+                    );
+                    nodeStatus[painterNode.id].state = 'error';
+                    nodeStatus[painterNode.id].messages.push("Only MaterialAir node can be connected to the Air input.");
+                }
+            }
+
+            // Explosive connection check
+            const expConn = state.connections.find(c => c.toNode === painterNode.id && c.toPort === 'explosive');
+            if (!expConn) {
+                if (nodeStatus[painterNode.id].state === 'valid') {
+                    nodeStatus[painterNode.id].state = 'warning';
+                }
+                nodeStatus[painterNode.id].messages.push("No Explosive node connected to Initializer. Simulation will run with NO explosive charge.");
+            } else {
+                const expNode = state.nodes.find(n => n.id === expConn.fromNode);
+                if (expNode) {
+                    if (expNode.type !== 'MaterialExplosive' && expNode.type !== 'MaterialIdealGas') {
+                        flawedConnections.set(
+                            `${expConn.fromNode}:${expConn.fromPort}->${expConn.toNode}:${expConn.toPort}`,
+                            "Only MaterialExplosive or MaterialIdealGas node can be connected to the Explosive input."
+                        );
+                        nodeStatus[painterNode.id].state = 'error';
+                        nodeStatus[painterNode.id].messages.push("Only MaterialExplosive or MaterialIdealGas node can be connected to the Explosive input.");
+                    } else if (initMode === 'Ideal Gas' && expNode.type === 'MaterialExplosive') {
+                        flawedConnections.set(
+                            `${expConn.fromNode}:${expConn.fromPort}->${expConn.toNode}:${expConn.toPort}`,
+                            "Solver physics is set to 'Ideal Gas' (1-material air), but explosive input is a 'MaterialExplosive' (HE-JWL) node. Connect a 'MaterialIdealGas' (IG-CHG) node instead."
+                        );
+                        
+                        if (nodeStatus[expNode.id].state !== 'error') nodeStatus[expNode.id].state = 'warning';
+                        nodeStatus[expNode.id].messages.push("Solver physics is set to 'Ideal Gas' (1-material air), but explosive input is a 'MaterialExplosive' (HE-JWL) node. Connect a 'MaterialIdealGas' (IG-CHG) node instead.");
+                        
+                        if (solverNode) {
+                            if (nodeStatus[solverNode.id].state !== 'error') nodeStatus[solverNode.id].state = 'warning';
+                            nodeStatus[solverNode.id].messages.push("Solver physics is set to 'Ideal Gas' (1-material air), but explosive input is a 'MaterialExplosive' (HE-JWL) node. Connect a 'MaterialIdealGas' (IG-CHG) node instead.");
+                        }
+                    } else if (initMode === 'Multi-Material JWL' && expNode.type === 'MaterialIdealGas') {
+                        flawedConnections.set(
+                            `${expConn.fromNode}:${expConn.fromPort}->${expConn.toNode}:${expConn.toPort}`,
+                            "Solver physics is set to 'Multi-Material JWL', but explosive input is a 'MaterialIdealGas' (IG-CHG) node. Connect a 'MaterialExplosive' (HE-JWL) node instead."
+                        );
+                        
+                        if (nodeStatus[expNode.id].state !== 'error') nodeStatus[expNode.id].state = 'warning';
+                        nodeStatus[expNode.id].messages.push("Solver physics is set to 'Multi-Material JWL', but explosive input is a 'MaterialIdealGas' (IG-CHG) node. Connect a 'MaterialExplosive' (HE-JWL) node instead.");
+                        
+                        if (solverNode) {
+                            if (nodeStatus[solverNode.id].state !== 'error') nodeStatus[solverNode.id].state = 'warning';
+                            nodeStatus[solverNode.id].messages.push("Solver physics is set to 'Multi-Material JWL', but explosive input is a 'MaterialIdealGas' (IG-CHG) node. Connect a 'MaterialExplosive' (HE-JWL) node instead.");
+                        }
+                    }
+                }
+            }
+        });
+
+        // 3. Telemetry Nodes Validation
+        state.nodes.forEach(node => {
+            if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph') {
+                const conn = state.connections.find(c => c.toNode === node.id && c.toPort === 'in');
+                if (conn) {
+                    const fromNode = state.nodes.find(n => n.id === conn.fromNode);
+                    if (!fromNode || fromNode.type !== 'CFDSolver') {
+                        flawedConnections.set(
+                            `${conn.fromNode}:${conn.fromPort}->${conn.toNode}:${conn.toPort}`,
+                            "Telemetry input must be connected to a CFD Solver."
+                        );
+                        nodeStatus[node.id].state = 'warning';
+                        nodeStatus[node.id].messages.push("Telemetry input must be connected to a CFD Solver.");
+                    }
+                }
+            }
+        });
+
+        return { nodeStatus, flawedConnections };
+    }
 }
+

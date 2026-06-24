@@ -7,7 +7,8 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-CFDSolver::CFDSolver(int num_cells, double domain_radius, double gamma)
+template <bool IsMultiMaterial>
+CFDSolverImpl<IsMultiMaterial>::CFDSolverImpl(int num_cells, double domain_radius, double gamma)
     : n_cells(num_cells), radius(domain_radius), gamma(gamma), currentTime(0.0), currentScheme(RUSANOV),
       ambient_rho(1.2), ambient_p(101325.0), active_r_idx(num_cells) {
     dr = radius / n_cells;
@@ -30,7 +31,8 @@ CFDSolver::CFDSolver(int num_cells, double domain_radius, double gamma)
     }
 }
 
-void CFDSolver::setFluxScheme(const std::string& scheme_name) {
+template <bool IsMultiMaterial>
+void CFDSolverImpl<IsMultiMaterial>::setFluxScheme(const std::string& scheme_name) {
     if (scheme_name == "ausm_plus" || scheme_name == "AUSMPlus" || scheme_name == "ausm+" || scheme_name == "AUSM+") {
         currentScheme = AUSM_PLUS;
     } else {
@@ -38,7 +40,8 @@ void CFDSolver::setFluxScheme(const std::string& scheme_name) {
     }
 }
 
-void CFDSolver::setInitialConditionTNT(double explosive_radius, double high_rho, double ambient_rho, double ambient_p) {
+template <bool IsMultiMaterial>
+void CFDSolverImpl<IsMultiMaterial>::setInitialConditionTNT(double explosive_radius, double high_rho, double ambient_rho, double ambient_p) {
     this->ambient_rho = ambient_rho;
     this->ambient_p = ambient_p;
     for (int i = 0; i < n_cells; ++i) {
@@ -46,15 +49,23 @@ void CFDSolver::setInitialConditionTNT(double explosive_radius, double high_rho,
         if (r <= explosive_radius) {
             states[i].rho = high_rho;
             states[i].p = ambient_p;
-            states[i].alpha1 = 0; states[i].alpha2 = 1.0;
-            states[i].arho1 = 0; states[i].arho2 = high_rho;
-            states[i].u = 0; states[i].E = states[i].rho * MultiMat::getEnergy_JWL(ambient_p, high_rho, currentMaterials.unreacted);
+            states[i].u = 0;
+            if constexpr (IsMultiMaterial) {
+                states[i].alpha1 = 0; states[i].alpha2 = 1.0;
+                states[i].arho1 = 0; states[i].arho2 = high_rho;
+                states[i].E = states[i].rho * MultiMat::getEnergy_JWL(ambient_p, high_rho, currentMaterials.unreacted);
+            } else {
+                states[i].E = states[i].rho * MultiMat::getEnergy_IdealGas(ambient_p, high_rho, gamma);
+            }
         } else {
             states[i].rho = ambient_rho;
             states[i].p = ambient_p;
-            states[i].alpha1 = 0; states[i].alpha2 = 0;
-            states[i].arho1 = 0; states[i].arho2 = 0;
-            states[i].u = 0; states[i].E = states[i].rho * MultiMat::getEnergy_IdealGas(ambient_p, ambient_rho, gamma);
+            states[i].u = 0;
+            if constexpr (IsMultiMaterial) {
+                states[i].alpha1 = 0; states[i].alpha2 = 0;
+                states[i].arho1 = 0; states[i].arho2 = 0;
+            }
+            states[i].E = states[i].rho * MultiMat::getEnergy_IdealGas(ambient_p, ambient_rho, gamma);
         }
     }
     active_r_idx = static_cast<int>(explosive_radius / dr) + 8;
@@ -63,7 +74,8 @@ void CFDSolver::setInitialConditionTNT(double explosive_radius, double high_rho,
     updateConservativeFromPrimitive(states, U);
 }
 
-void CFDSolver::setInitialConditionIdealGas(double explosive_radius, double high_rho, double detonation_energy, double ambient_rho, double ambient_p) {
+template <bool IsMultiMaterial>
+void CFDSolverImpl<IsMultiMaterial>::setInitialConditionIdealGas(double explosive_radius, double high_rho, double detonation_energy, double ambient_rho, double ambient_p) {
     this->ambient_rho = ambient_rho;
     this->ambient_p = ambient_p;
     for (int i = 0; i < n_cells; ++i) {
@@ -71,15 +83,21 @@ void CFDSolver::setInitialConditionIdealGas(double explosive_radius, double high
         if (r <= explosive_radius) {
             states[i].rho = high_rho;
             states[i].p = (gamma - 1.0) * high_rho * detonation_energy;
-            states[i].alpha1 = 0; states[i].alpha2 = 0;
-            states[i].arho1 = 0; states[i].arho2 = 0;
-            states[i].u = 0; states[i].E = states[i].p / (gamma - 1.0);
+            states[i].u = 0;
+            if constexpr (IsMultiMaterial) {
+                states[i].alpha1 = 0; states[i].alpha2 = 0;
+                states[i].arho1 = 0; states[i].arho2 = 0;
+            }
+            states[i].E = states[i].p / (gamma - 1.0);
         } else {
             states[i].rho = ambient_rho;
             states[i].p = ambient_p;
-            states[i].alpha1 = 0; states[i].alpha2 = 0;
-            states[i].arho1 = 0; states[i].arho2 = 0;
-            states[i].u = 0; states[i].E = states[i].p / (gamma - 1.0);
+            states[i].u = 0;
+            if constexpr (IsMultiMaterial) {
+                states[i].alpha1 = 0; states[i].alpha2 = 0;
+                states[i].arho1 = 0; states[i].arho2 = 0;
+            }
+            states[i].E = states[i].p / (gamma - 1.0);
         }
     }
     active_r_idx = static_cast<int>(explosive_radius / dr) + 8;
@@ -88,7 +106,8 @@ void CFDSolver::setInitialConditionIdealGas(double explosive_radius, double high
     updateConservativeFromPrimitive(states, U);
 }
 
-void CFDSolver::setInitialConditionRoseTNT(double explosive_radius, double high_rho, double chemical_energy, double ambient_rho, double ambient_p, double det_vel) {
+template <bool IsMultiMaterial>
+void CFDSolverImpl<IsMultiMaterial>::setInitialConditionRoseTNT(double explosive_radius, double high_rho, double chemical_energy, double ambient_rho, double ambient_p, double det_vel) {
     this->ambient_rho = ambient_rho;
     this->ambient_p = ambient_p;
     this->currentTime = explosive_radius / det_vel;
@@ -97,30 +116,25 @@ void CFDSolver::setInitialConditionRoseTNT(double explosive_radius, double high_
         if (r <= explosive_radius) {
             states[i].rho = high_rho;
             states[i].p = (gamma - 1.0) * high_rho * chemical_energy;
-            states[i].alpha1 = 0; states[i].alpha2 = 0;
-            states[i].arho1 = 0; states[i].arho2 = 0;
             states[i].u = 0;
+            if constexpr (IsMultiMaterial) {
+                states[i].alpha1 = 0; states[i].alpha2 = 0;
+                states[i].arho1 = 0; states[i].arho2 = 0;
+            }
             states[i].E = states[i].p / (gamma - 1.0);
         } else {
             states[i].rho = ambient_rho;
             states[i].p = ambient_p;
-            states[i].alpha1 = 0; states[i].alpha2 = 0;
-            states[i].arho1 = 0; states[i].arho2 = 0;
             states[i].u = 0;
+            if constexpr (IsMultiMaterial) {
+                states[i].alpha1 = 0; states[i].alpha2 = 0;
+                states[i].arho1 = 0; states[i].arho2 = 0;
+            }
             states[i].E = states[i].p / (gamma - 1.0);
         }
     }
     active_r_idx = static_cast<int>(explosive_radius / dr) + 8;
     if (active_r_idx > n_cells) active_r_idx = n_cells;
     if (active_r_idx < 5) active_r_idx = 5;
-    updateConservativeFromPrimitive(states, U);
-}
-
-void CFDSolver::setCustomInitialCondition(const std::vector<State>& initial_states) {
-    if (initial_states.size() != n_cells) return;
-    for (int i = 0; i < n_cells; ++i) {
-        states[i] = initial_states[i];
-    }
-    active_r_idx = n_cells;
     updateConservativeFromPrimitive(states, U);
 }

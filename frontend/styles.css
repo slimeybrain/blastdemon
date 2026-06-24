@@ -450,6 +450,53 @@ body {
     box-shadow: 0 0 10px #007acc;
 }
 
+.node.has-error {
+    border-color: #ef4444 !important;
+    box-shadow: 0 0 15px rgba(239, 68, 68, 0.4);
+    animation: nodeErrorPulse 2.5s infinite ease-in-out;
+}
+
+.node.has-warning {
+    border-color: #f59e0b !important;
+    box-shadow: 0 0 12px rgba(245, 158, 11, 0.3);
+    animation: nodeWarningPulse 2.5s infinite ease-in-out;
+}
+
+@keyframes nodeErrorPulse {
+    0%, 100% {
+        box-shadow: 0 0 8px rgba(239, 68, 68, 0.3);
+    }
+    50% {
+        box-shadow: 0 0 20px rgba(239, 68, 68, 0.7);
+    }
+}
+
+@keyframes nodeWarningPulse {
+    0%, 100% {
+        box-shadow: 0 0 6px rgba(245, 158, 11, 0.2);
+    }
+    50% {
+        box-shadow: 0 0 16px rgba(245, 158, 11, 0.6);
+    }
+}
+
+.node-validation-icon {
+    font-size: 11px;
+    margin-left: auto;
+    cursor: help;
+    display: none;
+    user-select: none;
+}
+
+.node.has-error .node-validation-icon.error {
+    display: inline-block;
+}
+
+.node.has-warning:not(.has-error) .node-validation-icon.warning {
+    display: inline-block;
+}
+
+
 .node-header {
     background: #444;
     padding: 4px 8px;
@@ -588,6 +635,28 @@ body {
     stroke: #00f0ff !important;
     filter: drop-shadow(0 0 5px #00f0ff);
 }
+
+.edge-path.flawed {
+    stroke: #ef4444 !important;
+    stroke-width: 3px !important;
+    stroke-dasharray: 6, 4;
+    animation: flowError 0.8s linear infinite;
+}
+
+.edge-group.flawed:hover .edge-path.flawed {
+    stroke-width: 4.5px !important;
+    filter: drop-shadow(0 0 4px rgba(239, 68, 68, 0.6));
+}
+
+@keyframes flowError {
+    from {
+        stroke-dashoffset: 20;
+    }
+    to {
+        stroke-dashoffset: 0;
+    }
+}
+
 
 .edge-path-interactive {
     fill: none;
@@ -898,24 +967,7 @@ canvas {
     color: #666;
     white-space: nowrap;
 }
-.telemetry-channel-select {
-    background: #252530;
-    color: #ccc;
-    border: 1px solid #444;
-    border-radius: 2px;
-    font-size: var(--font-xs);
-    font-family: var(--font-ui);
-    padding: 0 3px;
-    height: 14px;
-    cursor: pointer;
-    outline: none;
-    flex: 1;
-    min-width: 0;
-}
-.telemetry-channel-select:hover {
-    border-color: #00f0ff;
-    color: #fff;
-}
+
 
 /* Custom Select Dropdowns */
 .custom-select-container {

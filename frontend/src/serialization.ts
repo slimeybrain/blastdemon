@@ -63,6 +63,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 if (expConn) {
                     const expNode = state.nodes.find(n => n.id === expConn.fromNode);
                     if (expNode) {
+                        flattenedParams['explosive_type'] = expNode.type;
                         // Clear composition beforehand so we don't carry TNT composition if connecting an IdealGas charge
                         if (expNode.type === 'MaterialIdealGas') {
                             delete flattenedParams['composition'];

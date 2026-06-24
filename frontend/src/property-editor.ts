@@ -103,8 +103,6 @@ export class PropertyEditor {
                         if (expNode) {
                             if (initMode === 'Ideal Gas' && expNode.type === 'MaterialExplosive') {
                                 warnings.push("Solver physics is set to 'Ideal Gas' (1-material air), but explosive input is a 'MaterialExplosive' (HE-JWL) node. Connect a 'MaterialIdealGas' (IG-CHG) node instead.");
-                            } else if (initMode === 'Multi-Material JWL' && expNode.type === 'MaterialIdealGas') {
-                                warnings.push("Solver physics is set to 'Multi-Material JWL', but explosive input is a 'MaterialIdealGas' (IG-CHG) node. Connect a 'MaterialExplosive' (HE-JWL) node instead.");
                             }
                         }
                     }
