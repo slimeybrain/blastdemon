@@ -1094,11 +1094,27 @@ class MenuBarComponent {
     }
 }
 
+const NODE_ICONS: Record<string, string> = {
+    'DomainMesh': '🌐',
+    'MaterialAir': '💨',
+    'MaterialExplosive': '💥',
+    'MaterialIdealGas': '🫧',
+    'ThePainter': '🎨',
+    'CFDSolver': '⚡',
+    'TelemetryText': '📝',
+    'TelemetryGraph': '📈'
+};
+
+function getNodeIcon(type: string): string {
+    return NODE_ICONS[type] || '📦';
+}
+
 class OutlinerComponent {
     public container: HTMLElement;
     private stateManager: StateManager;
     private listener: () => void;
     private selectionListener: () => void;
+    private collapsedNodes: Set<string> = new Set();
 
     constructor(parent: HTMLElement, stateManager: StateManager) {
         this.container = document.createElement('div');
@@ -1232,7 +1248,7 @@ class OutlinerComponent {
             const list = document.createElement('ul');
             list.style.listStyle = 'none';
             list.style.padding = '0';
-            list.style.margin = '4px 0 0 12px';
+            list.style.margin = '4px 0 0 0';
 
             const renderNodeTree = (nodeId: string, parentEl: HTMLElement, level: number, visited: Set<string>) => {
                 if (visited.has(nodeId)) return;
@@ -1241,29 +1257,96 @@ class OutlinerComponent {
                 const node = model.nodes.find(n => n.id === nodeId);
                 if (!node) return;
 
-                const li = document.createElement('li');
-                li.className = this.stateManager.getSelectedNodeId() === node.id ? 'selected' : '';
-                li.style.padding = '4px 8px';
-                li.style.cursor = 'pointer';
-                li.style.borderBottom = '1px solid #222';
-                li.textContent = `${node.type} (${node.id})`;
-                li.onclick = (e) => {
-                    e.stopPropagation();
-                    this.stateManager.setSelectedNode(node.id);
-                };
-                parentEl.appendChild(li);
-
                 const children = model.connections
                     .filter(c => c.fromNode === nodeId)
                     .map(c => c.toNode);
 
-                if (children.length > 0) {
+                const unvisitedChildren = children.filter(cId => !visited.has(cId));
+
+                const li = document.createElement('li');
+                li.className = 'outliner-item';
+                li.style.listStyle = 'none';
+                li.style.margin = '0';
+                li.style.padding = '0';
+
+                const row = document.createElement('div');
+                row.className = 'outliner-node-row';
+                if (this.stateManager.getSelectedNodeId() === node.id) {
+                    row.classList.add('selected');
+                }
+
+                // Indentation of the row based on level
+                const indent = level * 12;
+                row.style.paddingLeft = `${indent + 6}px`;
+                row.style.paddingTop = '6px';
+                row.style.paddingBottom = '6px';
+                row.style.paddingRight = '8px';
+
+                // Arrow
+                const arrow = document.createElement('span');
+                arrow.className = 'outliner-node-arrow';
+                const isCollapsed = this.collapsedNodes.has(node.id);
+
+                if (unvisitedChildren.length > 0) {
+                    arrow.innerHTML = isCollapsed ? '▶' : '▼';
+                    arrow.onclick = (e) => {
+                        e.stopPropagation();
+                        if (isCollapsed) {
+                            this.collapsedNodes.delete(node.id);
+                        } else {
+                            this.collapsedNodes.add(node.id);
+                        }
+                        this.render();
+                    };
+                } else {
+                    arrow.innerHTML = '&nbsp;';
+                    arrow.style.opacity = '0';
+                }
+                row.appendChild(arrow);
+
+                // Icon
+                const icon = document.createElement('span');
+                icon.className = 'outliner-node-icon';
+                icon.innerHTML = getNodeIcon(node.type);
+                icon.style.marginRight = '4px';
+                row.appendChild(icon);
+
+                // Label
+                const label = document.createElement('span');
+                label.className = 'outliner-node-label';
+                
+                const typeSpan = document.createElement('span');
+                typeSpan.textContent = node.type;
+                typeSpan.style.fontWeight = '500';
+                
+                const idSpan = document.createElement('span');
+                idSpan.textContent = ` (${node.id})`;
+                idSpan.style.color = '#888';
+                idSpan.style.fontSize = '10px';
+
+                label.appendChild(typeSpan);
+                label.appendChild(idSpan);
+                row.appendChild(label);
+
+                row.onclick = (e) => {
+                    e.stopPropagation();
+                    this.stateManager.setSelectedNode(node.id);
+                };
+
+                li.appendChild(row);
+                parentEl.appendChild(li);
+
+                if (unvisitedChildren.length > 0) {
                     const subUl = document.createElement('ul');
+                    subUl.className = 'outliner-sub-list';
                     subUl.style.listStyle = 'none';
                     subUl.style.padding = '0';
                     subUl.style.margin = '0';
-                    parentEl.appendChild(subUl);
-                    children.forEach(childId => renderNodeTree(childId, subUl, level + 1, visited));
+                    if (isCollapsed) {
+                        subUl.style.display = 'none';
+                    }
+                    li.appendChild(subUl);
+                    unvisitedChildren.forEach(childId => renderNodeTree(childId, subUl, level + 1, visited));
                 }
             };
 

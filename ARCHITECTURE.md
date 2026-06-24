@@ -51,7 +51,7 @@ The backend is split into two separate processes that communicate via OS standar
 ## 4. Frontend State Management
 
 - **The DAG (Directed Acyclic Graph):** The global structure consists of `Node` interfaces and `Connection` interfaces (replacing legacy `Edge` terminology).
-- **Serialization:** `serializeForSolver` explicitly builds the `nodes` and `connections` arrays from the live state for the `INIT` payload.
+- **Serialization:** `serializeForSolver` strictly traces connected paths (from `CFDSolver` through `ThePainter` to the connected `DomainMesh`, `MaterialAir`, and `MaterialExplosive`/`MaterialIdealGas` inputs) to compile parameters. Parameters of disconnected nodes are ignored; if the explosive node is disconnected, `charge_mass` and `explosive_radius` default to `0.0`.
 - **Persistence:** `StateManager` handles workspace persistence using browser `localStorage` under the key `blast_workspace`. It mandates automatic synchronization on every state mutation and uses defensive hydration with a `try/catch` fallback.
 - **Node Properties:** Standard nodes contain coordinates, `type`, `parameters`, `inputs`, `outputs`, a `displayMode` ('compact' | 'collapsed'), and optional `width`/`height` dimensions.
 
@@ -67,7 +67,9 @@ The backend is split into two separate processes that communicate via OS standar
 
 ### GraphRenderer (The Node Graph)
 - **Viewport Structure:** Dynamically creates an infinite canvas within the parent container (viewport -> canvas-container -> absolute node layer & SVG Bezier paths).
-- **Aesthetics:** Data-type port coloration (Domain: Blue #2563eb, Material: Slate #64748b, Explosive: Red #dc2626, Telemetry: Green #16a34a). Headers embed specific SVG icons.
+- **Aesthetics:** Data-type port coloration (Domain: Blue #2563eb, Material: Slate #64748b, Explosive: Red #dc2626, Telemetry: Green #16a34a). Node headers display full descriptive names (e.g. `Material - Explosive (JWL)`) instead of compact initials, allowing node widths to dynamically auto-expand to show the full name.
+- **Header Controls:** The orient and collapse buttons are placed on the left side of the header (`justify-content: flex-start` with a `gap: 8px` on `.node-header`), ensuring they stay in a constant position relative to the node when zoom or node width changes.
+- **Scale & Transform:** Default view scale zoom is initialized to `1.25` (expanded) and applied immediately in the constructor via `updateTransform()`.
 - **Ergonomics:** Wires have magnetic snapping (15px threshold) with a glowing cyan (#00f0ff) ring outline. Ports highlight on hover (10px threshold).
 - **Stability:** Wire anchor points are calculated against physical DOM elements (`.port-bullet`) via `getBoundingClientRect()` on every animation frame to ensure perfect attachment. `ResizeObserver` instances trigger redraws on layout shifts.
 - **Direction:** Supports vertical vs. horizontal sequencing toggle from the panel header, adjusting layout flow and cubic Bezier control vectors dynamically.
@@ -78,7 +80,9 @@ The backend is split into two separate processes that communicate via OS standar
 - **Canvas Resolution Sync:** The main thread fetches `getBoundingClientRect()` bounds to set `canvas.width/height` BEFORE executing `transferControlToOffscreen()`.
 - **Resize Handling:** Workers listen for resize messages and execute `requestAnimationFrame(render)` immediately.
 - **Drawing Loop:** Implements dynamic auto-scaling and pixel binning. Uses a strict 40-pixel padding margin and `#475569` baseline reference axes.
-- **Lifecycle:** Paths are strictly wrapper via `ctx.beginPath()`, colored bright green (`#00ff00`, width 2), and committed via `ctx.stroke()`.
+- **Plotting Channels:** Supports plotting of pressure, density, velocity, internal energy, and mass fraction telemetry data.
+- **Throttled Rendering:** Telemetry graphs support a plot stride (`plot_stride`) control allowing the user to select the plot rate (every 1, 2, 5, 10, 20, 50, 100 frames) to throttle chart redraws and maintain UI responsiveness.
+- **Lifecycle:** Paths are strictly wrapped via `ctx.beginPath()`, colored using the selected channel color, and committed via `ctx.stroke()`.
 - **Feedback Loop:** The worker calculates dynamic bounds (minY, maxY) and posts them back to the main thread via `postMessage({ type: 'bounds', minY, maxY })`.
 
 ### NodeViewer
@@ -104,7 +108,7 @@ The backend is split into two separate processes that communicate via OS standar
 
 ### Other Panels
 - **OUTLINER:** Renders a hierarchical DAG via nested `<ul>` and `<li>` lists starting strictly from Root nodes (0 incoming connections).
-- **PROPERTIES:** Includes an 'I/O Connections' sector listing inputs/outputs driven strictly by the global `state.connections` store.
+- **PROPERTIES:** Includes an 'I/O Connections' sector listing inputs/outputs driven strictly by the global `state.connections` store. Displays descriptive validation warning boxes if key connections (CFD Solver, DomainMesh, MaterialAir, or MaterialExplosive) are missing from the graph path.
 
 ## 7. Development & CI Lifecycle
 

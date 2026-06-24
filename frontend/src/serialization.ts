@@ -18,22 +18,67 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
     const numericKeys = [
         'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature',
         'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
-        'jwl_R1', 'jwl_R2', 'jwl_omega', 'cfl', 'output_interval',
+        'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl', 'output_interval',
         'spatial_order', 'temporal_order',
         'n_cells', 'gamma', 'explosive_radius', 'ambient_rho'
     ];
 
-    // Flatten all parameters from all nodes into a single configuration object
     const flattenedParams: Record<string, any> = {};
-    state.nodes.forEach(node => {
-        Object.entries(node.parameters).forEach(([key, value]) => {
-            if (numericKeys.includes(key)) {
-                flattenedParams[key] = Number(value);
-            } else {
-                flattenedParams[key] = value;
-            }
+
+    // 1. Trace active connections to strictly copy connected parameters
+    const solverNode = state.nodes.find(n => n.type === 'CFDSolver');
+    if (solverNode) {
+        // Apply active solver parameters
+        Object.entries(solverNode.parameters).forEach(([key, value]) => {
+            flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
         });
-    });
+
+        // Trace from solver's 'in' port
+        const solverConn = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'in');
+        if (solverConn) {
+            const painterNode = state.nodes.find(n => n.id === solverConn.fromNode);
+            if (painterNode && painterNode.type === 'ThePainter') {
+                // Trace painter inputs
+                const meshConn = state.connections.find(c => c.toNode === painterNode.id && c.toPort === 'mesh');
+                if (meshConn) {
+                    const meshNode = state.nodes.find(n => n.id === meshConn.fromNode);
+                    if (meshNode) {
+                        Object.entries(meshNode.parameters).forEach(([key, value]) => {
+                            flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                        });
+                    }
+                }
+
+                const airConn = state.connections.find(c => c.toNode === painterNode.id && c.toPort === 'air');
+                if (airConn) {
+                    const airNode = state.nodes.find(n => n.id === airConn.fromNode);
+                    if (airNode) {
+                        Object.entries(airNode.parameters).forEach(([key, value]) => {
+                            flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                        });
+                    }
+                }
+
+                const expConn = state.connections.find(c => c.toNode === painterNode.id && c.toPort === 'explosive');
+                if (expConn) {
+                    const expNode = state.nodes.find(n => n.id === expConn.fromNode);
+                    if (expNode) {
+                        // Clear composition beforehand so we don't carry TNT composition if connecting an IdealGas charge
+                        if (expNode.type === 'MaterialIdealGas') {
+                            delete flattenedParams['composition'];
+                        }
+                        const initMode = solverNode?.parameters['init_mode'] || 'Multi-Material JWL';
+                        Object.entries(expNode.parameters).forEach(([key, value]) => {
+                            if (key === 'gamma' && (initMode === 'Ideal Gas' || expNode.type === 'MaterialIdealGas')) {
+                                return; // Skip gamma to prevent overriding the air's gamma in ideal gas mode
+                            }
+                            flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                        });
+                    }
+                }
+            }
+        }
+    }
 
     // Derived parameters for backend (Zero-Omission Phase)
     if (command === "INIT") {
@@ -41,15 +86,24 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         const dx = flattenedParams['cell_size'] || 0.001;
         flattenedParams['n_cells'] = Math.round(radius / dx);
 
-        flattenedParams['gamma'] = 1.4; // Default air
+        // gamma comes from MaterialAir's gamma parameter (default 1.4 if not set)
+        if (!flattenedParams['gamma']) flattenedParams['gamma'] = 1.4;
 
-        const mass = flattenedParams['charge_mass'] || 1.0;
+        const mass = flattenedParams['charge_mass'] !== undefined ? flattenedParams['charge_mass'] : 0.0;
         const rho = flattenedParams['rho'] || 1630.0;
-        flattenedParams['explosive_radius'] = Math.pow((3.0 * mass) / (4.0 * Math.PI * rho), 1.0/3.0);
+        flattenedParams['charge_mass'] = mass;
+        flattenedParams['rho'] = rho;
+        flattenedParams['explosive_radius'] = mass > 0 ? Math.pow((3.0 * mass) / (4.0 * Math.PI * rho), 1.0/3.0) : 0.0;
 
         const p = flattenedParams['atm_pressure'] || 101325.0;
         const t = flattenedParams['atm_temperature'] || 298.15;
         flattenedParams['ambient_rho'] = p / (287.058 * t);
+
+        // Ensure init_mode and composition are present with safe defaults
+        if (!flattenedParams['init_mode']) flattenedParams['init_mode'] = 'Multi-Material JWL';
+        if (flattenedParams['init_mode'] === 'Multi-Material JWL' && !flattenedParams['composition']) {
+            flattenedParams['composition'] = 'TNT';
+        }
     }
 
     return JSON.stringify({

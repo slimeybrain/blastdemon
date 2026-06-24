@@ -77,7 +77,12 @@ public:
         return true;
 #else
         if (pipe(stdin_pipe) == -1) return false;
-        if (pipe(stdout_pipe) == -1) return false;
+        if (pipe(stdout_pipe) == -1) {
+            close(stdin_pipe[0]);
+            close(stdin_pipe[1]);
+            stdin_pipe[0] = stdin_pipe[1] = -1;
+            return false;
+        }
 
         pid = fork();
         if (pid == -1) {

@@ -17,7 +17,7 @@ export class GraphRenderer {
     private stateManager: StateManager;
     private panelId: string;
 
-    private zoom: number = 1.0;
+    private zoom: number = 1.25;
     private panX: number = 0;
     private panY: number = 0;
 
@@ -35,6 +35,7 @@ export class GraphRenderer {
 
     private nodeElements: Map<string, HTMLElement> = new Map();
     private nodeWorkers: Map<string, Worker> = new Map();
+    private graphFrameCounters: Map<string, number> = new Map();
     /** Set of node IDs whose resize handle is currently being dragged by the user. */
     private nodeUserResizing: Set<string> = new Set();
     private lastMouseX: number = 0;
@@ -43,6 +44,8 @@ export class GraphRenderer {
     private connectionRafId: number | null = null;
 
     private selectedNodeId: string | null = null;
+    private selectedConnection: Connection | null = null;
+    private detachedConnection: Connection | null = null;
     private spacePressed: boolean = false;
     private snapToGrid: boolean = true;
     private showGrid: boolean = true;
@@ -147,6 +150,7 @@ export class GraphRenderer {
         }
         
         this.updateGridBackground();
+        this.updateTransform();
         this.stateManager.onStateChange(this.stateListener);
         this.stateManager.onTelemetryUpdate(this.telemetryListener);
         this.stateManager.onSelectionChange(this.selectionListener);
@@ -177,6 +181,7 @@ export class GraphRenderer {
                 const widthDiff = Math.abs((node.width || 0) - newWidth);
                 const heightDiff = Math.abs((node.height || 0) - newHeight);
                 if (newWidth > 0 && newHeight > 0 && (widthDiff > 4 || heightDiff > 4)) {
+                    const userIsResizing = this.nodeUserResizing.has(nodeId);
                     const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText';
                     if (isTelemetry && node.displayMode !== 'compact') {
                         // For TelemetryText, only persist new dimensions when the user is
@@ -185,7 +190,6 @@ export class GraphRenderer {
                         // clips it, which would otherwise write a permanently larger height
                         // into state and slide the port downward.
                         const isTelemetryText = node.type === 'TelemetryText';
-                        const userIsResizing = this.nodeUserResizing.has(nodeId);
                         if (!isTelemetryText || userIsResizing) {
                             node.width = newWidth;
                             node.height = newHeight;
@@ -193,8 +197,8 @@ export class GraphRenderer {
                         }
                     }
 
-                    // Automatic mode switching for telemetry nodes
-                    if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph') {
+                    // Automatic mode switching for telemetry nodes (only when user is resizing)
+                    if (userIsResizing && (node.type === 'TelemetryText' || node.type === 'TelemetryGraph')) {
                         let targetMode: 'compact' | 'normal' | 'expanded' = 'normal';
                         if (newHeight < 60) targetMode = 'compact';
                         else if (newHeight >= 180) targetMode = 'expanded';
@@ -311,6 +315,17 @@ export class GraphRenderer {
         } else if (node.type === 'TelemetryGraph' && data) {
             const worker = this.nodeWorkers.get(node.id);
             if (worker) {
+                const plotStride = Number(node.parameters?.plot_stride ?? 1);
+                let currentCount = this.graphFrameCounters.get(node.id) ?? 0;
+                currentCount++;
+                this.graphFrameCounters.set(node.id, currentCount);
+
+                const isTerminated = this.stateManager.getStatus() === 'TERMINATED';
+
+                if (plotStride > 1 && currentCount % plotStride !== 0 && !isTerminated) {
+                    return; // Skip this frame
+                }
+
                 if (data instanceof ArrayBuffer) {
                     const bufferCopy = data.slice(0);
                     worker.postMessage(bufferCopy, [bufferCopy]);
@@ -348,6 +363,8 @@ export class GraphRenderer {
         this.addManagedEventListener(this.viewport, 'click', (e: MouseEvent) => {
             if (e.target === this.viewport || e.target === this.container || e.target === this.svg) {
                 this.selectNode(null);
+                this.selectedConnection = null;
+                this.render();
             }
         });
 
@@ -513,6 +530,7 @@ export class GraphRenderer {
             }
             this.isDraggingWire = false;
             this.hoveredPort = null;
+            this.detachedConnection = null;
             this.render();
         }
 
@@ -530,14 +548,43 @@ export class GraphRenderer {
             if (!this.isDraggingNode) this.viewport.style.cursor = 'grab';
         }
 
-        if ((e.key === 'Delete' || e.key === 'Backspace') && this.selectedNodeId) {
-            const state = this.stateManager.getCurrentState();
-            if (state) {
-                state.nodes = state.nodes.filter(n => n.id !== this.selectedNodeId);
-                state.connections = state.connections.filter(edge => edge.fromNode !== this.selectedNodeId && edge.toNode !== this.selectedNodeId);
-                this.selectNode(null);
-                this.stateManager.pushState(state);
+        if (e.key === 'Delete' || e.key === 'Backspace') {
+            if (this.selectedNodeId) {
+                const state = this.stateManager.getCurrentState();
+                if (state) {
+                    state.nodes = state.nodes.filter(n => n.id !== this.selectedNodeId);
+                    state.connections = state.connections.filter(edge => edge.fromNode !== this.selectedNodeId && edge.toNode !== this.selectedNodeId);
+                    this.selectNode(null);
+                    this.stateManager.pushState(state);
+                }
+            } else if (this.selectedConnection) {
+                const state = this.stateManager.getCurrentState();
+                if (state) {
+                    state.connections = state.connections.filter(conn =>
+                        !(conn.fromNode === this.selectedConnection!.fromNode &&
+                          conn.fromPort === this.selectedConnection!.fromPort &&
+                          conn.toNode === this.selectedConnection!.toNode &&
+                          conn.toPort === this.selectedConnection!.toPort)
+                    );
+                    this.selectedConnection = null;
+                    this.render();
+                    this.stateManager.pushState(state);
+                }
             }
+        }
+
+        if (e.key === 'Escape' && this.isDraggingWire) {
+            this.isDraggingWire = false;
+            this.hoveredPort = null;
+            if (this.detachedConnection) {
+                const state = this.stateManager.getCurrentState();
+                if (state) {
+                    state.connections.push(this.detachedConnection);
+                    this.stateManager.pushState(state);
+                }
+                this.detachedConnection = null;
+            }
+            this.render();
         }
     }
 
@@ -571,13 +618,14 @@ export class GraphRenderer {
         menu.onmousedown = (e) => e.stopPropagation();
 
         const nodeTypes: { label: string, type: NodeType }[] = [
-            { label: 'Domain Mesh', type: 'DomainMesh' },
-            { label: 'Material - Air', type: 'MaterialAir' },
-            { label: 'Material - Explosive', type: 'MaterialExplosive' },
-            { label: 'Initializer', type: 'ThePainter' },
-            { label: 'CFD Solver', type: 'CFDSolver' },
-            { label: 'Telemetry - Text', type: 'TelemetryText' },
-            { label: 'Telemetry - Graph', type: 'TelemetryGraph' }
+            { label: 'Domain Mesh',              type: 'DomainMesh' },
+            { label: 'Material - Air',           type: 'MaterialAir' },
+            { label: 'Material - Explosive (JWL)', type: 'MaterialExplosive' },
+            { label: 'Material - Ideal Gas',     type: 'MaterialIdealGas' },
+            { label: 'Initializer',              type: 'ThePainter' },
+            { label: 'CFD Solver',               type: 'CFDSolver' },
+            { label: 'Telemetry - Text',         type: 'TelemetryText' },
+            { label: 'Telemetry - Graph',        type: 'TelemetryGraph' }
         ];
 
         nodeTypes.forEach(nt => {
@@ -599,6 +647,50 @@ export class GraphRenderer {
         setTimeout(() => window.addEventListener('mousedown', closeMenu), 0);
     }
 
+    private showConnectionContextMenu(x: number, y: number, edge: Connection): void {
+        const existingMenu = document.querySelector('.context-menu');
+        if (existingMenu) existingMenu.remove();
+
+        const menu = document.createElement('div');
+        menu.className = 'context-menu';
+        menu.style.left = `${x}px`;
+        menu.style.top = `${y}px`;
+        menu.onmousedown = (e) => e.stopPropagation();
+
+        const item = document.createElement('div');
+        item.className = 'context-menu-item danger';
+        item.textContent = 'Delete Connection';
+        item.onclick = () => {
+            const state = this.stateManager.getCurrentState();
+            if (state) {
+                state.connections = state.connections.filter(conn =>
+                    !(conn.fromNode === edge.fromNode &&
+                      conn.fromPort === edge.fromPort &&
+                      conn.toNode === edge.toNode &&
+                      conn.toPort === edge.toPort)
+                );
+                if (this.selectedConnection &&
+                    this.selectedConnection.fromNode === edge.fromNode &&
+                    this.selectedConnection.fromPort === edge.fromPort &&
+                    this.selectedConnection.toNode === edge.toNode &&
+                    this.selectedConnection.toPort === edge.toPort) {
+                    this.selectedConnection = null;
+                }
+                this.render();
+                this.stateManager.pushState(state);
+            }
+            menu.remove();
+        };
+        menu.appendChild(item);
+
+        document.body.appendChild(menu);
+        const closeMenu = () => {
+            menu.remove();
+            window.removeEventListener('mousedown', closeMenu);
+        };
+        setTimeout(() => window.addEventListener('mousedown', closeMenu), 0);
+    }
+
     private addNode(type: NodeType, x: number, y: number): void {
         const state = this.stateManager.getCurrentState();
         if (!state) return;
@@ -607,6 +699,7 @@ export class GraphRenderer {
             'DomainMesh': 'node-mesh',
             'MaterialAir': 'node-air',
             'MaterialExplosive': 'node-explosive',
+            'MaterialIdealGas': 'node-idealgas',
             'ThePainter': 'node-painter',
             'CFDSolver': 'node-solver',
             'TelemetryText': 'node-log',
@@ -650,6 +743,7 @@ export class GraphRenderer {
             case 'DomainMesh': return [{ id: 'out', label: 'Mesh' }];
             case 'MaterialAir': return [{ id: 'out', label: 'Material' }];
             case 'MaterialExplosive': return [{ id: 'out', label: 'Material' }];
+            case 'MaterialIdealGas': return [{ id: 'out', label: 'Material' }];
             case 'ThePainter': return [{ id: 'out', label: 'State' }];
             case 'CFDSolver': return [{ id: 'telemetry', label: 'Telemetry' }];
             default: return [];
@@ -669,10 +763,40 @@ export class GraphRenderer {
                 z_min_bc: 'Reflecting',
                 z_max_bc: 'Reflecting'
             };
-            case 'MaterialAir': return { atm_pressure: 101325, atm_temperature: 298.15 };
-            case 'MaterialExplosive': return { charge_mass: 1.0, composition: 'TNT', rho: 1630, detonation_energy: 4520000 };
-            case 'CFDSolver': return { cfl: 0.4, flux_scheme: 'AUSM+', spatial_order: 2, temporal_order: 2, output_mode: 'By Time', output_interval: 0.0001 };
-            case 'TelemetryGraph': return { telemetry_channel: 0, x_axis_mode: 'radius' };
+            case 'MaterialAir': return {
+                gamma: 1.4,
+                atm_pressure: 101325,
+                atm_temperature: 298.15
+            };
+            case 'MaterialExplosive': return {
+                composition: 'TNT',
+                charge_mass: 1.0,
+                rho: 1630,
+                detonation_energy: 4290000,
+                det_vel: 6930,
+                jwl_A: 373.77e9,
+                jwl_B: 3.747e9,
+                jwl_R1: 4.15,
+                jwl_R2: 0.90,
+                jwl_omega: 0.35
+            };
+            case 'MaterialIdealGas': return {
+                // Standalone ideal-gas charge — no JWL composition needed.
+                // Pair with init_mode = 'Ideal Gas' on the CFD Solver.
+                charge_mass: 1.0,
+                rho: 1630,
+                detonation_energy: 4520000
+            };
+            case 'CFDSolver': return {
+                init_mode: 'Multi-Material JWL',
+                cfl: 0.4,
+                flux_scheme: 'AUSM+',
+                spatial_order: 2,
+                temporal_order: 2,
+                output_mode: 'By Time',
+                output_interval: 0.0001
+            };
+            case 'TelemetryGraph': return { telemetry_channel: 0, x_axis_mode: 'radius', plot_stride: 1 };
             default: return {};
         }
     }
@@ -682,6 +806,9 @@ export class GraphRenderer {
     }
 
     private selectNode(nodeId: string | null): void {
+        if (nodeId !== null) {
+            this.selectedConnection = null;
+        }
         this.stateManager.setSelectedNode(nodeId);
         this.handleSelectionChange(nodeId);
     }
@@ -753,14 +880,29 @@ export class GraphRenderer {
 
     private getCompactName(type: NodeType): string {
         switch (type) {
-            case 'DomainMesh': return 'MESH';
-            case 'MaterialAir': return 'AIR';
-            case 'MaterialExplosive': return 'EXPL';
-            case 'ThePainter': return 'INIT';
-            case 'CFDSolver': return 'SOLVER';
-            case 'TelemetryText': return 'LOG';
-            case 'TelemetryGraph': return 'CHART';
+            case 'DomainMesh':      return 'MESH';
+            case 'MaterialAir':     return 'AIR';
+            case 'MaterialExplosive': return 'HE-JWL';
+            case 'MaterialIdealGas': return 'IG-CHG';
+            case 'ThePainter':      return 'INIT';
+            case 'CFDSolver':       return 'SOLVER';
+            case 'TelemetryText':   return 'LOG';
+            case 'TelemetryGraph':  return 'CHART';
             default: return (type as string).toUpperCase();
+        }
+    }
+
+    private getFullNodeName(type: NodeType): string {
+        switch (type) {
+            case 'DomainMesh':        return 'Domain Mesh';
+            case 'MaterialAir':       return 'Material - Air';
+            case 'MaterialExplosive': return 'Material - Explosive (JWL)';
+            case 'MaterialIdealGas':  return 'Material - Ideal Gas';
+            case 'ThePainter':        return 'Initializer';
+            case 'CFDSolver':         return 'CFD Solver';
+            case 'TelemetryText':     return 'Telemetry - Text';
+            case 'TelemetryGraph':    return 'Telemetry - Graph';
+            default: return type;
         }
     }
 
@@ -777,6 +919,7 @@ export class GraphRenderer {
                     worker.terminate();
                     this.nodeWorkers.delete(id);
                 }
+                this.graphFrameCounters.delete(id);
             }
         }
 
@@ -819,9 +962,6 @@ export class GraphRenderer {
 
                     const header = document.createElement('div');
                     header.className = 'node-header';
-                    
-                    let titleHTML = `<span>${this.getCompactName(node.type)}</span>`;
-                    header.innerHTML = titleHTML;
 
                     const buttonGroup = document.createElement('div');
                     buttonGroup.style.display = 'flex';
@@ -840,6 +980,11 @@ export class GraphRenderer {
                     buttonGroup.appendChild(collapseBtn);
 
                     header.appendChild(buttonGroup);
+
+                    const titleSpan = document.createElement('span');
+                    titleSpan.className = 'node-title-span';
+                    titleSpan.textContent = this.getFullNodeName(node.type);
+                    header.appendChild(titleSpan);
 
                     orientBtn.addEventListener('mousedown', (e) => e.stopPropagation());
                     orientBtn.addEventListener('click', (e) => {
@@ -1027,15 +1172,50 @@ export class GraphRenderer {
                                 const colorClass = this.getPortColorClass(node.type, node.inputs[0].id);
                                 p.innerHTML = `<div class="port-bullet vertical ${colorClass}" id="${this.panelId}-port-in-${node.id}-representative"></div>`;
                                 p.addEventListener('mouseup', () => {
-                                    if (this.isDraggingWire) {
-                                        state.connections.push({
-                                            fromNode: this.dragSourceNodeId!,
-                                            fromPort: this.dragSourcePortId!,
-                                            toNode: node.id,
-                                            toPort: node.inputs[0].id
-                                        });
-                                        this.stateManager.pushState(state);
-                                    }
+
+                                                                    if (this.isDraggingWire) {
+
+                                                                        const currentState = this.stateManager.getCurrentState();
+
+                                                                        if (currentState) {
+
+                                                                            const exists = currentState.connections.some(conn =>
+
+                                                                                conn.fromNode === this.dragSourceNodeId &&
+
+                                                                                conn.fromPort === this.dragSourcePortId &&
+
+                                                                                conn.toNode === node.id &&
+
+                                                                                conn.toPort === node.inputs[0].id
+
+                                                                            );
+
+                                                                            if (!exists) {
+
+                                                                                currentState.connections.push({
+
+                                                                                    fromNode: this.dragSourceNodeId!,
+
+                                                                                    fromPort: this.dragSourcePortId!,
+
+                                                                                    toNode: node.id,
+
+                                                                                    toPort: node.inputs[0].id
+
+                                                                                });
+
+                                                                                this.stateManager.pushState(currentState);
+
+                                                                            }
+
+                                                                        }
+
+                                                                    }
+
+                                                                });
+                                p.addEventListener('mousedown', (e) => {
+                                    this.handleInputPortMouseDown(e, node.id, node.inputs[0].id);
                                 });
                                 portsTopEl.appendChild(p);
                             }
@@ -1059,15 +1239,50 @@ export class GraphRenderer {
                                 const colorClass = this.getPortColorClass(node.type, node.inputs[0].id);
                                 p.innerHTML = `<div class="port-bullet ${colorClass}" id="${this.panelId}-port-in-${node.id}-representative"></div>`;
                                 p.addEventListener('mouseup', () => {
-                                    if (this.isDraggingWire) {
-                                        state.connections.push({
-                                            fromNode: this.dragSourceNodeId!,
-                                            fromPort: this.dragSourcePortId!,
-                                            toNode: node.id,
-                                            toPort: node.inputs[0].id
-                                        });
-                                        this.stateManager.pushState(state);
-                                    }
+
+                                                                    if (this.isDraggingWire) {
+
+                                                                        const currentState = this.stateManager.getCurrentState();
+
+                                                                        if (currentState) {
+
+                                                                            const exists = currentState.connections.some(conn =>
+
+                                                                                conn.fromNode === this.dragSourceNodeId &&
+
+                                                                                conn.fromPort === this.dragSourcePortId &&
+
+                                                                                conn.toNode === node.id &&
+
+                                                                                conn.toPort === node.inputs[0].id
+
+                                                                            );
+
+                                                                            if (!exists) {
+
+                                                                                currentState.connections.push({
+
+                                                                                    fromNode: this.dragSourceNodeId!,
+
+                                                                                    fromPort: this.dragSourcePortId!,
+
+                                                                                    toNode: node.id,
+
+                                                                                    toPort: node.inputs[0].id
+
+                                                                                });
+
+                                                                                this.stateManager.pushState(currentState);
+
+                                                                            }
+
+                                                                        }
+
+                                                                    }
+
+                                                                });
+                                p.addEventListener('mousedown', (e) => {
+                                    this.handleInputPortMouseDown(e, node.id, node.inputs[0].id);
                                 });
                                 portsEl.appendChild(p);
                             }
@@ -1094,15 +1309,50 @@ export class GraphRenderer {
                                 const colorClass = this.getPortColorClass(node.type, node.inputs[0].id);
                                 p.innerHTML = `<div class="port-bullet vertical ${colorClass}" id="${this.panelId}-port-in-${node.id}-representative"></div>`;
                                 p.addEventListener('mouseup', () => {
-                                    if (this.isDraggingWire) {
-                                        state.connections.push({
-                                            fromNode: this.dragSourceNodeId!,
-                                            fromPort: this.dragSourcePortId!,
-                                            toNode: node.id,
-                                            toPort: node.inputs[0].id
-                                        });
-                                        this.stateManager.pushState(state);
-                                    }
+
+                                                                    if (this.isDraggingWire) {
+
+                                                                        const currentState = this.stateManager.getCurrentState();
+
+                                                                        if (currentState) {
+
+                                                                            const exists = currentState.connections.some(conn =>
+
+                                                                                conn.fromNode === this.dragSourceNodeId &&
+
+                                                                                conn.fromPort === this.dragSourcePortId &&
+
+                                                                                conn.toNode === node.id &&
+
+                                                                                conn.toPort === node.inputs[0].id
+
+                                                                            );
+
+                                                                            if (!exists) {
+
+                                                                                currentState.connections.push({
+
+                                                                                    fromNode: this.dragSourceNodeId!,
+
+                                                                                    fromPort: this.dragSourcePortId!,
+
+                                                                                    toNode: node.id,
+
+                                                                                    toPort: node.inputs[0].id
+
+                                                                                });
+
+                                                                                this.stateManager.pushState(currentState);
+
+                                                                            }
+
+                                                                        }
+
+                                                                    }
+
+                                                                });
+                                p.addEventListener('mousedown', (e) => {
+                                    this.handleInputPortMouseDown(e, node.id, node.inputs[0].id);
                                 });
                                 portsTopEl.appendChild(p);
                             }
@@ -1126,15 +1376,50 @@ export class GraphRenderer {
                                 const colorClass = this.getPortColorClass(node.type, node.inputs[0].id);
                                 p.innerHTML = `<div class="port-bullet ${colorClass}" id="${this.panelId}-port-in-${node.id}-representative"></div>`;
                                 p.addEventListener('mouseup', () => {
-                                    if (this.isDraggingWire) {
-                                        state.connections.push({
-                                            fromNode: this.dragSourceNodeId!,
-                                            fromPort: this.dragSourcePortId!,
-                                            toNode: node.id,
-                                            toPort: node.inputs[0].id
-                                        });
-                                        this.stateManager.pushState(state);
-                                    }
+
+                                                                    if (this.isDraggingWire) {
+
+                                                                        const currentState = this.stateManager.getCurrentState();
+
+                                                                        if (currentState) {
+
+                                                                            const exists = currentState.connections.some(conn =>
+
+                                                                                conn.fromNode === this.dragSourceNodeId &&
+
+                                                                                conn.fromPort === this.dragSourcePortId &&
+
+                                                                                conn.toNode === node.id &&
+
+                                                                                conn.toPort === node.inputs[0].id
+
+                                                                            );
+
+                                                                            if (!exists) {
+
+                                                                                currentState.connections.push({
+
+                                                                                    fromNode: this.dragSourceNodeId!,
+
+                                                                                    fromPort: this.dragSourcePortId!,
+
+                                                                                    toNode: node.id,
+
+                                                                                    toPort: node.inputs[0].id
+
+                                                                                });
+
+                                                                                this.stateManager.pushState(currentState);
+
+                                                                            }
+
+                                                                        }
+
+                                                                    }
+
+                                                                });
+                                p.addEventListener('mousedown', (e) => {
+                                    this.handleInputPortMouseDown(e, node.id, node.inputs[0].id);
                                 });
                                 portsEl.appendChild(p);
                             }
@@ -1160,15 +1445,50 @@ export class GraphRenderer {
                                 const colorClass = this.getPortColorClass(node.type, input.id);
                                 p.innerHTML = `<div class="port-bullet vertical ${colorClass}" id="${this.panelId}-port-in-${node.id}-${input.id}"></div><span class="port-label vertical">${input.label}</span>`;
                                 p.addEventListener('mouseup', () => {
-                                    if (this.isDraggingWire) {
-                                        state.connections.push({
-                                            fromNode: this.dragSourceNodeId!,
-                                            fromPort: this.dragSourcePortId!,
-                                            toNode: node.id,
-                                            toPort: input.id
-                                        });
-                                        this.stateManager.pushState(state);
-                                    }
+
+                                                                    if (this.isDraggingWire) {
+
+                                                                        const currentState = this.stateManager.getCurrentState();
+
+                                                                        if (currentState) {
+
+                                                                            const exists = currentState.connections.some(conn =>
+
+                                                                                conn.fromNode === this.dragSourceNodeId &&
+
+                                                                                conn.fromPort === this.dragSourcePortId &&
+
+                                                                                conn.toNode === node.id &&
+
+                                                                                conn.toPort === input.id
+
+                                                                            );
+
+                                                                            if (!exists) {
+
+                                                                                currentState.connections.push({
+
+                                                                                    fromNode: this.dragSourceNodeId!,
+
+                                                                                    fromPort: this.dragSourcePortId!,
+
+                                                                                    toNode: node.id,
+
+                                                                                    toPort: input.id
+
+                                                                                });
+
+                                                                                this.stateManager.pushState(currentState);
+
+                                                                            }
+
+                                                                        }
+
+                                                                    }
+
+                                                                });
+                                p.addEventListener('mousedown', (e) => {
+                                    this.handleInputPortMouseDown(e, node.id, input.id);
                                 });
                                 portsTopEl.appendChild(p);
                             });
@@ -1197,15 +1517,50 @@ export class GraphRenderer {
                                 const colorClass = this.getPortColorClass(node.type, node.inputs[0].id);
                                 p.innerHTML = `<div class="port-bullet ${colorClass}" id="${this.panelId}-port-in-${node.id}-representative"></div>`;
                                 p.addEventListener('mouseup', () => {
-                                    if (this.isDraggingWire) {
-                                        state.connections.push({
-                                            fromNode: this.dragSourceNodeId!,
-                                            fromPort: this.dragSourcePortId!,
-                                            toNode: node.id,
-                                            toPort: node.inputs[0].id
-                                        });
-                                        this.stateManager.pushState(state);
-                                    }
+
+                                                                    if (this.isDraggingWire) {
+
+                                                                        const currentState = this.stateManager.getCurrentState();
+
+                                                                        if (currentState) {
+
+                                                                            const exists = currentState.connections.some(conn =>
+
+                                                                                conn.fromNode === this.dragSourceNodeId &&
+
+                                                                                conn.fromPort === this.dragSourcePortId &&
+
+                                                                                conn.toNode === node.id &&
+
+                                                                                conn.toPort === node.inputs[0].id
+
+                                                                            );
+
+                                                                            if (!exists) {
+
+                                                                                currentState.connections.push({
+
+                                                                                    fromNode: this.dragSourceNodeId!,
+
+                                                                                    fromPort: this.dragSourcePortId!,
+
+                                                                                    toNode: node.id,
+
+                                                                                    toPort: node.inputs[0].id
+
+                                                                                });
+
+                                                                                this.stateManager.pushState(currentState);
+
+                                                                            }
+
+                                                                        }
+
+                                                                    }
+
+                                                                });
+                                p.addEventListener('mousedown', (e) => {
+                                    this.handleInputPortMouseDown(e, node.id, node.inputs[0].id);
                                 });
                                 portsEl.appendChild(p);
                             }
@@ -1229,15 +1584,50 @@ export class GraphRenderer {
                                 const colorClass = this.getPortColorClass(node.type, input.id);
                                 p.innerHTML = `<div class="port-bullet ${colorClass}" id="${this.panelId}-port-in-${node.id}-${input.id}"></div><span class="port-label">${input.label}</span>`;
                                 p.addEventListener('mouseup', () => {
-                                    if (this.isDraggingWire) {
-                                        state.connections.push({
-                                            fromNode: this.dragSourceNodeId!,
-                                            fromPort: this.dragSourcePortId!,
-                                            toNode: node.id,
-                                            toPort: input.id
-                                        });
-                                        this.stateManager.pushState(state);
-                                    }
+
+                                                                    if (this.isDraggingWire) {
+
+                                                                        const currentState = this.stateManager.getCurrentState();
+
+                                                                        if (currentState) {
+
+                                                                            const exists = currentState.connections.some(conn =>
+
+                                                                                conn.fromNode === this.dragSourceNodeId &&
+
+                                                                                conn.fromPort === this.dragSourcePortId &&
+
+                                                                                conn.toNode === node.id &&
+
+                                                                                conn.toPort === input.id
+
+                                                                            );
+
+                                                                            if (!exists) {
+
+                                                                                currentState.connections.push({
+
+                                                                                    fromNode: this.dragSourceNodeId!,
+
+                                                                                    fromPort: this.dragSourcePortId!,
+
+                                                                                    toNode: node.id,
+
+                                                                                    toPort: input.id
+
+                                                                                });
+
+                                                                                this.stateManager.pushState(currentState);
+
+                                                                            }
+
+                                                                        }
+
+                                                                    }
+
+                                                                });
+                                p.addEventListener('mousedown', (e) => {
+                                    this.handleInputPortMouseDown(e, node.id, input.id);
                                 });
                                 portsEl.appendChild(p);
                             });
@@ -1367,6 +1757,41 @@ export class GraphRenderer {
         });
     }
 
+    private handleInputPortMouseDown(e: MouseEvent, nodeId: string, portId: string): void {
+        const state = this.stateManager.getCurrentState();
+        if (!state) return;
+
+        const existingIndex = state.connections.findIndex(conn =>
+            conn.toNode === nodeId && conn.toPort === portId
+        );
+
+        if (existingIndex !== -1) {
+            e.stopPropagation();
+            e.preventDefault();
+
+            const conn = state.connections[existingIndex];
+
+            // Remove connection from state immediately
+            state.connections.splice(existingIndex, 1);
+            this.stateManager.pushState(state);
+
+            // Start dragging wire from the original output port
+            this.isDraggingWire = true;
+            this.dragSourceNodeId = conn.fromNode;
+            this.dragSourcePortId = conn.fromPort;
+            this.detachedConnection = conn;
+
+            // Set mouse position
+            const ctm = this.svg.getScreenCTM();
+            if (ctm) {
+                const pt = new DOMPoint(e.clientX, e.clientY);
+                const worldPoint = pt.matrixTransform(ctm.inverse());
+                this.mouseWorldPosition = { x: worldPoint.x, y: worldPoint.y };
+            }
+            this.render();
+        }
+    }
+
     private updateConnections(state: SimulationState): void {
         this.svg.innerHTML = '';
         this.updateModelRegions();
@@ -1390,11 +1815,23 @@ export class GraphRenderer {
             const cp2X = toOrient === 'VERT' ? toPos.x : toPos.x - strength;
             const cp2Y = toOrient === 'VERT' ? toPos.y - strength : toPos.y;
 
+            const isSelected = this.selectedConnection &&
+                               this.selectedConnection.fromNode === edge.fromNode &&
+                               this.selectedConnection.fromPort === edge.fromPort &&
+                               this.selectedConnection.toNode === edge.toNode &&
+                               this.selectedConnection.toPort === edge.toPort;
+
+            const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+            group.setAttribute('class', 'edge-group');
+            if (isSelected) {
+                group.classList.add('selected');
+            }
+
             const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
             const d = `M ${fromPos.x} ${fromPos.y} C ${cp1X} ${cp1Y}, ${cp2X} ${cp2Y}, ${toPos.x} ${toPos.y}`;
             path.setAttribute('d', d);
             path.setAttribute('class', 'edge-path');
-            
+
             const fromModelId = this.stateManager.getAllModels().find(m => m.nodes.some(n => n.id === edge.fromNode))?.id;
             const toModelId = this.stateManager.getAllModels().find(m => m.nodes.some(n => n.id === edge.toNode))?.id;
 
@@ -1407,7 +1844,30 @@ export class GraphRenderer {
             }
             path.setAttribute('stroke-width', '2');
             path.setAttribute('fill', 'none');
-            this.svg.appendChild(path);
+
+            const interactivePath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            interactivePath.setAttribute('d', d);
+            interactivePath.setAttribute('class', 'edge-path-interactive');
+
+            interactivePath.addEventListener('mousedown', (e) => {
+                e.stopPropagation();
+                this.selectNode(null);
+                this.selectedConnection = edge;
+                this.render();
+            });
+
+            interactivePath.addEventListener('contextmenu', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                this.selectNode(null);
+                this.selectedConnection = edge;
+                this.render();
+                this.showConnectionContextMenu(e.clientX, e.clientY, edge);
+            });
+
+            group.appendChild(path);
+            group.appendChild(interactivePath);
+            this.svg.appendChild(group);
         });
 
 
@@ -1440,6 +1900,7 @@ export class GraphRenderer {
     private getPortColorClass(nodeType: string, portId: string): string {
         if (nodeType === 'DomainMesh' || portId === 'mesh') return 'domain';
         if (nodeType === 'MaterialExplosive' || portId === 'explosive') return 'explosive';
+        if (nodeType === 'MaterialIdealGas') return 'material';
         if (portId === 'telemetry' || (portId === 'in' && (nodeType === 'TelemetryText' || nodeType === 'TelemetryGraph'))) return 'telemetry';
         return 'material';
     }
@@ -1514,8 +1975,19 @@ export class GraphRenderer {
                 { label: 'Density',         color: '#f0a000' },
                 { label: 'Velocity',        color: '#a0f000' },
                 { label: 'Int. Energy',     color: '#f000a0' },
+                { label: 'Mass Fraction',   color: '#a000f0' },
             ];
             const currentChannel = Number(node.parameters?.telemetry_channel ?? 0);
+            const currentStride = Number(node.parameters?.plot_stride ?? 1);
+            const STRIDES = [
+                { label: '1x', value: 1 },
+                { label: '2x', value: 2 },
+                { label: '5x', value: 5 },
+                { label: '10x', value: 10 },
+                { label: '20x', value: 20 },
+                { label: '50x', value: 50 },
+                { label: '100x', value: 100 }
+            ];
 
             const meshNode = this.stateManager.getCurrentState()?.nodes.find(n => n.type === 'DomainMesh');
             const is1D = (meshNode?.parameters?.dimension ?? '1D') === '1D';
@@ -1539,10 +2011,14 @@ export class GraphRenderer {
             }
 
             if (!container.querySelector('canvas')) {
-                // --- Channel selector bar ---
+                // --- Channel/Rate selector bar ---
                 const selectorBar = document.createElement('div');
                 selectorBar.className = 'telemetry-channel-bar';
-                selectorBar.innerHTML = '<span class="telemetry-channel-label">Channel:</span>';
+                
+                const channelLabelSpan = document.createElement('span');
+                channelLabelSpan.className = 'telemetry-channel-label';
+                channelLabelSpan.textContent = 'Ch:';
+                selectorBar.appendChild(channelLabelSpan);
 
                 const select = this.createCustomDropdown(
                     CHANNELS.map((ch, idx) => ({ value: String(idx), label: ch.label })),
@@ -1557,8 +2033,27 @@ export class GraphRenderer {
                     },
                     'telemetry-channel-select'
                 );
-
                 selectorBar.appendChild(select);
+
+                const strideLabelSpan = document.createElement('span');
+                strideLabelSpan.className = 'telemetry-channel-label';
+                strideLabelSpan.style.marginLeft = '8px';
+                strideLabelSpan.textContent = 'Rate:';
+                selectorBar.appendChild(strideLabelSpan);
+
+                const strideSelect = this.createCustomDropdown(
+                    STRIDES.map(st => ({ value: String(st.value), label: st.label })),
+                    String(currentStride),
+                    (val) => {
+                        const newStride = parseInt(val, 10);
+                        this.stateManager.updateNodeParameters(node.id, {
+                            plot_stride: newStride
+                        });
+                    },
+                    'telemetry-stride-select'
+                );
+                selectorBar.appendChild(strideSelect);
+
                 container.appendChild(selectorBar);
 
                 // --- Graph canvas ---
@@ -1636,6 +2131,25 @@ export class GraphRenderer {
                         }
                     }
                 }
+
+                const strideSelect = container.querySelector('.telemetry-stride-select') as HTMLElement;
+                if (strideSelect) {
+                    const trigger = strideSelect.querySelector('.custom-select-trigger');
+                    if (trigger) {
+                        const currentOpt = STRIDES.find(st => st.value === currentStride);
+                        if (currentOpt && trigger.textContent !== currentOpt.label) {
+                            trigger.textContent = currentOpt.label;
+                            strideSelect.querySelectorAll('.custom-select-option').forEach(opt => {
+                                const optEl = opt as HTMLElement;
+                                if (optEl.dataset.value === String(currentStride)) {
+                                    optEl.classList.add('selected');
+                                } else {
+                                    optEl.classList.remove('selected');
+                                }
+                            });
+                        }
+                    }
+                }
             }
         }
     }
@@ -1653,6 +2167,12 @@ export class GraphRenderer {
             if (node.type === 'DomainMesh') {
                 const dim = node.parameters['dimension'] || '1D';
                 if (form.dataset.renderedDimension !== dim.toString()) {
+                    needsRebuild = true;
+                }
+            }
+            if (node.type === 'MaterialExplosive') {
+                const comp = node.parameters['composition'] || 'TNT';
+                if (form.dataset.renderedComposition !== comp.toString()) {
                     needsRebuild = true;
                 }
             }
@@ -1695,12 +2215,21 @@ export class GraphRenderer {
             const dim = node.parameters['dimension'] || '1D';
             form.dataset.renderedDimension = dim.toString();
         }
+        if (node.type === 'MaterialExplosive') {
+            const comp = node.parameters['composition'] || 'TNT';
+            form.dataset.renderedComposition = comp.toString();
+        }
 
         for (const [key, value] of Object.entries(node.parameters)) {
             if (node.type === 'DomainMesh') {
                 const dim = node.parameters['dimension'] || '1D';
                 if ((key === 'y_min_bc' || key === 'y_max_bc') && dim === '1D') continue;
                 if ((key === 'z_min_bc' || key === 'z_max_bc') && (dim === '1D' || dim === '2D')) continue;
+            }
+            if (node.type === 'MaterialExplosive') {
+                const comp = node.parameters['composition'] || 'TNT';
+                const customKeys = ['det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
+                if (comp !== 'Custom' && customKeys.includes(key)) continue;
             }
 
             const row = document.createElement('div');
@@ -1724,7 +2253,9 @@ export class GraphRenderer {
                 'z_max_bc': ['Reflecting', 'Transmitting', 'Terminate'],
                 'left_bc': ['Reflecting', 'Transmitting', 'Terminate'],
                 'right_bc': ['Reflecting', 'Transmitting', 'Terminate'],
-                'composition': ['TNT', 'IdealGas', 'Custom'],
+                // Explosive composition — JWL parameter sets (Ideal Gas uses its own node)
+                'composition': ['TNT', 'PETN', 'RDX', 'Custom'],
+                'init_mode': ['Multi-Material JWL', 'Ideal Gas'],
                 'flux_scheme': ['AUSM+', 'Rusanov'],
                 'spatial_order': ['1', '2', '3'],
                 'temporal_order': ['1', '2', '3', '4'],
@@ -1737,7 +2268,54 @@ export class GraphRenderer {
                     dropdowns[key].map(opt => ({ value: opt, label: opt })),
                     value.toString(),
                     (newVal) => {
-                        this.stateManager.updateNodeParameters(node.id, { [key]: newVal });
+                        console.log("[DEBUG] Custom Dropdown onChange triggered:", key, newVal, "for node:", node.id);
+                        const numericKeys = [
+                            'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature',
+                            'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
+                            'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl', 'output_interval',
+                            'spatial_order', 'temporal_order', 'gamma', 'plot_stride'
+                        ];
+                        const castValue = numericKeys.includes(key) ? Number(newVal) : newVal;
+                        const updates: Record<string, any> = { [key]: castValue };
+                        if (node.type === 'MaterialExplosive' && key === 'composition') {
+                            const EXPLOSIVE_PRESETS: Record<string, Record<string, number>> = {
+                                'TNT': {
+                                    rho: 1630,
+                                    detonation_energy: 4290000,
+                                    det_vel: 6930,
+                                    jwl_A: 373.77e9,
+                                    jwl_B: 3.747e9,
+                                    jwl_R1: 4.15,
+                                    jwl_R2: 0.90,
+                                    jwl_omega: 0.35
+                                },
+                                'PETN': {
+                                    rho: 1770,
+                                    detonation_energy: 5800000,
+                                    det_vel: 8300,
+                                    jwl_A: 613.4e9,
+                                    jwl_B: 15.07e9,
+                                    jwl_R1: 4.4,
+                                    jwl_R2: 1.2,
+                                    jwl_omega: 0.28
+                                },
+                                'RDX': {
+                                    rho: 1806,
+                                    detonation_energy: 5300000,
+                                    det_vel: 8750,
+                                    jwl_A: 524.2e9,
+                                    jwl_B: 7.678e9,
+                                    jwl_R1: 4.2,
+                                    jwl_R2: 1.1,
+                                    jwl_omega: 0.34
+                                }
+                            };
+                            const preset = EXPLOSIVE_PRESETS[newVal];
+                            if (preset) {
+                                Object.assign(updates, preset);
+                            }
+                        }
+                        this.stateManager.updateNodeParameters(node.id, updates);
                     },
                     key
                 );
@@ -1777,7 +2355,10 @@ export class GraphRenderer {
     ): HTMLElement {
         const container = document.createElement('div');
         container.className = 'custom-select-container';
-        if (dataKey) container.dataset.key = dataKey;
+        if (dataKey) {
+            container.dataset.key = dataKey;
+            container.classList.add(dataKey);
+        }
 
         const trigger = document.createElement('div');
         trigger.className = 'custom-select-trigger';
@@ -1836,13 +2417,15 @@ export class GraphRenderer {
             case 'DomainMesh':
                 return 'Cartesian grid with structured uniform mesh. Defines the spatial domain boundary conditions and discretization sizing.';
             case 'MaterialAir':
-                return 'Air material initialization. Configures ambient atmospheric pressure and temperature coefficients.';
+                return 'Air material initialization. Configures ambient atmospheric pressure, temperature, and adiabatic index (gamma).';
             case 'MaterialExplosive':
-                return 'High-explosive chemical charge initialization. Configures composition, charge mass, density, and JWL state properties.';
+                return 'High-explosive charge — Multi-Material JWL mode. Picks pre-calibrated JWL EOS from TNT/PETN/RDX table. Use when init_mode = Multi-Material JWL on the CFD Solver.';
+            case 'MaterialIdealGas':
+                return 'Ideal-gas explosive charge. Defines a hot pressurised sphere using a simple (gamma-1)·rho·e_int equation of state. Pair with init_mode = Ideal Gas on the CFD Solver.';
             case 'ThePainter':
                 return 'Initial conditions painter. Maps mesh cells to physical material states for the simulation starting phase.';
             case 'CFDSolver':
-                return 'High-order CFD simulation engine. Solves Euler equations using high-resolution reconstruction and flux splitting schemes.';
+                return 'High-order CFD simulation engine. Solves Euler equations using high-resolution reconstruction and flux splitting schemes. Set init_mode to select between a single-material Ideal Gas run or a full Multi-Material JWL detonation simulation.';
             case 'TelemetryText':
                 return 'Live text stream telemetry logger. Outputs simulator event timelines, iteration milestones, and system states.';
             case 'TelemetryGraph':

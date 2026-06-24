@@ -1,4 +1,4 @@
-export type NodeType = 'DomainMesh' | 'MaterialAir' | 'MaterialExplosive' | 'ThePainter' | 'CFDSolver' | 'TelemetryText' | 'TelemetryGraph';
+export type NodeType = 'DomainMesh' | 'MaterialAir' | 'MaterialExplosive' | 'MaterialIdealGas' | 'ThePainter' | 'CFDSolver' | 'TelemetryText' | 'TelemetryGraph';
 
 export interface Port {
     id: string;

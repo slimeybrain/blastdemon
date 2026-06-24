@@ -275,6 +275,12 @@ void process_json(const std::string& json_str, SOCKET_TYPE client_fd, std::share
         std::string solver_path = "./BlastSolver";
 #ifdef _WIN32
         solver_path = "BlastSolver.exe";
+#else
+        if (access(solver_path.c_str(), F_OK) != 0) {
+            if (access("./build/BlastSolver", F_OK) == 0) {
+                solver_path = "./build/BlastSolver";
+            }
+        }
 #endif
 
         if (active_process->start(solver_path)) {
@@ -340,6 +346,7 @@ void process_json(const std::string& json_str, SOCKET_TYPE client_fd, std::share
             active_process->writeStdin(json_str + "\n\n");
         } else {
             std::cerr << "Command " << command << " ignored: Solver not running." << std::endl;
+            send_websocket_text(client_fd, "[WARNING] Command ignored: Solver process is not running. Please click 'Initialize' first.");
         }
     }
 
@@ -485,6 +492,9 @@ int main() {
         SOCKET_TYPE client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &addrlen);
         if (client_fd != INVALID_SOCKET_HANDLE) {
             std::thread(handle_client, client_fd).detach();
+        } else {
+            // Sleep briefly to prevent a 100% CPU spinning loop on persistent accept errors
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     }
 

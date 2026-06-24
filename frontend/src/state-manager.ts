@@ -344,6 +344,7 @@ export class StateManager {
     }
 
     pushState(newState: SimulationState, autoSave: boolean = true): void {
+        this.healNodes(newState.nodes);
         // Construct new AppState from the SimulationState
         const appStateCopy = JSON.parse(JSON.stringify(this.appState)) as AppState;
         const ws = appStateCopy.workspaces.find(w => w.id === appStateCopy.activeWorkspaceId);
@@ -429,6 +430,7 @@ export class StateManager {
     }
 
     updateNodeParameters(nodeId: string, parameters: Record<string, any>): void {
+        console.log("[DEBUG] updateNodeParameters called for node:", nodeId, "params:", parameters);
         const appStateCopy = JSON.parse(JSON.stringify(this.appState)) as AppState;
         let found = false;
         
@@ -436,6 +438,7 @@ export class StateManager {
             const node = model.nodes.find(n => n.id === nodeId);
             if (node) {
                 node.parameters = { ...node.parameters, ...parameters };
+                console.log("[DEBUG] Node parameters updated in memory. New parameters:", node.parameters);
                 found = true;
                 break;
             }
@@ -444,23 +447,31 @@ export class StateManager {
         if (found) {
             this.setStatus('UNINITIALIZED');
             this.pushAppState(appStateCopy);
+        } else {
+            console.error("[DEBUG] Node NOT found for parameter update:", nodeId);
         }
     }
 
     updateNodeParametersInPlace(nodeId: string, parameters: Record<string, any>): void {
         const appStateCopy = JSON.parse(JSON.stringify(this.appState)) as AppState;
         let found = false;
+        let changed = false;
         
         for (const model of Object.values(appStateCopy.models)) {
             const node = model.nodes.find(n => n.id === nodeId);
             if (node) {
-                node.parameters = { ...node.parameters, ...parameters };
+                for (const [key, value] of Object.entries(parameters)) {
+                    if (node.parameters[key] !== value) {
+                        node.parameters[key] = value;
+                        changed = true;
+                    }
+                }
                 found = true;
                 break;
             }
         }
 
-        if (found) {
+        if (found && changed) {
             this.appState = appStateCopy;
             this.notifyListeners();
         }
@@ -829,6 +840,10 @@ export class StateManager {
             const saved = localStorage.getItem('blast_app_state');
             if (saved) {
                 this.appState = JSON.parse(saved);
+                // Self-healing: Ensure all nodes are healed
+                Object.values(this.appState.models).forEach(model => {
+                    this.healNodes(model.nodes);
+                });
                 this.history = [JSON.parse(JSON.stringify(this.appState))];
                 this.currentIndex = 0;
                 this.notifyListeners();
@@ -864,6 +879,10 @@ export class StateManager {
                         activeWorkspaceId: `ws-${parsed.activeIndex || 0}`,
                         workspaceCounter: parsed.workspaces.length
                     };
+                    // Self-healing for legacy loaded nodes
+                    Object.values(this.appState.models).forEach(model => {
+                        this.healNodes(model.nodes);
+                    });
                     this.history = [JSON.parse(JSON.stringify(this.appState))];
                     this.currentIndex = 0;
                     this.notifyListeners();
@@ -930,6 +949,9 @@ export class StateManager {
     }
 
     loadAppState(newAppState: AppState): void {
+        Object.values(newAppState.models).forEach(model => {
+            this.healNodes(model.nodes);
+        });
         this.pushAppState(newAppState);
     }
 
@@ -937,6 +959,72 @@ export class StateManager {
         localStorage.removeItem('blast_app_state');
         localStorage.removeItem('blast_workspace');
         console.log('[System] Local workspace and AppState cleared.');
+    }
+
+    private healNodes(nodes: Node[]): void {
+        const defaults: Record<string, Record<string, any>> = {
+            'DomainMesh': {
+                dimension: '1D',
+                domain_radius: 1.0,
+                cell_size: 0.001,
+                left_bc: 'Transmitting',
+                right_bc: 'Transmitting',
+                y_min_bc: 'Reflecting',
+                y_max_bc: 'Reflecting',
+                z_min_bc: 'Reflecting',
+                z_max_bc: 'Reflecting'
+            },
+            'MaterialAir': {
+                atm_pressure: 101325.0,
+                atm_temperature: 298.15,
+                gamma: 1.4
+            },
+            'MaterialExplosive': {
+                composition: 'TNT',
+                charge_mass: 1.0,
+                rho: 1630,
+                detonation_energy: 4290000,
+                det_vel: 6930,
+                jwl_A: 373.77e9,
+                jwl_B: 3.747e9,
+                jwl_R1: 4.15,
+                jwl_R2: 0.90,
+                jwl_omega: 0.35
+            },
+            'MaterialIdealGas': {
+                charge_mass: 1.0,
+                rho: 1630,
+                detonation_energy: 4520000
+            },
+            'CFDSolver': {
+                init_mode: 'Multi-Material JWL',
+                cfl: 0.4,
+                flux_scheme: 'AUSM+',
+                spatial_order: 2,
+                temporal_order: 2,
+                output_mode: 'By Time',
+                output_interval: 0.0001
+            },
+            'TelemetryGraph': {
+                telemetry_channel: 0,
+                x_axis_mode: 'radius',
+                plot_stride: 1
+            }
+        };
+
+        nodes.forEach(node => {
+            if (!node.parameters) {
+                node.parameters = {};
+            }
+            const nodeDefaults = defaults[node.type];
+            if (nodeDefaults) {
+                for (const [key, val] of Object.entries(nodeDefaults)) {
+                    if (node.parameters[key] === undefined) {
+                        node.parameters[key] = val;
+                    }
+                }
+            }
+        });
     }
 }
 

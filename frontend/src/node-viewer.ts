@@ -25,6 +25,8 @@ export class NodeViewer {
     private lastChannel: number | null = null;
     private lastShowGridVal: boolean | null = null;
     private lastXAxisModeVal: string | null = null;
+    private lastStride: number | null = null;
+    private graphFrameCount: number = 0;
 
     constructor(parent: HTMLElement, stateManager: StateManager) {
         this.container = document.createElement('div');
@@ -100,6 +102,7 @@ export class NodeViewer {
                 const maxVal = Number(node.parameters?.max_y ?? 1000000);
                 const colorVal = node.parameters?.color ?? '#00f0ff';
                 const showGridVal = node.parameters?.show_grid !== false;
+                const currentStride = Number(node.parameters?.plot_stride ?? 1);
 
                 if (this.lastChannel !== currentChannel || this.lastColor !== colorVal) {
                     this.lastChannel = currentChannel;
@@ -134,6 +137,12 @@ export class NodeViewer {
                     const gridCheckbox = this.container.querySelector('.viewer-header input[type="checkbox"]') as HTMLInputElement;
                     if (gridCheckbox) gridCheckbox.checked = showGridVal;
                     this.chartWorker?.postMessage({ type: 'setConfig', showGrid: showGridVal });
+                }
+
+                if (this.lastStride !== currentStride) {
+                    this.lastStride = currentStride;
+                    const strideSelect = this.container.querySelector('.viewer-stride-select') as HTMLSelectElement;
+                    if (strideSelect) strideSelect.value = String(currentStride);
                 }
 
                 if (this.lastXAxisModeVal !== xAxisMode) {
@@ -246,6 +255,7 @@ export class NodeViewer {
             { label: 'Density',         color: '#f0a000' },
             { label: 'Velocity',        color: '#a0f000' },
             { label: 'Int. Energy',     color: '#f000a0' },
+            { label: 'Mass Fraction',   color: '#a000f0' },
         ];
         const currentChannel = Number(node.parameters?.telemetry_channel ?? 0);
         const initialColor = node.parameters?.color ?? CHANNELS[currentChannel]?.color ?? '#00f0ff';
@@ -259,6 +269,8 @@ export class NodeViewer {
         this.lastChannel = null;
         this.lastShowGridVal = null;
         this.lastXAxisModeVal = null;
+        this.lastStride = null;
+        this.graphFrameCount = 0;
 
         const meshNode = this.stateManager.getCurrentState()?.nodes.find(n => n.type === 'DomainMesh');
         const is1D = (meshNode?.parameters?.dimension ?? '1D') === '1D';
@@ -361,6 +373,52 @@ export class NodeViewer {
         channelControl.appendChild(channelLabel);
         channelControl.appendChild(channelSelect);
         header.appendChild(channelControl);
+
+        // Add Plot Rate (stride) control
+        const strideSelect = document.createElement('select');
+        strideSelect.className = 'viewer-stride-select';
+        strideSelect.style.fontSize = 'var(--font-xs)';
+        strideSelect.style.background = '#333';
+        strideSelect.style.color = '#ccc';
+        strideSelect.style.border = '1px solid #444';
+        strideSelect.style.padding = '2px 4px';
+        strideSelect.style.borderRadius = '3px';
+
+        const STRIDES = [
+            { label: 'Every frame', value: 1 },
+            { label: 'Every 2 frames', value: 2 },
+            { label: 'Every 5 frames', value: 5 },
+            { label: 'Every 10 frames', value: 10 },
+            { label: 'Every 20 frames', value: 20 },
+            { label: 'Every 50 frames', value: 50 },
+            { label: 'Every 100 frames', value: 100 }
+        ];
+
+        const currentStride = Number(node.parameters?.plot_stride ?? 1);
+
+        STRIDES.forEach(st => {
+            const opt = document.createElement('option');
+            opt.value = String(st.value);
+            opt.textContent = st.label;
+            if (st.value === currentStride) opt.selected = true;
+            strideSelect.appendChild(opt);
+        });
+
+        strideSelect.onchange = () => {
+            const newStride = Number(strideSelect.value);
+            this.stateManager.updateNodeParameters(node.id, { plot_stride: newStride });
+        };
+
+        const strideControl = document.createElement('div');
+        strideControl.style.display = 'flex';
+        strideControl.style.alignItems = 'center';
+        strideControl.style.gap = '4px';
+        const strideLabel = document.createElement('label');
+        strideLabel.textContent = 'Rate:';
+        strideLabel.style.fontSize = 'var(--font-xs)';
+        strideControl.appendChild(strideLabel);
+        strideControl.appendChild(strideSelect);
+        header.appendChild(strideControl);
 
         // Add X-Axis selector control if 1D model
         if (is1D) {
@@ -503,6 +561,17 @@ export class NodeViewer {
         grid.style.alignItems = 'center';
 
         for (const [key, value] of Object.entries(node.parameters)) {
+            if (node.type === 'DomainMesh') {
+                const dim = node.parameters['dimension'] || '1D';
+                if ((key === 'y_min_bc' || key === 'y_max_bc') && dim === '1D') continue;
+                if ((key === 'z_min_bc' || key === 'z_max_bc') && (dim === '1D' || dim === '2D')) continue;
+            }
+            if (node.type === 'MaterialExplosive') {
+                const comp = node.parameters['composition'] || 'TNT';
+                const customKeys = ['det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
+                if (comp !== 'Custom' && customKeys.includes(key)) continue;
+            }
+
             const label = document.createElement('label');
             label.textContent = key.replace(/_/g, ' ').toUpperCase();
             label.style.fontSize = 'var(--font-sm)';
@@ -530,18 +599,29 @@ export class NodeViewer {
         if (this.renderRequestId !== null) return;
         const loop = () => {
             if (this.telemetryBuffer && this.chartWorker) {
-                if (this.telemetryBuffer instanceof ArrayBuffer) {
-                    this.chartWorker.postMessage(this.telemetryBuffer, [this.telemetryBuffer]);
+                const state = this.stateManager.getCurrentState();
+                const node = state?.nodes.find(n => n.id === this.currentNodeId);
+                const plotStride = Number(node?.parameters?.plot_stride ?? 1);
+
+                this.graphFrameCount++;
+                const isTerminated = this.stateManager.getStatus() === 'TERMINATED';
+
+                if (plotStride > 1 && this.graphFrameCount % plotStride !== 0 && !isTerminated) {
+                    this.telemetryBuffer = null;
                 } else {
-                    const pressureData = this.telemetryBuffer.data || this.telemetryBuffer.telemetry;
-                    if (pressureData && (Array.isArray(pressureData) || pressureData instanceof Float32Array)) {
-                        this.chartWorker.postMessage({
-                            type: 'frame',
-                            data: pressureData
-                        });
+                    if (this.telemetryBuffer instanceof ArrayBuffer) {
+                        this.chartWorker.postMessage(this.telemetryBuffer, [this.telemetryBuffer]);
+                    } else {
+                        const pressureData = this.telemetryBuffer.data || this.telemetryBuffer.telemetry;
+                        if (pressureData && (Array.isArray(pressureData) || pressureData instanceof Float32Array)) {
+                            this.chartWorker.postMessage({
+                                type: 'frame',
+                                data: pressureData
+                            });
+                        }
                     }
+                    this.telemetryBuffer = null;
                 }
-                this.telemetryBuffer = null;
             }
             this.renderRequestId = requestAnimationFrame(loop);
         };
@@ -582,8 +662,8 @@ export class NodeViewer {
         const numericKeys = [
             'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature',
             'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
-            'jwl_R1', 'jwl_R2', 'jwl_omega', 'cfl', 'output_interval',
-            'spatial_order', 'temporal_order'
+            'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl', 'output_interval',
+            'spatial_order', 'temporal_order', 'gamma', 'plot_stride'
         ];
 
         const dropdowns: Record<string, string[]> = {
@@ -596,11 +676,13 @@ export class NodeViewer {
             'z_max_bc': ['Reflecting', 'Transmitting', 'Terminate'],
             'left_bc': ['Reflecting', 'Transmitting', 'Terminate'],
             'right_bc': ['Reflecting', 'Transmitting', 'Terminate'],
-            'composition': ['TNT', 'IdealGas', 'Custom'],
+            'composition': ['TNT', 'PETN', 'RDX', 'Custom'],
+            'init_mode': ['Multi-Material JWL', 'Ideal Gas'],
             'flux_scheme': ['AUSM+', 'Rusanov'],
             'spatial_order': ['1', '2', '3'],
             'temporal_order': ['1', '2', '3', '4'],
-            'output_mode': ['By Step', 'By Time']
+            'output_mode': ['By Step', 'By Time'],
+            'plot_stride': ['1', '2', '5', '10', '20', '50', '100']
         };
 
         if (dropdowns[key]) {
@@ -623,7 +705,7 @@ export class NodeViewer {
             select.addEventListener('change', () => {
                 let val: any = select.value;
                 if (numericKeys.includes(key)) val = Number(val);
-                this.stateManager.updateNodeParameters(node.id, { [key]: val });
+                this.updateParameter(node, key, val);
             });
             return select;
         }
@@ -645,9 +727,55 @@ export class NodeViewer {
             if (input.type === 'number') {
                 newVal = Number(input.value);
             }
-            this.stateManager.updateNodeParameters(node.id, { [key]: newVal });
+            this.updateParameter(node, key, newVal);
         });
 
         return input;
+    }
+
+    private updateParameter(node: Node, key: string, value: any): void {
+        const updates: Record<string, any> = { [key]: value };
+
+        if (node.type === 'MaterialExplosive' && key === 'composition') {
+            const EXPLOSIVE_PRESETS: Record<string, Record<string, number>> = {
+                'TNT': {
+                    rho: 1630,
+                    detonation_energy: 4290000,
+                    det_vel: 6930,
+                    jwl_A: 373.77e9,
+                    jwl_B: 3.747e9,
+                    jwl_R1: 4.15,
+                    jwl_R2: 0.90,
+                    jwl_omega: 0.35
+                },
+                'PETN': {
+                    rho: 1770,
+                    detonation_energy: 5800000,
+                    det_vel: 8300,
+                    jwl_A: 613.4e9,
+                    jwl_B: 15.07e9,
+                    jwl_R1: 4.4,
+                    jwl_R2: 1.2,
+                    jwl_omega: 0.28
+                },
+                'RDX': {
+                    rho: 1806,
+                    detonation_energy: 5300000,
+                    det_vel: 8750,
+                    jwl_A: 524.2e9,
+                    jwl_B: 7.678e9,
+                    jwl_R1: 4.2,
+                    jwl_R2: 1.1,
+                    jwl_omega: 0.34
+                }
+            };
+            const preset = EXPLOSIVE_PRESETS[value];
+            if (preset) {
+                Object.assign(updates, preset);
+            }
+        }
+
+        this.stateManager.updateNodeParameters(node.id, updates);
+        this.render();
     }
 }

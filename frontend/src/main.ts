@@ -26,12 +26,23 @@ const initialState: SimulationState = {
         {
             id: 'node-air', type: 'MaterialAir', x: 50, y: 200, displayMode: 'normal',
             inputs: [], outputs: [{ id: 'out', label: 'Material' }],
-            parameters: { atm_pressure: 101325, atm_temperature: 298.15 }
+            parameters: { gamma: 1.4, atm_pressure: 101325, atm_temperature: 298.15 }
         },
         {
             id: 'node-explosive', type: 'MaterialExplosive', x: 50, y: 350, displayMode: 'normal',
             inputs: [], outputs: [{ id: 'out', label: 'Material' }],
-            parameters: { charge_mass: 1.0, composition: 'TNT', rho: 1630, detonation_energy: 4520000 }
+            parameters: {
+                composition: 'TNT',
+                charge_mass: 1.0,
+                rho: 1630,
+                detonation_energy: 4290000,
+                det_vel: 6930,
+                jwl_A: 373.77e9,
+                jwl_B: 3.747e9,
+                jwl_R1: 4.15,
+                jwl_R2: 0.90,
+                jwl_omega: 0.35
+            }
         },
         {
             id: 'node-painter', type: 'ThePainter', x: 300, y: 200, displayMode: 'normal',
@@ -43,7 +54,7 @@ const initialState: SimulationState = {
             id: 'node-solver', type: 'CFDSolver', x: 550, y: 200, displayMode: 'normal',
             inputs: [{ id: 'in', label: 'Initial State' }],
             outputs: [{ id: 'telemetry', label: 'Telemetry' }],
-            parameters: { cfl: 0.4, flux_scheme: 'AUSM+', spatial_order: 2, temporal_order: 2, output_mode: 'By Time', output_interval: 0.0001 }
+            parameters: { init_mode: 'Multi-Material JWL', cfl: 0.4, flux_scheme: 'AUSM+', spatial_order: 2, temporal_order: 2, output_mode: 'By Time', output_interval: 0.0001 }
         }
     ],
     connections: [

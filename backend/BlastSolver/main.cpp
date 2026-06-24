@@ -156,24 +156,61 @@ void emit_telemetry(const CFDSolver& solver, double elapsed, bool is_terminated)
     const std::vector<State>& states = solver.getStates();
     int n = solver.getNumCells();
 
-    // 1. Emit Metadata JSON
+    // 1. Emit Metadata JSON envelope
     nlohmann::json envelope;
     envelope["type"] = "TELEMETRY";
     envelope["time"] = elapsed;
     envelope["is_terminated"] = is_terminated;
     std::cout << envelope.dump() << std::endl;
 
-    // 2. Emit Binary Frame (Pressure only)
-    std::vector<float> p_data(n);
+    // 2. Emit structured multi-channel binary frame
+    //    Header: [uint32 n_cells][uint32 n_channels=7]
+    //    Payload channels (each n floats): [pressure][density][velocity][internal_energy][mass_frac_burned][mass_frac_unburnt][mass_frac_air]
+    //    Internal energy: e_int = E/rho - 0.5*u*u  (specific internal energy, J/kg)
+    const uint32_t n_cells    = static_cast<uint32_t>(n);
+    const uint32_t n_channels = 7;
+
+    std::vector<float> frame;
+    frame.reserve(n * n_channels);
+
+    // Channel 0: Pressure
+    for (int i = 0; i < n; ++i) frame.push_back(static_cast<float>(states[i].p));
+    // Channel 1: Density
+    for (int i = 0; i < n; ++i) frame.push_back(static_cast<float>(states[i].rho));
+    // Channel 2: Velocity
+    for (int i = 0; i < n; ++i) frame.push_back(static_cast<float>(states[i].u));
+    // Channel 3: Specific internal energy  e_int = E/rho - 0.5*u^2
     for (int i = 0; i < n; ++i) {
-        p_data[i] = (float)states[i].p;
+        double rho = states[i].rho;
+        double e_int = (rho > 0.0) ? (states[i].E / rho - 0.5 * states[i].u * states[i].u) : 0.0;
+        frame.push_back(static_cast<float>(e_int));
+    }
+    // Channel 4: Volume Fraction (burned products)  alpha1
+    for (int i = 0; i < n; ++i) {
+        frame.push_back(static_cast<float>(std::clamp(states[i].alpha1, 0.0, 1.0)));
+    }
+    // Channel 5: Volume Fraction (unburnt reactant)  alpha2
+    for (int i = 0; i < n; ++i) {
+        frame.push_back(static_cast<float>(std::clamp(states[i].alpha2, 0.0, 1.0)));
+    }
+    // Channel 6: Volume Fraction (air)  1.0 - alpha1 - alpha2
+    for (int i = 0; i < n; ++i) {
+        double air_frac = 1.0 - states[i].alpha1 - states[i].alpha2;
+        frame.push_back(static_cast<float>(std::clamp(air_frac, 0.0, 1.0)));
     }
 
-    size_t total_bytes = p_data.size() * sizeof(float);
+    // Prefix with 8-byte header then raw float data
+    size_t header_bytes  = sizeof(uint32_t) * 2;
+    size_t payload_bytes = frame.size() * sizeof(float);
+    size_t total_bytes   = header_bytes + payload_bytes;
+
     std::cout << "BIN_FRAME " << total_bytes << "\n";
-    std::cout.write(reinterpret_cast<const char*>(p_data.data()), total_bytes);
+    std::cout.write(reinterpret_cast<const char*>(&n_cells),    sizeof(uint32_t));
+    std::cout.write(reinterpret_cast<const char*>(&n_channels), sizeof(uint32_t));
+    std::cout.write(reinterpret_cast<const char*>(frame.data()), payload_bytes);
     std::cout.flush();
 }
+
 
 int main() {
     std::string line;
@@ -230,17 +267,58 @@ int main() {
                         global_solver->setTemporalOrder(msg.at("temporal_order").get<int>());
 
                         double explosive_radius = msg.at("explosive_radius").get<double>();
-                        double high_rho = msg.at("rho").get<double>();
-                        double ambient_rho = msg.at("ambient_rho").get<double>();
-                        double ambient_p = msg.at("atm_pressure").get<double>();
+                        double high_rho         = msg.at("rho").get<double>();
+                        double ambient_rho      = msg.at("ambient_rho").get<double>();
+                        double ambient_p        = msg.at("atm_pressure").get<double>();
 
-                        global_solver->setInitialConditionTNT(explosive_radius, high_rho, ambient_rho, ambient_p);
+                        // --- Initialisation mode selection ---
+                        std::string init_mode   = msg.value("init_mode",   "Multi-Material JWL");
+                        std::string composition  = msg.value("composition", "TNT");
+
+                        // Select JWL material set from composition string
+                        MultiMat::MaterialSet matSet = MultiMat::TNT;
+                        if      (composition == "PETN") matSet = MultiMat::PETN;
+                        else if (composition == "RDX")  matSet = MultiMat::RDX;
+                        else if (composition == "Custom" || composition == "CUSTOM") {
+                            double jwl_A     = msg.value("jwl_A",     373.77e9);
+                            double jwl_B     = msg.value("jwl_B",     3.747e9);
+                            double jwl_R1    = msg.value("jwl_R1",    4.15);
+                            double jwl_R2    = msg.value("jwl_R2",    0.90);
+                            double jwl_omega = msg.value("jwl_omega", 0.35);
+                            double det_vel   = msg.value("det_vel",   6930.0);
+                            double det_energy= msg.value("detonation_energy", 4.29e6);
+
+                            matSet.products  = { jwl_A, jwl_B, jwl_R1, jwl_R2, jwl_omega, high_rho, 1000.0, 300.0 };
+                            matSet.unreacted = { jwl_A, jwl_B, jwl_R1, jwl_R2, jwl_omega, high_rho, 1000.0, 300.0 };
+                            matSet.det_vel   = det_vel;
+                            matSet.detonation_energy = det_energy;
+                        }
+                        global_solver->setMaterialParameters(matSet);
+
+                        if (init_mode == "Ideal Gas") {
+                            // Single-material ideal gas burst.
+                            // detonation_energy is the specific internal energy (J/kg) of the charge.
+                            double det_energy = msg.value("detonation_energy", 4520000.0);
+                            global_solver->setInitialConditionIdealGas(
+                                explosive_radius, high_rho, det_energy, ambient_rho, ambient_p);
+                            emit_kernel_log("SYSTEM",
+                                "Solver Initialized [Ideal Gas mode, gamma=" + std::to_string(gamma) + "].", global_t);
+                        } else {
+                            // Multi-Material JWL: detonation products + unreacted explosive + air.
+                            global_solver->setInitialConditionTNT(
+                                explosive_radius, high_rho, ambient_rho, ambient_p);
+                            emit_kernel_log("SYSTEM",
+                                "Solver Initialized [Multi-Material JWL, composition=" + composition + "].", global_t);
+                        }
 
                         emit_telemetry(*global_solver, global_t, false);
-                        emit_kernel_log("SYSTEM", "Solver Initialized via Zero-Omission Binding.", global_t);
+                        emit_kernel_log("SYSTEM", "Solver ready. Zero-Omission binding complete.", global_t);
 
                     } else if (command == "STEP") {
-                        if (!global_solver) continue;
+                        if (!global_solver) {
+                            emit_kernel_log("ERROR", "Cannot execute simulation step: Solver is uninitialized. Send INIT first.", global_t);
+                            continue;
+                        }
                         global_target_steps = msg.at("steps").get<int>();
                         global_cfl = msg.value("cfl", 0.4);
                         global_exec_until_end = false;
@@ -255,7 +333,10 @@ int main() {
                         }
 
                     } else if (command == "EXEC_ALL" || command == "EXEC_END") {
-                        if (!global_solver) continue;
+                        if (!global_solver) {
+                            emit_kernel_log("ERROR", "Cannot execute simulation: Solver is uninitialized. Send INIT first.", global_t);
+                            continue;
+                        }
                         global_cfl = msg.value("cfl", 0.4);
                         global_exec_until_end = true;
 
@@ -269,7 +350,10 @@ int main() {
                         }
 
                     } else if (command == "EXEC_1K") {
-                        if (!global_solver) continue;
+                        if (!global_solver) {
+                            emit_kernel_log("ERROR", "Cannot execute 1000 steps: Solver is uninitialized. Send INIT first.", global_t);
+                            continue;
+                        }
                         global_target_steps = 1000;
                         global_cfl = msg.value("cfl", 0.4);
                         global_exec_until_end = false;
@@ -295,7 +379,20 @@ int main() {
                     } else if (command == "TERMINATE") {
                         sim_terminate = true;
                         sim_running = false;
-                        emit_kernel_log("SYSTEM", "Execution Terminated.", global_t);
+
+                        // Spin-wait briefly until the worker thread has stopped running
+                        int wait_count = 0;
+                        while (sim_running.load() && wait_count < 10) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                            wait_count++;
+                        }
+
+                        global_solver.reset(); // Deallocate memory
+                        global_num_cells = 0;
+                        global_t = 0.0;
+                        step_progress = 0;
+
+                        emit_kernel_log("SYSTEM", "Execution Terminated. Memory cleared, ready for new simulation.", 0.0);
                     }
 
                 } catch (const std::exception& e) {

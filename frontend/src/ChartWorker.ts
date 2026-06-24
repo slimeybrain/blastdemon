@@ -15,7 +15,7 @@ let displayMax = 1;
 let range = 1;
 let showAxes = true;
 
-// Multi-channel telemetry: which channel index to display (0=p, 1=rho, 2=u, 3=e_int)
+// Multi-channel telemetry: which channel index to display (0=p, 1=rho, 2=u, 3=e_int, 4=mass_frac)
 let selectedChannel = 0;
 
 // Last received raw multi-channel buffer so we can re-slice when channel changes
@@ -31,6 +31,16 @@ const PADDING = 55;
 const rAF = typeof requestAnimationFrame !== 'undefined'
     ? requestAnimationFrame
     : (cb: Function) => setTimeout(() => cb(Date.now()), 1000 / 60);
+
+let renderRequested = false;
+function requestRender(): void {
+    if (renderRequested) return;
+    renderRequested = true;
+    rAF(() => {
+        renderRequested = false;
+        render();
+    });
+}
 
 function applyTransform(): void {
     // Re-apply the DPR scale after any canvas resize (canvas resize resets transform)
@@ -68,6 +78,14 @@ function extractChannel(buffer: ArrayBuffer, channel: number): Float32Array {
 }
 
 function updateAutoScale(): void {
+    if (selectedChannel === 4) {
+        displayMin = 0.0;
+        displayMax = 1.0;
+        range = 1.0;
+        self.postMessage({ type: 'bounds', minY: displayMin, maxY: displayMax });
+        return;
+    }
+
     if (!rawData || rawData.length === 0) return;
 
     let minY_raw = Infinity;
@@ -86,6 +104,10 @@ function updateAutoScale(): void {
     if (hasValidData) {
         const rawRange = maxY_raw - minY_raw === 0 ? 1 : maxY_raw - minY_raw;
         displayMin = minY_raw - (rawRange * 0.1);
+        // Clamp displayMin to 0 for positive-only channels if raw minimum is non-negative
+        if (minY_raw >= 0 && (selectedChannel === 0 || selectedChannel === 1 || selectedChannel === 3 || selectedChannel === 4)) {
+            displayMin = Math.max(0, displayMin);
+        }
         displayMax = maxY_raw + (rawRange * 0.1);
         range = displayMax - displayMin;
         self.postMessage({ type: 'bounds', minY: displayMin, maxY: displayMax });
@@ -96,10 +118,97 @@ function updateAutoScale(): void {
     }
 }
 
+function drawCurve(data: Float32Array, color: string, physDrawWidth: number, drawHeight: number, currentPadding: number): void {
+    if (!ctx) return;
+    const numPoints = data.length;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+
+    let first = true;
+    for (let px = 0; px < physDrawWidth; px++) {
+        const x = px / dpr;
+        const start = Math.floor(px * numPoints / physDrawWidth);
+        const end = Math.max(start + 1, Math.floor((px + 1) * numPoints / physDrawWidth));
+        if (start >= numPoints) break;
+
+        let minY = data[start];
+        let maxY = data[start];
+        for (let i = start + 1; i < end; i++) {
+            const val = data[i];
+            if (!isFinite(val)) continue;
+            if (val < minY) minY = val;
+            if (val > maxY) maxY = val;
+        }
+
+        if (!isFinite(minY) || !isFinite(maxY)) continue;
+
+        const yTop    = drawHeight - ((maxY - displayMin) / (range || 1)) * drawHeight;
+        const yBottom = drawHeight - ((minY - displayMin) / (range || 1)) * drawHeight;
+        const canvasX = currentPadding + x;
+
+        if (first) {
+            ctx.moveTo(canvasX, yTop);
+            first = false;
+        } else {
+            ctx.lineTo(canvasX, yTop);
+        }
+        if (Math.abs(yBottom - yTop) > 0.5) {
+            ctx.lineTo(canvasX, yBottom);
+        }
+    }
+    ctx.stroke();
+}
+
+function drawLegend(currentPadding: number): void {
+    if (!ctx) return;
+    ctx.save();
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+
+    const items = [
+        { label: 'Air (Ideal Gas)', color: '#38bdf8' },
+        { label: 'Unburnt Explosive', color: '#f59e0b' },
+        { label: 'Burned Explosive (JWL)', color: '#f43f5e' }
+    ];
+
+    const boxWidth = 175;
+    const boxHeight = 65;
+    const x = width - boxWidth - 15;
+    const y = 15;
+
+    // Draw background (glassmorphic panel)
+    ctx.fillStyle = 'rgba(30, 41, 59, 0.85)';
+    ctx.strokeStyle = '#475569';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    if (typeof (ctx as any).roundRect === 'function') {
+        (ctx as any).roundRect(x, y, boxWidth, boxHeight, 4);
+    } else {
+        ctx.rect(x, y, boxWidth, boxHeight);
+    }
+    ctx.fill();
+    ctx.stroke();
+
+    // Draw items
+    for (let i = 0; i < items.length; i++) {
+        const itemY = y + 12 + i * 17;
+        
+        // Color block
+        ctx.fillStyle = items[i].color;
+        ctx.fillRect(x + 10, itemY - 4, 12, 8);
+
+        // Label
+        ctx.fillStyle = '#cbd5e1';
+        ctx.fillText(items[i].label, x + 28, itemY);
+    }
+    ctx.restore();
+}
+
 function render(): void {
     try {
         if (!ctx || !canvas || width <= 0 || height <= 0) {
-            rAF(render);
             return;
         }
 
@@ -140,7 +249,8 @@ function render(): void {
                 ctx.stroke();
                 
                 // Draw text
-                ctx.fillText(val.toExponential(2), currentPadding - 6, y);
+                const labelText = (selectedChannel === 4) ? val.toFixed(2) : val.toExponential(2);
+                ctx.fillText(labelText, currentPadding - 6, y);
             }
 
             // Horizontal axis ticks & labels (X-axis)
@@ -172,65 +282,34 @@ function render(): void {
             }
         }
 
-        if (!rawData || rawData.length === 0) {
-            rAF(render);
-            return;
-        }
-
-        const numPoints = rawData.length;
         const drawWidth = width - currentPadding;
         const drawHeight = height - currentPadding;
-
-        // Use actual physical pixels for x-loop to maximise resolution
         const physDrawWidth = Math.round(drawWidth * dpr);
 
-        ctx.strokeStyle = chartColor;
-        ctx.lineWidth = 1.5;
-        ctx.beginPath();
+        if (selectedChannel === 4 && lastBuffer) {
+            const dataBurned = extractChannel(lastBuffer, 4);
+            const dataUnburnt = extractChannel(lastBuffer, 5);
+            const dataAir = extractChannel(lastBuffer, 6);
 
-        let first = true;
-        for (let px = 0; px < physDrawWidth; px++) {
-            // Map physical pixel to logical x
-            const x = px / dpr;
+            // Draw Air (sky blue)
+            drawCurve(dataAir, '#38bdf8', physDrawWidth, drawHeight, currentPadding);
+            // Draw Unburnt (amber)
+            drawCurve(dataUnburnt, '#f59e0b', physDrawWidth, drawHeight, currentPadding);
+            // Draw Burned (rose/pink)
+            drawCurve(dataBurned, '#f43f5e', physDrawWidth, drawHeight, currentPadding);
 
-            const start = Math.floor(px * numPoints / physDrawWidth);
-            const end = Math.max(start + 1, Math.floor((px + 1) * numPoints / physDrawWidth));
-            if (start >= numPoints) break;
-
-            let minY = rawData[start];
-            let maxY = rawData[start];
-            for (let i = start + 1; i < end; i++) {
-                const val = rawData[i];
-                if (!isFinite(val)) continue;
-                if (val < minY) minY = val;
-                if (val > maxY) maxY = val;
+            // Draw Legend
+            drawLegend(currentPadding);
+        } else {
+            if (!rawData || rawData.length === 0) {
+                return;
             }
-
-            if (!isFinite(minY) || !isFinite(maxY)) continue;
-
-            const yTop    = drawHeight - ((maxY - displayMin) / (range || 1)) * drawHeight;
-            const yBottom = drawHeight - ((minY - displayMin) / (range || 1)) * drawHeight;
-            const canvasX = currentPadding + x;
-
-            if (first) {
-                ctx.moveTo(canvasX, yTop);
-                first = false;
-            } else {
-                ctx.lineTo(canvasX, yTop);
-            }
-            if (Math.abs(yBottom - yTop) > 0.5) {
-                ctx.lineTo(canvasX, yBottom);
-            }
+            drawCurve(rawData, chartColor, physDrawWidth, drawHeight, currentPadding);
         }
-        ctx.stroke();
     } catch (err) {
         console.error('ChartWorker rendering error:', err);
     }
-
-    rAF(render);
 }
-
-rAF(render);
 
 self.onmessage = (event) => {
     const data = event.data;
@@ -239,6 +318,7 @@ self.onmessage = (event) => {
         lastBuffer = data;
         rawData = extractChannel(data, selectedChannel);
         updateAutoScale();
+        requestRender();
         return;
     }
 
@@ -254,6 +334,7 @@ self.onmessage = (event) => {
         canvas.height = Math.round(height * dpr);
         ctx = canvas.getContext('2d') as OffscreenCanvasRenderingContext2D;
         applyTransform();
+        requestRender();
         return;
     }
 
@@ -264,6 +345,7 @@ self.onmessage = (event) => {
         canvas.width  = Math.round(width  * dpr);
         canvas.height = Math.round(height * dpr);
         applyTransform();
+        requestRender();
         return;
     }
 
@@ -284,6 +366,7 @@ self.onmessage = (event) => {
                 updateAutoScale();
             }
         }
+        requestRender();
         return;
     }
 
@@ -295,6 +378,7 @@ self.onmessage = (event) => {
         if (pressureData && (Array.isArray(pressureData) || pressureData instanceof Float32Array)) {
             rawData = new Float32Array(pressureData);
             updateAutoScale();
+            requestRender();
         }
     }
 };
