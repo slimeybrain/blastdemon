@@ -663,7 +663,9 @@ export class NodeViewer {
             'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature',
             'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
             'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl', 'output_interval',
-            'spatial_order', 'temporal_order', 'gamma', 'plot_stride'
+            'spatial_order', 'temporal_order', 'gamma', 'plot_stride',
+            // 2D CFD keys
+            'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r'
         ];
 
         const dropdowns: Record<string, string[]> = {
@@ -676,8 +678,15 @@ export class NodeViewer {
             'z_max_bc': ['Reflecting', 'Transmitting', 'Terminate'],
             'left_bc': ['Reflecting', 'Transmitting', 'Terminate'],
             'right_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+            'bc_r_min': ['Reflecting', 'Transmitting', 'Terminate'],
+            'bc_r_max': ['Reflecting', 'Transmitting', 'Terminate'],
+            'bc_z_min': ['Reflecting', 'Transmitting', 'Terminate'],
+            'bc_z_max': ['Reflecting', 'Transmitting', 'Terminate'],
+            'coordinate_system': ['Axisymmetric', 'Cartesian'],
+            'device': ['cpu', 'cuda'],
+            'trigger_type': ['end', 'time', 'step'],
             'composition': ['TNT', 'PETN', 'RDX', 'Custom'],
-            'init_mode': ['Multi-Material JWL', 'Ideal Gas'],
+            'init_mode': ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
             'flux_scheme': ['AUSM+', 'Rusanov'],
             'spatial_order': ['1', '2', '3'],
             'temporal_order': ['1', '2', '3', '4'],

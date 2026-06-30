@@ -443,6 +443,7 @@ body {
     /* Always clip content so filling text/charts can never push the node
        taller than its explicitly-set height, keeping port anchors stable. */
     overflow: hidden;
+    z-index: 5;
 }
 
 .node.selected {

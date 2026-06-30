@@ -1109,7 +1109,14 @@ const NODE_ICONS: Record<string, string> = {
     'ThePainter': '🎨',
     'CFDSolver': '⚡',
     'TelemetryText': '📝',
-    'TelemetryGraph': '📈'
+    'TelemetryGraph': '📈',
+    'DomainMesh2D': '🌐',
+    'DetonatorLocation': '🎯',
+    'RemapNode': '🔄',
+    'HardwareConfig': '⚙️',
+    'CFDSolver2D': '⚡',
+    'TelemetryContour': '🗺️',
+    'VTKOutput': '💾'
 };
 
 function getNodeIcon(type: string): string {
@@ -1380,7 +1387,8 @@ class ExecutionManagerComponent {
     private stateManager: StateManager;
     private statusListener: (status: any) => void;
     private stateListener: () => void;
-    private targetSelect: HTMLSelectElement;
+    private modelStatusListener: (modelId: string, status: any) => void;
+    private modelListContainer: HTMLElement;
 
     constructor(parent: HTMLElement, stateManager: StateManager) {
         this.container = document.createElement('div');
@@ -1389,6 +1397,8 @@ class ExecutionManagerComponent {
         this.container.style.display = 'flex';
         this.container.style.flexDirection = 'column';
         this.container.style.gap = '10px';
+        this.container.style.height = '100%';
+        this.container.style.overflowY = 'auto';
         parent.appendChild(this.container);
 
         this.stateManager = stateManager;
@@ -1399,56 +1409,50 @@ class ExecutionManagerComponent {
             btn.textContent = text;
             btn.className = className;
             btn.style.width = '100%';
-            btn.style.padding = '8px';
+            btn.style.padding = '10px 14px';
+            btn.style.fontSize = '12px';
+            btn.style.borderRadius = '4px';
+            btn.style.cursor = 'pointer';
             return btn;
         };
 
-        const statusRow = document.createElement('div');
-        statusRow.style.display = 'flex';
-        statusRow.style.justifyContent = 'space-between';
-        statusRow.style.alignItems = 'center';
-        statusRow.innerHTML = `<span>Status:</span><div id="exec-status-badge" class="status-badge badge-${this.stateManager.getStatus().toLowerCase()}">${this.stateManager.getStatus()}</div>`;
-        this.container.appendChild(statusRow);
+        // Title and targets header
+        const headerRow = document.createElement('div');
+        headerRow.style.display = 'flex';
+        headerRow.style.justifyContent = 'space-between';
+        headerRow.style.alignItems = 'center';
+        headerRow.style.borderBottom = '1px solid #333';
+        headerRow.style.paddingBottom = '6px';
+        headerRow.innerHTML = `<span style="font-weight:bold;font-size:12px;color:#00f0ff;">Execution Targets</span>`;
+        this.container.appendChild(headerRow);
 
-        this.statusListener = (status) => {
-            const badge = this.container.querySelector('#exec-status-badge');
-            if (badge) {
-                badge.textContent = status;
-                badge.className = `status-badge badge-${status.toLowerCase()}`;
-            }
-        };
-        this.stateManager.onStatusChange(this.statusListener);
+        // Model checkbox list container
+        this.modelListContainer = document.createElement('div');
+        this.modelListContainer.style.display = 'flex';
+        this.modelListContainer.style.flexDirection = 'column';
+        this.modelListContainer.style.gap = '8px';
+        this.modelListContainer.style.maxHeight = '300px';
+        this.modelListContainer.style.overflowY = 'auto';
+        this.modelListContainer.style.background = '#1a1a1f';
+        this.modelListContainer.style.border = '1px solid #2d2d37';
+        this.modelListContainer.style.borderRadius = '4px';
+        this.modelListContainer.style.padding = '6px';
+        this.container.appendChild(this.modelListContainer);
 
-        const targetRow = document.createElement('div');
-        targetRow.style.display = 'flex';
-        targetRow.style.flexDirection = 'column';
-        targetRow.style.gap = '4px';
-
-        const targetLabel = document.createElement('span');
-        targetLabel.textContent = 'Execution Target:';
-        targetLabel.style.fontSize = '11px';
-        targetLabel.style.color = '#888';
-        targetLabel.style.fontWeight = 'bold';
-        targetRow.appendChild(targetLabel);
-
-        this.targetSelect = document.createElement('select');
-        this.targetSelect.className = 'header-select';
-        this.targetSelect.style.width = '100%';
-
-        this.targetSelect.onchange = () => {
-            this.stateManager.setRunTarget(this.targetSelect.value);
-        };
-        targetRow.appendChild(this.targetSelect);
-        this.container.appendChild(targetRow);
-
-        this.stateListener = () => this.updateTargets();
-        this.stateManager.onStateChange(this.stateListener);
+        // Global buttons title
+        const globalTitle = document.createElement('div');
+        globalTitle.style.fontWeight = 'bold';
+        globalTitle.style.fontSize = '11px';
+        globalTitle.style.color = '#888';
+        globalTitle.style.marginTop = '6px';
+        globalTitle.textContent = 'GLOBAL CONTROLS (Selected Models)';
+        this.container.appendChild(globalTitle);
 
         const mainControls = document.createElement('div');
         mainControls.style.display = 'grid';
         mainControls.style.gridTemplateColumns = '1fr';
         mainControls.style.gap = '8px';
-        mainControls.appendChild(createBtn('init-btn', 'Initialize', 'header-button'));
+        mainControls.appendChild(createBtn('init-btn', 'Initialize Selected', 'header-button'));
         this.container.appendChild(mainControls);
 
         const stepControls = document.createElement('div');
@@ -1466,56 +1470,216 @@ class ExecutionManagerComponent {
         runControls.style.display = 'grid';
         runControls.style.gridTemplateColumns = '1fr 1fr';
         runControls.style.gap = '8px';
-        runControls.appendChild(createBtn('interrupt-btn', 'Interrupt', 'header-button warning'));
-        runControls.appendChild(createBtn('terminate-btn', 'Terminate', 'header-button danger'));
+        runControls.appendChild(createBtn('interrupt-btn', 'Interrupt Selected', 'header-button warning'));
+        runControls.appendChild(createBtn('terminate-btn', 'Terminate Selected', 'header-button danger'));
         this.container.appendChild(runControls);
 
-        const progressCont = document.createElement('div');
-        progressCont.className = 'progress-container';
-        progressCont.style.height = '10px';
-        progressCont.style.background = '#333';
-        progressCont.style.marginTop = '10px';
-        const progressBar = document.createElement('div');
-        progressBar.id = 'progress-bar';
-        progressBar.className = 'progress-bar';
-        progressBar.style.width = '0%';
-        progressCont.appendChild(progressBar);
-        this.container.appendChild(progressCont);
+        this.statusListener = () => {
+            this.updateTargets();
+        };
+        this.stateManager.onStatusChange(this.statusListener);
 
-        const progressLabel = document.createElement('div');
-        progressLabel.id = 'progress-label';
-        progressLabel.style.fontSize = 'var(--font-sm)';
-        progressLabel.style.textAlign = 'center';
-        progressLabel.style.marginTop = '4px';
-        progressLabel.style.color = '#888';
-        progressLabel.textContent = 'Ready';
-        this.container.appendChild(progressLabel);
+        this.modelStatusListener = () => {
+            this.updateTargets();
+        };
+        this.stateManager.onModelStatusChange(this.modelStatusListener);
+
+        this.stateListener = () => this.updateTargets();
+        this.stateManager.onStateChange(this.stateListener);
 
         this.updateTargets();
     }
 
     destroy() {
         this.stateManager.offStatusChange(this.statusListener);
+        this.stateManager.offModelStatusChange(this.modelStatusListener);
         this.stateManager.offStateChange(this.stateListener);
         this.container.remove();
     }
 
     updateTargets() {
-        this.targetSelect.innerHTML = '';
-        
-        const optAll = document.createElement('option');
-        optAll.value = 'all';
-        optAll.textContent = 'All Models (Merged)';
-        optAll.selected = this.stateManager.getRunTarget() === 'all';
-        this.targetSelect.appendChild(optAll);
+        this.modelListContainer.innerHTML = '';
 
         const models = this.stateManager.getWorkspaceModels();
+        if (models.length === 0) {
+            this.modelListContainer.innerHTML = `<div style="padding:10px; color:#888; font-style:italic; font-size:11px;">No models in workspace</div>`;
+            return;
+        }
+
+        // Add a "Select/Deselect All" row
+        const selectAllRow = document.createElement('div');
+        selectAllRow.style.display = 'flex';
+        selectAllRow.style.alignItems = 'center';
+        selectAllRow.style.gap = '8px';
+        selectAllRow.style.padding = '6px 8px';
+        selectAllRow.style.borderBottom = '1px solid #2d2d37';
+
+        const selectAllCheckbox = document.createElement('input');
+        selectAllCheckbox.type = 'checkbox';
+        selectAllCheckbox.style.width = '16px';
+        selectAllCheckbox.style.height = '16px';
+        selectAllCheckbox.style.cursor = 'pointer';
+        const allSelected = models.every(m => this.stateManager.isRunTargetSelected(m.id));
+        selectAllCheckbox.checked = allSelected;
+        selectAllCheckbox.onchange = () => {
+            if (selectAllCheckbox.checked) {
+                this.stateManager.setSelectedRunTargets(models.map(m => m.id));
+            } else {
+                this.stateManager.setSelectedRunTargets([]);
+            }
+            this.updateTargets();
+        };
+
+        const selectAllLabel = document.createElement('label');
+        selectAllLabel.textContent = 'Toggle All';
+        selectAllLabel.style.fontSize = '12px';
+        selectAllLabel.style.fontWeight = 'bold';
+        selectAllLabel.style.color = '#ccc';
+        selectAllLabel.style.cursor = 'pointer';
+        selectAllLabel.onclick = () => selectAllCheckbox.click();
+
+        selectAllRow.appendChild(selectAllCheckbox);
+        selectAllRow.appendChild(selectAllLabel);
+        this.modelListContainer.appendChild(selectAllRow);
+
         models.forEach(model => {
-            const opt = document.createElement('option');
-            opt.value = model.id;
-            opt.textContent = model.name;
-            opt.selected = this.stateManager.getRunTarget() === model.id;
-            this.targetSelect.appendChild(opt);
+            const row = document.createElement('div');
+            row.style.display = 'flex';
+            row.style.flexDirection = 'column';
+            row.style.gap = '4px';
+            row.style.padding = '6px 8px';
+            row.style.borderBottom = '1px solid #222';
+
+            const topMeta = document.createElement('div');
+            topMeta.style.display = 'flex';
+            topMeta.style.alignItems = 'center';
+            topMeta.style.justifyContent = 'space-between';
+            topMeta.style.padding = '4px 0';
+
+            const leftPart = document.createElement('div');
+            leftPart.style.display = 'flex';
+            leftPart.style.alignItems = 'center';
+            leftPart.style.gap = '8px';
+
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.style.width = '16px';
+            checkbox.style.height = '16px';
+            checkbox.style.cursor = 'pointer';
+            checkbox.checked = this.stateManager.isRunTargetSelected(model.id);
+            checkbox.onchange = () => {
+                this.stateManager.toggleRunTarget(model.id);
+                this.updateTargets();
+            };
+
+            const name = document.createElement('span');
+            name.textContent = model.name;
+            name.style.fontSize = '12px';
+            name.style.fontWeight = 'bold';
+            name.style.color = '#fff';
+            name.style.cursor = 'pointer';
+            name.onclick = () => checkbox.click();
+
+            leftPart.appendChild(checkbox);
+            leftPart.appendChild(name);
+            topMeta.appendChild(leftPart);
+
+            const status = this.stateManager.getModelStatus(model.id);
+            const badge = document.createElement('div');
+            badge.className = `status-badge badge-${status.toLowerCase()}`;
+            badge.textContent = status;
+            topMeta.appendChild(badge);
+
+            row.appendChild(topMeta);
+
+            // Progress bar and details
+            const progress = this.stateManager.getModelProgress(model.id);
+            const simTime = this.stateManager.getModelSimTime(model.id);
+
+            const progressContainer = document.createElement('div');
+            progressContainer.style.display = 'flex';
+            progressContainer.style.alignItems = 'center';
+            progressContainer.style.gap = '8px';
+
+            const progressBg = document.createElement('div');
+            progressBg.style.flex = '1';
+            progressBg.style.height = '6px';
+            progressBg.style.background = '#333';
+            progressBg.style.borderRadius = '3px';
+            progressBg.style.overflow = 'hidden';
+
+            const progressFill = document.createElement('div');
+            progressFill.style.height = '100%';
+            progressFill.style.background = '#00f0ff';
+            progressFill.style.width = `${progress}%`;
+            progressBg.appendChild(progressFill);
+
+            const progressText = document.createElement('span');
+            progressText.style.fontSize = '10px';
+            progressText.style.color = '#888';
+            progressText.style.width = '100px';
+            progressText.style.textAlign = 'right';
+            if (status === 'RUNNING') {
+                progressText.textContent = `${progress}% | ${simTime.toExponential(3)}s`;
+            } else if (status === 'INITIALIZED' || status === 'PAUSED' || status === 'TERMINATED') {
+                progressText.textContent = `${simTime.toExponential(3)}s`;
+            } else {
+                progressText.textContent = 'Ready';
+            }
+
+            progressContainer.appendChild(progressBg);
+            progressContainer.appendChild(progressText);
+            row.appendChild(progressContainer);
+
+            // Model-specific individual action buttons
+            const actionsRow = document.createElement('div');
+            actionsRow.style.display = 'flex';
+            actionsRow.style.gap = '4px';
+            actionsRow.style.marginTop = '4px';
+
+            const createMiniBtn = (text: string, title: string, bg: string, color: string, onClick: () => void) => {
+                const btn = document.createElement('button');
+                btn.textContent = text;
+                btn.title = title;
+                btn.style.flex = '1';
+                btn.style.fontSize = '10px';
+                btn.style.padding = '4px 6px';
+                btn.style.border = 'none';
+                btn.style.borderRadius = '3px';
+                btn.style.background = bg;
+                btn.style.color = color;
+                btn.style.cursor = 'pointer';
+                btn.onclick = (e) => {
+                    e.stopPropagation();
+                    onClick();
+                };
+                return btn;
+            };
+
+            const initBtn = createMiniBtn('Init', 'Initialize Model', '#3a3a4a', '#00f0ff', () => {
+                document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'INIT' } }));
+            });
+            const playBtn = createMiniBtn('End', 'Run Model to Completion', '#2b4c2b', '#4ade80', () => {
+                document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'EXEC_ALL' } }));
+            });
+            const stepBtn = createMiniBtn('Step 100', 'Run 100 Steps', '#3b3b4f', '#ccc', () => {
+                document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'STEP', steps: 100 } }));
+            });
+            const pauseBtn = createMiniBtn('Pause', 'Interrupt Model', '#4c3a2b', '#fb923c', () => {
+                document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'PAUSE' } }));
+            });
+            const termBtn = createMiniBtn('Term', 'Terminate Model Solver', '#4c2b2b', '#f87171', () => {
+                document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'TERMINATE' } }));
+            });
+
+            actionsRow.appendChild(initBtn);
+            actionsRow.appendChild(playBtn);
+            actionsRow.appendChild(stepBtn);
+            actionsRow.appendChild(pauseBtn);
+            actionsRow.appendChild(termBtn);
+            row.appendChild(actionsRow);
+
+            this.modelListContainer.appendChild(row);
         });
     }
 }

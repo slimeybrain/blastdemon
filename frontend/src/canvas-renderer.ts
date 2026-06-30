@@ -1,5 +1,6 @@
 import { SimulationState, Node, Connection, Port } from './types.js';
 import { StateManager } from './state-manager.js';
+import { validateSimulationState } from './validation.js';
 
 export class CanvasRenderer {
     private canvas: HTMLCanvasElement;
@@ -310,128 +311,6 @@ export class CanvasRenderer {
         nodeStatus: Record<string, { state: 'error' | 'warning' | 'valid'; messages: string[] }>;
         flawedConnections: Map<string, string>;
     } {
-        const nodeStatus: Record<string, { state: 'error' | 'warning' | 'valid'; messages: string[] }> = {};
-        const flawedConnections = new Map<string, string>();
-
-        state.nodes.forEach(node => {
-            nodeStatus[node.id] = { state: 'valid', messages: [] };
-        });
-
-        const solverNode = state.nodes.find(n => n.type === 'CFDSolver');
-        const initMode = solverNode?.parameters['init_mode'] || 'Multi-Material JWL';
-
-        if (solverNode) {
-            const painterConn = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'in');
-            if (!painterConn) {
-                nodeStatus[solverNode.id].state = 'error';
-                nodeStatus[solverNode.id].messages.push("CFD Solver is not connected to the Initializer (ThePainter).");
-            } else {
-                const painterNode = state.nodes.find(n => n.id === painterConn.fromNode);
-                if (!painterNode || painterNode.type !== 'ThePainter') {
-                    flawedConnections.set(
-                        `${painterConn.fromNode}:${painterConn.fromPort}->${painterConn.toNode}:${painterConn.toPort}`,
-                        "CFD Solver 'Initial State' port must be connected to the Initializer (ThePainter)."
-                    );
-                    nodeStatus[solverNode.id].state = 'error';
-                    nodeStatus[solverNode.id].messages.push("CFD Solver 'Initial State' port must be connected to the Initializer (ThePainter).");
-                }
-            }
-        }
-
-        const painterNodes = state.nodes.filter(n => n.type === 'ThePainter');
-        painterNodes.forEach(painterNode => {
-            const meshConn = state.connections.find(c => c.toNode === painterNode.id && c.toPort === 'mesh');
-            if (!meshConn) {
-                nodeStatus[painterNode.id].state = 'error';
-                nodeStatus[painterNode.id].messages.push("No Mesh node connected to Initializer. A DomainMesh node is required.");
-            } else {
-                const fromNode = state.nodes.find(n => n.id === meshConn.fromNode);
-                if (!fromNode || fromNode.type !== 'DomainMesh') {
-                    flawedConnections.set(
-                        `${meshConn.fromNode}:${meshConn.fromPort}->${meshConn.toNode}:${meshConn.toPort}`,
-                        "Only DomainMesh node can be connected to the Mesh input."
-                    );
-                    nodeStatus[painterNode.id].state = 'error';
-                    nodeStatus[painterNode.id].messages.push("Only DomainMesh node can be connected to the Mesh input.");
-                }
-            }
-
-            const airConn = state.connections.find(c => c.toNode === painterNode.id && c.toPort === 'air');
-            if (!airConn) {
-                nodeStatus[painterNode.id].state = 'error';
-                nodeStatus[painterNode.id].messages.push("No Air node connected to Initializer. A MaterialAir node is required.");
-            } else {
-                const fromNode = state.nodes.find(n => n.id === airConn.fromNode);
-                if (!fromNode || fromNode.type !== 'MaterialAir') {
-                    flawedConnections.set(
-                        `${airConn.fromNode}:${airConn.fromPort}->${airConn.toNode}:${airConn.toPort}`,
-                        "Only MaterialAir node can be connected to the Air input."
-                    );
-                    nodeStatus[painterNode.id].state = 'error';
-                    nodeStatus[painterNode.id].messages.push("Only MaterialAir node can be connected to the Air input.");
-                }
-            }
-
-            const expConn = state.connections.find(c => c.toNode === painterNode.id && c.toPort === 'explosive');
-            if (!expConn) {
-                if (nodeStatus[painterNode.id].state === 'valid') {
-                    nodeStatus[painterNode.id].state = 'warning';
-                }
-                nodeStatus[painterNode.id].messages.push("No Explosive node connected to Initializer. Simulation will run with NO explosive charge.");
-            } else {
-                const expNode = state.nodes.find(n => n.id === expConn.fromNode);
-                if (expNode) {
-                    if (expNode.type !== 'MaterialExplosive' && expNode.type !== 'MaterialIdealGas') {
-                        flawedConnections.set(
-                            `${expConn.fromNode}:${expConn.fromPort}->${expConn.toNode}:${expConn.toPort}`,
-                            "Only MaterialExplosive or MaterialIdealGas node can be connected to the Explosive input."
-                        );
-                        nodeStatus[painterNode.id].state = 'error';
-                        nodeStatus[painterNode.id].messages.push("Only MaterialExplosive or MaterialIdealGas node can be connected to the Explosive input.");
-                    } else if (initMode === 'Ideal Gas' && expNode.type === 'MaterialExplosive') {
-                        flawedConnections.set(
-                            `${expConn.fromNode}:${expConn.fromPort}->${expConn.toNode}:${expConn.toPort}`,
-                            "Solver physics is set to 'Ideal Gas' (1-material air), but explosive input is a 'MaterialExplosive' (HE-JWL) node. Connect a 'MaterialIdealGas' (IG-CHG) node instead."
-                        );
-                        if (nodeStatus[expNode.id].state !== 'error') nodeStatus[expNode.id].state = 'warning';
-                        nodeStatus[expNode.id].messages.push("Solver physics is set to 'Ideal Gas' (1-material air), but explosive input is a 'MaterialExplosive' (HE-JWL) node. Connect a 'MaterialIdealGas' (IG-CHG) node instead.");
-                        if (solverNode) {
-                            if (nodeStatus[solverNode.id].state !== 'error') nodeStatus[solverNode.id].state = 'warning';
-                            nodeStatus[solverNode.id].messages.push("Solver physics is set to 'Ideal Gas' (1-material air), but explosive input is a 'MaterialExplosive' (HE-JWL) node. Connect a 'MaterialIdealGas' (IG-CHG) node instead.");
-                        }
-                    } else if (initMode === 'Multi-Material JWL' && expNode.type === 'MaterialIdealGas') {
-                        flawedConnections.set(
-                            `${expConn.fromNode}:${expConn.fromPort}->${expConn.toNode}:${expConn.toPort}`,
-                            "Solver physics is set to 'Multi-Material JWL', but explosive input is a 'MaterialIdealGas' (IG-CHG) node. Connect a 'MaterialExplosive' (HE-JWL) node instead."
-                        );
-                        if (nodeStatus[expNode.id].state !== 'error') nodeStatus[expNode.id].state = 'warning';
-                        nodeStatus[expNode.id].messages.push("Solver physics is set to 'Multi-Material JWL', but explosive input is a 'MaterialIdealGas' (IG-CHG) node. Connect a 'MaterialExplosive' (HE-JWL) node instead.");
-                        if (solverNode) {
-                            if (nodeStatus[solverNode.id].state !== 'error') nodeStatus[solverNode.id].state = 'warning';
-                            nodeStatus[solverNode.id].messages.push("Solver physics is set to 'Multi-Material JWL', but explosive input is a 'MaterialIdealGas' (IG-CHG) node. Connect a 'MaterialExplosive' (HE-JWL) node instead.");
-                        }
-                    }
-                }
-            }
-        });
-
-        state.nodes.forEach(node => {
-            if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph') {
-                const conn = state.connections.find(c => c.toNode === node.id && c.toPort === 'in');
-                if (conn) {
-                    const fromNode = state.nodes.find(n => n.id === conn.fromNode);
-                    if (!fromNode || fromNode.type !== 'CFDSolver') {
-                        flawedConnections.set(
-                            `${conn.fromNode}:${conn.fromPort}->${conn.toNode}:${conn.toPort}`,
-                            "Telemetry input must be connected to a CFD Solver."
-                        );
-                        nodeStatus[node.id].state = 'warning';
-                        nodeStatus[node.id].messages.push("Telemetry input must be connected to a CFD Solver.");
-                    }
-                }
-            }
-        });
-
-        return { nodeStatus, flawedConnections };
+        return validateSimulationState(state);
     }
 }

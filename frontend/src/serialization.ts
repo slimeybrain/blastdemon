@@ -12,7 +12,7 @@ export function serializeSimulationState(state: SimulationState): string {
     });
 }
 
-export function serializeForSolver(state: SimulationState, command: string = "INIT"): string {
+export function serializeForSolver(state: SimulationState, command: string = "INIT", modelId?: string): string {
     const strippedNodes = state.nodes.map(({ x, y, ...rest }) => rest);
 
     const numericKeys = [
@@ -20,25 +20,24 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
         'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl', 'output_interval',
         'spatial_order', 'temporal_order',
-        'n_cells', 'gamma', 'explosive_radius', 'ambient_rho'
+        'n_cells', 'gamma', 'explosive_radius', 'ambient_rho',
+        // 2D CFD keys
+        'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_r', 'remap_radius', 'trigger_value'
     ];
 
     const flattenedParams: Record<string, any> = {};
 
-    // 1. Trace active connections to strictly copy connected parameters
+    // 1. Trace 1D Solver if it exists
     const solverNode = state.nodes.find(n => n.type === 'CFDSolver');
     if (solverNode) {
-        // Apply active solver parameters
         Object.entries(solverNode.parameters).forEach(([key, value]) => {
             flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
         });
 
-        // Trace from solver's 'in' port
         const solverConn = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'in');
         if (solverConn) {
             const painterNode = state.nodes.find(n => n.id === solverConn.fromNode);
             if (painterNode && painterNode.type === 'ThePainter') {
-                // Trace painter inputs
                 const meshConn = state.connections.find(c => c.toNode === painterNode.id && c.toPort === 'mesh');
                 if (meshConn) {
                     const meshNode = state.nodes.find(n => n.id === meshConn.fromNode);
@@ -64,19 +63,108 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     const expNode = state.nodes.find(n => n.id === expConn.fromNode);
                     if (expNode) {
                         flattenedParams['explosive_type'] = expNode.type;
-                        // Clear composition beforehand so we don't carry TNT composition if connecting an IdealGas charge
                         if (expNode.type === 'MaterialIdealGas') {
                             delete flattenedParams['composition'];
                         }
                         const initMode = solverNode?.parameters['init_mode'] || 'Multi-Material JWL';
                         Object.entries(expNode.parameters).forEach(([key, value]) => {
                             if (key === 'gamma' && (initMode === 'Ideal Gas' || expNode.type === 'MaterialIdealGas')) {
-                                return; // Skip gamma to prevent overriding the air's gamma in ideal gas mode
+                                return;
                             }
                             flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
                         });
                     }
                 }
+            }
+        }
+    }
+
+    // 2. Trace 2D Solver if it exists
+    const solverNode2D = state.nodes.find(n => n.type === 'CFDSolver2D');
+    if (solverNode2D) {
+        // Apply CFDSolver2D parameters
+        Object.entries(solverNode2D.parameters).forEach(([key, value]) => {
+            flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+        });
+
+        // Trace mesh input
+        const meshConn2D = state.connections.find(c => c.toNode === solverNode2D.id && c.toPort === 'mesh');
+        if (meshConn2D) {
+            const meshNode2D = state.nodes.find(n => n.id === meshConn2D.fromNode);
+            if (meshNode2D) {
+                Object.entries(meshNode2D.parameters).forEach(([key, value]) => {
+                    flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                });
+            }
+        }
+
+        // Trace remap input
+        const remapConn2D = state.connections.find(c => c.toNode === solverNode2D.id && c.toPort === 'remap');
+        if (remapConn2D) {
+            const remapNode2D = state.nodes.find(n => n.id === remapConn2D.fromNode);
+            if (remapNode2D) {
+                Object.entries(remapNode2D.parameters).forEach(([key, value]) => {
+                    flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                });
+            }
+        }
+
+        // Trace detonator input
+        const detConn2D = state.connections.find(c => c.toNode === solverNode2D.id && c.toPort === 'detonator');
+        if (detConn2D) {
+            const detNode2D = state.nodes.find(n => n.id === detConn2D.fromNode);
+            if (detNode2D) {
+                Object.entries(detNode2D.parameters).forEach(([key, value]) => {
+                    flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                });
+            }
+        }
+
+        // Trace hardware config
+        const hwConn2D = state.connections.find(c => c.toNode === solverNode2D.id && c.toPort === 'hardware');
+        if (hwConn2D) {
+            const hwNode2D = state.nodes.find(n => n.id === hwConnConnNode(hwConn2D.fromNode));
+            function hwConnConnNode(id: string) { return id; } // helper
+            const hwNode = state.nodes.find(n => n.id === hwConn2D.fromNode);
+            if (hwNode) {
+                Object.entries(hwNode.parameters).forEach(([key, value]) => {
+                    flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                });
+            }
+        }
+
+        // Trace air input
+        const airConn2D = state.connections.find(c => c.toNode === solverNode2D.id && c.toPort === 'air');
+        if (airConn2D) {
+            const airNode = state.nodes.find(n => n.id === airConn2D.fromNode);
+            if (airNode) {
+                Object.entries(airNode.parameters).forEach(([key, value]) => {
+                    flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                });
+            }
+        }
+
+        // Trace explosive input
+        const expConn2D = state.connections.find(c => c.toNode === solverNode2D.id && c.toPort === 'explosive');
+        if (expConn2D) {
+            const expNode = state.nodes.find(n => n.id === expConn2D.fromNode);
+            if (expNode) {
+                flattenedParams['explosive_type'] = expNode.type;
+                Object.entries(expNode.parameters).forEach(([key, value]) => {
+                    flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                });
+            }
+        }
+
+        // Trace ideal gas input
+        const igConn2D = state.connections.find(c => c.toNode === solverNode2D.id && c.toPort === 'ideal_gas');
+        if (igConn2D) {
+            const igNode = state.nodes.find(n => n.id === igConn2D.fromNode);
+            if (igNode) {
+                flattenedParams['explosive_type'] = igNode.type;
+                Object.entries(igNode.parameters).forEach(([key, value]) => {
+                    flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                });
             }
         }
     }
@@ -105,10 +193,26 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         if (flattenedParams['init_mode'] === 'Multi-Material JWL' && !flattenedParams['composition']) {
             flattenedParams['composition'] = 'TNT';
         }
+    } else if (command === "INIT_2D") {
+        if (!flattenedParams['gamma']) flattenedParams['gamma'] = 1.4;
+
+        const p = flattenedParams['atm_pressure'] || 101325.0;
+        const t = flattenedParams['atm_temperature'] || 298.15;
+        flattenedParams['ambient_rho'] = p / (287.058 * t);
+
+        if (!flattenedParams['init_mode']) flattenedParams['init_mode'] = 'From1D';
+        if (!flattenedParams['composition']) flattenedParams['composition'] = 'TNT';
+        if (!flattenedParams['device']) flattenedParams['device'] = 'cpu';
+
+        if (flattenedParams['nr'] === undefined) flattenedParams['nr'] = 200;
+        if (flattenedParams['nz'] === undefined) flattenedParams['nz'] = 200;
+        if (flattenedParams['max_r'] === undefined) flattenedParams['max_r'] = 1.0;
+        if (flattenedParams['max_z'] === undefined) flattenedParams['max_z'] = 1.0;
     }
 
     return JSON.stringify({
         command: command,
+        modelId: modelId,
         ...flattenedParams,
         // Full DAG for Broker tracking
         nodes: strippedNodes,

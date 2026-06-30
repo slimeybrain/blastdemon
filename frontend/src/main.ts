@@ -129,7 +129,7 @@ const layoutManager = new LayoutManager('app-container', stateManager);
 
 function getCflFromSolver(): number {
     const state = stateManager.getCurrentState();
-    const solver = state?.nodes?.find(n => n.type === 'CFDSolver');
+    const solver = state?.nodes?.find(n => n.type === 'CFDSolver2D') || state?.nodes?.find(n => n.type === 'CFDSolver');
     return solver?.parameters?.cfl || 0.4;
 }
 
@@ -319,127 +319,333 @@ document.addEventListener('click', async (e) => {
 
     if (isExecutionBtn) {
         if (!networkManager.isConnected()) {
-            stateManager.pushTelemetry("[ERROR] WebSocket is not connected to the Broker backend. Please ensure the Broker daemon is running on port 8080.");
             alert("Error: WebSocket is not connected to the Broker backend. Please ensure the Broker daemon is running.");
             return;
         }
     }
 
     if (target.id === 'init-btn') {
-        const runTarget = stateManager.getRunTarget();
-        const state = stateManager.getSimulationState(runTarget);
-        if (state) {
-            stateManager.clearPendingSteps();
-            const payload = serializeForSolver(state, "INIT");
-            console.log("Sending INIT payload:", payload);
-            networkManager.send(payload);
-            stateManager.setStatus('INITIALIZED');
-        }
+        const selected = stateManager.getSelectedRunTargets();
+        selected.forEach(modelId => {
+            executeModelCommand(modelId, 'INIT');
+        });
     }
 
     const stepMatch = target.id.match(/exec-(\d+)-btn/);
     if (stepMatch) {
         const steps = parseInt(stepMatch[1]);
-        if (stateManager.getStatus() === 'UNINITIALIZED' || stateManager.getStatus() === 'TERMINATED') {
-            stateManager.pushTelemetry("[WARNING] Cannot execute simulation steps: System is uninitialized. Please click 'Initialize' first.");
-            return;
-        }
-        stateManager.addPendingSteps(steps);
-
-        if (stateManager.getStatus() !== 'RUNNING') {
-            networkManager.send({ command: "STEP", steps: stateManager.getPendingSteps(), cfl: getCflFromSolver() });
-            stateManager.clearPendingSteps();
-            stateManager.setStatus('RUNNING');
-        }
+        const selected = stateManager.getSelectedRunTargets();
+        selected.forEach(modelId => {
+            executeModelCommand(modelId, 'STEP', { steps });
+        });
     }
 
     if (target.id === 'exec-end-btn') {
-        if (stateManager.getStatus() === 'UNINITIALIZED' || stateManager.getStatus() === 'TERMINATED') {
-            stateManager.pushTelemetry("[WARNING] Cannot execute simulation: System is uninitialized. Please click 'Initialize' first.");
-            return;
-        }
-        stateManager.clearPendingSteps();
-        networkManager.send({ command: "EXEC_ALL", cfl: getCflFromSolver() });
-        stateManager.setStatus('RUNNING');
+        const selected = stateManager.getSelectedRunTargets();
+        selected.forEach(modelId => {
+            executeModelCommand(modelId, 'EXEC_ALL');
+        });
     }
 
     if (target.id === 'interrupt-btn') {
-        stateManager.clearPendingSteps();
-        networkManager.send({ command: "PAUSE" });
-        stateManager.setStatus('PAUSED');
+        const selected = stateManager.getSelectedRunTargets();
+        selected.forEach(modelId => {
+            executeModelCommand(modelId, 'PAUSE');
+        });
     }
 
     if (target.id === 'terminate-btn') {
-        stateManager.clearPendingSteps();
-        networkManager.send({ command: "TERMINATE" });
-        stateManager.setStatus('TERMINATED');
+        const selected = stateManager.getSelectedRunTargets();
+        selected.forEach(modelId => {
+            executeModelCommand(modelId, 'TERMINATE');
+        });
     }
 });
 
 
+/**
+ * Walk workspace cross-model connections to find the "remap partner" of a model.
+ * A 2D model has a RemapNode whose 'in' port is connected FROM a node in the 1D model.
+ * Returns the partner modelId, or null if none found.
+ */
+function findRemapPartner(modelId: string): string | null {
+    const ws = stateManager.getActiveWorkspace();
+    if (!ws) return null;
+    const model = stateManager.getAllModels().find(m => m.id === modelId);
+    if (!model) return null;
+    const wsConns = (ws as any).connections as Array<{fromNode:string,fromPort:string,toNode:string,toPort:string}> || [];
+
+    // Case 1: this model has a RemapNode — find the 1D model feeding its 'in' port.
+    const remapNode = model.nodes.find((n: any) => n.type === 'RemapNode');
+    if (remapNode) {
+        const conn = wsConns.find(c => c.toNode === remapNode.id && c.toPort === 'in');
+        if (conn) {
+            for (const mId of ws.modelIds) {
+                if (mId === modelId) continue;
+                const m = stateManager.getAllModels().find((x: any) => x.id === mId);
+                if (m?.nodes.some((n: any) => n.id === conn.fromNode)) return mId;
+            }
+        }
+    }
+
+    // Case 2: this model is the 1D source — find the 2D model whose RemapNode we feed.
+    const modelNodeIds = new Set(model.nodes.map((n: any) => n.id));
+    for (const conn of wsConns) {
+        if (!modelNodeIds.has(conn.fromNode)) continue;
+        for (const mId of ws.modelIds) {
+            if (mId === modelId) continue;
+            const m = stateManager.getAllModels().find((x: any) => x.id === mId);
+            const target = m?.nodes.find((n: any) => n.id === conn.toNode);
+            if (target?.type === 'RemapNode') return mId;
+        }
+    }
+    return null;
+}
+
+function executeModelCommand(modelId: string, command: string, extra: Record<string, any> = {}) {
+    if (!networkManager.isConnected()) {
+        stateManager.pushTelemetry(modelId, "[ERROR] WebSocket is not connected to the Broker backend.");
+        return;
+    }
+    const model = stateManager.getAllModels().find(m => m.id === modelId);
+    const has2D = model?.nodes.some(n => n.type === 'CFDSolver2D') || false;
+
+    if (command === "INIT") {
+        const state = stateManager.getSimulationState(modelId);
+        if (state) {
+            if (has2D) {
+                const solver2D = state.nodes.find(n => n.type === 'CFDSolver2D');
+                const hwConn = state.connections.find(c => c.toNode === solver2D?.id && c.toPort === 'hardware');
+                const hwNode = hwConn ? state.nodes.find(n => n.id === hwConn.fromNode) : null;
+                const device = hwNode?.parameters?.device || 'cpu';
+                networkManager.send({ command: "SET_DEVICE", modelId, device });
+
+                const payload = serializeForSolver(state, "INIT_2D", modelId);
+                console.log(`Sending INIT_2D payload for model ${modelId}:`, payload);
+                networkManager.send(payload);
+                stateManager.setModelStatus(modelId, 'INITIALIZED');
+
+                const initMode = solver2D?.parameters?.init_mode || 'From1D';
+                if (initMode === 'From1D' || initMode === 'Remap') {
+                    const remapConn = state.connections.find(c => c.toNode === solver2D?.id && c.toPort === 'remap');
+                    const remapNode = remapConn ? state.nodes.find(n => n.id === remapConn.fromNode) : null;
+                    if (remapNode) {
+                        const detConn = state.connections.find(c => c.toNode === solver2D?.id && c.toPort === 'detonator');
+                        const detNode = detConn ? state.nodes.find(n => n.id === detConn.fromNode) : null;
+
+                        const explosiveZ = detNode 
+                            ? Number(detNode.parameters.explosive_z ?? 0.0)
+                            : Number(remapNode.parameters.explosive_z ?? 0.0);
+                        const explosiveR = detNode
+                            ? Number(detNode.parameters.explosive_r ?? 0.0)
+                            : Number(remapNode.parameters.explosive_r ?? 0.0);
+                        const remapRadius = Number(remapNode.parameters.remap_radius ?? 0.5);
+
+                        networkManager.send({
+                            command: "REMAP",
+                            modelId,
+                            explosive_z: explosiveZ,
+                            remap_radius: remapRadius,
+                            explosive_r: explosiveR
+                        });
+                    }
+                }
+            } else {
+                const payload = serializeForSolver(state, "INIT", modelId);
+                console.log(`Sending INIT payload for model ${modelId}:`, payload);
+                networkManager.send(payload);
+                stateManager.setModelStatus(modelId, 'INITIALIZED');
+            }
+        }
+    } else if (command === "STEP") {
+        const steps = extra.steps || 1;
+        const currentStatus = stateManager.getModelStatus(modelId);
+        if (currentStatus === 'UNINITIALIZED' || currentStatus === 'TERMINATED') {
+            const solverNode = model?.nodes.find(n => n.type === 'CFDSolver2D') || model?.nodes.find(n => n.type === 'CFDSolver');
+            if (solverNode) {
+                stateManager.pushTelemetry(solverNode.id, "[WARNING] Cannot execute simulation steps: Solver is uninitialized. Send INIT first.");
+            }
+            return;
+        }
+        if (has2D) {
+            networkManager.send({ command: "STEP_2D", modelId, steps, cfl: getCflFromSolver() });
+        } else {
+            networkManager.send({ command: "STEP", modelId, steps, cfl: getCflFromSolver() });
+        }
+        stateManager.setModelStatus(modelId, 'RUNNING');
+    } else if (command === "EXEC_ALL") {
+        const currentStatus = stateManager.getModelStatus(modelId);
+        if (currentStatus === 'UNINITIALIZED' || currentStatus === 'TERMINATED') {
+            const solverNode = model?.nodes.find(n => n.type === 'CFDSolver2D') || model?.nodes.find(n => n.type === 'CFDSolver');
+            if (solverNode) {
+                stateManager.pushTelemetry(solverNode.id, "[WARNING] Cannot execute simulation: Solver is uninitialized. Send INIT first.");
+            }
+            return;
+        }
+        if (has2D) {
+            networkManager.send({ command: "EXEC_ALL_2D", modelId, cfl: getCflFromSolver() });
+        } else {
+            networkManager.send({ command: "EXEC_ALL", modelId, cfl: getCflFromSolver() });
+        }
+        stateManager.setModelStatus(modelId, 'RUNNING');
+    } else if (command === "PAUSE") {
+        if (has2D) {
+            networkManager.send({ command: "PAUSE_2D", modelId });
+        } else {
+            networkManager.send({ command: "PAUSE", modelId });
+        }
+        stateManager.setModelStatus(modelId, 'PAUSED');
+    } else if (command === "TERMINATE") {
+        if (has2D) {
+            networkManager.send({ command: "TERMINATE_2D", modelId });
+        } else {
+            networkManager.send({ command: "TERMINATE", modelId });
+        }
+        stateManager.setModelStatus(modelId, 'TERMINATED');
+        // The backend always clears both phases on any TERMINATE command.
+        // Mirror that in the UI so the partner model doesn't stay stuck as RUNNING/PAUSED.
+        const partner = findRemapPartner(modelId);
+        if (partner) stateManager.setModelStatus(partner, 'TERMINATED');
+    }
+}
+
+document.addEventListener('model-action', (e: any) => {
+    const { modelId, command, steps } = e.detail;
+    executeModelCommand(modelId, command, { steps });
+});
+
+function is2DFrame(buffer: ArrayBuffer): boolean {
+    if (buffer.byteLength < 12) return false;
+    const view = new DataView(buffer);
+    const nr = view.getUint32(0, true);
+    const nz = view.getUint32(4, true);
+    const n_channels = view.getUint32(8, true);
+    const expected = nr * nz * n_channels * 4 + 12;
+    return expected === buffer.byteLength;
+}
+
 networkManager.onMessage((data) => {
     if (data instanceof ArrayBuffer) {
-        stateManager.pushTelemetry(data);
+        const view = new DataView(data);
+        let modelId = "";
+        let offset = 0;
+        while (offset < data.byteLength) {
+            const charCode = view.getUint8(offset++);
+            if (charCode === 0) break;
+            modelId += String.fromCharCode(charCode);
+        }
+        const payloadBuffer = data.slice(offset);
+        
+        let model = stateManager.getAllModels().find(m => m.id === modelId);
+        const type = is2DFrame(payloadBuffer) ? 'CFDSolver2D' : 'CFDSolver';
+        let solverNode = model?.nodes.find(n => n.type === type);
+        
+        if (!solverNode) {
+            // Fallback: search all models in the active workspace
+            const activeWs = stateManager.getActiveWorkspace();
+            for (const mId of activeWs.modelIds) {
+                const m = stateManager.getAllModels().find(x => x.id === mId);
+                solverNode = m?.nodes.find(n => n.type === type);
+                if (solverNode) {
+                    model = m;
+                    break;
+                }
+            }
+        }
+        
+        if (solverNode) {
+            stateManager.pushTelemetry(solverNode.id, payloadBuffer);
+        }
         return;
     }
 
     if (typeof data !== 'string') return;
 
-    // Handle Resource Pulse and other non-JSON or custom JSON
     try {
         const dataJson = JSON.parse(data);
-        const progressBar = document.getElementById('progress-bar');
+        let modelId = dataJson.modelId;
 
         if (dataJson.type === 'resource_pulse') {
             layoutManager.broadcastResourceData(dataJson);
             return;
         }
 
-        if (dataJson.type === 'progress') {
-            const progressLabel = document.getElementById('progress-label');
-            if (progressBar) progressBar.style.width = `${dataJson.percent}%`;
-            if (progressLabel) {
-                if (dataJson.mode === 'STEP') {
-                    progressLabel.textContent = `Steps: ${dataJson.completed} / ${dataJson.total} (${dataJson.percent}%) | Time: ${dataJson.sim_time.toExponential(6)}s`;
-                } else if (dataJson.mode === 'EXEC_ALL') {
-                    progressLabel.textContent = `Progress: ${dataJson.percent}% | Time: ${dataJson.sim_time.toExponential(6)}s`;
-                } else {
-                    progressLabel.textContent = `Progress: ${dataJson.percent}%`;
-                }
-            }
-            stateManager.pushTelemetry(dataJson);
-            return;
+        // Determine correct target solver type
+        let targetType: 'CFDSolver2D' | 'CFDSolver' = 'CFDSolver';
+        if (dataJson.type === 'progress_2d' || dataJson.type === 'TELEMETRY_2D') {
+            targetType = 'CFDSolver2D';
+        } else if (dataJson.type === 'progress' || dataJson.type === 'TELEMETRY') {
+            targetType = 'CFDSolver';
+        } else if (dataJson.type === 'log') {
+            const msg = dataJson.message || "";
+            const is2DLog = msg.includes("2D") || msg.includes("REMAP") || msg.includes("vtk");
+            targetType = is2DLog ? 'CFDSolver2D' : 'CFDSolver';
         }
 
-        if (dataJson.type === 'TELEMETRY') {
-            stateManager.pushTelemetry(dataJson);
-            if (progressBar) progressBar.style.width = '0%';
-            const progressLabel = document.getElementById('progress-label');
-            if (progressLabel && dataJson.time > 0) {
-                progressLabel.textContent = `Time: ${dataJson.time.toExponential(6)}s ${dataJson.is_terminated ? '(Terminated)' : ''}`;
+        // Find the model that actually contains the target solver type
+        let model = stateManager.getAllModels().find(m => m.id === modelId);
+        if (modelId && (!model || !model.nodes.some(n => n.type === targetType))) {
+            const activeWs = stateManager.getActiveWorkspace();
+            const foundModel = activeWs.modelIds
+                .map(id => stateManager.getAllModels().find(m => m.id === id))
+                .find(m => m?.nodes.some(n => n.type === targetType));
+            if (foundModel) {
+                modelId = foundModel.id;
+                model = foundModel;
             }
-            if (dataJson.time === 0) stateManager.setStatus('INITIALIZED');
+        }
 
-            if (stateManager.getStatus() === 'RUNNING' && dataJson.is_terminated !== true) {
-                const pending = stateManager.getPendingSteps();
-                if (pending > 0) {
-                    networkManager.send({ command: "STEP", steps: pending, cfl: getCflFromSolver() });
-                    stateManager.clearPendingSteps();
-                } else {
-                    stateManager.setStatus('PAUSED');
-                }
-            }
-
-            if (dataJson.is_terminated === true && dataJson.time > 0) {
-                stateManager.clearPendingSteps();
-                if (stateManager.getStatus() !== 'TERMINATED') {
-                    stateManager.setStatus('TERMINATED');
+        if (dataJson.type === 'log') {
+            if (modelId && model) {
+                const solverNode = model.nodes.find(n => n.type === targetType);
+                if (solverNode) {
+                    stateManager.pushTelemetry(solverNode.id, dataJson.message);
                 }
             }
             return;
         }
+
+        if (dataJson.type === 'progress' || dataJson.type === 'progress_2d') {
+            if (modelId) {
+                stateManager.setModelProgress(modelId, dataJson.percent);
+                stateManager.setModelSimTime(modelId, dataJson.sim_time);
+                
+                if (dataJson.percent === 100) {
+                    stateManager.setModelStatus(modelId, 'PAUSED');
+                }
+
+                if (model) {
+                    const solverNode = model.nodes.find(n => n.type === targetType);
+                    if (solverNode) {
+                        stateManager.pushTelemetry(solverNode.id, dataJson);
+                    }
+                }
+            }
+            return;
+        }
+
+        if (dataJson.type === 'TELEMETRY' || dataJson.type === 'TELEMETRY_2D') {
+            if (modelId) {
+                stateManager.setModelSimTime(modelId, dataJson.time);
+                if (dataJson.time === 0) {
+                    stateManager.setModelStatus(modelId, 'INITIALIZED');
+                    stateManager.setModelProgress(modelId, 0);
+                } else if (dataJson.is_terminated === true) {
+                    stateManager.setModelStatus(modelId, 'TERMINATED');
+                }
+
+                if (model) {
+                    const solverNode = model.nodes.find(n => n.type === targetType);
+                    if (solverNode) {
+                        stateManager.pushTelemetry(solverNode.id, dataJson);
+                    }
+                }
+            }
+            return;
+        }
+
     } catch (e) {
-        // If not JSON, it's likely a kernel log string
+        // If not JSON, it's likely a generic kernel log string
         if (data.startsWith('[') && data.includes(']')) {
             stateManager.pushTelemetry(data);
         }

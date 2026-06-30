@@ -1,5 +1,6 @@
 import { SimulationState, Node, Connection, Port, NodeType } from './types.js';
 import { StateManager } from './state-manager.js';
+import { validateSimulationState } from './validation.js';
 
 const SVG_ICONS = {
     horiz: `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="display:block;"><rect x="1" y="4" width="5" height="8" rx="1"/><rect x="10" y="4" width="5" height="8" rx="1"/><path d="M6 8h4"/></svg>`,
@@ -29,6 +30,14 @@ export class GraphRenderer {
     private draggedNodeId: string | null = null;
     private dragOffsetX: number = 0;
     private dragOffsetY: number = 0;
+
+    private selectedNodeIds: Set<string> = new Set();
+    private selectedModelId: string | null = null;
+    private isDraggingModel: boolean = false;
+    private draggedModelId: string | null = null;
+    private dragStartWorldX: number = 0;
+    private dragStartWorldY: number = 0;
+    private draggedNodesStartPositions: Map<string, { x: number, y: number }> = new Map();
 
     private isDraggingWire: boolean = false;
     private dragSourceNodeId: string | null = null;
@@ -200,13 +209,8 @@ export class GraphRenderer {
                 const heightDiff = Math.abs((node.height || 0) - newHeight);
                 if (newWidth > 0 && newHeight > 0 && (widthDiff > 4 || heightDiff > 4)) {
                     const userIsResizing = this.nodeUserResizing.has(nodeId);
-                    const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText';
+                    const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour';
                     if (isTelemetry && node.displayMode !== 'compact') {
-                        // For TelemetryText, only persist new dimensions when the user is
-                        // actively dragging the native resize handle. Text arriving in the
-                        // log body can briefly expand the flex layout before overflow:hidden
-                        // clips it, which would otherwise write a permanently larger height
-                        // into state and slide the port downward.
                         const isTelemetryText = node.type === 'TelemetryText';
                         if (!isTelemetryText || userIsResizing) {
                             node.width = newWidth;
@@ -216,7 +220,7 @@ export class GraphRenderer {
                     }
 
                     // Automatic mode switching for telemetry nodes (only when user is resizing)
-                    if (userIsResizing && (node.type === 'TelemetryText' || node.type === 'TelemetryGraph')) {
+                    if (userIsResizing && (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour')) {
                         let targetMode: 'compact' | 'normal' | 'expanded' = 'normal';
                         if (newHeight < 60) targetMode = 'compact';
                         else if (newHeight >= 180) targetMode = 'expanded';
@@ -227,16 +231,16 @@ export class GraphRenderer {
                         }
                     }
 
-                    // Notify worker of resize if it's a TelemetryGraph
-                    if (node.type === 'TelemetryGraph') {
+                    // Notify worker of resize
+                    if (node.type === 'TelemetryGraph' || node.type === 'TelemetryContour') {
                         const worker = this.nodeWorkers.get(nodeId);
                         if (worker) {
                             const canvas = target.querySelector('canvas');
                             if (canvas) {
                                 worker.postMessage({
                                     type: 'resize',
-                                    width: newWidth,
-                                    height: newHeight
+                                    width: canvas.clientWidth || newWidth,
+                                    height: canvas.clientHeight || newHeight
                                 });
                             }
                         }
@@ -357,6 +361,12 @@ export class GraphRenderer {
                     }
                 }
             }
+        } else if (node.type === 'TelemetryContour' && data) {
+            const worker = this.nodeWorkers.get(node.id);
+            if (worker && data instanceof ArrayBuffer) {
+                const bufferCopy = data.slice(0);
+                worker.postMessage(bufferCopy, [bufferCopy]);
+            }
         }
     }
 
@@ -380,6 +390,8 @@ export class GraphRenderer {
 
         this.addManagedEventListener(this.viewport, 'click', (e: MouseEvent) => {
             if (e.target === this.viewport || e.target === this.container || e.target === this.svg) {
+                this.selectedNodeIds.clear();
+                this.selectedModelId = null;
                 this.selectNode(null);
                 this.selectedConnection = null;
                 this.render();
@@ -468,26 +480,58 @@ export class GraphRenderer {
 
                 this.render();
             }
-        } else if (this.isDraggingNode && this.draggedNodeId) {
+        } else if (this.isDraggingNode) {
             const state = this.stateManager.getCurrentState();
             if (state) {
-                const node = state.nodes.find(n => n.id === this.draggedNodeId);
-                if (node) {
-                    const rect = this.viewport.getBoundingClientRect();
-                    const worldX = (e.clientX - rect.left - this.panX) / this.zoom;
-                    const worldY = (e.clientY - rect.top - this.panY) / this.zoom;
+                const rect = this.viewport.getBoundingClientRect();
+                const worldX = (e.clientX - rect.left - this.panX) / this.zoom;
+                const worldY = (e.clientY - rect.top - this.panY) / this.zoom;
 
-                    let targetX = worldX - this.dragOffsetX;
-                    let targetY = worldY - this.dragOffsetY;
-                    if (this.snapToGrid) {
-                        targetX = Math.round(targetX / this.gridSpacing) * this.gridSpacing;
-                        targetY = Math.round(targetY / this.gridSpacing) * this.gridSpacing;
+                const dx = worldX - this.dragStartWorldX;
+                const dy = worldY - this.dragStartWorldY;
+
+                this.selectedNodeIds.forEach(id => {
+                    const startPos = this.draggedNodesStartPositions.get(id);
+                    const node = state.nodes.find(n => n.id === id);
+                    if (node && startPos) {
+                        let targetX = startPos.x + dx;
+                        let targetY = startPos.y + dy;
+                        if (this.snapToGrid) {
+                            targetX = Math.round(targetX / this.gridSpacing) * this.gridSpacing;
+                            targetY = Math.round(targetY / this.gridSpacing) * this.gridSpacing;
+                        }
+                        node.x = Math.round(targetX);
+                        node.y = Math.round(targetY);
                     }
-                    node.x = Math.round(targetX);
-                    node.y = Math.round(targetY);
+                });
 
-                    this.stateManager.updateState(state, false);
-                }
+                this.stateManager.updateState(state, false);
+            }
+        } else if (this.isDraggingModel && this.draggedModelId) {
+            const state = this.stateManager.getCurrentState();
+            if (state) {
+                const rect = this.viewport.getBoundingClientRect();
+                const worldX = (e.clientX - rect.left - this.panX) / this.zoom;
+                const worldY = (e.clientY - rect.top - this.panY) / this.zoom;
+
+                const dx = worldX - this.dragStartWorldX;
+                const dy = worldY - this.dragStartWorldY;
+
+                this.draggedNodesStartPositions.forEach((startPos, id) => {
+                    const node = state.nodes.find(n => n.id === id);
+                    if (node) {
+                        let targetX = startPos.x + dx;
+                        let targetY = startPos.y + dy;
+                        if (this.snapToGrid) {
+                            targetX = Math.round(targetX / this.gridSpacing) * this.gridSpacing;
+                            targetY = Math.round(targetY / this.gridSpacing) * this.gridSpacing;
+                        }
+                        node.x = Math.round(targetX);
+                        node.y = Math.round(targetY);
+                    }
+                });
+
+                this.stateManager.updateState(state, false);
             }
         } else {
             const ctm = this.svg.getScreenCTM();
@@ -521,6 +565,13 @@ export class GraphRenderer {
 
     private onMouseUp(): void {
         if (this.isDraggingNode && this.draggedNodeId) {
+            const state = this.stateManager.getCurrentState();
+            if (state) {
+                this.stateManager.pushState(state);
+            }
+        }
+
+        if (this.isDraggingModel && this.draggedModelId) {
             const state = this.stateManager.getCurrentState();
             if (state) {
                 this.stateManager.pushState(state);
@@ -566,6 +617,8 @@ export class GraphRenderer {
         this.isPanning = false;
         this.isDraggingNode = false;
         this.draggedNodeId = null;
+        this.isDraggingModel = false;
+        this.draggedModelId = null;
         this.viewport.style.cursor = 'crosshair';
     }
 
@@ -654,7 +707,15 @@ export class GraphRenderer {
             { label: 'Initializer',              type: 'ThePainter' },
             { label: 'CFD Solver',               type: 'CFDSolver' },
             { label: 'Telemetry - Text',         type: 'TelemetryText' },
-            { label: 'Telemetry - Graph',        type: 'TelemetryGraph' }
+            { label: 'Telemetry - Graph',        type: 'TelemetryGraph' },
+            // 2D CFD Nodes
+            { label: 'Domain Mesh 2D',           type: 'DomainMesh2D' },
+            { label: 'Detonator Location',       type: 'DetonatorLocation' },
+            { label: 'Remapper (1D -> 2D)',      type: 'RemapNode' },
+            { label: 'CFD Solver 2D',            type: 'CFDSolver2D' },
+            { label: 'Telemetry - Contour (2D)',  type: 'TelemetryContour' },
+            { label: 'VTK Output Controls',      type: 'VTKOutput' },
+            { label: 'Hardware Configuration',   type: 'HardwareConfig' }
         ];
 
         nodeTypes.forEach(nt => {
@@ -732,7 +793,14 @@ export class GraphRenderer {
             'ThePainter': 'node-painter',
             'CFDSolver': 'node-solver',
             'TelemetryText': 'node-log',
-            'TelemetryGraph': 'node-chart'
+            'TelemetryGraph': 'node-chart',
+            'DomainMesh2D': 'node-mesh2d',
+            'DetonatorLocation': 'node-detonator',
+            'RemapNode': 'node-remap',
+            'HardwareConfig': 'node-hardware',
+            'CFDSolver2D': 'node-solver2d',
+            'TelemetryContour': 'node-contour',
+            'VTKOutput': 'node-vtk'
         };
         const prefix = prefixMap[type] || `node-${type.toLowerCase()}`;
 
@@ -747,11 +815,22 @@ export class GraphRenderer {
 
         const newNode: Node = {
             id, type, x, y,
-            displayMode: 'normal',
+            displayMode: 'expanded',
             inputs: this.getDefaultInputs(type),
             outputs: this.getDefaultOutputs(type),
             parameters: this.getDefaultParameters(type)
         };
+
+        if (type === 'TelemetryText' || type === 'TelemetryGraph') {
+            newNode.width = 350;
+            newNode.height = 220;
+        } else if (type === 'TelemetryContour') {
+            newNode.width = 350;
+            newNode.height = 300;
+        } else if (type === 'VTKOutput') {
+            newNode.width = 250;
+            newNode.height = 120;
+        }
 
         state.nodes.push(newNode);
         this.stateManager.pushState(state);
@@ -763,6 +842,18 @@ export class GraphRenderer {
             case 'CFDSolver': return [{ id: 'in', label: 'Initial State' }];
             case 'TelemetryText':
             case 'TelemetryGraph': return [{ id: 'in', label: 'Data Stream' }];
+            case 'CFDSolver2D': return [
+                { id: 'mesh', label: 'Mesh' },
+                { id: 'detonator', label: 'Detonator' },
+                { id: 'remap', label: 'Remap' },
+                { id: 'hardware', label: 'Hardware' },
+                { id: 'air', label: 'Air' },
+                { id: 'explosive', label: 'Explosive' },
+                { id: 'ideal_gas', label: 'Ideal Gas' }
+            ];
+            case 'RemapNode': return [{ id: 'in', label: '1D Solver' }];
+            case 'TelemetryContour': return [{ id: 'in', label: 'Data Stream' }];
+            case 'VTKOutput': return [{ id: 'in', label: 'Solver' }];
             default: return [];
         }
     }
@@ -775,6 +866,11 @@ export class GraphRenderer {
             case 'MaterialIdealGas': return [{ id: 'out', label: 'Material' }];
             case 'ThePainter': return [{ id: 'out', label: 'State' }];
             case 'CFDSolver': return [{ id: 'telemetry', label: 'Telemetry' }];
+            case 'DomainMesh2D': return [{ id: 'mesh', label: 'Mesh Spec' }];
+            case 'DetonatorLocation': return [{ id: 'detonator', label: 'Detonator Spec' }];
+            case 'RemapNode': return [{ id: 'remap', label: 'Remap Spec' }];
+            case 'HardwareConfig': return [{ id: 'hardware', label: 'Hardware Spec' }];
+            case 'CFDSolver2D': return [{ id: 'telemetry', label: 'Telemetry' }];
             default: return [];
         }
     }
@@ -810,8 +906,6 @@ export class GraphRenderer {
                 jwl_omega: 0.35
             };
             case 'MaterialIdealGas': return {
-                // Standalone ideal-gas charge — no JWL composition needed.
-                // Pair with init_mode = 'Ideal Gas' on the CFD Solver.
                 charge_mass: 1.0,
                 rho: 1630,
                 detonation_energy: 4520000
@@ -826,6 +920,45 @@ export class GraphRenderer {
                 output_interval: 0.0001
             };
             case 'TelemetryGraph': return { telemetry_channel: 0, x_axis_mode: 'radius', plot_stride: 1 };
+            case 'DomainMesh2D': return {
+                nr: 200,
+                nz: 200,
+                max_r: 1.0,
+                max_z: 1.0,
+                bc_r_min: 'Reflecting',
+                bc_r_max: 'Terminate',
+                bc_z_min: 'Reflecting',
+                bc_z_max: 'Terminate',
+                coordinate_system: 'Axisymmetric'
+            };
+            case 'DetonatorLocation': return {
+                explosive_z: 0.0,
+                explosive_r: 0.0,
+                explosive_radius: 0.1
+            };
+            case 'RemapNode': return {
+                explosive_z: 0.0,
+                explosive_r: 0.0,
+                remap_radius: 0.5,
+                trigger_type: 'end'
+            };
+            case 'HardwareConfig': return {
+                device: 'cpu'
+            };
+            case 'CFDSolver2D': return {
+                init_mode: 'From1D',
+                cfl: 0.35,
+                flux_scheme: 'AUSM+',
+                spatial_order: 2,
+                temporal_order: 2
+            };
+            case 'TelemetryContour': return {
+                telemetry_channel: 0,
+                auto_scale: true
+            };
+            case 'VTKOutput': return {
+                vtk_dir: './vtk_output'
+            };
             default: return {};
         }
     }
@@ -845,6 +978,15 @@ export class GraphRenderer {
 
     private handleSelectionChange(nodeId: string | null): void {
         this.selectedNodeId = nodeId;
+        if (nodeId !== null) {
+            if (!this.selectedNodeIds.has(nodeId)) {
+                this.selectedNodeIds.clear();
+                this.selectedNodeIds.add(nodeId);
+            }
+            this.selectedModelId = null;
+        } else {
+            this.selectedNodeIds.clear();
+        }
         if (this.onNodeSelected) this.onNodeSelected(nodeId);
         this.render();
     }
@@ -918,6 +1060,13 @@ export class GraphRenderer {
             case 'CFDSolver':       return 'SOLVER';
             case 'TelemetryText':   return 'LOG';
             case 'TelemetryGraph':  return 'CHART';
+            case 'DomainMesh2D':    return 'MESH2D';
+            case 'DetonatorLocation': return 'DETONATOR';
+            case 'RemapNode':       return 'REMAP';
+            case 'HardwareConfig':   return 'HARDWARE';
+            case 'CFDSolver2D':     return 'SOLVER2D';
+            case 'TelemetryContour': return 'CONTOUR';
+            case 'VTKOutput':       return 'VTK';
             default: return (type as string).toUpperCase();
         }
     }
@@ -932,6 +1081,13 @@ export class GraphRenderer {
             case 'CFDSolver':         return 'CFD Solver';
             case 'TelemetryText':     return 'Telemetry - Text';
             case 'TelemetryGraph':    return 'Telemetry - Graph';
+            case 'DomainMesh2D':      return 'Domain Mesh 2D';
+            case 'DetonatorLocation': return 'Detonator Location';
+            case 'RemapNode':         return 'Remapper (1D -> 2D)';
+            case 'HardwareConfig':    return 'Hardware Configuration';
+            case 'CFDSolver2D':       return 'CFD Solver 2D';
+            case 'TelemetryContour':  return 'Telemetry - Contour (2D)';
+            case 'VTKOutput':         return 'VTK Output Controls';
             default: return type;
         }
     }
@@ -960,10 +1116,14 @@ export class GraphRenderer {
                 if (!nodeEl) {
                     nodeEl = document.createElement('div');
                     nodeEl.className = 'node';
-                    if (node.type === 'TelemetryGraph' || node.type === 'TelemetryText') {
+                    if (node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour') {
                         nodeEl.classList.add('resizable');
-                        if (node.width === undefined) node.width = 250;
-                        if (node.height === undefined) node.height = node.type === 'TelemetryGraph' ? 150 : 130;
+                        if (node.width === undefined) node.width = node.type === 'TelemetryContour' ? 350 : 250;
+                        if (node.height === undefined) {
+                            if (node.type === 'TelemetryContour') node.height = 300;
+                            else if (node.type === 'TelemetryGraph') node.height = 150;
+                            else node.height = 130;
+                        }
 
                         // Track when the user is actively using the native resize handle so the
                         // ResizeObserver can distinguish user-driven resizes from content-driven
@@ -1071,21 +1231,48 @@ export class GraphRenderer {
                     header.addEventListener('mousedown', (e) => {
                         if (this.spacePressed || e.button !== 0) return;
                         e.stopPropagation();
+
+                        const isModifier = e.shiftKey || e.ctrlKey || e.metaKey;
+                        if (isModifier) {
+                            if (this.selectedNodeIds.has(node.id)) {
+                                this.selectedNodeIds.delete(node.id);
+                                if (this.selectedNodeId === node.id) {
+                                    const next = Array.from(this.selectedNodeIds)[0] || null;
+                                    this.selectNode(next);
+                                } else {
+                                    this.render();
+                                }
+                            } else {
+                                this.selectedNodeIds.add(node.id);
+                                this.selectNode(node.id);
+                            }
+                        } else {
+                            if (!this.selectedNodeIds.has(node.id)) {
+                                this.selectedNodeIds.clear();
+                                this.selectedNodeIds.add(node.id);
+                            }
+                            this.selectNode(node.id);
+                        }
+
                         this.isDraggingNode = true;
                         this.draggedNodeId = node.id;
-                        this.selectNode(node.id);
 
                         const rect = this.viewport.getBoundingClientRect();
                         const worldX = (e.clientX - rect.left - this.panX) / this.zoom;
                         const worldY = (e.clientY - rect.top - this.panY) / this.zoom;
+                        this.dragStartWorldX = worldX;
+                        this.dragStartWorldY = worldY;
 
+                        this.draggedNodesStartPositions.clear();
                         const currentState = this.stateManager.getCurrentState();
-                        const currentNode = currentState?.nodes.find(n => n.id === node.id);
-                        const nodeX = currentNode ? currentNode.x : node.x;
-                        const nodeY = currentNode ? currentNode.y : node.y;
-
-                        this.dragOffsetX = worldX - nodeX;
-                        this.dragOffsetY = worldY - nodeY;
+                        if (currentState) {
+                            this.selectedNodeIds.forEach(id => {
+                                const n = currentState.nodes.find(nodeItem => nodeItem.id === id);
+                                if (n) {
+                                    this.draggedNodesStartPositions.set(id, { x: n.x, y: n.y });
+                                }
+                            });
+                        }
                     });
                     nodeEl.appendChild(header);
 
@@ -1154,7 +1341,7 @@ export class GraphRenderer {
                 const displayMode = node.displayMode || 'normal';
                 const nodeOrientation = node.orientation || 'HORIZ';
 
-                const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText';
+                const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour';
 
                 // Only override the element's inline width/height from state when the
                 // user is NOT actively dragging the native resize handle. Mid-drag, the
@@ -1177,8 +1364,9 @@ export class GraphRenderer {
                     }
                 }
 
-                if (nodeEl.classList.contains('selected') !== (node.id === this.selectedNodeId)) {
-                    nodeEl.classList.toggle('selected', node.id === this.selectedNodeId);
+                const isSelected = this.selectedNodeIds.has(node.id);
+                if (nodeEl.classList.contains('selected') !== isSelected) {
+                    nodeEl.classList.toggle('selected', isSelected);
                 }
 
                 nodeEl.classList.toggle('orientation-horiz', nodeOrientation === 'HORIZ');
@@ -1713,7 +1901,7 @@ export class GraphRenderer {
                 if (displayMode === 'compact') {
                     contentEl.style.display = 'none';
                 } else if (displayMode === 'normal') {
-                    if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph') {
+                    if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour') {
                         contentEl.style.display = 'flex';
                         this.renderTelemetryContent(node, contentEl);
                     } else {
@@ -1722,7 +1910,7 @@ export class GraphRenderer {
                 } else {
                     contentEl.style.display = 'flex';
                     this.renderNodeParameters(node, contentEl);
-                    if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph') {
+                    if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour') {
                         this.renderTelemetryContent(node, contentEl);
                     }
                 }
@@ -1766,8 +1954,9 @@ export class GraphRenderer {
             let maxY = -Infinity;
 
             nodes.forEach(node => {
-                const w = node.width || 180;
-                const h = node.height || 150;
+                const el = this.nodeElements.get(node.id);
+                const w = el ? el.offsetWidth : (node.width || 180);
+                const h = el ? el.offsetHeight : (node.height || 150);
                 if (node.x < minX) minX = node.x;
                 if (node.y < minY) minY = node.y;
                 if (node.x + w > maxX) maxX = node.x + w;
@@ -1784,17 +1973,23 @@ export class GraphRenderer {
             const height = maxY - minY;
 
             const colors = this.getModelColors(model.id);
+            const isModelSelected = this.selectedModelId === model.id;
 
             const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
             rect.setAttribute('x', minX.toString());
             rect.setAttribute('y', minY.toString());
             rect.setAttribute('width', width.toString());
             rect.setAttribute('height', height.toString());
-            rect.setAttribute('fill', colors.faint);
+            rect.setAttribute('fill', isModelSelected ? colors.faint.replace('0.04', '0.1') : colors.faint);
             rect.setAttribute('stroke', colors.base);
-            rect.setAttribute('stroke-width', '1.5');
-            rect.setAttribute('stroke-dasharray', '4, 4');
-            rect.setAttribute('class', 'model-region-rect');
+            rect.setAttribute('stroke-width', isModelSelected ? '3' : '1.5');
+            rect.setAttribute('stroke-dasharray', isModelSelected ? 'none' : '4, 4');
+            rect.setAttribute('class', `model-region-rect${isModelSelected ? ' selected' : ''}`);
+            rect.style.pointerEvents = 'auto';
+            rect.style.cursor = 'grab';
+            if (isModelSelected) {
+                rect.style.filter = `drop-shadow(0 0 6px ${colors.base})`;
+            }
             regionsGroup.appendChild(rect);
 
             const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
@@ -1802,6 +1997,8 @@ export class GraphRenderer {
             label.setAttribute('y', (minY + 20).toString());
             label.setAttribute('fill', colors.base);
             label.setAttribute('class', 'model-region-label');
+            label.style.pointerEvents = 'auto';
+            label.style.cursor = 'grab';
             
             let labelText = model.name;
             if (model.filename) {
@@ -1812,6 +2009,36 @@ export class GraphRenderer {
             }
             label.textContent = labelText;
             regionsGroup.appendChild(label);
+
+            const handleModelMouseDown = (e: MouseEvent) => {
+                if (this.spacePressed || e.button !== 0) return;
+                e.stopPropagation();
+                e.preventDefault();
+
+                this.selectedModelId = model.id;
+                this.selectedNodeIds.clear();
+                this.selectNode(null);
+                this.selectedConnection = null;
+
+                this.isDraggingModel = true;
+                this.draggedModelId = model.id;
+
+                const rectBound = this.viewport.getBoundingClientRect();
+                const worldX = (e.clientX - rectBound.left - this.panX) / this.zoom;
+                const worldY = (e.clientY - rectBound.top - this.panY) / this.zoom;
+                this.dragStartWorldX = worldX;
+                this.dragStartWorldY = worldY;
+
+                this.draggedNodesStartPositions.clear();
+                model.nodes.forEach(n => {
+                    this.draggedNodesStartPositions.set(n.id, { x: n.x, y: n.y });
+                });
+
+                this.render();
+            };
+
+            rect.addEventListener('mousedown', handleModelMouseDown);
+            label.addEventListener('mousedown', handleModelMouseDown);
         });
     }
 
@@ -1979,10 +2206,13 @@ export class GraphRenderer {
     }
 
     private getPortColorClass(nodeType: string, portId: string): string {
-        if (nodeType === 'DomainMesh' || portId === 'mesh') return 'domain';
+        if (nodeType === 'DomainMesh' || nodeType === 'DomainMesh2D' || portId === 'mesh') return 'domain';
         if (nodeType === 'MaterialExplosive' || portId === 'explosive') return 'explosive';
-        if (nodeType === 'MaterialIdealGas') return 'material';
-        if (portId === 'telemetry' || (portId === 'in' && (nodeType === 'TelemetryText' || nodeType === 'TelemetryGraph'))) return 'telemetry';
+        if (nodeType === 'MaterialIdealGas' || portId === 'ideal_gas') return 'material';
+        if (nodeType === 'DetonatorLocation' || portId === 'detonator') return 'detonator';
+        if (nodeType === 'RemapNode' || portId === 'remap') return 'remap';
+        if (nodeType === 'HardwareConfig' || portId === 'hardware') return 'hardware';
+        if (portId === 'telemetry' || (portId === 'in' && (nodeType === 'TelemetryText' || nodeType === 'TelemetryGraph' || nodeType === 'TelemetryContour'))) return 'telemetry';
         return 'material';
     }
 
@@ -2232,11 +2462,138 @@ export class GraphRenderer {
                     }
                 }
             }
+        } else if (node.type === 'TelemetryContour') {
+            const CHANNELS: { label: string }[] = [
+                { label: 'Pressure' },
+                { label: 'Density' },
+                { label: 'Radial Vel' },
+                { label: 'Axial Vel' },
+                { label: 'Spec Energy' },
+                { label: 'Burn Frac' },
+                { label: 'Unburnt Frac' }
+            ];
+            const currentChannel = Number(node.parameters?.telemetry_channel ?? 0);
+
+            const state = this.stateManager.getCurrentState();
+            let isAxisymmetric = true;
+            if (state) {
+                const conn = state.connections.find(c => c.toNode === node.id && c.toPort === 'in');
+                const solverNode = conn ? state.nodes.find(n => n.id === conn.fromNode) : null;
+                if (solverNode && solverNode.type === 'CFDSolver2D') {
+                    const meshConn = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'mesh');
+                    const meshNode = meshConn ? state.nodes.find(n => n.id === meshConn.fromNode) : null;
+                    if (meshNode && meshNode.type === 'DomainMesh2D') {
+                        isAxisymmetric = (meshNode.parameters?.coordinate_system ?? 'Axisymmetric') === 'Axisymmetric';
+                    }
+                }
+            }
+
+            const worker = this.nodeWorkers.get(node.id);
+            if (worker) {
+                worker.postMessage({
+                    type: 'setConfig',
+                    channel: currentChannel,
+                    autoScale: node.parameters?.auto_scale !== false,
+                    min: node.parameters?.min_y !== undefined ? Number(node.parameters.min_y) : 0,
+                    max: node.parameters?.max_y !== undefined ? Number(node.parameters.max_y) : 1,
+                    isAxisymmetric: isAxisymmetric
+                });
+            }
+
+            if (!container.querySelector('canvas')) {
+                const selectorBar = document.createElement('div');
+                selectorBar.className = 'telemetry-channel-bar';
+                
+                const labelSpan = document.createElement('span');
+                labelSpan.className = 'telemetry-channel-label';
+                labelSpan.textContent = 'Channel:';
+                selectorBar.appendChild(labelSpan);
+
+                const select = this.createCustomDropdown(
+                    CHANNELS.map((ch, idx) => ({ value: String(idx), label: ch.label })),
+                    String(currentChannel),
+                    (val) => {
+                        const ch = parseInt(val, 10);
+                        this.stateManager.updateNodeParameters(node.id, {
+                            telemetry_channel: ch
+                        });
+                    },
+                    'telemetry-channel-select'
+                );
+                selectorBar.appendChild(select);
+                container.appendChild(selectorBar);
+
+                const graphBody = document.createElement('div');
+                graphBody.className = 'node-body-graph';
+                graphBody.style.flex = '1';
+                container.appendChild(graphBody);
+
+                const canvas = document.createElement('canvas');
+                canvas.style.width = '100%';
+                canvas.style.height = '100%';
+                graphBody.appendChild(canvas);
+
+                const newWorker = new Worker(new URL('./ContourWorker.ts', import.meta.url), { type: 'module' });
+                this.nodeWorkers.set(node.id, newWorker);
+                
+                newWorker.onmessage = (e) => {
+                    if (e.data.type === 'bounds') {
+                        this.stateManager.updateNodeParametersInPlace(node.id, {
+                            min_y: e.data.minY,
+                            max_y: e.data.maxY
+                        });
+                    }
+                };
+
+                const offscreen = (canvas as any).transferControlToOffscreen();
+                newWorker.postMessage({ type: 'init', canvas: offscreen }, [offscreen] as any);
+                newWorker.postMessage({
+                    type: 'setConfig',
+                    channel: currentChannel,
+                    autoScale: node.parameters?.auto_scale !== false,
+                    min: node.parameters?.min_y !== undefined ? Number(node.parameters.min_y) : 0,
+                    max: node.parameters?.max_y !== undefined ? Number(node.parameters.max_y) : 1,
+                    isAxisymmetric: isAxisymmetric
+                });
+
+                requestAnimationFrame(() => {
+                    newWorker.postMessage({
+                        type: 'resize',
+                        width: canvas.clientWidth || 300,
+                        height: canvas.clientHeight || 200
+                    });
+                });
+
+                const initialData = this.stateManager.getTelemetry(node.id);
+                if (initialData && initialData instanceof ArrayBuffer) {
+                    const bufferCopy = initialData.slice(0);
+                    newWorker.postMessage(bufferCopy, [bufferCopy]);
+                }
+            } else {
+                const select = container.querySelector('.telemetry-channel-select') as HTMLElement;
+                if (select) {
+                    const trigger = select.querySelector('.custom-select-trigger');
+                    if (trigger) {
+                        const currentOpt = CHANNELS[currentChannel];
+                        if (currentOpt && trigger.textContent !== currentOpt.label) {
+                            trigger.textContent = currentOpt.label;
+                            select.querySelectorAll('.custom-select-option').forEach(opt => {
+                                const optEl = opt as HTMLElement;
+                                if (optEl.dataset.value === String(currentChannel)) {
+                                    optEl.classList.add('selected');
+                                } else {
+                                    optEl.classList.remove('selected');
+                                }
+                            });
+                        }
+                    }
+                }
+            }
         }
     }
 
     private renderNodeParameters(node: Node, container: HTMLElement): void {
-        if (node.type === 'TelemetryGraph') {
+        if (node.type === 'TelemetryGraph' || node.type === 'TelemetryContour') {
             const form = container.querySelector('.node-params-form');
             if (form) form.remove();
             return;
@@ -2334,13 +2691,21 @@ export class GraphRenderer {
                 'z_max_bc': ['Reflecting', 'Transmitting', 'Terminate'],
                 'left_bc': ['Reflecting', 'Transmitting', 'Terminate'],
                 'right_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+                'bc_r_min': ['Reflecting', 'Transmitting', 'Terminate'],
+                'bc_r_max': ['Reflecting', 'Transmitting', 'Terminate'],
+                'bc_z_min': ['Reflecting', 'Transmitting', 'Terminate'],
+                'bc_z_max': ['Reflecting', 'Transmitting', 'Terminate'],
+                'coordinate_system': ['Axisymmetric', 'Cartesian'],
+                'device': ['cpu', 'cuda'],
+                'trigger_type': ['end', 'time', 'step'],
                 // Explosive composition — JWL parameter sets (Ideal Gas uses its own node)
                 'composition': ['TNT', 'PETN', 'RDX', 'Custom'],
-                'init_mode': ['Multi-Material JWL', 'Ideal Gas'],
+                'init_mode': ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
                 'flux_scheme': ['AUSM+', 'Rusanov'],
                 'spatial_order': ['1', '2', '3'],
                 'temporal_order': ['1', '2', '3', '4'],
-                'output_mode': ['By Step', 'By Time']
+                'output_mode': ['By Step', 'By Time'],
+                'plot_stride': ['1', '2', '5', '10', '20', '50', '100']
             };
 
             let inputEl: HTMLElement;
@@ -2354,7 +2719,9 @@ export class GraphRenderer {
                             'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature',
                             'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
                             'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl', 'output_interval',
-                            'spatial_order', 'temporal_order', 'gamma', 'plot_stride'
+                            'spatial_order', 'temporal_order', 'gamma', 'plot_stride',
+                            // 2D CFD keys
+                            'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r'
                         ];
                         const castValue = numericKeys.includes(key) ? Number(newVal) : newVal;
                         const updates: Record<string, any> = { [key]: castValue };
@@ -2710,11 +3077,13 @@ export class GraphRenderer {
         if (node.displayMode === 'normal') {
             if (node.type === 'TelemetryText') return 130;
             if (node.type === 'TelemetryGraph') return 150;
+            if (node.type === 'TelemetryContour') return 300;
             base += Math.max(node.inputs.length, node.outputs.length) * 20;
         } else if (node.displayMode === 'expanded') {
             base += Object.keys(node.parameters).length * 25;
             if (node.type === 'TelemetryText') base += 100;
             if (node.type === 'TelemetryGraph') base += 120;
+            if (node.type === 'TelemetryContour') base += 270;
             base += Math.max(node.inputs.length, node.outputs.length) * 20;
         }
         return Math.max(base, 60);
@@ -2724,140 +3093,7 @@ export class GraphRenderer {
         nodeStatus: Record<string, { state: 'error' | 'warning' | 'valid'; messages: string[] }>;
         flawedConnections: Map<string, string>;
     } {
-        const nodeStatus: Record<string, { state: 'error' | 'warning' | 'valid'; messages: string[] }> = {};
-        const flawedConnections = new Map<string, string>();
-
-        // Initialize node status
-        state.nodes.forEach(node => {
-            nodeStatus[node.id] = { state: 'valid', messages: [] };
-        });
-
-        const solverNode = state.nodes.find(n => n.type === 'CFDSolver');
-        const initMode = solverNode?.parameters['init_mode'] || 'Multi-Material JWL';
-
-        // 1. CFD Solver Validation
-        if (solverNode) {
-            const painterConn = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'in');
-            if (!painterConn) {
-                nodeStatus[solverNode.id].state = 'error';
-                nodeStatus[solverNode.id].messages.push("CFD Solver is not connected to the Initializer (ThePainter).");
-            } else {
-                const painterNode = state.nodes.find(n => n.id === painterConn.fromNode);
-                if (!painterNode || painterNode.type !== 'ThePainter') {
-                    flawedConnections.set(
-                        `${painterConn.fromNode}:${painterConn.fromPort}->${painterConn.toNode}:${painterConn.toPort}`,
-                        "CFD Solver 'Initial State' port must be connected to the Initializer (ThePainter)."
-                    );
-                    nodeStatus[solverNode.id].state = 'error';
-                    nodeStatus[solverNode.id].messages.push("CFD Solver 'Initial State' port must be connected to the Initializer (ThePainter).");
-                }
-            }
-        }
-
-        // 2. ThePainter Validation
-        const painterNodes = state.nodes.filter(n => n.type === 'ThePainter');
-        painterNodes.forEach(painterNode => {
-            // Mesh connection check
-            const meshConn = state.connections.find(c => c.toNode === painterNode.id && c.toPort === 'mesh');
-            if (!meshConn) {
-                nodeStatus[painterNode.id].state = 'error';
-                nodeStatus[painterNode.id].messages.push("No Mesh node connected to Initializer. A DomainMesh node is required.");
-            } else {
-                const fromNode = state.nodes.find(n => n.id === meshConn.fromNode);
-                if (!fromNode || fromNode.type !== 'DomainMesh') {
-                    flawedConnections.set(
-                        `${meshConn.fromNode}:${meshConn.fromPort}->${meshConn.toNode}:${meshConn.toPort}`,
-                        "Only DomainMesh node can be connected to the Mesh input."
-                    );
-                    nodeStatus[painterNode.id].state = 'error';
-                    nodeStatus[painterNode.id].messages.push("Only DomainMesh node can be connected to the Mesh input.");
-                }
-            }
-
-            // Air connection check
-            const airConn = state.connections.find(c => c.toNode === painterNode.id && c.toPort === 'air');
-            if (!airConn) {
-                nodeStatus[painterNode.id].state = 'error';
-                nodeStatus[painterNode.id].messages.push("No Air node connected to Initializer. A MaterialAir node is required.");
-            } else {
-                const fromNode = state.nodes.find(n => n.id === airConn.fromNode);
-                if (!fromNode || fromNode.type !== 'MaterialAir') {
-                    flawedConnections.set(
-                        `${airConn.fromNode}:${airConn.fromPort}->${airConn.toNode}:${airConn.toPort}`,
-                        "Only MaterialAir node can be connected to the Air input."
-                    );
-                    nodeStatus[painterNode.id].state = 'error';
-                    nodeStatus[painterNode.id].messages.push("Only MaterialAir node can be connected to the Air input.");
-                }
-            }
-
-            // Explosive connection check
-            const expConn = state.connections.find(c => c.toNode === painterNode.id && c.toPort === 'explosive');
-            if (!expConn) {
-                if (nodeStatus[painterNode.id].state === 'valid') {
-                    nodeStatus[painterNode.id].state = 'warning';
-                }
-                nodeStatus[painterNode.id].messages.push("No Explosive node connected to Initializer. Simulation will run with NO explosive charge.");
-            } else {
-                const expNode = state.nodes.find(n => n.id === expConn.fromNode);
-                if (expNode) {
-                    if (expNode.type !== 'MaterialExplosive' && expNode.type !== 'MaterialIdealGas') {
-                        flawedConnections.set(
-                            `${expConn.fromNode}:${expConn.fromPort}->${expConn.toNode}:${expConn.toPort}`,
-                            "Only MaterialExplosive or MaterialIdealGas node can be connected to the Explosive input."
-                        );
-                        nodeStatus[painterNode.id].state = 'error';
-                        nodeStatus[painterNode.id].messages.push("Only MaterialExplosive or MaterialIdealGas node can be connected to the Explosive input.");
-                    } else if (initMode === 'Ideal Gas' && expNode.type === 'MaterialExplosive') {
-                        flawedConnections.set(
-                            `${expConn.fromNode}:${expConn.fromPort}->${expConn.toNode}:${expConn.toPort}`,
-                            "Solver physics is set to 'Ideal Gas' (1-material air), but explosive input is a 'MaterialExplosive' (HE-JWL) node. Connect a 'MaterialIdealGas' (IG-CHG) node instead."
-                        );
-                        
-                        if (nodeStatus[expNode.id].state !== 'error') nodeStatus[expNode.id].state = 'warning';
-                        nodeStatus[expNode.id].messages.push("Solver physics is set to 'Ideal Gas' (1-material air), but explosive input is a 'MaterialExplosive' (HE-JWL) node. Connect a 'MaterialIdealGas' (IG-CHG) node instead.");
-                        
-                        if (solverNode) {
-                            if (nodeStatus[solverNode.id].state !== 'error') nodeStatus[solverNode.id].state = 'warning';
-                            nodeStatus[solverNode.id].messages.push("Solver physics is set to 'Ideal Gas' (1-material air), but explosive input is a 'MaterialExplosive' (HE-JWL) node. Connect a 'MaterialIdealGas' (IG-CHG) node instead.");
-                        }
-                    } else if (initMode === 'Multi-Material JWL' && expNode.type === 'MaterialIdealGas') {
-                        flawedConnections.set(
-                            `${expConn.fromNode}:${expConn.fromPort}->${expConn.toNode}:${expConn.toPort}`,
-                            "Solver physics is set to 'Multi-Material JWL', but explosive input is a 'MaterialIdealGas' (IG-CHG) node. Connect a 'MaterialExplosive' (HE-JWL) node instead."
-                        );
-                        
-                        if (nodeStatus[expNode.id].state !== 'error') nodeStatus[expNode.id].state = 'warning';
-                        nodeStatus[expNode.id].messages.push("Solver physics is set to 'Multi-Material JWL', but explosive input is a 'MaterialIdealGas' (IG-CHG) node. Connect a 'MaterialExplosive' (HE-JWL) node instead.");
-                        
-                        if (solverNode) {
-                            if (nodeStatus[solverNode.id].state !== 'error') nodeStatus[solverNode.id].state = 'warning';
-                            nodeStatus[solverNode.id].messages.push("Solver physics is set to 'Multi-Material JWL', but explosive input is a 'MaterialIdealGas' (IG-CHG) node. Connect a 'MaterialExplosive' (HE-JWL) node instead.");
-                        }
-                    }
-                }
-            }
-        });
-
-        // 3. Telemetry Nodes Validation
-        state.nodes.forEach(node => {
-            if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph') {
-                const conn = state.connections.find(c => c.toNode === node.id && c.toPort === 'in');
-                if (conn) {
-                    const fromNode = state.nodes.find(n => n.id === conn.fromNode);
-                    if (!fromNode || fromNode.type !== 'CFDSolver') {
-                        flawedConnections.set(
-                            `${conn.fromNode}:${conn.fromPort}->${conn.toNode}:${conn.toPort}`,
-                            "Telemetry input must be connected to a CFD Solver."
-                        );
-                        nodeStatus[node.id].state = 'warning';
-                        nodeStatus[node.id].messages.push("Telemetry input must be connected to a CFD Solver.");
-                    }
-                }
-            }
-        });
-
-        return { nodeStatus, flawedConnections };
+        return validateSimulationState(state);
     }
 }
 

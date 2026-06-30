@@ -16,6 +16,12 @@ export class StateManager {
     // Run target selection (either a model ID or 'all' for merged)
     private runTargetId: string | 'all' = 'all';
     private runTargetListeners: ((targetId: string | 'all') => void)[] = [];
+    private selectedRunTargets: Set<string> = new Set();
+    private lastWorkspaceId: string | null = null;
+    private modelStatuses: Map<string, SimulationStatus> = new Map();
+    private modelProgresses: Map<string, number> = new Map();
+    private modelSimTimes: Map<string, number> = new Map();
+    private modelStatusListeners: ((modelId: string, status: SimulationStatus) => void)[] = [];
 
     constructor(initialState?: SimulationState) {
         const defaultModelId = 'model-default';
@@ -74,6 +80,78 @@ export class StateManager {
         this.runTargetListeners.push(listener);
     }
 
+    getSelectedRunTargets(): string[] {
+        const ws = this.getActiveWorkspace();
+        if (!ws) return [];
+        return ws.modelIds.filter(id => this.selectedRunTargets.has(id));
+    }
+
+    setSelectedRunTargets(targetIds: string[]): void {
+        this.selectedRunTargets = new Set(targetIds);
+        const ws = this.getActiveWorkspace();
+        if (ws) {
+            ws.selectedModelIds = targetIds;
+        }
+        this.runTargetListeners.forEach(l => l(targetIds.includes('all') ? 'all' : (targetIds[0] || 'all')));
+        this.saveWorkspace();
+    }
+
+    toggleRunTarget(targetId: string): void {
+        if (this.selectedRunTargets.has(targetId)) {
+            this.selectedRunTargets.delete(targetId);
+        } else {
+            this.selectedRunTargets.add(targetId);
+        }
+        const ws = this.getActiveWorkspace();
+        if (ws) {
+            ws.selectedModelIds = Array.from(this.selectedRunTargets);
+        }
+        this.runTargetListeners.forEach(l => l(this.runTargetId));
+        this.saveWorkspace();
+    }
+
+    isRunTargetSelected(targetId: string): boolean {
+        return this.selectedRunTargets.has(targetId);
+    }
+
+    getModelStatus(modelId: string): SimulationStatus {
+        return this.modelStatuses.get(modelId) || 'UNINITIALIZED';
+    }
+
+    setModelStatus(modelId: string, status: SimulationStatus): void {
+        this.modelStatuses.set(modelId, status);
+        this.modelStatusListeners.forEach(l => l(modelId, status));
+        
+        const activeWs = this.getActiveWorkspace();
+        if (activeWs && activeWs.activeModelId === modelId) {
+            this.setStatus(status);
+        }
+    }
+
+    onModelStatusChange(listener: (modelId: string, status: SimulationStatus) => void): void {
+        this.modelStatusListeners.push(listener);
+    }
+
+    offModelStatusChange(listener: (modelId: string, status: SimulationStatus) => void): void {
+        this.modelStatusListeners = this.modelStatusListeners.filter(l => l !== listener);
+    }
+
+    getModelProgress(modelId: string): number {
+        return this.modelProgresses.get(modelId) || 0;
+    }
+
+    setModelProgress(modelId: string, percent: number): void {
+        this.modelProgresses.set(modelId, percent);
+    }
+
+    getModelSimTime(modelId: string): number {
+        return this.modelSimTimes.get(modelId) || 0.0;
+    }
+
+    setModelSimTime(modelId: string, simTime: number): void {
+        this.modelSimTimes.set(modelId, simTime);
+    }
+
     // Workspace management
     getActiveWorkspace(): Workspace {
         return this.appState.workspaces.find(ws => ws.id === this.appState.activeWorkspaceId) || this.appState.workspaces[0];
@@ -104,6 +182,12 @@ export class StateManager {
 
         if (targetWorkspace) {
             this.appState.activeWorkspaceId = targetWorkspace.id;
+            if (targetWorkspace.selectedModelIds) {
+                this.selectedRunTargets = new Set(targetWorkspace.selectedModelIds);
+            } else {
+                this.selectedRunTargets = new Set(targetWorkspace.modelIds);
+                targetWorkspace.selectedModelIds = Array.from(this.selectedRunTargets);
+            }
             // Reset run target if model not present
             if (this.runTargetId !== 'all' && !targetWorkspace.modelIds.includes(this.runTargetId)) {
                 this.runTargetId = 'all';
@@ -322,6 +406,38 @@ export class StateManager {
         };
     }
 
+    private syncSelectedRunTargets(state: AppState, forceReset: boolean = false): void {
+        const activeWs = state.workspaces.find(ws => ws.id === state.activeWorkspaceId);
+        if (activeWs) {
+            if (forceReset || this.lastWorkspaceId !== activeWs.id) {
+                this.lastWorkspaceId = activeWs.id;
+                if (activeWs.selectedModelIds) {
+                    this.selectedRunTargets = new Set(activeWs.selectedModelIds);
+                } else {
+                    this.selectedRunTargets = new Set(activeWs.modelIds);
+                    activeWs.selectedModelIds = Array.from(this.selectedRunTargets);
+                }
+            } else {
+                // Remove invalid IDs
+                const validIds = new Set(activeWs.modelIds);
+                this.selectedRunTargets.forEach(id => {
+                    if (!validIds.has(id)) this.selectedRunTargets.delete(id);
+                });
+                
+                // Automatically select newly added models
+                const prevWs = this.appState ? this.appState.workspaces.find(ws => ws.id === this.appState.activeWorkspaceId) : null;
+                if (prevWs) {
+                    activeWs.modelIds.forEach(id => {
+                        if (!prevWs.modelIds.includes(id)) {
+                            this.selectedRunTargets.add(id);
+                        }
+                    });
+                }
+                activeWs.selectedModelIds = Array.from(this.selectedRunTargets);
+            }
+        }
+    }
+
     pushAppState(newAppState: AppState, autoSave: boolean = true): void {
         const stateCopy = JSON.parse(JSON.stringify(newAppState)) as AppState;
         
@@ -330,6 +446,9 @@ export class StateManager {
             ws.layout = ensureMenuBar(ws.layout);
             ws.modelIds = Array.from(new Set(ws.modelIds));
         });
+
+        // Sync selectedRunTargets
+        this.syncSelectedRunTargets(stateCopy);
 
         if (this.currentIndex < this.history.length - 1) {
             this.history = this.history.slice(0, this.currentIndex + 1);
@@ -489,16 +608,24 @@ export class StateManager {
             const nextMode = modes[nextIndex];
             node.displayMode = nextMode;
 
-            if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph') {
+            if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour') {
                 if (nextMode === 'compact') {
                     node.width = 180;
                     node.height = 40;
                 } else if (nextMode === 'normal') {
-                    node.width = 250;
-                    node.height = node.type === 'TelemetryGraph' ? 150 : 130;
+                    node.width = node.type === 'TelemetryContour' ? 350 : 250;
+                    if (node.type === 'TelemetryContour') {
+                        node.height = 300;
+                    } else {
+                        node.height = node.type === 'TelemetryGraph' ? 150 : 130;
+                    }
                 } else if (nextMode === 'expanded') {
                     node.width = 350;
-                    node.height = 220;
+                    if (node.type === 'TelemetryContour') {
+                        node.height = 300;
+                    } else {
+                        node.height = 220;
+                    }
                 }
             } else {
                 delete node.width;
@@ -614,11 +741,11 @@ export class StateManager {
         }
 
         if (typeof data === 'object' && data !== null) {
-            if (data.type === 'progress' || data.command === 'PROGRESS') {
+            if (data.type === 'progress' || data.type === 'progress_2d' || data.command === 'PROGRESS') {
                 const percent = data.percent !== undefined ? data.percent : (data.value || 0);
                 return `[${timestamp}] [PROGRESS] ${percent}% complete`;
             }
-            if (data.type === 'TELEMETRY') {
+            if (data.type === 'TELEMETRY' || data.type === 'TELEMETRY_2D') {
                 return `[${timestamp}] [SOLVER] Time: ${data.time?.toExponential(6) || '0'}, Terminated: ${data.is_terminated || false}`;
             }
             if (data.type === 'resource_pulse') {
@@ -630,23 +757,27 @@ export class StateManager {
         return `[${timestamp}] [DATA] ${String(data)}`;
     }
 
-    pushTelemetry(nodeIdOrData: any, optionalData?: any): void {
+    pushTelemetry(nodeIdOrData: any, optionalData?: any, modelId?: string): void {
         let nodeId: string | null = null;
         let data: any = null;
 
         const state = this.getCurrentState();
         if (!state) return;
 
+        const model = modelId ? this.appState.models[modelId] : null;
+        const nodes = model ? model.nodes : state.nodes;
+        const connections = model ? model.connections : state.connections;
+
         if (typeof nodeIdOrData === 'string' && optionalData !== undefined) {
             nodeId = nodeIdOrData;
             data = optionalData;
         } else if (typeof nodeIdOrData === 'string') {
-            const solverNode = state.nodes.find(n => n.type === 'CFDSolver');
+            const solverNode = nodes.find(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D');
             if (!solverNode) return;
             nodeId = solverNode.id;
             data = nodeIdOrData;
         } else {
-            const solverNode = state.nodes.find(n => n.id === 'node-solver') || state.nodes.find(n => n.type === 'CFDSolver');
+            const solverNode = nodes.find(n => n.id === 'node-solver') || nodes.find(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D');
             if (!solverNode) return;
             nodeId = solverNode.id;
             data = nodeIdOrData;
@@ -654,10 +785,10 @@ export class StateManager {
 
         if (!nodeId) return;
 
-        const targetNode = state.nodes.find(n => n.id === nodeId);
+        const targetNode = nodes.find(n => n.id === nodeId);
         let telemetryToStore = data;
         if (targetNode?.type === 'TelemetryText' && !(data instanceof ArrayBuffer)) {
-            if (data && typeof data === 'object' && (data.type === 'progress' || data.type === 'resource_pulse')) {
+            if (data && typeof data === 'object' && (data.type === 'progress' || data.type === 'progress_2d' || data.type === 'resource_pulse')) {
                  // Skip
             } else {
                 let log = this.telemetryStore.get(nodeId);
@@ -673,17 +804,22 @@ export class StateManager {
         }
         this.notifyTelemetryUpdate(nodeId, telemetryToStore);
 
-        const telemetryConnections = state.connections.filter(e => e.fromNode === nodeId);
+        const telemetryConnections = connections.filter(e => e.fromNode === nodeId);
         telemetryConnections.forEach(connection => {
-            const connectedNode = state.nodes.find(n => n.id === connection.toNode);
+            const connectedNode = nodes.find(n => n.id === connection.toNode);
             if (connectedNode) {
                 if (connectedNode.type === 'TelemetryGraph') {
-                    if (data instanceof ArrayBuffer || (data && data.type === 'TELEMETRY')) {
+                    if (data instanceof ArrayBuffer || (data && (data.type === 'TELEMETRY' || data.type === 'TELEMETRY_2D'))) {
+                         this.telemetryStore.set(connectedNode.id, data);
+                         this.notifyTelemetryUpdate(connectedNode.id, data);
+                    }
+                } else if (connectedNode.type === 'TelemetryContour') {
+                    if (data instanceof ArrayBuffer) {
                          this.telemetryStore.set(connectedNode.id, data);
                          this.notifyTelemetryUpdate(connectedNode.id, data);
                     }
                 } else if (connectedNode.type === 'TelemetryText') {
-                    if (data && typeof data === 'object' && (data.type === 'progress' || data.type === 'resource_pulse')) {
+                    if (data && typeof data === 'object' && (data.type === 'progress' || data.type === 'progress_2d' || data.type === 'resource_pulse')) {
                         return;
                     }
 
@@ -846,6 +982,7 @@ export class StateManager {
                 });
                 this.history = [JSON.parse(JSON.stringify(this.appState))];
                 this.currentIndex = 0;
+                this.syncSelectedRunTargets(this.appState, true);
                 this.notifyListeners();
                 console.log('[System] AppState hydrated successfully.');
                 return this.getCurrentState();
@@ -885,6 +1022,7 @@ export class StateManager {
                     });
                     this.history = [JSON.parse(JSON.stringify(this.appState))];
                     this.currentIndex = 0;
+                    this.syncSelectedRunTargets(this.appState, true);
                     this.notifyListeners();
                     console.log('[System] Legacy workspace converted.');
                     return this.getCurrentState();
@@ -921,6 +1059,7 @@ export class StateManager {
             };
             this.history = [JSON.parse(JSON.stringify(this.appState))];
             this.currentIndex = 0;
+            this.syncSelectedRunTargets(this.appState, true);
             this.notifyListeners();
             return this.getCurrentState();
         }
@@ -1009,6 +1148,45 @@ export class StateManager {
                 telemetry_channel: 0,
                 x_axis_mode: 'radius',
                 plot_stride: 1
+            },
+            'DomainMesh2D': {
+                nr: 200,
+                nz: 200,
+                max_r: 1.0,
+                max_z: 1.0,
+                bc_r_min: 'Reflecting',
+                bc_r_max: 'Terminate',
+                bc_z_min: 'Reflecting',
+                bc_z_max: 'Terminate',
+                coordinate_system: 'Axisymmetric'
+            },
+            'DetonatorLocation': {
+                explosive_z: 0.0,
+                explosive_r: 0.0,
+                explosive_radius: 0.1
+            },
+            'RemapNode': {
+                explosive_z: 0.0,
+                explosive_r: 0.0,
+                remap_radius: 0.5,
+                trigger_type: 'end'
+            },
+            'HardwareConfig': {
+                device: 'cpu'
+            },
+            'CFDSolver2D': {
+                init_mode: 'From1D',
+                cfl: 0.35,
+                flux_scheme: 'AUSM+',
+                spatial_order: 2,
+                temporal_order: 2
+            },
+            'TelemetryContour': {
+                telemetry_channel: 0,
+                auto_scale: true
+            },
+            'VTKOutput': {
+                vtk_dir: './vtk_output'
             }
         };
 

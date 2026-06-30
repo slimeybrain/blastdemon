@@ -1,4 +1,5 @@
 // ChartWorker.ts
+export {};
 let canvas: OffscreenCanvas | null = null;
 let ctx: OffscreenCanvasRenderingContext2D | null = null;
 

@@ -1,4 +1,4 @@
-export type NodeType = 'DomainMesh' | 'MaterialAir' | 'MaterialExplosive' | 'MaterialIdealGas' | 'ThePainter' | 'CFDSolver' | 'TelemetryText' | 'TelemetryGraph';
+export type NodeType = 'DomainMesh' | 'MaterialAir' | 'MaterialExplosive' | 'MaterialIdealGas' | 'ThePainter' | 'CFDSolver' | 'TelemetryText' | 'TelemetryGraph' | 'DomainMesh2D' | 'DetonatorLocation' | 'RemapNode' | 'CFDSolver2D' | 'TelemetryContour' | 'VTKOutput' | 'HardwareConfig';
 
 export interface Port {
     id: string;
@@ -29,7 +29,7 @@ export interface Connection {
 export type SimulationStatus = 'UNINITIALIZED' | 'INITIALIZED' | 'RUNNING' | 'PAUSED' | 'TERMINATED';
 
 export type LayoutDirection = 'horizontal' | 'vertical';
-export type PanelType = 'MENU_BAR' | 'OUTLINER' | 'NODE_GRAPH' | 'PROPERTIES' | 'TELEMETRY_GRAPH' | 'TELEMETRY_TEXT' | 'NODE_VIEWER' | 'EXECUTION_MANAGER' | 'RESOURCE_MANAGER';
+export type PanelType = 'MENU_BAR' | 'OUTLINER' | 'NODE_GRAPH' | 'PROPERTIES' | 'TELEMETRY_GRAPH' | 'TELEMETRY_TEXT' | 'NODE_VIEWER' | 'EXECUTION_MANAGER' | 'RESOURCE_MANAGER' | 'TELEMETRY_CONTOUR';
 
 export interface SplitNode {
     type: 'split';
@@ -71,6 +71,7 @@ export interface Workspace {
     activeModelId: string | null;
     layout: LayoutNode;
     connections: Connection[];
+    selectedModelIds?: string[];
 }
 
 export interface AppState {

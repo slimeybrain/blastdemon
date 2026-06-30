@@ -1,5 +1,6 @@
 import { StateManager } from './state-manager.js';
 import { Node } from './types.js';
+import { validateSimulationState } from './validation.js';
 
 export class PropertyEditor {
     public container: HTMLElement;
@@ -76,38 +77,9 @@ export class PropertyEditor {
 
         // Validation warnings banner
         const warnings: string[] = [];
-        const solverNode = state?.nodes.find(n => n.type === 'CFDSolver');
-        if (solverNode && state) {
-            const initMode = solverNode.parameters['init_mode'] || 'Multi-Material JWL';
-            const painterConn = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'in');
-            if (!painterConn) {
-                warnings.push("CFD Solver is not connected to the Initializer (ThePainter).");
-            } else {
-                const painterNode = state.nodes.find(n => n.id === painterConn.fromNode);
-                if (!painterNode || painterNode.type !== 'ThePainter') {
-                    warnings.push("CFD Solver 'Initial State' port must be connected to the Initializer (ThePainter).");
-                } else {
-                    const meshConn = state.connections.find(c => c.toNode === painterNode.id && c.toPort === 'mesh');
-                    if (!meshConn) {
-                        warnings.push("No Mesh node connected to Initializer. A DomainMesh node is required.");
-                    }
-                    const airConn = state.connections.find(c => c.toNode === painterNode.id && c.toPort === 'air');
-                    if (!airConn) {
-                        warnings.push("No Air node connected to Initializer. A MaterialAir node is required.");
-                    }
-                    const expConn = state.connections.find(c => c.toNode === painterNode.id && c.toPort === 'explosive');
-                    if (!expConn) {
-                        warnings.push("No Explosive node connected to Initializer. Simulation will run with NO explosive charge.");
-                    } else {
-                        const expNode = state.nodes.find(n => n.id === expConn.fromNode);
-                        if (expNode) {
-                            if (initMode === 'Ideal Gas' && expNode.type === 'MaterialExplosive') {
-                                warnings.push("Solver physics is set to 'Ideal Gas' (1-material air), but explosive input is a 'MaterialExplosive' (HE-JWL) node. Connect a 'MaterialIdealGas' (IG-CHG) node instead.");
-                            }
-                        }
-                    }
-                }
-            }
+        if (state) {
+            const valResults = validateSimulationState(state);
+            warnings.push(...valResults.globalWarnings);
         }
 
         if (warnings.length > 0) {
@@ -233,7 +205,9 @@ export class PropertyEditor {
             'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature',
             'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
             'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl', 'output_interval',
-            'spatial_order', 'temporal_order', 'gamma', 'plot_stride'
+            'spatial_order', 'temporal_order', 'gamma', 'plot_stride',
+            // 2D CFD keys
+            'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r'
         ];
 
         const dropdowns: Record<string, string[]> = {
@@ -246,10 +220,15 @@ export class PropertyEditor {
             'z_max_bc': ['Reflecting', 'Transmitting', 'Terminate'],
             'left_bc': ['Reflecting', 'Transmitting', 'Terminate'],
             'right_bc': ['Reflecting', 'Transmitting', 'Terminate'],
-            // Explosive composition — chooses JWL material set
+            'bc_r_min': ['Reflecting', 'Transmitting', 'Terminate'],
+            'bc_r_max': ['Reflecting', 'Transmitting', 'Terminate'],
+            'bc_z_min': ['Reflecting', 'Transmitting', 'Terminate'],
+            'bc_z_max': ['Reflecting', 'Transmitting', 'Terminate'],
+            'coordinate_system': ['Axisymmetric', 'Cartesian'],
+            'device': ['cpu', 'cuda'],
+            'trigger_type': ['end', 'time', 'step'],
             'composition': ['TNT', 'PETN', 'RDX', 'Custom'],
-            // Solver initialisation mode
-            'init_mode': ['Multi-Material JWL', 'Ideal Gas'],
+            'init_mode': ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
             'flux_scheme': ['AUSM+', 'Rusanov'],
             'spatial_order': ['1', '2', '3'],
             'temporal_order': ['1', '2', '3', '4'],
@@ -312,7 +291,6 @@ export class PropertyEditor {
 
         const updates: Record<string, any> = { [key]: value };
 
-        // Auto-fill presets for MaterialExplosive when composition changes
         if (node.type === 'MaterialExplosive' && key === 'composition') {
             const EXPLOSIVE_PRESETS: Record<string, Record<string, number>> = {
                 'TNT': {
@@ -374,6 +352,20 @@ export class PropertyEditor {
                 return 'Live text stream telemetry logger. Outputs simulator event timelines, iteration milestones, and system states.';
             case 'TelemetryGraph':
                 return 'Real-time chart telemetry viewer. Plots grid spatial properties, cell pressure profiles, and simulation telemetry histories.';
+            case 'DomainMesh2D':
+                return '2D Axisymmetric mesh. Discretizes the r-z coordinates and defines boundary conditions for r_min, r_max, z_min, z_max.';
+            case 'DetonatorLocation':
+                return 'Detonator position and size. Defines where detonation starts in the 2D r-z space.';
+            case 'RemapNode':
+                return 'Remapper node. Integrates the 1D physical state onto the 2D mesh, interpolating conservation variables at the specified trigger condition.';
+            case 'HardwareConfig':
+                return 'Hardware settings. Choose execution device: CPU (utilizes OpenMP threads) or GPU (utilizes CUDA math kernels).';
+            case 'CFDSolver2D':
+                return '2D axisymmetric CFD solver. Connects 2D domain mesh, detonators, remapper, hardware settings, and charge materials.';
+            case 'TelemetryContour':
+                return 'Real-time 2D contour plot (heatmap) telemetry viewer. Renders dynamic physical fields (pressure, density, speed, mass fractions).';
+            case 'VTKOutput':
+                return 'Controls saving simulation state snapshots in standard VTK XML Unstructured Grid (.vtu) format for external visualizers like Paraview.';
             default:
                 return 'Simulation graph node.';
         }
