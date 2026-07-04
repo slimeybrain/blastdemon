@@ -25,6 +25,7 @@
     #include <netinet/in.h>
     #include <unistd.h>
     #include <arpa/inet.h>
+    #include <fcntl.h>
     typedef int SOCKET_TYPE;
     #define CLOSE_SOCKET close
     #define INVALID_SOCKET_HANDLE -1
@@ -155,13 +156,24 @@ std::string base64_encode(const std::vector<uint8_t>& input) {
     return output;
 }
 
+#include <mutex>
+
+// --- Client Connection Context for thread safety ---
+struct ClientConnection {
+    SOCKET_TYPE fd = INVALID_SOCKET_HANDLE;
+    std::mutex send_mutex;
+};
+
 // --- WebSocket Handshake ---
 std::string get_websocket_accept(const std::string& key) {
     const std::string magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     return base64_encode(sha1::compute(key + magic));
 }
 
-void send_websocket_frame(SOCKET_TYPE client_fd, const void* data, size_t len, uint8_t opcode = 0x01) {
+void send_websocket_frame(std::shared_ptr<ClientConnection> client, const void* data, size_t len, uint8_t opcode = 0x01) {
+    std::lock_guard<std::mutex> lock(client->send_mutex);
+    if (client->fd == INVALID_SOCKET_HANDLE) return;
+
     std::vector<uint8_t> frame;
     frame.push_back(0x80 | (opcode & 0x0F)); // FIN + opcode
 
@@ -180,15 +192,27 @@ void send_websocket_frame(SOCKET_TYPE client_fd, const void* data, size_t len, u
 
     const uint8_t* p = reinterpret_cast<const uint8_t*>(data);
     frame.insert(frame.end(), p, p + len);
-    send(client_fd, (const char*)frame.data(), (int)frame.size(), 0);
+
+    size_t total_sent = 0;
+    while (total_sent < frame.size()) {
+#ifdef _WIN32
+        int n = send(client->fd, (const char*)frame.data() + total_sent, (int)(frame.size() - total_sent), 0);
+#else
+        ssize_t n = send(client->fd, (const char*)frame.data() + total_sent, frame.size() - total_sent, MSG_NOSIGNAL);
+#endif
+        if (n <= 0) {
+            break; // Socket error or closed
+        }
+        total_sent += n;
+    }
 }
 
-void send_websocket_text(SOCKET_TYPE client_fd, const std::string& message) {
-    send_websocket_frame(client_fd, message.data(), message.length(), 0x01);
+void send_websocket_text(std::shared_ptr<ClientConnection> client, const std::string& message) {
+    send_websocket_frame(client, message.data(), message.length(), 0x01);
 }
 
-void send_websocket_binary(SOCKET_TYPE client_fd, const void* data, size_t len) {
-    send_websocket_frame(client_fd, data, len, 0x02);
+void send_websocket_binary(std::shared_ptr<ClientConnection> client, const void* data, size_t len) {
+    send_websocket_frame(client, data, len, 0x02);
 }
 
 // --- Native Structures ---
@@ -240,7 +264,7 @@ std::string get_json_value(const std::string& json, const std::string& key) {
     }
 }
 
-void process_json(const std::string& json_str, SOCKET_TYPE client_fd, std::shared_ptr<Process>& active_process) {
+void process_json(const std::string& json_str, std::shared_ptr<ClientConnection> client, std::map<std::string, std::shared_ptr<Process>>& active_processes) {
     nlohmann::json payload;
     try {
         payload = nlohmann::json::parse(json_str);
@@ -250,28 +274,70 @@ void process_json(const std::string& json_str, SOCKET_TYPE client_fd, std::share
     }
 
     std::string command = payload.value("command", "");
-    if (command == "INIT") {
-        std::cout << "[DEBUG] RAW BROKER RECEIVE: " << json_str << std::endl;
+    std::string modelId = payload.value("modelId", "default");
+
+    if (command == "INIT" || command == "INIT_2D") {
+        std::cout << "[DEBUG] RAW BROKER RECEIVE INIT FOR modelId " << modelId << ": " << json_str << std::endl;
     }
 
     if (command == "STOP") {
-        std::cout << "--- STOP COMMAND RECEIVED ---" << std::endl;
-        if (active_process) {
-            active_process->terminate();
-            active_process.reset();
-            std::cout << "Process terminated by user." << std::endl;
+        std::cout << "--- STOP COMMAND RECEIVED for modelId " << modelId << " ---" << std::endl;
+        if (active_processes.count(modelId) && active_processes[modelId]) {
+            active_processes[modelId]->terminate();
+            active_processes.erase(modelId);
+            std::cout << "Process for modelId " << modelId << " terminated by user." << std::endl;
         }
         return;
     }
 
-    if (command == "INIT" || command == "START") {
-        std::cout << "--- " << command << " COMMAND RECEIVED ---" << std::endl;
-        if (active_process) {
-            active_process->terminate();
-            active_process.reset();
+    if (command == "INIT" || command == "START" || command == "INIT_2D") {
+        std::cout << "--- " << command << " COMMAND RECEIVED for modelId " << modelId << " ---" << std::endl;
+
+        // ── Per-model process isolation ─────────────────────────────────────────
+        // Each modelId owns exactly one BlastSolver process for its entire
+        // lifetime (both 1D and 2D phases).  INIT and INIT_2D for the *same*
+        // modelId are sent to that model's existing process; the solver handles
+        // both phases internally.  NEVER share processes across different models —
+        // doing so contaminates their global state.
+        //
+        // The previous "reuse any other running process" heuristic was the root
+        // cause of cross-model parameter contamination and the Ideal Gas
+        // direct-init deadlock, and has been removed.
+        // ────────────────────────────────────────────────────────────────────────
+
+        if ((command == "INIT_2D" || command == "INIT") && active_processes.count(modelId) && active_processes[modelId]) {
+            // Try to route INIT or INIT_2D to the existing process. The child may not
+            // yet have entered its read loop, so retry for up to 200 ms before
+            // giving up and spawning a fresh process.
+            auto& existing = active_processes[modelId];
+            bool routed = false;
+            for (int attempt = 0; attempt < 20; ++attempt) {
+                if (existing->isRunning()) {
+                    if (existing->writeStdin(json_str + "\n\n")) {
+                        std::cout << "[DEBUG] Routing INIT_2D to existing process for modelId "
+                                  << modelId << " (attempt " << attempt + 1 << ")" << std::endl;
+                        routed = true;
+                        break;
+                    }
+                }
+                // Child may be in startup, give it 10 ms and retry.
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            if (routed) return;
+            // Process died between commands — fall through and spawn fresh.
+            std::cerr << "[WARN] Existing process for " << modelId
+                      << " died before " << command << " could be routed — spawning fresh." << std::endl;
+            existing->terminate();
+            active_processes.erase(modelId);
         }
 
-        active_process = std::make_shared<Process>();
+        // Kill any stale process for this model before spawning a fresh one.
+        if (active_processes.count(modelId) && active_processes[modelId]) {
+            active_processes[modelId]->terminate();
+            active_processes.erase(modelId);
+        }
+
+        auto active_process = std::make_shared<Process>();
         std::string solver_path = "./BlastSolver";
 #ifdef _WIN32
         solver_path = "BlastSolver.exe";
@@ -284,9 +350,11 @@ void process_json(const std::string& json_str, SOCKET_TYPE client_fd, std::share
 #endif
 
         if (active_process->start(solver_path)) {
-            std::cout << "Starting BlastSolver for initialization..." << std::endl;
+            std::cout << "Starting BlastSolver for modelId " << modelId << std::endl;
             active_process->writeStdin(json_str + "\n\n");
-            std::thread([client_fd, proc = active_process]() {
+            active_processes[modelId] = active_process;
+
+            std::thread([client, proc = active_process, modelId]() {
                 std::vector<uint8_t> buffer(8192);
                 std::vector<uint8_t> accumulator;
                 while (true) {
@@ -295,103 +363,136 @@ void process_json(const std::string& json_str, SOCKET_TYPE client_fd, std::share
                     accumulator.insert(accumulator.end(), buffer.begin(), buffer.begin() + n);
 
                     while (!accumulator.empty()) {
-                        // Check for BIN_FRAME marker
-                        const std::string marker = "BIN_FRAME ";
-                        if (accumulator.size() >= marker.size() &&
-                            std::equal(marker.begin(), marker.end(), accumulator.begin())) {
+                        // Check for BIN_FRAME or BIN2D_FRAME marker
+                        std::string marker = "";
+                        const std::string m1 = "BIN_FRAME ";
+                        const std::string m2_a = "BIN2D_FRAME ";
+                        const std::string m2_b = "BIN_FRAME_2D ";
+                        if (accumulator.size() >= m2_a.size() &&
+                            std::equal(m2_a.begin(), m2_a.end(), accumulator.begin())) {
+                            marker = m2_a;
+                        } else if (accumulator.size() >= m2_b.size() &&
+                            std::equal(m2_b.begin(), m2_b.end(), accumulator.begin())) {
+                            marker = m2_b;
+                        } else if (accumulator.size() >= m1.size() &&
+                            std::equal(m1.begin(), m1.end(), accumulator.begin())) {
+                            marker = m1;
+                        }
 
-                            // Find the newline after the size
+                        if (!marker.empty()) {
                             auto nl_it = std::find(accumulator.begin(), accumulator.end(), (uint8_t)'\n');
-                            if (nl_it == accumulator.end()) break; // Need more data
+                            if (nl_it == accumulator.end()) break;
 
                             try {
                                 std::string size_str(reinterpret_cast<char*>(accumulator.data() + marker.size()),
-                                                    std::distance(accumulator.begin() + marker.size(), nl_it));
+                                                     std::distance(accumulator.begin() + marker.size(), nl_it));
                                 size_t payload_size = std::stoul(size_str);
                                 size_t header_size = std::distance(accumulator.begin(), nl_it) + 1;
 
-                                if (accumulator.size() < header_size + payload_size) break; // Need more data
+                                if (accumulator.size() < header_size + payload_size) break;
 
-                                send_websocket_binary(client_fd, accumulator.data() + header_size, payload_size);
-                                accumulator.erase(accumulator.begin(), accumulator.begin() + header_size + payload_size);
-                            } catch (const std::exception& e) {
+                                std::vector<uint8_t> ws_payload;
+                                ws_payload.insert(ws_payload.end(), modelId.begin(), modelId.end());
+                                ws_payload.push_back('\0');
+                                ws_payload.insert(ws_payload.end(),
+                                                  accumulator.begin() + header_size,
+                                                  accumulator.begin() + header_size + payload_size);
+
+                                send_websocket_binary(client, ws_payload.data(), ws_payload.size());
+                                accumulator.erase(accumulator.begin(),
+                                                  accumulator.begin() + header_size + payload_size);
+                            } catch (const std::exception&) {
                                 std::cout << "Malformed binary frame size" << std::endl;
-                                accumulator.erase(accumulator.begin(), nl_it + 1);
+                                auto nl = std::find(accumulator.begin(), accumulator.end(), (uint8_t)'\n');
+                                accumulator.erase(accumulator.begin(), nl + 1);
                                 continue;
                             }
                         } else {
-                            // Standard text line
                             auto nl_it = std::find(accumulator.begin(), accumulator.end(), (uint8_t)'\n');
-                            if (nl_it == accumulator.end()) break; // Need more data
+                            if (nl_it == accumulator.end()) break;
 
                             std::string line(reinterpret_cast<char*>(accumulator.data()),
                                              std::distance(accumulator.begin(), nl_it));
                             if (!line.empty() && line.back() == '\r') line.pop_back();
                             if (!line.empty()) {
-                                send_websocket_text(client_fd, line);
+                                try {
+                                    nlohmann::json log_json = nlohmann::json::parse(line);
+                                    log_json["modelId"] = modelId;
+                                    send_websocket_text(client, log_json.dump());
+                                } catch (...) {
+                                    nlohmann::json log_envelope;
+                                    log_envelope["type"] = "log";
+                                    log_envelope["modelId"] = modelId;
+                                    log_envelope["message"] = line;
+                                    send_websocket_text(client, log_envelope.dump());
+                                }
                             }
                             accumulator.erase(accumulator.begin(), nl_it + 1);
                         }
                     }
                 }
-                std::cout << "Telemetry relay thread finished." << std::endl;
+                std::cout << "Telemetry relay thread finished for modelId " << modelId << std::endl;
             }).detach();
         } else {
-            std::cerr << "Failed to start BlastSolver" << std::endl;
+            std::cerr << "Failed to start BlastSolver for modelId " << modelId << std::endl;
         }
-    } else if (command == "STEP" || command == "TERMINATE" || command == "EXEC_ALL" || command == "EXEC_END" || command == "PAUSE" || command == "RESUME") {
-        if (command == "PAUSE") std::cout << "[DEBUG] PAUSE COMMAND RECEIVED\n";
-        if (command == "TERMINATE") std::cout << "[DEBUG] TERMINATE COMMAND RECEIVED\n";
-        if (active_process && active_process->isRunning()) {
-            active_process->writeStdin(json_str + "\n\n");
-        } else {
-            std::cerr << "Command " << command << " ignored: Solver not running." << std::endl;
-            send_websocket_text(client_fd, "[WARNING] Command ignored: Solver process is not running. Please click 'Initialize' first.");
-        }
-    }
-
-    SimulationState state;
-    int mapped_count = 0;
-    if (payload.contains("nodes") && payload["nodes"].is_array()) {
-        for (const auto& node : payload["nodes"]) {
-            try {
-                Node n;
-                n.id = node.value("id", "unknown_" + std::to_string(mapped_count));
-                n.type = node.value("type", "Unknown");
-
-                if (node.contains("parameters") && node["parameters"].is_object()) {
-                    for (auto it = node["parameters"].begin(); it != node["parameters"].end(); ++it) {
-                        if (it.value().is_string()) {
-                            n.parameters[it.key()] = it.value().get<std::string>();
-                        } else if (it.value().is_number()) {
-                            n.parameters[it.key()] = it.value().dump();
-                        }
+    } else if (command == "STEP" || command == "TERMINATE" || command == "EXEC_ALL" || command == "EXEC_END" || command == "PAUSE" || command == "RESUME" ||
+               command == "SET_DEVICE" || command == "REMAP" || command == "STEP_2D" || command == "EXEC_ALL_2D" || command == "PAUSE_2D" || command == "RESUME_2D" || command == "TERMINATE_2D" || command == "WRITE_VTK" || command == "CONTOUR_CONFIG") {
+        if (command == "PAUSE" || command == "PAUSE_2D") std::cout << "[DEBUG] PAUSE COMMAND RECEIVED for modelId " << modelId << "\n";
+        if (command == "TERMINATE" || command == "TERMINATE_2D") std::cout << "[DEBUG] TERMINATE COMMAND RECEIVED for modelId " << modelId << "\n";
+        
+        if (active_processes.count(modelId) && active_processes[modelId]) {
+            auto& proc = active_processes[modelId];
+            bool routed = false;
+            for (int attempt = 0; attempt < 20; ++attempt) {
+                if (proc->isRunning()) {
+                    if (proc->writeStdin(json_str + "\n\n")) {
+                        routed = true;
+                        break;
                     }
                 }
-
-                if (n.type == "DomainMesh") { /* map mesh */ }
-                else if (n.type == "MaterialAir") { /* map air */ }
-                else if (n.type == "MaterialExplosive") { /* map explosive */ }
-                else if (n.type == "CFDSolver") { /* map solver */ }
-
-                std::cout << "Mapped Node: " << n.id << std::endl;
-                state.nodes.push_back(n);
-                mapped_count++;
-            } catch (const std::exception& e) {
-                std::cerr << "[JSON ERROR] Node failed: " << e.what() << std::endl;
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
+
+            if (routed) {
+                if (command == "TERMINATE" || command == "TERMINATE_2D") {
+                    // Erase ALL entries pointing to the same process (shared 1D/2D process).
+                    auto target_proc = active_processes[modelId];
+                    std::vector<std::string> to_erase;
+                    for (auto const& [id, proc_val] : active_processes) {
+                        if (proc_val == target_proc) to_erase.push_back(id);
+                    }
+                    for (const auto& id : to_erase) active_processes.erase(id);
+                }
+            } else {
+                std::cerr << "Command " << command << " ignored: Solver not responsive or running for modelId " << modelId << std::endl;
+                nlohmann::json err_env;
+                err_env["type"] = "log";
+                err_env["modelId"] = modelId;
+                err_env["message"] = "[WARNING] Command ignored: Solver process is not running or responsive.";
+                send_websocket_text(client, err_env.dump());
+            }
+        } else {
+            std::cerr << "Command " << command << " ignored: Solver not running for modelId " << modelId << std::endl;
+            nlohmann::json err_env;
+            err_env["type"] = "log";
+            err_env["modelId"] = modelId;
+            err_env["message"] = "[WARNING] Command ignored: Solver process is not running. Please click 'Initialize' first.";
+            send_websocket_text(client, err_env.dump());
         }
     }
-    std::cout << "Successfully mapped " << mapped_count << " nodes to native structures." << std::endl;
-    std::cout << "--------------------------------" << std::endl;
 }
 
 void handle_client(SOCKET_TYPE client_fd) {
-    std::shared_ptr<Process> active_process = nullptr;
+    auto client = std::make_shared<ClientConnection>();
+    client->fd = client_fd;
+
+    std::map<std::string, std::shared_ptr<Process>> active_processes;
     char handshake_buffer[8192];
-    int bytes_read = recv(client_fd, handshake_buffer, sizeof(handshake_buffer) - 1, 0);
+    int bytes_read = recv(client->fd, handshake_buffer, sizeof(handshake_buffer) - 1, 0);
     if (bytes_read <= 0) {
-        CLOSE_SOCKET(client_fd);
+        CLOSE_SOCKET(client->fd);
+        client->fd = INVALID_SOCKET_HANDLE;
         return;
     }
     handshake_buffer[bytes_read] = '\0';
@@ -408,12 +509,12 @@ void handle_client(SOCKET_TYPE client_fd) {
                                    "Upgrade: websocket\r\n"
                                    "Connection: Upgrade\r\n"
                                    "Sec-WebSocket-Accept: " + accept_key + "\r\n\r\n";
-            send(client_fd, response.c_str(), (int)response.length(), 0);
+            send(client->fd, response.c_str(), (int)response.length(), 0);
             std::cout << "WebSocket handshake complete" << std::endl;
 
             while (true) {
                 uint8_t header[2];
-                if (!read_exactly(client_fd, header, 2)) break;
+                if (!read_exactly(client->fd, header, 2)) break;
 
                 uint8_t opcode = header[0] & 0x0F;
                 bool masked = header[1] & 0x80;
@@ -423,23 +524,23 @@ void handle_client(SOCKET_TYPE client_fd) {
 
                 if (payload_len == 126) {
                     uint8_t extended_len[2];
-                    if (!read_exactly(client_fd, extended_len, 2)) break;
+                    if (!read_exactly(client->fd, extended_len, 2)) break;
                     payload_len = (extended_len[0] << 8) | extended_len[1];
                 } else if (payload_len == 127) {
                     uint8_t extended_len[8];
-                    if (!read_exactly(client_fd, extended_len, 8)) break;
+                    if (!read_exactly(client->fd, extended_len, 8)) break;
                     payload_len = 0;
                     for (int i = 0; i < 8; ++i) payload_len = (payload_len << 8) | extended_len[i];
                 }
 
                 uint8_t mask[4];
                 if (masked) {
-                    if (!read_exactly(client_fd, mask, 4)) break;
+                    if (!read_exactly(client->fd, mask, 4)) break;
                 }
 
                 std::vector<uint8_t> payload(payload_len);
                 if (payload_len > 0) {
-                    if (!read_exactly(client_fd, payload.data(), (size_t)payload_len)) break;
+                    if (!read_exactly(client->fd, payload.data(), (size_t)payload_len)) break;
                 }
 
                 if (masked) {
@@ -448,18 +549,27 @@ void handle_client(SOCKET_TYPE client_fd) {
 
                 if (opcode == 0x1) {
                     std::string message(payload.begin(), payload.end());
-                    process_json(message, client_fd, active_process);
+                    process_json(message, client, active_processes);
                 }
             }
         }
     }
 
-    if (active_process) {
-        active_process->terminate();
+    for (auto& pair : active_processes) {
+        if (pair.second) {
+            pair.second->terminate();
+        }
     }
 
     std::cout << "Client disconnected" << std::endl;
-    CLOSE_SOCKET(client_fd);
+
+    {
+        std::lock_guard<std::mutex> lock(client->send_mutex);
+        if (client->fd != INVALID_SOCKET_HANDLE) {
+            CLOSE_SOCKET(client->fd);
+            client->fd = INVALID_SOCKET_HANDLE;
+        }
+    }
 }
 
 int main() {
@@ -468,12 +578,20 @@ int main() {
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) return 1;
 #endif
 
+#ifndef _WIN32
+    // Ignore SIGPIPE globally. A dead child process or a disconnected WebSocket
+    // client will now yield EPIPE/EBADF from write()/send() instead of killing
+    // the Broker process with SIGPIPE (exit code 141).
+    signal(SIGPIPE, SIG_IGN);
+#endif
+
     SOCKET_TYPE server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd == INVALID_SOCKET_HANDLE) return 1;
 
 #ifndef _WIN32
     int opt = 1;
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    fcntl(server_fd, F_SETFD, FD_CLOEXEC);
 #endif
 
     struct sockaddr_in address;
@@ -491,6 +609,9 @@ int main() {
         socklen_t addrlen = sizeof(client_addr);
         SOCKET_TYPE client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &addrlen);
         if (client_fd != INVALID_SOCKET_HANDLE) {
+#ifndef _WIN32
+            fcntl(client_fd, F_SETFD, FD_CLOEXEC);
+#endif
             std::thread(handle_client, client_fd).detach();
         } else {
             // Sleep briefly to prevent a 100% CPU spinning loop on persistent accept errors

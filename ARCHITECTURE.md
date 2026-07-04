@@ -22,10 +22,13 @@ The backend is split into two separate processes that communicate via OS standar
 - **Boot Safety:** Aggressive boot logging (`[SYSTEM] Booting Broker...`). Catches bind/listen failures, logging `[FATAL]` to `std::cerr` and terminating with `exit(1)`.
 - **JSON Processing:** The payload mapping loop in `process_json` evaluates every node in the `payload["nodes"]` array without early exits. It uses robust `try/catch` blocks inside the loop so that a failure in mapping one node does not halt the processing of the rest.
 - **Command Routing:** Forwards commands like `EXEC_ALL` and `EXEC_END` from the WebSocket directly to the Worker's stdin.
-- **Telemetry Relay Loop:** Implements binary-safe logic using a `std::vector<uint8_t>` accumulator and `try/catch` blocks around `std::stoul` to prevent crashes on malformed `BIN_FRAME` sizes.
+- **Telemetry Relay Loop:** Implements binary-safe logic using a std::vector<uint8_t> accumulator and try/catch blocks around `std::stoul` to prevent crashes on malformed `BIN_FRAME` sizes. In `emit_telemetry_2d`, the channel count `n_channels` is computed dynamically from the output frame length (e.g. 5 channels for Ideal Gas vs 7 for Multi-Material) to seamlessly support varying telemetry payloads.
 
 ### The BlastSolver (Worker)
 - **Role:** Executes the high-performance CFD CUDA/C++ math.
+- **2D Solver & CUDA Extension:** Spawns `CFDSolver2D` (CPU) or `CFDSolver2DCuda` (GPU) solvers depending on device config.
+  - **Ideal Gas Single-Material Track:** Tracks `is_ideal_gas` state flag set upon initialization. Conditionally omits `alpha1` and `alpha2` telemetry (reducing channel count from 7 to 5) so the UI natively treats it as a single-material ideal gas simulation.
+  - **Circular 1D-to-2D Remap:** Implements subgrid cell averaging ($K=5$ sub-cells per direction) to map 1D spherical solver states to 2D conservative variables. Clamps coordinate distances to the physical 1D domain boundary (`d_sub <= r_1d.back()`) to prevent flat-extrapolation into the corners of the grid, ensuring a clean circular shock boundary.
 - **Simulation Loop:** Runs asynchronously via a detached `std::thread`, managed by atomic flags (`sim_running`, `sim_paused`, `sim_terminate`).
 - **Termination:** `CFDSolver::is_terminated()` const method returns true when `active_r_idx >= n_cells`.
 - **Parameter Binding:** The `INIT` command payload maps frontend parameters directly to the solver configuration structure. There are no default fallbacks; all values are strictly parsed from the JSON payload.
@@ -38,7 +41,42 @@ The backend is split into two separate processes that communicate via OS standar
   - JSON strings for metadata, progress, and resource pulses.
   - Raw binary float arrays prefixed with a exact `BIN_FRAME <size>\n` marker for high-frequency graph telemetry.
 
-## 3. Network & Telemetry Flow (Frontend)
+## 3. CFD Solvers & Mathematical Engine
+
+The simulation mathematics and physical state updates are computed in the `BlastSolver` using a set of structured, high-performance CFD solvers.
+
+### Available Solvers
+1. **1D Solver (`CFDSolverImpl<IsMultiMaterial>`)**: 
+   - Templated class specializing on whether the simulation tracks a single-material (Ideal Gas) or multi-material flow (unreacted JWL explosive, JWL detonation products, and ambient air).
+   - Simulates 1D spherical/radial explosion dynamics on a 1D grid.
+2. **2D Solver (`CFDSolver2D` / `CFDSolver2DCuda`)**:
+   - Supports 2D axisymmetric (cylindrical $r$-$z$) and Cartesian geometry configurations.
+   - Solves 2D fluid dynamics equations with optional GPU acceleration via CUDA.
+
+### Capabilities & Physical Models
+* **Equation of State (EOS)**:
+  - **Ideal Gas**: Used for ambient air and standalone single-material simulations. Relates pressure and energy via $E = \frac{p}{\gamma - 1}$.
+  - **JWL (Jones-Wilkins-Lee)**: Relates pressure, density, and energy for high-pressure unreacted explosive and detonation products.
+* **Detonation Model**: Programmed Burn (PB) calculates burn fraction $F_{pb}$ dynamically using detonation arrival times ($t_{arr} = r/D_{CJ}$) and transit times across a defined burn thickness.
+* **1D-to-2D Remap**: Translates computed 1D states onto the 2D grid at a user-defined time or step. Uses subgrid cell averaging ($K=5$ sub-cells per direction) to compute 2D conservative variables. Clamps coordinate distances to the physical 1D domain boundary (`d_sub <= r_1d.back()`) to prevent flat-extrapolation into grid corners, ensuring a clean circular shock profile.
+
+### Mathematical Discretization & Numerical Schemes
+* **Finite Volume Discretization**: Formulated on structured cell-centered grids.
+* **Spatial Reconstruction**: Up to 3rd-order spatial reconstruction with shock-capturing limiters (e.g. Minmod) to prevent spurious oscillations near shock waves.
+* **Interface Fluxes**: Supports Rusanov (Lax-Friedrichs) or AUSM+ (Advection Upstream Splitting Method) flux schemes.
+* **Temporal Integration**: Explicit Runge-Kutta time-stepping schemes (1st, 2nd, 3rd, and 4th order RK configurations).
+
+### Memory Management
+* **Contiguous Cache-Friendly Layouts**: Primitive states (density, velocities, pressure, volume fractions) and conservative variables are stored as flat, contiguous 1D vectors (`std::vector<State2D>`) to maximize CPU L1/L2 cache line utilization.
+* **Zero-Allocation Time Stepping**: All temporary Runge-Kutta staging vectors (`U1`, `U2`, `k1`-`k4`, flux arrays) are pre-allocated in solver constructors. No dynamic memory allocations occur during the main simulation loop.
+* **GPU Memory Optimization**: For the CUDA solver, pinned host memory buffers and direct GPU device allocations are set up once in the constructor. Simulation steps run entirely on the GPU, with only the downsampled contour data copied back to the host via asynchronous CUDA memory copies.
+
+### Parallelization & Active Region Optimization
+* **CPU Multithreading**: Spatially parallelized via OpenMP compiler directives (`#pragma omp parallel for collapse(2)`) to scale computation across multiple CPU cores.
+* **GPU CUDA Acceleration**: Offloads grid cells, flux reconstruction, and conservative variable updates to custom CUDA kernels executing on thousands of GPU threads.
+* **Active Region Block Tracking**: The 2D grid is divided into $16 \times 16$ spatial blocks. The solver tracks active blocks where pressure, velocity, or material concentrations deviate from ambient thresholds. Solver steps and flux updates are restricted to the bounding box of active blocks, dramatically reducing computational overhead and speeding up run times.
+
+## 4. Network & Telemetry Flow (Frontend)
 
 - **WebSocket Initialization:** The `NetworkManager.ts` strictly sets `binaryType = 'arraybuffer'` immediately upon instantiation.
 - **Debugging:** `NetworkManager` intercepts the `INIT` payload and logs it via `console.warn('[DEBUG] RAW INIT PAYLOAD:', ...)` before transmission.
@@ -48,14 +86,14 @@ The backend is split into two separate processes that communicate via OS standar
   - To support dual-canvas rendering, buffers are cloned using `data.slice(0)` prior to Worker `postMessage` transfer, preventing buffer neutering.
 - **High-Performance Resource Routing:** `resource_pulse` events bypass the global `StateManager` entirely. They are routed directly from the WS handler to `layoutManager.broadcastResourceData`, calling a fast `updateMetrics` method directly on DOM elements.
 
-## 4. Frontend State Management
+## 5. Frontend State Management
 
 - **The DAG (Directed Acyclic Graph):** The global structure consists of `Node` interfaces and `Connection` interfaces (replacing legacy `Edge` terminology).
-- **Serialization:** `serializeForSolver` strictly traces connected paths (from `CFDSolver` through `ThePainter` to the connected `DomainMesh`, `MaterialAir`, and `MaterialExplosive`/`MaterialIdealGas` inputs) to compile parameters. Parameters of disconnected nodes are ignored; if the explosive node is disconnected, `charge_mass` and `explosive_radius` default to `0.0`.
+- **Serialization:** `serializeForSolver` strictly traces connected paths (from `CFDSolver` through `ThePainter` to the connected `DomainMesh`, `MaterialAir`, and `MaterialExplosive`/`MaterialIdealGas` inputs) to compile parameters. Parameters of disconnected nodes are ignored; if the explosive node is disconnected, `charge_mass` and `explosive_radius` default to `0.0`. In `INIT_2D` commands, it correctly computes `explosive_radius` from `charge_mass` and `rho` to prevent detonator preset defaults from overriding it.
 - **Persistence:** `StateManager` handles workspace persistence using browser `localStorage` under the key `blast_workspace`. It mandates automatic synchronization on every state mutation and uses defensive hydration with a `try/catch` fallback.
 - **Node Properties:** Standard nodes contain coordinates, `type`, `parameters`, `inputs`, `outputs`, a `displayMode` ('compact' | 'collapsed'), and optional `width`/`height` dimensions.
 
-## 5. UI Layout Architecture
+## 6. UI Layout Architecture
 
 - **Nuclear CSS Overrides:** Global layout stability is enforced via `frontend/styles.css` using `min-width: 0 !important` and `min-height: 0 !important` on `.panel-container` objects, and `max-width: 100% !important` on `<canvas>`, preventing Flexbox expansion traps.
 - **Strict CSS Containment:** Workspace panels (`.panel-content`) use `position: relative; flex: 1; overflow: hidden; display: flex; flex-direction: column;`. Global fixed layouts or unbounded 100vw/vh are prohibited within sub-components.
@@ -63,7 +101,7 @@ The backend is split into two separate processes that communicate via OS standar
   - Every workspace panel includes a compact header bar with a panel-type selector.
   - `LayoutManager` caches component instances (e.g., `RESOURCE_MANAGER`, `NODE_VIEWER`) in a map, safely re-attaching them via DOM nodes after clearing existing targets to preserve internal state during split-pane adjustments.
 
-## 6. Sub-Components & Panels
+## 7. Sub-Components & Panels
 
 ### GraphRenderer (The Node Graph)
 - **Viewport Structure:** Dynamically creates an infinite canvas within the parent container (viewport -> canvas-container -> absolute node layer & SVG Bezier paths).
@@ -110,7 +148,7 @@ The backend is split into two separate processes that communicate via OS standar
 - **OUTLINER:** Renders a hierarchical DAG via nested `<ul>` and `<li>` lists starting strictly from Root nodes (0 incoming connections).
 - **PROPERTIES:** Includes an 'I/O Connections' sector listing inputs/outputs driven strictly by the global `state.connections` store. Displays descriptive validation warning boxes if key connections (CFD Solver, DomainMesh, MaterialAir, or MaterialExplosive) are missing from the graph path.
 
-## 7. Development & CI Lifecycle
+## 8. Development & CI Lifecycle
 
 - **Build Systems:**
   - C++ Backend: Compiled via CMake in a distinct build directory (`mkdir build && cd build && cmake .. && make Broker` / `make BlastSolver`).

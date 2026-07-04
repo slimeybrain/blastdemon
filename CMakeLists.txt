@@ -1,16 +1,24 @@
 cmake_minimum_required(VERSION 3.20)
-project(BlastDaemon CXX)
+project(BlastDaemon CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+# Target SM86 (Ampere) / SM89 (Ada) / SM120 (Blackwell) — add older SMs as needed
+set(CMAKE_CUDA_ARCHITECTURES 86 89 120)
+
 # Apply strict compiler warnings
 if(MSVC)
     add_compile_options(/W4)
 else()
-    add_compile_options(-Wall -Wextra -Wpedantic)
+    add_compile_options(-Wall -Wextra)
 endif()
+
+# OpenMP for CPU 2D solver parallelism
+find_package(OpenMP)
 
 # Find HDF5
 find_package(HDF5 COMPONENTS C)
@@ -23,17 +31,45 @@ target_include_directories(Broker PRIVATE
 # Broker is explicitly restricted to C++17
 set_target_properties(Broker PROPERTIES CXX_STANDARD 17)
 
-# Solver (Worker)
+# Solver (Worker) — CPU + CUDA 2D sources
 add_executable(BlastSolver
     backend/BlastSolver/main.cpp
     backend/BlastSolver/cfd_solver.cpp
     backend/BlastSolver/HDF5Writer.cpp
     backend/BlastSolver/XDMFWriter.cpp
+    # 2D CPU solver
+    backend/BlastSolver/cfd_solver_2d_init.cpp
+    backend/BlastSolver/cfd_solver_2d_step.cpp
+    backend/BlastSolver/cfd_solver_2d_fluxes.cpp
+    # 2D CUDA solver
+    backend/BlastSolver/cfd_solver_2d_cuda.cu
+    # VTK output writer
+    backend/BlastSolver/VTKWriter.cpp
 )
 
 target_include_directories(BlastSolver PRIVATE
     backend/BlastSolver/include
 )
+
+# CUDA-specific properties for BlastSolver
+set_target_properties(BlastSolver PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+)
+target_compile_options(BlastSolver PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3>
+)
+
+# OpenMP linkage
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(BlastSolver PRIVATE OpenMP::OpenMP_CXX)
+    target_compile_options(BlastSolver PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler -fopenmp>
+    )
+    message(STATUS "OpenMP found and enabled for BlastSolver.")
+endif()
+
+target_link_libraries(BlastSolver PRIVATE ${CMAKE_DL_LIBS})
+
 
 if(HDF5_FOUND)
     target_include_directories(BlastSolver PRIVATE ${HDF5_INCLUDE_DIRS})

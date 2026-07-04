@@ -129,12 +129,21 @@ public:
         if (hStdInWrite) { CloseHandle(hStdInWrite); hStdInWrite = nullptr; }
         if (hStdOutRead) { CloseHandle(hStdOutRead); hStdOutRead = nullptr; }
 #else
+        // Close stdin first so the child gets EOF and can shut down cleanly.
+        if (stdin_pipe[1] != -1) { close(stdin_pipe[1]); stdin_pipe[1] = -1; }
         if (pid > 0) {
-            kill(pid, SIGKILL);
-            waitpid(pid, nullptr, 0);
+            // Give the child a moment to exit on EOF, then escalate.
+            kill(pid, SIGTERM);
+            struct timespec ts = { 0, 50000000 }; // 50 ms
+            nanosleep(&ts, nullptr);
+            int status;
+            pid_t r = waitpid(pid, &status, WNOHANG);
+            if (r == 0) {
+                kill(pid, SIGKILL);
+                waitpid(pid, &status, 0);
+            }
             pid = -1;
         }
-        if (stdin_pipe[1] != -1) { close(stdin_pipe[1]); stdin_pipe[1] = -1; }
         if (stdout_pipe[0] != -1) { close(stdout_pipe[0]); stdout_pipe[0] = -1; }
 #endif
     }
@@ -159,7 +168,12 @@ public:
         return WriteFile(hStdInWrite, data.c_str(), (DWORD)data.length(), &bytesWritten, NULL);
 #else
         if (stdin_pipe[1] == -1) return false;
-        return write(stdin_pipe[1], data.c_str(), data.length()) != -1;
+        ssize_t n = write(stdin_pipe[1], data.c_str(), data.length());
+        if (n == -1 && errno == EPIPE) {
+            close(stdin_pipe[1]); stdin_pipe[1] = -1;
+            return false;
+        }
+        return n != -1;
 #endif
     }
 
@@ -175,12 +189,23 @@ public:
         if (pid <= 0) return false;
         int status;
         pid_t result = waitpid(pid, &status, WNOHANG);
-        if (result == 0) return true;
+        if (result == 0) {
+            // Child still running (most common case).
+            return true;
+        }
         if (result == pid) {
+            // Child has actually exited — confirmed.
+            if (WIFEXITED(status)) {
+                std::cout << "[DEBUG] Child process " << pid << " exited with status " << WEXITSTATUS(status) << std::endl;
+            } else if (WIFSIGNALED(status)) {
+                std::cout << "[DEBUG] Child process " << pid << " terminated by signal " << WTERMSIG(status) << std::endl;
+            }
             pid = -1;
             return false;
         }
-        return false;
+        // result == -1: ECHILD (no child with that pid yet per kernel, race
+        // condition right after fork) or EINTR.  Treat as still running.
+        return true;
 #endif
     }
 
