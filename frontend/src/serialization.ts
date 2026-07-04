@@ -200,7 +200,26 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         const t = flattenedParams['atm_temperature'] || 298.15;
         flattenedParams['ambient_rho'] = p / (287.058 * t);
 
-        if (!flattenedParams['init_mode']) flattenedParams['init_mode'] = 'From1D';
+        const mass = flattenedParams['charge_mass'] !== undefined ? flattenedParams['charge_mass'] : 0.0;
+        flattenedParams['charge_mass'] = mass;
+        if (mass > 0) {
+            const rho = flattenedParams['rho'] || 1630.0;
+            flattenedParams['explosive_radius'] = Math.pow((3.0 * mass) / (4.0 * Math.PI * rho), 1.0/3.0);
+        }
+
+        // Only default to 'From1D' when a 1D solver is actually present in the graph.
+        // Otherwise infer from the connected explosive type so the 2D worker
+        // initialises directly instead of waiting for a remap that will never come.
+        if (!flattenedParams['init_mode']) {
+            const has1DSolver = state.nodes.some(n => n.type === 'CFDSolver');
+            if (has1DSolver) {
+                flattenedParams['init_mode'] = 'From1D';
+            } else if (flattenedParams['explosive_type'] === 'MaterialIdealGas') {
+                flattenedParams['init_mode'] = 'Ideal Gas';
+            } else {
+                flattenedParams['init_mode'] = 'JWL';
+            }
+        }
         if (!flattenedParams['composition']) flattenedParams['composition'] = 'TNT';
         if (!flattenedParams['device']) flattenedParams['device'] = 'cpu';
 

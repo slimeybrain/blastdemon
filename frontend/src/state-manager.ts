@@ -613,14 +613,14 @@ export class StateManager {
                     node.width = 180;
                     node.height = 40;
                 } else if (nextMode === 'normal') {
-                    node.width = node.type === 'TelemetryContour' ? 350 : 250;
+                    node.width = node.type === 'TelemetryContour' ? 420 : 250;
                     if (node.type === 'TelemetryContour') {
                         node.height = 300;
                     } else {
                         node.height = node.type === 'TelemetryGraph' ? 150 : 130;
                     }
                 } else if (nextMode === 'expanded') {
-                    node.width = 350;
+                    node.width = node.type === 'TelemetryContour' ? 420 : 350;
                     if (node.type === 'TelemetryContour') {
                         node.height = 300;
                     } else {
@@ -1183,7 +1183,9 @@ export class StateManager {
             },
             'TelemetryContour': {
                 telemetry_channel: 0,
-                auto_scale: true
+                auto_scale: true,
+                downsample_stride: 1,
+                refresh_rate: 0.0
             },
             'VTKOutput': {
                 vtk_dir: './vtk_output'

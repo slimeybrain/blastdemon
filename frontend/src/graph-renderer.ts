@@ -2337,7 +2337,7 @@ export class GraphRenderer {
                     (val) => {
                         const ch = parseInt(val, 10);
                         const newColor = CHANNELS[ch]?.color ?? '#00f0ff';
-                        this.stateManager.updateNodeParameters(node.id, {
+                        this.stateManager.updateNodeParametersInPlace(node.id, {
                             telemetry_channel: ch,
                             color: newColor
                         });
@@ -2357,7 +2357,7 @@ export class GraphRenderer {
                     String(currentStride),
                     (val) => {
                         const newStride = parseInt(val, 10);
-                        this.stateManager.updateNodeParameters(node.id, {
+                        this.stateManager.updateNodeParametersInPlace(node.id, {
                             plot_stride: newStride
                         });
                     },
@@ -2473,6 +2473,28 @@ export class GraphRenderer {
                 { label: 'Unburnt Frac' }
             ];
             const currentChannel = Number(node.parameters?.telemetry_channel ?? 0);
+            const currentStride = Number(node.parameters?.downsample_stride ?? 1);
+            const currentRate = Number(node.parameters?.refresh_rate ?? 0.0);
+
+            const STRIDES = [
+                { value: '1', label: '1x (Full)' },
+                { value: '2', label: '2x' },
+                { value: '3', label: '3x' },
+                { value: '4', label: '4x' },
+                { value: '5', label: '5x' },
+                { value: '8', label: '8x' }
+            ];
+
+            const RATES = [
+                { value: '0', label: 'Max FPS' },
+                { value: '0.05', label: '20 FPS (0.05s)' },
+                { value: '0.1', label: '10/s' },
+                { value: '0.2', label: '5/s' },
+                { value: '0.5', label: '2/s' },
+                { value: '1.0', label: '1/s' },
+                { value: '2.0', label: '0.5/s' },
+                { value: '5.0', label: 'Manual' }
+            ];
 
             const state = this.stateManager.getCurrentState();
             let isAxisymmetric = true;
@@ -2493,6 +2515,8 @@ export class GraphRenderer {
                 worker.postMessage({
                     type: 'setConfig',
                     channel: currentChannel,
+                    stride: currentStride,
+                    refreshRate: currentRate,
                     autoScale: node.parameters?.auto_scale !== false,
                     min: node.parameters?.min_y !== undefined ? Number(node.parameters.min_y) : 0,
                     max: node.parameters?.max_y !== undefined ? Number(node.parameters.max_y) : 1,
@@ -2503,24 +2527,169 @@ export class GraphRenderer {
             if (!container.querySelector('canvas')) {
                 const selectorBar = document.createElement('div');
                 selectorBar.className = 'telemetry-channel-bar';
-                
+                selectorBar.style.display = 'flex';
+                selectorBar.style.flexWrap = 'nowrap';
+                selectorBar.style.gap = '6px';
+                selectorBar.style.alignItems = 'center';
+                selectorBar.style.padding = '2px 8px';
+                selectorBar.style.background = '#151520';
+                selectorBar.style.borderBottom = '1px solid #222';
+                selectorBar.style.flexShrink = '0';
+                selectorBar.style.height = '24px';
+                selectorBar.style.overflow = 'visible';
+
+                // 1. Channel Select
+                const chGroup = document.createElement('div');
+                chGroup.style.display = 'flex';
+                chGroup.style.alignItems = 'center';
+                chGroup.style.gap = '3px';
+                chGroup.style.flex = '1';
+                chGroup.style.minWidth = '0';
+
                 const labelSpan = document.createElement('span');
                 labelSpan.className = 'telemetry-channel-label';
-                labelSpan.textContent = 'Channel:';
-                selectorBar.appendChild(labelSpan);
+                labelSpan.textContent = 'Ch:';
+                chGroup.appendChild(labelSpan);
 
                 const select = this.createCustomDropdown(
                     CHANNELS.map((ch, idx) => ({ value: String(idx), label: ch.label })),
                     String(currentChannel),
                     (val) => {
                         const ch = parseInt(val, 10);
-                        this.stateManager.updateNodeParameters(node.id, {
+                        this.stateManager.updateNodeParametersInPlace(node.id, {
                             telemetry_channel: ch
                         });
                     },
                     'telemetry-channel-select'
                 );
-                selectorBar.appendChild(select);
+                chGroup.appendChild(select);
+                selectorBar.appendChild(chGroup);
+
+                // 2. Downsample (Stride) Select
+                const strideGroup = document.createElement('div');
+                strideGroup.style.display = 'flex';
+                strideGroup.style.alignItems = 'center';
+                strideGroup.style.gap = '3px';
+
+                const strideLabel = document.createElement('span');
+                strideLabel.className = 'telemetry-channel-label';
+                strideLabel.textContent = 'Stride:';
+                strideGroup.appendChild(strideLabel);
+
+                const strideSelect = this.createCustomDropdown(
+                    STRIDES,
+                    String(currentStride),
+                    (val) => {
+                        const strideVal = parseInt(val, 10);
+                        this.stateManager.updateNodeParametersInPlace(node.id, {
+                            downsample_stride: strideVal
+                        });
+                        const net = (window as any).networkManager;
+                        if (net && net.isConnected()) {
+                            let targetModelId = node.id;
+                            const models = this.stateManager.getAppState().models;
+                            for (const [mid, m] of Object.entries(models)) {
+                                if (m.nodes.some(n => n.id === node.id)) {
+                                    targetModelId = mid;
+                                    break;
+                                }
+                            }
+                            net.send({
+                                command: "CONTOUR_CONFIG",
+                                modelId: targetModelId,
+                                stride: strideVal,
+                                refresh_rate: currentRate
+                            });
+                        }
+                    },
+                    'telemetry-stride-select'
+                );
+                strideGroup.appendChild(strideSelect);
+                selectorBar.appendChild(strideGroup);
+
+                // 3. Refresh Rate Select
+                const rateGroup = document.createElement('div');
+                rateGroup.style.display = 'flex';
+                rateGroup.style.alignItems = 'center';
+                rateGroup.style.gap = '3px';
+
+                const rateLabel = document.createElement('span');
+                rateLabel.className = 'telemetry-channel-label';
+                rateLabel.textContent = 'Rate:';
+                rateGroup.appendChild(rateLabel);
+
+                const rateSelect = this.createCustomDropdown(
+                    RATES,
+                    String(currentRate),
+                    (val) => {
+                        const rateVal = parseFloat(val);
+                        this.stateManager.updateNodeParametersInPlace(node.id, {
+                            refresh_rate: rateVal
+                        });
+                        const net = (window as any).networkManager;
+                        if (net && net.isConnected()) {
+                            let targetModelId = node.id;
+                            const models = this.stateManager.getAppState().models;
+                            for (const [mid, m] of Object.entries(models)) {
+                                if (m.nodes.some(n => n.id === node.id)) {
+                                    targetModelId = mid;
+                                    break;
+                                }
+                            }
+                            net.send({
+                                command: "CONTOUR_CONFIG",
+                                modelId: targetModelId,
+                                stride: currentStride,
+                                refresh_rate: rateVal
+                            });
+                        }
+                    },
+                    'telemetry-rate-select'
+                );
+                rateGroup.appendChild(rateSelect);
+                selectorBar.appendChild(rateGroup);
+
+                // 4. Refresh Button
+                const refreshBtn = document.createElement('button');
+                refreshBtn.className = 'telemetry-refresh-btn';
+                refreshBtn.innerHTML = '🔄';
+                refreshBtn.title = 'Force Immediate Refresh';
+                refreshBtn.style.padding = '2px 4px';
+                refreshBtn.style.background = 'rgba(59, 130, 246, 0.2)';
+                refreshBtn.style.border = '1px solid rgba(59, 130, 246, 0.5)';
+                refreshBtn.style.borderRadius = '3px';
+                refreshBtn.style.color = '#fff';
+                refreshBtn.style.cursor = 'pointer';
+                refreshBtn.style.fontSize = '10px';
+                refreshBtn.style.height = '18px';
+                refreshBtn.style.display = 'inline-flex';
+                refreshBtn.style.alignItems = 'center';
+                refreshBtn.style.justifyContent = 'center';
+
+                refreshBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const w = this.nodeWorkers.get(node.id);
+                    if (w) {
+                        w.postMessage({ type: 'forceRender' });
+                    }
+                    const net = (window as any).networkManager;
+                    if (net && net.isConnected()) {
+                        let targetModelId = node.id;
+                        const models = this.stateManager.getAppState().models;
+                        for (const [mid, m] of Object.entries(models)) {
+                            if (m.nodes.some(n => n.id === node.id)) {
+                                targetModelId = mid;
+                                break;
+                            }
+                        }
+                        net.send({
+                            command: "CONTOUR_REFRESH",
+                            modelId: targetModelId
+                        });
+                    }
+                });
+                selectorBar.appendChild(refreshBtn);
+
                 container.appendChild(selectorBar);
 
                 const graphBody = document.createElement('div');
@@ -2550,6 +2719,8 @@ export class GraphRenderer {
                 newWorker.postMessage({
                     type: 'setConfig',
                     channel: currentChannel,
+                    stride: currentStride,
+                    refreshRate: currentRate,
                     autoScale: node.parameters?.auto_scale !== false,
                     min: node.parameters?.min_y !== undefined ? Number(node.parameters.min_y) : 0,
                     max: node.parameters?.max_y !== undefined ? Number(node.parameters.max_y) : 1,
@@ -2580,6 +2751,44 @@ export class GraphRenderer {
                             select.querySelectorAll('.custom-select-option').forEach(opt => {
                                 const optEl = opt as HTMLElement;
                                 if (optEl.dataset.value === String(currentChannel)) {
+                                    optEl.classList.add('selected');
+                                } else {
+                                    optEl.classList.remove('selected');
+                                }
+                            });
+                        }
+                    }
+                }
+
+                const strideSel = container.querySelector('.telemetry-stride-select') as HTMLElement;
+                if (strideSel) {
+                    const trigger = strideSel.querySelector('.custom-select-trigger');
+                    if (trigger) {
+                        const currentOpt = STRIDES.find(opt => opt.value === String(currentStride));
+                        if (currentOpt && trigger.textContent !== currentOpt.label) {
+                            trigger.textContent = currentOpt.label;
+                            strideSel.querySelectorAll('.custom-select-option').forEach(opt => {
+                                const optEl = opt as HTMLElement;
+                                if (optEl.dataset.value === String(currentStride)) {
+                                    optEl.classList.add('selected');
+                                } else {
+                                    optEl.classList.remove('selected');
+                                }
+                            });
+                        }
+                    }
+                }
+
+                const rateSel = container.querySelector('.telemetry-rate-select') as HTMLElement;
+                if (rateSel) {
+                    const trigger = rateSel.querySelector('.custom-select-trigger');
+                    if (trigger) {
+                        const currentOpt = RATES.find(opt => opt.value === String(currentRate));
+                        if (currentOpt && trigger.textContent !== currentOpt.label) {
+                            trigger.textContent = currentOpt.label;
+                            rateSel.querySelectorAll('.custom-select-option').forEach(opt => {
+                                const optEl = opt as HTMLElement;
+                                if (optEl.dataset.value === String(currentRate)) {
                                     optEl.classList.add('selected');
                                 } else {
                                     optEl.classList.remove('selected');

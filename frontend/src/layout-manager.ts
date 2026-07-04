@@ -1388,100 +1388,29 @@ class ExecutionManagerComponent {
     private statusListener: (status: any) => void;
     private stateListener: () => void;
     private modelStatusListener: (modelId: string, status: any) => void;
-    private modelListContainer: HTMLElement;
+    
+    private connectionBadge!: HTMLElement;
+    private targetsListContainer!: HTMLElement;
+    
+    private globalInitBtn!: HTMLButtonElement;
+    private globalRunBtn!: HTMLButtonElement;
+    private globalPauseBtn!: HTMLButtonElement;
+    private globalTermBtn!: HTMLButtonElement;
+    private globalStepBtns: HTMLButtonElement[] = [];
 
     constructor(parent: HTMLElement, stateManager: StateManager) {
         this.container = document.createElement('div');
         this.container.className = 'execution-manager-panel';
-        this.container.style.padding = '12px';
-        this.container.style.display = 'flex';
-        this.container.style.flexDirection = 'column';
-        this.container.style.gap = '10px';
-        this.container.style.height = '100%';
-        this.container.style.overflowY = 'auto';
         parent.appendChild(this.container);
 
         this.stateManager = stateManager;
 
-        const createBtn = (id: string, text: string, className: string = 'header-button') => {
-            const btn = document.createElement('button');
-            btn.id = id;
-            btn.textContent = text;
-            btn.className = className;
-            btn.style.width = '100%';
-            btn.style.padding = '10px 14px';
-            btn.style.fontSize = '12px';
-            btn.style.borderRadius = '4px';
-            btn.style.cursor = 'pointer';
-            return btn;
-        };
+        this.buildStructure();
 
-        // Title and targets header
-        const headerRow = document.createElement('div');
-        headerRow.style.display = 'flex';
-        headerRow.style.justifyContent = 'space-between';
-        headerRow.style.alignItems = 'center';
-        headerRow.style.borderBottom = '1px solid #333';
-        headerRow.style.paddingBottom = '6px';
-        headerRow.innerHTML = `<span style="font-weight:bold;font-size:12px;color:#00f0ff;">Execution Targets</span>`;
-        this.container.appendChild(headerRow);
-
-        // Model checkbox list container
-        this.modelListContainer = document.createElement('div');
-        this.modelListContainer.style.display = 'flex';
-        this.modelListContainer.style.flexDirection = 'column';
-        this.modelListContainer.style.gap = '8px';
-        this.modelListContainer.style.maxHeight = '300px';
-        this.modelListContainer.style.overflowY = 'auto';
-        this.modelListContainer.style.background = '#1a1a1f';
-        this.modelListContainer.style.border = '1px solid #2d2d37';
-        this.modelListContainer.style.borderRadius = '4px';
-        this.modelListContainer.style.padding = '6px';
-        this.container.appendChild(this.modelListContainer);
-
-        // Global buttons title
-        const globalTitle = document.createElement('div');
-        globalTitle.style.fontWeight = 'bold';
-        globalTitle.style.fontSize = '11px';
-        globalTitle.style.color = '#888';
-        globalTitle.style.marginTop = '6px';
-        globalTitle.textContent = 'GLOBAL CONTROLS (Selected Models)';
-        this.container.appendChild(globalTitle);
-
-        const mainControls = document.createElement('div');
-        mainControls.style.display = 'grid';
-        mainControls.style.gridTemplateColumns = '1fr';
-        mainControls.style.gap = '8px';
-        mainControls.appendChild(createBtn('init-btn', 'Initialize Selected', 'header-button'));
-        this.container.appendChild(mainControls);
-
-        const stepControls = document.createElement('div');
-        stepControls.style.display = 'grid';
-        stepControls.style.gridTemplateColumns = 'repeat(5, 1fr)';
-        stepControls.style.gap = '4px';
-        stepControls.appendChild(createBtn('exec-1-btn', '1', 'header-button secondary'));
-        stepControls.appendChild(createBtn('exec-10-btn', '10', 'header-button secondary'));
-        stepControls.appendChild(createBtn('exec-100-btn', '100', 'header-button secondary'));
-        stepControls.appendChild(createBtn('exec-1000-btn', '1000', 'header-button secondary'));
-        stepControls.appendChild(createBtn('exec-end-btn', 'End', 'header-button success'));
-        this.container.appendChild(stepControls);
-
-        const runControls = document.createElement('div');
-        runControls.style.display = 'grid';
-        runControls.style.gridTemplateColumns = '1fr 1fr';
-        runControls.style.gap = '8px';
-        runControls.appendChild(createBtn('interrupt-btn', 'Interrupt Selected', 'header-button warning'));
-        runControls.appendChild(createBtn('terminate-btn', 'Terminate Selected', 'header-button danger'));
-        this.container.appendChild(runControls);
-
-        this.statusListener = () => {
-            this.updateTargets();
-        };
+        this.statusListener = () => this.updateTargets();
         this.stateManager.onStatusChange(this.statusListener);
 
-        this.modelStatusListener = () => {
-            this.updateTargets();
-        };
+        this.modelStatusListener = () => this.updateTargets();
         this.stateManager.onModelStatusChange(this.modelStatusListener);
 
         this.stateListener = () => this.updateTargets();
@@ -1496,131 +1425,327 @@ class ExecutionManagerComponent {
         this.stateManager.offStateChange(this.stateListener);
         this.container.remove();
     }
+    
+    private buildStructure() {
+        this.container.innerHTML = '';
+
+        // Title and connection header
+        const headerRow = document.createElement('div');
+        headerRow.style.display = 'flex';
+        headerRow.style.justifyContent = 'space-between';
+        headerRow.style.alignItems = 'center';
+        headerRow.style.borderBottom = '1px solid #333';
+        headerRow.style.paddingBottom = '8px';
+        headerRow.style.marginBottom = '12px';
+        
+        const titleSpan = document.createElement('span');
+        titleSpan.style.fontWeight = 'bold';
+        titleSpan.style.fontSize = '12px';
+        titleSpan.style.color = '#00f0ff';
+        titleSpan.textContent = 'Execution Control';
+        headerRow.appendChild(titleSpan);
+
+        this.connectionBadge = document.createElement('span');
+        this.connectionBadge.className = 'execution-connection-status connection-disconnected';
+        this.connectionBadge.textContent = 'Offline';
+        headerRow.appendChild(this.connectionBadge);
+
+        this.container.appendChild(headerRow);
+
+        // Global controls card
+        const globalCard = document.createElement('div');
+        globalCard.className = 'global-controls-card';
+
+        const globalTitle = document.createElement('div');
+        globalTitle.className = 'global-controls-title';
+        globalTitle.innerHTML = '⚡ Global Controls (Selected)';
+        globalCard.appendChild(globalTitle);
+
+        const globalStateRow = document.createElement('div');
+        globalStateRow.className = 'execution-controls-row';
+        globalStateRow.style.marginBottom = '6px';
+
+        const createBtn = (text: string, title: string, classes: string, onClick: () => void) => {
+            const btn = document.createElement('button');
+            btn.className = `execution-btn ${classes}`;
+            btn.textContent = text;
+            btn.title = title;
+            btn.onclick = (e) => {
+                e.stopPropagation();
+                onClick();
+            };
+            return btn;
+        };
+
+        this.globalInitBtn = createBtn('Init', 'Initialize all selected models', 'execution-btn-state execution-btn-init', () => {
+            document.dispatchEvent(new CustomEvent('global-action', { detail: { command: 'INIT' } }));
+        }) as HTMLButtonElement;
+
+        this.globalRunBtn = createBtn('Run', 'Run all selected models to completion', 'execution-btn-state execution-btn-run', () => {
+            document.dispatchEvent(new CustomEvent('global-action', { detail: { command: 'EXEC_ALL' } }));
+        }) as HTMLButtonElement;
+
+        this.globalPauseBtn = createBtn('Pause', 'Pause execution of all selected models', 'execution-btn-state execution-btn-pause', () => {
+            document.dispatchEvent(new CustomEvent('global-action', { detail: { command: 'PAUSE' } }));
+        }) as HTMLButtonElement;
+
+        this.globalTermBtn = createBtn('Term', 'Terminate execution and clear memory of selected models', 'execution-btn-state execution-btn-term', () => {
+            document.dispatchEvent(new CustomEvent('global-action', { detail: { command: 'TERMINATE' } }));
+        }) as HTMLButtonElement;
+
+        globalStateRow.appendChild(this.globalInitBtn);
+        globalStateRow.appendChild(this.globalRunBtn);
+        globalStateRow.appendChild(this.globalPauseBtn);
+        globalStateRow.appendChild(this.globalTermBtn);
+        globalCard.appendChild(globalStateRow);
+
+        // Global steps row
+        const globalStepRow = document.createElement('div');
+        globalStepRow.className = 'execution-step-row';
+
+        const stepLabel = document.createElement('span');
+        stepLabel.className = 'execution-step-label';
+        stepLabel.textContent = 'Step:';
+        globalStepRow.appendChild(stepLabel);
+
+        const globalStepGrid = document.createElement('div');
+        globalStepGrid.className = 'execution-btn-grid';
+
+        this.globalStepBtns = [1, 10, 100, 1000].map(steps => {
+            const btn = createBtn(String(steps), `Step selected targets by ${steps} steps`, 'execution-btn-step', () => {
+                document.dispatchEvent(new CustomEvent('global-action', { detail: { command: 'STEP', steps } }));
+            });
+            globalStepGrid.appendChild(btn);
+            return btn as HTMLButtonElement;
+        });
+
+        globalStepRow.appendChild(globalStepGrid);
+        globalCard.appendChild(globalStepRow);
+        this.container.appendChild(globalCard);
+
+        // Targets Header
+        const targetsHeader = document.createElement('div');
+        targetsHeader.style.fontWeight = 'bold';
+        targetsHeader.style.fontSize = '11px';
+        targetsHeader.style.color = '#888';
+        targetsHeader.style.letterSpacing = '0.05em';
+        targetsHeader.style.marginBottom = '8px';
+        targetsHeader.textContent = 'EXECUTION TARGETS';
+        this.container.appendChild(targetsHeader);
+
+        // Targets list container
+        this.targetsListContainer = document.createElement('div');
+        this.targetsListContainer.style.display = 'flex';
+        this.targetsListContainer.style.flexDirection = 'column';
+        this.targetsListContainer.style.gap = '10px';
+        this.container.appendChild(this.targetsListContainer);
+    }
+
+    private findPipeline(modelId: string) {
+        const ws = this.stateManager.getActiveWorkspace();
+        if (!ws) return null;
+
+        const wsConns = ws.connections as Array<{fromNode:string,fromPort:string,toNode:string,toPort:string}>;
+        const allModels = this.stateManager.getAllModels();
+
+        const nodeToModel = new Map<string, string>();
+        for (const mId of ws.modelIds) {
+            const m = allModels.find(x => x.id === mId);
+            m?.nodes.forEach(n => nodeToModel.set(n.id, mId));
+        }
+
+        for (const conn of wsConns) {
+            const fromModelId = nodeToModel.get(conn.fromNode);
+            const toModelId   = nodeToModel.get(conn.toNode);
+            if (!fromModelId || !toModelId || fromModelId === toModelId) continue;
+
+            const toModel  = allModels.find(m => m.id === toModelId);
+            const toNode   = toModel?.nodes.find(n => n.id === conn.toNode);
+            if (toNode?.type !== 'RemapNode') continue;
+
+            const fromModel = allModels.find(m => m.id === fromModelId);
+            if (!fromModel?.nodes.some(n => n.type === 'CFDSolver')) continue;
+
+            // ONLY match if modelId is the 2D target model!
+            if (modelId === toModelId) {
+                return {
+                    model1dId: fromModelId,
+                    model2dId: toModelId,
+                    processId: toModelId,
+                };
+            }
+        }
+        return null;
+    }
 
     updateTargets() {
-        this.modelListContainer.innerHTML = '';
+        if (!this.targetsListContainer) return;
+        this.targetsListContainer.innerHTML = '';
+
+        const isConnected = (window as any).networkManager?.isConnected() ?? false;
+        
+        // Update connection badge
+        if (isConnected) {
+            this.connectionBadge.className = 'execution-connection-status connection-connected';
+            this.connectionBadge.textContent = 'Online';
+        } else {
+            this.connectionBadge.className = 'execution-connection-status connection-disconnected';
+            this.connectionBadge.textContent = 'Offline';
+        }
 
         const models = this.stateManager.getWorkspaceModels();
         if (models.length === 0) {
-            this.modelListContainer.innerHTML = `<div style="padding:10px; color:#888; font-style:italic; font-size:11px;">No models in workspace</div>`;
+            this.targetsListContainer.innerHTML = `<div style="padding:15px; color:#666; font-style:italic; font-size:11px; text-align:center; background:#18181f; border:1px solid #222; border-radius:4px;">No models in active workspace</div>`;
+            
+            // Disable all global buttons
+            this.globalInitBtn.disabled = true;
+            this.globalRunBtn.disabled = true;
+            this.globalPauseBtn.disabled = true;
+            this.globalTermBtn.disabled = true;
+            this.globalStepBtns.forEach(b => b.disabled = true);
             return;
         }
 
-        // Add a "Select/Deselect All" row
-        const selectAllRow = document.createElement('div');
-        selectAllRow.style.display = 'flex';
-        selectAllRow.style.alignItems = 'center';
-        selectAllRow.style.gap = '8px';
-        selectAllRow.style.padding = '6px 8px';
-        selectAllRow.style.borderBottom = '1px solid #2d2d37';
+        // Add a "Select/Deselect All" row if multiple models exist
+        if (models.length > 1) {
+            const selectAllRow = document.createElement('div');
+            selectAllRow.style.display = 'flex';
+            selectAllRow.style.alignItems = 'center';
+            selectAllRow.style.gap = '8px';
+            selectAllRow.style.padding = '6px 8px';
+            selectAllRow.style.background = '#18181f';
+            selectAllRow.style.border = '1px solid #222';
+            selectAllRow.style.borderRadius = '4px';
 
-        const selectAllCheckbox = document.createElement('input');
-        selectAllCheckbox.type = 'checkbox';
-        selectAllCheckbox.style.width = '16px';
-        selectAllCheckbox.style.height = '16px';
-        selectAllCheckbox.style.cursor = 'pointer';
-        const allSelected = models.every(m => this.stateManager.isRunTargetSelected(m.id));
-        selectAllCheckbox.checked = allSelected;
-        selectAllCheckbox.onchange = () => {
-            if (selectAllCheckbox.checked) {
-                this.stateManager.setSelectedRunTargets(models.map(m => m.id));
-            } else {
-                this.stateManager.setSelectedRunTargets([]);
+            const selectAllCheckbox = document.createElement('input');
+            selectAllCheckbox.type = 'checkbox';
+            selectAllCheckbox.className = 'execution-target-checkbox';
+            const allSelected = models.every(m => this.stateManager.isRunTargetSelected(m.id));
+            selectAllCheckbox.checked = allSelected;
+            selectAllCheckbox.onchange = () => {
+                if (selectAllCheckbox.checked) {
+                    this.stateManager.setSelectedRunTargets(models.map(m => m.id));
+                } else {
+                    this.stateManager.setSelectedRunTargets([]);
+                }
+                this.updateTargets();
+            };
+
+            const selectAllLabel = document.createElement('label');
+            selectAllLabel.textContent = 'Toggle All Target Selections';
+            selectAllLabel.style.fontSize = '11px';
+            selectAllLabel.style.fontWeight = 'bold';
+            selectAllLabel.style.color = '#888';
+            selectAllLabel.style.cursor = 'pointer';
+            selectAllLabel.onclick = () => selectAllCheckbox.click();
+
+            selectAllRow.appendChild(selectAllCheckbox);
+            selectAllRow.appendChild(selectAllLabel);
+            this.targetsListContainer.appendChild(selectAllRow);
+        }
+
+        // Track states for global controls disabling
+        let anySelected = false;
+        let anySelectedRunning = false;
+        let anySelectedPausedOrInitialized = false;
+        let anySelectedUninitializedOrTerminated = false;
+        let anySelectedInitializedRunningOrPaused = false;
+
+        const renderCard = (model: any) => {
+            const card = document.createElement('div');
+            card.className = 'execution-target-card';
+            
+            const isSelected = this.stateManager.isRunTargetSelected(model.id);
+            const status = this.stateManager.getModelStatus(model.id);
+
+            if (isSelected) {
+                anySelected = true;
+                if (status === 'RUNNING') {
+                    anySelectedRunning = true;
+                    anySelectedInitializedRunningOrPaused = true;
+                } else if (status === 'INITIALIZED' || status === 'PAUSED') {
+                    anySelectedPausedOrInitialized = true;
+                    anySelectedInitializedRunningOrPaused = true;
+                } else if (status === 'TERMINATED' || status === 'UNINITIALIZED') {
+                    anySelectedUninitializedOrTerminated = true;
+                    anySelectedInitializedRunningOrPaused = true;
+                }
             }
-            this.updateTargets();
-        };
 
-        const selectAllLabel = document.createElement('label');
-        selectAllLabel.textContent = 'Toggle All';
-        selectAllLabel.style.fontSize = '12px';
-        selectAllLabel.style.fontWeight = 'bold';
-        selectAllLabel.style.color = '#ccc';
-        selectAllLabel.style.cursor = 'pointer';
-        selectAllLabel.onclick = () => selectAllCheckbox.click();
+            // Header row
+            const headerRow = document.createElement('div');
+            headerRow.className = 'execution-target-header';
 
-        selectAllRow.appendChild(selectAllCheckbox);
-        selectAllRow.appendChild(selectAllLabel);
-        this.modelListContainer.appendChild(selectAllRow);
-
-        models.forEach(model => {
-            const row = document.createElement('div');
-            row.style.display = 'flex';
-            row.style.flexDirection = 'column';
-            row.style.gap = '4px';
-            row.style.padding = '6px 8px';
-            row.style.borderBottom = '1px solid #222';
-
-            const topMeta = document.createElement('div');
-            topMeta.style.display = 'flex';
-            topMeta.style.alignItems = 'center';
-            topMeta.style.justifyContent = 'space-between';
-            topMeta.style.padding = '4px 0';
-
-            const leftPart = document.createElement('div');
-            leftPart.style.display = 'flex';
-            leftPart.style.alignItems = 'center';
-            leftPart.style.gap = '8px';
+            const metaDiv = document.createElement('div');
+            metaDiv.className = 'execution-target-meta';
 
             const checkbox = document.createElement('input');
             checkbox.type = 'checkbox';
-            checkbox.style.width = '16px';
-            checkbox.style.height = '16px';
-            checkbox.style.cursor = 'pointer';
-            checkbox.checked = this.stateManager.isRunTargetSelected(model.id);
+            checkbox.className = 'execution-target-checkbox';
+            checkbox.checked = isSelected;
             checkbox.onchange = () => {
                 this.stateManager.toggleRunTarget(model.id);
                 this.updateTargets();
             };
 
-            const name = document.createElement('span');
-            name.textContent = model.name;
-            name.style.fontSize = '12px';
-            name.style.fontWeight = 'bold';
-            name.style.color = '#fff';
-            name.style.cursor = 'pointer';
-            name.onclick = () => checkbox.click();
+            const getColors = (id: string) => {
+                let hash = 0;
+                for (let i = 0; i < id.length; i++) {
+                    hash = id.charCodeAt(i) + ((hash << 5) - hash);
+                }
+                const h = Math.abs(hash) % 360;
+                return `hsl(${h}, 75%, 60%)`;
+            };
+            const accentColor = getColors(model.id);
 
-            leftPart.appendChild(checkbox);
-            leftPart.appendChild(name);
-            topMeta.appendChild(leftPart);
+            const nameSpan = document.createElement('span');
+            nameSpan.className = 'execution-target-name';
+            nameSpan.textContent = model.name;
+            nameSpan.style.color = accentColor;
+            nameSpan.onclick = () => checkbox.click();
 
-            const status = this.stateManager.getModelStatus(model.id);
+            metaDiv.appendChild(checkbox);
+            metaDiv.appendChild(nameSpan);
+            headerRow.appendChild(metaDiv);
+
             const badge = document.createElement('div');
             badge.className = `status-badge badge-${status.toLowerCase()}`;
             badge.textContent = status;
-            topMeta.appendChild(badge);
-
-            row.appendChild(topMeta);
+            headerRow.appendChild(badge);
+            card.appendChild(headerRow);
 
             // Progress bar and details
             const progress = this.stateManager.getModelProgress(model.id);
             const simTime = this.stateManager.getModelSimTime(model.id);
+            const has2D = model.nodes.some((n: any) => n.type === 'CFDSolver2D');
 
             const progressContainer = document.createElement('div');
-            progressContainer.style.display = 'flex';
-            progressContainer.style.alignItems = 'center';
-            progressContainer.style.gap = '8px';
+            progressContainer.className = 'progress-bar-container';
 
             const progressBg = document.createElement('div');
-            progressBg.style.flex = '1';
-            progressBg.style.height = '6px';
-            progressBg.style.background = '#333';
-            progressBg.style.borderRadius = '3px';
-            progressBg.style.overflow = 'hidden';
+            progressBg.className = 'progress-bar-bg';
 
             const progressFill = document.createElement('div');
-            progressFill.style.height = '100%';
-            progressFill.style.background = '#00f0ff';
-            progressFill.style.width = `${progress}%`;
+            progressFill.className = 'progress-bar-fill';
+            
+            // Indeterminate status: 2D running in EXEC_ALL mode has no percent (progress === 0)
+            const isIndeterminate = has2D && status === 'RUNNING' && progress === 0;
+            if (isIndeterminate) {
+                progressFill.classList.add('indeterminate');
+            } else {
+                progressFill.style.width = `${progress}%`;
+            }
             progressBg.appendChild(progressFill);
 
             const progressText = document.createElement('span');
-            progressText.style.fontSize = '10px';
-            progressText.style.color = '#888';
-            progressText.style.width = '100px';
-            progressText.style.textAlign = 'right';
+            progressText.className = 'progress-bar-text';
+            
             if (status === 'RUNNING') {
-                progressText.textContent = `${progress}% | ${simTime.toExponential(3)}s`;
+                if (isIndeterminate) {
+                    progressText.textContent = `${simTime.toExponential(3)}s`;
+                } else {
+                    progressText.textContent = `${progress}% | ${simTime.toExponential(3)}s`;
+                }
             } else if (status === 'INITIALIZED' || status === 'PAUSED' || status === 'TERMINATED') {
                 progressText.textContent = `${simTime.toExponential(3)}s`;
             } else {
@@ -1629,26 +1754,17 @@ class ExecutionManagerComponent {
 
             progressContainer.appendChild(progressBg);
             progressContainer.appendChild(progressText);
-            row.appendChild(progressContainer);
+            card.appendChild(progressContainer);
 
-            // Model-specific individual action buttons
+            // State Actions Row
             const actionsRow = document.createElement('div');
-            actionsRow.style.display = 'flex';
-            actionsRow.style.gap = '4px';
-            actionsRow.style.marginTop = '4px';
+            actionsRow.className = 'execution-controls-row';
 
-            const createMiniBtn = (text: string, title: string, bg: string, color: string, onClick: () => void) => {
+            const createMiniBtn = (text: string, title: string, classes: string, onClick: () => void) => {
                 const btn = document.createElement('button');
+                btn.className = `execution-btn execution-btn-state ${classes}`;
                 btn.textContent = text;
                 btn.title = title;
-                btn.style.flex = '1';
-                btn.style.fontSize = '10px';
-                btn.style.padding = '4px 6px';
-                btn.style.border = 'none';
-                btn.style.borderRadius = '3px';
-                btn.style.background = bg;
-                btn.style.color = color;
-                btn.style.cursor = 'pointer';
                 btn.onclick = (e) => {
                     e.stopPropagation();
                     onClick();
@@ -1656,30 +1772,111 @@ class ExecutionManagerComponent {
                 return btn;
             };
 
-            const initBtn = createMiniBtn('Init', 'Initialize Model', '#3a3a4a', '#00f0ff', () => {
+            const initBtn = createMiniBtn('Init', 'Initialize Solver Process', 'execution-btn-init', () => {
                 document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'INIT' } }));
             });
-            const playBtn = createMiniBtn('End', 'Run Model to Completion', '#2b4c2b', '#4ade80', () => {
+            const playBtn = createMiniBtn('Run', 'Run to Completion', 'execution-btn-run', () => {
                 document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'EXEC_ALL' } }));
             });
-            const stepBtn = createMiniBtn('Step 100', 'Run 100 Steps', '#3b3b4f', '#ccc', () => {
-                document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'STEP', steps: 100 } }));
-            });
-            const pauseBtn = createMiniBtn('Pause', 'Interrupt Model', '#4c3a2b', '#fb923c', () => {
+            const pauseBtn = createMiniBtn('Pause', 'Pause execution', 'execution-btn-pause', () => {
                 document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'PAUSE' } }));
             });
-            const termBtn = createMiniBtn('Term', 'Terminate Model Solver', '#4c2b2b', '#f87171', () => {
+            const termBtn = createMiniBtn('Term', 'Terminate Solver & Clear Memory', 'execution-btn-term', () => {
                 document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'TERMINATE' } }));
             });
 
             actionsRow.appendChild(initBtn);
             actionsRow.appendChild(playBtn);
-            actionsRow.appendChild(stepBtn);
             actionsRow.appendChild(pauseBtn);
             actionsRow.appendChild(termBtn);
-            row.appendChild(actionsRow);
+            card.appendChild(actionsRow);
 
-            this.modelListContainer.appendChild(row);
+            // Stepping Row (Large square step keys)
+            const stepRow = document.createElement('div');
+            stepRow.className = 'execution-step-row';
+
+            const stepRowLabel = document.createElement('span');
+            stepRowLabel.className = 'execution-step-label';
+            stepRowLabel.textContent = 'Step:';
+            stepRow.appendChild(stepRowLabel);
+
+            const stepGrid = document.createElement('div');
+            stepGrid.className = 'execution-btn-grid';
+
+            const stepButtons = [1, 10, 100, 1000].map(steps => {
+                const btn = document.createElement('button');
+                btn.className = 'execution-btn execution-btn-step';
+                btn.textContent = String(steps);
+                btn.title = `Step by ${steps} steps`;
+                btn.onclick = (e) => {
+                    e.stopPropagation();
+                    document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'STEP', steps } }));
+                };
+                stepGrid.appendChild(btn);
+                return btn;
+            });
+
+            stepRow.appendChild(stepGrid);
+            card.appendChild(stepRow);
+
+            // Compute Button States based on connection, model state
+            let disableAllControls = !isConnected;
+            const pipeline = this.findPipeline(model.id);
+
+            if (disableAllControls) {
+                initBtn.disabled = true;
+                playBtn.disabled = true;
+                pauseBtn.disabled = true;
+                termBtn.disabled = true;
+                stepButtons.forEach(b => b.disabled = true);
+            } else {
+                if (status === 'RUNNING') {
+                    initBtn.disabled = true;
+                    playBtn.disabled = !pipeline; // Allow running pipeline models while 1D is running to execution-queue 2D
+                    pauseBtn.disabled = false;
+                    termBtn.disabled = false;
+                    stepButtons.forEach(b => b.disabled = true);
+                } else if (status === 'INITIALIZED' || status === 'PAUSED') {
+                    initBtn.disabled = false;
+                    playBtn.disabled = false;
+                    pauseBtn.disabled = true;
+                    termBtn.disabled = false;
+                    stepButtons.forEach(b => b.disabled = false);
+                } else {
+                    // UNINITIALIZED or TERMINATED
+                    initBtn.disabled = false;
+                    playBtn.disabled = false; // Allow running directly (will auto-init + run)
+                    pauseBtn.disabled = true;
+                    termBtn.disabled = true;
+                    stepButtons.forEach(b => b.disabled = true);
+                }
+            }
+
+            return card;
+        };
+
+        models.forEach(model => {
+            const card = renderCard(model);
+            this.targetsListContainer.appendChild(card);
         });
+
+        // Update Global Buttons states
+        if (!isConnected || !anySelected) {
+            this.globalInitBtn.disabled = true;
+            this.globalRunBtn.disabled = true;
+            this.globalPauseBtn.disabled = true;
+            this.globalTermBtn.disabled = true;
+            this.globalStepBtns.forEach(b => b.disabled = true);
+        } else {
+            // Init is enabled if any selected is NOT running
+            this.globalInitBtn.disabled = anySelectedRunning && !anySelectedPausedOrInitialized;
+            // Run enabled if any selected is initialized/paused, running (to queue), or uninitialized (to auto-run)
+            this.globalRunBtn.disabled = !anySelectedPausedOrInitialized && !anySelectedRunning && !anySelectedUninitializedOrTerminated;
+            this.globalStepBtns.forEach(b => b.disabled = !anySelectedPausedOrInitialized);
+            // Pause enabled if any selected is running
+            this.globalPauseBtn.disabled = !anySelectedRunning;
+            // Terminate enabled if any selected is initialized, running or paused
+            this.globalTermBtn.disabled = !anySelectedInitializedRunningOrPaused;
+        }
     }
 }

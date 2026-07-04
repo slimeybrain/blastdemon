@@ -15,6 +15,11 @@ let range = 1;
 let autoScale = true;
 let isAxisymmetric = true;
 
+let stride = 1;
+let refreshRate = 0.0; // in seconds
+let lastRenderTime = 0;
+let renderTimeout: any = null;
+
 // Helper offscreen canvas to render the raw grid before stretching
 let tempCanvas: OffscreenCanvas | null = null;
 let tempCtx: OffscreenCanvasRenderingContext2D | null = null;
@@ -58,12 +63,6 @@ function getColor(val: number, min: number, max: number): { r: number; g: number
     t = Math.max(0, Math.min(1, t));
 
     // Inferno/Plasma inspired palette
-    // 0.0 -> Deep Indigo/Blue (0, 10, 40)
-    // 0.25 -> Purple/Pink (140, 20, 120)
-    // 0.5 -> Red/Orange (230, 60, 40)
-    // 0.75 -> Gold/Yellow (250, 190, 20)
-    // 1.0 -> White (255, 255, 255)
-    
     let r = 0, g = 0, b = 0;
     if (t < 0.25) {
         const localT = t / 0.25;
@@ -111,6 +110,8 @@ function updateAutoScale(data: Float32Array): void {
 function render(): void {
     if (!ctx || !canvas || width <= 0 || height <= 0 || !lastBuffer) return;
 
+    lastRenderTime = Date.now();
+
     const frameInfo = extractChannel2D(lastBuffer, selectedChannel);
     if (!frameInfo) return;
 
@@ -119,34 +120,34 @@ function render(): void {
     // Update scale
     updateAutoScale(data);
 
+    // Calculate out dimensions based on stride
+    const outNr = Math.ceil(nr / stride);
+    const outNz = Math.ceil(nz / stride);
+
     // Initialise or resize temporary offscreen canvas for raw grid
-    if (!tempCanvas || tempCanvas.width !== nr || tempCanvas.height !== nz) {
-        tempCanvas = new OffscreenCanvas(nr, nz);
+    if (!tempCanvas || tempCanvas.width !== outNr || tempCanvas.height !== outNz) {
+        tempCanvas = new OffscreenCanvas(outNr, outNz);
         tempCtx = tempCanvas.getContext('2d');
     }
 
     if (!tempCtx) return;
 
-    // Build the image data for the raw nr x nz grid
-    const imgData = tempCtx.createImageData(nr, nz);
+    // Build the image data for the raw outNr x outNz grid
+    const imgData = tempCtx.createImageData(outNr, outNz);
     const pixels = imgData.data;
 
-    // Index mapping in solver: index = i * nz_cells + j
-    // We want to map:
-    // i (radial / r) -> x-axis of canvas (0 to nr-1)
-    // j (axial / z) -> y-axis of canvas (0 to nz-1)
-    // Canvas coordinate index in ImageData is: (y * width + x) * 4
-    // Here: x = i, y = (nz - 1 - j) to flip so detonator (z=0) is at bottom/left
-    for (let i = 0; i < nr; ++i) {
-        for (let j = 0; j < nz; ++j) {
-            const solverIdx = i * nz + j;
+    for (let i = 0; i < outNr; ++i) {
+        for (let j = 0; j < outNz; ++j) {
+            const rawI = Math.min(nr - 1, i * stride);
+            const rawJ = Math.min(nz - 1, j * stride);
+            const solverIdx = rawI * nz + rawJ;
             const val = data[solverIdx];
 
             const col = getColor(val, displayMin, displayMax);
             
             // Flip y-coordinate for intuitive contour plot (z vertical)
-            const canvasY = nz - 1 - j;
-            const pixelIdx = (canvasY * nr + i) * 4;
+            const canvasY = outNz - 1 - j;
+            const pixelIdx = (canvasY * outNr + i) * 4;
 
             pixels[pixelIdx + 0] = col.r;
             pixels[pixelIdx + 1] = col.g;
@@ -159,7 +160,7 @@ function render(): void {
 
     // Calculate drawing box keeping aspect ratio
     // If axisymmetric, the shown width is double the nr cells due to reflection (r goes from -max_r to max_r)
-    const aspect = isAxisymmetric ? (2 * nr) / nz : nr / nz;
+    const aspect = isAxisymmetric ? (2 * outNr) / outNz : outNr / outNz;
     let dw = width;
     let dh = height;
     if (width / height > aspect) {
@@ -172,30 +173,30 @@ function render(): void {
     const dx = (width - dw) / 2;
     const dy = (height - dh) / 2;
 
-    // Draw heatmap preserving aspect ratio
+    // Draw heatmap preserving aspect ratio (sharp pixels per cell)
     ctx.clearRect(0, 0, width, height);
-    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingEnabled = false;
 
     if (isAxisymmetric) {
         // Draw left reflected half (r from -max_r to 0)
         ctx.save();
         ctx.translate(dx + dw / 2, dy);
         ctx.scale(-1, 1);
-        ctx.drawImage(tempCanvas, 0, 0, nr, nz, 0, 0, dw / 2, dh);
+        ctx.drawImage(tempCanvas, 0, 0, outNr, outNz, 0, 0, dw / 2, dh);
         ctx.restore();
 
         // Draw right normal half (r from 0 to max_r)
-        ctx.drawImage(tempCanvas, 0, 0, nr, nz, dx + dw / 2, dy, dw / 2, dh);
+        ctx.drawImage(tempCanvas, 0, 0, outNr, outNz, dx + dw / 2, dy, dw / 2, dh);
     } else {
         // Draw standard full width
-        ctx.drawImage(tempCanvas, 0, 0, nr, nz, dx, dy, dw, dh);
+        ctx.drawImage(tempCanvas, 0, 0, outNr, outNz, dx, dy, dw, dh);
     }
 
     // Draw grid info overlay (glassmorphism/ HUD styling)
     ctx.save();
     ctx.font = '11px monospace';
     ctx.fillStyle = '#94a3b8';
-    ctx.fillText(`Mesh: ${nr} × ${nz}`, 15, 20);
+    ctx.fillText(`Mesh: ${nr} × ${nz} (Render: ${outNr} × ${outNz})`, 15, 20);
     ctx.fillText(`Range: [${displayMin.toExponential(2)}, ${displayMax.toExponential(2)}]`, 15, 35);
     ctx.restore();
 }
@@ -205,7 +206,46 @@ self.onmessage = (event) => {
 
     if (data instanceof ArrayBuffer) {
         lastBuffer = data;
-        requestRender();
+
+        // Robustness: throttle & catch-up logic
+        const now = Date.now();
+        const intervalMs = refreshRate * 1000;
+
+        if (intervalMs <= 0) {
+            if (renderTimeout) {
+                clearTimeout(renderTimeout);
+                renderTimeout = null;
+            }
+            requestRender();
+        } else {
+            const timeSinceLast = now - lastRenderTime;
+            if (timeSinceLast >= intervalMs) {
+                if (renderTimeout) {
+                    clearTimeout(renderTimeout);
+                    renderTimeout = null;
+                }
+                requestRender();
+            } else {
+                // If a rendering is not already pending, schedule it to run
+                // exactly when the throttle period expires.
+                if (!renderTimeout) {
+                    const delay = intervalMs - timeSinceLast;
+                    renderTimeout = setTimeout(() => {
+                        renderTimeout = null;
+                        requestRender();
+                    }, delay);
+                }
+            }
+        }
+        return;
+    }
+
+    if (data.type === 'forceRender') {
+        if (renderTimeout) {
+            clearTimeout(renderTimeout);
+            renderTimeout = null;
+        }
+        render();
         return;
     }
 
@@ -235,6 +275,8 @@ self.onmessage = (event) => {
 
     if (data.type === 'setConfig') {
         if (typeof data.channel === 'number') selectedChannel = data.channel;
+        if (typeof data.stride === 'number') stride = data.stride;
+        if (typeof data.refreshRate === 'number') refreshRate = data.refreshRate;
         if (typeof data.autoScale === 'boolean') autoScale = data.autoScale;
         if (typeof data.isAxisymmetric === 'boolean') isAxisymmetric = data.isAxisymmetric;
         if (!autoScale) {

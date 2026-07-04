@@ -4,6 +4,7 @@ export class NetworkManager {
     private terminal: HTMLElement | null;
     private messageCallbacks: ((data: string | ArrayBuffer) => void)[] = [];
     private openCallbacks: (() => void)[] = [];
+    private closeCallbacks: (() => void)[] = [];
     private reconnectTimeout: number = 3000;
     private isManuallyClosed: boolean = false;
 
@@ -42,6 +43,7 @@ export class NetworkManager {
         };
 
         this.socket.onclose = () => {
+            this.closeCallbacks.forEach(callback => callback());
             if (!this.isManuallyClosed) {
                 this.log('[System] WebSocket Disconnected. Retrying in 3s...', 'error');
                 setTimeout(() => this.connect(), this.reconnectTimeout);
@@ -76,6 +78,10 @@ export class NetworkManager {
 
     public onOpen(callback: () => void): void {
         this.openCallbacks.push(callback);
+    }
+
+    public onClose(callback: () => void): void {
+        this.closeCallbacks.push(callback);
     }
 
     public close(): void {
