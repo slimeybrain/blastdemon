@@ -1388,11 +1388,11 @@ class ExecutionManagerComponent {
     private statusListener: (status: any) => void;
     private stateListener: () => void;
     private modelStatusListener: (modelId: string, status: any) => void;
+    private telemetryListener: (nodeId: string, data: any) => void;
     
     private connectionBadge!: HTMLElement;
     private targetsListContainer!: HTMLElement;
     
-
 
     constructor(parent: HTMLElement, stateManager: StateManager) {
         this.container = document.createElement('div');
@@ -1412,6 +1412,15 @@ class ExecutionManagerComponent {
         this.stateListener = () => this.updateTargets();
         this.stateManager.onStateChange(this.stateListener);
 
+        this.telemetryListener = (nodeId, data) => {
+            if (data && typeof data === 'object') {
+                if (data.type === 'progress' || data.type === 'progress_2d' || data.type === 'TELEMETRY' || data.type === 'TELEMETRY_2D') {
+                    this.updateTargets();
+                }
+            }
+        };
+        this.stateManager.onTelemetryUpdate(this.telemetryListener);
+
         this.updateTargets();
     }
 
@@ -1419,6 +1428,7 @@ class ExecutionManagerComponent {
         this.stateManager.offStatusChange(this.statusListener);
         this.stateManager.offModelStatusChange(this.modelStatusListener);
         this.stateManager.offStateChange(this.stateListener);
+        this.stateManager.offTelemetryUpdate(this.telemetryListener);
         this.container.remove();
     }
     
@@ -1505,9 +1515,207 @@ class ExecutionManagerComponent {
         return null;
     }
 
+    private createCard(model: any): HTMLElement {
+        const card = document.createElement('div');
+        card.className = 'execution-target-card';
+        card.dataset.modelId = model.id;
+
+        // Header row
+        const headerRow = document.createElement('div');
+        headerRow.className = 'execution-target-header';
+
+        const metaDiv = document.createElement('div');
+        metaDiv.className = 'execution-target-meta';
+
+        const getColors = (id: string) => {
+            let hash = 0;
+            for (let i = 0; i < id.length; i++) {
+                hash = id.charCodeAt(i) + ((hash << 5) - hash);
+            }
+            const h = Math.abs(hash) % 360;
+            return `hsl(${h}, 75%, 60%)`;
+        };
+        const accentColor = getColors(model.id);
+
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'execution-target-name';
+        nameSpan.textContent = model.name;
+        nameSpan.style.color = accentColor;
+
+        metaDiv.appendChild(nameSpan);
+        headerRow.appendChild(metaDiv);
+
+        const badge = document.createElement('div');
+        badge.className = `status-badge`;
+        headerRow.appendChild(badge);
+        card.appendChild(headerRow);
+
+        // Progress bar and details
+        const progressContainer = document.createElement('div');
+        progressContainer.className = 'progress-bar-container';
+
+        const progressBg = document.createElement('div');
+        progressBg.className = 'progress-bar-bg';
+
+        const progressFill = document.createElement('div');
+        progressFill.className = 'progress-bar-fill';
+        progressBg.appendChild(progressFill);
+
+        const progressText = document.createElement('span');
+        progressText.className = 'progress-bar-text';
+
+        progressContainer.appendChild(progressBg);
+        progressContainer.appendChild(progressText);
+        card.appendChild(progressContainer);
+
+        // State Actions Row
+        const actionsRow = document.createElement('div');
+        actionsRow.className = 'execution-controls-row';
+
+        const createMiniBtn = (text: string, title: string, classes: string, onClick: () => void) => {
+            const btn = document.createElement('button');
+            btn.className = `execution-btn execution-btn-state ${classes}`;
+            btn.textContent = text;
+            btn.title = title;
+            btn.onclick = (e) => {
+                e.stopPropagation();
+                onClick();
+            };
+            return btn;
+        };
+
+        const initBtn = createMiniBtn('Init', 'Initialize Solver Process', 'execution-btn-init', () => {
+            document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'INIT' } }));
+        });
+        const playBtn = createMiniBtn('Run', 'Run to Completion', 'execution-btn-run', () => {
+            document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'EXEC_ALL' } }));
+        });
+        const pauseBtn = createMiniBtn('Pause', 'Pause execution', 'execution-btn-pause', () => {
+            document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'PAUSE' } }));
+        });
+        const termBtn = createMiniBtn('Term', 'Terminate Solver & Clear Memory', 'execution-btn-term', () => {
+            document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'TERMINATE' } }));
+        });
+
+        actionsRow.appendChild(initBtn);
+        actionsRow.appendChild(playBtn);
+        actionsRow.appendChild(pauseBtn);
+        actionsRow.appendChild(termBtn);
+        card.appendChild(actionsRow);
+
+        // Stepping Row (Large square step keys)
+        const stepRow = document.createElement('div');
+        stepRow.className = 'execution-step-row';
+
+        const stepRowLabel = document.createElement('span');
+        stepRowLabel.className = 'execution-step-label';
+        stepRowLabel.textContent = 'Step:';
+        stepRow.appendChild(stepRowLabel);
+
+        const stepGrid = document.createElement('div');
+        stepGrid.className = 'execution-btn-grid';
+
+        [1, 10, 100, 1000].forEach(steps => {
+            const btn = document.createElement('button');
+            btn.className = 'execution-btn execution-btn-step';
+            btn.textContent = String(steps);
+            btn.title = `Step by ${steps} steps`;
+            btn.onclick = (e) => {
+                e.stopPropagation();
+                document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'STEP', steps } }));
+            };
+            stepGrid.appendChild(btn);
+        });
+
+        stepRow.appendChild(stepGrid);
+        card.appendChild(stepRow);
+
+        return card;
+    }
+
+    private updateCard(card: HTMLElement, model: any, isConnected: boolean): void {
+        const status = this.stateManager.getModelStatus(model.id);
+        const progress = this.stateManager.getModelProgress(model.id);
+        const simTime = this.stateManager.getModelSimTime(model.id);
+        const has2D = model.nodes.some((n: any) => n.type === 'CFDSolver2D');
+
+        // Update badge
+        const badge = card.querySelector('.status-badge') as HTMLElement;
+        if (badge) {
+            badge.className = `status-badge badge-${status.toLowerCase()}`;
+            badge.textContent = status;
+        }
+
+        // Update progress bar fill
+        const progressFill = card.querySelector('.progress-bar-fill') as HTMLElement;
+        if (progressFill) {
+            const isIndeterminate = has2D && status === 'RUNNING' && progress === 0;
+            if (isIndeterminate) {
+                progressFill.classList.add('indeterminate');
+                progressFill.style.width = '';
+            } else {
+                progressFill.classList.remove('indeterminate');
+                progressFill.style.width = `${progress}%`;
+            }
+        }
+
+        // Update progress bar text
+        const progressText = card.querySelector('.progress-bar-text') as HTMLElement;
+        if (progressText) {
+            if (status === 'RUNNING') {
+                const isIndeterminate = has2D && status === 'RUNNING' && progress === 0;
+                if (isIndeterminate) {
+                    progressText.textContent = `${simTime.toExponential(3)}s`;
+                } else {
+                    progressText.textContent = `${progress}% | ${simTime.toExponential(3)}s`;
+                }
+            } else if (status === 'INITIALIZED' || status === 'PAUSED' || status === 'TERMINATED') {
+                progressText.textContent = `${simTime.toExponential(3)}s`;
+            } else {
+                progressText.textContent = 'Ready';
+            }
+        }
+
+        // Update buttons disabled state
+        const initBtn = card.querySelector('.execution-btn-init') as HTMLButtonElement;
+        const playBtn = card.querySelector('.execution-btn-run') as HTMLButtonElement;
+        const pauseBtn = card.querySelector('.execution-btn-pause') as HTMLButtonElement;
+        const termBtn = card.querySelector('.execution-btn-term') as HTMLButtonElement;
+        const stepButtons = Array.from(card.querySelectorAll('.execution-btn-step')) as HTMLButtonElement[];
+
+        const pipeline = this.findPipeline(model.id);
+
+        if (!isConnected) {
+            if (initBtn) initBtn.disabled = true;
+            if (playBtn) playBtn.disabled = true;
+            if (pauseBtn) pauseBtn.disabled = true;
+            if (termBtn) termBtn.disabled = true;
+            stepButtons.forEach(b => b.disabled = true);
+        } else {
+            if (status === 'RUNNING') {
+                if (initBtn) initBtn.disabled = true;
+                if (playBtn) playBtn.disabled = !pipeline;
+                if (pauseBtn) pauseBtn.disabled = false;
+                if (termBtn) termBtn.disabled = false;
+                stepButtons.forEach(b => b.disabled = true);
+            } else if (status === 'INITIALIZED' || status === 'PAUSED') {
+                if (initBtn) initBtn.disabled = false;
+                if (playBtn) playBtn.disabled = false;
+                if (pauseBtn) pauseBtn.disabled = true;
+                if (termBtn) termBtn.disabled = false;
+                stepButtons.forEach(b => b.disabled = false);
+            } else {
+                if (initBtn) initBtn.disabled = false;
+                if (playBtn) playBtn.disabled = false;
+                if (pauseBtn) pauseBtn.disabled = true;
+                if (termBtn) termBtn.disabled = true;
+                stepButtons.forEach(b => b.disabled = true);
+            }
+        }
+    }
+
     updateTargets() {
         if (!this.targetsListContainer) return;
-        this.targetsListContainer.innerHTML = '';
 
         const isConnected = (window as any).networkManager?.isConnected() ?? false;
         
@@ -1526,189 +1734,33 @@ class ExecutionManagerComponent {
             return;
         }
 
-
-
-        const renderCard = (model: any) => {
-            const card = document.createElement('div');
-            card.className = 'execution-target-card';
-            
-             const status = this.stateManager.getModelStatus(model.id);
- 
-             // Header row
-             const headerRow = document.createElement('div');
-             headerRow.className = 'execution-target-header';
- 
-             const metaDiv = document.createElement('div');
-             metaDiv.className = 'execution-target-meta';
- 
-             const getColors = (id: string) => {
-                 let hash = 0;
-                 for (let i = 0; i < id.length; i++) {
-                     hash = id.charCodeAt(i) + ((hash << 5) - hash);
-                 }
-                 const h = Math.abs(hash) % 360;
-                 return `hsl(${h}, 75%, 60%)`;
-             };
-             const accentColor = getColors(model.id);
- 
-             const nameSpan = document.createElement('span');
-             nameSpan.className = 'execution-target-name';
-             nameSpan.textContent = model.name;
-             nameSpan.style.color = accentColor;
- 
-             metaDiv.appendChild(nameSpan);
-             headerRow.appendChild(metaDiv);
-
-            const badge = document.createElement('div');
-            badge.className = `status-badge badge-${status.toLowerCase()}`;
-            badge.textContent = status;
-            headerRow.appendChild(badge);
-            card.appendChild(headerRow);
-
-            // Progress bar and details
-            const progress = this.stateManager.getModelProgress(model.id);
-            const simTime = this.stateManager.getModelSimTime(model.id);
-            const has2D = model.nodes.some((n: any) => n.type === 'CFDSolver2D');
-
-            const progressContainer = document.createElement('div');
-            progressContainer.className = 'progress-bar-container';
-
-            const progressBg = document.createElement('div');
-            progressBg.className = 'progress-bar-bg';
-
-            const progressFill = document.createElement('div');
-            progressFill.className = 'progress-bar-fill';
-            
-            // Indeterminate status: 2D running in EXEC_ALL mode has no percent (progress === 0)
-            const isIndeterminate = has2D && status === 'RUNNING' && progress === 0;
-            if (isIndeterminate) {
-                progressFill.classList.add('indeterminate');
-            } else {
-                progressFill.style.width = `${progress}%`;
+        // Remove any existing cards that are not in the current models list
+        const modelIds = new Set(models.map(m => m.id));
+        Array.from(this.targetsListContainer.children).forEach(child => {
+            const childEl = child as HTMLElement;
+            if (childEl.dataset.modelId && !modelIds.has(childEl.dataset.modelId)) {
+                childEl.remove();
             }
-            progressBg.appendChild(progressFill);
+        });
 
-            const progressText = document.createElement('span');
-            progressText.className = 'progress-bar-text';
-            
-            if (status === 'RUNNING') {
-                if (isIndeterminate) {
-                    progressText.textContent = `${simTime.toExponential(3)}s`;
-                } else {
-                    progressText.textContent = `${progress}% | ${simTime.toExponential(3)}s`;
+        // Ensure we show correct cards in the correct order
+        models.forEach((model, index) => {
+            let card = this.targetsListContainer.querySelector(`[data-model-id="${model.id}"]`) as HTMLElement;
+            if (!card) {
+                // If it is the empty placeholder, clear it first
+                if (this.targetsListContainer.innerHTML.includes('No models')) {
+                    this.targetsListContainer.innerHTML = '';
                 }
-            } else if (status === 'INITIALIZED' || status === 'PAUSED' || status === 'TERMINATED') {
-                progressText.textContent = `${simTime.toExponential(3)}s`;
-            } else {
-                progressText.textContent = 'Ready';
+                card = this.createCard(model);
+                this.targetsListContainer.appendChild(card);
+            }
+            
+            // Ensure card is in the correct order/index (e.g. if ordering changed)
+            if (this.targetsListContainer.children[index] !== card) {
+                this.targetsListContainer.insertBefore(card, this.targetsListContainer.children[index] || null);
             }
 
-            progressContainer.appendChild(progressBg);
-            progressContainer.appendChild(progressText);
-            card.appendChild(progressContainer);
-
-            // State Actions Row
-            const actionsRow = document.createElement('div');
-            actionsRow.className = 'execution-controls-row';
-
-            const createMiniBtn = (text: string, title: string, classes: string, onClick: () => void) => {
-                const btn = document.createElement('button');
-                btn.className = `execution-btn execution-btn-state ${classes}`;
-                btn.textContent = text;
-                btn.title = title;
-                btn.onclick = (e) => {
-                    e.stopPropagation();
-                    onClick();
-                };
-                return btn;
-            };
-
-            const initBtn = createMiniBtn('Init', 'Initialize Solver Process', 'execution-btn-init', () => {
-                document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'INIT' } }));
-            });
-            const playBtn = createMiniBtn('Run', 'Run to Completion', 'execution-btn-run', () => {
-                document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'EXEC_ALL' } }));
-            });
-            const pauseBtn = createMiniBtn('Pause', 'Pause execution', 'execution-btn-pause', () => {
-                document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'PAUSE' } }));
-            });
-            const termBtn = createMiniBtn('Term', 'Terminate Solver & Clear Memory', 'execution-btn-term', () => {
-                document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'TERMINATE' } }));
-            });
-
-            actionsRow.appendChild(initBtn);
-            actionsRow.appendChild(playBtn);
-            actionsRow.appendChild(pauseBtn);
-            actionsRow.appendChild(termBtn);
-            card.appendChild(actionsRow);
-
-            // Stepping Row (Large square step keys)
-            const stepRow = document.createElement('div');
-            stepRow.className = 'execution-step-row';
-
-            const stepRowLabel = document.createElement('span');
-            stepRowLabel.className = 'execution-step-label';
-            stepRowLabel.textContent = 'Step:';
-            stepRow.appendChild(stepRowLabel);
-
-            const stepGrid = document.createElement('div');
-            stepGrid.className = 'execution-btn-grid';
-
-            const stepButtons = [1, 10, 100, 1000].map(steps => {
-                const btn = document.createElement('button');
-                btn.className = 'execution-btn execution-btn-step';
-                btn.textContent = String(steps);
-                btn.title = `Step by ${steps} steps`;
-                btn.onclick = (e) => {
-                    e.stopPropagation();
-                    document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'STEP', steps } }));
-                };
-                stepGrid.appendChild(btn);
-                return btn;
-            });
-
-            stepRow.appendChild(stepGrid);
-            card.appendChild(stepRow);
-
-            // Compute Button States based on connection, model state
-            let disableAllControls = !isConnected;
-            const pipeline = this.findPipeline(model.id);
-
-            if (disableAllControls) {
-                initBtn.disabled = true;
-                playBtn.disabled = true;
-                pauseBtn.disabled = true;
-                termBtn.disabled = true;
-                stepButtons.forEach(b => b.disabled = true);
-            } else {
-                if (status === 'RUNNING') {
-                    initBtn.disabled = true;
-                    playBtn.disabled = !pipeline; // Allow running pipeline models while 1D is running to execution-queue 2D
-                    pauseBtn.disabled = false;
-                    termBtn.disabled = false;
-                    stepButtons.forEach(b => b.disabled = true);
-                } else if (status === 'INITIALIZED' || status === 'PAUSED') {
-                    initBtn.disabled = false;
-                    playBtn.disabled = false;
-                    pauseBtn.disabled = true;
-                    termBtn.disabled = false;
-                    stepButtons.forEach(b => b.disabled = false);
-                } else {
-                    // UNINITIALIZED or TERMINATED
-                    initBtn.disabled = false;
-                    playBtn.disabled = false; // Allow running directly (will auto-init + run)
-                    pauseBtn.disabled = true;
-                    termBtn.disabled = true;
-                    stepButtons.forEach(b => b.disabled = true);
-                }
-            }
-
-            return card;
-        };
-
-        models.forEach(model => {
-            const card = renderCard(model);
-            this.targetsListContainer.appendChild(card);
+            this.updateCard(card, model, isConnected);
         });
     }
 }

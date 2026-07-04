@@ -69,12 +69,15 @@ export class StateManager {
     }
 
     setModelStatus(modelId: string, status: SimulationStatus): void {
-        this.modelStatuses.set(modelId, status);
-        this.modelStatusListeners.forEach(l => l(modelId, status));
-        
-        const activeWs = this.getActiveWorkspace();
-        if (activeWs && activeWs.activeModelId === modelId) {
-            this.setStatus(status);
+        const oldStatus = this.modelStatuses.get(modelId);
+        if (oldStatus !== status) {
+            this.modelStatuses.set(modelId, status);
+            this.modelStatusListeners.forEach(l => l(modelId, status));
+            
+            const activeWs = this.getActiveWorkspace();
+            if (activeWs && activeWs.activeModelId === modelId) {
+                this.setStatus(status);
+            }
         }
     }
 
@@ -548,7 +551,7 @@ export class StateManager {
         const node = state.nodes.find(n => n.id === nodeId);
         if (node) {
             const modes: ('compact' | 'normal' | 'expanded')[] = ['normal', 'expanded', 'compact'];
-            const currentMode = (node.displayMode === 'full-panel' ? 'expanded' : node.displayMode) || 'normal';
+            const currentMode = (node.displayMode === 'full-panel' ? 'expanded' : node.displayMode) || 'expanded';
             const nextIndex = (modes.indexOf(currentMode) + 1) % modes.length;
             const nextMode = modes[nextIndex];
             node.displayMode = nextMode;
@@ -688,10 +691,12 @@ export class StateManager {
         if (typeof data === 'object' && data !== null) {
             if (data.type === 'progress' || data.type === 'progress_2d' || data.command === 'PROGRESS') {
                 const percent = data.percent !== undefined ? data.percent : (data.value || 0);
-                return `[${timestamp}] [PROGRESS] ${percent}% complete`;
+                const wcStr = data.wallclock !== undefined ? `, Wallclock: ${Number(data.wallclock).toFixed(4)}s` : '';
+                return `[${timestamp}] [PROGRESS] ${percent}% complete${wcStr}`;
             }
             if (data.type === 'TELEMETRY' || data.type === 'TELEMETRY_2D') {
-                return `[${timestamp}] [SOLVER] Time: ${data.time?.toExponential(6) || '0'}, Terminated: ${data.is_terminated || false}`;
+                const wcStr = data.wallclock !== undefined ? `, Wallclock: ${Number(data.wallclock).toFixed(4)}s` : '';
+                return `[${timestamp}] [SOLVER] Time: ${data.time?.toExponential(6) || '0'}${wcStr}, Terminated: ${data.is_terminated || false}`;
             }
             if (data.type === 'resource_pulse') {
                 return `[${timestamp}] [RESOURCES] CPU: ${data.metrics?.cpu?.toFixed(1)}%, RAM: ${data.metrics?.ram?.toFixed(1)}%`;
@@ -1083,7 +1088,8 @@ export class StateManager {
                 spatial_order: 2,
                 temporal_order: 2,
                 output_mode: 'By Time',
-                output_interval: 0.0001
+                output_interval: 0.0001,
+                precision: 'double'
             },
             'TelemetryGraph': {
                 telemetry_channel: 0,
@@ -1113,7 +1119,8 @@ export class StateManager {
                 trigger_type: 'end'
             },
             'HardwareConfig': {
-                device: 'cpu'
+                device: 'cpu',
+                precision: 'double'
             },
             'CFDSolver2D': {
                 init_mode: 'From1D',
@@ -1136,6 +1143,9 @@ export class StateManager {
         nodes.forEach(node => {
             if (!node.parameters) {
                 node.parameters = {};
+            }
+            if (!node.displayMode) {
+                node.displayMode = 'expanded';
             }
             const nodeDefaults = defaults[node.type];
             if (nodeDefaults) {

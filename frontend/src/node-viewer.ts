@@ -635,6 +635,63 @@ export class NodeViewer {
         }
     }
 
+    private syncTerminal(terminal: HTMLElement, lines: string[], className?: string): void {
+        if (lines.length === 0) {
+            terminal.innerHTML = '';
+            return;
+        }
+
+        const childCount = terminal.children.length;
+        
+        if (childCount === 0 || childCount > lines.length) {
+            terminal.innerHTML = '';
+            lines.forEach(line => {
+                const div = document.createElement('div');
+                if (className) div.className = className;
+                div.textContent = line;
+                terminal.appendChild(div);
+            });
+            terminal.scrollTop = terminal.scrollHeight;
+            return;
+        }
+
+        const lastChild = terminal.lastElementChild as HTMLElement;
+        const lastText = lastChild ? lastChild.textContent : null;
+        
+        let matchIndex = -1;
+        if (lastText) {
+            for (let i = lines.length - 1; i >= 0; i--) {
+                if (lines[i] === lastText) {
+                    matchIndex = i;
+                    break;
+                }
+            }
+        }
+
+        if (matchIndex !== -1) {
+            for (let i = matchIndex + 1; i < lines.length; i++) {
+                const div = document.createElement('div');
+                if (className) div.className = className;
+                div.textContent = lines[i];
+                terminal.appendChild(div);
+            }
+            
+            while (terminal.children.length > lines.length) {
+                terminal.firstElementChild?.remove();
+            }
+            terminal.scrollTop = terminal.scrollHeight;
+        } else {
+            terminal.innerHTML = '';
+            lines.forEach(line => {
+                const div = document.createElement('div');
+                if (className) div.className = className;
+                div.textContent = line;
+                terminal.appendChild(div);
+            });
+            terminal.scrollTop = terminal.scrollHeight;
+        }
+    }
+
     private updateNodeViewerData(nodeId: string, data: any): void {
         const state = this.stateManager.getCurrentState();
         const node = state?.nodes.find(n => n.id === nodeId);
@@ -643,15 +700,7 @@ export class NodeViewer {
         if (node.type === 'TelemetryText') {
             const terminal = document.getElementById(`viewer-text-${nodeId}`);
             if (terminal && Array.isArray(data)) {
-                if (terminal.children.length !== data.length) {
-                    terminal.innerHTML = '';
-                    data.forEach(line => {
-                        const div = document.createElement('div');
-                        div.textContent = line;
-                        terminal.appendChild(div);
-                    });
-                    terminal.scrollTop = terminal.scrollHeight;
-                }
+                this.syncTerminal(terminal, data);
             }
         } else if (node.type === 'TelemetryGraph') {
             this.telemetryBuffer = data;
@@ -689,7 +738,7 @@ export class NodeViewer {
             'init_mode': ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
             'flux_scheme': ['AUSM+', 'Rusanov'],
             'spatial_order': ['1', '2', '3'],
-            'temporal_order': ['1', '2', '3', '4'],
+            'temporal_order': ['1', '2', '3'],
             'output_mode': ['By Step', 'By Time'],
             'plot_stride': ['1', '2', '5', '10', '20', '50', '100']
         };

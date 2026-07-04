@@ -300,6 +300,63 @@ export class GraphRenderer {
         this.eventListeners.push({ target, type, listener });
     }
 
+    private syncTerminal(terminal: HTMLElement, lines: string[], className?: string): void {
+        if (lines.length === 0) {
+            terminal.innerHTML = '';
+            return;
+        }
+
+        const childCount = terminal.children.length;
+        
+        if (childCount === 0 || childCount > lines.length) {
+            terminal.innerHTML = '';
+            lines.forEach(line => {
+                const div = document.createElement('div');
+                if (className) div.className = className;
+                div.textContent = line;
+                terminal.appendChild(div);
+            });
+            terminal.scrollTop = terminal.scrollHeight;
+            return;
+        }
+
+        const lastChild = terminal.lastElementChild as HTMLElement;
+        const lastText = lastChild ? lastChild.textContent : null;
+        
+        let matchIndex = -1;
+        if (lastText) {
+            for (let i = lines.length - 1; i >= 0; i--) {
+                if (lines[i] === lastText) {
+                    matchIndex = i;
+                    break;
+                }
+            }
+        }
+
+        if (matchIndex !== -1) {
+            for (let i = matchIndex + 1; i < lines.length; i++) {
+                const div = document.createElement('div');
+                if (className) div.className = className;
+                div.textContent = lines[i];
+                terminal.appendChild(div);
+            }
+            
+            while (terminal.children.length > lines.length) {
+                terminal.firstElementChild?.remove();
+            }
+            terminal.scrollTop = terminal.scrollHeight;
+        } else {
+            terminal.innerHTML = '';
+            lines.forEach(line => {
+                const div = document.createElement('div');
+                if (className) div.className = className;
+                div.textContent = line;
+                terminal.appendChild(div);
+            });
+            terminal.scrollTop = terminal.scrollHeight;
+        }
+    }
+
     private handleTelemetryUpdate(nodeId: string, data: any): void {
         const nodeEl = this.nodeElements.get(nodeId);
         if (!nodeEl) return;
@@ -313,14 +370,7 @@ export class GraphRenderer {
         if (node.type === 'TelemetryText' && Array.isArray(data)) {
             const body = nodeEl.querySelector('.node-body-text') as HTMLElement;
             if (body) {
-                body.innerHTML = '';
-                data.forEach(line => {
-                    const lineEl = document.createElement('div');
-                    lineEl.className = 'log-line';
-                    lineEl.textContent = line;
-                    body.appendChild(lineEl);
-                });
-                body.scrollTop = body.scrollHeight;
+                this.syncTerminal(body, data, 'log-line');
                 
                 // Force connection update to handle any layout shifts or height modifications
                 if (this.connectionRafId === null) {
@@ -932,7 +982,8 @@ export class GraphRenderer {
                 spatial_order: 2,
                 temporal_order: 2,
                 output_mode: 'By Time',
-                output_interval: 0.0001
+                output_interval: 0.0001,
+                precision: 'double'
             };
             case 'TelemetryGraph': return { telemetry_channel: 0, x_axis_mode: 'radius', plot_stride: 1 };
             case 'DomainMesh2D': return {
@@ -958,7 +1009,8 @@ export class GraphRenderer {
                 trigger_type: 'end'
             };
             case 'HardwareConfig': return {
-                device: 'cpu'
+                device: 'cpu',
+                precision: 'double'
             };
             case 'CFDSolver2D': return {
                 init_mode: 'From1D',
@@ -1375,7 +1427,7 @@ export class GraphRenderer {
 
 
 
-                const displayMode = node.displayMode || 'normal';
+                const displayMode = node.displayMode || 'expanded';
                 const nodeOrientation = node.orientation || 'HORIZ';
 
                 const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour';
@@ -2642,13 +2694,14 @@ export class GraphRenderer {
                 'bc_z_max': ['Reflecting', 'Transmitting', 'Terminate'],
                 'coordinate_system': ['Axisymmetric', 'Cartesian'],
                 'device': ['cpu', 'cuda'],
+                'precision': ['double', 'single'],
                 'trigger_type': ['end', 'time', 'step'],
                 // Explosive composition — JWL parameter sets (Ideal Gas uses its own node)
                 'composition': ['TNT', 'PETN', 'RDX', 'Custom'],
                 'init_mode': ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
                 'flux_scheme': ['AUSM+', 'Rusanov'],
                 'spatial_order': ['1', '2', '3'],
-                'temporal_order': ['1', '2', '3', '4'],
+                'temporal_order': ['1', '2', '3'],
                 'output_mode': ['By Step', 'By Time'],
                 'plot_stride': ['1', '2', '5', '10', '20', '50', '100']
             };
@@ -2823,6 +2876,20 @@ export class GraphRenderer {
                 return 'Live text stream telemetry logger. Outputs simulator event timelines, iteration milestones, and system states.';
             case 'TelemetryGraph':
                 return 'Real-time chart telemetry viewer. Plots grid spatial properties, cell pressure profiles, and simulation telemetry histories.';
+            case 'DomainMesh2D':
+                return '2D Axisymmetric mesh. Discretizes the r-z coordinate space and defines boundary conditions for r_min, r_max, z_min, and z_max faces. Feeds the 2D CFD Solver.';
+            case 'DetonatorLocation':
+                return 'Detonator position node. Specifies where the detonation point source is placed in the 2D r-z domain. explosive_z and explosive_r set the axial and radial coordinates (m); explosive_radius sets the initial hot-spot radius (m). Required by the 2D CFD Solver for all detonation modes.';
+            case 'RemapNode':
+                return 'Remapper (1D → 2D). Reads the converged 1D spherical-symmetric solution and maps its conserved variables onto the 2D axisymmetric mesh, centered at the specified explosive_z / explosive_r origin. Triggers at "end" of the 1D run, or at a specific time or step count.';
+            case 'HardwareConfig':
+                return 'Hardware configuration node. Selects the execution device (CPU with OpenMP, or GPU with CUDA) and the floating-point precision (double / single). Applied to both 1D and 2D solvers in the model.';
+            case 'CFDSolver2D':
+                return '2D axisymmetric CFD solver. Solves the Euler equations on the r-z mesh using high-order MUSCL reconstruction and AUSM+/Rusanov flux splitting. Accepts a domain mesh, detonator location, remapper, hardware config, and charge materials. init_mode selects From1D (remap a finished 1D run), Multi-Material JWL, or Ideal Gas.';
+            case 'TelemetryContour':
+                return 'Real-time 2D contour heatmap telemetry viewer. Renders dynamic physical fields — pressure, density, velocity magnitude, and multi-material mass fractions — streamed live from the 2D solver at every output step.';
+            case 'VTKOutput':
+                return 'VTK output controls. Saves simulation snapshots in VTK XML Unstructured Grid (.vtu) format to the specified directory. Files are compatible with ParaView, VisIt, and other VTK-based post-processors.';
             default:
                 return 'Simulation graph node.';
         }
@@ -3009,22 +3076,24 @@ export class GraphRenderer {
     }
 
     private getNodeEstimatedWidth(node: Node): number {
-        if (node.displayMode === 'compact') return 100;
+        const displayMode = node.displayMode || 'expanded';
+        if (displayMode === 'compact') return 100;
         if (node.width !== undefined) return node.width;
         return 200;
     }
 
     private getNodeEstimatedHeight(node: Node): number {
-        if (node.displayMode === 'compact') return 40;
+        const displayMode = node.displayMode || 'expanded';
+        if (displayMode === 'compact') return 40;
         if (node.height !== undefined) return node.height;
 
         let base = 30; // Header
-        if (node.displayMode === 'normal') {
+        if (displayMode === 'normal') {
             if (node.type === 'TelemetryText') return 130;
             if (node.type === 'TelemetryGraph') return 150;
             if (node.type === 'TelemetryContour') return 300;
             base += Math.max(node.inputs.length, node.outputs.length) * 20;
-        } else if (node.displayMode === 'expanded') {
+        } else if (displayMode === 'expanded') {
             base += Object.keys(node.parameters).length * 25;
             if (node.type === 'TelemetryText') base += 100;
             if (node.type === 'TelemetryGraph') base += 120;

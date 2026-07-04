@@ -854,10 +854,11 @@ canvas {
 }
 
 .resource-label {
-    font-size: var(--font-xs);
+    font-size: var(--font-sm); /* 11px */
     font-weight: bold;
     margin-bottom: 8px;
-    color: #888;
+    color: #aaa; /* slightly brighter for better contrast */
+    letter-spacing: 0.05em;
 }
 
 .meter-container {
@@ -889,7 +890,7 @@ canvas {
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
-    font-size: var(--font-sm);
+    font-size: var(--font-md); /* 13px */
     font-weight: bold;
     color: #fff;
 }

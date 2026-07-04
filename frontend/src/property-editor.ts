@@ -226,12 +226,13 @@ export class PropertyEditor {
             'bc_z_max': ['Reflecting', 'Transmitting', 'Terminate'],
             'coordinate_system': ['Axisymmetric', 'Cartesian'],
             'device': ['cpu', 'cuda'],
+            'precision': ['double', 'single'],
             'trigger_type': ['end', 'time', 'step'],
             'composition': ['TNT', 'PETN', 'RDX', 'Custom'],
             'init_mode': ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
             'flux_scheme': ['AUSM+', 'Rusanov'],
             'spatial_order': ['1', '2', '3'],
-            'temporal_order': ['1', '2', '3', '4'],
+            'temporal_order': ['1', '2', '3'],
             'output_mode': ['By Step', 'By Time'],
             'plot_stride': ['1', '2', '5', '10', '20', '50', '100']
         };
