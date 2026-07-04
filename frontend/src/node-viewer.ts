@@ -571,6 +571,10 @@ export class NodeViewer {
                 const customKeys = ['det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
                 if (comp !== 'Custom' && customKeys.includes(key)) continue;
             }
+            if (node.type === 'MaterialExplosive' || node.type === 'MaterialIdealGas') {
+                const shape = node.parameters['charge_shape'] || 'Sphere';
+                if (key === 'charge_height' && shape !== 'Cylinder') continue;
+            }
 
             const label = document.createElement('label');
             label.textContent = key.replace(/_/g, ' ').toUpperCase();
@@ -714,7 +718,9 @@ export class NodeViewer {
             'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl', 'output_interval',
             'spatial_order', 'temporal_order', 'gamma', 'plot_stride',
             // 2D CFD keys
-            'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r'
+            'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r',
+            'charge_r', 'charge_z', 'charge_radius', 'charge_height',
+            'detonator_r', 'detonator_z', 'detonator_radius'
         ];
 
         const dropdowns: Record<string, string[]> = {
@@ -740,7 +746,8 @@ export class NodeViewer {
             'spatial_order': ['1', '2', '3'],
             'temporal_order': ['1', '2', '3'],
             'output_mode': ['By Step', 'By Time'],
-            'plot_stride': ['1', '2', '5', '10', '20', '50', '100']
+            'plot_stride': ['1', '2', '5', '10', '20', '50', '100'],
+            'charge_shape': ['Sphere', 'Cylinder']
         };
 
         if (dropdowns[key]) {

@@ -119,6 +119,10 @@ export class PropertyEditor {
                 const customKeys = ['det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
                 if (comp !== 'Custom' && customKeys.includes(key)) continue;
             }
+            if (node.type === 'MaterialExplosive' || node.type === 'MaterialIdealGas') {
+                const shape = node.parameters['charge_shape'] || 'Sphere';
+                if (key === 'charge_height' && shape !== 'Cylinder') continue;
+            }
 
             const row = document.createElement('div');
             row.style.marginBottom = '10px';
@@ -201,13 +205,27 @@ export class PropertyEditor {
     }
 
     private createInputElement(node: Node, key: string, value: any): HTMLElement {
+        if (typeof value === 'boolean') {
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.checked = value;
+            checkbox.style.width = 'auto';
+            checkbox.style.margin = '4px 0';
+            checkbox.addEventListener('change', () => {
+                this.updateParameter(key, checkbox.checked);
+            });
+            return checkbox;
+        }
+
         const numericKeys = [
             'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature',
             'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
             'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl', 'output_interval',
             'spatial_order', 'temporal_order', 'gamma', 'plot_stride',
             // 2D CFD keys
-            'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r'
+            'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r',
+            'charge_r', 'charge_z', 'charge_radius', 'charge_height',
+            'detonator_r', 'detonator_z', 'detonator_radius'
         ];
 
         const dropdowns: Record<string, string[]> = {
@@ -234,7 +252,9 @@ export class PropertyEditor {
             'spatial_order': ['1', '2', '3'],
             'temporal_order': ['1', '2', '3'],
             'output_mode': ['By Step', 'By Time'],
-            'plot_stride': ['1', '2', '5', '10', '20', '50', '100']
+            'plot_stride': ['1', '2', '5', '10', '20', '50', '100'],
+            'charge_shape': ['Sphere', 'Cylinder'],
+            'colormap': ['plasma', 'viridis', 'rainbow', 'coolwarm', 'cividis', 'grayscale']
         };
 
         if (dropdowns[key]) {

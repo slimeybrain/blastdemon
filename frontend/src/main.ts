@@ -208,6 +208,25 @@ document.addEventListener('click', async (e) => {
         }
     }
 
+    if (target.id === 'menu-copy-model') {
+        const activeWs = stateManager.getActiveWorkspace();
+        if (activeWs.activeModelId) {
+            stateManager.copyModelToClipboard(activeWs.activeModelId);
+            console.log(`Copied active model to clipboard: ${activeWs.activeModelId}`);
+        } else {
+            alert("No active model to copy.");
+        }
+    }
+
+    if (target.id === 'menu-paste-model') {
+        const pasted = stateManager.pasteModelFromClipboard();
+        if (pasted) {
+            console.log(`Pasted model from clipboard: ${pasted.id}`);
+        } else {
+            alert("Clipboard is empty. Copy a model first.");
+        }
+    }
+
     // --- Workspace Menu Actions ---
     if (target.id === 'menu-new-workspace') {
         stateManager.createWorkspace();

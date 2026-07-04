@@ -982,6 +982,9 @@ class MenuBarComponent {
                     <div class="menu-separator"></div>
                     <div id="menu-load-binary">Load Model (Binary)...</div>
                     <div id="menu-save-binary">Save Model (Binary)</div>
+                    <div class="menu-separator"></div>
+                    <div id="menu-copy-model">Copy Active Model</div>
+                    <div id="menu-paste-model">Paste Model</div>
                 </div>
             </div>
         `;

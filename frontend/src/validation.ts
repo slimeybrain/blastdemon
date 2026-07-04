@@ -374,7 +374,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             }
         }
 
-        if (node.type === 'MaterialIdealGas') {
+        if (node.type === 'MaterialExplosive' || node.type === 'MaterialIdealGas') {
             const charge_mass = Number(node.parameters?.charge_mass ?? 1.0);
             const rho = Number(node.parameters?.rho ?? 1630);
             const detonation_energy = Number(node.parameters?.detonation_energy ?? 4520000);
@@ -388,14 +388,33 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             if (isNaN(detonation_energy) || detonation_energy <= 0) {
                 addMessage(node.id, 'error', "Detonation energy must be greater than 0.");
             }
+
+            const shape = node.parameters?.charge_shape || 'Sphere';
+            const charge_r = Number(node.parameters?.charge_r ?? 0.0);
+            const charge_z = Number(node.parameters?.charge_z ?? 0.1);
+            const charge_radius = Number(node.parameters?.charge_radius ?? 0.05);
+            const charge_height = Number(node.parameters?.charge_height ?? 0.1);
+
+            if (isNaN(charge_r) || charge_r < 0) {
+                addMessage(node.id, 'error', "Charge radial coordinate (R) must be non-negative.");
+            }
+            if (isNaN(charge_z) || charge_z < 0) {
+                addMessage(node.id, 'error', "Charge axial coordinate (Z) must be non-negative.");
+            }
+            if (isNaN(charge_radius) || charge_radius <= 0) {
+                addMessage(node.id, 'error', "Charge radius must be greater than 0.");
+            }
+            if (shape === 'Cylinder' && (isNaN(charge_height) || charge_height <= 0)) {
+                addMessage(node.id, 'error', "Charge height must be greater than 0 for cylindrical charges.");
+            }
         }
 
         if (node.type === 'DetonatorLocation') {
-            const explosive_radius = Number(node.parameters?.explosive_radius ?? 0.1);
-            const explosive_z = Number(node.parameters?.explosive_z ?? 0.0);
-            const explosive_r = Number(node.parameters?.explosive_r ?? 0.0);
+            const det_radius = Number(node.parameters?.detonator_radius !== undefined ? node.parameters.detonator_radius : (node.parameters.explosive_radius ?? 0.001));
+            const det_z = Number(node.parameters?.detonator_z !== undefined ? node.parameters.detonator_z : (node.parameters.explosive_z ?? 0.0));
+            const det_r = Number(node.parameters?.detonator_r !== undefined ? node.parameters.detonator_r : (node.parameters.explosive_r ?? 0.0));
 
-            if (isNaN(explosive_radius) || explosive_radius <= 0) {
+            if (isNaN(det_radius) || det_radius <= 0) {
                 addMessage(node.id, 'error', "Detonator radius must be greater than 0.");
             }
 
@@ -411,14 +430,14 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                             const max_r = Number(meshNode.parameters?.max_r ?? 1.0);
                             const max_z = Number(meshNode.parameters?.max_z ?? 1.0);
 
-                            if (explosive_z < 0 || explosive_z > max_z) {
-                                addMessage(node.id, 'warning', `Detonator position (explosive_z = ${explosive_z}) is outside the mesh domain [0, ${max_z}].`);
+                            if (det_z < 0 || det_z > max_z) {
+                                addMessage(node.id, 'warning', `Detonator position (z = ${det_z}) is outside the mesh domain [0, ${max_z}].`);
                             }
-                            if (explosive_r < 0 || explosive_r > max_r) {
-                                addMessage(node.id, 'warning', `Detonator position (explosive_r = ${explosive_r}) is outside the mesh domain [0, ${max_r}].`);
+                            if (det_r < 0 || det_r > max_r) {
+                                addMessage(node.id, 'warning', `Detonator position (r = ${det_r}) is outside the mesh domain [0, ${max_r}].`);
                             }
-                            if (explosive_radius > max_r) {
-                                addMessage(node.id, 'warning', `Detonator radius (${explosive_radius}) exceeds mesh max R (${max_r}).`);
+                            if (det_radius > max_r) {
+                                addMessage(node.id, 'warning', `Detonator radius (${det_radius}) exceeds mesh max R (${max_r}).`);
                             }
                         }
                     }

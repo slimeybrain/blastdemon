@@ -13,6 +13,8 @@ let displayMin = 0;
 let displayMax = 1;
 let range = 1;
 let autoScale = true;
+let useLogScale = false;
+let selectedColormap = 'plasma';
 let isAxisymmetric = true;
 
 let stride = 1;
@@ -57,12 +59,8 @@ function extractChannel2D(buffer: ArrayBuffer, channel: number): { data: Float32
     return { data: floatData, nr, nz };
 }
 
-// Gorgeous plasma-like/spectral colormap for rich aesthetics
-function getColor(val: number, min: number, max: number): { r: number; g: number; b: number } {
-    let t = (max - min) === 0 ? 0 : (val - min) / (max - min);
-    t = Math.max(0, Math.min(1, t));
-
-    // Inferno/Plasma inspired palette
+// Inferno/Plasma inspired palette (existing default)
+function getPlasmaColor(t: number): { r: number; g: number; b: number } {
     let r = 0, g = 0, b = 0;
     if (t < 0.25) {
         const localT = t / 0.25;
@@ -86,6 +84,131 @@ function getColor(val: number, min: number, max: number): { r: number; g: number
         b = Math.round(20 + localT * 235);
     }
     return { r, g, b };
+}
+
+// Perceptually uniform Viridis colormap approximation
+function getViridisColor(t: number): { r: number; g: number; b: number } {
+    let r = 0, g = 0, b = 0;
+    if (t < 0.25) {
+        const localT = t / 0.25;
+        r = Math.round(68 - localT * 10);
+        g = Math.round(1 + localT * 70);
+        b = Math.round(84 + localT * 30);
+    } else if (t < 0.5) {
+        const localT = (t - 0.25) / 0.25;
+        r = Math.round(58 + localT * 18);
+        g = Math.round(71 + localT * 57);
+        b = Math.round(114 + localT * 15);
+    } else if (t < 0.75) {
+        const localT = (t - 0.5) / 0.25;
+        r = Math.round(76 + localT * 130);
+        g = Math.round(128 + localT * 63);
+        b = Math.round(129 - localT * 88);
+    } else {
+        const localT = (t - 0.75) / 0.25;
+        r = Math.round(206 + localT * 47);
+        g = Math.round(191 + localT * 58);
+        b = Math.round(41 - localT * 5);
+    }
+    return { r, g, b };
+}
+
+// Classic Rainbow (Jet) spectral colormap
+function getRainbowColor(t: number): { r: number; g: number; b: number } {
+    let r = 0, g = 0, b = 0;
+    if (t < 0.25) {
+        const localT = t / 0.25;
+        r = 0;
+        g = Math.round(localT * 255);
+        b = 255;
+    } else if (t < 0.5) {
+        const localT = (t - 0.25) / 0.25;
+        r = 0;
+        g = 255;
+        b = Math.round(255 - localT * 255);
+    } else if (t < 0.75) {
+        const localT = (t - 0.5) / 0.25;
+        r = Math.round(localT * 255);
+        g = 255;
+        b = 0;
+    } else {
+        const localT = (t - 0.75) / 0.25;
+        r = 255;
+        g = Math.round(255 - localT * 255);
+        b = 0;
+    }
+    return { r, g, b };
+}
+
+// Diverging CoolWarm (Blue to White to Red)
+function getCoolWarmColor(t: number): { r: number; g: number; b: number } {
+    let r = 0, g = 0, b = 0;
+    if (t < 0.5) {
+        const localT = t / 0.5;
+        r = Math.round(59 + localT * 161);
+        g = Math.round(76 + localT * 144);
+        b = Math.round(192 + localT * 28);
+    } else {
+        const localT = (t - 0.5) / 0.5;
+        r = Math.round(220 + localT * 9);
+        g = Math.round(220 - localT * 184);
+        b = Math.round(220 - localT * 161);
+    }
+    return { r, g, b };
+}
+
+// Color-blind friendly Cividis approximation
+function getCividisColor(t: number): { r: number; g: number; b: number } {
+    let r = 0, g = 0, b = 0;
+    if (t < 0.5) {
+        const localT = t / 0.5;
+        r = Math.round(0 + localT * 84);
+        g = Math.round(33 + localT * 79);
+        b = Math.round(84 + localT * 53);
+    } else {
+        const localT = (t - 0.5) / 0.5;
+        r = Math.round(84 + localT * 168);
+        g = Math.round(112 + localT * 102);
+        b = Math.round(137 - localT * 86);
+    }
+    return { r, g, b };
+}
+
+// Grayscale/Monochrome colormap
+function getGrayscaleColor(t: number): { r: number; g: number; b: number } {
+    const v = Math.round(t * 255);
+    return { r: v, g: v, b: v };
+}
+
+// Master color lookup function
+function getColor(val: number, min: number, max: number): { r: number; g: number; b: number } {
+    let t = 0;
+    if (useLogScale) {
+        const safeMax = Math.max(1e-20, max);
+        const dynamicFloor = safeMax * 1e-6; // dynamic range limit
+        const safeMin = Math.max(dynamicFloor, min);
+        
+        const logMin = Math.log10(safeMin);
+        const logMax = Math.log10(safeMax);
+        const logVal = Math.log10(Math.max(safeMin, val));
+        
+        if (logMax !== logMin) {
+            t = (logVal - logMin) / (logMax - logMin);
+        }
+    } else {
+        t = (max - min) === 0 ? 0 : (val - min) / (max - min);
+    }
+    t = Math.max(0, Math.min(1, t));
+
+    switch (selectedColormap) {
+        case 'viridis': return getViridisColor(t);
+        case 'rainbow': return getRainbowColor(t);
+        case 'coolwarm': return getCoolWarmColor(t);
+        case 'cividis': return getCividisColor(t);
+        case 'grayscale': return getGrayscaleColor(t);
+        case 'plasma':
+        default: return getPlasmaColor(t);
+    }
 }
 
 function updateAutoScale(data: Float32Array): void {
@@ -278,6 +401,8 @@ self.onmessage = (event) => {
         if (typeof data.stride === 'number') stride = data.stride;
         if (typeof data.refreshRate === 'number') refreshRate = data.refreshRate;
         if (typeof data.autoScale === 'boolean') autoScale = data.autoScale;
+        if (typeof data.logScale === 'boolean') useLogScale = data.logScale;
+        if (typeof data.colormap === 'string') selectedColormap = data.colormap;
         if (typeof data.isAxisymmetric === 'boolean') isAxisymmetric = data.isAxisymmetric;
         if (!autoScale) {
             if (typeof data.min === 'number') displayMin = data.min;

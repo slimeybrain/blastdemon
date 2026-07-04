@@ -33,6 +33,7 @@ export class GraphRenderer {
 
     private selectedNodeIds: Set<string> = new Set();
     private selectedModelId: string | null = null;
+    private lastMouseWorldPosition: { x: number, y: number } | null = null;
     private isDraggingModel: boolean = false;
     private draggedModelId: string | null = null;
     private dragStartWorldX: number = 0;
@@ -491,6 +492,11 @@ export class GraphRenderer {
     }
 
     private onMouseMove(e: MouseEvent): void {
+        const rect = this.viewport.getBoundingClientRect();
+        const worldX = (e.clientX - rect.left - this.panX) / this.zoom;
+        const worldY = (e.clientY - rect.top - this.panY) / this.zoom;
+        this.lastMouseWorldPosition = { x: worldX, y: worldY };
+
         const dx = e.clientX - this.lastMouseX;
         const dy = e.clientY - this.lastMouseY;
         this.lastMouseX = e.clientX;
@@ -513,14 +519,26 @@ export class GraphRenderer {
                 const state = this.stateManager.getCurrentState();
                 if (state) {
                     for (const node of state.nodes) {
+                        // Skip if the node is the drag source itself (cannot connect a node to itself)
+                        if (node.id === this.dragSourceNodeId) continue;
+
                         const useRepresentative = node.displayMode === 'compact' || node.displayMode === 'full-panel'
                             || (node.type === 'TelemetryText' && (node.orientation || 'HORIZ') === 'HORIZ');
                         const inputsToCheck = useRepresentative ? (node.inputs.length > 0 ? [node.inputs[0]] : []) : node.inputs;
                         for (const input of inputsToCheck) {
+                            // Check compatibility first
+                            if (this.dragSourceNodeId && this.dragSourcePortId) {
+                                const fromNode = state.nodes.find(n => n.id === this.dragSourceNodeId);
+                                if (fromNode && !this.isConnectionCompatible(fromNode, this.dragSourcePortId, node, input.id)) {
+                                    continue;
+                                }
+                            }
+
                             const pos = this.getPortPosition(node, input.id, true);
                             if (pos) {
-                                const dist = Math.sqrt(Math.pow(pos.x - worldPoint.x, 2) + Math.pow(pos.y - worldPoint.y, 2));
-                                if (dist < 35) {
+                                const localDist = Math.sqrt(Math.pow(pos.x - worldPoint.x, 2) + Math.pow(pos.y - worldPoint.y, 2));
+                                const screenDist = localDist * this.zoom;
+                                if (screenDist < 25) { // Snapping threshold of 25 screen pixels
                                     this.mouseWorldPosition = { x: pos.x, y: pos.y };
                                     this.hoveredPort = { nodeId: node.id, portId: input.id, isInput: true };
                                     break;
@@ -602,8 +620,9 @@ export class GraphRenderer {
                         for (const port of [...inputs.map(p => ({...p, isInput: true})), ...outputs.map(p => ({...p, isInput: false}))]) {
                             const pos = this.getPortPosition(node, port.id, port.isInput);
                             if (pos) {
-                                const dist = Math.sqrt(Math.pow(pos.x - worldPoint.x, 2) + Math.pow(pos.y - worldPoint.y, 2));
-                                if (dist < 30) {
+                                const localDist = Math.sqrt(Math.pow(pos.x - worldPoint.x, 2) + Math.pow(pos.y - worldPoint.y, 2));
+                                const screenDist = localDist * this.zoom;
+                                if (screenDist < 20) { // Hover highlighting at 20 screen pixels
                                     found = { nodeId: node.id, portId: port.id, isInput: port.isInput };
                                     break;
                                 }
@@ -617,6 +636,46 @@ export class GraphRenderer {
                     this.render();
                 }
             }
+        }
+    }
+
+    private isConnectionCompatible(fromNode: Node, fromPortId: string, toNode: Node, toPortId: string): boolean {
+        const fromType = fromNode.type;
+        const toType = toNode.type;
+
+        switch (toType) {
+            case 'ThePainter':
+                if (toPortId === 'mesh') return fromType === 'DomainMesh';
+                if (toPortId === 'air') return fromType === 'MaterialAir';
+                if (toPortId === 'explosive') return fromType === 'MaterialExplosive' || fromType === 'MaterialIdealGas';
+                return false;
+            case 'CFDSolver':
+                if (toPortId === 'in') return fromType === 'ThePainter';
+                return false;
+            case 'CFDSolver2D':
+                if (toPortId === 'mesh') return fromType === 'DomainMesh2D';
+                if (toPortId === 'detonator') return fromType === 'DetonatorLocation';
+                if (toPortId === 'remap') return fromType === 'RemapNode';
+                if (toPortId === 'hardware') return fromType === 'HardwareConfig';
+                if (toPortId === 'air') return fromType === 'MaterialAir';
+                if (toPortId === 'explosive') return fromType === 'MaterialExplosive';
+                if (toPortId === 'ideal_gas') return fromType === 'MaterialIdealGas';
+                return false;
+            case 'RemapNode':
+                if (toPortId === 'in') return fromType === 'CFDSolver';
+                return false;
+            case 'TelemetryText':
+            case 'TelemetryGraph':
+                if (toPortId === 'in') return fromType === 'CFDSolver' || fromType === 'CFDSolver2D';
+                return false;
+            case 'TelemetryContour':
+                if (toPortId === 'in') return fromType === 'CFDSolver2D';
+                return false;
+            case 'VTKOutput':
+                if (toPortId === 'in') return fromType === 'CFDSolver' || fromType === 'CFDSolver2D';
+                return false;
+            default:
+                return false;
         }
     }
 
@@ -690,6 +749,57 @@ export class GraphRenderer {
     private onKeyDown(e: KeyboardEvent): void {
         if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) return;
 
+        // Ctrl+C (Copy Model)
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
+            let targetModelId = this.selectedModelId;
+            if (!targetModelId && this.selectedNodeId) {
+                const model = this.stateManager.getAllModels().find(m => m.nodes.some(n => n.id === this.selectedNodeId));
+                if (model) {
+                    targetModelId = model.id;
+                }
+            }
+            if (targetModelId) {
+                e.preventDefault();
+                this.stateManager.copyModelToClipboard(targetModelId);
+                console.log(`Copied model ${targetModelId} to clipboard`);
+            }
+        }
+
+        // Ctrl+V (Paste Model)
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
+            const clipboardModel = this.stateManager.getClipboardModel();
+            if (clipboardModel) {
+                e.preventDefault();
+                let offsetX = 100;
+                let offsetY = 100;
+                if (this.lastMouseWorldPosition) {
+                    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                    clipboardModel.nodes.forEach(n => {
+                        if (n.x < minX) minX = n.x;
+                        if (n.y < minY) minY = n.y;
+                        const w = n.width || 120;
+                        const h = n.height || 80;
+                        if (n.x + w > maxX) maxX = n.x + w;
+                        if (n.y + h > maxY) maxY = n.y + h;
+                    });
+                    if (minX !== Infinity) {
+                        const centerX = (minX + maxX) / 2;
+                        const centerY = (minY + maxY) / 2;
+                        offsetX = this.lastMouseWorldPosition.x - centerX;
+                        offsetY = this.lastMouseWorldPosition.y - centerY;
+                    }
+                }
+                const pasted = this.stateManager.pasteModelFromClipboard(offsetX, offsetY);
+                if (pasted) {
+                    this.selectedModelId = pasted.id;
+                    this.selectedNodeIds.clear();
+                    this.selectNode(null);
+                    this.selectedConnection = null;
+                    this.render();
+                }
+            }
+        }
+
         if (e.code === 'Space') {
             this.spacePressed = true;
             if (!this.isDraggingNode) this.viewport.style.cursor = 'grab';
@@ -751,10 +861,10 @@ export class GraphRenderer {
         const worldX = (mouseX - this.panX) / this.zoom;
         const worldY = (mouseY - this.panY) / this.zoom;
 
-        this.showContextMenu(e.clientX, e.clientY, worldX, worldY);
+        this.showContextMenu(e.clientX, e.clientY, worldX, worldY, e.target as HTMLElement);
     }
 
-    private showContextMenu(x: number, y: number, wx: number, wy: number): void {
+    private showContextMenu(x: number, y: number, wx: number, wy: number, target: HTMLElement): void {
         const existingMenu = document.querySelector('.context-menu');
         if (existingMenu) existingMenu.remove();
 
@@ -764,37 +874,179 @@ export class GraphRenderer {
         menu.style.top = `${y}px`;
         menu.onmousedown = (e) => e.stopPropagation();
 
-        const nodeTypes: { label: string, type: NodeType }[] = [
-            { label: 'Domain Mesh',              type: 'DomainMesh' },
-            { label: 'Material - Air',           type: 'MaterialAir' },
-            { label: 'Material - Explosive (JWL)', type: 'MaterialExplosive' },
-            { label: 'Material - Ideal Gas',     type: 'MaterialIdealGas' },
-            { label: 'Initializer',              type: 'ThePainter' },
-            { label: 'CFD Solver',               type: 'CFDSolver' },
-            { label: 'Telemetry - Text',         type: 'TelemetryText' },
-            { label: 'Telemetry - Graph',        type: 'TelemetryGraph' },
-            // 2D CFD Nodes
-            { label: 'Domain Mesh 2D',           type: 'DomainMesh2D' },
-            { label: 'Detonator Location',       type: 'DetonatorLocation' },
-            { label: 'Remapper (1D -> 2D)',      type: 'RemapNode' },
-            { label: 'CFD Solver 2D',            type: 'CFDSolver2D' },
-            { label: 'Telemetry - Contour (2D)',  type: 'TelemetryContour' },
-            { label: 'VTK Output Controls',      type: 'VTKOutput' },
-            { label: 'Hardware Configuration',   type: 'HardwareConfig' }
-        ];
+        // 1. Model Copy/Paste Actions
+        const modelRectOrLabel = target.closest('[data-model-id]');
+        const rightClickedModelId = modelRectOrLabel ? modelRectOrLabel.getAttribute('data-model-id') : null;
+        
+        let hasModelActions = false;
+        
+        if (rightClickedModelId) {
+            const model = this.stateManager.getAllModels().find(m => m.id === rightClickedModelId);
+            if (model) {
+                const copyItem = document.createElement('div');
+                copyItem.className = 'context-menu-item';
+                copyItem.innerHTML = `📋 Copy Model <b>${model.name}</b>`;
+                copyItem.onclick = () => {
+                    this.stateManager.copyModelToClipboard(model.id);
+                    menu.remove();
+                };
+                menu.appendChild(copyItem);
+                hasModelActions = true;
+            }
+        } else if (this.selectedModelId) {
+            const model = this.stateManager.getAllModels().find(m => m.id === this.selectedModelId);
+            if (model) {
+                const copyItem = document.createElement('div');
+                copyItem.className = 'context-menu-item';
+                copyItem.innerHTML = `📋 Copy Selected Model <b>${model.name}</b>`;
+                copyItem.onclick = () => {
+                    this.stateManager.copyModelToClipboard(model.id);
+                    menu.remove();
+                };
+                menu.appendChild(copyItem);
+                hasModelActions = true;
+            }
+        }
 
-        nodeTypes.forEach(nt => {
-            const item = document.createElement('div');
-            item.className = 'context-menu-item';
-            item.textContent = nt.label;
-            item.onclick = () => {
-                this.addNode(nt.type, wx, wy);
+        const clipboardModel = this.stateManager.getClipboardModel();
+        if (clipboardModel) {
+            const pasteItem = document.createElement('div');
+            pasteItem.className = 'context-menu-item';
+            pasteItem.innerHTML = `📋 Paste Model <b>${clipboardModel.name}</b>`;
+            pasteItem.onclick = () => {
+                let offsetX = 100;
+                let offsetY = 100;
+                let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                clipboardModel.nodes.forEach(n => {
+                    if (n.x < minX) minX = n.x;
+                    if (n.y < minY) minY = n.y;
+                    const w = n.width || 120;
+                    const h = n.height || 80;
+                    if (n.x + w > maxX) maxX = n.x + w;
+                    if (n.y + h > maxY) maxY = n.y + h;
+                });
+                if (minX !== Infinity) {
+                    const centerX = (minX + maxX) / 2;
+                    const centerY = (minY + maxY) / 2;
+                    offsetX = wx - centerX;
+                    offsetY = wy - centerY;
+                }
+                const pasted = this.stateManager.pasteModelFromClipboard(offsetX, offsetY);
+                if (pasted) {
+                    this.selectedModelId = pasted.id;
+                    this.selectedNodeIds.clear();
+                    this.selectNode(null);
+                    this.selectedConnection = null;
+                    this.render();
+                }
                 menu.remove();
             };
-            menu.appendChild(item);
+            menu.appendChild(pasteItem);
+            hasModelActions = true;
+        }
+
+        if (hasModelActions) {
+            const separator = document.createElement('div');
+            separator.className = 'menu-separator';
+            menu.appendChild(separator);
+        }
+
+        const categories = [
+            {
+                name: '1D Simulation',
+                items: [
+                    { label: 'Domain Mesh', type: 'DomainMesh' },
+                    { label: 'Initializer', type: 'ThePainter' },
+                    { label: 'CFD Solver', type: 'CFDSolver' }
+                ]
+            },
+            {
+                name: '2D Simulation',
+                items: [
+                    { label: 'Domain Mesh 2D', type: 'DomainMesh2D' },
+                    { label: 'Detonator Location', type: 'DetonatorLocation' },
+                    { label: 'Remapper (1D -> 2D)', type: 'RemapNode' },
+                    { label: 'CFD Solver 2D', type: 'CFDSolver2D' }
+                ]
+            },
+            {
+                name: 'Material Models',
+                items: [
+                    { label: 'Material - Air', type: 'MaterialAir' },
+                    { label: 'Material - Explosive (JWL)', type: 'MaterialExplosive' },
+                    { label: 'Material - Ideal Gas', type: 'MaterialIdealGas' }
+                ]
+            },
+            {
+                name: 'Telemetry & Output',
+                items: [
+                    { label: 'Telemetry - Text', type: 'TelemetryText' },
+                    { label: 'Telemetry - Graph', type: 'TelemetryGraph' },
+                    { label: 'Telemetry - Contour (2D)', type: 'TelemetryContour' },
+                    { label: 'VTK Output Controls', type: 'VTKOutput' }
+                ]
+            },
+            {
+                name: 'Configuration',
+                items: [
+                    { label: 'Hardware Configuration', type: 'HardwareConfig' }
+                ]
+            }
+        ];
+
+        categories.forEach(cat => {
+            const catItem = document.createElement('div');
+            catItem.className = 'context-menu-item has-submenu';
+            
+            const labelSpan = document.createElement('span');
+            labelSpan.textContent = cat.name;
+            catItem.appendChild(labelSpan);
+            
+            const arrowSpan = document.createElement('span');
+            arrowSpan.className = 'submenu-arrow';
+            arrowSpan.textContent = '▶';
+            catItem.appendChild(arrowSpan);
+            
+            const submenu = document.createElement('div');
+            submenu.className = 'submenu';
+            
+            cat.items.forEach(nt => {
+                const item = document.createElement('div');
+                item.className = 'context-menu-item';
+                item.textContent = nt.label;
+                item.onclick = (e) => {
+                    e.stopPropagation();
+                    this.addNode(nt.type as NodeType, wx, wy);
+                    menu.remove();
+                };
+                submenu.appendChild(item);
+            });
+            
+            catItem.appendChild(submenu);
+            menu.appendChild(catItem);
         });
 
         document.body.appendChild(menu);
+
+        const rect = menu.getBoundingClientRect();
+        let adjustedX = x;
+        let adjustedY = y;
+        if (x + rect.width > window.innerWidth) {
+            adjustedX = window.innerWidth - rect.width - 10;
+        }
+        if (y + rect.height > window.innerHeight) {
+            adjustedY = window.innerHeight - rect.height - 10;
+        }
+        menu.style.left = `${adjustedX}px`;
+        menu.style.top = `${adjustedY}px`;
+
+        if (adjustedX + rect.width + 200 > window.innerWidth) {
+            menu.classList.add('submenu-left');
+            menu.querySelectorAll('.submenu-arrow').forEach(el => {
+                el.textContent = '◀';
+            });
+        }
+
         const closeMenu = () => {
             menu.remove();
             window.removeEventListener('mousedown', closeMenu);
@@ -968,12 +1220,22 @@ export class GraphRenderer {
                 jwl_B: 3.747e9,
                 jwl_R1: 4.15,
                 jwl_R2: 0.90,
-                jwl_omega: 0.35
+                jwl_omega: 0.35,
+                charge_shape: 'Sphere',
+                charge_r: 0.0,
+                charge_z: 0.1,
+                charge_radius: 0.05,
+                charge_height: 0.1
             };
             case 'MaterialIdealGas': return {
                 charge_mass: 1.0,
                 rho: 1630,
-                detonation_energy: 4520000
+                detonation_energy: 4520000,
+                charge_shape: 'Sphere',
+                charge_r: 0.0,
+                charge_z: 0.1,
+                charge_radius: 0.05,
+                charge_height: 0.1
             };
             case 'CFDSolver': return {
                 init_mode: 'Multi-Material JWL',
@@ -998,9 +1260,9 @@ export class GraphRenderer {
                 coordinate_system: 'Axisymmetric'
             };
             case 'DetonatorLocation': return {
-                explosive_z: 0.0,
-                explosive_r: 0.0,
-                explosive_radius: 0.1
+                detonator_r: 0.0,
+                detonator_z: 0.1,
+                detonator_radius: 0.001
             };
             case 'RemapNode': return {
                 explosive_z: 0.0,
@@ -1021,7 +1283,11 @@ export class GraphRenderer {
             };
             case 'TelemetryContour': return {
                 telemetry_channel: 0,
-                auto_scale: true
+                auto_scale: true,
+                log_scale: false,
+                colormap: 'plasma',
+                min_y: 0,
+                max_y: 1
             };
             case 'VTKOutput': return {
                 vtk_dir: './vtk_output'
@@ -1773,6 +2039,7 @@ export class GraphRenderer {
             rect.setAttribute('stroke-width', isModelSelected ? '3' : '1.5');
             rect.setAttribute('stroke-dasharray', isModelSelected ? 'none' : '4, 4');
             rect.setAttribute('class', `model-region-rect${isModelSelected ? ' selected' : ''}`);
+            rect.setAttribute('data-model-id', model.id);
             rect.style.pointerEvents = 'auto';
             rect.style.cursor = 'grab';
             if (isModelSelected) {
@@ -1785,6 +2052,7 @@ export class GraphRenderer {
             label.setAttribute('y', (minY + 20).toString());
             label.setAttribute('fill', colors.base);
             label.setAttribute('class', 'model-region-label');
+            label.setAttribute('data-model-id', model.id);
             label.style.pointerEvents = 'auto';
             label.style.cursor = 'grab';
             
@@ -2298,6 +2566,20 @@ export class GraphRenderer {
                 }
             }
 
+            const COLORMAPS = [
+                { value: 'plasma', label: 'Plasma' },
+                { value: 'viridis', label: 'Viridis' },
+                { value: 'rainbow', label: 'Rainbow' },
+                { value: 'coolwarm', label: 'CoolWarm' },
+                { value: 'cividis', label: 'Cividis' },
+                { value: 'grayscale', label: 'Grayscale' }
+            ];
+            const currentColorMap = node.parameters?.colormap ?? 'plasma';
+            const currentLogScale = node.parameters?.log_scale === true;
+            const autoScale = node.parameters?.auto_scale !== false;
+            const minY = node.parameters?.min_y !== undefined ? Number(node.parameters.min_y) : 0;
+            const maxY = node.parameters?.max_y !== undefined ? Number(node.parameters.max_y) : 1;
+
             const worker = this.nodeWorkers.get(node.id);
             if (worker) {
                 worker.postMessage({
@@ -2305,9 +2587,11 @@ export class GraphRenderer {
                     channel: currentChannel,
                     stride: 1,
                     refreshRate: currentRate,
-                    autoScale: node.parameters?.auto_scale !== false,
-                    min: node.parameters?.min_y !== undefined ? Number(node.parameters.min_y) : 0,
-                    max: node.parameters?.max_y !== undefined ? Number(node.parameters.max_y) : 1,
+                    autoScale: autoScale,
+                    logScale: currentLogScale,
+                    colormap: currentColorMap,
+                    min: minY,
+                    max: maxY,
                     isAxisymmetric: isAxisymmetric
                 });
             }
@@ -2480,6 +2764,138 @@ export class GraphRenderer {
 
                 container.appendChild(selectorBar);
 
+                // --- Bar 2: Visual Color & Scale controls [NEW] ---
+                const scaleBar = document.createElement('div');
+                scaleBar.className = 'telemetry-scale-bar';
+
+                // Colormap Dropdown
+                const mapGroup = document.createElement('div');
+                mapGroup.style.display = 'flex';
+                mapGroup.style.alignItems = 'center';
+                mapGroup.style.gap = '3px';
+                mapGroup.style.flex = '1';
+                mapGroup.style.minWidth = '0';
+
+                const mapLabel = document.createElement('span');
+                mapLabel.className = 'telemetry-channel-label';
+                mapLabel.textContent = 'Map:';
+                mapGroup.appendChild(mapLabel);
+
+                const mapSelect = this.createCustomDropdown(
+                    COLORMAPS,
+                    currentColorMap,
+                    (val) => {
+                        this.stateManager.updateNodeParametersInPlace(node.id, {
+                            colormap: val
+                        });
+                    },
+                    'telemetry-colormap-select'
+                );
+                mapGroup.appendChild(mapSelect);
+                scaleBar.appendChild(mapGroup);
+
+                // Log Checkbox
+                const logGroup = document.createElement('label');
+                logGroup.className = 'telemetry-log-checkbox-container';
+                logGroup.textContent = 'Log:';
+
+                const logCheckbox = document.createElement('input');
+                logCheckbox.type = 'checkbox';
+                logCheckbox.className = 'telemetry-log-checkbox';
+                logCheckbox.checked = currentLogScale;
+                logCheckbox.addEventListener('change', () => {
+                    this.stateManager.updateNodeParametersInPlace(node.id, {
+                        log_scale: logCheckbox.checked
+                    });
+                });
+                logGroup.appendChild(logCheckbox);
+                scaleBar.appendChild(logGroup);
+
+                // Lock Scales Checkbox
+                const lockGroup = document.createElement('label');
+                lockGroup.className = 'telemetry-log-checkbox-container';
+                lockGroup.textContent = 'Lock:';
+
+                const lockCheckbox = document.createElement('input');
+                lockCheckbox.type = 'checkbox';
+                lockCheckbox.className = 'telemetry-lock-checkbox';
+                lockCheckbox.checked = !autoScale;
+                lockCheckbox.addEventListener('change', () => {
+                    this.stateManager.updateNodeParametersInPlace(node.id, {
+                        auto_scale: !lockCheckbox.checked
+                    });
+                });
+                lockGroup.appendChild(lockCheckbox);
+                scaleBar.appendChild(lockGroup);
+
+                // Min Text Entry
+                const minLabel = document.createElement('span');
+                minLabel.className = 'telemetry-channel-label';
+                minLabel.textContent = 'Min:';
+                scaleBar.appendChild(minLabel);
+
+                const minInput = document.createElement('input');
+                minInput.type = 'text';
+                minInput.className = 'telemetry-range-input telemetry-min-input';
+                minInput.value = minY.toExponential(2);
+                minInput.disabled = autoScale;
+                scaleBar.appendChild(minInput);
+
+                // Max Text Entry
+                const maxLabel = document.createElement('span');
+                maxLabel.className = 'telemetry-channel-label';
+                maxLabel.textContent = 'Max:';
+                scaleBar.appendChild(maxLabel);
+
+                const maxInput = document.createElement('input');
+                maxInput.type = 'text';
+                maxInput.className = 'telemetry-range-input telemetry-max-input';
+                maxInput.value = maxY.toExponential(2);
+                maxInput.disabled = autoScale;
+                scaleBar.appendChild(maxInput);
+
+                // Set Button
+                const setBtn = document.createElement('button');
+                setBtn.className = 'telemetry-set-btn';
+                setBtn.textContent = 'Set';
+                setBtn.title = 'Apply Manual Range & Lock Scales';
+
+                const applyManualRange = () => {
+                    const parsedMin = parseFloat(minInput.value);
+                    const parsedMax = parseFloat(maxInput.value);
+                    if (!isNaN(parsedMin) && !isNaN(parsedMax)) {
+                        this.stateManager.updateNodeParametersInPlace(node.id, {
+                            min_y: parsedMin,
+                            max_y: parsedMax,
+                            auto_scale: false
+                        });
+                    }
+                };
+
+                setBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    applyManualRange();
+                });
+
+                const handleKeydown = (e: KeyboardEvent) => {
+                    if (e.key === 'Enter') {
+                        e.stopPropagation();
+                        applyManualRange();
+                    }
+                };
+                minInput.addEventListener('keydown', handleKeydown);
+                maxInput.addEventListener('keydown', handleKeydown);
+
+                // Prevent propagation of mousedown/mouseup/click to avoid node dragging
+                [logCheckbox, logGroup, lockCheckbox, lockGroup, minInput, maxInput, setBtn].forEach(el => {
+                    ['mousedown', 'mouseup', 'click'].forEach(evtType => {
+                        el.addEventListener(evtType, (e) => e.stopPropagation());
+                    });
+                });
+
+                scaleBar.appendChild(setBtn);
+                container.appendChild(scaleBar);
+
                 const graphBody = document.createElement('div');
                 graphBody.className = 'node-body-graph';
                 graphBody.style.flex = '1';
@@ -2509,9 +2925,11 @@ export class GraphRenderer {
                     channel: currentChannel,
                     stride: 1,
                     refreshRate: currentRate,
-                    autoScale: node.parameters?.auto_scale !== false,
-                    min: node.parameters?.min_y !== undefined ? Number(node.parameters.min_y) : 0,
-                    max: node.parameters?.max_y !== undefined ? Number(node.parameters.max_y) : 1,
+                    autoScale: autoScale,
+                    logScale: currentLogScale,
+                    colormap: currentColorMap,
+                    min: minY,
+                    max: maxY,
                     isAxisymmetric: isAxisymmetric
                 });
 
@@ -2582,6 +3000,61 @@ export class GraphRenderer {
                                     optEl.classList.remove('selected');
                                 }
                             });
+                        }
+                    }
+                }
+
+                const colormapSel = container.querySelector('.telemetry-colormap-select') as HTMLElement;
+                if (colormapSel) {
+                    const trigger = colormapSel.querySelector('.custom-select-trigger');
+                    if (trigger) {
+                        const currentOpt = COLORMAPS.find(opt => opt.value === currentColorMap);
+                        if (currentOpt && trigger.textContent !== currentOpt.label) {
+                            trigger.textContent = currentOpt.label;
+                            colormapSel.querySelectorAll('.custom-select-option').forEach(opt => {
+                                const optEl = opt as HTMLElement;
+                                if (optEl.dataset.value === currentColorMap) {
+                                    optEl.classList.add('selected');
+                                } else {
+                                    optEl.classList.remove('selected');
+                                }
+                            });
+                        }
+                    }
+                }
+
+                const logCheckbox = container.querySelector('.telemetry-log-checkbox') as HTMLInputElement;
+                if (logCheckbox) {
+                    if (logCheckbox.checked !== currentLogScale) {
+                        logCheckbox.checked = currentLogScale;
+                    }
+                }
+
+                const lockCheckbox = container.querySelector('.telemetry-lock-checkbox') as HTMLInputElement;
+                if (lockCheckbox) {
+                    if (lockCheckbox.checked !== !autoScale) {
+                        lockCheckbox.checked = !autoScale;
+                    }
+                }
+
+                const minInput = container.querySelector('.telemetry-min-input') as HTMLInputElement;
+                if (minInput) {
+                    minInput.disabled = autoScale;
+                    if (document.activeElement !== minInput) {
+                        const expectedVal = minY.toExponential(2);
+                        if (minInput.value !== expectedVal) {
+                            minInput.value = expectedVal;
+                        }
+                    }
+                }
+
+                const maxInput = container.querySelector('.telemetry-max-input') as HTMLInputElement;
+                if (maxInput) {
+                    maxInput.disabled = autoScale;
+                    if (document.activeElement !== maxInput) {
+                        const expectedVal = maxY.toExponential(2);
+                        if (maxInput.value !== expectedVal) {
+                            maxInput.value = expectedVal;
                         }
                     }
                 }
@@ -2666,6 +3139,10 @@ export class GraphRenderer {
                 const customKeys = ['det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
                 if (comp !== 'Custom' && customKeys.includes(key)) continue;
             }
+            if (node.type === 'MaterialExplosive' || node.type === 'MaterialIdealGas') {
+                const shape = node.parameters['charge_shape'] || 'Sphere';
+                if (key === 'charge_height' && shape !== 'Cylinder') continue;
+            }
 
             const row = document.createElement('div');
             row.style.marginBottom = '4px';
@@ -2703,7 +3180,8 @@ export class GraphRenderer {
                 'spatial_order': ['1', '2', '3'],
                 'temporal_order': ['1', '2', '3'],
                 'output_mode': ['By Step', 'By Time'],
-                'plot_stride': ['1', '2', '5', '10', '20', '50', '100']
+                'plot_stride': ['1', '2', '5', '10', '20', '50', '100'],
+                'charge_shape': ['Sphere', 'Cylinder']
             };
 
             let inputEl: HTMLElement;
@@ -2719,7 +3197,9 @@ export class GraphRenderer {
                             'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl', 'output_interval',
                             'spatial_order', 'temporal_order', 'gamma', 'plot_stride',
                             // 2D CFD keys
-                            'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r'
+                            'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r',
+                            'charge_r', 'charge_z', 'charge_radius', 'charge_height',
+                            'detonator_r', 'detonator_z', 'detonator_radius'
                         ];
                         const castValue = numericKeys.includes(key) ? Number(newVal) : newVal;
                         const updates: Record<string, any> = { [key]: castValue };

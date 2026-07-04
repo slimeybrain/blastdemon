@@ -692,21 +692,33 @@ body {
 
 .context-menu {
     position: fixed;
-    background: #252526;
-    border: 1px solid #454545;
-    box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+    background: rgba(30, 30, 35, 0.95);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.05);
     z-index: 1000;
-    padding: 4px 0;
+    padding: 6px 0;
+    border-radius: 6px;
+    min-width: 190px;
+    font-family: var(--font-ui), sans-serif;
+    color: #e0e0e0;
 }
 
 .context-menu-item {
-    padding: 4px 12px;
+    padding: 6px 16px;
     font-size: var(--font-sm);
     cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    transition: background-color 0.15s, color 0.15s;
+    user-select: none;
 }
 
 .context-menu-item:hover {
-    background: #007acc;
+    background-color: #007acc;
+    color: #ffffff;
 }
 
 .context-menu-item.danger {
@@ -714,8 +726,67 @@ body {
 }
 
 .context-menu-item.danger:hover {
-    background: #dc2626;
+    background-color: #dc2626;
+    color: #ffffff;
+}
+
+.context-menu-item.has-submenu {
+    position: relative;
+}
+
+.submenu-arrow {
+    font-size: 9px;
+    color: #888;
+    margin-left: 12px;
+    transition: color 0.15s;
+}
+
+.context-menu-item:hover > .submenu-arrow {
     color: #fff;
+}
+
+.submenu {
+    display: none;
+    position: absolute;
+    top: -6px;
+    left: 100%;
+    background: rgba(30, 30, 35, 0.98);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    padding: 6px 0;
+    border-radius: 6px;
+    min-width: 200px;
+    z-index: 1001;
+}
+
+.context-menu-item.has-submenu:hover > .submenu {
+    display: block;
+    animation: submenuFadeIn 0.15s ease-out;
+}
+
+.context-menu.submenu-left .submenu {
+    left: auto;
+    right: 100%;
+}
+
+@keyframes submenuFadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(2px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.menu-separator {
+    height: 1px;
+    background: rgba(255, 255, 255, 0.08);
+    margin: 4px 0;
+    padding: 0;
 }
 
 .panel-container, .panel-container * {
@@ -1068,6 +1139,86 @@ canvas {
 
 .telemetry-channel-label {
     flex-shrink: 0;
+}
+
+.telemetry-scale-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 8px;
+    background: #151520;
+    border-bottom: 1px solid #222;
+    flex-shrink: 0;
+    height: 20px;
+    overflow: visible;
+}
+
+.telemetry-scale-bar .custom-select-container.telemetry-colormap-select {
+    width: 80px;
+    flex-shrink: 0;
+}
+
+.telemetry-log-checkbox-container {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    flex-shrink: 0;
+    font-size: var(--font-xs);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #666;
+    user-select: none;
+    cursor: pointer;
+}
+
+.telemetry-log-checkbox {
+    width: 12px;
+    height: 12px;
+    margin: 0;
+    accent-color: #00f0ff;
+    cursor: pointer;
+}
+
+.telemetry-scale-bar .telemetry-range-input {
+    width: 55px;
+    background: #222;
+    color: #ccc;
+    border: 1px solid #444;
+    border-radius: 2px;
+    padding: 1px 3px;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    height: 14px;
+    box-sizing: border-box;
+}
+
+.telemetry-scale-bar .telemetry-range-input:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    background: #181818;
+}
+
+.telemetry-scale-bar .telemetry-set-btn {
+    flex-shrink: 0;
+    padding: 1px 4px;
+    background: rgba(59, 130, 246, 0.2);
+    border: 1px solid rgba(59, 130, 246, 0.5);
+    border-radius: 3px;
+    color: #fff;
+    cursor: pointer;
+    font-size: 9px;
+    height: 14px;
+    line-height: 10px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: background-color 0.15s, border-color 0.15s;
+}
+
+.telemetry-scale-bar .telemetry-set-btn:hover {
+    background-color: rgba(59, 130, 246, 0.45);
+    border-color: rgba(59, 130, 246, 0.85);
 }
 
 .custom-select-options {

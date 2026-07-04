@@ -1,4 +1,4 @@
-import { SimulationState, SimulationStatus, LayoutNode, PanelNode, SplitNode, LayoutDirection, PanelType, Model, Workspace, AppState, Node, Connection } from './types.js';
+import { SimulationState, SimulationStatus, LayoutNode, PanelNode, SplitNode, LayoutDirection, PanelType, Model, Workspace, AppState, Node, Connection, NodeType } from './types.js';
 
 export class StateManager {
     private appState: AppState;
@@ -18,6 +18,7 @@ export class StateManager {
     private modelProgresses: Map<string, number> = new Map();
     private modelSimTimes: Map<string, number> = new Map();
     private modelStatusListeners: ((modelId: string, status: SimulationStatus) => void)[] = [];
+    private clipboardModel: Model | null = null;
 
     constructor(initialState?: SimulationState) {
         const defaultModelId = 'model-default';
@@ -307,6 +308,114 @@ export class StateManager {
         }
     }
 
+    copyModelToClipboard(modelId: string): void {
+        const model = this.appState.models[modelId];
+        if (model) {
+            this.clipboardModel = JSON.parse(JSON.stringify(model));
+        }
+    }
+
+    getClipboardModel(): Model | null {
+        return this.clipboardModel;
+    }
+
+    private getUniqueNodeId(type: NodeType, tempExistingIds: Set<string>): string {
+        const prefixMap: Record<NodeType, string> = {
+            'DomainMesh': 'node-mesh',
+            'MaterialAir': 'node-air',
+            'MaterialExplosive': 'node-explosive',
+            'MaterialIdealGas': 'node-idealgas',
+            'ThePainter': 'node-painter',
+            'CFDSolver': 'node-solver',
+            'TelemetryText': 'node-log',
+            'TelemetryGraph': 'node-chart',
+            'DomainMesh2D': 'node-mesh2d',
+            'DetonatorLocation': 'node-detonator',
+            'RemapNode': 'node-remap',
+            'HardwareConfig': 'node-hardware',
+            'CFDSolver2D': 'node-solver2d',
+            'TelemetryContour': 'node-contour',
+            'VTKOutput': 'node-vtk'
+        };
+        const prefix = prefixMap[type] || `node-${type.toLowerCase()}`;
+
+        let index = 1;
+        if (tempExistingIds.has(prefix)) {
+            index = 2;
+        }
+        while (tempExistingIds.has(`${prefix}-${index}`)) {
+            index++;
+        }
+        const newId = index === 1 && !tempExistingIds.has(prefix) ? prefix : `${prefix}-${index}`;
+        tempExistingIds.add(newId);
+        return newId;
+    }
+
+    pasteModelFromClipboard(offsetX: number = 100, offsetY: number = 100): Model | null {
+        if (!this.clipboardModel) return null;
+
+        const newModelId = `model-${Math.random().toString(36).substr(2, 9)}`;
+
+        // Unique name
+        let newModelName = `${this.clipboardModel.name} (Copy)`;
+        let nameConflict = Object.values(this.appState.models).some(m => m.name === newModelName);
+        let counter = 1;
+        while (nameConflict) {
+            newModelName = `${this.clipboardModel.name} (Copy) ${counter}`;
+            nameConflict = Object.values(this.appState.models).some(m => m.name === newModelName);
+            counter++;
+        }
+
+        const tempExistingIds = new Set<string>();
+        Object.values(this.appState.models).forEach(model => {
+            model.nodes.forEach(n => tempExistingIds.add(n.id));
+        });
+
+        const idMapping: Record<string, string> = {};
+        const duplicatedNodes: Node[] = this.clipboardModel.nodes.map(node => {
+            const newNodeId = this.getUniqueNodeId(node.type, tempExistingIds);
+            idMapping[node.id] = newNodeId;
+            return {
+                ...JSON.parse(JSON.stringify(node)),
+                id: newNodeId,
+                x: node.x + offsetX,
+                y: node.y + offsetY
+            };
+        });
+
+        const duplicatedConnections: Connection[] = this.clipboardModel.connections.map(conn => {
+            return {
+                fromNode: idMapping[conn.fromNode] || conn.fromNode,
+                fromPort: conn.fromPort,
+                toNode: idMapping[conn.toNode] || conn.toNode,
+                toPort: conn.toPort
+            };
+        });
+
+        const newModel: Model = {
+            id: newModelId,
+            name: newModelName,
+            filename: this.clipboardModel.filename ? `${this.clipboardModel.filename.replace(/\.[^/.]+$/, "")}_copy.json` : null,
+            nodes: duplicatedNodes,
+            connections: duplicatedConnections
+        };
+
+        this.appState.models[newModelId] = newModel;
+
+        const activeWs = this.getActiveWorkspace();
+        activeWs.modelIds.push(newModelId);
+        activeWs.activeModelId = newModelId;
+
+        // Initialize statuses
+        this.modelStatuses.set(newModelId, 'UNINITIALIZED');
+        this.modelProgresses.set(newModelId, 0);
+        this.modelSimTimes.set(newModelId, 0.0);
+
+        this.pushAppState(this.appState);
+
+        return newModel;
+    }
+
     // Core state sync and history
     getCurrentState(): SimulationState | null {
         const ws = this.getActiveWorkspace();
@@ -504,7 +613,10 @@ export class StateManager {
         for (const model of Object.values(appStateCopy.models)) {
             const node = model.nodes.find(n => n.id === nodeId);
             if (node) {
-                node.parameters = { ...node.parameters, ...parameters };
+                const merged = { ...node.parameters, ...parameters };
+                const updatedKey = Object.keys(parameters).find(k => k === 'charge_mass') || Object.keys(parameters)[0];
+                syncExplosiveParameters(node.type, merged, updatedKey);
+                node.parameters = merged;
                 console.log("[DEBUG] Node parameters updated in memory. New parameters:", node.parameters);
                 found = true;
                 break;
@@ -527,7 +639,11 @@ export class StateManager {
         for (const model of Object.values(appStateCopy.models)) {
             const node = model.nodes.find(n => n.id === nodeId);
             if (node) {
-                for (const [key, value] of Object.entries(parameters)) {
+                const merged = { ...node.parameters, ...parameters };
+                const updatedKey = Object.keys(parameters).find(k => k === 'charge_mass') || Object.keys(parameters)[0];
+                syncExplosiveParameters(node.type, merged, updatedKey);
+                
+                for (const [key, value] of Object.entries(merged)) {
                     if (node.parameters[key] !== value) {
                         node.parameters[key] = value;
                         changed = true;
@@ -1074,12 +1190,22 @@ export class StateManager {
                 jwl_B: 3.747e9,
                 jwl_R1: 4.15,
                 jwl_R2: 0.90,
-                jwl_omega: 0.35
+                jwl_omega: 0.35,
+                charge_shape: 'Sphere',
+                charge_r: 0.0,
+                charge_z: 0.1,
+                charge_radius: 0.05,
+                charge_height: 0.1
             },
             'MaterialIdealGas': {
                 charge_mass: 1.0,
                 rho: 1630,
-                detonation_energy: 4520000
+                detonation_energy: 4520000,
+                charge_shape: 'Sphere',
+                charge_r: 0.0,
+                charge_z: 0.1,
+                charge_radius: 0.05,
+                charge_height: 0.1
             },
             'CFDSolver': {
                 init_mode: 'Multi-Material JWL',
@@ -1108,9 +1234,9 @@ export class StateManager {
                 coordinate_system: 'Axisymmetric'
             },
             'DetonatorLocation': {
-                explosive_z: 0.0,
-                explosive_r: 0.0,
-                explosive_radius: 0.1
+                detonator_r: 0.0,
+                detonator_z: 0.1,
+                detonator_radius: 0.001
             },
             'RemapNode': {
                 explosive_z: 0.0,
@@ -1132,6 +1258,8 @@ export class StateManager {
             'TelemetryContour': {
                 telemetry_channel: 0,
                 auto_scale: true,
+                log_scale: false,
+                colormap: 'plasma',
                 downsample_stride: 1,
                 refresh_rate: 0.0
             },
@@ -1155,6 +1283,7 @@ export class StateManager {
                     }
                 }
             }
+            syncExplosiveParameters(node.type, node.parameters);
         });
     }
 }
@@ -1214,4 +1343,34 @@ function ensureMenuBar(node: LayoutNode): LayoutNode {
         };
     }
     return result;
+}
+
+function syncExplosiveParameters(nodeType: string, parameters: Record<string, any>, updatedKey?: string): void {
+    if (nodeType !== 'MaterialExplosive' && nodeType !== 'MaterialIdealGas') {
+        return;
+    }
+
+    const shape = parameters['charge_shape'] || 'Sphere';
+    const rho = Number(parameters['rho'] !== undefined ? parameters['rho'] : 1630.0);
+    const height = Number(parameters['charge_height'] !== undefined ? parameters['charge_height'] : 0.1);
+    const radius = Number(parameters['charge_radius'] !== undefined ? parameters['charge_radius'] : 0.05);
+    const mass = Number(parameters['charge_mass'] !== undefined ? parameters['charge_mass'] : 0.0);
+
+    if (updatedKey === 'charge_mass') {
+        if (mass > 0 && rho > 0) {
+            if (shape === 'Cylinder') {
+                if (height > 0) {
+                    parameters['charge_radius'] = Math.sqrt(mass / (Math.PI * rho * height));
+                }
+            } else {
+                parameters['charge_radius'] = Math.pow((3.0 * mass) / (4.0 * Math.PI * rho), 1.0 / 3.0);
+            }
+        }
+    } else {
+        if (shape === 'Cylinder') {
+            parameters['charge_mass'] = Math.PI * radius * radius * height * rho;
+        } else {
+            parameters['charge_mass'] = (4.0 / 3.0) * Math.PI * Math.pow(radius, 3.0) * rho;
+        }
+    }
 }

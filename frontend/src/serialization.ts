@@ -22,7 +22,9 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'spatial_order', 'temporal_order',
         'n_cells', 'gamma', 'explosive_radius', 'ambient_rho',
         // 2D CFD keys
-        'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_r', 'remap_radius', 'trigger_value'
+        'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_r', 'remap_radius', 'trigger_value',
+        'charge_r', 'charge_z', 'charge_radius', 'charge_height',
+        'detonator_r', 'detonator_z', 'detonator_radius'
     ];
 
     const flattenedParams: Record<string, any> = {};
@@ -200,11 +202,49 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         const t = flattenedParams['atm_temperature'] || 298.15;
         flattenedParams['ambient_rho'] = p / (287.058 * t);
 
+        // Map and heal detonator locations if old naming is present
+        if (flattenedParams['detonator_r'] === undefined) {
+            flattenedParams['detonator_r'] = flattenedParams['explosive_r'] !== undefined ? flattenedParams['explosive_r'] : 0.0;
+        }
+        if (flattenedParams['detonator_z'] === undefined) {
+            flattenedParams['detonator_z'] = flattenedParams['explosive_z'] !== undefined ? flattenedParams['explosive_z'] : 0.1;
+        }
+        if (flattenedParams['detonator_radius'] === undefined) {
+            flattenedParams['detonator_radius'] = flattenedParams['explosive_radius'] !== undefined ? flattenedParams['explosive_radius'] : 0.001;
+        }
+
+        if (flattenedParams['charge_shape'] === undefined) {
+            flattenedParams['charge_shape'] = 'Sphere';
+        }
+        if (flattenedParams['charge_r'] === undefined) {
+            flattenedParams['charge_r'] = 0.0;
+        }
+        if (flattenedParams['charge_z'] === undefined) {
+            flattenedParams['charge_z'] = flattenedParams['explosive_z'] !== undefined ? flattenedParams['explosive_z'] : 0.1;
+        }
+        if (flattenedParams['charge_radius'] === undefined) {
+            flattenedParams['charge_radius'] = flattenedParams['explosive_radius'] !== undefined ? flattenedParams['explosive_radius'] : 0.05;
+        }
+        if (flattenedParams['charge_height'] === undefined) {
+            flattenedParams['charge_height'] = 0.1;
+        }
+
         const mass = flattenedParams['charge_mass'] !== undefined ? flattenedParams['charge_mass'] : 0.0;
         flattenedParams['charge_mass'] = mass;
-        if (mass > 0) {
-            const rho = flattenedParams['rho'] || 1630.0;
-            flattenedParams['explosive_radius'] = Math.pow((3.0 * mass) / (4.0 * Math.PI * rho), 1.0/3.0);
+        const rho = flattenedParams['rho'] || 1630.0;
+        flattenedParams['rho'] = rho;
+
+        if (flattenedParams['charge_radius'] === undefined || flattenedParams['charge_radius'] === 0.0) {
+            if (mass > 0) {
+                if (flattenedParams['charge_shape'] === 'Cylinder') {
+                    const height = flattenedParams['charge_height'] || 0.1;
+                    flattenedParams['charge_radius'] = Math.sqrt(mass / (Math.PI * rho * height));
+                } else {
+                    flattenedParams['charge_radius'] = Math.pow((3.0 * mass) / (4.0 * Math.PI * rho), 1.0/3.0);
+                }
+            } else {
+                flattenedParams['charge_radius'] = 0.05;
+            }
         }
 
         // Only default to 'From1D' when a 1D solver is actually present in the graph.
