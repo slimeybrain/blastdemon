@@ -463,11 +463,14 @@ export class GraphRenderer {
                 const state = this.stateManager.getCurrentState();
                 if (state) {
                     for (const node of state.nodes) {
-                        for (const input of node.inputs) {
+                        const useRepresentative = node.displayMode === 'compact' || node.displayMode === 'full-panel'
+                            || (node.type === 'TelemetryText' && (node.orientation || 'HORIZ') === 'HORIZ');
+                        const inputsToCheck = useRepresentative ? (node.inputs.length > 0 ? [node.inputs[0]] : []) : node.inputs;
+                        for (const input of inputsToCheck) {
                             const pos = this.getPortPosition(node, input.id, true);
                             if (pos) {
                                 const dist = Math.sqrt(Math.pow(pos.x - worldPoint.x, 2) + Math.pow(pos.y - worldPoint.y, 2));
-                                if (dist < 15) {
+                                if (dist < 35) {
                                     this.mouseWorldPosition = { x: pos.x, y: pos.y };
                                     this.hoveredPort = { nodeId: node.id, portId: input.id, isInput: true };
                                     break;
@@ -542,11 +545,15 @@ export class GraphRenderer {
                 let found = null;
                 if (state) {
                     for (const node of state.nodes) {
-                        for (const port of [...node.inputs.map(p => ({...p, isInput: true})), ...node.outputs.map(p => ({...p, isInput: false}))]) {
+                        const useRepresentative = node.displayMode === 'compact' || node.displayMode === 'full-panel'
+                            || (node.type === 'TelemetryText' && (node.orientation || 'HORIZ') === 'HORIZ');
+                        const inputs = useRepresentative ? (node.inputs.length > 0 ? [node.inputs[0]] : []) : node.inputs;
+                        const outputs = useRepresentative ? (node.outputs.length > 0 ? [node.outputs[0]] : []) : node.outputs;
+                        for (const port of [...inputs.map(p => ({...p, isInput: true})), ...outputs.map(p => ({...p, isInput: false}))]) {
                             const pos = this.getPortPosition(node, port.id, port.isInput);
                             if (pos) {
                                 const dist = Math.sqrt(Math.pow(pos.x - worldPoint.x, 2) + Math.pow(pos.y - worldPoint.y, 2));
-                                if (dist < 10) {
+                                if (dist < 30) {
                                     found = { nodeId: node.id, portId: port.id, isInput: port.isInput };
                                     break;
                                 }
@@ -582,6 +589,14 @@ export class GraphRenderer {
             if (this.hoveredPort && this.hoveredPort.isInput) {
                 const state = this.stateManager.getCurrentState();
                 if (state) {
+                    const existingIdx = state.connections.findIndex(conn =>
+                        conn.toNode === this.hoveredPort!.nodeId &&
+                        conn.toPort === this.hoveredPort!.portId
+                    );
+                    if (existingIdx !== -1) {
+                        state.connections.splice(existingIdx, 1);
+                    }
+
                     const exists = state.connections.some(conn =>
                         conn.fromNode === this.dragSourceNodeId &&
                         conn.fromPort === this.dragSourcePortId &&
@@ -1125,24 +1140,46 @@ export class GraphRenderer {
                             else node.height = 130;
                         }
 
-                        // Track when the user is actively using the native resize handle so the
-                        // ResizeObserver can distinguish user-driven resizes from content-driven
-                        // layout changes (e.g. text filling the log body).
+                        // Custom resize handle
+                        const resizeHandle = document.createElement('div');
+                        resizeHandle.className = 'custom-resize-handle';
+                        nodeEl.appendChild(resizeHandle);
+                        
                         const nodeId = node.id;
-                        nodeEl.addEventListener('mousedown', (e) => {
-                            // The native resize handle sits at the bottom-right corner. A click
-                            // within ~18 px of that corner is almost certainly the resize handle.
-                            const r = nodeEl!.getBoundingClientRect();
-                            const fromRight  = r.right  - e.clientX;
-                            const fromBottom = r.bottom - e.clientY;
-                            if (fromRight <= 18 && fromBottom <= 18) {
-                                this.nodeUserResizing.add(nodeId);
-                                const onUp = () => {
-                                    this.nodeUserResizing.delete(nodeId);
-                                    window.removeEventListener('mouseup', onUp);
-                                };
-                                window.addEventListener('mouseup', onUp);
-                            }
+                        resizeHandle.addEventListener('mousedown', (e) => {
+                            e.stopPropagation();
+                            this.nodeUserResizing.add(nodeId);
+                            const startX = e.clientX;
+                            const startY = e.clientY;
+                            const startW = node.width || nodeEl!.offsetWidth;
+                            const startH = node.height || nodeEl!.offsetHeight;
+                            const onMove = (me: MouseEvent) => {
+                                const dx = (me.clientX - startX) / this.zoom;
+                                const dy = (me.clientY - startY) / this.zoom;
+                                nodeEl!.style.width = `${Math.max(150, startW + dx)}px`;
+                                nodeEl!.style.height = `${Math.max(60, startH + dy)}px`;
+                            };
+                            const onUp = () => {
+                                this.nodeUserResizing.delete(nodeId);
+                                window.removeEventListener('mousemove', onMove);
+                                window.removeEventListener('mouseup', onUp);
+                                
+                                // Manually trigger resize observer update just in case
+                                const rect = nodeEl!.getBoundingClientRect();
+                                const newW = Math.round(rect.width / this.zoom);
+                                const newH = Math.round(rect.height / this.zoom);
+                                const state = this.stateManager.getCurrentState();
+                                if (state) {
+                                    const n = state.nodes.find(n => n.id === nodeId);
+                                    if (n) {
+                                        n.width = newW;
+                                        n.height = newH;
+                                        this.stateManager.pushState(state, true);
+                                    }
+                                }
+                            };
+                            window.addEventListener('mousemove', onMove);
+                            window.addEventListener('mouseup', onUp);
                         });
                     }
                     nodeEl.dataset.id = node.id;
@@ -1417,49 +1454,6 @@ export class GraphRenderer {
                                 p.className = 'port input vertical representative';
                                 const colorClass = this.getPortColorClass(node.type, node.inputs[0].id);
                                 p.innerHTML = `<div class="port-bullet vertical ${colorClass}" id="${this.panelId}-port-in-${node.id}-representative"></div>`;
-                                p.addEventListener('mouseup', () => {
-
-                                                                    if (this.isDraggingWire) {
-
-                                                                        const currentState = this.stateManager.getCurrentState();
-
-                                                                        if (currentState) {
-
-                                                                            const exists = currentState.connections.some(conn =>
-
-                                                                                conn.fromNode === this.dragSourceNodeId &&
-
-                                                                                conn.fromPort === this.dragSourcePortId &&
-
-                                                                                conn.toNode === node.id &&
-
-                                                                                conn.toPort === node.inputs[0].id
-
-                                                                            );
-
-                                                                            if (!exists) {
-
-                                                                                currentState.connections.push({
-
-                                                                                    fromNode: this.dragSourceNodeId!,
-
-                                                                                    fromPort: this.dragSourcePortId!,
-
-                                                                                    toNode: node.id,
-
-                                                                                    toPort: node.inputs[0].id
-
-                                                                                });
-
-                                                                                this.stateManager.pushState(currentState);
-
-                                                                            }
-
-                                                                        }
-
-                                                                    }
-
-                                                                });
                                 p.addEventListener('mousedown', (e) => {
                                     this.handleInputPortMouseDown(e, node.id, node.inputs[0].id);
                                 });
@@ -1484,49 +1478,6 @@ export class GraphRenderer {
                                 p.className = 'port input representative';
                                 const colorClass = this.getPortColorClass(node.type, node.inputs[0].id);
                                 p.innerHTML = `<div class="port-bullet ${colorClass}" id="${this.panelId}-port-in-${node.id}-representative"></div>`;
-                                p.addEventListener('mouseup', () => {
-
-                                                                    if (this.isDraggingWire) {
-
-                                                                        const currentState = this.stateManager.getCurrentState();
-
-                                                                        if (currentState) {
-
-                                                                            const exists = currentState.connections.some(conn =>
-
-                                                                                conn.fromNode === this.dragSourceNodeId &&
-
-                                                                                conn.fromPort === this.dragSourcePortId &&
-
-                                                                                conn.toNode === node.id &&
-
-                                                                                conn.toPort === node.inputs[0].id
-
-                                                                            );
-
-                                                                            if (!exists) {
-
-                                                                                currentState.connections.push({
-
-                                                                                    fromNode: this.dragSourceNodeId!,
-
-                                                                                    fromPort: this.dragSourcePortId!,
-
-                                                                                    toNode: node.id,
-
-                                                                                    toPort: node.inputs[0].id
-
-                                                                                });
-
-                                                                                this.stateManager.pushState(currentState);
-
-                                                                            }
-
-                                                                        }
-
-                                                                    }
-
-                                                                });
                                 p.addEventListener('mousedown', (e) => {
                                     this.handleInputPortMouseDown(e, node.id, node.inputs[0].id);
                                 });
@@ -1554,49 +1505,6 @@ export class GraphRenderer {
                                 p.className = 'port input vertical representative';
                                 const colorClass = this.getPortColorClass(node.type, node.inputs[0].id);
                                 p.innerHTML = `<div class="port-bullet vertical ${colorClass}" id="${this.panelId}-port-in-${node.id}-representative"></div>`;
-                                p.addEventListener('mouseup', () => {
-
-                                                                    if (this.isDraggingWire) {
-
-                                                                        const currentState = this.stateManager.getCurrentState();
-
-                                                                        if (currentState) {
-
-                                                                            const exists = currentState.connections.some(conn =>
-
-                                                                                conn.fromNode === this.dragSourceNodeId &&
-
-                                                                                conn.fromPort === this.dragSourcePortId &&
-
-                                                                                conn.toNode === node.id &&
-
-                                                                                conn.toPort === node.inputs[0].id
-
-                                                                            );
-
-                                                                            if (!exists) {
-
-                                                                                currentState.connections.push({
-
-                                                                                    fromNode: this.dragSourceNodeId!,
-
-                                                                                    fromPort: this.dragSourcePortId!,
-
-                                                                                    toNode: node.id,
-
-                                                                                    toPort: node.inputs[0].id
-
-                                                                                });
-
-                                                                                this.stateManager.pushState(currentState);
-
-                                                                            }
-
-                                                                        }
-
-                                                                    }
-
-                                                                });
                                 p.addEventListener('mousedown', (e) => {
                                     this.handleInputPortMouseDown(e, node.id, node.inputs[0].id);
                                 });
@@ -1621,49 +1529,6 @@ export class GraphRenderer {
                                 p.className = 'port input representative';
                                 const colorClass = this.getPortColorClass(node.type, node.inputs[0].id);
                                 p.innerHTML = `<div class="port-bullet ${colorClass}" id="${this.panelId}-port-in-${node.id}-representative"></div>`;
-                                p.addEventListener('mouseup', () => {
-
-                                                                    if (this.isDraggingWire) {
-
-                                                                        const currentState = this.stateManager.getCurrentState();
-
-                                                                        if (currentState) {
-
-                                                                            const exists = currentState.connections.some(conn =>
-
-                                                                                conn.fromNode === this.dragSourceNodeId &&
-
-                                                                                conn.fromPort === this.dragSourcePortId &&
-
-                                                                                conn.toNode === node.id &&
-
-                                                                                conn.toPort === node.inputs[0].id
-
-                                                                            );
-
-                                                                            if (!exists) {
-
-                                                                                currentState.connections.push({
-
-                                                                                    fromNode: this.dragSourceNodeId!,
-
-                                                                                    fromPort: this.dragSourcePortId!,
-
-                                                                                    toNode: node.id,
-
-                                                                                    toPort: node.inputs[0].id
-
-                                                                                });
-
-                                                                                this.stateManager.pushState(currentState);
-
-                                                                            }
-
-                                                                        }
-
-                                                                    }
-
-                                                                });
                                 p.addEventListener('mousedown', (e) => {
                                     this.handleInputPortMouseDown(e, node.id, node.inputs[0].id);
                                 });
@@ -1690,49 +1555,6 @@ export class GraphRenderer {
                                 p.className = 'port input vertical';
                                 const colorClass = this.getPortColorClass(node.type, input.id);
                                 p.innerHTML = `<div class="port-bullet vertical ${colorClass}" id="${this.panelId}-port-in-${node.id}-${input.id}"></div><span class="port-label vertical">${input.label}</span>`;
-                                p.addEventListener('mouseup', () => {
-
-                                                                    if (this.isDraggingWire) {
-
-                                                                        const currentState = this.stateManager.getCurrentState();
-
-                                                                        if (currentState) {
-
-                                                                            const exists = currentState.connections.some(conn =>
-
-                                                                                conn.fromNode === this.dragSourceNodeId &&
-
-                                                                                conn.fromPort === this.dragSourcePortId &&
-
-                                                                                conn.toNode === node.id &&
-
-                                                                                conn.toPort === input.id
-
-                                                                            );
-
-                                                                            if (!exists) {
-
-                                                                                currentState.connections.push({
-
-                                                                                    fromNode: this.dragSourceNodeId!,
-
-                                                                                    fromPort: this.dragSourcePortId!,
-
-                                                                                    toNode: node.id,
-
-                                                                                    toPort: input.id
-
-                                                                                });
-
-                                                                                this.stateManager.pushState(currentState);
-
-                                                                            }
-
-                                                                        }
-
-                                                                    }
-
-                                                                });
                                 p.addEventListener('mousedown', (e) => {
                                     this.handleInputPortMouseDown(e, node.id, input.id);
                                 });
@@ -1762,49 +1584,6 @@ export class GraphRenderer {
                                 p.className = 'port input representative';
                                 const colorClass = this.getPortColorClass(node.type, node.inputs[0].id);
                                 p.innerHTML = `<div class="port-bullet ${colorClass}" id="${this.panelId}-port-in-${node.id}-representative"></div>`;
-                                p.addEventListener('mouseup', () => {
-
-                                                                    if (this.isDraggingWire) {
-
-                                                                        const currentState = this.stateManager.getCurrentState();
-
-                                                                        if (currentState) {
-
-                                                                            const exists = currentState.connections.some(conn =>
-
-                                                                                conn.fromNode === this.dragSourceNodeId &&
-
-                                                                                conn.fromPort === this.dragSourcePortId &&
-
-                                                                                conn.toNode === node.id &&
-
-                                                                                conn.toPort === node.inputs[0].id
-
-                                                                            );
-
-                                                                            if (!exists) {
-
-                                                                                currentState.connections.push({
-
-                                                                                    fromNode: this.dragSourceNodeId!,
-
-                                                                                    fromPort: this.dragSourcePortId!,
-
-                                                                                    toNode: node.id,
-
-                                                                                    toPort: node.inputs[0].id
-
-                                                                                });
-
-                                                                                this.stateManager.pushState(currentState);
-
-                                                                            }
-
-                                                                        }
-
-                                                                    }
-
-                                                                });
                                 p.addEventListener('mousedown', (e) => {
                                     this.handleInputPortMouseDown(e, node.id, node.inputs[0].id);
                                 });
@@ -1829,49 +1608,6 @@ export class GraphRenderer {
                                 p.className = 'port input';
                                 const colorClass = this.getPortColorClass(node.type, input.id);
                                 p.innerHTML = `<div class="port-bullet ${colorClass}" id="${this.panelId}-port-in-${node.id}-${input.id}"></div><span class="port-label">${input.label}</span>`;
-                                p.addEventListener('mouseup', () => {
-
-                                                                    if (this.isDraggingWire) {
-
-                                                                        const currentState = this.stateManager.getCurrentState();
-
-                                                                        if (currentState) {
-
-                                                                            const exists = currentState.connections.some(conn =>
-
-                                                                                conn.fromNode === this.dragSourceNodeId &&
-
-                                                                                conn.fromPort === this.dragSourcePortId &&
-
-                                                                                conn.toNode === node.id &&
-
-                                                                                conn.toPort === input.id
-
-                                                                            );
-
-                                                                            if (!exists) {
-
-                                                                                currentState.connections.push({
-
-                                                                                    fromNode: this.dragSourceNodeId!,
-
-                                                                                    fromPort: this.dragSourcePortId!,
-
-                                                                                    toNode: node.id,
-
-                                                                                    toPort: input.id
-
-                                                                                });
-
-                                                                                this.stateManager.pushState(currentState);
-
-                                                                            }
-
-                                                                        }
-
-                                                                    }
-
-                                                                });
                                 p.addEventListener('mousedown', (e) => {
                                     this.handleInputPortMouseDown(e, node.id, input.id);
                                 });
@@ -2515,7 +2251,7 @@ export class GraphRenderer {
                 worker.postMessage({
                     type: 'setConfig',
                     channel: currentChannel,
-                    stride: currentStride,
+                    stride: 1,
                     refreshRate: currentRate,
                     autoScale: node.parameters?.auto_scale !== false,
                     min: node.parameters?.min_y !== undefined ? Number(node.parameters.min_y) : 0,
@@ -2719,7 +2455,7 @@ export class GraphRenderer {
                 newWorker.postMessage({
                     type: 'setConfig',
                     channel: currentChannel,
-                    stride: currentStride,
+                    stride: 1,
                     refreshRate: currentRate,
                     autoScale: node.parameters?.auto_scale !== false,
                     min: node.parameters?.min_y !== undefined ? Number(node.parameters.min_y) : 0,

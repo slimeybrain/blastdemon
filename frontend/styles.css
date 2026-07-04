@@ -440,9 +440,7 @@ body {
     user-select: none;
     display: flex;
     flex-direction: column;
-    /* Always clip content so filling text/charts can never push the node
-       taller than its explicitly-set height, keeping port anchors stable. */
-    overflow: hidden;
+    /* Removed overflow: hidden so port bullets can overlap the edges */
     z-index: 5;
 }
 
@@ -552,11 +550,16 @@ body {
 }
 
 .port-bullet {
-    width: 6px;
-    height: 6px;
+    width: 10px;
+    height: 10px;
     background: #aaa;
     border-radius: 50%;
     position: absolute;
+    transition: transform 0.15s;
+}
+
+.port-bullet:hover {
+    transform: scale(1.3);
 }
 
 .port-bullet.domain { background: #2563eb; }
@@ -564,10 +567,10 @@ body {
 .port-bullet.explosive { background: #dc2626; }
 .port-bullet.telemetry { background: #16a34a; }
 
-.port.input .port-bullet { left: -3px; }
+.port.input .port-bullet { left: -5px; }
 .port.input.representative { height: 10px; margin-top: 4px; }
 .port.output { justify-content: flex-end; }
-.port.output .port-bullet { right: -3px; }
+.port.output .port-bullet { right: -5px; }
 .port.output.representative { height: 10px; margin-bottom: 4px; }
 
 .port-label { padding: 0 12px; }
@@ -603,8 +606,28 @@ body {
 
 
 .node.resizable {
-    resize: both;
-    overflow: hidden;
+    /* Custom resize handle replaces native resize: both */
+}
+
+.custom-resize-handle {
+    position: absolute;
+    bottom: 0;
+    right: 0;
+    width: 15px;
+    height: 15px;
+    cursor: se-resize;
+    z-index: 100;
+}
+.custom-resize-handle::after {
+    content: '';
+    position: absolute;
+    bottom: 2px;
+    right: 2px;
+    width: 0;
+    height: 0;
+    border-style: solid;
+    border-width: 0 0 8px 8px;
+    border-color: transparent transparent #888 transparent;
 }
 
 .node-body-graph canvas {
@@ -764,14 +787,20 @@ canvas {
     pointer-events: auto;
 }
 .port.vertical.input .port-bullet {
-    top: -3px;
+    top: -5px;
     left: 50%;
     transform: translateX(-50%);
 }
+.port.vertical.input .port-bullet:hover {
+    transform: translateX(-50%) scale(1.3);
+}
 .port.vertical.output .port-bullet {
-    bottom: -3px;
+    bottom: -5px;
     left: 50%;
     transform: translateX(-50%);
+}
+.port.vertical.output .port-bullet:hover {
+    transform: translateX(-50%) scale(1.3);
 }
 .port-label.vertical {
     display: none;

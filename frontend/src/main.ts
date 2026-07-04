@@ -302,29 +302,7 @@ document.addEventListener('click', async (e) => {
 // Execution deduplication
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Given a list of selected modelIds, remove any model that is the 1D partner
- * of a remap pipeline whose 2D partner is ALSO in the list.  The 2D partner's
- * executeModelCommand already handles the full pipeline (INIT 1D → INIT 2D),
- * so firing it again from the 1D partner's model ID would double-spawn the
- * BlastSolver process and corrupt the pipeline.
- *
- * Standalone models (no pipeline) are passed through unchanged.
- */
-function deduplicateForExecution(modelIds: string[]): string[] {
-    const idSet = new Set(modelIds);
-    const result: string[] = [];
-    for (const mid of modelIds) {
-        const pipeline = findRemapPipeline(mid);
-        if (pipeline && mid === pipeline.model1dId && idSet.has(pipeline.model2dId)) {
-            // 2D partner is also selected — it will handle the whole pipeline.
-            // Skip the 1D model to avoid a duplicate command.
-            continue;
-        }
-        result.push(mid);
-    }
-    return result;
-}
+
 
 document.addEventListener('click', (e: MouseEvent) => {
     const target = e.target as HTMLElement;
@@ -434,8 +412,8 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
     };
 
     const sendContourConfig = (targetId: string) => {
-        const models = stateManager.getAllModels();
-        for (const m of models) {
+        const m = stateManager.getAllModels().find(model => model.id === targetId);
+        if (m) {
             const contourNode = m.nodes.find(n => n.type === 'TelemetryContour');
             if (contourNode) {
                 const stride = Number(contourNode.parameters?.downsample_stride ?? 1);
@@ -446,8 +424,100 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
                     stride,
                     refresh_rate: rate
                 });
-                break;
             }
+        }
+    };
+
+    // Helper to perform remapping from 1D telemetry if available
+    const tryRemapFrom1D = (targetModelId: string, pipe: any): boolean => {
+        const model1d = stateManager.getAllModels().find(m => m.id === pipe.model1dId);
+        const solver1DNode = model1d?.nodes.find(n => n.type === 'CFDSolver');
+        const telemetry = solver1DNode ? stateManager.getTelemetry(solver1DNode.id + "-binary") : null;
+        
+        console.log(`[tryRemapFrom1D] targetModelId: ${targetModelId}, pipe.model1dId: ${pipe.model1dId}`);
+        console.log(`[tryRemapFrom1D] solver1DNode:`, solver1DNode);
+        console.log(`[tryRemapFrom1D] telemetry:`, telemetry);
+
+        const solver2DNode = model?.nodes.find(n => n.type === 'CFDSolver2D');
+        if (solver2DNode) {
+            stateManager.pushTelemetry(solver2DNode.id, `[DEBUG] tryRemapFrom1D starting. target=${targetModelId} 1dModel=${pipe.model1dId} node=${solver1DNode?.id ?? 'null'} telemetry=${telemetry ? ('ArrayBuffer(' + telemetry.byteLength + ')') : 'null'}`, targetModelId);
+        }
+
+        if (!telemetry || !(telemetry instanceof ArrayBuffer)) {
+            if (solver2DNode) {
+                const storeKeys = Array.from((stateManager as any).telemetryStore.keys()).join(', ');
+                stateManager.pushTelemetry(solver2DNode.id, `[WARNING] Cannot initialize: No 1D simulation telemetry found (telemetry=${telemetry ? typeof telemetry : 'null'}). Please run the 1D model first. Available telemetry keys: [${storeKeys}]`, targetModelId);
+            }
+            return false;
+        }
+
+        try {
+            const cell_size = Number(solver1DNode!.parameters?.cell_size ?? 0.001);
+            const view = new DataView(telemetry);
+            const n_cells = view.getUint32(0, true);
+            const n_channels = view.getUint32(4, true);
+            const floats = new Float32Array(telemetry, 8);
+            
+            const r_1d: number[] = [];
+            const states_1d: any[] = [];
+            
+            for (let i = 0; i < n_cells; i++) {
+                r_1d.push((i + 0.5) * cell_size);
+                const p = floats[i];
+                const rho = floats[n_cells + i];
+                const u = floats[2 * n_cells + i];
+                const E_specific = floats[3 * n_cells + i];
+                const alpha1 = floats[4 * n_cells + i];
+                const alpha2 = floats[5 * n_cells + i];
+                const E = rho * (E_specific + 0.5 * u * u);
+                
+                states_1d.push({
+                    rho,
+                    u,
+                    p,
+                    E,
+                    alpha1,
+                    alpha2,
+                    arho1: rho * alpha1,
+                    arho2: rho * alpha2,
+                    floor_status: 0
+                });
+            }
+            
+            const state = stateManager.getSimulationState(targetModelId);
+            const remapConn = state?.connections.find(c => c.toNode === solver2DNode?.id && c.toPort === 'remap');
+            const remapNode = remapConn ? state?.nodes.find(n => n.id === remapConn.fromNode) : null;
+            
+            const detConn = state?.connections.find(c => c.toNode === solver2DNode?.id && c.toPort === 'detonator');
+            const detNode = detConn ? state?.nodes.find(n => n.id === detConn.fromNode) : null;
+
+            const explosiveZ = detNode 
+                ? Number(detNode.parameters.explosive_z ?? 0.0)
+                : Number(remapNode?.parameters?.explosive_z ?? 0.0);
+            const explosiveR = detNode
+                ? Number(detNode.parameters.explosive_r ?? 0.0)
+                : Number(remapNode?.parameters?.explosive_r ?? 0.0);
+            const remapRadius = Number(remapNode?.parameters?.remap_radius ?? 0.5);
+
+            console.log(`Sending REMAP parameters for modelId ${targetModelId} with parsed 1D states`);
+            if (solver2DNode) {
+                stateManager.pushTelemetry(solver2DNode.id, `[DEBUG] Sending REMAP command: explosive_z=${explosiveZ}, remap_radius=${remapRadius}, states_count=${states_1d.length}`, targetModelId);
+            }
+            networkManager.send({
+                command: "REMAP",
+                modelId: targetModelId,
+                explosive_z: explosiveZ,
+                remap_radius: remapRadius,
+                explosive_r: explosiveR,
+                r_1d: r_1d,
+                states_1d: states_1d
+            });
+            return true;
+        } catch (err) {
+            if (solver2DNode) {
+                stateManager.pushTelemetry(solver2DNode.id, `[ERROR] Failed to parse 1D telemetry: ${err}`, targetModelId);
+            }
+            return false;
         }
     };
 
@@ -460,63 +530,21 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
         }
 
         if (pipeline) {
-            // Always initialize both phases for a pipeline inside the 2D solver's process.
-            // Step 1 — send INIT (1D phase)
-            const state1d = stateManager.getSimulationState(pipeline.model1dId);
-            if (state1d) {
-                const payload1d = serializeForSolver(state1d, "INIT", modelId);
-                console.log(`[Pipeline] Sending INIT (1D) for modelId ${modelId}`);
-                networkManager.send(payload1d);
+            // Treat model as isolated: send INIT_2D first, then REMAP from 1D telemetry
+            const state = stateManager.getSimulationState(modelId);
+            if (state) {
+                const payload = serializeForSolver(state, "INIT_2D", modelId);
+                console.log(`Sending INIT_2D for 2D model ${modelId} in pipeline`);
+                networkManager.send(payload);
+                sendContourConfig(modelId);
+                
+                if (tryRemapFrom1D(modelId, pipeline)) {
+                    stateManager.setModelStatus(modelId, 'INITIALIZED');
+                } else {
+                    stateManager.setModelStatus(modelId, 'UNINITIALIZED');
+                }
             }
-
-            // Step 2 — send INIT_2D to the same process.
-            const ws  = stateManager.getActiveWorkspace();
-            const m1  = stateManager.getAllModels().find(m => m.id === pipeline.model1dId);
-            const m2  = stateManager.getAllModels().find(m => m.id === pipeline.model2dId);
-            const mergedState: SimulationState = {
-                nodes:       [...(m1?.nodes || []), ...(m2?.nodes || [])],
-                connections: [...(m1?.connections || []), ...(m2?.connections || []),
-                              ...(ws?.connections || [])],
-                layout:      (ws?.layout ?? stateManager.getCurrentState()?.layout) as LayoutNode
-            };
-            
-            const payload2d = serializeForSolver(mergedState, "INIT_2D", modelId);
-            console.log(`[Pipeline] Sending INIT_2D (2D phase) for modelId ${modelId}`);
-            networkManager.send(payload2d);
-            sendContourConfig(modelId);
-
-            // Step 3 — send REMAP command.
-            const solver2D = m2?.nodes.find(n => n.type === 'CFDSolver2D');
-            const remapConn = mergedState.connections.find(c => c.toNode === solver2D?.id && c.toPort === 'remap');
-            const remapNode = remapConn ? mergedState.nodes.find(n => n.id === remapConn.fromNode) : null;
-            if (remapNode) {
-                const detConn = mergedState.connections.find(c => c.toNode === solver2D?.id && c.toPort === 'detonator');
-                const detNode = detConn ? mergedState.nodes.find(n => n.id === detConn.fromNode) : null;
-
-                const explosiveZ = detNode 
-                    ? Number(detNode.parameters.explosive_z ?? 0.0)
-                    : Number(remapNode.parameters.explosive_z ?? 0.0);
-                const explosiveR = detNode
-                    ? Number(detNode.parameters.explosive_r ?? 0.0)
-                    : Number(remapNode.parameters.explosive_r ?? 0.0);
-                const remapRadius = Number(remapNode.parameters.remap_radius ?? 0.5);
-
-                console.log(`[Pipeline] Sending REMAP parameters for modelId ${modelId}`);
-                networkManager.send({
-                    command: "REMAP",
-                    modelId: modelId,
-                    explosive_z: explosiveZ,
-                    remap_radius: remapRadius,
-                    explosive_r: explosiveR
-                });
-            }
-            
-            // Step 4 — Run the 1D phase in the background inside this process automatically!
-            const cfl = getCflFromSolver();
-            networkManager.send({ command: "EXEC_ALL", modelId: modelId, cfl });
-            stateManager.setModelStatus(modelId, 'RUNNING');
         }
-
         else if (has2D) {
             // Standalone 2D model (Ideal Gas / JWL direct init — no remap partner).
             const state = stateManager.getSimulationState(modelId);
@@ -527,7 +555,6 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
                 sendContourConfig(modelId);
                 stateManager.setModelStatus(modelId, 'INITIALIZED');
             }
-
         } else {
             // Pure 1D model.
             const state = stateManager.getSimulationState(modelId);
@@ -550,10 +577,7 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
         }
         const cfl = getCflFromSolver();
         
-        if (pipeline) {
-            sendContourConfig(modelId);
-            networkManager.send({ command: "STEP_2D", modelId: modelId, steps, cfl });
-        } else if (has2D) {
+        if (pipeline || has2D) {
             sendContourConfig(modelId);
             networkManager.send({ command: "STEP_2D", modelId: modelId, steps, cfl });
         } else {
@@ -568,65 +592,19 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
 
         if (status === 'UNINITIALIZED' || status === 'TERMINATED') {
             if (pipeline) {
-                // Auto-initialize pipeline in the background and run 1D + 2D phases!
-                // Step 1 — send INIT (1D phase)
-                const state1d = stateManager.getSimulationState(pipeline.model1dId);
-                if (state1d) {
-                    const payload1d = serializeForSolver(state1d, "INIT", modelId);
-                    console.log(`[Pipeline Auto-Run] Sending INIT (1D) for modelId ${modelId}`);
-                    networkManager.send(payload1d);
+                // Initialize model from 1D telemetry first, then run
+                const state = stateManager.getSimulationState(modelId);
+                if (state) {
+                    const payload = serializeForSolver(state, "INIT_2D", modelId);
+                    console.log(`Sending INIT_2D for 2D model ${modelId} in pipeline`);
+                    networkManager.send(payload);
+                    sendContourConfig(modelId);
+                    
+                    if (tryRemapFrom1D(modelId, pipeline)) {
+                        networkManager.send({ command: "EXEC_ALL_2D", modelId: modelId, cfl });
+                        stateManager.setModelStatus(modelId, 'RUNNING');
+                    }
                 }
-
-                // Step 2 — send INIT_2D to the same process.
-                const ws  = stateManager.getActiveWorkspace();
-                const m1  = stateManager.getAllModels().find(m => m.id === pipeline.model1dId);
-                const m2  = stateManager.getAllModels().find(m => m.id === pipeline.model2dId);
-                const mergedState: SimulationState = {
-                    nodes:       [...(m1?.nodes || []), ...(m2?.nodes || [])],
-                    connections: [...(m1?.connections || []), ...(m2?.connections || []),
-                                  ...(ws?.connections || [])],
-                    layout:      (ws?.layout ?? stateManager.getCurrentState()?.layout) as LayoutNode
-                };
-                
-                const payload2d = serializeForSolver(mergedState, "INIT_2D", modelId);
-                console.log(`[Pipeline Auto-Run] Sending INIT_2D (2D phase) for modelId ${modelId}`);
-                networkManager.send(payload2d);
-                sendContourConfig(modelId);
-
-                // Step 3 — send REMAP command.
-                const solver2D = m2?.nodes.find(n => n.type === 'CFDSolver2D');
-                const remapConn = mergedState.connections.find(c => c.toNode === solver2D?.id && c.toPort === 'remap');
-                const remapNode = remapConn ? mergedState.nodes.find(n => n.id === remapConn.fromNode) : null;
-                if (remapNode) {
-                    const detConn = mergedState.connections.find(c => c.toNode === solver2D?.id && c.toPort === 'detonator');
-                    const detNode = detConn ? mergedState.nodes.find(n => n.id === detConn.fromNode) : null;
-
-                    const explosiveZ = detNode 
-                        ? Number(detNode.parameters.explosive_z ?? 0.0)
-                        : Number(remapNode.parameters.explosive_z ?? 0.0);
-                    const explosiveR = detNode
-                        ? Number(detNode.parameters.explosive_r ?? 0.0)
-                        : Number(remapNode.parameters.explosive_r ?? 0.0);
-                    const remapRadius = Number(remapNode.parameters.remap_radius ?? 0.5);
-
-                    console.log(`[Pipeline Auto-Run] Sending REMAP parameters for modelId ${modelId}`);
-                    networkManager.send({
-                        command: "REMAP",
-                        modelId: modelId,
-                        explosive_z: explosiveZ,
-                        remap_radius: remapRadius,
-                        explosive_r: explosiveR
-                    });
-                }
-                
-                // Step 4 — Run the 1D phase in the background inside this process automatically!
-                console.log(`[Pipeline Auto-Run] Sending EXEC_ALL (1D) for modelId ${modelId}`);
-                networkManager.send({ command: "EXEC_ALL", modelId: modelId, cfl });
-
-                // Step 5 — Send EXEC_ALL_2D so that 2D phase starts running as soon as 1D completes!
-                console.log(`[Pipeline Auto-Run] Sending EXEC_ALL_2D (2D) for modelId ${modelId}`);
-                networkManager.send({ command: "EXEC_ALL_2D", modelId: modelId, cfl });
-
             } else if (has2D) {
                 // Standalone 2D model
                 const state = stateManager.getSimulationState(modelId);
@@ -636,6 +614,7 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
                     networkManager.send(payload);
                     sendContourConfig(modelId);
                     networkManager.send({ command: "EXEC_ALL_2D", modelId: modelId, cfl });
+                    stateManager.setModelStatus(modelId, 'RUNNING');
                 }
             } else {
                 // Pure 1D model
@@ -645,27 +624,23 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
                     console.log(`[Auto-Run] Sending INIT for standalone 1D model ${modelId}`);
                     networkManager.send(payload);
                     networkManager.send({ command: "EXEC_ALL", modelId: modelId, cfl });
+                    stateManager.setModelStatus(modelId, 'RUNNING');
                 }
             }
         } else {
-            // Already initialized / paused / running 1D phase in background
-            if (pipeline) {
-                sendContourConfig(modelId);
-                networkManager.send({ command: "EXEC_ALL_2D", modelId: modelId, cfl });
-            } else if (has2D) {
+            // Already initialized / paused
+            if (pipeline || has2D) {
                 sendContourConfig(modelId);
                 networkManager.send({ command: "EXEC_ALL_2D", modelId: modelId, cfl });
             } else {
                 networkManager.send({ command: "EXEC_ALL",    modelId: modelId, cfl });
             }
+            stateManager.setModelStatus(modelId, 'RUNNING');
         }
-        stateManager.setModelStatus(modelId, 'RUNNING');
 
     // ── PAUSE ─────────────────────────────────────────────────────────────────
     } else if (command === "PAUSE") {
-        if (pipeline) {
-            networkManager.send({ command: "PAUSE_2D", modelId: modelId });
-        } else if (has2D) {
+        if (pipeline || has2D) {
             networkManager.send({ command: "PAUSE_2D", modelId: modelId });
         } else {
             networkManager.send({ command: "PAUSE",    modelId: modelId });
@@ -674,9 +649,7 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
 
     // ── TERMINATE ─────────────────────────────────────────────────────────────
     } else if (command === "TERMINATE") {
-        if (pipeline) {
-            networkManager.send({ command: "TERMINATE_2D", modelId: modelId });
-        } else if (has2D) {
+        if (pipeline || has2D) {
             networkManager.send({ command: "TERMINATE_2D", modelId: modelId });
         } else {
             networkManager.send({ command: "TERMINATE",    modelId: modelId });
@@ -695,17 +668,7 @@ document.addEventListener('model-action', (e: any) => {
     executeModelCommand(modelId, command, { steps }, false);
 });
 
-document.addEventListener('global-action', (e: any) => {
-    const { command, steps } = e.detail;
-    if (!networkManager.isConnected()) {
-        alert("Error: WebSocket is not connected to the Broker backend. Please ensure the Broker daemon is running.");
-        return;
-    }
-    const selected = stateManager.getSelectedRunTargets();
-    selected.forEach(modelId => {
-        executeModelCommand(modelId, command, { steps }, true);
-    });
-});
+
 
 function is2DFrame(buffer: ArrayBuffer): boolean {
     if (buffer.byteLength < 12) return false;
@@ -729,24 +692,17 @@ networkManager.onMessage((data) => {
         }
         const payloadBuffer = data.slice(offset);
         
-        const type = is2DFrame(payloadBuffer) ? 'CFDSolver2D' : 'CFDSolver';
+        let type: 'CFDSolver2D' | 'CFDSolver' = 'CFDSolver';
         let model = stateManager.getAllModels().find(m => m.id === modelId);
-        let solverNode = model?.nodes.find(n => n.type === type);
-        
-        if (!solverNode) {
-            const activeWs = stateManager.getActiveWorkspace();
-            for (const mId of activeWs.modelIds) {
-                const m = stateManager.getAllModels().find(x => x.id === mId);
-                solverNode = m?.nodes.find(n => n.type === type);
-                if (solverNode) {
-                    model = m;
-                    break;
-                }
-            }
+        if (model && model.nodes.some(n => n.type === 'CFDSolver2D')) {
+            type = 'CFDSolver2D';
         }
         
+        let solverNode = model?.nodes.find(n => n.type === type);
+        
         if (solverNode) {
-            stateManager.pushTelemetry(solverNode.id, payloadBuffer);
+            stateManager.pushTelemetry(solverNode.id, payloadBuffer, modelId);
+            stateManager.pushTelemetry(solverNode.id + "-binary", payloadBuffer, modelId);
         }
         return;
     }
@@ -764,33 +720,23 @@ networkManager.onMessage((data) => {
 
         // Determine correct target solver type
         let targetType: 'CFDSolver2D' | 'CFDSolver' = 'CFDSolver';
-        if (dataJson.type === 'progress_2d' || dataJson.type === 'TELEMETRY_2D') {
+        if (dataJson.type === 'progress_2d' || dataJson.type === 'TELEMETRY_2D' || dataJson.scope === '2d') {
             targetType = 'CFDSolver2D';
         } else if (dataJson.type === 'progress' || dataJson.type === 'TELEMETRY') {
             targetType = 'CFDSolver';
         } else if (dataJson.type === 'log') {
             const msg = dataJson.message || "";
-            const is2DLog = msg.includes("2D") || msg.includes("REMAP") || msg.includes("vtk");
+            const is2DLog = msg.includes("2D") || msg.includes("REMAP") || msg.includes("vtk") || msg.includes("2d");
             targetType = is2DLog ? 'CFDSolver2D' : 'CFDSolver';
         }
 
         let model = stateManager.getAllModels().find(m => m.id === modelId);
-        if (modelId && (!model || !model.nodes.some(n => n.type === targetType))) {
-            const activeWs = stateManager.getActiveWorkspace();
-            const foundModel = activeWs.modelIds
-                .map(id => stateManager.getAllModels().find(m => m.id === id))
-                .find(m => m?.nodes.some(n => n.type === targetType));
-            if (foundModel) {
-                modelId = foundModel.id;
-                model = foundModel;
-            }
-        }
 
         if (dataJson.type === 'log') {
             if (modelId && model) {
                 const solverNode = model.nodes.find(n => n.type === targetType);
                 if (solverNode) {
-                    stateManager.pushTelemetry(solverNode.id, dataJson.message);
+                    stateManager.pushTelemetry(solverNode.id, dataJson.message, modelId);
                 }
             }
             return;
@@ -802,13 +748,21 @@ networkManager.onMessage((data) => {
                 stateManager.setModelSimTime(modelId, dataJson.sim_time);
                 
                 if (dataJson.percent === 100) {
-                    stateManager.setModelStatus(modelId, 'PAUSED');
+                    const currentStatus = stateManager.getModelStatus(modelId);
+                    if (currentStatus !== 'TERMINATED') {
+                        stateManager.setModelStatus(modelId, 'PAUSED');
+                    }
+                } else if (dataJson.percent < 100) {
+                    const currentStatus = stateManager.getModelStatus(modelId);
+                    if (currentStatus !== 'PAUSED' && currentStatus !== 'TERMINATED') {
+                        stateManager.setModelStatus(modelId, 'RUNNING');
+                    }
                 }
 
                 if (model) {
                     const solverNode = model.nodes.find(n => n.type === targetType);
                     if (solverNode) {
-                        stateManager.pushTelemetry(solverNode.id, dataJson);
+                        stateManager.pushTelemetry(solverNode.id, dataJson, modelId);
                     }
                 }
             }
@@ -829,13 +783,23 @@ networkManager.onMessage((data) => {
                     if (currentProgress === 100) {
                         stateManager.setModelProgress(modelId, 0);
                         stateManager.setModelStatus(modelId, 'PAUSED');
+                    } else {
+                        const currentStatus = stateManager.getModelStatus(modelId);
+                        if (currentStatus !== 'PAUSED' && currentStatus !== 'TERMINATED') {
+                            stateManager.setModelStatus(modelId, 'RUNNING');
+                        }
+                    }
+                } else {
+                    const currentStatus = stateManager.getModelStatus(modelId);
+                    if (currentStatus !== 'PAUSED' && currentStatus !== 'TERMINATED') {
+                        stateManager.setModelStatus(modelId, 'RUNNING');
                     }
                 }
 
                 if (model) {
                     const solverNode = model.nodes.find(n => n.type === targetType);
                     if (solverNode) {
-                        stateManager.pushTelemetry(solverNode.id, dataJson);
+                        stateManager.pushTelemetry(solverNode.id, dataJson, modelId);
                     }
                 }
             }

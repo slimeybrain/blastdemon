@@ -1392,11 +1392,7 @@ class ExecutionManagerComponent {
     private connectionBadge!: HTMLElement;
     private targetsListContainer!: HTMLElement;
     
-    private globalInitBtn!: HTMLButtonElement;
-    private globalRunBtn!: HTMLButtonElement;
-    private globalPauseBtn!: HTMLButtonElement;
-    private globalTermBtn!: HTMLButtonElement;
-    private globalStepBtns: HTMLButtonElement[] = [];
+
 
     constructor(parent: HTMLElement, stateManager: StateManager) {
         this.container = document.createElement('div');
@@ -1452,76 +1448,7 @@ class ExecutionManagerComponent {
 
         this.container.appendChild(headerRow);
 
-        // Global controls card
-        const globalCard = document.createElement('div');
-        globalCard.className = 'global-controls-card';
 
-        const globalTitle = document.createElement('div');
-        globalTitle.className = 'global-controls-title';
-        globalTitle.innerHTML = '⚡ Global Controls (Selected)';
-        globalCard.appendChild(globalTitle);
-
-        const globalStateRow = document.createElement('div');
-        globalStateRow.className = 'execution-controls-row';
-        globalStateRow.style.marginBottom = '6px';
-
-        const createBtn = (text: string, title: string, classes: string, onClick: () => void) => {
-            const btn = document.createElement('button');
-            btn.className = `execution-btn ${classes}`;
-            btn.textContent = text;
-            btn.title = title;
-            btn.onclick = (e) => {
-                e.stopPropagation();
-                onClick();
-            };
-            return btn;
-        };
-
-        this.globalInitBtn = createBtn('Init', 'Initialize all selected models', 'execution-btn-state execution-btn-init', () => {
-            document.dispatchEvent(new CustomEvent('global-action', { detail: { command: 'INIT' } }));
-        }) as HTMLButtonElement;
-
-        this.globalRunBtn = createBtn('Run', 'Run all selected models to completion', 'execution-btn-state execution-btn-run', () => {
-            document.dispatchEvent(new CustomEvent('global-action', { detail: { command: 'EXEC_ALL' } }));
-        }) as HTMLButtonElement;
-
-        this.globalPauseBtn = createBtn('Pause', 'Pause execution of all selected models', 'execution-btn-state execution-btn-pause', () => {
-            document.dispatchEvent(new CustomEvent('global-action', { detail: { command: 'PAUSE' } }));
-        }) as HTMLButtonElement;
-
-        this.globalTermBtn = createBtn('Term', 'Terminate execution and clear memory of selected models', 'execution-btn-state execution-btn-term', () => {
-            document.dispatchEvent(new CustomEvent('global-action', { detail: { command: 'TERMINATE' } }));
-        }) as HTMLButtonElement;
-
-        globalStateRow.appendChild(this.globalInitBtn);
-        globalStateRow.appendChild(this.globalRunBtn);
-        globalStateRow.appendChild(this.globalPauseBtn);
-        globalStateRow.appendChild(this.globalTermBtn);
-        globalCard.appendChild(globalStateRow);
-
-        // Global steps row
-        const globalStepRow = document.createElement('div');
-        globalStepRow.className = 'execution-step-row';
-
-        const stepLabel = document.createElement('span');
-        stepLabel.className = 'execution-step-label';
-        stepLabel.textContent = 'Step:';
-        globalStepRow.appendChild(stepLabel);
-
-        const globalStepGrid = document.createElement('div');
-        globalStepGrid.className = 'execution-btn-grid';
-
-        this.globalStepBtns = [1, 10, 100, 1000].map(steps => {
-            const btn = createBtn(String(steps), `Step selected targets by ${steps} steps`, 'execution-btn-step', () => {
-                document.dispatchEvent(new CustomEvent('global-action', { detail: { command: 'STEP', steps } }));
-            });
-            globalStepGrid.appendChild(btn);
-            return btn as HTMLButtonElement;
-        });
-
-        globalStepRow.appendChild(globalStepGrid);
-        globalCard.appendChild(globalStepRow);
-        this.container.appendChild(globalCard);
 
         // Targets Header
         const targetsHeader = document.createElement('div');
@@ -1596,117 +1523,41 @@ class ExecutionManagerComponent {
         const models = this.stateManager.getWorkspaceModels();
         if (models.length === 0) {
             this.targetsListContainer.innerHTML = `<div style="padding:15px; color:#666; font-style:italic; font-size:11px; text-align:center; background:#18181f; border:1px solid #222; border-radius:4px;">No models in active workspace</div>`;
-            
-            // Disable all global buttons
-            this.globalInitBtn.disabled = true;
-            this.globalRunBtn.disabled = true;
-            this.globalPauseBtn.disabled = true;
-            this.globalTermBtn.disabled = true;
-            this.globalStepBtns.forEach(b => b.disabled = true);
             return;
         }
 
-        // Add a "Select/Deselect All" row if multiple models exist
-        if (models.length > 1) {
-            const selectAllRow = document.createElement('div');
-            selectAllRow.style.display = 'flex';
-            selectAllRow.style.alignItems = 'center';
-            selectAllRow.style.gap = '8px';
-            selectAllRow.style.padding = '6px 8px';
-            selectAllRow.style.background = '#18181f';
-            selectAllRow.style.border = '1px solid #222';
-            selectAllRow.style.borderRadius = '4px';
 
-            const selectAllCheckbox = document.createElement('input');
-            selectAllCheckbox.type = 'checkbox';
-            selectAllCheckbox.className = 'execution-target-checkbox';
-            const allSelected = models.every(m => this.stateManager.isRunTargetSelected(m.id));
-            selectAllCheckbox.checked = allSelected;
-            selectAllCheckbox.onchange = () => {
-                if (selectAllCheckbox.checked) {
-                    this.stateManager.setSelectedRunTargets(models.map(m => m.id));
-                } else {
-                    this.stateManager.setSelectedRunTargets([]);
-                }
-                this.updateTargets();
-            };
-
-            const selectAllLabel = document.createElement('label');
-            selectAllLabel.textContent = 'Toggle All Target Selections';
-            selectAllLabel.style.fontSize = '11px';
-            selectAllLabel.style.fontWeight = 'bold';
-            selectAllLabel.style.color = '#888';
-            selectAllLabel.style.cursor = 'pointer';
-            selectAllLabel.onclick = () => selectAllCheckbox.click();
-
-            selectAllRow.appendChild(selectAllCheckbox);
-            selectAllRow.appendChild(selectAllLabel);
-            this.targetsListContainer.appendChild(selectAllRow);
-        }
-
-        // Track states for global controls disabling
-        let anySelected = false;
-        let anySelectedRunning = false;
-        let anySelectedPausedOrInitialized = false;
-        let anySelectedUninitializedOrTerminated = false;
-        let anySelectedInitializedRunningOrPaused = false;
 
         const renderCard = (model: any) => {
             const card = document.createElement('div');
             card.className = 'execution-target-card';
             
-            const isSelected = this.stateManager.isRunTargetSelected(model.id);
-            const status = this.stateManager.getModelStatus(model.id);
-
-            if (isSelected) {
-                anySelected = true;
-                if (status === 'RUNNING') {
-                    anySelectedRunning = true;
-                    anySelectedInitializedRunningOrPaused = true;
-                } else if (status === 'INITIALIZED' || status === 'PAUSED') {
-                    anySelectedPausedOrInitialized = true;
-                    anySelectedInitializedRunningOrPaused = true;
-                } else if (status === 'TERMINATED' || status === 'UNINITIALIZED') {
-                    anySelectedUninitializedOrTerminated = true;
-                    anySelectedInitializedRunningOrPaused = true;
-                }
-            }
-
-            // Header row
-            const headerRow = document.createElement('div');
-            headerRow.className = 'execution-target-header';
-
-            const metaDiv = document.createElement('div');
-            metaDiv.className = 'execution-target-meta';
-
-            const checkbox = document.createElement('input');
-            checkbox.type = 'checkbox';
-            checkbox.className = 'execution-target-checkbox';
-            checkbox.checked = isSelected;
-            checkbox.onchange = () => {
-                this.stateManager.toggleRunTarget(model.id);
-                this.updateTargets();
-            };
-
-            const getColors = (id: string) => {
-                let hash = 0;
-                for (let i = 0; i < id.length; i++) {
-                    hash = id.charCodeAt(i) + ((hash << 5) - hash);
-                }
-                const h = Math.abs(hash) % 360;
-                return `hsl(${h}, 75%, 60%)`;
-            };
-            const accentColor = getColors(model.id);
-
-            const nameSpan = document.createElement('span');
-            nameSpan.className = 'execution-target-name';
-            nameSpan.textContent = model.name;
-            nameSpan.style.color = accentColor;
-            nameSpan.onclick = () => checkbox.click();
-
-            metaDiv.appendChild(checkbox);
-            metaDiv.appendChild(nameSpan);
-            headerRow.appendChild(metaDiv);
+             const status = this.stateManager.getModelStatus(model.id);
+ 
+             // Header row
+             const headerRow = document.createElement('div');
+             headerRow.className = 'execution-target-header';
+ 
+             const metaDiv = document.createElement('div');
+             metaDiv.className = 'execution-target-meta';
+ 
+             const getColors = (id: string) => {
+                 let hash = 0;
+                 for (let i = 0; i < id.length; i++) {
+                     hash = id.charCodeAt(i) + ((hash << 5) - hash);
+                 }
+                 const h = Math.abs(hash) % 360;
+                 return `hsl(${h}, 75%, 60%)`;
+             };
+             const accentColor = getColors(model.id);
+ 
+             const nameSpan = document.createElement('span');
+             nameSpan.className = 'execution-target-name';
+             nameSpan.textContent = model.name;
+             nameSpan.style.color = accentColor;
+ 
+             metaDiv.appendChild(nameSpan);
+             headerRow.appendChild(metaDiv);
 
             const badge = document.createElement('div');
             badge.className = `status-badge badge-${status.toLowerCase()}`;
@@ -1859,24 +1710,5 @@ class ExecutionManagerComponent {
             const card = renderCard(model);
             this.targetsListContainer.appendChild(card);
         });
-
-        // Update Global Buttons states
-        if (!isConnected || !anySelected) {
-            this.globalInitBtn.disabled = true;
-            this.globalRunBtn.disabled = true;
-            this.globalPauseBtn.disabled = true;
-            this.globalTermBtn.disabled = true;
-            this.globalStepBtns.forEach(b => b.disabled = true);
-        } else {
-            // Init is enabled if any selected is NOT running
-            this.globalInitBtn.disabled = anySelectedRunning && !anySelectedPausedOrInitialized;
-            // Run enabled if any selected is initialized/paused, running (to queue), or uninitialized (to auto-run)
-            this.globalRunBtn.disabled = !anySelectedPausedOrInitialized && !anySelectedRunning && !anySelectedUninitializedOrTerminated;
-            this.globalStepBtns.forEach(b => b.disabled = !anySelectedPausedOrInitialized);
-            // Pause enabled if any selected is running
-            this.globalPauseBtn.disabled = !anySelectedRunning;
-            // Terminate enabled if any selected is initialized, running or paused
-            this.globalTermBtn.disabled = !anySelectedInitializedRunningOrPaused;
-        }
     }
 }

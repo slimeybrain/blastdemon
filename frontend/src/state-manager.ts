@@ -13,11 +13,7 @@ export class StateManager {
     public selectedNodeId: string | null = null;
     private selectionListeners: ((nodeId: string | null) => void)[] = [];
 
-    // Run target selection (either a model ID or 'all' for merged)
-    private runTargetId: string | 'all' = 'all';
-    private runTargetListeners: ((targetId: string | 'all') => void)[] = [];
-    private selectedRunTargets: Set<string> = new Set();
-    private lastWorkspaceId: string | null = null;
+    // Removed runTarget fields
     private modelStatuses: Map<string, SimulationStatus> = new Map();
     private modelProgresses: Map<string, number> = new Map();
     private modelSimTimes: Map<string, number> = new Map();
@@ -66,53 +62,7 @@ export class StateManager {
         return this.appState.workspaces.findIndex(ws => ws.id === this.appState.activeWorkspaceId);
     }
 
-    // Run target management
-    getRunTarget(): string | 'all' {
-        return this.runTargetId;
-    }
-
-    setRunTarget(targetId: string | 'all'): void {
-        this.runTargetId = targetId;
-        this.runTargetListeners.forEach(l => l(targetId));
-    }
-
-    onRunTargetChange(listener: (targetId: string | 'all') => void): void {
-        this.runTargetListeners.push(listener);
-    }
-
-    getSelectedRunTargets(): string[] {
-        const ws = this.getActiveWorkspace();
-        if (!ws) return [];
-        return ws.modelIds.filter(id => this.selectedRunTargets.has(id));
-    }
-
-    setSelectedRunTargets(targetIds: string[]): void {
-        this.selectedRunTargets = new Set(targetIds);
-        const ws = this.getActiveWorkspace();
-        if (ws) {
-            ws.selectedModelIds = targetIds;
-        }
-        this.runTargetListeners.forEach(l => l(targetIds.includes('all') ? 'all' : (targetIds[0] || 'all')));
-        this.saveWorkspace();
-    }
-
-    toggleRunTarget(targetId: string): void {
-        if (this.selectedRunTargets.has(targetId)) {
-            this.selectedRunTargets.delete(targetId);
-        } else {
-            this.selectedRunTargets.add(targetId);
-        }
-        const ws = this.getActiveWorkspace();
-        if (ws) {
-            ws.selectedModelIds = Array.from(this.selectedRunTargets);
-        }
-        this.runTargetListeners.forEach(l => l(this.runTargetId));
-        this.saveWorkspace();
-    }
-
-    isRunTargetSelected(targetId: string): boolean {
-        return this.selectedRunTargets.has(targetId);
-    }
+    // Removed runTarget methods
 
     getModelStatus(modelId: string): SimulationStatus {
         return this.modelStatuses.get(modelId) || 'UNINITIALIZED';
@@ -182,16 +132,7 @@ export class StateManager {
 
         if (targetWorkspace) {
             this.appState.activeWorkspaceId = targetWorkspace.id;
-            if (targetWorkspace.selectedModelIds) {
-                this.selectedRunTargets = new Set(targetWorkspace.selectedModelIds);
-            } else {
-                this.selectedRunTargets = new Set(targetWorkspace.modelIds);
-                targetWorkspace.selectedModelIds = Array.from(this.selectedRunTargets);
-            }
-            // Reset run target if model not present
-            if (this.runTargetId !== 'all' && !targetWorkspace.modelIds.includes(this.runTargetId)) {
-                this.runTargetId = 'all';
-            }
+
             this.pushAppState(this.appState);
         }
     }
@@ -406,37 +347,7 @@ export class StateManager {
         };
     }
 
-    private syncSelectedRunTargets(state: AppState, forceReset: boolean = false): void {
-        const activeWs = state.workspaces.find(ws => ws.id === state.activeWorkspaceId);
-        if (activeWs) {
-            if (forceReset || this.lastWorkspaceId !== activeWs.id) {
-                this.lastWorkspaceId = activeWs.id;
-                if (activeWs.selectedModelIds) {
-                    this.selectedRunTargets = new Set(activeWs.selectedModelIds);
-                } else {
-                    this.selectedRunTargets = new Set(activeWs.modelIds);
-                    activeWs.selectedModelIds = Array.from(this.selectedRunTargets);
-                }
-            } else {
-                // Remove invalid IDs
-                const validIds = new Set(activeWs.modelIds);
-                this.selectedRunTargets.forEach(id => {
-                    if (!validIds.has(id)) this.selectedRunTargets.delete(id);
-                });
-                
-                // Automatically select newly added models
-                const prevWs = this.appState ? this.appState.workspaces.find(ws => ws.id === this.appState.activeWorkspaceId) : null;
-                if (prevWs) {
-                    activeWs.modelIds.forEach(id => {
-                        if (!prevWs.modelIds.includes(id)) {
-                            this.selectedRunTargets.add(id);
-                        }
-                    });
-                }
-                activeWs.selectedModelIds = Array.from(this.selectedRunTargets);
-            }
-        }
-    }
+
 
     pushAppState(newAppState: AppState, autoSave: boolean = true): void {
         const stateCopy = JSON.parse(JSON.stringify(newAppState)) as AppState;
@@ -447,8 +358,7 @@ export class StateManager {
             ws.modelIds = Array.from(new Set(ws.modelIds));
         });
 
-        // Sync selectedRunTargets
-        this.syncSelectedRunTargets(stateCopy);
+
 
         if (this.currentIndex < this.history.length - 1) {
             this.history = this.history.slice(0, this.currentIndex + 1);
@@ -482,12 +392,35 @@ export class StateManager {
             });
         });
 
-        // Clear existing nodes in the workspace models so we can rebuild
-        modelsInWs.forEach(model => {
-            model.nodes = [];
-            model.connections = [];
+        // Determine which models need to be rebuilt.
+        // We always rebuild the active model, plus any model that has nodes in newState.nodes.
+        const modelsToRebuild = new Set<string>();
+        if (ws.activeModelId) {
+            modelsToRebuild.add(ws.activeModelId);
+        }
+        newState.nodes.forEach(node => {
+            const mId = nodeToModelMap[node.id];
+            if (mId) {
+                modelsToRebuild.add(mId);
+            }
         });
-        ws.connections = [];
+
+        // Clear existing nodes and connections ONLY for models being rebuilt
+        modelsInWs.forEach(model => {
+            if (modelsToRebuild.has(model.id)) {
+                model.nodes = [];
+                model.connections = [];
+            }
+        });
+
+        // Clear only cross-model connections involving rebuilt models
+        ws.connections = ws.connections.filter(conn => {
+            const fromModelId = nodeToModelMap[conn.fromNode];
+            const toModelId = nodeToModelMap[conn.toNode];
+            const involvesRebuilt = (fromModelId && modelsToRebuild.has(fromModelId)) ||
+                                    (toModelId && modelsToRebuild.has(toModelId));
+            return !involvesRebuilt;
+        });
 
         // Distribute nodes
         newState.nodes.forEach(node => {
@@ -507,11 +440,23 @@ export class StateManager {
             const toModelId = appStateCopy.models[ws.modelIds.find(id => appStateCopy.models[id].nodes.some(n => n.id === conn.toNode)) || '']?.id;
 
             if (fromModelId && toModelId && fromModelId === toModelId) {
-                // Internal connection
-                appStateCopy.models[fromModelId].connections.push(conn);
+                if (modelsToRebuild.has(fromModelId)) {
+                    // Internal connection for a rebuilt model: add it
+                    appStateCopy.models[fromModelId].connections.push(conn);
+                }
             } else {
-                // Cross-model connection
-                ws.connections.push(conn);
+                // Cross-model connection: add it if it involves a rebuilt model
+                const involvesRebuilt = (fromModelId && modelsToRebuild.has(fromModelId)) || 
+                                        (toModelId && modelsToRebuild.has(toModelId));
+                if (involvesRebuilt) {
+                    const exists = ws.connections.some(c => 
+                        c.fromNode === conn.fromNode && c.fromPort === conn.fromPort &&
+                        c.toNode === conn.toNode && c.toPort === conn.toPort
+                    );
+                    if (!exists) {
+                        ws.connections.push(conn);
+                    }
+                }
             }
         });
 
@@ -799,9 +744,7 @@ export class StateManager {
             }
         }
 
-        if (!(data instanceof ArrayBuffer)) {
-            this.telemetryStore.set(nodeId, telemetryToStore);
-        }
+        this.telemetryStore.set(nodeId, telemetryToStore);
         this.notifyTelemetryUpdate(nodeId, telemetryToStore);
 
         const telemetryConnections = connections.filter(e => e.fromNode === nodeId);
@@ -982,7 +925,6 @@ export class StateManager {
                 });
                 this.history = [JSON.parse(JSON.stringify(this.appState))];
                 this.currentIndex = 0;
-                this.syncSelectedRunTargets(this.appState, true);
                 this.notifyListeners();
                 console.log('[System] AppState hydrated successfully.');
                 return this.getCurrentState();
@@ -1022,7 +964,7 @@ export class StateManager {
                     });
                     this.history = [JSON.parse(JSON.stringify(this.appState))];
                     this.currentIndex = 0;
-                    this.syncSelectedRunTargets(this.appState, true);
+
                     this.notifyListeners();
                     console.log('[System] Legacy workspace converted.');
                     return this.getCurrentState();
@@ -1059,7 +1001,6 @@ export class StateManager {
             };
             this.history = [JSON.parse(JSON.stringify(this.appState))];
             this.currentIndex = 0;
-            this.syncSelectedRunTargets(this.appState, true);
             this.notifyListeners();
             return this.getCurrentState();
         }
