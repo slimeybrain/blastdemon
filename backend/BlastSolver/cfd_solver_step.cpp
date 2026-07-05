@@ -644,3 +644,29 @@ std::vector<float> CFDSolverImpl<IsMultiMaterial>::getTelemetryChannels() const 
 
     return frame;
 }
+
+template <bool IsMultiMaterial>
+std::vector<float> CFDSolverImpl<IsMultiMaterial>::getCellValues(int i) const {
+    std::vector<float> vals(7, 0.0f);
+    if (i < 0 || i >= n_cells) return vals;
+    
+    const auto& s = states[i];
+    vals[0] = static_cast<float>(s.p);
+    vals[1] = static_cast<float>(s.rho);
+    vals[2] = static_cast<float>(s.u);
+    
+    double e_int = (s.rho > 0.0) ? (s.E / s.rho - 0.5 * s.u * s.u) : 0.0;
+    vals[3] = static_cast<float>(e_int);
+    
+    if constexpr (IsMultiMaterial) {
+        vals[4] = static_cast<float>(std::clamp(s.alpha1, 0.0, 1.0));
+        vals[5] = static_cast<float>(std::clamp(s.alpha2, 0.0, 1.0));
+        double air_frac = 1.0 - s.alpha1 - s.alpha2;
+        vals[6] = static_cast<float>(std::clamp(air_frac, 0.0, 1.0));
+    } else {
+        vals[4] = 0.0f;
+        vals[5] = 0.0f;
+        vals[6] = 1.0f;
+    }
+    return vals;
+}

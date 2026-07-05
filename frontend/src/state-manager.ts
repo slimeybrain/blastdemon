@@ -873,10 +873,15 @@ export class StateManager {
         telemetryConnections.forEach(connection => {
             const connectedNode = nodes.find(n => n.id === connection.toNode);
             if (connectedNode) {
-                if (connectedNode.type === 'TelemetryGraph' || connectedNode.type === 'VirtualGauges') {
+                if (connectedNode.type === 'TelemetryGraph') {
                     if (data instanceof ArrayBuffer || (data && (data.type === 'TELEMETRY' || data.type === 'TELEMETRY_2D'))) {
                          this.telemetryStore.set(connectedNode.id, data);
                          this.notifyTelemetryUpdate(connectedNode.id, data);
+                    }
+                } else if (connectedNode.type === 'VirtualGauges') {
+                    if (data && !(data instanceof ArrayBuffer) && data.gauges_history) {
+                         this.telemetryStore.set(connectedNode.id, data.gauges_history);
+                         this.notifyTelemetryUpdate(connectedNode.id, data.gauges_history);
                     }
                 } else if (connectedNode.type === 'TelemetryContour') {
                     if (data instanceof ArrayBuffer) {
@@ -1227,8 +1232,7 @@ export class StateManager {
                 plot_stride: 1
             },
             'DomainMesh2D': {
-                nr: 200,
-                nz: 200,
+                cell_size: 0.005,
                 max_r: 1.0,
                 max_z: 1.0,
                 bc_r_min: 'Reflecting',

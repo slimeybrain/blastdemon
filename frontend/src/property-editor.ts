@@ -54,6 +54,23 @@ export class PropertyEditor {
                     input.value = value.toString();
                 }
             }
+
+            const gridInfo = this.container.querySelector('#grid-info-display') as HTMLDivElement;
+            if (gridInfo) {
+                const cellSize = Number(node.parameters['cell_size'] ?? 0.001);
+                if (node.type === 'DomainMesh') {
+                    const radius = Number(node.parameters['domain_radius'] ?? 1.0);
+                    const n_cells = Math.round(radius / cellSize);
+                    gridInfo.textContent = `Calculated Grid: ${n_cells} cells (Total: ${n_cells.toLocaleString()})`;
+                } else if (node.type === 'DomainMesh2D') {
+                    const max_r = Number(node.parameters['max_r'] ?? 1.0);
+                    const max_z = Number(node.parameters['max_z'] ?? 1.0);
+                    const nr = Math.round(max_r / cellSize);
+                    const nz = Math.round(max_z / cellSize);
+                    gridInfo.textContent = `Calculated Grid: ${nr} x ${nz} cells (Total: ${(nr * nz).toLocaleString()})`;
+                }
+            }
+
             return;
         }
 
@@ -108,7 +125,38 @@ export class PropertyEditor {
         form.style.padding = '10px';
         form.onsubmit = (e) => e.preventDefault();
 
-        for (const [key, value] of Object.entries(node.parameters)) {
+        const paramKeys = Object.keys(node.parameters);
+        if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D') {
+            paramKeys.sort((a, b) => {
+                if (a === 'cell_size') return -1;
+                if (b === 'cell_size') return 1;
+                return 0;
+            });
+            
+            const cellSize = Number(node.parameters['cell_size'] ?? 0.001);
+            const info = document.createElement('div');
+            info.id = 'grid-info-display';
+            info.style.fontSize = 'var(--font-sm)';
+            info.style.color = '#569cd6';
+            info.style.marginBottom = '10px';
+            if (node.type === 'DomainMesh') {
+                const radius = Number(node.parameters['domain_radius'] ?? 1.0);
+                const n_cells = Math.round(radius / cellSize);
+                info.textContent = `Calculated Grid: ${n_cells} cells (Total: ${n_cells.toLocaleString()})`;
+            } else {
+                const max_r = Number(node.parameters['max_r'] ?? 1.0);
+                const max_z = Number(node.parameters['max_z'] ?? 1.0);
+                const nr = Math.round(max_r / cellSize);
+                const nz = Math.round(max_z / cellSize);
+                info.textContent = `Calculated Grid: ${nr} x ${nz} cells (Total: ${(nr * nz).toLocaleString()})`;
+            }
+            form.appendChild(info);
+        }
+
+        for (const key of paramKeys) {
+            const value = node.parameters[key];
+            if (key === 'nr' || key === 'nz' || key === 'n_cells') continue;
+
             if (node.type === 'DomainMesh') {
                 const dim = node.parameters['dimension'] || '1D';
                 if ((key === 'y_min_bc' || key === 'y_max_bc') && dim === '1D') continue;
@@ -134,7 +182,7 @@ export class PropertyEditor {
                 if (key === 'charge_height' && shape !== 'Cylinder') continue;
             }
             if (node.type === 'VirtualGauges') {
-                if (key === 'gauges') continue;
+                if (key === 'gauges' || key === 'telemetry_channel') continue;
             }
 
             const row = document.createElement('div');
@@ -307,7 +355,7 @@ export class PropertyEditor {
         input.style.border = '1px solid #444';
         input.style.padding = '4px';
 
-        input.addEventListener('change', () => {
+        input.addEventListener('input', () => {
             let newVal: any = input.value;
             if (input.type === 'number') {
                 newVal = Number(input.value);
@@ -402,6 +450,8 @@ export class PropertyEditor {
                 return 'Real-time 2D contour plot (heatmap) telemetry viewer. Renders dynamic physical fields (pressure, density, speed, mass fractions).';
             case 'VTKOutput':
                 return 'Controls saving simulation state snapshots in standard VTK XML Unstructured Grid (.vtu) format for external visualizers like Paraview.';
+            case 'VirtualGauges':
+                return 'Virtual gauges. Records and tracks simulation variables (pressure, density, velocity, species) at discrete coordinates over time.';
             default:
                 return 'Simulation graph node.';
         }

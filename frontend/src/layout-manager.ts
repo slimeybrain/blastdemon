@@ -1119,7 +1119,8 @@ const NODE_ICONS: Record<string, string> = {
     'HardwareConfig': '⚙️',
     'CFDSolver2D': '⚡',
     'TelemetryContour': '🗺️',
-    'VTKOutput': '💾'
+    'VTKOutput': '💾',
+    'VirtualGauges': '⏱️'
 };
 
 function getNodeIcon(type: string): string {

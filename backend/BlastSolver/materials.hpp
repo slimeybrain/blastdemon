@@ -64,6 +64,8 @@ namespace MultiMat {
         5.30e6
     };
 
+
+
 #ifdef __CUDACC__
 __host__ __device__
 #endif
@@ -110,7 +112,7 @@ __host__ __device__
         }
 
         if (alpha2 > 1e-6) {
-            double V2 = unreacted.rho0 / rho2_mat;
+            double V2 = 1.0; // Stiffened gas approximation for unreacted solid to prevent severe numerical stiffness
             double f2 = unreacted.A * (1.0 - unreacted.omega / (unreacted.R1 * V2)) * exp(-unreacted.R1 * V2) +
                         unreacted.B * (1.0 - unreacted.omega / (unreacted.R2 * V2)) * exp(-unreacted.R2 * V2);
             sum_alpha_f_omega += alpha2 * f2 / omega2;
@@ -145,7 +147,7 @@ __host__ __device__
         }
 
         if (alpha2 > 1e-6) {
-            double V2 = unreacted.rho0 / rho2_mat;
+            double V2 = 1.0; // Stiffened gas approximation for unreacted solid
             double f2 = unreacted.A * (1.0 - unreacted.omega / (unreacted.R1 * V2)) * exp(-unreacted.R1 * V2) +
                         unreacted.B * (1.0 - unreacted.omega / (unreacted.R2 * V2)) * exp(-unreacted.R2 * V2);
             sum_alpha_f_omega += alpha2 * f2 / omega2;
@@ -186,16 +188,16 @@ __host__ __device__
 
         double c2_2 = 0.0;
         if (alpha2 > 1e-6) {
-            double V2 = unreacted.rho0 / rho2_mat;
-            c2_2 = (unreacted.A / rho2_mat) * (unreacted.R1 * V2 - unreacted.omega - 1.0) * exp(-unreacted.R1 * V2) +
-                   (unreacted.B / rho2_mat) * (unreacted.R2 * V2 - unreacted.omega - 1.0) * exp(-unreacted.R2 * V2) +
-                   (unreacted.omega + 1.0) * p / rho2_mat;
+            double V2 = 1.0; // Stiffened gas approximation for unreacted solid
+            c2_2 = (unreacted.A / unreacted.rho0) * (unreacted.R1 * V2 - unreacted.omega - 1.0) * exp(-unreacted.R1 * V2) +
+                   (unreacted.B / unreacted.rho0) * (unreacted.R2 * V2 - unreacted.omega - 1.0) * exp(-unreacted.R2 * V2) +
+                   (unreacted.omega + 1.0) * p / unreacted.rho0;
         }
 
         double inv_rho_c2 = 0.0;
         if (alpha0 > 1e-6) inv_rho_c2 += alpha0 / (rho0 * fmax(115600.0, c2_0));
         if (alpha1 > 1e-6) inv_rho_c2 += alpha1 / (rho1_mat * fmax(115600.0, c2_1));
-        if (alpha2 > 1e-6) inv_rho_c2 += alpha2 / (rho2_mat * fmax(4.0e6, c2_2));
+        if (alpha2 > 1e-6) inv_rho_c2 += alpha2 / (unreacted.rho0 * fmax(4.0e6, c2_2));
 
         if (inv_rho_c2 < 1e-12) return 340.0;
         double c2 = 1.0 / (rho * inv_rho_c2);

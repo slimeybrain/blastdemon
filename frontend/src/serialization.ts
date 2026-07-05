@@ -305,10 +305,14 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         if (!flattenedParams['composition']) flattenedParams['composition'] = 'TNT';
         if (!flattenedParams['device']) flattenedParams['device'] = 'cpu';
 
-        if (flattenedParams['nr'] === undefined) flattenedParams['nr'] = 200;
-        if (flattenedParams['nz'] === undefined) flattenedParams['nz'] = 200;
-        if (flattenedParams['max_r'] === undefined) flattenedParams['max_r'] = 1.0;
-        if (flattenedParams['max_z'] === undefined) flattenedParams['max_z'] = 1.0;
+        const cellSize = flattenedParams['cell_size'] || 0.005;
+        const maxR = flattenedParams['max_r'] || 1.0;
+        const maxZ = flattenedParams['max_z'] || 1.0;
+
+        flattenedParams['nr'] = Math.round(maxR / cellSize);
+        flattenedParams['nz'] = Math.round(maxZ / cellSize);
+        flattenedParams['max_r'] = maxR;
+        flattenedParams['max_z'] = maxZ;
     }
 
     return JSON.stringify({

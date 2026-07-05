@@ -57,207 +57,91 @@ void CFDSolver2D::updatePrimitiveFromConservative() {
     const double rho_floor = 1e-8;
     const double p_floor = 1e-8;
 
-    #pragma omp parallel for collapse(2)
-    for (int tr = 0; tr < num_tiles_r; ++tr) {
-        for (int tz = 0; tz < num_tiles_z; ++tz) {
-            int pool_idx = tile_map[tr * num_tiles_z + tz];
-            if (pool_idx == -1) continue;
+    #pragma omp parallel for
+    for (int pool_idx = 0; pool_idx < (int)U_pool.size(); ++pool_idx) {
+        for (int k = 0; k < TILE_SIZE * TILE_SIZE; ++k) {
+            double u_rho = U_pool[pool_idx].rho[k];
+            double u_rhour = U_pool[pool_idx].rhour[k];
+            double u_rhouz = U_pool[pool_idx].rhouz[k];
+            double u_E = U_pool[pool_idx].E[k];
+            double u_alpha1 = U_pool[pool_idx].alpha1[k];
+            double u_alpha2 = U_pool[pool_idx].alpha2[k];
+            double u_arho1 = U_pool[pool_idx].arho1[k];
+            double u_arho2 = U_pool[pool_idx].arho2[k];
 
-            for (int k = 0; k < TILE_SIZE * TILE_SIZE; ++k) {
-                int local_i = k / TILE_SIZE;
-                int local_j = k % TILE_SIZE;
-                int i = tr * TILE_SIZE + local_i;
-                int j = tz * TILE_SIZE + local_j;
-                if (i >= nr_cells || j >= nz_cells) continue;
+            bool bad = std::isnan(u_rho) || std::isinf(u_rho) || u_rho < rho_floor ||
+                       std::isnan(u_rhour) || std::isinf(u_rhour) ||
+                       std::isnan(u_rhouz) || std::isinf(u_rhouz) ||
+                       std::isnan(u_E) || std::isinf(u_E);
 
-                double u_rho = U_pool[pool_idx].rho[k];
-                double u_rhour = U_pool[pool_idx].rhour[k];
-                double u_rhouz = U_pool[pool_idx].rhouz[k];
-                double u_E = U_pool[pool_idx].E[k];
-                double u_alpha1 = U_pool[pool_idx].alpha1[k];
-                double u_alpha2 = U_pool[pool_idx].alpha2[k];
-                double u_arho1 = U_pool[pool_idx].arho1[k];
-                double u_arho2 = U_pool[pool_idx].arho2[k];
+            int floor_status = 0;
+            double p = ambient_p;
+            double ur = 0.0;
+            double uz = 0.0;
 
-                bool bad = std::isnan(u_rho) || std::isinf(u_rho) || u_rho < rho_floor ||
-                           std::isnan(u_rhour) || std::isinf(u_rhour) ||
-                           std::isnan(u_rhouz) || std::isinf(u_rhouz) ||
-                           std::isnan(u_E) || std::isinf(u_E);
+            if (!bad) {
+                double rho_safe = std::max(u_rho, rho_floor);
+                ur = u_rhour / rho_safe;
+                uz = u_rhouz / rho_safe;
+                double ke = 0.5 * rho_safe * (ur * ur + uz * uz);
 
-                int floor_status = 0;
-                double p = ambient_p;
-                double ur = 0.0;
-                double uz = 0.0;
-
-                if (!bad) {
-                    double rho_safe = std::max(u_rho, rho_floor);
-                    ur = u_rhour / rho_safe;
-                    uz = u_rhouz / rho_safe;
-                    double ke = 0.5 * rho_safe * (ur * ur + uz * uz);
-
-                    double alpha1 = std::max(0.0, std::min(1.0, u_alpha1));
-                    double alpha2 = std::max(0.0, std::min(1.0, u_alpha2));
-                    if (alpha1 + alpha2 > 1.0) {
-                        double sum = alpha1 + alpha2;
-                        alpha1 /= sum;
-                        alpha2 /= sum;
-                    }
-
-                    double arho1 = std::max(0.0, std::min(u_rho, u_arho1));
-                    double arho2 = std::max(0.0, std::min(u_rho, u_arho2));
-                    if (arho1 + arho2 > u_rho) {
-                        double sum = arho1 + arho2;
-                        arho1 = (arho1 / sum) * u_rho;
-                        arho2 = (arho2 / sum) * u_rho;
-                    }
-
-                    double e_internal = std::max(u_E - ke, p_floor / (gamma - 1.0));
-                    p = MultiMat::getMixturePressure(e_internal, u_rho, alpha1, alpha2, arho1, arho2, gamma, currentMaterials.products, currentMaterials.unreacted);
-                    
-                    if (std::isnan(p) || std::isinf(p) || p < p_floor) {
-                        bad = true;
-                    } else {
-                        states_pool[pool_idx].rho[k] = rho_safe;
-                        states_pool[pool_idx].ur[k] = ur;
-                        states_pool[pool_idx].uz[k] = uz;
-                        states_pool[pool_idx].E[k] = u_E;
-                        states_pool[pool_idx].alpha1[k] = alpha1;
-                        states_pool[pool_idx].alpha2[k] = alpha2;
-                        states_pool[pool_idx].arho1[k] = arho1;
-                        states_pool[pool_idx].arho2[k] = arho2;
-                        states_pool[pool_idx].p[k] = p;
-                    }
+                double alpha1 = std::max(0.0, std::min(1.0, u_alpha1));
+                double alpha2 = std::max(0.0, std::min(1.0, u_alpha2));
+                if (alpha1 + alpha2 > 1.0) {
+                    double sum = alpha1 + alpha2;
+                    alpha1 /= sum;
+                    alpha2 /= sum;
                 }
 
-                if (bad) {
-                    floor_status |= 8;
-                    double sum_rho = 0, sum_rhour = 0, sum_rhouz = 0, sum_E = 0;
-                    double sum_alpha1 = 0, sum_alpha2 = 0, sum_arho1 = 0, sum_arho2 = 0;
-                    int count = 0;
-
-                    auto is_good = [&](int ni, int nj) {
-                        if (ni < 0 || ni >= nr_cells || nj < 0 || nj >= nz_cells) return false;
-                        int ntr = ni / TILE_SIZE;
-                        int ntz = nj / TILE_SIZE;
-                        int n_pool_idx = tile_map[ntr * num_tiles_z + ntz];
-                        if (n_pool_idx == -1) return false;
-                        int nk = (ni % TILE_SIZE) * TILE_SIZE + (nj % TILE_SIZE);
-                        
-                        double n_rho = U_pool[n_pool_idx].rho[nk];
-                        double n_rhour = U_pool[n_pool_idx].rhour[nk];
-                        double n_rhouz = U_pool[n_pool_idx].rhouz[nk];
-                        double n_E = U_pool[n_pool_idx].E[nk];
-                        
-                        if (std::isnan(n_rho) || std::isinf(n_rho) || n_rho < rho_floor) return false;
-                        if (std::isnan(n_rhour) || std::isinf(n_rhour)) return false;
-                        if (std::isnan(n_rhouz) || std::isinf(n_rhouz)) return false;
-                        if (std::isnan(n_E) || std::isinf(n_E)) return false;
-                        
-                        double n_p = states_pool[n_pool_idx].p[nk];
-                        if (std::isnan(n_p) || std::isinf(n_p) || n_p < p_floor) return false;
-                        
-                        return true;
-                    };
-
-                    int neighbors[4][2] = {{i-1, j}, {i+1, j}, {i, j-1}, {i, j+1}};
-                    for (int n = 0; n < 4; ++n) {
-                        int ni = neighbors[n][0];
-                        int nj = neighbors[n][1];
-                        if (is_good(ni, nj)) {
-                            int ntr = ni / TILE_SIZE;
-                            int ntz = nj / TILE_SIZE;
-                            int n_pool_idx = tile_map[ntr * num_tiles_z + ntz];
-                            int nk = (ni % TILE_SIZE) * TILE_SIZE + (nj % TILE_SIZE);
-                            
-                            sum_rho += U_pool[n_pool_idx].rho[nk];
-                            sum_rhour += U_pool[n_pool_idx].rhour[nk];
-                            sum_rhouz += U_pool[n_pool_idx].rhouz[nk];
-                            sum_E += U_pool[n_pool_idx].E[nk];
-                            sum_alpha1 += U_pool[n_pool_idx].alpha1[nk];
-                            sum_alpha2 += U_pool[n_pool_idx].alpha2[nk];
-                            sum_arho1 += U_pool[n_pool_idx].arho1[nk];
-                            sum_arho2 += U_pool[n_pool_idx].arho2[nk];
-                            count++;
-                        }
-                    }
-
-                    if (count > 0) {
-                        u_rho = sum_rho / count;
-                        u_rhour = sum_rhour / count;
-                        u_rhouz = sum_rhouz / count;
-                        u_E = sum_E / count;
-                        u_alpha1 = sum_alpha1 / count;
-                        u_alpha2 = sum_alpha2 / count;
-                        u_arho1 = sum_arho1 / count;
-                        u_arho2 = sum_arho2 / count;
-                        
-                        U_pool[pool_idx].rho[k] = u_rho;
-                        U_pool[pool_idx].rhour[k] = u_rhour;
-                        U_pool[pool_idx].rhouz[k] = u_rhouz;
-                        U_pool[pool_idx].E[k] = u_E;
-                        U_pool[pool_idx].alpha1[k] = u_alpha1;
-                        U_pool[pool_idx].alpha2[k] = u_alpha2;
-                        U_pool[pool_idx].arho1[k] = u_arho1;
-                        U_pool[pool_idx].arho2[k] = u_arho2;
-                        
-                        double rho_safe = std::max(u_rho, rho_floor);
-                        ur = u_rhour / rho_safe;
-                        uz = u_rhouz / rho_safe;
-                        double ke = 0.5 * rho_safe * (ur * ur + uz * uz);
-
-                        double alpha1 = std::max(0.0, std::min(1.0, u_alpha1));
-                        double alpha2 = std::max(0.0, std::min(1.0, u_alpha2));
-                        if (alpha1 + alpha2 > 1.0) {
-                            double sum = alpha1 + alpha2;
-                            alpha1 /= sum;
-                            alpha2 /= sum;
-                        }
-
-                        double arho1 = std::max(0.0, std::min(u_rho, u_arho1));
-                        double arho2 = std::max(0.0, std::min(u_rho, u_arho2));
-                        if (arho1 + arho2 > u_rho) {
-                            double sum = arho1 + arho2;
-                            arho1 = (arho1 / sum) * u_rho;
-                            arho2 = (arho2 / sum) * u_rho;
-                        }
-
-                        double e_internal = std::max(u_E - ke, p_floor / (gamma - 1.0));
-                        p = MultiMat::getMixturePressure(e_internal, u_rho, alpha1, alpha2, arho1, arho2, gamma, currentMaterials.products, currentMaterials.unreacted);
-                        p = std::max(p, p_floor);
-                        
-                        states_pool[pool_idx].rho[k] = rho_safe;
-                        states_pool[pool_idx].ur[k] = ur;
-                        states_pool[pool_idx].uz[k] = uz;
-                        states_pool[pool_idx].E[k] = u_E;
-                        states_pool[pool_idx].alpha1[k] = alpha1;
-                        states_pool[pool_idx].alpha2[k] = alpha2;
-                        states_pool[pool_idx].arho1[k] = arho1;
-                        states_pool[pool_idx].arho2[k] = arho2;
-                        states_pool[pool_idx].p[k] = p;
-                    } else {
-                        // Fallback to ambient
-                        states_pool[pool_idx].rho[k] = ambient_rho;
-                        states_pool[pool_idx].ur[k] = 0.0;
-                        states_pool[pool_idx].uz[k] = 0.0;
-                        states_pool[pool_idx].p[k] = ambient_p;
-                        states_pool[pool_idx].alpha1[k] = 0.0;
-                        states_pool[pool_idx].alpha2[k] = 0.0;
-                        states_pool[pool_idx].arho1[k] = 0.0;
-                        states_pool[pool_idx].arho2[k] = 0.0;
-                        states_pool[pool_idx].E[k] = ambient_p / (gamma - 1.0);
-                        
-                        U_pool[pool_idx].rho[k] = ambient_rho;
-                        U_pool[pool_idx].rhour[k] = 0.0;
-                        U_pool[pool_idx].rhouz[k] = 0.0;
-                        U_pool[pool_idx].E[k] = states_pool[pool_idx].E[k];
-                        U_pool[pool_idx].alpha1[k] = 0.0;
-                        U_pool[pool_idx].alpha2[k] = 0.0;
-                        U_pool[pool_idx].arho1[k] = 0.0;
-                        U_pool[pool_idx].arho2[k] = 0.0;
-                    }
+                double arho1 = std::max(0.0, std::min(u_rho, u_arho1));
+                double arho2 = std::max(0.0, std::min(u_rho, u_arho2));
+                if (arho1 + arho2 > u_rho) {
+                    double sum = arho1 + arho2;
+                    arho1 = (arho1 / sum) * u_rho;
+                    arho2 = (arho2 / sum) * u_rho;
                 }
-                states_pool[pool_idx].floor_status[k] = floor_status;
+
+                double e_internal = std::max(u_E - ke, p_floor / (gamma - 1.0));
+                p = MultiMat::getMixturePressure(e_internal, u_rho, alpha1, alpha2, arho1, arho2, gamma, currentMaterials.products, currentMaterials.unreacted);
+                
+                if (std::isnan(p) || std::isinf(p) || p < p_floor) {
+                    bad = true;
+                } else {
+                    states_pool[pool_idx].rho[k] = rho_safe;
+                    states_pool[pool_idx].ur[k] = ur;
+                    states_pool[pool_idx].uz[k] = uz;
+                    states_pool[pool_idx].E[k] = u_E;
+                    states_pool[pool_idx].alpha1[k] = alpha1;
+                    states_pool[pool_idx].alpha2[k] = alpha2;
+                    states_pool[pool_idx].arho1[k] = arho1;
+                    states_pool[pool_idx].arho2[k] = arho2;
+                    states_pool[pool_idx].p[k] = p;
+                }
             }
+
+            if (bad) {
+                // Fallback to ambient
+                states_pool[pool_idx].rho[k] = ambient_rho;
+                states_pool[pool_idx].ur[k] = 0.0;
+                states_pool[pool_idx].uz[k] = 0.0;
+                states_pool[pool_idx].p[k] = ambient_p;
+                states_pool[pool_idx].alpha1[k] = 0.0;
+                states_pool[pool_idx].alpha2[k] = 0.0;
+                states_pool[pool_idx].arho1[k] = 0.0;
+                states_pool[pool_idx].arho2[k] = 0.0;
+                states_pool[pool_idx].E[k] = ambient_p / (gamma - 1.0);
+                
+                U_pool[pool_idx].rho[k] = ambient_rho;
+                U_pool[pool_idx].rhour[k] = 0.0;
+                U_pool[pool_idx].rhouz[k] = 0.0;
+                U_pool[pool_idx].E[k] = states_pool[pool_idx].E[k];
+                U_pool[pool_idx].alpha1[k] = 0.0;
+                U_pool[pool_idx].alpha2[k] = 0.0;
+                U_pool[pool_idx].arho1[k] = 0.0;
+                U_pool[pool_idx].arho2[k] = 0.0;
+            }
+            
+            states_pool[pool_idx].floor_status[k] = floor_status;
         }
     }
 }
@@ -268,51 +152,120 @@ struct CellState {
     double rho, ur, uz, p, E, alpha1, alpha2, arho1, arho2;
 };
 
+inline void compute_E_cpu(CellState& s, double gamma, const MultiMat::MaterialSet& mat, bool is_ideal_gas);
+
+inline CellState applyBC(CellState s, CFDSolver2D::BCType bc, double normal_vel, double ambient_rho, double ambient_p, double gamma, const MultiMat::MaterialSet& mat, bool is_ideal_gas, bool is_r_axis) {
+    if (bc == CFDSolver2D::REFLECTIVE) {
+        if (is_r_axis) {
+            s.ur = -s.ur;
+        } else {
+            s.uz = -s.uz;
+        }
+    } else if (bc == CFDSolver2D::TRANSMISSIVE) {
+        // Zero-gradient
+    } else if (bc == CFDSolver2D::OUTFLOW_RIEMANN) {
+        double c;
+        if (is_ideal_gas) {
+            c = std::sqrt(gamma * s.p / s.rho);
+        } else {
+            c = MultiMat::getMixtureSoundSpeed(s.p, s.rho, s.alpha1, s.alpha2, s.arho1, s.arho2, gamma, mat.products, mat.unreacted);
+        }
+        if (normal_vel < 0.0) {
+            // Inflow
+            s.rho = ambient_rho;
+            s.ur = 0.0;
+            s.uz = 0.0;
+            s.p = ambient_p;
+            s.alpha1 = 0.0;
+            s.alpha2 = 0.0;
+            s.arho1 = 0.0;
+            s.arho2 = 0.0;
+            s.E = is_ideal_gas ? (ambient_p / (gamma - 1.0)) : 
+                  (ambient_rho * MultiMat::getEnergy_IdealGas(ambient_p, ambient_rho, gamma));
+        } else if (normal_vel < c) {
+            // Subsonic outflow
+            s.p = ambient_p;
+            compute_E_cpu(s, gamma, mat, is_ideal_gas);
+        }
+        // Supersonic outflow (extrapolate as is)
+    }
+    return s;
+}
+
 inline CellState readState(const CFDSolver2D* solver, const std::vector<int32_t>& tile_map, const std::vector<PrimitiveTile>& states_pool, int i, int j) {
+    bool is_outside_i = false;
+    bool is_outside_j = false;
+    int original_i = i;
+    int original_j = j;
+
     if (i < 0) {
-        CellState s = readState(solver, tile_map, states_pool, -i - 1, j);
-        s.ur = -s.ur;
-        return s;
+        is_outside_i = true;
+        if (solver->getBCRmin() == CFDSolver2D::REFLECTIVE) {
+            i = -i - 1;
+        } else {
+            i = 0;
+        }
+    } else if (i >= solver->getNr()) {
+        is_outside_i = true;
+        if (solver->getBCRmax() == CFDSolver2D::REFLECTIVE) {
+            i = 2 * solver->getNr() - 1 - i;
+        } else {
+            i = solver->getNr() - 1;
+        }
     }
     if (j < 0) {
-        CellState s = readState(solver, tile_map, states_pool, i, -j - 1);
-        s.uz = -s.uz;
-        return s;
+        is_outside_j = true;
+        if (solver->getBCZmin() == CFDSolver2D::REFLECTIVE) {
+            j = -j - 1;
+        } else {
+            j = 0;
+        }
+    } else if (j >= solver->getNz()) {
+        is_outside_j = true;
+        if (solver->getBCZmax() == CFDSolver2D::REFLECTIVE) {
+            j = 2 * solver->getNz() - 1 - j;
+        } else {
+            j = solver->getNz() - 1;
+        }
     }
-    if (i >= solver->getNr()) {
-        CellState s = readState(solver, tile_map, states_pool, solver->getNr() - 1, j);
-        s.ur = -s.ur; // Reflective
-        return s;
-    }
-    if (j >= solver->getNz()) {
-        CellState s = readState(solver, tile_map, states_pool, i, solver->getNz() - 1);
-        s.uz = -s.uz; // Reflective
-        return s;
-    }
-    
+
     int tr = i / TILE_SIZE;
     int tz = j / TILE_SIZE;
     int pool_idx = tile_map[tr * ((solver->getNz() + TILE_SIZE - 1) / TILE_SIZE) + tz];
-    
+
+    CellState s;
     if (pool_idx == -1) {
-        return {1.2, 0.0, 0.0, 101325.0, 101325.0/0.4, 0.0, 0.0, 0.0, 0.0};
+        s = { solver->getAmbientRho(), 0.0, 0.0, solver->getAmbientP(), 
+              solver->isIdealGas() ? (solver->getAmbientP() / (solver->getGamma() - 1.0)) : 
+              (solver->getAmbientRho() * MultiMat::getEnergy_IdealGas(solver->getAmbientP(), solver->getAmbientRho(), solver->getGamma())), 
+              0.0, 0.0, 0.0, 0.0 };
+    } else {
+        int local_i = i % TILE_SIZE;
+        int local_j = j % TILE_SIZE;
+        int k = local_i * TILE_SIZE + local_j;
+        s = {
+            states_pool[pool_idx].rho[k],
+            states_pool[pool_idx].ur[k],
+            states_pool[pool_idx].uz[k],
+            states_pool[pool_idx].p[k],
+            states_pool[pool_idx].E[k],
+            states_pool[pool_idx].alpha1[k],
+            states_pool[pool_idx].alpha2[k],
+            states_pool[pool_idx].arho1[k],
+            states_pool[pool_idx].arho2[k]
+        };
     }
-    
-    int local_i = i % TILE_SIZE;
-    int local_j = j % TILE_SIZE;
-    int k = local_i * TILE_SIZE + local_j;
-    
-    return {
-        states_pool[pool_idx].rho[k],
-        states_pool[pool_idx].ur[k],
-        states_pool[pool_idx].uz[k],
-        states_pool[pool_idx].p[k],
-        states_pool[pool_idx].E[k],
-        states_pool[pool_idx].alpha1[k],
-        states_pool[pool_idx].alpha2[k],
-        states_pool[pool_idx].arho1[k],
-        states_pool[pool_idx].arho2[k]
-    };
+
+    if (is_outside_i) {
+        double normal_vel = (original_i < 0) ? s.ur : -s.ur;
+        s = applyBC(s, (original_i < 0) ? solver->getBCRmin() : solver->getBCRmax(), normal_vel, solver->getAmbientRho(), solver->getAmbientP(), solver->getGamma(), solver->getMaterialParameters(), solver->isIdealGas(), true);
+    }
+    if (is_outside_j) {
+        double normal_vel = (original_j < 0) ? s.uz : -s.uz;
+        s = applyBC(s, (original_j < 0) ? solver->getBCZmin() : solver->getBCZmax(), normal_vel, solver->getAmbientRho(), solver->getAmbientP(), solver->getGamma(), solver->getMaterialParameters(), solver->isIdealGas(), false);
+    }
+
+    return s;
 }
 
 // --------------------------------------------------------------------------------------
@@ -838,65 +791,15 @@ std::vector<float> CFDSolver2D::getTelemetry2D(int stride) const {
 
 double CFDSolver2D::computeStepSize(double cfl) const {
     double max_speed = 1e-6;
-    double max_p_ratio = 1.0;
-    
-    #pragma omp parallel for collapse(2) reduction(max:max_speed, max_p_ratio)
-    for (int tr = 0; tr < num_tiles_r; ++tr) {
-        for (int tz = 0; tz < num_tiles_z; ++tz) {
-            int pool_idx = tile_map[tr * num_tiles_z + tz];
-            if (pool_idx == -1) continue;
-            
-            for (int local_i = 0; local_i < TILE_SIZE; ++local_i) {
-                for (int local_j = 0; local_j < TILE_SIZE; ++local_j) {
-                    int i = tr * TILE_SIZE + local_i;
-                    int j = tz * TILE_SIZE + local_j;
-                    if (i >= nr_cells || j >= nz_cells) continue;
-                    
-                    int k = local_i * TILE_SIZE + local_j;
-                    double p = states_pool[pool_idx].p[k];
-                    double rho = states_pool[pool_idx].rho[k];
-                    double ur = states_pool[pool_idx].ur[k];
-                    double uz = states_pool[pool_idx].uz[k];
-                    double alpha1 = states_pool[pool_idx].alpha1[k];
-                    double alpha2 = states_pool[pool_idx].alpha2[k];
-                    double arho1 = states_pool[pool_idx].arho1[k];
-                    double arho2 = states_pool[pool_idx].arho2[k];
-                    
-                    double c = MultiMat::getMixtureSoundSpeed(p, rho, alpha1, alpha2, arho1, arho2, gamma, currentMaterials.products, currentMaterials.unreacted);
-                    double s = std::max(std::abs(ur), std::abs(uz)) + c;
-                    if (!std::isnan(s) && !std::isinf(s)) {
-                        max_speed = std::max(max_speed, s);
-                    }
-                    
-                    // Compare with 4 neighbors to find local pressure ratio
-                    int neighbors[4][2] = {{i-1, j}, {i+1, j}, {i, j-1}, {i, j+1}};
-                    for (int n = 0; n < 4; ++n) {
-                        int ni = neighbors[n][0];
-                        int nj = neighbors[n][1];
-                        if (ni >= 0 && ni < nr_cells && nj >= 0 && nj < nz_cells) {
-                            CellState s_nb = readState(this, tile_map, states_pool, ni, nj);
-                            double p_nb = s_nb.p;
-                            double ratio = std::max(p, p_nb) / std::max(1e-10, std::min(p, p_nb));
-                            if (!std::isnan(ratio) && !std::isinf(ratio)) {
-                                max_p_ratio = std::max(max_p_ratio, ratio);
-                            }
-                        }
-                    }
-                }
-            }
+    #pragma omp parallel for reduction(max:max_speed)
+    for (int pool_idx = 0; pool_idx < (int)states_pool.size(); ++pool_idx) {
+        for (int k = 0; k < TILE_SIZE * TILE_SIZE; ++k) {
+            double c = MultiMat::getMixtureSoundSpeed(states_pool[pool_idx].p[k], states_pool[pool_idx].rho[k], states_pool[pool_idx].alpha1[k], states_pool[pool_idx].alpha2[k], states_pool[pool_idx].arho1[k], states_pool[pool_idx].arho2[k], gamma, currentMaterials.products, currentMaterials.unreacted);
+            double s = std::max(std::abs(states_pool[pool_idx].ur[k]), std::abs(states_pool[pool_idx].uz[k])) + c;
+            max_speed = std::max(max_speed, s);
         }
     }
-    
-    double order_factor = 1.0;
-    if (spatialOrder == 2) order_factor = 0.8;
-    else if (spatialOrder >= 3) order_factor = 0.4;
-    
-    double dynamic_cfl = cfl * order_factor;
-    if (max_p_ratio > 5.0) {
-        dynamic_cfl *= std::max(0.2, 5.0 / max_p_ratio);
-    }
-    
-    return dynamic_cfl * std::min(dr, dz) / max_speed;
+    return cfl * std::min(dr, dz) / max_speed;
 }
 
 void CFDSolver2D::run(double duration) {
@@ -908,3 +811,61 @@ void CFDSolver2D::run(double duration) {
         currentTime += dt;
     }
 }
+
+std::vector<float> CFDSolver2D::getCellValues(int i, int j) const {
+    std::vector<float> vals(7, 0.0f);
+    if (i < 0 || i >= nr_cells || j < 0 || j >= nz_cells) return vals;
+    
+    CellState s = readState(this, tile_map, states_pool, i, j);
+    vals[0] = static_cast<float>(s.p);
+    vals[1] = static_cast<float>(s.rho);
+    double u_mag = std::sqrt(s.ur * s.ur + s.uz * s.uz);
+    vals[2] = static_cast<float>(u_mag);
+    
+    double e_int = (s.rho > 0.0) ? (s.E / s.rho - 0.5 * u_mag * u_mag) : 0.0;
+    vals[3] = static_cast<float>(e_int);
+    
+    vals[4] = static_cast<float>(std::clamp(s.alpha1, 0.0, 1.0));
+    vals[5] = static_cast<float>(std::clamp(s.alpha2, 0.0, 1.0));
+    double air_frac = 1.0 - s.alpha1 - s.alpha2;
+    vals[6] = static_cast<float>(std::clamp(air_frac, 0.0, 1.0));
+    
+    return vals;
+}
+
+bool CFDSolver2D::checkTerminationCondition() const {
+    double threshold = 1.05 * ambient_p;
+    
+    auto get_cell_p = [&](int i, int j) -> double {
+        int tr = i / TILE_SIZE;
+        int tz = j / TILE_SIZE;
+        int pool_idx = tile_map[tr * ((nz_cells + TILE_SIZE - 1) / TILE_SIZE) + tz];
+        if (pool_idx == -1) return ambient_p;
+        int local_i = i % TILE_SIZE;
+        int local_j = j % TILE_SIZE;
+        return states_pool[pool_idx].p[local_i * TILE_SIZE + local_j];
+    };
+
+    if (bcRmin == OUTFLOW_RIEMANN) {
+        for (int j = 0; j < nz_cells; ++j) {
+            if (get_cell_p(0, j) > threshold) return true;
+        }
+    }
+    if (bcRmax == OUTFLOW_RIEMANN) {
+        for (int j = 0; j < nz_cells; ++j) {
+            if (get_cell_p(nr_cells - 1, j) > threshold) return true;
+        }
+    }
+    if (bcZmin == OUTFLOW_RIEMANN) {
+        for (int i = 0; i < nr_cells; ++i) {
+            if (get_cell_p(i, 0) > threshold) return true;
+        }
+    }
+    if (bcZmax == OUTFLOW_RIEMANN) {
+        for (int i = 0; i < nr_cells; ++i) {
+            if (get_cell_p(i, nz_cells - 1) > threshold) return true;
+        }
+    }
+    return false;
+}
+

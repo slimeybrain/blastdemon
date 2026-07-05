@@ -33,6 +33,8 @@ std::atomic<int> global_num_cells{0};
 std::atomic<int> global_target_steps{0};
 std::atomic<bool> global_exec_until_end{false};
 std::atomic<double> global_cfl{0.4};
+std::atomic<double> global_wallclock_1d{0.0};
+std::atomic<double> global_wallclock_2d{0.0};
 std::mutex cout_mutex;
 
 std::unique_ptr<CFDSolver> global_solver = nullptr;
@@ -54,6 +56,107 @@ std::unique_ptr<CFDSolver2D> global_solver_2d = nullptr;
 std::unique_ptr<CFDSolver2DCuda> global_solver_2d_cuda = nullptr;
 double global_t2d = 0.0;
 double global_dt_2d = 0.0;
+
+struct GaugeDef {
+    std::string id;
+    double r;
+    double z;
+};
+
+struct GaugeHistory {
+    std::string id;
+    std::vector<std::vector<float>> channel_values; // size 7: [p, rho, u, e_int, alpha1, alpha2, air]
+};
+
+std::vector<GaugeDef> global_gauges;
+std::vector<double> global_gauge_times;
+std::vector<GaugeHistory> global_gauges_history;
+std::mutex global_gauges_mutex;
+
+void init_gauges(const nlohmann::json& msg) {
+    std::lock_guard<std::mutex> lock(global_gauges_mutex);
+    global_gauges.clear();
+    global_gauge_times.clear();
+    global_gauges_history.clear();
+    
+    if (msg.contains("nodes")) {
+        for (const auto& node : msg["nodes"]) {
+            if (node.value("type", "") == "VirtualGauges") {
+                if (node.contains("parameters") && node["parameters"].contains("gauges")) {
+                    for (const auto& gauge : node["parameters"]["gauges"]) {
+                        GaugeDef g;
+                        g.id = gauge.value("id", "");
+                        g.r = gauge.value("r", 0.0);
+                        g.z = gauge.value("z", 0.0);
+                        global_gauges.push_back(g);
+                        
+                        GaugeHistory h;
+                        h.id = g.id;
+                        h.channel_values.resize(7);
+                        global_gauges_history.push_back(h);
+                    }
+                }
+            }
+        }
+    }
+}
+
+void record_gauges_1d(double t) {
+    std::lock_guard<std::mutex> lock(global_gauges_mutex);
+    if (global_gauges.empty() || !global_solver) return;
+    int n_cells = global_solver->getNumCells();
+    double radius = global_solver->getRadius();
+    double dx = radius / n_cells;
+    
+    global_gauge_times.push_back(t);
+    for (size_t g_idx = 0; g_idx < global_gauges.size(); ++g_idx) {
+        const auto& g = global_gauges[g_idx];
+        int i = std::clamp(static_cast<int>(g.r / dx), 0, n_cells - 1);
+        auto vals = global_solver->getCellValues(i);
+        for (int ch = 0; ch < 7; ++ch) {
+            global_gauges_history[g_idx].channel_values[ch].push_back(vals[ch]);
+        }
+    }
+}
+
+void record_gauges_2d(double t) {
+    std::lock_guard<std::mutex> lock(global_gauges_mutex);
+    if (global_gauges.empty()) return;
+    
+    int nr = 0, nz = 0;
+    double dr = 0.0, dz = 0.0;
+    if (global_solver_2d_cuda) {
+        nr = global_solver_2d_cuda->getNr();
+        nz = global_solver_2d_cuda->getNz();
+        dr = global_solver_2d_cuda->getDr();
+        dz = global_solver_2d_cuda->getDz();
+    } else if (global_solver_2d) {
+        nr = global_solver_2d->getNr();
+        nz = global_solver_2d->getNz();
+        dr = global_solver_2d->getDr();
+        dz = global_solver_2d->getDz();
+    } else {
+        return;
+    }
+
+    global_gauge_times.push_back(t);
+    for (size_t g_idx = 0; g_idx < global_gauges.size(); ++g_idx) {
+        const auto& g = global_gauges[g_idx];
+        int i = std::clamp(static_cast<int>(g.r / dr), 0, nr - 1);
+        int j = std::clamp(static_cast<int>(g.z / dz), 0, nz - 1);
+        
+        std::vector<float> vals(7, 0.0f);
+        if (global_solver_2d_cuda) {
+            vals = global_solver_2d_cuda->getCellValues(i, j);
+        } else if (global_solver_2d) {
+            vals = global_solver_2d->getCellValues(i, j);
+        }
+        
+        for (int ch = 0; ch < 7; ++ch) {
+            global_gauges_history[g_idx].channel_values[ch].push_back(vals[ch]);
+        }
+    }
+}
 
 void emit_telemetry(const CFDSolver& solver, double elapsed, bool is_terminated = false);
 void emit_telemetry_2d(double elapsed, bool is_terminated = false);
@@ -104,9 +207,13 @@ void worker_thread_func() {
 
         if (done) break;
 
+        auto step_start = std::chrono::steady_clock::now();
         double dt = global_solver->computeStepSize(global_cfl.load());
         global_solver->step(dt);
+        auto step_end = std::chrono::steady_clock::now();
+        global_wallclock_1d = global_wallclock_1d.load() + std::chrono::duration<double>(step_end - step_start).count();
         global_t += dt;
+        record_gauges_1d(global_t);
 
         if (!global_exec_until_end.load()) {
             global_target_steps--;
@@ -193,14 +300,20 @@ void worker_2d_thread_func() {
 
         bool done = false;
         if (global_exec_until_end_2d.load()) {
-            // No natural termination in 2D yet unless we add it
-            // For now, EXEC_ALL runs until PAUSE or TERMINATE
+            bool terminated = false;
+            if (global_solver_2d_cuda) terminated = global_solver_2d_cuda->checkTerminationCondition();
+            else if (global_solver_2d) terminated = global_solver_2d->checkTerminationCondition();
+            if (terminated) {
+                emit_kernel_log("SYSTEM", "Shock wave reached outflow boundary. Terminating simulation.", global_t2d, "2d");
+                done = true;
+            }
         } else {
             if (global_target_steps_2d.load() <= 0) done = true;
         }
 
         if (done) break;
 
+        auto step_start = std::chrono::steady_clock::now();
         double dt = 0.0;
         if (global_solver_2d_cuda) {
             double max_s = global_solver_2d_cuda->getMaxWaveSpeed();
@@ -210,8 +323,12 @@ void worker_2d_thread_func() {
             dt = global_solver_2d->computeStepSize(global_cfl_2d.load());
             global_solver_2d->step(dt);
         }
+        auto step_end = std::chrono::steady_clock::now();
+        global_wallclock_2d = global_wallclock_2d.load() + std::chrono::duration<double>(step_end - step_start).count();
         global_dt_2d = dt;
         global_t2d += dt;
+
+        record_gauges_2d(global_t2d);
 
         if (!global_exec_until_end_2d.load()) {
             global_target_steps_2d--;
@@ -474,6 +591,27 @@ void emit_telemetry(const CFDSolver& solver, double elapsed, bool is_terminated)
     envelope["type"] = "TELEMETRY";
     envelope["time"] = elapsed;
     envelope["is_terminated"] = is_terminated;
+    envelope["wallclock"] = global_wallclock_1d.load();
+
+    {
+        std::lock_guard<std::mutex> g_lock(global_gauges_mutex);
+        if (!global_gauges.empty()) {
+            nlohmann::json gh;
+            gh["solverTracked"] = true;
+            gh["times"] = global_gauge_times;
+            nlohmann::json vals_obj = nlohmann::json::object();
+            for (const auto& h : global_gauges_history) {
+                nlohmann::json ch_arrays = nlohmann::json::array();
+                for (int ch = 0; ch < 7; ++ch) {
+                    ch_arrays.push_back(h.channel_values[ch]);
+                }
+                vals_obj[h.id] = ch_arrays;
+            }
+            gh["values"] = vals_obj;
+            envelope["gauges_history"] = gh;
+        }
+    }
+
     std::cout << envelope.dump() << std::endl;
 
     const uint32_t n_cells    = static_cast<uint32_t>(n);
@@ -521,6 +659,27 @@ void emit_telemetry_2d(double elapsed, bool is_terminated) {
     envelope["is_terminated"] = is_terminated;
     envelope["nr"] = out_nr;
     envelope["nz"] = out_nz;
+    envelope["wallclock"] = global_wallclock_2d.load();
+
+    {
+        std::lock_guard<std::mutex> g_lock(global_gauges_mutex);
+        if (!global_gauges.empty()) {
+            nlohmann::json gh;
+            gh["solverTracked"] = true;
+            gh["times"] = global_gauge_times;
+            nlohmann::json vals_obj = nlohmann::json::object();
+            for (const auto& h : global_gauges_history) {
+                nlohmann::json ch_arrays = nlohmann::json::array();
+                for (int ch = 0; ch < 7; ++ch) {
+                    ch_arrays.push_back(h.channel_values[ch]);
+                }
+                vals_obj[h.id] = ch_arrays;
+            }
+            gh["values"] = vals_obj;
+            envelope["gauges_history"] = gh;
+        }
+    }
+
     std::cout << envelope.dump() << std::endl;
 
     const uint32_t out_nr_u = static_cast<uint32_t>(out_nr);
@@ -560,8 +719,9 @@ int main() {
 
                 if (command == "INIT") {
                     sim_terminate = true;
-                    sim_running = false;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    while (sim_running.load()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    }
                     sim_terminate = false;
                     sim_paused = false;
                     step_progress = 0;
@@ -617,6 +777,9 @@ int main() {
                         global_solver->setInitialConditionTNT(explosive_radius, high_rho, ambient_rho, ambient_p);
                     }
 
+                    init_gauges(msg);
+                    record_gauges_1d(global_t);
+
                     emit_telemetry(*global_solver, global_t, false);
                     emit_kernel_log("SYSTEM", "Solver ready. Zero-Omission binding complete.", global_t, "1d");
 
@@ -648,17 +811,18 @@ int main() {
                     sim_paused = false;
                 } else if (command == "TERMINATE") {
                     sim_terminate = true;
-                    sim_running = false;
-                    int wait_count = 0;
-                    while (sim_running.load() && wait_count < 10) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); wait_count++; }
+                    while (sim_running.load()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    }
                     global_solver.reset();
                     global_num_cells = 0;
                     global_t = 0.0;
                     step_progress = 0;
                 } else if (command == "INIT_2D") {
                     sim2d_terminate = true;
-                    sim2d_running = false;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    while (sim2d_running.load()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    }
                     sim2d_terminate = false;
                     sim2d_paused = false;
                     step_progress_2d = 0;
@@ -696,6 +860,13 @@ int main() {
                     CFDSolver2D::BCType r_max_bc = map_bc_2d(bc_r_max_str);
                     CFDSolver2D::BCType z_min_bc = map_bc_2d(bc_z_min_str);
                     CFDSolver2D::BCType z_max_bc = map_bc_2d(bc_z_max_str);
+
+                    if (coord_sys == "Axisymmetric") {
+                        if (r_min_bc != CFDSolver2D::REFLECTIVE) {
+                            std::cout << "[INFO] Forcing R-Min boundary to Reflecting (Axisymmetric centerline)." << std::endl;
+                            r_min_bc = CFDSolver2D::REFLECTIVE;
+                        }
+                    }
 
                     MultiMat::MaterialSet matSet = MultiMat::TNT;
                     if      (composition == "PETN") matSet = MultiMat::PETN;
@@ -739,18 +910,34 @@ int main() {
                             double high_rho = msg.value("high_rho", msg.value("rho", 1630.0));
                             double ambient_rho = msg.value("ambient_rho", 1.2);
                             double ambient_p = msg.value("atm_pressure", msg.value("ambient_p", 101325.0));
-                            double explosive_z = msg.value("explosive_z", 0.0);
-                            double explosive_radius = msg.value("explosive_radius", 0.1);
+                            double explosive_z = msg.value("charge_z", msg.value("explosive_z", 0.0));
+                            double explosive_radius = msg.value("charge_radius", msg.value("explosive_radius", 0.1));
                             
                             global_solver_2d_cuda->setInitialConditionIdealGas(explosive_z, explosive_radius, high_rho, det_energy, ambient_rho, ambient_p);
+                            double detonator_r = msg.value("detonator_r", 0.0);
+                            double detonator_z = msg.value("detonator_z", explosive_z);
+                            global_solver_2d_cuda->setDetonatorLocation(detonator_r, detonator_z);
                         } else if (init_mode == "Multi-Material JWL" || init_mode == "JWL") {
                             double high_rho = msg.value("high_rho", msg.value("rho", 1630.0));
                             double ambient_rho = msg.value("ambient_rho", 1.2);
                             double ambient_p = msg.value("atm_pressure", msg.value("ambient_p", 101325.0));
-                            double explosive_z = msg.value("explosive_z", 0.0);
-                            double explosive_radius = msg.value("explosive_radius", 0.1);
+                            double explosive_z = msg.value("charge_z", msg.value("explosive_z", 0.0));
+                            double explosive_radius = msg.value("charge_radius", msg.value("explosive_radius", 0.1));
                             
-                            global_solver_2d_cuda->setInitialConditionTNT(explosive_z, explosive_radius, high_rho, ambient_rho, ambient_p);
+                            std::string charge_shape = msg.value("charge_shape", "Sphere");
+                            if (charge_shape == "Cylinder" || charge_shape == "cylinder") {
+                                double charge_radius = msg.value("charge_radius", 0.1);
+                                double charge_height = msg.value("charge_height", 0.2);
+                                global_solver_2d_cuda->setInitialConditionTNTCylinder(explosive_z, charge_radius, charge_height, high_rho, ambient_rho, ambient_p);
+                                double detonator_r = msg.value("detonator_r", 0.0);
+                                double detonator_z = msg.value("detonator_z", explosive_z + charge_height / 2.0);
+                                global_solver_2d_cuda->setDetonatorLocation(detonator_r, detonator_z);
+                            } else {
+                                global_solver_2d_cuda->setInitialConditionTNT(explosive_z, explosive_radius, high_rho, ambient_rho, ambient_p);
+                                double detonator_r = msg.value("detonator_r", 0.0);
+                                double detonator_z = msg.value("detonator_z", explosive_z);
+                                global_solver_2d_cuda->setDetonatorLocation(detonator_r, detonator_z);
+                            }
                         }
                     } else {
                         global_solver_2d_cuda.reset();
@@ -769,22 +956,40 @@ int main() {
                             double high_rho = msg.value("high_rho", msg.value("rho", 1630.0));
                             double ambient_rho = msg.value("ambient_rho", 1.2);
                             double ambient_p = msg.value("atm_pressure", msg.value("ambient_p", 101325.0));
-                            double explosive_z = msg.value("explosive_z", 0.0);
-                            double explosive_radius = msg.value("explosive_radius", 0.1);
+                            double explosive_z = msg.value("charge_z", msg.value("explosive_z", 0.0));
+                            double explosive_radius = msg.value("charge_radius", msg.value("explosive_radius", 0.1));
                             
                             global_solver_2d->setInitialConditionIdealGas(explosive_z, explosive_radius, high_rho, det_energy, ambient_rho, ambient_p);
+                            double detonator_r = msg.value("detonator_r", 0.0);
+                            double detonator_z = msg.value("detonator_z", explosive_z);
+                            global_solver_2d->setDetonatorLocation(detonator_r, detonator_z);
                         } else if (init_mode == "Multi-Material JWL" || init_mode == "JWL") {
                             double high_rho = msg.value("high_rho", msg.value("rho", 1630.0));
                             double ambient_rho = msg.value("ambient_rho", 1.2);
                             double ambient_p = msg.value("atm_pressure", msg.value("ambient_p", 101325.0));
-                            double explosive_z = msg.value("explosive_z", 0.0);
-                            double explosive_radius = msg.value("explosive_radius", 0.1);
+                            double explosive_z = msg.value("charge_z", msg.value("explosive_z", 0.0));
+                            double explosive_radius = msg.value("charge_radius", msg.value("explosive_radius", 0.1));
                             
-                            global_solver_2d->setInitialConditionTNT(explosive_z, explosive_radius, high_rho, ambient_rho, ambient_p);
+                            std::string charge_shape = msg.value("charge_shape", "Sphere");
+                            if (charge_shape == "Cylinder" || charge_shape == "cylinder") {
+                                double charge_radius = msg.value("charge_radius", 0.1);
+                                double charge_height = msg.value("charge_height", 0.2);
+                                global_solver_2d->setInitialConditionTNTCylinder(explosive_z, charge_radius, charge_height, high_rho, ambient_rho, ambient_p);
+                                double detonator_r = msg.value("detonator_r", 0.0);
+                                double detonator_z = msg.value("detonator_z", explosive_z + charge_height / 2.0);
+                                global_solver_2d->setDetonatorLocation(detonator_r, detonator_z);
+                            } else {
+                                global_solver_2d->setInitialConditionTNT(explosive_z, explosive_radius, high_rho, ambient_rho, ambient_p);
+                                double detonator_r = msg.value("detonator_r", 0.0);
+                                double detonator_z = msg.value("detonator_z", explosive_z);
+                                global_solver_2d->setDetonatorLocation(detonator_r, detonator_z);
+                            }
                         }
                     }
                     
                     solver2d_initialized = true;
+                    init_gauges(msg);
+                    record_gauges_2d(global_t2d);
                     emit_kernel_log("SYSTEM", "2D Solver Initialized", global_t2d, "2d");
                     emit_telemetry_2d(global_t2d, false);
                 } else if (command == "STEP_2D") {
@@ -815,9 +1020,9 @@ int main() {
                     sim2d_paused = false;
                 } else if (command == "TERMINATE_2D") {
                     sim2d_terminate = true;
-                    sim2d_running = false;
-                    int wait_count = 0;
-                    while (sim2d_running.load() && wait_count < 10) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); wait_count++; }
+                    while (sim2d_running.load()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    }
                     global_solver_2d.reset();
                     global_solver_2d_cuda.reset();
                     global_t2d = 0.0;
@@ -850,7 +1055,7 @@ int main() {
                         global_solver_2d->setInitialConditionFrom1D(explosive_z, remap_radius, r_1d, states_1d, ambient_rho, ambient_p, explosive_r);
                         global_solver_2d->setTime(0.0);
                     } else if (global_solver_2d_cuda) {
-                        global_solver_2d_cuda->setInitialConditionFrom1D(explosive_z, remap_radius, r_1d, states_1d, ambient_rho, ambient_p);
+                        global_solver_2d_cuda->setInitialConditionFrom1D(explosive_z, remap_radius, r_1d, states_1d, ambient_rho, ambient_p, explosive_r);
                         global_solver_2d_cuda->setTime(0.0);
                     }
                     global_t2d = 0.0;
@@ -870,11 +1075,6 @@ int main() {
         }
     });
     stdin_listener_thread.join();
-
-    // Prevent abrupt termination of detached worker threads when stdin reaches EOF
-    while (sim_running.load() || sim2d_running.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
 
     return 0;
 }

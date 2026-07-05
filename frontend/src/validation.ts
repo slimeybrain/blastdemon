@@ -368,22 +368,24 @@ export function validateSimulationState(state: SimulationState): ValidationResul
         }
 
         if (node.type === 'DomainMesh2D') {
-            const nr = Number(node.parameters?.nr ?? 200);
-            const nz = Number(node.parameters?.nz ?? 200);
+            const cell_size = Number(node.parameters?.cell_size ?? 0.005);
             const max_r = Number(node.parameters?.max_r ?? 1.0);
             const max_z = Number(node.parameters?.max_z ?? 1.0);
 
-            if (isNaN(nr) || nr <= 0 || !Number.isInteger(nr)) {
-                addMessage(node.id, 'error', "Mesh resolution R (nr) must be a positive integer.");
-            }
-            if (isNaN(nz) || nz <= 0 || !Number.isInteger(nz)) {
-                addMessage(node.id, 'error', "Mesh resolution Z (nz) must be a positive integer.");
+            if (isNaN(cell_size) || cell_size <= 0) {
+                addMessage(node.id, 'error', "Mesh Cell Size must be greater than 0.");
             }
             if (isNaN(max_r) || max_r <= 0) {
                 addMessage(node.id, 'error', "Mesh dimension R (max_r) must be greater than 0.");
             }
             if (isNaN(max_z) || max_z <= 0) {
                 addMessage(node.id, 'error', "Mesh dimension Z (max_z) must be greater than 0.");
+            }
+
+            const coordSys = node.parameters?.coordinate_system || 'Axisymmetric';
+            const bcRmin = node.parameters?.bc_r_min || 'Reflecting';
+            if (coordSys === 'Axisymmetric' && bcRmin !== 'Reflecting') {
+                addMessage(node.id, 'error', "In Axisymmetric coordinate system, the R-Min boundary (centerline r=0) must be Reflecting.");
             }
         }
 

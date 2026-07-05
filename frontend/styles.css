@@ -1702,6 +1702,201 @@ canvas {
     gap: 4px;
 }
 
+/* Virtual Gauges Panel Styles */
+.gauges-manager-panel {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+    background: #1e1e1e;
+    color: #cbd5e1;
+    font-family: var(--font-ui), sans-serif;
+}
+
+.gauges-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 12px;
+    background: #252526;
+    border-bottom: 1px solid #333;
+    align-items: center;
+}
+
+.gauges-toolbar button, .gauges-bulk-actions button {
+    background: #333;
+    color: #ccc;
+    border: 1px solid #444;
+    padding: 4px 10px;
+    font-size: var(--font-xs);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.gauges-toolbar button:hover, .gauges-bulk-actions button:hover {
+    background: #444;
+    color: #fff;
+    border-color: #555;
+}
+
+.gauges-toolbar button.primary {
+    background: #007acc;
+    color: #fff;
+    border-color: #0098ff;
+}
+
+.gauges-toolbar button.primary:hover {
+    background: #0098ff;
+}
+
+.gauges-toolbar button.danger, .gauges-bulk-actions button.danger {
+    background: #dc2626;
+    color: #fff;
+    border-color: #ef4444;
+}
+
+.gauges-toolbar button.danger:hover, .gauges-bulk-actions button.danger:hover {
+    background: #ef4444;
+}
+
+.gauges-panel-split {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    overflow: hidden;
+}
+
+/* Landscape/side-by-side on wide screens */
+@media (min-width: 900px) {
+    .gauges-panel-split {
+        flex-direction: row;
+    }
+}
+
+.gauges-chart-area {
+    flex: 1.5;
+    min-height: 250px;
+    position: relative;
+    background: #09090b;
+    border-bottom: 1px solid #333;
+}
+
+@media (min-width: 900px) {
+    .gauges-chart-area {
+        border-bottom: none;
+        border-right: 1px solid #333;
+    }
+}
+
+.gauges-chart-area canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+.gauges-list-area {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    padding: 12px;
+}
+
+.gauges-table-container {
+    flex: 1;
+    overflow-y: auto;
+    border: 1px solid #333;
+    border-radius: 4px;
+    background: #18181b;
+}
+
+.gauges-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--font-xs);
+    text-align: left;
+}
+
+.gauges-table th, .gauges-table td {
+    padding: 6px 8px;
+    border-bottom: 1px solid #27272a;
+}
+
+.gauges-table th {
+    background: #18181b;
+    color: #71717a;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+
+.gauges-table input[type="number"], .gauges-table input[type="text"] {
+    background: #252526;
+    color: #ccc;
+    border: 1px solid #444;
+    border-radius: 3px;
+    padding: 2px 4px;
+    font-size: var(--font-xs);
+}
+
+/* On-canvas Node Gauges Styles */
+.node-body-gauges {
+    width: 100%;
+    flex: 1;
+    min-height: 0;
+    background: #111;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+.node-gauges-toolbar {
+    display: flex;
+    gap: 4px;
+    padding: 3px 6px;
+    background: #1e1e1e;
+    border-bottom: 1px solid #333;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.node-gauges-toolbar button {
+    background: #2b2b2b;
+    color: #ccc;
+    border: 1px solid #444;
+    border-radius: 3px;
+    padding: 1px 4px;
+    font-size: 9px;
+    cursor: pointer;
+}
+
+.node-gauges-toolbar button:hover {
+    background: #3b3b3b;
+    color: #fff;
+    border-color: #555;
+}
+
+.node-gauges-toolbar select {
+    background: #2b2b2b;
+    color: #ccc;
+    border: 1px solid #444;
+    border-radius: 3px;
+    padding: 0 4px;
+    font-size: 9px;
+}
+
+.node-gauges-canvas {
+    width: 100%;
+    display: block;
+}
+
 
 
 

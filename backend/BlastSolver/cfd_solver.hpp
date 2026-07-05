@@ -42,6 +42,7 @@ public:
     virtual double getAmbientRho() const = 0;
     virtual double getAmbientP() const = 0;
 
+    virtual std::vector<float> getCellValues(int i) const = 0;
     virtual std::vector<float> getTelemetryChannels() const = 0;
     virtual std::vector<double> getLocalTimesteps(double cfl) const = 0;
 
@@ -85,6 +86,7 @@ public:
     double getAmbientRho() const override { return ambient_rho; }
     double getAmbientP() const override { return ambient_p; }
 
+    std::vector<float> getCellValues(int i) const override;
     std::vector<float> getTelemetryChannels() const override;
     std::vector<double> getLocalTimesteps(double cfl) const override;
 

@@ -16,6 +16,13 @@ export class NodeViewer {
     private lastType: NodeType | null = null;
     private lastId: string | null = null;
 
+    private selectedGaugeIds: Set<string> = new Set();
+    private currentPage: number = 1;
+    private searchQuery: string = "";
+    private gaugesChannel: number = 0;
+    private gaugesCanvas: HTMLCanvasElement | null = null;
+    private gaugesResizeObserver: ResizeObserver | null = null;
+
     private telemetryBuffer: any = null;
     private renderRequestId: number | null = null;
 
@@ -89,7 +96,7 @@ export class NodeViewer {
         }
 
         if (this.lastId === node.id && this.lastType === node.type) {
-            if (node.type !== 'TelemetryText' && node.type !== 'TelemetryGraph') {
+            if (node.type !== 'TelemetryText' && node.type !== 'TelemetryGraph' && node.type !== 'VirtualGauges') {
                 this.renderStandardNode(node);
             } else if (node.type === 'TelemetryGraph') {
                 // Sync settings from the node parameters (e.g. after model load)
@@ -171,6 +178,8 @@ export class NodeViewer {
             this.renderExpandedText(node);
         } else if (node.type === 'TelemetryGraph') {
             this.renderExpandedGraph(node);
+        } else if (node.type === 'VirtualGauges') {
+            this.renderVirtualGauges(node);
         } else {
             this.renderStandardNode(node);
         }
@@ -602,12 +611,437 @@ export class NodeViewer {
 
     private handleTelemetry(nodeId: string, data: any): void {
         if (nodeId !== this.currentNodeId) return;
+        const state = this.stateManager.getCurrentState();
+        const node = state?.nodes.find(n => n.id === nodeId);
+        if (node && node.type === 'VirtualGauges') {
+            if (this.gaugesCanvas) {
+                const gauges = node.parameters?.gauges || [];
+                const has2D = state?.nodes.some(n => n.type === 'DomainMesh2D') || false;
+                const history = this.stateManager.getTelemetry(nodeId);
+                this.drawGaugesChart(this.gaugesCanvas, history, gauges, this.gaugesChannel, has2D);
+            }
+            return;
+        }
         if (data instanceof ArrayBuffer) {
             const bufferCopy = data.slice(0);
             this.updateNodeViewerData(nodeId, bufferCopy);
         } else {
             this.updateNodeViewerData(nodeId, data);
         }
+    }
+
+    private renderVirtualGauges(node: Node): void {
+        this.stopRenderLoop();
+        this.telemetryBuffer = null;
+        if (this.chartWorker) {
+            this.chartWorker.terminate();
+            this.chartWorker = null;
+        }
+        if (this.gaugesResizeObserver) {
+            this.gaugesResizeObserver.disconnect();
+            this.gaugesResizeObserver = null;
+        }
+
+        const state = this.stateManager.getCurrentState();
+        const has2D = state?.nodes.some(n => n.type === 'DomainMesh2D') || false;
+        const gauges = node.parameters?.gauges || [];
+
+        this.container.style.position = 'relative';
+        this.container.style.overflow = 'hidden';
+
+        const panel = document.createElement('div');
+        panel.className = 'gauges-manager-panel';
+        panel.style.width = '100%';
+        panel.style.height = '100%';
+        panel.style.display = 'flex';
+        panel.style.flexDirection = 'column';
+
+        const toolbar = document.createElement('div');
+        toolbar.className = 'gauges-toolbar';
+
+        const title = document.createElement('span');
+        title.style.fontWeight = 'bold';
+        title.style.marginRight = '10px';
+        title.style.fontSize = 'var(--font-sm)';
+        title.textContent = `GAUGES: ${node.id}`;
+        toolbar.appendChild(title);
+
+
+
+        const addBtn = document.createElement('button');
+        addBtn.className = 'primary';
+        addBtn.textContent = '+ Add Gauge';
+        addBtn.addEventListener('click', () => {
+            const nextIdx = gauges.length + 1;
+            const newGauges = [...gauges, { id: `G${nextIdx}`, r: 0.1, z: 0.0, active: true }];
+            this.stateManager.updateNodeParameters(node.id, { gauges: newGauges });
+            this.render();
+        });
+        toolbar.appendChild(addBtn);
+
+        const clearBtn = document.createElement('button');
+        clearBtn.className = 'danger';
+        clearBtn.textContent = 'Clear All';
+        clearBtn.addEventListener('click', () => {
+            this.stateManager.updateNodeParameters(node.id, { gauges: [] });
+            this.render();
+        });
+        toolbar.appendChild(clearBtn);
+
+        const searchInput = document.createElement('input');
+        searchInput.type = 'text';
+        searchInput.placeholder = 'Search gauges...';
+        searchInput.value = this.searchQuery;
+        searchInput.style.background = '#333';
+        searchInput.style.color = '#ccc';
+        searchInput.style.border = '1px solid #444';
+        searchInput.style.padding = '3px 8px';
+        searchInput.style.borderRadius = '4px';
+        searchInput.style.fontSize = 'var(--font-xs)';
+        searchInput.style.marginLeft = 'auto';
+        searchInput.addEventListener('input', () => {
+            this.searchQuery = searchInput.value;
+            this.syncVirtualGauges(node, has2D);
+        });
+        toolbar.appendChild(searchInput);
+
+        panel.appendChild(toolbar);
+
+        const split = document.createElement('div');
+        split.className = 'gauges-panel-split';
+        split.style.display = 'flex';
+        split.style.flex = '1';
+        split.style.minHeight = '0';
+
+        const chartArea = document.createElement('div');
+        chartArea.className = 'gauges-chart-area';
+        chartArea.style.flex = '1.5';
+        chartArea.style.position = 'relative';
+
+        const canvas = document.createElement('canvas');
+        canvas.className = 'gauges-canvas';
+        chartArea.appendChild(canvas);
+        this.gaugesCanvas = canvas;
+
+        split.appendChild(chartArea);
+
+        const listArea = document.createElement('div');
+        listArea.className = 'gauges-list-area';
+        listArea.style.flex = '1';
+        listArea.style.display = 'flex';
+        listArea.style.flexDirection = 'column';
+        listArea.style.gap = '8px';
+
+        const tableContainer = document.createElement('div');
+        tableContainer.className = 'gauges-table-container';
+        tableContainer.style.flex = '1';
+        tableContainer.style.overflowY = 'auto';
+        listArea.appendChild(tableContainer);
+
+        const paginationControls = document.createElement('div');
+        paginationControls.className = 'gauges-pagination-controls';
+        paginationControls.style.display = 'flex';
+        paginationControls.style.justifyContent = 'space-between';
+        paginationControls.style.alignItems = 'center';
+        paginationControls.style.padding = '4px 0';
+
+        const infoSpan = document.createElement('span');
+        infoSpan.className = 'gauges-pagination-info';
+        infoSpan.style.fontSize = 'var(--font-xs)';
+        infoSpan.style.color = '#71717a';
+        paginationControls.appendChild(infoSpan);
+
+        const btnContainer = document.createElement('div');
+        btnContainer.style.display = 'flex';
+        btnContainer.style.gap = '4px';
+
+        const prevBtn = document.createElement('button');
+        prevBtn.className = 'gauges-prev-page-btn';
+        prevBtn.textContent = '◀';
+        prevBtn.style.background = '#333';
+        prevBtn.style.color = '#ccc';
+        prevBtn.style.border = '1px solid #444';
+        prevBtn.style.padding = '2px 6px';
+        prevBtn.style.borderRadius = '3px';
+        prevBtn.style.cursor = 'pointer';
+        prevBtn.addEventListener('click', () => {
+            if (this.currentPage > 1) {
+                this.currentPage--;
+                this.syncVirtualGauges(node, has2D);
+            }
+        });
+        btnContainer.appendChild(prevBtn);
+
+        const nextBtn = document.createElement('button');
+        nextBtn.className = 'gauges-next-page-btn';
+        nextBtn.textContent = '▶';
+        nextBtn.style.background = '#333';
+        nextBtn.style.color = '#ccc';
+        nextBtn.style.border = '1px solid #444';
+        nextBtn.style.padding = '2px 6px';
+        nextBtn.style.borderRadius = '3px';
+        nextBtn.style.cursor = 'pointer';
+        nextBtn.addEventListener('click', () => {
+            const query = this.searchQuery.toLowerCase().trim();
+            const filteredGauges = gauges.filter((g: any) => 
+                g.id.toLowerCase().includes(query) ||
+                String(g.r).includes(query) ||
+                (has2D && String(g.z).includes(query))
+            );
+            const totalPages = Math.ceil(filteredGauges.length / 50) || 1;
+            if (this.currentPage < totalPages) {
+                this.currentPage++;
+                this.syncVirtualGauges(node, has2D);
+            }
+        });
+        btnContainer.appendChild(nextBtn);
+
+        paginationControls.appendChild(btnContainer);
+        listArea.appendChild(paginationControls);
+
+        split.appendChild(listArea);
+        panel.appendChild(split);
+        this.container.appendChild(panel);
+
+        this.gaugesResizeObserver = new ResizeObserver(() => {
+            canvas.width = canvas.clientWidth;
+            canvas.height = canvas.clientHeight;
+            const history = this.stateManager.getTelemetry(node.id);
+            this.drawGaugesChart(canvas, history, node.parameters?.gauges || [], this.gaugesChannel, has2D);
+        });
+        this.gaugesResizeObserver.observe(canvas);
+
+        this.syncVirtualGauges(node, has2D);
+    }
+
+    private syncVirtualGauges(node: Node, has2D: boolean): void {
+        const tableContainer = this.container.querySelector('.gauges-table-container') as HTMLElement;
+        if (!tableContainer) return;
+
+        const gauges = node.parameters?.gauges || [];
+        
+        const query = this.searchQuery.toLowerCase().trim();
+        const filteredGauges = gauges.filter((g: any) => 
+            g.id.toLowerCase().includes(query) ||
+            String(g.r).includes(query) ||
+            (has2D && String(g.z).includes(query))
+        );
+
+        const pageSize = 50;
+        const totalItems = filteredGauges.length;
+        const totalPages = Math.ceil(totalItems / pageSize) || 1;
+        this.currentPage = Math.max(1, Math.min(this.currentPage, totalPages));
+        const startIndex = (this.currentPage - 1) * pageSize;
+        const endIndex = Math.min(startIndex + pageSize, totalItems);
+        const pagedGauges = filteredGauges.slice(startIndex, endIndex);
+
+        const infoSpan = this.container.querySelector('.gauges-pagination-info') as HTMLElement;
+        if (infoSpan) {
+            infoSpan.textContent = totalItems > 0 
+                ? `Showing ${startIndex + 1}-${endIndex} of ${totalItems} gauges`
+                : 'No gauges to display';
+        }
+
+        const prevBtn = this.container.querySelector('.gauges-prev-page-btn') as HTMLButtonElement;
+        const nextBtn = this.container.querySelector('.gauges-next-page-btn') as HTMLButtonElement;
+        if (prevBtn) prevBtn.disabled = this.currentPage === 1;
+        if (nextBtn) nextBtn.disabled = this.currentPage === totalPages;
+
+        tableContainer.innerHTML = '';
+        const table = document.createElement('table');
+        table.className = 'gauges-table';
+        table.style.width = '100%';
+        table.style.borderCollapse = 'collapse';
+
+        const thead = document.createElement('thead');
+        const headerTr = document.createElement('tr');
+        headerTr.innerHTML = `
+            <th style="width: 60px;">ID</th>
+            <th>R (m)</th>
+            ${has2D ? '<th>Z (m)</th>' : ''}
+            <th style="width: 40px; text-align: center;">Actions</th>
+        `;
+        thead.appendChild(headerTr);
+        table.appendChild(thead);
+
+        const tbody = document.createElement('tbody');
+        pagedGauges.forEach((g: any) => {
+            const tr = document.createElement('tr');
+            tr.style.borderBottom = '1px solid #27272a';
+
+            const tdId = document.createElement('td');
+            tdId.style.padding = '6px 8px';
+            tdId.style.fontWeight = 'bold';
+            tdId.textContent = g.id;
+            tr.appendChild(tdId);
+
+            const tdR = document.createElement('td');
+            tdR.style.padding = '6px 8px';
+            const inputR = document.createElement('input');
+            inputR.type = 'number';
+            inputR.step = 'any';
+            inputR.value = String(g.r);
+            inputR.style.width = '70px';
+            inputR.addEventListener('change', () => {
+                const idx = gauges.findIndex((x: any) => x.id === g.id);
+                if (idx !== -1) {
+                    const updated = [...gauges];
+                    updated[idx] = { ...g, r: Number(inputR.value) };
+                    this.stateManager.updateNodeParameters(node.id, { gauges: updated });
+                }
+            });
+            tdR.appendChild(inputR);
+            tr.appendChild(tdR);
+
+            if (has2D) {
+                const tdZ = document.createElement('td');
+                tdZ.style.padding = '6px 8px';
+                const inputZ = document.createElement('input');
+                inputZ.type = 'number';
+                inputZ.step = 'any';
+                inputZ.value = String(g.z);
+                inputZ.style.width = '70px';
+                inputZ.addEventListener('change', () => {
+                    const idx = gauges.findIndex((x: any) => x.id === g.id);
+                    if (idx !== -1) {
+                        const updated = [...gauges];
+                        updated[idx] = { ...g, z: Number(inputZ.value) };
+                        this.stateManager.updateNodeParameters(node.id, { gauges: updated });
+                    }
+                });
+                tdZ.appendChild(inputZ);
+                tr.appendChild(tdZ);
+            }
+
+            const tdActions = document.createElement('td');
+            tdActions.style.padding = '6px 8px';
+            tdActions.style.textAlign = 'center';
+            const delBtn = document.createElement('button');
+            delBtn.textContent = 'Delete';
+            delBtn.style.background = '#dc2626';
+            delBtn.style.color = '#fff';
+            delBtn.style.border = 'none';
+            delBtn.style.padding = '2px 6px';
+            delBtn.style.borderRadius = '3px';
+            delBtn.style.cursor = 'pointer';
+            delBtn.addEventListener('click', () => {
+                const updated = gauges.filter((x: any) => x.id !== g.id);
+                this.stateManager.updateNodeParameters(node.id, { gauges: updated });
+                this.render();
+            });
+            tdActions.appendChild(delBtn);
+            tr.appendChild(tdActions);
+
+            tbody.appendChild(tr);
+        });
+
+        table.appendChild(tbody);
+        tableContainer.appendChild(table);
+    }
+
+    private drawGaugesChart(canvas: HTMLCanvasElement, history: any, gauges: any[], channel: number, has2D: boolean): void {
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        const width = canvas.width;
+        const height = canvas.height;
+
+        ctx.clearRect(0, 0, width, height);
+
+        if (!history || !history.times || history.times.length === 0 || gauges.length === 0) {
+            ctx.fillStyle = '#666';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('Waiting for telemetry...', width / 2, height / 2);
+            return;
+        }
+
+        const times = history.times;
+        const values = history.values;
+
+        let minVal = Infinity;
+        let maxVal = -Infinity;
+        let hasData = false;
+
+        gauges.forEach(g => {
+            const gData = values[g.id];
+            if (gData && gData[channel]) {
+                const arr = gData[channel];
+                arr.forEach((v: number) => {
+                    if (isFinite(v)) {
+                        if (v < minVal) minVal = v;
+                        if (v > maxVal) maxVal = v;
+                        hasData = true;
+                    }
+                });
+            }
+        });
+
+        if (!hasData) {
+            ctx.fillStyle = '#666';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('No gauge data for selected channel', width / 2, height / 2);
+            return;
+        }
+
+        const padding = 40;
+        const plotWidth = width - 2 * padding;
+        const plotHeight = height - 2 * padding;
+        const range = maxVal - minVal === 0 ? 1.0 : maxVal - minVal;
+
+        ctx.strokeStyle = '#333';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(padding, padding);
+        ctx.lineTo(padding, height - padding);
+        ctx.lineTo(width - padding, height - padding);
+        ctx.stroke();
+
+        ctx.fillStyle = '#888';
+        ctx.font = '9px monospace';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(maxVal.toExponential(2), padding - 4, padding);
+        ctx.fillText(minVal.toExponential(2), padding - 4, height - padding);
+
+        ctx.fillText(`t = ${times[times.length - 1].toFixed(5)}s`, width - padding, height - padding + 12);
+
+        const colors = ['#38bdf8', '#fb7185', '#34d399', '#fbbf24', '#a78bfa', '#2dd4bf'];
+        gauges.forEach((g, gIdx) => {
+            const gData = values[g.id];
+            if (gData && gData[channel]) {
+                const arr = gData[channel];
+                ctx.strokeStyle = colors[gIdx % colors.length];
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+
+                arr.forEach((v: number, i: number) => {
+                    if (i >= times.length) return;
+                    const x = padding + (i / (times.length - 1)) * plotWidth;
+                    const y = height - padding - ((v - minVal) / range) * plotHeight;
+                    if (i === 0) {
+                        ctx.moveTo(x, y);
+                    } else {
+                        ctx.lineTo(x, y);
+                    }
+                });
+                ctx.stroke();
+
+                if (arr.length > 0 && times.length > 0) {
+                    const lastIdx = Math.min(arr.length - 1, times.length - 1);
+                    const lastVal = arr[lastIdx];
+                    const x = padding + (lastIdx / (times.length - 1)) * plotWidth;
+                    const y = height - padding - ((lastVal - minVal) / range) * plotHeight;
+                    ctx.fillStyle = colors[gIdx % colors.length];
+                    ctx.font = 'bold 8px monospace';
+                    ctx.textAlign = 'left';
+                    ctx.fillText(` ${g.id}`, x, y);
+                }
+            }
+        });
     }
 
     private startRenderLoop(): void {

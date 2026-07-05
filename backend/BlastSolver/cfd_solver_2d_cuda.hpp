@@ -52,11 +52,18 @@ public:
 
     void setBCTypes(BCType r_min, BCType r_max, BCType z_min, BCType z_max) {
         bcRmin = r_min; bcRmax = r_max; bcZmin = z_min; bcZmax = z_max;
+     }
+    void setDetonatorLocation(double r, double z) {
+        det_x = r;
+        det_z = z;
     }
 
     std::vector<State2D> getStates();
     std::vector<float> getTelemetry2D(int stride = 1);
+    std::vector<float> getCellValues(int i, int j);
     double getMaxWaveSpeed();
+    bool checkTerminationCondition();
+    bool isIdealGas() const { return is_ideal_gas; }
 
 private:
     int nr_cells;
@@ -102,6 +109,7 @@ private:
     double* d_block_maxes;
     double* d_block_p_ratios;
     uint8_t* d_tile_active_flags;
+    int* d_terminated = nullptr;
     
     // CPU fallback arrays for initialization
     std::vector<PrimitiveTile> host_states_pool;

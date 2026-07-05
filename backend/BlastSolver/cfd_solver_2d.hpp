@@ -57,10 +57,26 @@ public:
         bcRmin = r_min; bcRmax = r_max; bcZmin = z_min; bcZmax = z_max;
     }
     void setCoordinateSystemCartesian(bool cartesian) { is_cartesian = cartesian; }
+    void setDetonatorLocation(double r, double z) {
+        det_x = r;
+        det_z = z;
+    }
+
+    BCType getBCRmin() const { return bcRmin; }
+    BCType getBCRmax() const { return bcRmax; }
+    BCType getBCZmin() const { return bcZmin; }
+    BCType getBCZmax() const { return bcZmax; }
+    double getAmbientRho() const { return ambient_rho; }
+    double getAmbientP() const { return ambient_p; }
+    const MultiMat::MaterialSet& getMaterialParameters() const { return currentMaterials; }
+    bool isIdealGas() const { return is_ideal_gas; }
+
+    bool checkTerminationCondition() const;
 
     // Telemetry and export (Needs conversion from Sparse SoA to expected format)
     std::vector<State2D> getStates() const;
     std::vector<float> getTelemetry2D(int stride = 1) const;
+    std::vector<float> getCellValues(int i, int j) const;
 
     void setSolidVelocities(const double* v);
     void setSolidMask(const uint8_t* mask);

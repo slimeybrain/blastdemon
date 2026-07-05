@@ -23,24 +23,88 @@ struct CellState {
 
 // ... Device kernels ...
 
-__device__ inline CellState readState_device(const int32_t* tile_map, const PrimitiveTile* states_pool, int i, int j, int nr_cells, int nz_cells, int num_tiles_z) {
-    bool flip_ur = false;
-    bool flip_uz = false;
+__device__ inline void compute_E_device(CellState& s, double gamma, const MultiMat::MaterialSet* d_materials, bool is_ideal_gas);
+
+__device__ inline CellState applyBC_device(CellState s, int bc, double normal_vel, double ambient_rho, double ambient_p, double gamma, const MultiMat::MaterialSet* d_materials, bool is_ideal_gas, bool is_r_axis) {
+    if (bc == 0) { // REFLECTIVE is 0
+        if (is_r_axis) {
+            s.ur = -s.ur;
+        } else {
+            s.uz = -s.uz;
+        }
+    } else if (bc == 1) { // TRANSMISSIVE is 1
+        // Zero-gradient: copy directly, do nothing
+    } else if (bc == 2) { // OUTFLOW_RIEMANN is 2
+        double c;
+        if (is_ideal_gas) {
+            c = sqrt(gamma * s.p / s.rho);
+        } else {
+            c = MultiMat::getMixtureSoundSpeed(s.p, s.rho, s.alpha1, s.alpha2, s.arho1, s.arho2, gamma, d_materials->products, d_materials->unreacted);
+        }
+        if (normal_vel < 0.0) {
+            // Inflow
+            s.rho = ambient_rho;
+            s.ur = 0.0;
+            s.uz = 0.0;
+            s.p = ambient_p;
+            s.alpha1 = 0.0;
+            s.alpha2 = 0.0;
+            s.arho1 = 0.0;
+            s.arho2 = 0.0;
+            s.E = is_ideal_gas ? (ambient_p / (gamma - 1.0)) : 
+                  (ambient_rho * MultiMat::getEnergy_IdealGas(ambient_p, ambient_rho, gamma));
+        } else if (normal_vel < c) {
+            // Subsonic outflow
+            s.p = ambient_p;
+            compute_E_device(s, gamma, d_materials, is_ideal_gas);
+        }
+        // Supersonic outflow (extrapolate as is)
+    }
+    return s;
+}
+
+__device__ inline CellState readState_device(
+    const int32_t* tile_map, const PrimitiveTile* states_pool, 
+    int i, int j, int nr_cells, int nz_cells, int num_tiles_z,
+    double ambient_rho, double ambient_p, double gamma,
+    int bcRmin, int bcRmax, int bcZmin, int bcZmax,
+    const MultiMat::MaterialSet* d_materials, bool is_ideal_gas) {
+    
+    bool is_outside_i = false;
+    bool is_outside_j = false;
+    int original_i = i;
+    int original_j = j;
     
     if (i < 0) {
-        i = -i - 1;
-        flip_ur = true;
+        is_outside_i = true;
+        if (bcRmin == 0) {
+            i = -i - 1;
+        } else {
+            i = 0;
+        }
     } else if (i >= nr_cells) {
-        i = nr_cells - 1;
-        flip_ur = true;
+        is_outside_i = true;
+        if (bcRmax == 0) {
+            i = 2 * nr_cells - 1 - i;
+        } else {
+            i = nr_cells - 1;
+        }
     }
     
     if (j < 0) {
-        j = -j - 1;
-        flip_uz = true;
+        is_outside_j = true;
+        if (bcZmin == 0) {
+            j = -j - 1;
+        } else {
+            j = 0;
+        }
     } else if (j >= nz_cells) {
-        j = nz_cells - 1;
-        flip_uz = true;
+        is_outside_j = true;
+        if (bcZmax == 0) {
+            j = 2 * nz_cells - 1 - j;
+        } else {
+            j = nz_cells - 1;
+        }
     }
     
     int tr = i / TILE_SIZE;
@@ -49,7 +113,10 @@ __device__ inline CellState readState_device(const int32_t* tile_map, const Prim
     
     CellState s;
     if (pool_idx == -1) {
-        s = {1.2, 0.0, 0.0, 101325.0, 101325.0/0.4, 0.0, 0.0, 0.0, 0.0};
+        s = { ambient_rho, 0.0, 0.0, ambient_p, 
+              is_ideal_gas ? (ambient_p / (gamma - 1.0)) : 
+              (ambient_rho * MultiMat::getEnergy_IdealGas(ambient_p, ambient_rho, gamma)), 
+              0.0, 0.0, 0.0, 0.0 };
     } else {
         int local_i = i % TILE_SIZE;
         int local_j = j % TILE_SIZE;
@@ -68,8 +135,14 @@ __device__ inline CellState readState_device(const int32_t* tile_map, const Prim
         };
     }
     
-    if (flip_ur) s.ur = -s.ur;
-    if (flip_uz) s.uz = -s.uz;
+    if (is_outside_i) {
+        double normal_vel = (original_i < 0) ? s.ur : -s.ur;
+        s = applyBC_device(s, (original_i < 0) ? bcRmin : bcRmax, normal_vel, ambient_rho, ambient_p, gamma, d_materials, is_ideal_gas, true);
+    }
+    if (is_outside_j) {
+        double normal_vel = (original_j < 0) ? s.uz : -s.uz;
+        s = applyBC_device(s, (original_j < 0) ? bcZmin : bcZmax, normal_vel, ambient_rho, ambient_p, gamma, d_materials, is_ideal_gas, false);
+    }
     
     return s;
 }
@@ -175,7 +248,9 @@ __global__ __launch_bounds__(256, 2) void computeTileRHS_kernel(
     int num_tiles_r, int num_tiles_z, int nr_cells, int nz_cells, 
     double dr, double dz, double gamma, double dt, double A_coeff, MultiMat::MaterialSet* d_materials,
     const int32_t* tile_map, const PrimitiveTile* states_pool, ConservativeTile* dU_pool,
-    int spatialOrder, bool is_ideal_gas) {
+    int spatialOrder, bool is_ideal_gas,
+    int bcRmin, int bcRmax, int bcZmin, int bcZmax,
+    double ambient_rho, double ambient_p) {
     
     int tr = blockIdx.x;
     int tz = blockIdx.y;
@@ -191,11 +266,11 @@ __global__ __launch_bounds__(256, 2) void computeTileRHS_kernel(
     
     int k = local_i * TILE_SIZE + local_j;
     
-    CellState s_c = readState_device(tile_map, states_pool, i, j, nr_cells, nz_cells, num_tiles_z);
-    CellState s_L = readState_device(tile_map, states_pool, i - 1, j, nr_cells, nz_cells, num_tiles_z);
-    CellState s_R = readState_device(tile_map, states_pool, i + 1, j, nr_cells, nz_cells, num_tiles_z);
-    CellState s_B = readState_device(tile_map, states_pool, i, j - 1, nr_cells, nz_cells, num_tiles_z);
-    CellState s_T = readState_device(tile_map, states_pool, i, j + 1, nr_cells, nz_cells, num_tiles_z);
+    CellState s_c = readState_device(tile_map, states_pool, i, j, nr_cells, nz_cells, num_tiles_z, ambient_rho, ambient_p, gamma, bcRmin, bcRmax, bcZmin, bcZmax, d_materials, is_ideal_gas);
+    CellState s_L = readState_device(tile_map, states_pool, i - 1, j, nr_cells, nz_cells, num_tiles_z, ambient_rho, ambient_p, gamma, bcRmin, bcRmax, bcZmin, bcZmax, d_materials, is_ideal_gas);
+    CellState s_R = readState_device(tile_map, states_pool, i + 1, j, nr_cells, nz_cells, num_tiles_z, ambient_rho, ambient_p, gamma, bcRmin, bcRmax, bcZmin, bcZmax, d_materials, is_ideal_gas);
+    CellState s_B = readState_device(tile_map, states_pool, i, j - 1, nr_cells, nz_cells, num_tiles_z, ambient_rho, ambient_p, gamma, bcRmin, bcRmax, bcZmin, bcZmax, d_materials, is_ideal_gas);
+    CellState s_T = readState_device(tile_map, states_pool, i, j + 1, nr_cells, nz_cells, num_tiles_z, ambient_rho, ambient_p, gamma, bcRmin, bcRmax, bcZmin, bcZmax, d_materials, is_ideal_gas);
 
     CellState s_faceL_L = s_L;
     CellState s_faceL_R = s_c;
@@ -207,10 +282,10 @@ __global__ __launch_bounds__(256, 2) void computeTileRHS_kernel(
     CellState s_faceT_R = s_T;
 
     if (spatialOrder == 2) {
-        CellState s_LL = readState_device(tile_map, states_pool, i - 2, j, nr_cells, nz_cells, num_tiles_z);
-        CellState s_RR = readState_device(tile_map, states_pool, i + 2, j, nr_cells, nz_cells, num_tiles_z);
-        CellState s_BB = readState_device(tile_map, states_pool, i, j - 2, nr_cells, nz_cells, num_tiles_z);
-        CellState s_TT = readState_device(tile_map, states_pool, i, j + 2, nr_cells, nz_cells, num_tiles_z);
+        CellState s_LL = readState_device(tile_map, states_pool, i - 2, j, nr_cells, nz_cells, num_tiles_z, ambient_rho, ambient_p, gamma, bcRmin, bcRmax, bcZmin, bcZmax, d_materials, is_ideal_gas);
+        CellState s_RR = readState_device(tile_map, states_pool, i + 2, j, nr_cells, nz_cells, num_tiles_z, ambient_rho, ambient_p, gamma, bcRmin, bcRmax, bcZmin, bcZmax, d_materials, is_ideal_gas);
+        CellState s_BB = readState_device(tile_map, states_pool, i, j - 2, nr_cells, nz_cells, num_tiles_z, ambient_rho, ambient_p, gamma, bcRmin, bcRmax, bcZmin, bcZmax, d_materials, is_ideal_gas);
+        CellState s_TT = readState_device(tile_map, states_pool, i, j + 2, nr_cells, nz_cells, num_tiles_z, ambient_rho, ambient_p, gamma, bcRmin, bcRmax, bcZmin, bcZmax, d_materials, is_ideal_gas);
 
         // Reconstruct left radial face i - 1/2
         s_faceL_L.rho = s_L.rho + 0.5 * minmod_device(s_L.rho - s_LL.rho, s_c.rho - s_L.rho);
@@ -313,10 +388,10 @@ __global__ __launch_bounds__(256, 2) void computeTileRHS_kernel(
         compute_E_device(s_faceT_R, gamma, d_materials, is_ideal_gas);
 
     } else if (spatialOrder == 3) {
-        CellState s_LL = readState_device(tile_map, states_pool, i - 2, j, nr_cells, nz_cells, num_tiles_z);
-        CellState s_RR = readState_device(tile_map, states_pool, i + 2, j, nr_cells, nz_cells, num_tiles_z);
-        CellState s_BB = readState_device(tile_map, states_pool, i, j - 2, nr_cells, nz_cells, num_tiles_z);
-        CellState s_TT = readState_device(tile_map, states_pool, i, j + 2, nr_cells, nz_cells, num_tiles_z);
+        CellState s_LL = readState_device(tile_map, states_pool, i - 2, j, nr_cells, nz_cells, num_tiles_z, ambient_rho, ambient_p, gamma, bcRmin, bcRmax, bcZmin, bcZmax, d_materials, is_ideal_gas);
+        CellState s_RR = readState_device(tile_map, states_pool, i + 2, j, nr_cells, nz_cells, num_tiles_z, ambient_rho, ambient_p, gamma, bcRmin, bcRmax, bcZmin, bcZmax, d_materials, is_ideal_gas);
+        CellState s_BB = readState_device(tile_map, states_pool, i, j - 2, nr_cells, nz_cells, num_tiles_z, ambient_rho, ambient_p, gamma, bcRmin, bcRmax, bcZmin, bcZmax, d_materials, is_ideal_gas);
+        CellState s_TT = readState_device(tile_map, states_pool, i, j + 2, nr_cells, nz_cells, num_tiles_z, ambient_rho, ambient_p, gamma, bcRmin, bcRmax, bcZmin, bcZmax, d_materials, is_ideal_gas);
 
         // Reconstruct left radial face i - 1/2 using WENO3
         s_faceL_L.rho = weno3_device(s_LL.rho, s_L.rho, s_c.rho);
@@ -480,6 +555,25 @@ __global__ void applyLSRK3Step_kernel(
     d_U_pool[pool_idx].arho2[k] += B[stage] * d_dU_pool[pool_idx].arho2[k];
 }
 
+__global__ void applyEulerStep_kernel(
+    int current_pool_size, double dt,
+    ConservativeTile* d_U_pool, ConservativeTile* d_dU_pool) {
+    
+    int pool_idx = blockIdx.x;
+    if (pool_idx >= current_pool_size) return;
+    
+    int k = threadIdx.x * TILE_SIZE + threadIdx.y;
+    
+    d_U_pool[pool_idx].rho[k] += dt * d_dU_pool[pool_idx].rho[k];
+    d_U_pool[pool_idx].rhour[k] += dt * d_dU_pool[pool_idx].rhour[k];
+    d_U_pool[pool_idx].rhouz[k] += dt * d_dU_pool[pool_idx].rhouz[k];
+    d_U_pool[pool_idx].E[k] += dt * d_dU_pool[pool_idx].E[k];
+    d_U_pool[pool_idx].alpha1[k] += dt * d_dU_pool[pool_idx].alpha1[k];
+    d_U_pool[pool_idx].alpha2[k] += dt * d_dU_pool[pool_idx].alpha2[k];
+    d_U_pool[pool_idx].arho1[k] += dt * d_dU_pool[pool_idx].arho1[k];
+    d_U_pool[pool_idx].arho2[k] += dt * d_dU_pool[pool_idx].arho2[k];
+}
+
 __global__ void applyProgrammedBurn_kernel(
     int num_tiles_r, int num_tiles_z, int nr_cells, int nz_cells,
     double dr, double dz, double currentTime, double dt,
@@ -532,40 +626,10 @@ __global__ void applyProgrammedBurn_kernel(
     }
 }
 
-__device__ inline bool is_neighbor_good(
-    const int32_t* tile_map, const ConservativeTile* d_U_pool, const PrimitiveTile* d_states_pool,
-    int ni, int nj, int nr_cells, int nz_cells, int num_tiles_z, double rho_floor, double p_floor) {
-    
-    if (ni < 0 || ni >= nr_cells || nj < 0 || nj >= nz_cells) return false;
-    
-    int ntr = ni / TILE_SIZE;
-    int ntz = nj / TILE_SIZE;
-    int n_pool_idx = tile_map[ntr * num_tiles_z + ntz];
-    if (n_pool_idx == -1) return false;
-    
-    int nk = (ni % TILE_SIZE) * TILE_SIZE + (nj % TILE_SIZE);
-    
-    double n_rho = d_U_pool[n_pool_idx].rho[nk];
-    double n_rhour = d_U_pool[n_pool_idx].rhour[nk];
-    double n_rhouz = d_U_pool[n_pool_idx].rhouz[nk];
-    double n_E = d_U_pool[n_pool_idx].E[nk];
-    
-    if (isnan(n_rho) || isinf(n_rho) || n_rho < rho_floor) return false;
-    if (isnan(n_rhour) || isinf(n_rhour)) return false;
-    if (isnan(n_rhouz) || isinf(n_rhouz)) return false;
-    if (isnan(n_E) || isinf(n_E)) return false;
-    
-    double n_p = d_states_pool[n_pool_idx].p[nk];
-    if (isnan(n_p) || isinf(n_p) || n_p < p_floor) return false;
-    
-    return true;
-}
-
 __global__ void updatePrimitiveFromConservative_kernel(
     int current_pool_size, double gamma, MultiMat::MaterialSet* d_materials,
     double ambient_rho, double ambient_p,
-    ConservativeTile* d_U_pool, PrimitiveTile* d_states_pool,
-    const int32_t* tile_map, int nr_cells, int nz_cells, int num_tiles_z) {
+    ConservativeTile* d_U_pool, PrimitiveTile* d_states_pool) {
     
     int pool_idx = blockIdx.x;
     if (pool_idx >= current_pool_size) return;
@@ -634,111 +698,6 @@ __global__ void updatePrimitiveFromConservative_kernel(
     }
 
     if (bad) {
-        // Find tr, tz for this pool_idx
-        int tr = -1, tz = -1;
-        int num_tiles_r = (nr_cells + TILE_SIZE - 1) / TILE_SIZE;
-        for (int r = 0; r < num_tiles_r; ++r) {
-            for (int z = 0; z < num_tiles_z; ++z) {
-                if (tile_map[r * num_tiles_z + z] == pool_idx) {
-                    tr = r;
-                    tz = z;
-                    break;
-                }
-            }
-            if (tr != -1) break;
-        }
-        
-        double sum_rho = 0, sum_rhour = 0, sum_rhouz = 0, sum_E = 0;
-        double sum_alpha1 = 0, sum_alpha2 = 0, sum_arho1 = 0, sum_arho2 = 0;
-        int count = 0;
-        
-        if (tr != -1 && tz != -1) {
-            int local_i = k / TILE_SIZE;
-            int local_j = k % TILE_SIZE;
-            int i = tr * TILE_SIZE + local_i;
-            int j = tz * TILE_SIZE + local_j;
-            
-            int neighbors[4][2] = {{i-1, j}, {i+1, j}, {i, j-1}, {i, j+1}};
-            for (int n = 0; n < 4; ++n) {
-                int ni = neighbors[n][0];
-                int nj = neighbors[n][1];
-                if (is_neighbor_good(tile_map, d_U_pool, d_states_pool, ni, nj, nr_cells, nz_cells, num_tiles_z, rho_floor, p_floor)) {
-                    int ntr = ni / TILE_SIZE;
-                    int ntz = nj / TILE_SIZE;
-                    int n_pool_idx = tile_map[ntr * num_tiles_z + ntz];
-                    int nk = (ni % TILE_SIZE) * TILE_SIZE + (nj % TILE_SIZE);
-                    
-                    sum_rho += d_U_pool[n_pool_idx].rho[nk];
-                    sum_rhour += d_U_pool[n_pool_idx].rhour[nk];
-                    sum_rhouz += d_U_pool[n_pool_idx].rhouz[nk];
-                    sum_E += d_U_pool[n_pool_idx].E[nk];
-                    sum_alpha1 += d_U_pool[n_pool_idx].alpha1[nk];
-                    sum_alpha2 += d_U_pool[n_pool_idx].alpha2[nk];
-                    sum_arho1 += d_U_pool[n_pool_idx].arho1[nk];
-                    sum_arho2 += d_U_pool[n_pool_idx].arho2[nk];
-                    count++;
-                }
-            }
-        }
-        
-        if (count > 0) {
-            u_rho = sum_rho / count;
-            u_rhour = sum_rhour / count;
-            u_rhouz = sum_rhouz / count;
-            u_E = sum_E / count;
-            u_alpha1 = sum_alpha1 / count;
-            u_alpha2 = sum_alpha2 / count;
-            u_arho1 = sum_arho1 / count;
-            u_arho2 = sum_arho2 / count;
-            
-            d_U_pool[pool_idx].rho[k] = u_rho;
-            d_U_pool[pool_idx].rhour[k] = u_rhour;
-            d_U_pool[pool_idx].rhouz[k] = u_rhouz;
-            d_U_pool[pool_idx].E[k] = u_E;
-            d_U_pool[pool_idx].alpha1[k] = u_alpha1;
-            d_U_pool[pool_idx].alpha2[k] = u_alpha2;
-            d_U_pool[pool_idx].arho1[k] = u_arho1;
-            d_U_pool[pool_idx].arho2[k] = u_arho2;
-            
-            double rho_safe = fmax(u_rho, rho_floor);
-            ur = u_rhour / rho_safe;
-            uz = u_rhouz / rho_safe;
-            double ke = 0.5 * rho_safe * (ur * ur + uz * uz);
-
-            double alpha1 = fmax(0.0, fmin(1.0, u_alpha1));
-            double alpha2 = fmax(0.0, fmin(1.0, u_alpha2));
-            if (alpha1 + alpha2 > 1.0) {
-                double sum = alpha1 + alpha2;
-                alpha1 /= sum;
-                alpha2 /= sum;
-            }
-
-            double arho1 = fmax(0.0, fmin(u_rho, u_arho1));
-            double arho2 = fmax(0.0, fmin(u_rho, u_arho2));
-            if (arho1 + arho2 > u_rho) {
-                double sum = arho1 + arho2;
-                arho1 = (arho1 / sum) * u_rho;
-                arho2 = (arho2 / sum) * u_rho;
-            }
-
-            double e_internal = fmax(u_E - ke, p_floor / (gamma - 1.0));
-            p = MultiMat::getMixturePressure(e_internal, u_rho, alpha1, alpha2, arho1, arho2, gamma, d_materials->products, d_materials->unreacted);
-            p = fmax(p, p_floor);
-            
-            d_states_pool[pool_idx].rho[k] = rho_safe;
-            d_states_pool[pool_idx].ur[k] = ur;
-            d_states_pool[pool_idx].uz[k] = uz;
-            d_states_pool[pool_idx].E[k] = u_E;
-            d_states_pool[pool_idx].alpha1[k] = alpha1;
-            d_states_pool[pool_idx].alpha2[k] = alpha2;
-            d_states_pool[pool_idx].arho1[k] = arho1;
-            d_states_pool[pool_idx].arho2[k] = arho2;
-            d_states_pool[pool_idx].p[k] = p;
-            bad = false; // Resolved!
-        }
-    }
-
-    if (bad) {
         d_states_pool[pool_idx].rho[k] = ambient_rho;
         d_states_pool[pool_idx].ur[k] = 0.0;
         d_states_pool[pool_idx].uz[k] = 0.0;
@@ -761,23 +720,14 @@ __global__ void updatePrimitiveFromConservative_kernel(
 }
 
 __global__ void computeMaxWaveSpeed_kernel(
-    int num_tiles_r, int num_tiles_z, int nr_cells, int nz_cells,
-    double gamma, const MultiMat::MaterialSet* d_materials,
-    const int32_t* tile_map, const PrimitiveTile* d_states_pool,
-    double* d_block_maxes, double* d_block_p_ratios) {
+    int current_pool_size, double gamma, MultiMat::MaterialSet* d_materials,
+    PrimitiveTile* d_states_pool, double* d_block_maxes) {
     
-    int tr = blockIdx.x;
-    int tz = blockIdx.y;
-    int pool_idx = tile_map[tr * num_tiles_z + tz];
-    if (pool_idx == -1) return;
+    int pool_idx = blockIdx.x;
+    if (pool_idx >= current_pool_size) return;
     
     int local_i = threadIdx.x;
     int local_j = threadIdx.y;
-    int i = tr * TILE_SIZE + local_i;
-    int j = tz * TILE_SIZE + local_j;
-    
-    if (i >= nr_cells || j >= nz_cells) return;
-    
     int k = local_i * TILE_SIZE + local_j;
     
     double p = d_states_pool[pool_idx].p[k];
@@ -795,39 +745,20 @@ __global__ void computeMaxWaveSpeed_kernel(
     );
     double s = fmax(fabs(ur), fabs(uz)) + c;
     
-    double max_ratio = 1.0;
-    int neighbors[4][2] = {{i-1, j}, {i+1, j}, {i, j-1}, {i, j+1}};
-    for (int n = 0; n < 4; ++n) {
-        int ni = neighbors[n][0];
-        int nj = neighbors[n][1];
-        if (ni >= 0 && ni < nr_cells && nj >= 0 && nj < nz_cells) {
-            CellState s_nb = readState_device(tile_map, d_states_pool, ni, nj, nr_cells, nz_cells, num_tiles_z);
-            double p_nb = s_nb.p;
-            double ratio = fmax(p, p_nb) / fmax(1e-10, fmin(p, p_nb));
-            if (!isnan(ratio) && !isinf(ratio)) {
-                max_ratio = fmax(max_ratio, ratio);
-            }
-        }
-    }
-    
     __shared__ double s_data[256];
-    __shared__ double r_data[256];
     int tid = threadIdx.x * TILE_SIZE + threadIdx.y;
     s_data[tid] = s;
-    r_data[tid] = max_ratio;
     __syncthreads();
     
     for (unsigned int s_step = 128; s_step > 0; s_step >>= 1) {
         if (tid < s_step) {
             s_data[tid] = fmax(s_data[tid], s_data[tid + s_step]);
-            r_data[tid] = fmax(r_data[tid], r_data[tid + s_step]);
         }
         __syncthreads();
     }
     
     if (tid == 0) {
         d_block_maxes[pool_idx] = s_data[0];
-        d_block_p_ratios[pool_idx] = r_data[0];
     }
 }
 
@@ -872,7 +803,7 @@ __global__ void checkTileActive_kernel(
 
 CFDSolver2DCuda::CFDSolver2DCuda(int nr, int nz, double max_r, double max_z, double gamma)
     : nr_cells(nr), nz_cells(nz), max_r(max_r), max_z(max_z), gamma(gamma), currentTime(0.0), currentScheme(RUSANOV),
-      ambient_rho(1.2), ambient_p(101325.0), current_pool_size(0), d_block_maxes(nullptr), d_block_p_ratios(nullptr), d_tile_active_flags(nullptr) {
+      ambient_rho(1.2), ambient_p(101325.0), current_pool_size(0), d_block_maxes(nullptr), d_tile_active_flags(nullptr) {
     
     dr = max_r / nr_cells;
     dz = max_z / nz_cells;
@@ -894,13 +825,14 @@ CFDSolver2DCuda::CFDSolver2DCuda(int nr, int nz, double max_r, double max_z, dou
     CUDA_CHECK(cudaMalloc(&d_states_pool, max_active_tiles * sizeof(PrimitiveTile)));
     CUDA_CHECK(cudaMalloc(&d_U_pool, max_active_tiles * sizeof(ConservativeTile)));
     CUDA_CHECK(cudaMalloc(&d_dU_pool, max_active_tiles * sizeof(ConservativeTile)));
-    CUDA_CHECK(cudaMemset(d_dU_pool, 0, max_active_tiles * sizeof(ConservativeTile)));
     CUDA_CHECK(cudaMalloc(&d_block_maxes, max_active_tiles * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_block_p_ratios, max_active_tiles * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_tile_active_flags, max_active_tiles * sizeof(uint8_t)));
     
     CUDA_CHECK(cudaMalloc(&d_materials, sizeof(MultiMat::MaterialSet)));
     CUDA_CHECK(cudaMemcpy(d_materials, &currentMaterials, sizeof(MultiMat::MaterialSet), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMalloc(&d_terminated, sizeof(int)));
+    int zero = 0;
+    CUDA_CHECK(cudaMemcpy(d_terminated, &zero, sizeof(int), cudaMemcpyHostToDevice));
 }
 
 CFDSolver2DCuda::~CFDSolver2DCuda() {
@@ -911,8 +843,8 @@ CFDSolver2DCuda::~CFDSolver2DCuda() {
     cudaFree(d_dU_pool);
     cudaFree(d_materials);
     if (d_block_maxes) cudaFree(d_block_maxes);
-    if (d_block_p_ratios) cudaFree(d_block_p_ratios);
     if (d_tile_active_flags) cudaFree(d_tile_active_flags);
+    if (d_terminated) cudaFree(d_terminated);
 }
 
 void CFDSolver2DCuda::setMaterialParameters(const MultiMat::MaterialSet& materials) {
@@ -930,37 +862,30 @@ void CFDSolver2DCuda::growTilePool(int new_max_tiles) {
     ConservativeTile* d_new_U_pool = nullptr;
     ConservativeTile* d_new_dU_pool = nullptr;
     double* d_new_block_maxes = nullptr;
-    double* d_new_block_p_ratios = nullptr;
     uint8_t* d_new_tile_active_flags = nullptr;
 
     CUDA_CHECK(cudaMalloc(&d_new_states_pool, new_max_tiles * sizeof(PrimitiveTile)));
     CUDA_CHECK(cudaMalloc(&d_new_U_pool, new_max_tiles * sizeof(ConservativeTile)));
     CUDA_CHECK(cudaMalloc(&d_new_dU_pool, new_max_tiles * sizeof(ConservativeTile)));
-    CUDA_CHECK(cudaMemset(d_new_dU_pool, 0, new_max_tiles * sizeof(ConservativeTile)));
     CUDA_CHECK(cudaMalloc(&d_new_block_maxes, new_max_tiles * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_new_block_p_ratios, new_max_tiles * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_new_tile_active_flags, new_max_tiles * sizeof(uint8_t)));
 
     if (current_pool_size > 0) {
         CUDA_CHECK(cudaMemcpy(d_new_states_pool, d_states_pool, current_pool_size * sizeof(PrimitiveTile), cudaMemcpyDeviceToDevice));
         CUDA_CHECK(cudaMemcpy(d_new_U_pool, d_U_pool, current_pool_size * sizeof(ConservativeTile), cudaMemcpyDeviceToDevice));
         CUDA_CHECK(cudaMemcpy(d_new_dU_pool, d_dU_pool, current_pool_size * sizeof(ConservativeTile), cudaMemcpyDeviceToDevice));
-        CUDA_CHECK(cudaMemcpy(d_new_block_maxes, d_block_maxes, current_pool_size * sizeof(double), cudaMemcpyDeviceToDevice));
-        CUDA_CHECK(cudaMemcpy(d_new_block_p_ratios, d_block_p_ratios, current_pool_size * sizeof(double), cudaMemcpyDeviceToDevice));
     }
 
     if (d_states_pool) CUDA_CHECK(cudaFree(d_states_pool));
     if (d_U_pool) CUDA_CHECK(cudaFree(d_U_pool));
     if (d_dU_pool) CUDA_CHECK(cudaFree(d_dU_pool));
     if (d_block_maxes) CUDA_CHECK(cudaFree(d_block_maxes));
-    if (d_block_p_ratios) CUDA_CHECK(cudaFree(d_block_p_ratios));
     if (d_tile_active_flags) CUDA_CHECK(cudaFree(d_tile_active_flags));
 
     d_states_pool = d_new_states_pool;
     d_U_pool = d_new_U_pool;
     d_dU_pool = d_new_dU_pool;
     d_block_maxes = d_new_block_maxes;
-    d_block_p_ratios = d_new_block_p_ratios;
     d_tile_active_flags = d_new_tile_active_flags;
     max_active_tiles = new_max_tiles;
 }
@@ -1036,12 +961,24 @@ void CFDSolver2DCuda::setInitialConditionTNT(double explosive_z, double explosiv
 
     // We do initialization entirely on CPU then copy to GPU
     for (int i = 0; i < nr_cells; ++i) {
-        double r = (i + 0.5) * dr;
         for (int j = 0; j < nz_cells; ++j) {
-            double z = (j + 0.5) * dz;
-            double dist = std::sqrt(r * r + (z - explosive_z) * (z - explosive_z));
-            
-            if (dist <= explosive_radius) {
+            double sum_w = 0.0;
+            double sum_w_inside = 0.0;
+            for (int ki = 0; ki < 8; ++ki) {
+                double r_sub = i * dr + (ki + 0.5) * (dr / 8.0);
+                double w = r_sub;
+                for (int kj = 0; kj < 8; ++kj) {
+                    double z_sub = j * dz + (kj + 0.5) * (dz / 8.0);
+                    double dist = std::sqrt(r_sub * r_sub + (z_sub - explosive_z) * (z_sub - explosive_z));
+                    if (dist <= explosive_radius) {
+                        sum_w_inside += w;
+                    }
+                    sum_w += w;
+                }
+            }
+            double f_vol = sum_w_inside / sum_w;
+
+            if (f_vol > 0.0) {
                 int tr = i / TILE_SIZE;
                 int tz = j / TILE_SIZE;
                 int pool_idx = allocateTile(tr, tz);
@@ -1050,24 +987,29 @@ void CFDSolver2DCuda::setInitialConditionTNT(double explosive_z, double explosiv
                 int local_j = j % TILE_SIZE;
                 int k = local_i * TILE_SIZE + local_j;
                 
-                host_states_pool[pool_idx].rho[k] = high_rho;
+                double alpha2 = f_vol;
+                double arho2 = f_vol * high_rho;
+                double rho = arho2 + (1.0 - f_vol) * ambient_rho;
+                double E = MultiMat::getMixtureEnergy(ambient_p, rho, 0.0, alpha2, 0.0, arho2, gamma, currentMaterials.products, currentMaterials.unreacted);
+
+                host_states_pool[pool_idx].rho[k] = rho;
                 host_states_pool[pool_idx].p[k] = ambient_p;
                 host_states_pool[pool_idx].alpha1[k] = 0.0; 
-                host_states_pool[pool_idx].alpha2[k] = 1.0;
+                host_states_pool[pool_idx].alpha2[k] = alpha2;
                 host_states_pool[pool_idx].arho1[k] = 0.0; 
-                host_states_pool[pool_idx].arho2[k] = high_rho;
+                host_states_pool[pool_idx].arho2[k] = arho2;
                 host_states_pool[pool_idx].ur[k] = 0.0; 
                 host_states_pool[pool_idx].uz[k] = 0.0;
-                host_states_pool[pool_idx].E[k] = high_rho * MultiMat::getEnergy_JWL(ambient_p, high_rho, currentMaterials.unreacted);
+                host_states_pool[pool_idx].E[k] = E;
                 
-                host_U_pool[pool_idx].rho[k] = high_rho;
+                host_U_pool[pool_idx].rho[k] = rho;
                 host_U_pool[pool_idx].rhour[k] = 0.0;
                 host_U_pool[pool_idx].rhouz[k] = 0.0;
-                host_U_pool[pool_idx].E[k] = host_states_pool[pool_idx].E[k];
+                host_U_pool[pool_idx].E[k] = E;
                 host_U_pool[pool_idx].alpha1[k] = 0.0;
-                host_U_pool[pool_idx].alpha2[k] = 1.0;
+                host_U_pool[pool_idx].alpha2[k] = alpha2;
                 host_U_pool[pool_idx].arho1[k] = 0.0;
-                host_U_pool[pool_idx].arho2[k] = high_rho;
+                host_U_pool[pool_idx].arho2[k] = arho2;
             }
         }
     }
@@ -1270,28 +1212,39 @@ void CFDSolver2DCuda::setInitialConditionFrom1D(double explosive_z, double remap
     syncPoolToDevice();
     if (current_pool_size > 0) {
         dim3 threads(TILE_SIZE, TILE_SIZE);
-        updatePrimitiveFromConservative_kernel<<<current_pool_size, threads>>>(current_pool_size, gamma, d_materials, ambient_rho, ambient_p, d_U_pool, d_states_pool, d_tile_map, nr_cells, nz_cells, num_tiles_z);
+        updatePrimitiveFromConservative_kernel<<<current_pool_size, threads>>>(current_pool_size, gamma, d_materials, ambient_rho, ambient_p, d_U_pool, d_states_pool);
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaDeviceSynchronize());
     }
     updateActiveRegionHost();
 }
-void CFDSolver2DCuda::setInitialConditionTNTCylinder(double explosive_z, double radius, double height, double high_rho, double ambient_rho, double ambient_p) {}
-void CFDSolver2DCuda::setInitialConditionIdealGas(double explosive_z, double explosive_radius, double high_rho, double detonation_energy, double ambient_rho, double ambient_p) {
+void CFDSolver2DCuda::setInitialConditionTNTCylinder(double explosive_z, double radius, double height, double high_rho, double ambient_rho, double ambient_p) {
     this->ambient_rho = ambient_rho;
     this->ambient_p = ambient_p;
     this->det_x = 0.0;
     this->det_y = 0.0;
-    this->det_z = explosive_z;
-    this->is_ideal_gas = true;
-    
-    for (int i = 0; i < nr_cells; ++i) {
-        double r = (i + 0.5) * dr;
-        for (int j = 0; j < nz_cells; ++j) {
-            double z = (j + 0.5) * dz;
-            double dist = std::sqrt(r * r + (z - explosive_z) * (z - explosive_z));
+    this->det_z = explosive_z + height / 2.0;
+    this->is_ideal_gas = false;
 
-            if (dist <= explosive_radius) {
+    for (int i = 0; i < nr_cells; ++i) {
+        for (int j = 0; j < nz_cells; ++j) {
+            double sum_w = 0.0;
+            double sum_w_inside = 0.0;
+            for (int ki = 0; ki < 8; ++ki) {
+                double r_sub = i * dr + (ki + 0.5) * (dr / 8.0);
+                double w = r_sub;
+                for (int kj = 0; kj < 8; ++kj) {
+                    double z_sub = j * dz + (kj + 0.5) * (dz / 8.0);
+                    bool inside = (r_sub <= radius) && (std::abs(z_sub - explosive_z) <= height / 2.0);
+                    if (inside) {
+                        sum_w_inside += w;
+                    }
+                    sum_w += w;
+                }
+            }
+            double f_vol = sum_w_inside / sum_w;
+
+            if (f_vol > 0.0) {
                 int tr = i / TILE_SIZE;
                 int tz = j / TILE_SIZE;
                 int pool_idx = allocateTile(tr, tz);
@@ -1300,17 +1253,109 @@ void CFDSolver2DCuda::setInitialConditionIdealGas(double explosive_z, double exp
                 int local_j = j % TILE_SIZE;
                 int k = local_i * TILE_SIZE + local_j;
                 
-                host_states_pool[pool_idx].rho[k] = high_rho;
-                host_states_pool[pool_idx].p[k] = (gamma - 1.0) * high_rho * detonation_energy;
+                double alpha2 = f_vol;
+                double arho2 = f_vol * high_rho;
+                double rho = arho2 + (1.0 - f_vol) * ambient_rho;
+                double E = MultiMat::getMixtureEnergy(ambient_p, rho, 0.0, alpha2, 0.0, arho2, gamma, currentMaterials.products, currentMaterials.unreacted);
+
+                host_states_pool[pool_idx].rho[k] = rho;
+                host_states_pool[pool_idx].p[k] = ambient_p;
+                host_states_pool[pool_idx].alpha1[k] = 0.0; 
+                host_states_pool[pool_idx].alpha2[k] = alpha2;
+                host_states_pool[pool_idx].arho1[k] = 0.0; 
+                host_states_pool[pool_idx].arho2[k] = arho2;
+                host_states_pool[pool_idx].ur[k] = 0.0; 
+                host_states_pool[pool_idx].uz[k] = 0.0;
+                host_states_pool[pool_idx].E[k] = E;
+                
+                host_U_pool[pool_idx].rho[k] = rho;
+                host_U_pool[pool_idx].rhour[k] = 0.0;
+                host_U_pool[pool_idx].rhouz[k] = 0.0;
+                host_U_pool[pool_idx].E[k] = E;
+                host_U_pool[pool_idx].alpha1[k] = 0.0;
+                host_U_pool[pool_idx].alpha2[k] = alpha2;
+                host_U_pool[pool_idx].arho1[k] = 0.0;
+                host_U_pool[pool_idx].arho2[k] = arho2;
+            }
+        }
+    }
+    
+    // Fill remaining elements in allocated tiles to ambient
+    for (int p = 0; p < current_pool_size; ++p) {
+        for (int k = 0; k < TILE_SIZE * TILE_SIZE; ++k) {
+            if (host_states_pool[p].rho[k] == 0.0) { // Uninitialized
+                host_states_pool[p].rho[k] = ambient_rho;
+                host_states_pool[p].p[k] = ambient_p;
+                host_states_pool[p].E[k] = ambient_rho * MultiMat::getEnergy_IdealGas(ambient_p, ambient_rho, gamma);
+                
+                host_U_pool[p].rho[k] = ambient_rho;
+                host_U_pool[p].E[k] = host_states_pool[p].E[k];
+            }
+        }
+    }
+
+    syncPoolToDevice();
+    if (current_pool_size > 0) {
+        dim3 threads(TILE_SIZE, TILE_SIZE);
+        updatePrimitiveFromConservative_kernel<<<current_pool_size, threads>>>(current_pool_size, gamma, d_materials, ambient_rho, ambient_p, d_U_pool, d_states_pool);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+    }
+    updateActiveRegionHost();
+}
+
+void CFDSolver2DCuda::setInitialConditionIdealGas(double explosive_z, double explosive_radius, double high_rho, double detonation_energy, double ambient_rho, double ambient_p) {
+    this->ambient_rho = ambient_rho;
+    this->ambient_p = ambient_p;
+    this->det_x = 0.0;
+    this->det_y = 0.0;
+    this->det_z = explosive_z;
+    this->is_ideal_gas = true;
+    
+    double p_high = (gamma - 1.0) * high_rho * detonation_energy;
+    
+    for (int i = 0; i < nr_cells; ++i) {
+        for (int j = 0; j < nz_cells; ++j) {
+            double sum_w = 0.0;
+            double sum_w_inside = 0.0;
+            for (int ki = 0; ki < 8; ++ki) {
+                double r_sub = i * dr + (ki + 0.5) * (dr / 8.0);
+                double w = r_sub;
+                for (int kj = 0; kj < 8; ++kj) {
+                    double z_sub = j * dz + (kj + 0.5) * (dz / 8.0);
+                    double dist = std::sqrt(r_sub * r_sub + (z_sub - explosive_z) * (z_sub - explosive_z));
+                    if (dist <= explosive_radius) {
+                        sum_w_inside += w;
+                    }
+                    sum_w += w;
+                }
+            }
+            double f_vol = sum_w_inside / sum_w;
+
+            if (f_vol > 0.0) {
+                int tr = i / TILE_SIZE;
+                int tz = j / TILE_SIZE;
+                int pool_idx = allocateTile(tr, tz);
+                
+                int local_i = i % TILE_SIZE;
+                int local_j = j % TILE_SIZE;
+                int k = local_i * TILE_SIZE + local_j;
+                
+                double rho = f_vol * high_rho + (1.0 - f_vol) * ambient_rho;
+                double p = f_vol * p_high + (1.0 - f_vol) * ambient_p;
+                double E = p / (gamma - 1.0);
+
+                host_states_pool[pool_idx].rho[k] = rho;
+                host_states_pool[pool_idx].p[k] = p;
                 host_states_pool[pool_idx].alpha1[k] = 0.0; host_states_pool[pool_idx].alpha2[k] = 0.0;
                 host_states_pool[pool_idx].arho1[k] = 0.0; host_states_pool[pool_idx].arho2[k] = 0.0;
                 host_states_pool[pool_idx].ur[k] = 0.0; host_states_pool[pool_idx].uz[k] = 0.0;
-                host_states_pool[pool_idx].E[k] = host_states_pool[pool_idx].p[k] / (gamma - 1.0);
+                host_states_pool[pool_idx].E[k] = E;
                 
-                host_U_pool[pool_idx].rho[k] = high_rho;
+                host_U_pool[pool_idx].rho[k] = rho;
                 host_U_pool[pool_idx].rhour[k] = 0.0;
                 host_U_pool[pool_idx].rhouz[k] = 0.0;
-                host_U_pool[pool_idx].E[k] = host_states_pool[pool_idx].E[k];
+                host_U_pool[pool_idx].E[k] = E;
                 host_U_pool[pool_idx].alpha1[k] = 0.0; host_U_pool[pool_idx].alpha2[k] = 0.0;
                 host_U_pool[pool_idx].arho1[k] = 0.0; host_U_pool[pool_idx].arho2[k] = 0.0;
             }
@@ -1369,9 +1414,6 @@ void CFDSolver2DCuda::updateActiveRegionHost() {
             CUDA_CHECK(cudaMemcpy(d_states_pool + initial_pool_size, host_states_pool.data() + initial_pool_size, num_new_tiles * sizeof(PrimitiveTile), cudaMemcpyHostToDevice));
             CUDA_CHECK(cudaMemcpy(d_U_pool + initial_pool_size, host_U_pool.data() + initial_pool_size, num_new_tiles * sizeof(ConservativeTile), cudaMemcpyHostToDevice));
             
-            // Zero-initialize newly allocated tiles in d_dU_pool
-            CUDA_CHECK(cudaMemset(d_dU_pool + initial_pool_size, 0, num_new_tiles * sizeof(ConservativeTile)));
-            
             // Sync the updated tile map
             CUDA_CHECK(cudaMemcpy(d_tile_map, host_tile_map.data(), host_tile_map.size() * sizeof(int32_t), cudaMemcpyHostToDevice));
         }
@@ -1382,23 +1424,42 @@ void CFDSolver2DCuda::step(double dt) {
     dim3 threads(TILE_SIZE, TILE_SIZE);
     dim3 blocks(num_tiles_r, num_tiles_z);
     
-    for (int stage = 0; stage < 3; ++stage) {
-        const double A[3] = {0.0, -5.0/9.0, -153.0/128.0};
-        computeTileRHS_kernel<<<blocks, threads>>>(num_tiles_r, num_tiles_z, nr_cells, nz_cells, dr, dz, gamma, dt, A[stage], d_materials, d_tile_map, d_states_pool, d_dU_pool, spatialOrder, is_ideal_gas);
+    if (temporalOrder == 1) {
+        computeTileRHS_kernel<<<blocks, threads>>>(
+            num_tiles_r, num_tiles_z, nr_cells, nz_cells, dr, dz, gamma, 1.0, 0.0, d_materials, d_tile_map, d_states_pool, d_dU_pool, spatialOrder, is_ideal_gas,
+            static_cast<int>(bcRmin), static_cast<int>(bcRmax), static_cast<int>(bcZmin), static_cast<int>(bcZmax),
+            ambient_rho, ambient_p
+        );
         CUDA_CHECK(cudaGetLastError());
         
-        applyLSRK3Step_kernel<<<current_pool_size, threads>>>(current_pool_size, stage, d_U_pool, d_dU_pool);
+        applyEulerStep_kernel<<<current_pool_size, threads>>>(current_pool_size, dt, d_U_pool, d_dU_pool);
         CUDA_CHECK(cudaGetLastError());
         
-        updatePrimitiveFromConservative_kernel<<<current_pool_size, threads>>>(current_pool_size, gamma, d_materials, ambient_rho, ambient_p, d_U_pool, d_states_pool, d_tile_map, nr_cells, nz_cells, num_tiles_z);
+        updatePrimitiveFromConservative_kernel<<<current_pool_size, threads>>>(current_pool_size, gamma, d_materials, ambient_rho, ambient_p, d_U_pool, d_states_pool);
         CUDA_CHECK(cudaGetLastError());
+    } else {
+        for (int stage = 0; stage < 3; ++stage) {
+            const double A[3] = {0.0, -5.0/9.0, -153.0/128.0};
+            computeTileRHS_kernel<<<blocks, threads>>>(
+                num_tiles_r, num_tiles_z, nr_cells, nz_cells, dr, dz, gamma, dt, A[stage], d_materials, d_tile_map, d_states_pool, d_dU_pool, spatialOrder, is_ideal_gas,
+                static_cast<int>(bcRmin), static_cast<int>(bcRmax), static_cast<int>(bcZmin), static_cast<int>(bcZmax),
+                ambient_rho, ambient_p
+            );
+            CUDA_CHECK(cudaGetLastError());
+            
+            applyLSRK3Step_kernel<<<current_pool_size, threads>>>(current_pool_size, stage, d_U_pool, d_dU_pool);
+            CUDA_CHECK(cudaGetLastError());
+            
+            updatePrimitiveFromConservative_kernel<<<current_pool_size, threads>>>(current_pool_size, gamma, d_materials, ambient_rho, ambient_p, d_U_pool, d_states_pool);
+            CUDA_CHECK(cudaGetLastError());
+        }
     }
     
     if (!is_ideal_gas) {
         applyProgrammedBurn_kernel<<<blocks, threads>>>(num_tiles_r, num_tiles_z, nr_cells, nz_cells, dr, dz, currentTime, dt, det_x, det_y, det_z, d_materials, d_tile_map, d_U_pool);
         CUDA_CHECK(cudaGetLastError());
         
-        updatePrimitiveFromConservative_kernel<<<current_pool_size, threads>>>(current_pool_size, gamma, d_materials, ambient_rho, ambient_p, d_U_pool, d_states_pool, d_tile_map, nr_cells, nz_cells, num_tiles_z);
+        updatePrimitiveFromConservative_kernel<<<current_pool_size, threads>>>(current_pool_size, gamma, d_materials, ambient_rho, ambient_p, d_U_pool, d_states_pool);
         CUDA_CHECK(cudaGetLastError());
     }
     
@@ -1468,35 +1529,153 @@ double CFDSolver2DCuda::getMaxWaveSpeed() {
     if (current_pool_size == 0) return 340.0;
     
     dim3 threads(TILE_SIZE, TILE_SIZE);
-    dim3 blocks(num_tiles_r, num_tiles_z);
-    computeMaxWaveSpeed_kernel<<<blocks, threads>>>(
-        num_tiles_r, num_tiles_z, nr_cells, nz_cells, gamma, d_materials,
-        d_tile_map, d_states_pool, d_block_maxes, d_block_p_ratios
-    );
+    computeMaxWaveSpeed_kernel<<<current_pool_size, threads>>>(current_pool_size, gamma, d_materials, d_states_pool, d_block_maxes);
     CUDA_CHECK(cudaGetLastError());
     
     std::vector<double> host_block_maxes(current_pool_size);
-    std::vector<double> host_block_ratios(current_pool_size);
     CUDA_CHECK(cudaMemcpy(host_block_maxes.data(), d_block_maxes, current_pool_size * sizeof(double), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(host_block_ratios.data(), d_block_p_ratios, current_pool_size * sizeof(double), cudaMemcpyDeviceToHost));
     
     double max_speed = 1e-6;
-    double max_p_ratio = 1.0;
     for (int p = 0; p < current_pool_size; ++p) {
         if (host_block_maxes[p] > max_speed) max_speed = host_block_maxes[p];
-        if (host_block_ratios[p] > max_p_ratio) max_p_ratio = host_block_ratios[p];
+    }
+    return max_speed;
+}
+
+__global__ void checkTerminationCudaKernel(
+    const int32_t* tile_map, const PrimitiveTile* states_pool,
+    int nr_cells, int nz_cells, int num_tiles_z, double ambient_p, double threshold,
+    int bcRmin, int bcRmax, int bcZmin, int bcZmax,
+    int* d_terminated) {
+    
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    // Check bcRmin or bcRmax along z axis
+    if (idx < nz_cells) {
+        int j = idx;
+        if (bcRmin == 2) { // OUTFLOW_RIEMANN is 2
+            int tr = 0; // i = 0 is tile_tr = 0
+            int tz = j / TILE_SIZE;
+            int pool_idx = tile_map[tr * num_tiles_z + tz];
+            if (pool_idx != -1) {
+                int local_i = 0;
+                int local_j = j % TILE_SIZE;
+                if (states_pool[pool_idx].p[local_i * TILE_SIZE + local_j] > threshold) {
+                    *d_terminated = 1;
+                }
+            }
+        }
+        if (bcRmax == 2) {
+            int tr = (nr_cells - 1) / TILE_SIZE;
+            int tz = j / TILE_SIZE;
+            int pool_idx = tile_map[tr * num_tiles_z + tz];
+            if (pool_idx != -1) {
+                int local_i = (nr_cells - 1) % TILE_SIZE;
+                int local_j = j % TILE_SIZE;
+                if (states_pool[pool_idx].p[local_i * TILE_SIZE + local_j] > threshold) {
+                    *d_terminated = 1;
+                }
+            }
+        }
     }
     
-    double order_factor = 1.0;
-    if (spatialOrder == 2) order_factor = 0.8;
-    else if (spatialOrder >= 3) order_factor = 0.4;
-    
-    double dynamic_cfl_ratio = order_factor;
-    if (max_p_ratio > 5.0) {
-        dynamic_cfl_ratio *= std::max(0.2, 5.0 / max_p_ratio);
+    // Check bcZmin or bcZmax along r axis
+    if (idx < nr_cells) {
+        int i = idx;
+        if (bcZmin == 2) {
+            int tr = i / TILE_SIZE;
+            int tz = 0;
+            int pool_idx = tile_map[tr * num_tiles_z + tz];
+            if (pool_idx != -1) {
+                int local_i = i % TILE_SIZE;
+                int local_j = 0;
+                if (states_pool[pool_idx].p[local_i * TILE_SIZE + local_j] > threshold) {
+                    *d_terminated = 1;
+                }
+            }
+        }
+        if (bcZmax == 2) {
+            int tr = i / TILE_SIZE;
+            int tz = (nz_cells - 1) / TILE_SIZE;
+            int pool_idx = tile_map[tr * num_tiles_z + tz];
+            if (pool_idx != -1) {
+                int local_i = i % TILE_SIZE;
+                int local_j = (nz_cells - 1) % TILE_SIZE;
+                if (states_pool[pool_idx].p[local_i * TILE_SIZE + local_j] > threshold) {
+                    *d_terminated = 1;
+                }
+            }
+        }
     }
+}
+
+bool CFDSolver2DCuda::checkTerminationCondition() {
+    int h_terminated = 0;
+    CUDA_CHECK(cudaMemcpy(d_terminated, &h_terminated, sizeof(int), cudaMemcpyHostToDevice));
     
-    return max_speed / dynamic_cfl_ratio;
+    double threshold = 1.05 * ambient_p;
+    int max_threads = std::max(nr_cells, nz_cells);
+    int threads_per_block = 256;
+    int num_blocks = (max_threads + threads_per_block - 1) / threads_per_block;
+    
+    checkTerminationCudaKernel<<<num_blocks, threads_per_block>>>(
+        d_tile_map, d_states_pool, nr_cells, nz_cells, num_tiles_z, ambient_p, threshold,
+        static_cast<int>(bcRmin), static_cast<int>(bcRmax), static_cast<int>(bcZmin), static_cast<int>(bcZmax),
+        d_terminated
+    );
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+    
+    CUDA_CHECK(cudaMemcpy(&h_terminated, d_terminated, sizeof(int), cudaMemcpyDeviceToHost));
+    return h_terminated == 1;
+}
+
+std::vector<float> CFDSolver2DCuda::getCellValues(int i, int j) {
+    std::vector<float> vals(7, 0.0f);
+    if (i < 0 || i >= nr_cells || j < 0 || j >= nz_cells) return vals;
+    
+    int tr = i / TILE_SIZE;
+    int tz = j / TILE_SIZE;
+    int pool_idx = host_tile_map[tr * num_tiles_z + tz];
+    
+    if (pool_idx == -1) {
+        vals[0] = static_cast<float>(ambient_p);
+        vals[1] = static_cast<float>(ambient_rho);
+        vals[2] = 0.0f;
+        vals[3] = 0.0f;
+        if (is_ideal_gas) {
+            vals[4] = static_cast<float>(ambient_p / (gamma - 1.0));
+        } else {
+            vals[4] = static_cast<float>(ambient_rho * MultiMat::getEnergy_IdealGas(ambient_p, ambient_rho, gamma));
+        }
+        vals[5] = 0.0f;
+        vals[6] = 0.0f;
+    } else {
+        int k = (i % TILE_SIZE) * TILE_SIZE + (j % TILE_SIZE);
+        double h_rho = 0.0, h_ur = 0.0, h_uz = 0.0, h_p = 0.0, h_E = 0.0, h_a1 = 0.0, h_a2 = 0.0;
+        
+        CUDA_CHECK(cudaMemcpy(&h_rho, &(d_states_pool[pool_idx].rho[k]), sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(&h_ur,  &(d_states_pool[pool_idx].ur[k]),  sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(&h_uz,  &(d_states_pool[pool_idx].uz[k]),  sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(&h_p,   &(d_states_pool[pool_idx].p[k]),   sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(&h_E,   &(d_states_pool[pool_idx].E[k]),   sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(&h_a1,  &(d_states_pool[pool_idx].alpha1[k]), sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(&h_a2,  &(d_states_pool[pool_idx].alpha2[k]), sizeof(double), cudaMemcpyDeviceToHost));
+        
+        vals[0] = static_cast<float>(h_p);
+        vals[1] = static_cast<float>(h_rho);
+        double u_mag = std::sqrt(h_ur * h_ur + h_uz * h_uz);
+        vals[2] = static_cast<float>(u_mag);
+        
+        double e_int = (h_rho > 0.0) ? (h_E / h_rho - 0.5 * u_mag * u_mag) : 0.0;
+        vals[3] = static_cast<float>(e_int);
+        
+        vals[4] = static_cast<float>(std::clamp(h_a1, 0.0, 1.0));
+        vals[5] = static_cast<float>(std::clamp(h_a2, 0.0, 1.0));
+        double air_frac = 1.0 - h_a1 - h_a2;
+        vals[6] = static_cast<float>(std::clamp(air_frac, 0.0, 1.0));
+    }
+    return vals;
 }
 
 void get_cuda_vram_info(size_t& free_bytes, size_t& total_bytes) {

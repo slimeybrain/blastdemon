@@ -210,7 +210,7 @@ export class GraphRenderer {
                 const heightDiff = Math.abs((node.height || 0) - newHeight);
                 if (newWidth > 0 && newHeight > 0 && (widthDiff > 4 || heightDiff > 4)) {
                     const userIsResizing = this.nodeUserResizing.has(nodeId);
-                    const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour';
+                    const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges';
                     if (isTelemetry && node.displayMode !== 'compact') {
                         const isTelemetryText = node.type === 'TelemetryText';
                         if (!isTelemetryText || userIsResizing) {
@@ -221,7 +221,7 @@ export class GraphRenderer {
                     }
 
                     // Automatic mode switching for telemetry nodes (only when user is resizing)
-                    if (userIsResizing && (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour')) {
+                    if (userIsResizing && (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges')) {
                         let targetMode: 'compact' | 'normal' | 'expanded' = 'normal';
                         if (newHeight < 60) targetMode = 'compact';
                         else if (newHeight >= 180) targetMode = 'expanded';
@@ -988,6 +988,7 @@ export class GraphRenderer {
                     { label: 'Telemetry - Text', type: 'TelemetryText' },
                     { label: 'Telemetry - Graph', type: 'TelemetryGraph' },
                     { label: 'Telemetry - Contour (2D)', type: 'TelemetryContour' },
+                    { label: 'Virtual Gauges', type: 'VirtualGauges' },
                     { label: 'VTK Output Controls', type: 'VTKOutput' }
                 ]
             },
@@ -1462,11 +1463,11 @@ export class GraphRenderer {
                 if (!nodeEl) {
                     nodeEl = document.createElement('div');
                     nodeEl.className = 'node';
-                    if (node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour') {
+                    if (node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges') {
                         nodeEl.classList.add('resizable');
-                        if (node.width === undefined) node.width = node.type === 'TelemetryContour' ? 350 : 250;
+                        if (node.width === undefined) node.width = (node.type === 'TelemetryContour' || node.type === 'VirtualGauges') ? 350 : 250;
                         if (node.height === undefined) {
-                            if (node.type === 'TelemetryContour') node.height = 300;
+                            if (node.type === 'TelemetryContour' || node.type === 'VirtualGauges') node.height = 300;
                             else if (node.type === 'TelemetryGraph') node.height = 150;
                             else node.height = 130;
                         }
@@ -1709,7 +1710,7 @@ export class GraphRenderer {
                 const displayMode = node.displayMode || 'expanded';
                 const nodeOrientation = node.orientation || 'HORIZ';
 
-                const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour';
+                const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges';
 
                 // Only override the element's inline width/height from state when the
                 // user is NOT actively dragging the native resize handle. Mid-drag, the
@@ -3213,6 +3214,21 @@ export class GraphRenderer {
                         }
                     }
                 }
+                const gridInfo = form.querySelector('.grid-info-display') as HTMLDivElement;
+                if (gridInfo) {
+                    const cellSize = Number(node.parameters['cell_size'] ?? 0.001);
+                    if (node.type === 'DomainMesh') {
+                        const radius = Number(node.parameters['domain_radius'] ?? 1.0);
+                        const n_cells = Math.round(radius / cellSize);
+                        gridInfo.textContent = `Calculated Grid: ${n_cells} cells (Total: ${n_cells.toLocaleString()})`;
+                    } else if (node.type === 'DomainMesh2D') {
+                        const max_r = Number(node.parameters['max_r'] ?? 1.0);
+                        const max_z = Number(node.parameters['max_z'] ?? 1.0);
+                        const nr = Math.round(max_r / cellSize);
+                        const nz = Math.round(max_z / cellSize);
+                        gridInfo.textContent = `Calculated Grid: ${nr} x ${nz} cells (Total: ${(nr * nz).toLocaleString()})`;
+                    }
+                }
                 return;
             }
         }
@@ -3234,8 +3250,39 @@ export class GraphRenderer {
             form.dataset.renderedMaterialType = matType.toString();
         }
 
-        for (const [key, value] of Object.entries(node.parameters)) {
+        const paramKeys = Object.keys(node.parameters);
+        if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D') {
+            paramKeys.sort((a, b) => {
+                if (a === 'cell_size') return -1;
+                if (b === 'cell_size') return 1;
+                return 0;
+            });
+            
+            const cellSize = Number(node.parameters['cell_size'] ?? 0.001);
+            const info = document.createElement('div');
+            info.className = 'grid-info-display';
+            info.style.fontSize = 'var(--font-xs)';
+            info.style.color = '#569cd6';
+            info.style.marginBottom = '4px';
+            if (node.type === 'DomainMesh') {
+                const radius = Number(node.parameters['domain_radius'] ?? 1.0);
+                const n_cells = Math.round(radius / cellSize);
+                info.textContent = `Calculated Grid: ${n_cells} cells (Total: ${n_cells.toLocaleString()})`;
+            } else {
+                const max_r = Number(node.parameters['max_r'] ?? 1.0);
+                const max_z = Number(node.parameters['max_z'] ?? 1.0);
+                const nr = Math.round(max_r / cellSize);
+                const nz = Math.round(max_z / cellSize);
+                info.textContent = `Calculated Grid: ${nr} x ${nz} cells (Total: ${(nr * nz).toLocaleString()})`;
+            }
+            form.appendChild(info);
+        }
+
+        for (const key of paramKeys) {
+            const value = node.parameters[key];
             if (key === 'gauges') continue;
+            if (key === 'nr' || key === 'nz' || key === 'n_cells') continue;
+            if (node.type === 'VirtualGauges' && key === 'telemetry_channel') continue;
             if (node.type === 'DomainMesh') {
                 const dim = node.parameters['dimension'] || '1D';
                 if ((key === 'y_min_bc' || key === 'y_max_bc') && dim === '1D') continue;
@@ -3377,7 +3424,7 @@ export class GraphRenderer {
                 input.style.border = '1px solid #444';
                 input.style.padding = '1px 2px';
 
-                input.addEventListener('change', () => {
+                input.addEventListener('input', () => {
                     const newVal = isNumeric ? Number(input.value) : input.value;
                     this.stateManager.updateNodeParameters(node.id, { [key]: newVal });
                 });
@@ -3488,6 +3535,8 @@ export class GraphRenderer {
                 return 'Real-time 2D contour heatmap telemetry viewer. Renders dynamic physical fields — pressure, density, velocity magnitude, and multi-material mass fractions — streamed live from the 2D solver at every output step.';
             case 'VTKOutput':
                 return 'VTK output controls. Saves simulation snapshots in VTK XML Unstructured Grid (.vtu) format to the specified directory. Files are compatible with ParaView, VisIt, and other VTK-based post-processors.';
+            case 'VirtualGauges':
+                return 'Virtual gauges. Records and tracks simulation variables (pressure, density, velocity, species) at discrete coordinates over time.';
             default:
                 return 'Simulation graph node.';
         }
@@ -3730,37 +3779,45 @@ export class GraphRenderer {
         toolbar.style.gap = '6px';
         toolbar.style.alignItems = 'center';
 
-        const CHANNELS_1D = ['Pressure', 'Density', 'Velocity', 'Int. Energy', 'Mass Fraction'];
-        const CHANNELS_2D = ['Pressure', 'Density', 'Radial Vel', 'Axial Vel', 'Energy', 'Mass Frac 1', 'Mass Frac 2'];
-        const channelsList = has2D ? CHANNELS_2D : CHANNELS_1D;
+        const CHANNELS = [
+            { label: 'Pressure (Pa)' },
+            { label: 'Density (kg/m³)' },
+            { label: 'Velocity (m/s)' },
+            { label: 'Energy (J/kg)' },
+            { label: 'Mass Fraction 1' },
+            { label: 'Mass Fraction 2' }
+        ];
 
-        const chSelect = document.createElement('select');
-        chSelect.className = 'node-gauges-channel-select';
-        chSelect.style.flex = '1';
-        chSelect.style.background = '#252526';
-        chSelect.style.color = '#ccc';
-        chSelect.style.border = '1px solid #444';
-        chSelect.style.padding = '2px 4px';
-        chSelect.style.fontSize = '11px';
-
-        channelsList.forEach((chName, idx) => {
+        const outputSelect = document.createElement('select');
+        outputSelect.style.fontSize = '11px';
+        outputSelect.style.background = '#222';
+        outputSelect.style.color = '#ccc';
+        outputSelect.style.border = '1px solid #444';
+        outputSelect.style.padding = '2px';
+        outputSelect.style.borderRadius = '3px';
+        CHANNELS.forEach((ch, idx) => {
             const opt = document.createElement('option');
             opt.value = String(idx);
-            opt.textContent = chName;
+            opt.textContent = ch.label;
             if (idx === currentChannel) opt.selected = true;
-            chSelect.appendChild(opt);
+            outputSelect.appendChild(opt);
         });
-        chSelect.onmousedown = (e) => e.stopPropagation();
-        chSelect.onchange = () => {
-            const newCh = Number(chSelect.value);
-            this.stateManager.updateNodeParameters(node.id, { telemetry_channel: newCh });
-            const canvas = body.querySelector('.node-gauges-canvas') as HTMLCanvasElement;
-            const history = this.stateManager.getTelemetry(node.id);
-            if (canvas && history) {
-                this.drawGaugesChart(canvas, history, node.parameters?.gauges || [], newCh, has2D);
-            }
+        outputSelect.onchange = () => {
+            this.stateManager.updateNodeParameters(node.id, { telemetry_channel: Number(outputSelect.value) });
         };
-        toolbar.appendChild(chSelect);
+        outputSelect.onmousedown = (e) => e.stopPropagation();
+        
+        const outputLabel = document.createElement('span');
+        outputLabel.textContent = 'Quantity:';
+        outputLabel.style.fontSize = '11px';
+        outputLabel.style.color = '#888';
+        toolbar.appendChild(outputLabel);
+        toolbar.appendChild(outputSelect);
+        
+        // Spacer
+        const spacer = document.createElement('div');
+        spacer.style.flex = '1';
+        toolbar.appendChild(spacer);
 
         const addBtn = document.createElement('button');
         addBtn.textContent = '+ Gauge';
@@ -3796,22 +3853,35 @@ export class GraphRenderer {
 
         body.appendChild(toolbar);
 
+        // Flex row container for chart and list
+        const contentRow = document.createElement('div');
+        contentRow.style.display = 'flex';
+        contentRow.style.flexDirection = 'row';
+        contentRow.style.flex = '1';
+        contentRow.style.gap = '8px';
+        contentRow.style.minHeight = '60px';
+        body.appendChild(contentRow);
+
         // 2. Chart Canvas
         const canvas = document.createElement('canvas');
         canvas.className = 'node-gauges-canvas';
-        canvas.width = 250;
-        canvas.height = 100;
         canvas.style.width = '100%';
-        canvas.style.height = '100px';
+        canvas.style.flex = '1.5';
+        canvas.style.minHeight = '60px';
+        canvas.style.minWidth = '0';
         canvas.style.background = '#1e1e1e';
         canvas.style.border = '1px solid #333';
         canvas.style.borderRadius = '3px';
-        body.appendChild(canvas);
+        contentRow.appendChild(canvas);
 
         // 3. Gauges List/Table
         const listDiv = document.createElement('div');
-        listDiv.style.maxHeight = '100px';
+        listDiv.style.flex = '1';
+        listDiv.style.minHeight = '60px';
+        listDiv.style.minWidth = '0';
+        listDiv.style.maxHeight = '200px';
         listDiv.style.overflowY = 'auto';
+        listDiv.style.overflowX = 'auto';
         listDiv.style.border = '1px solid #333';
         listDiv.style.borderRadius = '3px';
         listDiv.style.background = '#181818';
@@ -3913,15 +3983,27 @@ export class GraphRenderer {
             });
             listDiv.appendChild(table);
         }
-        body.appendChild(listDiv);
+        contentRow.appendChild(listDiv);
 
-        // Draw initial chart
+        // Draw chart and automatically adjust layout and canvas resolution when resized
         const history = this.stateManager.getTelemetry(node.id);
-        if (history) {
-            setTimeout(() => {
-                this.drawGaugesChart(canvas, history, gauges, currentChannel, has2D);
-            }, 0);
-        }
+        const ro = new ResizeObserver((entries) => {
+            for (const entry of entries) {
+                const { width } = entry.contentRect;
+                if (width < 340) {
+                    contentRow.style.flexDirection = 'column';
+                } else {
+                    contentRow.style.flexDirection = 'row';
+                }
+                
+                canvas.width = canvas.clientWidth || 250;
+                canvas.height = canvas.clientHeight || 100;
+                if (history) {
+                    this.drawGaugesChart(canvas, history, gauges, currentChannel, has2D);
+                }
+            }
+        });
+        ro.observe(body);
     }
 
     private drawGaugesChart(canvas: HTMLCanvasElement, history: any, gauges: any[], channel: number, has2D: boolean): void {
@@ -3974,26 +4056,28 @@ export class GraphRenderer {
             return;
         }
 
-        const padding = 20;
-        const plotWidth = width - 2 * padding;
-        const plotHeight = height - 2 * padding;
+        const paddingLeft = 38;
+        const paddingRight = 10;
+        const paddingY = 15;
+        const plotWidth = width - paddingLeft - paddingRight;
+        const plotHeight = height - 2 * paddingY;
         const range = maxVal - minVal === 0 ? 1.0 : maxVal - minVal;
 
         // Draw grid/bounds labels
         ctx.strokeStyle = '#333';
         ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.moveTo(padding, padding);
-        ctx.lineTo(padding, height - padding);
-        ctx.lineTo(width - padding, height - padding);
+        ctx.moveTo(paddingLeft, paddingY);
+        ctx.lineTo(paddingLeft, height - paddingY);
+        ctx.lineTo(width - paddingRight, height - paddingY);
         ctx.stroke();
 
         ctx.fillStyle = '#888';
         ctx.font = '8px monospace';
         ctx.textAlign = 'right';
         ctx.textBaseline = 'middle';
-        ctx.fillText(maxVal.toExponential(1), padding - 4, padding);
-        ctx.fillText(minVal.toExponential(1), padding - 4, height - padding);
+        ctx.fillText(maxVal.toExponential(1), paddingLeft - 4, paddingY);
+        ctx.fillText(minVal.toExponential(1), paddingLeft - 4, height - paddingY);
 
         // Draw curves
         const colors = ['#38bdf8', '#fb7185', '#34d399', '#fbbf24', '#a78bfa', '#2dd4bf'];
@@ -4007,8 +4091,8 @@ export class GraphRenderer {
 
                 arr.forEach((v: number, i: number) => {
                     if (i >= times.length) return;
-                    const x = padding + (i / (times.length - 1)) * plotWidth;
-                    const y = height - padding - ((v - minVal) / range) * plotHeight;
+                    const x = paddingLeft + (i / (times.length - 1)) * plotWidth;
+                    const y = height - paddingY - ((v - minVal) / range) * plotHeight;
                     if (i === 0) {
                         ctx.moveTo(x, y);
                     } else {

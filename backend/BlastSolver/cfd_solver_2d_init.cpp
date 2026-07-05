@@ -70,15 +70,6 @@ void CFDSolver2D::initTileToAmbient(int pool_idx) {
         U_pool[pool_idx].alpha2[k] = 0.0;
         U_pool[pool_idx].arho1[k] = 0.0;
         U_pool[pool_idx].arho2[k] = 0.0;
-
-        dU_pool[pool_idx].rho[k] = 0.0;
-        dU_pool[pool_idx].rhour[k] = 0.0;
-        dU_pool[pool_idx].rhouz[k] = 0.0;
-        dU_pool[pool_idx].E[k] = 0.0;
-        dU_pool[pool_idx].alpha1[k] = 0.0;
-        dU_pool[pool_idx].alpha2[k] = 0.0;
-        dU_pool[pool_idx].arho1[k] = 0.0;
-        dU_pool[pool_idx].arho2[k] = 0.0;
     }
 }
 
@@ -102,12 +93,24 @@ void CFDSolver2D::setInitialConditionTNT(double explosive_z, double explosive_ra
 
     // Allocate all tiles that contain the explosive
     for (int i = 0; i < nr_cells; ++i) {
-        double r = (i + 0.5) * dr;
         for (int j = 0; j < nz_cells; ++j) {
-            double z = (j + 0.5) * dz;
-            double dist = std::sqrt(r * r + (z - explosive_z) * (z - explosive_z));
-            
-            if (dist <= explosive_radius) {
+            double sum_w = 0.0;
+            double sum_w_inside = 0.0;
+            for (int ki = 0; ki < 8; ++ki) {
+                double r_sub = i * dr + (ki + 0.5) * (dr / 8.0);
+                double w = is_cartesian ? 1.0 : r_sub;
+                for (int kj = 0; kj < 8; ++kj) {
+                    double z_sub = j * dz + (kj + 0.5) * (dz / 8.0);
+                    double dist = std::sqrt(r_sub * r_sub + (z_sub - explosive_z) * (z_sub - explosive_z));
+                    if (dist <= explosive_radius) {
+                        sum_w_inside += w;
+                    }
+                    sum_w += w;
+                }
+            }
+            double f_vol = sum_w_inside / sum_w;
+
+            if (f_vol > 0.0) {
                 int tr = i / TILE_SIZE;
                 int tz = j / TILE_SIZE;
                 int pool_idx = allocateTile(tr, tz);
@@ -116,24 +119,29 @@ void CFDSolver2D::setInitialConditionTNT(double explosive_z, double explosive_ra
                 int local_j = j % TILE_SIZE;
                 int local_idx = local_i * TILE_SIZE + local_j;
                 
-                states_pool[pool_idx].rho[local_idx] = high_rho;
+                double alpha2 = f_vol;
+                double arho2 = f_vol * high_rho;
+                double rho = arho2 + (1.0 - f_vol) * ambient_rho;
+                double E = MultiMat::getMixtureEnergy(ambient_p, rho, 0.0, alpha2, 0.0, arho2, gamma, currentMaterials.products, currentMaterials.unreacted);
+
+                states_pool[pool_idx].rho[local_idx] = rho;
                 states_pool[pool_idx].p[local_idx] = ambient_p;
                 states_pool[pool_idx].alpha1[local_idx] = 0.0; 
-                states_pool[pool_idx].alpha2[local_idx] = 1.0;
+                states_pool[pool_idx].alpha2[local_idx] = alpha2;
                 states_pool[pool_idx].arho1[local_idx] = 0.0; 
-                states_pool[pool_idx].arho2[local_idx] = high_rho;
+                states_pool[pool_idx].arho2[local_idx] = arho2;
                 states_pool[pool_idx].ur[local_idx] = 0.0; 
                 states_pool[pool_idx].uz[local_idx] = 0.0;
-                states_pool[pool_idx].E[local_idx] = high_rho * MultiMat::getEnergy_JWL(ambient_p, high_rho, currentMaterials.unreacted);
+                states_pool[pool_idx].E[local_idx] = E;
                 
-                U_pool[pool_idx].rho[local_idx] = high_rho;
+                U_pool[pool_idx].rho[local_idx] = rho;
                 U_pool[pool_idx].rhour[local_idx] = 0.0;
                 U_pool[pool_idx].rhouz[local_idx] = 0.0;
-                U_pool[pool_idx].E[local_idx] = states_pool[pool_idx].E[local_idx];
+                U_pool[pool_idx].E[local_idx] = E;
                 U_pool[pool_idx].alpha1[local_idx] = 0.0;
-                U_pool[pool_idx].alpha2[local_idx] = 1.0;
+                U_pool[pool_idx].alpha2[local_idx] = alpha2;
                 U_pool[pool_idx].arho1[local_idx] = 0.0;
-                U_pool[pool_idx].arho2[local_idx] = high_rho;
+                U_pool[pool_idx].arho2[local_idx] = arho2;
             }
         }
     }
@@ -150,13 +158,27 @@ void CFDSolver2D::setInitialConditionIdealGas(double explosive_z, double explosi
     this->det_z = explosive_z;
     this->is_ideal_gas = true;
     
+    double p_high = (gamma - 1.0) * high_rho * detonation_energy;
+    
     for (int i = 0; i < nr_cells; ++i) {
-        double r = (i + 0.5) * dr;
         for (int j = 0; j < nz_cells; ++j) {
-            double z = (j + 0.5) * dz;
-            double dist = std::sqrt(r * r + (z - explosive_z) * (z - explosive_z));
+            double sum_w = 0.0;
+            double sum_w_inside = 0.0;
+            for (int ki = 0; ki < 8; ++ki) {
+                double r_sub = i * dr + (ki + 0.5) * (dr / 8.0);
+                double w = is_cartesian ? 1.0 : r_sub;
+                for (int kj = 0; kj < 8; ++kj) {
+                    double z_sub = j * dz + (kj + 0.5) * (dz / 8.0);
+                    double dist = std::sqrt(r_sub * r_sub + (z_sub - explosive_z) * (z_sub - explosive_z));
+                    if (dist <= explosive_radius) {
+                        sum_w_inside += w;
+                    }
+                    sum_w += w;
+                }
+            }
+            double f_vol = sum_w_inside / sum_w;
 
-            if (dist <= explosive_radius) {
+            if (f_vol > 0.0) {
                 int tr = i / TILE_SIZE;
                 int tz = j / TILE_SIZE;
                 int pool_idx = allocateTile(tr, tz);
@@ -165,17 +187,21 @@ void CFDSolver2D::setInitialConditionIdealGas(double explosive_z, double explosi
                 int local_j = j % TILE_SIZE;
                 int local_idx = local_i * TILE_SIZE + local_j;
                 
-                states_pool[pool_idx].rho[local_idx] = high_rho;
-                states_pool[pool_idx].p[local_idx] = (gamma - 1.0) * high_rho * detonation_energy;
+                double rho = f_vol * high_rho + (1.0 - f_vol) * ambient_rho;
+                double p = f_vol * p_high + (1.0 - f_vol) * ambient_p;
+                double E = p / (gamma - 1.0);
+
+                states_pool[pool_idx].rho[local_idx] = rho;
+                states_pool[pool_idx].p[local_idx] = p;
                 states_pool[pool_idx].alpha1[local_idx] = 0.0; states_pool[pool_idx].alpha2[local_idx] = 0.0;
                 states_pool[pool_idx].arho1[local_idx] = 0.0; states_pool[pool_idx].arho2[local_idx] = 0.0;
                 states_pool[pool_idx].ur[local_idx] = 0.0; states_pool[pool_idx].uz[local_idx] = 0.0;
-                states_pool[pool_idx].E[local_idx] = states_pool[pool_idx].p[local_idx] / (gamma - 1.0);
+                states_pool[pool_idx].E[local_idx] = E;
                 
-                U_pool[pool_idx].rho[local_idx] = high_rho;
+                U_pool[pool_idx].rho[local_idx] = rho;
                 U_pool[pool_idx].rhour[local_idx] = 0.0;
                 U_pool[pool_idx].rhouz[local_idx] = 0.0;
-                U_pool[pool_idx].E[local_idx] = states_pool[pool_idx].E[local_idx];
+                U_pool[pool_idx].E[local_idx] = E;
                 U_pool[pool_idx].alpha1[local_idx] = 0.0; U_pool[pool_idx].alpha2[local_idx] = 0.0;
                 U_pool[pool_idx].arho1[local_idx] = 0.0; U_pool[pool_idx].arho2[local_idx] = 0.0;
             }
@@ -195,13 +221,24 @@ void CFDSolver2D::setInitialConditionTNTCylinder(double explosive_z, double radi
     this->is_ideal_gas = false;
 
     for (int i = 0; i < nr_cells; ++i) {
-        double r = (i + 0.5) * dr;
         for (int j = 0; j < nz_cells; ++j) {
-            double z = (j + 0.5) * dz;
+            double sum_w = 0.0;
+            double sum_w_inside = 0.0;
+            for (int ki = 0; ki < 8; ++ki) {
+                double r_sub = i * dr + (ki + 0.5) * (dr / 8.0);
+                double w = is_cartesian ? 1.0 : r_sub;
+                for (int kj = 0; kj < 8; ++kj) {
+                    double z_sub = j * dz + (kj + 0.5) * (dz / 8.0);
+                    bool inside = (r_sub <= radius) && (std::abs(z_sub - explosive_z) <= height / 2.0);
+                    if (inside) {
+                        sum_w_inside += w;
+                    }
+                    sum_w += w;
+                }
+            }
+            double f_vol = sum_w_inside / sum_w;
 
-            bool inside = (r <= radius) && (std::abs(z - explosive_z) <= height / 2.0);
-
-            if (inside) {
+            if (f_vol > 0.0) {
                 int tr = i / TILE_SIZE;
                 int tz = j / TILE_SIZE;
                 int pool_idx = allocateTile(tr, tz);
@@ -210,19 +247,24 @@ void CFDSolver2D::setInitialConditionTNTCylinder(double explosive_z, double radi
                 int local_j = j % TILE_SIZE;
                 int local_idx = local_i * TILE_SIZE + local_j;
                 
-                states_pool[pool_idx].rho[local_idx] = high_rho;
+                double alpha2 = f_vol;
+                double arho2 = f_vol * high_rho;
+                double rho = arho2 + (1.0 - f_vol) * ambient_rho;
+                double E = MultiMat::getMixtureEnergy(ambient_p, rho, 0.0, alpha2, 0.0, arho2, gamma, currentMaterials.products, currentMaterials.unreacted);
+
+                states_pool[pool_idx].rho[local_idx] = rho;
                 states_pool[pool_idx].p[local_idx] = ambient_p;
-                states_pool[pool_idx].alpha1[local_idx] = 0.0; states_pool[pool_idx].alpha2[local_idx] = 1.0;
-                states_pool[pool_idx].arho1[local_idx] = 0.0; states_pool[pool_idx].arho2[local_idx] = high_rho;
+                states_pool[pool_idx].alpha1[local_idx] = 0.0; states_pool[pool_idx].alpha2[local_idx] = alpha2;
+                states_pool[pool_idx].arho1[local_idx] = 0.0; states_pool[pool_idx].arho2[local_idx] = arho2;
                 states_pool[pool_idx].ur[local_idx] = 0.0; states_pool[pool_idx].uz[local_idx] = 0.0;
-                states_pool[pool_idx].E[local_idx] = high_rho * MultiMat::getEnergy_JWL(ambient_p, high_rho, currentMaterials.unreacted);
+                states_pool[pool_idx].E[local_idx] = E;
                 
-                U_pool[pool_idx].rho[local_idx] = high_rho;
+                U_pool[pool_idx].rho[local_idx] = rho;
                 U_pool[pool_idx].rhour[local_idx] = 0.0;
                 U_pool[pool_idx].rhouz[local_idx] = 0.0;
-                U_pool[pool_idx].E[local_idx] = states_pool[pool_idx].E[local_idx];
-                U_pool[pool_idx].alpha1[local_idx] = 0.0; U_pool[pool_idx].alpha2[local_idx] = 1.0;
-                U_pool[pool_idx].arho1[local_idx] = 0.0; U_pool[pool_idx].arho2[local_idx] = high_rho;
+                U_pool[pool_idx].E[local_idx] = E;
+                U_pool[pool_idx].alpha1[local_idx] = 0.0; U_pool[pool_idx].alpha2[local_idx] = alpha2;
+                U_pool[pool_idx].arho1[local_idx] = 0.0; U_pool[pool_idx].arho2[local_idx] = arho2;
             }
         }
     }
