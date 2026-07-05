@@ -322,9 +322,9 @@ export class StateManager {
     private getUniqueNodeId(type: NodeType, tempExistingIds: Set<string>): string {
         const prefixMap: Record<NodeType, string> = {
             'DomainMesh': 'node-mesh',
-            'MaterialAir': 'node-air',
-            'MaterialExplosive': 'node-explosive',
-            'MaterialIdealGas': 'node-idealgas',
+            'Material': 'node-material',
+            'Charge1D': 'node-charge1d',
+            'Charge2D': 'node-charge2d',
             'ThePainter': 'node-painter',
             'CFDSolver': 'node-solver',
             'TelemetryText': 'node-log',
@@ -335,7 +335,8 @@ export class StateManager {
             'HardwareConfig': 'node-hardware',
             'CFDSolver2D': 'node-solver2d',
             'TelemetryContour': 'node-contour',
-            'VTKOutput': 'node-vtk'
+            'VTKOutput': 'node-vtk',
+            'VirtualGauges': 'node-gauges'
         };
         const prefix = prefixMap[type] || `node-${type.toLowerCase()}`;
 
@@ -615,7 +616,7 @@ export class StateManager {
             if (node) {
                 const merged = { ...node.parameters, ...parameters };
                 const updatedKey = Object.keys(parameters).find(k => k === 'charge_mass') || Object.keys(parameters)[0];
-                syncExplosiveParameters(node.type, merged, updatedKey);
+                syncExplosiveParameters(node, merged, model, updatedKey);
                 node.parameters = merged;
                 console.log("[DEBUG] Node parameters updated in memory. New parameters:", node.parameters);
                 found = true;
@@ -641,7 +642,7 @@ export class StateManager {
             if (node) {
                 const merged = { ...node.parameters, ...parameters };
                 const updatedKey = Object.keys(parameters).find(k => k === 'charge_mass') || Object.keys(parameters)[0];
-                syncExplosiveParameters(node.type, merged, updatedKey);
+                syncExplosiveParameters(node, merged, model, updatedKey);
                 
                 for (const [key, value] of Object.entries(merged)) {
                     if (node.parameters[key] !== value) {
@@ -872,7 +873,7 @@ export class StateManager {
         telemetryConnections.forEach(connection => {
             const connectedNode = nodes.find(n => n.id === connection.toNode);
             if (connectedNode) {
-                if (connectedNode.type === 'TelemetryGraph') {
+                if (connectedNode.type === 'TelemetryGraph' || connectedNode.type === 'VirtualGauges') {
                     if (data instanceof ArrayBuffer || (data && (data.type === 'TELEMETRY' || data.type === 'TELEMETRY_2D'))) {
                          this.telemetryStore.set(connectedNode.id, data);
                          this.notifyTelemetryUpdate(connectedNode.id, data);
@@ -1175,14 +1176,14 @@ export class StateManager {
                 z_min_bc: 'Reflecting',
                 z_max_bc: 'Reflecting'
             },
-            'MaterialAir': {
+            'Material': {
+                material_type: 'Air',
+                // Air params
                 atm_pressure: 101325.0,
                 atm_temperature: 298.15,
-                gamma: 1.4
-            },
-            'MaterialExplosive': {
+                gamma: 1.4,
+                // JWL params
                 composition: 'TNT',
-                charge_mass: 1.0,
                 rho: 1630,
                 detonation_energy: 4290000,
                 det_vel: 6930,
@@ -1191,21 +1192,24 @@ export class StateManager {
                 jwl_R1: 4.15,
                 jwl_R2: 0.90,
                 jwl_omega: 0.35,
-                charge_shape: 'Sphere',
-                charge_r: 0.0,
-                charge_z: 0.1,
-                charge_radius: 0.05,
-                charge_height: 0.1
+                // Ideal Gas Charge params
+                ideal_gamma: 1.4,
+                ideal_rho_0: 1.25,
+                ideal_e_0: 4290000
             },
-            'MaterialIdealGas': {
-                charge_mass: 1.0,
-                rho: 1630,
-                detonation_energy: 4520000,
+            'Charge1D': {
+                charge_radius: 0.05
+            },
+            'Charge2D': {
                 charge_shape: 'Sphere',
-                charge_r: 0.0,
-                charge_z: 0.1,
                 charge_radius: 0.05,
-                charge_height: 0.1
+                charge_height: 0.1,
+                charge_r: 0.0,
+                charge_z: 0.1
+            },
+            'VirtualGauges': {
+                gauges: [],
+                telemetry_channel: 0
             },
             'CFDSolver': {
                 init_mode: 'Multi-Material JWL',
@@ -1283,7 +1287,9 @@ export class StateManager {
                     }
                 }
             }
-            syncExplosiveParameters(node.type, node.parameters);
+            // Sync logic
+            const model = Object.values(this.appState.models).find(m => m.nodes.includes(node)) || null;
+            syncExplosiveParameters(node, node.parameters, model);
         });
     }
 }
@@ -1345,13 +1351,22 @@ function ensureMenuBar(node: LayoutNode): LayoutNode {
     return result;
 }
 
-function syncExplosiveParameters(nodeType: string, parameters: Record<string, any>, updatedKey?: string): void {
-    if (nodeType !== 'MaterialExplosive' && nodeType !== 'MaterialIdealGas') {
+function syncExplosiveParameters(node: Node, parameters: Record<string, any>, state: { nodes: Node[], connections: Connection[] } | null, updatedKey?: string): void {
+    if (node.type !== 'Charge1D' && node.type !== 'Charge2D') {
         return;
     }
 
     const shape = parameters['charge_shape'] || 'Sphere';
-    const rho = Number(parameters['rho'] !== undefined ? parameters['rho'] : 1630.0);
+    
+    let rho = 1630.0;
+    if (state) {
+        const conn = state.connections.find(c => c.toNode === node.id && c.toPort === 'material');
+        const matNode = conn ? state.nodes.find(n => n.id === conn.fromNode) : null;
+        if (matNode && matNode.type === 'Material') {
+            rho = Number(matNode.parameters?.rho ?? 1630.0);
+        }
+    }
+
     const height = Number(parameters['charge_height'] !== undefined ? parameters['charge_height'] : 0.1);
     const radius = Number(parameters['charge_radius'] !== undefined ? parameters['charge_radius'] : 0.05);
     const mass = Number(parameters['charge_mass'] !== undefined ? parameters['charge_mass'] : 0.0);

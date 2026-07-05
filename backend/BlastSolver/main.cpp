@@ -871,5 +871,10 @@ int main() {
     });
     stdin_listener_thread.join();
 
+    // Prevent abrupt termination of detached worker threads when stdin reaches EOF
+    while (sim_running.load() || sim2d_running.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
     return 0;
 }

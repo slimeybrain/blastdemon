@@ -70,6 +70,15 @@ void CFDSolver2D::initTileToAmbient(int pool_idx) {
         U_pool[pool_idx].alpha2[k] = 0.0;
         U_pool[pool_idx].arho1[k] = 0.0;
         U_pool[pool_idx].arho2[k] = 0.0;
+
+        dU_pool[pool_idx].rho[k] = 0.0;
+        dU_pool[pool_idx].rhour[k] = 0.0;
+        dU_pool[pool_idx].rhouz[k] = 0.0;
+        dU_pool[pool_idx].E[k] = 0.0;
+        dU_pool[pool_idx].alpha1[k] = 0.0;
+        dU_pool[pool_idx].alpha2[k] = 0.0;
+        dU_pool[pool_idx].arho1[k] = 0.0;
+        dU_pool[pool_idx].arho2[k] = 0.0;
     }
 }
 

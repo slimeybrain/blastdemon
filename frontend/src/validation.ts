@@ -83,13 +83,13 @@ export function validateSimulationState(state: SimulationState): ValidationResul
         // Air connection check
         const airConn = state.connections.find(c => c.toNode === painterNode.id && c.toPort === 'air');
         if (!airConn) {
-            addMessage(painterNode.id, 'error', "No Air node connected to Initializer. A MaterialAir node is required.");
+            addMessage(painterNode.id, 'error', "No Air node connected to Initializer. A Material node (configured as Air) is required.");
         } else {
             const fromNode = state.nodes.find(n => n.id === airConn.fromNode);
-            if (!fromNode || fromNode.type !== 'MaterialAir') {
+            if (!fromNode || fromNode.type !== 'Material' || fromNode.parameters?.material_type !== 'Air') {
                 const connKey = `${airConn.fromNode}:${airConn.fromPort}->${airConn.toNode}:${airConn.toPort}`;
-                flawedConnections.set(connKey, "Only MaterialAir node can be connected to the Air input.");
-                addMessage(painterNode.id, 'error', "Only MaterialAir node can be connected to the Air input.");
+                flawedConnections.set(connKey, "Only a Material node configured as Air can be connected to the Air input.");
+                addMessage(painterNode.id, 'error', "Only a Material node configured as Air can be connected to the Air input.");
             }
         }
 
@@ -100,23 +100,29 @@ export function validateSimulationState(state: SimulationState): ValidationResul
         } else {
             const expNode = state.nodes.find(n => n.id === expConn.fromNode);
             if (expNode) {
-                if (expNode.type !== 'MaterialExplosive' && expNode.type !== 'MaterialIdealGas') {
+                if (expNode.type !== 'Charge1D') {
                     const connKey = `${expConn.fromNode}:${expConn.fromPort}->${expConn.toNode}:${expConn.toPort}`;
-                    flawedConnections.set(connKey, "Only MaterialExplosive or MaterialIdealGas node can be connected to the Explosive input.");
-                    addMessage(painterNode.id, 'error', "Only MaterialExplosive or MaterialIdealGas node can be connected to the Explosive input.");
-                } else if (initMode === 'Ideal Gas' && expNode.type === 'MaterialExplosive') {
-                    const connKey = `${expConn.fromNode}:${expConn.fromPort}->${expConn.toNode}:${expConn.toPort}`;
-                    flawedConnections.set(connKey, "Solver physics is set to 'Ideal Gas' (1-material air), but explosive input is a 'MaterialExplosive' (HE-JWL) node. Connect a 'MaterialIdealGas' (IG-CHG) node instead.");
-                    addMessage(expNode.id, 'warning', "Solver physics is set to 'Ideal Gas' (1-material air), but explosive input is a 'MaterialExplosive' (HE-JWL) node. Connect a 'MaterialIdealGas' (IG-CHG) node instead.");
-                    if (activeSolver) {
-                        addMessage(activeSolver.id, 'warning', "Solver physics is set to 'Ideal Gas' (1-material air), but explosive input is a 'MaterialExplosive' (HE-JWL) node. Connect a 'MaterialIdealGas' (IG-CHG) node instead.");
-                    }
-                } else if (initMode === 'Multi-Material JWL' && expNode.type === 'MaterialIdealGas') {
-                    const connKey = `${expConn.fromNode}:${expConn.fromPort}->${expConn.toNode}:${expConn.toPort}`;
-                    flawedConnections.set(connKey, "Solver physics is set to 'Multi-Material JWL', but explosive input is a 'MaterialIdealGas' (IG-CHG) node. Connect a 'MaterialExplosive' (HE-JWL) node instead.");
-                    addMessage(expNode.id, 'warning', "Solver physics is set to 'Multi-Material JWL', but explosive input is a 'MaterialIdealGas' (IG-CHG) node. Connect a 'MaterialExplosive' (HE-JWL) node instead.");
-                    if (activeSolver) {
-                        addMessage(activeSolver.id, 'warning', "Solver physics is set to 'Multi-Material JWL', but explosive input is a 'MaterialIdealGas' (IG-CHG) node. Connect a 'MaterialExplosive' (HE-JWL) node instead.");
+                    flawedConnections.set(connKey, "Only Charge1D node can be connected to the Explosive input of Initializer.");
+                    addMessage(painterNode.id, 'error', "Only Charge1D node can be connected to the Explosive input of Initializer.");
+                } else {
+                    // Check if Charge1D has a Material node connected
+                    const matConn = state.connections.find(c => c.toNode === expNode.id && c.toPort === 'material');
+                    if (!matConn) {
+                        addMessage(expNode.id, 'error', "No Material connected to Charge 1D.");
+                    } else {
+                        const matNode = state.nodes.find(n => n.id === matConn.fromNode);
+                        if (!matNode || matNode.type !== 'Material') {
+                            const connKey = `${matConn.fromNode}:${matConn.fromPort}->${matConn.toNode}:${matConn.toPort}`;
+                            flawedConnections.set(connKey, "Only Material node can be connected to the Material input of Charge 1D.");
+                            addMessage(expNode.id, 'error', "Only Material node can be connected to the Material input of Charge 1D.");
+                        } else {
+                            const matType = matNode.parameters?.material_type || 'Air';
+                            if (initMode === 'Ideal Gas' && matType === 'JWL Charge') {
+                                addMessage(expNode.id, 'warning', "Solver physics is set to 'Ideal Gas' (1-material air), but explosive input is a 'JWL Charge'. Connect an 'Ideal Gas Charge' instead.");
+                            } else if (initMode === 'Multi-Material JWL' && matType === 'Ideal Gas Charge') {
+                                addMessage(expNode.id, 'warning', "Solver physics is set to 'Multi-Material JWL', but explosive input is an 'Ideal Gas Charge'. Connect a 'JWL Charge' instead.");
+                            }
+                        }
                     }
                 }
             }
@@ -201,26 +207,47 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             // Air check
             const airConn = state.connections.find(c => c.toNode === solver2D.id && c.toPort === 'air');
             if (!airConn) {
-                addMessage(solver2D.id, 'error', "No Air node connected to CFD Solver 2D. A MaterialAir node is required for Multi-Material JWL mode.");
+                addMessage(solver2D.id, 'error', "No Air node connected to CFD Solver 2D. A Material node configured as Air is required.");
             } else {
                 const airNode = state.nodes.find(n => n.id === airConn.fromNode);
-                if (!airNode || airNode.type !== 'MaterialAir') {
+                if (!airNode || airNode.type !== 'Material' || airNode.parameters?.material_type !== 'Air') {
                     const connKey = `${airConn.fromNode}:${airConn.fromPort}->${airConn.toNode}:${airConn.toPort}`;
-                    flawedConnections.set(connKey, "Only MaterialAir node can be connected to the Air input of CFD Solver 2D.");
-                    addMessage(solver2D.id, 'error', "Only MaterialAir node can be connected to the Air input of CFD Solver 2D.");
+                    flawedConnections.set(connKey, "Only a Material node configured as Air can be connected to the Air input of CFD Solver 2D.");
+                    addMessage(solver2D.id, 'error', "Only a Material node configured as Air can be connected to the Air input of CFD Solver 2D.");
                 }
             }
 
             // Explosive check
-            const expConn = state.connections.find(c => c.toNode === solver2D.id && c.toPort === 'explosive');
+            let expConn = state.connections.find(c => c.toNode === solver2D.id && c.toPort === 'charge');
             if (!expConn) {
-                addMessage(solver2D.id, 'error', "No Explosive node connected to CFD Solver 2D. A MaterialExplosive node is required for Multi-Material JWL mode.");
+                expConn = state.connections.find(c => c.toNode === solver2D.id && c.toPort === 'explosive');
+            }
+            if (!expConn) {
+                addMessage(solver2D.id, 'error', "No Explosive node connected to CFD Solver 2D. A Charge node (Charge2D or Charge1D) is required.");
             } else {
                 const expNode = state.nodes.find(n => n.id === expConn.fromNode);
-                if (!expNode || expNode.type !== 'MaterialExplosive') {
+                if (!expNode || (expNode.type !== 'Charge2D' && expNode.type !== 'Charge1D')) {
                     const connKey = `${expConn.fromNode}:${expConn.fromPort}->${expConn.toNode}:${expConn.toPort}`;
-                    flawedConnections.set(connKey, "Only MaterialExplosive node can be connected to the Explosive input of CFD Solver 2D.");
-                    addMessage(solver2D.id, 'error', "Only MaterialExplosive node can be connected to the Explosive input of CFD Solver 2D.");
+                    flawedConnections.set(connKey, "Only Charge2D or Charge1D node can be connected to the Explosive input of CFD Solver 2D.");
+                    addMessage(solver2D.id, 'error', "Only Charge2D or Charge1D node can be connected to the Explosive input of CFD Solver 2D.");
+                } else {
+                    // Check if Charge has a Material node connected
+                    const matConn = state.connections.find(c => c.toNode === expNode.id && c.toPort === 'material');
+                    if (!matConn) {
+                        addMessage(expNode.id, 'error', "No Material connected to Charge.");
+                    } else {
+                        const matNode = state.nodes.find(n => n.id === matConn.fromNode);
+                        if (!matNode || matNode.type !== 'Material') {
+                            const connKey = `${matConn.fromNode}:${matConn.fromPort}->${matConn.toNode}:${matConn.toPort}`;
+                            flawedConnections.set(connKey, "Only Material node can be connected to the Material input of Charge.");
+                            addMessage(expNode.id, 'error', "Only Material node can be connected to the Material input of Charge.");
+                        } else {
+                            const matType = matNode.parameters?.material_type || 'Air';
+                            if (matType !== 'JWL Charge') {
+                                addMessage(expNode.id, 'error', "CFD Solver 2D in JWL mode requires a 'JWL Charge' material type connected to the Charge node.");
+                            }
+                        }
+                    }
                 }
             }
 
@@ -254,26 +281,44 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             // Air check
             const airConn = state.connections.find(c => c.toNode === solver2D.id && c.toPort === 'air');
             if (!airConn) {
-                addMessage(solver2D.id, 'error', "No Air node connected to CFD Solver 2D. A MaterialAir node is required for Ideal Gas mode.");
+                addMessage(solver2D.id, 'error', "No Air node connected to CFD Solver 2D. A Material node configured as Air is required.");
             } else {
                 const airNode = state.nodes.find(n => n.id === airConn.fromNode);
-                if (!airNode || airNode.type !== 'MaterialAir') {
+                if (!airNode || airNode.type !== 'Material' || airNode.parameters?.material_type !== 'Air') {
                     const connKey = `${airConn.fromNode}:${airConn.fromPort}->${airConn.toNode}:${airConn.toPort}`;
-                    flawedConnections.set(connKey, "Only MaterialAir node can be connected to the Air input of CFD Solver 2D.");
-                    addMessage(solver2D.id, 'error', "Only MaterialAir node can be connected to the Air input of CFD Solver 2D.");
+                    flawedConnections.set(connKey, "Only a Material node configured as Air can be connected to the Air input of CFD Solver 2D.");
+                    addMessage(solver2D.id, 'error', "Only a Material node configured as Air can be connected to the Air input of CFD Solver 2D.");
                 }
             }
 
             // Ideal Gas check
             const igConn = state.connections.find(c => c.toNode === solver2D.id && c.toPort === 'ideal_gas');
             if (!igConn) {
-                addMessage(solver2D.id, 'error', "No Ideal Gas node connected to CFD Solver 2D. A MaterialIdealGas node is required for Ideal Gas mode.");
+                addMessage(solver2D.id, 'error', "No Ideal Gas node connected to CFD Solver 2D. A Charge node (Charge2D or Charge1D) is required.");
             } else {
                 const igNode = state.nodes.find(n => n.id === igConn.fromNode);
-                if (!igNode || igNode.type !== 'MaterialIdealGas') {
+                if (!igNode || (igNode.type !== 'Charge2D' && igNode.type !== 'Charge1D')) {
                     const connKey = `${igConn.fromNode}:${igConn.fromPort}->${igConn.toNode}:${igConn.toPort}`;
-                    flawedConnections.set(connKey, "Only MaterialIdealGas node can be connected to the Ideal Gas input of CFD Solver 2D.");
-                    addMessage(solver2D.id, 'error', "Only MaterialIdealGas node can be connected to the Ideal Gas input of CFD Solver 2D.");
+                    flawedConnections.set(connKey, "Only Charge2D or Charge1D node can be connected to the Ideal Gas input of CFD Solver 2D.");
+                    addMessage(solver2D.id, 'error', "Only Charge2D or Charge1D node can be connected to the Ideal Gas input of CFD Solver 2D.");
+                } else {
+                    // Check if Charge has a Material node connected
+                    const matConn = state.connections.find(c => c.toNode === igNode.id && c.toPort === 'material');
+                    if (!matConn) {
+                        addMessage(igNode.id, 'error', "No Material connected to Charge.");
+                    } else {
+                        const matNode = state.nodes.find(n => n.id === matConn.fromNode);
+                        if (!matNode || matNode.type !== 'Material') {
+                            const connKey = `${matConn.fromNode}:${matConn.fromPort}->${matConn.toNode}:${matConn.toPort}`;
+                            flawedConnections.set(connKey, "Only Material node can be connected to the Material input of Charge.");
+                            addMessage(igNode.id, 'error', "Only Material node can be connected to the Material input of Charge.");
+                        } else {
+                            const matType = matNode.parameters?.material_type || 'Air';
+                            if (matType !== 'Ideal Gas Charge') {
+                                addMessage(igNode.id, 'error', "CFD Solver 2D in Ideal Gas mode requires an 'Ideal Gas Charge' material type connected to the Charge node.");
+                            }
+                        }
+                    }
                 }
             }
 
@@ -342,53 +387,48 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             }
         }
 
-        if (node.type === 'MaterialAir') {
-            const gamma = Number(node.parameters?.gamma ?? 1.4);
-            const atm_pressure = Number(node.parameters?.atm_pressure ?? 101325);
-            const atm_temperature = Number(node.parameters?.atm_temperature ?? 298.15);
+        if (node.type === 'Material') {
+            const matType = node.parameters?.material_type || 'Air';
+            if (matType === 'Air') {
+                const gamma = Number(node.parameters?.gamma ?? 1.4);
+                const atm_pressure = Number(node.parameters?.atm_pressure ?? 101325);
+                const atm_temperature = Number(node.parameters?.atm_temperature ?? 298.15);
 
-            if (isNaN(gamma) || gamma <= 1.0) {
-                addMessage(node.id, 'error', "Air adiabatic index (gamma) must be greater than 1.0.");
-            }
-            if (isNaN(atm_pressure) || atm_pressure <= 0) {
-                addMessage(node.id, 'error', "Atmospheric Pressure must be greater than 0.");
-            }
-            if (isNaN(atm_temperature) || atm_temperature <= 0) {
-                addMessage(node.id, 'error', "Atmospheric Temperature (Kelvin) must be greater than 0.");
+                if (isNaN(gamma) || gamma <= 1.0) {
+                    addMessage(node.id, 'error', "Air adiabatic index (gamma) must be greater than 1.0.");
+                }
+                if (isNaN(atm_pressure) || atm_pressure <= 0) {
+                    addMessage(node.id, 'error', "Atmospheric Pressure must be greater than 0.");
+                }
+                if (isNaN(atm_temperature) || atm_temperature <= 0) {
+                    addMessage(node.id, 'error', "Atmospheric Temperature (Kelvin) must be greater than 0.");
+                }
+            } else if (matType === 'JWL Charge') {
+                const rho = Number(node.parameters?.rho ?? 1630);
+                const detonation_energy = Number(node.parameters?.detonation_energy ?? 4290000);
+                if (isNaN(rho) || rho <= 0) {
+                    addMessage(node.id, 'error', "Explosive density (rho) must be greater than 0.");
+                }
+                if (isNaN(detonation_energy) || detonation_energy <= 0) {
+                    addMessage(node.id, 'error', "Detonation energy must be greater than 0.");
+                }
+            } else if (matType === 'Ideal Gas Charge') {
+                const ideal_gamma = Number(node.parameters?.ideal_gamma ?? 1.4);
+                const ideal_rho_0 = Number(node.parameters?.ideal_rho_0 ?? 1.25);
+                const ideal_e_0 = Number(node.parameters?.ideal_e_0 ?? 4290000);
+                if (isNaN(ideal_gamma) || ideal_gamma <= 1.0) {
+                    addMessage(node.id, 'error', "Ideal Gas Charge adiabatic index (gamma) must be greater than 1.0.");
+                }
+                if (isNaN(ideal_rho_0) || ideal_rho_0 <= 0) {
+                    addMessage(node.id, 'error', "Ideal Gas Charge density (rho) must be greater than 0.");
+                }
+                if (isNaN(ideal_e_0) || ideal_e_0 <= 0) {
+                    addMessage(node.id, 'error', "Ideal Gas Charge specific energy must be greater than 0.");
+                }
             }
         }
 
-        if (node.type === 'MaterialExplosive') {
-            const charge_mass = Number(node.parameters?.charge_mass ?? 1.0);
-            const rho = Number(node.parameters?.rho ?? 1630);
-            const detonation_energy = Number(node.parameters?.detonation_energy ?? 4290000);
-
-            if (isNaN(charge_mass) || charge_mass <= 0) {
-                addMessage(node.id, 'error', "Explosive charge mass must be greater than 0.");
-            }
-            if (isNaN(rho) || rho <= 0) {
-                addMessage(node.id, 'error', "Explosive density (rho) must be greater than 0.");
-            }
-            if (isNaN(detonation_energy) || detonation_energy <= 0) {
-                addMessage(node.id, 'error', "Detonation energy must be greater than 0.");
-            }
-        }
-
-        if (node.type === 'MaterialExplosive' || node.type === 'MaterialIdealGas') {
-            const charge_mass = Number(node.parameters?.charge_mass ?? 1.0);
-            const rho = Number(node.parameters?.rho ?? 1630);
-            const detonation_energy = Number(node.parameters?.detonation_energy ?? 4520000);
-
-            if (isNaN(charge_mass) || charge_mass <= 0) {
-                addMessage(node.id, 'error', "Explosive charge mass must be greater than 0.");
-            }
-            if (isNaN(rho) || rho <= 0) {
-                addMessage(node.id, 'error', "Explosive density (rho) must be greater than 0.");
-            }
-            if (isNaN(detonation_energy) || detonation_energy <= 0) {
-                addMessage(node.id, 'error', "Detonation energy must be greater than 0.");
-            }
-
+        if (node.type === 'Charge2D') {
             const shape = node.parameters?.charge_shape || 'Sphere';
             const charge_r = Number(node.parameters?.charge_r ?? 0.0);
             const charge_z = Number(node.parameters?.charge_z ?? 0.1);
@@ -406,6 +446,13 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             }
             if (shape === 'Cylinder' && (isNaN(charge_height) || charge_height <= 0)) {
                 addMessage(node.id, 'error', "Charge height must be greater than 0 for cylindrical charges.");
+            }
+        }
+
+        if (node.type === 'Charge1D') {
+            const charge_radius = Number(node.parameters?.charge_radius ?? 0.05);
+            if (isNaN(charge_radius) || charge_radius <= 0) {
+                addMessage(node.id, 'error', "Charge radius must be greater than 0.");
             }
         }
 
@@ -484,7 +531,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
         }
 
         // --- 5. Telemetry & Output Node Validations ---
-        if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour' || node.type === 'VTKOutput') {
+        if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour' || node.type === 'VTKOutput' || node.type === 'VirtualGauges') {
             const conn = state.connections.find(c => c.toNode === node.id && c.toPort === 'in');
             if (!conn) {
                 addMessage(node.id, 'warning', `Not connected to any CFD Solver. No data will be received.`);
@@ -496,11 +543,11 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                         flawedConnections.set(connKey, "TelemetryContour requires a 2D CFD Solver source.");
                         addMessage(node.id, 'error', "TelemetryContour requires a 2D CFD Solver source.");
                     }
-                } else if (node.type === 'TelemetryGraph') {
+                } else if (node.type === 'TelemetryGraph' || node.type === 'VirtualGauges') {
                     if (!fromNode || (fromNode.type !== 'CFDSolver' && fromNode.type !== 'CFDSolver2D')) {
                         const connKey = `${conn.fromNode}:${conn.fromPort}->${conn.toNode}:${conn.toPort}`;
-                        flawedConnections.set(connKey, "TelemetryGraph must be connected to a CFD Solver.");
-                        addMessage(node.id, 'error', "TelemetryGraph must be connected to a CFD Solver.");
+                        flawedConnections.set(connKey, `${node.type} must be connected to a CFD Solver.`);
+                        addMessage(node.id, 'error', `${node.type} must be connected to a CFD Solver.`);
                     }
                 } else {
                     if (!fromNode || (fromNode.type !== 'CFDSolver' && fromNode.type !== 'CFDSolver2D')) {

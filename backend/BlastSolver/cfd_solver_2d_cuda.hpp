@@ -100,6 +100,7 @@ private:
 
     double* d_wave_speeds;
     double* d_block_maxes;
+    double* d_block_p_ratios;
     uint8_t* d_tile_active_flags;
     
     // CPU fallback arrays for initialization

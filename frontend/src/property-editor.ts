@@ -114,14 +114,27 @@ export class PropertyEditor {
                 if ((key === 'y_min_bc' || key === 'y_max_bc') && dim === '1D') continue;
                 if ((key === 'z_min_bc' || key === 'z_max_bc') && (dim === '1D' || dim === '2D')) continue;
             }
-            if (node.type === 'MaterialExplosive') {
-                const comp = node.parameters['composition'] || 'TNT';
+            if (node.type === 'Material') {
+                const matType = node.parameters['material_type'] || 'Air';
+                const airKeys = ['gamma', 'atm_pressure', 'atm_temperature'];
+                const jwlKeys = ['composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
                 const customKeys = ['det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
-                if (comp !== 'Custom' && customKeys.includes(key)) continue;
+                const igKeys = ['ideal_gamma', 'ideal_rho_0', 'ideal_e_0'];
+
+                if (matType === 'Air' && (jwlKeys.includes(key) || igKeys.includes(key))) continue;
+                if (matType === 'JWL Charge') {
+                    if (airKeys.includes(key) || igKeys.includes(key)) continue;
+                    const comp = node.parameters['composition'] || 'TNT';
+                    if (comp !== 'Custom' && customKeys.includes(key)) continue;
+                }
+                if (matType === 'Ideal Gas Charge' && (airKeys.includes(key) || jwlKeys.includes(key))) continue;
             }
-            if (node.type === 'MaterialExplosive' || node.type === 'MaterialIdealGas') {
+            if (node.type === 'Charge2D') {
                 const shape = node.parameters['charge_shape'] || 'Sphere';
                 if (key === 'charge_height' && shape !== 'Cylinder') continue;
+            }
+            if (node.type === 'VirtualGauges') {
+                if (key === 'gauges') continue;
             }
 
             const row = document.createElement('div');
@@ -225,7 +238,8 @@ export class PropertyEditor {
             // 2D CFD keys
             'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r',
             'charge_r', 'charge_z', 'charge_radius', 'charge_height',
-            'detonator_r', 'detonator_z', 'detonator_radius'
+            'detonator_r', 'detonator_z', 'detonator_radius',
+            'ideal_gamma', 'ideal_rho_0', 'ideal_e_0'
         ];
 
         const dropdowns: Record<string, string[]> = {
@@ -254,6 +268,7 @@ export class PropertyEditor {
             'output_mode': ['By Step', 'By Time'],
             'plot_stride': ['1', '2', '5', '10', '20', '50', '100'],
             'charge_shape': ['Sphere', 'Cylinder'],
+            'material_type': ['Air', 'JWL Charge', 'Ideal Gas Charge'],
             'colormap': ['plasma', 'viridis', 'rainbow', 'coolwarm', 'cividis', 'grayscale']
         };
 
@@ -312,7 +327,7 @@ export class PropertyEditor {
 
         const updates: Record<string, any> = { [key]: value };
 
-        if (node.type === 'MaterialExplosive' && key === 'composition') {
+        if (node.type === 'Material' && key === 'composition') {
             const EXPLOSIVE_PRESETS: Record<string, Record<string, number>> = {
                 'TNT': {
                     rho: 1630,

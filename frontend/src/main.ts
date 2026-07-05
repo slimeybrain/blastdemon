@@ -24,16 +24,21 @@ const initialState: SimulationState = {
             }
         },
         {
-            id: 'node-air', type: 'MaterialAir', x: 50, y: 200, displayMode: 'expanded',
-            inputs: [], outputs: [{ id: 'out', label: 'Material' }],
-            parameters: { gamma: 1.4, atm_pressure: 101325, atm_temperature: 298.15 }
-        },
-        {
-            id: 'node-explosive', type: 'MaterialExplosive', x: 50, y: 350, displayMode: 'expanded',
+            id: 'node-air', type: 'Material', x: 50, y: 180, displayMode: 'expanded',
             inputs: [], outputs: [{ id: 'out', label: 'Material' }],
             parameters: {
+                material_type: 'Air',
+                atm_pressure: 101325.0,
+                atm_temperature: 298.15,
+                gamma: 1.4
+            }
+        },
+        {
+            id: 'node-material-explosive', type: 'Material', x: 50, y: 310, displayMode: 'expanded',
+            inputs: [], outputs: [{ id: 'out', label: 'Material' }],
+            parameters: {
+                material_type: 'JWL Charge',
                 composition: 'TNT',
-                charge_mass: 1.0,
                 rho: 1630,
                 detonation_energy: 4290000,
                 det_vel: 6930,
@@ -45,8 +50,16 @@ const initialState: SimulationState = {
             }
         },
         {
+            id: 'node-explosive', type: 'Charge1D', x: 50, y: 500, displayMode: 'expanded',
+            inputs: [{ id: 'material', label: 'Material' }],
+            outputs: [{ id: 'out', label: 'Charge' }],
+            parameters: {
+                charge_radius: 0.05
+            }
+        },
+        {
             id: 'node-painter', type: 'ThePainter', x: 300, y: 200, displayMode: 'expanded',
-            inputs: [{ id: 'mesh', label: 'Mesh' }, { id: 'air', label: 'Air' }, { id: 'explosive', label: 'Explosive' }],
+            inputs: [{ id: 'mesh', label: 'Mesh' }, { id: 'air', label: 'Air' }, { id: 'explosive', label: 'Charge' }],
             outputs: [{ id: 'out', label: 'State' }],
             parameters: {}
         },
@@ -60,6 +73,7 @@ const initialState: SimulationState = {
     connections: [
         { fromNode: 'node-mesh', fromPort: 'out', toNode: 'node-painter', toPort: 'mesh' },
         { fromNode: 'node-air', fromPort: 'out', toNode: 'node-painter', toPort: 'air' },
+        { fromNode: 'node-material-explosive', fromPort: 'out', toNode: 'node-explosive', toPort: 'material' },
         { fromNode: 'node-explosive', fromPort: 'out', toNode: 'node-painter', toPort: 'explosive' },
         { fromNode: 'node-painter', fromPort: 'out', toNode: 'node-solver', toPort: 'in' }
     ],

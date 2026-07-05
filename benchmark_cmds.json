@@ -1,0 +1,2 @@
+{"command": "INIT_2D", "modelId": "model-default", "init_mode": "Ideal Gas", "cfl": 0.35, "flux_scheme": "AUSM+", "spatial_order": 2, "temporal_order": 2, "nr": 500, "nz": 1000, "max_r": 1.5, "max_z": 3.0, "bc_r_min": "REFLECTIVE", "bc_r_max": "OUTFLOW_RIEMANN", "bc_z_min": "REFLECTIVE", "bc_z_max": "OUTFLOW_RIEMANN", "ambient_rho": 1.2, "ambient_p": 101325, "high_rho": 20, "detonation_energy": 4000000, "explosive_r": 0.0, "explosive_z": 0.3, "device": "cuda", "gamma": 1.4}
+{"command": "STEP_2D", "modelId": "model-default", "cfl": 0.35, "steps": 2000}

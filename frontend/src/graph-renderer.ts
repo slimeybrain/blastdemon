@@ -646,8 +646,8 @@ export class GraphRenderer {
         switch (toType) {
             case 'ThePainter':
                 if (toPortId === 'mesh') return fromType === 'DomainMesh';
-                if (toPortId === 'air') return fromType === 'MaterialAir';
-                if (toPortId === 'explosive') return fromType === 'MaterialExplosive' || fromType === 'MaterialIdealGas';
+                if (toPortId === 'air') return fromType === 'Material';
+                if (toPortId === 'explosive') return fromType === 'Charge1D';
                 return false;
             case 'CFDSolver':
                 if (toPortId === 'in') return fromType === 'ThePainter';
@@ -657,13 +657,18 @@ export class GraphRenderer {
                 if (toPortId === 'detonator') return fromType === 'DetonatorLocation';
                 if (toPortId === 'remap') return fromType === 'RemapNode';
                 if (toPortId === 'hardware') return fromType === 'HardwareConfig';
-                if (toPortId === 'air') return fromType === 'MaterialAir';
-                if (toPortId === 'explosive') return fromType === 'MaterialExplosive';
-                if (toPortId === 'ideal_gas') return fromType === 'MaterialIdealGas';
+                if (toPortId === 'air') return fromType === 'Material';
+                if (toPortId === 'explosive') return fromType === 'Charge2D' || fromType === 'Charge1D';
+                if (toPortId === 'ideal_gas') return fromType === 'Charge2D' || fromType === 'Charge1D';
+                return false;
+            case 'Charge1D':
+            case 'Charge2D':
+                if (toPortId === 'material') return fromType === 'Material';
                 return false;
             case 'RemapNode':
                 if (toPortId === 'in') return fromType === 'CFDSolver';
                 return false;
+            case 'VirtualGauges':
             case 'TelemetryText':
             case 'TelemetryGraph':
                 if (toPortId === 'in') return fromType === 'CFDSolver' || fromType === 'CFDSolver2D';
@@ -1104,9 +1109,7 @@ export class GraphRenderer {
 
         const prefixMap: Record<NodeType, string> = {
             'DomainMesh': 'node-mesh',
-            'MaterialAir': 'node-air',
-            'MaterialExplosive': 'node-explosive',
-            'MaterialIdealGas': 'node-idealgas',
+            'Material': 'node-material',
             'ThePainter': 'node-painter',
             'CFDSolver': 'node-solver',
             'TelemetryText': 'node-log',
@@ -1117,7 +1120,10 @@ export class GraphRenderer {
             'HardwareConfig': 'node-hardware',
             'CFDSolver2D': 'node-solver2d',
             'TelemetryContour': 'node-contour',
-            'VTKOutput': 'node-vtk'
+            'VTKOutput': 'node-vtk',
+            'VirtualGauges': 'node-gauges',
+            'Charge1D': 'node-charge1d',
+            'Charge2D': 'node-charge2d'
         };
         const prefix = prefixMap[type] || `node-${type.toLowerCase()}`;
 
@@ -1155,22 +1161,24 @@ export class GraphRenderer {
 
     private getDefaultInputs(type: NodeType): Port[] {
         switch (type) {
-            case 'ThePainter': return [{ id: 'mesh', label: 'Mesh' }, { id: 'air', label: 'Air' }, { id: 'explosive', label: 'Explosive' }];
+            case 'ThePainter': return [{ id: 'mesh', label: 'Mesh' }, { id: 'air', label: 'Air' }, { id: 'explosive', label: 'Charge' }];
             case 'CFDSolver': return [{ id: 'in', label: 'Initial State' }];
             case 'TelemetryText':
             case 'TelemetryGraph': return [{ id: 'in', label: 'Data Stream' }];
             case 'CFDSolver2D': return [
                 { id: 'mesh', label: 'Mesh' },
                 { id: 'detonator', label: 'Detonator' },
-                { id: 'remap', label: 'Remap' },
+                { id: 'explosive', label: 'Charge' },
                 { id: 'hardware', label: 'Hardware' },
                 { id: 'air', label: 'Air' },
-                { id: 'explosive', label: 'Explosive' },
-                { id: 'ideal_gas', label: 'Ideal Gas' }
+                { id: 'remap', label: 'Remap' }
             ];
+            case 'Charge1D':
+            case 'Charge2D': return [{ id: 'material', label: 'Material' }];
             case 'RemapNode': return [{ id: 'in', label: '1D Solver' }];
             case 'TelemetryContour': return [{ id: 'in', label: 'Data Stream' }];
             case 'VTKOutput': return [{ id: 'in', label: 'Solver' }];
+            case 'VirtualGauges': return [{ id: 'in', label: 'Solver Output' }];
             default: return [];
         }
     }
@@ -1178,9 +1186,9 @@ export class GraphRenderer {
     private getDefaultOutputs(type: NodeType): Port[] {
         switch (type) {
             case 'DomainMesh': return [{ id: 'out', label: 'Mesh' }];
-            case 'MaterialAir': return [{ id: 'out', label: 'Material' }];
-            case 'MaterialExplosive': return [{ id: 'out', label: 'Material' }];
-            case 'MaterialIdealGas': return [{ id: 'out', label: 'Material' }];
+            case 'Material': return [{ id: 'out', label: 'Material' }];
+            case 'Charge1D':
+            case 'Charge2D': return [{ id: 'out', label: 'Charge' }];
             case 'ThePainter': return [{ id: 'out', label: 'State' }];
             case 'CFDSolver': return [{ id: 'telemetry', label: 'Telemetry' }];
             case 'DomainMesh2D': return [{ id: 'mesh', label: 'Mesh Spec' }];
@@ -1205,14 +1213,14 @@ export class GraphRenderer {
                 z_min_bc: 'Reflecting',
                 z_max_bc: 'Reflecting'
             };
-            case 'MaterialAir': return {
+            case 'Material': return {
+                material_type: 'Air',
+                // Air params
+                atm_pressure: 101325.0,
+                atm_temperature: 298.15,
                 gamma: 1.4,
-                atm_pressure: 101325,
-                atm_temperature: 298.15
-            };
-            case 'MaterialExplosive': return {
+                // JWL params
                 composition: 'TNT',
-                charge_mass: 1.0,
                 rho: 1630,
                 detonation_energy: 4290000,
                 det_vel: 6930,
@@ -1221,21 +1229,24 @@ export class GraphRenderer {
                 jwl_R1: 4.15,
                 jwl_R2: 0.90,
                 jwl_omega: 0.35,
-                charge_shape: 'Sphere',
-                charge_r: 0.0,
-                charge_z: 0.1,
-                charge_radius: 0.05,
-                charge_height: 0.1
+                // Ideal Gas Charge params
+                ideal_gamma: 1.4,
+                ideal_rho_0: 1.25,
+                ideal_e_0: 4290000
             };
-            case 'MaterialIdealGas': return {
-                charge_mass: 1.0,
-                rho: 1630,
-                detonation_energy: 4520000,
+            case 'Charge1D': return {
+                charge_radius: 0.05
+            };
+            case 'Charge2D': return {
                 charge_shape: 'Sphere',
-                charge_r: 0.0,
-                charge_z: 0.1,
                 charge_radius: 0.05,
-                charge_height: 0.1
+                charge_height: 0.1,
+                charge_r: 0.0,
+                charge_z: 0.1
+            };
+            case 'VirtualGauges': return {
+                gauges: [],
+                telemetry_channel: 0
             };
             case 'CFDSolver': return {
                 init_mode: 'Multi-Material JWL',
@@ -1386,9 +1397,10 @@ export class GraphRenderer {
     private getCompactName(type: NodeType): string {
         switch (type) {
             case 'DomainMesh':      return 'MESH';
-            case 'MaterialAir':     return 'AIR';
-            case 'MaterialExplosive': return 'HE-JWL';
-            case 'MaterialIdealGas': return 'IG-CHG';
+            case 'Material':        return 'MATERIAL';
+            case 'Charge1D':        return 'CHARGE1D';
+            case 'Charge2D':        return 'CHARGE2D';
+            case 'VirtualGauges':   return 'GAUGES';
             case 'ThePainter':      return 'INIT';
             case 'CFDSolver':       return 'SOLVER';
             case 'TelemetryText':   return 'LOG';
@@ -1407,9 +1419,10 @@ export class GraphRenderer {
     private getFullNodeName(type: NodeType): string {
         switch (type) {
             case 'DomainMesh':        return 'Domain Mesh';
-            case 'MaterialAir':       return 'Material - Air';
-            case 'MaterialExplosive': return 'Material - Explosive (JWL)';
-            case 'MaterialIdealGas':  return 'Material - Ideal Gas';
+            case 'Material':          return 'Material';
+            case 'Charge1D':          return 'Charge (1D)';
+            case 'Charge2D':          return 'Charge (2D)';
+            case 'VirtualGauges':     return 'Virtual Gauges';
             case 'ThePainter':        return 'Initializer';
             case 'CFDSolver':         return 'CFD Solver';
             case 'TelemetryText':     return 'Telemetry - Text';
@@ -1955,9 +1968,13 @@ export class GraphRenderer {
                 if (displayMode === 'compact') {
                     contentEl.style.display = 'none';
                 } else if (displayMode === 'normal') {
-                    if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour') {
+                    if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges') {
                         contentEl.style.display = 'flex';
-                        this.renderTelemetryContent(node, contentEl);
+                        if (node.type === 'VirtualGauges') {
+                            this.renderVirtualGaugesContent(node, contentEl);
+                        } else {
+                            this.renderTelemetryContent(node, contentEl);
+                        }
                     } else {
                         contentEl.style.display = 'none';
                     }
@@ -1966,6 +1983,8 @@ export class GraphRenderer {
                     this.renderNodeParameters(node, contentEl);
                     if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour') {
                         this.renderTelemetryContent(node, contentEl);
+                    } else if (node.type === 'VirtualGauges') {
+                        this.renderVirtualGaugesContent(node, contentEl);
                     }
                 }
 
@@ -2554,14 +2573,56 @@ export class GraphRenderer {
 
             const state = this.stateManager.getCurrentState();
             let isAxisymmetric = true;
+            let chargeInfo = null;
+            let detonatorInfo = null;
             if (state) {
                 const conn = state.connections.find(c => c.toNode === node.id && c.toPort === 'in');
                 const solverNode = conn ? state.nodes.find(n => n.id === conn.fromNode) : null;
                 if (solverNode && solverNode.type === 'CFDSolver2D') {
                     const meshConn = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'mesh');
-                    const meshNode = meshConn ? state.nodes.find(n => n.id === meshConn.fromNode) : null;
-                    if (meshNode && meshNode.type === 'DomainMesh2D') {
+                    let meshNode = meshConn ? state.nodes.find(n => n.id === meshConn.fromNode && n.type === 'DomainMesh2D') : null;
+                    if (!meshNode) {
+                        meshNode = state.nodes.find(n => n.type === 'DomainMesh2D') || null;
+                    }
+                    if (meshNode) {
                         isAxisymmetric = (meshNode.parameters?.coordinate_system ?? 'Axisymmetric') === 'Axisymmetric';
+                    }
+
+                    const max_r = Number(meshNode?.parameters?.max_r ?? 1.0);
+                    const max_z = Number(meshNode?.parameters?.max_z ?? 1.0);
+
+                    let chargeNode = null;
+                    // 1. Direct connection to solver's 'charge' port
+                    const solverChargeConn = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'charge');
+                    chargeNode = solverChargeConn ? state.nodes.find(n => n.id === solverChargeConn.fromNode && n.type === 'Charge2D') : null;
+
+                    // 2. Connection fallback
+                    if (!chargeNode) {
+                        chargeNode = state.nodes.find(n => n.type === 'Charge2D') || null;
+                    }
+
+                    if (chargeNode) {
+                        chargeInfo = {
+                            shape: chargeNode.parameters?.charge_shape ?? 'Sphere',
+                            r: Number(chargeNode.parameters?.charge_r ?? 0.0),
+                            z: Number(chargeNode.parameters?.charge_z ?? 0.0),
+                            radius: Number(chargeNode.parameters?.charge_radius ?? 0.05),
+                            height: Number(chargeNode.parameters?.charge_height ?? 0.1),
+                            max_r: max_r,
+                            max_z: max_z
+                        };
+                    }
+
+                    const detConn = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'detonator');
+                    const detNode = detConn ? state.nodes.find(n => n.id === detConn.fromNode && n.type === 'DetonatorLocation') : null;
+                    if (detNode) {
+                        detonatorInfo = {
+                            r: Number(detNode.parameters?.detonator_r ?? 0.0),
+                            z: Number(detNode.parameters?.detonator_z ?? 0.0),
+                            radius: Number(detNode.parameters?.detonator_radius ?? 0.001),
+                            max_r: max_r,
+                            max_z: max_z
+                        };
                     }
                 }
             }
@@ -2592,7 +2653,9 @@ export class GraphRenderer {
                     colormap: currentColorMap,
                     min: minY,
                     max: maxY,
-                    isAxisymmetric: isAxisymmetric
+                    isAxisymmetric: isAxisymmetric,
+                    chargeInfo: (node.parameters?.show_charge !== false) ? chargeInfo : null,
+                    detonatorInfo: (node.parameters?.show_detonator !== false) ? detonatorInfo : null
                 });
             }
 
@@ -2828,6 +2891,40 @@ export class GraphRenderer {
                 lockGroup.appendChild(lockCheckbox);
                 scaleBar.appendChild(lockGroup);
 
+                // Show Charge Checkbox [NEW]
+                const showCharge = node.parameters?.show_charge !== false;
+                const chargeToggleGroup = document.createElement('label');
+                chargeToggleGroup.className = 'telemetry-log-checkbox-container';
+                chargeToggleGroup.textContent = 'Charge:';
+
+                const chargeCheckbox = document.createElement('input');
+                chargeCheckbox.type = 'checkbox';
+                chargeCheckbox.checked = showCharge;
+                chargeCheckbox.addEventListener('change', () => {
+                    this.stateManager.updateNodeParametersInPlace(node.id, {
+                        show_charge: chargeCheckbox.checked
+                    });
+                });
+                chargeToggleGroup.appendChild(chargeCheckbox);
+                scaleBar.appendChild(chargeToggleGroup);
+
+                // Show Detonator Checkbox [NEW]
+                const showDetonator = node.parameters?.show_detonator !== false;
+                const detToggleGroup = document.createElement('label');
+                detToggleGroup.className = 'telemetry-log-checkbox-container';
+                detToggleGroup.textContent = 'Det:';
+
+                const detCheckbox = document.createElement('input');
+                detCheckbox.type = 'checkbox';
+                detCheckbox.checked = showDetonator;
+                detCheckbox.addEventListener('change', () => {
+                    this.stateManager.updateNodeParametersInPlace(node.id, {
+                        show_detonator: detCheckbox.checked
+                    });
+                });
+                detToggleGroup.appendChild(detCheckbox);
+                scaleBar.appendChild(detToggleGroup);
+
                 // Min Text Entry
                 const minLabel = document.createElement('span');
                 minLabel.className = 'telemetry-channel-label';
@@ -2887,7 +2984,11 @@ export class GraphRenderer {
                 maxInput.addEventListener('keydown', handleKeydown);
 
                 // Prevent propagation of mousedown/mouseup/click to avoid node dragging
-                [logCheckbox, logGroup, lockCheckbox, lockGroup, minInput, maxInput, setBtn].forEach(el => {
+                [
+                    logCheckbox, logGroup, lockCheckbox, lockGroup,
+                    chargeCheckbox, chargeToggleGroup, detCheckbox, detToggleGroup,
+                    minInput, maxInput, setBtn
+                ].forEach(el => {
                     ['mousedown', 'mouseup', 'click'].forEach(evtType => {
                         el.addEventListener(evtType, (e) => e.stopPropagation());
                     });
@@ -2930,7 +3031,9 @@ export class GraphRenderer {
                     colormap: currentColorMap,
                     min: minY,
                     max: maxY,
-                    isAxisymmetric: isAxisymmetric
+                    isAxisymmetric: isAxisymmetric,
+                    chargeInfo: (node.parameters?.show_charge !== false) ? chargeInfo : null,
+                    detonatorInfo: (node.parameters?.show_detonator !== false) ? detonatorInfo : null
                 });
 
                 requestAnimationFrame(() => {
@@ -3078,9 +3181,10 @@ export class GraphRenderer {
                     needsRebuild = true;
                 }
             }
-            if (node.type === 'MaterialExplosive') {
+            if (node.type === 'Material') {
                 const comp = node.parameters['composition'] || 'TNT';
-                if (form.dataset.renderedComposition !== comp.toString()) {
+                const matType = node.parameters['material_type'] || 'Air';
+                if (form.dataset.renderedComposition !== comp.toString() || form.dataset.renderedMaterialType !== matType.toString()) {
                     needsRebuild = true;
                 }
             }
@@ -3123,23 +3227,37 @@ export class GraphRenderer {
             const dim = node.parameters['dimension'] || '1D';
             form.dataset.renderedDimension = dim.toString();
         }
-        if (node.type === 'MaterialExplosive') {
+        if (node.type === 'Material') {
             const comp = node.parameters['composition'] || 'TNT';
+            const matType = node.parameters['material_type'] || 'Air';
             form.dataset.renderedComposition = comp.toString();
+            form.dataset.renderedMaterialType = matType.toString();
         }
 
         for (const [key, value] of Object.entries(node.parameters)) {
+            if (key === 'gauges') continue;
             if (node.type === 'DomainMesh') {
                 const dim = node.parameters['dimension'] || '1D';
                 if ((key === 'y_min_bc' || key === 'y_max_bc') && dim === '1D') continue;
                 if ((key === 'z_min_bc' || key === 'z_max_bc') && (dim === '1D' || dim === '2D')) continue;
             }
-            if (node.type === 'MaterialExplosive') {
-                const comp = node.parameters['composition'] || 'TNT';
-                const customKeys = ['det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
-                if (comp !== 'Custom' && customKeys.includes(key)) continue;
+            if (node.type === 'Material') {
+                const matType = node.parameters['material_type'] || 'Air';
+                if (matType === 'Air') {
+                    const airKeys = ['material_type', 'atm_pressure', 'atm_temperature', 'gamma'];
+                    if (!airKeys.includes(key)) continue;
+                } else if (matType === 'JWL Charge') {
+                    const comp = node.parameters['composition'] || 'TNT';
+                    const jwlKeys = ['material_type', 'composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
+                    if (!jwlKeys.includes(key)) continue;
+                    const customKeys = ['det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
+                    if (comp !== 'Custom' && customKeys.includes(key)) continue;
+                } else if (matType === 'Ideal Gas Charge') {
+                    const igKeys = ['material_type', 'ideal_gamma', 'ideal_rho_0', 'ideal_e_0'];
+                    if (!igKeys.includes(key)) continue;
+                }
             }
-            if (node.type === 'MaterialExplosive' || node.type === 'MaterialIdealGas') {
+            if (node.type === 'Charge2D' || node.type === 'Charge1D') {
                 const shape = node.parameters['charge_shape'] || 'Sphere';
                 if (key === 'charge_height' && shape !== 'Cylinder') continue;
             }
@@ -3203,7 +3321,7 @@ export class GraphRenderer {
                         ];
                         const castValue = numericKeys.includes(key) ? Number(newVal) : newVal;
                         const updates: Record<string, any> = { [key]: castValue };
-                        if (node.type === 'MaterialExplosive' && key === 'composition') {
+                        if (node.type === 'Material' && key === 'composition') {
                             const EXPLOSIVE_PRESETS: Record<string, Record<string, number>> = {
                                 'TNT': {
                                     rho: 1630,
@@ -3572,15 +3690,334 @@ export class GraphRenderer {
             if (node.type === 'TelemetryText') return 130;
             if (node.type === 'TelemetryGraph') return 150;
             if (node.type === 'TelemetryContour') return 300;
+            if (node.type === 'VirtualGauges') return 200;
             base += Math.max(node.inputs.length, node.outputs.length) * 20;
         } else if (displayMode === 'expanded') {
             base += Object.keys(node.parameters).length * 25;
             if (node.type === 'TelemetryText') base += 100;
             if (node.type === 'TelemetryGraph') base += 120;
             if (node.type === 'TelemetryContour') base += 270;
+            if (node.type === 'VirtualGauges') base += 250;
             base += Math.max(node.inputs.length, node.outputs.length) * 20;
         }
         return Math.max(base, 60);
+    }
+
+    private renderVirtualGaugesContent(node: Node, container: HTMLElement): void {
+        let body = container.querySelector('.node-body-gauges') as HTMLElement;
+        const state = this.stateManager.getCurrentState();
+        const has2D = state?.nodes.some(n => n.type === 'DomainMesh2D') || false;
+        const gauges = node.parameters?.gauges || [];
+        const currentChannel = Number(node.parameters?.telemetry_channel ?? 0);
+
+        if (!body) {
+            body = document.createElement('div');
+            body.className = 'node-body-gauges';
+            body.style.display = 'flex';
+            body.style.flexDirection = 'column';
+            body.style.padding = '8px';
+            body.style.gap = '8px';
+            body.style.minHeight = '180px';
+            container.appendChild(body);
+        }
+
+        body.innerHTML = '';
+
+        // 1. Toolbar
+        const toolbar = document.createElement('div');
+        toolbar.className = 'node-gauges-toolbar';
+        toolbar.style.display = 'flex';
+        toolbar.style.gap = '6px';
+        toolbar.style.alignItems = 'center';
+
+        const CHANNELS_1D = ['Pressure', 'Density', 'Velocity', 'Int. Energy', 'Mass Fraction'];
+        const CHANNELS_2D = ['Pressure', 'Density', 'Radial Vel', 'Axial Vel', 'Energy', 'Mass Frac 1', 'Mass Frac 2'];
+        const channelsList = has2D ? CHANNELS_2D : CHANNELS_1D;
+
+        const chSelect = document.createElement('select');
+        chSelect.className = 'node-gauges-channel-select';
+        chSelect.style.flex = '1';
+        chSelect.style.background = '#252526';
+        chSelect.style.color = '#ccc';
+        chSelect.style.border = '1px solid #444';
+        chSelect.style.padding = '2px 4px';
+        chSelect.style.fontSize = '11px';
+
+        channelsList.forEach((chName, idx) => {
+            const opt = document.createElement('option');
+            opt.value = String(idx);
+            opt.textContent = chName;
+            if (idx === currentChannel) opt.selected = true;
+            chSelect.appendChild(opt);
+        });
+        chSelect.onmousedown = (e) => e.stopPropagation();
+        chSelect.onchange = () => {
+            const newCh = Number(chSelect.value);
+            this.stateManager.updateNodeParameters(node.id, { telemetry_channel: newCh });
+            const canvas = body.querySelector('.node-gauges-canvas') as HTMLCanvasElement;
+            const history = this.stateManager.getTelemetry(node.id);
+            if (canvas && history) {
+                this.drawGaugesChart(canvas, history, node.parameters?.gauges || [], newCh, has2D);
+            }
+        };
+        toolbar.appendChild(chSelect);
+
+        const addBtn = document.createElement('button');
+        addBtn.textContent = '+ Gauge';
+        addBtn.style.padding = '2px 6px';
+        addBtn.style.fontSize = '11px';
+        addBtn.style.background = '#38bdf8';
+        addBtn.style.color = '#0f172a';
+        addBtn.style.border = 'none';
+        addBtn.style.borderRadius = '3px';
+        addBtn.style.cursor = 'pointer';
+        addBtn.onmousedown = (e) => e.stopPropagation();
+        addBtn.onclick = () => {
+            const nextIdx = gauges.length + 1;
+            const newGauges = [...gauges, { id: `G${nextIdx}`, r: 0.1, z: 0.0, active: true }];
+            this.stateManager.updateNodeParameters(node.id, { gauges: newGauges });
+        };
+        toolbar.appendChild(addBtn);
+
+        const clearBtn = document.createElement('button');
+        clearBtn.textContent = 'Clear';
+        clearBtn.style.padding = '2px 6px';
+        clearBtn.style.fontSize = '11px';
+        clearBtn.style.background = '#dc2626';
+        clearBtn.style.color = '#fff';
+        clearBtn.style.border = 'none';
+        clearBtn.style.borderRadius = '3px';
+        clearBtn.style.cursor = 'pointer';
+        clearBtn.onmousedown = (e) => e.stopPropagation();
+        clearBtn.onclick = () => {
+            this.stateManager.updateNodeParameters(node.id, { gauges: [] });
+        };
+        toolbar.appendChild(clearBtn);
+
+        body.appendChild(toolbar);
+
+        // 2. Chart Canvas
+        const canvas = document.createElement('canvas');
+        canvas.className = 'node-gauges-canvas';
+        canvas.width = 250;
+        canvas.height = 100;
+        canvas.style.width = '100%';
+        canvas.style.height = '100px';
+        canvas.style.background = '#1e1e1e';
+        canvas.style.border = '1px solid #333';
+        canvas.style.borderRadius = '3px';
+        body.appendChild(canvas);
+
+        // 3. Gauges List/Table
+        const listDiv = document.createElement('div');
+        listDiv.style.maxHeight = '100px';
+        listDiv.style.overflowY = 'auto';
+        listDiv.style.border = '1px solid #333';
+        listDiv.style.borderRadius = '3px';
+        listDiv.style.background = '#181818';
+
+        if (gauges.length === 0) {
+            const empty = document.createElement('div');
+            empty.style.padding = '8px';
+            empty.style.fontSize = '11px';
+            empty.style.color = '#666';
+            empty.style.fontStyle = 'italic';
+            empty.textContent = 'No gauges defined';
+            listDiv.appendChild(empty);
+        } else {
+            const table = document.createElement('table');
+            table.style.width = '100%';
+            table.style.borderCollapse = 'collapse';
+            table.style.fontSize = '11px';
+
+            gauges.forEach((g: any, idx: number) => {
+                const tr = document.createElement('tr');
+                tr.style.borderBottom = '1px solid #222';
+
+                // ID
+                const tdId = document.createElement('td');
+                tdId.style.padding = '4px';
+                tdId.style.fontWeight = 'bold';
+                tdId.textContent = g.id;
+                tr.appendChild(tdId);
+
+                // R Coordinate Input
+                const tdR = document.createElement('td');
+                tdR.style.padding = '4px';
+                const inputR = document.createElement('input');
+                inputR.type = 'number';
+                inputR.step = 'any';
+                inputR.value = String(g.r);
+                inputR.style.width = '50px';
+                inputR.style.background = '#252526';
+                inputR.style.color = '#ccc';
+                inputR.style.border = '1px solid #444';
+                inputR.style.fontSize = '10px';
+                inputR.style.padding = '1px 3px';
+                inputR.onmousedown = (e) => e.stopPropagation();
+                inputR.onchange = () => {
+                    const updated = [...gauges];
+                    updated[idx] = { ...g, r: Number(inputR.value) };
+                    this.stateManager.updateNodeParameters(node.id, { gauges: updated });
+                };
+                tdR.appendChild(document.createTextNode('R: '));
+                tdR.appendChild(inputR);
+                tr.appendChild(tdR);
+
+                // Z Coordinate Input (only if 2D)
+                if (has2D) {
+                    const tdZ = document.createElement('td');
+                    tdZ.style.padding = '4px';
+                    const inputZ = document.createElement('input');
+                    inputZ.type = 'number';
+                    inputZ.step = 'any';
+                    inputZ.value = String(g.z);
+                    inputZ.style.width = '50px';
+                    inputZ.style.background = '#252526';
+                    inputZ.style.color = '#ccc';
+                    inputZ.style.border = '1px solid #444';
+                    inputZ.style.fontSize = '10px';
+                    inputZ.style.padding = '1px 3px';
+                    inputZ.onmousedown = (e) => e.stopPropagation();
+                    inputZ.onchange = () => {
+                        const updated = [...gauges];
+                        updated[idx] = { ...g, z: Number(inputZ.value) };
+                        this.stateManager.updateNodeParameters(node.id, { gauges: updated });
+                    };
+                    tdZ.appendChild(document.createTextNode(' Z: '));
+                    tdZ.appendChild(inputZ);
+                    tr.appendChild(tdZ);
+                }
+
+                // Delete Button
+                const tdDel = document.createElement('td');
+                tdDel.style.padding = '4px';
+                tdDel.style.textAlign = 'right';
+                const delBtn = document.createElement('button');
+                delBtn.textContent = '×';
+                delBtn.style.background = 'none';
+                delBtn.style.color = '#ef4444';
+                delBtn.style.border = 'none';
+                delBtn.style.cursor = 'pointer';
+                delBtn.style.fontWeight = 'bold';
+                delBtn.style.fontSize = '14px';
+                delBtn.onmousedown = (e) => e.stopPropagation();
+                delBtn.onclick = () => {
+                    const updated = gauges.filter((_: any, i: number) => i !== idx);
+                    this.stateManager.updateNodeParameters(node.id, { gauges: updated });
+                };
+                tdDel.appendChild(delBtn);
+                tr.appendChild(tdDel);
+
+                table.appendChild(tr);
+            });
+            listDiv.appendChild(table);
+        }
+        body.appendChild(listDiv);
+
+        // Draw initial chart
+        const history = this.stateManager.getTelemetry(node.id);
+        if (history) {
+            setTimeout(() => {
+                this.drawGaugesChart(canvas, history, gauges, currentChannel, has2D);
+            }, 0);
+        }
+    }
+
+    private drawGaugesChart(canvas: HTMLCanvasElement, history: any, gauges: any[], channel: number, has2D: boolean): void {
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        const width = canvas.width;
+        const height = canvas.height;
+
+        ctx.clearRect(0, 0, width, height);
+
+        // If no data
+        if (!history || !history.times || history.times.length === 0 || gauges.length === 0) {
+            ctx.fillStyle = '#666';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('Waiting for telemetry...', width / 2, height / 2);
+            return;
+        }
+
+        const times = history.times;
+        const values = history.values; // Record<gaugeId, Record<channelIdx, number[]>>
+
+        // Find min/max values for scaling
+        let minVal = Infinity;
+        let maxVal = -Infinity;
+        let hasData = false;
+
+        gauges.forEach(g => {
+            const gData = values[g.id];
+            if (gData && gData[channel]) {
+                const arr = gData[channel];
+                arr.forEach((v: number) => {
+                    if (isFinite(v)) {
+                        if (v < minVal) minVal = v;
+                        if (v > maxVal) maxVal = v;
+                        hasData = true;
+                    }
+                });
+            }
+        });
+
+        if (!hasData) {
+            ctx.fillStyle = '#666';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('No gauge data for selected channel', width / 2, height / 2);
+            return;
+        }
+
+        const padding = 20;
+        const plotWidth = width - 2 * padding;
+        const plotHeight = height - 2 * padding;
+        const range = maxVal - minVal === 0 ? 1.0 : maxVal - minVal;
+
+        // Draw grid/bounds labels
+        ctx.strokeStyle = '#333';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(padding, padding);
+        ctx.lineTo(padding, height - padding);
+        ctx.lineTo(width - padding, height - padding);
+        ctx.stroke();
+
+        ctx.fillStyle = '#888';
+        ctx.font = '8px monospace';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(maxVal.toExponential(1), padding - 4, padding);
+        ctx.fillText(minVal.toExponential(1), padding - 4, height - padding);
+
+        // Draw curves
+        const colors = ['#38bdf8', '#fb7185', '#34d399', '#fbbf24', '#a78bfa', '#2dd4bf'];
+        gauges.forEach((g, gIdx) => {
+            const gData = values[g.id];
+            if (gData && gData[channel]) {
+                const arr = gData[channel];
+                ctx.strokeStyle = colors[gIdx % colors.length];
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+
+                arr.forEach((v: number, i: number) => {
+                    if (i >= times.length) return;
+                    const x = padding + (i / (times.length - 1)) * plotWidth;
+                    const y = height - padding - ((v - minVal) / range) * plotHeight;
+                    if (i === 0) {
+                        ctx.moveTo(x, y);
+                    } else {
+                        ctx.lineTo(x, y);
+                    }
+                });
+                ctx.stroke();
+            }
+        });
     }
 
     private validateGraph(state: SimulationState): {

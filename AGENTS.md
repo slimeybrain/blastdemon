@@ -23,3 +23,9 @@
 - Prioritize memory safety and explicit OS-level error handling in C++.
 - Write clean, human-readable vanilla TS using Object-Oriented or functional paradigms.
 - Never add a dependency to `package.json` or `CMakeLists.txt` without explicit human approval.
+
+## 5. Browser Agent & Tool Restrictions (ABSOLUTE RULE)
+- **Do NOT** use the `browser_subagent` tool or start browser subagents under any circumstances.
+- **Do NOT** open new browser windows or pages.
+- Verify frontend layout, visual changes, and state logic through static analysis, code reviews, unit tests, or manual user inspection rather than invoking automated browser agents.
+

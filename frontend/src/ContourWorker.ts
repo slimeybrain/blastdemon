@@ -16,6 +16,8 @@ let autoScale = true;
 let useLogScale = false;
 let selectedColormap = 'plasma';
 let isAxisymmetric = true;
+let chargeInfo: any = null;
+let detonatorInfo: any = null;
 
 let stride = 1;
 let refreshRate = 0.0; // in seconds
@@ -231,59 +233,82 @@ function updateAutoScale(data: Float32Array): void {
 }
 
 function render(): void {
-    if (!ctx || !canvas || width <= 0 || height <= 0 || !lastBuffer) return;
+    const context = ctx;
+    if (!context || !canvas || width <= 0 || height <= 0) return;
 
     lastRenderTime = Date.now();
 
-    const frameInfo = extractChannel2D(lastBuffer, selectedChannel);
-    if (!frameInfo) return;
+    context.clearRect(0, 0, width, height);
+    context.imageSmoothingEnabled = false;
 
-    const { data, nr, nz } = frameInfo;
+    let hasHeatmap = false;
+    let outNr = 0;
+    let outNz = 0;
+    let nr = 0;
+    let nz = 0;
 
-    // Update scale
-    updateAutoScale(data);
+    const frameInfo = lastBuffer ? extractChannel2D(lastBuffer, selectedChannel) : null;
+    if (frameInfo) {
+        const { data, nr: cellNr, nz: cellNz } = frameInfo;
+        nr = cellNr;
+        nz = cellNz;
 
-    // Calculate out dimensions based on stride
-    const outNr = Math.ceil(nr / stride);
-    const outNz = Math.ceil(nz / stride);
+        // Update scale
+        updateAutoScale(data);
 
-    // Initialise or resize temporary offscreen canvas for raw grid
-    if (!tempCanvas || tempCanvas.width !== outNr || tempCanvas.height !== outNz) {
-        tempCanvas = new OffscreenCanvas(outNr, outNz);
-        tempCtx = tempCanvas.getContext('2d');
-    }
+        // Calculate out dimensions based on stride
+        outNr = Math.ceil(nr / stride);
+        outNz = Math.ceil(nz / stride);
 
-    if (!tempCtx) return;
+        // Initialise or resize temporary offscreen canvas for raw grid
+        if (!tempCanvas || tempCanvas.width !== outNr || tempCanvas.height !== outNz) {
+            tempCanvas = new OffscreenCanvas(outNr, outNz);
+            tempCtx = tempCanvas.getContext('2d');
+        }
 
-    // Build the image data for the raw outNr x outNz grid
-    const imgData = tempCtx.createImageData(outNr, outNz);
-    const pixels = imgData.data;
+        if (tempCtx) {
+            // Build the image data for the raw outNr x outNz grid
+            const imgData = tempCtx.createImageData(outNr, outNz);
+            const pixels = imgData.data;
 
-    for (let i = 0; i < outNr; ++i) {
-        for (let j = 0; j < outNz; ++j) {
-            const rawI = Math.min(nr - 1, i * stride);
-            const rawJ = Math.min(nz - 1, j * stride);
-            const solverIdx = rawI * nz + rawJ;
-            const val = data[solverIdx];
+            for (let i = 0; i < outNr; ++i) {
+                for (let j = 0; j < outNz; ++j) {
+                    const rawI = Math.min(nr - 1, i * stride);
+                    const rawJ = Math.min(nz - 1, j * stride);
+                    const solverIdx = rawI * nz + rawJ;
+                    const val = data[solverIdx];
 
-            const col = getColor(val, displayMin, displayMax);
-            
-            // Flip y-coordinate for intuitive contour plot (z vertical)
-            const canvasY = outNz - 1 - j;
-            const pixelIdx = (canvasY * outNr + i) * 4;
+                    const col = getColor(val, displayMin, displayMax);
+                    
+                    // Flip y-coordinate for intuitive contour plot (z vertical)
+                    const canvasY = outNz - 1 - j;
+                    const pixelIdx = (canvasY * outNr + i) * 4;
 
-            pixels[pixelIdx + 0] = col.r;
-            pixels[pixelIdx + 1] = col.g;
-            pixels[pixelIdx + 2] = col.b;
-            pixels[pixelIdx + 3] = 255; // Alpha
+                    pixels[pixelIdx + 0] = col.r;
+                    pixels[pixelIdx + 1] = col.g;
+                    pixels[pixelIdx + 2] = col.b;
+                    pixels[pixelIdx + 3] = 255; // Alpha
+                }
+            }
+            tempCtx.putImageData(imgData, 0, 0);
+            hasHeatmap = true;
         }
     }
 
-    tempCtx.putImageData(imgData, 0, 0);
+    // Determine domain dimensions for overlay mapping
+    let max_r = 1.0;
+    let max_z = 1.0;
+    if (chargeInfo) {
+        max_r = chargeInfo.max_r || 1.0;
+        max_z = chargeInfo.max_z || 1.0;
+    }
 
-    // Calculate drawing box keeping aspect ratio
-    // If axisymmetric, the shown width is double the nr cells due to reflection (r goes from -max_r to max_r)
-    const aspect = isAxisymmetric ? (2 * outNr) / outNz : outNr / outNz;
+    // Calculate aspect ratio
+    // If we have a heatmap, use its aspect ratio. Otherwise, use physical domain bounds.
+    const aspect = hasHeatmap
+        ? (isAxisymmetric ? (2 * outNr) / outNz : outNr / outNz)
+        : (isAxisymmetric ? (2 * max_r) / max_z : max_r / max_z);
+
     let dw = width;
     let dh = height;
     if (width / height > aspect) {
@@ -296,32 +321,128 @@ function render(): void {
     const dx = (width - dw) / 2;
     const dy = (height - dh) / 2;
 
-    // Draw heatmap preserving aspect ratio (sharp pixels per cell)
-    ctx.clearRect(0, 0, width, height);
-    ctx.imageSmoothingEnabled = false;
+    // Draw heatmap
+    if (hasHeatmap && tempCanvas) {
+        if (isAxisymmetric) {
+            // Draw left reflected half (r from -max_r to 0)
+            context.save();
+            context.translate(dx + dw / 2, dy);
+            context.scale(-1, 1);
+            context.drawImage(tempCanvas, 0, 0, outNr, outNz, 0, 0, dw / 2, dh);
+            context.restore();
 
-    if (isAxisymmetric) {
-        // Draw left reflected half (r from -max_r to 0)
-        ctx.save();
-        ctx.translate(dx + dw / 2, dy);
-        ctx.scale(-1, 1);
-        ctx.drawImage(tempCanvas, 0, 0, outNr, outNz, 0, 0, dw / 2, dh);
-        ctx.restore();
-
-        // Draw right normal half (r from 0 to max_r)
-        ctx.drawImage(tempCanvas, 0, 0, outNr, outNz, dx + dw / 2, dy, dw / 2, dh);
+            // Draw right normal half (r from 0 to max_r)
+            context.drawImage(tempCanvas, 0, 0, outNr, outNz, dx + dw / 2, dy, dw / 2, dh);
+        } else {
+            // Draw standard full width
+            context.drawImage(tempCanvas, 0, 0, outNr, outNz, dx, dy, dw, dh);
+        }
     } else {
-        // Draw standard full width
-        ctx.drawImage(tempCanvas, 0, 0, outNr, outNz, dx, dy, dw, dh);
+        // Draw grid placeholder when waiting for telemetry
+        context.save();
+        context.strokeStyle = 'rgba(71, 85, 105, 0.4)';
+        context.lineWidth = 1;
+        context.strokeRect(dx, dy, dw, dh);
+        // Draw center axis if axisymmetric
+        if (isAxisymmetric) {
+            context.beginPath();
+            context.moveTo(dx + dw / 2, dy);
+            context.lineTo(dx + dw / 2, dy + dh);
+            context.stroke();
+        }
+        context.restore();
+    }
+
+    // Render overlays (charge shape and detonator location)
+    if (chargeInfo) {
+        const { shape, r: cR, z: cZ, radius, height: cH } = chargeInfo;
+        context.save();
+        context.lineWidth = 1.5;
+        
+        const drawOutline = (flipX: boolean) => {
+            const getCanvasCoords = (pr: number, pz: number) => {
+                let cx = dx + dw / 2;
+                if (isAxisymmetric) {
+                    const sign = flipX ? -1 : 1;
+                    cx += sign * (pr / max_r) * (dw / 2);
+                } else {
+                    cx = dx + (pr / max_r) * dw;
+                }
+                const cy = dy + dh - (pz / max_z) * dh;
+                return { x: cx, y: cy };
+            };
+
+            context.beginPath();
+            if (shape === 'Sphere') {
+                const center = getCanvasCoords(cR, cZ);
+                const edge = getCanvasCoords(cR + radius, cZ);
+                const rCanvas = Math.abs(edge.x - center.x);
+                context.arc(center.x, center.y, rCanvas, 0, 2 * Math.PI);
+            } else if (shape === 'Cylinder') {
+                const topLeft = getCanvasCoords(cR - radius, cZ + cH / 2);
+                const bottomRight = getCanvasCoords(cR + radius, cZ - cH / 2);
+                const rectW = Math.abs(bottomRight.x - topLeft.x);
+                const rectH = Math.abs(bottomRight.y - topLeft.y);
+                context.rect(Math.min(topLeft.x, bottomRight.x), Math.min(topLeft.y, bottomRight.y), rectW, rectH);
+            }
+            // Double stroke for maximum visibility (white inside, black outside border)
+            context.strokeStyle = '#000000';
+            context.lineWidth = 3;
+            context.stroke();
+            
+            context.strokeStyle = '#ffffff';
+            context.lineWidth = 1.5;
+            context.stroke();
+        };
+
+        drawOutline(false);
+        if (isAxisymmetric) {
+            drawOutline(true);
+        }
+        context.restore();
+    }
+
+    if (detonatorInfo) {
+        const { r: dR, z: dZ } = detonatorInfo;
+        context.save();
+        
+        const drawDet = (flipX: boolean) => {
+            let cx = dx + dw / 2;
+            if (isAxisymmetric) {
+                const sign = flipX ? -1 : 1;
+                cx += sign * (dR / max_r) * (dw / 2);
+            } else {
+                cx = dx + (dR / max_r) * dw;
+            }
+            const cy = dy + dh - (dZ / max_z) * dh;
+
+            context.beginPath();
+            context.arc(cx, cy, 4, 0, 2 * Math.PI);
+            context.fillStyle = '#ff3b30'; // red detonator dot
+            context.strokeStyle = '#ffffff';
+            context.lineWidth = 1.5;
+            context.fill();
+            context.stroke();
+        };
+
+        drawDet(false);
+        if (isAxisymmetric) {
+            drawDet(true);
+        }
+        context.restore();
     }
 
     // Draw grid info overlay (glassmorphism/ HUD styling)
-    ctx.save();
-    ctx.font = '11px monospace';
-    ctx.fillStyle = '#94a3b8';
-    ctx.fillText(`Mesh: ${nr} × ${nz} (Render: ${outNr} × ${outNz})`, 15, 20);
-    ctx.fillText(`Range: [${displayMin.toExponential(2)}, ${displayMax.toExponential(2)}]`, 15, 35);
-    ctx.restore();
+    context.save();
+    context.font = '11px monospace';
+    context.fillStyle = '#94a3b8';
+    if (hasHeatmap) {
+        context.fillText(`Mesh: ${nr} × ${nz} (Render: ${outNr} × ${outNz})`, 15, 20);
+        context.fillText(`Range: [${displayMin.toExponential(2)}, ${displayMax.toExponential(2)}]`, 15, 35);
+    } else {
+        context.fillText('Waiting for telemetry...', 15, 20);
+    }
+    context.restore();
 }
 
 self.onmessage = (event) => {
@@ -404,6 +525,8 @@ self.onmessage = (event) => {
         if (typeof data.logScale === 'boolean') useLogScale = data.logScale;
         if (typeof data.colormap === 'string') selectedColormap = data.colormap;
         if (typeof data.isAxisymmetric === 'boolean') isAxisymmetric = data.isAxisymmetric;
+        if (data.chargeInfo !== undefined) chargeInfo = data.chargeInfo;
+        if (data.detonatorInfo !== undefined) detonatorInfo = data.detonatorInfo;
         if (!autoScale) {
             if (typeof data.min === 'number') displayMin = data.min;
             if (typeof data.max === 'number') displayMax = data.max;

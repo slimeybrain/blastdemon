@@ -566,12 +566,23 @@ export class NodeViewer {
                 if ((key === 'y_min_bc' || key === 'y_max_bc') && dim === '1D') continue;
                 if ((key === 'z_min_bc' || key === 'z_max_bc') && (dim === '1D' || dim === '2D')) continue;
             }
-            if (node.type === 'MaterialExplosive') {
-                const comp = node.parameters['composition'] || 'TNT';
-                const customKeys = ['det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
-                if (comp !== 'Custom' && customKeys.includes(key)) continue;
+            if (node.type === 'Material') {
+                const matType = node.parameters['material_type'] || 'Air';
+                if (matType === 'Air') {
+                    const airKeys = ['material_type', 'atm_pressure', 'atm_temperature', 'gamma'];
+                    if (!airKeys.includes(key)) continue;
+                } else if (matType === 'JWL Charge') {
+                    const comp = node.parameters['composition'] || 'TNT';
+                    const jwlKeys = ['material_type', 'composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
+                    if (!jwlKeys.includes(key)) continue;
+                    const customKeys = ['det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
+                    if (comp !== 'Custom' && customKeys.includes(key)) continue;
+                } else if (matType === 'Ideal Gas Charge') {
+                    const igKeys = ['material_type', 'ideal_gamma', 'ideal_rho_0', 'ideal_e_0'];
+                    if (!igKeys.includes(key)) continue;
+                }
             }
-            if (node.type === 'MaterialExplosive' || node.type === 'MaterialIdealGas') {
+            if (node.type === 'Charge2D' || node.type === 'Charge1D') {
                 const shape = node.parameters['charge_shape'] || 'Sphere';
                 if (key === 'charge_height' && shape !== 'Cylinder') continue;
             }
@@ -801,7 +812,7 @@ export class NodeViewer {
     private updateParameter(node: Node, key: string, value: any): void {
         const updates: Record<string, any> = { [key]: value };
 
-        if (node.type === 'MaterialExplosive' && key === 'composition') {
+        if (node.type === 'Material' && key === 'composition') {
             const EXPLOSIVE_PRESETS: Record<string, Record<string, number>> = {
                 'TNT': {
                     rho: 1630,
