@@ -393,9 +393,19 @@ export class GraphRenderer {
                 currentCount++;
                 this.graphFrameCounters.set(node.id, currentCount);
 
-                const isTerminated = this.stateManager.getStatus() === 'TERMINATED';
+                const status = this.stateManager.getStatus();
+                const isTerminated = status === 'TERMINATED';
+                const isInitialized = status === 'INITIALIZED';
+                const isTimeZero = (data && typeof data === 'object' && data.time === 0);
 
-                if (plotStride > 1 && currentCount % plotStride !== 0 && !isTerminated) {
+                if (isInitialized || isTimeZero) {
+                    this.graphFrameCounters.set(node.id, 1);
+                    currentCount = 1;
+                }
+
+                const isInitialOrControl = currentCount === 1 || isInitialized || isTerminated || isTimeZero;
+
+                if (plotStride > 1 && !isInitialOrControl && currentCount % plotStride !== 0) {
                     return; // Skip this frame
                 }
 
@@ -958,10 +968,15 @@ export class GraphRenderer {
 
         const categories = [
             {
+                name: 'Material',
+                action: () => this.addNode('Material', wx, wy)
+            },
+            {
                 name: '1D Simulation',
                 items: [
                     { label: 'Domain Mesh', type: 'DomainMesh' },
                     { label: 'Initializer', type: 'ThePainter' },
+                    { label: '1D Charge', type: 'Charge1D' },
                     { label: 'CFD Solver', type: 'CFDSolver' }
                 ]
             },
@@ -971,15 +986,8 @@ export class GraphRenderer {
                     { label: 'Domain Mesh 2D', type: 'DomainMesh2D' },
                     { label: 'Detonator Location', type: 'DetonatorLocation' },
                     { label: 'Remapper (1D -> 2D)', type: 'RemapNode' },
+                    { label: '2D Charge', type: 'Charge2D' },
                     { label: 'CFD Solver 2D', type: 'CFDSolver2D' }
-                ]
-            },
-            {
-                name: 'Material Models',
-                items: [
-                    { label: 'Material - Air', type: 'MaterialAir' },
-                    { label: 'Material - Explosive (JWL)', type: 'MaterialExplosive' },
-                    { label: 'Material - Ideal Gas', type: 'MaterialIdealGas' }
                 ]
             },
             {
@@ -1002,33 +1010,44 @@ export class GraphRenderer {
 
         categories.forEach(cat => {
             const catItem = document.createElement('div');
-            catItem.className = 'context-menu-item has-submenu';
             
-            const labelSpan = document.createElement('span');
-            labelSpan.textContent = cat.name;
-            catItem.appendChild(labelSpan);
-            
-            const arrowSpan = document.createElement('span');
-            arrowSpan.className = 'submenu-arrow';
-            arrowSpan.textContent = '▶';
-            catItem.appendChild(arrowSpan);
-            
-            const submenu = document.createElement('div');
-            submenu.className = 'submenu';
-            
-            cat.items.forEach(nt => {
-                const item = document.createElement('div');
-                item.className = 'context-menu-item';
-                item.textContent = nt.label;
-                item.onclick = (e) => {
+            if ('action' in cat && typeof cat.action === 'function') {
+                catItem.className = 'context-menu-item';
+                catItem.textContent = cat.name;
+                catItem.onclick = (e) => {
                     e.stopPropagation();
-                    this.addNode(nt.type as NodeType, wx, wy);
+                    (cat.action as () => void)();
                     menu.remove();
                 };
-                submenu.appendChild(item);
-            });
-            
-            catItem.appendChild(submenu);
+            } else {
+                catItem.className = 'context-menu-item has-submenu';
+                
+                const labelSpan = document.createElement('span');
+                labelSpan.textContent = cat.name;
+                catItem.appendChild(labelSpan);
+                
+                const arrowSpan = document.createElement('span');
+                arrowSpan.className = 'submenu-arrow';
+                arrowSpan.textContent = '▶';
+                catItem.appendChild(arrowSpan);
+                
+                const submenu = document.createElement('div');
+                submenu.className = 'submenu';
+                
+                cat.items.forEach(nt => {
+                    const item = document.createElement('div');
+                    item.className = 'context-menu-item';
+                    item.textContent = nt.label;
+                    item.onclick = (e) => {
+                        e.stopPropagation();
+                        this.addNode(nt.type as NodeType, wx, wy);
+                        menu.remove();
+                    };
+                    submenu.appendChild(item);
+                });
+                
+                catItem.appendChild(submenu);
+            }
             menu.appendChild(catItem);
         });
 
@@ -1231,7 +1250,6 @@ export class GraphRenderer {
                 jwl_R2: 0.90,
                 jwl_omega: 0.35,
                 // Ideal Gas Charge params
-                ideal_gamma: 1.4,
                 ideal_rho_0: 1.25,
                 ideal_e_0: 4290000
             };
@@ -1572,9 +1590,55 @@ export class GraphRenderer {
                         const infoOverlay = document.createElement('div');
                         infoOverlay.className = 'node-info-overlay';
                         infoOverlay.dataset.nodeId = node.id;
+                        
+                        let bodyContent = this.getNodeDescription(node.type);
+                        if (node.type === 'Material') {
+                            const matType = node.parameters?.material_type || 'Air';
+                            if (matType === 'JWL Charge') {
+                                const comp = node.parameters?.composition || 'TNT';
+                                 const EXPLOSIVE_REFS: Record<string, string> = {
+                                    'Aluminized ANFO': 'Sanchidrián et al., Central European Journal of Energetic Materials (2015)',
+                                    'Ammonal': 'Lee et al., LLNL JWL Database (UCRL-50422, 1968)',
+                                    'ANFO': 'Lee et al., LLNL JWL Database (UCRL-50422, 1968)',
+                                    'Baratol': 'Lee et al., LLNL JWL Database (UCRL-50422, 1968)',
+                                    'C-4': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
+                                    'Composition A-3': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
+                                    'Composition B': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
+                                    'Composition C-3': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
+                                    'Cyclotol': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
+                                    'Heavy ANFO': 'Sanchidrián et al., Central European Journal of Energetic Materials (2015)',
+                                    'HMX': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
+                                    'LX-04': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
+                                    'LX-07': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
+                                    'LX-10': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
+                                    'LX-14': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
+                                    'LX-17': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
+                                    'Mining Emulsion': 'Castedo et al., Int. Journal of Rock Mechanics & Mining Sciences (2018)',
+                                    'Octol': 'Lee et al., LLNL JWL Database (UCRL-50422, 1968)',
+                                    'PBX 9404': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
+                                    'PBX 9501': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
+                                    'PBX 9502': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
+                                    'PE-10': 'Chemring / STV Group Demolition Range Datasheets (Estimated)',
+                                    'PE-12': 'Chemring / STV Group Demolition Range Datasheets (Estimated)',
+                                    'PE-4': 'Dobratz & Crawford, LLNL Explosives Handbook (1985) / PE-4 Cylinder Test Fit',
+                                    'PE-8': 'Chemring / STV Group Demolition Range Datasheets (Estimated)',
+                                    'Pentolite': 'Lee et al., LLNL JWL Database (UCRL-50422, 1968)',
+                                    'PETN': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
+                                    'RDX': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
+                                    'TATB': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
+                                    'Tetryl': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
+                                    'TNT': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
+                                    'Water Gel': 'Sanchidrián et al., Central European Journal of Energetic Materials (2015)',
+                                    'Custom': 'N/A'
+                                };
+                                const ref = EXPLOSIVE_REFS[comp] || 'N/A';
+                                bodyContent += `<br/><br/><strong>Composition:</strong> ${comp}<br/><strong>Reference Source:</strong> ${ref}`;
+                            }
+                        }
+
                         infoOverlay.innerHTML = `
                             <div class="node-info-overlay-title">${node.type} Info</div>
-                            <div class="node-info-overlay-body">${this.getNodeDescription(node.type)}</div>
+                            <div class="node-info-overlay-body">${bodyContent}</div>
                         `;
                         // Convert client coords → world coords so overlay scales with canvas
                         const rect = this.viewport.getBoundingClientRect();
@@ -2283,8 +2347,8 @@ export class GraphRenderer {
 
     private getPortColorClass(nodeType: string, portId: string): string {
         if (nodeType === 'DomainMesh' || nodeType === 'DomainMesh2D' || portId === 'mesh') return 'domain';
-        if (nodeType === 'MaterialExplosive' || portId === 'explosive') return 'explosive';
-        if (nodeType === 'MaterialIdealGas' || portId === 'ideal_gas') return 'material';
+        if (nodeType === 'Charge1D' || nodeType === 'Charge2D' || portId === 'explosive') return 'explosive';
+        if (portId === 'ideal_gas') return 'material';
         if (nodeType === 'DetonatorLocation' || portId === 'detonator') return 'detonator';
         if (nodeType === 'RemapNode' || portId === 'remap') return 'remap';
         if (nodeType === 'HardwareConfig' || portId === 'hardware') return 'hardware';
@@ -2597,7 +2661,7 @@ export class GraphRenderer {
                     const solverChargeConn = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'charge');
                     chargeNode = solverChargeConn ? state.nodes.find(n => n.id === solverChargeConn.fromNode && n.type === 'Charge2D') : null;
 
-                    // 2. Connection fallback
+                    // 2. Connection fallback for 2D
                     if (!chargeNode) {
                         chargeNode = state.nodes.find(n => n.type === 'Charge2D') || null;
                     }
@@ -2612,6 +2676,51 @@ export class GraphRenderer {
                             max_r: max_r,
                             max_z: max_z
                         };
+                    } else {
+                        // 3. Try to get charge geometry from Remapper
+                        const remapConn = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'remap');
+                        if (remapConn) {
+                            const remapNode = state.nodes.find(n => n.id === remapConn.fromNode && n.type === 'RemapNode');
+                            if (remapNode) {
+                                const ws = this.stateManager.getActiveWorkspace();
+                                const wsConns = ws ? (ws.connections || []) : [];
+                                const solver1DConn = wsConns.find(c => c.toNode === remapNode.id && c.toPort === 'in');
+
+                                if (solver1DConn) {
+                                    const allModels = this.stateManager.getAllModels();
+                                    let solver1DNode = null;
+                                    let model1D = null;
+                                    for (const m of allModels) {
+                                        const found = m.nodes.find(n => n.id === solver1DConn.fromNode && n.type === 'CFDSolver');
+                                        if (found) {
+                                            solver1DNode = found;
+                                            model1D = m;
+                                            break;
+                                        }
+                                    }
+
+                                    if (solver1DNode && model1D) {
+                                        const painterConn = model1D.connections.find(c => c.toNode === solver1DNode.id && c.toPort === 'in');
+                                        const painterNode = painterConn ? model1D.nodes.find(n => n.id === painterConn.fromNode && n.type === 'ThePainter') : null;
+                                        if (painterNode) {
+                                            const charge1DConn = model1D.connections.find(c => c.toNode === painterNode.id && c.toPort === 'explosive');
+                                            const charge1DNode = charge1DConn ? model1D.nodes.find(n => n.id === charge1DConn.fromNode && n.type === 'Charge1D') : null;
+                                            if (charge1DNode) {
+                                                chargeInfo = {
+                                                    shape: 'Sphere', // 1D remapped into 2D is always a spherical boundary
+                                                    r: Number(remapNode.parameters?.explosive_r ?? 0.0),
+                                                    z: Number(remapNode.parameters?.explosive_z ?? 0.0),
+                                                    radius: Number(charge1DNode.parameters?.charge_radius ?? 0.05),
+                                                    height: 0.1, // N/A for Sphere
+                                                    max_r: max_r,
+                                                    max_z: max_z
+                                                };
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     const detConn = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'detonator');
@@ -3209,7 +3318,7 @@ export class GraphRenderer {
                         } else {
                             const input = el as HTMLInputElement;
                             if (document.activeElement !== input) {
-                                input.value = value.toString();
+                                input.value = typeof value === 'number' ? parseFloat(value.toPrecision(7)).toString() : value.toString();
                             }
                         }
                     }
@@ -3294,13 +3403,10 @@ export class GraphRenderer {
                     const airKeys = ['material_type', 'atm_pressure', 'atm_temperature', 'gamma'];
                     if (!airKeys.includes(key)) continue;
                 } else if (matType === 'JWL Charge') {
-                    const comp = node.parameters['composition'] || 'TNT';
                     const jwlKeys = ['material_type', 'composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
                     if (!jwlKeys.includes(key)) continue;
-                    const customKeys = ['det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
-                    if (comp !== 'Custom' && customKeys.includes(key)) continue;
                 } else if (matType === 'Ideal Gas Charge') {
-                    const igKeys = ['material_type', 'ideal_gamma', 'ideal_rho_0', 'ideal_e_0'];
+                    const igKeys = ['material_type', 'composition', 'ideal_rho_0', 'ideal_e_0'];
                     if (!igKeys.includes(key)) continue;
                 }
             }
@@ -3339,14 +3445,15 @@ export class GraphRenderer {
                 'precision': ['double', 'single'],
                 'trigger_type': ['end', 'time', 'step'],
                 // Explosive composition — JWL parameter sets (Ideal Gas uses its own node)
-                'composition': ['TNT', 'PETN', 'RDX', 'Custom'],
+                'composition': ['Aluminized ANFO', 'Ammonal', 'ANFO', 'Baratol', 'C-4', 'Composition A-3', 'Composition B', 'Composition C-3', 'Cyclotol', 'Heavy ANFO', 'HMX', 'LX-04', 'LX-07', 'LX-10', 'LX-14', 'LX-17', 'Mining Emulsion', 'Octol', 'PBX 9404', 'PBX 9501', 'PBX 9502', 'PE-10', 'PE-12', 'PE-4', 'PE-8', 'Pentolite', 'PETN', 'RDX', 'TATB', 'Tetryl', 'TNT', 'Water Gel', 'Custom'],
                 'init_mode': ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
                 'flux_scheme': ['AUSM+', 'Rusanov'],
                 'spatial_order': ['1', '2', '3'],
                 'temporal_order': ['1', '2', '3'],
                 'output_mode': ['By Step', 'By Time'],
                 'plot_stride': ['1', '2', '5', '10', '20', '50', '100'],
-                'charge_shape': ['Sphere', 'Cylinder']
+                'charge_shape': ['Sphere', 'Cylinder'],
+                'material_type': ['Air', 'JWL Charge', 'Ideal Gas Charge']
             };
 
             let inputEl: HTMLElement;
@@ -3369,16 +3476,266 @@ export class GraphRenderer {
                         const castValue = numericKeys.includes(key) ? Number(newVal) : newVal;
                         const updates: Record<string, any> = { [key]: castValue };
                         if (node.type === 'Material' && key === 'composition') {
-                            const EXPLOSIVE_PRESETS: Record<string, Record<string, number>> = {
-                                'TNT': {
-                                    rho: 1630,
-                                    detonation_energy: 4290000,
-                                    det_vel: 6930,
-                                    jwl_A: 373.77e9,
-                                    jwl_B: 3.747e9,
+                             const EXPLOSIVE_PRESETS: Record<string, Record<string, number>> = {
+                                'Aluminized ANFO': {
+                                    rho: 1050,
+                                    detonation_energy: 4100000,
+                                    det_vel: 4900,
+                                    jwl_A: 76.5e9,
+                                    jwl_B: 1.85e9,
                                     jwl_R1: 4.15,
-                                    jwl_R2: 0.90,
+                                    jwl_R2: 1.15,
+                                    jwl_omega: 0.30
+                                },
+                                'Ammonal': {
+                                    rho: 1600,
+                                    detonation_energy: 4400000,
+                                    det_vel: 5400,
+                                    jwl_A: 125.0e9,
+                                    jwl_B: 2.5e9,
+                                    jwl_R1: 4.0,
+                                    jwl_R2: 1.0,
+                                    jwl_omega: 0.25
+                                },
+                                'ANFO': {
+                                    rho: 930,
+                                    detonation_energy: 3700000,
+                                    det_vel: 4700,
+                                    jwl_A: 49.46e9,
+                                    jwl_B: 1.891e9,
+                                    jwl_R1: 4.10,
+                                    jwl_R2: 1.15,
+                                    jwl_omega: 0.33
+                                },
+                                'Baratol': {
+                                    rho: 2550,
+                                    detonation_energy: 2800000,
+                                    det_vel: 4900,
+                                    jwl_A: 289.4e9,
+                                    jwl_B: 5.14e9,
+                                    jwl_R1: 4.4,
+                                    jwl_R2: 1.2,
+                                    jwl_omega: 0.25
+                                },
+                                'C-4': {
+                                    rho: 1601,
+                                    detonation_energy: 5600000,
+                                    det_vel: 8040,
+                                    jwl_A: 593.7e9,
+                                    jwl_B: 12.87e9,
+                                    jwl_R1: 4.5,
+                                    jwl_R2: 1.2,
+                                    jwl_omega: 0.38
+                                },
+                                'Composition A-3': {
+                                    rho: 1650,
+                                    detonation_energy: 5000000,
+                                    det_vel: 8100,
+                                    jwl_A: 601.5e9,
+                                    jwl_B: 12.0e9,
+                                    jwl_R1: 4.5,
+                                    jwl_R2: 1.2,
                                     jwl_omega: 0.35
+                                },
+                                'Composition B': {
+                                    rho: 1717,
+                                    detonation_energy: 5170000,
+                                    det_vel: 7980,
+                                    jwl_A: 524.2e9,
+                                    jwl_B: 7.67e9,
+                                    jwl_R1: 4.2,
+                                    jwl_R2: 1.1,
+                                    jwl_omega: 0.34
+                                },
+                                'Composition C-3': {
+                                    rho: 1600,
+                                    detonation_energy: 5300000,
+                                    det_vel: 8000,
+                                    jwl_A: 580.0e9,
+                                    jwl_B: 11.5e9,
+                                    jwl_R1: 4.4,
+                                    jwl_R2: 1.2,
+                                    jwl_omega: 0.35
+                                },
+                                'Cyclotol': {
+                                    rho: 1750,
+                                    detonation_energy: 5200000,
+                                    det_vel: 8250,
+                                    jwl_A: 582.0e9,
+                                    jwl_B: 10.5e9,
+                                    jwl_R1: 4.3,
+                                    jwl_R2: 1.1,
+                                    jwl_omega: 0.32
+                                },
+                                'Heavy ANFO': {
+                                    rho: 1250,
+                                    detonation_energy: 3500000,
+                                    det_vel: 5000,
+                                    jwl_A: 198.0e9,
+                                    jwl_B: 1.45e9,
+                                    jwl_R1: 4.30,
+                                    jwl_R2: 1.00,
+                                    jwl_omega: 0.20
+                                },
+                                'HMX': {
+                                    rho: 1890,
+                                    detonation_energy: 5620000,
+                                    det_vel: 9110,
+                                    jwl_A: 778.3e9,
+                                    jwl_B: 7.071e9,
+                                    jwl_R1: 4.2,
+                                    jwl_R2: 1.0,
+                                    jwl_omega: 0.30
+                                },
+                                'LX-04': {
+                                    rho: 1860,
+                                    detonation_energy: 5300000,
+                                    det_vel: 8400,
+                                    jwl_A: 742.0e9,
+                                    jwl_B: 11.2e9,
+                                    jwl_R1: 4.4,
+                                    jwl_R2: 1.2,
+                                    jwl_omega: 0.30
+                                },
+                                'LX-07': {
+                                    rho: 1860,
+                                    detonation_energy: 5500000,
+                                    det_vel: 8600,
+                                    jwl_A: 785.0e9,
+                                    jwl_B: 12.5e9,
+                                    jwl_R1: 4.45,
+                                    jwl_R2: 1.15,
+                                    jwl_omega: 0.32
+                                },
+                                'LX-10': {
+                                    rho: 1860,
+                                    detonation_energy: 5800000,
+                                    det_vel: 8820,
+                                    jwl_A: 830.0e9,
+                                    jwl_B: 15.0e9,
+                                    jwl_R1: 4.5,
+                                    jwl_R2: 1.1,
+                                    jwl_omega: 0.38
+                                },
+                                'LX-14': {
+                                    rho: 1835,
+                                    detonation_energy: 6000000,
+                                    det_vel: 8800,
+                                    jwl_A: 825.8e9,
+                                    jwl_B: 17.24e9,
+                                    jwl_R1: 4.4,
+                                    jwl_R2: 0.9,
+                                    jwl_omega: 0.38
+                                },
+                                'LX-17': {
+                                    rho: 1900,
+                                    detonation_energy: 4500000,
+                                    det_vel: 7600,
+                                    jwl_A: 640.0e9,
+                                    jwl_B: 14.0e9,
+                                    jwl_R1: 4.2,
+                                    jwl_R2: 1.1,
+                                    jwl_omega: 0.30
+                                },
+                                'Mining Emulsion': {
+                                    rho: 1150,
+                                    detonation_energy: 3200000,
+                                    det_vel: 5300,
+                                    jwl_A: 215.0e9,
+                                    jwl_B: 1.76e9,
+                                    jwl_R1: 4.45,
+                                    jwl_R2: 1.05,
+                                    jwl_omega: 0.15
+                                },
+                                'Octol': {
+                                    rho: 1810,
+                                    detonation_energy: 5400000,
+                                    det_vel: 8380,
+                                    jwl_A: 718.5e9,
+                                    jwl_B: 13.9e9,
+                                    jwl_R1: 4.35,
+                                    jwl_R2: 1.05,
+                                    jwl_omega: 0.32
+                                },
+                                'PBX 9404': {
+                                    rho: 1840,
+                                    detonation_energy: 6020000,
+                                    det_vel: 8800,
+                                    jwl_A: 852.4e9,
+                                    jwl_B: 18.02e9,
+                                    jwl_R1: 4.55,
+                                    jwl_R2: 1.10,
+                                    jwl_omega: 0.38
+                                },
+                                'PBX 9501': {
+                                    rho: 1830,
+                                    detonation_energy: 5880000,
+                                    det_vel: 8800,
+                                    jwl_A: 854.5e9,
+                                    jwl_B: 20.49e9,
+                                    jwl_R1: 4.60,
+                                    jwl_R2: 1.35,
+                                    jwl_omega: 0.38
+                                },
+                                'PBX 9502': {
+                                    rho: 1895,
+                                    detonation_energy: 4100000,
+                                    det_vel: 7700,
+                                    jwl_A: 548.8e9,
+                                    jwl_B: 7.67e9,
+                                    jwl_R1: 4.4,
+                                    jwl_R2: 1.2,
+                                    jwl_omega: 0.30
+                                },
+                                'PE-10': {
+                                    rho: 1550,
+                                    detonation_energy: 5200000,
+                                    det_vel: 7800,
+                                    jwl_A: 590.0e9,
+                                    jwl_B: 12.0e9,
+                                    jwl_R1: 4.5,
+                                    jwl_R2: 1.4,
+                                    jwl_omega: 0.25
+                                },
+                                'PE-12': {
+                                    rho: 1520,
+                                    detonation_energy: 5000000,
+                                    det_vel: 7700,
+                                    jwl_A: 570.0e9,
+                                    jwl_B: 11.5e9,
+                                    jwl_R1: 4.5,
+                                    jwl_R2: 1.4,
+                                    jwl_omega: 0.25
+                                },
+                                'PE-4': {
+                                    rho: 1590,
+                                    detonation_energy: 5621000,
+                                    det_vel: 8100,
+                                    jwl_A: 609.8e9,
+                                    jwl_B: 12.95e9,
+                                    jwl_R1: 4.5,
+                                    jwl_R2: 1.4,
+                                    jwl_omega: 0.25
+                                },
+                                'PE-8': {
+                                    rho: 1570,
+                                    detonation_energy: 5400000,
+                                    det_vel: 8000,
+                                    jwl_A: 600.0e9,
+                                    jwl_B: 12.5e9,
+                                    jwl_R1: 4.5,
+                                    jwl_R2: 1.4,
+                                    jwl_omega: 0.25
+                                },
+                                'Pentolite': {
+                                    rho: 1660,
+                                    detonation_energy: 5000000,
+                                    det_vel: 7470,
+                                    jwl_A: 492.2e9,
+                                    jwl_B: 9.38e9,
+                                    jwl_R1: 4.3,
+                                    jwl_R2: 1.1,
+                                    jwl_omega: 0.31
                                 },
                                 'PETN': {
                                     rho: 1770,
@@ -3399,11 +3756,57 @@ export class GraphRenderer {
                                     jwl_R1: 4.2,
                                     jwl_R2: 1.1,
                                     jwl_omega: 0.34
+                                },
+                                'TATB': {
+                                    rho: 1800,
+                                    detonation_energy: 4400000,
+                                    det_vel: 7660,
+                                    jwl_A: 554.6e9,
+                                    jwl_B: 7.91e9,
+                                    jwl_R1: 4.5,
+                                    jwl_R2: 1.6,
+                                    jwl_omega: 0.25
+                                },
+                                'Tetryl': {
+                                    rho: 1730,
+                                    detonation_energy: 4230000,
+                                    det_vel: 7570,
+                                    jwl_A: 510.9e9,
+                                    jwl_B: 8.44e9,
+                                    jwl_R1: 4.5,
+                                    jwl_R2: 1.4,
+                                    jwl_omega: 0.25
+                                },
+                                'TNT': {
+                                    rho: 1630,
+                                    detonation_energy: 4290000,
+                                    det_vel: 6930,
+                                    jwl_A: 373.77e9,
+                                    jwl_B: 3.747e9,
+                                    jwl_R1: 4.15,
+                                    jwl_R2: 0.90,
+                                    jwl_omega: 0.35
+                                },
+                                'Water Gel': {
+                                    rho: 1200,
+                                    detonation_energy: 3400000,
+                                    det_vel: 4800,
+                                    jwl_A: 154.0e9,
+                                    jwl_B: 2.15e9,
+                                    jwl_R1: 4.30,
+                                    jwl_R2: 1.10,
+                                    jwl_omega: 0.25
                                 }
                             };
                             const preset = EXPLOSIVE_PRESETS[newVal];
                             if (preset) {
-                                Object.assign(updates, preset);
+                                const matType = node.parameters['material_type'] || 'Air';
+                                if (matType === 'Ideal Gas Charge') {
+                                    updates['ideal_rho_0'] = preset.rho;
+                                    updates['ideal_e_0'] = preset.detonation_energy;
+                                } else {
+                                    Object.assign(updates, preset);
+                                }
                             }
                         }
                         this.stateManager.updateNodeParameters(node.id, updates);
@@ -3415,7 +3818,7 @@ export class GraphRenderer {
                 const isNumeric = typeof value === 'number';
                 input.type = isNumeric ? 'number' : 'text';
                 if (isNumeric) input.step = 'any';
-                input.value = value.toString();
+                input.value = typeof value === 'number' ? parseFloat(value.toPrecision(7)).toString() : value.toString();
                 input.dataset.key = key;
                 input.style.width = '100%';
                 input.style.fontSize = 'var(--font-xs)';
@@ -3426,7 +3829,14 @@ export class GraphRenderer {
 
                 input.addEventListener('input', () => {
                     const newVal = isNumeric ? Number(input.value) : input.value;
-                    this.stateManager.updateNodeParameters(node.id, { [key]: newVal });
+                    const updates: Record<string, any> = { [key]: newVal };
+                    if (node.type === 'Material' && ['rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'].includes(key)) {
+                        updates['composition'] = 'Custom';
+                    }
+                    if (node.type === 'Material' && ['ideal_rho_0', 'ideal_e_0'].includes(key)) {
+                        updates['composition'] = 'Custom';
+                    }
+                    this.stateManager.updateNodeParameters(node.id, updates);
                 });
                 inputEl = input;
             }
@@ -3507,12 +3917,12 @@ export class GraphRenderer {
         switch (type) {
             case 'DomainMesh':
                 return 'Cartesian grid with structured uniform mesh. Defines the spatial domain boundary conditions and discretization sizing.';
-            case 'MaterialAir':
-                return 'Air material initialization. Configures ambient atmospheric pressure, temperature, and adiabatic index (gamma).';
-            case 'MaterialExplosive':
-                return 'High-explosive charge — Multi-Material JWL mode. Picks pre-calibrated JWL EOS from TNT/PETN/RDX table. Use when init_mode = Multi-Material JWL on the CFD Solver.';
-            case 'MaterialIdealGas':
-                return 'Ideal-gas explosive charge. Defines a hot pressurised sphere using a simple (gamma-1)·rho·e_int equation of state. Pair with init_mode = Ideal Gas on the CFD Solver.';
+            case 'Material':
+                return 'Material properties. Defines Air, JWL explosive, or Ideal Gas explosive equations of state.';
+            case 'Charge1D':
+                return '1D Charge configuration.';
+            case 'Charge2D':
+                return '2D Charge configuration.';
             case 'ThePainter':
                 return 'Initial conditions painter. Maps mesh cells to physical material states for the simulation starting phase.';
             case 'CFDSolver':

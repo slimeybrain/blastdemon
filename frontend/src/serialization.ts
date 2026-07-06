@@ -24,7 +24,8 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         // 2D CFD keys
         'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_r', 'remap_radius', 'trigger_value',
         'charge_r', 'charge_z', 'charge_radius', 'charge_height',
-        'detonator_r', 'detonator_z', 'detonator_radius'
+        'detonator_r', 'detonator_z', 'detonator_radius',
+        'ideal_gamma', 'ideal_rho_0', 'ideal_e_0'
     ];
 
     const flattenedParams: Record<string, any> = {};
@@ -66,6 +67,10 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 if (expConn) {
                     const chargeNode = state.nodes.find(n => n.id === expConn.fromNode);
                     if (chargeNode && chargeNode.type === 'Charge1D') {
+                        // Copy all parameters (e.g. charge_mass)
+                        Object.entries(chargeNode.parameters).forEach(([key, value]) => {
+                            flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                        });
                         // Radius comes from Charge1D parameter
                         const radius = Number(chargeNode.parameters?.charge_radius ?? 0.05);
                         flattenedParams['charge_radius'] = radius;
@@ -86,11 +91,11 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                                     });
                                 } else if (matType === 'Ideal Gas Charge') {
                                     flattenedParams['explosive_type'] = 'MaterialIdealGas';
-                                    flattenedParams['gamma'] = Number(matNode.parameters?.ideal_gamma ?? 1.4);
+                                    flattenedParams['gamma'] = Number(flattenedParams['gamma'] ?? 1.4);
                                     flattenedParams['rho'] = Number(matNode.parameters?.ideal_rho_0 ?? 1.25);
                                     flattenedParams['detonation_energy'] = Number(matNode.parameters?.ideal_e_0 ?? 4290000);
                                     Object.entries(matNode.parameters).forEach(([key, value]) => {
-                                        if (key !== 'material_type' && key !== 'ideal_gamma' && key !== 'ideal_rho_0' && key !== 'ideal_e_0') {
+                                        if (key !== 'material_type' && key !== 'ideal_rho_0' && key !== 'ideal_e_0') {
                                             flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
                                         }
                                     });
@@ -198,11 +203,11 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                             });
                         } else if (matType === 'Ideal Gas Charge') {
                             flattenedParams['explosive_type'] = 'MaterialIdealGas';
-                            flattenedParams['gamma'] = Number(matNode.parameters?.ideal_gamma ?? 1.4);
+                            flattenedParams['gamma'] = Number(flattenedParams['gamma'] ?? 1.4);
                             flattenedParams['rho'] = Number(matNode.parameters?.ideal_rho_0 ?? 1.25);
                             flattenedParams['detonation_energy'] = Number(matNode.parameters?.ideal_e_0 ?? 4290000);
                             Object.entries(matNode.parameters).forEach(([key, value]) => {
-                                if (key !== 'material_type' && key !== 'ideal_gamma' && key !== 'ideal_rho_0' && key !== 'ideal_e_0') {
+                                if (key !== 'material_type' && key !== 'ideal_rho_0' && key !== 'ideal_e_0') {
                                     flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
                                 }
                             });
@@ -276,17 +281,15 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         const rho = flattenedParams['rho'] || 1630.0;
         flattenedParams['rho'] = rho;
 
-        if (flattenedParams['charge_radius'] === undefined || flattenedParams['charge_radius'] === 0.0) {
-            if (mass > 0) {
-                if (flattenedParams['charge_shape'] === 'Cylinder') {
-                    const height = flattenedParams['charge_height'] || 0.1;
-                    flattenedParams['charge_radius'] = Math.sqrt(mass / (Math.PI * rho * height));
-                } else {
-                    flattenedParams['charge_radius'] = Math.pow((3.0 * mass) / (4.0 * Math.PI * rho), 1.0/3.0);
-                }
+        if (mass > 0) {
+            if (flattenedParams['charge_shape'] === 'Cylinder') {
+                const height = flattenedParams['charge_height'] || 0.1;
+                flattenedParams['charge_radius'] = Math.sqrt(mass / (Math.PI * rho * height));
             } else {
-                flattenedParams['charge_radius'] = 0.05;
+                flattenedParams['charge_radius'] = Math.pow((3.0 * mass) / (4.0 * Math.PI * rho), 1.0/3.0);
             }
+        } else if (flattenedParams['charge_radius'] === undefined || flattenedParams['charge_radius'] === 0.0) {
+            flattenedParams['charge_radius'] = 0.05;
         }
 
         // Only default to 'From1D' when a 1D solver is actually present in the graph.

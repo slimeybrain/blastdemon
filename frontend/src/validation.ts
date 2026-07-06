@@ -292,15 +292,18 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             }
 
             // Ideal Gas check
-            const igConn = state.connections.find(c => c.toNode === solver2D.id && c.toPort === 'ideal_gas');
+            let igConn = state.connections.find(c => c.toNode === solver2D.id && c.toPort === 'charge');
             if (!igConn) {
-                addMessage(solver2D.id, 'error', "No Ideal Gas node connected to CFD Solver 2D. A Charge node (Charge2D or Charge1D) is required.");
+                igConn = state.connections.find(c => c.toNode === solver2D.id && c.toPort === 'explosive');
+            }
+            if (!igConn) {
+                addMessage(solver2D.id, 'error', "No Charge node connected to CFD Solver 2D. A Charge node (Charge2D or Charge1D) is required.");
             } else {
                 const igNode = state.nodes.find(n => n.id === igConn.fromNode);
                 if (!igNode || (igNode.type !== 'Charge2D' && igNode.type !== 'Charge1D')) {
                     const connKey = `${igConn.fromNode}:${igConn.fromPort}->${igConn.toNode}:${igConn.toPort}`;
-                    flawedConnections.set(connKey, "Only Charge2D or Charge1D node can be connected to the Ideal Gas input of CFD Solver 2D.");
-                    addMessage(solver2D.id, 'error', "Only Charge2D or Charge1D node can be connected to the Ideal Gas input of CFD Solver 2D.");
+                    flawedConnections.set(connKey, "Only Charge2D or Charge1D node can be connected to the Charge input of CFD Solver 2D.");
+                    addMessage(solver2D.id, 'error', "Only Charge2D or Charge1D node can be connected to the Charge input of CFD Solver 2D.");
                 } else {
                     // Check if Charge has a Material node connected
                     const matConn = state.connections.find(c => c.toNode === igNode.id && c.toPort === 'material');
@@ -336,7 +339,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             }
 
             // Ignored inputs warning
-            const ignoredPorts = ['remap', 'explosive'];
+            const ignoredPorts = ['remap'];
             ignoredPorts.forEach(port => {
                 const conn = state.connections.find(c => c.toNode === solver2D.id && c.toPort === port);
                 if (conn) {

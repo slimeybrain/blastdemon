@@ -512,10 +512,13 @@ void handle_client(SOCKET_TYPE client_fd) {
             send(client->fd, response.c_str(), (int)response.length(), 0);
             std::cout << "WebSocket handshake complete" << std::endl;
 
+            std::vector<uint8_t> ws_message_accumulator;
+            uint8_t current_msg_opcode = 0;
             while (true) {
                 uint8_t header[2];
                 if (!read_exactly(client->fd, header, 2)) break;
 
+                uint8_t fin = header[0] & 0x80;
                 uint8_t opcode = header[0] & 0x0F;
                 bool masked = header[1] & 0x80;
                 uint64_t payload_len = header[1] & 0x7F;
@@ -547,9 +550,19 @@ void handle_client(SOCKET_TYPE client_fd) {
                     for (size_t i = 0; i < payload_len; ++i) payload[i] ^= mask[i % 4];
                 }
 
-                if (opcode == 0x1) {
-                    std::string message(payload.begin(), payload.end());
-                    process_json(message, client, active_processes);
+                if (opcode != 0x0) {
+                    current_msg_opcode = opcode;
+                    ws_message_accumulator.clear();
+                }
+                ws_message_accumulator.insert(ws_message_accumulator.end(), payload.begin(), payload.end());
+
+                if (fin) {
+                    if (current_msg_opcode == 0x1) {
+                        std::string message(ws_message_accumulator.begin(), ws_message_accumulator.end());
+                        process_json(message, client, active_processes);
+                    }
+                    ws_message_accumulator.clear();
+                    current_msg_opcode = 0;
                 }
             }
         }

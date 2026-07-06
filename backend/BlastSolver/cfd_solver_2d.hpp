@@ -37,6 +37,8 @@ public:
     void setSpatialOrder(int order) { spatialOrder = order; }
     void setTemporalOrder(int order) { temporalOrder = order; }
     void setMaterialParameters(const MultiMat::MaterialSet& materials) { currentMaterials = materials; }
+    void setGamma(double g) { gamma = g; }
+    void setIdealGas(bool val) { is_ideal_gas = val; }
 
     void step(double dt);
     void run(double duration);

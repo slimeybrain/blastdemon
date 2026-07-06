@@ -35,6 +35,8 @@ public:
     void setSpatialOrder(int order) { spatialOrder = order; }
     void setTemporalOrder(int order) { temporalOrder = order; }
     void setMaterialParameters(const MultiMat::MaterialSet& materials);
+    void setGamma(double g) { gamma = g; }
+    void setIdealGas(bool val) { is_ideal_gas = val; }
 
     void step(double dt);
     void run(double duration);
@@ -64,6 +66,7 @@ public:
     double getMaxWaveSpeed();
     bool checkTerminationCondition();
     bool isIdealGas() const { return is_ideal_gas; }
+    size_t getAllocatedVRAM() const;
 
 private:
     int nr_cells;

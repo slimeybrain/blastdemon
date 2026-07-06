@@ -537,6 +537,27 @@ uint64_t get_system_ram_bytes() {
     return 0;
 }
 
+uint64_t get_system_used_ram_bytes() {
+    std::ifstream meminfo("/proc/meminfo");
+    std::string key;
+    uint64_t value;
+    uint64_t total = 0;
+    uint64_t available = 0;
+    while (meminfo >> key >> value) {
+        if (key == "MemTotal:") {
+            total = value * 1024;
+        } else if (key == "MemAvailable:") {
+            available = value * 1024;
+        }
+        std::string dummy;
+        std::getline(meminfo, dummy);
+    }
+    if (total > 0 && available > 0 && total >= available) {
+        return total - available;
+    }
+    return total - available; // fallback if available is 0, though unlikely
+}
+
 void emit_resource_pulse() {
     static CPUMonitor cpu_monitor;
     static GPUMonitor gpu_monitor;
@@ -574,9 +595,11 @@ void emit_resource_pulse() {
     pulse["cpu"] = cpu_usage;
     pulse["ram_alloc"] = ram_alloc;
     pulse["ram_total"] = system_ram;
+    pulse["ram_system"] = get_system_used_ram_bytes();
     pulse["gpu_util"] = gpu_util;
     pulse["vram_alloc"] = total_vram - free_vram;
     pulse["vram_total"] = total_vram;
+    pulse["vram_blastdaemon"] = (global_solver_2d_cuda != nullptr) ? global_solver_2d_cuda->getAllocatedVRAM() : 0;
     pulse["gpu_temp"] = gpu_temp;
 
     std::cout << pulse.dump() << std::endl;
@@ -743,9 +766,118 @@ int main() {
                         global_solver = std::make_unique<CFDSolverImpl<true>>(n_cells, radius, gamma);
                     }
 
+                    // Set boundary conditions
+                    std::string left_bc_str = msg.value("left_bc", "Transmitting");
+                    std::string right_bc_str = msg.value("right_bc", "Transmitting");
+                    auto map_bc_1d = [](const std::string& str) {
+                        if (str == "Transmitting" || str == "transmitting" || str == "TRANSMISSIVE" || str == "transmissive" || str == "Terminate" || str == "terminate") {
+                            return CFDSolver::TRANSMISSIVE;
+                        } else {
+                            return CFDSolver::REFLECTIVE;
+                        }
+                    };
+                    global_solver->setBCTypes(map_bc_1d(left_bc_str), map_bc_1d(right_bc_str));
+
                     global_solver->setFluxScheme(msg.at("flux_scheme").get<std::string>());
                     global_solver->setSpatialOrder(msg.at("spatial_order").get<int>());
                     global_solver->setTemporalOrder(msg.at("temporal_order").get<int>());
+
+                    // 1D Nodegraph validation check
+                    std::vector<std::string> missing_elements;
+                    if (!msg.contains("nodes") || !msg.contains("connections")) {
+                        missing_elements.push_back("Missing DAG nodes/connections");
+                    } else {
+                        bool has_solver = false;
+                        std::string solver_id = "";
+                        for (const auto& node : msg["nodes"]) {
+                            if (node.value("type", "") == "CFDSolver") {
+                                has_solver = true;
+                                solver_id = node.value("id", "");
+                                break;
+                            }
+                        }
+                        if (!has_solver) {
+                            missing_elements.push_back("CFDSolver node");
+                        } else {
+                            std::string painter_id = "";
+                            for (const auto& conn : msg["connections"]) {
+                                if (conn.value("toNode", "") == solver_id && conn.value("toPort", "") == "in") {
+                                    painter_id = conn.value("fromNode", "");
+                                    break;
+                                }
+                            }
+                            if (painter_id.empty()) {
+                                missing_elements.push_back("Connection from ThePainter to CFDSolver");
+                            } else {
+                                bool has_painter = false;
+                                for (const auto& node : msg["nodes"]) {
+                                    if (node.value("id", "") == painter_id && node.value("type", "") == "ThePainter") {
+                                        has_painter = true;
+                                        break;
+                                    }
+                                }
+                                if (!has_painter) {
+                                    missing_elements.push_back("ThePainter node");
+                                } else {
+                                    bool has_mesh = false;
+                                    bool has_air = false;
+                                    bool has_explosive = false;
+                                    std::string charge_id = "";
+                                    for (const auto& conn : msg["connections"]) {
+                                        if (conn.value("toNode", "") == painter_id) {
+                                            std::string port = conn.value("toPort", "");
+                                            std::string from = conn.value("fromNode", "");
+                                            if (port == "mesh") {
+                                                for (const auto& n : msg["nodes"]) {
+                                                    if (n.value("id", "") == from && n.value("type", "") == "DomainMesh") {
+                                                        has_mesh = true;
+                                                    }
+                                                }
+                                            } else if (port == "air") {
+                                                for (const auto& n : msg["nodes"]) {
+                                                    if (n.value("id", "") == from && n.value("type", "") == "Material" && n.value("parameters", nlohmann::json::object()).value("material_type", "") == "Air") {
+                                                        has_air = true;
+                                                    }
+                                                }
+                                            } else if (port == "explosive") {
+                                                for (const auto& n : msg["nodes"]) {
+                                                    if (n.value("id", "") == from && n.value("type", "") == "Charge1D") {
+                                                        has_explosive = true;
+                                                        charge_id = from;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if (!has_mesh) missing_elements.push_back("DomainMesh connected to ThePainter");
+                                    if (!has_air) missing_elements.push_back("Material (Air) connected to ThePainter");
+                                    if (!has_explosive) {
+                                        missing_elements.push_back("Charge1D connected to ThePainter");
+                                    } else if (!charge_id.empty()) {
+                                        bool has_charge_material = false;
+                                        for (const auto& conn : msg["connections"]) {
+                                            if (conn.value("toNode", "") == charge_id && conn.value("toPort", "") == "material") {
+                                                std::string from = conn.value("fromNode", "");
+                                                for (const auto& n : msg["nodes"]) {
+                                                    if (n.value("id", "") == from && n.value("type", "") == "Material") {
+                                                        has_charge_material = true;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if (!has_charge_material) missing_elements.push_back("Material connected to Charge1D");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (!missing_elements.empty()) {
+                        std::string warn_msg = "Incomplete 1D nodegraph. Missing elements: ";
+                        for (size_t i = 0; i < missing_elements.size(); ++i) {
+                            warn_msg += missing_elements[i] + (i == missing_elements.size() - 1 ? "" : ", ");
+                        }
+                        emit_kernel_log("WARNING", warn_msg, global_t, "1d");
+                    }
 
                     double explosive_radius = msg.at("explosive_radius").get<double>();
                     double high_rho         = msg.at("rho").get<double>();
@@ -755,7 +887,8 @@ int main() {
                     MultiMat::MaterialSet matSet = MultiMat::TNT;
                     if      (composition == "PETN") matSet = MultiMat::PETN;
                     else if (composition == "RDX")  matSet = MultiMat::RDX;
-                    else if (composition == "Custom" || composition == "CUSTOM") {
+                    else if (composition == "TNT")  matSet = MultiMat::TNT;
+                    else {
                         double jwl_A     = msg.value("jwl_A",     373.77e9);
                         double jwl_B     = msg.value("jwl_B",     3.747e9);
                         double jwl_R1    = msg.value("jwl_R1",    4.15);
@@ -826,6 +959,132 @@ int main() {
                     sim2d_terminate = false;
                     sim2d_paused = false;
                     step_progress_2d = 0;
+
+                    // 2D Nodegraph validation check
+                    std::vector<std::string> missing_elements_2d;
+                    std::string init_mode_2d = msg.value("init_mode", "From1D");
+                    if (!msg.contains("nodes") || !msg.contains("connections")) {
+                        missing_elements_2d.push_back("Missing DAG nodes/connections");
+                    } else {
+                        bool has_solver2d = false;
+                        std::string solver2d_id = "";
+                        for (const auto& node : msg["nodes"]) {
+                            if (node.value("type", "") == "CFDSolver2D") {
+                                has_solver2d = true;
+                                solver2d_id = node.value("id", "");
+                                break;
+                            }
+                        }
+                        if (!has_solver2d) {
+                            missing_elements_2d.push_back("CFDSolver2D node");
+                        } else {
+                            bool has_mesh2d = false;
+                            bool has_air2d = false;
+                            bool has_charge = false;
+                            bool has_detonator = false;
+                            bool has_remap = false;
+                            std::string charge2d_id = "";
+                            std::string remap_id = "";
+
+                            for (const auto& conn : msg["connections"]) {
+                                if (conn.value("toNode", "") == solver2d_id) {
+                                    std::string port = conn.value("toPort", "");
+                                    std::string from = conn.value("fromNode", "");
+                                    if (port == "mesh") {
+                                        for (const auto& n : msg["nodes"]) {
+                                            if (n.value("id", "") == from && n.value("type", "") == "DomainMesh2D") {
+                                                has_mesh2d = true;
+                                            }
+                                        }
+                                    } else if (port == "air") {
+                                        for (const auto& n : msg["nodes"]) {
+                                            if (n.value("id", "") == from && n.value("type", "") == "Material" && n.value("parameters", nlohmann::json::object()).value("material_type", "") == "Air") {
+                                                has_air2d = true;
+                                            }
+                                        }
+                                    } else if (port == "charge" || port == "explosive") {
+                                        for (const auto& n : msg["nodes"]) {
+                                            if (n.value("id", "") == from && (n.value("type", "") == "Charge2D" || n.value("type", "") == "Charge1D")) {
+                                                has_charge = true;
+                                                charge2d_id = from;
+                                            }
+                                        }
+                                    } else if (port == "detonator") {
+                                        for (const auto& n : msg["nodes"]) {
+                                            if (n.value("id", "") == from && n.value("type", "") == "DetonatorLocation") {
+                                                has_detonator = true;
+                                            }
+                                        }
+                                    } else if (port == "remap") {
+                                        for (const auto& n : msg["nodes"]) {
+                                            if (n.value("id", "") == from && n.value("type", "") == "RemapNode") {
+                                                has_remap = true;
+                                                remap_id = from;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (!has_mesh2d) {
+                                missing_elements_2d.push_back("DomainMesh2D connected to CFD Solver 2D");
+                            }
+
+                            if (init_mode_2d == "From1D") {
+                                if (!has_remap) {
+                                    missing_elements_2d.push_back("RemapNode connected to CFD Solver 2D");
+                                } else {
+                                    // Check if RemapNode has connection from CFDSolver (1D)
+                                    bool remap_has_1d_solver = false;
+                                    for (const auto& conn : msg["connections"]) {
+                                        if (conn.value("toNode", "") == remap_id && conn.value("toPort", "") == "in") {
+                                            std::string from = conn.value("fromNode", "");
+                                            for (const auto& n : msg["nodes"]) {
+                                                if (n.value("id", "") == from && n.value("type", "") == "CFDSolver") {
+                                                    remap_has_1d_solver = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if (!remap_has_1d_solver) {
+                                        missing_elements_2d.push_back("CFDSolver (1D) connected to RemapNode");
+                                    }
+                                }
+                            } else {
+                                if (!has_air2d) {
+                                    missing_elements_2d.push_back("Material (Air) connected to CFD Solver 2D");
+                                }
+                                if (!has_charge) {
+                                    missing_elements_2d.push_back("Charge node connected to CFD Solver 2D");
+                                } else if (!charge2d_id.empty()) {
+                                    bool has_charge_material = false;
+                                    for (const auto& conn : msg["connections"]) {
+                                        if (conn.value("toNode", "") == charge2d_id && conn.value("toPort", "") == "material") {
+                                            std::string from = conn.value("fromNode", "");
+                                            for (const auto& n : msg["nodes"]) {
+                                                if (n.value("id", "") == from && n.value("type", "") == "Material") {
+                                                    has_charge_material = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if (!has_charge_material) {
+                                        missing_elements_2d.push_back("Material connected to Charge node");
+                                    }
+                                }
+                                if (!has_detonator) {
+                                    missing_elements_2d.push_back("DetonatorLocation connected to CFD Solver 2D");
+                                }
+                            }
+                        }
+                    }
+                    if (!missing_elements_2d.empty()) {
+                        std::string warn_msg = "Incomplete 2D nodegraph. Missing elements: ";
+                        for (size_t i = 0; i < missing_elements_2d.size(); ++i) {
+                            warn_msg += missing_elements_2d[i] + (i == missing_elements_2d.size() - 1 ? "" : ", ");
+                        }
+                        emit_kernel_log("WARNING", warn_msg, global_t2d, "2d");
+                    }
                     
                     int nr = msg.value("nr", 100);
                     int nz = msg.value("nz", 100);
@@ -871,7 +1130,8 @@ int main() {
                     MultiMat::MaterialSet matSet = MultiMat::TNT;
                     if      (composition == "PETN") matSet = MultiMat::PETN;
                     else if (composition == "RDX")  matSet = MultiMat::RDX;
-                    else if (composition == "Custom" || composition == "CUSTOM") {
+                    else if (composition == "TNT")  matSet = MultiMat::TNT;
+                    else {
                         double jwl_A     = msg.value("jwl_A",     373.77e9);
                         double jwl_B     = msg.value("jwl_B",     3.747e9);
                         double jwl_R1    = msg.value("jwl_R1",    4.15);
@@ -1034,6 +1294,30 @@ int main() {
                     double explosive_r = msg.value("explosive_r", 0.0);
                     double ambient_rho = msg.value("ambient_rho", 1.2);
                     double ambient_p = msg.value("ambient_p", 101325.0);
+                    double gamma = msg.value("gamma", 1.4);
+                    
+                    std::string composition = msg.value("composition", "TNT");
+                    std::string explosive_type = msg.value("explosive_type", "");
+                    bool is_ideal_gas = (explosive_type == "MaterialIdealGas" || msg.value("init_mode", "") == "Ideal Gas");
+
+                    MultiMat::MaterialSet matSet = MultiMat::TNT;
+                    if      (composition == "PETN") matSet = MultiMat::PETN;
+                    else if (composition == "RDX")  matSet = MultiMat::RDX;
+                    else if (composition == "TNT")  matSet = MultiMat::TNT;
+                    else {
+                        double jwl_A     = msg.value("jwl_A",     373.77e9);
+                        double jwl_B     = msg.value("jwl_B",     3.747e9);
+                        double jwl_R1    = msg.value("jwl_R1",    4.15);
+                        double jwl_R2    = msg.value("jwl_R2",    0.90);
+                        double jwl_omega = msg.value("jwl_omega", 0.35);
+                        double high_rho  = msg.value("rho",       1630.0);
+                        double det_vel   = msg.value("det_vel",   6930.0);
+                        double det_energy= msg.value("detonation_energy", 4.29e6);
+                        matSet.products  = { jwl_A, jwl_B, jwl_R1, jwl_R2, jwl_omega, high_rho, 1000.0, 300.0 };
+                        matSet.unreacted = { jwl_A, jwl_B, jwl_R1, jwl_R2, jwl_omega, high_rho, 1000.0, 300.0 };
+                        matSet.det_vel   = det_vel;
+                        matSet.detonation_energy = det_energy;
+                    }
 
                     std::vector<double> r_1d = msg.at("r_1d").get<std::vector<double>>();
                     std::vector<MultiMaterialState> states_1d;
@@ -1052,9 +1336,15 @@ int main() {
                     }
 
                     if (global_solver_2d) {
+                        global_solver_2d->setGamma(gamma);
+                        global_solver_2d->setIdealGas(is_ideal_gas);
+                        global_solver_2d->setMaterialParameters(matSet);
                         global_solver_2d->setInitialConditionFrom1D(explosive_z, remap_radius, r_1d, states_1d, ambient_rho, ambient_p, explosive_r);
                         global_solver_2d->setTime(0.0);
                     } else if (global_solver_2d_cuda) {
+                        global_solver_2d_cuda->setGamma(gamma);
+                        global_solver_2d_cuda->setIdealGas(is_ideal_gas);
+                        global_solver_2d_cuda->setMaterialParameters(matSet);
                         global_solver_2d_cuda->setInitialConditionFrom1D(explosive_z, remap_radius, r_1d, states_1d, ambient_rho, ambient_p, explosive_r);
                         global_solver_2d_cuda->setTime(0.0);
                     }

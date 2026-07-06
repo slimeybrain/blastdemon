@@ -1106,9 +1106,9 @@ class MenuBarComponent {
 
 const NODE_ICONS: Record<string, string> = {
     'DomainMesh': '🌐',
-    'MaterialAir': '💨',
-    'MaterialExplosive': '💥',
-    'MaterialIdealGas': '🫧',
+    'Material': '💨',
+    'Charge1D': '💥',
+    'Charge2D': '💥',
     'ThePainter': '🎨',
     'CFDSolver': '⚡',
     'TelemetryText': '📝',

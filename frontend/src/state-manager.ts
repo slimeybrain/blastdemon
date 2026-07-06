@@ -486,7 +486,7 @@ export class StateManager {
     }
 
     pushState(newState: SimulationState, autoSave: boolean = true): void {
-        this.healNodes(newState.nodes);
+        this.healNodes(newState.nodes, newState);
         // Construct new AppState from the SimulationState
         const appStateCopy = JSON.parse(JSON.stringify(this.appState)) as AppState;
         const ws = appStateCopy.workspaces.find(w => w.id === appStateCopy.activeWorkspaceId);
@@ -619,6 +619,17 @@ export class StateManager {
                 syncExplosiveParameters(node, merged, model, updatedKey);
                 node.parameters = merged;
                 console.log("[DEBUG] Node parameters updated in memory. New parameters:", node.parameters);
+                
+                if (node.type === 'Material') {
+                    const dependentConns = model.connections.filter(c => c.fromNode === node.id && c.toPort === 'material');
+                    dependentConns.forEach(c => {
+                        const depNode = model.nodes.find(n => n.id === c.toNode);
+                        if (depNode && (depNode.type === 'Charge1D' || depNode.type === 'Charge2D')) {
+                            syncExplosiveParameters(depNode, depNode.parameters, model, 'rho');
+                        }
+                    });
+                }
+                
                 found = true;
                 break;
             }
@@ -650,6 +661,21 @@ export class StateManager {
                         changed = true;
                     }
                 }
+                
+                if (node.type === 'Material') {
+                    const dependentConns = model.connections.filter(c => c.fromNode === node.id && c.toPort === 'material');
+                    dependentConns.forEach(c => {
+                        const depNode = model.nodes.find(n => n.id === c.toNode);
+                        if (depNode && (depNode.type === 'Charge1D' || depNode.type === 'Charge2D')) {
+                            const oldRadius = depNode.parameters['charge_radius'];
+                            syncExplosiveParameters(depNode, depNode.parameters, model, 'rho');
+                            if (depNode.parameters['charge_radius'] !== oldRadius) {
+                                changed = true;
+                            }
+                        }
+                    });
+                }
+                
                 found = true;
                 break;
             }
@@ -1168,7 +1194,7 @@ export class StateManager {
         console.log('[System] Local workspace and AppState cleared.');
     }
 
-    private healNodes(nodes: Node[]): void {
+    private healNodes(nodes: Node[], stateObj?: { nodes: Node[], connections: Connection[] }): void {
         const defaults: Record<string, Record<string, any>> = {
             'DomainMesh': {
                 dimension: '1D',
@@ -1198,7 +1224,6 @@ export class StateManager {
                 jwl_R2: 0.90,
                 jwl_omega: 0.35,
                 // Ideal Gas Charge params
-                ideal_gamma: 1.4,
                 ideal_rho_0: 1.25,
                 ideal_e_0: 4290000
             },
@@ -1292,7 +1317,10 @@ export class StateManager {
                 }
             }
             // Sync logic
-            const model = Object.values(this.appState.models).find(m => m.nodes.includes(node)) || null;
+            let model: { nodes: Node[], connections: Connection[] } | null = stateObj || null;
+            if (!model) {
+                model = Object.values(this.appState.models).find(m => m.nodes.some(n => n.id === node.id)) || null;
+            }
             syncExplosiveParameters(node, node.parameters, model);
         });
     }
@@ -1375,7 +1403,13 @@ function syncExplosiveParameters(node: Node, parameters: Record<string, any>, st
     const radius = Number(parameters['charge_radius'] !== undefined ? parameters['charge_radius'] : 0.05);
     const mass = Number(parameters['charge_mass'] !== undefined ? parameters['charge_mass'] : 0.0);
 
-    if (updatedKey === 'charge_mass') {
+    if (updatedKey === 'charge_radius') {
+        if (shape === 'Cylinder') {
+            parameters['charge_mass'] = Math.PI * radius * radius * height * rho;
+        } else {
+            parameters['charge_mass'] = (4.0 / 3.0) * Math.PI * Math.pow(radius, 3.0) * rho;
+        }
+    } else {
         if (mass > 0 && rho > 0) {
             if (shape === 'Cylinder') {
                 if (height > 0) {
@@ -1384,12 +1418,6 @@ function syncExplosiveParameters(node: Node, parameters: Record<string, any>, st
             } else {
                 parameters['charge_radius'] = Math.pow((3.0 * mass) / (4.0 * Math.PI * rho), 1.0 / 3.0);
             }
-        }
-    } else {
-        if (shape === 'Cylinder') {
-            parameters['charge_mass'] = Math.PI * radius * radius * height * rho;
-        } else {
-            parameters['charge_mass'] = (4.0 / 3.0) * Math.PI * Math.pow(radius, 3.0) * rho;
         }
     }
 }

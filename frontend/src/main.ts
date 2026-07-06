@@ -496,8 +496,8 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
             
             for (let i = 0; i < n_cells; i++) {
                 r_1d.push((i + 0.5) * cell_size);
-                const p = floats[i];
-                const rho = floats[n_cells + i];
+                const p = floats[0 * n_cells + i];
+                const rho = floats[1 * n_cells + i];
                 const u = floats[2 * n_cells + i];
                 const E_specific = floats[3 * n_cells + i];
                 const alpha1 = floats[4 * n_cells + i];
@@ -525,12 +525,20 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
             const detNode = detConn ? state?.nodes.find(n => n.id === detConn.fromNode) : null;
 
             const explosiveZ = detNode 
-                ? Number(detNode.parameters.explosive_z ?? 0.0)
+                ? Number(detNode.parameters.detonator_z ?? 0.0)
                 : Number(remapNode?.parameters?.explosive_z ?? 0.0);
             const explosiveR = detNode
-                ? Number(detNode.parameters.explosive_r ?? 0.0)
+                ? Number(detNode.parameters.detonator_r ?? 0.0)
                 : Number(remapNode?.parameters?.explosive_r ?? 0.0);
             const remapRadius = Number(remapNode?.parameters?.remap_radius ?? 0.5);
+
+            // Extract all ambient air, atmospheric, and explosive/JWL properties from the 1D model
+            const dummy1DState: SimulationState = {
+                nodes: model1d?.nodes ?? [],
+                connections: model1d?.connections ?? [],
+                layout: {} as any
+            };
+            const serialized1D = JSON.parse(serializeForSolver(dummy1DState, "INIT", pipe.model1dId));
 
             console.log(`Sending REMAP parameters for modelId ${targetModelId} with parsed 1D states`);
             if (solver2DNode) {
@@ -543,7 +551,26 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
                 remap_radius: remapRadius,
                 explosive_r: explosiveR,
                 r_1d: r_1d,
-                states_1d: states_1d
+                states_1d: states_1d,
+                
+                // Inherited properties
+                ambient_rho: serialized1D.ambient_rho,
+                ambient_p: serialized1D.atm_pressure ?? serialized1D.ambient_p ?? 101325.0,
+                atm_pressure: serialized1D.atm_pressure,
+                atm_temperature: serialized1D.atm_temperature,
+                gamma: serialized1D.gamma,
+                is_ideal_gas: serialized1D.explosive_type === 'MaterialIdealGas' || serialized1D.init_mode === 'Ideal Gas' || serialized1D.is_ideal_gas === true,
+                composition: serialized1D.composition,
+                explosive_type: serialized1D.explosive_type,
+                rho: serialized1D.rho,
+                high_rho: serialized1D.rho,
+                detonation_energy: serialized1D.detonation_energy,
+                det_vel: serialized1D.det_vel,
+                jwl_A: serialized1D.jwl_A,
+                jwl_B: serialized1D.jwl_B,
+                jwl_R1: serialized1D.jwl_R1,
+                jwl_R2: serialized1D.jwl_R2,
+                jwl_omega: serialized1D.jwl_omega
             });
             return true;
         } catch (err) {

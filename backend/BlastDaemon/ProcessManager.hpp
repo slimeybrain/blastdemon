@@ -168,12 +168,19 @@ public:
         return WriteFile(hStdInWrite, data.c_str(), (DWORD)data.length(), &bytesWritten, NULL);
 #else
         if (stdin_pipe[1] == -1) return false;
-        ssize_t n = write(stdin_pipe[1], data.c_str(), data.length());
-        if (n == -1 && errno == EPIPE) {
-            close(stdin_pipe[1]); stdin_pipe[1] = -1;
-            return false;
+        size_t written = 0;
+        while (written < data.length()) {
+            ssize_t n = write(stdin_pipe[1], data.c_str() + written, data.length() - written);
+            if (n == -1) {
+                if (errno == EINTR) continue;
+                if (errno == EPIPE) {
+                    close(stdin_pipe[1]); stdin_pipe[1] = -1;
+                }
+                return false;
+            }
+            written += n;
         }
-        return n != -1;
+        return true;
 #endif
     }
 

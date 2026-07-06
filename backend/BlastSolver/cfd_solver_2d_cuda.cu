@@ -957,7 +957,6 @@ void CFDSolver2DCuda::setInitialConditionTNT(double explosive_z, double explosiv
     this->det_x = 0.0;
     this->det_y = 0.0;
     this->det_z = explosive_z;
-    this->is_ideal_gas = false;
 
     // We do initialization entirely on CPU then copy to GPU
     for (int i = 0; i < nr_cells; ++i) {
@@ -1041,7 +1040,6 @@ void CFDSolver2DCuda::setInitialConditionFrom1D(double explosive_z, double remap
     this->det_x = explosive_r;
     this->det_y = 0.0;
     this->det_z = explosive_z;
-    this->is_ideal_gas = false;
     const int K = 5;
     double dr_sub = dr / K;
     double dz_sub = dz / K;
@@ -1159,7 +1157,11 @@ void CFDSolver2DCuda::setInitialConditionFrom1D(double explosive_z, double remap
                             uz_sub = 0.0;
                         }
                         p_sub = p_1d_val;
-                        E_sub = MultiMat::getMixtureEnergy(p_sub, rho_sub, alpha1_sub, alpha2_sub, arho1_sub, arho2_sub, gamma, currentMaterials.products, currentMaterials.unreacted) + 0.5 * rho_sub * (ur_sub * ur_sub + uz_sub * uz_sub);
+                        if (is_ideal_gas) {
+                            E_sub = p_sub / (gamma - 1.0) + 0.5 * rho_sub * (ur_sub * ur_sub + uz_sub * uz_sub);
+                        } else {
+                            E_sub = MultiMat::getMixtureEnergy(p_sub, rho_sub, alpha1_sub, alpha2_sub, arho1_sub, arho2_sub, gamma, currentMaterials.products, currentMaterials.unreacted) + 0.5 * rho_sub * (ur_sub * ur_sub + uz_sub * uz_sub);
+                        }
                     } else {
                         rho_sub = ambient_rho;
                         ur_sub = 0.0;
@@ -1169,7 +1171,11 @@ void CFDSolver2DCuda::setInitialConditionFrom1D(double explosive_z, double remap
                         alpha2_sub = 0.0;
                         arho1_sub = 0.0;
                         arho2_sub = 0.0;
-                        E_sub = MultiMat::getMixtureEnergy(p_sub, rho_sub, alpha1_sub, alpha2_sub, arho1_sub, arho2_sub, gamma, currentMaterials.products, currentMaterials.unreacted) + 0.5 * rho_sub * (ur_sub * ur_sub + uz_sub * uz_sub);
+                        if (is_ideal_gas) {
+                            E_sub = p_sub / (gamma - 1.0) + 0.5 * rho_sub * (ur_sub * ur_sub + uz_sub * uz_sub);
+                        } else {
+                            E_sub = MultiMat::getMixtureEnergy(p_sub, rho_sub, alpha1_sub, alpha2_sub, arho1_sub, arho2_sub, gamma, currentMaterials.products, currentMaterials.unreacted) + 0.5 * rho_sub * (ur_sub * ur_sub + uz_sub * uz_sub);
+                        }
                     }
 
                     sum_rho_w   += rho_sub * w_sub;
@@ -1224,7 +1230,6 @@ void CFDSolver2DCuda::setInitialConditionTNTCylinder(double explosive_z, double 
     this->det_x = 0.0;
     this->det_y = 0.0;
     this->det_z = explosive_z + height / 2.0;
-    this->is_ideal_gas = false;
 
     for (int i = 0; i < nr_cells; ++i) {
         for (int j = 0; j < nz_cells; ++j) {
@@ -1683,5 +1688,18 @@ void get_cuda_vram_info(size_t& free_bytes, size_t& total_bytes) {
         free_bytes = 0;
         total_bytes = 0;
     }
+}
+
+size_t CFDSolver2DCuda::getAllocatedVRAM() const {
+    size_t total = 0;
+    total += num_tiles_r * num_tiles_z * sizeof(int32_t); // d_tile_map
+    total += max_active_tiles * sizeof(PrimitiveTile);   // d_states_pool
+    total += max_active_tiles * sizeof(ConservativeTile); // d_U_pool
+    total += max_active_tiles * sizeof(ConservativeTile); // d_dU_pool
+    total += max_active_tiles * sizeof(double);           // d_block_maxes
+    total += max_active_tiles * sizeof(uint8_t);          // d_tile_active_flags
+    total += sizeof(MultiMat::MaterialSet);               // d_materials
+    total += sizeof(int);                                 // d_terminated
+    return total;
 }
 

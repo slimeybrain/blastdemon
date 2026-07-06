@@ -89,7 +89,6 @@ void CFDSolver2D::setInitialConditionTNT(double explosive_z, double explosive_ra
     this->det_x = 0.0;
     this->det_y = 0.0;
     this->det_z = explosive_z;
-    this->is_ideal_gas = false;
 
     // Allocate all tiles that contain the explosive
     for (int i = 0; i < nr_cells; ++i) {
@@ -218,7 +217,6 @@ void CFDSolver2D::setInitialConditionTNTCylinder(double explosive_z, double radi
     this->det_x = 0.0;
     this->det_y = 0.0;
     this->det_z = explosive_z + height / 2.0; // Top of the cylinder
-    this->is_ideal_gas = false;
 
     for (int i = 0; i < nr_cells; ++i) {
         for (int j = 0; j < nz_cells; ++j) {
@@ -404,7 +402,11 @@ void CFDSolver2D::setInitialConditionFrom1D(double explosive_z, double remap_rad
                             uz_sub = 0.0;
                         }
                         p_sub = p_1d_val;
-                        E_sub = MultiMat::getMixtureEnergy(p_sub, rho_sub, alpha1_sub, alpha2_sub, arho1_sub, arho2_sub, gamma, currentMaterials.products, currentMaterials.unreacted) + 0.5 * rho_sub * (ur_sub * ur_sub + uz_sub * uz_sub);
+                        if (is_ideal_gas) {
+                            E_sub = p_sub / (gamma - 1.0) + 0.5 * rho_sub * (ur_sub * ur_sub + uz_sub * uz_sub);
+                        } else {
+                            E_sub = MultiMat::getMixtureEnergy(p_sub, rho_sub, alpha1_sub, alpha2_sub, arho1_sub, arho2_sub, gamma, currentMaterials.products, currentMaterials.unreacted) + 0.5 * rho_sub * (ur_sub * ur_sub + uz_sub * uz_sub);
+                        }
                     } else {
                         rho_sub = ambient_rho;
                         ur_sub = 0.0;
@@ -414,7 +416,11 @@ void CFDSolver2D::setInitialConditionFrom1D(double explosive_z, double remap_rad
                         alpha2_sub = 0.0;
                         arho1_sub = 0.0;
                         arho2_sub = 0.0;
-                        E_sub = MultiMat::getMixtureEnergy(p_sub, rho_sub, alpha1_sub, alpha2_sub, arho1_sub, arho2_sub, gamma, currentMaterials.products, currentMaterials.unreacted) + 0.5 * rho_sub * (ur_sub * ur_sub + uz_sub * uz_sub);
+                        if (is_ideal_gas) {
+                            E_sub = p_sub / (gamma - 1.0) + 0.5 * rho_sub * (ur_sub * ur_sub + uz_sub * uz_sub);
+                        } else {
+                            E_sub = MultiMat::getMixtureEnergy(p_sub, rho_sub, alpha1_sub, alpha2_sub, arho1_sub, arho2_sub, gamma, currentMaterials.products, currentMaterials.unreacted) + 0.5 * rho_sub * (ur_sub * ur_sub + uz_sub * uz_sub);
+                        }
                     }
 
                     sum_rho_w   += rho_sub * w_sub;
