@@ -57,3 +57,6 @@ node_modules/
 **/my_test_out.txt
 **/test_cmds.json
 
+# Profiling outputs
+*.nsys-rep
+*.sqlite
