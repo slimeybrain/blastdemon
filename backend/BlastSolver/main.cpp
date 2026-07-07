@@ -20,6 +20,8 @@
 #include "cfd_solver.hpp"
 #include "cfd_solver_2d.hpp"
 #include "cfd_solver_2d_cuda.hpp"
+#include "cfd_solver_3d.hpp"
+#include "cfd_solver_3d_cuda.hpp"
 #include "HDF5Writer.hpp"
 #include "XDMFWriter.hpp"
 
@@ -56,6 +58,20 @@ std::unique_ptr<CFDSolver2D> global_solver_2d = nullptr;
 std::unique_ptr<CFDSolver2DCuda> global_solver_2d_cuda = nullptr;
 double global_t2d = 0.0;
 double global_dt_2d = 0.0;
+
+// 3D State
+std::atomic<bool> sim3d_running{false};
+std::atomic<bool> sim3d_paused{false};
+std::atomic<bool> sim3d_terminate{false};
+std::unique_ptr<CFDSolver3D> global_solver_3d = nullptr;
+std::vector<Slice3D> global_slices_3d;
+double global_t3d = 0.0;
+double global_dt_3d = 0.0;
+std::atomic<int> step_progress_3d{0};
+std::atomic<int> global_target_steps_3d{0};
+std::atomic<bool> global_exec_until_end_3d{false};
+std::atomic<double> global_cfl_3d{0.4};
+std::atomic<double> global_wallclock_3d{0.0};
 
 struct GaugeDef {
     std::string id;
@@ -158,8 +174,24 @@ void record_gauges_2d(double t) {
     }
 }
 
+void record_gauges_3d(double t) {
+    std::lock_guard<std::mutex> lock(global_gauges_mutex);
+    if (global_gauges.empty() || !global_solver_3d) return;
+
+    global_gauge_times.push_back(t);
+    for (size_t g_idx = 0; g_idx < global_gauges.size(); ++g_idx) {
+        const auto& g = global_gauges[g_idx];
+        Gauge3D gauge_def = { g.id, g.r, 0.0, g.z }; // Map 2D r,z to 3D x,z
+        auto vals = global_solver_3d->sampleGauge(gauge_def);
+        for (int ch = 0; ch < 7; ++ch) {
+            global_gauges_history[g_idx].channel_values[ch].push_back(vals[ch]);
+        }
+    }
+}
+
 void emit_telemetry(const CFDSolver& solver, double elapsed, bool is_terminated = false);
 void emit_telemetry_2d(double elapsed, bool is_terminated = false);
+void emit_telemetry_3d(double elapsed, bool is_terminated = false);
 void emit_resource_pulse();
 
 void emit_kernel_log(const std::string& level, const std::string& msg, double t, const std::string& scope = "1d") {
@@ -276,6 +308,106 @@ void worker_thread_func() {
     sim_terminate = false;
     global_target_steps = 0;
     global_exec_until_end = false;
+}
+
+void worker_3d_thread_func() {
+    emit_kernel_log("INFO", "3D worker thread started.", global_t3d, "3d");
+
+    if (!global_solver_3d) {
+        emit_kernel_log("ERROR", "3D worker: no solver available.", 0.0, "3d");
+        sim3d_running = false;
+        return;
+    }
+
+    auto last_telemetry_time = std::chrono::steady_clock::now();
+    int initial_steps = global_target_steps_3d.load();
+
+    while (sim3d_running) {
+        if (sim3d_terminate) break;
+
+        if (sim3d_paused) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            continue;
+        }
+
+        bool done = false;
+        if (global_exec_until_end_3d.load()) {
+            if (global_solver_3d->is_terminated()) {
+                emit_kernel_log("SYSTEM", "3D termination condition reached.", global_t3d, "3d");
+                done = true;
+            }
+        } else {
+            if (global_target_steps_3d.load() <= 0) done = true;
+        }
+
+        if (done) break;
+
+        auto step_start = std::chrono::steady_clock::now();
+        double dt = global_solver_3d->computeStepSize(global_cfl_3d.load());
+        global_solver_3d->step(dt);
+        auto step_end = std::chrono::steady_clock::now();
+        global_wallclock_3d = global_wallclock_3d.load() + std::chrono::duration<double>(step_end - step_start).count();
+        global_dt_3d = dt;
+        global_t3d += dt;
+
+        record_gauges_3d(global_t3d);
+
+        if (!global_exec_until_end_3d.load()) {
+            global_target_steps_3d--;
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_telemetry_time).count();
+        if (elapsed_ms >= global_telemetry_interval_ms.load()) {
+            emit_telemetry_3d(global_t3d, false);
+            last_telemetry_time = now;
+
+            nlohmann::json progress_msg;
+            progress_msg["type"] = "progress";
+            progress_msg["sim_time"] = global_t3d;
+            progress_msg["scope"] = "3d";
+            progress_msg["dt"] = global_dt_3d;
+
+            if (global_exec_until_end_3d.load()) {
+                progress_msg["percent"] = 50;
+                progress_msg["mode"] = "EXEC_ALL_3D";
+            } else {
+                if (initial_steps > 0) {
+                    int completed = initial_steps - global_target_steps_3d.load();
+                    int percent = std::clamp((int)((completed * 100) / initial_steps), 0, 100);
+                    step_progress_3d = percent;
+                    progress_msg["percent"] = percent;
+                    progress_msg["completed"] = completed;
+                    progress_msg["total"] = initial_steps;
+                    progress_msg["mode"] = "STEP_3D";
+                }
+            }
+            std::lock_guard<std::mutex> lock(cout_mutex);
+            std::cout << progress_msg.dump() << std::endl;
+        }
+    }
+
+    emit_telemetry_3d(global_t3d, global_solver_3d->is_terminated());
+
+    nlohmann::json progress_msg;
+    progress_msg["type"] = "progress";
+    progress_msg["sim_time"] = global_t3d;
+    progress_msg["scope"] = "3d";
+    progress_msg["percent"] = 100;
+    progress_msg["mode"] = global_exec_until_end_3d.load() ? "EXEC_ALL_3D" : "STEP_3D";
+    {
+        std::lock_guard<std::mutex> lock(cout_mutex);
+        std::cout << progress_msg.dump() << std::endl;
+    }
+
+    step_progress_3d = 100;
+    emit_kernel_log("INFO", "3D worker thread execution cycle ended.", global_t3d, "3d");
+
+    sim3d_running = false;
+    sim3d_paused = false;
+    sim3d_terminate = false;
+    global_target_steps_3d = 0;
+    global_exec_until_end_3d = false;
 }
 
 void worker_2d_thread_func() {
@@ -717,6 +849,87 @@ void emit_telemetry_2d(double elapsed, bool is_terminated) {
     std::cout.write(reinterpret_cast<const char*>(&out_nz_u),     sizeof(uint32_t));
     std::cout.write(reinterpret_cast<const char*>(&n_channels_u), sizeof(uint32_t));
     std::cout.write(reinterpret_cast<const char*>(downsampled.data()), payload_bytes);
+    std::cout.flush();
+}
+
+void emit_telemetry_3d(double elapsed, bool is_terminated) {
+    std::lock_guard<std::mutex> lock(cout_mutex);
+    if (!global_solver_3d) return;
+
+    nlohmann::json envelope;
+    envelope["type"] = "TELEMETRY_3D";
+    envelope["time"] = elapsed;
+    envelope["dt"] = global_dt_3d;
+    envelope["is_terminated"] = is_terminated;
+    envelope["wallclock"] = global_wallclock_3d.load();
+
+    {
+        std::lock_guard<std::mutex> g_lock(global_gauges_mutex);
+        if (!global_gauges.empty()) {
+            nlohmann::json gh;
+            gh["solverTracked"] = true;
+            gh["times"] = global_gauge_times;
+            nlohmann::json vals_obj = nlohmann::json::object();
+            for (const auto& h : global_gauges_history) {
+                nlohmann::json ch_arrays = nlohmann::json::array();
+                for (int ch = 0; ch < 7; ++ch) {
+                    ch_arrays.push_back(h.channel_values[ch]);
+                }
+                vals_obj[h.id] = ch_arrays;
+            }
+            gh["values"] = vals_obj;
+            envelope["gauges_history"] = gh;
+        }
+    }
+
+    std::cout << envelope.dump() << std::endl;
+
+    // BIN_FRAME_3D_SLICES implementation
+    // Format: "SLIC" magic, time, n_slices, [axis, offset, w, h, data...]
+    uint32_t magic = 0x43494c53; // "SLIC"
+    float time_f = (float)elapsed;
+    uint32_t n_slices = global_slices_3d.size();
+
+    // If no slices defined, add a default center XY slice
+    if (n_slices == 0) {
+        Slice3D s; s.axis = "xy"; s.offset = global_solver_3d->getZMin() + global_solver_3d->getCellSize() * global_solver_3d->getNz() * 0.5;
+        global_slices_3d.push_back(s);
+        n_slices = 1;
+    }
+
+    std::vector<std::vector<float>> slice_datas;
+    size_t total_payload_bytes = 0;
+    for (const auto& s : global_slices_3d) {
+        auto data = global_solver_3d->extractSlice(s);
+        total_payload_bytes += data.size() * sizeof(float);
+        slice_datas.push_back(std::move(data));
+    }
+
+    size_t header_bytes = 12; // magic (4) + time (4) + n_slices (4)
+    size_t slice_header_bytes = n_slices * 16; // (axis, offset, w, h) per slice
+    size_t total_bytes = header_bytes + slice_header_bytes + total_payload_bytes;
+
+    std::cout << "BIN_FRAME_3D_SLICES " << total_bytes << "\n";
+    std::cout.write(reinterpret_cast<const char*>(&magic), 4);
+    std::cout.write(reinterpret_cast<const char*>(&time_f), 4);
+    std::cout.write(reinterpret_cast<const char*>(&n_slices), 4);
+
+    for (size_t i = 0; i < n_slices; ++i) {
+        const auto& s = global_slices_3d[i];
+        const auto& data = slice_datas[i];
+        uint32_t axis_id = (s.axis == "xy" ? 0 : (s.axis == "xz" ? 1 : 2));
+        float offset = (float)s.offset;
+        uint32_t w = 0, h = 0;
+        if (axis_id == 0) { w = global_solver_3d->getNx(); h = global_solver_3d->getNy(); }
+        else if (axis_id == 1) { w = global_solver_3d->getNx(); h = global_solver_3d->getNz(); }
+        else { w = global_solver_3d->getNy(); h = global_solver_3d->getNz(); }
+
+        std::cout.write(reinterpret_cast<const char*>(&axis_id), 4);
+        std::cout.write(reinterpret_cast<const char*>(&offset), 4);
+        std::cout.write(reinterpret_cast<const char*>(&w), 4);
+        std::cout.write(reinterpret_cast<const char*>(&h), 4);
+        std::cout.write(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(float));
+    }
     std::cout.flush();
 }
 
@@ -1335,7 +1548,11 @@ int main() {
                         states_1d.push_back(s);
                     }
 
-                    if (global_solver_2d) {
+                    if (global_solver_3d) {
+                        double explosive_x = msg.value("explosive_x", 0.0);
+                        double explosive_y = msg.value("explosive_y", 0.0);
+                        global_solver_3d->initializeFrom1D(r_1d, states_1d, explosive_x, explosive_y, explosive_z, remap_radius);
+                    } else if (global_solver_2d) {
                         global_solver_2d->setGamma(gamma);
                         global_solver_2d->setIdealGas(is_ideal_gas);
                         global_solver_2d->setMaterialParameters(matSet);
@@ -1352,6 +1569,119 @@ int main() {
                     solver2d_initialized = true;
                     emit_kernel_log("REMAP", "1D->2D remap applied successfully.", 0.0, "2d");
                     emit_telemetry_2d(global_t2d, false);
+                } else if (command == "STEP_3D") {
+                    if (!global_solver_3d) continue;
+                    global_target_steps_3d = msg.at("steps").get<int>();
+                    global_cfl_3d = msg.value("cfl", 0.4);
+                    global_exec_until_end_3d = false;
+                    if (!sim3d_running) {
+                        sim3d_running = true;
+                        sim3d_paused = false;
+                        sim3d_terminate = false;
+                        std::thread(worker_3d_thread_func).detach();
+                    } else { sim3d_paused = false; }
+                } else if (command == "EXEC_ALL_3D") {
+                    if (!global_solver_3d) continue;
+                    global_cfl_3d = msg.value("cfl", 0.4);
+                    global_exec_until_end_3d = true;
+                    if (!sim3d_running) {
+                        sim3d_running = true;
+                        sim3d_paused = false;
+                        sim3d_terminate = false;
+                        std::thread(worker_3d_thread_func).detach();
+                    } else { sim3d_paused = false; }
+                } else if (command == "PAUSE_3D") {
+                    sim3d_paused = true;
+                    global_target_steps_3d = 0;
+                } else if (command == "RESUME_3D") {
+                    sim3d_paused = false;
+                } else if (command == "TERMINATE_3D") {
+                    sim3d_terminate = true;
+                    while (sim3d_running.load()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    }
+                    global_solver_3d.reset();
+                    global_t3d = 0.0;
+                    step_progress_3d = 0;
+                } else if (command == "INIT_3D") {
+                    sim3d_terminate = true;
+                    while (sim3d_running.load()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    }
+                    sim3d_terminate = false;
+                    sim3d_paused = false;
+
+                    int nx = msg.value("nx", 64);
+                    int ny = msg.value("ny", 64);
+                    int nz = msg.value("nz", 64);
+                    double cellSize = msg.value("cell_size", 0.01);
+                    double xmin = msg.value("xmin", 0.0);
+                    double ymin = msg.value("ymin", 0.0);
+                    double zmin = msg.value("zmin", 0.0);
+                    std::string device = msg.value("device", "cpu");
+
+                    global_slices_3d.clear();
+                    if (msg.contains("slices")) {
+                        for (const auto& s_msg : msg["slices"]) {
+                            Slice3D s;
+                            s.axis = s_msg.value("axis", "xy");
+                            s.offset = s_msg.value("offset", 0.0);
+                            global_slices_3d.push_back(s);
+                        }
+                    }
+
+                    if (device == "cuda") {
+                        global_solver_3d = std::make_unique<CFDSolver3DCuda>(nx, ny, nz, cellSize, xmin, ymin, zmin);
+                    } else {
+                        global_solver_3d = std::make_unique<CFDSolver3DImpl<true>>(nx, ny, nz, cellSize, xmin, ymin, zmin);
+                    }
+
+                    Charge3DParams cp;
+                    cp.shape = msg.value("charge_shape", "Sphere");
+                    if (cp.shape == "Sphere") cp.shape_type = 0;
+                    else if (cp.shape == "Block") cp.shape_type = 1;
+                    else cp.shape_type = 2; // Cylinder
+                    cp.x = msg.value("charge_x", 0.0);
+                    cp.y = msg.value("charge_y", 0.0);
+                    cp.z = msg.value("charge_z", 0.0);
+                    cp.radius = msg.value("charge_radius", 0.1);
+                    cp.height = msg.value("charge_height", 0.1);
+                    cp.lx = msg.value("charge_lx", 0.1);
+                    cp.ly = msg.value("charge_ly", 0.1);
+                    cp.lz = msg.value("charge_lz", 0.1);
+
+                    std::string composition = msg.value("composition", "TNT");
+                    MultiMat::MaterialSet matSet = MultiMat::TNT;
+                    if      (composition == "PETN") matSet = MultiMat::PETN;
+                    else if (composition == "RDX")  matSet = MultiMat::RDX;
+                    else if (composition == "TNT")  matSet = MultiMat::TNT;
+
+                    double ambient_rho = msg.value("ambient_rho", 1.225);
+                    double ambient_p = msg.value("atm_pressure", 101325.0);
+
+                    global_solver_3d->setInitialCondition(cp, matSet, ambient_rho, ambient_p);
+
+                    if (msg.contains("detonator_x")) {
+                        double dx = msg.value("detonator_x", cp.x);
+                        double dy = msg.value("detonator_y", cp.y);
+                        double dz = msg.value("detonator_z", cp.z);
+                        global_solver_3d->setDetonatorLocation(dx, dy, dz);
+                    }
+
+                    auto map_bc_3d = [](const std::string& str) {
+                        if (str == "Transmitting" || str == "TRANSMISSIVE" || str == "Terminate") return BCType3D::TRANSMISSIVE;
+                        return BCType3D::REFLECTIVE;
+                    };
+                    global_solver_3d->setBoundaryConditions(
+                        map_bc_3d(msg.value("bc_x_min", "Reflecting")), map_bc_3d(msg.value("bc_x_max", "Transmitting")),
+                        map_bc_3d(msg.value("bc_y_min", "Reflecting")), map_bc_3d(msg.value("bc_y_max", "Transmitting")),
+                        map_bc_3d(msg.value("bc_z_min", "Reflecting")), map_bc_3d(msg.value("bc_z_max", "Transmitting"))
+                    );
+
+                    init_gauges(msg);
+                    emit_kernel_log("SYSTEM", "3D Solver Initialized", 0.0, "3d");
+                    emit_telemetry_3d(0.0, false);
+
                 } else if (command == "CONTOUR_CONFIG") {
                     global_telemetry_stride = msg.value("stride", 1);
                     double rate = msg.value("refresh_rate", 0.0);

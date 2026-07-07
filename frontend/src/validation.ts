@@ -353,7 +353,41 @@ export function validateSimulationState(state: SimulationState): ValidationResul
         }
     });
 
-    // --- 4. Validation of Individual Nodes & Parameters ---
+    // --- 4. CFD Solver 3D Validation ---
+    const solvers3D = state.nodes.filter(n => n.type === 'CFDSolver3D');
+    solvers3D.forEach(solver3D => {
+        // CFL validation
+        const cfl = Number(solver3D.parameters?.cfl ?? 0.4);
+        if (isNaN(cfl) || cfl <= 0 || cfl >= 1.0) {
+            addMessage(solver3D.id, 'error', "CFL parameter must be between 0.0 and 1.0 (exclusive).");
+        }
+
+        // Mesh 3D connection check
+        const meshConn3D = state.connections.find(c => c.toNode === solver3D.id && c.toPort === 'mesh');
+        if (!meshConn3D) {
+            addMessage(solver3D.id, 'error', "No Mesh node connected to CFD Solver 3D. A DomainMesh3D node is required.");
+        } else {
+            const fromNode = state.nodes.find(n => n.id === meshConn3D.fromNode);
+            if (!fromNode || fromNode.type !== 'DomainMesh3D') {
+                const connKey = `${meshConn3D.fromNode}:${meshConn3D.fromPort}->${meshConn3D.toNode}:${meshConn3D.toPort}`;
+                flawedConnections.set(connKey, "Only DomainMesh3D node can be connected to the Mesh input of CFD Solver 3D.");
+                addMessage(solver3D.id, 'error', "Only DomainMesh3D node can be connected to the Mesh input of CFD Solver 3D.");
+            }
+        }
+
+        // Charge 3D connection check
+        const chargeConn3D = state.connections.find(c => c.toNode === solver3D.id && c.toPort === 'charge');
+        if (chargeConn3D) {
+            const chargeNode3D = state.nodes.find(n => n.id === chargeConn3D.fromNode);
+            if (!chargeNode3D || chargeNode3D.type !== 'Charge3D') {
+                const connKey = `${chargeConn3D.fromNode}:${chargeConn3D.fromPort}->${chargeConn3D.toNode}:${chargeConn3D.toPort}`;
+                flawedConnections.set(connKey, "Only Charge3D node can be connected to the Charge input of CFD Solver 3D.");
+                addMessage(solver3D.id, 'error', "Only Charge3D node can be connected to the Charge input of CFD Solver 3D.");
+            }
+        }
+    });
+
+    // --- 5. Validation of Individual Nodes & Parameters ---
     state.nodes.forEach(node => {
         if (node.type === 'DomainMesh') {
             const cell_size = Number(node.parameters?.cell_size ?? 0.001);
@@ -535,8 +569,8 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             }
         }
 
-        // --- 5. Telemetry & Output Node Validations ---
-        if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour' || node.type === 'VTKOutput' || node.type === 'VirtualGauges') {
+        // --- 6. Telemetry & Output Node Validations ---
+        if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour' || node.type === 'VTKOutput' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport') {
             const conn = state.connections.find(c => c.toNode === node.id && c.toPort === 'in');
             if (!conn) {
                 addMessage(node.id, 'warning', `Not connected to any CFD Solver. No data will be received.`);
@@ -548,20 +582,34 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                         flawedConnections.set(connKey, "TelemetryContour requires a 2D CFD Solver source.");
                         addMessage(node.id, 'error', "TelemetryContour requires a 2D CFD Solver source.");
                     }
+                } else if (node.type === 'Telemetry3DViewport') {
+                    if (!fromNode || fromNode.type !== 'CFDSolver3D') {
+                        const connKey = `${conn.fromNode}:${conn.fromPort}->${conn.toNode}:${conn.toPort}`;
+                        flawedConnections.set(connKey, "Telemetry3DViewport requires a 3D CFD Solver source.");
+                        addMessage(node.id, 'error', "Telemetry3DViewport requires a 3D CFD Solver source.");
+                    }
                 } else if (node.type === 'TelemetryGraph' || node.type === 'VirtualGauges') {
-                    if (!fromNode || (fromNode.type !== 'CFDSolver' && fromNode.type !== 'CFDSolver2D')) {
+                    if (!fromNode || (fromNode.type !== 'CFDSolver' && fromNode.type !== 'CFDSolver2D' && fromNode.type !== 'CFDSolver3D')) {
                         const connKey = `${conn.fromNode}:${conn.fromPort}->${conn.toNode}:${conn.toPort}`;
                         flawedConnections.set(connKey, `${node.type} must be connected to a CFD Solver.`);
                         addMessage(node.id, 'error', `${node.type} must be connected to a CFD Solver.`);
                     }
                 } else {
-                    if (!fromNode || (fromNode.type !== 'CFDSolver' && fromNode.type !== 'CFDSolver2D')) {
+                    if (!fromNode || (fromNode.type !== 'CFDSolver' && fromNode.type !== 'CFDSolver2D' && fromNode.type !== 'CFDSolver3D')) {
                         const connKey = `${conn.fromNode}:${conn.fromPort}->${conn.toNode}:${conn.toPort}`;
                         flawedConnections.set(connKey, "Telemetry/Output must be connected to a CFD Solver.");
                         addMessage(node.id, 'error', "Telemetry/Output must be connected to a CFD Solver.");
                     }
                 }
             }
+        }
+    });
+
+    // DomainMesh3D validation
+    state.nodes.filter(n => n.type === 'DomainMesh3D').forEach(mesh3D => {
+        const cellSize = Number(mesh3D.parameters?.cell_size || 0.01);
+        if (isNaN(cellSize) || cellSize <= 0) {
+            addMessage(mesh3D.id, 'error', "Mesh Cell Size must be greater than 0.");
         }
     });
 

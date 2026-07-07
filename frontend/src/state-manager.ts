@@ -336,7 +336,12 @@ export class StateManager {
             'CFDSolver2D': 'node-solver2d',
             'TelemetryContour': 'node-contour',
             'VTKOutput': 'node-vtk',
-            'VirtualGauges': 'node-gauges'
+            'VirtualGauges': 'node-gauges',
+            'DomainMesh3D': 'node-mesh3d',
+            'Charge3D': 'node-charge3d',
+            'CFDSolver3D': 'node-solver3d',
+            'Telemetry3DViewport': 'node-viewport3d',
+            'VirtualGauges3D': 'node-gauges3d'
         };
         const prefix = prefixMap[type] || `node-${type.toLowerCase()}`;
 
@@ -1298,6 +1303,30 @@ export class StateManager {
             },
             'VTKOutput': {
                 vtk_dir: './vtk_output'
+            },
+            'DomainMesh3D': {
+                dim_x: 1.0, dim_y: 1.0, dim_z: 1.0,
+                origin_x: 0.0, origin_y: 0.0, origin_z: 0.0,
+                cell_size: 0.01,
+                bc_x_min: 'Reflecting', bc_x_max: 'Transmitting',
+                bc_y_min: 'Reflecting', bc_y_max: 'Transmitting',
+                bc_z_min: 'Reflecting', bc_z_max: 'Transmitting'
+            },
+            'Charge3D': {
+                charge_shape: 'Sphere',
+                charge_x: 0.5, charge_y: 0.5, charge_z: 0.5,
+                charge_radius: 0.1,
+                charge_lx: 0.2, charge_ly: 0.2, charge_lz: 0.2
+            },
+            'CFDSolver3D': {
+                cfl: 0.4,
+                device: 'cpu'
+            },
+            'Telemetry3DViewport': {
+                slices: [{ axis: 'xy', offset: 0.5, quantities: ['pressure'] }]
+            },
+            'VirtualGauges3D': {
+                gauges: [{ name: 'G1', x: 0.6, y: 0.5, z: 0.5 }]
             }
         };
 

@@ -366,9 +366,13 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
                         // Check for BIN_FRAME or BIN2D_FRAME marker
                         std::string marker = "";
                         const std::string m1 = "BIN_FRAME ";
+                        const std::string m3 = "BIN_FRAME_3D_SLICES ";
                         const std::string m2_a = "BIN2D_FRAME ";
                         const std::string m2_b = "BIN_FRAME_2D ";
-                        if (accumulator.size() >= m2_a.size() &&
+                        if (accumulator.size() >= m3.size() &&
+                            std::equal(m3.begin(), m3.end(), accumulator.begin())) {
+                            marker = m3;
+                        } else if (accumulator.size() >= m2_a.size() &&
                             std::equal(m2_a.begin(), m2_a.end(), accumulator.begin())) {
                             marker = m2_a;
                         } else if (accumulator.size() >= m2_b.size() &&

@@ -437,6 +437,7 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
     const model    = stateManager.getAllModels().find(m => m.id === modelId);
     const has2D    = model?.nodes.some(n => n.type === 'CFDSolver2D') || false;
     const pipeline = findRemapPipeline(modelId);
+    const has3D      = model?.nodes.some(n => n.type === 'CFDSolver3D') || false;
 
     // Helper to get solver node for logging
     const getSolverNode = (mid: string) => {
@@ -605,6 +606,22 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
                 }
             }
         }
+        else if (has3D) {
+            const state = stateManager.getSimulationState(modelId);
+            if (state) {
+                if (pipeline) {
+                    const payload = serializeForSolver(state, "INIT_3D", modelId);
+                    networkManager.send(payload);
+                    if (tryRemapFrom1D(modelId, pipeline)) {
+                        stateManager.setModelStatus(modelId, 'INITIALIZED');
+                    }
+                } else {
+                    const payload = serializeForSolver(state, "INIT_3D", modelId);
+                    networkManager.send(payload);
+                    stateManager.setModelStatus(modelId, 'INITIALIZED');
+                }
+            }
+        }
         else if (has2D) {
             // Standalone 2D model (Ideal Gas / JWL direct init — no remap partner).
             const state = stateManager.getSimulationState(modelId);
@@ -637,7 +654,10 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
         }
         const cfl = getCflFromSolver();
         
-        if (pipeline || has2D) {
+        const has3D = model?.nodes.some(n => n.type === 'CFDSolver3D') || false;
+        if (has3D) {
+            networkManager.send({ command: "STEP_3D", modelId: modelId, steps, cfl });
+        } else if (pipeline || has2D) {
             sendContourConfig(modelId);
             networkManager.send({ command: "STEP_2D", modelId: modelId, steps, cfl });
         } else {
@@ -650,8 +670,18 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
         const status = stateManager.getModelStatus(modelId);
         const cfl = getCflFromSolver();
 
+        const has3D = model?.nodes.some(n => n.type === 'CFDSolver3D') || false;
+
         if (status === 'UNINITIALIZED' || status === 'TERMINATED') {
-            if (pipeline) {
+            if (has3D) {
+                const state = stateManager.getSimulationState(modelId);
+                if (state) {
+                    const payload = serializeForSolver(state, "INIT_3D", modelId);
+                    networkManager.send(payload);
+                    networkManager.send({ command: "EXEC_ALL_3D", modelId: modelId, cfl });
+                    stateManager.setModelStatus(modelId, 'RUNNING');
+                }
+            } else if (pipeline) {
                 // Initialize model from 1D telemetry first, then run
                 const state = stateManager.getSimulationState(modelId);
                 if (state) {
@@ -689,7 +719,9 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
             }
         } else {
             // Already initialized / paused
-            if (pipeline || has2D) {
+            if (has3D) {
+                networkManager.send({ command: "EXEC_ALL_3D", modelId: modelId, cfl });
+            } else if (pipeline || has2D) {
                 sendContourConfig(modelId);
                 networkManager.send({ command: "EXEC_ALL_2D", modelId: modelId, cfl });
             } else {
@@ -700,7 +732,10 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
 
     // ── PAUSE ─────────────────────────────────────────────────────────────────
     } else if (command === "PAUSE") {
-        if (pipeline || has2D) {
+        const has3D = model?.nodes.some(n => n.type === 'CFDSolver3D') || false;
+        if (has3D) {
+            networkManager.send({ command: "PAUSE_3D", modelId: modelId });
+        } else if (pipeline || has2D) {
             networkManager.send({ command: "PAUSE_2D", modelId: modelId });
         } else {
             networkManager.send({ command: "PAUSE",    modelId: modelId });
@@ -709,7 +744,10 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
 
     // ── TERMINATE ─────────────────────────────────────────────────────────────
     } else if (command === "TERMINATE") {
-        if (pipeline || has2D) {
+        const has3D = model?.nodes.some(n => n.type === 'CFDSolver3D') || false;
+        if (has3D) {
+            networkManager.send({ command: "TERMINATE_3D", modelId: modelId });
+        } else if (pipeline || has2D) {
             networkManager.send({ command: "TERMINATE_2D", modelId: modelId });
         } else {
             networkManager.send({ command: "TERMINATE",    modelId: modelId });
@@ -752,10 +790,11 @@ networkManager.onMessage((data) => {
         }
         const payloadBuffer = data.slice(offset);
         
-        let type: 'CFDSolver2D' | 'CFDSolver' = 'CFDSolver';
+        let type: 'CFDSolver2D' | 'CFDSolver' | 'CFDSolver3D' = 'CFDSolver';
         let model = stateManager.getAllModels().find(m => m.id === modelId);
-        if (model && model.nodes.some(n => n.type === 'CFDSolver2D')) {
-            type = 'CFDSolver2D';
+        if (model) {
+            if (model.nodes.some(n => n.type === 'CFDSolver3D')) type = 'CFDSolver3D';
+            else if (model.nodes.some(n => n.type === 'CFDSolver2D')) type = 'CFDSolver2D';
         }
         
         let solverNode = model?.nodes.find(n => n.type === type);
@@ -763,6 +802,12 @@ networkManager.onMessage((data) => {
         if (solverNode) {
             stateManager.pushTelemetry(solverNode.id, payloadBuffer, modelId);
             stateManager.pushTelemetry(solverNode.id + "-binary", payloadBuffer, modelId);
+            // Forward 3D slices to viewport
+            if (type === 'CFDSolver3D') {
+                layoutManager.components.forEach(comp => {
+                    if (comp.type === 'TELEMETRY_3D') comp.instance.pushFrame(payloadBuffer.slice(0));
+                });
+            }
         }
         return;
     }
@@ -779,15 +824,20 @@ networkManager.onMessage((data) => {
         }
 
         // Determine correct target solver type
-        let targetType: 'CFDSolver2D' | 'CFDSolver' = 'CFDSolver';
-        if (dataJson.type === 'progress_2d' || dataJson.type === 'TELEMETRY_2D' || dataJson.scope === '2d') {
+        let targetType: 'CFDSolver2D' | 'CFDSolver' | 'CFDSolver3D' = 'CFDSolver';
+        if (dataJson.type === 'progress_3d' || dataJson.type === 'TELEMETRY_3D' || dataJson.scope === '3d') {
+            targetType = 'CFDSolver3D';
+        } else if (dataJson.type === 'progress_2d' || dataJson.type === 'TELEMETRY_2D' || dataJson.scope === '2d') {
             targetType = 'CFDSolver2D';
         } else if (dataJson.type === 'progress' || dataJson.type === 'TELEMETRY') {
             targetType = 'CFDSolver';
         } else if (dataJson.type === 'log') {
             const msg = dataJson.message || "";
+            const is3DLog = msg.includes("3D") || msg.includes("3d");
             const is2DLog = msg.includes("2D") || msg.includes("REMAP") || msg.includes("vtk") || msg.includes("2d");
-            targetType = is2DLog ? 'CFDSolver2D' : 'CFDSolver';
+            if (is3DLog) targetType = 'CFDSolver3D';
+            else if (is2DLog) targetType = 'CFDSolver2D';
+            else targetType = 'CFDSolver';
         }
 
         let model = stateManager.getAllModels().find(m => m.id === modelId);

@@ -8,7 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 # Target SM86 (Ampere) / SM89 (Ada) / SM120 (Blackwell) — add older SMs as needed
-set(CMAKE_CUDA_ARCHITECTURES 86 89 120)
+set(CMAKE_CUDA_ARCHITECTURES 60 70 75 80 86)
 
 # Apply strict compiler warnings
 if(MSVC)
@@ -19,6 +19,9 @@ endif()
 
 # OpenMP for CPU 2D solver parallelism
 find_package(OpenMP)
+
+# Find ZLIB (needed for VTKWriter)
+find_package(ZLIB REQUIRED)
 
 # Find HDF5
 find_package(HDF5 COMPONENTS C)
@@ -43,6 +46,10 @@ add_executable(BlastSolver
     backend/BlastSolver/cfd_solver_2d_fluxes.cpp
     # 2D CUDA solver
     backend/BlastSolver/cfd_solver_2d_cuda.cu
+    # 3D Solver
+    backend/BlastSolver/cfd_solver_3d.cpp
+    backend/BlastSolver/cfd_solver_3d_cuda.cu
+    backend/BlastSolver/remapper_3d.cpp
     # VTK output writer
     backend/BlastSolver/VTKWriter.cpp
 )
@@ -68,7 +75,7 @@ if(OpenMP_CXX_FOUND)
     message(STATUS "OpenMP found and enabled for BlastSolver.")
 endif()
 
-target_link_libraries(BlastSolver PRIVATE ${CMAKE_DL_LIBS})
+target_link_libraries(BlastSolver PRIVATE ${CMAKE_DL_LIBS} ZLIB::ZLIB)
 
 
 if(HDF5_FOUND)
