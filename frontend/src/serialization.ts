@@ -25,7 +25,11 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_r', 'remap_radius', 'trigger_value',
         'charge_r', 'charge_z', 'charge_radius', 'charge_height',
         'detonator_r', 'detonator_z', 'detonator_radius',
-        'ideal_gamma', 'ideal_rho_0', 'ideal_e_0'
+        'ideal_gamma', 'ideal_rho_0', 'ideal_e_0',
+        // 3D CFD keys
+        'nx', 'ny', 'nz', 'dim_x', 'dim_y', 'dim_z', 'origin_x', 'origin_y', 'origin_z',
+        'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
+        'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin'
     ];
 
     const flattenedParams: Record<string, any> = {};
@@ -104,6 +108,69 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // 3. Trace 3D Solver if it exists
+    const solverNode3D = state.nodes.find(n => n.type === 'CFDSolver3D');
+    if (solverNode3D) {
+        Object.entries(solverNode3D.parameters).forEach(([key, value]) => {
+            flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+        });
+
+        // Trace Mesh 3D
+        const meshConn3D = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'mesh');
+        if (meshConn3D) {
+            const meshNode3D = state.nodes.find(n => n.id === meshConn3D.fromNode);
+            if (meshNode3D) {
+                Object.entries(meshNode3D.parameters).forEach(([key, value]) => {
+                    flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                });
+            }
+        }
+
+        // Trace Charge 3D
+        const chargeConn3D = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'charge');
+        if (chargeConn3D) {
+            const chargeNode3D = state.nodes.find(n => n.id === chargeConn3D.fromNode);
+            if (chargeNode3D) {
+                Object.entries(chargeNode3D.parameters).forEach(([key, value]) => {
+                    flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                });
+
+                // Trace Material for Charge 3D
+                const matConn = state.connections.find(c => c.toNode === chargeNode3D.id && c.toPort === 'material');
+                if (matConn) {
+                    const matNode = state.nodes.find(n => n.id === matConn.fromNode);
+                    if (matNode) {
+                        Object.entries(matNode.parameters).forEach(([key, value]) => {
+                            if (key !== 'material_type') {
+                                flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                            }
+                        });
+                    }
+                }
+            }
+        }
+
+        // Trace Remap 3D
+        const remapConn3D = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'remap');
+        if (remapConn3D) {
+            const remapNode3D = state.nodes.find(n => n.id === remapConn3D.fromNode);
+            if (remapNode3D) {
+                Object.entries(remapNode3D.parameters).forEach(([key, value]) => {
+                    flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                });
+            }
+        }
+
+        // Trace Gauges 3D
+        const gaugeConn3D = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'gauges');
+        if (gaugeConn3D) {
+            const gaugeNode3D = state.nodes.find(n => n.id === gaugeConn3D.fromNode);
+            if (gaugeNode3D) {
+                flattenedParams['gauges'] = gaugeNode3D.parameters.gauges || [];
             }
         }
     }
@@ -316,6 +383,20 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         flattenedParams['nz'] = Math.round(maxZ / cellSize);
         flattenedParams['max_r'] = maxR;
         flattenedParams['max_z'] = maxZ;
+    } else if (command === "INIT_3D") {
+        const cellSize = flattenedParams['cell_size'] || 0.01;
+        const dimX = flattenedParams['dim_x'] || 1.0;
+        const dimY = flattenedParams['dim_y'] || 1.0;
+        const dimZ = flattenedParams['dim_z'] || 1.0;
+
+        flattenedParams['nx'] = Math.round(dimX / cellSize);
+        flattenedParams['ny'] = Math.round(dimY / cellSize);
+        flattenedParams['nz'] = Math.round(dimZ / cellSize);
+        flattenedParams['xmin'] = flattenedParams['origin_x'] || 0.0;
+        flattenedParams['ymin'] = flattenedParams['origin_y'] || 0.0;
+        flattenedParams['zmin'] = flattenedParams['origin_z'] || 0.0;
+
+        if (!flattenedParams['device']) flattenedParams['device'] = 'cpu';
     }
 
     return JSON.stringify({

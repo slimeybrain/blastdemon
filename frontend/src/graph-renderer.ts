@@ -654,6 +654,20 @@ export class GraphRenderer {
         const toType = toNode.type;
 
         switch (toType) {
+            case 'CFDSolver3D':
+                if (toPortId === 'mesh') return fromType === 'DomainMesh3D';
+                if (toPortId === 'charge') return fromType === 'Charge3D';
+                if (toPortId === 'gauges') return fromType === 'VirtualGauges3D';
+                return false;
+            case 'Charge3D':
+                if (toPortId === 'material') return fromType === 'Material';
+                return false;
+            case 'Telemetry3DViewport':
+                if (toPortId === 'in') return fromType === 'CFDSolver3D';
+                return false;
+            case 'VirtualGauges3D':
+                if (toPortId === 'in') return fromType === 'CFDSolver3D';
+                return false;
             case 'ThePainter':
                 if (toPortId === 'mesh') return fromType === 'DomainMesh';
                 if (toPortId === 'air') return fromType === 'Material';
@@ -991,12 +1005,22 @@ export class GraphRenderer {
                 ]
             },
             {
+                name: '3D Simulation',
+                items: [
+                    { label: 'Domain Mesh 3D', type: 'DomainMesh3D' },
+                    { label: '3D Charge', type: 'Charge3D' },
+                    { label: 'CFD Solver 3D', type: 'CFDSolver3D' }
+                ]
+            },
+            {
                 name: 'Telemetry & Output',
                 items: [
                     { label: 'Telemetry - Text', type: 'TelemetryText' },
                     { label: 'Telemetry - Graph', type: 'TelemetryGraph' },
                     { label: 'Telemetry - Contour (2D)', type: 'TelemetryContour' },
+                    { label: 'Telemetry - 3D Viewport', type: 'Telemetry3DViewport' },
                     { label: 'Virtual Gauges', type: 'VirtualGauges' },
+                    { label: 'Virtual Gauges 3D', type: 'VirtualGauges3D' },
                     { label: 'VTK Output Controls', type: 'VTKOutput' }
                 ]
             },
@@ -1143,7 +1167,12 @@ export class GraphRenderer {
             'VTKOutput': 'node-vtk',
             'VirtualGauges': 'node-gauges',
             'Charge1D': 'node-charge1d',
-            'Charge2D': 'node-charge2d'
+            'Charge2D': 'node-charge2d',
+            'DomainMesh3D': 'node-mesh3d',
+            'Charge3D': 'node-charge3d',
+            'CFDSolver3D': 'node-solver3d',
+            'Telemetry3DViewport': 'node-viewport3d',
+            'VirtualGauges3D': 'node-gauges3d'
         };
         const prefix = prefixMap[type] || `node-${type.toLowerCase()}`;
 
@@ -1167,7 +1196,7 @@ export class GraphRenderer {
         if (type === 'TelemetryText' || type === 'TelemetryGraph') {
             newNode.width = 350;
             newNode.height = 220;
-        } else if (type === 'TelemetryContour') {
+        } else if (type === 'TelemetryContour' || type === 'Telemetry3DViewport') {
             newNode.width = 350;
             newNode.height = 300;
         } else if (type === 'VTKOutput') {
@@ -1199,6 +1228,15 @@ export class GraphRenderer {
             case 'TelemetryContour': return [{ id: 'in', label: 'Data Stream' }];
             case 'VTKOutput': return [{ id: 'in', label: 'Solver' }];
             case 'VirtualGauges': return [{ id: 'in', label: 'Solver Output' }];
+            case 'CFDSolver3D': return [
+                { id: 'mesh', label: 'Mesh' },
+                { id: 'charge', label: 'Charge' },
+                { id: 'gauges', label: 'Gauges' },
+                { id: 'remap', label: 'Remap' }
+            ];
+            case 'Charge3D': return [{ id: 'material', label: 'Material' }];
+            case 'Telemetry3DViewport': return [{ id: 'in', label: 'Data Stream' }];
+            case 'VirtualGauges3D': return [{ id: 'in', label: 'Solver' }];
             default: return [];
         }
     }
@@ -1216,6 +1254,10 @@ export class GraphRenderer {
             case 'RemapNode': return [{ id: 'remap', label: 'Remap Spec' }];
             case 'HardwareConfig': return [{ id: 'hardware', label: 'Hardware Spec' }];
             case 'CFDSolver2D': return [{ id: 'telemetry', label: 'Telemetry' }];
+            case 'DomainMesh3D': return [{ id: 'mesh', label: 'Mesh Spec' }];
+            case 'Charge3D': return [{ id: 'out', label: 'Charge Spec' }];
+            case 'CFDSolver3D': return [{ id: 'telemetry', label: 'Telemetry' }];
+            case 'VirtualGauges3D': return [{ id: 'out', label: 'Gauges Spec' }];
             default: return [];
         }
     }
@@ -1321,6 +1363,30 @@ export class GraphRenderer {
             };
             case 'VTKOutput': return {
                 vtk_dir: './vtk_output'
+            };
+            case 'DomainMesh3D': return {
+                dim_x: 1.0, dim_y: 1.0, dim_z: 1.0,
+                origin_x: 0.0, origin_y: 0.0, origin_z: 0.0,
+                cell_size: 0.01,
+                bc_x_min: 'Reflecting', bc_x_max: 'Transmitting',
+                bc_y_min: 'Reflecting', bc_y_max: 'Transmitting',
+                bc_z_min: 'Reflecting', bc_z_max: 'Transmitting'
+            };
+            case 'Charge3D': return {
+                charge_shape: 'Sphere',
+                charge_x: 0.5, charge_y: 0.5, charge_z: 0.5,
+                charge_radius: 0.1,
+                charge_lx: 0.2, charge_ly: 0.2, charge_lz: 0.2
+            };
+            case 'CFDSolver3D': return {
+                cfl: 0.4,
+                device: 'cpu'
+            };
+            case 'Telemetry3DViewport': return {
+                slices: [{ axis: 'xy', offset: 0.5, quantities: ['pressure'] }]
+            };
+            case 'VirtualGauges3D': return {
+                gauges: [{ name: 'G1', x: 0.6, y: 0.5, z: 0.5 }]
             };
             default: return {};
         }
@@ -1431,6 +1497,11 @@ export class GraphRenderer {
             case 'CFDSolver2D':     return 'SOLVER2D';
             case 'TelemetryContour': return 'CONTOUR';
             case 'VTKOutput':       return 'VTK';
+            case 'DomainMesh3D':    return 'MESH3D';
+            case 'Charge3D':        return 'CHARGE3D';
+            case 'CFDSolver3D':     return 'SOLVER3D';
+            case 'Telemetry3DViewport': return 'VIEW3D';
+            case 'VirtualGauges3D': return 'GAUGES3D';
             default: return (type as string).toUpperCase();
         }
     }
@@ -1453,6 +1524,11 @@ export class GraphRenderer {
             case 'CFDSolver2D':       return 'CFD Solver 2D';
             case 'TelemetryContour':  return 'Telemetry - Contour (2D)';
             case 'VTKOutput':         return 'VTK Output Controls';
+            case 'DomainMesh3D':      return 'Domain Mesh 3D';
+            case 'Charge3D':          return 'Charge (3D)';
+            case 'CFDSolver3D':       return 'CFD Solver 3D';
+            case 'Telemetry3DViewport': return 'Telemetry - 3D Viewport';
+            case 'VirtualGauges3D':   return 'Virtual Gauges 3D';
             default: return type;
         }
     }
@@ -2033,9 +2109,9 @@ export class GraphRenderer {
                 if (displayMode === 'compact') {
                     contentEl.style.display = 'none';
                 } else if (displayMode === 'normal') {
-                    if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges') {
+                    if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport' || node.type === 'VirtualGauges3D') {
                         contentEl.style.display = 'flex';
-                        if (node.type === 'VirtualGauges') {
+                        if (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') {
                             this.renderVirtualGaugesContent(node, contentEl);
                         } else {
                             this.renderTelemetryContent(node, contentEl);

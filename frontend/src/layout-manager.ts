@@ -4,6 +4,7 @@ import { GraphRenderer } from './graph-renderer.js';
 import { PropertyEditor } from './property-editor.js';
 import { NodeViewer } from './node-viewer.js';
 import { ResourceManager } from './resource-manager.js';
+import { Telemetry3DViewport } from './telemetry-3d-viewport.js';
 
 export class LayoutManager {
     private container: HTMLElement;
@@ -584,7 +585,7 @@ export class LayoutManager {
 
         const select = document.createElement('select');
         select.className = 'header-select';
-        const types: PanelType[] = ['OUTLINER', 'NODE_GRAPH', 'PROPERTIES', 'NODE_VIEWER', 'EXECUTION_MANAGER', 'RESOURCE_MANAGER'];
+        const types: PanelType[] = ['OUTLINER', 'NODE_GRAPH', 'PROPERTIES', 'NODE_VIEWER', 'EXECUTION_MANAGER', 'RESOURCE_MANAGER', 'TELEMETRY_3D'];
         types.forEach(t => {
             const opt = document.createElement('option');
             opt.value = t;
@@ -819,11 +820,14 @@ export class LayoutManager {
             case 'RESOURCE_MANAGER':
                 this.renderResourceManager(node, container);
                 break;
+            case 'TELEMETRY_3D':
+                this.renderTelemetry3D(node, container);
+                break;
             default:
                 container.innerHTML = `<div style="padding:10px">Panel: ${node.panelType}</div>`;
         }
-    }
 
+    }
     private renderMenuBar(node: PanelNode, container: HTMLElement): void {
         let comp = this.components.get(node.id);
         if (!comp) {
@@ -833,6 +837,18 @@ export class LayoutManager {
         } else {
             container.appendChild(comp.instance.container);
             comp.instance.render();
+        }
+    }
+
+    private renderTelemetry3D(node: PanelNode, container: HTMLElement): void {
+        let comp = this.components.get(node.id);
+        if (!comp) {
+            const viewport = new Telemetry3DViewport(container, node.id);
+            comp = { type: 'TELEMETRY_3D', instance: viewport, container };
+            this.components.set(node.id, comp);
+        } else if (comp.container !== container) {
+            // Re-parenting logic if needed
+            comp.container = container;
         }
     }
 

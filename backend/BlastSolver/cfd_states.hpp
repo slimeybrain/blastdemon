@@ -79,4 +79,33 @@ struct ConservativeState2D {
 };
 #endif
 
+#ifndef STATE_3D_DEFINED
+#define STATE_3D_DEFINED
+struct State3D {
+    double rho;
+    double ux;
+    double uy;
+    double uz;
+    double p;
+    double E;
+    double alpha1;
+    double alpha2;
+    double arho1;
+    double arho2;
+    int floor_status;
+};
+
+struct ConservativeState3D {
+    double rho;
+    double rhoux;
+    double rhouy;
+    double rhouz;
+    double E;
+    double alpha1;
+    double alpha2;
+    double arho1;
+    double arho2;
+};
+#endif
+
 #endif // CFD_STATES_HPP
