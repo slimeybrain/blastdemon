@@ -17,7 +17,6 @@ enum class BCType3D {
 
 struct Charge3DParams {
     int shape_type; // 0=Sphere, 1=Block, 2=Cylinder
-    std::string shape; // "Sphere", "Cylinder", "Block"
     double x, y, z;
     double radius;
     double height;
@@ -175,7 +174,8 @@ template <bool IsMultiMaterial>
 class CFDSolver3DImpl : public CFDSolver3DImplBase {
     std::vector<PrimitiveTile3D<IsMultiMaterial>> states_pool;
     std::vector<ConservativeTile3D<IsMultiMaterial>> U_pool;
-    std::vector<bool> active_tiles;
+    std::vector<ConservativeTile3D<IsMultiMaterial>> U_prev_pool;
+    std::vector<uint8_t> active_tiles;
 
     int n_tiles_x, n_tiles_y, n_tiles_z;
 
@@ -199,6 +199,10 @@ public:
     void setCellStateIdeal(int i, int j, int k, const CellState3D<false>& s) override;
     void commitStates() override;
     void setDetonatorLocation(double x, double y, double z) override;
+    
+    const std::vector<PrimitiveTile3D<IsMultiMaterial>>& getStatesPool() const { return states_pool; }
+    const std::vector<ConservativeTile3D<IsMultiMaterial>>& getUPool() const { return U_pool; }
+    const std::vector<uint8_t>& getActiveTiles() const { return active_tiles; }
 
 private:
     void updateActiveRegions();
@@ -208,30 +212,22 @@ private:
     void updatePrimitiveFromConservative();
     bool checkTermination();
 public:
+    inline void applyBC3DHelper(int& g, int n, BCType3D bc_min, BCType3D bc_max, bool& reflect) const {
+        if (g < 0) {
+            if (bc_min == BCType3D::REFLECTIVE) { g = -g - 1; reflect = !reflect; }
+            else g = 0;
+        } else if (g >= n) {
+            if (bc_max == BCType3D::REFLECTIVE) { g = 2 * n - 1 - g; reflect = !reflect; }
+            else g = n - 1;
+        }
+    }
+
     inline CellState3D<IsMultiMaterial> sampleState(int gx, int gy, int gz) const {
         bool reflective_x = false, reflective_y = false, reflective_z = false;
 
-        if (gx < 0) {
-            if (bcXmin == BCType3D::REFLECTIVE) { gx = -gx - 1; reflective_x = true; }
-            else gx = 0;
-        } else if (gx >= nx) {
-            if (bcXmax == BCType3D::REFLECTIVE) { gx = 2 * nx - 1 - gx; reflective_x = true; }
-            else gx = nx - 1;
-        }
-        if (gy < 0) {
-            if (bcYmin == BCType3D::REFLECTIVE) { gy = -gy - 1; reflective_y = true; }
-            else gy = 0;
-        } else if (gy >= ny) {
-            if (bcYmax == BCType3D::REFLECTIVE) { gy = 2 * ny - 1 - gy; reflective_y = true; }
-            else gy = ny - 1;
-        }
-        if (gz < 0) {
-            if (bcZmin == BCType3D::REFLECTIVE) { gz = -gz - 1; reflective_z = true; }
-            else gz = 0;
-        } else if (gz >= nz) {
-            if (bcZmax == BCType3D::REFLECTIVE) { gz = 2 * nz - 1 - gz; reflective_z = true; }
-            else gz = nz - 1;
-        }
+        applyBC3DHelper(gx, nx, bcXmin, bcXmax, reflective_x);
+        applyBC3DHelper(gy, ny, bcYmin, bcYmax, reflective_y);
+        applyBC3DHelper(gz, nz, bcZmin, bcZmax, reflective_z);
 
         gx = std::clamp(gx, 0, nx - 1);
         gy = std::clamp(gy, 0, ny - 1);

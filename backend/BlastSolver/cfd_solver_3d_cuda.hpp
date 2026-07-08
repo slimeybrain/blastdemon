@@ -3,16 +3,18 @@
 
 #include "cfd_solver_3d.hpp"
 
+template <bool IsMultiMaterial>
 class CFDSolver3DCuda : public CFDSolver3DImplBase {
     // GPU pointers and internal state
     void* d_states = nullptr;
     void* d_U = nullptr;
+    void* d_U_prev = nullptr;
     void* d_active_tiles = nullptr;
     void* d_max_s_buf = nullptr;
     void* d_slice_buf = nullptr;
 
     // Host temporary mirrors during remapping
-    PrimitiveTile3D<false>* temp_h_states = nullptr;
+    PrimitiveTile3D<IsMultiMaterial>* temp_h_states = nullptr;
     uint8_t* temp_h_active = nullptr;
 
     void updateActiveRegions();
@@ -39,6 +41,10 @@ public:
     void setCellStateMulti(int i, int j, int k, const CellState3D<true>& s) override;
     void setCellStateIdeal(int i, int j, int k, const CellState3D<false>& s) override;
     void commitStates() override;
+
+    const void* getDeviceStates() const { return d_states; }
+    const void* getDeviceU() const { return d_U; }
+    const void* getDeviceActiveTiles() const { return d_active_tiles; }
 };
 
 #endif

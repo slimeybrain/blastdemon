@@ -936,6 +936,40 @@ void emit_telemetry_3d(double elapsed, bool is_terminated) {
     std::cout.flush();
 }
 
+MultiMat::MaterialSet parseMaterialSet(const nlohmann::json& msg) {
+    std::string composition = msg.value("composition", "TNT");
+    MultiMat::MaterialSet matSet = MultiMat::TNT;
+    if      (composition == "PETN") matSet = MultiMat::PETN;
+    else if (composition == "RDX")  matSet = MultiMat::RDX;
+    else if (composition == "TNT")  matSet = MultiMat::TNT;
+    else {
+        double jwl_A     = msg.value("jwl_A",     373.77e9);
+        double jwl_B     = msg.value("jwl_B",     3.747e9);
+        double jwl_R1    = msg.value("jwl_R1",    4.15);
+        double jwl_R2    = msg.value("jwl_R2",    0.90);
+        double jwl_omega = msg.value("jwl_omega", 0.35);
+        double high_rho  = msg.value("rho",       1630.0);
+        double det_vel   = msg.value("det_vel",   6930.0);
+        double det_energy= msg.value("detonation_energy", 4.29e6);
+        matSet.products  = { jwl_A, jwl_B, jwl_R1, jwl_R2, jwl_omega, high_rho, 1000.0, 300.0 };
+
+        // Estimate unreacted solid parameters to keep initial state physically correct and stable
+        // A typical stable unreacted JWL has:
+        // A_u ~ 770 GPa, B_u ~ -4.8 GPa, R1_u ~ 10.5, R2_u ~ 1.1, omega_u ~ 0.89
+        // Scaling with density allows handling low/high density custom mixtures/presets correctly.
+        double unreacted_A = 770.0e9 * (high_rho / 1800.0);
+        double unreacted_B = -4.8e9 * (high_rho / 1800.0);
+        double unreacted_R1 = 10.5;
+        double unreacted_R2 = 1.1;
+        double unreacted_omega = 0.89;
+        matSet.unreacted = { unreacted_A, unreacted_B, unreacted_R1, unreacted_R2, unreacted_omega, high_rho, 1000.0, 300.0 };
+
+        matSet.det_vel   = det_vel;
+        matSet.detonation_energy = det_energy;
+    }
+    return matSet;
+}
+
 int main() {
     std::string line;
 
@@ -1100,23 +1134,7 @@ int main() {
                     double ambient_rho      = msg.at("ambient_rho").get<double>();
                     double ambient_p        = msg.at("atm_pressure").get<double>();
 
-                    MultiMat::MaterialSet matSet = MultiMat::TNT;
-                    if      (composition == "PETN") matSet = MultiMat::PETN;
-                    else if (composition == "RDX")  matSet = MultiMat::RDX;
-                    else if (composition == "TNT")  matSet = MultiMat::TNT;
-                    else {
-                        double jwl_A     = msg.value("jwl_A",     373.77e9);
-                        double jwl_B     = msg.value("jwl_B",     3.747e9);
-                        double jwl_R1    = msg.value("jwl_R1",    4.15);
-                        double jwl_R2    = msg.value("jwl_R2",    0.90);
-                        double jwl_omega = msg.value("jwl_omega", 0.35);
-                        double det_vel   = msg.value("det_vel",   6930.0);
-                        double det_energy= msg.value("detonation_energy", 4.29e6);
-                        matSet.products  = { jwl_A, jwl_B, jwl_R1, jwl_R2, jwl_omega, high_rho, 1000.0, 300.0 };
-                        matSet.unreacted = { jwl_A, jwl_B, jwl_R1, jwl_R2, jwl_omega, high_rho, 1000.0, 300.0 };
-                        matSet.det_vel   = det_vel;
-                        matSet.detonation_energy = det_energy;
-                    }
+                    MultiMat::MaterialSet matSet = parseMaterialSet(msg);
                     global_solver->setMaterialParameters(matSet);
 
                     if (init_mode == "Ideal Gas" || explosive_type == "MaterialIdealGas") {
@@ -1343,24 +1361,7 @@ int main() {
                         }
                     }
 
-                    MultiMat::MaterialSet matSet = MultiMat::TNT;
-                    if      (composition == "PETN") matSet = MultiMat::PETN;
-                    else if (composition == "RDX")  matSet = MultiMat::RDX;
-                    else if (composition == "TNT")  matSet = MultiMat::TNT;
-                    else {
-                        double jwl_A     = msg.value("jwl_A",     373.77e9);
-                        double jwl_B     = msg.value("jwl_B",     3.747e9);
-                        double jwl_R1    = msg.value("jwl_R1",    4.15);
-                        double jwl_R2    = msg.value("jwl_R2",    0.90);
-                        double jwl_omega = msg.value("jwl_omega", 0.35);
-                        double high_rho  = msg.value("rho",       1630.0);
-                        double det_vel   = msg.value("det_vel",   6930.0);
-                        double det_energy= msg.value("detonation_energy", 4.29e6);
-                        matSet.products  = { jwl_A, jwl_B, jwl_R1, jwl_R2, jwl_omega, high_rho, 1000.0, 300.0 };
-                        matSet.unreacted = { jwl_A, jwl_B, jwl_R1, jwl_R2, jwl_omega, high_rho, 1000.0, 300.0 };
-                        matSet.det_vel   = det_vel;
-                        matSet.detonation_energy = det_energy;
-                    }
+                    MultiMat::MaterialSet matSet = parseMaterialSet(msg);
 
                     global_t2d = 0.0;
                     global_dt_2d = 0.0;
@@ -1516,24 +1517,7 @@ int main() {
                     std::string explosive_type = msg.value("explosive_type", "");
                     bool is_ideal_gas = (explosive_type == "MaterialIdealGas" || msg.value("init_mode", "") == "Ideal Gas");
 
-                    MultiMat::MaterialSet matSet = MultiMat::TNT;
-                    if      (composition == "PETN") matSet = MultiMat::PETN;
-                    else if (composition == "RDX")  matSet = MultiMat::RDX;
-                    else if (composition == "TNT")  matSet = MultiMat::TNT;
-                    else {
-                        double jwl_A     = msg.value("jwl_A",     373.77e9);
-                        double jwl_B     = msg.value("jwl_B",     3.747e9);
-                        double jwl_R1    = msg.value("jwl_R1",    4.15);
-                        double jwl_R2    = msg.value("jwl_R2",    0.90);
-                        double jwl_omega = msg.value("jwl_omega", 0.35);
-                        double high_rho  = msg.value("rho",       1630.0);
-                        double det_vel   = msg.value("det_vel",   6930.0);
-                        double det_energy= msg.value("detonation_energy", 4.29e6);
-                        matSet.products  = { jwl_A, jwl_B, jwl_R1, jwl_R2, jwl_omega, high_rho, 1000.0, 300.0 };
-                        matSet.unreacted = { jwl_A, jwl_B, jwl_R1, jwl_R2, jwl_omega, high_rho, 1000.0, 300.0 };
-                        matSet.det_vel   = det_vel;
-                        matSet.detonation_energy = det_energy;
-                    }
+                    MultiMat::MaterialSet matSet = parseMaterialSet(msg);
 
                     std::vector<double> r_1d = msg.at("r_1d").get<std::vector<double>>();
                     std::vector<MultiMaterialState> states_1d;
@@ -1555,6 +1539,8 @@ int main() {
                         double explosive_x = msg.value("explosive_x", 0.0);
                         double explosive_y = msg.value("explosive_y", 0.0);
                         global_solver_3d->initializeFrom1D(r_1d, states_1d, explosive_x, explosive_y, explosive_z, remap_radius);
+                        global_t3d = 0.0;
+                        global_wallclock_3d = 0.0;
                     } else if (global_solver_2d) {
                         global_solver_2d->setGamma(gamma);
                         global_solver_2d->setIdealGas(is_ideal_gas);
@@ -1613,6 +1599,8 @@ int main() {
                     }
                     sim3d_terminate = false;
                     sim3d_paused = false;
+                    global_t3d = 0.0;
+                    global_wallclock_3d = 0.0;
 
                     int nx = msg.value("nx", 64);
                     int ny = msg.value("ny", 64);
@@ -1652,7 +1640,11 @@ int main() {
                     bool is_multimat = (init_mode == "Multi-Material JWL");
 
                     if (device == "cuda") {
-                        global_solver_3d = std::make_unique<CFDSolver3DCuda>(nx, ny, nz, cellSize, xmin, ymin, zmin);
+                        if (is_multimat) {
+                            global_solver_3d = std::make_unique<CFDSolver3DCuda<true>>(nx, ny, nz, cellSize, xmin, ymin, zmin);
+                        } else {
+                            global_solver_3d = std::make_unique<CFDSolver3DCuda<false>>(nx, ny, nz, cellSize, xmin, ymin, zmin);
+                        }
                     } else {
                         if (is_multimat) {
                             global_solver_3d = std::make_unique<CFDSolver3DImpl<true>>(nx, ny, nz, cellSize, xmin, ymin, zmin);
@@ -1664,15 +1656,17 @@ int main() {
                     std::string flux_scheme = msg.value("flux_scheme", "AUSM+");
                     int spatial_order = msg.value("spatial_order", 2);
                     int temporal_order = msg.value("temporal_order", 2);
+                    std::string precision = msg.value("precision", "single");
 
                     global_solver_3d->setFluxScheme(flux_scheme);
                     global_solver_3d->setSpatialOrder(spatial_order);
                     global_solver_3d->setTemporalOrder(temporal_order);
+                    // Note: C++ solver is inherently double-precision, 'precision' param is parsed but not templated yet for performance.
 
                     Charge3DParams cp;
-                    cp.shape = msg.value("charge_shape", "Sphere");
-                    if (cp.shape == "Sphere") cp.shape_type = 0;
-                    else if (cp.shape == "Block") cp.shape_type = 1;
+                    std::string shape_str = msg.value("charge_shape", "Sphere");
+                    if (shape_str == "Sphere") cp.shape_type = 0;
+                    else if (shape_str == "Block") cp.shape_type = 1;
                     else cp.shape_type = 2; // Cylinder
                     cp.x = msg.value("charge_x", 0.0);
                     cp.y = msg.value("charge_y", 0.0);
@@ -1683,11 +1677,7 @@ int main() {
                     cp.ly = msg.value("charge_ly", 0.1);
                     cp.lz = msg.value("charge_lz", 0.1);
 
-                    std::string composition = msg.value("composition", "TNT");
-                    MultiMat::MaterialSet matSet = MultiMat::TNT;
-                    if      (composition == "PETN") matSet = MultiMat::PETN;
-                    else if (composition == "RDX")  matSet = MultiMat::RDX;
-                    else if (composition == "TNT")  matSet = MultiMat::TNT;
+                    MultiMat::MaterialSet matSet = parseMaterialSet(msg);
 
                     double ambient_rho = msg.value("ambient_rho", 1.225);
                     double ambient_p = msg.value("atm_pressure", 101325.0);
@@ -1702,7 +1692,8 @@ int main() {
                     }
 
                     auto map_bc_3d = [](const std::string& str) {
-                        if (str == "Transmitting" || str == "TRANSMISSIVE" || str == "Terminate") return BCType3D::TRANSMISSIVE;
+                        if (str == "Transmitting" || str == "TRANSMISSIVE") return BCType3D::TRANSMISSIVE;
+                        if (str == "Terminate" || str == "OUTFLOW_RIEMANN") return BCType3D::OUTFLOW_RIEMANN;
                         return BCType3D::REFLECTIVE;
                     };
                     global_solver_3d->setBoundaryConditions(

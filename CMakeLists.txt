@@ -86,3 +86,26 @@ else()
     target_compile_definitions(BlastSolver PRIVATE NO_HDF5)
     message(WARNING "HDF5 not found. Building BlastSolver without HDF5 support (NO_HDF5 defined).")
 endif()
+
+# test_cuda_solver binary
+add_executable(test_cuda_solver
+    backend/BlastSolver/test_cuda_solver.cu
+    backend/BlastSolver/cfd_solver_3d.cpp
+    backend/BlastSolver/cfd_solver_3d_cuda.cu
+    backend/BlastSolver/remapper_3d.cpp
+)
+target_include_directories(test_cuda_solver PRIVATE backend/BlastSolver/include)
+set_target_properties(test_cuda_solver PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+target_compile_options(test_cuda_solver PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3>)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(test_cuda_solver PRIVATE OpenMP::OpenMP_CXX)
+    target_compile_options(test_cuda_solver PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler -fopenmp>)
+endif()
+target_link_libraries(test_cuda_solver PRIVATE ${CMAKE_DL_LIBS} ZLIB::ZLIB)
+if(HDF5_FOUND)
+    target_include_directories(test_cuda_solver PRIVATE ${HDF5_INCLUDE_DIRS})
+    target_link_libraries(test_cuda_solver PRIVATE ${HDF5_LIBRARIES})
+else()
+    target_compile_definitions(test_cuda_solver PRIVATE NO_HDF5)
+endif()
+

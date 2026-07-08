@@ -15,7 +15,9 @@ CFDSolver3DImpl<IsMultiMaterial>::CFDSolver3DImpl(int nx, int ny, int nz, double
     int total_tiles = n_tiles_x * n_tiles_y * n_tiles_z;
     states_pool.resize(total_tiles);
     U_pool.resize(total_tiles);
-    active_tiles.assign(total_tiles, false);
+    U_prev_pool.resize(total_tiles);
+    active_tiles.assign(total_tiles, 0);
+    is_ideal_gas_val = !IsMultiMaterial;
 }
 
 template <bool IsMultiMaterial>
@@ -32,6 +34,7 @@ void CFDSolver3DImpl<IsMultiMaterial>::setInitialCondition(const Charge3DParams&
     #pragma omp parallel for
     for (int t = 0; t < (int)states_pool.size(); ++t) {
         auto& tile = states_pool[t];
+        auto& u_tile = U_pool[t];
         for (int i = 0; i < TILE_CELLS_3D; ++i) {
             tile.rho[i] = ambient_rho;
             tile.ux[i] = 0.0;
@@ -52,6 +55,18 @@ void CFDSolver3DImpl<IsMultiMaterial>::setInitialCondition(const Charge3DParams&
                 tile.arho2[i] = 0.0;
             }
             tile.floor_status[i] = 0;
+
+            u_tile.rho[i] = ambient_rho;
+            u_tile.rhoux[i] = 0.0;
+            u_tile.rhouy[i] = 0.0;
+            u_tile.rhouz[i] = 0.0;
+            u_tile.E[i] = tile.E[i];
+            if constexpr (IsMultiMaterial) {
+                u_tile.alpha1[i] = 0.0;
+                u_tile.alpha2[i] = 0.0;
+                u_tile.arho1[i] = 0.0;
+                u_tile.arho2[i] = 0.0;
+            }
         }
     }
 
@@ -80,13 +95,13 @@ void CFDSolver3DImpl<IsMultiMaterial>::setInitialCondition(const Charge3DParams&
                             double dist_sq = (x_c - charge.x)*(x_c - charge.x) + (y_c - charge.y)*(y_c - charge.y) + (z_c - charge.z)*(z_c - charge.z);
                             bool in_charge = false;
 
-                            if (charge.shape == "Sphere") {
+                            if (charge.shape_type == 0) { // Sphere
                                 if (dist_sq <= charge.radius * charge.radius) in_charge = true;
-                            } else if (charge.shape == "Block") {
+                            } else if (charge.shape_type == 1) { // Block
                                 if (std::abs(x_c - charge.x) <= charge.lx*0.5 &&
                                     std::abs(y_c - charge.y) <= charge.ly*0.5 &&
                                     std::abs(z_c - charge.z) <= charge.lz*0.5) in_charge = true;
-                            } else if (charge.shape == "Cylinder") {
+                            } else if (charge.shape_type == 2) { // Cylinder
                                 double dr_sq = (x_c - charge.x)*(x_c - charge.x) + (y_c - charge.y)*(y_c - charge.y);
                                 if (dr_sq <= charge.radius*charge.radius && std::abs(z_c - charge.z) <= charge.height*0.5) in_charge = true;
                             }
@@ -110,11 +125,24 @@ void CFDSolver3DImpl<IsMultiMaterial>::setInitialCondition(const Charge3DParams&
                                 tile.E[c_idx] = getEnergy3D<IsMultiMaterial>(tile.p[c_idx], tile.rho[c_idx], temp_s, gamma, materials.products, materials.unreacted);
                                 double dist = std::sqrt(dist_sq);
                                 tile.arrival_time[c_idx] = dist / materials.det_vel;
+
+                                auto& u_tile = U_pool[t_idx];
+                                u_tile.rho[c_idx] = tile.rho[c_idx];
+                                u_tile.rhoux[c_idx] = 0.0;
+                                u_tile.rhouy[c_idx] = 0.0;
+                                u_tile.rhouz[c_idx] = 0.0;
+                                u_tile.E[c_idx] = tile.E[c_idx];
+                                if constexpr (IsMultiMaterial) {
+                                    u_tile.alpha1[c_idx] = tile.alpha1[c_idx];
+                                    u_tile.alpha2[c_idx] = tile.alpha2[c_idx];
+                                    u_tile.arho1[c_idx] = tile.arho1[c_idx];
+                                    u_tile.arho2[c_idx] = tile.arho2[c_idx];
+                                }
                             }
                         }
                     }
                 }
-                if (tile_has_charge) active_tiles[t_idx] = true;
+                if (tile_has_charge) active_tiles[t_idx] = 1;
             }
         }
     }
@@ -123,18 +151,18 @@ void CFDSolver3DImpl<IsMultiMaterial>::setInitialCondition(const Charge3DParams&
 
 template <bool IsMultiMaterial>
 void CFDSolver3DImpl<IsMultiMaterial>::updateActiveRegions() {
-    std::vector<bool> next_active = active_tiles;
+    std::vector<uint8_t> next_active = active_tiles;
     for (int tz = 0; tz < n_tiles_z; ++tz) {
         for (int ty = 0; ty < n_tiles_y; ++ty) {
             for (int tx = 0; tx < n_tiles_x; ++tx) {
                 int idx = tx + ty * n_tiles_x + tz * n_tiles_x * n_tiles_y;
                 if (active_tiles[idx]) {
-                    if (tx > 0) next_active[idx - 1] = true;
-                    if (tx < n_tiles_x - 1) next_active[idx + 1] = true;
-                    if (ty > 0) next_active[idx - n_tiles_x] = true;
-                    if (ty < n_tiles_y - 1) next_active[idx + n_tiles_x] = true;
-                    if (tz > 0) next_active[idx - n_tiles_x * n_tiles_y] = true;
-                    if (tz < n_tiles_z - 1) next_active[idx + n_tiles_x * n_tiles_y] = true;
+                    if (tx > 0) next_active[idx - 1] = 1;
+                    if (tx < n_tiles_x - 1) next_active[idx + 1] = 1;
+                    if (ty > 0) next_active[idx - n_tiles_x] = 1;
+                    if (ty < n_tiles_y - 1) next_active[idx + n_tiles_x] = 1;
+                    if (tz > 0) next_active[idx - n_tiles_x * n_tiles_y] = 1;
+                    if (tz < n_tiles_z - 1) next_active[idx + n_tiles_x * n_tiles_y] = 1;
                 }
             }
         }
@@ -276,22 +304,69 @@ static inline double minmod(double a, double b) {
     return (std::abs(a) < std::abs(b)) ? a : b;
 }
 
+static inline double weno3(double qm1, double q0, double qp1) {
+    double eps = 1e-6;
+    double beta0 = (qp1 - q0) * (qp1 - q0);
+    double beta1 = (q0 - qm1) * (q0 - qm1);
+    double alpha0 = (2.0 / 3.0) / ((eps + beta0) * (eps + beta0));
+    double alpha1 = (1.0 / 3.0) / ((eps + beta1) * (eps + beta1));
+    double sum_alpha = alpha0 + alpha1;
+    double w0 = alpha0 / sum_alpha;
+    double w1 = alpha1 / sum_alpha;
+    return w0 * (0.5 * q0 + 0.5 * qp1) + w1 * (-0.5 * qm1 + 1.5 * q0);
+}
+
 template <bool IsMultiMaterial>
-CellState3D<IsMultiMaterial> reconstruct(const CellState3D<IsMultiMaterial>& sL, const CellState3D<IsMultiMaterial>& sC, const CellState3D<IsMultiMaterial>& sR, double side, double gamma, const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted) {
+CellState3D<IsMultiMaterial> reconstruct(const CellState3D<IsMultiMaterial>& sL, const CellState3D<IsMultiMaterial>& sC, const CellState3D<IsMultiMaterial>& sR, double side, int spatialOrder, double gamma, const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted) {
     CellState3D<IsMultiMaterial> res;
-    auto slope = [&](double L, double C, double R) { return minmod(C - L, R - C); };
+    
+    if (spatialOrder == 1) {
+        if (side < 0) { res = sC; }
+        else { res = sC; } 
+        // Wait, for 1st order we just return sC, but let's implement properly
+        return sC;
+    }
+    
+    if (spatialOrder == 3) {
+        if (side < 0) { // Right-biased for left face of i+1
+            res.rho = std::max(1e-7, weno3(sR.rho, sC.rho, sL.rho));
+            res.ux = weno3(sR.ux, sC.ux, sL.ux);
+            res.uy = weno3(sR.uy, sC.uy, sL.uy);
+            res.uz = weno3(sR.uz, sC.uz, sL.uz);
+            res.p = std::max(1e-7, weno3(sR.p, sC.p, sL.p));
+            if constexpr (IsMultiMaterial) {
+                res.alpha1 = std::clamp(weno3(sR.alpha1, sC.alpha1, sL.alpha1), 0.0, 1.0);
+                res.alpha2 = std::clamp(weno3(sR.alpha2, sC.alpha2, sL.alpha2), 0.0, 1.0);
+                res.arho1 = std::max(0.0, weno3(sR.arho1, sC.arho1, sL.arho1));
+                res.arho2 = std::max(0.0, weno3(sR.arho2, sC.arho2, sL.arho2));
+            }
+        } else { // Left-biased for right face of i
+            res.rho = std::max(1e-7, weno3(sL.rho, sC.rho, sR.rho));
+            res.ux = weno3(sL.ux, sC.ux, sR.ux);
+            res.uy = weno3(sL.uy, sC.uy, sR.uy);
+            res.uz = weno3(sL.uz, sC.uz, sR.uz);
+            res.p = std::max(1e-7, weno3(sL.p, sC.p, sR.p));
+            if constexpr (IsMultiMaterial) {
+                res.alpha1 = std::clamp(weno3(sL.alpha1, sC.alpha1, sR.alpha1), 0.0, 1.0);
+                res.alpha2 = std::clamp(weno3(sL.alpha2, sC.alpha2, sR.alpha2), 0.0, 1.0);
+                res.arho1 = std::max(0.0, weno3(sL.arho1, sC.arho1, sR.arho1));
+                res.arho2 = std::max(0.0, weno3(sL.arho2, sC.arho2, sR.arho2));
+            }
+        }
+    } else { // spatialOrder == 2 (MinMod)
+        auto slope = [&](double L, double C, double R) { return minmod(C - L, R - C); };
+        res.rho = sC.rho + side * slope(sL.rho, sC.rho, sR.rho);
+        res.ux = sC.ux + side * slope(sL.ux, sC.ux, sR.ux);
+        res.uy = sC.uy + side * slope(sL.uy, sC.uy, sR.uy);
+        res.uz = sC.uz + side * slope(sL.uz, sC.uz, sR.uz);
+        res.p = sC.p + side * slope(sL.p, sC.p, sR.p);
 
-    res.rho = sC.rho + side * slope(sL.rho, sC.rho, sR.rho);
-    res.ux = sC.ux + side * slope(sL.ux, sC.ux, sR.ux);
-    res.uy = sC.uy + side * slope(sL.uy, sC.uy, sR.uy);
-    res.uz = sC.uz + side * slope(sL.uz, sC.uz, sR.uz);
-    res.p = sC.p + side * slope(sL.p, sC.p, sR.p);
-
-    if constexpr (IsMultiMaterial) {
-        res.alpha1 = std::clamp(sC.alpha1 + side * slope(sL.alpha1, sC.alpha1, sR.alpha1), 0.0, 1.0);
-        res.alpha2 = std::clamp(sC.alpha2 + side * slope(sL.alpha2, sC.alpha2, sR.alpha2), 0.0, 1.0);
-        res.arho1 = std::clamp(sC.arho1 + side * slope(sL.arho1, sC.arho1, sR.arho1), 0.0, res.rho);
-        res.arho2 = std::clamp(sC.arho2 + side * slope(sL.arho2, sC.arho2, sR.arho2), 0.0, res.rho);
+        if constexpr (IsMultiMaterial) {
+            res.alpha1 = std::clamp(sC.alpha1 + side * slope(sL.alpha1, sC.alpha1, sR.alpha1), 0.0, 1.0);
+            res.alpha2 = std::clamp(sC.alpha2 + side * slope(sL.alpha2, sC.alpha2, sR.alpha2), 0.0, 1.0);
+            res.arho1 = std::clamp(sC.arho1 + side * slope(sL.arho1, sC.arho1, sR.arho1), 0.0, res.rho);
+            res.arho2 = std::clamp(sC.arho2 + side * slope(sL.arho2, sC.arho2, sR.arho2), 0.0, res.rho);
+        }
     }
 
     double ke = 0.5 * res.rho * (res.ux*res.ux + res.uy*res.uy + res.uz*res.uz);
@@ -333,8 +408,8 @@ void CFDSolver3DImpl<IsMultiMaterial>::computeFluxes(double dt) {
                             auto sR1 = sampleState(gx+1, gy, gz);
                             auto sR2 = sampleState(gx+2, gy, gz);
 
-                            auto fxL = get_f(reconstruct(sL2, sL1, sC, 0.5, gamma, currentMaterials.products, currentMaterials.unreacted), reconstruct(sL1, sC, sR1, -0.5, gamma, currentMaterials.products, currentMaterials.unreacted), 0);
-                            auto fxR = get_f(reconstruct(sL1, sC, sR1, 0.5, gamma, currentMaterials.products, currentMaterials.unreacted), reconstruct(sC, sR1, sR2, -0.5, gamma, currentMaterials.products, currentMaterials.unreacted), 0);
+                            auto fxL = get_f(reconstruct(sL2, sL1, sC, 0.5, spatialOrder, gamma, currentMaterials.products, currentMaterials.unreacted), reconstruct(sL1, sC, sR1, -0.5, spatialOrder, gamma, currentMaterials.products, currentMaterials.unreacted), 0);
+                            auto fxR = get_f(reconstruct(sL1, sC, sR1, 0.5, spatialOrder, gamma, currentMaterials.products, currentMaterials.unreacted), reconstruct(sC, sR1, sR2, -0.5, spatialOrder, gamma, currentMaterials.products, currentMaterials.unreacted), 0);
 
                             // Y-Fluxes
                             auto sB2 = sampleState(gx, gy-2, gz);
@@ -342,8 +417,8 @@ void CFDSolver3DImpl<IsMultiMaterial>::computeFluxes(double dt) {
                             auto sT1 = sampleState(gx,   gy+1, gz);
                             auto sT2 = sampleState(gx,   gy+2, gz);
 
-                            auto fyB = get_f(reconstruct(sB2, sB1, sC, 0.5, gamma, currentMaterials.products, currentMaterials.unreacted), reconstruct(sB1, sC, sT1, -0.5, gamma, currentMaterials.products, currentMaterials.unreacted), 1);
-                            auto fyT = get_f(reconstruct(sB1, sC, sT1, 0.5, gamma, currentMaterials.products, currentMaterials.unreacted), reconstruct(sC, sT1, sT2, -0.5, gamma, currentMaterials.products, currentMaterials.unreacted), 1);
+                            auto fyB = get_f(reconstruct(sB2, sB1, sC, 0.5, spatialOrder, gamma, currentMaterials.products, currentMaterials.unreacted), reconstruct(sB1, sC, sT1, -0.5, spatialOrder, gamma, currentMaterials.products, currentMaterials.unreacted), 1);
+                            auto fyT = get_f(reconstruct(sB1, sC, sT1, 0.5, spatialOrder, gamma, currentMaterials.products, currentMaterials.unreacted), reconstruct(sC, sT1, sT2, -0.5, spatialOrder, gamma, currentMaterials.products, currentMaterials.unreacted), 1);
 
                             // Z-Fluxes
                             auto sD2 = sampleState(gx, gy, gz-2);
@@ -351,8 +426,10 @@ void CFDSolver3DImpl<IsMultiMaterial>::computeFluxes(double dt) {
                             auto sU1 = sampleState(gx, gy, gz+1);
                             auto sU2 = sampleState(gx, gy, gz+2);
 
-                            auto fzD = get_f(reconstruct(sD2, sD1, sC, 0.5, gamma, currentMaterials.products, currentMaterials.unreacted), reconstruct(sD1, sC, sU1, -0.5, gamma, currentMaterials.products, currentMaterials.unreacted), 2);
-                            auto fzU = get_f(reconstruct(sD1, sC, sU1, 0.5, gamma, currentMaterials.products, currentMaterials.unreacted), reconstruct(sC, sU1, sU2, -0.5, gamma, currentMaterials.products, currentMaterials.unreacted), 2);
+                            auto fzD = get_f(reconstruct(sD2, sD1, sC, 0.5, spatialOrder, gamma, currentMaterials.products, currentMaterials.unreacted), reconstruct(sD1, sC, sU1, -0.5, spatialOrder, gamma, currentMaterials.products, currentMaterials.unreacted), 2);
+                            auto fzU = get_f(reconstruct(sD1, sC, sU1, 0.5, spatialOrder, gamma, currentMaterials.products, currentMaterials.unreacted), reconstruct(sC, sU1, sU2, -0.5, spatialOrder, gamma, currentMaterials.products, currentMaterials.unreacted), 2);
+
+
 
                             u.rho[idx] -= dt * invDx * (fxR.rho - fxL.rho + fyT.rho - fyB.rho + fzU.rho - fzD.rho);
                             u.rhoux[idx] -= dt * invDx * (fxR.rhoux - fxL.rhoux + fyT.rhoux - fyB.rhoux + fzU.rhoux - fzD.rhoux);
@@ -448,7 +525,7 @@ void CFDSolver3DImpl<IsMultiMaterial>::updatePrimitiveFromConservative() {
 
 template <bool IsMultiMaterial>
 void CFDSolver3DImpl<IsMultiMaterial>::step(double dt) {
-    if (temporalOrder == 1) {
+    auto copy_primitive_to_U = [&]() {
         #pragma omp parallel for
         for (int t = 0; t < (int)states_pool.size(); ++t) {
             if (!active_tiles[t]) continue;
@@ -466,95 +543,69 @@ void CFDSolver3DImpl<IsMultiMaterial>::step(double dt) {
                 }
             }
         }
+    };
 
-        computeFluxes(dt);
-
-        if constexpr (IsMultiMaterial) {
-            applyProgrammedBurn(dt);
+    auto average_U = [&](const std::vector<ConservativeTile3D<IsMultiMaterial>>& U0, double w0, double w1) {
+        #pragma omp parallel for
+        for (int t = 0; t < (int)states_pool.size(); ++t) {
+            if (!active_tiles[t]) continue;
+            auto& u = U_pool[t];
+            const auto& u0 = U0[t];
+            for (int i = 0; i < TILE_CELLS_3D; ++i) {
+                u.rho[i] = w0 * u0.rho[i] + w1 * u.rho[i];
+                u.rhoux[i] = w0 * u0.rhoux[i] + w1 * u.rhoux[i];
+                u.rhouy[i] = w0 * u0.rhouy[i] + w1 * u.rhouy[i];
+                u.rhouz[i] = w0 * u0.rhouz[i] + w1 * u.rhouz[i];
+                u.E[i] = w0 * u0.E[i] + w1 * u.E[i];
+                if constexpr (IsMultiMaterial) {
+                    u.alpha1[i] = w0 * u0.alpha1[i] + w1 * u.alpha1[i];
+                    u.alpha2[i] = w0 * u0.alpha2[i] + w1 * u.alpha2[i];
+                    u.arho1[i] = w0 * u0.arho1[i] + w1 * u.arho1[i];
+                    u.arho2[i] = w0 * u0.arho2[i] + w1 * u.arho2[i];
+                }
+            }
         }
+    };
 
+    copy_primitive_to_U();
+
+    if (temporalOrder == 1) {
+        computeFluxes(dt);
+    } else if (temporalOrder == 2) {
+        U_prev_pool = U_pool;
+        computeFluxes(dt);
         updatePrimitiveFromConservative();
         applyBC();
-        currentTime += dt;
-        updateActiveRegions();
-    } else {
-        std::vector<ConservativeTile3D<IsMultiMaterial>> U_prev = U_pool;
 
-        #pragma omp parallel for
-        for (int t = 0; t < (int)states_pool.size(); ++t) {
-            if (!active_tiles[t]) continue;
-            auto& s = states_pool[t];
-            auto& u = U_pool[t];
-            for (int i = 0; i < TILE_CELLS_3D; ++i) {
-                u.rho[i] = s.rho[i];
-                u.rhoux[i] = s.rho[i] * s.ux[i];
-                u.rhouy[i] = s.rho[i] * s.uy[i];
-                u.rhouz[i] = s.rho[i] * s.uz[i];
-                u.E[i] = s.E[i];
-                if constexpr (IsMultiMaterial) {
-                    u.alpha1[i] = s.alpha1[i]; u.alpha2[i] = s.alpha2[i];
-                    u.arho1[i] = s.arho1[i]; u.arho2[i] = s.arho2[i];
-                }
-            }
-        }
-        U_prev = U_pool;
-
+        computeFluxes(dt);
+        average_U(U_prev_pool, 0.5, 0.5);
+    } else { // SSP-RK3
+        U_prev_pool = U_pool;
+        
         // Stage 1
         computeFluxes(dt);
-        if constexpr (IsMultiMaterial) {
-            applyProgrammedBurn(dt);
-        }
         updatePrimitiveFromConservative();
         applyBC();
 
         // Stage 2
-        #pragma omp parallel for
-        for (int t = 0; t < (int)states_pool.size(); ++t) {
-            if (!active_tiles[t]) continue;
-            auto& s = states_pool[t];
-            auto& u = U_pool[t];
-            for (int i = 0; i < TILE_CELLS_3D; ++i) {
-                u.rho[i] = s.rho[i];
-                u.rhoux[i] = s.rho[i] * s.ux[i];
-                u.rhouy[i] = s.rho[i] * s.uy[i];
-                u.rhouz[i] = s.rho[i] * s.uz[i];
-                u.E[i] = s.E[i];
-                if constexpr (IsMultiMaterial) {
-                    u.alpha1[i] = s.alpha1[i]; u.alpha2[i] = s.alpha2[i];
-                    u.arho1[i] = s.arho1[i]; u.arho2[i] = s.arho2[i];
-                }
-            }
-        }
         computeFluxes(dt);
-        if constexpr (IsMultiMaterial) {
-            applyProgrammedBurn(dt);
-        }
-
-        #pragma omp parallel for
-        for (int t = 0; t < (int)states_pool.size(); ++t) {
-            if (!active_tiles[t]) continue;
-            auto& u = U_pool[t];
-            const auto& u_n = U_prev[t];
-            for (int i = 0; i < TILE_CELLS_3D; ++i) {
-                u.rho[i] = 0.5 * u_n.rho[i] + 0.5 * u.rho[i];
-                u.rhoux[i] = 0.5 * u_n.rhoux[i] + 0.5 * u.rhoux[i];
-                u.rhouy[i] = 0.5 * u_n.rhouy[i] + 0.5 * u.rhouy[i];
-                u.rhouz[i] = 0.5 * u_n.rhouz[i] + 0.5 * u.rhouz[i];
-                u.E[i] = 0.5 * u_n.E[i] + 0.5 * u.E[i];
-                if constexpr (IsMultiMaterial) {
-                    u.alpha1[i] = 0.5 * u_n.alpha1[i] + 0.5 * u.alpha1[i];
-                    u.alpha2[i] = 0.5 * u_n.alpha2[i] + 0.5 * u.alpha2[i];
-                    u.arho1[i] = 0.5 * u_n.arho1[i] + 0.5 * u.arho1[i];
-                    u.arho2[i] = 0.5 * u_n.arho2[i] + 0.5 * u.arho2[i];
-                }
-            }
-        }
-
+        average_U(U_prev_pool, 0.75, 0.25);
         updatePrimitiveFromConservative();
         applyBC();
-        currentTime += dt;
-        updateActiveRegions();
+
+        // Stage 3
+        computeFluxes(dt);
+        average_U(U_prev_pool, 1.0 / 3.0, 2.0 / 3.0);
     }
+
+    if constexpr (IsMultiMaterial) {
+        applyProgrammedBurn(dt);
+    }
+
+    updatePrimitiveFromConservative();
+    applyBC();
+    currentTime += dt;
+    updateActiveRegions();
 }
 
 template <bool IsMultiMaterial>
@@ -575,7 +626,9 @@ double CFDSolver3DImpl<IsMultiMaterial>::computeStepSize(double cfl) const {
                 temp_s.arho1 = tile.arho1[i]; temp_s.arho2 = tile.arho2[i];
             }
             double c = getSoundSpeed3D<IsMultiMaterial>(tile.p[i], tile.rho[i], temp_s, gamma, currentMaterials.products, currentMaterials.unreacted);
-            max_s = std::max(max_s, u_mag + c);
+            if (u_mag + c > max_s) {
+                max_s = u_mag + c;
+            }
         }
     }
     return cfl * cellSize / max_s;
@@ -652,7 +705,6 @@ extern void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<Mu
 template <bool IsMultiMaterial>
 void CFDSolver3DImpl<IsMultiMaterial>::initializeFrom1D(const std::vector<double>& r_1d, const std::vector<MultiMaterialState>& states_1d, double x_expl, double y_expl, double z_expl, double R_remap) {
     remap_1d_to_3d(r_1d, states_1d, *this, x_expl, y_expl, z_expl, R_remap);
-    updateActiveRegions();
 }
 
 template <bool IsMultiMaterial>
@@ -665,23 +717,46 @@ void CFDSolver3DImpl<IsMultiMaterial>::setCellStateMulti(int gx, int gy, int gz,
         tile.p[c_idx] = s.p; tile.E[c_idx] = s.E;
         tile.alpha1[c_idx] = s.alpha1; tile.alpha2[c_idx] = s.alpha2;
         tile.arho1[c_idx] = s.arho1; tile.arho2[c_idx] = s.arho2;
-        active_tiles[t_idx] = true;
+        active_tiles[t_idx] = 1;
     }
 }
 
 template <bool IsMultiMaterial>
 void CFDSolver3DImpl<IsMultiMaterial>::setCellStateIdeal(int gx, int gy, int gz, const CellState3D<false>& s) {
-    int t_idx = (gx / TILE_SIZE_3D) + (gy / TILE_SIZE_3D) * n_tiles_x + (gz / TILE_SIZE_3D) * n_tiles_x * n_tiles_y;
+    int tx = gx / TILE_SIZE_3D;
+    int ty = gy / TILE_SIZE_3D;
+    int tz = gz / TILE_SIZE_3D;
+    int t_idx = tx + ty * n_tiles_x + tz * n_tiles_x * n_tiles_y;
     int c_idx = (gx % TILE_SIZE_3D) + (gy % TILE_SIZE_3D) * TILE_SIZE_3D + (gz % TILE_SIZE_3D) * TILE_SIZE_3D * TILE_SIZE_3D;
     auto& tile = states_pool[t_idx];
     tile.rho[c_idx] = s.rho; tile.ux[c_idx] = s.ux; tile.uy[c_idx] = s.uy; tile.uz[c_idx] = s.uz;
     tile.p[c_idx] = s.p; tile.E[c_idx] = s.E;
-    active_tiles[t_idx] = true;
+    active_tiles[t_idx] = 1;
 }
 
 template <bool IsMultiMaterial>
 void CFDSolver3DImpl<IsMultiMaterial>::commitStates() {
     updateActiveRegions();
+    
+    #pragma omp parallel for
+    for (int t = 0; t < (int)states_pool.size(); ++t) {
+        if (!active_tiles[t]) continue;
+        const auto& state_tile = states_pool[t];
+        auto& u_tile = U_pool[t];
+        for (int i = 0; i < TILE_CELLS_3D; ++i) {
+            u_tile.rho[i] = state_tile.rho[i];
+            u_tile.rhoux[i] = state_tile.rho[i] * state_tile.ux[i];
+            u_tile.rhouy[i] = state_tile.rho[i] * state_tile.uy[i];
+            u_tile.rhouz[i] = state_tile.rho[i] * state_tile.uz[i];
+            u_tile.E[i] = state_tile.E[i];
+            if constexpr (IsMultiMaterial) {
+                u_tile.arho1[i] = state_tile.arho1[i];
+                u_tile.arho2[i] = state_tile.arho2[i];
+                u_tile.alpha1[i] = state_tile.alpha1[i];
+                u_tile.alpha2[i] = state_tile.alpha2[i];
+            }
+        }
+    }
 }
 
 template <bool IsMultiMaterial> void CFDSolver3DImpl<IsMultiMaterial>::setFluxScheme(const std::string& name) { currentFluxScheme = name; }

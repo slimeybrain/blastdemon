@@ -1412,8 +1412,9 @@ export class GraphRenderer {
                 cfl: 0.4,
                 init_mode: 'From1D',
                 flux_scheme: 'AUSM+',
-                spatial_order: '2',
-                temporal_order: '2',
+                spatial_order: 2,
+                temporal_order: 2,
+                precision: 'single',
                 device: 'cpu'
             };
             case 'Telemetry3DViewport': return {
@@ -3935,6 +3936,10 @@ export class GraphRenderer {
                 'z_max_bc': ['Reflecting', 'Transmitting', 'Terminate'],
                 'left_bc': ['Reflecting', 'Transmitting', 'Terminate'],
                 'right_bc': ['Reflecting', 'Transmitting', 'Terminate'],
+                'bc_x_min': ['Reflecting', 'Transmitting', 'Terminate'],
+                'bc_x_max': ['Reflecting', 'Transmitting', 'Terminate'],
+                'bc_y_min': ['Reflecting', 'Transmitting', 'Terminate'],
+                'bc_y_max': ['Reflecting', 'Transmitting', 'Terminate'],
                 'bc_r_min': ['Reflecting', 'Transmitting', 'Terminate'],
                 'bc_r_max': ['Reflecting', 'Transmitting', 'Terminate'],
                 'bc_z_min': ['Reflecting', 'Transmitting', 'Terminate'],

@@ -3,6 +3,7 @@
 #include <vector>
 #include <cmath>
 #include <algorithm>
+#include <iostream>
 
 /**
  * remap_1d_to_3d
@@ -47,9 +48,9 @@ void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<MultiMate
     for (int k = 0; k < nz; ++k) {
         for (int j = 0; j < ny; ++j) {
             for (int i = 0; i < nx; ++i) {
-                double x_c = (i + 0.5) * dx;
-                double y_c = (j + 0.5) * dx;
-                double z_c = (k + 0.5) * dx;
+                double x_c = solver_3d.getXMin() + (i + 0.5) * dx;
+                double y_c = solver_3d.getYMin() + (j + 0.5) * dx;
+                double z_c = solver_3d.getZMin() + (k + 0.5) * dx;
 
                 double dx_expl = x_c - x_expl;
                 double dy_expl = y_c - y_expl;
@@ -98,12 +99,19 @@ void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<MultiMate
                 double ke = 0.5 * s3d.rho * (s3d.ux*s3d.ux + s3d.uy*s3d.uy + s3d.uz*s3d.uz);
                 if (solver_3d.isIdealGas()) {
                     s3d.E = s3d.p / (solver_3d.getGamma() - 1.0) + ke;
+                    CellState3D<false> s_gas;
+                    s_gas.rho = s3d.rho;
+                    s_gas.ux = s3d.ux;
+                    s_gas.uy = s3d.uy;
+                    s_gas.uz = s3d.uz;
+                    s_gas.p = s3d.p;
+                    s_gas.E = s3d.E;
+                    solver_3d.setCellStateIdeal(i, j, k, s_gas);
                 } else {
                     const auto& mat = solver_3d.getMaterialParameters();
                     s3d.E = MultiMat::getMixtureEnergy(s3d.p, s3d.rho, s3d.alpha1, s3d.alpha2, s3d.arho1, s3d.arho2, solver_3d.getGamma(), mat.products, mat.unreacted) + ke;
+                    solver_3d.setCellStateMulti(i, j, k, s3d);
                 }
-
-                solver_3d.setCellStateMulti(i, j, k, s3d);
             }
         }
     }

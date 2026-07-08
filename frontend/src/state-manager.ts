@@ -1398,7 +1398,8 @@ export class StateManager {
                 init_mode: 'From1D',
                 flux_scheme: 'AUSM+',
                 spatial_order: 2,
-                temporal_order: 2
+                temporal_order: 2,
+                precision: 'single'
             },
             'Telemetry3DViewport': {
                 colormap: 'plasma',
