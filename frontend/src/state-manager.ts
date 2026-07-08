@@ -1409,7 +1409,8 @@ export class StateManager {
                 auto_scale: true,
                 min_val: 101325.0,
                 max_val: 101325.0 * 100.0,
-                show_grid: true
+                show_grid: true,
+                interpolate: false
             },
             'VirtualGauges3D': {
                 gauges: [{ name: 'G1', x: 0.6, y: 0.5, z: 0.5 }]

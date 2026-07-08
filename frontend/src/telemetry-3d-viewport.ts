@@ -33,7 +33,7 @@ export class Telemetry3DViewport {
         this.worker = new Worker(new URL('./ViewportWorker.ts?v=' + Date.now(), import.meta.url), { type: 'module' });
 
         this.worker.onmessage = (e) => {
-            const { type, renderer } = e.data;
+            const { type, renderer, min, max } = e.data;
             if (type === 'rendererInfo') {
                 const badge = document.getElementById(`viewport-renderer-badge-${this.panelId}`);
                 if (badge) {
@@ -48,6 +48,20 @@ export class Telemetry3DViewport {
                         badge.style.color = '#ffaa00';
                         badge.style.background = 'rgba(255, 170, 0, 0.1)';
                     }
+                }
+            } else if (type === 'rangeUpdated') {
+                const vpNode = this.getViewportNode();
+                if (vpNode) {
+                    this.stateManager.updateNodeParameters(vpNode.id, {
+                        auto_scale: false,
+                        min_val: min,
+                        max_val: max
+                    });
+                }
+            } else if (type === 'currentRange') {
+                const rangeLabel = document.getElementById(`viewport-current-range-${this.panelId}`);
+                if (rangeLabel) {
+                    rangeLabel.textContent = `Current: [${this.formatRangeValue(min)}, ${this.formatRangeValue(max)}]`;
                 }
             }
         };
@@ -276,6 +290,13 @@ export class Telemetry3DViewport {
         return body;
     }
 
+    private formatRangeValue(val: number): string {
+        if (Math.abs(val) < 1e-3 || Math.abs(val) > 1e6) {
+            return val.toExponential(4);
+        }
+        return val.toFixed(1);
+    }
+
     private applyButtonStyle(btn: HTMLElement) {
         btn.style.background = '#2c2c30';
         btn.style.color = '#ffffff';
@@ -354,6 +375,27 @@ export class Telemetry3DViewport {
         edgesRow.appendChild(document.createTextNode('Show Cell Edges'));
         parent.appendChild(edgesRow);
 
+        // Interpolate colors checkbox
+        const interpRow = document.createElement('label');
+        interpRow.style.display = 'flex';
+        interpRow.style.alignItems = 'center';
+        interpRow.style.gap = '6px';
+        interpRow.style.cursor = 'pointer';
+        
+        const interpCb = document.createElement('input');
+        interpCb.type = 'checkbox';
+        interpCb.id = 'viewport-interpolate-cb';
+        interpCb.onchange = () => {
+            const vpNode = this.getViewportNode();
+            if (vpNode) {
+                this.stateManager.updateNodeParameters(vpNode.id, { interpolate: interpCb.checked });
+                this.worker.postMessage({ type: 'setConfig', data: { interpolate: interpCb.checked } });
+            }
+        };
+        interpRow.appendChild(interpCb);
+        interpRow.appendChild(document.createTextNode('Interpolate (Smooth) Colors'));
+        parent.appendChild(interpRow);
+
         // Colormap
         const cmapRow = document.createElement('div');
         cmapRow.style.display = 'flex';
@@ -413,6 +455,16 @@ export class Telemetry3DViewport {
         rangeHeader.appendChild(document.createTextNode('Auto scale contour range'));
         parent.appendChild(rangeHeader);
 
+        // Range text displaying actual current min/max of the plotted contour
+        const rangeText = document.createElement('div');
+        rangeText.id = `viewport-current-range-${this.panelId}`;
+        rangeText.style.fontSize = '9px';
+        rangeText.style.color = '#00adff';
+        rangeText.style.marginTop = '4px';
+        rangeText.style.marginBottom = '4px';
+        rangeText.textContent = `Current: [N/A]`;
+        parent.appendChild(rangeText);
+
         const rangeInputs = document.createElement('div');
         rangeInputs.id = 'viewport-range-inputs';
         rangeInputs.style.display = 'flex';
@@ -452,6 +504,20 @@ export class Telemetry3DViewport {
         rangeInputs.appendChild(minWrap);
         rangeInputs.appendChild(maxWrap);
         parent.appendChild(rangeInputs);
+
+        const scaleToCurrentRow = document.createElement('div');
+        scaleToCurrentRow.style.display = 'flex';
+        scaleToCurrentRow.style.justifyContent = 'center';
+        scaleToCurrentRow.style.marginTop = '6px';
+        const scaleToCurrentBtn = document.createElement('button');
+        scaleToCurrentBtn.innerHTML = '🎯 Scale to Current Frame';
+        this.applyButtonStyle(scaleToCurrentBtn);
+        scaleToCurrentBtn.style.width = '100%';
+        scaleToCurrentBtn.onclick = () => {
+            this.worker.postMessage({ type: 'scaleToCurrent' });
+        };
+        scaleToCurrentRow.appendChild(scaleToCurrentBtn);
+        parent.appendChild(scaleToCurrentRow);
     }
 
     private buildSolverControls(parent: HTMLElement) {
@@ -647,6 +713,11 @@ export class Telemetry3DViewport {
         const edgesCb = document.getElementById('viewport-edges-cb') as HTMLInputElement;
         if (edgesCb && document.activeElement !== edgesCb) {
             edgesCb.checked = vpNode.parameters.cell_edges === true;
+        }
+
+        const interpCb = document.getElementById('viewport-interpolate-cb') as HTMLInputElement;
+        if (interpCb && document.activeElement !== interpCb) {
+            interpCb.checked = vpNode.parameters.interpolate === true;
         }
 
         const cmapSel = document.getElementById('viewport-cmap-sel') as HTMLSelectElement;
@@ -875,6 +946,7 @@ export class Telemetry3DViewport {
                 showGrid: vpNode.parameters.show_grid !== false,
                 useLogScale: vpNode.parameters.log_scale === true,
                 showCellEdges: vpNode.parameters.cell_edges === true,
+                interpolate: vpNode.parameters.interpolate === true,
                 xmin: 0.0,
                 ymin: 0.0,
                 zmin: 0.0,

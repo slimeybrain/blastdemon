@@ -29,6 +29,7 @@ public:
     void setFluxScheme(const std::string& scheme_name) override;
     void setSpatialOrder(int order) override;
     void setTemporalOrder(int order) override;
+    void setBoundaryConditions(BCType3D xmin, BCType3D xmax, BCType3D ymin, BCType3D ymax, BCType3D zmin, BCType3D zmax) override;
 
     void step(double dt) override;
     double computeStepSize(double cfl = 0.4) const override;

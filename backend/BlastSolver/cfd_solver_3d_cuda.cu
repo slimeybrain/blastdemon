@@ -23,6 +23,8 @@ __constant__ double d_xmin, d_ymin, d_zmin;
 __constant__ int d_bcXmin, d_bcXmax, d_bcYmin, d_bcYmax, d_bcZmin, d_bcZmax;
 __constant__ int d_spatialOrder;
 __constant__ int d_temporalOrder;
+__constant__ double d_ambient_rho;
+__constant__ double d_ambient_p;
 
 template <bool IsMultiMaterial>
 __global__ void __launch_bounds__(512) commit_states_kernel(PrimitiveTile3D<IsMultiMaterial>* states, ConservativeTile3D<IsMultiMaterial>* U, const uint8_t* active_tiles, int total_tiles) {
@@ -130,51 +132,77 @@ __device__ void getAUSMPlusFluxGPU(const GPUCellState& sL, const GPUCellState& s
     double ML = uL / a_half;
     double MR = uR / a_half;
 
-    auto get_M_plus = [](double M) {
-        if (fabs(M) <= 1.0) return 0.25 * (M + 1.0) * (M + 1.0) + 0.125 * (M * M - 1.0) * (M * M - 1.0);
-        return 0.5 * (M + fabs(M));
+    double alpha = 3.0 / 16.0;
+    double beta = 1.0 / 8.0;
+
+    auto get_M_plus = [beta](double M) {
+        if (fabs(M) <= 1.0) {
+            double term = 0.25 * (M + 1.0) * (M + 1.0);
+            return term + beta * (M * M - 1.0) * (M * M - 1.0);
+        } else {
+            return 0.5 * (M + fabs(M));
+        }
     };
-    auto get_M_minus = [](double M) {
-        if (fabs(M) <= 1.0) return -0.25 * (M - 1.0) * (M - 1.0) - 0.125 * (M * M - 1.0) * (M * M - 1.0);
-        return 0.5 * (M - fabs(M));
+    auto get_M_minus = [beta](double M) {
+        if (fabs(M) <= 1.0) {
+            double term = -0.25 * (M - 1.0) * (M - 1.0);
+            return term - beta * (M * M - 1.0) * (M * M - 1.0);
+        } else {
+            return 0.5 * (M - fabs(M));
+        }
     };
-    auto get_P_plus = [](double M) {
-        if (fabs(M) <= 1.0) return 0.25 * (M + 1.0) * (M + 1.0) * (2.0 - M) + (3.0/16.0) * M * (M * M - 1.0) * (M * M - 1.0);
-        return (M >= 0.0) ? 1.0 : 0.0;
+    auto get_P_plus = [alpha](double M) {
+        if (fabs(M) <= 1.0) {
+            double term = 0.25 * (M + 1.0) * (M + 1.0) * (2.0 - M);
+            return term + alpha * M * (M * M - 1.0) * (M * M - 1.0);
+        } else {
+            return (M >= 0.0) ? 1.0 : 0.0;
+        }
     };
-    auto get_P_minus = [](double M) {
-        if (fabs(M) <= 1.0) return 0.25 * (M - 1.0) * (M - 1.0) * (2.0 + M) - (3.0/16.0) * M * (M * M - 1.0) * (M * M - 1.0);
-        return (M < 0.0) ? 1.0 : 0.0;
+    auto get_P_minus = [alpha](double M) {
+        if (fabs(M) <= 1.0) {
+            double term = 0.25 * (M - 1.0) * (M - 1.0) * (2.0 + M);
+            return term - alpha * M * (M * M - 1.0) * (M * M - 1.0);
+        } else {
+            return (M < 0.0) ? 1.0 : 0.0;
+        }
     };
 
     double M_half = get_M_plus(ML) + get_M_minus(MR);
     double p_half = get_P_plus(ML) * sL.p + get_P_minus(MR) * sR.p;
-    double mass_flux = M_half * a_half;
 
-    const auto& s = (mass_flux >= 0) ? sL : sR;
-    flux[0] = mass_flux * s.rho;
-    flux[1] = mass_flux * s.rho * s.ux + (dir == 0 ? p_half : 0);
-    flux[2] = mass_flux * s.rho * s.uy + (dir == 1 ? p_half : 0);
-    flux[3] = mass_flux * s.rho * s.uz + (dir == 2 ? p_half : 0);
-    flux[4] = mass_flux * (s.E + s.p);
+    if (M_half >= 0.0) {
+        flux[0] = M_half * a_half * sL.rho;
+        flux[1] = M_half * a_half * sL.rho * sL.ux + (dir == 0 ? p_half : 0);
+        flux[2] = M_half * a_half * sL.rho * sL.uy + (dir == 1 ? p_half : 0);
+        flux[3] = M_half * a_half * sL.rho * sL.uz + (dir == 2 ? p_half : 0);
+        flux[4] = M_half * a_half * (sL.E + sL.p);
+    } else {
+        flux[0] = M_half * a_half * sR.rho;
+        flux[1] = M_half * a_half * sR.rho * sR.ux + (dir == 0 ? p_half : 0);
+        flux[2] = M_half * a_half * sR.rho * sR.uy + (dir == 1 ? p_half : 0);
+        flux[3] = M_half * a_half * sR.rho * sR.uz + (dir == 2 ? p_half : 0);
+        flux[4] = M_half * a_half * (sR.E + sR.p);
+    }
 
-    // Entropy fix for expansion shocks (parity with 1D)
+    // Entropy fix for expansion shocks (Harten parity)
     double lambda_minus_L = uL - aL;
     double lambda_minus_R = uR - aR;
     if (lambda_minus_L < 0.0 && lambda_minus_R > 0.0) {
         double dlambda = lambda_minus_R - lambda_minus_L;
-        double diss = dlambda / 4.0;
+        double diss = dlambda > 0 ? (dlambda * dlambda) / (4.0 * dlambda) : 0.0;
         flux[0] -= diss * (sR.rho - sL.rho);
         flux[1] -= diss * (sR.rho * sR.ux - sL.rho * sL.ux);
         flux[2] -= diss * (sR.rho * sR.uy - sL.rho * sL.uy);
         flux[3] -= diss * (sR.rho * sR.uz - sL.rho * sL.uz);
         flux[4] -= diss * (sR.E - sL.E);
     }
+
     double lambda_plus_L = uL + aL;
     double lambda_plus_R = uR + aR;
     if (lambda_plus_L < 0.0 && lambda_plus_R > 0.0) {
         double dlambda = lambda_plus_R - lambda_plus_L;
-        double diss = dlambda / 4.0;
+        double diss = dlambda > 0 ? (dlambda * dlambda) / (4.0 * dlambda) : 0.0;
         flux[0] -= diss * (sR.rho - sL.rho);
         flux[1] -= diss * (sR.rho * sR.ux - sL.rho * sL.ux);
         flux[2] -= diss * (sR.rho * sR.uy - sL.rho * sL.uy);
@@ -311,7 +339,7 @@ __global__ void __launch_bounds__(512) compute_flux_kernel_3d(const PrimitiveTil
 }
 
 template <bool IsMultiMaterial>
-__global__ void __launch_bounds__(512) update_primitive_kernel_3d(PrimitiveTile3D<IsMultiMaterial>* states, const ConservativeTile3D<IsMultiMaterial>* U, const uint8_t* active_tiles) {
+__global__ void __launch_bounds__(512) update_primitive_kernel_3d(PrimitiveTile3D<IsMultiMaterial>* states, ConservativeTile3D<IsMultiMaterial>* U, const uint8_t* active_tiles) {
     int tx = blockIdx.x;
     int ty = blockIdx.y;
     int tz = blockIdx.z;
@@ -324,17 +352,84 @@ __global__ void __launch_bounds__(512) update_primitive_kernel_3d(PrimitiveTile3
     int lz = threadIdx.z;
     int c_idx = lx + ly * TILE_SIZE_3D + lz * TILE_SIZE_3D * TILE_SIZE_3D;
 
-    double rho = max(1e-6, U[t_idx].rho[c_idx]);
-    double rhoux = U[t_idx].rhoux[c_idx];
-    double rhouy = U[t_idx].rhouy[c_idx];
-    double rhouz = U[t_idx].rhouz[c_idx];
-    double E = U[t_idx].E[c_idx];
+    double u_rho = U[t_idx].rho[c_idx];
+    double u_rhoux = U[t_idx].rhoux[c_idx];
+    double u_rhouy = U[t_idx].rhouy[c_idx];
+    double u_rhouz = U[t_idx].rhouz[c_idx];
+    double u_E = U[t_idx].E[c_idx];
 
-    double ux = rhoux / rho;
-    double uy = rhouy / rho;
-    double uz = rhouz / rho;
-    double ke = 0.5 * rho * (ux*ux + uy*uy + uz*uz);
-    double p = max(1e-6, (E - ke) * (d_gamma - 1.0));
+    bool bad = isnan(u_rho) || isinf(u_rho) || u_rho < 1e-8 ||
+               isnan(u_rhoux) || isinf(u_rhoux) ||
+               isnan(u_rhouy) || isinf(u_rhouy) ||
+               isnan(u_rhouz) || isinf(u_rhouz) ||
+               isnan(u_E) || isinf(u_E);
+
+    if constexpr (IsMultiMaterial) {
+        bad = bad || isnan(U[t_idx].alpha1[c_idx]) || isinf(U[t_idx].alpha1[c_idx]) ||
+                    isnan(U[t_idx].alpha2[c_idx]) || isinf(U[t_idx].alpha2[c_idx]) ||
+                    isnan(U[t_idx].arho1[c_idx]) || isinf(U[t_idx].arho1[c_idx]) ||
+                    isnan(U[t_idx].arho2[c_idx]) || isinf(U[t_idx].arho2[c_idx]);
+    }
+
+    double rho = d_ambient_rho;
+    double ux = 0.0;
+    double uy = 0.0;
+    double uz = 0.0;
+    double p = d_ambient_p;
+    double E = d_ambient_p / (d_gamma - 1.0);
+    double alpha1 = 0.0;
+    double alpha2 = 0.0;
+    double arho1 = 0.0;
+    double arho2 = 0.0;
+
+    if (!bad) {
+        rho = u_rho;
+        ux = u_rhoux / rho;
+        uy = u_rhouy / rho;
+        uz = u_rhouz / rho;
+        double ke = 0.5 * rho * (ux*ux + uy*uy + uz*uz);
+        double e_int = u_E - ke;
+
+        if constexpr (IsMultiMaterial) {
+            alpha1 = fmax(0.0, fmin(1.0, U[t_idx].alpha1[c_idx]));
+            alpha2 = fmax(0.0, fmin(1.0, U[t_idx].alpha2[c_idx]));
+            arho1 = fmax(0.0, fmin(rho, U[t_idx].arho1[c_idx]));
+            arho2 = fmax(0.0, fmin(rho, U[t_idx].arho2[c_idx]));
+        }
+
+        double p_val = e_int * (d_gamma - 1.0);
+        if (isnan(p_val) || isinf(p_val) || p_val < 1e-8) {
+            bad = true;
+        } else {
+            p = p_val;
+            E = u_E;
+        }
+    }
+
+    if (bad) {
+        rho = d_ambient_rho;
+        ux = 0.0;
+        uy = 0.0;
+        uz = 0.0;
+        p = d_ambient_p;
+        E = d_ambient_p / (d_gamma - 1.0);
+        alpha1 = 0.0;
+        alpha2 = 0.0;
+        arho1 = 0.0;
+        arho2 = 0.0;
+
+        U[t_idx].rho[c_idx] = d_ambient_rho;
+        U[t_idx].rhoux[c_idx] = 0.0;
+        U[t_idx].rhouy[c_idx] = 0.0;
+        U[t_idx].rhouz[c_idx] = 0.0;
+        U[t_idx].E[c_idx] = E;
+        if constexpr (IsMultiMaterial) {
+            U[t_idx].alpha1[c_idx] = 0.0;
+            U[t_idx].alpha2[c_idx] = 0.0;
+            U[t_idx].arho1[c_idx] = 0.0;
+            U[t_idx].arho2[c_idx] = 0.0;
+        }
+    }
 
     states[t_idx].rho[c_idx] = rho;
     states[t_idx].ux[c_idx] = ux;
@@ -342,7 +437,13 @@ __global__ void __launch_bounds__(512) update_primitive_kernel_3d(PrimitiveTile3
     states[t_idx].uz[c_idx] = uz;
     states[t_idx].p[c_idx] = p;
     states[t_idx].E[c_idx] = E;
-    states[t_idx].floor_status[c_idx] = 0;
+    states[t_idx].floor_status[c_idx] = bad ? 1 : 0;
+    if constexpr (IsMultiMaterial) {
+        states[t_idx].alpha1[c_idx] = alpha1;
+        states[t_idx].alpha2[c_idx] = alpha2;
+        states[t_idx].arho1[c_idx] = arho1;
+        states[t_idx].arho2[c_idx] = arho2;
+    }
 }
 
 template <bool IsMultiMaterial>
@@ -361,7 +462,7 @@ template <bool IsMultiMaterial>
 __global__ void __launch_bounds__(512) set_initial_condition_kernel(PrimitiveTile3D<IsMultiMaterial>* states, ConservativeTile3D<IsMultiMaterial>* U, uint8_t* active_tiles,
                                             int nx, int ny, int nz, double cellSize, double xmin, double ymin, double zmin,
                                             double amb_rho, double amb_p, double gamma,
-                                            Charge3DParams charge) {
+                                            Charge3DParams charge, double high_rho, double det_energy, double det_vel) {
     int tx = blockIdx.x;
     int ty = blockIdx.y;
     int tz = blockIdx.z;
@@ -378,32 +479,62 @@ __global__ void __launch_bounds__(512) set_initial_condition_kernel(PrimitiveTil
 
     if (gx >= nx || gy >= ny || gz >= nz) return;
 
-
-
     double x_c = xmin + (gx + 0.5) * cellSize;
     double y_c = ymin + (gy + 0.5) * cellSize;
     double z_c = zmin + (gz + 0.5) * cellSize;
 
-    bool in_charge = false;
-    double dx = x_c - charge.x;
-    double dy = y_c - charge.y;
-    double dz = z_c - charge.z;
-    double dist_sq = dx*dx + dy*dy + dz*dz;
-
-    if (charge.shape_type == 0) { // Sphere
-        if (dist_sq <= charge.radius * charge.radius) in_charge = true;
-    } else if (charge.shape_type == 1) { // Block
-        if (fabs(dx) <= charge.lx*0.5 && fabs(dy) <= charge.ly*0.5 && fabs(dz) <= charge.lz*0.5) in_charge = true;
-    } else if (charge.shape_type == 2) { // Cylinder
-        double dr_sq = dx*dx + dy*dy;
-        if (dr_sq <= charge.radius*charge.radius && fabs(dz) <= charge.height*0.5) in_charge = true;
+    int points_inside = 0;
+    for (double ox : {-0.25, 0.25}) {
+        for (double oy : {-0.25, 0.25}) {
+            for (double oz : {-0.25, 0.25}) {
+                double px = x_c + ox * cellSize;
+                double py = y_c + oy * cellSize;
+                double pz = z_c + oz * cellSize;
+                double dx_p = px - charge.x;
+                double dy_p = py - charge.y;
+                double dz_p = pz - charge.z;
+                double dist_sq_p = dx_p*dx_p + dy_p*dy_p + dz_p*dz_p;
+                bool inside = false;
+                if (charge.shape_type == 0) { // Sphere
+                    if (dist_sq_p <= charge.radius * charge.radius) inside = true;
+                } else if (charge.shape_type == 1) { // Block
+                    if (fabs(dx_p) <= charge.lx*0.5 && fabs(dy_p) <= charge.ly*0.5 && fabs(dz_p) <= charge.lz*0.5) inside = true;
+                } else if (charge.shape_type == 2) { // Cylinder
+                    double dr_sq_p = dx_p*dx_p + dy_p*dy_p;
+                    if (dr_sq_p <= charge.radius*charge.radius && fabs(dz_p) <= charge.height*0.5) inside = true;
+                }
+                if (inside) points_inside++;
+            }
+        }
     }
+    double f_vol = points_inside / 8.0;
 
     double rho = amb_rho;
     double p = amb_p;
-    if (in_charge) {
-        rho = amb_rho * 10.0;
-        p = amb_p * 1000.0;
+    double arrival_time = -1.0;
+    double alpha1 = 0.0;
+    double alpha2 = 0.0;
+    double arho1 = 0.0;
+    double arho2 = 0.0;
+
+    if (f_vol > 0.0) {
+        if constexpr (IsMultiMaterial) {
+            alpha1 = 1.0 - f_vol;
+            alpha2 = f_vol;
+            arho1 = alpha1 * amb_rho;
+            arho2 = alpha2 * high_rho;
+            rho = arho1 + arho2;
+            p = amb_p;
+            double dx = x_c - charge.x;
+            double dy = y_c - charge.y;
+            double dz = z_c - charge.z;
+            double dist = sqrt(dx*dx + dy*dy + dz*dz);
+            arrival_time = dist / det_vel;
+        } else {
+            rho = f_vol * high_rho + (1.0 - f_vol) * amb_rho;
+            double p_high = (gamma - 1.0) * high_rho * det_energy;
+            p = f_vol * p_high + (1.0 - f_vol) * amb_p;
+        }
         active_tiles[t_idx] = 1;
     }
 
@@ -413,13 +544,25 @@ __global__ void __launch_bounds__(512) set_initial_condition_kernel(PrimitiveTil
     states[t_idx].uz[c_idx] = 0;
     states[t_idx].p[c_idx] = p;
     states[t_idx].E[c_idx] = p / (gamma - 1.0);
-    states[t_idx].arrival_time[c_idx] = -1.0;
+    states[t_idx].arrival_time[c_idx] = arrival_time;
+    if constexpr (IsMultiMaterial) {
+        states[t_idx].alpha1[c_idx] = alpha1;
+        states[t_idx].alpha2[c_idx] = alpha2;
+        states[t_idx].arho1[c_idx] = arho1;
+        states[t_idx].arho2[c_idx] = arho2;
+    }
 
     U[t_idx].rho[c_idx] = rho;
     U[t_idx].rhoux[c_idx] = 0;
     U[t_idx].rhouy[c_idx] = 0;
     U[t_idx].rhouz[c_idx] = 0;
     U[t_idx].E[c_idx] = states[t_idx].E[c_idx];
+    if constexpr (IsMultiMaterial) {
+        U[t_idx].alpha1[c_idx] = alpha1;
+        U[t_idx].alpha2[c_idx] = alpha2;
+        U[t_idx].arho1[c_idx] = arho1;
+        U[t_idx].arho2[c_idx] = arho2;
+    }
 }
 
 template <bool IsMultiMaterial>
@@ -541,6 +684,8 @@ void CFDSolver3DCuda<IsMultiMaterial>::setDetonatorLocation(double x, double y, 
 template <bool IsMultiMaterial>
 void CFDSolver3DCuda<IsMultiMaterial>::setInitialCondition(const Charge3DParams& charge, const MultiMat::MaterialSet& materials, double amb_rho, double amb_p) {
     currentMaterials = materials;
+    CHECK_CUDA(cudaMemcpyToSymbol(d_ambient_rho, &amb_rho, sizeof(double)));
+    CHECK_CUDA(cudaMemcpyToSymbol(d_ambient_p, &amb_p, sizeof(double)));
     int ntx = (nx + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
     int nty = (ny + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
     int ntz = (nz + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
@@ -554,7 +699,8 @@ void CFDSolver3DCuda<IsMultiMaterial>::setInitialCondition(const Charge3DParams&
     set_initial_condition_kernel<IsMultiMaterial><<<blocks, threads>>>(
         (PrimitiveTile3D<IsMultiMaterial>*)d_states, (ConservativeTile3D<IsMultiMaterial>*)d_U, (uint8_t*)d_active_tiles,
         nx, ny, nz, cellSize, xmin, ymin, zmin,
-        amb_rho, amb_p, gamma, charge
+        amb_rho, amb_p, gamma, charge,
+        materials.unreacted.rho0, materials.detonation_energy, materials.det_vel
     );
     CHECK_CUDA(cudaDeviceSynchronize());
     updateActiveRegions();
@@ -598,7 +744,7 @@ void CFDSolver3DCuda<IsMultiMaterial>::step(double dt) {
 
     if (temporalOrder == 1) {
         compute_flux_kernel_3d<IsMultiMaterial><<<blocks, threads>>>((const PrimitiveTile3D<IsMultiMaterial>*)d_states, (ConservativeTile3D<IsMultiMaterial>*)d_U, (const uint8_t*)d_active_tiles, dt);
-        update_primitive_kernel_3d<IsMultiMaterial><<<blocks, threads>>>((PrimitiveTile3D<IsMultiMaterial>*)d_states, (const ConservativeTile3D<IsMultiMaterial>*)d_U, (const uint8_t*)d_active_tiles);
+        update_primitive_kernel_3d<IsMultiMaterial><<<blocks, threads>>>((PrimitiveTile3D<IsMultiMaterial>*)d_states, (ConservativeTile3D<IsMultiMaterial>*)d_U, (const uint8_t*)d_active_tiles);
         apply_bc_kernel_3d<IsMultiMaterial><<<blocks, threads>>>((PrimitiveTile3D<IsMultiMaterial>*)d_states, nx, ny, nz);
     } else if (temporalOrder == 2) {
         // Copy U_pool to U_prev_pool
@@ -607,13 +753,13 @@ void CFDSolver3DCuda<IsMultiMaterial>::step(double dt) {
         
         // Stage 1
         compute_flux_kernel_3d<IsMultiMaterial><<<blocks, threads>>>((const PrimitiveTile3D<IsMultiMaterial>*)d_states, (ConservativeTile3D<IsMultiMaterial>*)d_U, (const uint8_t*)d_active_tiles, dt);
-        update_primitive_kernel_3d<IsMultiMaterial><<<blocks, threads>>>((PrimitiveTile3D<IsMultiMaterial>*)d_states, (const ConservativeTile3D<IsMultiMaterial>*)d_U, (const uint8_t*)d_active_tiles);
+        update_primitive_kernel_3d<IsMultiMaterial><<<blocks, threads>>>((PrimitiveTile3D<IsMultiMaterial>*)d_states, (ConservativeTile3D<IsMultiMaterial>*)d_U, (const uint8_t*)d_active_tiles);
         apply_bc_kernel_3d<IsMultiMaterial><<<blocks, threads>>>((PrimitiveTile3D<IsMultiMaterial>*)d_states, nx, ny, nz);
 
         // Stage 2
         compute_flux_kernel_3d<IsMultiMaterial><<<blocks, threads>>>((const PrimitiveTile3D<IsMultiMaterial>*)d_states, (ConservativeTile3D<IsMultiMaterial>*)d_U, (const uint8_t*)d_active_tiles, dt);
         average_U_kernel_3d<IsMultiMaterial><<<blocks, threads>>>((ConservativeTile3D<IsMultiMaterial>*)d_U, (const ConservativeTile3D<IsMultiMaterial>*)d_U_prev, (const uint8_t*)d_active_tiles, 0.5, 0.5);
-        update_primitive_kernel_3d<IsMultiMaterial><<<blocks, threads>>>((PrimitiveTile3D<IsMultiMaterial>*)d_states, (const ConservativeTile3D<IsMultiMaterial>*)d_U, (const uint8_t*)d_active_tiles);
+        update_primitive_kernel_3d<IsMultiMaterial><<<blocks, threads>>>((PrimitiveTile3D<IsMultiMaterial>*)d_states, (ConservativeTile3D<IsMultiMaterial>*)d_U, (const uint8_t*)d_active_tiles);
         apply_bc_kernel_3d<IsMultiMaterial><<<blocks, threads>>>((PrimitiveTile3D<IsMultiMaterial>*)d_states, nx, ny, nz);
     } else { // SSP-RK3
         // Copy U_pool to U_prev_pool
@@ -623,7 +769,7 @@ void CFDSolver3DCuda<IsMultiMaterial>::step(double dt) {
         // Stage 1
         compute_flux_kernel_3d<IsMultiMaterial><<<blocks, threads>>>((const PrimitiveTile3D<IsMultiMaterial>*)d_states, (ConservativeTile3D<IsMultiMaterial>*)d_U, (const uint8_t*)d_active_tiles, dt);
         CHECK_CUDA(cudaGetLastError());
-        update_primitive_kernel_3d<IsMultiMaterial><<<blocks, threads>>>((PrimitiveTile3D<IsMultiMaterial>*)d_states, (const ConservativeTile3D<IsMultiMaterial>*)d_U, (const uint8_t*)d_active_tiles);
+        update_primitive_kernel_3d<IsMultiMaterial><<<blocks, threads>>>((PrimitiveTile3D<IsMultiMaterial>*)d_states, (ConservativeTile3D<IsMultiMaterial>*)d_U, (const uint8_t*)d_active_tiles);
         CHECK_CUDA(cudaGetLastError());
         apply_bc_kernel_3d<IsMultiMaterial><<<blocks, threads>>>((PrimitiveTile3D<IsMultiMaterial>*)d_states, nx, ny, nz);
         CHECK_CUDA(cudaGetLastError());
@@ -633,7 +779,7 @@ void CFDSolver3DCuda<IsMultiMaterial>::step(double dt) {
         CHECK_CUDA(cudaGetLastError());
         average_U_kernel_3d<IsMultiMaterial><<<blocks, threads>>>((ConservativeTile3D<IsMultiMaterial>*)d_U, (const ConservativeTile3D<IsMultiMaterial>*)d_U_prev, (const uint8_t*)d_active_tiles, 0.75, 0.25);
         CHECK_CUDA(cudaGetLastError());
-        update_primitive_kernel_3d<IsMultiMaterial><<<blocks, threads>>>((PrimitiveTile3D<IsMultiMaterial>*)d_states, (const ConservativeTile3D<IsMultiMaterial>*)d_U, (const uint8_t*)d_active_tiles);
+        update_primitive_kernel_3d<IsMultiMaterial><<<blocks, threads>>>((PrimitiveTile3D<IsMultiMaterial>*)d_states, (ConservativeTile3D<IsMultiMaterial>*)d_U, (const uint8_t*)d_active_tiles);
         CHECK_CUDA(cudaGetLastError());
         apply_bc_kernel_3d<IsMultiMaterial><<<blocks, threads>>>((PrimitiveTile3D<IsMultiMaterial>*)d_states, nx, ny, nz);
         CHECK_CUDA(cudaGetLastError());
@@ -643,7 +789,7 @@ void CFDSolver3DCuda<IsMultiMaterial>::step(double dt) {
         CHECK_CUDA(cudaGetLastError());
         average_U_kernel_3d<IsMultiMaterial><<<blocks, threads>>>((ConservativeTile3D<IsMultiMaterial>*)d_U, (const ConservativeTile3D<IsMultiMaterial>*)d_U_prev, (const uint8_t*)d_active_tiles, 1.0/3.0, 2.0/3.0);
         CHECK_CUDA(cudaGetLastError());
-        update_primitive_kernel_3d<IsMultiMaterial><<<blocks, threads>>>((PrimitiveTile3D<IsMultiMaterial>*)d_states, (const ConservativeTile3D<IsMultiMaterial>*)d_U, (const uint8_t*)d_active_tiles);
+        update_primitive_kernel_3d<IsMultiMaterial><<<blocks, threads>>>((PrimitiveTile3D<IsMultiMaterial>*)d_states, (ConservativeTile3D<IsMultiMaterial>*)d_U, (const uint8_t*)d_active_tiles);
         CHECK_CUDA(cudaGetLastError());
         apply_bc_kernel_3d<IsMultiMaterial><<<blocks, threads>>>((PrimitiveTile3D<IsMultiMaterial>*)d_states, nx, ny, nz);
         CHECK_CUDA(cudaGetLastError());
@@ -839,12 +985,24 @@ void CFDSolver3DCuda<IsMultiMaterial>::setCellStateMulti(int i, int j, int k, co
         temp_h_states[t_idx].uz[c_idx] = s.uz;
         temp_h_states[t_idx].p[c_idx] = s.p;
         temp_h_states[t_idx].E[c_idx] = s.E;
+        if constexpr (IsMultiMaterial) {
+            temp_h_states[t_idx].alpha1[c_idx] = s.alpha1;
+            temp_h_states[t_idx].alpha2[c_idx] = s.alpha2;
+            temp_h_states[t_idx].arho1[c_idx] = s.arho1;
+            temp_h_states[t_idx].arho2[c_idx] = s.arho2;
+        }
         temp_h_active[t_idx] = 1;
     } else {
         PrimitiveTile3D<IsMultiMaterial> h_tile;
         CHECK_CUDA(cudaMemcpy(&h_tile, (PrimitiveTile3D<IsMultiMaterial>*)d_states + t_idx, sizeof(PrimitiveTile3D<IsMultiMaterial>), cudaMemcpyDeviceToHost));
         h_tile.rho[c_idx] = s.rho; h_tile.ux[c_idx] = s.ux; h_tile.uy[c_idx] = s.uy; h_tile.uz[c_idx] = s.uz;
         h_tile.p[c_idx] = s.p; h_tile.E[c_idx] = s.E;
+        if constexpr (IsMultiMaterial) {
+            h_tile.alpha1[c_idx] = s.alpha1;
+            h_tile.alpha2[c_idx] = s.alpha2;
+            h_tile.arho1[c_idx] = s.arho1;
+            h_tile.arho2[c_idx] = s.arho2;
+        }
         CHECK_CUDA(cudaMemcpy((PrimitiveTile3D<IsMultiMaterial>*)d_states + t_idx, &h_tile, sizeof(PrimitiveTile3D<IsMultiMaterial>), cudaMemcpyHostToDevice));
 
         uint8_t active = 1;
@@ -911,6 +1069,13 @@ void CFDSolver3DCuda<IsMultiMaterial>::setSpatialOrder(int order) {
 }
 template <bool IsMultiMaterial>
 void CFDSolver3DCuda<IsMultiMaterial>::setTemporalOrder(int order) { temporalOrder = order; }
+
+template <bool IsMultiMaterial>
+void CFDSolver3DCuda<IsMultiMaterial>::setBoundaryConditions(BCType3D xmin, BCType3D xmax, BCType3D ymin, BCType3D ymax, BCType3D zmin, BCType3D zmax) {
+    CFDSolver3DImplBase::setBoundaryConditions(xmin, xmax, ymin, ymax, zmin, zmax);
+    updateBoundaryConditions();
+}
+
 
 
 template class CFDSolver3DCuda<true>;

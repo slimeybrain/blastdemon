@@ -23,6 +23,8 @@ uniform int uColormap;
 uniform float uMin;
 uniform float uMax;
 uniform bool uIsWireframe;
+uniform vec2 uSliceSize;
+uniform bool uInterpolate;
 out vec4 outColor;
 
 vec3 colormap_plasma(float t) {
@@ -38,7 +40,12 @@ void main() {
         outColor = vec4(0.3, 0.3, 0.4, 1.0);
         return;
     }
-    float raw = texture(uTexture, vTexCoord).r;
+    vec2 uv = vTexCoord;
+    if (!uInterpolate) {
+        vec2 texel = floor(vTexCoord * uSliceSize);
+        uv = (texel + vec2(0.5)) / uSliceSize;
+    }
+    float raw = texture(uTexture, uv).r;
     float t = clamp((raw - uMin) / (uMax - uMin), 0.0, 1.0);
     vec3 color;
     if (uColormap == 1) color = colormap_viridis(t);
@@ -69,6 +76,8 @@ uniform int uColormap;
 uniform float uMin;
 uniform float uMax;
 uniform bool uIsWireframe;
+uniform vec2 uSliceSize;
+uniform bool uInterpolate;
 
 vec3 colormap_plasma(float t) {
     return vec3(t * 1.5, t * t, 1.0 - t);
@@ -83,7 +92,12 @@ void main() {
         gl_FragColor = vec4(0.3, 0.3, 0.4, 1.0);
         return;
     }
-    float raw = texture2D(uTexture, vTexCoord).r;
+    vec2 uv = vTexCoord;
+    if (!uInterpolate) {
+        vec2 texel = floor(vTexCoord * uSliceSize);
+        uv = (texel + vec2(0.5)) / uSliceSize;
+    }
+    float raw = texture2D(uTexture, uv).r;
     float t = clamp((raw - uMin) / (uMax - uMin), 0.0, 1.0);
     vec3 color;
     if (uColormap == 1) color = colormap_viridis(t);
@@ -115,6 +129,7 @@ let colormap = 0;
 let minY = 101325.0;
 let maxY = 1000000.0;
 let autoScale = true;
+let interpolate = false;
 
 let bboxBuffer: WebGLBuffer | null = null;
 
@@ -388,7 +403,7 @@ function handleFrame(buffer: ArrayBuffer) {
         } else {
             const tex = gl.createTexture()!;
             gl.bindTexture(gl.TEXTURE_2D, tex);
-            const filter = gl.NEAREST;
+            const filter = hasFloatLinear ? gl.LINEAR : gl.NEAREST;
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -506,6 +521,11 @@ function render() {
     gl.uniformMatrix4fv(uModel, false, modelMatrix);
     gl.uniform1f(uAlpha, 0.7);
 
+    const uInterp = gl.getUniformLocation(program, "uInterpolate");
+    if (uInterp !== null) {
+        gl.uniform1i(uInterp, interpolate ? 1 : 0);
+    }
+
     // Draw BBox
     gl.uniform1i(uIsWF, 1);
     gl.bindBuffer(gl.ARRAY_BUFFER, bboxBuffer);
@@ -515,10 +535,14 @@ function render() {
     gl.drawArrays(gl.LINES, 0, 24);
 
     gl.uniform1i(uIsWF, 0);
+    const uSliceSizeLoc = gl.getUniformLocation(program, "uSliceSize");
     activeSlices.forEach(slice => {
         gl!.activeTexture(gl!.TEXTURE0);
         gl!.bindTexture(gl!.TEXTURE_2D, slice.texture);
         gl!.bindBuffer(gl!.ARRAY_BUFFER, slice.buffer);
+        if (uSliceSizeLoc !== null) {
+            gl!.uniform2f(uSliceSizeLoc, slice.w, slice.h);
+        }
 
         gl!.vertexAttribPointer(0, 3, gl!.FLOAT, false, 20, 0);
         gl!.enableVertexAttribArray(0);
@@ -599,6 +623,7 @@ function render() {
             if (data.minY !== undefined) minY = data.minY;
             if (data.maxY !== undefined) maxY = data.maxY;
             if (data.autoScale !== undefined) autoScale = data.autoScale;
+            if (data.interpolate !== undefined) interpolate = data.interpolate;
             if (data.xmin !== undefined) xmin = data.xmin;
             if (data.ymin !== undefined) ymin = data.ymin;
             if (data.zmin !== undefined) zmin = data.zmin;

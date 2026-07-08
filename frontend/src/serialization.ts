@@ -157,11 +157,31 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 if (matConn) {
                     const matNode = state.nodes.find(n => n.id === matConn.fromNode);
                     if (matNode) {
-                        Object.entries(matNode.parameters).forEach(([key, value]) => {
-                            if (key !== 'material_type') {
-                                flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
-                            }
-                        });
+                        const matType = matNode.parameters?.material_type || 'Air';
+                        if (matType === 'JWL Charge') {
+                            flattenedParams['explosive_type'] = 'MaterialExplosive';
+                            Object.entries(matNode.parameters).forEach(([key, value]) => {
+                                if (key !== 'material_type') {
+                                    flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                                }
+                            });
+                        } else if (matType === 'Ideal Gas Charge') {
+                            flattenedParams['explosive_type'] = 'MaterialIdealGas';
+                            flattenedParams['gamma'] = Number(flattenedParams['gamma'] ?? 1.4);
+                            flattenedParams['rho'] = Number(matNode.parameters?.ideal_rho_0 ?? 1.25);
+                            flattenedParams['detonation_energy'] = Number(matNode.parameters?.ideal_e_0 ?? 4290000);
+                            Object.entries(matNode.parameters).forEach(([key, value]) => {
+                                if (key !== 'material_type' && key !== 'ideal_rho_0' && key !== 'ideal_e_0') {
+                                    flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                                }
+                            });
+                        } else {
+                            Object.entries(matNode.parameters).forEach(([key, value]) => {
+                                if (key !== 'material_type') {
+                                    flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                                }
+                            });
+                        }
                     }
                 }
             }

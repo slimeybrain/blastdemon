@@ -143,7 +143,7 @@ const layoutManager = new LayoutManager('app-container', stateManager);
 
 function getCflFromSolver(): number {
     const state = stateManager.getCurrentState();
-    const solver = state?.nodes?.find(n => n.type === 'CFDSolver2D') || state?.nodes?.find(n => n.type === 'CFDSolver');
+    const solver = state?.nodes?.find(n => n.type === 'CFDSolver3D') || state?.nodes?.find(n => n.type === 'CFDSolver2D') || state?.nodes?.find(n => n.type === 'CFDSolver');
     return solver?.parameters?.cfl || 0.4;
 }
 

@@ -49,6 +49,7 @@ export class GraphRenderer {
 
     private nodeElements: Map<string, HTMLElement> = new Map();
     private nodeWorkers: Map<string, Worker> = new Map();
+    private viewportRanges: Map<string, { min: number, max: number }> = new Map();
     private graphFrameCounters: Map<string, number> = new Map();
     /** Set of node IDs whose resize handle is currently being dragged by the user. */
     private nodeUserResizing: Set<string> = new Set();
@@ -450,8 +451,13 @@ export class GraphRenderer {
                     worker.postMessage({
                         type: 'setConfig',
                         data: {
-                            minY: 101325.0,
-                            maxY: 101325.0 * 10.0, // Set dynamic ranges based on data
+                            minY: node.parameters?.min_val ?? 101325.0,
+                            maxY: node.parameters?.max_val ?? 101325.0 * 10.0,
+                            autoScale: node.parameters?.auto_scale !== false,
+                            useLogScale: node.parameters?.log_scale === true,
+                            showGrid: node.parameters?.show_grid !== false,
+                            showCellEdges: node.parameters?.cell_edges === true,
+                            interpolate: node.parameters?.interpolate === true,
                             xmin: data.xmin,
                             ymin: data.ymin,
                             zmin: data.zmin,
@@ -2935,6 +2941,22 @@ export class GraphRenderer {
                             errorEl.style.padding = '2px 4px';
                             errorEl.style.borderRadius = '3px';
                         }
+                    } else if (e.data && e.data.type === 'rangeUpdated') {
+                        this.stateManager.updateNodeParameters(node.id, {
+                            auto_scale: false,
+                            min_val: e.data.min,
+                            max_val: e.data.max
+                        });
+                        const slicesPanel = container.querySelector('.node-slices-panel') as HTMLElement;
+                        if (slicesPanel) {
+                            this.rebuildSlicesPanel(node, slicesPanel);
+                        }
+                    } else if (e.data && e.data.type === 'currentRange') {
+                        this.viewportRanges.set(node.id, { min: e.data.min, max: e.data.max });
+                        const rangeText = container.querySelector(`.slices-range-text-${node.id}`) as HTMLElement;
+                        if (rangeText) {
+                            rangeText.textContent = `Current: [${this.formatRangeValue(e.data.min)}, ${this.formatRangeValue(e.data.max)}]`;
+                        }
                     }
                 };
                 newWorker.onerror = (err) => {
@@ -3088,6 +3110,8 @@ export class GraphRenderer {
                         autoScale: node.parameters?.auto_scale !== false,
                         showGrid: node.parameters?.show_grid !== false,
                         useLogScale: node.parameters?.log_scale === true,
+                        showCellEdges: node.parameters?.cell_edges === true,
+                        interpolate: node.parameters?.interpolate === true,
                         xmin: 0.0,
                         ymin: 0.0,
                         zmin: 0.0,
@@ -5101,6 +5125,13 @@ export class GraphRenderer {
         });
     }
 
+    private formatRangeValue(val: number): string {
+        if (Math.abs(val) < 1e-3 || Math.abs(val) > 1e6) {
+            return val.toExponential(4);
+        }
+        return val.toFixed(1);
+    }
+
     private rebuildSlicesPanel(node: Node, panel: HTMLElement) {
         panel.innerHTML = '';
 
@@ -5220,6 +5251,7 @@ export class GraphRenderer {
         const showGridVal = node.parameters?.show_grid !== false;
         const logScaleVal = node.parameters?.log_scale === true;
         const cellEdgesVal = node.parameters?.cell_edges === true;
+        const interpolateVal = node.parameters?.interpolate === true;
 
         configContainer.appendChild(createCheckbox('Auto Scale', autoScaleVal, (val) => {
             this.stateManager.updateNodeParametersInPlace(node.id, { auto_scale: val });
@@ -5241,8 +5273,28 @@ export class GraphRenderer {
             const worker = this.nodeWorkers.get(node.id);
             if (worker) worker.postMessage({ type: 'setConfig', data: { showCellEdges: val } });
         }));
+        configContainer.appendChild(createCheckbox('Interpolate', interpolateVal, (val) => {
+            this.stateManager.updateNodeParametersInPlace(node.id, { interpolate: val });
+            const worker = this.nodeWorkers.get(node.id);
+            if (worker) worker.postMessage({ type: 'setConfig', data: { interpolate: val } });
+        }));
 
         panel.appendChild(configContainer);
+
+        // Range text displaying actual current min/max of the plotted contour
+        const rangeText = document.createElement('div');
+        rangeText.className = `slices-range-text-${node.id}`;
+        rangeText.style.fontSize = '9px';
+        rangeText.style.color = '#00adff';
+        rangeText.style.marginBottom = '6px';
+        
+        const cached = this.viewportRanges.get(node.id);
+        if (cached) {
+            rangeText.textContent = `Current: [${this.formatRangeValue(cached.min)}, ${this.formatRangeValue(cached.max)}]`;
+        } else {
+            rangeText.textContent = `Current: [N/A]`;
+        }
+        panel.appendChild(rangeText);
 
         // 3. Min / Max Value Row
         const rangeRow = document.createElement('div');
@@ -5308,6 +5360,34 @@ export class GraphRenderer {
         rangeRow.appendChild(maxInput);
 
         panel.appendChild(rangeRow);
+
+        // Scale to Current Button
+        const scaleBtnRow = document.createElement('div');
+        scaleBtnRow.style.display = 'flex';
+        scaleBtnRow.style.justifyContent = 'center';
+        scaleBtnRow.style.marginBottom = '8px';
+
+        const scaleBtn = document.createElement('button');
+        scaleBtn.textContent = '🎯 Scale to Current';
+        scaleBtn.style.width = '100%';
+        scaleBtn.style.background = '#2c2c30';
+        scaleBtn.style.color = '#ccc';
+        scaleBtn.style.border = '1px solid #444';
+        scaleBtn.style.borderRadius = '3px';
+        scaleBtn.style.padding = '3px 6px';
+        scaleBtn.style.cursor = 'pointer';
+        scaleBtn.style.fontSize = '9px';
+        scaleBtn.style.fontWeight = '500';
+        scaleBtn.onmouseover = () => scaleBtn.style.background = '#3c3c40';
+        scaleBtn.onmouseout = () => scaleBtn.style.background = '#2c2c30';
+        scaleBtn.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const worker = this.nodeWorkers.get(node.id);
+            if (worker) worker.postMessage({ type: 'scaleToCurrent' });
+        };
+        scaleBtnRow.appendChild(scaleBtn);
+        panel.appendChild(scaleBtnRow);
 
         // 4. Active Slices List Title
         const titleRow = document.createElement('div');

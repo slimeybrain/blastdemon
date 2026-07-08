@@ -30,6 +30,7 @@ uniform float uMax;
 uniform bool uUseLogScale;
 uniform int uIsWireframe;
 uniform bool uShowCellEdges;
+uniform bool uInterpolate;
 out vec4 outColor;
 
 vec3 colormap_plasma(float t) {
@@ -55,7 +56,12 @@ void main() {
         }
         return;
     }
-    float raw = texture(uTexture, vTexCoord).r;
+    vec2 uv = vTexCoord;
+    if (!uInterpolate) {
+        vec2 texel = floor(vTexCoord * vSliceSize);
+        uv = (texel + vec2(0.5)) / vSliceSize;
+    }
+    float raw = texture(uTexture, uv).r;
     float t;
     float denom = uMax - uMin;
     if (denom < 1e-5) denom = 1e-5;
@@ -113,6 +119,7 @@ uniform float uMax;
 uniform bool uUseLogScale;
 uniform int uIsWireframe;
 uniform bool uShowCellEdges;
+uniform bool uInterpolate;
 
 vec3 colormap_plasma(float t) {
     return vec3(t * 1.5, t * t, 1.0 - t);
@@ -137,7 +144,12 @@ void main() {
         }
         return;
     }
-    float raw = texture2D(uTexture, vTexCoord).r;
+    vec2 uv = vTexCoord;
+    if (!uInterpolate) {
+        vec2 texel = floor(vTexCoord * vSliceSize);
+        uv = (texel + vec2(0.5)) / vSliceSize;
+    }
+    float raw = texture2D(uTexture, uv).r;
     float t;
     float denom = uMax - uMin;
     if (denom < 1e-5) denom = 1e-5;
@@ -185,7 +197,7 @@ struct Uniforms {
     useLogScale: f32,
     isWireframe: f32,
     showCellEdges: f32,
-    padding1: f32,
+    interpolate: f32,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -224,7 +236,12 @@ fn fs_main(@location(0) texCoord: vec2<f32>, @location(1) sliceSize: vec2<f32>) 
             return vec4<f32>(0.15, 0.15, 0.18, 0.6); // Cell Edges grid
         }
     }
-    let raw = textureSample(uTexture, uSampler, texCoord).r;
+    var uv = texCoord;
+    if (uniforms.interpolate < 0.5) {
+        let texel = floor(texCoord * sliceSize);
+        uv = (texel + vec2<f32>(0.5, 0.5)) / sliceSize;
+    }
+    let raw = textureSample(uTexture, uSampler, uv).r;
     var t = 0.0;
     var denom = uniforms.maxVal - uniforms.minVal;
     if (denom < 1e-5) {
@@ -316,6 +333,16 @@ let autoScale = true;
 let showGrid = true;
 let useLogScale = false;
 let showCellEdges = false;
+let interpolate = false;
+
+interface CachedSlice {
+    axis: number;
+    offset: number;
+    w: number;
+    h: number;
+    data: Float32Array;
+}
+let cachedSlices: CachedSlice[] = [];
 
 // Domain Bounds Configurations
 let xmin = 0.0;
@@ -378,7 +405,11 @@ async function initContext(canvas: OffscreenCanvas) {
         try {
             const adapter = await nav.gpu.requestAdapter();
             if (adapter) {
-                gpuDevice = await adapter.requestDevice();
+                const requiredFeatures = [];
+                if (adapter.features.has('float32-filterable')) {
+                    requiredFeatures.push('float32-filterable');
+                }
+                gpuDevice = await adapter.requestDevice({ requiredFeatures: requiredFeatures as any });
                 gpuContext = canvas.getContext('webgpu') as any;
                 if (gpuContext && gpuDevice) {
                     gpuContext.configure({
@@ -394,7 +425,8 @@ async function initContext(canvas: OffscreenCanvas) {
 
                     // Compile Shaders
                     const shaderModule = gpuDevice.createShaderModule({ code: WGSL_SOURCE });
-                    // Define explicit BindGroupLayout for non-filtering r32float compatibility
+                    const isFilterable = gpuDevice.features.has('float32-filterable');
+                    // Define explicit BindGroupLayout for r32float compatibility
                     bindGroupLayout = gpuDevice.createBindGroupLayout({
                         entries: [
                             {
@@ -405,12 +437,12 @@ async function initContext(canvas: OffscreenCanvas) {
                             {
                                 binding: 1,
                                 visibility: 2, // FRAGMENT
-                                texture: { sampleType: 'unfilterable-float' }
+                                texture: { sampleType: isFilterable ? 'float' : 'unfilterable-float' }
                             },
                             {
                                 binding: 2,
                                 visibility: 2, // FRAGMENT
-                                sampler: { type: 'non-filtering' }
+                                sampler: { type: isFilterable ? 'filtering' : 'non-filtering' }
                             }
                         ]
                     });
@@ -489,8 +521,8 @@ async function initContext(canvas: OffscreenCanvas) {
                     });
 
                     gpuSampler = gpuDevice.createSampler({
-                        magFilter: 'nearest',
-                        minFilter: 'nearest'
+                        magFilter: isFilterable ? 'linear' : 'nearest',
+                        minFilter: isFilterable ? 'linear' : 'nearest'
                     });
 
                     // GPUBufferUsage: UNIFORM = 64, COPY_DST = 8
@@ -806,44 +838,49 @@ function handleFrame(buffer: ArrayBuffer) {
     const time = view.getFloat32(4, true);
     const numSlices = view.getUint32(8, true);
 
-    // Compute combined scaling range across ALL slices to prevent scale flickering
-    if (autoScale) {
-        let globalMin = Infinity;
-        let globalMax = -Infinity;
-        let offset = 12;
-        for (let i = 0; i < numSlices; i++) {
-            const w = view.getUint32(offset + 8, true);
-            const h = view.getUint32(offset + 12, true);
-            const dataStart = offset + 16;
-            const floatData = new Float32Array(buffer, dataStart, w * h);
-            for (let j = 0; j < floatData.length; j++) {
-                const v = floatData[j];
-                if (isFinite(v)) {
-                    if (v < globalMin) globalMin = v;
-                    if (v > globalMax) globalMax = v;
-                }
+    // Populate cachedSlices
+    cachedSlices = [];
+    let cacheOffset = 12;
+    for (let i = 0; i < numSlices; i++) {
+        const axis = view.getUint32(cacheOffset, true);
+        const zOff = view.getFloat32(cacheOffset + 4, true);
+        const w = view.getUint32(cacheOffset + 8, true);
+        const h = view.getUint32(cacheOffset + 12, true);
+        const dataStart = cacheOffset + 16;
+        const floatData = new Float32Array(buffer, dataStart, w * h);
+        cachedSlices.push({
+            axis,
+            offset: zOff,
+            w,
+            h,
+            data: new Float32Array(floatData)
+        });
+        cacheOffset = dataStart + (w * h * 4);
+    }
+
+    // Compute combined scaling range across ALL slices
+    let globalMin = Infinity;
+    let globalMax = -Infinity;
+    cachedSlices.forEach(s => {
+        for (let j = 0; j < s.data.length; j++) {
+            const v = s.data[j];
+            if (isFinite(v)) {
+                if (v < globalMin) globalMin = v;
+                if (v > globalMax) globalMax = v;
             }
-            offset = dataStart + (w * h * 4);
         }
-        if (globalMin < globalMax) {
+    });
+
+    if (globalMin < globalMax) {
+        if (autoScale) {
             minY = globalMin;
             maxY = globalMax;
         }
+        self.postMessage({ type: 'currentRange', min: globalMin, max: globalMax });
     }
 
     if (is2DFallback) {
-        activeSlices2D = [];
-        let offset = 12;
-        for (let i = 0; i < numSlices; i++) {
-            const axis = view.getUint32(offset, true);
-            const zOff = view.getFloat32(offset + 4, true);
-            const w = view.getUint32(offset + 8, true);
-            const h = view.getUint32(offset + 12, true);
-            const dataStart = offset + 16;
-            const floatData = new Float32Array(buffer.slice(dataStart, dataStart + w * h * 4));
-            activeSlices2D.push({ axis, offset: zOff, w, h, data: floatData });
-            offset = dataStart + (w * h * 4);
-        }
+        activeSlices2D = cachedSlices;
         return;
     }
 
@@ -880,14 +917,12 @@ function padFloatData(src: Float32Array, w: number, h: number): { data: Float32A
     }
 
     if (isWebGPU && gpuDevice) {
-        let offset = 12;
-        for (let i = 0; i < numSlices; i++) {
-            const axis = view.getUint32(offset, true);
-            const zOff = view.getFloat32(offset + 4, true);
-            const w = view.getUint32(offset + 8, true);
-            const h = view.getUint32(offset + 12, true);
-            const dataStart = offset + 16;
-            const floatData = new Float32Array(buffer, dataStart, w * h);
+        cachedSlices.forEach((sliceObj, i) => {
+            const axis = sliceObj.axis;
+            const zOff = sliceObj.offset;
+            const w = sliceObj.w;
+            const h = sliceObj.h;
+            const floatData = sliceObj.data;
 
             let slice: SliceDataWebGPU;
             const geo = getSliceGeometry(axis, zOff, w, h);
@@ -960,61 +995,58 @@ function padFloatData(src: Float32Array, w: number, h: number): { data: Float32A
                 slice = { axis, offset: zOff, w, h, gpuTexture: tex, gpuTextureView: texView, vertexBuffer: vb, bindGroup };
                 activeSlicesWebGPU[axis] = slice;
             }
-            offset = dataStart + (w * h * 4);
-        }
+        });
         return;
     }
 
     // WebGL frame processing
     if (!gl) return;
+    const activeGl = gl;
 
     if (Object.keys(activeSlicesWebGL).length !== numSlices) {
         Object.values(activeSlicesWebGL).forEach(s => {
-            gl!.deleteTexture(s.texture);
-            gl!.deleteBuffer(s.buffer);
+            activeGl.deleteTexture(s.texture);
+            activeGl.deleteBuffer(s.buffer);
         });
         activeSlicesWebGL = {};
     }
 
-    const internalFormat = isWebGL2 ? gl.R32F : gl.LUMINANCE;
-    const format = isWebGL2 ? gl.RED : gl.LUMINANCE;
+    const internalFormat = isWebGL2 ? activeGl.R32F : activeGl.LUMINANCE;
+    const format = isWebGL2 ? activeGl.RED : activeGl.LUMINANCE;
 
-    let offset = 12;
-    for (let i = 0; i < numSlices; i++) {
-        const axis = view.getUint32(offset, true);
-        const zOff = view.getFloat32(offset + 4, true);
-        const w = view.getUint32(offset + 8, true);
-        const h = view.getUint32(offset + 12, true);
-        const dataStart = offset + 16;
-        const floatData = new Float32Array(buffer, dataStart, w * h);
+    cachedSlices.forEach((sliceObj, i) => {
+        const axis = sliceObj.axis;
+        const zOff = sliceObj.offset;
+        const w = sliceObj.w;
+        const h = sliceObj.h;
+        const floatData = sliceObj.data;
 
         let slice: SliceDataWebGL;
         if (activeSlicesWebGL[axis]) {
             slice = activeSlicesWebGL[axis];
-            gl.bindTexture(gl.TEXTURE_2D, slice.texture);
-            gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, w, h, 0, format, gl.FLOAT, floatData);
+            activeGl.bindTexture(activeGl.TEXTURE_2D, slice.texture);
+            activeGl.texImage2D(activeGl.TEXTURE_2D, 0, internalFormat, w, h, 0, format, activeGl.FLOAT, floatData);
 
-            gl.bindBuffer(gl.ARRAY_BUFFER, slice.buffer);
-            gl.bufferData(gl.ARRAY_BUFFER, getSliceGeometry(axis, zOff, w, h), gl.STATIC_DRAW);
+            activeGl.bindBuffer(activeGl.ARRAY_BUFFER, slice.buffer);
+            activeGl.bufferData(activeGl.ARRAY_BUFFER, getSliceGeometry(axis, zOff, w, h), activeGl.STATIC_DRAW);
         } else {
-            const tex = gl.createTexture()!;
-            gl.bindTexture(gl.TEXTURE_2D, tex);
-            const filter = gl.NEAREST;
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-            gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, w, h, 0, format, gl.FLOAT, floatData);
+            const tex = activeGl.createTexture()!;
+            activeGl.bindTexture(activeGl.TEXTURE_2D, tex);
+            const filter = hasFloatLinear ? activeGl.LINEAR : activeGl.NEAREST;
+            activeGl.texParameteri(activeGl.TEXTURE_2D, activeGl.TEXTURE_MIN_FILTER, filter);
+            activeGl.texParameteri(activeGl.TEXTURE_2D, activeGl.TEXTURE_MAG_FILTER, filter);
+            activeGl.texParameteri(activeGl.TEXTURE_2D, activeGl.TEXTURE_WRAP_S, activeGl.CLAMP_TO_EDGE);
+            activeGl.texParameteri(activeGl.TEXTURE_2D, activeGl.TEXTURE_WRAP_T, activeGl.CLAMP_TO_EDGE);
+            activeGl.texImage2D(activeGl.TEXTURE_2D, 0, internalFormat, w, h, 0, format, activeGl.FLOAT, floatData);
 
-            const buf = gl.createBuffer()!;
-            gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-            gl.bufferData(gl.ARRAY_BUFFER, getSliceGeometry(axis, zOff, w, h), gl.STATIC_DRAW);
+            const buf = activeGl.createBuffer()!;
+            activeGl.bindBuffer(activeGl.ARRAY_BUFFER, buf);
+            activeGl.bufferData(activeGl.ARRAY_BUFFER, getSliceGeometry(axis, zOff, w, h), activeGl.STATIC_DRAW);
 
             slice = { axis, offset: zOff, w, h, texture: tex, buffer: buf };
             activeSlicesWebGL[axis] = slice;
         }
-        offset = dataStart + (w * h * 4);
-    }
+    });
 }
 
 // 2D Projection helper matrix math
@@ -1147,6 +1179,7 @@ function render() {
         intView[52] = useLogScale ? 1 : 0;
         intView[53] = 0; // Wireframe boolean placeholder
         intView[54] = showCellEdges ? 1 : 0;
+        intView[55] = interpolate ? 1 : 0;
         
         gpuDevice.queue.writeBuffer(gpuUniformBuffer!, 0, uniformData.buffer);
 
@@ -1320,6 +1353,10 @@ function render() {
     if (uShowEdges !== null) {
         gl.uniform1i(uShowEdges, showCellEdges ? 1 : 0);
     }
+    const uInterp = gl.getUniformLocation(program, "uInterpolate");
+    if (uInterp !== null) {
+        gl.uniform1i(uInterp, interpolate ? 1 : 0);
+    }
 
     Object.values(activeSlicesWebGL).forEach(slice => {
         gl!.activeTexture(gl!.TEXTURE0);
@@ -1442,12 +1479,15 @@ self.onmessage = async (e) => {
                 if (data.colormap === 'viridis') colormap = 1;
                 else colormap = 0;
             }
+            if (data.minY !== undefined) minY = data.minY;
             if (data.min !== undefined) minY = data.min;
+            if (data.maxY !== undefined) maxY = data.maxY;
             if (data.max !== undefined) maxY = data.max;
             if (data.autoScale !== undefined) autoScale = data.autoScale;
             if (data.useLogScale !== undefined) useLogScale = data.useLogScale;
             if (data.showGrid !== undefined) showGrid = data.showGrid;
             if (data.showCellEdges !== undefined) showCellEdges = data.showCellEdges;
+            if (data.interpolate !== undefined) interpolate = data.interpolate;
             if (data.xmin !== undefined) xmin = data.xmin;
             if (data.ymin !== undefined) ymin = data.ymin;
             if (data.zmin !== undefined) zmin = data.zmin;
@@ -1457,6 +1497,25 @@ self.onmessage = async (e) => {
             if (data.nz !== undefined) nz = data.nz;
             if (data.usePerspective !== undefined) usePerspective = data.usePerspective;
             if (data.fov !== undefined) fov = data.fov;
+
+            // Recalculate autoScale range immediately using cached frame data
+            if (autoScale && cachedSlices.length > 0) {
+                let globalMin = Infinity;
+                let globalMax = -Infinity;
+                cachedSlices.forEach(s => {
+                    for (let j = 0; j < s.data.length; j++) {
+                        const v = s.data[j];
+                        if (isFinite(v)) {
+                            if (v < globalMin) globalMin = v;
+                            if (v > globalMax) globalMax = v;
+                        }
+                    }
+                });
+                if (globalMin < globalMax) {
+                    minY = globalMin;
+                    maxY = globalMax;
+                }
+            }
 
             let sizeChanged = false;
             if (data.xmin !== undefined && data.xmin !== xmin) { xmin = data.xmin; }
@@ -1471,6 +1530,27 @@ self.onmessage = async (e) => {
                 updateMatrices(canvasWidth(), canvasHeight());
             }
             render();
+        } else if (type === "scaleToCurrent") {
+            if (cachedSlices.length > 0) {
+                let globalMin = Infinity;
+                let globalMax = -Infinity;
+                cachedSlices.forEach(s => {
+                    for (let j = 0; j < s.data.length; j++) {
+                        const v = s.data[j];
+                        if (isFinite(v)) {
+                            if (v < globalMin) globalMin = v;
+                            if (v > globalMax) globalMax = v;
+                        }
+                    }
+                });
+                if (globalMin < globalMax) {
+                    minY = globalMin;
+                    maxY = globalMax;
+                    autoScale = false;
+                    self.postMessage({ type: 'rangeUpdated', min: minY, max: maxY });
+                    render();
+                }
+            }
         }
     } catch (err: any) {
         self.postMessage({ type: 'error', message: err.message || String(err) });

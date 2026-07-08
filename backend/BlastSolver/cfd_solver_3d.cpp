@@ -92,38 +92,52 @@ void CFDSolver3DImpl<IsMultiMaterial>::setInitialCondition(const Charge3DParams&
                             double x_c = xmin + (gx + 0.5) * cellSize;
 
                             int c_idx = i + j * TILE_SIZE_3D + k * TILE_SIZE_3D * TILE_SIZE_3D;
-                            double dist_sq = (x_c - charge.x)*(x_c - charge.x) + (y_c - charge.y)*(y_c - charge.y) + (z_c - charge.z)*(z_c - charge.z);
-                            bool in_charge = false;
-
-                            if (charge.shape_type == 0) { // Sphere
-                                if (dist_sq <= charge.radius * charge.radius) in_charge = true;
-                            } else if (charge.shape_type == 1) { // Block
-                                if (std::abs(x_c - charge.x) <= charge.lx*0.5 &&
-                                    std::abs(y_c - charge.y) <= charge.ly*0.5 &&
-                                    std::abs(z_c - charge.z) <= charge.lz*0.5) in_charge = true;
-                            } else if (charge.shape_type == 2) { // Cylinder
-                                double dr_sq = (x_c - charge.x)*(x_c - charge.x) + (y_c - charge.y)*(y_c - charge.y);
-                                if (dr_sq <= charge.radius*charge.radius && std::abs(z_c - charge.z) <= charge.height*0.5) in_charge = true;
+                            
+                            int points_inside = 0;
+                            for (double ox : {-0.25, 0.25}) {
+                                for (double oy : {-0.25, 0.25}) {
+                                    for (double oz : {-0.25, 0.25}) {
+                                        double px = x_c + ox * cellSize;
+                                        double py = y_c + oy * cellSize;
+                                        double pz = z_c + oz * cellSize;
+                                        double dx = px - charge.x;
+                                        double dy = py - charge.y;
+                                        double dz = pz - charge.z;
+                                        double dist_sq = dx*dx + dy*dy + dz*dz;
+                                        bool inside = false;
+                                        if (charge.shape_type == 0) { // Sphere
+                                            if (dist_sq <= charge.radius * charge.radius) inside = true;
+                                        } else if (charge.shape_type == 1) { // Block
+                                            if (std::abs(dx) <= charge.lx*0.5 && std::abs(dy) <= charge.ly*0.5 && std::abs(dz) <= charge.lz*0.5) inside = true;
+                                        } else if (charge.shape_type == 2) { // Cylinder
+                                            double dr_sq = dx*dx + dy*dy;
+                                            if (dr_sq <= charge.radius*charge.radius && std::abs(dz) <= charge.height*0.5) inside = true;
+                                        }
+                                        if (inside) points_inside++;
+                                    }
+                                }
                             }
+                            double f_vol = points_inside / 8.0;
 
-                            if (in_charge) {
+                            if (f_vol > 0.0) {
                                 tile_has_charge = true;
                                 CellState3D<IsMultiMaterial> temp_s;
                                 if constexpr (IsMultiMaterial) {
-                                    tile.alpha1[c_idx] = 0.0;
-                                    tile.alpha2[c_idx] = 1.0;
-                                    tile.arho1[c_idx] = 0.0;
-                                    tile.arho2[c_idx] = materials.unreacted.rho0;
-                                    tile.rho[c_idx] = tile.arho2[c_idx];
+                                    tile.alpha1[c_idx] = 1.0 - f_vol;
+                                    tile.alpha2[c_idx] = f_vol;
+                                    tile.arho1[c_idx] = tile.alpha1[c_idx] * ambient_rho;
+                                    tile.arho2[c_idx] = tile.alpha2[c_idx] * materials.unreacted.rho0;
+                                    tile.rho[c_idx] = tile.arho1[c_idx] + tile.arho2[c_idx];
                                     tile.p[c_idx] = ambient_p;
-                                    temp_s.alpha1 = 0.0; temp_s.alpha2 = 1.0;
-                                    temp_s.arho1 = 0.0; temp_s.arho2 = materials.unreacted.rho0;
+                                    temp_s.alpha1 = tile.alpha1[c_idx]; temp_s.alpha2 = tile.alpha2[c_idx];
+                                    temp_s.arho1 = tile.arho1[c_idx]; temp_s.arho2 = tile.arho2[c_idx];
                                 } else {
-                                    tile.rho[c_idx] = ambient_rho * 10.0;
-                                    tile.p[c_idx] = ambient_p * 1000.0;
+                                    tile.rho[c_idx] = f_vol * materials.unreacted.rho0 + (1.0 - f_vol) * ambient_rho;
+                                    double p_high = (gamma - 1.0) * materials.unreacted.rho0 * materials.detonation_energy;
+                                    tile.p[c_idx] = f_vol * p_high + (1.0 - f_vol) * ambient_p;
                                 }
                                 tile.E[c_idx] = getEnergy3D<IsMultiMaterial>(tile.p[c_idx], tile.rho[c_idx], temp_s, gamma, materials.products, materials.unreacted);
-                                double dist = std::sqrt(dist_sq);
+                                double dist = std::sqrt((x_c - charge.x)*(x_c - charge.x) + (y_c - charge.y)*(y_c - charge.y) + (z_c - charge.z)*(z_c - charge.z));
                                 tile.arrival_time[c_idx] = dist / materials.det_vel;
 
                                 auto& u_tile = U_pool[t_idx];
@@ -231,65 +245,101 @@ Flux3D<IsMultiMaterial> getAUSMPlusFlux3D(const CellState3D<IsMultiMaterial>& sL
     double beta = 1.0 / 8.0;
 
     auto get_M_plus = [beta](double M) {
-        if (std::abs(M) <= 1.0) return 0.25 * (M + 1.0) * (M + 1.0) + beta * (M * M - 1.0) * (M * M - 1.0);
-        return 0.5 * (M + std::abs(M));
+        if (std::abs(M) <= 1.0) {
+            double term = 0.25 * (M + 1.0) * (M + 1.0);
+            return term + beta * (M * M - 1.0) * (M * M - 1.0);
+        } else {
+            return 0.5 * (M + std::abs(M));
+        }
     };
+
     auto get_M_minus = [beta](double M) {
-        if (std::abs(M) <= 1.0) return -0.25 * (M - 1.0) * (M - 1.0) - beta * (M * M - 1.0) * (M * M - 1.0);
-        return 0.5 * (M - std::abs(M));
+        if (std::abs(M) <= 1.0) {
+            double term = -0.25 * (M - 1.0) * (M - 1.0);
+            return term - beta * (M * M - 1.0) * (M * M - 1.0);
+        } else {
+            return 0.5 * (M - std::abs(M));
+        }
     };
+
     auto get_P_plus = [alpha](double M) {
-        if (std::abs(M) <= 1.0) return 0.25 * (M + 1.0) * (M + 1.0) * (2.0 - M) + alpha * M * (M * M - 1.0) * (M * M - 1.0);
-        return (M >= 0.0) ? 1.0 : 0.0;
+        if (std::abs(M) <= 1.0) {
+            double term = 0.25 * (M + 1.0) * (M + 1.0) * (2.0 - M);
+            return term + alpha * M * (M * M - 1.0) * (M * M - 1.0);
+        } else {
+            return (M >= 0.0) ? 1.0 : 0.0;
+        }
     };
+
     auto get_P_minus = [alpha](double M) {
-        if (std::abs(M) <= 1.0) return 0.25 * (M - 1.0) * (M - 1.0) * (2.0 + M) - alpha * M * (M * M - 1.0) * (M * M - 1.0);
-        return (M < 0.0) ? 1.0 : 0.0;
+        if (std::abs(M) <= 1.0) {
+            double term = 0.25 * (M - 1.0) * (M - 1.0) * (2.0 + M);
+            return term - alpha * M * (M * M - 1.0) * (M * M - 1.0);
+        } else {
+            return (M < 0.0) ? 1.0 : 0.0;
+        }
     };
 
     double M_half = get_M_plus(ML) + get_M_minus(MR);
     double p_half = get_P_plus(ML) * sL.p + get_P_minus(MR) * sR.p;
-    double mass_flux = M_half * a_half;
 
     Flux3D<IsMultiMaterial> F;
-    const auto& s = (mass_flux >= 0) ? sL : sR;
-
-    F.rho = mass_flux * s.rho;
-    F.rhoux = mass_flux * s.rho * s.ux + (dir == 0 ? p_half : 0);
-    F.rhouy = mass_flux * s.rho * s.uy + (dir == 1 ? p_half : 0);
-    F.rhouz = mass_flux * s.rho * s.uz + (dir == 2 ? p_half : 0);
-    F.E = mass_flux * (s.E + s.p);
-    if constexpr (IsMultiMaterial) {
-        F.alpha1 = mass_flux * s.alpha1; F.alpha2 = mass_flux * s.alpha2;
-        F.arho1 = mass_flux * s.arho1; F.arho2 = mass_flux * s.arho2;
+    if (M_half >= 0.0) {
+        F.rho = M_half * a_half * sL.rho;
+        F.rhoux = M_half * a_half * sL.rho * sL.ux + (dir == 0 ? p_half : 0);
+        F.rhouy = M_half * a_half * sL.rho * sL.uy + (dir == 1 ? p_half : 0);
+        F.rhouz = M_half * a_half * sL.rho * sL.uz + (dir == 2 ? p_half : 0);
+        F.E = M_half * a_half * (sL.E + sL.p);
+        if constexpr (IsMultiMaterial) {
+            F.alpha1 = M_half * a_half * sL.alpha1;
+            F.alpha2 = M_half * a_half * sL.alpha2;
+            F.arho1 = M_half * a_half * sL.arho1;
+            F.arho2 = M_half * a_half * sL.arho2;
+        }
+    } else {
+        F.rho = M_half * a_half * sR.rho;
+        F.rhoux = M_half * a_half * sR.rho * sR.ux + (dir == 0 ? p_half : 0);
+        F.rhouy = M_half * a_half * sR.rho * sR.uy + (dir == 1 ? p_half : 0);
+        F.rhouz = M_half * a_half * sR.rho * sR.uz + (dir == 2 ? p_half : 0);
+        F.E = M_half * a_half * (sR.E + sR.p);
+        if constexpr (IsMultiMaterial) {
+            F.alpha1 = M_half * a_half * sR.alpha1;
+            F.alpha2 = M_half * a_half * sR.alpha2;
+            F.arho1 = M_half * a_half * sR.arho1;
+            F.arho2 = M_half * a_half * sR.arho2;
+        }
     }
 
-    // Entropy fix for expansion shocks (parity with 1D)
-    double lambda_minus_L = uL - aL;
-    double lambda_minus_R = uR - aR;
-    if (lambda_minus_L < 0.0 && lambda_minus_R > 0.0) {
-        double dlambda = lambda_minus_R - lambda_minus_L;
-        double diss = dlambda / 4.0;
-        F.rho -= diss * (sR.rho - sL.rho);
+    // Robust Entropy Fix (Harten entropy fix for expansion shocks)
+    double lambda_L = uL - aL;
+    double lambda_R = uR - aR;
+    
+    // Left-going acoustic wave
+    if (lambda_L < 0.0 && lambda_R > 0.0) {
+        double dlambda = lambda_R - lambda_L;
+        double diss = dlambda > 0 ? (dlambda * dlambda) / (4.0 * dlambda) : 0.0;
+        F.rho   -= diss * (sR.rho - sL.rho);
         F.rhoux -= diss * (sR.rho * sR.ux - sL.rho * sL.ux);
         F.rhouy -= diss * (sR.rho * sR.uy - sL.rho * sL.uy);
         F.rhouz -= diss * (sR.rho * sR.uz - sL.rho * sL.uz);
-        F.E -= diss * (sR.E - sL.E);
+        F.E     -= diss * (sR.E - sL.E);
         if constexpr (IsMultiMaterial) {
             F.arho1 -= diss * (sR.arho1 - sL.arho1);
             F.arho2 -= diss * (sR.arho2 - sL.arho2);
         }
     }
+
+    // Right-going acoustic wave
     double lambda_plus_L = uL + aL;
     double lambda_plus_R = uR + aR;
     if (lambda_plus_L < 0.0 && lambda_plus_R > 0.0) {
         double dlambda = lambda_plus_R - lambda_plus_L;
-        double diss = dlambda / 4.0;
-        F.rho -= diss * (sR.rho - sL.rho);
+        double diss = dlambda > 0 ? (dlambda * dlambda) / (4.0 * dlambda) : 0.0;
+        F.rho   -= diss * (sR.rho - sL.rho);
         F.rhoux -= diss * (sR.rho * sR.ux - sL.rho * sL.ux);
         F.rhouy -= diss * (sR.rho * sR.uy - sL.rho * sL.uy);
         F.rhouz -= diss * (sR.rho * sR.uz - sL.rho * sL.uz);
-        F.E -= diss * (sR.E - sL.E);
+        F.E     -= diss * (sR.E - sL.E);
         if constexpr (IsMultiMaterial) {
             F.arho1 -= diss * (sR.arho1 - sL.arho1);
             F.arho2 -= diss * (sR.arho2 - sL.arho2);
@@ -498,26 +548,87 @@ void CFDSolver3DImpl<IsMultiMaterial>::updatePrimitiveFromConservative() {
         auto& s = states_pool[t];
         auto& u = U_pool[t];
         for (int i = 0; i < TILE_CELLS_3D; ++i) {
-            s.rho[i] = std::max(u.rho[i], 1e-6);
-            s.ux[i] = u.rhoux[i] / s.rho[i];
-            s.uy[i] = u.rhouy[i] / s.rho[i];
-            s.uz[i] = u.rhouz[i] / s.rho[i];
-            s.E[i] = u.E[i];
-            double ke = 0.5 * s.rho[i] * (s.ux[i]*s.ux[i] + s.uy[i]*s.uy[i] + s.uz[i]*s.uz[i]);
-            double e_int = s.E[i] - ke;
+            double u_rho = u.rho[i];
+            double u_rhoux = u.rhoux[i];
+            double u_rhouy = u.rhouy[i];
+            double u_rhouz = u.rhouz[i];
+            double u_E = u.E[i];
+
+            bool bad = std::isnan(u_rho) || std::isinf(u_rho) || u_rho < 1e-8 ||
+                       std::isnan(u_rhoux) || std::isinf(u_rhoux) ||
+                       std::isnan(u_rhouy) || std::isinf(u_rhouy) ||
+                       std::isnan(u_rhouz) || std::isinf(u_rhouz) ||
+                       std::isnan(u_E) || std::isinf(u_E);
+
             if constexpr (IsMultiMaterial) {
-                s.alpha1[i] = std::clamp(u.alpha1[i], 0.0, 1.0);
-                s.alpha2[i] = std::clamp(u.alpha2[i], 0.0, 1.0);
-                s.arho1[i] = std::clamp(u.arho1[i], 0.0, s.rho[i]);
-                s.arho2[i] = std::clamp(u.arho2[i], 0.0, s.rho[i]);
+                bad = bad || std::isnan(u.alpha1[i]) || std::isinf(u.alpha1[i]) ||
+                            std::isnan(u.alpha2[i]) || std::isinf(u.alpha2[i]) ||
+                            std::isnan(u.arho1[i]) || std::isinf(u.arho1[i]) ||
+                            std::isnan(u.arho2[i]) || std::isinf(u.arho2[i]);
+            }
+
+            if (!bad) {
+                s.rho[i] = std::max(u_rho, 1e-8);
+                s.ux[i] = u_rhoux / s.rho[i];
+                s.uy[i] = u_rhouy / s.rho[i];
+                s.uz[i] = u_rhouz / s.rho[i];
+                s.E[i] = u_E;
+                double ke = 0.5 * s.rho[i] * (s.ux[i]*s.ux[i] + s.uy[i]*s.uy[i] + s.uz[i]*s.uz[i]);
+                double e_int = s.E[i] - ke;
+
+                if constexpr (IsMultiMaterial) {
+                    s.alpha1[i] = std::clamp(u.alpha1[i], 0.0, 1.0);
+                    s.alpha2[i] = std::clamp(u.alpha2[i], 0.0, 1.0);
+                    s.arho1[i] = std::clamp(u.arho1[i], 0.0, s.rho[i]);
+                    s.arho2[i] = std::clamp(u.arho2[i], 0.0, s.rho[i]);
+                    CellState3D<IsMultiMaterial> temp_s;
+                    temp_s.alpha1 = s.alpha1[i];
+                    temp_s.alpha2 = s.alpha2[i];
+                    temp_s.arho1 = s.arho1[i];
+                    temp_s.arho2 = s.arho2[i];
+                    double p_val = getPressure3D<IsMultiMaterial>(e_int, s.rho[i], temp_s, gamma, currentMaterials.products, currentMaterials.unreacted);
+                    if (std::isnan(p_val) || std::isinf(p_val) || p_val < 1e-8) {
+                        bad = true;
+                    } else {
+                        s.p[i] = p_val;
+                    }
+                } else {
+                    double p_val = e_int * (gamma - 1.0);
+                    if (std::isnan(p_val) || std::isinf(p_val) || p_val < 1e-8) {
+                        bad = true;
+                    } else {
+                        s.p[i] = p_val;
+                    }
+                }
+            }
+
+            if (bad) {
+                s.rho[i] = ambient_rho;
+                s.ux[i] = 0.0;
+                s.uy[i] = 0.0;
+                s.uz[i] = 0.0;
+                s.p[i] = ambient_p;
                 CellState3D<IsMultiMaterial> temp_s;
-                temp_s.alpha1 = s.alpha1[i];
-                temp_s.alpha2 = s.alpha2[i];
-                temp_s.arho1 = s.arho1[i];
-                temp_s.arho2 = s.arho2[i];
-                s.p[i] = std::max(getPressure3D<IsMultiMaterial>(e_int, s.rho[i], temp_s, gamma, currentMaterials.products, currentMaterials.unreacted), 1e-6);
+                if constexpr (IsMultiMaterial) {
+                    temp_s.alpha1 = 0.0; temp_s.alpha2 = 0.0;
+                    temp_s.arho1 = 0.0; temp_s.arho2 = 0.0;
+                    s.alpha1[i] = 0.0; s.alpha2[i] = 0.0;
+                    s.arho1[i] = 0.0; s.arho2[i] = 0.0;
+                }
+                s.E[i] = getEnergy3D<IsMultiMaterial>(ambient_p, ambient_rho, temp_s, gamma, currentMaterials.products, currentMaterials.unreacted);
+
+                u.rho[i] = ambient_rho;
+                u.rhoux[i] = 0.0;
+                u.rhouy[i] = 0.0;
+                u.rhouz[i] = 0.0;
+                u.E[i] = s.E[i];
+                if constexpr (IsMultiMaterial) {
+                    u.alpha1[i] = 0.0; u.alpha2[i] = 0.0;
+                    u.arho1[i] = 0.0; u.arho2[i] = 0.0;
+                }
+                s.floor_status[i] = 1;
             } else {
-                s.p[i] = std::max(e_int * (gamma - 1.0), 1e-6);
+                s.floor_status[i] = 0;
             }
         }
     }
