@@ -170,11 +170,11 @@ public:
     void setGamma(double g) { gamma = g; }
 };
 
-template <bool IsMultiMaterial>
+template <typename RealType, bool IsMultiMaterial>
 class CFDSolver3DImpl : public CFDSolver3DImplBase {
-    std::vector<PrimitiveTile3D<IsMultiMaterial>> states_pool;
-    std::vector<ConservativeTile3D<IsMultiMaterial>> U_pool;
-    std::vector<ConservativeTile3D<IsMultiMaterial>> U_prev_pool;
+    std::vector<PrimitiveTile3D<RealType, IsMultiMaterial>> states_pool;
+    std::vector<ConservativeTile3D<RealType, IsMultiMaterial>> U_pool;
+    std::vector<ConservativeTile3D<RealType, IsMultiMaterial>> U_prev_pool;
     std::vector<uint8_t> active_tiles;
 
     int n_tiles_x, n_tiles_y, n_tiles_z;
@@ -200,8 +200,8 @@ public:
     void commitStates() override;
     void setDetonatorLocation(double x, double y, double z) override;
     
-    const std::vector<PrimitiveTile3D<IsMultiMaterial>>& getStatesPool() const { return states_pool; }
-    const std::vector<ConservativeTile3D<IsMultiMaterial>>& getUPool() const { return U_pool; }
+    const std::vector<PrimitiveTile3D<RealType, IsMultiMaterial>>& getStatesPool() const { return states_pool; }
+    const std::vector<ConservativeTile3D<RealType, IsMultiMaterial>>& getUPool() const { return U_pool; }
     const std::vector<uint8_t>& getActiveTiles() const { return active_tiles; }
 
 private:
@@ -212,6 +212,39 @@ private:
     void updatePrimitiveFromConservative();
     bool checkTermination();
 public:
+    template <typename RT, bool MM>
+    struct CellState3DT {
+        RT rho, ux, uy, uz, p, E, alpha1, alpha2, arho1, arho2;
+    };
+
+    inline CellState3DT<RealType, IsMultiMaterial> sampleStateInternal(int gx, int gy, int gz) const {
+        bool reflective_x = false, reflective_y = false, reflective_z = false;
+
+        applyBC3DHelper(gx, nx, bcXmin, bcXmax, reflective_x);
+        applyBC3DHelper(gy, ny, bcYmin, bcYmax, reflective_y);
+        applyBC3DHelper(gz, nz, bcZmin, bcZmax, reflective_z);
+
+        gx = std::clamp(gx, 0, nx - 1);
+        gy = std::clamp(gy, 0, ny - 1);
+        gz = std::clamp(gz, 0, nz - 1);
+
+        int t_idx = (gx >> 3) + (gy >> 3) * n_tiles_x + (gz >> 3) * n_tiles_x * n_tiles_y;
+        const auto& tile = states_pool[t_idx];
+        int c_idx = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
+
+        CellState3DT<RealType, IsMultiMaterial> s;
+        s.p = tile.p[c_idx]; s.rho = tile.rho[c_idx]; s.E = tile.E[c_idx];
+        s.ux = reflective_x ? -tile.ux[c_idx] : tile.ux[c_idx];
+        s.uy = reflective_y ? -tile.uy[c_idx] : tile.uy[c_idx];
+        s.uz = reflective_z ? -tile.uz[c_idx] : tile.uz[c_idx];
+
+        if constexpr (IsMultiMaterial) {
+            s.alpha1 = tile.alpha1[c_idx]; s.alpha2 = tile.alpha2[c_idx];
+            s.arho1 = tile.arho1[c_idx]; s.arho2 = tile.arho2[c_idx];
+        }
+        return s;
+    }
+
     inline void applyBC3DHelper(int& g, int n, BCType3D bc_min, BCType3D bc_max, bool& reflect) const {
         if (g < 0) {
             if (bc_min == BCType3D::REFLECTIVE) { g = -g - 1; reflect = !reflect; }
@@ -238,14 +271,14 @@ public:
         int c_idx = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
 
         CellState3D<IsMultiMaterial> s;
-        s.p = tile.p[c_idx]; s.rho = tile.rho[c_idx]; s.E = tile.E[c_idx];
-        s.ux = reflective_x ? -tile.ux[c_idx] : tile.ux[c_idx];
-        s.uy = reflective_y ? -tile.uy[c_idx] : tile.uy[c_idx];
-        s.uz = reflective_z ? -tile.uz[c_idx] : tile.uz[c_idx];
+        s.p = (double)tile.p[c_idx]; s.rho = (double)tile.rho[c_idx]; s.E = (double)tile.E[c_idx];
+        s.ux = reflective_x ? -(double)tile.ux[c_idx] : (double)tile.ux[c_idx];
+        s.uy = reflective_y ? -(double)tile.uy[c_idx] : (double)tile.uy[c_idx];
+        s.uz = reflective_z ? -(double)tile.uz[c_idx] : (double)tile.uz[c_idx];
 
         if constexpr (IsMultiMaterial) {
-            s.alpha1 = tile.alpha1[c_idx]; s.alpha2 = tile.alpha2[c_idx];
-            s.arho1 = tile.arho1[c_idx]; s.arho2 = tile.arho2[c_idx];
+            s.alpha1 = (double)tile.alpha1[c_idx]; s.alpha2 = (double)tile.alpha2[c_idx];
+            s.arho1 = (double)tile.arho1[c_idx]; s.arho2 = (double)tile.arho2[c_idx];
         }
         return s;
     }

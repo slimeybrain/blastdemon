@@ -7,8 +7,8 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-template <bool IsMultiMaterial>
-CFDSolverImpl<IsMultiMaterial>::CFDSolverImpl(int num_cells, double domain_radius, double gamma)
+template <typename RealType, bool IsMultiMaterial>
+CFDSolverImpl<RealType, IsMultiMaterial>::CFDSolverImpl(int num_cells, double domain_radius, double gamma)
     : n_cells(num_cells), radius(domain_radius), gamma(gamma), currentTime(0.0), currentScheme(RUSANOV),
       ambient_rho(1.2), ambient_p(101325.0), active_r_idx(num_cells) {
     dr = radius / n_cells;
@@ -31,8 +31,8 @@ CFDSolverImpl<IsMultiMaterial>::CFDSolverImpl(int num_cells, double domain_radiu
     }
 }
 
-template <bool IsMultiMaterial>
-void CFDSolverImpl<IsMultiMaterial>::setFluxScheme(const std::string& scheme_name) {
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolverImpl<RealType, IsMultiMaterial>::setFluxScheme(const std::string& scheme_name) {
     if (scheme_name == "ausm_plus" || scheme_name == "AUSMPlus" || scheme_name == "ausm+" || scheme_name == "AUSM+") {
         currentScheme = AUSM_PLUS;
     } else {
@@ -40,8 +40,8 @@ void CFDSolverImpl<IsMultiMaterial>::setFluxScheme(const std::string& scheme_nam
     }
 }
 
-template <bool IsMultiMaterial>
-void CFDSolverImpl<IsMultiMaterial>::setInitialConditionTNT(double explosive_radius, double high_rho, double ambient_rho, double ambient_p) {
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolverImpl<RealType, IsMultiMaterial>::setInitialConditionTNT(double explosive_radius, double high_rho, double ambient_rho, double ambient_p) {
     this->ambient_rho = ambient_rho;
     this->ambient_p = ambient_p;
     for (int i = 0; i < n_cells; ++i) {
@@ -72,8 +72,8 @@ void CFDSolverImpl<IsMultiMaterial>::setInitialConditionTNT(double explosive_rad
     updateConservativeFromPrimitive(states, U);
 }
 
-template <bool IsMultiMaterial>
-void CFDSolverImpl<IsMultiMaterial>::setInitialConditionIdealGas(double explosive_radius, double high_rho, double detonation_energy, double ambient_rho, double ambient_p) {
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolverImpl<RealType, IsMultiMaterial>::setInitialConditionIdealGas(double explosive_radius, double high_rho, double detonation_energy, double ambient_rho, double ambient_p) {
     this->ambient_rho = ambient_rho;
     this->ambient_p = ambient_p;
     double p_high = (gamma - 1.0) * high_rho * detonation_energy;
@@ -98,8 +98,8 @@ void CFDSolverImpl<IsMultiMaterial>::setInitialConditionIdealGas(double explosiv
     updateConservativeFromPrimitive(states, U);
 }
 
-template <bool IsMultiMaterial>
-void CFDSolverImpl<IsMultiMaterial>::setInitialConditionRoseTNT(double explosive_radius, double high_rho, double chemical_energy, double ambient_rho, double ambient_p, double det_vel) {
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolverImpl<RealType, IsMultiMaterial>::setInitialConditionRoseTNT(double explosive_radius, double high_rho, double chemical_energy, double ambient_rho, double ambient_p, double det_vel) {
     this->ambient_rho = ambient_rho;
     this->ambient_p = ambient_p;
     this->currentTime = explosive_radius / det_vel;

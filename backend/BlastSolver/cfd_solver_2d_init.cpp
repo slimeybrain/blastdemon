@@ -8,7 +8,8 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-CFDSolver2D::CFDSolver2D(int nr, int nz, double max_r, double max_z, double gamma)
+template <typename RealType>
+CFDSolver2DImpl<RealType>::CFDSolver2DImpl(int nr, int nz, double max_r, double max_z, double gamma)
     : nr_cells(nr), nz_cells(nz), max_r(max_r), max_z(max_z), gamma(gamma), currentTime(0.0), currentScheme(AUSM_PLUS),
       ambient_rho(1.2), ambient_p(101325.0) {
     dr = max_r / nr_cells;
@@ -27,15 +28,16 @@ CFDSolver2D::CFDSolver2D(int nr, int nz, double max_r, double max_z, double gamm
     solid_mask.resize(nr_cells * nz_cells, 0);
 }
 
-int CFDSolver2D::allocateTile(int tr, int tz) {
+template <typename RealType>
+int CFDSolver2DImpl<RealType>::allocateTile(int tr, int tz) {
     if (tr < 0 || tr >= num_tiles_r || tz < 0 || tz >= num_tiles_z) return -1;
     int flat_idx = tr * num_tiles_z + tz;
     if (tile_map[flat_idx] != -1) return tile_map[flat_idx];
     
     int pool_idx = states_pool.size();
-    states_pool.push_back(PrimitiveTile());
-    U_pool.push_back(ConservativeTile());
-    dU_pool.push_back(ConservativeTile());
+    states_pool.push_back(PrimitiveTileT<RealType>());
+    U_pool.push_back(ConservativeTileT<RealType>());
+    dU_pool.push_back(ConservativeTileT<RealType>());
     
     initTileToAmbient(pool_idx);
     
@@ -44,12 +46,13 @@ int CFDSolver2D::allocateTile(int tr, int tz) {
     return pool_idx;
 }
 
-void CFDSolver2D::initTileToAmbient(int pool_idx) {
+template <typename RealType>
+void CFDSolver2DImpl<RealType>::initTileToAmbient(int pool_idx) {
     for (int k = 0; k < TILE_SIZE * TILE_SIZE; ++k) {
-        states_pool[pool_idx].rho[k] = ambient_rho;
+        states_pool[pool_idx].rho[k] = (RealType)ambient_rho;
         states_pool[pool_idx].ur[k] = 0.0;
         states_pool[pool_idx].uz[k] = 0.0;
-        states_pool[pool_idx].p[k] = ambient_p;
+        states_pool[pool_idx].p[k] = (RealType)ambient_p;
         states_pool[pool_idx].alpha1[k] = 0.0;
         states_pool[pool_idx].alpha2[k] = 0.0;
         states_pool[pool_idx].arho1[k] = 0.0;
@@ -57,12 +60,12 @@ void CFDSolver2D::initTileToAmbient(int pool_idx) {
         states_pool[pool_idx].floor_status[k] = 0;
         
         if (is_ideal_gas) {
-            states_pool[pool_idx].E[k] = ambient_p / (gamma - 1.0);
+            states_pool[pool_idx].E[k] = (RealType)ambient_p / ((RealType)gamma - (RealType)1.0);
         } else {
-            states_pool[pool_idx].E[k] = ambient_rho * MultiMat::getEnergy_IdealGas(ambient_p, ambient_rho, gamma);
+            states_pool[pool_idx].E[k] = (RealType)(ambient_rho * MultiMat::getEnergy_IdealGas(ambient_p, ambient_rho, gamma));
         }
         
-        U_pool[pool_idx].rho[k] = ambient_rho;
+        U_pool[pool_idx].rho[k] = (RealType)ambient_rho;
         U_pool[pool_idx].rhour[k] = 0.0;
         U_pool[pool_idx].rhouz[k] = 0.0;
         U_pool[pool_idx].E[k] = states_pool[pool_idx].E[k];
@@ -73,7 +76,8 @@ void CFDSolver2D::initTileToAmbient(int pool_idx) {
     }
 }
 
-void CFDSolver2D::setFluxScheme(const std::string& scheme_name) {
+template <typename RealType>
+void CFDSolver2DImpl<RealType>::setFluxScheme(const std::string& scheme_name) {
     if (scheme_name == "ausm_plus" || scheme_name == "AUSMPlus" || scheme_name == "ausm+" || scheme_name == "AUSM+") {
         currentScheme = AUSM_PLUS;
     } else {
@@ -81,7 +85,8 @@ void CFDSolver2D::setFluxScheme(const std::string& scheme_name) {
     }
 }
 
-void CFDSolver2D::setInitialConditionTNT(double explosive_z, double explosive_radius, 
+template <typename RealType>
+void CFDSolver2DImpl<RealType>::setInitialConditionTNT(double explosive_z, double explosive_radius, 
                                         double high_rho, 
                                         double ambient_rho, double ambient_p) {
     this->ambient_rho = ambient_rho;
@@ -123,31 +128,32 @@ void CFDSolver2D::setInitialConditionTNT(double explosive_z, double explosive_ra
                 double rho = arho2 + (1.0 - f_vol) * ambient_rho;
                 double E = MultiMat::getMixtureEnergy(ambient_p, rho, 0.0, alpha2, 0.0, arho2, gamma, currentMaterials.products, currentMaterials.unreacted);
 
-                states_pool[pool_idx].rho[local_idx] = rho;
-                states_pool[pool_idx].p[local_idx] = ambient_p;
+                states_pool[pool_idx].rho[local_idx] = (RealType)rho;
+                states_pool[pool_idx].p[local_idx] = (RealType)ambient_p;
                 states_pool[pool_idx].alpha1[local_idx] = 0.0; 
-                states_pool[pool_idx].alpha2[local_idx] = alpha2;
+                states_pool[pool_idx].alpha2[local_idx] = (RealType)alpha2;
                 states_pool[pool_idx].arho1[local_idx] = 0.0; 
-                states_pool[pool_idx].arho2[local_idx] = arho2;
+                states_pool[pool_idx].arho2[local_idx] = (RealType)arho2;
                 states_pool[pool_idx].ur[local_idx] = 0.0; 
                 states_pool[pool_idx].uz[local_idx] = 0.0;
-                states_pool[pool_idx].E[local_idx] = E;
+                states_pool[pool_idx].E[local_idx] = (RealType)E;
                 
-                U_pool[pool_idx].rho[local_idx] = rho;
+                U_pool[pool_idx].rho[local_idx] = (RealType)rho;
                 U_pool[pool_idx].rhour[local_idx] = 0.0;
                 U_pool[pool_idx].rhouz[local_idx] = 0.0;
-                U_pool[pool_idx].E[local_idx] = E;
+                U_pool[pool_idx].E[local_idx] = (RealType)E;
                 U_pool[pool_idx].alpha1[local_idx] = 0.0;
-                U_pool[pool_idx].alpha2[local_idx] = alpha2;
+                U_pool[pool_idx].alpha2[local_idx] = (RealType)alpha2;
                 U_pool[pool_idx].arho1[local_idx] = 0.0;
-                U_pool[pool_idx].arho2[local_idx] = arho2;
+                U_pool[pool_idx].arho2[local_idx] = (RealType)arho2;
             }
         }
     }
     updateActiveRegion();
 }
 
-void CFDSolver2D::setInitialConditionIdealGas(double explosive_z, double explosive_radius,
+template <typename RealType>
+void CFDSolver2DImpl<RealType>::setInitialConditionIdealGas(double explosive_z, double explosive_radius,
                                              double high_rho, double detonation_energy,
                                              double ambient_rho, double ambient_p) {
     this->ambient_rho = ambient_rho;
@@ -190,17 +196,17 @@ void CFDSolver2D::setInitialConditionIdealGas(double explosive_z, double explosi
                 double p = f_vol * p_high + (1.0 - f_vol) * ambient_p;
                 double E = p / (gamma - 1.0);
 
-                states_pool[pool_idx].rho[local_idx] = rho;
-                states_pool[pool_idx].p[local_idx] = p;
+                states_pool[pool_idx].rho[local_idx] = (RealType)rho;
+                states_pool[pool_idx].p[local_idx] = (RealType)p;
                 states_pool[pool_idx].alpha1[local_idx] = 0.0; states_pool[pool_idx].alpha2[local_idx] = 0.0;
                 states_pool[pool_idx].arho1[local_idx] = 0.0; states_pool[pool_idx].arho2[local_idx] = 0.0;
                 states_pool[pool_idx].ur[local_idx] = 0.0; states_pool[pool_idx].uz[local_idx] = 0.0;
-                states_pool[pool_idx].E[local_idx] = E;
+                states_pool[pool_idx].E[local_idx] = (RealType)E;
                 
-                U_pool[pool_idx].rho[local_idx] = rho;
+                U_pool[pool_idx].rho[local_idx] = (RealType)rho;
                 U_pool[pool_idx].rhour[local_idx] = 0.0;
                 U_pool[pool_idx].rhouz[local_idx] = 0.0;
-                U_pool[pool_idx].E[local_idx] = E;
+                U_pool[pool_idx].E[local_idx] = (RealType)E;
                 U_pool[pool_idx].alpha1[local_idx] = 0.0; U_pool[pool_idx].alpha2[local_idx] = 0.0;
                 U_pool[pool_idx].arho1[local_idx] = 0.0; U_pool[pool_idx].arho2[local_idx] = 0.0;
             }
@@ -209,7 +215,8 @@ void CFDSolver2D::setInitialConditionIdealGas(double explosive_z, double explosi
     updateActiveRegion();
 }
 
-void CFDSolver2D::setInitialConditionTNTCylinder(double explosive_z, double radius, double height,
+template <typename RealType>
+void CFDSolver2DImpl<RealType>::setInitialConditionTNTCylinder(double explosive_z, double radius, double height,
                                                 double high_rho,
                                                 double ambient_rho, double ambient_p) {
     this->ambient_rho = ambient_rho;
@@ -250,26 +257,27 @@ void CFDSolver2D::setInitialConditionTNTCylinder(double explosive_z, double radi
                 double rho = arho2 + (1.0 - f_vol) * ambient_rho;
                 double E = MultiMat::getMixtureEnergy(ambient_p, rho, 0.0, alpha2, 0.0, arho2, gamma, currentMaterials.products, currentMaterials.unreacted);
 
-                states_pool[pool_idx].rho[local_idx] = rho;
-                states_pool[pool_idx].p[local_idx] = ambient_p;
-                states_pool[pool_idx].alpha1[local_idx] = 0.0; states_pool[pool_idx].alpha2[local_idx] = alpha2;
-                states_pool[pool_idx].arho1[local_idx] = 0.0; states_pool[pool_idx].arho2[local_idx] = arho2;
+                states_pool[pool_idx].rho[local_idx] = (RealType)rho;
+                states_pool[pool_idx].p[local_idx] = (RealType)ambient_p;
+                states_pool[pool_idx].alpha1[local_idx] = 0.0; states_pool[pool_idx].alpha2[local_idx] = (RealType)alpha2;
+                states_pool[pool_idx].arho1[local_idx] = 0.0; states_pool[pool_idx].arho2[local_idx] = (RealType)arho2;
                 states_pool[pool_idx].ur[local_idx] = 0.0; states_pool[pool_idx].uz[local_idx] = 0.0;
-                states_pool[pool_idx].E[local_idx] = E;
+                states_pool[pool_idx].E[local_idx] = (RealType)E;
                 
-                U_pool[pool_idx].rho[local_idx] = rho;
+                U_pool[pool_idx].rho[local_idx] = (RealType)rho;
                 U_pool[pool_idx].rhour[local_idx] = 0.0;
                 U_pool[pool_idx].rhouz[local_idx] = 0.0;
-                U_pool[pool_idx].E[local_idx] = E;
-                U_pool[pool_idx].alpha1[local_idx] = 0.0; U_pool[pool_idx].alpha2[local_idx] = alpha2;
-                U_pool[pool_idx].arho1[local_idx] = 0.0; U_pool[pool_idx].arho2[local_idx] = arho2;
+                U_pool[pool_idx].E[local_idx] = (RealType)E;
+                U_pool[pool_idx].alpha1[local_idx] = 0.0; U_pool[pool_idx].alpha2[local_idx] = (RealType)alpha2;
+                U_pool[pool_idx].arho1[local_idx] = 0.0; U_pool[pool_idx].arho2[local_idx] = (RealType)arho2;
             }
         }
     }
     updateActiveRegion();
 }
 
-void CFDSolver2D::setInitialConditionFrom1D(double explosive_z, double remap_radius,
+template <typename RealType>
+void CFDSolver2DImpl<RealType>::setInitialConditionFrom1D(double explosive_z, double remap_radius,
                                            const std::vector<double>& r_1d,
                                            const std::vector<MultiMaterialState>& states_1d,
                                            double ambient_rho, double ambient_p,
@@ -435,17 +443,20 @@ void CFDSolver2D::setInitialConditionFrom1D(double explosive_z, double remap_rad
                 }
             }
 
-            U_pool[pool_idx].rho[local_idx]   = sum_rho_w / sum_w;
-            U_pool[pool_idx].rhour[local_idx] = sum_rhour_w / sum_w;
-            U_pool[pool_idx].rhouz[local_idx] = sum_rhouz_w / sum_w;
-            U_pool[pool_idx].E[local_idx]     = sum_E_w / sum_w;
-            U_pool[pool_idx].alpha1[local_idx] = sum_alpha1_w / sum_w;
-            U_pool[pool_idx].alpha2[local_idx] = sum_alpha2_w / sum_w;
-            U_pool[pool_idx].arho1[local_idx]  = sum_arho1_w / sum_w;
-            U_pool[pool_idx].arho2[local_idx]  = sum_arho2_w / sum_w;
+            U_pool[pool_idx].rho[local_idx]   = (RealType)(sum_rho_w / sum_w);
+            U_pool[pool_idx].rhour[local_idx] = (RealType)(sum_rhour_w / sum_w);
+            U_pool[pool_idx].rhouz[local_idx] = (RealType)(sum_rhouz_w / sum_w);
+            U_pool[pool_idx].E[local_idx]     = (RealType)(sum_E_w / sum_w);
+            U_pool[pool_idx].alpha1[local_idx] = (RealType)(sum_alpha1_w / sum_w);
+            U_pool[pool_idx].alpha2[local_idx] = (RealType)(sum_alpha2_w / sum_w);
+            U_pool[pool_idx].arho1[local_idx]  = (RealType)(sum_arho1_w / sum_w);
+            U_pool[pool_idx].arho2[local_idx]  = (RealType)(sum_arho2_w / sum_w);
         }
     }
 
     updatePrimitiveFromConservative();
     updateActiveRegion();
 }
+
+template class CFDSolver2DImpl<float>;
+template class CFDSolver2DImpl<double>;

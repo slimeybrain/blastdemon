@@ -1010,10 +1010,19 @@ int main() {
                     std::string composition  = msg.value("composition", "TNT");
                     std::string explosive_type = msg.value("explosive_type", "");
 
-                    if (init_mode == "Ideal Gas" || explosive_type == "MaterialIdealGas") {
-                        global_solver = std::make_unique<CFDSolverImpl<false>>(n_cells, radius, gamma);
+                    std::string precision = msg.value("precision", "double");
+                    if (precision == "single" || precision == "float") {
+                        if (init_mode == "Ideal Gas" || explosive_type == "MaterialIdealGas") {
+                            global_solver = std::make_unique<CFDSolverImpl<float, false>>(n_cells, radius, gamma);
+                        } else {
+                            global_solver = std::make_unique<CFDSolverImpl<float, true>>(n_cells, radius, gamma);
+                        }
                     } else {
-                        global_solver = std::make_unique<CFDSolverImpl<true>>(n_cells, radius, gamma);
+                        if (init_mode == "Ideal Gas" || explosive_type == "MaterialIdealGas") {
+                            global_solver = std::make_unique<CFDSolverImpl<double, false>>(n_cells, radius, gamma);
+                        } else {
+                            global_solver = std::make_unique<CFDSolverImpl<double, true>>(n_cells, radius, gamma);
+                        }
                     }
 
                     // Set boundary conditions
@@ -1366,9 +1375,14 @@ int main() {
                     global_t2d = 0.0;
                     global_dt_2d = 0.0;
 
+                    std::string precision = msg.value("precision", "double");
                     if (device == "cuda") {
                         global_solver_2d.reset();
-                        global_solver_2d_cuda = std::make_unique<CFDSolver2DCuda>(nr, nz, max_r, max_z, gamma);
+                        if (precision == "single" || precision == "float") {
+                            global_solver_2d_cuda = std::make_unique<CFDSolver2DCudaImpl<float>>(nr, nz, max_r, max_z, gamma);
+                        } else {
+                            global_solver_2d_cuda = std::make_unique<CFDSolver2DCudaImpl<double>>(nr, nz, max_r, max_z, gamma);
+                        }
                         
                         global_solver_2d_cuda->setFluxScheme(flux_scheme);
                         global_solver_2d_cuda->setSpatialOrder(spatial_order);
@@ -1418,7 +1432,11 @@ int main() {
                         }
                     } else {
                         global_solver_2d_cuda.reset();
-                        global_solver_2d = std::make_unique<CFDSolver2D>(nr, nz, max_r, max_z, gamma);
+                        if (precision == "single" || precision == "float") {
+                            global_solver_2d = std::make_unique<CFDSolver2DImpl<float>>(nr, nz, max_r, max_z, gamma);
+                        } else {
+                            global_solver_2d = std::make_unique<CFDSolver2DImpl<double>>(nr, nz, max_r, max_z, gamma);
+                        }
                         
                         global_solver_2d->setFluxScheme(flux_scheme);
                         global_solver_2d->setSpatialOrder(spatial_order);
@@ -1639,29 +1657,44 @@ int main() {
                     std::string init_mode = msg.value("init_mode", "Multi-Material JWL");
                     bool is_multimat = (init_mode == "Multi-Material JWL");
 
+                    std::string precision = msg.value("precision", "single");
                     if (device == "cuda") {
-                        if (is_multimat) {
-                            global_solver_3d = std::make_unique<CFDSolver3DCuda<true>>(nx, ny, nz, cellSize, xmin, ymin, zmin);
+                        if (precision == "single" || precision == "float") {
+                            if (is_multimat) {
+                                global_solver_3d = std::make_unique<CFDSolver3DCuda<float, true>>(nx, ny, nz, cellSize, xmin, ymin, zmin);
+                            } else {
+                                global_solver_3d = std::make_unique<CFDSolver3DCuda<float, false>>(nx, ny, nz, cellSize, xmin, ymin, zmin);
+                            }
                         } else {
-                            global_solver_3d = std::make_unique<CFDSolver3DCuda<false>>(nx, ny, nz, cellSize, xmin, ymin, zmin);
+                            if (is_multimat) {
+                                global_solver_3d = std::make_unique<CFDSolver3DCuda<double, true>>(nx, ny, nz, cellSize, xmin, ymin, zmin);
+                            } else {
+                                global_solver_3d = std::make_unique<CFDSolver3DCuda<double, false>>(nx, ny, nz, cellSize, xmin, ymin, zmin);
+                            }
                         }
                     } else {
-                        if (is_multimat) {
-                            global_solver_3d = std::make_unique<CFDSolver3DImpl<true>>(nx, ny, nz, cellSize, xmin, ymin, zmin);
+                        if (precision == "single" || precision == "float") {
+                            if (is_multimat) {
+                                global_solver_3d = std::make_unique<CFDSolver3DImpl<float, true>>(nx, ny, nz, cellSize, xmin, ymin, zmin);
+                            } else {
+                                global_solver_3d = std::make_unique<CFDSolver3DImpl<float, false>>(nx, ny, nz, cellSize, xmin, ymin, zmin);
+                            }
                         } else {
-                            global_solver_3d = std::make_unique<CFDSolver3DImpl<false>>(nx, ny, nz, cellSize, xmin, ymin, zmin);
+                            if (is_multimat) {
+                                global_solver_3d = std::make_unique<CFDSolver3DImpl<double, true>>(nx, ny, nz, cellSize, xmin, ymin, zmin);
+                            } else {
+                                global_solver_3d = std::make_unique<CFDSolver3DImpl<double, false>>(nx, ny, nz, cellSize, xmin, ymin, zmin);
+                            }
                         }
                     }
 
                     std::string flux_scheme = msg.value("flux_scheme", "AUSM+");
                     int spatial_order = msg.value("spatial_order", 2);
                     int temporal_order = msg.value("temporal_order", 2);
-                    std::string precision = msg.value("precision", "single");
 
                     global_solver_3d->setFluxScheme(flux_scheme);
                     global_solver_3d->setSpatialOrder(spatial_order);
                     global_solver_3d->setTemporalOrder(temporal_order);
-                    // Note: C++ solver is inherently double-precision, 'precision' param is parsed but not templated yet for performance.
 
                     Charge3DParams cp;
                     std::string shape_str = msg.value("charge_shape", "Sphere");

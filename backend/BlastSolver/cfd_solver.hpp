@@ -50,11 +50,11 @@ public:
     virtual const std::vector<double>& getGeomA() const = 0;
 };
 
-template <bool IsMultiMaterial>
+template <typename RealType, bool IsMultiMaterial>
 class CFDSolverImpl : public CFDSolver {
 public:
-    using PrimitiveState = typename StateTypes<IsMultiMaterial>::PrimitiveState;
-    using ConservedState = typename StateTypes<IsMultiMaterial>::ConservedState;
+    using PrimitiveState = typename StateTypes<RealType, IsMultiMaterial>::PrimitiveState;
+    using ConservedState = typename StateTypes<RealType, IsMultiMaterial>::ConservedState;
 
     CFDSolverImpl(int num_cells, double domain_radius, double gamma = 1.4);
 
@@ -113,7 +113,7 @@ private:
 
     std::vector<PrimitiveState> states;
     std::vector<ConservedState> U;
-    std::vector<double> v_int; // Interface velocities
+    std::vector<RealType> v_int; // Interface velocities
 
     std::vector<double> geom_V;
     std::vector<double> geom_A;

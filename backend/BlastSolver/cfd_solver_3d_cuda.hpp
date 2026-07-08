@@ -3,7 +3,7 @@
 
 #include "cfd_solver_3d.hpp"
 
-template <bool IsMultiMaterial>
+template <typename RealType, bool IsMultiMaterial>
 class CFDSolver3DCuda : public CFDSolver3DImplBase {
     // GPU pointers and internal state
     void* d_states = nullptr;
@@ -14,7 +14,7 @@ class CFDSolver3DCuda : public CFDSolver3DImplBase {
     void* d_slice_buf = nullptr;
 
     // Host temporary mirrors during remapping
-    PrimitiveTile3D<IsMultiMaterial>* temp_h_states = nullptr;
+    PrimitiveTile3D<RealType, IsMultiMaterial>* temp_h_states = nullptr;
     uint8_t* temp_h_active = nullptr;
 
     void updateActiveRegions();

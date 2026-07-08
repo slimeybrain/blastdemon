@@ -10,84 +10,89 @@ constexpr int TILE_SIZE_3D = 8;
 constexpr int TILE_CELLS_3D = TILE_SIZE_3D * TILE_SIZE_3D * TILE_SIZE_3D;
 
 // Structure of Arrays (SoA) for a single Tile (Conservative Variables)
-struct ConservativeTile {
-    double rho[TILE_SIZE * TILE_SIZE];
-    double rhour[TILE_SIZE * TILE_SIZE];
-    double rhouz[TILE_SIZE * TILE_SIZE];
-    double E[TILE_SIZE * TILE_SIZE];
-    double alpha1[TILE_SIZE * TILE_SIZE];
-    double alpha2[TILE_SIZE * TILE_SIZE];
-    double arho1[TILE_SIZE * TILE_SIZE];
-    double arho2[TILE_SIZE * TILE_SIZE];
+template <typename RealType>
+struct ConservativeTileT {
+    RealType rho[TILE_SIZE * TILE_SIZE];
+    RealType rhour[TILE_SIZE * TILE_SIZE];
+    RealType rhouz[TILE_SIZE * TILE_SIZE];
+    RealType E[TILE_SIZE * TILE_SIZE];
+    RealType alpha1[TILE_SIZE * TILE_SIZE];
+    RealType alpha2[TILE_SIZE * TILE_SIZE];
+    RealType arho1[TILE_SIZE * TILE_SIZE];
+    RealType arho2[TILE_SIZE * TILE_SIZE];
 };
 
 // Structure of Arrays (SoA) for a single Tile (Primitive Variables)
-struct PrimitiveTile {
-    double rho[TILE_SIZE * TILE_SIZE];
-    double ur[TILE_SIZE * TILE_SIZE];
-    double uz[TILE_SIZE * TILE_SIZE];
-    double p[TILE_SIZE * TILE_SIZE];
-    double E[TILE_SIZE * TILE_SIZE];
-    double alpha1[TILE_SIZE * TILE_SIZE];
-    double alpha2[TILE_SIZE * TILE_SIZE];
-    double arho1[TILE_SIZE * TILE_SIZE];
-    double arho2[TILE_SIZE * TILE_SIZE];
+template <typename RealType>
+struct PrimitiveTileT {
+    RealType rho[TILE_SIZE * TILE_SIZE];
+    RealType ur[TILE_SIZE * TILE_SIZE];
+    RealType uz[TILE_SIZE * TILE_SIZE];
+    RealType p[TILE_SIZE * TILE_SIZE];
+    RealType E[TILE_SIZE * TILE_SIZE];
+    RealType alpha1[TILE_SIZE * TILE_SIZE];
+    RealType alpha2[TILE_SIZE * TILE_SIZE];
+    RealType arho1[TILE_SIZE * TILE_SIZE];
+    RealType arho2[TILE_SIZE * TILE_SIZE];
     int floor_status[TILE_SIZE * TILE_SIZE];
 };
 
-template <bool IsMultiMaterial>
+using ConservativeTile = ConservativeTileT<double>;
+using PrimitiveTile = PrimitiveTileT<double>;
+
+template <typename RealType, bool IsMultiMaterial>
 struct ConservativeTile3D;
 
-template <>
-struct ConservativeTile3D<false> {
-    Real rho[TILE_CELLS_3D];
-    Real rhoux[TILE_CELLS_3D];
-    Real rhouy[TILE_CELLS_3D];
-    Real rhouz[TILE_CELLS_3D];
-    Real E[TILE_CELLS_3D];
+template <typename RealType>
+struct ConservativeTile3D<RealType, false> {
+    RealType rho[TILE_CELLS_3D];
+    RealType rhoux[TILE_CELLS_3D];
+    RealType rhouy[TILE_CELLS_3D];
+    RealType rhouz[TILE_CELLS_3D];
+    RealType E[TILE_CELLS_3D];
 };
 
-template <>
-struct ConservativeTile3D<true> {
-    Real rho[TILE_CELLS_3D];
-    Real rhoux[TILE_CELLS_3D];
-    Real rhouy[TILE_CELLS_3D];
-    Real rhouz[TILE_CELLS_3D];
-    Real E[TILE_CELLS_3D];
-    Real alpha1[TILE_CELLS_3D];
-    Real alpha2[TILE_CELLS_3D];
-    Real arho1[TILE_CELLS_3D];
-    Real arho2[TILE_CELLS_3D];
+template <typename RealType>
+struct ConservativeTile3D<RealType, true> {
+    RealType rho[TILE_CELLS_3D];
+    RealType rhoux[TILE_CELLS_3D];
+    RealType rhouy[TILE_CELLS_3D];
+    RealType rhouz[TILE_CELLS_3D];
+    RealType E[TILE_CELLS_3D];
+    RealType alpha1[TILE_CELLS_3D];
+    RealType alpha2[TILE_CELLS_3D];
+    RealType arho1[TILE_CELLS_3D];
+    RealType arho2[TILE_CELLS_3D];
 };
 
-template <bool IsMultiMaterial>
+template <typename RealType, bool IsMultiMaterial>
 struct PrimitiveTile3D;
 
-template <>
-struct PrimitiveTile3D<false> {
-    Real rho[TILE_CELLS_3D];
-    Real ux[TILE_CELLS_3D];
-    Real uy[TILE_CELLS_3D];
-    Real uz[TILE_CELLS_3D];
-    Real p[TILE_CELLS_3D];
-    Real E[TILE_CELLS_3D];
-    Real arrival_time[TILE_CELLS_3D];
+template <typename RealType>
+struct PrimitiveTile3D<RealType, false> {
+    RealType rho[TILE_CELLS_3D];
+    RealType ux[TILE_CELLS_3D];
+    RealType uy[TILE_CELLS_3D];
+    RealType uz[TILE_CELLS_3D];
+    RealType p[TILE_CELLS_3D];
+    RealType E[TILE_CELLS_3D];
+    RealType arrival_time[TILE_CELLS_3D];
     int floor_status[TILE_CELLS_3D];
 };
 
-template <>
-struct PrimitiveTile3D<true> {
-    Real rho[TILE_CELLS_3D];
-    Real ux[TILE_CELLS_3D];
-    Real uy[TILE_CELLS_3D];
-    Real uz[TILE_CELLS_3D];
-    Real p[TILE_CELLS_3D];
-    Real E[TILE_CELLS_3D];
-    Real alpha1[TILE_CELLS_3D];
-    Real alpha2[TILE_CELLS_3D];
-    Real arho1[TILE_CELLS_3D];
-    Real arho2[TILE_CELLS_3D];
-    Real arrival_time[TILE_CELLS_3D];
+template <typename RealType>
+struct PrimitiveTile3D<RealType, true> {
+    RealType rho[TILE_CELLS_3D];
+    RealType ux[TILE_CELLS_3D];
+    RealType uy[TILE_CELLS_3D];
+    RealType uz[TILE_CELLS_3D];
+    RealType p[TILE_CELLS_3D];
+    RealType E[TILE_CELLS_3D];
+    RealType alpha1[TILE_CELLS_3D];
+    RealType alpha2[TILE_CELLS_3D];
+    RealType arho1[TILE_CELLS_3D];
+    RealType arho2[TILE_CELLS_3D];
+    RealType arrival_time[TILE_CELLS_3D];
     int floor_status[TILE_CELLS_3D];
 };
 
