@@ -445,7 +445,9 @@ body {
 }
 
 .node.selected {
-    border-color: #007acc;
+    border-top-color: #007acc;
+    border-right-color: #007acc;
+    border-bottom-color: #007acc;
     box-shadow: 0 0 10px #007acc;
 }
 

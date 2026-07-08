@@ -7,14 +7,14 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-# Target SM86 (Ampere) / SM89 (Ada) / SM120 (Blackwell) — add older SMs as needed
-set(CMAKE_CUDA_ARCHITECTURES 60 70 75 80 86)
+# Target the best available GPU architecture automatically
+set(CMAKE_CUDA_ARCHITECTURES native)
 
-# Apply strict compiler warnings
+# Apply strict compiler warnings and high optimizations
 if(MSVC)
-    add_compile_options(/W4)
+    add_compile_options(/W4 /O2)
 else()
-    add_compile_options(-Wall -Wextra)
+    add_compile_options(-Wall -Wextra -O3 -march=native)
 endif()
 
 # OpenMP for CPU 2D solver parallelism

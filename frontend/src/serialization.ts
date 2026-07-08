@@ -130,6 +130,19 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             }
         }
 
+        // Trace Air for CFD Solver 3D
+        const airConn3D = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'air');
+        if (airConn3D) {
+            const airNode3D = state.nodes.find(n => n.id === airConn3D.fromNode);
+            if (airNode3D && airNode3D.type === 'Material' && airNode3D.parameters?.material_type === 'Air') {
+                Object.entries(airNode3D.parameters).forEach(([key, value]) => {
+                    if (key !== 'material_type') {
+                        flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                    }
+                });
+            }
+        }
+
         // Trace Charge 3D
         const chargeConn3D = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'charge');
         if (chargeConn3D) {
@@ -154,6 +167,17 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             }
         }
 
+        // Trace Detonator for CFD Solver 3D
+        const detConn3D = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'detonator');
+        if (detConn3D) {
+            const detNode3D = state.nodes.find(n => n.id === detConn3D.fromNode);
+            if (detNode3D && detNode3D.type === 'DetonatorLocation3D') {
+                Object.entries(detNode3D.parameters).forEach(([key, value]) => {
+                    flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                });
+            }
+        }
+
         // Trace Remap 3D
         const remapConn3D = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'remap');
         if (remapConn3D) {
@@ -171,6 +195,17 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             const gaugeNode3D = state.nodes.find(n => n.id === gaugeConn3D.fromNode);
             if (gaugeNode3D) {
                 flattenedParams['gauges'] = gaugeNode3D.parameters.gauges || [];
+            }
+        }
+
+        // Trace Telemetry3DViewport slices
+        const telemetryConns = state.connections.filter(c => c.fromNode === solverNode3D.id && c.fromPort === 'telemetry');
+        for (const conn of telemetryConns) {
+            const viewNode = state.nodes.find(n => n.id === conn.toNode);
+            if (viewNode && viewNode.type === 'Telemetry3DViewport') {
+                if (viewNode.parameters.slices) {
+                    flattenedParams['slices'] = viewNode.parameters.slices;
+                }
             }
         }
     }
@@ -209,7 +244,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         const detConn2D = state.connections.find(c => c.toNode === solverNode2D.id && c.toPort === 'detonator');
         if (detConn2D) {
             const detNode2D = state.nodes.find(n => n.id === detConn2D.fromNode);
-            if (detNode2D) {
+            if (detNode2D && detNode2D.type === 'DetonatorLocation') {
                 Object.entries(detNode2D.parameters).forEach(([key, value]) => {
                     flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
                 });
@@ -396,7 +431,16 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         flattenedParams['ymin'] = flattenedParams['origin_y'] || 0.0;
         flattenedParams['zmin'] = flattenedParams['origin_z'] || 0.0;
 
+        if (!flattenedParams['gamma']) flattenedParams['gamma'] = 1.4;
+        const p = flattenedParams['atm_pressure'] || 101325.0;
+        const t = flattenedParams['atm_temperature'] || 298.15;
+        flattenedParams['ambient_rho'] = p / (287.058 * t);
+
         if (!flattenedParams['device']) flattenedParams['device'] = 'cpu';
+        if (!flattenedParams['init_mode']) flattenedParams['init_mode'] = 'Multi-Material JWL';
+        if (!flattenedParams['flux_scheme']) flattenedParams['flux_scheme'] = 'AUSM+';
+        if (flattenedParams['spatial_order'] === undefined) flattenedParams['spatial_order'] = 2;
+        if (flattenedParams['temporal_order'] === undefined) flattenedParams['temporal_order'] = 2;
     }
 
     return JSON.stringify({

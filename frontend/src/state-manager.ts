@@ -331,6 +331,7 @@ export class StateManager {
             'TelemetryGraph': 'node-chart',
             'DomainMesh2D': 'node-mesh2d',
             'DetonatorLocation': 'node-detonator',
+            'DetonatorLocation3D': 'node-detonator',
             'RemapNode': 'node-remap',
             'HardwareConfig': 'node-hardware',
             'CFDSolver2D': 'node-solver2d',
@@ -688,6 +689,7 @@ export class StateManager {
 
         if (found && changed) {
             this.appState = appStateCopy;
+            this.saveWorkspace();
             this.notifyListeners();
         }
     }
@@ -842,7 +844,7 @@ export class StateManager {
                 const wcStr = data.wallclock !== undefined ? `, Wallclock: ${Number(data.wallclock).toFixed(4)}s` : '';
                 return `[${timestamp}] [PROGRESS] ${percent}% complete${wcStr}`;
             }
-            if (data.type === 'TELEMETRY' || data.type === 'TELEMETRY_2D') {
+            if (data.type === 'TELEMETRY' || data.type === 'TELEMETRY_2D' || data.type === 'TELEMETRY_3D') {
                 const wcStr = data.wallclock !== undefined ? `, Wallclock: ${Number(data.wallclock).toFixed(4)}s` : '';
                 return `[${timestamp}] [SOLVER] Time: ${data.time?.toExponential(6) || '0'}${wcStr}, Terminated: ${data.is_terminated || false}`;
             }
@@ -870,12 +872,12 @@ export class StateManager {
             nodeId = nodeIdOrData;
             data = optionalData;
         } else if (typeof nodeIdOrData === 'string') {
-            const solverNode = nodes.find(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D');
+            const solverNode = nodes.find(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D');
             if (!solverNode) return;
             nodeId = solverNode.id;
             data = nodeIdOrData;
         } else {
-            const solverNode = nodes.find(n => n.id === 'node-solver') || nodes.find(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D');
+            const solverNode = nodes.find(n => n.id === 'node-solver') || nodes.find(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D');
             if (!solverNode) return;
             nodeId = solverNode.id;
             data = nodeIdOrData;
@@ -905,22 +907,22 @@ export class StateManager {
             const connectedNode = nodes.find(n => n.id === connection.toNode);
             if (connectedNode) {
                 if (connectedNode.type === 'TelemetryGraph') {
-                    if (data instanceof ArrayBuffer || (data && (data.type === 'TELEMETRY' || data.type === 'TELEMETRY_2D'))) {
+                    if (data instanceof ArrayBuffer || (data && (data.type === 'TELEMETRY' || data.type === 'TELEMETRY_2D' || data.type === 'TELEMETRY_3D'))) {
                          this.telemetryStore.set(connectedNode.id, data);
                          this.notifyTelemetryUpdate(connectedNode.id, data);
                     }
-                } else if (connectedNode.type === 'VirtualGauges') {
+                } else if (connectedNode.type === 'VirtualGauges' || connectedNode.type === 'VirtualGauges3D') {
                     if (data && !(data instanceof ArrayBuffer) && data.gauges_history) {
                          this.telemetryStore.set(connectedNode.id, data.gauges_history);
                          this.notifyTelemetryUpdate(connectedNode.id, data.gauges_history);
                     }
-                } else if (connectedNode.type === 'TelemetryContour') {
-                    if (data instanceof ArrayBuffer) {
+                } else if (connectedNode.type === 'TelemetryContour' || connectedNode.type === 'Telemetry3DViewport') {
+                    if (data instanceof ArrayBuffer || (data && data.type === 'TELEMETRY_3D')) {
                          this.telemetryStore.set(connectedNode.id, data);
                          this.notifyTelemetryUpdate(connectedNode.id, data);
                     }
                 } else if (connectedNode.type === 'TelemetryText') {
-                    if (data && typeof data === 'object' && (data.type === 'progress' || data.type === 'progress_2d' || data.type === 'resource_pulse')) {
+                    if (data && typeof data === 'object' && (data.type === 'progress' || data.type === 'progress_2d' || data.type === 'progress_3d' || data.type === 'resource_pulse')) {
                         return;
                     }
 
@@ -1077,6 +1079,7 @@ export class StateManager {
             const saved = localStorage.getItem('blast_app_state');
             if (saved) {
                 this.appState = JSON.parse(saved);
+                this.healDuplicateNodeIds();
                 // Self-healing: Ensure all nodes are healed
                 Object.values(this.appState.models).forEach(model => {
                     this.healNodes(model.nodes);
@@ -1187,16 +1190,82 @@ export class StateManager {
     }
 
     loadAppState(newAppState: AppState): void {
-        Object.values(newAppState.models).forEach(model => {
+        this.appState = newAppState;
+        this.healDuplicateNodeIds();
+        Object.values(this.appState.models).forEach(model => {
             this.healNodes(model.nodes);
         });
-        this.pushAppState(newAppState);
+        this.pushAppState(this.appState);
     }
 
     clearWorkspace(): void {
         localStorage.removeItem('blast_app_state');
         localStorage.removeItem('blast_workspace');
         console.log('[System] Local workspace and AppState cleared.');
+    }
+
+    generateUniqueNodeId(type: NodeType): string {
+        const existingIds = new Set<string>();
+        Object.values(this.appState.models).forEach(model => {
+            model.nodes.forEach(n => existingIds.add(n.id));
+        });
+        return this.getUniqueNodeId(type, existingIds);
+    }
+
+    private nodeExistsInAnyModel(nodeId: string): boolean {
+        return Object.values(this.appState.models).some(m => m.nodes.some(n => n.id === nodeId));
+    }
+
+    public healDuplicateNodeIds(): void {
+        const seenIds = new Set<string>();
+        Object.values(this.appState.models).forEach(model => {
+            const modelIdMap = new Map<string, string>(); // oldId -> newId for this specific model
+
+            model.nodes.forEach(node => {
+                if (seenIds.has(node.id)) {
+                    const prefix = node.id.replace(/-\d+$/, '');
+                    let index = 1;
+                    let newId = `${prefix}-${index}`;
+                    while (seenIds.has(newId) || this.nodeExistsInAnyModel(newId)) {
+                        index++;
+                        newId = `${prefix}-${index}`;
+                    }
+                    console.warn(`[HEAL] Renaming duplicate node ID ${node.id} to ${newId} in model "${model.name}"`);
+                    modelIdMap.set(node.id, newId);
+                    
+                    if (this.selectedNodeId === node.id) {
+                        this.selectedNodeId = newId;
+                    }
+                    
+                    node.id = newId;
+                }
+                seenIds.add(node.id);
+            });
+
+            if (modelIdMap.size > 0) {
+                // Update internal connections of this model
+                model.connections.forEach(conn => {
+                    if (modelIdMap.has(conn.fromNode)) {
+                        conn.fromNode = modelIdMap.get(conn.fromNode)!;
+                    }
+                    if (modelIdMap.has(conn.toNode)) {
+                        conn.toNode = modelIdMap.get(conn.toNode)!;
+                    }
+                });
+
+                // Update cross-model workspace connections referencing these renamed nodes
+                this.appState.workspaces.forEach(ws => {
+                    ws.connections.forEach(conn => {
+                        if (modelIdMap.has(conn.fromNode)) {
+                            conn.fromNode = modelIdMap.get(conn.fromNode)!;
+                        }
+                        if (modelIdMap.has(conn.toNode)) {
+                            conn.toNode = modelIdMap.get(conn.toNode)!;
+                        }
+                    });
+                });
+            }
+        });
     }
 
     private healNodes(nodes: Node[], stateObj?: { nodes: Node[], connections: Connection[] }): void {
@@ -1276,6 +1345,11 @@ export class StateManager {
                 detonator_z: 0.1,
                 detonator_radius: 0.001
             },
+            'DetonatorLocation3D': {
+                detonator_x: 0.5,
+                detonator_y: 0.5,
+                detonator_z: 0.5
+            },
             'RemapNode': {
                 explosive_z: 0.0,
                 explosive_r: 0.0,
@@ -1320,10 +1394,21 @@ export class StateManager {
             },
             'CFDSolver3D': {
                 cfl: 0.4,
-                device: 'cpu'
+                device: 'cpu',
+                init_mode: 'From1D',
+                flux_scheme: 'AUSM+',
+                spatial_order: 2,
+                temporal_order: 2
             },
             'Telemetry3DViewport': {
-                slices: [{ axis: 'xy', offset: 0.5, quantities: ['pressure'] }]
+                colormap: 'plasma',
+                refresh_rate: 0.033,
+                slices: [{ axis: 'xy', offset: 0.5, quantities: ['pressure'], stride: 1 }],
+                log_scale: false,
+                auto_scale: true,
+                min_val: 101325.0,
+                max_val: 101325.0 * 100.0,
+                show_grid: true
             },
             'VirtualGauges3D': {
                 gauges: [{ name: 'G1', x: 0.6, y: 0.5, z: 0.5 }]

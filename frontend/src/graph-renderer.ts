@@ -2,6 +2,7 @@ import { SimulationState, Node, Connection, Port, NodeType } from './types.js';
 import { StateManager } from './state-manager.js';
 import { validateSimulationState } from './validation.js';
 
+
 const SVG_ICONS = {
     horiz: `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="display:block;"><rect x="1" y="4" width="5" height="8" rx="1"/><rect x="10" y="4" width="5" height="8" rx="1"/><path d="M6 8h4"/></svg>`,
     vert: `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="display:block;"><rect x="4" y="1" width="8" height="5" rx="1"/><rect x="4" y="10" width="8" height="5" rx="1"/><path d="M8 6v4"/></svg>`,
@@ -210,7 +211,7 @@ export class GraphRenderer {
                 const heightDiff = Math.abs((node.height || 0) - newHeight);
                 if (newWidth > 0 && newHeight > 0 && (widthDiff > 4 || heightDiff > 4)) {
                     const userIsResizing = this.nodeUserResizing.has(nodeId);
-                    const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges';
+                    const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport';
                     if (isTelemetry && node.displayMode !== 'compact') {
                         const isTelemetryText = node.type === 'TelemetryText';
                         if (!isTelemetryText || userIsResizing) {
@@ -221,7 +222,7 @@ export class GraphRenderer {
                     }
 
                     // Automatic mode switching for telemetry nodes (only when user is resizing)
-                    if (userIsResizing && (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges')) {
+                    if (userIsResizing && (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport')) {
                         let targetMode: 'compact' | 'normal' | 'expanded' = 'normal';
                         if (newHeight < 60) targetMode = 'compact';
                         else if (newHeight >= 180) targetMode = 'expanded';
@@ -233,16 +234,26 @@ export class GraphRenderer {
                     }
 
                     // Notify worker of resize
-                    if (node.type === 'TelemetryGraph' || node.type === 'TelemetryContour') {
+                    if (node.type === 'TelemetryGraph' || node.type === 'TelemetryContour' || node.type === 'Telemetry3DViewport') {
                         const worker = this.nodeWorkers.get(nodeId);
                         if (worker) {
                             const canvas = target.querySelector('canvas');
                             if (canvas) {
-                                worker.postMessage({
-                                    type: 'resize',
-                                    width: canvas.clientWidth || newWidth,
-                                    height: canvas.clientHeight || newHeight
-                                });
+                                if (node.type === 'Telemetry3DViewport') {
+                                    worker.postMessage({
+                                        type: 'resize',
+                                        data: {
+                                            width: canvas.clientWidth || newWidth,
+                                            height: canvas.clientHeight || newHeight
+                                        }
+                                    });
+                                } else {
+                                    worker.postMessage({
+                                        type: 'resize',
+                                        width: canvas.clientWidth || newWidth,
+                                        height: canvas.clientHeight || newHeight
+                                    });
+                                }
                             }
                         }
                     }
@@ -427,6 +438,30 @@ export class GraphRenderer {
             if (worker && data instanceof ArrayBuffer) {
                 const bufferCopy = data.slice(0);
                 worker.postMessage(bufferCopy, [bufferCopy]);
+            }
+        } else if (node.type === 'Telemetry3DViewport' && data) {
+            const worker = this.nodeWorkers.get(node.id);
+            if (worker) {
+                if (data instanceof ArrayBuffer) {
+                    const bufferCopy = data.slice(0);
+                    worker.postMessage({ type: 'frame', data: { buffer: bufferCopy } }, [bufferCopy]);
+                } else if (data.type === 'TELEMETRY_3D') {
+                    // Forward JSON config settings to the 3D viewport worker if present
+                    worker.postMessage({
+                        type: 'setConfig',
+                        data: {
+                            minY: 101325.0,
+                            maxY: 101325.0 * 10.0, // Set dynamic ranges based on data
+                            xmin: data.xmin,
+                            ymin: data.ymin,
+                            zmin: data.zmin,
+                            dx: data.dx,
+                            nx: data.nx,
+                            ny: data.ny,
+                            nz: data.nz
+                        }
+                    });
+                }
             }
         }
     }
@@ -656,8 +691,11 @@ export class GraphRenderer {
         switch (toType) {
             case 'CFDSolver3D':
                 if (toPortId === 'mesh') return fromType === 'DomainMesh3D';
+                if (toPortId === 'air') return fromType === 'Material';
                 if (toPortId === 'charge') return fromType === 'Charge3D';
+                if (toPortId === 'detonator') return fromType === 'DetonatorLocation3D';
                 if (toPortId === 'gauges') return fromType === 'VirtualGauges3D';
+                if (toPortId === 'remap') return fromType === 'RemapNode';
                 return false;
             case 'Charge3D':
                 if (toPortId === 'material') return fromType === 'Material';
@@ -693,9 +731,11 @@ export class GraphRenderer {
                 if (toPortId === 'in') return fromType === 'CFDSolver';
                 return false;
             case 'VirtualGauges':
+                if (toPortId === 'in') return fromType === 'CFDSolver' || fromType === 'CFDSolver2D';
+                return false;
             case 'TelemetryText':
             case 'TelemetryGraph':
-                if (toPortId === 'in') return fromType === 'CFDSolver' || fromType === 'CFDSolver2D';
+                if (toPortId === 'in') return fromType === 'CFDSolver' || fromType === 'CFDSolver2D' || fromType === 'CFDSolver3D';
                 return false;
             case 'TelemetryContour':
                 if (toPortId === 'in') return fromType === 'CFDSolver2D';
@@ -907,6 +947,11 @@ export class GraphRenderer {
         const modelRectOrLabel = target.closest('[data-model-id]');
         const rightClickedModelId = modelRectOrLabel ? modelRectOrLabel.getAttribute('data-model-id') : null;
         
+        if (rightClickedModelId) {
+            this.stateManager.setActiveModel(rightClickedModelId);
+            this.selectedModelId = rightClickedModelId;
+        }
+        
         let hasModelActions = false;
         
         if (rightClickedModelId) {
@@ -1008,6 +1053,7 @@ export class GraphRenderer {
                 name: '3D Simulation',
                 items: [
                     { label: 'Domain Mesh 3D', type: 'DomainMesh3D' },
+                    { label: 'Detonator Location 3D', type: 'DetonatorLocation3D' },
                     { label: '3D Charge', type: 'Charge3D' },
                     { label: 'CFD Solver 3D', type: 'CFDSolver3D' }
                 ]
@@ -1151,39 +1197,7 @@ export class GraphRenderer {
         const state = this.stateManager.getCurrentState();
         if (!state) return;
 
-        const prefixMap: Record<NodeType, string> = {
-            'DomainMesh': 'node-mesh',
-            'Material': 'node-material',
-            'ThePainter': 'node-painter',
-            'CFDSolver': 'node-solver',
-            'TelemetryText': 'node-log',
-            'TelemetryGraph': 'node-chart',
-            'DomainMesh2D': 'node-mesh2d',
-            'DetonatorLocation': 'node-detonator',
-            'RemapNode': 'node-remap',
-            'HardwareConfig': 'node-hardware',
-            'CFDSolver2D': 'node-solver2d',
-            'TelemetryContour': 'node-contour',
-            'VTKOutput': 'node-vtk',
-            'VirtualGauges': 'node-gauges',
-            'Charge1D': 'node-charge1d',
-            'Charge2D': 'node-charge2d',
-            'DomainMesh3D': 'node-mesh3d',
-            'Charge3D': 'node-charge3d',
-            'CFDSolver3D': 'node-solver3d',
-            'Telemetry3DViewport': 'node-viewport3d',
-            'VirtualGauges3D': 'node-gauges3d'
-        };
-        const prefix = prefixMap[type] || `node-${type.toLowerCase()}`;
-
-        let index = 1;
-        if (state.nodes.some(n => n.id === prefix)) {
-            index = 2;
-        }
-        while (state.nodes.some(n => n.id === `${prefix}-${index}`)) {
-            index++;
-        }
-        const id = index === 1 && !state.nodes.some(n => n.id === prefix) ? prefix : `${prefix}-${index}`;
+        const id = this.stateManager.generateUniqueNodeId(type);
 
         const newNode: Node = {
             id, type, x, y,
@@ -1196,9 +1210,12 @@ export class GraphRenderer {
         if (type === 'TelemetryText' || type === 'TelemetryGraph') {
             newNode.width = 350;
             newNode.height = 220;
-        } else if (type === 'TelemetryContour' || type === 'Telemetry3DViewport') {
+        } else if (type === 'TelemetryContour') {
             newNode.width = 350;
             newNode.height = 300;
+        } else if (type === 'Telemetry3DViewport') {
+            newNode.width = 450;
+            newNode.height = 450;
         } else if (type === 'VTKOutput') {
             newNode.width = 250;
             newNode.height = 120;
@@ -1230,7 +1247,9 @@ export class GraphRenderer {
             case 'VirtualGauges': return [{ id: 'in', label: 'Solver Output' }];
             case 'CFDSolver3D': return [
                 { id: 'mesh', label: 'Mesh' },
+                { id: 'air', label: 'Air' },
                 { id: 'charge', label: 'Charge' },
+                { id: 'detonator', label: 'Detonator' },
                 { id: 'gauges', label: 'Gauges' },
                 { id: 'remap', label: 'Remap' }
             ];
@@ -1250,7 +1269,8 @@ export class GraphRenderer {
             case 'ThePainter': return [{ id: 'out', label: 'State' }];
             case 'CFDSolver': return [{ id: 'telemetry', label: 'Telemetry' }];
             case 'DomainMesh2D': return [{ id: 'mesh', label: 'Mesh Spec' }];
-            case 'DetonatorLocation': return [{ id: 'detonator', label: 'Detonator Spec' }];
+            case 'DetonatorLocation':
+            case 'DetonatorLocation3D': return [{ id: 'detonator', label: 'Detonator Spec' }];
             case 'RemapNode': return [{ id: 'remap', label: 'Remap Spec' }];
             case 'HardwareConfig': return [{ id: 'hardware', label: 'Hardware Spec' }];
             case 'CFDSolver2D': return [{ id: 'telemetry', label: 'Telemetry' }];
@@ -1336,6 +1356,11 @@ export class GraphRenderer {
                 detonator_z: 0.1,
                 detonator_radius: 0.001
             };
+            case 'DetonatorLocation3D': return {
+                detonator_x: 0.5,
+                detonator_y: 0.5,
+                detonator_z: 0.5
+            };
             case 'RemapNode': return {
                 explosive_z: 0.0,
                 explosive_r: 0.0,
@@ -1380,9 +1405,17 @@ export class GraphRenderer {
             };
             case 'CFDSolver3D': return {
                 cfl: 0.4,
+                init_mode: 'From1D',
+                flux_scheme: 'AUSM+',
+                spatial_order: '2',
+                temporal_order: '2',
                 device: 'cpu'
             };
             case 'Telemetry3DViewport': return {
+                colormap: 'plasma',
+                auto_scale: true,
+                log_scale: false,
+                show_grid: true,
                 slices: [{ axis: 'xy', offset: 0.5, quantities: ['pressure'] }]
             };
             case 'VirtualGauges3D': return {
@@ -1400,6 +1433,10 @@ export class GraphRenderer {
     private selectNode(nodeId: string | null): void {
         if (nodeId !== null) {
             this.selectedConnection = null;
+            const modelId = this.stateManager.getAllModels().find(m => m.nodes.some(n => n.id === nodeId))?.id;
+            if (modelId) {
+                this.stateManager.setActiveModel(modelId);
+            }
         }
         this.stateManager.setSelectedNode(nodeId);
         this.handleSelectionChange(nodeId);
@@ -1491,7 +1528,8 @@ export class GraphRenderer {
             case 'TelemetryText':   return 'LOG';
             case 'TelemetryGraph':  return 'CHART';
             case 'DomainMesh2D':    return 'MESH2D';
-            case 'DetonatorLocation': return 'DETONATOR';
+            case 'DetonatorLocation':
+            case 'DetonatorLocation3D': return 'DETONATOR';
             case 'RemapNode':       return 'REMAP';
             case 'HardwareConfig':   return 'HARDWARE';
             case 'CFDSolver2D':     return 'SOLVER2D';
@@ -1519,6 +1557,7 @@ export class GraphRenderer {
             case 'TelemetryGraph':    return 'Telemetry - Graph';
             case 'DomainMesh2D':      return 'Domain Mesh 2D';
             case 'DetonatorLocation': return 'Detonator Location';
+            case 'DetonatorLocation3D': return 'Detonator Location 3D';
             case 'RemapNode':         return 'Remapper (1D -> 2D)';
             case 'HardwareConfig':    return 'Hardware Configuration';
             case 'CFDSolver2D':       return 'CFD Solver 2D';
@@ -1557,11 +1596,12 @@ export class GraphRenderer {
                 if (!nodeEl) {
                     nodeEl = document.createElement('div');
                     nodeEl.className = 'node';
-                    if (node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges') {
+                    if (node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport') {
                         nodeEl.classList.add('resizable');
-                        if (node.width === undefined) node.width = (node.type === 'TelemetryContour' || node.type === 'VirtualGauges') ? 350 : 250;
+                        if (node.width === undefined) node.width = (node.type === 'Telemetry3DViewport') ? 450 : ((node.type === 'TelemetryContour' || node.type === 'VirtualGauges') ? 350 : 250);
                         if (node.height === undefined) {
-                            if (node.type === 'TelemetryContour' || node.type === 'VirtualGauges') node.height = 300;
+                            if (node.type === 'Telemetry3DViewport') node.height = 450;
+                            else if (node.type === 'TelemetryContour' || node.type === 'VirtualGauges') node.height = 300;
                             else if (node.type === 'TelemetryGraph') node.height = 150;
                             else node.height = 130;
                         }
@@ -1850,7 +1890,7 @@ export class GraphRenderer {
                 const displayMode = node.displayMode || 'expanded';
                 const nodeOrientation = node.orientation || 'HORIZ';
 
-                const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges';
+                const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport';
 
                 // Only override the element's inline width/height from state when the
                 // user is NOT actively dragging the native resize handle. Mid-drag, the
@@ -2122,9 +2162,9 @@ export class GraphRenderer {
                 } else {
                     contentEl.style.display = 'flex';
                     this.renderNodeParameters(node, contentEl);
-                    if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour') {
+                    if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour' || node.type === 'Telemetry3DViewport') {
                         this.renderTelemetryContent(node, contentEl);
-                    } else if (node.type === 'VirtualGauges') {
+                    } else if (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') {
                         this.renderVirtualGaugesContent(node, contentEl);
                     }
                 }
@@ -2231,6 +2271,7 @@ export class GraphRenderer {
                 e.stopPropagation();
                 e.preventDefault();
 
+                this.stateManager.setActiveModel(model.id);
                 this.selectedModelId = model.id;
                 this.selectedNodeIds.clear();
                 this.selectNode(null);
@@ -2355,16 +2396,16 @@ export class GraphRenderer {
             const toModelId = this.stateManager.getAllModels().find(m => m.nodes.some(n => n.id === edge.toNode))?.id;
 
             if (isFlawed) {
-                path.setAttribute('stroke', '#ef4444');
-                path.setAttribute('stroke-width', '3');
+                path.style.stroke = '#ef4444';
+                path.style.strokeWidth = '3px';
             } else if (fromModelId && toModelId && fromModelId === toModelId) {
                 const colors = this.getModelColors(fromModelId);
-                path.setAttribute('stroke', colors.base);
-                path.setAttribute('stroke-width', '2');
+                path.style.stroke = colors.base;
+                path.style.strokeWidth = '2px';
             } else {
-                path.setAttribute('stroke', '#a855f7');
+                path.style.stroke = '#a855f7';
                 path.setAttribute('stroke-dasharray', '2, 2');
-                path.setAttribute('stroke-width', '2');
+                path.style.strokeWidth = '2px';
             }
             path.setAttribute('fill', 'none');
 
@@ -2425,10 +2466,10 @@ export class GraphRenderer {
         if (nodeType === 'DomainMesh' || nodeType === 'DomainMesh2D' || portId === 'mesh') return 'domain';
         if (nodeType === 'Charge1D' || nodeType === 'Charge2D' || portId === 'explosive') return 'explosive';
         if (portId === 'ideal_gas') return 'material';
-        if (nodeType === 'DetonatorLocation' || portId === 'detonator') return 'detonator';
+        if (nodeType === 'DetonatorLocation' || nodeType === 'DetonatorLocation3D' || portId === 'detonator') return 'detonator';
         if (nodeType === 'RemapNode' || portId === 'remap') return 'remap';
         if (nodeType === 'HardwareConfig' || portId === 'hardware') return 'hardware';
-        if (portId === 'telemetry' || (portId === 'in' && (nodeType === 'TelemetryText' || nodeType === 'TelemetryGraph' || nodeType === 'TelemetryContour'))) return 'telemetry';
+        if (portId === 'telemetry' || (portId === 'in' && (nodeType === 'TelemetryText' || nodeType === 'TelemetryGraph' || nodeType === 'TelemetryContour' || nodeType === 'Telemetry3DViewport'))) return 'telemetry';
         return 'material';
     }
 
@@ -2678,6 +2719,321 @@ export class GraphRenderer {
                     }
                 }
             }
+        } else if (node.type === 'Telemetry3DViewport') {
+            const currentColorMap = node.parameters?.colormap ?? 'plasma';
+            const autoScale = node.parameters?.auto_scale !== false;
+            const currentRate = Number(node.parameters?.refresh_rate ?? 0.033);
+
+            const RATES = [
+                { value: '0', label: 'Max FPS' },
+                { value: '0.016', label: '60 FPS (0.016s)' },
+                { value: '0.033', label: '30 FPS (0.033s)' },
+                { value: '0.05', label: '20 FPS (0.05s)' },
+                { value: '0.1', label: '10/s' },
+                { value: '0.2', label: '5/s' },
+                { value: '0.5', label: '2/s' },
+                { value: '1.0', label: '1/s' }
+            ];
+
+            const worker = this.nodeWorkers.get(node.id);
+            if (worker) {
+                worker.postMessage({
+                    type: 'setConfig',
+                    data: { colormap: currentColorMap, autoScale: autoScale, logScale: node.parameters?.log_scale === true, showGrid: node.parameters?.show_grid !== false }
+                });
+            }
+
+            if (!container.querySelector('canvas')) {
+                container.style.flexDirection = 'row';
+
+                const mainArea = document.createElement('div');
+                mainArea.style.display = 'flex';
+                mainArea.style.flexDirection = 'column';
+                mainArea.style.flex = '1';
+                mainArea.style.minWidth = '0';
+                mainArea.style.height = '100%';
+                mainArea.style.position = 'relative';
+                container.appendChild(mainArea);
+
+                const graphBody = document.createElement('div');
+                graphBody.className = 'node-body-graph';
+                graphBody.style.flex = '1';
+                mainArea.appendChild(graphBody);
+
+                const sliceControlsPanel = document.createElement('div');
+                sliceControlsPanel.className = 'node-slices-panel';
+                sliceControlsPanel.style.background = '#121214';
+                sliceControlsPanel.style.borderLeft = '1px solid #222';
+                sliceControlsPanel.style.padding = '8px';
+                sliceControlsPanel.style.display = 'flex';
+                sliceControlsPanel.style.flexDirection = 'column';
+                sliceControlsPanel.style.gap = '6px';
+                sliceControlsPanel.style.width = '220px';
+                sliceControlsPanel.style.height = '100%';
+                sliceControlsPanel.style.overflowY = 'auto';
+                sliceControlsPanel.style.flexShrink = '0';
+                sliceControlsPanel.style.transition = 'width 0.15s, padding 0.15s';
+                container.appendChild(sliceControlsPanel);
+
+                // Add absolute toggle button
+                const toggleBtn = document.createElement('button');
+                toggleBtn.textContent = '▶ Hide';
+                toggleBtn.style.position = 'absolute';
+                toggleBtn.style.top = '25px';
+                toggleBtn.style.right = '4px';
+                toggleBtn.style.zIndex = '110';
+                toggleBtn.style.background = '#1e1e24';
+                toggleBtn.style.color = '#ccc';
+                toggleBtn.style.border = '1px solid #444';
+                toggleBtn.style.borderRadius = '3px';
+                toggleBtn.style.fontSize = '9px';
+                toggleBtn.style.padding = '2px 6px';
+                toggleBtn.style.cursor = 'pointer';
+                toggleBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    const isCollapsed = sliceControlsPanel.style.width === '0px';
+                    if (isCollapsed) {
+                        sliceControlsPanel.style.width = '220px';
+                        sliceControlsPanel.style.padding = '8px';
+                        sliceControlsPanel.style.borderLeft = '1px solid #222';
+                        toggleBtn.textContent = '▶ Hide';
+                    } else {
+                        sliceControlsPanel.style.width = '0px';
+                        sliceControlsPanel.style.padding = '0px';
+                        sliceControlsPanel.style.borderLeft = 'none';
+                        toggleBtn.textContent = '◀ Controls';
+                    }
+                };
+                mainArea.appendChild(toggleBtn);
+
+                // Add orthogonal view toolbar
+                const viewToolbar = document.createElement('div');
+                viewToolbar.style.position = 'absolute';
+                viewToolbar.style.top = '25px';
+                viewToolbar.style.left = '4px';
+                viewToolbar.style.zIndex = '110';
+                viewToolbar.style.display = 'flex';
+                viewToolbar.style.gap = '4px';
+                viewToolbar.style.background = 'rgba(30, 30, 36, 0.8)';
+                viewToolbar.style.padding = '2px';
+                viewToolbar.style.borderRadius = '3px';
+                viewToolbar.style.border = '1px solid #444';
+
+                const createViewBtn = (label: string, onClick: () => void) => {
+                    const btn = document.createElement('button');
+                    btn.textContent = label;
+                    btn.style.background = '#1e1e24';
+                    btn.style.color = '#ccc';
+                    btn.style.border = '1px solid #444';
+                    btn.style.borderRadius = '2px';
+                    btn.style.fontSize = '9px';
+                    btn.style.padding = '1px 5px';
+                    btn.style.cursor = 'pointer';
+                    btn.onclick = (e) => {
+                        e.stopPropagation();
+                        onClick();
+                    };
+                    return btn;
+                };
+
+                viewToolbar.appendChild(createViewBtn('X', () => {
+                    newWorker.postMessage({ type: 'setView', data: { rotX: 0, rotY: Math.PI / 2 } });
+                }));
+                viewToolbar.appendChild(createViewBtn('Y', () => {
+                    newWorker.postMessage({ type: 'setView', data: { rotX: Math.PI / 2, rotY: 0 } });
+                }));
+                viewToolbar.appendChild(createViewBtn('Z', () => {
+                    newWorker.postMessage({ type: 'setView', data: { rotX: 0, rotY: 0 } });
+                }));
+                viewToolbar.appendChild(createViewBtn('Reset', () => {
+                    newWorker.postMessage({ type: 'setView', data: { rotX: 0.5, rotY: 0.5, zoom: -2.5, panX: 0, panY: 0 } });
+                }));
+                mainArea.appendChild(viewToolbar);
+
+                const canvas = document.createElement('canvas');
+                canvas.style.width = '100%';
+                canvas.style.height = '100%';
+                canvas.style.display = 'block';
+                graphBody.appendChild(canvas);
+
+                const newWorker = new Worker(new URL('./ViewportWorker.ts?v=' + Date.now(), import.meta.url), { type: 'module' });
+                this.nodeWorkers.set(node.id, newWorker as any);
+
+                const errorEl = document.createElement('div');
+                errorEl.style.position = 'absolute';
+                errorEl.style.top = '10px';
+                errorEl.style.left = '10px';
+                errorEl.style.color = '#ff3333';
+                errorEl.style.fontFamily = 'monospace';
+                errorEl.style.fontSize = '11px';
+                errorEl.style.pointerEvents = 'none';
+                errorEl.style.whiteSpace = 'pre-wrap';
+                errorEl.style.zIndex = '100';
+                graphBody.appendChild(errorEl);
+
+                newWorker.onmessage = (e) => {
+                    if (e.data && e.data.type === 'error') {
+                        errorEl.textContent = `Worker Error: ${e.data.message}`;
+                        errorEl.style.color = '#ff3333';
+                    } else if (e.data && e.data.type === 'rendererInfo') {
+                        if (!errorEl.textContent || !errorEl.textContent.startsWith('Worker Error')) {
+                            errorEl.textContent = e.data.renderer;
+                            errorEl.style.color = '#00ffcc';
+                            errorEl.style.background = 'rgba(0,0,0,0.5)';
+                            errorEl.style.padding = '2px 4px';
+                            errorEl.style.borderRadius = '3px';
+                        }
+                    }
+                };
+                newWorker.onerror = (err) => {
+                    errorEl.textContent = `Worker Thread Error: ${err.message}`;
+                };
+
+                canvas.width = canvas.clientWidth || 300;
+                canvas.height = canvas.clientHeight || 200;
+                const offscreen = (canvas as any).transferControlToOffscreen();
+                newWorker.postMessage({
+                    type: 'init',
+                    data: {
+                        canvas: offscreen,
+                        width: canvas.width,
+                        height: canvas.height
+                    }
+                }, [offscreen]);
+
+                // Find connected domain mesh dimensions and configure worker
+                let dimX = 1.0, dimY = 1.0, dimZ = 1.0, cellSize = 0.01;
+                const state = this.stateManager.getCurrentState();
+                if (state) {
+                    const connToViewport = state.connections.find(c => c.toNode === node.id);
+                    if (connToViewport) {
+                        const solverNode = state.nodes.find(n => n.id === connToViewport.fromNode);
+                        if (solverNode) {
+                            const connToSolver = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'mesh');
+                            if (connToSolver) {
+                                const meshNode = state.nodes.find(n => n.id === connToSolver.fromNode);
+                                if (meshNode && meshNode.type === 'DomainMesh3D') {
+                                    dimX = Number(meshNode.parameters?.dim_x ?? 1.0);
+                                    dimY = Number(meshNode.parameters?.dim_y ?? 1.0);
+                                    dimZ = Number(meshNode.parameters?.dim_z ?? 1.0);
+                                    cellSize = Number(meshNode.parameters?.cell_size ?? 0.01);
+                                }
+                            }
+                        }
+                    }
+                }
+                const nx = Math.round(dimX / cellSize);
+                const ny = Math.round(dimY / cellSize);
+                const nz = Math.round(dimZ / cellSize);
+                newWorker.postMessage({
+                    type: 'setConfig',
+                    data: {
+                        xmin: 0.0,
+                        ymin: 0.0,
+                        zmin: 0.0,
+                        dx: cellSize,
+                        nx: nx,
+                        ny: ny,
+                        nz: nz
+                    }
+                });
+
+                let isDragging = false;
+                let lastX = 0;
+                let lastY = 0;
+
+                canvas.addEventListener('mousedown', (e) => {
+                    e.stopPropagation();
+                    isDragging = true;
+                    lastX = e.clientX;
+                    lastY = e.clientY;
+                });
+
+                window.addEventListener('mousemove', (e) => {
+                    if (!isDragging) return;
+                    const dx = e.clientX - lastX;
+                    const dy = e.clientY - lastY;
+                    lastX = e.clientX;
+                    lastY = e.clientY;
+                    newWorker.postMessage({ type: 'input', data: { drx: dy, dry: dx } });
+                });
+
+                window.addEventListener('mouseup', () => {
+                    isDragging = false;
+                });
+
+                canvas.addEventListener('wheel', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    newWorker.postMessage({ type: 'input', data: { dy: e.deltaY } });
+                }, { passive: false });
+
+                requestAnimationFrame(() => {
+                    newWorker.postMessage({
+                        type: 'resize',
+                        data: {
+                            width: canvas.clientWidth || 300,
+                            height: canvas.clientHeight || 200
+                        }
+                    });
+                });
+
+                const initialData = this.stateManager.getTelemetry(node.id);
+                if (initialData instanceof ArrayBuffer) {
+                    const bufferCopy = initialData.slice(0);
+                    newWorker.postMessage({ type: 'frame', data: { buffer: bufferCopy } }, [bufferCopy]);
+                }
+            }
+
+            // Sync configuration and domain mesh dimensions on every graph render pass
+            if (worker) {
+                let dimX = 1.0, dimY = 1.0, dimZ = 1.0, cellSize = 0.01;
+                const state = this.stateManager.getCurrentState();
+                if (state) {
+                    const connToViewport = state.connections.find(c => c.toNode === node.id);
+                    if (connToViewport) {
+                        const solverNode = state.nodes.find(n => n.id === connToViewport.fromNode);
+                        if (solverNode) {
+                            const connToSolver = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'mesh');
+                            if (connToSolver) {
+                                const meshNode = state.nodes.find(n => n.id === connToSolver.fromNode);
+                                if (meshNode && meshNode.type === 'DomainMesh3D') {
+                                    dimX = Number(meshNode.parameters?.dim_x ?? 1.0);
+                                    dimY = Number(meshNode.parameters?.dim_y ?? 1.0);
+                                    dimZ = Number(meshNode.parameters?.dim_z ?? 1.0);
+                                    cellSize = Number(meshNode.parameters?.cell_size ?? 0.01);
+                                }
+                            }
+                        }
+                    }
+                }
+                const nx = Math.round(dimX / cellSize);
+                const ny = Math.round(dimY / cellSize);
+                const nz = Math.round(dimZ / cellSize);
+                worker.postMessage({
+                    type: 'setConfig',
+                    data: {
+                        colormap: node.parameters?.colormap || 'plasma',
+                        minY: node.parameters?.min_val ?? 101325.0,
+                        maxY: node.parameters?.max_val ?? 101325.0 * 100.0,
+                        autoScale: node.parameters?.auto_scale !== false,
+                        showGrid: node.parameters?.show_grid !== false,
+                        useLogScale: node.parameters?.log_scale === true,
+                        xmin: 0.0,
+                        ymin: 0.0,
+                        zmin: 0.0,
+                        dx: cellSize,
+                        nx: nx,
+                        ny: ny,
+                        nz: nz
+                    }
+                });
+            }
+
+            const slicesPanel = container.querySelector('.node-slices-panel') as HTMLElement;
+            if (slicesPanel) {
+                this.rebuildSlicesPanel(node, slicesPanel);
+            }
         } else if (node.type === 'TelemetryContour') {
             const CHANNELS: { label: string }[] = [
                 { label: 'Pressure' },
@@ -2834,7 +3190,6 @@ export class GraphRenderer {
                     channel: currentChannel,
                     stride: 1,
                     refreshRate: currentRate,
-                    autoScale: autoScale,
                     logScale: currentLogScale,
                     colormap: currentColorMap,
                     min: minY,
@@ -3212,7 +3567,6 @@ export class GraphRenderer {
                     channel: currentChannel,
                     stride: 1,
                     refreshRate: currentRate,
-                    autoScale: autoScale,
                     logScale: currentLogScale,
                     colormap: currentColorMap,
                     min: minY,
@@ -3352,7 +3706,7 @@ export class GraphRenderer {
     }
 
     private renderNodeParameters(node: Node, container: HTMLElement): void {
-        if (node.type === 'TelemetryGraph' || node.type === 'TelemetryContour') {
+        if (node.type === 'TelemetryGraph' || node.type === 'TelemetryContour' || node.type === 'Telemetry3DViewport') {
             const form = container.querySelector('.node-params-form');
             if (form) form.remove();
             return;
@@ -3465,9 +3819,10 @@ export class GraphRenderer {
 
         for (const key of paramKeys) {
             const value = node.parameters[key];
-            if (key === 'gauges') continue;
+            if (key === 'gauges' || key === 'slices') continue;
             if (key === 'nr' || key === 'nz' || key === 'n_cells') continue;
-            if (node.type === 'VirtualGauges' && key === 'telemetry_channel') continue;
+            if ((node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') && key === 'telemetry_channel') continue;
+            // DetonatorLocation and DetonatorLocation3D are separate nodes now, showing correct properties
             if (node.type === 'DomainMesh') {
                 const dim = node.parameters['dimension'] || '1D';
                 if ((key === 'y_min_bc' || key === 'y_max_bc') && dim === '1D') continue;
@@ -3528,8 +3883,12 @@ export class GraphRenderer {
                 'temporal_order': ['1', '2', '3'],
                 'output_mode': ['By Step', 'By Time'],
                 'plot_stride': ['1', '2', '5', '10', '20', '50', '100'],
-                'charge_shape': ['Sphere', 'Cylinder'],
-                'material_type': ['Air', 'JWL Charge', 'Ideal Gas Charge']
+                charge_shape: ['Sphere', 'Cylinder'],
+                material_type: ['Air', 'JWL Charge', 'Ideal Gas Charge'],
+                colormap: ['plasma', 'viridis'],
+                auto_scale: ['true', 'false'],
+                log_scale: ['true', 'false'],
+                show_grid: ['true', 'false']
             };
 
             let inputEl: HTMLElement;
@@ -4011,6 +4370,8 @@ export class GraphRenderer {
                 return '2D Axisymmetric mesh. Discretizes the r-z coordinate space and defines boundary conditions for r_min, r_max, z_min, and z_max faces. Feeds the 2D CFD Solver.';
             case 'DetonatorLocation':
                 return 'Detonator position node. Specifies where the detonation point source is placed in the 2D r-z domain. explosive_z and explosive_r set the axial and radial coordinates (m); explosive_radius sets the initial hot-spot radius (m). Required by the 2D CFD Solver for all detonation modes.';
+            case 'DetonatorLocation3D':
+                return 'Detonator position node (3D). Specifies where the detonation point source is placed in the 3D Cartesian domain. detonator_x, detonator_y, and detonator_z set the coordinates (m). Required by the 3D CFD Solver.';
             case 'RemapNode':
                 return 'Remapper (1D → 2D). Reads the converged 1D spherical-symmetric solution and maps its conserved variables onto the 2D axisymmetric mesh, centered at the specified explosive_z / explosive_r origin. Triggers at "end" of the 1D run, or at a specific time or step count.';
             case 'HardwareConfig':
@@ -4225,14 +4586,16 @@ export class GraphRenderer {
             if (node.type === 'TelemetryText') return 130;
             if (node.type === 'TelemetryGraph') return 150;
             if (node.type === 'TelemetryContour') return 300;
-            if (node.type === 'VirtualGauges') return 200;
+            if (node.type === 'Telemetry3DViewport') return 350;
+            if (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') return 200;
             base += Math.max(node.inputs.length, node.outputs.length) * 20;
         } else if (displayMode === 'expanded') {
             base += Object.keys(node.parameters).length * 25;
             if (node.type === 'TelemetryText') base += 100;
             if (node.type === 'TelemetryGraph') base += 120;
             if (node.type === 'TelemetryContour') base += 270;
-            if (node.type === 'VirtualGauges') base += 250;
+            if (node.type === 'Telemetry3DViewport') base += 320;
+            if (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') base += 250;
             base += Math.max(node.inputs.length, node.outputs.length) * 20;
         }
         return Math.max(base, 60);
@@ -4242,6 +4605,7 @@ export class GraphRenderer {
         let body = container.querySelector('.node-body-gauges') as HTMLElement;
         const state = this.stateManager.getCurrentState();
         const has2D = state?.nodes.some(n => n.type === 'DomainMesh2D') || false;
+        const is3D = node.type === 'VirtualGauges3D';
         const gauges = node.parameters?.gauges || [];
         const currentChannel = Number(node.parameters?.telemetry_channel ?? 0);
 
@@ -4317,7 +4681,10 @@ export class GraphRenderer {
         addBtn.onmousedown = (e) => e.stopPropagation();
         addBtn.onclick = () => {
             const nextIdx = gauges.length + 1;
-            const newGauges = [...gauges, { id: `G${nextIdx}`, r: 0.1, z: 0.0, active: true }];
+            const newGauge = is3D 
+                ? { id: `G${nextIdx}`, x: 0.5, y: 0.5, z: 0.5, active: true }
+                : { id: `G${nextIdx}`, r: 0.1, z: 0.0, active: true };
+            const newGauges = [...gauges, newGauge];
             this.stateManager.updateNodeParameters(node.id, { gauges: newGauges });
         };
         toolbar.appendChild(addBtn);
@@ -4394,41 +4761,64 @@ export class GraphRenderer {
                 const tdId = document.createElement('td');
                 tdId.style.padding = '4px';
                 tdId.style.fontWeight = 'bold';
-                tdId.textContent = g.id;
+                tdId.textContent = g.id || g.name;
                 tr.appendChild(tdId);
 
-                // R Coordinate Input
-                const tdR = document.createElement('td');
-                tdR.style.padding = '4px';
-                const inputR = document.createElement('input');
-                inputR.type = 'number';
-                inputR.step = 'any';
-                inputR.value = String(g.r);
-                inputR.style.width = '50px';
-                inputR.style.background = '#252526';
-                inputR.style.color = '#ccc';
-                inputR.style.border = '1px solid #444';
-                inputR.style.fontSize = '10px';
-                inputR.style.padding = '1px 3px';
-                inputR.onmousedown = (e) => e.stopPropagation();
-                inputR.onchange = () => {
-                    const updated = [...gauges];
-                    updated[idx] = { ...g, r: Number(inputR.value) };
-                    this.stateManager.updateNodeParameters(node.id, { gauges: updated });
-                };
-                tdR.appendChild(document.createTextNode('R: '));
-                tdR.appendChild(inputR);
-                tr.appendChild(tdR);
+                if (is3D) {
+                    // X Coordinate Input
+                    const tdX = document.createElement('td');
+                    tdX.style.padding = '4px';
+                    const inputX = document.createElement('input');
+                    inputX.type = 'number';
+                    inputX.step = 'any';
+                    inputX.value = String(g.x ?? 0.5);
+                    inputX.style.width = '35px';
+                    inputX.style.background = '#252526';
+                    inputX.style.color = '#ccc';
+                    inputX.style.border = '1px solid #444';
+                    inputX.style.fontSize = '10px';
+                    inputX.style.padding = '1px 3px';
+                    inputX.onmousedown = (e) => e.stopPropagation();
+                    inputX.onchange = () => {
+                        const updated = [...gauges];
+                        updated[idx] = { ...g, x: Number(inputX.value) };
+                        this.stateManager.updateNodeParameters(node.id, { gauges: updated });
+                    };
+                    tdX.appendChild(document.createTextNode('X: '));
+                    tdX.appendChild(inputX);
+                    tr.appendChild(tdX);
 
-                // Z Coordinate Input (only if 2D)
-                if (has2D) {
+                    // Y Coordinate Input
+                    const tdY = document.createElement('td');
+                    tdY.style.padding = '4px';
+                    const inputY = document.createElement('input');
+                    inputY.type = 'number';
+                    inputY.step = 'any';
+                    inputY.value = String(g.y ?? 0.5);
+                    inputY.style.width = '35px';
+                    inputY.style.background = '#252526';
+                    inputY.style.color = '#ccc';
+                    inputY.style.border = '1px solid #444';
+                    inputY.style.fontSize = '10px';
+                    inputY.style.padding = '1px 3px';
+                    inputY.onmousedown = (e) => e.stopPropagation();
+                    inputY.onchange = () => {
+                        const updated = [...gauges];
+                        updated[idx] = { ...g, y: Number(inputY.value) };
+                        this.stateManager.updateNodeParameters(node.id, { gauges: updated });
+                    };
+                    tdY.appendChild(document.createTextNode(' Y: '));
+                    tdY.appendChild(inputY);
+                    tr.appendChild(tdY);
+
+                    // Z Coordinate Input
                     const tdZ = document.createElement('td');
                     tdZ.style.padding = '4px';
                     const inputZ = document.createElement('input');
                     inputZ.type = 'number';
                     inputZ.step = 'any';
-                    inputZ.value = String(g.z);
-                    inputZ.style.width = '50px';
+                    inputZ.value = String(g.z ?? 0.5);
+                    inputZ.style.width = '35px';
                     inputZ.style.background = '#252526';
                     inputZ.style.color = '#ccc';
                     inputZ.style.border = '1px solid #444';
@@ -4443,6 +4833,54 @@ export class GraphRenderer {
                     tdZ.appendChild(document.createTextNode(' Z: '));
                     tdZ.appendChild(inputZ);
                     tr.appendChild(tdZ);
+                } else {
+                    // R Coordinate Input
+                    const tdR = document.createElement('td');
+                    tdR.style.padding = '4px';
+                    const inputR = document.createElement('input');
+                    inputR.type = 'number';
+                    inputR.step = 'any';
+                    inputR.value = String(g.r ?? 0.1);
+                    inputR.style.width = '50px';
+                    inputR.style.background = '#252526';
+                    inputR.style.color = '#ccc';
+                    inputR.style.border = '1px solid #444';
+                    inputR.style.fontSize = '10px';
+                    inputR.style.padding = '1px 3px';
+                    inputR.onmousedown = (e) => e.stopPropagation();
+                    inputR.onchange = () => {
+                        const updated = [...gauges];
+                        updated[idx] = { ...g, r: Number(inputR.value) };
+                        this.stateManager.updateNodeParameters(node.id, { gauges: updated });
+                    };
+                    tdR.appendChild(document.createTextNode('R: '));
+                    tdR.appendChild(inputR);
+                    tr.appendChild(tdR);
+
+                    // Z Coordinate Input (only if 2D)
+                    if (has2D) {
+                        const tdZ = document.createElement('td');
+                        tdZ.style.padding = '4px';
+                        const inputZ = document.createElement('input');
+                        inputZ.type = 'number';
+                        inputZ.step = 'any';
+                        inputZ.value = String(g.z ?? 0.0);
+                        inputZ.style.width = '50px';
+                        inputZ.style.background = '#252526';
+                        inputZ.style.color = '#ccc';
+                        inputZ.style.border = '1px solid #444';
+                        inputZ.style.fontSize = '10px';
+                        inputZ.style.padding = '1px 3px';
+                        inputZ.onmousedown = (e) => e.stopPropagation();
+                        inputZ.onchange = () => {
+                            const updated = [...gauges];
+                            updated[idx] = { ...g, z: Number(inputZ.value) };
+                            this.stateManager.updateNodeParameters(node.id, { gauges: updated });
+                        };
+                        tdZ.appendChild(document.createTextNode(' Z: '));
+                        tdZ.appendChild(inputZ);
+                        tr.appendChild(tdZ);
+                    }
                 }
 
                 // Delete Button
@@ -4587,6 +5025,479 @@ export class GraphRenderer {
                 });
                 ctx.stroke();
             }
+        });
+    }
+
+    private rebuildSlicesPanel(node: Node, panel: HTMLElement) {
+        panel.innerHTML = '';
+
+        const createCheckbox = (label: string, value: boolean, onChange: (val: boolean) => void) => {
+            const labelEl = document.createElement('label');
+            labelEl.style.display = 'flex';
+            labelEl.style.alignItems = 'center';
+            labelEl.style.gap = '4px';
+            labelEl.style.fontSize = '9px';
+            labelEl.style.color = '#ccc';
+            labelEl.style.cursor = 'pointer';
+
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.checked = value;
+            cb.style.margin = '0';
+            cb.style.cursor = 'pointer';
+            cb.onchange = () => {
+                onChange(cb.checked);
+            };
+
+            labelEl.appendChild(cb);
+            labelEl.appendChild(document.createTextNode(label));
+            return labelEl;
+        };
+
+        // 1. Colormap Dropdown
+        const cmRow = document.createElement('div');
+        cmRow.style.display = 'flex';
+        cmRow.style.gap = '6px';
+        cmRow.style.alignItems = 'center';
+        cmRow.style.marginBottom = '6px';
+
+        const cmLabel = document.createElement('span');
+        cmLabel.textContent = 'Colormap:';
+        cmLabel.style.color = '#888';
+        cmLabel.style.fontSize = '9px';
+        cmRow.appendChild(cmLabel);
+
+        const cmSel = document.createElement('select');
+        cmSel.style.flex = '1';
+        cmSel.style.background = '#1a1a1c';
+        cmSel.style.color = '#ccc';
+        cmSel.style.border = '1px solid #333';
+        cmSel.style.borderRadius = '3px';
+        cmSel.style.fontSize = '9px';
+        cmSel.style.padding = '1px';
+        cmSel.innerHTML = '<option value="plasma">Plasma</option><option value="viridis">Viridis</option>';
+        cmSel.value = node.parameters?.colormap || 'plasma';
+        cmSel.onchange = () => {
+            const val = cmSel.value;
+            this.stateManager.updateNodeParametersInPlace(node.id, { colormap: val });
+            const worker = this.nodeWorkers.get(node.id);
+            if (worker) worker.postMessage({ type: 'setConfig', data: { colormap: val } });
+        };
+        cmRow.appendChild(cmSel);
+        panel.appendChild(cmRow);
+
+        // 2. Rate Dropdown
+        const rateRow = document.createElement('div');
+        rateRow.style.display = 'flex';
+        rateRow.style.gap = '6px';
+        rateRow.style.alignItems = 'center';
+        rateRow.style.marginBottom = '6px';
+
+        const rateLabel = document.createElement('span');
+        rateLabel.textContent = 'Refresh Rate:';
+        rateLabel.style.color = '#888';
+        rateLabel.style.fontSize = '9px';
+        rateRow.appendChild(rateLabel);
+
+        const rateSel = document.createElement('select');
+        rateSel.style.flex = '1';
+        rateSel.style.background = '#1a1a1c';
+        rateSel.style.color = '#ccc';
+        rateSel.style.border = '1px solid #333';
+        rateSel.style.borderRadius = '3px';
+        rateSel.style.fontSize = '9px';
+        rateSel.style.padding = '1px';
+        rateSel.innerHTML = `
+            <option value="0">Max FPS</option>
+            <option value="0.016">60 FPS (0.016s)</option>
+            <option value="0.033">30 FPS (0.033s)</option>
+            <option value="0.05">20 FPS (0.05s)</option>
+            <option value="0.1">10/s</option>
+            <option value="0.2">5/s</option>
+            <option value="0.5">2/s</option>
+            <option value="1.0">1/s</option>
+        `;
+        rateSel.value = String(node.parameters?.refresh_rate ?? 0.033);
+        rateSel.onchange = () => {
+            const rateVal = parseFloat(rateSel.value);
+            this.stateManager.updateNodeParametersInPlace(node.id, { refresh_rate: rateVal });
+            const net = (window as any).networkManager;
+            if (net && net.isConnected()) {
+                let targetModelId = node.id;
+                const models = this.stateManager.getAppState().models;
+                for (const [mid, m] of Object.entries(models)) {
+                    if (m.nodes.some(n => n.id === node.id)) {
+                        targetModelId = mid;
+                        break;
+                    }
+                }
+                net.send({ command: "VIEW3D_CONFIG", modelId: targetModelId, refresh_rate: rateVal });
+            }
+        };
+        rateRow.appendChild(rateSel);
+        panel.appendChild(rateRow);
+
+        const configContainer = document.createElement('div');
+        configContainer.style.display = 'grid';
+        configContainer.style.gridTemplateColumns = '1fr 1fr';
+        configContainer.style.gap = '6px';
+        configContainer.style.marginBottom = '8px';
+
+        const autoScaleVal = node.parameters?.auto_scale !== false;
+        const showGridVal = node.parameters?.show_grid !== false;
+        const logScaleVal = node.parameters?.log_scale === true;
+        const cellEdgesVal = node.parameters?.cell_edges === true;
+
+        configContainer.appendChild(createCheckbox('Auto Scale', autoScaleVal, (val) => {
+            this.stateManager.updateNodeParametersInPlace(node.id, { auto_scale: val });
+            const worker = this.nodeWorkers.get(node.id);
+            if (worker) worker.postMessage({ type: 'setConfig', data: { autoScale: val } });
+        }));
+        configContainer.appendChild(createCheckbox('Show Grid', showGridVal, (val) => {
+            this.stateManager.updateNodeParametersInPlace(node.id, { show_grid: val });
+            const worker = this.nodeWorkers.get(node.id);
+            if (worker) worker.postMessage({ type: 'setConfig', data: { showGrid: val } });
+        }));
+        configContainer.appendChild(createCheckbox('Log Scale', logScaleVal, (val) => {
+            this.stateManager.updateNodeParametersInPlace(node.id, { log_scale: val });
+            const worker = this.nodeWorkers.get(node.id);
+            if (worker) worker.postMessage({ type: 'setConfig', data: { useLogScale: val } });
+        }));
+        configContainer.appendChild(createCheckbox('Cell Edges', cellEdgesVal, (val) => {
+            this.stateManager.updateNodeParametersInPlace(node.id, { cell_edges: val });
+            const worker = this.nodeWorkers.get(node.id);
+            if (worker) worker.postMessage({ type: 'setConfig', data: { showCellEdges: val } });
+        }));
+
+        panel.appendChild(configContainer);
+
+        // 3. Min / Max Value Row
+        const rangeRow = document.createElement('div');
+        rangeRow.style.display = 'flex';
+        rangeRow.style.gap = '8px';
+        rangeRow.style.alignItems = 'center';
+        rangeRow.style.marginBottom = '6px';
+
+        const minLabel = document.createElement('span');
+        minLabel.textContent = 'Min:';
+        minLabel.style.color = '#888';
+        minLabel.style.fontSize = '9px';
+        rangeRow.appendChild(minLabel);
+
+        const minInput = document.createElement('input');
+        minInput.type = 'number';
+        minInput.value = String(node.parameters?.min_val ?? 101325.0);
+        minInput.style.width = '60px';
+        minInput.style.background = '#1a1a1c';
+        minInput.style.color = '#ccc';
+        minInput.style.border = '1px solid #333';
+        minInput.style.borderRadius = '3px';
+        minInput.style.fontSize = '9px';
+        minInput.style.padding = '2px';
+        minInput.oninput = () => {
+            const val = Number(minInput.value);
+            const worker = this.nodeWorkers.get(node.id);
+            if (worker) worker.postMessage({ type: 'setConfig', data: { minY: val } });
+        };
+        minInput.onchange = () => {
+            this.stateManager.updateNodeParametersInPlace(node.id, {
+                min_val: Number(minInput.value)
+            });
+        };
+        rangeRow.appendChild(minInput);
+
+        const maxLabel = document.createElement('span');
+        maxLabel.textContent = 'Max:';
+        maxLabel.style.color = '#888';
+        maxLabel.style.fontSize = '9px';
+        rangeRow.appendChild(maxLabel);
+
+        const maxInput = document.createElement('input');
+        maxInput.type = 'number';
+        maxInput.value = String(node.parameters?.max_val ?? 10132500.0);
+        maxInput.style.width = '70px';
+        maxInput.style.background = '#1a1a1c';
+        maxInput.style.color = '#ccc';
+        maxInput.style.border = '1px solid #333';
+        maxInput.style.borderRadius = '3px';
+        maxInput.style.fontSize = '9px';
+        maxInput.style.padding = '2px';
+        maxInput.oninput = () => {
+            const val = Number(maxInput.value);
+            const worker = this.nodeWorkers.get(node.id);
+            if (worker) worker.postMessage({ type: 'setConfig', data: { maxY: val } });
+        };
+        maxInput.onchange = () => {
+            this.stateManager.updateNodeParametersInPlace(node.id, {
+                max_val: Number(maxInput.value)
+            });
+        };
+        rangeRow.appendChild(maxInput);
+
+        panel.appendChild(rangeRow);
+
+        // 4. Active Slices List Title
+        const titleRow = document.createElement('div');
+        titleRow.style.display = 'flex';
+        titleRow.style.justifyContent = 'space-between';
+        titleRow.style.alignItems = 'center';
+        titleRow.style.borderBottom = '1px solid #333';
+        titleRow.style.paddingBottom = '4px';
+        titleRow.style.marginBottom = '6px';
+
+        const titleSpan = document.createElement('span');
+        titleSpan.textContent = 'ACTIVE SLICES';
+        titleSpan.style.fontWeight = 'bold';
+        titleSpan.style.color = '#00adff';
+        titleSpan.style.fontSize = '9px';
+        titleRow.appendChild(titleSpan);
+
+        const addBtn = document.createElement('button');
+        addBtn.textContent = '+ Add';
+        addBtn.style.background = '#00adff';
+        addBtn.style.color = '#0f172a';
+        addBtn.style.border = 'none';
+        addBtn.style.borderRadius = '3px';
+        addBtn.style.padding = '2px 6px';
+        addBtn.style.cursor = 'pointer';
+        addBtn.style.fontWeight = 'bold';
+        addBtn.style.fontSize = '9px';
+        addBtn.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const slices = node.parameters?.slices ? [...node.parameters.slices] : [];
+            slices.push({ axis: 'xy', offset: 0.5, quantities: ['pressure'], stride: 1 });
+            this.stateManager.updateNodeParametersInPlace(node.id, { slices });
+            
+            // Forward to running solver
+            const net = (window as any).networkManager;
+            if (net && net.isConnected()) {
+                let targetModelId = node.id;
+                const models = this.stateManager.getAppState().models;
+                for (const [mid, m] of Object.entries(models)) {
+                    if (m.nodes.some(n => n.id === node.id)) {
+                        targetModelId = mid;
+                        break;
+                    }
+                }
+                net.send({ command: "VIEW3D_CONFIG", modelId: targetModelId, slices });
+            }
+        };
+        titleRow.appendChild(addBtn);
+        panel.appendChild(titleRow);
+
+        // 5. Slices
+        const slices = node.parameters?.slices || [];
+        slices.forEach((slice: any, idx: number) => {
+            const row = document.createElement('div');
+            row.style.background = 'rgba(255,255,255,0.02)';
+            row.style.border = '1px solid rgba(255,255,255,0.05)';
+            row.style.borderRadius = '4px';
+            row.style.padding = '4px 6px';
+            row.style.display = 'flex';
+            row.style.flexDirection = 'column';
+            row.style.gap = '4px';
+            row.style.marginBottom = '6px';
+
+            const header = document.createElement('div');
+            header.style.display = 'flex';
+            header.style.justifyContent = 'space-between';
+            header.style.alignItems = 'center';
+
+            const idxSpan = document.createElement('span');
+            idxSpan.textContent = `Slice #${idx + 1}`;
+            idxSpan.style.color = '#888';
+            idxSpan.style.fontWeight = 'bold';
+            header.appendChild(idxSpan);
+
+            const delBtn = document.createElement('span');
+            delBtn.textContent = '🗑️';
+            delBtn.style.cursor = 'pointer';
+            delBtn.style.fontSize = '9px';
+            delBtn.onclick = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const updated = slices.filter((_: any, i: number) => i !== idx);
+                this.stateManager.updateNodeParametersInPlace(node.id, { slices: updated });
+                
+                // Forward to running solver
+                const net = (window as any).networkManager;
+                if (net && net.isConnected()) {
+                    let targetModelId = node.id;
+                    const models = this.stateManager.getAppState().models;
+                    for (const [mid, m] of Object.entries(models)) {
+                        if (m.nodes.some(n => n.id === node.id)) {
+                            targetModelId = mid;
+                            break;
+                        }
+                    }
+                    net.send({ command: "VIEW3D_CONFIG", modelId: targetModelId, slices: updated });
+                }
+            };
+            header.appendChild(delBtn);
+            row.appendChild(header);
+
+            // Controls grid (Axis, Qty, Stride)
+            const grid = document.createElement('div');
+            grid.style.display = 'grid';
+            grid.style.gridTemplateColumns = '1fr 1fr 1fr';
+            grid.style.gap = '4px';
+
+            // Axis select
+            const axisSel = document.createElement('select');
+            axisSel.style.background = '#1a1a1c';
+            axisSel.style.color = '#ccc';
+            axisSel.style.border = '1px solid #333';
+            axisSel.style.borderRadius = '3px';
+            axisSel.style.fontSize = '9px';
+            axisSel.style.padding = '1px';
+            axisSel.innerHTML = '<option value="xy">XY</option><option value="xz">XZ</option><option value="yz">YZ</option>';
+            axisSel.value = slice.axis;
+            axisSel.onchange = (e) => {
+                e.stopPropagation();
+                const updated = [...slices];
+                updated[idx] = { ...slice, axis: axisSel.value };
+                this.stateManager.updateNodeParametersInPlace(node.id, { slices: updated });
+                
+                // Forward to running solver
+                const net = (window as any).networkManager;
+                if (net && net.isConnected()) {
+                    let targetModelId = node.id;
+                    const models = this.stateManager.getAppState().models;
+                    for (const [mid, m] of Object.entries(models)) {
+                        if (m.nodes.some(n => n.id === node.id)) {
+                            targetModelId = mid;
+                            break;
+                        }
+                    }
+                    net.send({ command: "VIEW3D_CONFIG", modelId: targetModelId, slices: updated });
+                }
+            };
+            grid.appendChild(axisSel);
+
+            // Qty select
+            const qtySel = document.createElement('select');
+            qtySel.style.background = '#1a1a1c';
+            qtySel.style.color = '#ccc';
+            qtySel.style.border = '1px solid #333';
+            qtySel.style.borderRadius = '3px';
+            qtySel.style.fontSize = '9px';
+            qtySel.style.padding = '1px';
+            qtySel.innerHTML = '<option value="pressure">Pressure</option><option value="density">Density</option><option value="velocity">Velocity</option><option value="energy">Energy</option><option value="species1">Species 1</option><option value="species2">Species 2</option><option value="species3">Species 3</option>';
+            qtySel.value = slice.quantities?.[0] || 'pressure';
+            qtySel.onchange = (e) => {
+                e.stopPropagation();
+                const updated = [...slices];
+                updated[idx] = { ...slice, quantities: [qtySel.value] };
+                this.stateManager.updateNodeParametersInPlace(node.id, { slices: updated });
+            };
+            grid.appendChild(qtySel);
+
+            // Stride select
+            const strideSel = document.createElement('select');
+            strideSel.style.background = '#1a1a1c';
+            strideSel.style.color = '#ccc';
+            strideSel.style.border = '1px solid #333';
+            strideSel.style.borderRadius = '3px';
+            strideSel.style.fontSize = '9px';
+            strideSel.style.padding = '1px';
+            strideSel.innerHTML = '<option value="1">1:1</option><option value="2">1:2</option><option value="4">1:4</option><option value="8">1:8</option><option value="16">1:16</option>';
+            strideSel.value = String(slice.stride || 1);
+            strideSel.onchange = (e) => {
+                e.stopPropagation();
+                const updated = [...slices];
+                updated[idx] = { ...slice, stride: Number(strideSel.value) };
+                this.stateManager.updateNodeParametersInPlace(node.id, { slices: updated });
+            };
+            grid.appendChild(strideSel);
+
+            row.appendChild(grid);
+
+            // Slider wrapping
+            const sliderRow = document.createElement('div');
+            sliderRow.style.display = 'flex';
+            sliderRow.style.alignItems = 'center';
+            sliderRow.style.gap = '4px';
+
+            const slider = document.createElement('input');
+            slider.type = 'range';
+            slider.min = '0';
+            slider.max = '1';
+            slider.step = '0.01';
+            slider.value = String(slice.offset);
+            slider.style.flex = '1';
+            slider.style.height = '3px';
+            slider.style.outline = 'none';
+
+            const sliderVal = document.createElement('input');
+            sliderVal.type = 'number';
+            sliderVal.value = String(slice.offset);
+            sliderVal.style.width = '35px';
+            sliderVal.style.background = '#1a1a1c';
+            sliderVal.style.color = '#ccc';
+            sliderVal.style.border = '1px solid #333';
+            sliderVal.style.borderRadius = '3px';
+            sliderVal.style.fontSize = '8px';
+            sliderVal.style.padding = '1px';
+            sliderVal.style.textAlign = 'center';
+
+            slider.oninput = (e) => {
+                e.stopPropagation();
+                const val = Number(slider.value);
+                sliderVal.value = String(val);
+                
+                // Update in-place in memory to avoid UI rebuild during drag!
+                slice.offset = val;
+                
+                // Forward to running solver immediately
+                const net = (window as any).networkManager;
+                if (net && net.isConnected()) {
+                    let targetModelId = node.id;
+                    const models = this.stateManager.getAppState().models;
+                    for (const [mid, m] of Object.entries(models)) {
+                        if (m.nodes.some(n => n.id === node.id)) {
+                            targetModelId = mid;
+                            break;
+                        }
+                    }
+                    net.send({ command: "VIEW3D_CONFIG", modelId: targetModelId, slices });
+                }
+            };
+            slider.onchange = (e) => {
+                e.stopPropagation();
+                // Save final value to workspace parameters when drag is released
+                this.stateManager.updateNodeParametersInPlace(node.id, { slices });
+            };
+
+            sliderVal.onchange = (e) => {
+                e.stopPropagation();
+                const val = Math.max(0, Math.min(1.0, Number(sliderVal.value)));
+                slider.value = String(val);
+                sliderVal.value = String(val);
+                
+                slice.offset = val;
+                this.stateManager.updateNodeParametersInPlace(node.id, { slices });
+                
+                // Forward to running solver
+                const net = (window as any).networkManager;
+                if (net && net.isConnected()) {
+                    let targetModelId = node.id;
+                    const models = this.stateManager.getAppState().models;
+                    for (const [mid, m] of Object.entries(models)) {
+                        if (m.nodes.some(n => n.id === node.id)) {
+                            targetModelId = mid;
+                            break;
+                        }
+                    }
+                    net.send({ command: "VIEW3D_CONFIG", modelId: targetModelId, slices });
+                }
+            };
+
+            sliderRow.appendChild(slider);
+            sliderRow.appendChild(sliderVal);
+            row.appendChild(sliderRow);
+
+            panel.appendChild(row);
         });
     }
 

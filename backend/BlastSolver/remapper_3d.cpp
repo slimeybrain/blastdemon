@@ -96,7 +96,12 @@ void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<MultiMate
                 s3d.arho2 = avg.arho2 * inv27;
 
                 double ke = 0.5 * s3d.rho * (s3d.ux*s3d.ux + s3d.uy*s3d.uy + s3d.uz*s3d.uz);
-                s3d.E = s3d.p / (solver_3d.getGamma() - 1.0) + ke; // Assuming gamma=solver_3d.getGamma() for now
+                if (solver_3d.isIdealGas()) {
+                    s3d.E = s3d.p / (solver_3d.getGamma() - 1.0) + ke;
+                } else {
+                    const auto& mat = solver_3d.getMaterialParameters();
+                    s3d.E = MultiMat::getMixtureEnergy(s3d.p, s3d.rho, s3d.alpha1, s3d.alpha2, s3d.arho1, s3d.arho2, solver_3d.getGamma(), mat.products, mat.unreacted) + ke;
+                }
 
                 solver_3d.setCellStateMulti(i, j, k, s3d);
             }

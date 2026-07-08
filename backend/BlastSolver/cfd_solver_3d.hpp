@@ -33,12 +33,40 @@ struct Slice3D {
     std::string axis; // "xy", "yz", "xz"
     double offset;
     std::vector<std::string> quantities;
+    int stride = 1;
 };
 
 template <bool IsMultiMaterial>
 struct CellState3D {
     Real rho, ux, uy, uz, p, E, alpha1, alpha2, arho1, arho2;
 };
+
+template <bool IsMultiMaterial>
+inline double getPressure3D(double E_internal, double rho, const CellState3D<IsMultiMaterial>& s, double gamma, const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted) {
+    if constexpr (IsMultiMaterial) {
+        return MultiMat::getMixturePressure(E_internal, rho, s.alpha1, s.alpha2, s.arho1, s.arho2, gamma, products, unreacted);
+    } else {
+        return E_internal * (gamma - 1.0);
+    }
+}
+
+template <bool IsMultiMaterial>
+inline double getSoundSpeed3D(double p, double rho, const CellState3D<IsMultiMaterial>& s, double gamma, const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted) {
+    if constexpr (IsMultiMaterial) {
+        return MultiMat::getMixtureSoundSpeed(p, rho, s.alpha1, s.alpha2, s.arho1, s.arho2, gamma, products, unreacted);
+    } else {
+        return std::sqrt(gamma * p / std::max(1e-6, rho));
+    }
+}
+
+template <bool IsMultiMaterial>
+inline double getEnergy3D(double p, double rho, const CellState3D<IsMultiMaterial>& s, double gamma, const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted) {
+    if constexpr (IsMultiMaterial) {
+        return MultiMat::getMixtureEnergy(p, rho, s.alpha1, s.alpha2, s.arho1, s.arho2, gamma, products, unreacted);
+    } else {
+        return p / (gamma - 1.0);
+    }
+}
 
 class CFDSolver3D {
 public:
@@ -75,6 +103,9 @@ public:
     virtual void setCellStateMulti(int i, int j, int k, const CellState3D<true>& s) = 0;
     virtual void setCellStateIdeal(int i, int j, int k, const CellState3D<false>& s) = 0;
     virtual void commitStates() = 0;
+
+    virtual bool isIdealGas() const = 0;
+    virtual const MultiMat::MaterialSet& getMaterialParameters() const = 0;
 };
 
 class CFDSolver3DImplBase : public CFDSolver3D {
@@ -88,6 +119,7 @@ protected:
     double gamma = 1.4;
     double ambient_rho = 1.225;
     double ambient_p = 101325.0;
+    bool is_ideal_gas_val = false;
 
     BCType3D bcXmin = BCType3D::REFLECTIVE;
     BCType3D bcXmax = BCType3D::TRANSMISSIVE;
@@ -107,6 +139,9 @@ protected:
     MultiMat::MaterialSet currentMaterials = MultiMat::TNT;
 
 public:
+    bool isIdealGas() const override { return is_ideal_gas_val; }
+    const MultiMat::MaterialSet& getMaterialParameters() const override { return currentMaterials; }
+
     CFDSolver3DImplBase(int nx, int ny, int nz, double cellSize, double xmin = 0, double ymin = 0, double zmin = 0)
         : nx(nx), ny(ny), nz(nz), xmin(xmin), ymin(ymin), zmin(zmin), cellSize(cellSize) {
         lx = nx * cellSize;
@@ -169,8 +204,55 @@ private:
     void updateActiveRegions();
     void computeFluxes(double dt);
     void applyBC();
+    void applyProgrammedBurn(double dt);
+    void updatePrimitiveFromConservative();
     bool checkTermination();
-    CellState3D<IsMultiMaterial> sampleState(int i, int j, int k) const;
+public:
+    inline CellState3D<IsMultiMaterial> sampleState(int gx, int gy, int gz) const {
+        bool reflective_x = false, reflective_y = false, reflective_z = false;
+
+        if (gx < 0) {
+            if (bcXmin == BCType3D::REFLECTIVE) { gx = -gx - 1; reflective_x = true; }
+            else gx = 0;
+        } else if (gx >= nx) {
+            if (bcXmax == BCType3D::REFLECTIVE) { gx = 2 * nx - 1 - gx; reflective_x = true; }
+            else gx = nx - 1;
+        }
+        if (gy < 0) {
+            if (bcYmin == BCType3D::REFLECTIVE) { gy = -gy - 1; reflective_y = true; }
+            else gy = 0;
+        } else if (gy >= ny) {
+            if (bcYmax == BCType3D::REFLECTIVE) { gy = 2 * ny - 1 - gy; reflective_y = true; }
+            else gy = ny - 1;
+        }
+        if (gz < 0) {
+            if (bcZmin == BCType3D::REFLECTIVE) { gz = -gz - 1; reflective_z = true; }
+            else gz = 0;
+        } else if (gz >= nz) {
+            if (bcZmax == BCType3D::REFLECTIVE) { gz = 2 * nz - 1 - gz; reflective_z = true; }
+            else gz = nz - 1;
+        }
+
+        gx = std::clamp(gx, 0, nx - 1);
+        gy = std::clamp(gy, 0, ny - 1);
+        gz = std::clamp(gz, 0, nz - 1);
+
+        int t_idx = (gx >> 3) + (gy >> 3) * n_tiles_x + (gz >> 3) * n_tiles_x * n_tiles_y;
+        const auto& tile = states_pool[t_idx];
+        int c_idx = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
+
+        CellState3D<IsMultiMaterial> s;
+        s.p = tile.p[c_idx]; s.rho = tile.rho[c_idx]; s.E = tile.E[c_idx];
+        s.ux = reflective_x ? -tile.ux[c_idx] : tile.ux[c_idx];
+        s.uy = reflective_y ? -tile.uy[c_idx] : tile.uy[c_idx];
+        s.uz = reflective_z ? -tile.uz[c_idx] : tile.uz[c_idx];
+
+        if constexpr (IsMultiMaterial) {
+            s.alpha1 = tile.alpha1[c_idx]; s.alpha2 = tile.alpha2[c_idx];
+            s.arho1 = tile.arho1[c_idx]; s.arho2 = tile.arho2[c_idx];
+        }
+        return s;
+    }
 };
 
 #endif

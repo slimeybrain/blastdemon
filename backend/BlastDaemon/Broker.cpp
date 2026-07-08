@@ -276,7 +276,7 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
     std::string command = payload.value("command", "");
     std::string modelId = payload.value("modelId", "default");
 
-    if (command == "INIT" || command == "INIT_2D") {
+    if (command == "INIT" || command == "INIT_2D" || command == "INIT_3D") {
         std::cout << "[DEBUG] RAW BROKER RECEIVE INIT FOR modelId " << modelId << ": " << json_str << std::endl;
     }
 
@@ -290,7 +290,7 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
         return;
     }
 
-    if (command == "INIT" || command == "START" || command == "INIT_2D") {
+    if (command == "INIT" || command == "START" || command == "INIT_2D" || command == "INIT_3D") {
         std::cout << "--- " << command << " COMMAND RECEIVED for modelId " << modelId << " ---" << std::endl;
 
         // ── Per-model process isolation ─────────────────────────────────────────
@@ -305,8 +305,8 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
         // direct-init deadlock, and has been removed.
         // ────────────────────────────────────────────────────────────────────────
 
-        if ((command == "INIT_2D" || command == "INIT") && active_processes.count(modelId) && active_processes[modelId]) {
-            // Try to route INIT or INIT_2D to the existing process. The child may not
+        if ((command == "INIT_2D" || command == "INIT" || command == "INIT_3D") && active_processes.count(modelId) && active_processes[modelId]) {
+            // Try to route INIT, INIT_2D, or INIT_3D to the existing process. The child may not
             // yet have entered its read loop, so retry for up to 200 ms before
             // giving up and spawning a fresh process.
             auto& existing = active_processes[modelId];
@@ -314,7 +314,7 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
             for (int attempt = 0; attempt < 20; ++attempt) {
                 if (existing->isRunning()) {
                     if (existing->writeStdin(json_str + "\n\n")) {
-                        std::cout << "[DEBUG] Routing INIT_2D to existing process for modelId "
+                        std::cout << "[DEBUG] Routing " << command << " to existing process for modelId "
                                   << modelId << " (attempt " << attempt + 1 << ")" << std::endl;
                         routed = true;
                         break;
@@ -441,9 +441,10 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
             std::cerr << "Failed to start BlastSolver for modelId " << modelId << std::endl;
         }
     } else if (command == "STEP" || command == "TERMINATE" || command == "EXEC_ALL" || command == "EXEC_END" || command == "PAUSE" || command == "RESUME" ||
-               command == "SET_DEVICE" || command == "REMAP" || command == "STEP_2D" || command == "EXEC_ALL_2D" || command == "PAUSE_2D" || command == "RESUME_2D" || command == "TERMINATE_2D" || command == "WRITE_VTK" || command == "CONTOUR_CONFIG") {
-        if (command == "PAUSE" || command == "PAUSE_2D") std::cout << "[DEBUG] PAUSE COMMAND RECEIVED for modelId " << modelId << "\n";
-        if (command == "TERMINATE" || command == "TERMINATE_2D") std::cout << "[DEBUG] TERMINATE COMMAND RECEIVED for modelId " << modelId << "\n";
+               command == "SET_DEVICE" || command == "REMAP" || command == "STEP_2D" || command == "EXEC_ALL_2D" || command == "PAUSE_2D" || command == "RESUME_2D" || command == "TERMINATE_2D" || command == "WRITE_VTK" || command == "CONTOUR_CONFIG" ||
+               command == "STEP_3D" || command == "EXEC_ALL_3D" || command == "PAUSE_3D" || command == "TERMINATE_3D" || command == "VIEW3D_CONFIG") {
+        if (command == "PAUSE" || command == "PAUSE_2D" || command == "PAUSE_3D") std::cout << "[DEBUG] PAUSE COMMAND RECEIVED for modelId " << modelId << "\n";
+        if (command == "TERMINATE" || command == "TERMINATE_2D" || command == "TERMINATE_3D") std::cout << "[DEBUG] TERMINATE COMMAND RECEIVED for modelId " << modelId << "\n";
         
         if (active_processes.count(modelId) && active_processes[modelId]) {
             auto& proc = active_processes[modelId];
@@ -459,7 +460,7 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
             }
 
             if (routed) {
-                if (command == "TERMINATE" || command == "TERMINATE_2D") {
+                if (command == "TERMINATE" || command == "TERMINATE_2D" || command == "TERMINATE_3D") {
                     // Erase ALL entries pointing to the same process (shared 1D/2D process).
                     auto target_proc = active_processes[modelId];
                     std::vector<std::string> to_erase;

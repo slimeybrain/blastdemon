@@ -11,6 +11,12 @@ class CFDSolver3DCuda : public CFDSolver3DImplBase {
     void* d_max_s_buf = nullptr;
     void* d_slice_buf = nullptr;
 
+    // Host temporary mirrors during remapping
+    PrimitiveTile3D<false>* temp_h_states = nullptr;
+    uint8_t* temp_h_active = nullptr;
+
+    void updateActiveRegions();
+
 public:
     void updateBoundaryConditions();
     CFDSolver3DCuda(int nx, int ny, int nz, double cellSize, double xmin = 0, double ymin = 0, double zmin = 0);

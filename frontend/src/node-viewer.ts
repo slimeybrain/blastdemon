@@ -1,4 +1,5 @@
 import { StateManager } from './state-manager.js';
+import { createViewportRenderer } from './ViewportRenderer.js';
 import { Node, NodeType } from './types.js';
 import { PropertyEditor } from './property-editor.js';
 
@@ -180,6 +181,8 @@ export class NodeViewer {
             this.renderExpandedGraph(node);
         } else if (node.type === 'VirtualGauges') {
             this.renderVirtualGauges(node);
+        } else if (node.type === 'Telemetry3DViewport') {
+            this.renderExpanded3DViewport(node);
         } else {
             this.renderStandardNode(node);
         }
@@ -249,6 +252,201 @@ export class NodeViewer {
 
         terminalCont.appendChild(terminal);
         terminal.scrollTop = terminal.scrollHeight;
+    }
+
+    
+    private renderExpanded3DViewport(node: Node): void {
+        this.stopRenderLoop();
+        if (this.chartWorker) {
+            this.chartWorker.terminate();
+        }
+
+        const container = document.createElement('div');
+        container.style.display = 'flex';
+        container.style.flexDirection = 'column';
+        container.style.height = '100%';
+        container.style.width = '100%';
+
+        const controlsRow = document.createElement('div');
+        controlsRow.className = 'node-viewer-header';
+        controlsRow.style.padding = '10px';
+        controlsRow.style.borderBottom = '1px solid var(--border-color)';
+        controlsRow.style.display = 'flex';
+        controlsRow.style.gap = '10px';
+        controlsRow.style.alignItems = 'center';
+
+        const title = document.createElement('h3');
+        title.textContent = '3D Viewport: ' + node.id;
+        title.style.margin = '0';
+        title.style.marginRight = 'auto';
+        controlsRow.appendChild(title);
+
+        const mapSelect = document.createElement('select');
+        mapSelect.className = 'dark-input';
+        ['plasma', 'viridis'].forEach(m => {
+            const opt = document.createElement('option');
+            opt.value = m;
+            opt.textContent = m.toUpperCase();
+            if (node.parameters?.colormap === m) opt.selected = true;
+            mapSelect.appendChild(opt);
+        });
+
+        const scaleLabel = document.createElement('label');
+        scaleLabel.style.display = 'flex';
+        scaleLabel.style.alignItems = 'center';
+        scaleLabel.style.gap = '5px';
+        scaleLabel.style.fontSize = '12px';
+        scaleLabel.style.color = 'var(--text-dim)';
+        const autoScaleInput = document.createElement('input');
+        autoScaleInput.type = 'checkbox';
+        autoScaleInput.checked = node.parameters?.autoScale !== false;
+        scaleLabel.appendChild(autoScaleInput);
+        scaleLabel.appendChild(document.createTextNode('Auto Scale'));
+
+        controlsRow.appendChild(mapSelect);
+        controlsRow.appendChild(scaleLabel);
+
+        const recenterBtn = document.createElement('button');
+        recenterBtn.innerHTML = '🔄 Recenter';
+        recenterBtn.style.cursor = 'pointer';
+        recenterBtn.style.fontSize = '11px';
+        recenterBtn.style.padding = '2px 6px';
+        recenterBtn.style.background = '#2c2c30';
+        recenterBtn.style.color = '#fff';
+        recenterBtn.style.border = '1px solid rgba(255,255,255,0.1)';
+        recenterBtn.style.borderRadius = '4px';
+        recenterBtn.onclick = () => {
+            if (this.chartWorker) {
+                this.chartWorker.postMessage({
+                    type: 'setView',
+                    data: { rotX: 0.5, rotY: 0.5, zoom: -3.0, panX: 0.0, panY: 0.0 }
+                });
+            }
+        };
+        controlsRow.appendChild(recenterBtn);
+
+        container.appendChild(controlsRow);
+
+        const canvasContainer = document.createElement('div');
+        canvasContainer.style.flex = '1';
+        canvasContainer.style.position = 'relative';
+        
+        const canvas = document.createElement('canvas');
+        canvas.style.width = '100%';
+        canvas.style.height = '100%';
+        canvas.style.display = 'block';
+        canvasContainer.appendChild(canvas);
+        container.appendChild(canvasContainer);
+
+        this.container.appendChild(container);
+
+        const renderer = createViewportRenderer();
+        this.chartWorker = {
+            postMessage: (msg: any) => renderer.postMessage(msg),
+            terminate: () => {}
+        } as any;
+
+        this.chartWorker!.postMessage({
+            type: 'init',
+            data: {
+                canvas: canvas,
+                width: canvasContainer.clientWidth || 300,
+                height: canvasContainer.clientHeight || 200
+            }
+        });
+
+        this.chartWorker!.postMessage({
+            type: 'setConfig',
+            data: {
+                colormap: mapSelect.value,
+                autoScale: autoScaleInput.checked
+            }
+        });
+
+        mapSelect.addEventListener('change', () => {
+            if (this.chartWorker) {
+                this.chartWorker.postMessage({
+                    type: 'setConfig',
+                    data: { colormap: mapSelect.value }
+                });
+            }
+        });
+
+        autoScaleInput.addEventListener('change', () => {
+            if (this.chartWorker) {
+                this.chartWorker.postMessage({
+                    type: 'setConfig',
+                    data: { autoScale: autoScaleInput.checked }
+                });
+            }
+        });
+
+        let isDragging = false;
+        let dragMode: 'orbit' | 'pan' = 'orbit';
+        let lastX = 0;
+        let lastY = 0;
+
+        canvas.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+        });
+
+        canvas.addEventListener('mousedown', (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            isDragging = true;
+            lastX = e.clientX;
+            lastY = e.clientY;
+            if (e.button === 2 || e.shiftKey || e.button === 1) {
+                dragMode = 'pan';
+            } else {
+                dragMode = 'orbit';
+            }
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            const dx = e.clientX - lastX;
+            const dy = e.clientY - lastY;
+            lastX = e.clientX;
+            lastY = e.clientY;
+            if (this.chartWorker) {
+                if (dragMode === 'pan') {
+                    this.chartWorker.postMessage({ type: 'input', data: { dpx: dx, dpy: dy } });
+                } else {
+                    this.chartWorker.postMessage({ type: 'input', data: { drx: dy, dry: dx } });
+                }
+            }
+        });
+
+        window.addEventListener('mouseup', () => { isDragging = false; });
+
+        canvas.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (this.chartWorker) {
+                this.chartWorker.postMessage({ type: 'input', data: { dy: e.deltaY } });
+            }
+        }, { passive: false });
+
+
+        const ro = new ResizeObserver(() => {
+            if (this.chartWorker) {
+                this.chartWorker.postMessage({
+                    type: 'resize',
+                    data: {
+                        width: canvasContainer.clientWidth || 300,
+                        height: canvasContainer.clientHeight || 200
+                    }
+                });
+            }
+        });
+        ro.observe(canvasContainer);
+
+        const initialData = this.stateManager.getTelemetry(node.id);
+        if (initialData instanceof ArrayBuffer) {
+            this.chartWorker?.postMessage({ type: 'frame', data: { buffer: initialData } });
+        }
+        this.startRenderLoop();
     }
 
     private renderExpandedGraph(node: Node): void {
@@ -592,6 +790,7 @@ export class NodeViewer {
                 const shape = node.parameters['charge_shape'] || 'Sphere';
                 if (key === 'charge_height' && shape !== 'Cylinder') continue;
             }
+            // DetonatorLocation and DetonatorLocation3D are separate nodes now, showing correct properties
 
             const label = document.createElement('label');
             label.textContent = key.replace(/_/g, ' ').toUpperCase();
@@ -1067,7 +1266,11 @@ export class NodeViewer {
                     this.telemetryBuffer = null;
                 } else {
                     if (this.telemetryBuffer instanceof ArrayBuffer) {
-                        this.chartWorker.postMessage(this.telemetryBuffer, [this.telemetryBuffer]);
+                        if (node?.type === 'Telemetry3DViewport') {
+                            this.chartWorker.postMessage({ type: 'frame', data: { buffer: this.telemetryBuffer } }, [this.telemetryBuffer]);
+                        } else {
+                            this.chartWorker.postMessage(this.telemetryBuffer, [this.telemetryBuffer]);
+                        }
                     } else {
                         const pressureData = this.telemetryBuffer.data || this.telemetryBuffer.telemetry;
                         if (pressureData && (Array.isArray(pressureData) || pressureData instanceof Float32Array)) {
@@ -1159,7 +1362,7 @@ export class NodeViewer {
             if (terminal && Array.isArray(data)) {
                 this.syncTerminal(terminal, data);
             }
-        } else if (node.type === 'TelemetryGraph') {
+        } else if (node.type === 'TelemetryGraph' || node.type === 'Telemetry3DViewport') {
             this.telemetryBuffer = data;
         }
     }
@@ -1173,7 +1376,11 @@ export class NodeViewer {
             // 2D CFD keys
             'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r',
             'charge_r', 'charge_z', 'charge_radius', 'charge_height',
-            'detonator_r', 'detonator_z', 'detonator_radius'
+            'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
+            // 3D CFD keys
+            'nx', 'ny', 'nz', 'dim_x', 'dim_y', 'dim_z', 'origin_x', 'origin_y', 'origin_z',
+            'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
+            'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin', 'charge_radius'
         ];
 
         const dropdowns: Record<string, string[]> = {

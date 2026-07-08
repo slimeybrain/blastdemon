@@ -1,4 +1,4 @@
-export type NodeType = 'DomainMesh' | 'Material' | 'Charge1D' | 'Charge2D' | 'ThePainter' | 'CFDSolver' | 'TelemetryText' | 'TelemetryGraph' | 'DomainMesh2D' | 'DetonatorLocation' | 'RemapNode' | 'CFDSolver2D' | 'TelemetryContour' | 'VTKOutput' | 'HardwareConfig' | 'VirtualGauges' | 'DomainMesh3D' | 'Charge3D' | 'CFDSolver3D' | 'Telemetry3DViewport' | 'VirtualGauges3D';
+export type NodeType = 'DomainMesh' | 'Material' | 'Charge1D' | 'Charge2D' | 'ThePainter' | 'CFDSolver' | 'TelemetryText' | 'TelemetryGraph' | 'DomainMesh2D' | 'DetonatorLocation' | 'RemapNode' | 'CFDSolver2D' | 'TelemetryContour' | 'VTKOutput' | 'HardwareConfig' | 'VirtualGauges' | 'DomainMesh3D' | 'Charge3D' | 'CFDSolver3D' | 'Telemetry3DViewport' | 'VirtualGauges3D' | 'DetonatorLocation3D';
 
 export interface Port {
     id: string;

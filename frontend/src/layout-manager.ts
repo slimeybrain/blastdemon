@@ -843,12 +843,14 @@ export class LayoutManager {
     private renderTelemetry3D(node: PanelNode, container: HTMLElement): void {
         let comp = this.components.get(node.id);
         if (!comp) {
-            const viewport = new Telemetry3DViewport(container, node.id);
+            const viewport = new Telemetry3DViewport(container, node.id, this.stateManager);
             comp = { type: 'TELEMETRY_3D', instance: viewport, container };
             this.components.set(node.id, comp);
-        } else if (comp.container !== container) {
-            // Re-parenting logic if needed
-            comp.container = container;
+        } else {
+            if (comp.container !== container) {
+                comp.container = container;
+            }
+            comp.instance.attachTo(container);
         }
     }
 
@@ -1434,7 +1436,7 @@ class ExecutionManagerComponent {
 
         this.telemetryListener = (nodeId, data) => {
             if (data && typeof data === 'object') {
-                if (data.type === 'progress' || data.type === 'progress_2d' || data.type === 'TELEMETRY' || data.type === 'TELEMETRY_2D') {
+                if (data.type === 'progress' || data.type === 'progress_2d' || data.type === 'TELEMETRY' || data.type === 'TELEMETRY_2D' || data.type === 'TELEMETRY_3D') {
                     this.updateTargets();
                 }
             }

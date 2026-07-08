@@ -227,9 +227,11 @@ export class PropertyEditor {
                 const shape = node.parameters['charge_shape'] || 'Sphere';
                 if (key === 'charge_height' && shape !== 'Cylinder') continue;
             }
-            if (node.type === 'VirtualGauges') {
+            if (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') {
                 if (key === 'gauges' || key === 'telemetry_channel') continue;
             }
+            if (node.type === 'Telemetry3DViewport' && key === 'slices') continue;
+            // DetonatorLocation and DetonatorLocation3D are separate nodes now, showing correct properties
 
             const row = document.createElement('div');
             row.style.marginBottom = '10px';
@@ -246,6 +248,9 @@ export class PropertyEditor {
             input.dataset.key = key;
             row.appendChild(input);
             form.appendChild(row);
+        }
+        if (node.type === 'Telemetry3DViewport') {
+            this.renderTelemetry3DViewportSlices(node, form);
         }
         this.container.appendChild(form);
 
@@ -328,11 +333,11 @@ export class PropertyEditor {
             'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature',
             'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
             'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl', 'output_interval',
-            'spatial_order', 'temporal_order', 'gamma', 'plot_stride',
+            'spatial_order', 'temporal_order', 'gamma', 'plot_stride', 'refresh_rate',
             // 2D CFD keys
             'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r',
             'charge_r', 'charge_z', 'charge_radius', 'charge_height',
-            'detonator_r', 'detonator_z', 'detonator_radius',
+            'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
             'ideal_gamma', 'ideal_rho_0', 'ideal_e_0'
         ];
 
@@ -363,7 +368,8 @@ export class PropertyEditor {
             'plot_stride': ['1', '2', '5', '10', '20', '50', '100'],
             'charge_shape': ['Sphere', 'Cylinder'],
             'material_type': ['Air', 'JWL Charge', 'Ideal Gas Charge'],
-            'colormap': ['plasma', 'viridis', 'rainbow', 'coolwarm', 'cividis', 'grayscale']
+            'colormap': ['plasma', 'viridis', 'rainbow', 'coolwarm', 'cividis', 'grayscale'],
+            'refresh_rate': ['0.0', '0.016', '0.033', '0.05', '0.1', '0.2', '0.5', '1.0']
         };
 
         if (dropdowns[key]) {
@@ -411,6 +417,226 @@ export class PropertyEditor {
 
         return input;
     }
+
+    private renderTelemetry3DViewportSlices(node: Node, container: HTMLElement): void {
+        const slices = node.parameters.slices || [];
+        
+        const sectionTitle = document.createElement('div');
+        sectionTitle.style.fontWeight = 'bold';
+        sectionTitle.style.fontSize = 'var(--font-sm)';
+        sectionTitle.style.color = '#888';
+        sectionTitle.style.marginTop = '15px';
+        sectionTitle.style.marginBottom = '6px';
+        sectionTitle.textContent = 'ACTIVE CROSS-SECTION SLICES';
+        container.appendChild(sectionTitle);
+
+        const listContainer = document.createElement('div');
+        listContainer.style.display = 'flex';
+        listContainer.style.flexDirection = 'column';
+        listContainer.style.gap = '8px';
+        container.appendChild(listContainer);
+
+        slices.forEach((slice: any, idx: number) => {
+            const row = document.createElement('div');
+            row.style.background = '#1e1e1e';
+            row.style.border = '1px solid #333';
+            row.style.borderRadius = '4px';
+            row.style.padding = '8px';
+            row.style.display = 'flex';
+            row.style.flexDirection = 'column';
+            row.style.gap = '4px';
+
+            // Header of the slice row (Slice # and Delete button)
+            const rowHeader = document.createElement('div');
+            rowHeader.style.display = 'flex';
+            rowHeader.style.justifyContent = 'space-between';
+            rowHeader.style.alignItems = 'center';
+
+            const title = document.createElement('span');
+            title.style.fontSize = 'var(--font-xs)';
+            title.style.fontWeight = 'bold';
+            title.style.color = '#569cd6';
+            title.textContent = `Slice #${idx + 1}`;
+            rowHeader.appendChild(title);
+
+            const delBtn = document.createElement('button');
+            delBtn.textContent = 'Delete';
+            delBtn.style.fontSize = '10px';
+            delBtn.style.padding = '2px 6px';
+            delBtn.style.background = '#dc2626';
+            delBtn.style.color = '#fff';
+            delBtn.style.border = 'none';
+            delBtn.style.borderRadius = '3px';
+            delBtn.style.cursor = 'pointer';
+            delBtn.onclick = (e) => {
+                e.preventDefault();
+                const updated = slices.filter((_: any, i: number) => i !== idx);
+                this.updateParameter('slices', updated);
+            };
+            rowHeader.appendChild(delBtn);
+            row.appendChild(rowHeader);
+
+            // Inputs: Axis and Offset
+            const inputsRow = document.createElement('div');
+            inputsRow.style.display = 'flex';
+            inputsRow.style.gap = '8px';
+
+            // Axis select
+            const axisDiv = document.createElement('div');
+            axisDiv.style.flex = '1';
+            const axisLabel = document.createElement('label');
+            axisLabel.style.fontSize = '10px';
+            axisLabel.style.color = '#888';
+            axisLabel.textContent = 'AXIS';
+            axisDiv.appendChild(axisLabel);
+
+            const axisSelect = document.createElement('select');
+            axisSelect.style.width = '100%';
+            axisSelect.style.background = '#252526';
+            axisSelect.style.color = '#ccc';
+            axisSelect.style.border = '1px solid #444';
+            axisSelect.style.fontSize = 'var(--font-xs)';
+            axisSelect.style.padding = '2px';
+            
+            ['xy', 'xz', 'yz'].forEach(opt => {
+                const option = document.createElement('option');
+                option.value = opt;
+                option.text = opt.toUpperCase();
+                if (opt === slice.axis) option.selected = true;
+                axisSelect.appendChild(option);
+            });
+            axisSelect.onchange = () => {
+                const updated = [...slices];
+                updated[idx] = { ...slice, axis: axisSelect.value };
+                this.updateParameter('slices', updated);
+            };
+            axisDiv.appendChild(axisSelect);
+            inputsRow.appendChild(axisDiv);
+
+            // Offset input
+            const offsetDiv = document.createElement('div');
+            offsetDiv.style.flex = '1';
+            const offsetLabel = document.createElement('label');
+            offsetLabel.style.fontSize = '10px';
+            offsetLabel.style.color = '#888';
+            offsetLabel.textContent = 'OFFSET';
+            offsetDiv.appendChild(offsetLabel);
+
+            const offsetInput = document.createElement('input');
+            offsetInput.type = 'number';
+            offsetInput.step = 'any';
+            offsetInput.value = slice.offset;
+            offsetInput.style.width = '100%';
+            offsetInput.style.background = '#252526';
+            offsetInput.style.color = '#ccc';
+            offsetInput.style.border = '1px solid #444';
+            offsetInput.style.fontSize = 'var(--font-xs)';
+            offsetInput.style.padding = '2px';
+            offsetInput.onchange = () => {
+                const updated = [...slices];
+                updated[idx] = { ...slice, offset: Number(offsetInput.value) };
+                this.updateParameter('slices', updated);
+            };
+            offsetDiv.appendChild(offsetInput);
+            inputsRow.appendChild(offsetDiv);
+
+            // Quantity select
+            const qtyDiv = document.createElement('div');
+            qtyDiv.style.flex = '1';
+            const qtyLabel = document.createElement('label');
+            qtyLabel.style.fontSize = '10px';
+            qtyLabel.style.color = '#888';
+            qtyLabel.textContent = 'QUANTITY';
+            qtyDiv.appendChild(qtyLabel);
+
+            const qtySelect = document.createElement('select');
+            qtySelect.style.width = '100%';
+            qtySelect.style.background = '#252526';
+            qtySelect.style.color = '#ccc';
+            qtySelect.style.border = '1px solid #444';
+            qtySelect.style.fontSize = 'var(--font-xs)';
+            qtySelect.style.padding = '2px';
+            
+            const QUANTITIES = [
+                { value: 'pressure', label: 'Pressure' },
+                { value: 'density', label: 'Density' },
+                { value: 'velocity', label: 'Velocity' },
+                { value: 'energy', label: 'Energy' },
+                { value: 'species1', label: 'Species 1' },
+                { value: 'species2', label: 'Species 2' },
+                { value: 'species3', label: 'Species 3' }
+            ];
+
+            QUANTITIES.forEach(q => {
+                const option = document.createElement('option');
+                option.value = q.value;
+                option.text = q.label;
+                if (slice.quantities && slice.quantities[0] === q.value) option.selected = true;
+                qtySelect.appendChild(option);
+            });
+            qtySelect.onchange = () => {
+                const updated = [...slices];
+                updated[idx] = { ...slice, quantities: [qtySelect.value] };
+                this.updateParameter('slices', updated);
+            };
+            qtyDiv.appendChild(qtySelect);
+            inputsRow.appendChild(qtyDiv);
+
+            // Stride select
+            const strideDiv = document.createElement('div');
+            strideDiv.style.flex = '1';
+            const strideLabel = document.createElement('label');
+            strideLabel.style.fontSize = '10px';
+            strideLabel.style.color = '#888';
+            strideLabel.textContent = 'STRIDE';
+            strideDiv.appendChild(strideLabel);
+
+            const strideSelect = document.createElement('select');
+            strideSelect.style.width = '100%';
+            strideSelect.style.background = '#252526';
+            strideSelect.style.color = '#ccc';
+            strideSelect.style.border = '1px solid #444';
+            strideSelect.style.fontSize = 'var(--font-xs)';
+            strideSelect.style.padding = '2px';
+
+            [1, 2, 4, 8, 16].forEach(st => {
+                const option = document.createElement('option');
+                option.value = String(st);
+                option.text = `1:${st}`;
+                if ((slice.stride || 1) === st) option.selected = true;
+                strideSelect.appendChild(option);
+            });
+            strideSelect.onchange = () => {
+                const updated = [...slices];
+                updated[idx] = { ...slice, stride: Number(strideSelect.value) };
+                this.updateParameter('slices', updated);
+            };
+            strideDiv.appendChild(strideSelect);
+            inputsRow.appendChild(strideDiv);
+
+            row.appendChild(inputsRow);
+            listContainer.appendChild(row);
+        });
+
+        // Add Slice Button
+        const addBtn = document.createElement('button');
+        addBtn.textContent = '+ Add Slice';
+        addBtn.style.marginTop = '8px';
+        addBtn.style.padding = '4px 8px';
+        addBtn.style.background = '#38bdf8';
+        addBtn.style.color = '#0f172a';
+        addBtn.style.border = 'none';
+        addBtn.style.borderRadius = '4px';
+        addBtn.style.cursor = 'pointer';
+        addBtn.style.fontWeight = 'bold';
+        addBtn.onclick = (e) => {
+            e.preventDefault();
+            const updated = [...slices, { axis: 'xy', offset: 0.5, quantities: ['pressure'], stride: 1 }];
+            this.updateParameter('slices', updated);
+        };
+        container.appendChild(addBtn);
+    }
+
 
     private updateParameter(key: string, value: any): void {
         if (!this.currentNodeId) return;
@@ -788,6 +1014,8 @@ export class PropertyEditor {
                 return '2D Axisymmetric mesh. Discretizes the r-z coordinates and defines boundary conditions for r_min, r_max, z_min, z_max.';
             case 'DetonatorLocation':
                 return 'Detonator position and size. Defines where detonation starts in the 2D r-z space.';
+            case 'DetonatorLocation3D':
+                return 'Detonator position. Defines where detonation starts in the 3D Cartesian space.';
             case 'RemapNode':
                 return 'Remapper node. Integrates the 1D physical state onto the 2D mesh, interpolating conservation variables at the specified trigger condition.';
             case 'HardwareConfig':

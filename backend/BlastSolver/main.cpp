@@ -862,6 +862,13 @@ void emit_telemetry_3d(double elapsed, bool is_terminated) {
     envelope["dt"] = global_dt_3d;
     envelope["is_terminated"] = is_terminated;
     envelope["wallclock"] = global_wallclock_3d.load();
+    envelope["xmin"] = global_solver_3d->getXMin();
+    envelope["ymin"] = global_solver_3d->getYMin();
+    envelope["zmin"] = global_solver_3d->getZMin();
+    envelope["dx"] = global_solver_3d->getCellSize();
+    envelope["nx"] = global_solver_3d->getNx();
+    envelope["ny"] = global_solver_3d->getNy();
+    envelope["nz"] = global_solver_3d->getNz();
 
     {
         std::lock_guard<std::mutex> g_lock(global_gauges_mutex);
@@ -890,12 +897,7 @@ void emit_telemetry_3d(double elapsed, bool is_terminated) {
     float time_f = (float)elapsed;
     uint32_t n_slices = global_slices_3d.size();
 
-    // If no slices defined, add a default center XY slice
-    if (n_slices == 0) {
-        Slice3D s; s.axis = "xy"; s.offset = global_solver_3d->getZMin() + global_solver_3d->getCellSize() * global_solver_3d->getNz() * 0.5;
-        global_slices_3d.push_back(s);
-        n_slices = 1;
-    }
+
 
     std::vector<std::vector<float>> slice_datas;
     size_t total_payload_bytes = 0;
@@ -920,9 +922,10 @@ void emit_telemetry_3d(double elapsed, bool is_terminated) {
         uint32_t axis_id = (s.axis == "xy" ? 0 : (s.axis == "xz" ? 1 : 2));
         float offset = (float)s.offset;
         uint32_t w = 0, h = 0;
-        if (axis_id == 0) { w = global_solver_3d->getNx(); h = global_solver_3d->getNy(); }
-        else if (axis_id == 1) { w = global_solver_3d->getNx(); h = global_solver_3d->getNz(); }
-        else { w = global_solver_3d->getNy(); h = global_solver_3d->getNz(); }
+        int stride = s.stride > 0 ? s.stride : 1;
+        if (axis_id == 0) { w = (global_solver_3d->getNx() + stride - 1) / stride; h = (global_solver_3d->getNy() + stride - 1) / stride; }
+        else if (axis_id == 1) { w = (global_solver_3d->getNx() + stride - 1) / stride; h = (global_solver_3d->getNz() + stride - 1) / stride; }
+        else { w = (global_solver_3d->getNy() + stride - 1) / stride; h = (global_solver_3d->getNz() + stride - 1) / stride; }
 
         std::cout.write(reinterpret_cast<const char*>(&axis_id), 4);
         std::cout.write(reinterpret_cast<const char*>(&offset), 4);
@@ -1625,16 +1628,46 @@ int main() {
                         for (const auto& s_msg : msg["slices"]) {
                             Slice3D s;
                             s.axis = s_msg.value("axis", "xy");
-                            s.offset = s_msg.value("offset", 0.0);
+                            s.offset = s_msg.value("offset", 0.5);
+                            s.stride = s_msg.value("stride", 1);
+                            if (s.stride < 1) s.stride = 1;
+                            if (s_msg.contains("quantities")) {
+                                    for (const auto& q : s_msg["quantities"]) {
+                                        s.quantities.push_back(q.get<std::string>());
+                                    }
+                            }
                             global_slices_3d.push_back(s);
                         }
+                    } else {
+                        // Create default XY slice only if "slices" array is completely absent
+                        Slice3D s;
+                        s.axis = "xy";
+                        s.offset = 0.5;
+                        s.stride = 1;
+                        s.quantities.push_back("pressure");
+                        global_slices_3d.push_back(s);
                     }
+
+                    std::string init_mode = msg.value("init_mode", "Multi-Material JWL");
+                    bool is_multimat = (init_mode == "Multi-Material JWL");
 
                     if (device == "cuda") {
                         global_solver_3d = std::make_unique<CFDSolver3DCuda>(nx, ny, nz, cellSize, xmin, ymin, zmin);
                     } else {
-                        global_solver_3d = std::make_unique<CFDSolver3DImpl<true>>(nx, ny, nz, cellSize, xmin, ymin, zmin);
+                        if (is_multimat) {
+                            global_solver_3d = std::make_unique<CFDSolver3DImpl<true>>(nx, ny, nz, cellSize, xmin, ymin, zmin);
+                        } else {
+                            global_solver_3d = std::make_unique<CFDSolver3DImpl<false>>(nx, ny, nz, cellSize, xmin, ymin, zmin);
+                        }
                     }
+
+                    std::string flux_scheme = msg.value("flux_scheme", "AUSM+");
+                    int spatial_order = msg.value("spatial_order", 2);
+                    int temporal_order = msg.value("temporal_order", 2);
+
+                    global_solver_3d->setFluxScheme(flux_scheme);
+                    global_solver_3d->setSpatialOrder(spatial_order);
+                    global_solver_3d->setTemporalOrder(temporal_order);
 
                     Charge3DParams cp;
                     cp.shape = msg.value("charge_shape", "Sphere");
@@ -1682,10 +1715,26 @@ int main() {
                     emit_kernel_log("SYSTEM", "3D Solver Initialized", 0.0, "3d");
                     emit_telemetry_3d(0.0, false);
 
-                } else if (command == "CONTOUR_CONFIG") {
+                } else if (command == "CONTOUR_CONFIG" || command == "VIEW3D_CONFIG") {
                     global_telemetry_stride = msg.value("stride", 1);
                     double rate = msg.value("refresh_rate", 0.0);
                     global_telemetry_interval_ms = (rate > 0.0) ? static_cast<int>(rate * 1000.0) : 33;
+                    if (msg.contains("slices")) {
+                        global_slices_3d.clear();
+                        for (const auto& s_msg : msg["slices"]) {
+                            Slice3D s;
+                            s.axis = s_msg.value("axis", "xy");
+                            s.offset = s_msg.value("offset", 0.5);
+                            s.stride = s_msg.value("stride", 1);
+                            if (s.stride < 1) s.stride = 1;
+                            if (s_msg.contains("quantities")) {
+                                for (const auto& q : s_msg["quantities"]) {
+                                    s.quantities.push_back(q.get<std::string>());
+                                }
+                            }
+                            global_slices_3d.push_back(s);
+                        }
+                    }
                 }
 
             } catch (const std::exception& e) {

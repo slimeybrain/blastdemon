@@ -464,6 +464,7 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
 
     // Helper to perform remapping from 1D telemetry if available
     const tryRemapFrom1D = (targetModelId: string, pipe: any): boolean => {
+        const model = stateManager.getAllModels().find(m => m.id === targetModelId);
         const model1d = stateManager.getAllModels().find(m => m.id === pipe.model1dId);
         const solver1DNode = model1d?.nodes.find(n => n.type === 'CFDSolver');
         const telemetry = solver1DNode ? stateManager.getTelemetry(solver1DNode.id + "-binary") : null;
@@ -473,14 +474,17 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
         console.log(`[tryRemapFrom1D] telemetry:`, telemetry);
 
         const solver2DNode = model?.nodes.find(n => n.type === 'CFDSolver2D');
-        if (solver2DNode) {
-            stateManager.pushTelemetry(solver2DNode.id, `[DEBUG] tryRemapFrom1D starting. target=${targetModelId} 1dModel=${pipe.model1dId} node=${solver1DNode?.id ?? 'null'} telemetry=${telemetry ? ('ArrayBuffer(' + telemetry.byteLength + ')') : 'null'}`, targetModelId);
+        const solver3DNode = model?.nodes.find(n => n.type === 'CFDSolver3D');
+        const activeSolverNode = solver2DNode || solver3DNode;
+
+        if (activeSolverNode) {
+            stateManager.pushTelemetry(activeSolverNode.id, `[DEBUG] tryRemapFrom1D starting. target=${targetModelId} 1dModel=${pipe.model1dId} node=${solver1DNode?.id ?? 'null'} telemetry=${telemetry ? ('ArrayBuffer(' + telemetry.byteLength + ')') : 'null'}`, targetModelId);
         }
 
         if (!telemetry || !(telemetry instanceof ArrayBuffer)) {
-            if (solver2DNode) {
+            if (activeSolverNode) {
                 const storeKeys = Array.from((stateManager as any).telemetryStore.keys()).join(', ');
-                stateManager.pushTelemetry(solver2DNode.id, `[WARNING] Cannot initialize: No 1D simulation telemetry found (telemetry=${telemetry ? typeof telemetry : 'null'}). Please run the 1D model first. Available telemetry keys: [${storeKeys}]`, targetModelId);
+                stateManager.pushTelemetry(activeSolverNode.id, `[WARNING] Cannot initialize: No 1D simulation telemetry found (telemetry=${telemetry ? typeof telemetry : 'null'}). Please run the 1D model first. Available telemetry keys: [${storeKeys}]`, targetModelId);
             }
             return false;
         }
@@ -519,19 +523,35 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
             }
             
             const state = stateManager.getSimulationState(targetModelId);
-            const remapConn = state?.connections.find(c => c.toNode === solver2DNode?.id && c.toPort === 'remap');
-            const remapNode = remapConn ? state?.nodes.find(n => n.id === remapConn.fromNode) : null;
             
-            const detConn = state?.connections.find(c => c.toNode === solver2DNode?.id && c.toPort === 'detonator');
-            const detNode = detConn ? state?.nodes.find(n => n.id === detConn.fromNode) : null;
+            let explosiveX = 0.0;
+            let explosiveY = 0.0;
+            let explosiveZ = 0.0;
+            let explosiveR = 0.0;
+            let remapRadius = 0.5;
 
-            const explosiveZ = detNode 
-                ? Number(detNode.parameters.detonator_z ?? 0.0)
-                : Number(remapNode?.parameters?.explosive_z ?? 0.0);
-            const explosiveR = detNode
-                ? Number(detNode.parameters.detonator_r ?? 0.0)
-                : Number(remapNode?.parameters?.explosive_r ?? 0.0);
-            const remapRadius = Number(remapNode?.parameters?.remap_radius ?? 0.5);
+            if (solver3DNode) {
+                const remapConn = state?.connections.find(c => c.toNode === solver3DNode.id && c.toPort === 'remap');
+                const remapNode = remapConn ? state?.nodes.find(n => n.id === remapConn.fromNode) : null;
+                const detConn = state?.connections.find(c => c.toNode === solver3DNode.id && c.toPort === 'detonator');
+                const detNode = detConn ? state?.nodes.find(n => n.id === detConn.fromNode) : null;
+
+                explosiveX = detNode ? Number(detNode.parameters.detonator_x ?? 0.0) : Number(remapNode?.parameters?.explosive_x ?? 0.0);
+                explosiveY = detNode ? Number(detNode.parameters.detonator_y ?? 0.0) : Number(remapNode?.parameters?.explosive_y ?? 0.0);
+                explosiveZ = detNode ? Number(detNode.parameters.detonator_z ?? 0.0) : Number(remapNode?.parameters?.explosive_z ?? 0.0);
+                remapRadius = Number(remapNode?.parameters?.remap_radius ?? 0.5);
+            } else if (solver2DNode) {
+                const remapConn = state?.connections.find(c => c.toNode === solver2DNode.id && c.toPort === 'remap');
+                const remapNode = remapConn ? state?.nodes.find(n => n.id === remapConn.fromNode) : null;
+                const detConn = state?.connections.find(c => c.toNode === solver2DNode.id && c.toPort === 'detonator');
+                const detNode = detConn ? state?.nodes.find(n => n.id === detConn.fromNode) : null;
+
+                explosiveX = 0.0;
+                explosiveY = 0.0;
+                explosiveZ = detNode ? Number(detNode.parameters.detonator_z ?? 0.0) : Number(remapNode?.parameters?.explosive_z ?? 0.0);
+                explosiveR = detNode ? Number(detNode.parameters.detonator_r ?? 0.0) : Number(remapNode?.parameters?.explosive_r ?? 0.0);
+                remapRadius = Number(remapNode?.parameters?.remap_radius ?? 0.5);
+            }
 
             // Extract all ambient air, atmospheric, and explosive/JWL properties from the 1D model
             const dummy1DState: SimulationState = {
@@ -542,15 +562,17 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
             const serialized1D = JSON.parse(serializeForSolver(dummy1DState, "INIT", pipe.model1dId));
 
             console.log(`Sending REMAP parameters for modelId ${targetModelId} with parsed 1D states`);
-            if (solver2DNode) {
-                stateManager.pushTelemetry(solver2DNode.id, `[DEBUG] Sending REMAP command: explosive_z=${explosiveZ}, remap_radius=${remapRadius}, states_count=${states_1d.length}`, targetModelId);
+            if (activeSolverNode) {
+                stateManager.pushTelemetry(activeSolverNode.id, `[DEBUG] Sending REMAP command: explosive_z=${explosiveZ}, remap_radius=${remapRadius}, states_count=${states_1d.length}`, targetModelId);
             }
             networkManager.send({
                 command: "REMAP",
                 modelId: targetModelId,
+                explosive_x: explosiveX,
+                explosive_y: explosiveY,
                 explosive_z: explosiveZ,
-                remap_radius: remapRadius,
                 explosive_r: explosiveR,
+                remap_radius: remapRadius,
                 r_1d: r_1d,
                 states_1d: states_1d,
                 
@@ -575,8 +597,8 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
             });
             return true;
         } catch (err) {
-            if (solver2DNode) {
-                stateManager.pushTelemetry(solver2DNode.id, `[ERROR] Failed to parse 1D telemetry: ${err}`, targetModelId);
+            if (activeSolverNode) {
+                stateManager.pushTelemetry(activeSolverNode.id, `[ERROR] Failed to parse 1D telemetry: ${err}`, targetModelId);
             }
             return false;
         }
@@ -879,7 +901,7 @@ networkManager.onMessage((data) => {
             return;
         }
 
-        if (dataJson.type === 'TELEMETRY' || dataJson.type === 'TELEMETRY_2D') {
+        if (dataJson.type === 'TELEMETRY' || dataJson.type === 'TELEMETRY_2D' || dataJson.type === 'TELEMETRY_3D') {
             if (modelId) {
                 stateManager.setModelSimTime(modelId, dataJson.time);
                 if (dataJson.time === 0) {
@@ -911,6 +933,11 @@ networkManager.onMessage((data) => {
                     if (solverNode) {
                         stateManager.pushTelemetry(solverNode.id, dataJson, modelId);
                     }
+                }
+                if (dataJson.type === 'TELEMETRY_3D') {
+                    layoutManager.components.forEach(comp => {
+                        if (comp.type === 'TELEMETRY_3D') comp.instance.updateTelemetry(dataJson);
+                    });
                 }
             }
             return;

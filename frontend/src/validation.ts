@@ -375,6 +375,19 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             }
         }
 
+        // Air connection check
+        const airConn3D = state.connections.find(c => c.toNode === solver3D.id && c.toPort === 'air');
+        if (!airConn3D) {
+            addMessage(solver3D.id, 'error', "No Air node connected to CFD Solver 3D. A Material node (configured as Air) is required.");
+        } else {
+            const fromNode = state.nodes.find(n => n.id === airConn3D.fromNode);
+            if (!fromNode || fromNode.type !== 'Material' || fromNode.parameters?.material_type !== 'Air') {
+                const connKey = `${airConn3D.fromNode}:${airConn3D.fromPort}->${airConn3D.toNode}:${airConn3D.toPort}`;
+                flawedConnections.set(connKey, "Only a Material node configured as Air can be connected to the Air input of CFD Solver 3D.");
+                addMessage(solver3D.id, 'error', "Only a Material node configured as Air can be connected to the Air input of CFD Solver 3D.");
+            }
+        }
+
         // Charge 3D connection check
         const chargeConn3D = state.connections.find(c => c.toNode === solver3D.id && c.toPort === 'charge');
         if (chargeConn3D) {
@@ -383,6 +396,43 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                 const connKey = `${chargeConn3D.fromNode}:${chargeConn3D.fromPort}->${chargeConn3D.toNode}:${chargeConn3D.toPort}`;
                 flawedConnections.set(connKey, "Only Charge3D node can be connected to the Charge input of CFD Solver 3D.");
                 addMessage(solver3D.id, 'error', "Only Charge3D node can be connected to the Charge input of CFD Solver 3D.");
+            } else {
+                // Check if Charge3D has a Material node connected
+                const matConn = state.connections.find(c => c.toNode === chargeNode3D.id && c.toPort === 'material');
+                if (!matConn) {
+                    addMessage(chargeNode3D.id, 'error', "No Material connected to Charge 3D.");
+                } else {
+                    const matNode = state.nodes.find(n => n.id === matConn.fromNode);
+                    if (!matNode || matNode.type !== 'Material') {
+                        const connKey = `${matConn.fromNode}:${matConn.fromPort}->${matConn.toNode}:${matConn.toPort}`;
+                        flawedConnections.set(connKey, "Only Material node can be connected to the Material input of Charge 3D.");
+                        addMessage(chargeNode3D.id, 'error', "Only Material node can be connected to the Material input of Charge 3D.");
+                    }
+                }
+            }
+        }
+
+        // Detonator connection check
+        const detConn3D = state.connections.find(c => c.toNode === solver3D.id && c.toPort === 'detonator');
+        if (!detConn3D) {
+            addMessage(solver3D.id, 'error', "No Detonator node connected to CFD Solver 3D. A DetonatorLocation3D node is required.");
+        } else {
+            const detNode3D = state.nodes.find(n => n.id === detConn3D.fromNode);
+            if (!detNode3D || detNode3D.type !== 'DetonatorLocation3D') {
+                const connKey = `${detConn3D.fromNode}:${detConn3D.fromPort}->${detConn3D.toNode}:${detConn3D.toPort}`;
+                flawedConnections.set(connKey, "Only DetonatorLocation3D node can be connected to the Detonator input of CFD Solver 3D.");
+                addMessage(solver3D.id, 'error', "Only DetonatorLocation3D node can be connected to the Detonator input of CFD Solver 3D.");
+            }
+        }
+
+        // Remap connection check
+        const remapConn3D = state.connections.find(c => c.toNode === solver3D.id && c.toPort === 'remap');
+        if (remapConn3D) {
+            const remapNode3D = state.nodes.find(n => n.id === remapConn3D.fromNode);
+            if (!remapNode3D || remapNode3D.type !== 'RemapNode') {
+                const connKey = `${remapConn3D.fromNode}:${remapConn3D.fromPort}->${remapConn3D.toNode}:${remapConn3D.toPort}`;
+                flawedConnections.set(connKey, "Only RemapNode can be connected to the Remap input of CFD Solver 3D.");
+                addMessage(solver3D.id, 'error', "Only RemapNode can be connected to the Remap input of CFD Solver 3D.");
             }
         }
     });
@@ -496,6 +546,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
         }
 
         if (node.type === 'DetonatorLocation') {
+            const detConn = state.connections.find(c => c.fromNode === node.id && c.fromPort === 'detonator');
             const det_radius = Number(node.parameters?.detonator_radius !== undefined ? node.parameters.detonator_radius : (node.parameters.explosive_radius ?? 0.001));
             const det_z = Number(node.parameters?.detonator_z !== undefined ? node.parameters.detonator_z : (node.parameters.explosive_z ?? 0.0));
             const det_r = Number(node.parameters?.detonator_r !== undefined ? node.parameters.detonator_r : (node.parameters.explosive_r ?? 0.0));
@@ -505,7 +556,6 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             }
 
             // Cross-validation with connected mesh
-            const detConn = state.connections.find(c => c.fromNode === node.id && c.fromPort === 'detonator');
             if (detConn) {
                 const connectedSolver = state.nodes.find(n => n.id === detConn.toNode);
                 if (connectedSolver && connectedSolver.type === 'CFDSolver2D') {
@@ -524,6 +574,42 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                             }
                             if (det_radius > max_r) {
                                 addMessage(node.id, 'warning', `Detonator radius (${det_radius}) exceeds mesh max R (${max_r}).`);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (node.type === 'DetonatorLocation3D') {
+            const detConn = state.connections.find(c => c.fromNode === node.id && c.fromPort === 'detonator');
+            const detX = Number(node.parameters?.detonator_x ?? 0.5);
+            const detY = Number(node.parameters?.detonator_y ?? 0.5);
+            const detZ = Number(node.parameters?.detonator_z ?? 0.5);
+
+            // Cross-validation with connected mesh
+            if (detConn) {
+                const connectedSolver = state.nodes.find(n => n.id === detConn.toNode);
+                if (connectedSolver && connectedSolver.type === 'CFDSolver3D') {
+                    const meshConn3D = state.connections.find(c => c.toNode === connectedSolver.id && c.toPort === 'mesh');
+                    if (meshConn3D) {
+                        const meshNode = state.nodes.find(n => n.id === meshConn3D.fromNode);
+                        if (meshNode && meshNode.type === 'DomainMesh3D') {
+                            const dimX = Number(meshNode.parameters?.dim_x ?? 1.0);
+                            const dimY = Number(meshNode.parameters?.dim_y ?? 1.0);
+                            const dimZ = Number(meshNode.parameters?.dim_z ?? 1.0);
+                            const originX = Number(meshNode.parameters?.origin_x ?? 0.0);
+                            const originY = Number(meshNode.parameters?.origin_y ?? 0.0);
+                            const originZ = Number(meshNode.parameters?.origin_z ?? 0.0);
+
+                            if (detX < originX || detX > originX + dimX) {
+                                addMessage(node.id, 'warning', `Detonator position (x = ${detX}) is outside the mesh domain [${originX}, ${originX + dimX}].`);
+                            }
+                            if (detY < originY || detY > originY + dimY) {
+                                addMessage(node.id, 'warning', `Detonator position (y = ${detY}) is outside the mesh domain [${originY}, ${originY + dimY}].`);
+                            }
+                            if (detZ < originZ || detZ > originZ + dimZ) {
+                                addMessage(node.id, 'warning', `Detonator position (z = ${detZ}) is outside the mesh domain [${originZ}, ${originZ + dimZ}].`);
                             }
                         }
                     }
@@ -569,8 +655,104 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             }
         }
 
+        if (node.type === 'Charge3D') {
+            const shape = node.parameters?.charge_shape || 'Sphere';
+            const cx = Number(node.parameters?.charge_x ?? 0.5);
+            const cy = Number(node.parameters?.charge_y ?? 0.5);
+            const cz = Number(node.parameters?.charge_z ?? 0.5);
+            const charge_radius = Number(node.parameters?.charge_radius ?? 0.1);
+            const charge_lx = Number(node.parameters?.charge_lx ?? 0.2);
+            const charge_ly = Number(node.parameters?.charge_ly ?? 0.2);
+            const charge_lz = Number(node.parameters?.charge_lz ?? 0.2);
+
+            if (isNaN(cx) || isNaN(cy) || isNaN(cz)) {
+                addMessage(node.id, 'error', "Charge coordinates must be numeric.");
+            }
+            if (shape === 'Sphere' && (isNaN(charge_radius) || charge_radius <= 0)) {
+                addMessage(node.id, 'error', "Charge radius must be greater than 0 for spherical charges.");
+            }
+            if (shape === 'Block' && (isNaN(charge_lx) || charge_lx <= 0 || isNaN(charge_ly) || charge_ly <= 0 || isNaN(charge_lz) || charge_lz <= 0)) {
+                addMessage(node.id, 'error', "Block dimensions LX, LY, LZ must be greater than 0.");
+            }
+            if (shape === 'Cylinder' && (isNaN(charge_radius) || charge_radius <= 0 || isNaN(node.parameters?.charge_height) || Number(node.parameters.charge_height) <= 0)) {
+                addMessage(node.id, 'error', "Cylinder radius and height must be greater than 0.");
+            }
+
+            // Cross-validation with connected mesh
+            const chargeConn = state.connections.find(c => c.fromNode === node.id && c.fromPort === 'out');
+            if (chargeConn) {
+                const connectedSolver = state.nodes.find(n => n.id === chargeConn.toNode);
+                if (connectedSolver && connectedSolver.type === 'CFDSolver3D') {
+                    const meshConn3D = state.connections.find(c => c.toNode === connectedSolver.id && c.toPort === 'mesh');
+                    if (meshConn3D) {
+                        const meshNode = state.nodes.find(n => n.id === meshConn3D.fromNode);
+                        if (meshNode && meshNode.type === 'DomainMesh3D') {
+                            const dimX = Number(meshNode.parameters?.dim_x ?? 1.0);
+                            const dimY = Number(meshNode.parameters?.dim_y ?? 1.0);
+                            const dimZ = Number(meshNode.parameters?.dim_z ?? 1.0);
+                            const originX = Number(meshNode.parameters?.origin_x ?? 0.0);
+                            const originY = Number(meshNode.parameters?.origin_y ?? 0.0);
+                            const originZ = Number(meshNode.parameters?.origin_z ?? 0.0);
+
+                            if (cx < originX || cx > originX + dimX || cy < originY || cy > originY + dimY || cz < originZ || cz > originZ + dimZ) {
+                                addMessage(node.id, 'warning', `Charge center (${cx}, ${cy}, ${cz}) is outside the mesh domain.`);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (node.type === 'VirtualGauges3D') {
+            const gauges = node.parameters?.gauges || [];
+            
+            // Connection checks
+            const conn = state.connections.find(c => c.toNode === node.id && c.toPort === 'in');
+            if (!conn) {
+                addMessage(node.id, 'warning', `Not connected to any CFD Solver. No telemetry data will be received.`);
+            } else {
+                const fromNode = state.nodes.find(n => n.id === conn.fromNode);
+                if (!fromNode || fromNode.type !== 'CFDSolver3D') {
+                    const connKey = `${conn.fromNode}:${conn.fromPort}->${conn.toNode}:${conn.toPort}`;
+                    flawedConnections.set(connKey, "VirtualGauges3D must be connected to a CFD Solver 3D.");
+                    addMessage(node.id, 'error', "VirtualGauges3D must be connected to a CFD Solver 3D.");
+                } else {
+                    // Cross-validate gauge coordinates with domain bounds
+                    const meshConn3D = state.connections.find(c => c.toNode === fromNode.id && c.toPort === 'mesh');
+                    if (meshConn3D) {
+                        const meshNode = state.nodes.find(n => n.id === meshConn3D.fromNode);
+                        if (meshNode && meshNode.type === 'DomainMesh3D') {
+                            const dimX = Number(meshNode.parameters?.dim_x ?? 1.0);
+                            const dimY = Number(meshNode.parameters?.dim_y ?? 1.0);
+                            const dimZ = Number(meshNode.parameters?.dim_z ?? 1.0);
+                            const originX = Number(meshNode.parameters?.origin_x ?? 0.0);
+                            const originY = Number(meshNode.parameters?.origin_y ?? 0.0);
+                            const originZ = Number(meshNode.parameters?.origin_z ?? 0.0);
+
+                            gauges.forEach((g: any) => {
+                                const gx = Number(g.x ?? 0.5);
+                                const gy = Number(g.y ?? 0.5);
+                                const gz = Number(g.z ?? 0.5);
+                                const name = g.name || g.id || "Unnamed";
+
+                                if (gx < originX || gx > originX + dimX) {
+                                    addMessage(node.id, 'warning', `Gauge "${name}" position (x = ${gx}) is outside the mesh domain [${originX}, ${originX + dimX}].`);
+                                }
+                                if (gy < originY || gy > originY + dimY) {
+                                    addMessage(node.id, 'warning', `Gauge "${name}" position (y = ${gy}) is outside the mesh domain [${originY}, ${originY + dimY}].`);
+                                }
+                                if (gz < originZ || gz > originZ + dimZ) {
+                                    addMessage(node.id, 'warning', `Gauge "${name}" position (z = ${gz}) is outside the mesh domain [${originZ}, ${originZ + dimZ}].`);
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
         // --- 6. Telemetry & Output Node Validations ---
-        if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour' || node.type === 'VTKOutput' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport') {
+        if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour' || node.type === 'VTKOutput' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport' || node.type === 'VirtualGauges3D') {
             const conn = state.connections.find(c => c.toNode === node.id && c.toPort === 'in');
             if (!conn) {
                 addMessage(node.id, 'warning', `Not connected to any CFD Solver. No data will be received.`);
@@ -582,11 +764,11 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                         flawedConnections.set(connKey, "TelemetryContour requires a 2D CFD Solver source.");
                         addMessage(node.id, 'error', "TelemetryContour requires a 2D CFD Solver source.");
                     }
-                } else if (node.type === 'Telemetry3DViewport') {
+                } else if (node.type === 'Telemetry3DViewport' || node.type === 'VirtualGauges3D') {
                     if (!fromNode || fromNode.type !== 'CFDSolver3D') {
                         const connKey = `${conn.fromNode}:${conn.fromPort}->${conn.toNode}:${conn.toPort}`;
-                        flawedConnections.set(connKey, "Telemetry3DViewport requires a 3D CFD Solver source.");
-                        addMessage(node.id, 'error', "Telemetry3DViewport requires a 3D CFD Solver source.");
+                        flawedConnections.set(connKey, `${node.type} requires a 3D CFD Solver source.`);
+                        addMessage(node.id, 'error', `${node.type} requires a 3D CFD Solver source.`);
                     }
                 } else if (node.type === 'TelemetryGraph' || node.type === 'VirtualGauges') {
                     if (!fromNode || (fromNode.type !== 'CFDSolver' && fromNode.type !== 'CFDSolver2D' && fromNode.type !== 'CFDSolver3D')) {
@@ -608,8 +790,24 @@ export function validateSimulationState(state: SimulationState): ValidationResul
     // DomainMesh3D validation
     state.nodes.filter(n => n.type === 'DomainMesh3D').forEach(mesh3D => {
         const cellSize = Number(mesh3D.parameters?.cell_size || 0.01);
+        const dimX = Number(mesh3D.parameters?.dim_x || 1.0);
+        const dimY = Number(mesh3D.parameters?.dim_y || 1.0);
+        const dimZ = Number(mesh3D.parameters?.dim_z || 1.0);
+
         if (isNaN(cellSize) || cellSize <= 0) {
             addMessage(mesh3D.id, 'error', "Mesh Cell Size must be greater than 0.");
+        }
+        if (isNaN(dimX) || dimX <= 0) {
+            addMessage(mesh3D.id, 'error', "Mesh dimension X (dim_x) must be greater than 0.");
+        }
+        if (isNaN(dimY) || dimY <= 0) {
+            addMessage(mesh3D.id, 'error', "Mesh dimension Y (dim_y) must be greater than 0.");
+        }
+        if (isNaN(dimZ) || dimZ <= 0) {
+            addMessage(mesh3D.id, 'error', "Mesh dimension Z (dim_z) must be greater than 0.");
+        }
+        if (cellSize >= dimX || cellSize >= dimY || cellSize >= dimZ) {
+            addMessage(mesh3D.id, 'error', "Mesh Cell Size must be smaller than domain dimensions.");
         }
     });
 

@@ -38,7 +38,12 @@ void CFDSolver3DImpl<IsMultiMaterial>::setInitialCondition(const Charge3DParams&
             tile.uy[i] = 0.0;
             tile.uz[i] = 0.0;
             tile.p[i] = ambient_p;
-            tile.E[i] = ambient_p / (gamma - 1.0);
+            CellState3D<IsMultiMaterial> temp_s;
+            if constexpr (IsMultiMaterial) {
+                temp_s.alpha1 = 0.0; temp_s.alpha2 = 0.0;
+                temp_s.arho1 = 0.0; temp_s.arho2 = 0.0;
+            }
+            tile.E[i] = getEnergy3D<IsMultiMaterial>(ambient_p, ambient_rho, temp_s, gamma, materials.products, materials.unreacted);
             tile.arrival_time[i] = -1.0;
             if constexpr (IsMultiMaterial) {
                 tile.alpha1[i] = 0.0;
@@ -88,6 +93,7 @@ void CFDSolver3DImpl<IsMultiMaterial>::setInitialCondition(const Charge3DParams&
 
                             if (in_charge) {
                                 tile_has_charge = true;
+                                CellState3D<IsMultiMaterial> temp_s;
                                 if constexpr (IsMultiMaterial) {
                                     tile.alpha1[c_idx] = 0.0;
                                     tile.alpha2[c_idx] = 1.0;
@@ -95,11 +101,13 @@ void CFDSolver3DImpl<IsMultiMaterial>::setInitialCondition(const Charge3DParams&
                                     tile.arho2[c_idx] = materials.unreacted.rho0;
                                     tile.rho[c_idx] = tile.arho2[c_idx];
                                     tile.p[c_idx] = ambient_p;
+                                    temp_s.alpha1 = 0.0; temp_s.alpha2 = 1.0;
+                                    temp_s.arho1 = 0.0; temp_s.arho2 = materials.unreacted.rho0;
                                 } else {
                                     tile.rho[c_idx] = ambient_rho * 10.0;
                                     tile.p[c_idx] = ambient_p * 1000.0;
                                 }
-                                tile.E[c_idx] = tile.p[c_idx] / (gamma - 1.0);
+                                tile.E[c_idx] = getEnergy3D<IsMultiMaterial>(tile.p[c_idx], tile.rho[c_idx], temp_s, gamma, materials.products, materials.unreacted);
                                 double dist = std::sqrt(dist_sq);
                                 tile.arrival_time[c_idx] = dist / materials.det_vel;
                             }
@@ -140,7 +148,7 @@ struct Flux3D {
 };
 
 template <bool IsMultiMaterial>
-Flux3D<IsMultiMaterial> getRusanovFlux3D(const CellState3D<IsMultiMaterial>& sL, const CellState3D<IsMultiMaterial>& sR, int dir, double gamma) {
+Flux3D<IsMultiMaterial> getRusanovFlux3D(const CellState3D<IsMultiMaterial>& sL, const CellState3D<IsMultiMaterial>& sR, int dir, double gamma, const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted) {
     auto physFlux = [](const CellState3D<IsMultiMaterial>& s, int dir) {
         Flux3D<IsMultiMaterial> f;
         double u_n = (dir == 0) ? s.ux : (dir == 1 ? s.uy : s.uz);
@@ -159,8 +167,8 @@ Flux3D<IsMultiMaterial> getRusanovFlux3D(const CellState3D<IsMultiMaterial>& sL,
     Flux3D<IsMultiMaterial> fL = physFlux(sL, dir);
     Flux3D<IsMultiMaterial> fR = physFlux(sR, dir);
 
-    double cL = std::sqrt(gamma * sL.p / std::max(1e-6, sL.rho));
-    double cR = std::sqrt(gamma * sR.p / std::max(1e-6, sR.rho));
+    double cL = getSoundSpeed3D<IsMultiMaterial>(sL.p, sL.rho, sL, gamma, products, unreacted);
+    double cR = getSoundSpeed3D<IsMultiMaterial>(sR.p, sR.rho, sR, gamma, products, unreacted);
     double uL = (dir == 0) ? sL.ux : (dir == 1 ? sL.uy : sL.uz);
     double uR = (dir == 0) ? sR.ux : (dir == 1 ? sR.uy : sR.uz);
     double s_max = std::max(std::abs(uL) + cL, std::abs(uR) + cR);
@@ -181,9 +189,9 @@ Flux3D<IsMultiMaterial> getRusanovFlux3D(const CellState3D<IsMultiMaterial>& sL,
 }
 
 template <bool IsMultiMaterial>
-Flux3D<IsMultiMaterial> getAUSMPlusFlux3D(const CellState3D<IsMultiMaterial>& sL, const CellState3D<IsMultiMaterial>& sR, int dir, double gamma) {
-    double aL = std::sqrt(gamma * sL.p / std::max(1e-6, sL.rho));
-    double aR = std::sqrt(gamma * sR.p / std::max(1e-6, sR.rho));
+Flux3D<IsMultiMaterial> getAUSMPlusFlux3D(const CellState3D<IsMultiMaterial>& sL, const CellState3D<IsMultiMaterial>& sR, int dir, double gamma, const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted) {
+    double aL = getSoundSpeed3D<IsMultiMaterial>(sL.p, sL.rho, sL, gamma, products, unreacted);
+    double aR = getSoundSpeed3D<IsMultiMaterial>(sR.p, sR.rho, sR, gamma, products, unreacted);
     double a_half = 0.5 * (aL + aR);
 
     double uL = (dir == 0) ? sL.ux : (dir == 1 ? sL.uy : sL.uz);
@@ -269,7 +277,7 @@ static inline double minmod(double a, double b) {
 }
 
 template <bool IsMultiMaterial>
-CellState3D<IsMultiMaterial> reconstruct(const CellState3D<IsMultiMaterial>& sL, const CellState3D<IsMultiMaterial>& sC, const CellState3D<IsMultiMaterial>& sR, double side, double gamma) {
+CellState3D<IsMultiMaterial> reconstruct(const CellState3D<IsMultiMaterial>& sL, const CellState3D<IsMultiMaterial>& sC, const CellState3D<IsMultiMaterial>& sR, double side, double gamma, const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted) {
     CellState3D<IsMultiMaterial> res;
     auto slope = [&](double L, double C, double R) { return minmod(C - L, R - C); };
 
@@ -279,15 +287,16 @@ CellState3D<IsMultiMaterial> reconstruct(const CellState3D<IsMultiMaterial>& sL,
     res.uz = sC.uz + side * slope(sL.uz, sC.uz, sR.uz);
     res.p = sC.p + side * slope(sL.p, sC.p, sR.p);
 
-    double ke = 0.5 * res.rho * (res.ux*res.ux + res.uy*res.uy + res.uz*res.uz);
-    res.E = res.p / (gamma - 1.0) + ke;
-
     if constexpr (IsMultiMaterial) {
-        res.alpha1 = sC.alpha1 + side * slope(sL.alpha1, sC.alpha1, sR.alpha1);
-        res.alpha2 = sC.alpha2 + side * slope(sL.alpha2, sC.alpha2, sR.alpha2);
-        res.arho1 = sC.arho1 + side * slope(sL.arho1, sC.arho1, sR.arho1);
-        res.arho2 = sC.arho2 + side * slope(sL.arho2, sC.arho2, sR.arho2);
+        res.alpha1 = std::clamp(sC.alpha1 + side * slope(sL.alpha1, sC.alpha1, sR.alpha1), 0.0, 1.0);
+        res.alpha2 = std::clamp(sC.alpha2 + side * slope(sL.alpha2, sC.alpha2, sR.alpha2), 0.0, 1.0);
+        res.arho1 = std::clamp(sC.arho1 + side * slope(sL.arho1, sC.arho1, sR.arho1), 0.0, res.rho);
+        res.arho2 = std::clamp(sC.arho2 + side * slope(sL.arho2, sC.arho2, sR.arho2), 0.0, res.rho);
     }
+
+    double ke = 0.5 * res.rho * (res.ux*res.ux + res.uy*res.uy + res.uz*res.uz);
+    res.E = getEnergy3D<IsMultiMaterial>(res.p, res.rho, res, gamma, products, unreacted) + ke;
+
     return res;
 }
 
@@ -314,7 +323,7 @@ void CFDSolver3DImpl<IsMultiMaterial>::computeFluxes(double dt) {
                             int idx = i + j * TILE_SIZE_3D + k * TILE_SIZE_3D * TILE_SIZE_3D;
 
                             auto get_f = [&](const CellState3D<IsMultiMaterial>& L, const CellState3D<IsMultiMaterial>& R, int d) {
-                                return useAUSM ? getAUSMPlusFlux3D(L, R, d, gamma) : getRusanovFlux3D(L, R, d, gamma);
+                                return useAUSM ? getAUSMPlusFlux3D(L, R, d, gamma, currentMaterials.products, currentMaterials.unreacted) : getRusanovFlux3D(L, R, d, gamma, currentMaterials.products, currentMaterials.unreacted);
                             };
 
                             // X-Fluxes
@@ -324,17 +333,17 @@ void CFDSolver3DImpl<IsMultiMaterial>::computeFluxes(double dt) {
                             auto sR1 = sampleState(gx+1, gy, gz);
                             auto sR2 = sampleState(gx+2, gy, gz);
 
-                            auto fxL = get_f(reconstruct(sL2, sL1, sC, 0.5, gamma), reconstruct(sL1, sC, sR1, -0.5, gamma), 0);
-                            auto fxR = get_f(reconstruct(sL1, sC, sR1, 0.5, gamma), reconstruct(sC, sR1, sR2, -0.5, gamma), 0);
+                            auto fxL = get_f(reconstruct(sL2, sL1, sC, 0.5, gamma, currentMaterials.products, currentMaterials.unreacted), reconstruct(sL1, sC, sR1, -0.5, gamma, currentMaterials.products, currentMaterials.unreacted), 0);
+                            auto fxR = get_f(reconstruct(sL1, sC, sR1, 0.5, gamma, currentMaterials.products, currentMaterials.unreacted), reconstruct(sC, sR1, sR2, -0.5, gamma, currentMaterials.products, currentMaterials.unreacted), 0);
 
                             // Y-Fluxes
                             auto sB2 = sampleState(gx, gy-2, gz);
                             auto sB1 = sampleState(gx, gy-1, gz);
-                            auto sT1 = sampleState(gx, gy+1, gz);
-                            auto sT2 = sampleState(gx, gy+2, gz);
+                            auto sT1 = sampleState(gx,   gy+1, gz);
+                            auto sT2 = sampleState(gx,   gy+2, gz);
 
-                            auto fyB = get_f(reconstruct(sB2, sB1, sC, 0.5, gamma), reconstruct(sB1, sC, sT1, -0.5, gamma), 1);
-                            auto fyT = get_f(reconstruct(sB1, sC, sT1, 0.5, gamma), reconstruct(sC, sT1, sT2, -0.5, gamma), 1);
+                            auto fyB = get_f(reconstruct(sB2, sB1, sC, 0.5, gamma, currentMaterials.products, currentMaterials.unreacted), reconstruct(sB1, sC, sT1, -0.5, gamma, currentMaterials.products, currentMaterials.unreacted), 1);
+                            auto fyT = get_f(reconstruct(sB1, sC, sT1, 0.5, gamma, currentMaterials.products, currentMaterials.unreacted), reconstruct(sC, sT1, sT2, -0.5, gamma, currentMaterials.products, currentMaterials.unreacted), 1);
 
                             // Z-Fluxes
                             auto sD2 = sampleState(gx, gy, gz-2);
@@ -342,8 +351,8 @@ void CFDSolver3DImpl<IsMultiMaterial>::computeFluxes(double dt) {
                             auto sU1 = sampleState(gx, gy, gz+1);
                             auto sU2 = sampleState(gx, gy, gz+2);
 
-                            auto fzD = get_f(reconstruct(sD2, sD1, sC, 0.5, gamma), reconstruct(sD1, sC, sU1, -0.5, gamma), 2);
-                            auto fzU = get_f(reconstruct(sD1, sC, sU1, 0.5, gamma), reconstruct(sC, sU1, sU2, -0.5, gamma), 2);
+                            auto fzD = get_f(reconstruct(sD2, sD1, sC, 0.5, gamma, currentMaterials.products, currentMaterials.unreacted), reconstruct(sD1, sC, sU1, -0.5, gamma, currentMaterials.products, currentMaterials.unreacted), 2);
+                            auto fzU = get_f(reconstruct(sD1, sC, sU1, 0.5, gamma, currentMaterials.products, currentMaterials.unreacted), reconstruct(sC, sU1, sU2, -0.5, gamma, currentMaterials.products, currentMaterials.unreacted), 2);
 
                             u.rho[idx] -= dt * invDx * (fxR.rho - fxL.rho + fyT.rho - fyB.rho + fzU.rho - fzD.rho);
                             u.rhoux[idx] -= dt * invDx * (fxR.rhoux - fxL.rhoux + fyT.rhoux - fyB.rhoux + fzU.rhoux - fzD.rhoux);
@@ -365,27 +374,47 @@ void CFDSolver3DImpl<IsMultiMaterial>::computeFluxes(double dt) {
 }
 
 template <bool IsMultiMaterial>
-void CFDSolver3DImpl<IsMultiMaterial>::step(double dt) {
-    #pragma omp parallel for
-    for (int t = 0; t < (int)states_pool.size(); ++t) {
-        if (!active_tiles[t]) continue;
-        auto& s = states_pool[t];
-        auto& u = U_pool[t];
-        for (int i = 0; i < TILE_CELLS_3D; ++i) {
-            u.rho[i] = s.rho[i];
-            u.rhoux[i] = s.rho[i] * s.ux[i];
-            u.rhouy[i] = s.rho[i] * s.uy[i];
-            u.rhouz[i] = s.rho[i] * s.uz[i];
-            u.E[i] = s.E[i];
-            if constexpr (IsMultiMaterial) {
-                u.alpha1[i] = s.alpha1[i]; u.alpha2[i] = s.alpha2[i];
-                u.arho1[i] = s.arho1[i]; u.arho2[i] = s.arho2[i];
+void CFDSolver3DImpl<IsMultiMaterial>::applyProgrammedBurn(double dt) {
+    if constexpr (IsMultiMaterial) {
+        #pragma omp parallel for collapse(3)
+        for (int tz = 0; tz < n_tiles_z; ++tz) {
+            for (int ty = 0; ty < n_tiles_y; ++ty) {
+                for (int tx = 0; tx < n_tiles_x; ++tx) {
+                    int t_idx = tx + ty * n_tiles_x + tz * n_tiles_x * n_tiles_y;
+                    if (!active_tiles[t_idx]) continue;
+                    auto& u = U_pool[t_idx];
+                    for (int k = 0; k < TILE_SIZE_3D; ++k) {
+                        int gz = tz * TILE_SIZE_3D + k;
+                        double z_c = zmin + (gz + 0.5) * cellSize;
+                        for (int j = 0; j < TILE_SIZE_3D; ++j) {
+                            int gy = ty * TILE_SIZE_3D + j;
+                            double y_c = ymin + (gy + 0.5) * cellSize;
+                            for (int i = 0; i < TILE_SIZE_3D; ++i) {
+                                int gx = tx * TILE_SIZE_3D + i;
+                                double x_c = xmin + (gx + 0.5) * cellSize;
+                                int c_idx = i + j * TILE_SIZE_3D + k * TILE_SIZE_3D * TILE_SIZE_3D;
+
+                                double dF = MultiMat::computeProgrammedBurn(
+                                    currentTime, dt, x_c, y_c, z_c,
+                                    currentMaterials.det_vel, 0.0, detX, detY, detZ,
+                                    cellSize, currentMaterials.products.rho0,
+                                    u.alpha1[c_idx], u.alpha2[c_idx], u.arho1[c_idx], u.arho2[c_idx]
+                                );
+                                if (currentMaterials.detonation_energy > 0.0 && dF > 0.0) {
+                                    double rho_expl = u.arho1[c_idx] + u.arho2[c_idx];
+                                    u.E[c_idx] += dF * rho_expl * currentMaterials.detonation_energy;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
+}
 
-    computeFluxes(dt);
-
+template <bool IsMultiMaterial>
+void CFDSolver3DImpl<IsMultiMaterial>::updatePrimitiveFromConservative() {
     #pragma omp parallel for
     for (int t = 0; t < (int)states_pool.size(); ++t) {
         if (!active_tiles[t]) continue;
@@ -398,19 +427,134 @@ void CFDSolver3DImpl<IsMultiMaterial>::step(double dt) {
             s.uz[i] = u.rhouz[i] / s.rho[i];
             s.E[i] = u.E[i];
             double ke = 0.5 * s.rho[i] * (s.ux[i]*s.ux[i] + s.uy[i]*s.uy[i] + s.uz[i]*s.uz[i]);
-            s.p[i] = std::max((s.E[i] - ke) * (gamma - 1.0), 1e-6);
+            double e_int = s.E[i] - ke;
             if constexpr (IsMultiMaterial) {
                 s.alpha1[i] = std::clamp(u.alpha1[i], 0.0, 1.0);
                 s.alpha2[i] = std::clamp(u.alpha2[i], 0.0, 1.0);
                 s.arho1[i] = std::clamp(u.arho1[i], 0.0, s.rho[i]);
                 s.arho2[i] = std::clamp(u.arho2[i], 0.0, s.rho[i]);
+                CellState3D<IsMultiMaterial> temp_s;
+                temp_s.alpha1 = s.alpha1[i];
+                temp_s.alpha2 = s.alpha2[i];
+                temp_s.arho1 = s.arho1[i];
+                temp_s.arho2 = s.arho2[i];
+                s.p[i] = std::max(getPressure3D<IsMultiMaterial>(e_int, s.rho[i], temp_s, gamma, currentMaterials.products, currentMaterials.unreacted), 1e-6);
+            } else {
+                s.p[i] = std::max(e_int * (gamma - 1.0), 1e-6);
             }
         }
     }
+}
 
-    applyBC();
-    currentTime += dt;
-    updateActiveRegions();
+template <bool IsMultiMaterial>
+void CFDSolver3DImpl<IsMultiMaterial>::step(double dt) {
+    if (temporalOrder == 1) {
+        #pragma omp parallel for
+        for (int t = 0; t < (int)states_pool.size(); ++t) {
+            if (!active_tiles[t]) continue;
+            auto& s = states_pool[t];
+            auto& u = U_pool[t];
+            for (int i = 0; i < TILE_CELLS_3D; ++i) {
+                u.rho[i] = s.rho[i];
+                u.rhoux[i] = s.rho[i] * s.ux[i];
+                u.rhouy[i] = s.rho[i] * s.uy[i];
+                u.rhouz[i] = s.rho[i] * s.uz[i];
+                u.E[i] = s.E[i];
+                if constexpr (IsMultiMaterial) {
+                    u.alpha1[i] = s.alpha1[i]; u.alpha2[i] = s.alpha2[i];
+                    u.arho1[i] = s.arho1[i]; u.arho2[i] = s.arho2[i];
+                }
+            }
+        }
+
+        computeFluxes(dt);
+
+        if constexpr (IsMultiMaterial) {
+            applyProgrammedBurn(dt);
+        }
+
+        updatePrimitiveFromConservative();
+        applyBC();
+        currentTime += dt;
+        updateActiveRegions();
+    } else {
+        std::vector<ConservativeTile3D<IsMultiMaterial>> U_prev = U_pool;
+
+        #pragma omp parallel for
+        for (int t = 0; t < (int)states_pool.size(); ++t) {
+            if (!active_tiles[t]) continue;
+            auto& s = states_pool[t];
+            auto& u = U_pool[t];
+            for (int i = 0; i < TILE_CELLS_3D; ++i) {
+                u.rho[i] = s.rho[i];
+                u.rhoux[i] = s.rho[i] * s.ux[i];
+                u.rhouy[i] = s.rho[i] * s.uy[i];
+                u.rhouz[i] = s.rho[i] * s.uz[i];
+                u.E[i] = s.E[i];
+                if constexpr (IsMultiMaterial) {
+                    u.alpha1[i] = s.alpha1[i]; u.alpha2[i] = s.alpha2[i];
+                    u.arho1[i] = s.arho1[i]; u.arho2[i] = s.arho2[i];
+                }
+            }
+        }
+        U_prev = U_pool;
+
+        // Stage 1
+        computeFluxes(dt);
+        if constexpr (IsMultiMaterial) {
+            applyProgrammedBurn(dt);
+        }
+        updatePrimitiveFromConservative();
+        applyBC();
+
+        // Stage 2
+        #pragma omp parallel for
+        for (int t = 0; t < (int)states_pool.size(); ++t) {
+            if (!active_tiles[t]) continue;
+            auto& s = states_pool[t];
+            auto& u = U_pool[t];
+            for (int i = 0; i < TILE_CELLS_3D; ++i) {
+                u.rho[i] = s.rho[i];
+                u.rhoux[i] = s.rho[i] * s.ux[i];
+                u.rhouy[i] = s.rho[i] * s.uy[i];
+                u.rhouz[i] = s.rho[i] * s.uz[i];
+                u.E[i] = s.E[i];
+                if constexpr (IsMultiMaterial) {
+                    u.alpha1[i] = s.alpha1[i]; u.alpha2[i] = s.alpha2[i];
+                    u.arho1[i] = s.arho1[i]; u.arho2[i] = s.arho2[i];
+                }
+            }
+        }
+        computeFluxes(dt);
+        if constexpr (IsMultiMaterial) {
+            applyProgrammedBurn(dt);
+        }
+
+        #pragma omp parallel for
+        for (int t = 0; t < (int)states_pool.size(); ++t) {
+            if (!active_tiles[t]) continue;
+            auto& u = U_pool[t];
+            const auto& u_n = U_prev[t];
+            for (int i = 0; i < TILE_CELLS_3D; ++i) {
+                u.rho[i] = 0.5 * u_n.rho[i] + 0.5 * u.rho[i];
+                u.rhoux[i] = 0.5 * u_n.rhoux[i] + 0.5 * u.rhoux[i];
+                u.rhouy[i] = 0.5 * u_n.rhouy[i] + 0.5 * u.rhouy[i];
+                u.rhouz[i] = 0.5 * u_n.rhouz[i] + 0.5 * u.rhouz[i];
+                u.E[i] = 0.5 * u_n.E[i] + 0.5 * u.E[i];
+                if constexpr (IsMultiMaterial) {
+                    u.alpha1[i] = 0.5 * u_n.alpha1[i] + 0.5 * u.alpha1[i];
+                    u.alpha2[i] = 0.5 * u_n.alpha2[i] + 0.5 * u.alpha2[i];
+                    u.arho1[i] = 0.5 * u_n.arho1[i] + 0.5 * u.arho1[i];
+                    u.arho2[i] = 0.5 * u_n.arho2[i] + 0.5 * u.arho2[i];
+                }
+            }
+        }
+
+        updatePrimitiveFromConservative();
+        applyBC();
+        currentTime += dt;
+        updateActiveRegions();
+    }
 }
 
 template <bool IsMultiMaterial>
@@ -425,58 +569,16 @@ double CFDSolver3DImpl<IsMultiMaterial>::computeStepSize(double cfl) const {
         const auto& tile = states_pool[t];
         for (int i = 0; i < TILE_CELLS_3D; ++i) {
             double u_mag = std::sqrt(tile.ux[i]*tile.ux[i] + tile.uy[i]*tile.uy[i] + tile.uz[i]*tile.uz[i]);
-            double c = std::sqrt(gamma * tile.p[i] / std::max(1e-6, tile.rho[i]));
+            CellState3D<IsMultiMaterial> temp_s;
+            if constexpr (IsMultiMaterial) {
+                temp_s.alpha1 = tile.alpha1[i]; temp_s.alpha2 = tile.alpha2[i];
+                temp_s.arho1 = tile.arho1[i]; temp_s.arho2 = tile.arho2[i];
+            }
+            double c = getSoundSpeed3D<IsMultiMaterial>(tile.p[i], tile.rho[i], temp_s, gamma, currentMaterials.products, currentMaterials.unreacted);
             max_s = std::max(max_s, u_mag + c);
         }
     }
     return cfl * cellSize / max_s;
-}
-
-template <bool IsMultiMaterial>
-CellState3D<IsMultiMaterial> CFDSolver3DImpl<IsMultiMaterial>::sampleState(int gx, int gy, int gz) const {
-    bool reflective_x = false, reflective_y = false, reflective_z = false;
-
-    if (gx < 0) {
-        if (bcXmin == BCType3D::REFLECTIVE) { gx = -gx - 1; reflective_x = true; }
-        else gx = 0;
-    } else if (gx >= nx) {
-        if (bcXmax == BCType3D::REFLECTIVE) { gx = 2 * nx - 1 - gx; reflective_x = true; }
-        else gx = nx - 1;
-    }
-    if (gy < 0) {
-        if (bcYmin == BCType3D::REFLECTIVE) { gy = -gy - 1; reflective_y = true; }
-        else gy = 0;
-    } else if (gy >= ny) {
-        if (bcYmax == BCType3D::REFLECTIVE) { gy = 2 * ny - 1 - gy; reflective_y = true; }
-        else gy = ny - 1;
-    }
-    if (gz < 0) {
-        if (bcZmin == BCType3D::REFLECTIVE) { gz = -gz - 1; reflective_z = true; }
-        else gz = 0;
-    } else if (gz >= nz) {
-        if (bcZmax == BCType3D::REFLECTIVE) { gz = 2 * nz - 1 - gz; reflective_z = true; }
-        else gz = nz - 1;
-    }
-
-    gx = std::clamp(gx, 0, nx - 1);
-    gy = std::clamp(gy, 0, ny - 1);
-    gz = std::clamp(gz, 0, nz - 1);
-
-    int t_idx = (gx / TILE_SIZE_3D) + (gy / TILE_SIZE_3D) * n_tiles_x + (gz / TILE_SIZE_3D) * n_tiles_x * n_tiles_y;
-    const auto& tile = states_pool[t_idx];
-    int c_idx = (gx % TILE_SIZE_3D) + (gy % TILE_SIZE_3D) * TILE_SIZE_3D + (gz % TILE_SIZE_3D) * TILE_SIZE_3D * TILE_SIZE_3D;
-
-    CellState3D<IsMultiMaterial> s;
-    s.p = tile.p[c_idx]; s.rho = tile.rho[c_idx]; s.E = tile.E[c_idx];
-    s.ux = reflective_x ? -tile.ux[c_idx] : tile.ux[c_idx];
-    s.uy = reflective_y ? -tile.uy[c_idx] : tile.uy[c_idx];
-    s.uz = reflective_z ? -tile.uz[c_idx] : tile.uz[c_idx];
-
-    if constexpr (IsMultiMaterial) {
-        s.alpha1 = tile.alpha1[c_idx]; s.alpha2 = tile.alpha2[c_idx];
-        s.arho1 = tile.arho1[c_idx]; s.arho2 = tile.arho2[c_idx];
-    }
-    return s;
 }
 
 template <bool IsMultiMaterial>
@@ -497,18 +599,49 @@ std::vector<float> CFDSolver3DImpl<IsMultiMaterial>::sampleGauge(const Gauge3D& 
 template <bool IsMultiMaterial>
 std::vector<float> CFDSolver3DImpl<IsMultiMaterial>::extractSlice(const Slice3D& slice) const {
     std::vector<float> data;
+    std::string qty = (slice.quantities.empty()) ? "pressure" : slice.quantities[0];
+    int stride = slice.stride > 0 ? slice.stride : 1;
+
+    auto getVal = [&](const CellState3D<IsMultiMaterial>& s) -> float {
+        if (qty == "density" || qty == "rho") return (float)s.rho;
+        if (qty == "velocity" || qty == "speed") return (float)std::sqrt(s.ux*s.ux + s.uy*s.uy + s.uz*s.uz);
+        if (qty == "energy" || qty == "internal_energy") return (float)(s.E / std::max(s.rho, 1e-6));
+        if (qty == "species1" || qty == "alpha1") return (float)s.alpha1;
+        if (qty == "species2" || qty == "alpha2") return (float)s.alpha2;
+        if (qty == "species3") return (float)(1.0 - s.alpha1 - s.alpha2);
+        return (float)s.p;
+    };
+
     if (slice.axis == "xy") {
         int gz = std::clamp((int)((slice.offset - zmin) / cellSize), 0, nz - 1);
-        data.resize(nx * ny);
-        for (int gy = 0; gy < ny; ++gy) for (int gx = 0; gx < nx; ++gx) data[gx + gy * nx] = (float)sampleState(gx, gy, gz).p;
+        int out_nx = (nx + stride - 1) / stride;
+        int out_ny = (ny + stride - 1) / stride;
+        data.resize(out_nx * out_ny);
+        for (int gy = 0; gy < out_ny; ++gy) {
+            for (int gx = 0; gx < out_nx; ++gx) {
+                data[gx + gy * out_nx] = getVal(sampleState(gx * stride, gy * stride, gz));
+            }
+        }
     } else if (slice.axis == "xz") {
         int gy = std::clamp((int)((slice.offset - ymin) / cellSize), 0, ny - 1);
-        data.resize(nx * nz);
-        for (int gz = 0; gz < nz; ++gz) for (int gx = 0; gx < nx; ++gx) data[gx + gz * nx] = (float)sampleState(gx, gy, gz).p;
+        int out_nx = (nx + stride - 1) / stride;
+        int out_nz = (nz + stride - 1) / stride;
+        data.resize(out_nx * out_nz);
+        for (int gz = 0; gz < out_nz; ++gz) {
+            for (int gx = 0; gx < out_nx; ++gx) {
+                data[gx + gz * out_nx] = getVal(sampleState(gx * stride, gy, gz * stride));
+            }
+        }
     } else if (slice.axis == "yz") {
         int gx = std::clamp((int)((slice.offset - xmin) / cellSize), 0, nx - 1);
-        data.resize(ny * nz);
-        for (int gz = 0; gz < nz; ++gz) for (int gy = 0; gy < ny; ++gy) data[gy + gz * ny] = (float)sampleState(gx, gy, gz).p;
+        int out_ny = (ny + stride - 1) / stride;
+        int out_nz = (nz + stride - 1) / stride;
+        data.resize(out_ny * out_nz);
+        for (int gz = 0; gz < out_nz; ++gz) {
+            for (int gy = 0; gy < out_ny; ++gy) {
+                data[gy + gz * out_ny] = getVal(sampleState(gx, gy * stride, gz * stride));
+            }
+        }
     }
     return data;
 }
