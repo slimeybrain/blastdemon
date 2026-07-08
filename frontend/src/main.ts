@@ -462,6 +462,23 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
         }
     };
 
+    const sendView3DConfig = (targetId: string) => {
+        const m = stateManager.getAllModels().find(model => model.id === targetId);
+        if (m) {
+            const view3DNode = m.nodes.find(n => n.type === 'Telemetry3DViewport');
+            if (view3DNode) {
+                const slices = view3DNode.parameters?.slices || [];
+                const rate = Number(view3DNode.parameters?.refresh_rate ?? 0.0);
+                networkManager.send({
+                    command: "VIEW3D_CONFIG",
+                    modelId: targetId,
+                    slices,
+                    refresh_rate: rate
+                });
+            }
+        }
+    };
+
     // Helper to perform remapping from 1D telemetry if available
     const tryRemapFrom1D = (targetModelId: string, pipe: any): boolean => {
         const model = stateManager.getAllModels().find(m => m.id === targetModelId);
@@ -634,12 +651,14 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
                 if (pipeline) {
                     const payload = serializeForSolver(state, "INIT_3D", modelId);
                     networkManager.send(payload);
+                    sendView3DConfig(modelId);
                     if (tryRemapFrom1D(modelId, pipeline)) {
                         stateManager.setModelStatus(modelId, 'INITIALIZED');
                     }
                 } else {
                     const payload = serializeForSolver(state, "INIT_3D", modelId);
                     networkManager.send(payload);
+                    sendView3DConfig(modelId);
                     stateManager.setModelStatus(modelId, 'INITIALIZED');
                 }
             }
@@ -678,6 +697,7 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
         
         const has3D = model?.nodes.some(n => n.type === 'CFDSolver3D') || false;
         if (has3D) {
+            sendView3DConfig(modelId);
             networkManager.send({ command: "STEP_3D", modelId: modelId, steps, cfl });
         } else if (pipeline || has2D) {
             sendContourConfig(modelId);
@@ -700,6 +720,7 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
                 if (state) {
                     const payload = serializeForSolver(state, "INIT_3D", modelId);
                     networkManager.send(payload);
+                    sendView3DConfig(modelId);
                     networkManager.send({ command: "EXEC_ALL_3D", modelId: modelId, cfl });
                     stateManager.setModelStatus(modelId, 'RUNNING');
                 }
@@ -742,6 +763,7 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
         } else {
             // Already initialized / paused
             if (has3D) {
+                sendView3DConfig(modelId);
                 networkManager.send({ command: "EXEC_ALL_3D", modelId: modelId, cfl });
             } else if (pipeline || has2D) {
                 sendContourConfig(modelId);
