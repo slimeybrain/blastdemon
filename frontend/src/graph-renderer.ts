@@ -899,18 +899,23 @@ export class GraphRenderer {
             }
         }
 
-        if (e.key === 'Escape' && this.isDraggingWire) {
-            this.isDraggingWire = false;
-            this.hoveredPort = null;
-            if (this.detachedConnection) {
-                const state = this.stateManager.getCurrentState();
-                if (state) {
-                    state.connections.push(this.detachedConnection);
-                    this.stateManager.pushState(state);
+        if (e.key === 'Escape') {
+            const existingMenu = document.querySelector('.context-menu');
+            if (existingMenu) existingMenu.remove();
+
+            if (this.isDraggingWire) {
+                this.isDraggingWire = false;
+                this.hoveredPort = null;
+                if (this.detachedConnection) {
+                    const state = this.stateManager.getCurrentState();
+                    if (state) {
+                        state.connections.push(this.detachedConnection);
+                        this.stateManager.pushState(state);
+                    }
+                    this.detachedConnection = null;
                 }
-                this.detachedConnection = null;
+                this.render();
             }
-            this.render();
         }
     }
 
@@ -2837,17 +2842,63 @@ export class GraphRenderer {
                 };
 
                 viewToolbar.appendChild(createViewBtn('X', () => {
-                    newWorker.postMessage({ type: 'setView', data: { rotX: 0, rotY: Math.PI / 2 } });
+                    newWorker.postMessage({ type: 'setView', data: { pitch: 0, yaw: Math.PI / 2 } });
                 }));
                 viewToolbar.appendChild(createViewBtn('Y', () => {
-                    newWorker.postMessage({ type: 'setView', data: { rotX: Math.PI / 2, rotY: 0 } });
+                    newWorker.postMessage({ type: 'setView', data: { pitch: 0, yaw: 0 } });
                 }));
                 viewToolbar.appendChild(createViewBtn('Z', () => {
-                    newWorker.postMessage({ type: 'setView', data: { rotX: 0, rotY: 0 } });
+                    newWorker.postMessage({ type: 'setView', data: { pitch: Math.PI / 2, yaw: 0 } });
                 }));
                 viewToolbar.appendChild(createViewBtn('Reset', () => {
-                    newWorker.postMessage({ type: 'setView', data: { rotX: 0.5, rotY: 0.5, zoom: -2.5, panX: 0, panY: 0 } });
+                    newWorker.postMessage({ type: 'setView', data: { pitch: 0.42, yaw: 1.107, distance: 2.45, targetX: 0, targetY: 0, targetZ: 0 } });
                 }));
+
+                const perspLabel = document.createElement('label');
+                perspLabel.style.display = 'flex';
+                perspLabel.style.alignItems = 'center';
+                perspLabel.style.gap = '2px';
+                perspLabel.style.color = '#ccc';
+                perspLabel.style.fontSize = '9px';
+                perspLabel.style.marginLeft = '4px';
+                const perspCheck = document.createElement('input');
+                perspCheck.type = 'checkbox';
+                perspCheck.style.margin = '0';
+                perspCheck.style.width = '10px';
+                perspCheck.style.height = '10px';
+                perspCheck.onchange = (e) => {
+                    e.stopPropagation();
+                    const usePersp = perspCheck.checked;
+                    fovContainer.style.display = usePersp ? 'flex' : 'none';
+                    newWorker.postMessage({ type: 'setConfig', data: { usePerspective: usePersp } });
+                };
+                perspLabel.appendChild(perspCheck);
+                perspLabel.appendChild(document.createTextNode('Persp'));
+                viewToolbar.appendChild(perspLabel);
+
+                const fovContainer = document.createElement('div');
+                fovContainer.style.display = 'none';
+                fovContainer.style.alignItems = 'center';
+                fovContainer.style.gap = '2px';
+                const fovSlider = document.createElement('input');
+                fovSlider.type = 'range';
+                fovSlider.min = '10';
+                fovSlider.max = '120';
+                fovSlider.value = '45';
+                fovSlider.style.width = '40px';
+                fovSlider.style.height = '8px';
+                fovSlider.oninput = (e) => {
+                    e.stopPropagation();
+                    newWorker.postMessage({ type: 'setConfig', data: { fov: parseFloat(fovSlider.value) } });
+                };
+                const fovLabel = document.createElement('span');
+                fovLabel.textContent = 'FOV';
+                fovLabel.style.color = '#ccc';
+                fovLabel.style.fontSize = '9px';
+                fovContainer.appendChild(fovLabel);
+                fovContainer.appendChild(fovSlider);
+                viewToolbar.appendChild(fovContainer);
+
                 mainArea.appendChild(viewToolbar);
 
                 const canvas = document.createElement('canvas');
@@ -2939,14 +2990,25 @@ export class GraphRenderer {
                 });
 
                 let isDragging = false;
+                let dragMode: 'orbit' | 'pan' = 'orbit';
                 let lastX = 0;
                 let lastY = 0;
 
+                canvas.addEventListener('contextmenu', (e) => {
+                    e.preventDefault();
+                });
+
                 canvas.addEventListener('mousedown', (e) => {
                     e.stopPropagation();
+                    e.preventDefault();
                     isDragging = true;
                     lastX = e.clientX;
                     lastY = e.clientY;
+                    if (e.button === 2 || e.shiftKey || e.button === 1) {
+                        dragMode = 'pan';
+                    } else {
+                        dragMode = 'orbit';
+                    }
                 });
 
                 window.addEventListener('mousemove', (e) => {
@@ -2955,7 +3017,11 @@ export class GraphRenderer {
                     const dy = e.clientY - lastY;
                     lastX = e.clientX;
                     lastY = e.clientY;
-                    newWorker.postMessage({ type: 'input', data: { drx: dy, dry: dx } });
+                    if (dragMode === 'pan') {
+                        newWorker.postMessage({ type: 'input', data: { dpx: dx, dpy: dy } });
+                    } else {
+                        newWorker.postMessage({ type: 'input', data: { drx: dy, dry: dx } });
+                    }
                 });
 
                 window.addEventListener('mouseup', () => {
@@ -2963,10 +3029,12 @@ export class GraphRenderer {
                 });
 
                 canvas.addEventListener('wheel', (e) => {
+                    console.log('[Debug] 3D viewport wheel event fired (graph-renderer)');
                     e.preventDefault();
                     e.stopPropagation();
+                    e.stopImmediatePropagation();
                     newWorker.postMessage({ type: 'input', data: { dy: e.deltaY } });
-                }, { passive: false });
+                }, { passive: false, capture: true });
 
                 requestAnimationFrame(() => {
                     newWorker.postMessage({

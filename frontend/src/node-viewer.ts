@@ -306,24 +306,79 @@ export class NodeViewer {
         controlsRow.appendChild(mapSelect);
         controlsRow.appendChild(scaleLabel);
 
-        const recenterBtn = document.createElement('button');
-        recenterBtn.innerHTML = '🔄 Recenter';
-        recenterBtn.style.cursor = 'pointer';
-        recenterBtn.style.fontSize = '11px';
-        recenterBtn.style.padding = '2px 6px';
-        recenterBtn.style.background = '#2c2c30';
-        recenterBtn.style.color = '#fff';
-        recenterBtn.style.border = '1px solid rgba(255,255,255,0.1)';
-        recenterBtn.style.borderRadius = '4px';
-        recenterBtn.onclick = () => {
-            if (this.chartWorker) {
-                this.chartWorker.postMessage({
-                    type: 'setView',
-                    data: { rotX: 0.5, rotY: 0.5, zoom: -3.0, panX: 0.0, panY: 0.0 }
-                });
-            }
+        const createViewBtn = (label: string, onClick: () => void) => {
+            const btn = document.createElement('button');
+            btn.textContent = label;
+            btn.style.cursor = 'pointer';
+            btn.style.fontSize = '11px';
+            btn.style.padding = '2px 6px';
+            btn.style.background = '#2c2c30';
+            btn.style.color = '#fff';
+            btn.style.border = '1px solid rgba(255,255,255,0.1)';
+            btn.style.borderRadius = '4px';
+            btn.onclick = () => {
+                if (this.chartWorker) onClick();
+            };
+            return btn;
         };
-        controlsRow.appendChild(recenterBtn);
+
+        controlsRow.appendChild(createViewBtn('X', () => {
+            this.chartWorker?.postMessage({ type: 'setView', data: { pitch: 0, yaw: Math.PI / 2 } });
+        }));
+        controlsRow.appendChild(createViewBtn('Y', () => {
+            this.chartWorker?.postMessage({ type: 'setView', data: { pitch: 0, yaw: 0 } });
+        }));
+        controlsRow.appendChild(createViewBtn('Z', () => {
+            this.chartWorker?.postMessage({ type: 'setView', data: { pitch: Math.PI / 2, yaw: 0 } });
+        }));
+        controlsRow.appendChild(createViewBtn('Reset', () => {
+            this.chartWorker?.postMessage({
+                type: 'setView',
+                data: { pitch: 0.42, yaw: 1.107, distance: 3.0, targetX: 0, targetY: 0, targetZ: 0 }
+            });
+        }));
+
+        const perspLabel = document.createElement('label');
+        perspLabel.style.display = 'flex';
+        perspLabel.style.alignItems = 'center';
+        perspLabel.style.gap = '2px';
+        perspLabel.style.color = '#fff';
+        perspLabel.style.fontSize = '11px';
+        perspLabel.style.marginLeft = '4px';
+        const perspCheck = document.createElement('input');
+        perspCheck.type = 'checkbox';
+        perspCheck.style.margin = '0';
+        perspCheck.onchange = (e) => {
+            e.stopPropagation();
+            const usePersp = perspCheck.checked;
+            fovContainer.style.display = usePersp ? 'flex' : 'none';
+            this.chartWorker?.postMessage({ type: 'setConfig', data: { usePerspective: usePersp } });
+        };
+        perspLabel.appendChild(perspCheck);
+        perspLabel.appendChild(document.createTextNode('Persp'));
+        controlsRow.appendChild(perspLabel);
+
+        const fovContainer = document.createElement('div');
+        fovContainer.style.display = 'none';
+        fovContainer.style.alignItems = 'center';
+        fovContainer.style.gap = '2px';
+        const fovSlider = document.createElement('input');
+        fovSlider.type = 'range';
+        fovSlider.min = '10';
+        fovSlider.max = '120';
+        fovSlider.value = '45';
+        fovSlider.style.width = '60px';
+        fovSlider.oninput = (e) => {
+            e.stopPropagation();
+            this.chartWorker?.postMessage({ type: 'setConfig', data: { fov: parseFloat(fovSlider.value) } });
+        };
+        const fovLabel = document.createElement('span');
+        fovLabel.textContent = 'FOV';
+        fovLabel.style.color = '#fff';
+        fovLabel.style.fontSize = '11px';
+        fovContainer.appendChild(fovLabel);
+        fovContainer.appendChild(fovSlider);
+        controlsRow.appendChild(fovContainer);
 
         container.appendChild(controlsRow);
 
@@ -421,12 +476,14 @@ export class NodeViewer {
         window.addEventListener('mouseup', () => { isDragging = false; });
 
         canvas.addEventListener('wheel', (e) => {
+            console.log('[Debug] 3D viewport wheel event fired (node-viewer)');
             e.preventDefault();
             e.stopPropagation();
+            e.stopImmediatePropagation();
             if (this.chartWorker) {
                 this.chartWorker.postMessage({ type: 'input', data: { dy: e.deltaY } });
             }
-        }, { passive: false });
+        }, { passive: false, capture: true });
 
 
         const ro = new ResizeObserver(() => {

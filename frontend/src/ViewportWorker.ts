@@ -299,11 +299,14 @@ let projectionMatrix = new Float32Array(16);
 let viewMatrix = new Float32Array(16);
 let modelMatrix = new Float32Array(16);
 
-let zoom = -2.5;
-let rotX = 0.5;
-let rotY = 0.5;
-let panX = 0.0;
-let panY = 0.0;
+let distance = 2.45;
+let pitch = 0.42;
+let yaw = 1.107;
+let targetX = 0.0;
+let targetY = 0.0;
+let targetZ = 0.0;
+let usePerspective = false;
+let fov = 45.0;
 
 // Contour Visualization Configurations
 let colormap = 0; // 0=plasma, 1=viridis
@@ -665,36 +668,18 @@ function createShader(gl: WebGLRenderingContext, type: number, source: string) {
     return shader;
 }
 
+function subtract(a: number[], b: number[]) { return [a[0]-b[0], a[1]-b[1], a[2]-b[2]]; }
+function cross(a: number[], b: number[]) { return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]; }
+function normalize(a: number[]) { let len = Math.hypot(a[0], a[1], a[2]); if (len>0) { return [a[0]/len, a[1]/len, a[2]/len]; } return [0,0,0]; }
+
 function updateMatrices(width: number, height: number) {
     const w = width > 0 ? width : 1;
     const h = height > 0 ? height : 1;
     const aspect = w / h;
-    const fov = 45 * Math.PI / 180;
     const zNear = 0.1;
-    const zFar = 100.0;
+    const zFar = 1000.0;
 
-    // Perspective matrix
-    const f = 1.0 / Math.tan(fov / 2);
-    projectionMatrix.fill(0);
-    projectionMatrix[0] = f / aspect;
-    projectionMatrix[5] = f;
-    projectionMatrix[10] = (zFar + zNear) / (zNear - zFar);
-    projectionMatrix[11] = -1;
-    projectionMatrix[14] = (2 * zFar * zNear) / (zNear - zFar);
-
-    // View matrix
-    viewMatrix.set([
-        1, 0, 0, 0,
-        0, 1, 0, 0,
-        0, 0, 1, 0,
-        panX, panY, zoom, 1
-    ]);
-
-
-    // Model matrix (Rotation & Scaling aspect ratios)
-    const cx = Math.cos(rotX), sx = Math.sin(rotX);
-    const cy = Math.cos(rotY), sy = Math.sin(rotY);
-
+    // Model matrix (Scaling)
     const sizeX = nx * dx || 1.0;
     const sizeY = ny * dx || 1.0;
     const sizeZ = nz * dx || 1.0;
@@ -702,13 +687,78 @@ function updateMatrices(width: number, height: number) {
     const sX = sizeX / maxSize;
     const sY = sizeY / maxSize;
     const sZ = sizeZ / maxSize;
-
+    
+    // Shift model to be centered at its local origin if desired, or keep as is.
+    // The previous implementation didn't translate the model, so we leave translation at 0.
     modelMatrix.set([
-        cy * sX, sx*sy * sX, cx*sy * sX, 0,
-        0, cx * sY, -sx * sY, 0,
-        -sy * sZ, sx*cy * sZ, cx*cy * sZ, 0,
+        sX, 0, 0, 0,
+        0, sY, 0, 0,
+        0, 0, sZ, 0,
         0, 0, 0, 1
     ]);
+
+    // View matrix (LookAt)
+    let eyeX = targetX + distance * Math.cos(pitch) * Math.sin(yaw);
+    let eyeY = targetY + distance * Math.cos(pitch) * Math.cos(yaw);
+    let eyeZ = targetZ + distance * Math.sin(pitch);
+    
+    let eye = [eyeX, eyeY, eyeZ];
+    let center = [targetX, targetY, targetZ];
+    let up = [0, 0, 1]; // Z is up
+
+    let z = normalize(subtract(eye, center));
+    // If z is parallel to up [0,0,1] or [0,0,-1] (looking straight along Z axis)
+    if (Math.abs(z[0]) < 1e-4 && Math.abs(z[1]) < 1e-4) {
+        up = [0, 1, 0]; // temporarily set up to Y
+    }
+
+    let x = normalize(cross(up, z));
+    let y = cross(z, x);
+    viewMatrix.set([
+        x[0], y[0], z[0], 0,
+        x[1], y[1], z[1], 0,
+        x[2], y[2], z[2], 0,
+        -(x[0]*eye[0] + x[1]*eye[1] + x[2]*eye[2]),
+        -(y[0]*eye[0] + y[1]*eye[1] + y[2]*eye[2]),
+        -(z[0]*eye[0] + z[1]*eye[1] + z[2]*eye[2]),
+        1
+    ]);
+
+    // Projection matrix
+    if (usePerspective) {
+        let f = 1.0 / Math.tan((fov * Math.PI / 180) / 2);
+        projectionMatrix.fill(0);
+        projectionMatrix[0] = f / aspect;
+        projectionMatrix[5] = f;
+        if (isWebGPU) {
+            projectionMatrix[10] = -zFar / (zFar - zNear);
+            projectionMatrix[14] = -(zFar * zNear) / (zFar - zNear);
+        } else {
+            projectionMatrix[10] = (zFar + zNear) / (zNear - zFar);
+            projectionMatrix[14] = (2 * zFar * zNear) / (zNear - zFar);
+        }
+        projectionMatrix[11] = -1;
+    } else {
+        // Orthographic projection based on distance
+        let scale = distance * 0.5; // simple heuristic to match zoom feeling
+        let left = -scale * aspect;
+        let right = scale * aspect;
+        let bottom = -scale;
+        let top = scale;
+        projectionMatrix.fill(0);
+        projectionMatrix[0] = 2/(right-left);
+        projectionMatrix[5] = 2/(top-bottom);
+        if (isWebGPU) {
+            projectionMatrix[10] = -1/(zFar-zNear);
+            projectionMatrix[14] = -zNear/(zFar-zNear);
+        } else {
+            projectionMatrix[10] = -2/(zFar-zNear);
+            projectionMatrix[14] = -(zFar+zNear)/(zFar-zNear);
+        }
+        projectionMatrix[12] = -(right+left)/(right-left);
+        projectionMatrix[13] = -(top+bottom)/(top-bottom);
+        projectionMatrix[15] = 1;
+    }
 }
 
 function getSliceGeometry(axis: number, offset: number, w: number, h: number) {
@@ -1336,16 +1386,36 @@ self.onmessage = async (e) => {
             updateMatrices(w, h);
             render();
         } else if (type === "input") {
-            if (data.dy !== undefined) zoom = Math.max(-10, Math.min(-0.5, zoom + data.dy * 0.01));
-            if (data.drx !== undefined) rotX += data.drx * 0.01;
-            if (data.dry !== undefined) rotY += data.dry * 0.01;
-            if (data.dpx !== undefined) {
-                panX += data.dpx * 0.005;
-                console.log("[ViewportWorker] Panning X:", panX, "dx:", data.dpx);
+            if (data.dy !== undefined) {
+                // Scroll zooms distance
+                distance = Math.max(0.1, distance + data.dy * 0.01 * distance * 0.1);
             }
-            if (data.dpy !== undefined) {
-                panY -= data.dpy * 0.005;
-                console.log("[ViewportWorker] Panning Y:", panY, "dy:", data.dpy);
+            if (data.drx !== undefined) {
+                pitch += data.drx * 0.01;
+                // Clamp pitch to avoid gimbal lock at exact poles
+                pitch = Math.max(-Math.PI/2 + 0.01, Math.min(Math.PI/2 - 0.01, pitch));
+            }
+            if (data.dry !== undefined) {
+                yaw += data.dry * 0.01;
+            }
+            if (data.dpx !== undefined || data.dpy !== undefined) {
+                // Pan in camera plane
+                let z = [
+                    Math.cos(pitch) * Math.sin(yaw),
+                    Math.cos(pitch) * Math.cos(yaw),
+                    Math.sin(pitch)
+                ];
+                let up = [0, 0, 1];
+                let x = normalize(cross(up, z));
+                let y = cross(z, x);
+
+                let dpx = data.dpx || 0;
+                let dpy = data.dpy || 0;
+                let panSpeed = distance * 0.002;
+                
+                targetX += (x[0] * -dpx + y[0] * dpy) * panSpeed;
+                targetY += (x[1] * -dpx + y[1] * dpy) * panSpeed;
+                targetZ += (x[2] * -dpx + y[2] * dpy) * panSpeed;
             }
             
             const w = canvasWidth();
@@ -1353,11 +1423,12 @@ self.onmessage = async (e) => {
             updateMatrices(w, h);
             render();
         } else if (type === "setView") {
-            if (data.rotX !== undefined) rotX = data.rotX;
-            if (data.rotY !== undefined) rotY = data.rotY;
-            if (data.zoom !== undefined) zoom = data.zoom;
-            if (data.panX !== undefined) panX = data.panX;
-            if (data.panY !== undefined) panY = data.panY;
+            if (data.pitch !== undefined) pitch = data.pitch;
+            if (data.yaw !== undefined) yaw = data.yaw;
+            if (data.distance !== undefined) distance = data.distance;
+            if (data.targetX !== undefined) targetX = data.targetX;
+            if (data.targetY !== undefined) targetY = data.targetY;
+            if (data.targetZ !== undefined) targetZ = data.targetZ;
             
             updateMatrices(canvasWidth(), canvasHeight());
             render();
@@ -1369,14 +1440,21 @@ self.onmessage = async (e) => {
                 if (data.colormap === 'viridis') colormap = 1;
                 else colormap = 0;
             }
+            if (data.min !== undefined) minY = data.min;
+            if (data.max !== undefined) maxY = data.max;
             if (data.autoScale !== undefined) autoScale = data.autoScale;
-            if (!autoScale) {
-                if (data.minY !== undefined) minY = data.minY;
-                if (data.maxY !== undefined) maxY = data.maxY;
-            }
-            if (data.showGrid !== undefined) showGrid = data.showGrid;
             if (data.useLogScale !== undefined) useLogScale = data.useLogScale;
+            if (data.showGrid !== undefined) showGrid = data.showGrid;
             if (data.showCellEdges !== undefined) showCellEdges = data.showCellEdges;
+            if (data.xmin !== undefined) xmin = data.xmin;
+            if (data.ymin !== undefined) ymin = data.ymin;
+            if (data.zmin !== undefined) zmin = data.zmin;
+            if (data.dx !== undefined) dx = data.dx;
+            if (data.nx !== undefined) nx = data.nx;
+            if (data.ny !== undefined) ny = data.ny;
+            if (data.nz !== undefined) nz = data.nz;
+            if (data.usePerspective !== undefined) usePerspective = data.usePerspective;
+            if (data.fov !== undefined) fov = data.fov;
 
             let sizeChanged = false;
             if (data.xmin !== undefined && data.xmin !== xmin) { xmin = data.xmin; }
