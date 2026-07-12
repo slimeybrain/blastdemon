@@ -83,6 +83,26 @@ __host__ __device__
         return (p - f) / (jwl.omega * rho);
     }
 
+// Returns the JWL pressure of the unreacted solid at its natural (reference) volume V=1.
+// Interface cells between explosive and air must be initialized at this pressure so that
+// getMixtureEnergy and getMixturePressure are consistent (inverses) from the first step.
+#ifdef __CUDACC__
+__host__ __device__
+#endif
+    inline double getReferencePressure_Unreacted(const JWLParams& unreacted) {
+        // V2 = 1.0 (reference specific volume used throughout the stiffened-gas solid EoS)
+        const double V2 = 1.0;
+        double f2 = unreacted.A * (1.0 - unreacted.omega / (unreacted.R1 * V2)) * exp(-unreacted.R1 * V2) +
+                    unreacted.B * (1.0 - unreacted.omega / (unreacted.R2 * V2)) * exp(-unreacted.R2 * V2);
+        // At zero internal temperature the JWL pressure equals the cold curve f(V)
+        // plus omega * rho * e_int.  For e_int = 0 (reference state), p = f(V).
+        // We return fmax(0, f2) because negative JWL pressures are unphysical here.
+        return fmax(0.0, f2);
+    }
+
+    constexpr double MIN_ALPHA = 1e-4;
+
+
 #ifdef __CUDACC__
 __host__ __device__
 #endif
@@ -91,7 +111,6 @@ __host__ __device__
         if (alpha0 < 0.0) alpha0 = 0.0;
 
         double rho1_mat = fmax(1e-6, arho1 / fmax(alpha1, 1e-10));
-        double rho2_mat = fmax(1e-6, arho2 / fmax(alpha2, 1e-10));
 
         double omega0 = gamma0 - 1.0;
         double omega1 = products.omega;
@@ -99,23 +118,36 @@ __host__ __device__
 
         if (E_internal < 0) E_internal = 1e-6; // Safeguard
 
-        double sum_alpha_omega = (alpha0 / omega0) + (alpha1 / omega1) + (alpha2 / omega2);
+        // S1, S2: smooth ramp factors that scale both the alpha/omega and f(V) JWL terms.
+        // Applied uniformly to numerator AND denominator so getMixturePressure and
+        // getMixtureEnergy remain exact inverses at all concentrations.
+        double S1 = (alpha1 > 1e-10) ? fmin(1.0, alpha1 / 0.01) : 0.0;
+        double S2 = (alpha2 > 1e-10) ? fmin(1.0, alpha2 / 0.01) : 0.0;
+
+        double sum_alpha_omega = (alpha0 / omega0) + S1 * (alpha1 / omega1) + S2 * (alpha2 / omega2);
 
         // Compute the f(V) terms for JWL materials
         double sum_alpha_f_omega = 0.0;
 
-        if (alpha1 > 1e-6) {
+        if (S1 > 0.0) {
             double V1 = products.rho0 / rho1_mat;
             double f1 = products.A * (1.0 - products.omega / (products.R1 * V1)) * exp(-products.R1 * V1) +
                         products.B * (1.0 - products.omega / (products.R2 * V1)) * exp(-products.R2 * V1);
-            sum_alpha_f_omega += alpha1 * f1 / omega1;
+            // Products JWL: f1 can be positive (high-pressure detonation products), keep as-is.
+            sum_alpha_f_omega += alpha1 * S1 * f1 / omega1;
         }
 
-        if (alpha2 > 1e-6) {
+        if (S2 > 0.0) {
             double V2 = 1.0; // Stiffened gas approximation for unreacted solid to prevent severe numerical stiffness
             double f2 = unreacted.A * (1.0 - unreacted.omega / (unreacted.R1 * V2)) * exp(-unreacted.R1 * V2) +
                         unreacted.B * (1.0 - unreacted.omega / (unreacted.R2 * V2)) * exp(-unreacted.R2 * V2);
-            sum_alpha_f_omega += alpha2 * f2 / omega2;
+            // Clamp f2 >= 0: the unreacted solid JWL cold-curve is negative at V=1 for TNT/PETN/RDX
+            // (e.g. TNT: f2 ~ -347 MPa). A negative f2 forces interface cells to store ~194 MJ/m3
+            // of reference energy; any flux perturbation drives recovered pressure negative.
+            // Clamping to 0 makes the unreacted solid behave like a stiffened gas with zero
+            // cold-curve pressure, keeping interface cell energies at ~air levels (~183 kJ/m3).
+            f2 = fmax(0.0, f2);
+            sum_alpha_f_omega += alpha2 * S2 * f2 / omega2;
         }
 
         double p = (E_internal + sum_alpha_f_omega) / sum_alpha_omega;
@@ -130,27 +162,32 @@ __host__ __device__
         if (alpha0 < 0.0) alpha0 = 0.0;
 
         double rho1_mat = fmax(1e-6, arho1 / fmax(alpha1, 1e-10));
-        double rho2_mat = fmax(1e-6, arho2 / fmax(alpha2, 1e-10));
 
         double omega0 = gamma0 - 1.0;
         double omega1 = products.omega;
         double omega2 = unreacted.omega;
 
-        double sum_alpha_omega = (alpha0 / omega0) + (alpha1 / omega1) + (alpha2 / omega2);
+        // S1, S2 must match getMixturePressure exactly so the two functions are inverses.
+        double S1 = (alpha1 > 1e-10) ? fmin(1.0, alpha1 / 0.01) : 0.0;
+        double S2 = (alpha2 > 1e-10) ? fmin(1.0, alpha2 / 0.01) : 0.0;
+
+        double sum_alpha_omega = (alpha0 / omega0) + S1 * (alpha1 / omega1) + S2 * (alpha2 / omega2);
         double sum_alpha_f_omega = 0.0;
 
-        if (alpha1 > 1e-6) {
+        if (S1 > 0.0) {
             double V1 = products.rho0 / rho1_mat;
             double f1 = products.A * (1.0 - products.omega / (products.R1 * V1)) * exp(-products.R1 * V1) +
                         products.B * (1.0 - products.omega / (products.R2 * V1)) * exp(-products.R2 * V1);
-            sum_alpha_f_omega += alpha1 * f1 / omega1;
+            sum_alpha_f_omega += alpha1 * S1 * f1 / omega1;
         }
 
-        if (alpha2 > 1e-6) {
+        if (S2 > 0.0) {
             double V2 = 1.0; // Stiffened gas approximation for unreacted solid
             double f2 = unreacted.A * (1.0 - unreacted.omega / (unreacted.R1 * V2)) * exp(-unreacted.R1 * V2) +
                         unreacted.B * (1.0 - unreacted.omega / (unreacted.R2 * V2)) * exp(-unreacted.R2 * V2);
-            sum_alpha_f_omega += alpha2 * f2 / omega2;
+            // Clamp f2 >= 0 for stability (see getMixturePressure comment).
+            f2 = fmax(0.0, f2);
+            sum_alpha_f_omega += alpha2 * S2 * f2 / omega2;
         }
 
         return p * sum_alpha_omega - sum_alpha_f_omega;
@@ -165,21 +202,18 @@ __host__ __device__
 
         double rho0 = fmax(1e-6, rho - arho1 - arho2);
         double rho1_mat = fmax(1e-6, arho1 / fmax(alpha1, 1e-10));
-        double rho2_mat = fmax(1e-6, arho2 / fmax(alpha2, 1e-10));
 
-        double omega0 = gamma0 - 1.0;
-        double omega1 = products.omega;
-        double omega2 = unreacted.omega;
-
-        double dpdrho0 = gamma0 * p / rho0;
+        // S1, S2: same smooth ramp as getMixturePressure/getMixtureEnergy.
+        double S1 = (alpha1 > 1e-10) ? fmin(1.0, alpha1 / 0.01) : 0.0;
+        double S2 = (alpha2 > 1e-10) ? fmin(1.0, alpha2 / 0.01) : 0.0;
 
         double c2_0 = 0.0;
         if (alpha0 > 1e-6) {
-            c2_0 = gamma0 * p / rho0;
+            c2_0 = (gamma0) * p / rho0;
         }
 
         double c2_1 = 0.0;
-        if (alpha1 > 1e-6) {
+        if (S1 > 0.0) {
             double V1 = products.rho0 / rho1_mat;
             c2_1 = (products.A / rho1_mat) * (products.R1 * V1 - products.omega - 1.0) * exp(-products.R1 * V1) +
                    (products.B / rho1_mat) * (products.R2 * V1 - products.omega - 1.0) * exp(-products.R2 * V1) +
@@ -187,17 +221,22 @@ __host__ __device__
         }
 
         double c2_2 = 0.0;
-        if (alpha2 > 1e-6) {
+        if (S2 > 0.0) {
             double V2 = 1.0; // Stiffened gas approximation for unreacted solid
+            // f2 clamped to >= 0 to match getMixturePressure/getMixtureEnergy.
+            double f2_raw = unreacted.A * (1.0 - unreacted.omega / (unreacted.R1 * V2)) * exp(-unreacted.R1 * V2) +
+                            unreacted.B * (1.0 - unreacted.omega / (unreacted.R2 * V2)) * exp(-unreacted.R2 * V2);
+            (void)f2_raw; // f2_raw unused in sound speed formula; clamping only matters for pressure/energy
             c2_2 = (unreacted.A / unreacted.rho0) * (unreacted.R1 * V2 - unreacted.omega - 1.0) * exp(-unreacted.R1 * V2) +
                    (unreacted.B / unreacted.rho0) * (unreacted.R2 * V2 - unreacted.omega - 1.0) * exp(-unreacted.R2 * V2) +
                    (unreacted.omega + 1.0) * p / unreacted.rho0;
+            c2_2 = fmax(0.0, c2_2);
         }
 
         double inv_rho_c2 = 0.0;
         if (alpha0 > 1e-6) inv_rho_c2 += alpha0 / (rho0 * fmax(115600.0, c2_0));
-        if (alpha1 > 1e-6) inv_rho_c2 += alpha1 / (rho1_mat * fmax(115600.0, c2_1));
-        if (alpha2 > 1e-6) inv_rho_c2 += alpha2 / (unreacted.rho0 * fmax(4.0e6, c2_2));
+        if (S1 > 0.0) inv_rho_c2 += alpha1 * S1 / (rho1_mat * fmax(115600.0, c2_1));
+        if (S2 > 0.0) inv_rho_c2 += alpha2 * S2 / (unreacted.rho0 * fmax(4.0e6, c2_2));
 
         if (inv_rho_c2 < 1e-12) return 340.0;
         double c2 = 1.0 / (rho * inv_rho_c2);
@@ -235,7 +274,7 @@ __host__ __device__
             double& alpha1, double& alpha2,
             double& arho1,  double& arho2) {
 
-        if (alpha2 <= 1e-10) return 0.0;   // nothing to burn
+        if (alpha2 <= MIN_ALPHA) return 0.0;   // nothing to burn
 
         // N_BURN_CELLS controls the detonation-front smearing width.
         // 4 cells gives a smooth profile while preserving sharp shock capture.

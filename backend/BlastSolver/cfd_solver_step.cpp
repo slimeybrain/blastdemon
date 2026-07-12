@@ -551,10 +551,6 @@ double CFDSolverImpl<RealType, IsMultiMaterial>::computeStepSize(double cfl) con
     else if (spatialOrder >= 3) order_factor = 0.4;
 
     double dynamic_cfl = cfl * order_factor;
-    // Aggressive CFL scaling for extreme pressure jumps (shock fronts)
-    if (max_p_ratio > (RealType)5.0) {
-        dynamic_cfl *= (double)std::max((RealType)0.2, (RealType)5.0 / max_p_ratio);
-    }
 
     return dynamic_cfl * dr / (double)max_u_c;
 }
@@ -592,9 +588,6 @@ std::vector<double> CFDSolverImpl<RealType, IsMultiMaterial>::getLocalTimesteps(
     else if (spatialOrder >= 3) order_factor = 0.4;
 
     double dynamic_cfl = cfl * order_factor;
-    if (max_p_ratio > (RealType)5.0) {
-        dynamic_cfl *= (double)std::max((RealType)0.2, (RealType)5.0 / max_p_ratio);
-    }
 
     for (int i = 0; i < n_cells; ++i) {
         RealType c = getSoundSpeed<RealType, IsMultiMaterial>(states[i].p, states[i].rho, states[i], (RealType)gamma, currentMaterials.products, currentMaterials.unreacted);

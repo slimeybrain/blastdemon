@@ -12,6 +12,7 @@ class CFDSolver3DCuda : public CFDSolver3DImplBase {
     void* d_active_tiles = nullptr;
     void* d_max_s_buf = nullptr;
     void* d_slice_buf = nullptr;
+    void* d_tile_active_temp = nullptr;
 
     // Host temporary mirrors during remapping
     PrimitiveTile3D<RealType, IsMultiMaterial>* temp_h_states = nullptr;

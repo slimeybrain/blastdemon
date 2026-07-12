@@ -1,16 +1,22 @@
-# Build artifacts
+# ─── Build artifacts ──────────────────────────────────────────────────────────
 build/
 .cache/
+*.o
+*.a
 
-# Simulation output data
+# ─── Simulation output data ───────────────────────────────────────────────────
 *.h5
 *.xmf
+*.vtu
+*.vtp
+*.vtk
 
-# Frontend artifacts
+# ─── Frontend artifacts ───────────────────────────────────────────────────────
 frontend/dist/
 node_modules/
+frontend/node_modules/
 
-# Scratch/temp files at root
+# ─── Scratch / temporary dev files at root level ──────────────────────────────
 /all_replacements.txt
 /dangling.txt
 /dump.py
@@ -52,11 +58,180 @@ node_modules/
 /time_step.cpp
 /time_sync
 
-# Scratch logs in subdirectories
+# ─── Root-level one-off patch / fix / debug scripts ──────────────────────────
+/bc_cpu_implementation.txt
+/bc_diffs.txt
+/build_delta_solver.py
+/cfd_solver_3d_cuda.cu.lines
+/cuda_bc_implementation.txt
+/debug_replacement.py
+/error.log
+/extract_diffs.py
+/final_fix.py
+/final_patch.py
+/find_corruptor.py
+/fix_all.py
+/fix_all2.py
+/fix_alpha.py
+/fix_body.py
+/fix_brace.py
+/fix_brace2.py
+/fix_brace3.py
+/fix_braces.py
+/fix_burn_mess.py
+/fix_burn_pos.py
+/fix_cellstate.py
+/fix_cpu.py
+/fix_cuda.py
+/fix_cuda_2.py
+/fix_cuda_3.py
+/fix_cuda_4.py
+/fix_cuda_braces.py
+/fix_cuda_final.py
+/fix_cuda_final2.py
+/fix_cuda_ideal.py
+/fix_cuda_init1d.py
+/fix_cuda_init_final.py
+/fix_cuda_syntax.py
+/fix_cuda_syntax2.py
+/fix_cuda_syntax3.py
+/fix_d_products.py
+/fix_d_products_memcpy.py
+/fix_final.py
+/fix_final_2.py
+/fix_init_kernel.py
+/fix_max_speed.py
+/fix_methods.py
+/fix_multimat.py
+/fix_p.py
+/fix_products.py
+/fix_remaining.py
+/fix_rk_stage.py
+/fix_sample_gpu.py
+/fix_set_states.py
+/fix_temp_s.py
+/fix_test.py
+/fix_test2.py
+/fix_test3.py
+/fix_test4.py
+/fix_typos.py
+/fix_update_primitives.py
+/full_refactor.py
+/get_ar.sh
+/get_ar_cuda.sh
+/get_burn.sh
+/git_finder.py
+/main_diffs.txt
+/main_gauges_implementation.txt
+/main_telemetry_implementation.txt
+/move_funcs.py
+/output.log
+/patch.js
+/patch2.js
+/patch_burn.py
+/patch_burn_correct.py
+/patch_cfd_cuda.py
+/patch_cpu.py
+/patch_cpu_cpp.py
+/patch_cuda.py
+/patch_cuda_extract.py
+/patch_debug.py
+/patch_debug_step.py
+/patch_flux_kernel.py
+/patch_init.py
+/patch_max_speed.py
+/patch_multi_flux.py
+/patch_remapper_cleanup.py
+/patch_remapper_debug.py
+/patch_renderer.js
+/patch_script.py
+/patch_script_exact.py
+/patch_script_exact2.py
+/patch_script_exact3.py
+/patch_script_exact4.py
+/patch_script_exact5.py
+/patch_script_exact6.py
+/patch_script_exact7.py
+/patch_script_exact8.py
+/patch_script_exact9.py
+/patch_script_robust.py
+/patch_streams.py
+/patch_streams2.py
+/patch_streams3.py
+/patch_viewport.js
+/precise_patch.py
+/print_bc_diffs.py
+/print_main_diffs.py
+/print_replacement.py
+/rebuild_today.py
+/restore_all.py
+/restore_final.py
+/restore_funcs.py
+/rewrite_all.py
+/rewrite_cfd_cuda.py
+/rewrite_cfd_cuda_2.py
+/rewrite_cfd_cuda_3.py
+/rewrite_cfd_cuda_4.py
+/rewrite_cuda.py
+/robust_patch.py
+/run_broker.js
+/safe_patch.py
+/safe_patch_fixed.py
+/safe_patch_v3.py
+/scratch_solver.o
+/start_over.py
+/start_over_2.py
+/step_function.txt
+/test.json
+/test_braces.py
+/test_braces2.py
+/test_json.cpp
+/test_mixture.py
+/test_mixture2.py
+/test_mixture3.py
+/test_mixture4.py
+/test_mixture5.py
+/test_sg.py
+
+# ─── Scratch directories ──────────────────────────────────────────────────────
+/scratch/
+scratch/
+
+# ─── BlastSolver sub-directory scratch scripts ────────────────────────────────
+backend/BlastSolver/cfd_solver_3d_HEAD.cpp
+backend/BlastSolver/cfd_solver_3d_cuda_patched.cu
+backend/BlastSolver/cfd_solver_3d_cuda_patched2.cu
+backend/BlastSolver/cfd_solver_3d_cuda_patched_new.cu
+backend/BlastSolver/cfd_solver_3d_new.cpp
+backend/BlastSolver/copy_funcs.py
+backend/BlastSolver/diff.patch
+backend/BlastSolver/fix_file.py
+backend/BlastSolver/fix_remaining.py
+backend/BlastSolver/fix_test.py
+backend/BlastSolver/parse_bin.py
+backend/BlastSolver/patch.py
+backend/BlastSolver/patch_init1d.py
+backend/BlastSolver/restore_funcs.py
+backend/BlastSolver/restore_funcs2.py
+backend/BlastSolver/rm_sample.py
+backend/BlastSolver/test_cmds_gpu.json
+backend/BlastSolver/test_cuda_solver.cu
+backend/BlastSolver/test_restore.py
+backend/BlastSolver/update_tasks.py
+backend/BlastSolver/verify_precision.py
+backend/test_gpu.py
+
+# ─── Frontend scratch scripts ─────────────────────────────────────────────────
+frontend/scratch_math.js
+frontend/test_lookat.js
+frontend/test_proj.js
+frontend/test_view.js
+
+# ─── Subdirectory logs / outputs ──────────────────────────────────────────────
 **/my_test_err.txt
 **/my_test_out.txt
 **/test_cmds.json
 
-# Profiling outputs
+# ─── Profiling outputs ────────────────────────────────────────────────────────
 *.nsys-rep
 *.sqlite
