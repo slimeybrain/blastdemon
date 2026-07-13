@@ -1,12 +1,14 @@
 import { StateManager } from './state-manager.js';
 import { Node } from './types.js';
 import { validateSimulationState } from './validation.js';
+import { HostFileBrowserModal } from './host-file-browser.js';
 
 export class PropertyEditor {
     public container: HTMLElement;
     private stateManager: StateManager;
     private currentNodeId: string | null = null;
     private listener: ((state: any) => void) | null = null;
+    private activeTabIdx: number = 0;
 
     constructor(parent: HTMLElement, stateManager: StateManager) {
         this.container = document.createElement('div');
@@ -30,6 +32,7 @@ export class PropertyEditor {
     public setSelectedNode(nodeId: string | null): void {
         if (this.currentNodeId === nodeId) return;
         this.currentNodeId = nodeId;
+        this.activeTabIdx = 0;
         this.render(true);
     }
 
@@ -166,6 +169,11 @@ export class PropertyEditor {
         }
 
         // Parameters Section
+        if (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D' || node.type === 'VTKOutput' || node.type === 'Telemetry3DViewport') {
+            this.renderTabbedProperties(node);
+            return;
+        }
+ 
         const form = document.createElement('form');
         form.style.padding = '10px';
         form.onsubmit = (e) => e.preventDefault();
@@ -198,6 +206,7 @@ export class PropertyEditor {
             form.appendChild(info);
         }
 
+        let addedQtyHeader = false;
         for (const key of paramKeys) {
             const value = node.parameters[key];
             if (key === 'nr' || key === 'nz' || key === 'n_cells') continue;
@@ -227,11 +236,21 @@ export class PropertyEditor {
                 const shape = node.parameters['charge_shape'] || 'Sphere';
                 if (key === 'charge_height' && shape !== 'Cylinder') continue;
             }
-            if (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') {
-                if (key === 'gauges' || key === 'telemetry_channel') continue;
-            }
-            if (node.type === 'Telemetry3DViewport' && key === 'slices') continue;
             // DetonatorLocation and DetonatorLocation3D are separate nodes now, showing correct properties
+
+            if (key.startsWith('qty_') && !addedQtyHeader) {
+                addedQtyHeader = true;
+                const sectionHeader = document.createElement('div');
+                sectionHeader.style.fontWeight = 'bold';
+                sectionHeader.style.fontSize = 'var(--font-sm)';
+                sectionHeader.style.color = '#569cd6';
+                sectionHeader.style.marginTop = '15px';
+                sectionHeader.style.marginBottom = '6px';
+                sectionHeader.style.borderTop = '1px solid #333';
+                sectionHeader.style.paddingTop = '10px';
+                sectionHeader.textContent = 'OUTPUT QUANTITIES';
+                form.appendChild(sectionHeader);
+            }
 
             const row = document.createElement('div');
             row.style.marginBottom = '10px';
@@ -241,16 +260,17 @@ export class PropertyEditor {
             label.style.fontSize = 'var(--font-sm)';
             label.style.color = '#888';
             label.style.marginBottom = '4px';
-            label.textContent = key.replace(/_/g, ' ').toUpperCase();
+            
+            let labelText = key.replace(/_/g, ' ').toUpperCase();
+            if (key === 'qty_reacted') labelText = 'Reacted Explosive (Alpha1)';
+            else if (key === 'qty_unreacted') labelText = 'Unreacted Explosive (Alpha2)';
+            label.textContent = labelText;
             row.appendChild(label);
 
             const input = this.createInputElement(node, key, value);
             input.dataset.key = key;
             row.appendChild(input);
             form.appendChild(row);
-        }
-        if (node.type === 'Telemetry3DViewport') {
-            this.renderTelemetry3DViewportSlices(node, form);
         }
         this.container.appendChild(form);
 
@@ -316,6 +336,342 @@ export class PropertyEditor {
         this.container.appendChild(ioSection);
     }
 
+    private renderTabbedProperties(node: Node): void {
+        const form = document.createElement('form');
+        form.style.padding = '10px';
+        form.onsubmit = (e) => e.preventDefault();
+
+        const tabs = node.type === 'Telemetry3DViewport' ? ['VIEWPORT', 'SLICES', 'EXPORTS', 'QUANTITIES'] : ['FORMATS', 'CONFIG', 'QUANTITIES'];
+        const activeTabIdx = this.activeTabIdx;
+
+        // Create Tab Bar
+        const tabBar = document.createElement('div');
+        tabBar.style.display = 'flex';
+        tabBar.style.borderBottom = '1px solid #333';
+        tabBar.style.marginBottom = '12px';
+        tabBar.style.gap = '4px';
+
+        const panels: HTMLDivElement[] = [];
+
+        tabs.forEach((tabName, idx) => {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.textContent = tabName;
+            btn.style.padding = '6px 12px';
+            btn.style.fontSize = '10px';
+            btn.style.fontWeight = 'bold';
+            btn.style.background = idx === activeTabIdx ? '#569cd6' : '#2d2d2d';
+            btn.style.color = idx === activeTabIdx ? '#fff' : '#888';
+            btn.style.border = 'none';
+            btn.style.borderRadius = '3px 3px 0 0';
+            btn.style.cursor = 'pointer';
+            btn.style.flex = '1';
+            btn.style.textAlign = 'center';
+            btn.onclick = () => {
+                this.activeTabIdx = idx;
+                tabBar.querySelectorAll('button').forEach((b, bIdx) => {
+                    b.style.background = bIdx === idx ? '#569cd6' : '#2d2d2d';
+                    b.style.color = bIdx === idx ? '#fff' : '#888';
+                });
+                panels.forEach((p, pIdx) => {
+                    p.style.display = pIdx === idx ? 'block' : 'none';
+                });
+            };
+            tabBar.appendChild(btn);
+        });
+        form.appendChild(tabBar);
+
+        // Create Tab Panels
+        tabs.forEach((_, idx) => {
+            const panel = document.createElement('div');
+            panel.style.display = idx === activeTabIdx ? 'block' : 'none';
+            panels.push(panel);
+            form.appendChild(panel);
+        });
+
+        const createCheckboxField = (key: string, value: boolean, labelText: string) => {
+            const row = document.createElement('div');
+            row.style.display = 'flex';
+            row.style.alignItems = 'center';
+            row.style.gap = '8px';
+            row.style.marginBottom = '8px';
+
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.checked = value;
+            cb.style.cursor = 'pointer';
+            cb.style.width = 'auto';
+            cb.onchange = () => {
+                this.updateParameter(key, cb.checked);
+            };
+
+            const span = document.createElement('span');
+            span.style.fontSize = 'var(--font-sm)';
+            span.style.color = '#ccc';
+            span.style.cursor = 'pointer';
+            span.textContent = labelText;
+            span.onclick = () => {
+                cb.checked = !cb.checked;
+                cb.dispatchEvent(new Event('change'));
+            };
+
+            row.appendChild(cb);
+            row.appendChild(span);
+            return row;
+        };
+
+        const addRowToPanel = (key: string, labelText: string, inputEl: HTMLElement, panelIdx: number) => {
+            const row = document.createElement('div');
+            row.style.marginBottom = '10px';
+
+            const label = document.createElement('label');
+            label.style.display = 'block';
+            label.style.fontSize = 'var(--font-sm)';
+            label.style.color = '#888';
+            label.style.marginBottom = '4px';
+            label.textContent = labelText;
+            row.appendChild(label);
+
+            inputEl.dataset.key = key;
+
+            if (key === 'output_dir' || key === 'vtk_dir') {
+                const wrapper = document.createElement('div');
+                wrapper.style.display = 'flex';
+                wrapper.style.gap = '8px';
+                wrapper.style.alignItems = 'center';
+                
+                inputEl.style.flex = '1';
+                wrapper.appendChild(inputEl);
+                
+                const browseBtn = document.createElement('button');
+                browseBtn.type = 'button';
+                browseBtn.textContent = 'Browse';
+                browseBtn.style.padding = '4px 8px';
+                browseBtn.style.background = '#333';
+                browseBtn.style.color = '#fff';
+                browseBtn.style.border = '1px solid #555';
+                browseBtn.style.cursor = 'pointer';
+                browseBtn.onclick = () => {
+                    const startPath = node.parameters[key] || '';
+                    const browser = new HostFileBrowserModal((window as any).networkManager, 'save', 'select_dir', (path) => {
+                        const lastSlash = path.lastIndexOf('/');
+                        const dir = lastSlash !== -1 ? path.substring(0, lastSlash) : path;
+                        this.updateParameter(key, dir);
+                    });
+                    browser.open(startPath);
+                };
+                wrapper.appendChild(browseBtn);
+                row.appendChild(wrapper);
+
+                const activeWs = this.stateManager.getActiveWorkspace();
+                const model = this.stateManager.getAllModels().find(m => m.id === activeWs.activeModelId);
+                if (model && model.filename) {
+                    const lastSlash = model.filename.lastIndexOf('/');
+                    const projDir = lastSlash !== -1 ? model.filename.substring(0, lastSlash) : '.';
+                    const projInfo = document.createElement('div');
+                    projInfo.style.fontSize = 'var(--font-xs)';
+                    projInfo.style.color = '#569cd6';
+                    projInfo.style.marginTop = '4px';
+                    projInfo.textContent = `Project Folder: ${projDir}`;
+                    row.appendChild(projInfo);
+                }
+            } else {
+                row.appendChild(inputEl);
+            }
+            
+            panels[panelIdx].appendChild(row);
+        };
+
+        if (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') {
+            // FORMATS Tab: checkboxes
+            const formatsGrid = document.createElement('div');
+            formatsGrid.style.display = 'grid';
+            formatsGrid.style.gridTemplateColumns = 'repeat(3, 1fr)';
+            formatsGrid.style.gap = '8px';
+            formatsGrid.style.marginBottom = '10px';
+
+            formatsGrid.appendChild(createCheckboxField('export_ascii', !!node.parameters['export_ascii'], 'ASCII'));
+            formatsGrid.appendChild(createCheckboxField('export_binary', !!node.parameters['export_binary'], 'Binary'));
+            formatsGrid.appendChild(createCheckboxField('export_hdf5', !!node.parameters['export_hdf5'], 'HDF5'));
+            panels[0].appendChild(formatsGrid);
+
+            // FILES/CONFIG Tab: text/number/dropdown
+            const delimEl = this.createInputElement(node, 'ascii_delimiter', node.parameters['ascii_delimiter'] ?? 'Comma');
+            addRowToPanel('ascii_delimiter', 'ASCII DELIMITER', delimEl, 1);
+
+            const precEl = this.createInputElement(node, 'ascii_precision', node.parameters['ascii_precision'] ?? 6);
+            addRowToPanel('ascii_precision', 'ASCII PRECISION', precEl, 1);
+
+            const fileEl = this.createInputElement(node, 'custom_filename', node.parameters['custom_filename'] ?? 'gauges');
+            addRowToPanel('custom_filename', 'CUSTOM FILENAME', fileEl, 1);
+
+            const dirEl = this.createInputElement(node, 'output_dir', node.parameters['output_dir'] ?? '');
+            addRowToPanel('output_dir', 'OUTPUT DIR', dirEl, 1);
+
+            panels[1].appendChild(createCheckboxField('include_header', !!node.parameters['include_header'], 'Include Header'));
+
+        } else if (node.type === 'VTKOutput') {
+            // FORMATS/TRIGGERS Tab
+            const formatEl = this.createInputElement(node, 'vtk_format', node.parameters['vtk_format'] ?? 'Binary');
+            addRowToPanel('vtk_format', 'VTK FORMAT', formatEl, 0);
+
+            const stepEl = this.createInputElement(node, 'step_interval', node.parameters['step_interval'] ?? 10);
+            addRowToPanel('step_interval', 'STEP INTERVAL', stepEl, 0);
+
+            const timeEl = this.createInputElement(node, 'time_interval', node.parameters['time_interval'] ?? 0.0);
+            addRowToPanel('time_interval', 'TIME INTERVAL', timeEl, 0);
+
+            const triggersGrid = document.createElement('div');
+            triggersGrid.style.display = 'grid';
+            triggersGrid.style.gridTemplateColumns = 'repeat(2, 1fr)';
+            triggersGrid.style.gap = '8px';
+            triggersGrid.style.marginTop = '8px';
+
+            triggersGrid.appendChild(createCheckboxField('export_slices', !!node.parameters['export_slices'], 'Export Slices'));
+            triggersGrid.appendChild(createCheckboxField('export_volumes', !!node.parameters['export_volumes'], 'Export Volumes'));
+            panels[0].appendChild(triggersGrid);
+
+            // FILES/CONFIG Tab
+            const fileEl = this.createInputElement(node, 'custom_filename', node.parameters['custom_filename'] ?? 'vtk_output');
+            addRowToPanel('custom_filename', 'CUSTOM FILENAME', fileEl, 1);
+
+            const dirEl = this.createInputElement(node, 'vtk_dir', node.parameters['vtk_dir'] ?? '');
+            addRowToPanel('vtk_dir', 'VTK DIR', dirEl, 1);
+        } else if (node.type === 'Telemetry3DViewport') {
+            // VIEWPORT Tab
+            const cmapEl = this.createInputElement(node, 'colormap', node.parameters['colormap'] ?? 'plasma');
+            addRowToPanel('colormap', 'COLORMAP', cmapEl, 0);
+
+            const rateEl = this.createInputElement(node, 'refresh_rate', node.parameters['refresh_rate'] ?? 0.033);
+            addRowToPanel('refresh_rate', 'REFRESH RATE (SECONDS)', rateEl, 0);
+
+            const minEl = this.createInputElement(node, 'min_val', node.parameters['min_val'] ?? 101325.0);
+            addRowToPanel('min_val', 'MIN VALUE', minEl, 0);
+
+            const maxEl = this.createInputElement(node, 'max_val', node.parameters['max_val'] ?? 101325.0 * 100.0);
+            addRowToPanel('max_val', 'MAX VALUE', maxEl, 0);
+
+            const cbGrid = document.createElement('div');
+            cbGrid.style.display = 'grid';
+            cbGrid.style.gridTemplateColumns = 'repeat(2, 1fr)';
+            cbGrid.style.gap = '8px';
+            cbGrid.style.marginTop = '8px';
+            cbGrid.appendChild(createCheckboxField('log_scale', !!node.parameters['log_scale'], 'Log Scale'));
+            cbGrid.appendChild(createCheckboxField('auto_scale', !!node.parameters['auto_scale'], 'Auto Scale'));
+            cbGrid.appendChild(createCheckboxField('show_grid', !!node.parameters['show_grid'], 'Show Grid'));
+            cbGrid.appendChild(createCheckboxField('interpolate', !!node.parameters['interpolate'], 'Interpolate'));
+            panels[0].appendChild(cbGrid);
+
+            // SLICES Tab
+            this.renderTelemetry3DViewportSlices(node, panels[1]);
+
+            // EXPORTS Tab
+            const formatEl = this.createInputElement(node, 'vtk_format', node.parameters['vtk_format'] ?? 'Binary');
+            addRowToPanel('vtk_format', 'VTK FORMAT', formatEl, 2);
+
+            const stepEl = this.createInputElement(node, 'step_interval', node.parameters['step_interval'] ?? 10);
+            addRowToPanel('step_interval', 'STEP INTERVAL', stepEl, 2);
+
+            const timeEl = this.createInputElement(node, 'time_interval', node.parameters['time_interval'] ?? 0.0);
+            addRowToPanel('time_interval', 'TIME INTERVAL', timeEl, 2);
+
+            const fileEl = this.createInputElement(node, 'custom_filename', node.parameters['custom_filename'] ?? 'vtk_output');
+            addRowToPanel('custom_filename', 'CUSTOM FILENAME', fileEl, 2);
+
+            const dirEl = this.createInputElement(node, 'vtk_dir', node.parameters['vtk_dir'] ?? '');
+            addRowToPanel('vtk_dir', 'VTK DIR', dirEl, 2);
+
+            const exportGrid = document.createElement('div');
+            exportGrid.style.display = 'grid';
+            exportGrid.style.gridTemplateColumns = 'repeat(2, 1fr)';
+            exportGrid.style.gap = '8px';
+            exportGrid.style.marginTop = '8px';
+            exportGrid.appendChild(createCheckboxField('export_slices', !!node.parameters['export_slices'], 'Export Slices'));
+            exportGrid.appendChild(createCheckboxField('export_volumes', !!node.parameters['export_volumes'], 'Export Volumes'));
+            panels[2].appendChild(exportGrid);
+
+            // QUANTITIES Tab
+            const qtyGrid = document.createElement('div');
+            qtyGrid.style.display = 'grid';
+            qtyGrid.style.gridTemplateColumns = 'repeat(2, 1fr)';
+            qtyGrid.style.gap = '8px';
+
+            qtyGrid.appendChild(createCheckboxField('qty_pressure', !!node.parameters['qty_pressure'], 'Pressure'));
+            qtyGrid.appendChild(createCheckboxField('qty_density', !!node.parameters['qty_density'], 'Density'));
+            qtyGrid.appendChild(createCheckboxField('qty_velocity', !!node.parameters['qty_velocity'], 'Velocity'));
+            qtyGrid.appendChild(createCheckboxField('qty_energy', !!node.parameters['qty_energy'], 'Internal Energy'));
+            qtyGrid.appendChild(createCheckboxField('qty_reacted', !!node.parameters['qty_reacted'], 'Reacted (Alpha1)'));
+            qtyGrid.appendChild(createCheckboxField('qty_unreacted', !!node.parameters['qty_unreacted'], 'Unreacted (Alpha2)'));
+            qtyGrid.appendChild(createCheckboxField('qty_air', !!node.parameters['qty_air'], 'Air'));
+            panels[3].appendChild(qtyGrid);
+        }
+
+        if (node.type !== 'Telemetry3DViewport') {
+            // QUANTITIES Tab: multi-column checkboxes
+            const qtyGrid = document.createElement('div');
+            qtyGrid.style.display = 'grid';
+            qtyGrid.style.gridTemplateColumns = 'repeat(2, 1fr)';
+            qtyGrid.style.gap = '8px';
+
+            qtyGrid.appendChild(createCheckboxField('qty_pressure', !!node.parameters['qty_pressure'], 'Pressure'));
+            qtyGrid.appendChild(createCheckboxField('qty_density', !!node.parameters['qty_density'], 'Density'));
+            qtyGrid.appendChild(createCheckboxField('qty_velocity', !!node.parameters['qty_velocity'], 'Velocity'));
+            qtyGrid.appendChild(createCheckboxField('qty_energy', !!node.parameters['qty_energy'], 'Internal Energy'));
+            qtyGrid.appendChild(createCheckboxField('qty_reacted', !!node.parameters['qty_reacted'], 'Reacted (Alpha1)'));
+            qtyGrid.appendChild(createCheckboxField('qty_unreacted', !!node.parameters['qty_unreacted'], 'Unreacted (Alpha2)'));
+            qtyGrid.appendChild(createCheckboxField('qty_air', !!node.parameters['qty_air'], 'Air'));
+
+            panels[2].appendChild(qtyGrid);
+        }
+
+        this.container.appendChild(form);
+
+        // Connections section
+        const ioSection = document.createElement('div');
+        ioSection.style.padding = '10px';
+        ioSection.style.borderTop = '1px solid #333';
+        ioSection.style.marginTop = '10px';
+
+        const ioHeader = document.createElement('div');
+        ioHeader.style.fontWeight = 'bold';
+        ioHeader.style.fontSize = 'var(--font-sm)';
+        ioHeader.style.color = '#569cd6';
+        ioHeader.style.marginBottom = '8px';
+        ioHeader.textContent = 'I/O CONNECTIONS';
+        ioSection.appendChild(ioHeader);
+
+        const state = this.stateManager.getCurrentState();
+        const incoming = state ? state.connections.filter(c => c.toNode === node.id) : [];
+        const outgoing = state ? state.connections.filter(c => c.fromNode === node.id) : [];
+
+        if (incoming.length === 0 && outgoing.length === 0) {
+            const noConn = document.createElement('div');
+            noConn.style.fontSize = 'var(--font-sm)';
+            noConn.style.color = '#666';
+            noConn.style.fontStyle = 'italic';
+            noConn.textContent = 'No connections active';
+            ioSection.appendChild(noConn);
+        } else {
+            incoming.forEach(c => {
+                const connDiv = document.createElement('div');
+                connDiv.style.fontSize = 'var(--font-sm)';
+                connDiv.style.color = '#ccc';
+                connDiv.style.marginBottom = '4px';
+                connDiv.textContent = `📥 ${c.fromPort} ← [${c.fromNode}]`;
+                ioSection.appendChild(connDiv);
+            });
+            outgoing.forEach(c => {
+                const connDiv = document.createElement('div');
+                connDiv.style.fontSize = 'var(--font-sm)';
+                connDiv.style.color = '#ccc';
+                connDiv.style.marginBottom = '4px';
+                connDiv.textContent = `📤 ${c.fromPort} → [${c.toNode}] (${c.toPort})`;
+                ioSection.appendChild(connDiv);
+            });
+        }
+        this.container.appendChild(ioSection);
+    }
+
     private createInputElement(node: Node, key: string, value: any): HTMLElement {
         if (typeof value === 'boolean') {
             const checkbox = document.createElement('input');
@@ -334,6 +690,7 @@ export class PropertyEditor {
             'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
             'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl', 'output_interval',
             'spatial_order', 'temporal_order', 'gamma', 'plot_stride', 'refresh_rate',
+            'ascii_precision', 'step_interval', 'time_interval',
             // 2D CFD keys
             'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r',
             'charge_r', 'charge_z', 'charge_radius', 'charge_height',
@@ -373,7 +730,9 @@ export class PropertyEditor {
             'charge_shape': ['Sphere', 'Cylinder'],
             'material_type': ['Air', 'JWL Charge', 'Ideal Gas Charge'],
             'colormap': ['plasma', 'viridis', 'rainbow', 'coolwarm', 'cividis', 'grayscale'],
-            'refresh_rate': ['0.0', '0.016', '0.033', '0.05', '0.1', '0.2', '0.5', '1.0']
+            'refresh_rate': ['0.0', '0.016', '0.033', '0.05', '0.1', '0.2', '0.5', '1.0'],
+            'ascii_delimiter': ['Comma', 'Tab', 'Space'],
+            'vtk_format': ['ASCII', 'Binary', 'Compressed Binary']
         };
 
         if (dropdowns[key]) {

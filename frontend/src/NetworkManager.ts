@@ -76,6 +76,10 @@ export class NetworkManager {
         this.messageCallbacks.push(callback);
     }
 
+    public offMessage(callback: (data: string | ArrayBuffer) => void): void {
+        this.messageCallbacks = this.messageCallbacks.filter(cb => cb !== callback);
+    }
+
     public onOpen(callback: () => void): void {
         this.openCallbacks.push(callback);
     }

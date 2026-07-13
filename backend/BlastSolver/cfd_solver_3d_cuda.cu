@@ -1138,6 +1138,34 @@ std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::sampleGauge(const
 }
 
 template <typename RealType, bool IsMultiMaterial>
+std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::getCellValues(int gx, int gy, int gz) const {
+    gx = std::clamp(gx, 0, nx - 1);
+    gy = std::clamp(gy, 0, ny - 1);
+    gz = std::clamp(gz, 0, nz - 1);
+
+    int tx = gx / TILE_SIZE_3D, ty = gy / TILE_SIZE_3D, tz = gz / TILE_SIZE_3D;
+    int t_idx = tx + ty * ((nx+7)/8) + tz * ((nx+7)/8) * ((ny+7)/8);
+    int lx = gx % TILE_SIZE_3D, ly = gy % TILE_SIZE_3D, lz = gz % TILE_SIZE_3D;
+    int c_idx = lx + ly * 8 + lz * 64;
+
+    PrimitiveTile3D<RealType, IsMultiMaterial> h_tile;
+    CHECK_CUDA(cudaMemcpy(&h_tile, (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states + t_idx, sizeof(PrimitiveTile3D<RealType, IsMultiMaterial>), cudaMemcpyDeviceToHost));
+
+    std::vector<float> vals(7, 0.0f);
+    vals[0] = (float)h_tile.p[c_idx]; vals[1] = (float)h_tile.rho[c_idx];
+    vals[2] = (float)sqrt((double)(h_tile.ux[c_idx]*h_tile.ux[c_idx] + h_tile.uy[c_idx]*h_tile.uy[c_idx] + h_tile.uz[c_idx]*h_tile.uz[c_idx]));
+    vals[3] = (float)(h_tile.E[c_idx] / max((RealType)1e-6, h_tile.rho[c_idx]));
+    if constexpr (IsMultiMaterial) {
+        vals[4] = (float)h_tile.alpha1[c_idx];
+        vals[5] = (float)h_tile.alpha2[c_idx];
+        vals[6] = (float)(1.0 - h_tile.alpha1[c_idx] - h_tile.alpha2[c_idx]);
+    } else {
+        vals[6] = 1.0f;
+    }
+    return vals;
+}
+
+template <typename RealType, bool IsMultiMaterial>
 std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::extractSlice(const Slice3D& slice) const {
     std::vector<float> h_data;
     int axis = (slice.axis == "xy" ? 0 : (slice.axis == "xz" ? 1 : 2));

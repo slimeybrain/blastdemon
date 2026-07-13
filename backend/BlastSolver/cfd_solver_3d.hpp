@@ -96,6 +96,7 @@ public:
 
     virtual std::vector<float> sampleGauge(const Gauge3D& gauge) const = 0;
     virtual std::vector<float> extractSlice(const Slice3D& slice) const = 0;
+    virtual std::vector<float> getCellValues(int i, int j, int k) const = 0;
 
     virtual void initializeFrom1D(const std::vector<double>& r_1d, const std::vector<MultiMaterialState>& states_1d, double x_expl, double y_expl, double z_expl, double R_remap) = 0;
 
@@ -192,6 +193,7 @@ public:
 
     std::vector<float> sampleGauge(const Gauge3D& gauge) const override;
     std::vector<float> extractSlice(const Slice3D& slice) const override;
+    std::vector<float> getCellValues(int i, int j, int k) const override;
 
     void initializeFrom1D(const std::vector<double>& r_1d, const std::vector<MultiMaterialState>& states_1d, double x_expl, double y_expl, double z_expl, double R_remap) override;
 

@@ -17,6 +17,7 @@
 #include <dlfcn.h>
 
 #include <nlohmann/json.hpp>
+#include <filesystem>
 #include "cfd_solver.hpp"
 #include "cfd_solver_2d.hpp"
 #include "cfd_solver_2d_cuda.hpp"
@@ -24,6 +25,13 @@
 #include "cfd_solver_3d_cuda.hpp"
 #include "HDF5Writer.hpp"
 #include "XDMFWriter.hpp"
+#include "VTKWriter.hpp"
+
+std::string get_absolute_path(const std::string& path, const std::string& base_dir) {
+    if (path.empty()) return base_dir;
+    if (path[0] == '/') return path; // Already absolute
+    return base_dir + "/" + path;
+}
 
 
 // Global shared state for Phase 16.0 - Zero-Omission Architecture
@@ -77,6 +85,9 @@ struct GaugeDef {
     std::string id;
     double r;
     double z;
+    double x = 0.0;
+    double y = 0.0;
+    bool is_3d = false;
 };
 
 struct GaugeHistory {
@@ -89,21 +100,340 @@ std::vector<double> global_gauge_times;
 std::vector<GaugeHistory> global_gauges_history;
 std::mutex global_gauges_mutex;
 
+struct GaugeOutputConfig {
+    bool export_ascii = false;
+    bool export_binary = false;
+    bool export_hdf5 = false;
+    std::string ascii_delimiter = "Comma";
+    int ascii_precision = 6;
+    bool include_header = true;
+    std::string output_dir = "";
+    std::string custom_filename = "gauges";
+    bool qty_pressure = true;
+    bool qty_density = true;
+    bool qty_velocity = true;
+    bool qty_energy = true;
+    bool qty_reacted = true;
+    bool qty_unreacted = true;
+    bool qty_air = true;
+} global_gauge_config;
+
+struct VTKOutputConfig {
+    std::string vtk_dir = "";
+    bool export_slices = true;
+    bool export_volumes = false;
+    std::string custom_filename = "vtk_output";
+    int step_interval = 10;
+    double time_interval = 0.0;
+    std::string vtk_format = "Binary";
+    bool qty_pressure = true;
+    bool qty_density = true;
+    bool qty_velocity = true;
+    bool qty_energy = true;
+    bool qty_reacted = true;
+    bool qty_unreacted = true;
+    bool qty_air = true;
+} global_vtk_config;
+
+std::string global_model_filename = "";
+
+void write_gauge_files() {
+    std::lock_guard<std::mutex> lock(global_gauges_mutex);
+    if (global_gauges.empty()) return;
+
+    std::string default_dir = ".";
+    try {
+        if (std::filesystem::current_path().filename() == "build") {
+            default_dir = "..";
+        }
+    } catch (...) {}
+    if (!global_model_filename.empty()) {
+        size_t lastSlash = global_model_filename.find_last_of('/');
+        if (lastSlash != std::string::npos) {
+            default_dir = global_model_filename.substr(0, lastSlash);
+        }
+    }
+    std::string out_dir = get_absolute_path(global_gauge_config.output_dir, default_dir);
+
+    try {
+        std::filesystem::create_directories(out_dir);
+    } catch (const std::exception& e) {
+        std::cerr << "[ERROR] Failed to create directory: " << out_dir << " - " << e.what() << std::endl;
+    }
+
+    std::string delimiter = ", ";
+    if (global_gauge_config.ascii_delimiter == "Tab") delimiter = "\t";
+    else if (global_gauge_config.ascii_delimiter == "Space") delimiter = " ";
+
+    bool has_p = global_gauge_config.qty_pressure;
+    bool has_rho = global_gauge_config.qty_density;
+    bool has_vel = global_gauge_config.qty_velocity;
+    bool has_E = global_gauge_config.qty_energy;
+    bool has_reacted = global_gauge_config.qty_reacted;
+    bool has_unreacted = global_gauge_config.qty_unreacted;
+    bool has_air = global_gauge_config.qty_air;
+
+    // 1. Export ASCII
+    if (global_gauge_config.export_ascii) {
+        for (size_t g_idx = 0; g_idx < global_gauges.size(); ++g_idx) {
+            const auto& g = global_gauges[g_idx];
+            const auto& hist = global_gauges_history[g_idx];
+            std::string filename = out_dir + "/" + global_gauge_config.custom_filename + "_" + g.id + ".csv";
+            std::ofstream out(filename);
+            if (!out.is_open()) {
+                std::cerr << "[ERROR] Failed to open ASCII gauge file: " << filename << std::endl;
+                continue;
+            }
+
+            out << std::scientific << std::setprecision(global_gauge_config.ascii_precision);
+
+            if (global_gauge_config.include_header) {
+                out << "Time";
+                if (has_p) out << delimiter << "Pressure";
+                if (has_rho) out << delimiter << "Density";
+                if (has_vel) out << delimiter << "Velocity";
+                if (has_E) out << delimiter << "InternalEnergy";
+                if (has_reacted) out << delimiter << "Reacted_Explosive";
+                if (has_unreacted) out << delimiter << "Unreacted_Explosive";
+                if (has_air) out << delimiter << "Air";
+                out << "\n";
+            }
+
+            for (size_t t = 0; t < global_gauge_times.size(); ++t) {
+                out << global_gauge_times[t];
+                if (has_p) out << delimiter << hist.channel_values[0][t];
+                if (has_rho) out << delimiter << hist.channel_values[1][t];
+                if (has_vel) out << delimiter << hist.channel_values[2][t];
+                if (has_E) out << delimiter << hist.channel_values[3][t];
+                if (has_reacted) out << delimiter << hist.channel_values[4][t];
+                if (has_unreacted) out << delimiter << hist.channel_values[5][t];
+                if (has_air) out << delimiter << hist.channel_values[6][t];
+                out << "\n";
+            }
+            out.close();
+            std::cout << "[INFO] Exported ASCII gauge: " << filename << std::endl;
+        }
+    }
+
+    // 2. Export Binary
+    if (global_gauge_config.export_binary) {
+        for (size_t g_idx = 0; g_idx < global_gauges.size(); ++g_idx) {
+            const auto& g = global_gauges[g_idx];
+            const auto& hist = global_gauges_history[g_idx];
+            std::string filename = out_dir + "/" + global_gauge_config.custom_filename + "_" + g.id + ".bin";
+            std::ofstream out(filename, std::ios::binary);
+            if (!out.is_open()) {
+                std::cerr << "[ERROR] Failed to open Binary gauge file: " << filename << std::endl;
+                continue;
+            }
+
+            char magic[4] = {'B', 'G', 'D', 'G'};
+            out.write(magic, 4);
+
+            uint32_t num_times = global_gauge_times.size();
+            out.write(reinterpret_cast<const char*>(&num_times), sizeof(num_times));
+
+            uint32_t bitmask = 0;
+            if (has_p) bitmask |= 1;
+            if (has_rho) bitmask |= 2;
+            if (has_vel) bitmask |= 4;
+            if (has_E) bitmask |= 8;
+            if (has_reacted) bitmask |= 16;
+            if (has_unreacted) bitmask |= 32;
+            if (has_air) bitmask |= 64;
+
+            out.write(reinterpret_cast<const char*>(&bitmask), sizeof(bitmask));
+
+            for (size_t t = 0; t < global_gauge_times.size(); ++t) {
+                double time_val = global_gauge_times[t];
+                out.write(reinterpret_cast<const char*>(&time_val), sizeof(time_val));
+
+                if (has_p) { double v = hist.channel_values[0][t]; out.write(reinterpret_cast<const char*>(&v), sizeof(v)); }
+                if (has_rho) { double v = hist.channel_values[1][t]; out.write(reinterpret_cast<const char*>(&v), sizeof(v)); }
+                if (has_vel) { double v = hist.channel_values[2][t]; out.write(reinterpret_cast<const char*>(&v), sizeof(v)); }
+                if (has_E) { double v = hist.channel_values[3][t]; out.write(reinterpret_cast<const char*>(&v), sizeof(v)); }
+                if (has_reacted) { double v = hist.channel_values[4][t]; out.write(reinterpret_cast<const char*>(&v), sizeof(v)); }
+                if (has_unreacted) { double v = hist.channel_values[5][t]; out.write(reinterpret_cast<const char*>(&v), sizeof(v)); }
+                if (has_air) { double v = hist.channel_values[6][t]; out.write(reinterpret_cast<const char*>(&v), sizeof(v)); }
+            }
+            out.close();
+            std::cout << "[INFO] Exported Binary gauge: " << filename << std::endl;
+        }
+    }
+
+    // 3. Export HDF5
+    if (global_gauge_config.export_hdf5) {
+        std::string filename = out_dir + "/" + global_gauge_config.custom_filename + ".h5";
+        std::vector<std::string> gauge_ids;
+        std::vector<std::vector<float>> p_data, rho_data, vel_data, E_data, reacted_data, unreacted_data, air_data;
+
+        for (size_t g_idx = 0; g_idx < global_gauges.size(); ++g_idx) {
+            gauge_ids.push_back(global_gauges[g_idx].id);
+            const auto& hist = global_gauges_history[g_idx];
+            p_data.push_back(hist.channel_values[0]);
+            rho_data.push_back(hist.channel_values[1]);
+            vel_data.push_back(hist.channel_values[2]);
+            E_data.push_back(hist.channel_values[3]);
+            reacted_data.push_back(hist.channel_values[4]);
+            unreacted_data.push_back(hist.channel_values[5]);
+            air_data.push_back(hist.channel_values[6]);
+        }
+
+        HDF5Writer::writeGauges(filename, global_gauge_times, gauge_ids,
+                                p_data, rho_data, vel_data, E_data, reacted_data, unreacted_data, air_data,
+                                has_p, has_rho, has_vel, has_E, has_reacted, has_unreacted, has_air);
+        std::cout << "[INFO] Exported HDF5 gauge file: " << filename << std::endl;
+    }
+}
+
+void write_vtk_outputs(int step, double time) {
+    std::string default_dir = ".";
+    try {
+        if (std::filesystem::current_path().filename() == "build") {
+            default_dir = "..";
+        }
+    } catch (...) {}
+    if (!global_model_filename.empty()) {
+        size_t lastSlash = global_model_filename.find_last_of('/');
+        if (lastSlash != std::string::npos) {
+            default_dir = global_model_filename.substr(0, lastSlash);
+        }
+    }
+    std::string out_dir = get_absolute_path(global_vtk_config.vtk_dir, default_dir);
+
+    try {
+        std::filesystem::create_directories(out_dir);
+    } catch (const std::exception& e) {
+        std::cerr << "[ERROR] Failed to create directory: " << out_dir << " - " << e.what() << std::endl;
+    }
+
+    if (global_solver_3d) {
+        bool has_p = global_vtk_config.qty_pressure;
+        bool has_rho = global_vtk_config.qty_density;
+        bool has_vel = global_vtk_config.qty_velocity;
+        bool has_E = global_vtk_config.qty_energy;
+        bool has_reacted = global_vtk_config.qty_reacted;
+        bool has_unreacted = global_vtk_config.qty_unreacted;
+        bool has_air = global_vtk_config.qty_air;
+
+        // 1. Slices
+        if (global_vtk_config.export_slices) {
+            for (size_t i = 0; i < global_slices_3d.size(); ++i) {
+                std::string filename = out_dir + "/" + global_vtk_config.custom_filename + "_slice_" + global_slices_3d[i].axis + "_" + std::to_string(i) + "_" + std::to_string(step) + ".vtu";
+                export_vtu_slice_3d(filename, *global_solver_3d, global_slices_3d[i], global_vtk_config.vtk_format,
+                                    has_p, has_rho, has_vel, has_E, has_reacted, has_unreacted, has_air);
+            }
+        }
+
+        // 2. Volumes
+        if (global_vtk_config.export_volumes) {
+            std::string filename = out_dir + "/" + global_vtk_config.custom_filename + "_volume_" + std::to_string(step) + ".vtu";
+            export_vtu_volume_3d(filename, *global_solver_3d, global_vtk_config.vtk_format,
+                                 has_p, has_rho, has_vel, has_E, has_reacted, has_unreacted, has_air);
+        }
+    } else if (global_solver_2d_cuda || global_solver_2d) {
+        std::vector<State2D> states;
+        int nr = 0, nz = 0;
+        double dr = 0.0, dz = 0.0;
+        if (global_solver_2d_cuda) {
+            states = global_solver_2d_cuda->getStates();
+            nr = global_solver_2d_cuda->getNr();
+            nz = global_solver_2d_cuda->getNz();
+            dr = global_solver_2d_cuda->getDr();
+            dz = global_solver_2d_cuda->getDz();
+        } else {
+            states = global_solver_2d->getStates();
+            nr = global_solver_2d->getNr();
+            nz = global_solver_2d->getNz();
+            dr = global_solver_2d->getDr();
+            dz = global_solver_2d->getDz();
+        }
+
+        std::vector<double> rho(states.size()), ur(states.size()), uz(states.size()), p(states.size()), E(states.size()), alpha1(states.size()), alpha2(states.size());
+        for (size_t idx = 0; idx < states.size(); ++idx) {
+            rho[idx] = states[idx].rho;
+            ur[idx] = states[idx].ur;
+            uz[idx] = states[idx].uz;
+            p[idx] = states[idx].p;
+            E[idx] = states[idx].E;
+            alpha1[idx] = states[idx].alpha1;
+            alpha2[idx] = states[idx].alpha2;
+        }
+
+        std::string filename = out_dir + "/" + global_vtk_config.custom_filename + "_" + std::to_string(step) + ".vtu";
+        export_vtu_2d(filename, nr, nz, dr, dz, rho, ur, uz, p, E, alpha1, alpha2);
+    } else if (global_solver) {
+        int n_cells = global_solver->getNumCells();
+        double radius = global_solver->getRadius();
+        double dr = radius / n_cells;
+        
+        std::vector<double> rho(n_cells), u(n_cells), p(n_cells), E(n_cells), alpha1(n_cells), alpha2(n_cells);
+        for (int i = 0; i < n_cells; ++i) {
+            auto vals = global_solver->getCellValues(i);
+            p[i] = vals[0];
+            rho[i] = vals[1];
+            u[i] = vals[2];
+            E[i] = vals[3];
+            alpha1[i] = vals[4];
+            alpha2[i] = vals[5];
+        }
+
+        std::string filename = out_dir + "/" + global_vtk_config.custom_filename + "_" + std::to_string(step) + ".vtu";
+        export_vtu_1d(filename, n_cells, dr, rho, u, p, E, alpha1, alpha2);
+    }
+}
+
 void init_gauges(const nlohmann::json& msg) {
     std::lock_guard<std::mutex> lock(global_gauges_mutex);
     global_gauges.clear();
     global_gauge_times.clear();
     global_gauges_history.clear();
+
+    if (msg.contains("model_filename") && !msg["model_filename"].is_null()) {
+        global_model_filename = msg.value("model_filename", "");
+    }
     
     if (msg.contains("nodes")) {
         for (const auto& node : msg["nodes"]) {
-            if (node.value("type", "") == "VirtualGauges") {
+            std::string type = node.value("type", "");
+            if (type == "VirtualGauges" || type == "VirtualGauges3D") {
+                if (node.contains("parameters")) {
+                    const auto& params = node["parameters"];
+                    global_gauge_config.export_ascii = params.value("export_ascii", false);
+                    global_gauge_config.export_binary = params.value("export_binary", false);
+                    global_gauge_config.export_hdf5 = params.value("export_hdf5", false);
+                    global_gauge_config.ascii_delimiter = params.value("ascii_delimiter", "Comma");
+                    global_gauge_config.ascii_precision = params.value("ascii_precision", 6);
+                    global_gauge_config.include_header = params.value("include_header", true);
+                    global_gauge_config.output_dir = params.value("output_dir", "");
+                    global_gauge_config.custom_filename = params.value("custom_filename", "gauges");
+                    global_gauge_config.qty_pressure = params.value("qty_pressure", true);
+                    global_gauge_config.qty_density = params.value("qty_density", true);
+                    global_gauge_config.qty_velocity = params.value("qty_velocity", true);
+                    global_gauge_config.qty_energy = params.value("qty_energy", true);
+                    global_gauge_config.qty_reacted = params.value("qty_reacted", true);
+                    global_gauge_config.qty_unreacted = params.value("qty_unreacted", true);
+                    global_gauge_config.qty_air = params.value("qty_air", true);
+                }
+                
                 if (node.contains("parameters") && node["parameters"].contains("gauges")) {
                     for (const auto& gauge : node["parameters"]["gauges"]) {
                         GaugeDef g;
-                        g.id = gauge.value("id", "");
-                        g.r = gauge.value("r", 0.0);
-                        g.z = gauge.value("z", 0.0);
+                        if (type == "VirtualGauges") {
+                            g.id = gauge.value("id", "");
+                            g.r = gauge.value("r", 0.0);
+                            g.z = gauge.value("z", 0.0);
+                            g.x = 0.0;
+                            g.y = 0.0;
+                            g.is_3d = false;
+                        } else {
+                            g.id = gauge.value("id", gauge.value("name", ""));
+                            g.x = gauge.value("x", 0.0);
+                            g.y = gauge.value("y", 0.0);
+                            g.z = gauge.value("z", 0.0);
+                            g.r = 0.0;
+                            g.is_3d = true;
+                        }
                         global_gauges.push_back(g);
                         
                         GaugeHistory h;
@@ -112,8 +442,45 @@ void init_gauges(const nlohmann::json& msg) {
                         global_gauges_history.push_back(h);
                     }
                 }
+            } else if (type == "VTKOutput") {
+                if (node.contains("parameters")) {
+                    const auto& params = node["parameters"];
+                    global_vtk_config.vtk_dir = params.value("vtk_dir", "");
+                    global_vtk_config.export_slices = params.value("export_slices", true);
+                    global_vtk_config.export_volumes = params.value("export_volumes", false);
+                    global_vtk_config.custom_filename = params.value("custom_filename", "vtk_output");
+                    global_vtk_config.step_interval = params.value("step_interval", 10);
+                    global_vtk_config.time_interval = params.value("time_interval", 0.0);
+                    global_vtk_config.vtk_format = params.value("vtk_format", "Binary");
+                    global_vtk_config.qty_pressure = params.value("qty_pressure", true);
+                    global_vtk_config.qty_density = params.value("qty_density", true);
+                    global_vtk_config.qty_velocity = params.value("qty_velocity", true);
+                    global_vtk_config.qty_energy = params.value("qty_energy", true);
+                    global_vtk_config.qty_reacted = params.value("qty_reacted", true);
+                    global_vtk_config.qty_unreacted = params.value("qty_unreacted", true);
+                    global_vtk_config.qty_air = params.value("qty_air", true);
+                }
             }
         }
+    }
+
+    std::string default_dir = ".";
+    try {
+        if (std::filesystem::current_path().filename() == "build") {
+            default_dir = "..";
+        }
+    } catch (...) {}
+    if (!global_model_filename.empty()) {
+        size_t lastSlash = global_model_filename.find_last_of('/');
+        if (lastSlash != std::string::npos) {
+            default_dir = global_model_filename.substr(0, lastSlash);
+        }
+    }
+    if (global_gauge_config.output_dir.empty()) {
+        global_gauge_config.output_dir = default_dir;
+    }
+    if (global_vtk_config.vtk_dir.empty()) {
+        global_vtk_config.vtk_dir = default_dir;
     }
 }
 
@@ -181,7 +548,12 @@ void record_gauges_3d(double t) {
     global_gauge_times.push_back(t);
     for (size_t g_idx = 0; g_idx < global_gauges.size(); ++g_idx) {
         const auto& g = global_gauges[g_idx];
-        Gauge3D gauge_def = { g.id, g.r, 0.0, g.z }; // Map 2D r,z to 3D x,z
+        Gauge3D gauge_def;
+        if (g.is_3d) {
+            gauge_def = { g.id, g.x, g.y, g.z };
+        } else {
+            gauge_def = { g.id, g.r, 0.0, g.z }; // Map 2D r,z to 3D x,z
+        }
         auto vals = global_solver_3d->sampleGauge(gauge_def);
         for (int ch = 0; ch < 7; ++ch) {
             global_gauges_history[g_idx].channel_values[ch].push_back(vals[ch]);
@@ -220,6 +592,9 @@ void worker_thread_func() {
     int initial_idx = global_solver->getActiveIndex();
     int total_range = global_solver->getNumCells() - initial_idx;
 
+    int step_count = 0;
+    double last_vtk_time = global_t;
+
     emit_kernel_log("INFO", "Asynchronous worker thread started.", global_t, "1d");
 
     while (sim_running) {
@@ -245,7 +620,23 @@ void worker_thread_func() {
         auto step_end = std::chrono::steady_clock::now();
         global_wallclock_1d = global_wallclock_1d.load() + std::chrono::duration<double>(step_end - step_start).count();
         global_t += dt;
+        
+        step_count++;
         record_gauges_1d(global_t);
+
+        {
+            bool trigger_vtk = false;
+            if (global_vtk_config.step_interval > 0 && (step_count % global_vtk_config.step_interval == 0)) {
+                trigger_vtk = true;
+            }
+            if (global_vtk_config.time_interval > 0.0 && (global_t - last_vtk_time >= global_vtk_config.time_interval)) {
+                trigger_vtk = true;
+                last_vtk_time = global_t;
+            }
+            if (trigger_vtk) {
+                write_vtk_outputs(step_count, global_t);
+            }
+        }
 
         if (!global_exec_until_end.load()) {
             global_target_steps--;
@@ -303,6 +694,8 @@ void worker_thread_func() {
     
     step_progress = 100;
     emit_kernel_log("INFO", "Worker thread execution cycle ended.", global_t, "1d");
+    write_gauge_files();
+    write_vtk_outputs(step_count, global_t);
     sim_running = false;
     sim_paused = false;
     sim_terminate = false;
@@ -321,6 +714,8 @@ void worker_3d_thread_func() {
 
     auto last_telemetry_time = std::chrono::steady_clock::now();
     int initial_steps = global_target_steps_3d.load();
+    int step_count = 0;
+    double last_vtk_time = global_t3d;
 
     while (sim3d_running) {
         if (sim3d_terminate) break;
@@ -350,7 +745,23 @@ void worker_3d_thread_func() {
         global_dt_3d = dt;
         global_t3d += dt;
 
+        step_count++;
+
         record_gauges_3d(global_t3d);
+
+        {
+            bool trigger_vtk = false;
+            if (global_vtk_config.step_interval > 0 && (step_count % global_vtk_config.step_interval == 0)) {
+                trigger_vtk = true;
+            }
+            if (global_vtk_config.time_interval > 0.0 && (global_t3d - last_vtk_time >= global_vtk_config.time_interval)) {
+                trigger_vtk = true;
+                last_vtk_time = global_t3d;
+            }
+            if (trigger_vtk) {
+                write_vtk_outputs(step_count, global_t3d);
+            }
+        }
 
         if (!global_exec_until_end_3d.load()) {
             global_target_steps_3d--;
@@ -403,6 +814,9 @@ void worker_3d_thread_func() {
     step_progress_3d = 100;
     emit_kernel_log("INFO", "3D worker thread execution cycle ended.", global_t3d, "3d");
 
+    write_gauge_files();
+    write_vtk_outputs(step_count, global_t3d);
+
     sim3d_running = false;
     sim3d_paused = false;
     sim3d_terminate = false;
@@ -421,6 +835,8 @@ void worker_2d_thread_func() {
 
     auto last_telemetry_time = std::chrono::steady_clock::now();
     int initial_steps = global_target_steps_2d.load();
+    int step_count = 0;
+    double last_vtk_time = global_t2d;
 
     while (sim2d_running) {
         if (sim2d_terminate) break;
@@ -460,7 +876,22 @@ void worker_2d_thread_func() {
         global_dt_2d = dt;
         global_t2d += dt;
 
+        step_count++;
         record_gauges_2d(global_t2d);
+
+        {
+            bool trigger_vtk = false;
+            if (global_vtk_config.step_interval > 0 && (step_count % global_vtk_config.step_interval == 0)) {
+                trigger_vtk = true;
+            }
+            if (global_vtk_config.time_interval > 0.0 && (global_t2d - last_vtk_time >= global_vtk_config.time_interval)) {
+                trigger_vtk = true;
+                last_vtk_time = global_t2d;
+            }
+            if (trigger_vtk) {
+                write_vtk_outputs(step_count, global_t2d);
+            }
+        }
 
         if (!global_exec_until_end_2d.load()) {
             global_target_steps_2d--;
@@ -513,7 +944,8 @@ void worker_2d_thread_func() {
     
     step_progress_2d = 100;
     emit_kernel_log("INFO", "2D worker thread execution cycle ended.", global_t2d, "2d");
-
+    write_gauge_files();
+    write_vtk_outputs(step_count, global_t2d);
     sim2d_running = false;
     sim2d_paused = false;
     sim2d_terminate = false;
@@ -1759,6 +2191,8 @@ int main() {
                             global_slices_3d.push_back(s);
                         }
                     }
+                } else if (command == "WRITE_VTK") {
+                    write_vtk_outputs(0, 0.0);
                 }
 
             } catch (const std::exception& e) {

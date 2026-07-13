@@ -257,6 +257,14 @@ export class StateManager {
         return newModel;
     }
 
+    setModelFilename(modelId: string, filename: string): void {
+        const model = this.appState.models[modelId];
+        if (model) {
+            model.filename = filename;
+            this.pushAppState(this.appState);
+        }
+    }
+
     addModelToWorkspace(model: Model, wsId?: string): void {
         const targetWsId = wsId || this.appState.activeWorkspaceId;
         const ws = this.appState.workspaces.find(w => w.id === targetWsId);
@@ -903,9 +911,12 @@ export class StateManager {
         this.notifyTelemetryUpdate(nodeId, telemetryToStore);
 
         const telemetryConnections = connections.filter(e => e.fromNode === nodeId);
+        const updatedNodeIds = new Set<string>();
+
         telemetryConnections.forEach(connection => {
             const connectedNode = nodes.find(n => n.id === connection.toNode);
             if (connectedNode) {
+                updatedNodeIds.add(connectedNode.id);
                 if (connectedNode.type === 'TelemetryGraph') {
                     if (data instanceof ArrayBuffer || (data && (data.type === 'TELEMETRY' || data.type === 'TELEMETRY_2D' || data.type === 'TELEMETRY_3D'))) {
                          this.telemetryStore.set(connectedNode.id, data);
@@ -937,6 +948,20 @@ export class StateManager {
                     if (log.length > 100) log.shift();
                     this.telemetryStore.set(connectedNode.id, log);
                     this.notifyTelemetryUpdate(connectedNode.id, log);
+                }
+            }
+        });
+
+        // Also check for virtual gauge nodes connected to the solver in the reverse direction (VirtualGauges3D -> CFDSolver3D)
+        const reverseGaugeConnections = connections.filter(e => e.toNode === nodeId);
+        reverseGaugeConnections.forEach(connection => {
+            const connectedNode = nodes.find(n => n.id === connection.fromNode);
+            if (connectedNode && !updatedNodeIds.has(connectedNode.id)) {
+                if (connectedNode.type === 'VirtualGauges' || connectedNode.type === 'VirtualGauges3D') {
+                    if (data && !(data instanceof ArrayBuffer) && data.gauges_history) {
+                         this.telemetryStore.set(connectedNode.id, data.gauges_history);
+                         this.notifyTelemetryUpdate(connectedNode.id, data.gauges_history);
+                    }
                 }
             }
         });
@@ -1313,7 +1338,22 @@ export class StateManager {
             },
             'VirtualGauges': {
                 gauges: [],
-                telemetry_channel: 0
+                telemetry_channel: 0,
+                export_ascii: false,
+                export_binary: false,
+                export_hdf5: false,
+                ascii_delimiter: 'Comma',
+                ascii_precision: 6,
+                include_header: true,
+                output_dir: '',
+                custom_filename: 'gauges',
+                qty_pressure: true,
+                qty_density: true,
+                qty_velocity: true,
+                qty_energy: true,
+                qty_reacted: true,
+                qty_unreacted: true,
+                qty_air: true
             },
             'CFDSolver': {
                 init_mode: 'Multi-Material JWL',
@@ -1376,7 +1416,20 @@ export class StateManager {
                 refresh_rate: 0.0
             },
             'VTKOutput': {
-                vtk_dir: './vtk_output'
+                vtk_dir: '',
+                export_slices: true,
+                export_volumes: false,
+                custom_filename: 'vtk_output',
+                step_interval: 10,
+                time_interval: 0.0,
+                vtk_format: 'Binary',
+                qty_pressure: true,
+                qty_density: true,
+                qty_velocity: true,
+                qty_energy: true,
+                qty_reacted: true,
+                qty_unreacted: true,
+                qty_air: true
             },
             'DomainMesh3D': {
                 dim_x: 1.0, dim_y: 1.0, dim_z: 1.0,
@@ -1410,10 +1463,40 @@ export class StateManager {
                 min_val: 101325.0,
                 max_val: 101325.0 * 100.0,
                 show_grid: true,
-                interpolate: false
+                interpolate: false,
+                // VTK / File outputs
+                vtk_dir: '',
+                export_slices: true,
+                export_volumes: false,
+                custom_filename: 'vtk_output',
+                step_interval: 10,
+                time_interval: 0.0,
+                vtk_format: 'Binary',
+                qty_pressure: true,
+                qty_density: true,
+                qty_velocity: true,
+                qty_energy: true,
+                qty_reacted: true,
+                qty_unreacted: true,
+                qty_air: true
             },
             'VirtualGauges3D': {
-                gauges: [{ name: 'G1', x: 0.6, y: 0.5, z: 0.5 }]
+                gauges: [{ name: 'G1', x: 0.6, y: 0.5, z: 0.5 }],
+                export_ascii: false,
+                export_binary: false,
+                export_hdf5: false,
+                ascii_delimiter: 'Comma',
+                ascii_precision: 6,
+                include_header: true,
+                output_dir: '',
+                custom_filename: 'gauges',
+                qty_pressure: true,
+                qty_density: true,
+                qty_velocity: true,
+                qty_energy: true,
+                qty_reacted: true,
+                qty_unreacted: true,
+                qty_air: true
             }
         };
 

@@ -1707,94 +1707,53 @@ canvas {
 /* Virtual Gauges Panel Styles */
 .gauges-manager-panel {
     display: flex;
-    flex-direction: column;
+    flex-direction: row;
+    width: 100%;
     height: 100%;
     overflow: hidden;
-    background: #1e1e1e;
+    background: #111115;
     color: #cbd5e1;
     font-family: var(--font-ui), sans-serif;
 }
 
-.gauges-toolbar {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    padding: 8px 12px;
-    background: #252526;
-    border-bottom: 1px solid #333;
-    align-items: center;
-}
-
-.gauges-toolbar button, .gauges-bulk-actions button {
-    background: #333;
-    color: #ccc;
-    border: 1px solid #444;
-    padding: 4px 10px;
-    font-size: var(--font-xs);
-    border-radius: 4px;
-    cursor: pointer;
-    transition: background 0.15s, border-color 0.15s, color 0.15s;
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-}
-
-.gauges-toolbar button:hover, .gauges-bulk-actions button:hover {
-    background: #444;
-    color: #fff;
-    border-color: #555;
-}
-
-.gauges-toolbar button.primary {
-    background: #007acc;
-    color: #fff;
-    border-color: #0098ff;
-}
-
-.gauges-toolbar button.primary:hover {
-    background: #0098ff;
-}
-
-.gauges-toolbar button.danger, .gauges-bulk-actions button.danger {
-    background: #dc2626;
-    color: #fff;
-    border-color: #ef4444;
-}
-
-.gauges-toolbar button.danger:hover, .gauges-bulk-actions button.danger:hover {
-    background: #ef4444;
-}
-
-.gauges-panel-split {
+.gauges-chart-container {
+    flex: 1;
     display: flex;
     flex-direction: column;
-    flex: 1;
-    overflow: hidden;
+    min-width: 0;
+    height: 100%;
+    position: relative;
+    background: #09090b;
 }
 
-/* Landscape/side-by-side on wide screens */
-@media (min-width: 900px) {
-    .gauges-panel-split {
-        flex-direction: row;
-    }
+.gauges-chart-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    background: #18181c;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    height: 38px;
+    box-sizing: border-box;
+    flex-shrink: 0;
+}
+
+.gauges-chart-header .title {
+    font-weight: 600;
+    font-size: var(--font-xs);
+    letter-spacing: 0.5px;
+    color: #fff;
+    margin-right: auto;
 }
 
 .gauges-chart-area {
-    flex: 1.5;
-    min-height: 250px;
+    flex: 1;
     position: relative;
     background: #09090b;
-    border-bottom: 1px solid #333;
+    min-height: 0;
 }
 
-@media (min-width: 900px) {
-    .gauges-chart-area {
-        border-bottom: none;
-        border-right: 1px solid #333;
-    }
-}
-
-.gauges-chart-area canvas {
+.gauges-canvas {
     position: absolute;
     top: 0;
     left: 0;
@@ -1803,12 +1762,137 @@ canvas {
     display: block;
 }
 
-.gauges-list-area {
-    flex: 1;
+.gauges-controls-panel {
+    width: 320px;
+    background: #15151a;
+    border-left: 1px solid rgba(255, 255, 255, 0.08);
     display: flex;
     flex-direction: column;
+    flex-shrink: 0;
+    height: 100%;
     overflow: hidden;
+}
+
+.gauges-controls-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    background: #1c1c22;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    font-size: 10px;
+    font-weight: bold;
+    color: #00adff;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+}
+
+.gauges-controls-close-btn {
+    background: none;
+    border: none;
+    color: #888;
+    cursor: pointer;
+    font-size: 11px;
+    transition: color 0.15s;
+}
+
+.gauges-controls-close-btn:hover {
+    color: #fff;
+}
+
+.gauges-controls-tabs {
+    display: flex;
+    background: #18181c;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    padding: 2px 6px 0 6px;
+    gap: 4px;
+}
+
+.gauges-tab-btn {
+    flex: 1;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: 8px 4px;
+    color: #888;
+    font-size: 10px;
+    font-weight: bold;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+    text-align: center;
+}
+
+.gauges-tab-btn:hover {
+    color: #ccc;
+}
+
+.gauges-tab-btn.active {
+    color: #00f0ff;
+    border-bottom-color: #00f0ff;
+}
+
+.gauges-controls-tab-content {
+    flex: 1;
+    overflow-y: auto;
     padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 0;
+}
+
+.gauges-controls-tab-content button.primary {
+    background: #007acc;
+    color: #fff;
+    border: 1px solid #0098ff;
+    padding: 4px 10px;
+    font-size: var(--font-xs);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.gauges-controls-tab-content button.primary:hover {
+    background: #0098ff;
+}
+
+.gauges-controls-tab-content button.danger {
+    background: #dc2626;
+    color: #fff;
+    border: 1px solid #ef4444;
+    padding: 4px 10px;
+    font-size: var(--font-xs);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.gauges-controls-tab-content button.danger:hover {
+    background: #ef4444;
+}
+
+/* Float Show Panel Button */
+.gauges-float-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    background: #2c2c30;
+    color: #ffffff;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+    z-index: 10;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    transition: background 0.2s;
+}
+
+.gauges-float-btn:hover {
+    background: #3c3c40;
 }
 
 .gauges-table-container {
@@ -1817,6 +1901,7 @@ canvas {
     border: 1px solid #333;
     border-radius: 4px;
     background: #18181b;
+    min-height: 150px;
 }
 
 .gauges-table {
@@ -1846,6 +1931,7 @@ canvas {
     border-radius: 3px;
     padding: 2px 4px;
     font-size: var(--font-xs);
+    box-sizing: border-box;
 }
 
 /* On-canvas Node Gauges Styles */
@@ -1898,6 +1984,35 @@ canvas {
     width: 100%;
     display: block;
 }
+
+.node-body-gauges table td input[type="number"] {
+    background: #252526;
+    color: #ccc;
+    border: 1px solid #444;
+    border-radius: 3px;
+    font-size: 10px;
+    padding: 1px 3px;
+    outline: none;
+    transition: border-color 0.15s, color 0.15s;
+    box-sizing: border-box;
+}
+
+.node-body-gauges table td input[type="number"]:focus {
+    border-color: #38bdf8;
+    color: #fff;
+    background: #1e1e24;
+}
+
+/* Hide spin buttons / arrows in number inputs for node gauges to save space */
+.node-body-gauges table td input[type="number"]::-webkit-inner-spin-button,
+.node-body-gauges table td input[type="number"]::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+.node-body-gauges table td input[type="number"] {
+    -moz-appearance: textfield;
+}
+
 
 
 

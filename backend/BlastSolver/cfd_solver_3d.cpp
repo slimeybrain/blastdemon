@@ -816,6 +816,18 @@ std::vector<float> CFDSolver3DImpl<RealType, IsMultiMaterial>::sampleGauge(const
 }
 
 template <typename RealType, bool IsMultiMaterial>
+std::vector<float> CFDSolver3DImpl<RealType, IsMultiMaterial>::getCellValues(int gx, int gy, int gz) const {
+    auto s = sampleState(gx, gy, gz);
+    std::vector<float> vals(7, 0.0f);
+    vals[0] = (float)s.p; vals[1] = (float)s.rho;
+    vals[2] = (float)std::sqrt(s.ux*s.ux + s.uy*s.uy + s.uz*s.uz);
+    vals[3] = (float)(s.E / std::max(s.rho, 1e-6));
+    if constexpr (IsMultiMaterial) { vals[4] = (float)s.alpha1; vals[5] = (float)s.alpha2; vals[6] = (float)(1.0 - s.alpha1 - s.alpha2); }
+    else { vals[6] = 1.0f; }
+    return vals;
+}
+
+template <typename RealType, bool IsMultiMaterial>
 std::vector<float> CFDSolver3DImpl<RealType, IsMultiMaterial>::extractSlice(const Slice3D& slice) const {
     std::vector<float> data;
     std::string qty = (slice.quantities.empty()) ? "pressure" : slice.quantities[0];

@@ -5,6 +5,7 @@ import { PropertyEditor } from './property-editor.js';
 import { NodeViewer } from './node-viewer.js';
 import { ResourceManager } from './resource-manager.js';
 import { Telemetry3DViewport } from './telemetry-3d-viewport.js';
+import { CustomDialog } from './custom-dialog.js';
 
 export class LayoutManager {
     private container: HTMLElement;
@@ -997,6 +998,7 @@ class MenuBarComponent {
                     <div class="menu-separator"></div>
                     <div id="menu-load-json">Load Model (JSON)...</div>
                     <div id="menu-save-json">Save Model (JSON)</div>
+                    <div id="menu-save-as-local">Save Model As...</div>
                     <div class="menu-separator"></div>
                     <div id="menu-load-binary">Load Model (Binary)...</div>
                     <div id="menu-save-binary">Save Model (Binary)</div>
@@ -1062,10 +1064,10 @@ class MenuBarComponent {
 
             const closeBtn = tab.querySelector('.workspace-tab-close');
             if (closeBtn) {
-                closeBtn.addEventListener('click', (e) => {
+                closeBtn.addEventListener('click', async (e) => {
                     e.stopPropagation();
                     const wsId = (closeBtn as HTMLElement).dataset.wsId;
-                    if (wsId && confirm("Close this workspace? All its unsaved layouts will be discarded.")) {
+                    if (wsId && await CustomDialog.confirm("Close this workspace? All its unsaved layouts will be discarded.")) {
                         this.stateManager.deleteWorkspace(wsId);
                     }
                 });
@@ -1266,9 +1268,9 @@ class OutlinerComponent {
             closeModelBtn.style.lineHeight = '1';
             closeModelBtn.onmouseenter = () => closeModelBtn.style.color = '#ef4444';
             closeModelBtn.onmouseleave = () => closeModelBtn.style.color = '#888';
-            closeModelBtn.onclick = (e) => {
+            closeModelBtn.onclick = async (e) => {
                 e.stopPropagation();
-                if (confirm(`Close model "${model.name}" in this workspace?`)) {
+                if (await CustomDialog.confirm(`Close model "${model.name}" in this workspace?`)) {
                     this.stateManager.removeModelFromWorkspace(model.id);
                 }
             };

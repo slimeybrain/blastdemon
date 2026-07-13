@@ -12,7 +12,7 @@ export function serializeSimulationState(state: SimulationState): string {
     });
 }
 
-export function serializeForSolver(state: SimulationState, command: string = "INIT", modelId?: string): string {
+export function serializeForSolver(state: SimulationState, command: string = "INIT", modelId?: string, modelFilename?: string | null): string {
     const strippedNodes = state.nodes.map(({ x, y, ...rest }) => rest);
 
     const numericKeys = [
@@ -21,6 +21,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl', 'output_interval',
         'spatial_order', 'temporal_order',
         'n_cells', 'gamma', 'explosive_radius', 'ambient_rho',
+        'step_interval', 'time_interval',
         // 2D CFD keys
         'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_r', 'remap_radius', 'trigger_value',
         'charge_r', 'charge_z', 'charge_radius', 'charge_height',
@@ -218,7 +219,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             }
         }
 
-        // Trace Telemetry3DViewport slices
+        // Trace Telemetry3DViewport slices and VTK configuration
         const telemetryConns = state.connections.filter(c => c.fromNode === solverNode3D.id && c.fromPort === 'telemetry');
         for (const conn of telemetryConns) {
             const viewNode = state.nodes.find(n => n.id === conn.toNode);
@@ -226,6 +227,12 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 if (viewNode.parameters.slices) {
                     flattenedParams['slices'] = viewNode.parameters.slices;
                 }
+                // Trace file output options
+                Object.entries(viewNode.parameters).forEach(([key, value]) => {
+                    if (key !== 'slices' && key !== 'colormap' && key !== 'refresh_rate' && key !== 'log_scale' && key !== 'auto_scale' && key !== 'min_val' && key !== 'max_val' && key !== 'show_grid' && key !== 'interpolate') {
+                        flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                    }
+                });
             }
         }
     }
@@ -467,6 +474,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
     return JSON.stringify({
         command: command,
         modelId: modelId,
+        model_filename: modelFilename || null,
         ...flattenedParams,
         // Full DAG for Broker tracking
         nodes: strippedNodes,

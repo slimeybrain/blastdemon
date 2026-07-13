@@ -24,6 +24,7 @@ find_package(OpenMP)
 find_package(ZLIB REQUIRED)
 
 # Find HDF5
+set(HDF5_USE_STATIC_LIBRARIES ON)
 find_package(HDF5 COMPONENTS C)
 
 # Daemon (Broker)

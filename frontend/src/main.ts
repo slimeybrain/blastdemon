@@ -3,6 +3,8 @@ import { SimulationState, SimulationStatus, LayoutNode } from './types.js';
 import { NetworkManager } from './NetworkManager.js';
 import { serializeSimulationState, serializeForSolver, serializeToBinary, deserializeFromBinary } from './serialization.js';
 import { LayoutManager } from './layout-manager.js';
+import { HostFileBrowserModal } from './host-file-browser.js';
+import { CustomDialog } from './custom-dialog.js';
 
 console.log("BlastDaemon Workspace Initializing (Recursive Layout)...");
 
@@ -170,15 +172,25 @@ document.addEventListener('click', async (e) => {
 
     // --- File Menu Actions (Model-level) ---
     if (target.id === 'menu-new-model') {
-        const name = prompt("Enter name for the new model:", `Model ${stateManager.getAllModels().length + 1}`);
+        const name = await CustomDialog.prompt("Enter name for the new model:", `Model ${stateManager.getAllModels().length + 1}`);
         if (name !== null) {
             stateManager.createModel(name.trim() || undefined);
         }
     }
 
     if (target.id === 'menu-load-json') {
-        const fileInput = document.getElementById('load-json-file');
-        if (fileInput) fileInput.click();
+        const activeWs = stateManager.getActiveWorkspace();
+        const startPath = activeWs.activeModelId 
+            ? (stateManager.getAllModels().find(m => m.id === activeWs.activeModelId)?.filename || "") 
+            : "";
+        const browser = new HostFileBrowserModal(networkManager, 'open', '', (path) => {
+            networkManager.send({
+                command: "LOAD_MODEL_FILE",
+                modelId: activeWs.activeModelId || "default",
+                filePath: path
+            });
+        });
+        browser.open(startPath);
     }
 
     if (target.id === 'menu-save-json') {
@@ -191,10 +203,56 @@ document.addEventListener('click', async (e) => {
                     nodes: model.nodes,
                     connections: model.connections
                 }, null, 2);
-                fallbackSaveJson(jsonString, `${model.name.toLowerCase().replace(/\s+/g, '_')}.json`);
+                
+                // If model has a valid host absolute path, save directly
+                if (model.filename && model.filename.includes('/')) {
+                    networkManager.send({
+                        command: "SAVE_MODEL_FILE",
+                        modelId: model.id,
+                        filePath: model.filename,
+                        fileContent: jsonString
+                    });
+                } else {
+                    // Fall back to Save As
+                    const browser = new HostFileBrowserModal(networkManager, 'save', model.filename || `${model.name.toLowerCase().replace(/\s+/g, '_')}.json`, (path) => {
+                        networkManager.send({
+                            command: "SAVE_MODEL_FILE",
+                            modelId: model.id,
+                            filePath: path,
+                            fileContent: jsonString
+                        });
+                    });
+                    browser.open(model.filename || "");
+                }
             }
         } else {
-            alert("No active model to save.");
+            await CustomDialog.alert("No active model to save.");
+        }
+    }
+
+    if (target.id === 'menu-save-as-local') {
+        const activeWs = stateManager.getActiveWorkspace();
+        if (activeWs.activeModelId) {
+            const model = stateManager.getWorkspaceModels().find(m => m.id === activeWs.activeModelId);
+            if (model) {
+                const jsonString = JSON.stringify({
+                    name: model.name,
+                    nodes: model.nodes,
+                    connections: model.connections
+                }, null, 2);
+                
+                const browser = new HostFileBrowserModal(networkManager, 'save', model.filename || `${model.name.toLowerCase().replace(/\s+/g, '_')}.json`, (path) => {
+                    networkManager.send({
+                        command: "SAVE_MODEL_FILE",
+                        modelId: model.id,
+                        filePath: path,
+                        fileContent: jsonString
+                    });
+                });
+                browser.open(model.filename || "");
+            }
+        } else {
+            await CustomDialog.alert("No active model to save.");
         }
     }
 
@@ -218,7 +276,7 @@ document.addEventListener('click', async (e) => {
                 fallbackSaveBinary(buffer, `${model.name.toLowerCase().replace(/\s+/g, '_')}.bin`);
             }
         } else {
-            alert("No active model to save.");
+            await CustomDialog.alert("No active model to save.");
         }
     }
 
@@ -228,7 +286,7 @@ document.addEventListener('click', async (e) => {
             stateManager.copyModelToClipboard(activeWs.activeModelId);
             console.log(`Copied active model to clipboard: ${activeWs.activeModelId}`);
         } else {
-            alert("No active model to copy.");
+            await CustomDialog.alert("No active model to copy.");
         }
     }
 
@@ -237,7 +295,7 @@ document.addEventListener('click', async (e) => {
         if (pasted) {
             console.log(`Pasted model from clipboard: ${pasted.id}`);
         } else {
-            alert("Clipboard is empty. Copy a model first.");
+            await CustomDialog.alert("Clipboard is empty. Copy a model first.");
         }
     }
 
@@ -254,10 +312,10 @@ document.addEventListener('click', async (e) => {
         const activeWs = stateManager.getActiveWorkspace();
         const otherModels = stateManager.getAllModels().filter(m => !activeWs.modelIds.includes(m.id));
         if (otherModels.length === 0) {
-            alert("No other models available. Use 'File -> New Model' to create a new model first.");
+            await CustomDialog.alert("No other models available. Use 'File -> New Model' to create a new model first.");
         } else {
             const modelNames = otherModels.map((m, idx) => `${idx + 1}. ${m.name}`).join('\n');
-            const choice = prompt(`Select a model to add to this workspace (enter number 1-${otherModels.length}):\n${modelNames}`);
+            const choice = await CustomDialog.prompt(`Select a model to add to this workspace (enter number 1-${otherModels.length}):\n${modelNames}`);
             const idx = parseInt(choice || '') - 1;
             if (idx >= 0 && idx < otherModels.length) {
                 stateManager.addModelToWorkspace(otherModels[idx]);
@@ -268,10 +326,10 @@ document.addEventListener('click', async (e) => {
     if (target.id === 'menu-remove-model') {
         const wsModels = stateManager.getWorkspaceModels();
         if (wsModels.length === 0) {
-            alert("No models in this workspace to remove.");
+            await CustomDialog.alert("No models in this workspace to remove.");
         } else {
             const modelNames = wsModels.map((m, idx) => `${idx + 1}. ${m.name}`).join('\n');
-            const choice = prompt(`Select a model to remove from this workspace (enter number 1-${wsModels.length}):\n${modelNames}`);
+            const choice = await CustomDialog.prompt(`Select a model to remove from this workspace (enter number 1-${wsModels.length}):\n${modelNames}`);
             const idx = parseInt(choice || '') - 1;
             if (idx >= 0 && idx < wsModels.length) {
                 stateManager.removeModelFromWorkspace(wsModels[idx].id);
@@ -281,7 +339,7 @@ document.addEventListener('click', async (e) => {
 
     if (target.id === 'menu-save-workspace') {
         stateManager.saveWorkspace();
-        alert("Workspace and all models saved successfully to browser local storage.");
+        await CustomDialog.alert("Workspace and all models saved successfully to browser local storage.");
     }
 
     if (target.id === 'menu-export-workspace') {
@@ -303,17 +361,17 @@ document.addEventListener('click', async (e) => {
                 const file = (ev.target as HTMLInputElement).files?.[0];
                 if (!file) return;
                 const reader = new FileReader();
-                reader.onload = (event) => {
+                reader.onload = async (event) => {
                     try {
                         const parsed = JSON.parse(event.target?.result as string);
                         if (parsed.models && parsed.workspaces && parsed.activeWorkspaceId) {
                             stateManager.loadAppState(parsed);
                             console.log("Workspace state imported successfully.");
                         } else {
-                            alert("Invalid workspace project file.");
+                            await CustomDialog.alert("Invalid workspace project file.");
                         }
                     } catch (err) {
-                        alert("Failed to parse workspace project file: " + err);
+                        await CustomDialog.alert("Failed to parse workspace project file: " + err);
                     }
                 };
                 reader.readAsText(file);
@@ -323,7 +381,8 @@ document.addEventListener('click', async (e) => {
     }
 
     if (target.id === 'menu-reset-all') {
-        if (confirm("CRITICAL: This will flush all local storage and reload the application. Proceed?")) {
+        const proceed = await CustomDialog.confirm("CRITICAL: This will flush all local storage and reload the application. Proceed?");
+        if (proceed) {
             stateManager.clearWorkspace();
             window.location.reload();
         }
@@ -576,7 +635,7 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
                 connections: model1d?.connections ?? [],
                 layout: {} as any
             };
-            const serialized1D = JSON.parse(serializeForSolver(dummy1DState, "INIT", pipe.model1dId));
+            const serialized1D = JSON.parse(serializeForSolver(dummy1DState, "INIT", pipe.model1dId, model1d?.filename));
 
             console.log(`Sending REMAP parameters for modelId ${targetModelId} with parsed 1D states`);
             if (activeSolverNode) {
@@ -633,7 +692,7 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
             // Treat model as isolated: send INIT_2D first, then REMAP from 1D telemetry
             const state = stateManager.getSimulationState(modelId);
             if (state) {
-                const payload = serializeForSolver(state, "INIT_2D", modelId);
+                const payload = serializeForSolver(state, "INIT_2D", modelId, model?.filename);
                 console.log(`Sending INIT_2D for 2D model ${modelId} in pipeline`);
                 networkManager.send(payload);
                 sendContourConfig(modelId);
@@ -649,14 +708,14 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
             const state = stateManager.getSimulationState(modelId);
             if (state) {
                 if (pipeline) {
-                    const payload = serializeForSolver(state, "INIT_3D", modelId);
+                    const payload = serializeForSolver(state, "INIT_3D", modelId, model?.filename);
                     networkManager.send(payload);
                     sendView3DConfig(modelId);
                     if (tryRemapFrom1D(modelId, pipeline)) {
                         stateManager.setModelStatus(modelId, 'INITIALIZED');
                     }
                 } else {
-                    const payload = serializeForSolver(state, "INIT_3D", modelId);
+                    const payload = serializeForSolver(state, "INIT_3D", modelId, model?.filename);
                     networkManager.send(payload);
                     sendView3DConfig(modelId);
                     stateManager.setModelStatus(modelId, 'INITIALIZED');
@@ -667,7 +726,7 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
             // Standalone 2D model (Ideal Gas / JWL direct init — no remap partner).
             const state = stateManager.getSimulationState(modelId);
             if (state) {
-                const payload = serializeForSolver(state, "INIT_2D", modelId);
+                const payload = serializeForSolver(state, "INIT_2D", modelId, model?.filename);
                 console.log(`Sending INIT_2D for standalone 2D model ${modelId}`);
                 networkManager.send(payload);
                 sendContourConfig(modelId);
@@ -677,7 +736,7 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
             // Pure 1D model.
             const state = stateManager.getSimulationState(modelId);
             if (state) {
-                const payload = serializeForSolver(state, "INIT", modelId);
+                const payload = serializeForSolver(state, "INIT", modelId, model?.filename);
                 console.log(`Sending INIT (1D) for model ${modelId}`);
                 networkManager.send(payload);
                 stateManager.setModelStatus(modelId, 'INITIALIZED');
@@ -718,7 +777,7 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
             if (has3D) {
                 const state = stateManager.getSimulationState(modelId);
                 if (state) {
-                    const payload = serializeForSolver(state, "INIT_3D", modelId);
+                    const payload = serializeForSolver(state, "INIT_3D", modelId, model?.filename);
                     networkManager.send(payload);
                     sendView3DConfig(modelId);
                     networkManager.send({ command: "EXEC_ALL_3D", modelId: modelId, cfl });
@@ -728,7 +787,7 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
                 // Initialize model from 1D telemetry first, then run
                 const state = stateManager.getSimulationState(modelId);
                 if (state) {
-                    const payload = serializeForSolver(state, "INIT_2D", modelId);
+                    const payload = serializeForSolver(state, "INIT_2D", modelId, model?.filename);
                     console.log(`Sending INIT_2D for 2D model ${modelId} in pipeline`);
                     networkManager.send(payload);
                     sendContourConfig(modelId);
@@ -742,7 +801,7 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
                 // Standalone 2D model
                 const state = stateManager.getSimulationState(modelId);
                 if (state) {
-                    const payload = serializeForSolver(state, "INIT_2D", modelId);
+                    const payload = serializeForSolver(state, "INIT_2D", modelId, model?.filename);
                     console.log(`[Auto-Run] Sending INIT_2D for standalone 2D model ${modelId}`);
                     networkManager.send(payload);
                     sendContourConfig(modelId);
@@ -753,7 +812,7 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
                 // Pure 1D model
                 const state = stateManager.getSimulationState(modelId);
                 if (state) {
-                    const payload = serializeForSolver(state, "INIT", modelId);
+                    const payload = serializeForSolver(state, "INIT", modelId, model?.filename);
                     console.log(`[Auto-Run] Sending INIT for standalone 1D model ${modelId}`);
                     networkManager.send(payload);
                     networkManager.send({ command: "EXEC_ALL", modelId: modelId, cfl });
@@ -801,10 +860,10 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
     }
 }
 
-document.addEventListener('model-action', (e: any) => {
+document.addEventListener('model-action', async (e: any) => {
     const { modelId, command, steps } = e.detail;
     if (!networkManager.isConnected()) {
-        alert("Error: WebSocket is not connected to the Broker backend. Please ensure the Broker daemon is running.");
+        await CustomDialog.alert("Error: WebSocket is not connected to the Broker backend. Please ensure the Broker daemon is running.");
         return;
     }
     executeModelCommand(modelId, command, { steps }, false);
@@ -822,7 +881,7 @@ function is2DFrame(buffer: ArrayBuffer): boolean {
     return expected === buffer.byteLength;
 }
 
-networkManager.onMessage((data) => {
+networkManager.onMessage(async (data) => {
     if (data instanceof ArrayBuffer) {
         const view = new DataView(data);
         let modelId = "";
@@ -860,6 +919,74 @@ networkManager.onMessage((data) => {
 
     try {
         const dataJson = JSON.parse(data);
+        if (dataJson.type === 'save_model_response') {
+            if (dataJson.status === 'success') {
+                const modelId = dataJson.modelId;
+                const filePath = dataJson.filePath;
+                stateManager.setModelFilename(modelId, filePath);
+
+                const model = stateManager.getAllModels().find(m => m.id === modelId);
+                if (model) {
+                    const lastSlash = filePath.lastIndexOf('/');
+                    const dirPath = lastSlash !== -1 ? filePath.substring(0, lastSlash) : '.';
+
+                    model.nodes.forEach(n => {
+                        if (n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D') {
+                            stateManager.updateNodeParameters(n.id, { output_dir: dirPath });
+                        }
+                        if (n.type === 'VTKOutput' || n.type === 'Telemetry3DViewport') {
+                            stateManager.updateNodeParameters(n.id, { vtk_dir: dirPath });
+                        }
+                    });
+                }
+                await CustomDialog.alert(`Model saved successfully to:\n${filePath}`);
+            } else {
+                await CustomDialog.alert(`Error saving model file:\n${dataJson.error}`);
+            }
+            return;
+        }
+
+        if (dataJson.type === 'load_model_response') {
+            if (dataJson.status === 'success') {
+                const modelId = dataJson.modelId;
+                const filePath = dataJson.filePath;
+                try {
+                    const loaded = JSON.parse(dataJson.fileContent);
+                    const activeWs = stateManager.getActiveWorkspace();
+                    const state: SimulationState = {
+                        nodes: loaded.nodes || [],
+                        connections: loaded.connections || [],
+                        layout: loaded.layout || activeWs.layout
+                    };
+                    stateManager.pushState(state);
+
+                    if (activeWs.activeModelId) {
+                        stateManager.setModelFilename(activeWs.activeModelId, filePath);
+
+                        const model = stateManager.getAllModels().find(m => m.id === activeWs.activeModelId);
+                        if (model) {
+                             const lastSlash = filePath.lastIndexOf('/');
+                             const dirPath = lastSlash !== -1 ? filePath.substring(0, lastSlash) : '.';
+
+                            model.nodes.forEach(n => {
+                                if (n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D') {
+                                    stateManager.updateNodeParameters(n.id, { output_dir: dirPath });
+                                } else if (n.type === 'VTKOutput' || n.type === 'Telemetry3DViewport') {
+                                    stateManager.updateNodeParameters(n.id, { vtk_dir: dirPath });
+                                }
+                            });
+                        }
+                    }
+                    layoutManager.render(state);
+                    await CustomDialog.alert(`Model loaded successfully from:\n${filePath}`);
+                } catch (err) {
+                    await CustomDialog.alert("Failed to parse loaded model: " + err);
+                }
+            } else {
+                await CustomDialog.alert(`Error loading model file:\n${dataJson.error}`);
+            }
+            return;
+        }
         let modelId = dataJson.modelId;
 
         if (dataJson.type === 'resource_pulse') {
@@ -981,16 +1108,36 @@ document.getElementById('load-json-file')?.addEventListener('change', (e) => {
     const file = input.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (event) => {
-        try {
-            const state = JSON.parse(event.target?.result as string) as SimulationState;
-            stateManager.pushState(state);
-            layoutManager.render(state);
-            console.log("Model loaded successfully from JSON.");
-        } catch (err) {
-            alert("Failed to parse JSON file: " + err);
-        }
-    };
+                reader.onload = async (event) => {
+                    try {
+                        const state = JSON.parse(event.target?.result as string) as SimulationState;
+                        stateManager.pushState(state);
+                        const activeWs = stateManager.getActiveWorkspace();
+                        if (activeWs.activeModelId) {
+                            stateManager.setModelFilename(activeWs.activeModelId, file.name);
+                            
+                            const model = stateManager.getAllModels().find(m => m.id === activeWs.activeModelId);
+                            if (model) {
+                                const dirPath = "/home/chris/antigrav/blastdemon";
+                                model.nodes.forEach(n => {
+                                    if (n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D') {
+                                        if (!n.parameters.output_dir || n.parameters.output_dir === '') {
+                                            stateManager.updateNodeParameters(n.id, { output_dir: dirPath });
+                                        }
+                                    } else if (n.type === 'VTKOutput' || n.type === 'Telemetry3DViewport') {
+                                        if (!n.parameters.vtk_dir || n.parameters.vtk_dir === '') {
+                                            stateManager.updateNodeParameters(n.id, { vtk_dir: dirPath });
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                        layoutManager.render(state);
+                        console.log("Model loaded successfully from JSON.");
+                    } catch (err) {
+                        await CustomDialog.alert("Failed to parse JSON file: " + err);
+                    }
+                };
     reader.readAsText(file);
     input.value = ''; // Reset file input
 });
@@ -1000,15 +1147,35 @@ document.getElementById('load-binary-file')?.addEventListener('change', (e) => {
     const file = input.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (event) => {
+    reader.onload = async (event) => {
         try {
             const buffer = event.target?.result as ArrayBuffer;
             const state = deserializeFromBinary(buffer);
             stateManager.pushState(state);
+            const activeWs = stateManager.getActiveWorkspace();
+            if (activeWs.activeModelId) {
+                stateManager.setModelFilename(activeWs.activeModelId, file.name);
+                
+                const model = stateManager.getAllModels().find(m => m.id === activeWs.activeModelId);
+                if (model) {
+                    const dirPath = "/home/chris/antigrav/blastdemon";
+                    model.nodes.forEach(n => {
+                        if (n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D') {
+                            if (!n.parameters.output_dir || n.parameters.output_dir === '') {
+                                stateManager.updateNodeParameters(n.id, { output_dir: dirPath });
+                            }
+                        } else if (n.type === 'VTKOutput' || n.type === 'Telemetry3DViewport') {
+                            if (!n.parameters.vtk_dir || n.parameters.vtk_dir === '') {
+                                stateManager.updateNodeParameters(n.id, { vtk_dir: dirPath });
+                            }
+                        }
+                    });
+                }
+            }
             layoutManager.render(state);
             console.log("Model loaded successfully from Binary.");
         } catch (err) {
-            alert("Failed to parse Binary file: " + err);
+            await CustomDialog.alert("Failed to parse Binary file: " + err);
         }
     };
     reader.readAsArrayBuffer(file);

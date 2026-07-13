@@ -1,6 +1,7 @@
 import { SimulationState, Node, Connection, Port, NodeType } from './types.js';
 import { StateManager } from './state-manager.js';
 import { validateSimulationState } from './validation.js';
+import { HostFileBrowserModal } from './host-file-browser.js';
 
 
 const SVG_ICONS = {
@@ -57,6 +58,9 @@ export class GraphRenderer {
     private lastMouseY: number = 0;
     /** Pending requestAnimationFrame handle for deferred wire redraws. */
     private connectionRafId: number | null = null;
+
+    private gaugesPanelOpen: Map<string, boolean> = new Map();
+    private gaugesActiveTab: Map<string, 'list' | 'settings'> = new Map();
 
     private selectedNodeId: string | null = null;
     private selectedConnection: Connection | null = null;
@@ -212,7 +216,7 @@ export class GraphRenderer {
                 const heightDiff = Math.abs((node.height || 0) - newHeight);
                 if (newWidth > 0 && newHeight > 0 && (widthDiff > 4 || heightDiff > 4)) {
                     const userIsResizing = this.nodeUserResizing.has(nodeId);
-                    const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport';
+                    const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D' || node.type === 'Telemetry3DViewport';
                     if (isTelemetry && node.displayMode !== 'compact') {
                         const isTelemetryText = node.type === 'TelemetryText';
                         if (!isTelemetryText || userIsResizing) {
@@ -223,7 +227,7 @@ export class GraphRenderer {
                     }
 
                     // Automatic mode switching for telemetry nodes (only when user is resizing)
-                    if (userIsResizing && (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport')) {
+                    if (userIsResizing && (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D' || node.type === 'Telemetry3DViewport')) {
                         let targetMode: 'compact' | 'normal' | 'expanded' = 'normal';
                         if (newHeight < 60) targetMode = 'compact';
                         else if (newHeight >= 180) targetMode = 'expanded';
@@ -468,6 +472,14 @@ export class GraphRenderer {
                         }
                     });
                 }
+            }
+        } else if ((node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') && data) {
+            const canvas = nodeEl.querySelector('canvas') as HTMLCanvasElement;
+            if (canvas) {
+                const gauges = node.parameters?.gauges || [];
+                const currentChannel = Number(node.parameters?.telemetry_channel ?? 0);
+                const has2D = state?.nodes.some(n => n.type === 'DomainMesh2D') || false;
+                this.drawGaugesChart(canvas, data, gauges, currentChannel, has2D);
             }
         }
     }
@@ -1608,12 +1620,12 @@ export class GraphRenderer {
                 if (!nodeEl) {
                     nodeEl = document.createElement('div');
                     nodeEl.className = 'node';
-                    if (node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport') {
+                    if (node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D' || node.type === 'Telemetry3DViewport') {
                         nodeEl.classList.add('resizable');
-                        if (node.width === undefined) node.width = (node.type === 'Telemetry3DViewport') ? 450 : ((node.type === 'TelemetryContour' || node.type === 'VirtualGauges') ? 350 : 250);
+                        if (node.width === undefined) node.width = (node.type === 'Telemetry3DViewport' || node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') ? 450 : ((node.type === 'TelemetryContour') ? 350 : 250);
                         if (node.height === undefined) {
                             if (node.type === 'Telemetry3DViewport') node.height = 450;
-                            else if (node.type === 'TelemetryContour' || node.type === 'VirtualGauges') node.height = 300;
+                            else if (node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') node.height = 300;
                             else if (node.type === 'TelemetryGraph') node.height = 150;
                             else node.height = 130;
                         }
@@ -1902,7 +1914,7 @@ export class GraphRenderer {
                 const displayMode = node.displayMode || 'expanded';
                 const nodeOrientation = node.orientation || 'HORIZ';
 
-                const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport';
+                const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D' || node.type === 'Telemetry3DViewport';
 
                 // Only override the element's inline width/height from state when the
                 // user is NOT actively dragging the native resize handle. Mid-drag, the
@@ -2173,7 +2185,9 @@ export class GraphRenderer {
                     }
                 } else {
                     contentEl.style.display = 'flex';
-                    this.renderNodeParameters(node, contentEl);
+                    if (node.type !== 'VirtualGauges' && node.type !== 'VirtualGauges3D') {
+                        this.renderNodeParameters(node, contentEl);
+                    }
                     if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour' || node.type === 'Telemetry3DViewport') {
                         this.renderTelemetryContent(node, contentEl);
                     } else if (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') {
@@ -4699,32 +4713,144 @@ export class GraphRenderer {
     }
 
     private renderVirtualGaugesContent(node: Node, container: HTMLElement): void {
-        let body = container.querySelector('.node-body-gauges') as HTMLElement;
         const state = this.stateManager.getCurrentState();
         const has2D = state?.nodes.some(n => n.type === 'DomainMesh2D') || false;
         const is3D = node.type === 'VirtualGauges3D';
         const gauges = node.parameters?.gauges || [];
         const currentChannel = Number(node.parameters?.telemetry_channel ?? 0);
 
-        if (!body) {
-            body = document.createElement('div');
-            body.className = 'node-body-gauges';
-            body.style.display = 'flex';
-            body.style.flexDirection = 'column';
-            body.style.padding = '8px';
-            body.style.gap = '8px';
-            body.style.minHeight = '180px';
-            container.appendChild(body);
+        // Ensure collapsible states are initialized in GraphRenderer maps
+        if (!this.gaugesPanelOpen.has(node.id)) {
+            this.gaugesPanelOpen.set(node.id, true);
+        }
+        if (!this.gaugesActiveTab.has(node.id)) {
+            this.gaugesActiveTab.set(node.id, 'list');
         }
 
-        body.innerHTML = '';
+        let mainArea = container.querySelector('.gauges-main-area') as HTMLElement;
+        let controlsPanel = container.querySelector('.gauges-controls-panel') as HTMLElement;
+        let toggleBtn = container.querySelector('.gauges-toggle-btn') as HTMLElement;
 
-        // 1. Toolbar
+        if (!mainArea || !controlsPanel || !toggleBtn) {
+            container.innerHTML = '';
+            container.style.flexDirection = 'row';
+            container.style.display = 'flex';
+            container.style.height = '100%';
+            container.style.width = '100%';
+            container.style.overflow = 'hidden';
+            container.style.position = 'relative';
+
+            mainArea = document.createElement('div');
+            mainArea.className = 'gauges-main-area';
+            mainArea.style.display = 'flex';
+            mainArea.style.flexDirection = 'column';
+            mainArea.style.flex = '1';
+            mainArea.style.minWidth = '0';
+            mainArea.style.height = '100%';
+            mainArea.style.position = 'relative';
+            container.appendChild(mainArea);
+
+            controlsPanel = document.createElement('div');
+            controlsPanel.className = 'gauges-controls-panel';
+            controlsPanel.style.background = '#121214';
+            controlsPanel.style.display = 'flex';
+            controlsPanel.style.flexDirection = 'column';
+            controlsPanel.style.height = '100%';
+            controlsPanel.style.overflow = 'hidden';
+            controlsPanel.style.flexShrink = '0';
+            controlsPanel.style.transition = 'width 0.15s, padding 0.15s, border-left 0.15s';
+            container.appendChild(controlsPanel);
+
+            toggleBtn = document.createElement('button');
+            toggleBtn.className = 'gauges-toggle-btn';
+            toggleBtn.style.position = 'absolute';
+            toggleBtn.style.top = '4px';
+            toggleBtn.style.right = '4px';
+            toggleBtn.style.zIndex = '110';
+            toggleBtn.style.background = '#1e1e24';
+            toggleBtn.style.color = '#ccc';
+            toggleBtn.style.border = '1px solid #444';
+            toggleBtn.style.borderRadius = '3px';
+            toggleBtn.style.fontSize = '9px';
+            toggleBtn.style.padding = '2px 6px';
+            toggleBtn.style.cursor = 'pointer';
+            toggleBtn.onmousedown = (e) => e.stopPropagation();
+            mainArea.appendChild(toggleBtn);
+        }
+
+        // Apply open/collapsed state classes and sizes
+        const panelOpen = this.gaugesPanelOpen.get(node.id) !== false;
+        if (panelOpen) {
+            controlsPanel.style.width = '200px';
+            controlsPanel.style.padding = '8px';
+            controlsPanel.style.borderLeft = '1px solid #222';
+            toggleBtn.textContent = '▶ Hide';
+        } else {
+            controlsPanel.style.width = '0px';
+            controlsPanel.style.padding = '0px';
+            controlsPanel.style.borderLeft = 'none';
+            toggleBtn.textContent = '◀ Controls';
+        }
+
+        // Toggle panel click handler
+        toggleBtn.onclick = (e) => {
+            e.stopPropagation();
+            const isOpen = this.gaugesPanelOpen.get(node.id) !== false;
+            const nextOpen = !isOpen;
+            this.gaugesPanelOpen.set(node.id, nextOpen);
+
+            if (nextOpen) {
+                controlsPanel.style.width = '200px';
+                controlsPanel.style.padding = '8px';
+                controlsPanel.style.borderLeft = '1px solid #222';
+                toggleBtn.textContent = '▶ Hide';
+            } else {
+                controlsPanel.style.width = '0px';
+                controlsPanel.style.padding = '0px';
+                controlsPanel.style.borderLeft = 'none';
+                toggleBtn.textContent = '◀ Controls';
+            }
+
+            // Redraw chart canvas on layout transition
+            const canvas = mainArea.querySelector('canvas') as HTMLCanvasElement;
+            if (canvas) {
+                canvas.width = canvas.clientWidth || 250;
+                canvas.height = canvas.clientHeight || 100;
+                const history = this.stateManager.getTelemetry(node.id);
+                if (history) {
+                    this.drawGaugesChart(canvas, history, gauges, currentChannel, has2D);
+                }
+            }
+        };
+
+        // 1. Rebuild Left Main Area (Chart Area) contents except the toggle button
+        Array.from(mainArea.children).forEach(child => {
+            if (child !== toggleBtn) mainArea.removeChild(child);
+        });
+
+        // Add Toolbar
         const toolbar = document.createElement('div');
-        toolbar.className = 'node-gauges-toolbar';
         toolbar.style.display = 'flex';
         toolbar.style.gap = '6px';
         toolbar.style.alignItems = 'center';
+        toolbar.style.padding = '4px 8px';
+        toolbar.style.borderBottom = '1px solid #222';
+        toolbar.style.background = '#1a1a1c';
+
+        const outputLabel = document.createElement('span');
+        outputLabel.textContent = 'Quantity:';
+        outputLabel.style.fontSize = '9px';
+        outputLabel.style.fontWeight = 'bold';
+        outputLabel.style.color = '#888';
+        toolbar.appendChild(outputLabel);
+
+        const outputSelect = document.createElement('select');
+        outputSelect.style.fontSize = '9px';
+        outputSelect.style.background = '#222';
+        outputSelect.style.color = '#ccc';
+        outputSelect.style.border = '1px solid #444';
+        outputSelect.style.padding = '1px 3px';
+        outputSelect.style.borderRadius = '2px';
 
         const CHANNELS = [
             { label: 'Pressure (Pa)' },
@@ -4734,14 +4860,6 @@ export class GraphRenderer {
             { label: 'Mass Fraction 1' },
             { label: 'Mass Fraction 2' }
         ];
-
-        const outputSelect = document.createElement('select');
-        outputSelect.style.fontSize = '11px';
-        outputSelect.style.background = '#222';
-        outputSelect.style.color = '#ccc';
-        outputSelect.style.border = '1px solid #444';
-        outputSelect.style.padding = '2px';
-        outputSelect.style.borderRadius = '3px';
         CHANNELS.forEach((ch, idx) => {
             const opt = document.createElement('option');
             opt.value = String(idx);
@@ -4753,270 +4871,453 @@ export class GraphRenderer {
             this.stateManager.updateNodeParameters(node.id, { telemetry_channel: Number(outputSelect.value) });
         };
         outputSelect.onmousedown = (e) => e.stopPropagation();
-        
-        const outputLabel = document.createElement('span');
-        outputLabel.textContent = 'Quantity:';
-        outputLabel.style.fontSize = '11px';
-        outputLabel.style.color = '#888';
-        toolbar.appendChild(outputLabel);
         toolbar.appendChild(outputSelect);
-        
-        // Spacer
-        const spacer = document.createElement('div');
-        spacer.style.flex = '1';
-        toolbar.appendChild(spacer);
+        mainArea.appendChild(toolbar);
 
-        const addBtn = document.createElement('button');
-        addBtn.textContent = '+ Gauge';
-        addBtn.style.padding = '2px 6px';
-        addBtn.style.fontSize = '11px';
-        addBtn.style.background = '#38bdf8';
-        addBtn.style.color = '#0f172a';
-        addBtn.style.border = 'none';
-        addBtn.style.borderRadius = '3px';
-        addBtn.style.cursor = 'pointer';
-        addBtn.onmousedown = (e) => e.stopPropagation();
-        addBtn.onclick = () => {
-            const nextIdx = gauges.length + 1;
-            const newGauge = is3D 
-                ? { id: `G${nextIdx}`, x: 0.5, y: 0.5, z: 0.5, active: true }
-                : { id: `G${nextIdx}`, r: 0.1, z: 0.0, active: true };
-            const newGauges = [...gauges, newGauge];
-            this.stateManager.updateNodeParameters(node.id, { gauges: newGauges });
-        };
-        toolbar.appendChild(addBtn);
+        // Add Canvas Container & Canvas
+        const canvasContainer = document.createElement('div');
+        canvasContainer.style.flex = '1';
+        canvasContainer.style.position = 'relative';
+        canvasContainer.style.minHeight = '0';
+        canvasContainer.style.background = '#1e1e1e';
+        mainArea.appendChild(canvasContainer);
 
-        const clearBtn = document.createElement('button');
-        clearBtn.textContent = 'Clear';
-        clearBtn.style.padding = '2px 6px';
-        clearBtn.style.fontSize = '11px';
-        clearBtn.style.background = '#dc2626';
-        clearBtn.style.color = '#fff';
-        clearBtn.style.border = 'none';
-        clearBtn.style.borderRadius = '3px';
-        clearBtn.style.cursor = 'pointer';
-        clearBtn.onmousedown = (e) => e.stopPropagation();
-        clearBtn.onclick = () => {
-            this.stateManager.updateNodeParameters(node.id, { gauges: [] });
-        };
-        toolbar.appendChild(clearBtn);
-
-        body.appendChild(toolbar);
-
-        // Flex row container for chart and list
-        const contentRow = document.createElement('div');
-        contentRow.style.display = 'flex';
-        contentRow.style.flexDirection = 'row';
-        contentRow.style.flex = '1';
-        contentRow.style.gap = '8px';
-        contentRow.style.minHeight = '60px';
-        body.appendChild(contentRow);
-
-        // 2. Chart Canvas
         const canvas = document.createElement('canvas');
-        canvas.className = 'node-gauges-canvas';
+        canvas.style.position = 'absolute';
+        canvas.style.top = '0';
+        canvas.style.left = '0';
         canvas.style.width = '100%';
-        canvas.style.flex = '1.5';
-        canvas.style.minHeight = '60px';
-        canvas.style.minWidth = '0';
-        canvas.style.background = '#1e1e1e';
-        canvas.style.border = '1px solid #333';
-        canvas.style.borderRadius = '3px';
-        contentRow.appendChild(canvas);
+        canvas.style.height = '100%';
+        canvasContainer.appendChild(canvas);
 
-        // 3. Gauges List/Table
-        const listDiv = document.createElement('div');
-        listDiv.style.flex = '1';
-        listDiv.style.minHeight = '60px';
-        listDiv.style.minWidth = '0';
-        listDiv.style.maxHeight = '200px';
-        listDiv.style.overflowY = 'auto';
-        listDiv.style.overflowX = 'auto';
-        listDiv.style.border = '1px solid #333';
-        listDiv.style.borderRadius = '3px';
-        listDiv.style.background = '#181818';
+        // 2. Rebuild Right Collapsible controlsPanel contents
+        controlsPanel.innerHTML = '';
 
-        if (gauges.length === 0) {
-            const empty = document.createElement('div');
-            empty.style.padding = '8px';
-            empty.style.fontSize = '11px';
-            empty.style.color = '#666';
-            empty.style.fontStyle = 'italic';
-            empty.textContent = 'No gauges defined';
-            listDiv.appendChild(empty);
-        } else {
-            const table = document.createElement('table');
-            table.style.width = '100%';
-            table.style.borderCollapse = 'collapse';
-            table.style.fontSize = '11px';
+        const activeTab = this.gaugesActiveTab.get(node.id) || 'list';
 
-            gauges.forEach((g: any, idx: number) => {
-                const tr = document.createElement('tr');
-                tr.style.borderBottom = '1px solid #222';
+        // Tab headers
+        const tabBar = document.createElement('div');
+        tabBar.style.display = 'flex';
+        tabBar.style.borderBottom = '1px solid #333';
+        tabBar.style.marginBottom = '6px';
+        tabBar.style.gap = '4px';
 
-                // ID
-                const tdId = document.createElement('td');
-                tdId.style.padding = '4px';
-                tdId.style.fontWeight = 'bold';
-                tdId.textContent = g.id || g.name;
-                tr.appendChild(tdId);
+        const tabBtnList = document.createElement('button');
+        tabBtnList.textContent = 'GAUGES';
+        tabBtnList.style.padding = '4px 6px';
+        tabBtnList.style.fontSize = '9px';
+        tabBtnList.style.fontWeight = 'bold';
+        tabBtnList.style.background = activeTab === 'list' ? '#1e1e1e' : 'transparent';
+        tabBtnList.style.color = activeTab === 'list' ? '#38bdf8' : '#888';
+        tabBtnList.style.border = 'none';
+        tabBtnList.style.borderBottom = activeTab === 'list' ? '2px solid #38bdf8' : '2px solid transparent';
+        tabBtnList.style.cursor = 'pointer';
+        tabBtnList.style.flex = '1';
+        tabBtnList.style.textAlign = 'center';
+        tabBtnList.onmousedown = (e) => e.stopPropagation();
+        tabBtnList.onclick = (e) => {
+            e.stopPropagation();
+            this.gaugesActiveTab.set(node.id, 'list');
+            this.renderVirtualGaugesContent(node, container);
+        };
+        tabBar.appendChild(tabBtnList);
 
+        const tabBtnSettings = document.createElement('button');
+        tabBtnSettings.textContent = 'SETTINGS';
+        tabBtnSettings.style.padding = '4px 6px';
+        tabBtnSettings.style.fontSize = '9px';
+        tabBtnSettings.style.fontWeight = 'bold';
+        tabBtnSettings.style.background = activeTab === 'settings' ? '#1e1e1e' : 'transparent';
+        tabBtnSettings.style.color = activeTab === 'settings' ? '#38bdf8' : '#888';
+        tabBtnSettings.style.border = 'none';
+        tabBtnSettings.style.borderBottom = activeTab === 'settings' ? '2px solid #38bdf8' : '2px solid transparent';
+        tabBtnSettings.style.cursor = 'pointer';
+        tabBtnSettings.style.flex = '1';
+        tabBtnSettings.style.textAlign = 'center';
+        tabBtnSettings.onmousedown = (e) => e.stopPropagation();
+        tabBtnSettings.onclick = (e) => {
+            e.stopPropagation();
+            this.gaugesActiveTab.set(node.id, 'settings');
+            this.renderVirtualGaugesContent(node, container);
+        };
+        tabBar.appendChild(tabBtnSettings);
+        controlsPanel.appendChild(tabBar);
+
+        // Tab Content Scroll Container
+        const panelContent = document.createElement('div');
+        panelContent.style.flex = '1';
+        panelContent.style.overflowY = 'auto';
+        panelContent.style.display = 'flex';
+        panelContent.style.flexDirection = 'column';
+        panelContent.style.gap = '8px';
+        panelContent.style.minHeight = '0';
+        controlsPanel.appendChild(panelContent);
+
+        if (activeTab === 'list') {
+            // Add/Clear Buttons Row
+            const buttonsRow = document.createElement('div');
+            buttonsRow.style.display = 'flex';
+            buttonsRow.style.gap = '6px';
+
+            const addBtn = document.createElement('button');
+            addBtn.textContent = '+ Gauge';
+            addBtn.style.flex = '1';
+            addBtn.style.padding = '3px 6px';
+            addBtn.style.fontSize = '9px';
+            addBtn.style.fontWeight = 'bold';
+            addBtn.style.background = '#38bdf8';
+            addBtn.style.color = '#0f172a';
+            addBtn.style.border = 'none';
+            addBtn.style.borderRadius = '3px';
+            addBtn.style.cursor = 'pointer';
+            addBtn.onmousedown = (e) => e.stopPropagation();
+            addBtn.onclick = () => {
+                const nextIdx = gauges.length + 1;
+                const newGauge = is3D 
+                    ? { id: `G${nextIdx}`, x: 0.5, y: 0.5, z: 0.5, active: true }
+                    : { id: `G${nextIdx}`, r: 0.1, z: 0.0, active: true };
+                const newGauges = [...gauges, newGauge];
+                this.stateManager.updateNodeParameters(node.id, { gauges: newGauges });
+            };
+            buttonsRow.appendChild(addBtn);
+
+            const clearBtn = document.createElement('button');
+            clearBtn.textContent = 'Clear';
+            clearBtn.style.flex = '1';
+            clearBtn.style.padding = '3px 6px';
+            clearBtn.style.fontSize = '9px';
+            clearBtn.style.fontWeight = 'bold';
+            clearBtn.style.background = '#dc2626';
+            clearBtn.style.color = '#fff';
+            clearBtn.style.border = 'none';
+            clearBtn.style.borderRadius = '3px';
+            clearBtn.style.cursor = 'pointer';
+            clearBtn.onmousedown = (e) => e.stopPropagation();
+            clearBtn.onclick = () => {
+                this.stateManager.updateNodeParameters(node.id, { gauges: [] });
+            };
+            buttonsRow.appendChild(clearBtn);
+            panelContent.appendChild(buttonsRow);
+
+            // Gauges table
+            const listDiv = document.createElement('div');
+            listDiv.style.border = '1px solid #333';
+            listDiv.style.borderRadius = '3px';
+            listDiv.style.background = '#181818';
+            listDiv.style.minHeight = '40px';
+
+            if (gauges.length === 0) {
+                const empty = document.createElement('div');
+                empty.style.padding = '8px';
+                empty.style.fontSize = '9px';
+                empty.style.color = '#666';
+                empty.style.fontStyle = 'italic';
+                empty.textContent = 'No gauges defined';
+                listDiv.appendChild(empty);
+            } else {
+                const table = document.createElement('table');
+                table.style.width = '100%';
+                table.style.borderCollapse = 'collapse';
+                table.style.fontSize = '9px';
+                table.style.color = '#ccc';
+
+                const thead = document.createElement('thead');
+                thead.style.borderBottom = '1px solid #333';
+                thead.style.background = '#1a1a1c';
+                const headerTr = document.createElement('tr');
                 if (is3D) {
-                    // X Coordinate Input
-                    const tdX = document.createElement('td');
-                    tdX.style.padding = '4px';
-                    const inputX = document.createElement('input');
-                    inputX.type = 'number';
-                    inputX.step = 'any';
-                    inputX.value = String(g.x ?? 0.5);
-                    inputX.style.width = '35px';
-                    inputX.style.background = '#252526';
-                    inputX.style.color = '#ccc';
-                    inputX.style.border = '1px solid #444';
-                    inputX.style.fontSize = '10px';
-                    inputX.style.padding = '1px 3px';
-                    inputX.onmousedown = (e) => e.stopPropagation();
-                    inputX.onchange = () => {
-                        const updated = [...gauges];
-                        updated[idx] = { ...g, x: Number(inputX.value) };
-                        this.stateManager.updateNodeParameters(node.id, { gauges: updated });
-                    };
-                    tdX.appendChild(document.createTextNode('X: '));
-                    tdX.appendChild(inputX);
-                    tr.appendChild(tdX);
-
-                    // Y Coordinate Input
-                    const tdY = document.createElement('td');
-                    tdY.style.padding = '4px';
-                    const inputY = document.createElement('input');
-                    inputY.type = 'number';
-                    inputY.step = 'any';
-                    inputY.value = String(g.y ?? 0.5);
-                    inputY.style.width = '35px';
-                    inputY.style.background = '#252526';
-                    inputY.style.color = '#ccc';
-                    inputY.style.border = '1px solid #444';
-                    inputY.style.fontSize = '10px';
-                    inputY.style.padding = '1px 3px';
-                    inputY.onmousedown = (e) => e.stopPropagation();
-                    inputY.onchange = () => {
-                        const updated = [...gauges];
-                        updated[idx] = { ...g, y: Number(inputY.value) };
-                        this.stateManager.updateNodeParameters(node.id, { gauges: updated });
-                    };
-                    tdY.appendChild(document.createTextNode(' Y: '));
-                    tdY.appendChild(inputY);
-                    tr.appendChild(tdY);
-
-                    // Z Coordinate Input
-                    const tdZ = document.createElement('td');
-                    tdZ.style.padding = '4px';
-                    const inputZ = document.createElement('input');
-                    inputZ.type = 'number';
-                    inputZ.step = 'any';
-                    inputZ.value = String(g.z ?? 0.5);
-                    inputZ.style.width = '35px';
-                    inputZ.style.background = '#252526';
-                    inputZ.style.color = '#ccc';
-                    inputZ.style.border = '1px solid #444';
-                    inputZ.style.fontSize = '10px';
-                    inputZ.style.padding = '1px 3px';
-                    inputZ.onmousedown = (e) => e.stopPropagation();
-                    inputZ.onchange = () => {
-                        const updated = [...gauges];
-                        updated[idx] = { ...g, z: Number(inputZ.value) };
-                        this.stateManager.updateNodeParameters(node.id, { gauges: updated });
-                    };
-                    tdZ.appendChild(document.createTextNode(' Z: '));
-                    tdZ.appendChild(inputZ);
-                    tr.appendChild(tdZ);
+                    headerTr.innerHTML = `
+                        <th style="text-align:left;padding:2px 4px;">ID</th>
+                        <th style="text-align:left;padding:2px 4px;">X</th>
+                        <th style="text-align:left;padding:2px 4px;">Y</th>
+                        <th style="text-align:left;padding:2px 4px;">Z</th>
+                        <th></th>
+                    `;
                 } else {
-                    // R Coordinate Input
-                    const tdR = document.createElement('td');
-                    tdR.style.padding = '4px';
-                    const inputR = document.createElement('input');
-                    inputR.type = 'number';
-                    inputR.step = 'any';
-                    inputR.value = String(g.r ?? 0.1);
-                    inputR.style.width = '50px';
-                    inputR.style.background = '#252526';
-                    inputR.style.color = '#ccc';
-                    inputR.style.border = '1px solid #444';
-                    inputR.style.fontSize = '10px';
-                    inputR.style.padding = '1px 3px';
-                    inputR.onmousedown = (e) => e.stopPropagation();
-                    inputR.onchange = () => {
-                        const updated = [...gauges];
-                        updated[idx] = { ...g, r: Number(inputR.value) };
+                    headerTr.innerHTML = `
+                        <th style="text-align:left;padding:2px 4px;">ID</th>
+                        <th style="text-align:left;padding:2px 4px;">R</th>
+                        ${has2D ? '<th style="text-align:left;padding:2px 4px;">Z</th>' : ''}
+                        <th></th>
+                    `;
+                }
+                thead.appendChild(headerTr);
+                table.appendChild(thead);
+
+                const tbody = document.createElement('tbody');
+                gauges.forEach((g: any, idx: number) => {
+                    const tr = document.createElement('tr');
+                    tr.style.borderBottom = '1px solid #222';
+
+                    const tdId = document.createElement('td');
+                    tdId.style.padding = '2px 4px';
+                    tdId.style.fontWeight = 'bold';
+                    tdId.textContent = g.id || g.name;
+                    tr.appendChild(tdId);
+
+                    if (is3D) {
+                        const tdX = document.createElement('td');
+                        tdX.style.padding = '2px 4px';
+                        tdX.textContent = String(g.x ?? 0.5);
+                        tr.appendChild(tdX);
+
+                        const tdY = document.createElement('td');
+                        tdY.style.padding = '2px 4px';
+                        tdY.textContent = String(g.y ?? 0.5);
+                        tr.appendChild(tdY);
+
+                        const tdZ = document.createElement('td');
+                        tdZ.style.padding = '2px 4px';
+                        tdZ.textContent = String(g.z ?? 0.5);
+                        tr.appendChild(tdZ);
+                    } else {
+                        const tdR = document.createElement('td');
+                        tdR.style.padding = '2px 4px';
+                        tdR.textContent = String(g.r ?? 0.1);
+                        tr.appendChild(tdR);
+
+                        if (has2D) {
+                            const tdZ = document.createElement('td');
+                            tdZ.style.padding = '2px 4px';
+                            tdZ.textContent = String(g.z ?? 0.0);
+                            tr.appendChild(tdZ);
+                        }
+                    }
+
+                    // Delete Button
+                    const tdDel = document.createElement('td');
+                    tdDel.style.padding = '2px 4px';
+                    tdDel.style.textAlign = 'right';
+                    const delBtn = document.createElement('button');
+                    delBtn.textContent = '×';
+                    delBtn.style.background = 'none';
+                    delBtn.style.color = '#ef4444';
+                    delBtn.style.border = 'none';
+                    delBtn.style.cursor = 'pointer';
+                    delBtn.style.fontWeight = 'bold';
+                    delBtn.style.fontSize = '12px';
+                    delBtn.style.padding = '0';
+                    delBtn.onmousedown = (e) => e.stopPropagation();
+                    delBtn.onclick = () => {
+                        const updated = gauges.filter((_: any, i: number) => i !== idx);
                         this.stateManager.updateNodeParameters(node.id, { gauges: updated });
                     };
-                    tdR.appendChild(document.createTextNode('R: '));
-                    tdR.appendChild(inputR);
-                    tr.appendChild(tdR);
+                    tdDel.appendChild(delBtn);
+                    tr.appendChild(tdDel);
 
-                    // Z Coordinate Input (only if 2D)
-                    if (has2D) {
-                        const tdZ = document.createElement('td');
-                        tdZ.style.padding = '4px';
-                        const inputZ = document.createElement('input');
-                        inputZ.type = 'number';
-                        inputZ.step = 'any';
-                        inputZ.value = String(g.z ?? 0.0);
-                        inputZ.style.width = '50px';
-                        inputZ.style.background = '#252526';
-                        inputZ.style.color = '#ccc';
-                        inputZ.style.border = '1px solid #444';
-                        inputZ.style.fontSize = '10px';
-                        inputZ.style.padding = '1px 3px';
-                        inputZ.onmousedown = (e) => e.stopPropagation();
-                        inputZ.onchange = () => {
-                            const updated = [...gauges];
-                            updated[idx] = { ...g, z: Number(inputZ.value) };
-                            this.stateManager.updateNodeParameters(node.id, { gauges: updated });
-                        };
-                        tdZ.appendChild(document.createTextNode(' Z: '));
-                        tdZ.appendChild(inputZ);
-                        tr.appendChild(tdZ);
-                    }
-                }
+                    tbody.appendChild(tr);
+                });
+                table.appendChild(tbody);
+                listDiv.appendChild(table);
+            }
+            panelContent.appendChild(listDiv);
+        } else if (activeTab === 'settings') {
+            const mkSection = (label: string) => {
+                const hdr = document.createElement('div');
+                hdr.style.fontSize = '9px';
+                hdr.style.color = '#555';
+                hdr.style.fontWeight = 'bold';
+                hdr.style.letterSpacing = '0.08em';
+                hdr.style.padding = '6px 0 2px';
+                hdr.style.borderTop = '1px solid #2a2a2a';
+                hdr.style.marginTop = '4px';
+                hdr.textContent = label;
+                panelContent.appendChild(hdr);
+            };
 
-                // Delete Button
-                const tdDel = document.createElement('td');
-                tdDel.style.padding = '4px';
-                tdDel.style.textAlign = 'right';
-                const delBtn = document.createElement('button');
-                delBtn.textContent = '×';
-                delBtn.style.background = 'none';
-                delBtn.style.color = '#ef4444';
-                delBtn.style.border = 'none';
-                delBtn.style.cursor = 'pointer';
-                delBtn.style.fontWeight = 'bold';
-                delBtn.style.fontSize = '14px';
-                delBtn.onmousedown = (e) => e.stopPropagation();
-                delBtn.onclick = () => {
-                    const updated = gauges.filter((_: any, i: number) => i !== idx);
-                    this.stateManager.updateNodeParameters(node.id, { gauges: updated });
+            const mkRow = (labelText: string, el: HTMLElement) => {
+                const wrap = document.createElement('div');
+                wrap.style.display = 'flex';
+                wrap.style.flexDirection = 'column';
+                wrap.style.gap = '2px';
+                wrap.style.marginBottom = '4px';
+                const lbl = document.createElement('label');
+                lbl.style.fontSize = '8px';
+                lbl.style.color = '#666';
+                lbl.textContent = labelText;
+                wrap.appendChild(lbl);
+                wrap.appendChild(el);
+                return wrap;
+            };
+
+            const createCheckboxField = (key: string, value: boolean, labelText: string) => {
+                const row = document.createElement('div');
+                row.style.display = 'flex';
+                row.style.alignItems = 'center';
+                row.style.gap = '4px';
+                row.style.padding = '1px 0';
+
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.checked = value;
+                cb.style.cursor = 'pointer';
+                cb.style.margin = '0';
+                cb.onchange = () => {
+                    this.stateManager.updateNodeParameters(node.id, { [key]: cb.checked });
                 };
-                tdDel.appendChild(delBtn);
-                tr.appendChild(tdDel);
+                cb.onmousedown = (e) => e.stopPropagation();
 
-                table.appendChild(tr);
+                const span = document.createElement('span');
+                span.style.fontSize = '9px';
+                span.style.color = '#ccc';
+                span.style.cursor = 'pointer';
+                span.textContent = labelText;
+                span.onclick = () => {
+                    cb.checked = !cb.checked;
+                    cb.dispatchEvent(new Event('change'));
+                };
+
+                row.appendChild(cb);
+                row.appendChild(span);
+                return row;
+            };
+
+            const mkInput = (type: string, val: string | number, key: string, onChange: (v: string) => void): HTMLInputElement => {
+                const inp = document.createElement('input');
+                inp.type = type;
+                if (type === 'number') inp.step = 'any';
+                inp.value = String(val);
+                inp.style.width = '100%';
+                inp.style.fontSize = '9px';
+                inp.style.background = '#1a1a1c';
+                inp.style.color = '#ccc';
+                inp.style.border = '1px solid #333';
+                inp.style.padding = '1px 3px';
+                inp.style.borderRadius = '2px';
+                inp.style.boxSizing = 'border-box';
+                inp.onchange = () => onChange(inp.value);
+                inp.addEventListener('mousedown', e => e.stopPropagation());
+                return inp;
+            };
+
+            // FORMAT
+            mkSection('FORMAT');
+            const formatGrid = document.createElement('div');
+            formatGrid.style.display = 'grid';
+            formatGrid.style.gridTemplateColumns = 'repeat(2, 1fr)';
+            formatGrid.style.gap = '4px';
+            formatGrid.appendChild(createCheckboxField('export_ascii', !!node.parameters?.export_ascii, 'ASCII'));
+            formatGrid.appendChild(createCheckboxField('export_binary', !!node.parameters?.export_binary, 'Binary'));
+            formatGrid.appendChild(createCheckboxField('export_hdf5', !!node.parameters?.export_hdf5, 'HDF5'));
+            panelContent.appendChild(formatGrid);
+
+            // CONFIG
+            mkSection('CONFIG');
+            const delimSel = document.createElement('select');
+            delimSel.style.width = '100%';
+            delimSel.style.background = '#1a1a1c';
+            delimSel.style.color = '#ccc';
+            delimSel.style.border = '1px solid #333';
+            delimSel.style.borderRadius = '3px';
+            delimSel.style.fontSize = '9px';
+            delimSel.style.padding = '1px';
+            delimSel.innerHTML = '<option value=",">Comma (,)</option><option value="\\t">Tab (\\t)</option><option value=" ">Space ( )</option>';
+            delimSel.value = node.parameters?.ascii_delimiter || ',';
+            delimSel.onchange = () => {
+                this.stateManager.updateNodeParameters(node.id, { ascii_delimiter: delimSel.value });
+            };
+            delimSel.onmousedown = (e) => e.stopPropagation();
+            panelContent.appendChild(mkRow('ASCII DELIMITER', delimSel));
+
+            const precInput = mkInput('number', node.parameters?.ascii_precision ?? 6, 'ascii_precision', (v) => {
+                this.stateManager.updateNodeParameters(node.id, { ascii_precision: Number(v) });
             });
-            listDiv.appendChild(table);
+            panelContent.appendChild(mkRow('ASCII PRECISION', precInput));
+
+            panelContent.appendChild(createCheckboxField('include_header', node.parameters?.include_header !== false, 'Include Header'));
+
+            const strideSel = document.createElement('select');
+            strideSel.style.width = '100%';
+            strideSel.style.background = '#1a1a1c';
+            strideSel.style.color = '#ccc';
+            strideSel.style.border = '1px solid #333';
+            strideSel.style.borderRadius = '3px';
+            strideSel.style.fontSize = '9px';
+            strideSel.style.padding = '1px';
+            
+            const STRIDES = [
+                { value: 1, label: 'Every step' },
+                { value: 2, label: 'Every 2 steps' },
+                { value: 5, label: 'Every 5 steps' },
+                { value: 10, label: 'Every 10 steps' },
+                { value: 20, label: 'Every 20 steps' },
+                { value: 50, label: 'Every 50 steps' },
+                { value: 100, label: 'Every 100 steps' }
+            ];
+            STRIDES.forEach(s => {
+                const opt = document.createElement('option');
+                opt.value = String(s.value);
+                opt.textContent = s.label;
+                if (Number(node.parameters?.plot_stride ?? 1) === s.value) opt.selected = true;
+                strideSel.appendChild(opt);
+            });
+            strideSel.onchange = () => {
+                this.stateManager.updateNodeParameters(node.id, { plot_stride: Number(strideSel.value) });
+            };
+            strideSel.onmousedown = (e) => e.stopPropagation();
+            panelContent.appendChild(mkRow('PLOT STRIDE', strideSel));
+
+            // FILE
+            mkSection('FILE');
+            const fileInput = mkInput('text', node.parameters?.custom_filename ?? '', 'custom_filename', (v) => {
+                this.stateManager.updateNodeParameters(node.id, { custom_filename: v });
+            });
+            panelContent.appendChild(mkRow('FILENAME', fileInput));
+
+            const dirWrap = document.createElement('div');
+            dirWrap.style.display = 'flex';
+            dirWrap.style.gap = '4px';
+
+            const dirInput = mkInput('text', node.parameters?.output_dir ?? '', 'output_dir', (v) => {
+                this.stateManager.updateNodeParameters(node.id, { output_dir: v });
+            });
+            dirInput.style.flex = '1';
+            dirWrap.appendChild(dirInput);
+
+            const browseBtn = document.createElement('button');
+            browseBtn.textContent = '...';
+            browseBtn.style.padding = '1px 6px';
+            browseBtn.style.fontSize = '9px';
+            browseBtn.style.background = '#333';
+            browseBtn.style.color = '#ccc';
+            browseBtn.style.border = '1px solid #444';
+            browseBtn.style.borderRadius = '3px';
+            browseBtn.style.cursor = 'pointer';
+            browseBtn.onmousedown = (e) => e.stopPropagation();
+            browseBtn.onclick = () => {
+                const modal = new HostFileBrowserModal(
+                    (window as any).networkManager,
+                    'save',
+                    '',
+                    (folderPath) => {
+                        this.stateManager.updateNodeParameters(node.id, { output_dir: folderPath });
+                    }
+                );
+                modal.open(node.parameters?.output_dir || '');
+            };
+            dirWrap.appendChild(browseBtn);
+            panelContent.appendChild(mkRow('OUTPUT DIR', dirWrap));
+
+            // QUANTITIES
+            mkSection('QUANTITIES');
+            const qtyGrid = document.createElement('div');
+            qtyGrid.style.display = 'grid';
+            qtyGrid.style.gridTemplateColumns = 'repeat(2, 1fr)';
+            qtyGrid.style.gap = '4px';
+            qtyGrid.appendChild(createCheckboxField('qty_pressure', !!node.parameters?.qty_pressure, 'Pressure'));
+            qtyGrid.appendChild(createCheckboxField('qty_density', !!node.parameters?.qty_density, 'Density'));
+            qtyGrid.appendChild(createCheckboxField('qty_velocity', !!node.parameters?.qty_velocity, 'Velocity'));
+            qtyGrid.appendChild(createCheckboxField('qty_energy', !!node.parameters?.qty_energy, 'Energy'));
+            qtyGrid.appendChild(createCheckboxField('qty_reacted', !!node.parameters?.qty_reacted, 'Reacted'));
+            qtyGrid.appendChild(createCheckboxField('qty_unreacted', !!node.parameters?.qty_unreacted, 'Unreacted'));
+            qtyGrid.appendChild(createCheckboxField('qty_air', !!node.parameters?.qty_air, 'Air'));
+            panelContent.appendChild(qtyGrid);
         }
-        contentRow.appendChild(listDiv);
 
         // Draw chart and automatically adjust layout and canvas resolution when resized
         const history = this.stateManager.getTelemetry(node.id);
         const ro = new ResizeObserver((entries) => {
             for (const entry of entries) {
-                const { width } = entry.contentRect;
-                if (width < 340) {
-                    contentRow.style.flexDirection = 'column';
-                } else {
-                    contentRow.style.flexDirection = 'row';
-                }
-                
                 canvas.width = canvas.clientWidth || 250;
                 canvas.height = canvas.clientHeight || 100;
                 if (history) {
@@ -5024,7 +5325,7 @@ export class GraphRenderer {
                 }
             }
         });
-        ro.observe(body);
+        ro.observe(canvasContainer);
     }
 
     private drawGaugesChart(canvas: HTMLCanvasElement, history: any, gauges: any[], channel: number, has2D: boolean): void {

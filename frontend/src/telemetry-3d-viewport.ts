@@ -699,6 +699,22 @@ export class Telemetry3DViewport {
         const solverNode = this.getSolverNode();
         if (!vpNode) return;
 
+        // Resolve connected DomainMesh3D
+        let meshNode: any = null;
+        const state = this.stateManager.getCurrentState();
+        if (state) {
+            const connToViewport = state.connections.find(c => c.toNode === vpNode.id);
+            if (connToViewport) {
+                const solverNode = state.nodes.find(n => n.id === connToViewport.fromNode);
+                if (solverNode) {
+                    const connToSolver = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'mesh');
+                    if (connToSolver) {
+                        meshNode = state.nodes.find(n => n.id === connToSolver.fromNode);
+                    }
+                }
+            }
+        }
+
         // 1. Sync Render Settings
         const gridCb = document.getElementById('viewport-grid-cb') as HTMLInputElement;
         if (gridCb && document.activeElement !== gridCb) {
@@ -815,6 +831,7 @@ export class Telemetry3DViewport {
                     row.appendChild(grid);
 
                     // Offset slider + numerical input
+                    const bounds = getSliceBounds(slice.axis, meshNode);
                     const offWrap = document.createElement('div');
                     offWrap.style.display = 'flex';
                     offWrap.style.alignItems = 'center';
@@ -823,9 +840,9 @@ export class Telemetry3DViewport {
                     
                     const offSlider = document.createElement('input');
                     offSlider.type = 'range';
-                    offSlider.min = '0';
-                    offSlider.max = '1';
-                    offSlider.step = '0.01';
+                    offSlider.min = bounds.min.toString();
+                    offSlider.max = bounds.max.toString();
+                    offSlider.step = Math.max(0.001, (bounds.max - bounds.min) / 100).toString();
                     offSlider.value = slice.offset.toString();
                     offSlider.style.flex = '1';
                     offSlider.style.height = '3px';
@@ -845,7 +862,7 @@ export class Telemetry3DViewport {
                         this.updateSliceProperty(idx, { offset: Number(offSlider.value) });
                     };
                     offInp.onchange = () => {
-                        const val = Math.max(0, Math.min(1.0, Number(offInp.value)));
+                        const val = Math.max(bounds.min, Math.min(bounds.max, Number(offInp.value)));
                         offSlider.value = val.toString();
                         offInp.value = val.toString();
                         this.updateSliceProperty(idx, { offset: val });
@@ -863,6 +880,8 @@ export class Telemetry3DViewport {
                     const row = this.sliceListContainer!.children[idx] as HTMLElement;
                     if (!row) return;
                     
+                    const bounds = getSliceBounds(slice.axis, meshNode);
+                    
                     const axisSel = row.querySelector('select:nth-of-type(1)') as HTMLSelectElement;
                     if (axisSel && document.activeElement !== axisSel) {
                         axisSel.value = slice.axis;
@@ -872,8 +891,13 @@ export class Telemetry3DViewport {
                         qSel.value = slice.quantities?.[0] || 'pressure';
                     }
                     const offSlider = row.querySelector('input[type="range"]') as HTMLInputElement;
-                    if (offSlider && document.activeElement !== offSlider) {
-                        offSlider.value = slice.offset.toString();
+                    if (offSlider) {
+                        offSlider.min = bounds.min.toString();
+                        offSlider.max = bounds.max.toString();
+                        offSlider.step = Math.max(0.001, (bounds.max - bounds.min) / 100).toString();
+                        if (document.activeElement !== offSlider) {
+                            offSlider.value = slice.offset.toString();
+                        }
                     }
                     const offInp = row.querySelector('input[type="number"]') as HTMLInputElement;
                     if (offInp && document.activeElement !== offInp) {
@@ -913,24 +937,15 @@ export class Telemetry3DViewport {
 
         // 4. Find connected domain mesh dimensions and configure worker
         let dimX = 1.0, dimY = 1.0, dimZ = 1.0, cellSize = 0.01;
-        const state = this.stateManager.getCurrentState();
-        if (state) {
-            const connToViewport = state.connections.find(c => c.toNode === vpNode.id);
-            if (connToViewport) {
-                const solverNode = state.nodes.find(n => n.id === connToViewport.fromNode);
-                if (solverNode) {
-                    const connToSolver = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'mesh');
-                    if (connToSolver) {
-                        const meshNode = state.nodes.find(n => n.id === connToSolver.fromNode);
-                        if (meshNode && meshNode.type === 'DomainMesh3D') {
-                            dimX = Number(meshNode.parameters?.dim_x ?? 1.0);
-                            dimY = Number(meshNode.parameters?.dim_y ?? 1.0);
-                            dimZ = Number(meshNode.parameters?.dim_z ?? 1.0);
-                            cellSize = Number(meshNode.parameters?.cell_size ?? 0.01);
-                        }
-                    }
-                }
-            }
+        let xmin = 0.0, ymin = 0.0, zmin = 0.0;
+        if (meshNode && meshNode.type === 'DomainMesh3D') {
+            dimX = Number(meshNode.parameters?.dim_x ?? 1.0);
+            dimY = Number(meshNode.parameters?.dim_y ?? 1.0);
+            dimZ = Number(meshNode.parameters?.dim_z ?? 1.0);
+            xmin = Number(meshNode.parameters?.origin_x ?? 0.0);
+            ymin = Number(meshNode.parameters?.origin_y ?? 0.0);
+            zmin = Number(meshNode.parameters?.origin_z ?? 0.0);
+            cellSize = Number(meshNode.parameters?.cell_size ?? 0.01);
         }
         const nx = Math.round(dimX / cellSize);
         const ny = Math.round(dimY / cellSize);
@@ -947,9 +962,9 @@ export class Telemetry3DViewport {
                 useLogScale: vpNode.parameters.log_scale === true,
                 showCellEdges: vpNode.parameters.cell_edges === true,
                 interpolate: vpNode.parameters.interpolate === true,
-                xmin: 0.0,
-                ymin: 0.0,
-                zmin: 0.0,
+                xmin: xmin,
+                ymin: ymin,
+                zmin: zmin,
                 dx: cellSize,
                 nx: nx,
                 ny: ny,
@@ -1003,3 +1018,28 @@ export class Telemetry3DViewport {
         if (this.floatOpenBtn) this.floatOpenBtn.remove();
     }
 }
+
+function getSliceBounds(axis: string, meshNode: any) {
+    let min = 0.0;
+    let max = 1.0;
+    if (meshNode && meshNode.type === 'DomainMesh3D') {
+        const originX = Number(meshNode.parameters?.origin_x ?? 0.0);
+        const originY = Number(meshNode.parameters?.origin_y ?? 0.0);
+        const originZ = Number(meshNode.parameters?.origin_z ?? 0.0);
+        const dimX = Number(meshNode.parameters?.dim_x ?? 1.0);
+        const dimY = Number(meshNode.parameters?.dim_y ?? 1.0);
+        const dimZ = Number(meshNode.parameters?.dim_z ?? 1.0);
+        if (axis === 'xy') {
+            min = originZ;
+            max = originZ + dimZ;
+        } else if (axis === 'xz') {
+            min = originY;
+            max = originY + dimY;
+        } else if (axis === 'yz') {
+            min = originX;
+            max = originX + dimX;
+        }
+    }
+    return { min, max };
+}
+

@@ -14,4 +14,15 @@ void export_vtk_particles(const std::string& filename, int num_particles,
                            const double* stress_xx, const double* stress_yy,
                            const double* stress_xy, const double* stress_vm);
 
+class CFDSolver3D;
+struct Slice3D;
+
+void export_vtu_slice_3d(const std::string& filename, const CFDSolver3D& solver, const Slice3D& slice, const std::string& format,
+                         bool has_p, bool has_rho, bool has_vel, bool has_E,
+                         bool has_reacted, bool has_unreacted, bool has_air);
+
+void export_vtu_volume_3d(const std::string& filename, const CFDSolver3D& solver, const std::string& format,
+                          bool has_p, bool has_rho, bool has_vel, bool has_E,
+                          bool has_reacted, bool has_unreacted, bool has_air);
+
 #endif

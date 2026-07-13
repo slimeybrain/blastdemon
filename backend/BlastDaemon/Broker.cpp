@@ -10,6 +10,8 @@
 #include <memory>
 #include <algorithm>
 #include <nlohmann/json.hpp>
+#include <fstream>
+#include <filesystem>
 #include "ProcessManager.hpp"
 
 #ifdef _WIN32
@@ -275,6 +277,147 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
 
     std::string command = payload.value("command", "");
     std::string modelId = payload.value("modelId", "default");
+
+    if (command == "SAVE_MODEL_FILE") {
+        std::string filePath = payload.value("filePath", "");
+        std::string fileContent = payload.value("fileContent", "");
+        nlohmann::json resp;
+        resp["type"] = "save_model_response";
+        resp["modelId"] = modelId;
+        resp["filePath"] = filePath;
+
+        std::ofstream out(filePath);
+        if (out.is_open()) {
+            out << fileContent;
+            out.close();
+            resp["status"] = "success";
+            std::cout << "[Broker] Saved model " << modelId << " to local path: " << filePath << std::endl;
+        } else {
+            resp["status"] = "error";
+            resp["error"] = "Failed to open file for writing at: " + filePath;
+            std::cerr << "[Broker] [ERROR] Failed to save model to path: " << filePath << std::endl;
+        }
+
+        if (client) {
+            send_websocket_text(client, resp.dump());
+        }
+        return;
+    }
+
+    if (command == "LIST_DIR") {
+        std::string path_str = payload.value("path", "");
+        nlohmann::json resp;
+        resp["type"] = "list_dir_response";
+        resp["modelId"] = modelId;
+
+        try {
+            std::filesystem::path p(path_str);
+            if (path_str.empty() || path_str == "." || !std::filesystem::exists(p) || !std::filesystem::is_directory(p)) {
+                // Try parent path if it existed previously
+                if (!path_str.empty()) {
+                    p = std::filesystem::path(path_str).parent_path();
+                }
+                // Fall back to current path
+                if (p.empty() || !std::filesystem::exists(p) || !std::filesystem::is_directory(p)) {
+                    p = std::filesystem::current_path();
+                }
+            }
+            p = std::filesystem::absolute(p);
+            resp["currentPath"] = p.string();
+
+            nlohmann::json entries = nlohmann::json::array();
+            for (const auto& entry : std::filesystem::directory_iterator(p)) {
+                nlohmann::json ent;
+                ent["name"] = entry.path().filename().string();
+                ent["isDir"] = entry.is_directory();
+                try {
+                    ent["size"] = entry.is_regular_file() ? std::filesystem::file_size(entry) : 0;
+                } catch (...) {
+                    ent["size"] = 0;
+                }
+                entries.push_back(ent);
+            }
+            resp["status"] = "success";
+            resp["entries"] = entries;
+        } catch (const std::exception& e) {
+            try {
+                std::filesystem::path fallback = std::filesystem::absolute(std::filesystem::current_path());
+                resp["currentPath"] = fallback.string();
+                nlohmann::json entries = nlohmann::json::array();
+                for (const auto& entry : std::filesystem::directory_iterator(fallback)) {
+                    nlohmann::json ent;
+                    ent["name"] = entry.path().filename().string();
+                    ent["isDir"] = entry.is_directory();
+                    ent["size"] = 0;
+                    entries.push_back(ent);
+                }
+                resp["status"] = "success";
+                resp["entries"] = entries;
+                resp["warning"] = e.what();
+            } catch (...) {
+                resp["status"] = "error";
+                resp["error"] = e.what();
+            }
+        }
+
+        if (client) {
+            send_websocket_text(client, resp.dump());
+        }
+        return;
+    }
+
+    if (command == "LOAD_MODEL_FILE") {
+        std::string filePath = payload.value("filePath", "");
+        nlohmann::json resp;
+        resp["type"] = "load_model_response";
+        resp["modelId"] = modelId;
+        resp["filePath"] = filePath;
+
+        std::ifstream in(filePath);
+        if (in.is_open()) {
+            std::stringstream ss;
+            ss << in.rdbuf();
+            in.close();
+            resp["status"] = "success";
+            resp["fileContent"] = ss.str();
+            std::cout << "[Broker] Loaded model from local path: " << filePath << std::endl;
+        } else {
+            resp["status"] = "error";
+            resp["error"] = "Failed to open file for reading at: " + filePath;
+            std::cerr << "[Broker] [ERROR] Failed to load model from path: " << filePath << std::endl;
+        }
+
+        if (client) {
+            send_websocket_text(client, resp.dump());
+        }
+        return;
+    }
+
+    if (command == "CREATE_DIR") {
+        std::string path_str = payload.value("path", "");
+        nlohmann::json resp;
+        resp["type"] = "create_dir_response";
+        resp["modelId"] = modelId;
+        resp["path"] = path_str;
+
+        try {
+            if (!path_str.empty()) {
+                std::filesystem::create_directories(path_str);
+                resp["status"] = "success";
+            } else {
+                resp["status"] = "error";
+                resp["error"] = "Path is empty.";
+            }
+        } catch (const std::exception& e) {
+            resp["status"] = "error";
+            resp["error"] = e.what();
+        }
+
+        if (client) {
+            send_websocket_text(client, resp.dump());
+        }
+        return;
+    }
 
     if (command == "INIT" || command == "INIT_2D" || command == "INIT_3D") {
         std::cout << "[DEBUG] RAW BROKER RECEIVE INIT FOR modelId " << modelId << ": " << json_str << std::endl;
