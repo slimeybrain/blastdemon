@@ -64,7 +64,7 @@ export class PropertyEditor {
                 if (node.type === 'DomainMesh') {
                     const radius = Number(node.parameters['domain_radius'] ?? 1.0);
                     const n_cells = Math.round(radius / cellSize);
-                    gridInfo.textContent = `Calculated Grid: ${n_cells} cells (Total: ${n_cells.toLocaleString()})`;
+                    gridInfo.textContent = `Calculated Grid: ${n_cells.toLocaleString()} cells`;
                 } else if (node.type === 'DomainMesh2D') {
                     const max_r = Number(node.parameters['max_r'] ?? 1.0);
                     const max_z = Number(node.parameters['max_z'] ?? 1.0);
@@ -72,6 +72,46 @@ export class PropertyEditor {
                     const nz = Math.round(max_z / cellSize);
                     gridInfo.textContent = `Calculated Grid: ${nr} x ${nz} cells (Total: ${(nr * nz).toLocaleString()})`;
                 }
+            }
+
+            // Refresh validation warnings banner even in fast-update path
+            const warnings: string[] = [];
+            if (state) {
+                const valResults = validateSimulationState(state);
+                warnings.push(...valResults.globalWarnings);
+            }
+
+            let warnBox = this.container.querySelector('.validation-warning-box') as HTMLDivElement;
+            if (warnings.length > 0) {
+                if (!warnBox) {
+                    warnBox = document.createElement('div');
+                    warnBox.className = 'validation-warning-box';
+                    warnBox.style.background = '#dc262622';
+                    warnBox.style.border = '1px solid #dc2626';
+                    warnBox.style.borderRadius = '4px';
+                    warnBox.style.margin = '10px';
+                    warnBox.style.padding = '10px';
+                    warnBox.style.color = '#ef4444';
+                    warnBox.style.fontSize = 'var(--font-sm)';
+                    warnBox.style.fontWeight = 'bold';
+                    
+                    const form = this.container.querySelector('form');
+                    if (form) {
+                        this.container.insertBefore(warnBox, form);
+                    } else {
+                        this.container.appendChild(warnBox);
+                    }
+                }
+                
+                warnBox.innerHTML = '';
+                warnings.forEach(w => {
+                    const p = document.createElement('div');
+                    p.style.marginBottom = '4px';
+                    p.innerHTML = `⚠️ ${w}`;
+                    warnBox.appendChild(p);
+                });
+            } else if (warnBox) {
+                warnBox.remove();
             }
 
             return;
@@ -185,17 +225,26 @@ export class PropertyEditor {
                 if (b === 'cell_size') return 1;
                 return 0;
             });
-            
+        } else if (node.type === 'Charge1D' || node.type === 'Charge2D') {
+            paramKeys.sort((a, b) => {
+                if (a === 'charge_mass') return -1;
+                if (b === 'charge_mass') return 1;
+                return 0;
+            });
+        }
+        
+        let gridInfoDiv: HTMLDivElement | null = null;
+        if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D') {
             const cellSize = Number(node.parameters['cell_size'] ?? 0.001);
             const info = document.createElement('div');
             info.id = 'grid-info-display';
             info.style.fontSize = 'var(--font-sm)';
             info.style.color = '#569cd6';
-            info.style.marginBottom = '10px';
+            info.style.marginTop = '10px';
             if (node.type === 'DomainMesh') {
                 const radius = Number(node.parameters['domain_radius'] ?? 1.0);
                 const n_cells = Math.round(radius / cellSize);
-                info.textContent = `Calculated Grid: ${n_cells} cells (Total: ${n_cells.toLocaleString()})`;
+                info.textContent = `Calculated Grid: ${n_cells.toLocaleString()} cells`;
             } else {
                 const max_r = Number(node.parameters['max_r'] ?? 1.0);
                 const max_z = Number(node.parameters['max_z'] ?? 1.0);
@@ -203,7 +252,7 @@ export class PropertyEditor {
                 const nz = Math.round(max_z / cellSize);
                 info.textContent = `Calculated Grid: ${nr} x ${nz} cells (Total: ${(nr * nz).toLocaleString()})`;
             }
-            form.appendChild(info);
+            gridInfoDiv = info;
         }
 
         let addedQtyHeader = false;
@@ -271,6 +320,9 @@ export class PropertyEditor {
             input.dataset.key = key;
             row.appendChild(input);
             form.appendChild(row);
+        }
+        if (gridInfoDiv) {
+            form.appendChild(gridInfoDiv);
         }
         this.container.appendChild(form);
 
@@ -620,6 +672,10 @@ export class PropertyEditor {
             qtyGrid.appendChild(createCheckboxField('qty_reacted', !!node.parameters['qty_reacted'], 'Reacted (Alpha1)'));
             qtyGrid.appendChild(createCheckboxField('qty_unreacted', !!node.parameters['qty_unreacted'], 'Unreacted (Alpha2)'));
             qtyGrid.appendChild(createCheckboxField('qty_air', !!node.parameters['qty_air'], 'Air'));
+            if (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') {
+                qtyGrid.appendChild(createCheckboxField('qty_overpressure', !!node.parameters['qty_overpressure'], 'Overpressure'));
+                qtyGrid.appendChild(createCheckboxField('qty_impulse', !!node.parameters['qty_impulse'], 'Impulse'));
+            }
 
             panels[2].appendChild(qtyGrid);
         }
@@ -688,7 +744,7 @@ export class PropertyEditor {
         const numericKeys = [
             'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature',
             'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
-            'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl', 'output_interval',
+            'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl',
             'spatial_order', 'temporal_order', 'gamma', 'plot_stride', 'refresh_rate',
             'ascii_precision', 'step_interval', 'time_interval',
             // 2D CFD keys
@@ -725,7 +781,6 @@ export class PropertyEditor {
             'flux_scheme': ['AUSM+', 'Rusanov'],
             'spatial_order': ['1', '2', '3'],
             'temporal_order': ['1', '2', '3'],
-            'output_mode': ['By Step', 'By Time'],
             'plot_stride': ['1', '2', '5', '10', '20', '50', '100'],
             'charge_shape': ['Sphere', 'Cylinder'],
             'material_type': ['Air', 'JWL Charge', 'Ideal Gas Charge'],
@@ -1345,7 +1400,7 @@ export class PropertyEditor {
             }
         } else if (node.type === 'Material' && ['rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'].includes(key)) {
             updates['composition'] = 'Custom';
-        } else if (node.type === 'Material' && ['ideal_rho_0', 'ideal_e_0'].includes(key)) {
+        } else if (node.type === 'Material' && ['ideal_rho_0', 'ideal_e_0', 'ideal_gamma'].includes(key)) {
             updates['composition'] = 'Custom';
         }
 

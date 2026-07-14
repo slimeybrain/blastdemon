@@ -481,7 +481,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             if (matType === 'Air') {
                 const gamma = Number(node.parameters?.gamma ?? 1.4);
                 const atm_pressure = Number(node.parameters?.atm_pressure ?? 101325);
-                const atm_temperature = Number(node.parameters?.atm_temperature ?? 298.15);
+                const atm_temperature = Number(node.parameters?.atm_temperature ?? 288.0);
 
                 if (isNaN(gamma) || gamma <= 1.0) {
                     addMessage(node.id, 'error', "Air adiabatic index (gamma) must be greater than 1.0.");
@@ -503,7 +503,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                 }
             } else if (matType === 'Ideal Gas Charge') {
                 const ideal_gamma = Number(node.parameters?.ideal_gamma ?? 1.4);
-                const ideal_rho_0 = Number(node.parameters?.ideal_rho_0 ?? 1.25);
+                const ideal_rho_0 = Number(node.parameters?.ideal_rho_0 ?? 1630.0);
                 const ideal_e_0 = Number(node.parameters?.ideal_e_0 ?? 4290000);
                 if (isNaN(ideal_gamma) || ideal_gamma <= 1.0) {
                     addMessage(node.id, 'error', "Ideal Gas Charge adiabatic index (gamma) must be greater than 1.0.");
@@ -523,6 +523,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             const charge_z = Number(node.parameters?.charge_z ?? 0.1);
             const charge_radius = Number(node.parameters?.charge_radius ?? 0.05);
             const charge_height = Number(node.parameters?.charge_height ?? 0.1);
+            const charge_mass = Number(node.parameters?.charge_mass ?? 0.0);
 
             if (isNaN(charge_r) || charge_r < 0) {
                 addMessage(node.id, 'error', "Charge radial coordinate (R) must be non-negative.");
@@ -536,12 +537,19 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             if (shape === 'Cylinder' && (isNaN(charge_height) || charge_height <= 0)) {
                 addMessage(node.id, 'error', "Charge height must be greater than 0 for cylindrical charges.");
             }
+            if (isNaN(charge_mass) || charge_mass <= 0) {
+                addMessage(node.id, 'error', "Charge mass must be greater than 0.");
+            }
         }
 
         if (node.type === 'Charge1D') {
             const charge_radius = Number(node.parameters?.charge_radius ?? 0.05);
+            const charge_mass = Number(node.parameters?.charge_mass ?? 0.0);
             if (isNaN(charge_radius) || charge_radius <= 0) {
                 addMessage(node.id, 'error', "Charge radius must be greater than 0.");
+            }
+            if (isNaN(charge_mass) || charge_mass <= 0) {
+                addMessage(node.id, 'error', "Charge mass must be greater than 0.");
             }
         }
 
@@ -808,6 +816,20 @@ export function validateSimulationState(state: SimulationState): ValidationResul
         }
         if (cellSize >= dimX || cellSize >= dimY || cellSize >= dimZ) {
             addMessage(mesh3D.id, 'error', "Mesh Cell Size must be smaller than domain dimensions.");
+        }
+    });
+
+    // Generic validation check for missing/not-provided parameters
+    state.nodes.forEach(node => {
+        if (node.parameters) {
+            for (const [key, value] of Object.entries(node.parameters)) {
+                if (key === 'output_dir' || key === 'vtk_dir' || key === 'gauges' || key === 'slices') {
+                    continue;
+                }
+                if (value === undefined || value === null || value === "" || (typeof value === 'number' && isNaN(value))) {
+                    addMessage(node.id, 'warning', `Parameter '${key.replace(/_/g, ' ').toUpperCase()}' is not provided.`);
+                }
+            }
         }
     });
 

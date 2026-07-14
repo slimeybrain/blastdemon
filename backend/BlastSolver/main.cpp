@@ -116,6 +116,8 @@ struct GaugeOutputConfig {
     bool qty_reacted = true;
     bool qty_unreacted = true;
     bool qty_air = true;
+    bool qty_overpressure = true;
+    bool qty_impulse = true;
 } global_gauge_config;
 
 struct VTKOutputConfig {
@@ -172,6 +174,8 @@ void write_gauge_files() {
     bool has_reacted = global_gauge_config.qty_reacted;
     bool has_unreacted = global_gauge_config.qty_unreacted;
     bool has_air = global_gauge_config.qty_air;
+    bool has_op = global_gauge_config.qty_overpressure;
+    bool has_imp = global_gauge_config.qty_impulse;
 
     // 1. Export ASCII
     if (global_gauge_config.export_ascii) {
@@ -190,6 +194,8 @@ void write_gauge_files() {
             if (global_gauge_config.include_header) {
                 out << "Time";
                 if (has_p) out << delimiter << "Pressure";
+                if (has_op) out << delimiter << "Overpressure";
+                if (has_imp) out << delimiter << "Impulse";
                 if (has_rho) out << delimiter << "Density";
                 if (has_vel) out << delimiter << "Velocity";
                 if (has_E) out << delimiter << "InternalEnergy";
@@ -202,6 +208,8 @@ void write_gauge_files() {
             for (size_t t = 0; t < global_gauge_times.size(); ++t) {
                 out << global_gauge_times[t];
                 if (has_p) out << delimiter << hist.channel_values[0][t];
+                if (has_op) out << delimiter << hist.channel_values[7][t];
+                if (has_imp) out << delimiter << hist.channel_values[8][t];
                 if (has_rho) out << delimiter << hist.channel_values[1][t];
                 if (has_vel) out << delimiter << hist.channel_values[2][t];
                 if (has_E) out << delimiter << hist.channel_values[3][t];
@@ -241,6 +249,8 @@ void write_gauge_files() {
             if (has_reacted) bitmask |= 16;
             if (has_unreacted) bitmask |= 32;
             if (has_air) bitmask |= 64;
+            if (has_op) bitmask |= 128;
+            if (has_imp) bitmask |= 256;
 
             out.write(reinterpret_cast<const char*>(&bitmask), sizeof(bitmask));
 
@@ -255,6 +265,8 @@ void write_gauge_files() {
                 if (has_reacted) { double v = hist.channel_values[4][t]; out.write(reinterpret_cast<const char*>(&v), sizeof(v)); }
                 if (has_unreacted) { double v = hist.channel_values[5][t]; out.write(reinterpret_cast<const char*>(&v), sizeof(v)); }
                 if (has_air) { double v = hist.channel_values[6][t]; out.write(reinterpret_cast<const char*>(&v), sizeof(v)); }
+                if (has_op) { double v = hist.channel_values[7][t]; out.write(reinterpret_cast<const char*>(&v), sizeof(v)); }
+                if (has_imp) { double v = hist.channel_values[8][t]; out.write(reinterpret_cast<const char*>(&v), sizeof(v)); }
             }
             out.close();
             std::cout << "[INFO] Exported Binary gauge: " << filename << std::endl;
@@ -265,7 +277,7 @@ void write_gauge_files() {
     if (global_gauge_config.export_hdf5) {
         std::string filename = out_dir + "/" + global_gauge_config.custom_filename + ".h5";
         std::vector<std::string> gauge_ids;
-        std::vector<std::vector<float>> p_data, rho_data, vel_data, E_data, reacted_data, unreacted_data, air_data;
+        std::vector<std::vector<float>> p_data, rho_data, vel_data, E_data, reacted_data, unreacted_data, air_data, op_data, imp_data;
 
         for (size_t g_idx = 0; g_idx < global_gauges.size(); ++g_idx) {
             gauge_ids.push_back(global_gauges[g_idx].id);
@@ -277,11 +289,13 @@ void write_gauge_files() {
             reacted_data.push_back(hist.channel_values[4]);
             unreacted_data.push_back(hist.channel_values[5]);
             air_data.push_back(hist.channel_values[6]);
+            op_data.push_back(hist.channel_values[7]);
+            imp_data.push_back(hist.channel_values[8]);
         }
 
         HDF5Writer::writeGauges(filename, global_gauge_times, gauge_ids,
-                                p_data, rho_data, vel_data, E_data, reacted_data, unreacted_data, air_data,
-                                has_p, has_rho, has_vel, has_E, has_reacted, has_unreacted, has_air);
+                                p_data, rho_data, vel_data, E_data, reacted_data, unreacted_data, air_data, op_data, imp_data,
+                                has_p, has_rho, has_vel, has_E, has_reacted, has_unreacted, has_air, has_op, has_imp);
         std::cout << "[INFO] Exported HDF5 gauge file: " << filename << std::endl;
     }
 }
@@ -363,23 +377,7 @@ void write_vtk_outputs(int step, double time) {
         std::string filename = out_dir + "/" + global_vtk_config.custom_filename + "_" + std::to_string(step) + ".vtu";
         export_vtu_2d(filename, nr, nz, dr, dz, rho, ur, uz, p, E, alpha1, alpha2);
     } else if (global_solver) {
-        int n_cells = global_solver->getNumCells();
-        double radius = global_solver->getRadius();
-        double dr = radius / n_cells;
-        
-        std::vector<double> rho(n_cells), u(n_cells), p(n_cells), E(n_cells), alpha1(n_cells), alpha2(n_cells);
-        for (int i = 0; i < n_cells; ++i) {
-            auto vals = global_solver->getCellValues(i);
-            p[i] = vals[0];
-            rho[i] = vals[1];
-            u[i] = vals[2];
-            E[i] = vals[3];
-            alpha1[i] = vals[4];
-            alpha2[i] = vals[5];
-        }
-
-        std::string filename = out_dir + "/" + global_vtk_config.custom_filename + "_" + std::to_string(step) + ".vtu";
-        export_vtu_1d(filename, n_cells, dr, rho, u, p, E, alpha1, alpha2);
+        // Do not output VTU files for 1D models
     }
 }
 
@@ -414,6 +412,8 @@ void init_gauges(const nlohmann::json& msg) {
                     global_gauge_config.qty_reacted = params.value("qty_reacted", true);
                     global_gauge_config.qty_unreacted = params.value("qty_unreacted", true);
                     global_gauge_config.qty_air = params.value("qty_air", true);
+                    global_gauge_config.qty_overpressure = params.value("qty_overpressure", true);
+                    global_gauge_config.qty_impulse = params.value("qty_impulse", true);
                 }
                 
                 if (node.contains("parameters") && node["parameters"].contains("gauges")) {
@@ -438,7 +438,7 @@ void init_gauges(const nlohmann::json& msg) {
                         
                         GaugeHistory h;
                         h.id = g.id;
-                        h.channel_values.resize(7);
+                        h.channel_values.resize(9);
                         global_gauges_history.push_back(h);
                     }
                 }
@@ -490,7 +490,12 @@ void record_gauges_1d(double t) {
     int n_cells = global_solver->getNumCells();
     double radius = global_solver->getRadius();
     double dx = radius / n_cells;
+    double p_atm = global_solver->getAmbientP();
     
+    double dt = 0.0;
+    if (!global_gauge_times.empty()) {
+        dt = t - global_gauge_times.back();
+    }
     global_gauge_times.push_back(t);
     for (size_t g_idx = 0; g_idx < global_gauges.size(); ++g_idx) {
         const auto& g = global_gauges[g_idx];
@@ -499,6 +504,16 @@ void record_gauges_1d(double t) {
         for (int ch = 0; ch < 7; ++ch) {
             global_gauges_history[g_idx].channel_values[ch].push_back(vals[ch]);
         }
+        double overpressure = vals[0] - p_atm;
+        global_gauges_history[g_idx].channel_values[7].push_back(overpressure);
+
+        double impulse = 0.0;
+        if (!global_gauges_history[g_idx].channel_values[8].empty()) {
+            double prev_imp = global_gauges_history[g_idx].channel_values[8].back();
+            double prev_op = global_gauges_history[g_idx].channel_values[7][global_gauges_history[g_idx].channel_values[7].size() - 2];
+            impulse = prev_imp + 0.5 * (prev_op + overpressure) * dt;
+        }
+        global_gauges_history[g_idx].channel_values[8].push_back(impulse);
     }
 }
 
@@ -508,20 +523,27 @@ void record_gauges_2d(double t) {
     
     int nr = 0, nz = 0;
     double dr = 0.0, dz = 0.0;
+    double p_atm = 101325.0;
     if (global_solver_2d_cuda) {
         nr = global_solver_2d_cuda->getNr();
         nz = global_solver_2d_cuda->getNz();
         dr = global_solver_2d_cuda->getDr();
         dz = global_solver_2d_cuda->getDz();
+        p_atm = global_solver_2d_cuda->getAmbientP();
     } else if (global_solver_2d) {
         nr = global_solver_2d->getNr();
         nz = global_solver_2d->getNz();
         dr = global_solver_2d->getDr();
         dz = global_solver_2d->getDz();
+        p_atm = global_solver_2d->getAmbientP();
     } else {
         return;
     }
 
+    double dt = 0.0;
+    if (!global_gauge_times.empty()) {
+        dt = t - global_gauge_times.back();
+    }
     global_gauge_times.push_back(t);
     for (size_t g_idx = 0; g_idx < global_gauges.size(); ++g_idx) {
         const auto& g = global_gauges[g_idx];
@@ -538,13 +560,28 @@ void record_gauges_2d(double t) {
         for (int ch = 0; ch < 7; ++ch) {
             global_gauges_history[g_idx].channel_values[ch].push_back(vals[ch]);
         }
+        double overpressure = vals[0] - p_atm;
+        global_gauges_history[g_idx].channel_values[7].push_back(overpressure);
+
+        double impulse = 0.0;
+        if (!global_gauges_history[g_idx].channel_values[8].empty()) {
+            double prev_imp = global_gauges_history[g_idx].channel_values[8].back();
+            double prev_op = global_gauges_history[g_idx].channel_values[7][global_gauges_history[g_idx].channel_values[7].size() - 2];
+            impulse = prev_imp + 0.5 * (prev_op + overpressure) * dt;
+        }
+        global_gauges_history[g_idx].channel_values[8].push_back(impulse);
     }
 }
 
 void record_gauges_3d(double t) {
     std::lock_guard<std::mutex> lock(global_gauges_mutex);
     if (global_gauges.empty() || !global_solver_3d) return;
+    double p_atm = global_solver_3d->getAmbientP();
 
+    double dt = 0.0;
+    if (!global_gauge_times.empty()) {
+        dt = t - global_gauge_times.back();
+    }
     global_gauge_times.push_back(t);
     for (size_t g_idx = 0; g_idx < global_gauges.size(); ++g_idx) {
         const auto& g = global_gauges[g_idx];
@@ -558,6 +595,16 @@ void record_gauges_3d(double t) {
         for (int ch = 0; ch < 7; ++ch) {
             global_gauges_history[g_idx].channel_values[ch].push_back(vals[ch]);
         }
+        double overpressure = vals[0] - p_atm;
+        global_gauges_history[g_idx].channel_values[7].push_back(overpressure);
+
+        double impulse = 0.0;
+        if (!global_gauges_history[g_idx].channel_values[8].empty()) {
+            double prev_imp = global_gauges_history[g_idx].channel_values[8].back();
+            double prev_op = global_gauges_history[g_idx].channel_values[7][global_gauges_history[g_idx].channel_values[7].size() - 2];
+            impulse = prev_imp + 0.5 * (prev_op + overpressure) * dt;
+        }
+        global_gauges_history[g_idx].channel_values[8].push_back(impulse);
     }
 }
 
@@ -1189,7 +1236,7 @@ void emit_telemetry(const CFDSolver& solver, double elapsed, bool is_terminated)
             nlohmann::json vals_obj = nlohmann::json::object();
             for (const auto& h : global_gauges_history) {
                 nlohmann::json ch_arrays = nlohmann::json::array();
-                for (int ch = 0; ch < 7; ++ch) {
+                for (int ch = 0; ch < 9; ++ch) {
                     ch_arrays.push_back(h.channel_values[ch]);
                 }
                 vals_obj[h.id] = ch_arrays;
@@ -1257,7 +1304,7 @@ void emit_telemetry_2d(double elapsed, bool is_terminated) {
             nlohmann::json vals_obj = nlohmann::json::object();
             for (const auto& h : global_gauges_history) {
                 nlohmann::json ch_arrays = nlohmann::json::array();
-                for (int ch = 0; ch < 7; ++ch) {
+                for (int ch = 0; ch < 9; ++ch) {
                     ch_arrays.push_back(h.channel_values[ch]);
                 }
                 vals_obj[h.id] = ch_arrays;
@@ -1311,7 +1358,7 @@ void emit_telemetry_3d(double elapsed, bool is_terminated) {
             nlohmann::json vals_obj = nlohmann::json::object();
             for (const auto& h : global_gauges_history) {
                 nlohmann::json ch_arrays = nlohmann::json::array();
-                for (int ch = 0; ch < 7; ++ch) {
+                for (int ch = 0; ch < 9; ++ch) {
                     ch_arrays.push_back(h.channel_values[ch]);
                 }
                 vals_obj[h.id] = ch_arrays;
@@ -1831,7 +1878,7 @@ int main() {
                         if (init_mode == "Ideal Gas" || msg.value("explosive_type", "") == "MaterialIdealGas") {
                             double det_energy = msg.value("detonation_energy", 4520000.0);
                             double high_rho = msg.value("high_rho", msg.value("rho", 1630.0));
-                            double ambient_rho = msg.value("ambient_rho", 1.2);
+                            double ambient_rho = msg.value("ambient_rho", 1.225648589);
                             double ambient_p = msg.value("atm_pressure", msg.value("ambient_p", 101325.0));
                             double explosive_z = msg.value("charge_z", msg.value("explosive_z", 0.0));
                             double explosive_radius = msg.value("charge_radius", msg.value("explosive_radius", 0.1));
@@ -1842,7 +1889,7 @@ int main() {
                             global_solver_2d_cuda->setDetonatorLocation(detonator_r, detonator_z);
                         } else if (init_mode == "Multi-Material JWL" || init_mode == "JWL") {
                             double high_rho = msg.value("high_rho", msg.value("rho", 1630.0));
-                            double ambient_rho = msg.value("ambient_rho", 1.2);
+                            double ambient_rho = msg.value("ambient_rho", 1.225648589);
                             double ambient_p = msg.value("atm_pressure", msg.value("ambient_p", 101325.0));
                             double explosive_z = msg.value("charge_z", msg.value("explosive_z", 0.0));
                             double explosive_radius = msg.value("charge_radius", msg.value("explosive_radius", 0.1));
@@ -1881,7 +1928,7 @@ int main() {
                         if (init_mode == "Ideal Gas" || msg.value("explosive_type", "") == "MaterialIdealGas") {
                             double det_energy = msg.value("detonation_energy", 4520000.0);
                             double high_rho = msg.value("high_rho", msg.value("rho", 1630.0));
-                            double ambient_rho = msg.value("ambient_rho", 1.2);
+                            double ambient_rho = msg.value("ambient_rho", 1.225648589);
                             double ambient_p = msg.value("atm_pressure", msg.value("ambient_p", 101325.0));
                             double explosive_z = msg.value("charge_z", msg.value("explosive_z", 0.0));
                             double explosive_radius = msg.value("charge_radius", msg.value("explosive_radius", 0.1));
@@ -1892,7 +1939,7 @@ int main() {
                             global_solver_2d->setDetonatorLocation(detonator_r, detonator_z);
                         } else if (init_mode == "Multi-Material JWL" || init_mode == "JWL") {
                             double high_rho = msg.value("high_rho", msg.value("rho", 1630.0));
-                            double ambient_rho = msg.value("ambient_rho", 1.2);
+                            double ambient_rho = msg.value("ambient_rho", 1.225648589);
                             double ambient_p = msg.value("atm_pressure", msg.value("ambient_p", 101325.0));
                             double explosive_z = msg.value("charge_z", msg.value("explosive_z", 0.0));
                             double explosive_radius = msg.value("charge_radius", msg.value("explosive_radius", 0.1));
@@ -1959,7 +2006,7 @@ int main() {
                     double explosive_z = msg.value("explosive_z", 0.0);
                     double remap_radius = msg.value("remap_radius", 0.5);
                     double explosive_r = msg.value("explosive_r", 0.0);
-                    double ambient_rho = msg.value("ambient_rho", 1.2);
+                    double ambient_rho = msg.value("ambient_rho", 1.225648589);
                     double ambient_p = msg.value("ambient_p", 101325.0);
                     double gamma = msg.value("gamma", 1.4);
                     
@@ -2144,7 +2191,7 @@ int main() {
 
                     MultiMat::MaterialSet matSet = parseMaterialSet(msg);
 
-                    double ambient_rho = msg.value("ambient_rho", 1.225);
+                    double ambient_rho = msg.value("ambient_rho", 1.225648589);
                     double ambient_p = msg.value("atm_pressure", 101325.0);
 
                     global_solver_3d->setInitialCondition(cp, matSet, ambient_rho, ambient_p);

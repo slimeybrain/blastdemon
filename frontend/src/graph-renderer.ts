@@ -1311,8 +1311,8 @@ export class GraphRenderer {
                 dimension: '1D',
                 domain_radius: 1.0,
                 cell_size: 0.001,
-                x_min_bc: 'Reflecting',
-                x_max_bc: 'Terminate',
+                left_bc: 'Reflecting',
+                right_bc: 'Terminate',
                 y_min_bc: 'Reflecting',
                 y_max_bc: 'Reflecting',
                 z_min_bc: 'Reflecting',
@@ -1322,7 +1322,7 @@ export class GraphRenderer {
                 material_type: 'Air',
                 // Air params
                 atm_pressure: 101325.0,
-                atm_temperature: 298.15,
+                atm_temperature: 288.0,
                 gamma: 1.4,
                 // JWL params
                 composition: 'TNT',
@@ -1335,7 +1335,7 @@ export class GraphRenderer {
                 jwl_R2: 0.90,
                 jwl_omega: 0.35,
                 // Ideal Gas Charge params
-                ideal_rho_0: 1.25,
+                ideal_rho_0: 1630,
                 ideal_e_0: 4290000
             };
             case 'Charge1D': return {
@@ -1358,8 +1358,6 @@ export class GraphRenderer {
                 flux_scheme: 'AUSM+',
                 spatial_order: 2,
                 temporal_order: 2,
-                output_mode: 'By Time',
-                output_interval: 0.0001,
                 precision: 'double'
             };
             case 'TelemetryGraph': return { telemetry_channel: 0, x_axis_mode: 'radius', plot_stride: 1 };
@@ -3866,7 +3864,7 @@ export class GraphRenderer {
                     if (node.type === 'DomainMesh') {
                         const radius = Number(node.parameters['domain_radius'] ?? 1.0);
                         const n_cells = Math.round(radius / cellSize);
-                        gridInfo.textContent = `Calculated Grid: ${n_cells} cells (Total: ${n_cells.toLocaleString()})`;
+                        gridInfo.textContent = `Calculated Grid: ${n_cells.toLocaleString()} cells`;
                     } else if (node.type === 'DomainMesh2D') {
                         const max_r = Number(node.parameters['max_r'] ?? 1.0);
                         const max_z = Number(node.parameters['max_z'] ?? 1.0);
@@ -3903,17 +3901,26 @@ export class GraphRenderer {
                 if (b === 'cell_size') return 1;
                 return 0;
             });
-            
+        } else if (node.type === 'Charge1D' || node.type === 'Charge2D') {
+            paramKeys.sort((a, b) => {
+                if (a === 'charge_mass') return -1;
+                if (b === 'charge_mass') return 1;
+                return 0;
+            });
+        }
+        
+        let gridInfoDiv: HTMLDivElement | null = null;
+        if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D') {
             const cellSize = Number(node.parameters['cell_size'] ?? 0.001);
             const info = document.createElement('div');
             info.className = 'grid-info-display';
             info.style.fontSize = 'var(--font-xs)';
             info.style.color = '#569cd6';
-            info.style.marginBottom = '4px';
+            info.style.marginTop = '6px';
             if (node.type === 'DomainMesh') {
                 const radius = Number(node.parameters['domain_radius'] ?? 1.0);
                 const n_cells = Math.round(radius / cellSize);
-                info.textContent = `Calculated Grid: ${n_cells} cells (Total: ${n_cells.toLocaleString()})`;
+                info.textContent = `Calculated Grid: ${n_cells.toLocaleString()} cells`;
             } else {
                 const max_r = Number(node.parameters['max_r'] ?? 1.0);
                 const max_z = Number(node.parameters['max_z'] ?? 1.0);
@@ -3921,7 +3928,7 @@ export class GraphRenderer {
                 const nz = Math.round(max_z / cellSize);
                 info.textContent = `Calculated Grid: ${nr} x ${nz} cells (Total: ${(nr * nz).toLocaleString()})`;
             }
-            form.appendChild(info);
+            gridInfoDiv = info;
         }
 
         for (const key of paramKeys) {
@@ -3992,7 +3999,6 @@ export class GraphRenderer {
                 'flux_scheme': ['AUSM+', 'Rusanov'],
                 'spatial_order': ['1', '2', '3'],
                 'temporal_order': ['1', '2', '3'],
-                'output_mode': ['By Step', 'By Time'],
                 'plot_stride': ['1', '2', '5', '10', '20', '50', '100'],
                 charge_shape: ['Sphere', 'Cylinder'],
                 material_type: ['Air', 'JWL Charge', 'Ideal Gas Charge'],
@@ -4012,7 +4018,7 @@ export class GraphRenderer {
                         const numericKeys = [
                             'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature',
                             'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
-                            'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl', 'output_interval',
+                            'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl',
                             'spatial_order', 'temporal_order', 'gamma', 'plot_stride',
                             // 2D CFD keys
                             'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r',
@@ -4391,6 +4397,9 @@ export class GraphRenderer {
             row.appendChild(inputEl);
             form.appendChild(row);
         }
+        if (gridInfoDiv) {
+            form.appendChild(gridInfoDiv);
+        }
         container.appendChild(form);
     }
 
@@ -4717,7 +4726,26 @@ export class GraphRenderer {
         const has2D = state?.nodes.some(n => n.type === 'DomainMesh2D') || false;
         const is3D = node.type === 'VirtualGauges3D';
         const gauges = node.parameters?.gauges || [];
-        const currentChannel = Number(node.parameters?.telemetry_channel ?? 0);
+        const ALL_CHANNELS = [
+            { id: 0, param: 'qty_pressure',    label: 'Pressure (Pa)' },
+            { id: 1, param: 'qty_density',     label: 'Density (kg/m³)' },
+            { id: 2, param: 'qty_velocity',    label: 'Velocity (m/s)' },
+            { id: 3, param: 'qty_energy',      label: 'Energy (J/kg)' },
+            { id: 4, param: 'qty_reacted',     label: 'Reacted Fraction' },
+            { id: 5, param: 'qty_unreacted',   label: 'Unreacted Fraction' },
+            { id: 6, param: 'qty_air',         label: 'Air Fraction' },
+            { id: 7, param: 'qty_overpressure',label: 'Overpressure (Pa)' },
+            { id: 8, param: 'qty_impulse',     label: 'Impulse (Pa·s)' }
+        ];
+
+        const plottableChannels = ALL_CHANNELS.filter(ch => !!node.parameters?.[ch.param]);
+        let currentChannel = Number(node.parameters?.telemetry_channel ?? 0);
+        if (plottableChannels.length > 0 && !plottableChannels.some(ch => ch.id === currentChannel)) {
+            currentChannel = plottableChannels[0].id;
+            setTimeout(() => {
+                this.stateManager.updateNodeParameters(node.id, { telemetry_channel: currentChannel });
+            }, 0);
+        }
 
         // Ensure collapsible states are initialized in GraphRenderer maps
         if (!this.gaugesPanelOpen.has(node.id)) {
@@ -4852,19 +4880,11 @@ export class GraphRenderer {
         outputSelect.style.padding = '1px 3px';
         outputSelect.style.borderRadius = '2px';
 
-        const CHANNELS = [
-            { label: 'Pressure (Pa)' },
-            { label: 'Density (kg/m³)' },
-            { label: 'Velocity (m/s)' },
-            { label: 'Energy (J/kg)' },
-            { label: 'Mass Fraction 1' },
-            { label: 'Mass Fraction 2' }
-        ];
-        CHANNELS.forEach((ch, idx) => {
+        plottableChannels.forEach((ch) => {
             const opt = document.createElement('option');
-            opt.value = String(idx);
+            opt.value = String(ch.id);
             opt.textContent = ch.label;
-            if (idx === currentChannel) opt.selected = true;
+            if (ch.id === currentChannel) opt.selected = true;
             outputSelect.appendChild(opt);
         });
         outputSelect.onchange = () => {
@@ -4891,6 +4911,7 @@ export class GraphRenderer {
         canvasContainer.appendChild(canvas);
 
         // 2. Rebuild Right Collapsible controlsPanel contents
+        const oldScrollTop = (controlsPanel.querySelector('.gauges-panel-content') as HTMLElement)?.scrollTop || 0;
         controlsPanel.innerHTML = '';
 
         const activeTab = this.gaugesActiveTab.get(node.id) || 'list';
@@ -4945,6 +4966,7 @@ export class GraphRenderer {
 
         // Tab Content Scroll Container
         const panelContent = document.createElement('div');
+        panelContent.className = 'gauges-panel-content';
         panelContent.style.flex = '1';
         panelContent.style.overflowY = 'auto';
         panelContent.style.display = 'flex';
@@ -4974,12 +4996,37 @@ export class GraphRenderer {
             addBtn.onclick = () => {
                 const nextIdx = gauges.length + 1;
                 const newGauge = is3D 
-                    ? { id: `G${nextIdx}`, x: 0.5, y: 0.5, z: 0.5, active: true }
-                    : { id: `G${nextIdx}`, r: 0.1, z: 0.0, active: true };
+                    ? { id: `G${nextIdx}`, x: 0.5, y: 0.5, z: 0.5, active: true, plot: true }
+                    : { id: `G${nextIdx}`, r: 0.1, z: 0.0, active: true, plot: true };
                 const newGauges = [...gauges, newGauge];
                 this.stateManager.updateNodeParameters(node.id, { gauges: newGauges });
             };
             buttonsRow.appendChild(addBtn);
+
+            const deleteSelBtn = document.createElement('button');
+            deleteSelBtn.textContent = 'Delete Sel';
+            deleteSelBtn.style.flex = '1.2';
+            deleteSelBtn.style.padding = '3px 6px';
+            deleteSelBtn.style.fontSize = '9px';
+            deleteSelBtn.style.fontWeight = 'bold';
+            deleteSelBtn.style.background = '#e11d48';
+            deleteSelBtn.style.color = '#fff';
+            deleteSelBtn.style.border = 'none';
+            deleteSelBtn.style.borderRadius = '3px';
+            deleteSelBtn.style.cursor = 'pointer';
+            deleteSelBtn.onmousedown = (e) => e.stopPropagation();
+            
+            const selectedCount = gauges.filter((g: any) => g.plot !== false).length;
+            if (selectedCount === 0) {
+                deleteSelBtn.disabled = true;
+                deleteSelBtn.style.opacity = '0.5';
+                deleteSelBtn.style.cursor = 'not-allowed';
+            }
+            deleteSelBtn.onclick = () => {
+                const remaining = gauges.filter((g: any) => g.plot === false);
+                this.stateManager.updateNodeParameters(node.id, { gauges: remaining });
+            };
+            buttonsRow.appendChild(deleteSelBtn);
 
             const clearBtn = document.createElement('button');
             clearBtn.textContent = 'Clear';
@@ -5016,6 +5063,7 @@ export class GraphRenderer {
                 listDiv.appendChild(empty);
             } else {
                 const table = document.createElement('table');
+                table.className = 'gauges-table';
                 table.style.width = '100%';
                 table.style.borderCollapse = 'collapse';
                 table.style.fontSize = '9px';
@@ -5025,21 +5073,36 @@ export class GraphRenderer {
                 thead.style.borderBottom = '1px solid #333';
                 thead.style.background = '#1a1a1c';
                 const headerTr = document.createElement('tr');
+                const thSel = document.createElement('th');
+                thSel.style.width = '20px';
+                thSel.style.textAlign = 'center';
+                const masterCheck = document.createElement('input');
+                masterCheck.type = 'checkbox';
+                masterCheck.checked = gauges.length > 0 && gauges.every((g: any) => g.plot !== false);
+                masterCheck.onmousedown = (e) => e.stopPropagation();
+                masterCheck.onchange = () => {
+                    const checked = masterCheck.checked;
+                    gauges.forEach((g: any) => { g.plot = checked; });
+                    this.stateManager.updateNodeParameters(node.id, { gauges: gauges });
+                };
+                thSel.appendChild(masterCheck);
+                headerTr.appendChild(thSel);
+
                 if (is3D) {
-                    headerTr.innerHTML = `
+                    headerTr.insertAdjacentHTML('beforeend', `
                         <th style="text-align:left;padding:2px 4px;">ID</th>
                         <th style="text-align:left;padding:2px 4px;">X</th>
                         <th style="text-align:left;padding:2px 4px;">Y</th>
                         <th style="text-align:left;padding:2px 4px;">Z</th>
                         <th></th>
-                    `;
+                    `);
                 } else {
-                    headerTr.innerHTML = `
+                    headerTr.insertAdjacentHTML('beforeend', `
                         <th style="text-align:left;padding:2px 4px;">ID</th>
                         <th style="text-align:left;padding:2px 4px;">R</th>
                         ${has2D ? '<th style="text-align:left;padding:2px 4px;">Z</th>' : ''}
                         <th></th>
-                    `;
+                    `);
                 }
                 thead.appendChild(headerTr);
                 table.appendChild(thead);
@@ -5049,37 +5112,137 @@ export class GraphRenderer {
                     const tr = document.createElement('tr');
                     tr.style.borderBottom = '1px solid #222';
 
+                    const tdSel = document.createElement('td');
+                    tdSel.style.padding = '2px 4px';
+                    tdSel.style.textAlign = 'center';
+                    const check = document.createElement('input');
+                    check.type = 'checkbox';
+                    check.checked = g.plot !== false;
+                    check.onmousedown = (e) => e.stopPropagation();
+                    check.onchange = () => {
+                        g.plot = check.checked;
+                        this.stateManager.updateNodeParameters(node.id, { gauges: gauges });
+                    };
+                    tdSel.appendChild(check);
+                    tr.appendChild(tdSel);
+
                     const tdId = document.createElement('td');
                     tdId.style.padding = '2px 4px';
-                    tdId.style.fontWeight = 'bold';
-                    tdId.textContent = g.id || g.name;
+                    const inputId = document.createElement('input');
+                    inputId.type = 'text';
+                    inputId.value = g.id || g.name || '';
+                    inputId.style.width = '100%';
+                    inputId.style.fontWeight = 'bold';
+                    inputId.onmousedown = (e) => e.stopPropagation();
+                    inputId.onkeydown = (e) => e.stopPropagation();
+                    inputId.addEventListener('change', () => {
+                        const val = inputId.value.trim();
+                        if (val) {
+                            g.id = val;
+                            g.name = val;
+                            this.stateManager.updateNodeParameters(node.id, { gauges: gauges });
+                        } else {
+                            inputId.value = g.id || g.name || '';
+                        }
+                    });
+                    tdId.appendChild(inputId);
                     tr.appendChild(tdId);
 
                     if (is3D) {
                         const tdX = document.createElement('td');
                         tdX.style.padding = '2px 4px';
-                        tdX.textContent = String(g.x ?? 0.5);
+                        const inputX = document.createElement('input');
+                        inputX.type = 'text';
+                        inputX.inputMode = 'decimal';
+                        inputX.value = String(g.x ?? 0.5);
+                        inputX.style.width = '100%';
+                        inputX.onmousedown = (e) => e.stopPropagation();
+                        inputX.onkeydown = (e) => e.stopPropagation();
+                        inputX.addEventListener('change', () => {
+                            const val = Number(inputX.value);
+                            if (!isNaN(val)) {
+                                g.x = val;
+                                this.stateManager.updateNodeParameters(node.id, { gauges: gauges });
+                            }
+                        });
+                        tdX.appendChild(inputX);
                         tr.appendChild(tdX);
 
                         const tdY = document.createElement('td');
                         tdY.style.padding = '2px 4px';
-                        tdY.textContent = String(g.y ?? 0.5);
+                        const inputY = document.createElement('input');
+                        inputY.type = 'text';
+                        inputY.inputMode = 'decimal';
+                        inputY.value = String(g.y ?? 0.5);
+                        inputY.style.width = '100%';
+                        inputY.onmousedown = (e) => e.stopPropagation();
+                        inputY.onkeydown = (e) => e.stopPropagation();
+                        inputY.addEventListener('change', () => {
+                            const val = Number(inputY.value);
+                            if (!isNaN(val)) {
+                                g.y = val;
+                                this.stateManager.updateNodeParameters(node.id, { gauges: gauges });
+                            }
+                        });
+                        tdY.appendChild(inputY);
                         tr.appendChild(tdY);
 
                         const tdZ = document.createElement('td');
                         tdZ.style.padding = '2px 4px';
-                        tdZ.textContent = String(g.z ?? 0.5);
+                        const inputZ = document.createElement('input');
+                        inputZ.type = 'text';
+                        inputZ.inputMode = 'decimal';
+                        inputZ.value = String(g.z ?? 0.5);
+                        inputZ.style.width = '100%';
+                        inputZ.onmousedown = (e) => e.stopPropagation();
+                        inputZ.onkeydown = (e) => e.stopPropagation();
+                        inputZ.addEventListener('change', () => {
+                            const val = Number(inputZ.value);
+                            if (!isNaN(val)) {
+                                g.z = val;
+                                this.stateManager.updateNodeParameters(node.id, { gauges: gauges });
+                            }
+                        });
+                        tdZ.appendChild(inputZ);
                         tr.appendChild(tdZ);
                     } else {
                         const tdR = document.createElement('td');
                         tdR.style.padding = '2px 4px';
-                        tdR.textContent = String(g.r ?? 0.1);
+                        const inputR = document.createElement('input');
+                        inputR.type = 'text';
+                        inputR.inputMode = 'decimal';
+                        inputR.value = String(g.r ?? 0.1);
+                        inputR.style.width = '100%';
+                        inputR.onmousedown = (e) => e.stopPropagation();
+                        inputR.onkeydown = (e) => e.stopPropagation();
+                        inputR.addEventListener('change', () => {
+                            const val = Number(inputR.value);
+                            if (!isNaN(val)) {
+                                g.r = val;
+                                this.stateManager.updateNodeParameters(node.id, { gauges: gauges });
+                            }
+                        });
+                        tdR.appendChild(inputR);
                         tr.appendChild(tdR);
 
                         if (has2D) {
                             const tdZ = document.createElement('td');
                             tdZ.style.padding = '2px 4px';
-                            tdZ.textContent = String(g.z ?? 0.0);
+                            const inputZ = document.createElement('input');
+                            inputZ.type = 'text';
+                            inputZ.inputMode = 'decimal';
+                            inputZ.value = String(g.z ?? 0.0);
+                            inputZ.style.width = '100%';
+                            inputZ.onmousedown = (e) => e.stopPropagation();
+                            inputZ.onkeydown = (e) => e.stopPropagation();
+                            inputZ.addEventListener('change', () => {
+                                const val = Number(inputZ.value);
+                                if (!isNaN(val)) {
+                                    g.z = val;
+                                    this.stateManager.updateNodeParameters(node.id, { gauges: gauges });
+                                }
+                            });
+                            tdZ.appendChild(inputZ);
                             tr.appendChild(tdZ);
                         }
                     }
@@ -5311,7 +5474,13 @@ export class GraphRenderer {
             qtyGrid.appendChild(createCheckboxField('qty_reacted', !!node.parameters?.qty_reacted, 'Reacted'));
             qtyGrid.appendChild(createCheckboxField('qty_unreacted', !!node.parameters?.qty_unreacted, 'Unreacted'));
             qtyGrid.appendChild(createCheckboxField('qty_air', !!node.parameters?.qty_air, 'Air'));
+            qtyGrid.appendChild(createCheckboxField('qty_overpressure', !!node.parameters?.qty_overpressure, 'Overpressure'));
+            qtyGrid.appendChild(createCheckboxField('qty_impulse', !!node.parameters?.qty_impulse, 'Impulse'));
             panelContent.appendChild(qtyGrid);
+        }
+
+        if (oldScrollTop > 0) {
+            panelContent.scrollTop = oldScrollTop;
         }
 
         // Draw chart and automatically adjust layout and canvas resolution when resized
@@ -5355,7 +5524,7 @@ export class GraphRenderer {
         let maxVal = -Infinity;
         let hasData = false;
 
-        gauges.forEach(g => {
+        gauges.filter(g => g.plot !== false).forEach(g => {
             const gData = values[g.id];
             if (gData && gData[channel]) {
                 const arr = gData[channel];
@@ -5403,7 +5572,7 @@ export class GraphRenderer {
 
         // Draw curves
         const colors = ['#38bdf8', '#fb7185', '#34d399', '#fbbf24', '#a78bfa', '#2dd4bf'];
-        gauges.forEach((g, gIdx) => {
+        gauges.filter(g => g.plot !== false).forEach((g, gIdx) => {
             const gData = values[g.id];
             if (gData && gData[channel]) {
                 const arr = gData[channel];

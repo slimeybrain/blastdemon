@@ -106,6 +106,7 @@ public:
 
     virtual bool isIdealGas() const = 0;
     virtual const MultiMat::MaterialSet& getMaterialParameters() const = 0;
+    virtual double getAmbientP() const = 0;
 };
 
 class CFDSolver3DImplBase : public CFDSolver3D {
@@ -141,6 +142,7 @@ protected:
 public:
     bool isIdealGas() const override { return is_ideal_gas_val; }
     const MultiMat::MaterialSet& getMaterialParameters() const override { return currentMaterials; }
+    double getAmbientP() const override { return ambient_p; }
 
     CFDSolver3DImplBase(int nx, int ny, int nz, double cellSize, double xmin = 0, double ymin = 0, double zmin = 0)
         : nx(nx), ny(ny), nz(nz), xmin(xmin), ymin(ymin), zmin(zmin), cellSize(cellSize) {

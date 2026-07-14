@@ -61,6 +61,7 @@ public:
     virtual bool checkTerminationCondition() = 0;
     virtual bool isIdealGas() const = 0;
     virtual size_t getAllocatedVRAM() const = 0;
+    virtual double getAmbientP() const = 0;
 };
 
 template <typename RealType>
@@ -120,6 +121,7 @@ public:
     bool checkTerminationCondition() override;
     bool isIdealGas() const override { return is_ideal_gas; }
     size_t getAllocatedVRAM() const override;
+    double getAmbientP() const override { return ambient_p; }
 
 private:
     int nr_cells;

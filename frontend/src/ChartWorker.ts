@@ -26,6 +26,22 @@ let lastBuffer: ArrayBuffer | null = null;
 let xAxisMode = 'radius';
 let domainRadius = 1.0;
 
+// Zoom/Pan State
+let isZoomedOrPanned = false;
+let zoomMinX = 0;
+let zoomMaxX = 1.0;
+let zoomMinY = 0.0;
+let zoomMaxY = 1.0;
+
+// Drag tracking state
+let isDragging = false;
+let dragStartX = 0;
+let dragStartY = 0;
+let dragStartMinX = 0;
+let dragStartMaxX = 1.0;
+let dragStartMinY = 0.0;
+let dragStartMaxY = 1.0;
+
 // Padding in logical CSS pixels
 const PADDING = 55;
 
@@ -119,46 +135,103 @@ function updateAutoScale(): void {
     }
 }
 
-function drawCurve(data: Float32Array, color: string, physDrawWidth: number, drawHeight: number, currentPadding: number): void {
+function drawCurve(
+    data: Float32Array,
+    color: string,
+    physDrawWidth: number,
+    drawWidth: number,
+    drawHeight: number,
+    currentPadding: number,
+    activeMinX: number,
+    activeMaxX: number,
+    activeMinY: number,
+    activeMaxY: number
+): void {
     if (!ctx) return;
     const numPoints = data.length;
+    const activeRangeX = activeMaxX - activeMinX || 1;
+    const activeRangeY = activeMaxY - activeMinY || 1;
+
+    ctx.save();
+    // Clip to the plotting area so lines don't bleed into the axes/padding
+    ctx.beginPath();
+    ctx.rect(currentPadding, 0, drawWidth, drawHeight);
+    ctx.clip();
+
     ctx.strokeStyle = color;
     ctx.lineWidth = 1.5;
-    ctx.beginPath();
 
-    let first = true;
-    for (let px = 0; px < physDrawWidth; px++) {
-        const x = px / dpr;
-        const start = Math.floor(px * numPoints / physDrawWidth);
-        const end = Math.max(start + 1, Math.floor((px + 1) * numPoints / physDrawWidth));
-        if (start >= numPoints) break;
+    const dxPerIndex = xAxisMode === 'radius' ? (domainRadius / (numPoints - 1 || 1)) : 1;
+    const iMin = Math.max(0, Math.floor(activeMinX / dxPerIndex) - 1);
+    const iMax = Math.min(numPoints - 1, Math.ceil(activeMaxX / dxPerIndex) + 1);
+    const visiblePointsCount = iMax - iMin + 1;
 
-        let minY = data[start];
-        let maxY = data[start];
-        for (let i = start + 1; i < end; i++) {
-            const val = data[i];
-            if (!isFinite(val)) continue;
-            if (val < minY) minY = val;
-            if (val > maxY) maxY = val;
+    if (visiblePointsCount < drawWidth) {
+        // Zoomed in: draw connecting lines from point to point
+        ctx.beginPath();
+        let first = true;
+        for (let i = Math.max(0, iMin); i <= iMax; i++) {
+            const xVal = i * dxPerIndex;
+            const yVal = data[i];
+            if (!isFinite(yVal)) continue;
+
+            const canvasX = currentPadding + ((xVal - activeMinX) / activeRangeX) * drawWidth;
+            const canvasY = drawHeight - ((yVal - activeMinY) / activeRangeY) * drawHeight;
+
+            if (first) {
+                ctx.moveTo(canvasX, canvasY);
+                first = false;
+            } else {
+                ctx.lineTo(canvasX, canvasY);
+            }
         }
+        ctx.stroke();
+    } else {
+        // Zoomed out: pixel-based downsampling
+        ctx.beginPath();
+        let first = true;
+        for (let px = 0; px < physDrawWidth; px++) {
+            const pctL = px / physDrawWidth;
+            const pctR = (px + 1) / physDrawWidth;
+            const gxL = activeMinX + pctL * activeRangeX;
+            const gxR = activeMinX + pctR * activeRangeX;
 
-        if (!isFinite(minY) || !isFinite(maxY)) continue;
+            const iL = gxL / dxPerIndex;
+            const iR = gxR / dxPerIndex;
 
-        const yTop    = drawHeight - ((maxY - displayMin) / (range || 1)) * drawHeight;
-        const yBottom = drawHeight - ((minY - displayMin) / (range || 1)) * drawHeight;
-        const canvasX = currentPadding + x;
+            let start = Math.floor(Math.min(iL, iR));
+            let end = Math.ceil(Math.max(iL, iR));
+            start = Math.max(0, Math.min(numPoints - 1, start));
+            end = Math.max(0, Math.min(numPoints, end));
+            if (start >= end) continue;
 
-        if (first) {
-            ctx.moveTo(canvasX, yTop);
-            first = false;
-        } else {
-            ctx.lineTo(canvasX, yTop);
+            let minY = data[start];
+            let maxY = data[start];
+            for (let i = start + 1; i < end; i++) {
+                const val = data[i];
+                if (!isFinite(val)) continue;
+                if (val < minY) minY = val;
+                if (val > maxY) maxY = val;
+            }
+            if (!isFinite(minY) || !isFinite(maxY)) continue;
+
+            const yTop    = drawHeight - ((maxY - activeMinY) / activeRangeY) * drawHeight;
+            const yBottom = drawHeight - ((minY - activeMinY) / activeRangeY) * drawHeight;
+            const canvasX = currentPadding + (px / dpr);
+
+            if (first) {
+                ctx.moveTo(canvasX, yTop);
+                first = false;
+            } else {
+                ctx.lineTo(canvasX, yTop);
+            }
+            if (Math.abs(yBottom - yTop) > 0.5) {
+                ctx.lineTo(canvasX, yBottom);
+            }
         }
-        if (Math.abs(yBottom - yTop) > 0.5) {
-            ctx.lineTo(canvasX, yBottom);
-        }
+        ctx.stroke();
     }
-    ctx.stroke();
+    ctx.restore();
 }
 
 function drawLegend(currentPadding: number): void {
@@ -214,9 +287,33 @@ function render(): void {
         }
 
         const currentPadding = showAxes ? PADDING : 0;
+        const drawWidth = width - currentPadding;
+        const drawHeight = height - currentPadding;
 
         // Clear using logical CSS-pixel coordinates (ctx has dpr scale applied)
         ctx.clearRect(0, 0, width, height);
+
+        const maxXVal = (rawData && rawData.length > 0) ? rawData.length - 1 : 100;
+        const defaultMinX = 0;
+        const defaultMaxX = xAxisMode === 'radius' ? domainRadius : maxXVal;
+        const defaultMinY = displayMin;
+        const defaultMaxY = displayMax;
+
+        let activeMinX = defaultMinX;
+        let activeMaxX = defaultMaxX;
+        const activeMinY = defaultMinY;
+        const activeMaxY = defaultMaxY;
+
+        if (isZoomedOrPanned) {
+            activeMinX = zoomMinX;
+            activeMaxX = zoomMaxX;
+        } else {
+            zoomMinX = defaultMinX;
+            zoomMaxX = defaultMaxX;
+        }
+
+        const activeRangeX = activeMaxX - activeMinX || 1;
+        const activeRangeY = activeMaxY - activeMinY || 1;
 
         if (showAxes) {
             // Draw axes
@@ -238,8 +335,7 @@ function render(): void {
             const numTicksY = 5;
             for (let i = 0; i < numTicksY; i++) {
                 const pct = i / (numTicksY - 1);
-                // i = 0 is bottom (displayMin), i = numTicksY - 1 is top (displayMax)
-                const val = displayMin + pct * range;
+                const val = activeMinY + pct * activeRangeY;
                 const y = height - currentPadding - pct * (height - currentPadding);
                 
                 // Draw tick
@@ -258,7 +354,6 @@ function render(): void {
             ctx.textAlign = 'center';
             ctx.textBaseline = 'top';
             const numTicksX = 5;
-            const maxXVal = (rawData && rawData.length > 0) ? rawData.length - 1 : 100;
             for (let i = 0; i < numTicksX; i++) {
                 const pct = i / (numTicksX - 1);
                 const x = currentPadding + pct * (width - currentPadding);
@@ -271,20 +366,17 @@ function render(): void {
                 ctx.stroke();
                 
                 // Draw text
+                const val = activeMinX + pct * activeRangeX;
                 let labelText = '';
                 if (xAxisMode === 'radius') {
-                    const radiusVal = pct * domainRadius;
-                    labelText = radiusVal.toFixed(2);
+                    labelText = val.toFixed(2);
                 } else {
-                    const val = Math.round(pct * maxXVal);
-                    labelText = String(val);
+                    labelText = String(Math.round(val));
                 }
                 ctx.fillText(labelText, x, height - currentPadding + 6);
             }
         }
 
-        const drawWidth = width - currentPadding;
-        const drawHeight = height - currentPadding;
         const physDrawWidth = Math.round(drawWidth * dpr);
 
         if (selectedChannel === 4 && lastBuffer) {
@@ -293,11 +385,11 @@ function render(): void {
             const dataAir = extractChannel(lastBuffer, 6);
 
             // Draw Air (sky blue)
-            drawCurve(dataAir, '#38bdf8', physDrawWidth, drawHeight, currentPadding);
+            drawCurve(dataAir, '#38bdf8', physDrawWidth, drawWidth, drawHeight, currentPadding, activeMinX, activeMaxX, activeMinY, activeMaxY);
             // Draw Unburnt (amber)
-            drawCurve(dataUnburnt, '#f59e0b', physDrawWidth, drawHeight, currentPadding);
+            drawCurve(dataUnburnt, '#f59e0b', physDrawWidth, drawWidth, drawHeight, currentPadding, activeMinX, activeMaxX, activeMinY, activeMaxY);
             // Draw Burned (rose/pink)
-            drawCurve(dataBurned, '#f43f5e', physDrawWidth, drawHeight, currentPadding);
+            drawCurve(dataBurned, '#f43f5e', physDrawWidth, drawWidth, drawHeight, currentPadding, activeMinX, activeMaxX, activeMinY, activeMaxY);
 
             // Draw Legend
             drawLegend(currentPadding);
@@ -305,7 +397,7 @@ function render(): void {
             if (!rawData || rawData.length === 0) {
                 return;
             }
-            drawCurve(rawData, chartColor, physDrawWidth, drawHeight, currentPadding);
+            drawCurve(rawData, chartColor, physDrawWidth, drawWidth, drawHeight, currentPadding, activeMinX, activeMaxX, activeMinY, activeMaxY);
         }
     } catch (err) {
         console.error('ChartWorker rendering error:', err);
@@ -320,6 +412,63 @@ self.onmessage = (event) => {
         rawData = extractChannel(data, selectedChannel);
         updateAutoScale();
         requestRender();
+        return;
+    }
+
+    if (data.type === 'mouseEvent') {
+        const { event: mouseEvt, offsetX, deltaY } = data;
+        const currentPadding = showAxes ? PADDING : 0;
+        const drawWidth = width - currentPadding;
+
+        if (drawWidth > 0) {
+            const maxXVal = (rawData && rawData.length > 0) ? rawData.length - 1 : 100;
+            const defaultMinX = 0;
+            const defaultMaxX = xAxisMode === 'radius' ? domainRadius : maxXVal;
+
+            const getActiveBounds = () => {
+                if (isZoomedOrPanned) {
+                    return { minX: zoomMinX, maxX: zoomMaxX };
+                }
+                return { minX: defaultMinX, maxX: defaultMaxX };
+            };
+
+            const active = getActiveBounds();
+
+            if (mouseEvt === 'mousedown') {
+                isDragging = true;
+                dragStartX = offsetX;
+                dragStartMinX = active.minX;
+                dragStartMaxX = active.maxX;
+            } else if (mouseEvt === 'mousemove') {
+                if (isDragging) {
+                    const dxScreen = offsetX - dragStartX;
+                    const rangeX = dragStartMaxX - dragStartMinX;
+                    const dx = (dxScreen / drawWidth) * rangeX;
+
+                    zoomMinX = dragStartMinX - dx;
+                    zoomMaxX = dragStartMaxX - dx;
+                    isZoomedOrPanned = true;
+                    requestRender();
+                }
+            } else if (mouseEvt === 'mouseup' || mouseEvt === 'mouseleave') {
+                isDragging = false;
+            } else if (mouseEvt === 'dblclick') {
+                isZoomedOrPanned = false;
+                requestRender();
+            } else if (mouseEvt === 'wheel') {
+                const zoomFactor = deltaY > 0 ? 1.1 : 0.9;
+
+                const pctX = (offsetX - currentPadding) / drawWidth;
+                const targetX = active.minX + pctX * (active.maxX - active.minX);
+                const newRangeX = (active.maxX - active.minX) * zoomFactor;
+
+                zoomMinX = targetX - pctX * newRangeX;
+                zoomMaxX = zoomMinX + newRangeX;
+
+                isZoomedOrPanned = true;
+                requestRender();
+            }
+        }
         return;
     }
 
@@ -352,8 +501,14 @@ self.onmessage = (event) => {
 
     if (data.type === 'setConfig') {
         if (data.color)                         chartColor = data.color;
-        if (typeof data.min === 'number')        displayMin = data.min;
-        if (typeof data.max === 'number')        displayMax = data.max;
+        if (typeof data.min === 'number') {
+            displayMin = data.min;
+            isZoomedOrPanned = false;
+        }
+        if (typeof data.max === 'number') {
+            displayMax = data.max;
+            isZoomedOrPanned = false;
+        }
         if (typeof data.showAxes === 'boolean')  showAxes = data.showAxes;
         if (data.xAxisMode)                     xAxisMode = data.xAxisMode;
         if (typeof data.domainRadius === 'number') domainRadius = data.domainRadius;
@@ -362,6 +517,7 @@ self.onmessage = (event) => {
         // Channel switch: re-slice the cached buffer immediately without a new frame
         if (typeof data.channel === 'number' && data.channel !== selectedChannel) {
             selectedChannel = data.channel;
+            isZoomedOrPanned = false;
             if (lastBuffer) {
                 rawData = extractChannel(lastBuffer, selectedChannel);
                 updateAutoScale();

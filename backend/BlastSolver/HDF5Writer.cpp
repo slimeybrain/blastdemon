@@ -104,14 +104,17 @@ bool HDF5Writer::writeGauges(const std::string& filename,
                             const std::vector<std::vector<float>>& reacted_data,
                             const std::vector<std::vector<float>>& unreacted_data,
                             const std::vector<std::vector<float>>& air_data,
+                            const std::vector<std::vector<float>>& op_data,
+                            const std::vector<std::vector<float>>& imp_data,
                             bool has_p, bool has_rho, bool has_vel, bool has_E,
-                            bool has_reacted, bool has_unreacted, bool has_air) {
+                            bool has_reacted, bool has_unreacted, bool has_air,
+                            bool has_op, bool has_imp) {
 #ifdef NO_HDF5
     (void)filename; (void)times; (void)gauge_ids;
     (void)p_data; (void)rho_data; (void)vel_data; (void)E_data;
-    (void)reacted_data; (void)unreacted_data; (void)air_data;
+    (void)reacted_data; (void)unreacted_data; (void)air_data; (void)op_data; (void)imp_data;
     (void)has_p; (void)has_rho; (void)has_vel; (void)has_E;
-    (void)has_reacted; (void)has_unreacted; (void)has_air;
+    (void)has_reacted; (void)has_unreacted; (void)has_air; (void)has_op; (void)has_imp;
     return true;
 #else
     hid_t file_id = H5Fcreate(filename.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
@@ -154,6 +157,8 @@ bool HDF5Writer::writeGauges(const std::string& filename,
         if (has_reacted) writeDataset("Reacted_Explosive", reacted_data[g]);
         if (has_unreacted) writeDataset("Unreacted_Explosive", unreacted_data[g]);
         if (has_air) writeDataset("Air", air_data[g]);
+        if (has_op) writeDataset("Overpressure", op_data[g]);
+        if (has_imp) writeDataset("Impulse", imp_data[g]);
 
         if (g_grp >= 0) H5Gclose(g_grp);
     }

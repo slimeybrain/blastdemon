@@ -1310,7 +1310,7 @@ export class StateManager {
                 material_type: 'Air',
                 // Air params
                 atm_pressure: 101325.0,
-                atm_temperature: 298.15,
+                atm_temperature: 288.0,
                 gamma: 1.4,
                 // JWL params
                 composition: 'TNT',
@@ -1323,14 +1323,17 @@ export class StateManager {
                 jwl_R2: 0.90,
                 jwl_omega: 0.35,
                 // Ideal Gas Charge params
-                ideal_rho_0: 1.25,
+                ideal_gamma: 1.4,
+                ideal_rho_0: 1630,
                 ideal_e_0: 4290000
             },
             'Charge1D': {
+                charge_mass: 0.853479,
                 charge_radius: 0.05
             },
             'Charge2D': {
                 charge_shape: 'Sphere',
+                charge_mass: 0.853479,
                 charge_radius: 0.05,
                 charge_height: 0.1,
                 charge_r: 0.0,
@@ -1353,7 +1356,9 @@ export class StateManager {
                 qty_energy: true,
                 qty_reacted: true,
                 qty_unreacted: true,
-                qty_air: true
+                qty_air: true,
+                qty_overpressure: true,
+                qty_impulse: true
             },
             'CFDSolver': {
                 init_mode: 'Multi-Material JWL',
@@ -1361,8 +1366,6 @@ export class StateManager {
                 flux_scheme: 'AUSM+',
                 spatial_order: 2,
                 temporal_order: 2,
-                output_mode: 'By Time',
-                output_interval: 0.0001,
                 precision: 'double'
             },
             'TelemetryGraph': {
@@ -1496,7 +1499,9 @@ export class StateManager {
                 qty_energy: true,
                 qty_reacted: true,
                 qty_unreacted: true,
-                qty_air: true
+                qty_air: true,
+                qty_overpressure: true,
+                qty_impulse: true
             }
         };
 
@@ -1504,8 +1509,50 @@ export class StateManager {
             if (!node.parameters) {
                 node.parameters = {};
             }
+            if (node.type === 'CFDSolver' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver3D') {
+                delete node.parameters['output_mode'];
+                delete node.parameters['output_interval'];
+            }
+            if (node.type === 'DomainMesh') {
+                if (node.parameters['x_min_bc'] !== undefined) {
+                    node.parameters['left_bc'] = node.parameters['x_min_bc'];
+                    delete node.parameters['x_min_bc'];
+                }
+                if (node.parameters['x_max_bc'] !== undefined) {
+                    node.parameters['right_bc'] = node.parameters['x_max_bc'];
+                    delete node.parameters['x_max_bc'];
+                }
+            }
             if (!node.displayMode) {
                 node.displayMode = 'expanded';
+            }
+            // Self-healing: if charge_radius exists but charge_mass is missing, calculate charge_mass first so it doesn't get overwritten by defaults
+            if ((node.type === 'Charge1D' || node.type === 'Charge2D') && node.parameters['charge_radius'] !== undefined && node.parameters['charge_mass'] === undefined) {
+                let rho = 1630.0;
+                let model: { nodes: Node[], connections: Connection[] } | null = stateObj || null;
+                if (!model) {
+                    model = Object.values(this.appState.models).find(m => m.nodes.some(n => n.id === node.id)) || null;
+                }
+                if (model) {
+                    const conn = model.connections.find(c => c.toNode === node.id && c.toPort === 'material');
+                    const matNode = conn ? model.nodes.find(n => n.id === conn.fromNode) : null;
+                    if (matNode && matNode.type === 'Material') {
+                        const matType = matNode.parameters?.material_type || 'Air';
+                        if (matType === 'Ideal Gas Charge') {
+                            rho = Number(matNode.parameters?.ideal_rho_0 ?? 1630.0);
+                        } else {
+                            rho = Number(matNode.parameters?.rho ?? 1630.0);
+                        }
+                    }
+                }
+                const radius = Number(node.parameters['charge_radius']);
+                const shape = node.parameters['charge_shape'] || 'Sphere';
+                const height = Number(node.parameters['charge_height'] !== undefined ? node.parameters['charge_height'] : 0.1);
+                if (shape === 'Cylinder') {
+                    node.parameters['charge_mass'] = Math.PI * radius * radius * height * rho;
+                } else {
+                    node.parameters['charge_mass'] = (4.0 / 3.0) * Math.PI * Math.pow(radius, 3.0) * rho;
+                }
             }
             const nodeDefaults = defaults[node.type];
             if (nodeDefaults) {
@@ -1522,6 +1569,25 @@ export class StateManager {
             }
             syncExplosiveParameters(node, node.parameters, model);
         });
+    }
+
+    importWorkspace(workspace: Workspace, models: Model[]): void {
+        const appStateCopy = JSON.parse(JSON.stringify(this.appState)) as AppState;
+        
+        models.forEach(model => {
+            appStateCopy.models[model.id] = model;
+        });
+
+        const existingWsIdx = appStateCopy.workspaces.findIndex(w => w.id === workspace.id);
+        if (existingWsIdx !== -1) {
+            appStateCopy.workspaces[existingWsIdx] = workspace;
+        } else {
+            appStateCopy.workspaces.push(workspace);
+        }
+
+        appStateCopy.activeWorkspaceId = workspace.id;
+
+        this.loadAppState(appStateCopy);
     }
 }
 
@@ -1594,7 +1660,12 @@ function syncExplosiveParameters(node: Node, parameters: Record<string, any>, st
         const conn = state.connections.find(c => c.toNode === node.id && c.toPort === 'material');
         const matNode = conn ? state.nodes.find(n => n.id === conn.fromNode) : null;
         if (matNode && matNode.type === 'Material') {
-            rho = Number(matNode.parameters?.rho ?? 1630.0);
+            const matType = matNode.parameters?.material_type || 'Air';
+            if (matType === 'Ideal Gas Charge') {
+                rho = Number(matNode.parameters?.ideal_rho_0 ?? 1630.0);
+            } else {
+                rho = Number(matNode.parameters?.rho ?? 1630.0);
+            }
         }
     }
 

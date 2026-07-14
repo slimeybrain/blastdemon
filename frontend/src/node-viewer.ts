@@ -26,6 +26,18 @@ export class NodeViewer {
     private gaugesResizeObserver: ResizeObserver | null = null;
     private gaugesPanelOpen: boolean = true;
     private gaugesActiveTab: 'list' | 'settings' = 'list';
+    private gaugesZoomedOrPanned: boolean = false;
+    private gaugesZoomMinX: number = 0;
+    private gaugesZoomMaxX: number = 1.0;
+    private gaugesZoomMinY: number = 0.0;
+    private gaugesZoomMaxY: number = 1.0;
+    private gaugesIsDragging: boolean = false;
+    private gaugesDragStartX: number = 0;
+    private gaugesDragStartY: number = 0;
+    private gaugesDragStartMinX: number = 0;
+    private gaugesDragStartMaxX: number = 1.0;
+    private gaugesDragStartMinY: number = 0.0;
+    private gaugesDragStartMaxY: number = 1.0;
 
     private telemetryBuffer: any = null;
     private renderRequestId: number | null = null;
@@ -174,6 +186,7 @@ export class NodeViewer {
     }
 
     private renderNodeViewer(node: Node): void {
+        const oldScrollTop = (this.container.querySelector('.gauges-controls-tab-content') as HTMLElement)?.scrollTop || 0;
         this.lastId = node.id;
         this.lastType = node.type;
         this.container.innerHTML = '';
@@ -183,7 +196,7 @@ export class NodeViewer {
         } else if (node.type === 'TelemetryGraph') {
             this.renderExpandedGraph(node);
         } else if (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') {
-            this.renderVirtualGauges(node);
+            this.renderVirtualGauges(node, oldScrollTop);
         } else if (node.type === 'Telemetry3DViewport') {
             this.renderExpanded3DViewport(node);
         } else {
@@ -749,7 +762,69 @@ export class NodeViewer {
         this.chartCanvas.style.width = "100%";
         this.chartCanvas.style.height = "100%";
         this.chartCanvas.style.display = "block";
+        this.chartCanvas.style.touchAction = "none"; // Prevent default touch panning/scrolling
         wrapper.appendChild(this.chartCanvas);
+
+        // Pointer event listeners for pan and zoom interactions using setPointerCapture
+        this.chartCanvas.addEventListener('pointerdown', (e) => {
+            this.chartCanvas?.setPointerCapture(e.pointerId);
+            this.chartWorker?.postMessage({
+                type: 'mouseEvent',
+                event: 'mousedown',
+                offsetX: e.offsetX,
+                offsetY: e.offsetY,
+                shiftKey: e.shiftKey
+            });
+            e.preventDefault();
+        });
+
+        this.chartCanvas.addEventListener('pointermove', (e) => {
+            if (this.chartCanvas && this.chartCanvas.hasPointerCapture(e.pointerId)) {
+                this.chartWorker?.postMessage({
+                    type: 'mouseEvent',
+                    event: 'mousemove',
+                    offsetX: e.offsetX,
+                    offsetY: e.offsetY,
+                    shiftKey: e.shiftKey
+                });
+            }
+        });
+
+        const releaseCapture = (e: PointerEvent) => {
+            if (this.chartCanvas && this.chartCanvas.hasPointerCapture(e.pointerId)) {
+                this.chartCanvas.releasePointerCapture(e.pointerId);
+                this.chartWorker?.postMessage({
+                    type: 'mouseEvent',
+                    event: 'mouseup'
+                });
+            }
+        };
+
+        this.chartCanvas.addEventListener('pointerup', releaseCapture);
+        this.chartCanvas.addEventListener('pointercancel', releaseCapture);
+
+        this.chartCanvas.addEventListener('wheel', (e) => {
+            this.chartWorker?.postMessage({
+                type: 'mouseEvent',
+                event: 'wheel',
+                offsetX: e.offsetX,
+                offsetY: e.offsetY,
+                deltaY: e.deltaY,
+                shiftKey: e.shiftKey
+            });
+            e.preventDefault();
+        }, { passive: false });
+
+        this.chartCanvas.addEventListener('dblclick', (e) => {
+            this.chartWorker?.postMessage({
+                type: 'mouseEvent',
+                event: 'dblclick',
+                offsetX: e.offsetX,
+                offsetY: e.offsetY,
+                shiftKey: e.shiftKey
+            });
+            e.preventDefault();
+        });
 
         this.chartWorker = new Worker(new URL('./ChartWorker.ts', import.meta.url), { type: 'module' });
 
@@ -827,7 +902,23 @@ export class NodeViewer {
         grid.style.gap = '10px';
         grid.style.alignItems = 'center';
 
-        for (const [key, value] of Object.entries(node.parameters)) {
+        const paramKeys = Object.keys(node.parameters);
+        if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D') {
+            paramKeys.sort((a, b) => {
+                if (a === 'cell_size') return -1;
+                if (b === 'cell_size') return 1;
+                return 0;
+            });
+        } else if (node.type === 'Charge1D' || node.type === 'Charge2D') {
+            paramKeys.sort((a, b) => {
+                if (a === 'charge_mass') return -1;
+                if (b === 'charge_mass') return 1;
+                return 0;
+            });
+        }
+
+        for (const key of paramKeys) {
+            const value = node.parameters[key];
             if (node.type === 'DomainMesh') {
                 const dim = node.parameters['dimension'] || '1D';
                 if ((key === 'y_min_bc' || key === 'y_max_bc') && dim === '1D') continue;
@@ -842,7 +933,7 @@ export class NodeViewer {
                     const jwlKeys = ['material_type', 'composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
                     if (!jwlKeys.includes(key)) continue;
                 } else if (matType === 'Ideal Gas Charge') {
-                    const igKeys = ['material_type', 'composition', 'ideal_rho_0', 'ideal_e_0'];
+                    const igKeys = ['material_type', 'composition', 'ideal_gamma', 'ideal_rho_0', 'ideal_e_0'];
                     if (!igKeys.includes(key)) continue;
                 }
             }
@@ -886,7 +977,7 @@ export class NodeViewer {
         }
     }
 
-    private renderVirtualGauges(node: Node): void {
+    private renderVirtualGauges(node: Node, oldScrollTop: number = 0): void {
         this.stopRenderLoop();
         this.telemetryBuffer = null;
         if (this.chartWorker) {
@@ -897,10 +988,28 @@ export class NodeViewer {
             this.gaugesResizeObserver.disconnect();
             this.gaugesResizeObserver = null;
         }
+        this.gaugesZoomedOrPanned = false;
 
         const state = this.stateManager.getCurrentState();
         const has2D = state?.nodes.some(n => n.type === 'DomainMesh2D') || false;
         const is3D = node.type === 'VirtualGauges3D';
+
+        const ALL_CHANNELS = [
+            { id: 0, param: 'qty_pressure',    label: 'Pressure',          color: '#00f0ff' },
+            { id: 1, param: 'qty_density',     label: 'Density',           color: '#ff00f0' },
+            { id: 2, param: 'qty_velocity',    label: 'Velocity',          color: '#a0f000' },
+            { id: 3, param: 'qty_energy',      label: 'Int. Energy',       color: '#f000a0' },
+            { id: 4, param: 'qty_reacted',     label: 'Reacted (Alpha1)',  color: '#f43f5e' },
+            { id: 5, param: 'qty_unreacted',   label: 'Unreacted (Alpha2)',color: '#3b82f6' },
+            { id: 6, param: 'qty_air',         label: 'Air',               color: '#eab308' },
+            { id: 7, param: 'qty_overpressure',label: 'Overpressure',      color: '#38bdf8' },
+            { id: 8, param: 'qty_impulse',     label: 'Impulse',           color: '#a78bfa' }
+        ];
+
+        const plottableChannels = ALL_CHANNELS.filter(ch => !!node.parameters?.[ch.param]);
+        if (plottableChannels.length > 0 && !plottableChannels.some(ch => ch.id === this.gaugesChannel)) {
+            this.gaugesChannel = plottableChannels[0].id;
+        }
 
         this.container.style.position = 'relative';
         this.container.style.overflow = 'hidden';
@@ -942,26 +1051,17 @@ export class NodeViewer {
         channelSelect.style.padding = '2px 4px';
         channelSelect.style.borderRadius = '3px';
 
-        const CHANNELS = [
-            { label: 'Pressure',        color: '#00f0ff' },
-            { label: 'Density',         color: '#ff00f0' },
-            { label: 'Velocity',        color: '#a0f000' },
-            { label: 'Int. Energy',     color: '#f000a0' },
-            { label: 'Reacted (Alpha1)',color: '#f43f5e' },
-            { label: 'Unreacted (Alpha2)',color: '#3b82f6' },
-            { label: 'Air',             color: '#eab308' }
-        ];
-
-        CHANNELS.forEach((ch, idx) => {
+        plottableChannels.forEach((ch) => {
             const opt = document.createElement('option');
-            opt.value = String(idx);
+            opt.value = String(ch.id);
             opt.textContent = ch.label;
-            if (idx === this.gaugesChannel) opt.selected = true;
+            if (ch.id === this.gaugesChannel) opt.selected = true;
             channelSelect.appendChild(opt);
         });
 
         channelSelect.onchange = () => {
             this.gaugesChannel = Number(channelSelect.value);
+            this.gaugesZoomedOrPanned = false;
             const history = this.stateManager.getTelemetry(node.id);
             if (this.gaugesCanvas) {
                 this.drawGaugesChart(this.gaugesCanvas, history, node.parameters?.gauges || [], this.gaugesChannel, has2D);
@@ -1026,6 +1126,111 @@ export class NodeViewer {
         canvas.className = 'gauges-canvas';
         chartArea.appendChild(canvas);
         this.gaugesCanvas = canvas;
+
+        canvas.style.touchAction = 'none';
+
+        const getActiveGaugesBounds = () => {
+            const history = this.stateManager.getTelemetry(node.id);
+            const { minVal, maxVal, timesLength } = this.getGaugesBounds(node, this.gaugesChannel, history);
+            const defaultMinX = 0;
+            const defaultMaxX = timesLength - 1 || 1;
+            if (this.gaugesZoomedOrPanned) {
+                return {
+                    minX: this.gaugesZoomMinX,
+                    maxX: this.gaugesZoomMaxX,
+                    minY: minVal,
+                    maxY: maxVal
+                };
+            }
+            return {
+                minX: defaultMinX,
+                maxX: defaultMaxX,
+                minY: minVal,
+                maxY: maxVal
+            };
+        };
+
+        canvas.addEventListener('pointerdown', (e) => {
+            canvas.setPointerCapture(e.pointerId);
+            const rect = canvas.getBoundingClientRect();
+            this.gaugesIsDragging = true;
+            this.gaugesDragStartX = e.clientX - rect.left;
+
+            const active = getActiveGaugesBounds();
+            this.gaugesDragStartMinX = active.minX;
+            this.gaugesDragStartMaxX = active.maxX;
+            
+            e.preventDefault();
+        });
+
+        canvas.addEventListener('pointermove', (e) => {
+            if (this.gaugesIsDragging && canvas.hasPointerCapture(e.pointerId)) {
+                const rect = canvas.getBoundingClientRect();
+                const mouseX = e.clientX - rect.left;
+
+                const dxScreen = mouseX - this.gaugesDragStartX;
+
+                const padding = 40;
+                const plotWidth = rect.width - 2 * padding;
+
+                if (plotWidth > 0) {
+                    const rangeX = this.gaugesDragStartMaxX - this.gaugesDragStartMinX;
+                    const dx = (dxScreen / plotWidth) * rangeX;
+
+                    this.gaugesZoomMinX = this.gaugesDragStartMinX - dx;
+                    this.gaugesZoomMaxX = this.gaugesDragStartMaxX - dx;
+
+                    this.gaugesZoomedOrPanned = true;
+
+                    const history = this.stateManager.getTelemetry(node.id);
+                    this.drawGaugesChart(canvas, history, node.parameters?.gauges || [], this.gaugesChannel, has2D);
+                }
+            }
+        });
+
+        const releaseGaugesCapture = (e: PointerEvent) => {
+            if (canvas.hasPointerCapture(e.pointerId)) {
+                canvas.releasePointerCapture(e.pointerId);
+                this.gaugesIsDragging = false;
+            }
+        };
+
+        canvas.addEventListener('pointerup', releaseGaugesCapture);
+        canvas.addEventListener('pointercancel', releaseGaugesCapture);
+
+        canvas.addEventListener('wheel', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+
+            const padding = 40;
+            const plotWidth = rect.width - 2 * padding;
+
+            if (plotWidth <= 0) return;
+
+            const active = getActiveGaugesBounds();
+
+            const zoomFactor = e.deltaY > 0 ? 1.1 : 0.9;
+
+            const pctX = (mouseX - padding) / plotWidth;
+            const targetX = active.minX + pctX * (active.maxX - active.minX);
+            const newRangeX = (active.maxX - active.minX) * zoomFactor;
+
+            this.gaugesZoomMinX = targetX - pctX * newRangeX;
+            this.gaugesZoomMaxX = this.gaugesZoomMinX + newRangeX;
+
+            this.gaugesZoomedOrPanned = true;
+
+            const history = this.stateManager.getTelemetry(node.id);
+            this.drawGaugesChart(canvas, history, node.parameters?.gauges || [], this.gaugesChannel, has2D);
+            e.preventDefault();
+        }, { passive: false });
+
+        canvas.addEventListener('dblclick', (e) => {
+            this.gaugesZoomedOrPanned = false;
+            const history = this.stateManager.getTelemetry(node.id);
+            this.drawGaugesChart(canvas, history, node.parameters?.gauges || [], this.gaugesChannel, has2D);
+            e.preventDefault();
+        });
 
         // Floating gear button to show panel
         const floatBtn = document.createElement('button');
@@ -1103,7 +1308,7 @@ export class NodeViewer {
         controlsPanel.appendChild(tabContent);
 
         // Switch Tabs logic
-        const showTab = (tab: 'list' | 'settings') => {
+        const showTab = (tab: 'list' | 'settings', restoreScroll = 0) => {
             this.gaugesActiveTab = tab;
             tabListBtn.className = `gauges-tab-btn ${tab === 'list' ? 'active' : ''}`;
             tabSettingsBtn.className = `gauges-tab-btn ${tab === 'settings' ? 'active' : ''}`;
@@ -1112,6 +1317,9 @@ export class NodeViewer {
                 renderListTab();
             } else {
                 renderSettingsTab();
+            }
+            if (restoreScroll > 0) {
+                tabContent.scrollTop = restoreScroll;
             }
         };
 
@@ -1132,13 +1340,30 @@ export class NodeViewer {
                 const gauges = node.parameters?.gauges || [];
                 const nextIdx = gauges.length + 1;
                 const newGauge = is3D 
-                    ? { id: `G${nextIdx}`, x: 0.5, y: 0.5, z: 0.5, active: true }
-                    : { id: `G${nextIdx}`, r: 0.1, z: 0.0, active: true };
+                    ? { id: `G${nextIdx}`, x: 0.5, y: 0.5, z: 0.5, active: true, plot: true }
+                    : { id: `G${nextIdx}`, r: 0.1, z: 0.0, active: true, plot: true };
                 const newGauges = [...gauges, newGauge];
                 this.stateManager.updateNodeParameters(node.id, { gauges: newGauges });
                 this.render();
             };
             toolbarDiv.appendChild(addBtn);
+
+            const deleteSelBtn = document.createElement('button');
+            deleteSelBtn.className = 'danger';
+            deleteSelBtn.textContent = 'Delete Selected';
+            const selectedCount = (node.parameters?.gauges || []).filter((g: any) => g.plot !== false).length;
+            if (selectedCount === 0) {
+                deleteSelBtn.disabled = true;
+                deleteSelBtn.style.opacity = '0.5';
+                deleteSelBtn.style.cursor = 'not-allowed';
+            }
+            deleteSelBtn.onclick = () => {
+                const gauges = node.parameters?.gauges || [];
+                const remaining = gauges.filter((g: any) => g.plot === false);
+                this.stateManager.updateNodeParameters(node.id, { gauges: remaining });
+                this.render();
+            };
+            toolbarDiv.appendChild(deleteSelBtn);
 
             const clearBtn = document.createElement('button');
             clearBtn.className = 'danger';
@@ -1393,6 +1618,8 @@ export class NodeViewer {
             qtyGrid.appendChild(createCheckbox('qty_reacted', 'Reacted'));
             qtyGrid.appendChild(createCheckbox('qty_unreacted', 'Unreacted'));
             qtyGrid.appendChild(createCheckbox('qty_air', 'Air'));
+            qtyGrid.appendChild(createCheckbox('qty_overpressure', 'Overpressure'));
+            qtyGrid.appendChild(createCheckbox('qty_impulse', 'Impulse'));
 
             qtySection.appendChild(qtyGrid);
             tabContent.appendChild(qtySection);
@@ -1408,7 +1635,7 @@ export class NodeViewer {
         });
         this.gaugesResizeObserver.observe(canvas);
 
-        showTab(this.gaugesActiveTab);
+        showTab(this.gaugesActiveTab, oldScrollTop);
     }
 
     private syncVirtualGauges(node: Node, has2D: boolean): void {
@@ -1454,21 +1681,36 @@ export class NodeViewer {
 
         const thead = document.createElement('thead');
         const headerTr = document.createElement('tr');
+        const thSel = document.createElement('th');
+        thSel.style.width = '30px';
+        thSel.style.textAlign = 'center';
+        const masterCheck = document.createElement('input');
+        masterCheck.type = 'checkbox';
+        masterCheck.checked = pagedGauges.length > 0 && pagedGauges.every((g: any) => g.plot !== false);
+        masterCheck.onchange = () => {
+            const checked = masterCheck.checked;
+            pagedGauges.forEach((g: any) => { g.plot = checked; });
+            this.stateManager.updateNodeParameters(node.id, { gauges: gauges });
+            this.render();
+        };
+        thSel.appendChild(masterCheck);
+        headerTr.appendChild(thSel);
+
         if (is3D) {
-            headerTr.innerHTML = `
+            headerTr.insertAdjacentHTML('beforeend', `
                 <th style="width: 60px;">ID</th>
                 <th>X (m)</th>
                 <th>Y (m)</th>
                 <th>Z (m)</th>
                 <th style="width: 40px; text-align: center;">Actions</th>
-            `;
+            `);
         } else {
-            headerTr.innerHTML = `
+            headerTr.insertAdjacentHTML('beforeend', `
                 <th style="width: 60px;">ID</th>
                 <th>R (m)</th>
                 ${has2D ? '<th>Z (m)</th>' : ''}
                 <th style="width: 40px; text-align: center;">Actions</th>
-            `;
+            `);
         }
         thead.appendChild(headerTr);
         table.appendChild(thead);
@@ -1478,37 +1720,125 @@ export class NodeViewer {
             const tr = document.createElement('tr');
             tr.style.borderBottom = '1px solid #27272a';
 
+            const tdSel = document.createElement('td');
+            tdSel.style.padding = '6px 8px';
+            tdSel.style.textAlign = 'center';
+            const check = document.createElement('input');
+            check.type = 'checkbox';
+            check.checked = g.plot !== false;
+            check.onchange = () => {
+                g.plot = check.checked;
+                this.stateManager.updateNodeParameters(node.id, { gauges: gauges });
+                this.render();
+            };
+            tdSel.appendChild(check);
+            tr.appendChild(tdSel);
+
             const tdId = document.createElement('td');
             tdId.style.padding = '6px 8px';
-            tdId.style.fontWeight = 'bold';
-            tdId.textContent = g.id || g.name;
+            const inputId = document.createElement('input');
+            inputId.type = 'text';
+            inputId.value = g.id || g.name || '';
+            inputId.style.width = '100%';
+            inputId.style.fontWeight = 'bold';
+            inputId.addEventListener('change', () => {
+                const val = inputId.value.trim();
+                if (val) {
+                    g.id = val;
+                    g.name = val;
+                    this.stateManager.updateNodeParameters(node.id, { gauges: gauges });
+                } else {
+                    inputId.value = g.id || g.name || '';
+                }
+            });
+            tdId.appendChild(inputId);
             tr.appendChild(tdId);
 
             if (is3D) {
                 const tdX = document.createElement('td');
                 tdX.style.padding = '6px 8px';
-                tdX.textContent = String(g.x ?? 0.5);
+                const inputX = document.createElement('input');
+                inputX.type = 'text';
+                inputX.inputMode = 'decimal';
+                inputX.value = String(g.x ?? 0.5);
+                inputX.style.width = '100%';
+                inputX.addEventListener('change', () => {
+                    const val = Number(inputX.value);
+                    if (!isNaN(val)) {
+                        g.x = val;
+                        this.stateManager.updateNodeParameters(node.id, { gauges: gauges });
+                    }
+                });
+                tdX.appendChild(inputX);
                 tr.appendChild(tdX);
 
                 const tdY = document.createElement('td');
                 tdY.style.padding = '6px 8px';
-                tdY.textContent = String(g.y ?? 0.5);
+                const inputY = document.createElement('input');
+                inputY.type = 'text';
+                inputY.inputMode = 'decimal';
+                inputY.value = String(g.y ?? 0.5);
+                inputY.style.width = '100%';
+                inputY.addEventListener('change', () => {
+                    const val = Number(inputY.value);
+                    if (!isNaN(val)) {
+                        g.y = val;
+                        this.stateManager.updateNodeParameters(node.id, { gauges: gauges });
+                    }
+                });
+                tdY.appendChild(inputY);
                 tr.appendChild(tdY);
 
                 const tdZ = document.createElement('td');
                 tdZ.style.padding = '6px 8px';
-                tdZ.textContent = String(g.z ?? 0.5);
+                const inputZ = document.createElement('input');
+                inputZ.type = 'text';
+                inputZ.inputMode = 'decimal';
+                inputZ.value = String(g.z ?? 0.5);
+                inputZ.style.width = '100%';
+                inputZ.addEventListener('change', () => {
+                    const val = Number(inputZ.value);
+                    if (!isNaN(val)) {
+                        g.z = val;
+                        this.stateManager.updateNodeParameters(node.id, { gauges: gauges });
+                    }
+                });
+                tdZ.appendChild(inputZ);
                 tr.appendChild(tdZ);
             } else {
                 const tdR = document.createElement('td');
                 tdR.style.padding = '6px 8px';
-                tdR.textContent = String(g.r ?? 0.1);
+                const inputR = document.createElement('input');
+                inputR.type = 'text';
+                inputR.inputMode = 'decimal';
+                inputR.value = String(g.r ?? 0.1);
+                inputR.style.width = '100%';
+                inputR.addEventListener('change', () => {
+                    const val = Number(inputR.value);
+                    if (!isNaN(val)) {
+                        g.r = val;
+                        this.stateManager.updateNodeParameters(node.id, { gauges: gauges });
+                    }
+                });
+                tdR.appendChild(inputR);
                 tr.appendChild(tdR);
 
                 if (has2D) {
                     const tdZ = document.createElement('td');
                     tdZ.style.padding = '6px 8px';
-                    tdZ.textContent = String(g.z ?? 0.0);
+                    const inputZ = document.createElement('input');
+                    inputZ.type = 'text';
+                    inputZ.inputMode = 'decimal';
+                    inputZ.value = String(g.z ?? 0.0);
+                    inputZ.style.width = '100%';
+                    inputZ.addEventListener('change', () => {
+                        const val = Number(inputZ.value);
+                        if (!isNaN(val)) {
+                            g.z = val;
+                            this.stateManager.updateNodeParameters(node.id, { gauges: gauges });
+                        }
+                    });
+                    tdZ.appendChild(inputZ);
                     tr.appendChild(tdZ);
                 }
             }
@@ -1538,6 +1868,36 @@ export class NodeViewer {
         tableContainer.appendChild(table);
     }
 
+    private getGaugesBounds(node: Node, channel: number, history: any): { minVal: number; maxVal: number; timesLength: number } {
+        const gauges = node.parameters?.gauges || [];
+        let minVal = 0;
+        let maxVal = 1;
+        let hasData = false;
+        
+        if (history && history.times && history.times.length > 0 && history.values) {
+            let minV = Infinity;
+            let maxV = -Infinity;
+            gauges.filter((g: any) => g.plot !== false).forEach((g: any) => {
+                const gData = history.values[g.id || g.name];
+                if (gData && gData[channel]) {
+                    const arr = gData[channel];
+                    arr.forEach((v: number) => {
+                        if (isFinite(v)) {
+                            if (v < minV) minV = v;
+                            if (v > maxV) maxV = v;
+                            hasData = true;
+                        }
+                    });
+                }
+            });
+            if (hasData) {
+                minVal = minV;
+                maxVal = maxV;
+            }
+        }
+        return { minVal, maxVal, timesLength: history?.times?.length || 0 };
+    }
+
     private drawGaugesChart(canvas: HTMLCanvasElement, history: any, gauges: any[], channel: number, has2D: boolean): void {
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
@@ -1556,40 +1916,34 @@ export class NodeViewer {
             return;
         }
 
+        const state = this.stateManager.getCurrentState();
+        const node = state?.nodes.find(n => n.id === this.currentNodeId);
+        if (!node) return;
+
         const times = history.times;
         const values = history.values;
 
-        let minVal = Infinity;
-        let maxVal = -Infinity;
-        let hasData = false;
+        const { minVal, maxVal, timesLength } = this.getGaugesBounds(node, channel, history);
 
-        gauges.forEach(g => {
-            const gData = values[g.id || g.name];
-            if (gData && gData[channel]) {
-                const arr = gData[channel];
-                arr.forEach((v: number) => {
-                    if (isFinite(v)) {
-                        if (v < minVal) minVal = v;
-                        if (v > maxVal) maxVal = v;
-                        hasData = true;
-                    }
-                });
-            }
-        });
+        const defaultMinX = 0;
+        const defaultMaxX = timesLength - 1 || 1;
 
-        if (!hasData) {
-            ctx.fillStyle = '#666';
-            ctx.font = '10px sans-serif';
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillText('No gauge data for selected channel', width / 2, height / 2);
-            return;
+        let activeMinX = defaultMinX;
+        let activeMaxX = defaultMaxX;
+        const activeMinY = minVal;
+        const activeMaxY = maxVal;
+
+        if (this.gaugesZoomedOrPanned) {
+            activeMinX = this.gaugesZoomMinX;
+            activeMaxX = this.gaugesZoomMaxX;
+        } else {
+            this.gaugesZoomMinX = defaultMinX;
+            this.gaugesZoomMaxX = defaultMaxX;
         }
 
         const padding = 40;
         const plotWidth = width - 2 * padding;
         const plotHeight = height - 2 * padding;
-        const range = maxVal - minVal === 0 ? 1.0 : maxVal - minVal;
 
         ctx.strokeStyle = '#333';
         ctx.lineWidth = 1;
@@ -1603,13 +1957,26 @@ export class NodeViewer {
         ctx.font = '9px monospace';
         ctx.textAlign = 'right';
         ctx.textBaseline = 'middle';
-        ctx.fillText(maxVal.toExponential(2), padding - 4, padding);
-        ctx.fillText(minVal.toExponential(2), padding - 4, height - padding);
+        ctx.fillText(activeMaxY.toExponential(2), padding - 4, padding);
+        ctx.fillText(activeMinY.toExponential(2), padding - 4, height - padding);
 
-        ctx.fillText(`t = ${times[times.length - 1].toFixed(5)}s`, width - padding, height - padding + 12);
+        // Display start and end times
+        const tStart = times[Math.max(0, Math.min(times.length - 1, Math.round(activeMinX)))];
+        const tEnd = times[Math.max(0, Math.min(times.length - 1, Math.round(activeMaxX)))];
+        ctx.textAlign = 'left';
+        ctx.fillText(`t = ${tStart.toFixed(5)}s`, padding, height - padding + 12);
+        ctx.textAlign = 'right';
+        ctx.fillText(`t = ${tEnd.toFixed(5)}s`, width - padding, height - padding + 12);
 
         const colors = ['#38bdf8', '#fb7185', '#34d399', '#fbbf24', '#a78bfa', '#2dd4bf'];
-        gauges.forEach((g, gIdx) => {
+        
+        ctx.save();
+        // Clip to the plotting area so lines don't bleed into the axes/padding
+        ctx.beginPath();
+        ctx.rect(padding, padding, plotWidth, plotHeight);
+        ctx.clip();
+
+        gauges.filter(g => g.plot !== false).forEach((g, gIdx) => {
             const gData = values[g.id || g.name];
             if (gData && gData[channel]) {
                 const arr = gData[channel];
@@ -1617,12 +1984,14 @@ export class NodeViewer {
                 ctx.lineWidth = 1.5;
                 ctx.beginPath();
 
+                let first = true;
                 arr.forEach((v: number, i: number) => {
                     if (i >= times.length) return;
-                    const x = padding + (i / (times.length - 1)) * plotWidth;
-                    const y = height - padding - ((v - minVal) / range) * plotHeight;
-                    if (i === 0) {
+                    const x = padding + ((i - activeMinX) / (activeMaxX - activeMinX || 1)) * plotWidth;
+                    const y = height - padding - ((v - activeMinY) / (activeMaxY - activeMinY || 1)) * plotHeight;
+                    if (first) {
                         ctx.moveTo(x, y);
+                        first = false;
                     } else {
                         ctx.lineTo(x, y);
                     }
@@ -1632,8 +2001,10 @@ export class NodeViewer {
                 if (arr.length > 0 && times.length > 0) {
                     const lastIdx = Math.min(arr.length - 1, times.length - 1);
                     const lastVal = arr[lastIdx];
-                    const x = padding + (lastIdx / (times.length - 1)) * plotWidth;
-                    const y = height - padding - ((lastVal - minVal) / range) * plotHeight;
+                    const labelIdx = Math.max(0, Math.min(lastIdx, Math.round(activeMaxX)));
+                    const labelVal = arr[labelIdx] !== undefined ? arr[labelIdx] : lastVal;
+                    const x = padding + ((labelIdx - activeMinX) / (activeMaxX - activeMinX || 1)) * plotWidth;
+                    const y = height - padding - ((labelVal - activeMinY) / (activeMaxY - activeMinY || 1)) * plotHeight;
                     ctx.fillStyle = colors[gIdx % colors.length];
                     ctx.font = 'bold 8px monospace';
                     ctx.textAlign = 'left';
@@ -1641,6 +2012,7 @@ export class NodeViewer {
                 }
             }
         });
+        ctx.restore();
     }
 
     private startRenderLoop(): void {
@@ -1769,12 +2141,11 @@ export class NodeViewer {
             this.telemetryBuffer = data;
         }
     }
-
     private createInputElement(node: Node, key: string, value: any): HTMLElement {
         const numericKeys = [
             'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature',
             'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
-            'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl', 'output_interval',
+            'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl',
             'spatial_order', 'temporal_order', 'gamma', 'plot_stride',
             // 2D CFD keys
             'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r',
@@ -1812,7 +2183,6 @@ export class NodeViewer {
             'flux_scheme': ['AUSM+', 'Rusanov'],
             'spatial_order': ['1', '2', '3'],
             'temporal_order': ['1', '2', '3'],
-            'output_mode': ['By Step', 'By Time'],
             'plot_stride': ['1', '2', '5', '10', '20', '50', '100'],
             'charge_shape': ['Sphere', 'Cylinder'],
             'material_type': ['Air', 'JWL Charge', 'Ideal Gas Charge']
@@ -2204,7 +2574,7 @@ export class NodeViewer {
             }
         } else if (node.type === 'Material' && ['rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'].includes(key)) {
             updates['composition'] = 'Custom';
-        } else if (node.type === 'Material' && ['ideal_rho_0', 'ideal_e_0'].includes(key)) {
+        } else if (node.type === 'Material' && ['ideal_rho_0', 'ideal_e_0', 'ideal_gamma'].includes(key)) {
             updates['composition'] = 'Custom';
         }
 

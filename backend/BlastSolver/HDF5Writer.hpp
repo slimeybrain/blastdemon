@@ -23,8 +23,11 @@ public:
                             const std::vector<std::vector<float>>& reacted_data,
                             const std::vector<std::vector<float>>& unreacted_data,
                             const std::vector<std::vector<float>>& air_data,
+                            const std::vector<std::vector<float>>& op_data,
+                            const std::vector<std::vector<float>>& imp_data,
                             bool has_p, bool has_rho, bool has_vel, bool has_E,
-                            bool has_reacted, bool has_unreacted, bool has_air);
+                            bool has_reacted, bool has_unreacted, bool has_air,
+                            bool has_op, bool has_imp);
 };
 
 #endif // HDF5_WRITER_HPP

@@ -17,8 +17,8 @@ const initialState: SimulationState = {
                 dimension: '1D',
                 domain_radius: 1.0,
                 cell_size: 0.001,
-                x_min_bc: 'Reflecting',
-                x_max_bc: 'Terminate',
+                left_bc: 'Reflecting',
+                right_bc: 'Terminate',
                 y_min_bc: 'Reflecting',
                 y_max_bc: 'Reflecting',
                 z_min_bc: 'Reflecting',
@@ -31,7 +31,7 @@ const initialState: SimulationState = {
             parameters: {
                 material_type: 'Air',
                 atm_pressure: 101325.0,
-                atm_temperature: 298.15,
+                atm_temperature: 288.0,
                 gamma: 1.4
             }
         },
@@ -56,6 +56,7 @@ const initialState: SimulationState = {
             inputs: [{ id: 'material', label: 'Material' }],
             outputs: [{ id: 'out', label: 'Charge' }],
             parameters: {
+                charge_mass: 0.853479,
                 charge_radius: 0.05
             }
         },
@@ -69,7 +70,7 @@ const initialState: SimulationState = {
             id: 'node-solver', type: 'CFDSolver', x: 550, y: 200, displayMode: 'expanded',
             inputs: [{ id: 'in', label: 'Initial State' }],
             outputs: [{ id: 'telemetry', label: 'Telemetry' }],
-            parameters: { init_mode: 'Multi-Material JWL', cfl: 0.4, flux_scheme: 'AUSM+', spatial_order: 2, temporal_order: 2, output_mode: 'By Time', output_interval: 0.0001 }
+            parameters: { init_mode: 'Multi-Material JWL', cfl: 0.4, flux_scheme: 'AUSM+', spatial_order: 2, temporal_order: 2 }
         }
     ],
     connections: [
@@ -378,6 +379,103 @@ document.addEventListener('click', async (e) => {
             };
             input.click();
         }
+    }
+
+    if (target.id === 'menu-save-workspace-host') {
+        const activeWs = stateManager.getActiveWorkspace();
+        if (!activeWs) {
+            await CustomDialog.alert("No active workspace to save.");
+            return;
+        }
+
+        const startPath = activeWs.activeModelId 
+            ? (stateManager.getAllModels().find(m => m.id === activeWs.activeModelId)?.filename || "") 
+            : "";
+
+        const browser = new HostFileBrowserModal(
+            networkManager,
+            'save',
+            `${activeWs.name.toLowerCase().replace(/\s+/g, '_')}_workspace.json`,
+            async (fullPath) => {
+                const lastSlash = fullPath.lastIndexOf('/');
+                const dirPath = lastSlash !== -1 ? fullPath.substring(0, lastSlash) : '.';
+
+                // 1. Create directory on host
+                networkManager.send({
+                    command: "CREATE_DIR",
+                    path: dirPath
+                });
+
+                // 2. Save each model referenced in this workspace to the directory
+                const models = stateManager.getWorkspaceModels();
+                models.forEach(model => {
+                    const modelFilename = `${model.name.toLowerCase().replace(/\s+/g, '_')}.json`;
+                    const modelPath = `${dirPath}/${modelFilename}`;
+                    const modelJson = JSON.stringify({
+                        name: model.name,
+                        nodes: model.nodes,
+                        connections: model.connections
+                    }, null, 2);
+
+                    networkManager.send({
+                        command: "SAVE_MODEL_FILE",
+                        modelId: `ws-silent-${model.id}`,
+                        filePath: modelPath,
+                        fileContent: modelJson
+                    });
+                });
+
+                // 3. Save the self-contained workspace JSON
+                const wsContent = JSON.stringify({
+                    type: "blast_workspace_file",
+                    version: 1,
+                    workspace: {
+                        id: activeWs.id,
+                        name: activeWs.name,
+                        layout: activeWs.layout,
+                        connections: activeWs.connections,
+                        modelIds: activeWs.modelIds,
+                        activeModelId: activeWs.activeModelId
+                    },
+                    models: models.map(m => ({
+                        id: m.id,
+                        name: m.name,
+                        filename: `${dirPath}/${m.name.toLowerCase().replace(/\s+/g, '_')}.json`,
+                        nodes: m.nodes,
+                        connections: m.connections
+                    }))
+                }, null, 2);
+
+                networkManager.send({
+                    command: "SAVE_MODEL_FILE",
+                    modelId: "workspace",
+                    filePath: fullPath,
+                    fileContent: wsContent
+                });
+            }
+        );
+        browser.open(startPath);
+    }
+
+    if (target.id === 'menu-load-workspace-host') {
+        const activeWs = stateManager.getActiveWorkspace();
+        const startPath = activeWs.activeModelId 
+            ? (stateManager.getAllModels().find(m => m.id === activeWs.activeModelId)?.filename || "") 
+            : "";
+
+        const browser = new HostFileBrowserModal(
+            networkManager,
+            'open',
+            '',
+            (path) => {
+                networkManager.send({
+                    command: "LOAD_MODEL_FILE",
+                    modelId: "workspace",
+                    filePath: path
+                });
+            }
+        );
+        browser.open(startPath);
     }
 
     if (target.id === 'menu-reset-all') {
@@ -921,27 +1019,41 @@ networkManager.onMessage(async (data) => {
         const dataJson = JSON.parse(data);
         if (dataJson.type === 'save_model_response') {
             if (dataJson.status === 'success') {
-                const modelId = dataJson.modelId;
+                let modelId = dataJson.modelId;
                 const filePath = dataJson.filePath;
-                stateManager.setModelFilename(modelId, filePath);
+                const isWorkspaceSave = modelId === 'workspace';
+                const isSilentSave = modelId.startsWith('ws-silent-');
 
-                const model = stateManager.getAllModels().find(m => m.id === modelId);
-                if (model) {
-                    const lastSlash = filePath.lastIndexOf('/');
-                    const dirPath = lastSlash !== -1 ? filePath.substring(0, lastSlash) : '.';
-
-                    model.nodes.forEach(n => {
-                        if (n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D') {
-                            stateManager.updateNodeParameters(n.id, { output_dir: dirPath });
-                        }
-                        if (n.type === 'VTKOutput' || n.type === 'Telemetry3DViewport') {
-                            stateManager.updateNodeParameters(n.id, { vtk_dir: dirPath });
-                        }
-                    });
+                if (isSilentSave) {
+                    modelId = modelId.substring(10);
                 }
-                await CustomDialog.alert(`Model saved successfully to:\n${filePath}`);
+
+                if (modelId && modelId !== 'all' && modelId !== 'workspace') {
+                    stateManager.setModelFilename(modelId, filePath);
+
+                    const model = stateManager.getAllModels().find(m => m.id === modelId);
+                    if (model) {
+                        const lastSlash = filePath.lastIndexOf('/');
+                        const dirPath = lastSlash !== -1 ? filePath.substring(0, lastSlash) : '.';
+
+                        model.nodes.forEach(n => {
+                            if (n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D') {
+                                stateManager.updateNodeParameters(n.id, { output_dir: dirPath });
+                            }
+                            if (n.type === 'VTKOutput' || n.type === 'Telemetry3DViewport') {
+                                stateManager.updateNodeParameters(n.id, { vtk_dir: dirPath });
+                            }
+                        });
+                    }
+                }
+                
+                if (isWorkspaceSave) {
+                    await CustomDialog.alert(`Workspace saved successfully to:\n${filePath}`);
+                } else if (!isSilentSave) {
+                    await CustomDialog.alert(`Model saved successfully to:\n${filePath}`);
+                }
             } else {
-                await CustomDialog.alert(`Error saving model file:\n${dataJson.error}`);
+                await CustomDialog.alert(`Error saving file:\n${dataJson.error}`);
             }
             return;
         }
@@ -952,38 +1064,78 @@ networkManager.onMessage(async (data) => {
                 const filePath = dataJson.filePath;
                 try {
                     const loaded = JSON.parse(dataJson.fileContent);
-                    const activeWs = stateManager.getActiveWorkspace();
-                    const state: SimulationState = {
-                        nodes: loaded.nodes || [],
-                        connections: loaded.connections || [],
-                        layout: loaded.layout || activeWs.layout
-                    };
-                    stateManager.pushState(state);
+                    if (loaded.type === 'blast_workspace_file') {
+                        const ws = loaded.workspace;
+                        const models = loaded.models || [];
+                        
+                        // Dynamically update model filenames to reflect the loaded directory on host if needed
+                        const lastSlash = filePath.lastIndexOf('/');
+                        const dirPath = lastSlash !== -1 ? filePath.substring(0, lastSlash) : '.';
+                        
+                        models.forEach((m: any) => {
+                            if (m.filename) {
+                                const mSlash = m.filename.lastIndexOf('/');
+                                const mBasename = mSlash !== -1 ? m.filename.substring(mSlash + 1) : `${m.name.toLowerCase().replace(/\s+/g, '_')}.json`;
+                                m.filename = `${dirPath}/${mBasename}`;
+                            } else {
+                                m.filename = `${dirPath}/${m.name.toLowerCase().replace(/\s+/g, '_')}.json`;
+                            }
+                            
+                            // Update gauge / vtk output directories to this directory path as well
+                            if (m.nodes) {
+                                m.nodes.forEach((n: any) => {
+                                    if (n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D') {
+                                        n.parameters = n.parameters || {};
+                                        n.parameters.output_dir = dirPath;
+                                    } else if (n.type === 'VTKOutput' || n.type === 'Telemetry3DViewport') {
+                                        n.parameters = n.parameters || {};
+                                        n.parameters.vtk_dir = dirPath;
+                                    }
+                                });
+                            }
+                        });
 
-                    if (activeWs.activeModelId) {
-                        stateManager.setModelFilename(activeWs.activeModelId, filePath);
-
-                        const model = stateManager.getAllModels().find(m => m.id === activeWs.activeModelId);
-                        if (model) {
-                             const lastSlash = filePath.lastIndexOf('/');
-                             const dirPath = lastSlash !== -1 ? filePath.substring(0, lastSlash) : '.';
-
-                            model.nodes.forEach(n => {
-                                if (n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D') {
-                                    stateManager.updateNodeParameters(n.id, { output_dir: dirPath });
-                                } else if (n.type === 'VTKOutput' || n.type === 'Telemetry3DViewport') {
-                                    stateManager.updateNodeParameters(n.id, { vtk_dir: dirPath });
-                                }
-                            });
+                        stateManager.importWorkspace(ws, models);
+                        
+                        const activeState = stateManager.getCurrentState();
+                        if (activeState) {
+                            layoutManager.render(activeState);
                         }
+                        await CustomDialog.alert(`Workspace loaded and restored successfully from:\n${filePath}`);
+                    } else {
+                        const activeWs = stateManager.getActiveWorkspace();
+                        const state: SimulationState = {
+                            nodes: loaded.nodes || [],
+                            connections: loaded.connections || [],
+                            layout: loaded.layout || activeWs.layout
+                        };
+                        stateManager.pushState(state);
+
+                        if (activeWs.activeModelId) {
+                            stateManager.setModelFilename(activeWs.activeModelId, filePath);
+
+                            const model = stateManager.getAllModels().find(m => m.id === activeWs.activeModelId);
+                            if (model) {
+                                const lastSlash = filePath.lastIndexOf('/');
+                                const dirPath = lastSlash !== -1 ? filePath.substring(0, lastSlash) : '.';
+
+                                model.nodes.forEach(n => {
+                                    if (n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D') {
+                                        stateManager.updateNodeParameters(n.id, { output_dir: dirPath });
+                                    } else if (n.type === 'VTKOutput' || n.type === 'Telemetry3DViewport') {
+                                        stateManager.updateNodeParameters(n.id, { vtk_dir: dirPath });
+                                    }
+                                });
+                            }
+                        }
+                        layoutManager.render(state);
+                        await CustomDialog.alert(`Model loaded successfully from:\n${filePath}`);
                     }
-                    layoutManager.render(state);
-                    await CustomDialog.alert(`Model loaded successfully from:\n${filePath}`);
                 } catch (err) {
-                    await CustomDialog.alert("Failed to parse loaded model: " + err);
+                    await CustomDialog.alert("Failed to parse loaded file: " + err);
                 }
             } else {
-                await CustomDialog.alert(`Error loading model file:\n${dataJson.error}`);
+                await CustomDialog.alert(`Error loading file:\n${dataJson.error}`);
             }
             return;
         }

@@ -586,7 +586,7 @@ export class LayoutManager {
 
         const select = document.createElement('select');
         select.className = 'header-select';
-        const types: PanelType[] = ['OUTLINER', 'NODE_GRAPH', 'PROPERTIES', 'NODE_VIEWER', 'EXECUTION_MANAGER', 'RESOURCE_MANAGER', 'TELEMETRY_3D'];
+        const types: PanelType[] = ['OUTLINER', 'NODE_GRAPH', 'PROPERTIES', 'NODE_VIEWER', 'EXECUTION_MANAGER', 'RESOURCE_MANAGER', 'TELEMETRY_3D', 'COMPARE_MODELS'];
         types.forEach(t => {
             const opt = document.createElement('option');
             opt.value = t;
@@ -824,6 +824,9 @@ export class LayoutManager {
             case 'TELEMETRY_3D':
                 this.renderTelemetry3D(node, container);
                 break;
+            case 'COMPARE_MODELS':
+                this.renderCompareModels(node, container);
+                break;
             default:
                 container.innerHTML = `<div style="padding:10px">Panel: ${node.panelType}</div>`;
         }
@@ -852,6 +855,20 @@ export class LayoutManager {
                 comp.container = container;
             }
             comp.instance.attachTo(container);
+        }
+    }
+
+    private renderCompareModels(node: PanelNode, container: HTMLElement): void {
+        let comp = this.components.get(node.id);
+        if (!comp) {
+            const comparison = new CompareModelsComponent(container, this.stateManager, node.id);
+            comp = { type: 'COMPARE_MODELS', instance: comparison, container };
+            this.components.set(node.id, comp);
+        } else {
+            if (comp.container !== container) {
+                comp.container = container;
+            }
+            container.appendChild(comp.instance.container);
         }
     }
 
@@ -1022,6 +1039,8 @@ class MenuBarComponent {
                     <div id="menu-save-workspace">Save All</div>
                     <div id="menu-export-workspace">Export Workspace (JSON)...</div>
                     <div id="menu-import-workspace">Import Workspace (JSON)...</div>
+                    <div id="menu-save-workspace-host">Save Workspace to Host...</div>
+                    <div id="menu-load-workspace-host">Load Workspace from Host...</div>
                     <div class="menu-separator"></div>
                     <div id="menu-reset-all" style="color:#ef4444">Reset All (Danger)</div>
                 </div>
@@ -1786,5 +1805,1023 @@ class ExecutionManagerComponent {
 
             this.updateCard(card, model, isConnected);
         });
+    }
+}
+
+class CompareModelsComponent {
+    public container: HTMLElement;
+    private stateManager: StateManager;
+    private panelId: string;
+    
+    private stateListener: () => void;
+    private telemetryListener: (nodeId: string, data: any) => void;
+    
+    private chartContainer!: HTMLElement;
+    private canvas!: HTMLCanvasElement;
+    private controlsContainer!: HTMLElement;
+    private legendContainer!: HTMLElement;
+    
+    private channelSelect!: HTMLSelectElement;
+    private channelLabel!: HTMLElement;
+    private xAxisSelect!: HTMLSelectElement;
+    private xAxisLabel!: HTMLElement;
+    
+    private isControlsOpen: boolean = true;
+    private selectedModelIds: Set<string> = new Set();
+    private selectedChannel: number = 0;
+    private xAxisMode: string = 'radius';
+    private compareMode: 'spatial' | 'gauges' = 'spatial';
+    
+    private hoverX: number | null = null;
+    private hoverY: number | null = null;
+    
+    private zoomedOrPanned: boolean = false;
+    private zoomMinX: number = 0;
+    private zoomMaxX: number = 1.0;
+    private zoomMinY: number = 0.0;
+    private zoomMaxY: number = 1.0;
+    
+    private isDragging: boolean = false;
+    private dragStartX: number = 0;
+    private dragStartY: number = 0;
+    private dragStartMinX: number = 0;
+    private dragStartMaxX: number = 1.0;
+    private dragStartMinY: number = 0.0;
+    private dragStartMaxY: number = 1.0;
+
+    constructor(parent: HTMLElement, stateManager: StateManager, panelId: string) {
+        this.container = document.createElement('div');
+        this.container.className = 'compare-models-panel';
+        parent.appendChild(this.container);
+        
+        this.stateManager = stateManager;
+        this.panelId = panelId;
+        
+        // Load initial options
+        const state = this.stateManager.getCurrentState();
+        if (state) {
+            const findNode = (layout: any): any => {
+                if (layout.type === 'panel' && layout.id === panelId) return layout;
+                if (layout.type === 'split') {
+                    return findNode(layout.firstChild) || findNode(layout.secondChild);
+                }
+                return null;
+            };
+            const pNode = findNode(state.layout);
+            if (pNode && pNode.options) {
+                if (Array.isArray(pNode.options.selectedModelIds)) {
+                    this.selectedModelIds = new Set(pNode.options.selectedModelIds);
+                }
+                if (typeof pNode.options.channel === 'number') {
+                    this.selectedChannel = pNode.options.channel;
+                }
+                if (typeof pNode.options.isControlsOpen === 'boolean') {
+                    this.isControlsOpen = pNode.options.isControlsOpen;
+                }
+                if (typeof pNode.options.xAxisMode === 'string') {
+                    this.xAxisMode = pNode.options.xAxisMode;
+                }
+                if (typeof pNode.options.compareMode === 'string') {
+                    this.compareMode = pNode.options.compareMode as 'spatial' | 'gauges';
+                }
+            }
+        }
+        
+        this.buildStructure();
+        
+        this.stateListener = () => {
+            this.updateModelList();
+            this.draw();
+        };
+        this.stateManager.onStateChange(this.stateListener);
+        
+        this.telemetryListener = (nodeId: string, data: any) => {
+            this.draw();
+        };
+        this.stateManager.onTelemetryUpdate(this.telemetryListener);
+        
+        // Force canvas dimension sync
+        setTimeout(() => {
+            if (this.canvas) {
+                this.canvas.width = this.canvas.clientWidth;
+                this.canvas.height = this.canvas.clientHeight;
+                this.draw();
+            }
+        }, 50);
+        
+        const ro = new ResizeObserver(() => {
+            if (this.canvas) {
+                this.canvas.width = this.canvas.clientWidth;
+                this.canvas.height = this.canvas.clientHeight;
+                this.draw();
+            }
+        });
+        ro.observe(this.container);
+    }
+    
+    destroy() {
+        this.stateManager.offStateChange(this.stateListener);
+        this.stateManager.offTelemetryUpdate(this.telemetryListener);
+        this.container.remove();
+    }
+    
+    private buildStructure() {
+        this.container.innerHTML = '';
+        this.container.style.display = 'flex';
+        this.container.style.width = '100%';
+        this.container.style.height = '100%';
+        this.container.style.overflow = 'hidden';
+        
+        // Chart Container (Left)
+        this.chartContainer = document.createElement('div');
+        this.chartContainer.className = 'compare-chart-container';
+        this.chartContainer.style.flex = '1';
+        this.chartContainer.style.display = 'flex';
+        this.chartContainer.style.flexDirection = 'column';
+        this.chartContainer.style.minWidth = '0';
+        this.chartContainer.style.height = '100%';
+        this.container.appendChild(this.chartContainer);
+        
+        // Chart Header
+        const chartHeader = document.createElement('div');
+        chartHeader.className = 'compare-chart-header';
+        chartHeader.style.display = 'flex';
+        chartHeader.style.alignItems = 'center';
+        chartHeader.style.gap = '12px';
+        chartHeader.style.padding = '8px 12px';
+        chartHeader.style.background = '#18181c';
+        chartHeader.style.borderBottom = '1px solid rgba(255, 255, 255, 0.05)';
+        chartHeader.style.height = '38px';
+        chartHeader.style.boxSizing = 'border-box';
+        chartHeader.style.flexShrink = '0';
+        
+        const titleSpan = document.createElement('span');
+        titleSpan.style.fontWeight = '600';
+        titleSpan.style.fontSize = '11px';
+        titleSpan.style.color = '#fff';
+        titleSpan.style.marginRight = 'auto';
+        titleSpan.textContent = 'COMPARE MODELS';
+        chartHeader.appendChild(titleSpan);
+        
+        // Mode Selector dropdown
+        const modeLabel = document.createElement('span');
+        modeLabel.textContent = 'Mode:';
+        modeLabel.style.fontSize = '10px';
+        modeLabel.style.color = '#888';
+        chartHeader.appendChild(modeLabel);
+        
+        const modeSelect = document.createElement('select');
+        modeSelect.style.fontSize = '10px';
+        modeSelect.style.background = '#2a2a30';
+        modeSelect.style.color = '#ccc';
+        modeSelect.style.border = '1px solid #444';
+        modeSelect.style.padding = '2px 4px';
+        modeSelect.style.borderRadius = '3px';
+        
+        const modeOptSpatial = document.createElement('option');
+        modeOptSpatial.value = 'spatial';
+        modeOptSpatial.textContent = 'Spatial Profile';
+        if (this.compareMode === 'spatial') modeOptSpatial.selected = true;
+        modeSelect.appendChild(modeOptSpatial);
+        
+        const modeOptGauges = document.createElement('option');
+        modeOptGauges.value = 'gauges';
+        modeOptGauges.textContent = 'Virtual Gauges';
+        if (this.compareMode === 'gauges') modeOptGauges.selected = true;
+        modeSelect.appendChild(modeOptGauges);
+        
+        modeSelect.onchange = () => {
+            this.compareMode = modeSelect.value as 'spatial' | 'gauges';
+            this.selectedChannel = 0;
+            this.zoomedOrPanned = false;
+            this.updateChannelDropdown();
+            this.saveOptions();
+            this.draw();
+        };
+        chartHeader.appendChild(modeSelect);
+        
+        // Channel Selector dropdown
+        this.channelLabel = document.createElement('span');
+        this.channelLabel.textContent = 'Variable:';
+        this.channelLabel.style.fontSize = '10px';
+        this.channelLabel.style.color = '#888';
+        chartHeader.appendChild(this.channelLabel);
+        
+        this.channelSelect = document.createElement('select');
+        this.channelSelect.style.fontSize = '10px';
+        this.channelSelect.style.background = '#2a2a30';
+        this.channelSelect.style.color = '#ccc';
+        this.channelSelect.style.border = '1px solid #444';
+        this.channelSelect.style.padding = '2px 4px';
+        this.channelSelect.style.borderRadius = '3px';
+        this.channelSelect.onchange = () => {
+            this.selectedChannel = Number(this.channelSelect.value);
+            this.zoomedOrPanned = false;
+            this.saveOptions();
+            this.draw();
+        };
+        chartHeader.appendChild(this.channelSelect);
+        
+        // X-Axis mode dropdown
+        this.xAxisLabel = document.createElement('span');
+        this.xAxisLabel.textContent = 'X-Axis:';
+        this.xAxisLabel.style.fontSize = '10px';
+        this.xAxisLabel.style.color = '#888';
+        chartHeader.appendChild(this.xAxisLabel);
+        
+        this.xAxisSelect = document.createElement('select');
+        this.xAxisSelect.style.fontSize = '10px';
+        this.xAxisSelect.style.background = '#2a2a30';
+        this.xAxisSelect.style.color = '#ccc';
+        this.xAxisSelect.style.border = '1px solid #444';
+        this.xAxisSelect.style.padding = '2px 4px';
+        this.xAxisSelect.style.borderRadius = '3px';
+        
+        const xOptRadius = document.createElement('option');
+        xOptRadius.value = 'radius';
+        xOptRadius.textContent = 'Radius';
+        if (this.xAxisMode === 'radius') xOptRadius.selected = true;
+        this.xAxisSelect.appendChild(xOptRadius);
+        
+        const xOptCell = document.createElement('option');
+        xOptCell.value = 'cell_id';
+        xOptCell.textContent = 'Cell ID';
+        if (this.xAxisMode === 'cell_id') xOptCell.selected = true;
+        this.xAxisSelect.appendChild(xOptCell);
+        
+        this.xAxisSelect.onchange = () => {
+            this.xAxisMode = this.xAxisSelect.value;
+            this.zoomedOrPanned = false;
+            this.saveOptions();
+            this.draw();
+        };
+        chartHeader.appendChild(this.xAxisSelect);
+        
+        // Populate channel select values
+        this.updateChannelDropdown();
+        
+        // Settings Gear Button
+        const gearBtn = document.createElement('button');
+        gearBtn.style.background = 'none';
+        gearBtn.style.border = 'none';
+        gearBtn.style.color = '#888';
+        gearBtn.style.cursor = 'pointer';
+        gearBtn.style.fontSize = '12px';
+        gearBtn.innerHTML = '⚙️';
+        gearBtn.onclick = () => {
+            this.isControlsOpen = !this.isControlsOpen;
+            this.controlsContainer.style.display = this.isControlsOpen ? 'flex' : 'none';
+            this.saveOptions();
+            this.canvas.width = this.canvas.clientWidth;
+            this.canvas.height = this.canvas.clientHeight;
+            this.draw();
+        };
+        chartHeader.appendChild(gearBtn);
+        
+        this.chartContainer.appendChild(chartHeader);
+        
+        // Canvas wrapper
+        const canvasWrapper = document.createElement('div');
+        canvasWrapper.style.flex = '1';
+        canvasWrapper.style.position = 'relative';
+        canvasWrapper.style.minHeight = '0';
+        this.chartContainer.appendChild(canvasWrapper);
+        
+        this.canvas = document.createElement('canvas');
+        this.canvas.style.position = 'absolute';
+        this.canvas.style.top = '0';
+        this.canvas.style.left = '0';
+        this.canvas.style.width = '100%';
+        this.canvas.style.height = '100%';
+        this.canvas.style.display = 'block';
+        this.canvas.style.touchAction = 'none';
+        canvasWrapper.appendChild(this.canvas);
+        
+        const getActiveCompareBounds = () => {
+            const defaults = this.getDefaultBounds();
+            if (!defaults) return null;
+            if (this.zoomedOrPanned) {
+                return {
+                    minX: this.zoomMinX,
+                    maxX: this.zoomMaxX,
+                    minY: defaults.minY,
+                    maxY: defaults.maxY
+                };
+            }
+            return defaults;
+        };
+
+        this.canvas.addEventListener('pointerdown', (e) => {
+            const active = getActiveCompareBounds();
+            if (!active) return;
+            
+            this.canvas.setPointerCapture(e.pointerId);
+            const rect = this.canvas.getBoundingClientRect();
+            this.isDragging = true;
+            this.dragStartX = e.clientX - rect.left;
+            
+            this.dragStartMinX = active.minX;
+            this.dragStartMaxX = active.maxX;
+            
+            e.preventDefault();
+        });
+        
+        this.canvas.addEventListener('pointermove', (e) => {
+            const rect = this.canvas.getBoundingClientRect();
+            this.hoverX = e.clientX - rect.left;
+            this.hoverY = e.clientY - rect.top;
+            
+            if (this.isDragging && this.canvas.hasPointerCapture(e.pointerId)) {
+                const paddingLeft = 55;
+                const paddingRight = 15;
+                const plotW = rect.width - paddingLeft - paddingRight;
+                
+                if (plotW > 0) {
+                    const dxScreen = this.hoverX - this.dragStartX;
+                    const rangeX = this.dragStartMaxX - this.dragStartMinX;
+                    const dx = (dxScreen / plotW) * rangeX;
+                    
+                    this.zoomMinX = this.dragStartMinX - dx;
+                    this.zoomMaxX = this.dragStartMaxX - dx;
+                    
+                    this.zoomedOrPanned = true;
+                }
+            }
+            this.draw();
+        });
+        
+        const releaseCompareCapture = (e: PointerEvent) => {
+            if (this.canvas.hasPointerCapture(e.pointerId)) {
+                this.canvas.releasePointerCapture(e.pointerId);
+                this.isDragging = false;
+            }
+        };
+
+        this.canvas.addEventListener('pointerup', releaseCompareCapture);
+        this.canvas.addEventListener('pointercancel', releaseCompareCapture);
+        this.canvas.addEventListener('mouseleave', () => this.handleMouseLeave());
+        
+        this.canvas.addEventListener('wheel', (e) => {
+            const active = getActiveCompareBounds();
+            if (!active) return;
+            
+            const rect = this.canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            
+            const paddingLeft = 55;
+            const paddingRight = 15;
+            const plotW = rect.width - paddingLeft - paddingRight;
+            
+            if (plotW <= 0) return;
+            
+            const zoomFactor = e.deltaY > 0 ? 1.1 : 0.9;
+            
+            const pctX = (mouseX - paddingLeft) / plotW;
+            const targetX = active.minX + pctX * (active.maxX - active.minX);
+            const newRangeX = (active.maxX - active.minX) * zoomFactor;
+            
+            this.zoomMinX = targetX - pctX * newRangeX;
+            this.zoomMaxX = this.zoomMinX + newRangeX;
+            
+            this.zoomedOrPanned = true;
+            this.draw();
+            e.preventDefault();
+        }, { passive: false });
+        
+        this.canvas.addEventListener('dblclick', (e) => {
+            this.zoomedOrPanned = false;
+            this.draw();
+            e.preventDefault();
+        });
+        
+        // Controls Panel (Right)
+        this.controlsContainer = document.createElement('div');
+        this.controlsContainer.className = 'compare-controls-panel';
+        this.controlsContainer.style.width = '240px';
+        this.controlsContainer.style.background = '#15151a';
+        this.controlsContainer.style.borderLeft = '1px solid rgba(255, 255, 255, 0.08)';
+        this.controlsContainer.style.display = this.isControlsOpen ? 'flex' : 'none';
+        this.controlsContainer.style.flexDirection = 'column';
+        this.controlsContainer.style.flexShrink = '0';
+        this.controlsContainer.style.height = '100%';
+        this.controlsContainer.style.overflow = 'hidden';
+        this.container.appendChild(this.controlsContainer);
+        
+        // Controls Header
+        const controlsHeader = document.createElement('div');
+        controlsHeader.style.display = 'flex';
+        controlsHeader.style.justifyContent = 'space-between';
+        controlsHeader.style.alignItems = 'center';
+        controlsHeader.style.padding = '8px 12px';
+        controlsHeader.style.background = '#1c1c22';
+        controlsHeader.style.borderBottom = '1px solid rgba(255, 255, 255, 0.05)';
+        controlsHeader.style.fontSize = '10px';
+        controlsHeader.style.fontWeight = 'bold';
+        controlsHeader.style.color = '#00adff';
+        controlsHeader.style.letterSpacing = '1px';
+        controlsHeader.style.textTransform = 'uppercase';
+        controlsHeader.textContent = 'Models Legend';
+        
+        const closeBtn = document.createElement('button');
+        closeBtn.style.background = 'none';
+        closeBtn.style.border = 'none';
+        closeBtn.style.color = '#888';
+        closeBtn.style.cursor = 'pointer';
+        closeBtn.style.fontSize = '11px';
+        closeBtn.textContent = '▶';
+        closeBtn.onclick = () => {
+            this.isControlsOpen = false;
+            this.controlsContainer.style.display = 'none';
+            this.saveOptions();
+            this.canvas.width = this.canvas.clientWidth;
+            this.canvas.height = this.canvas.clientHeight;
+            this.draw();
+        };
+        controlsHeader.appendChild(closeBtn);
+        this.controlsContainer.appendChild(controlsHeader);
+        
+        // Legend Container
+        this.legendContainer = document.createElement('div');
+        this.legendContainer.style.flex = '1';
+        this.legendContainer.style.overflowY = 'auto';
+        this.legendContainer.style.padding = '12px';
+        this.legendContainer.style.display = 'flex';
+        this.legendContainer.style.flexDirection = 'column';
+        this.legendContainer.style.gap = '8px';
+        this.controlsContainer.appendChild(this.legendContainer);
+        
+        this.updateModelList();
+    }
+    
+    private updateChannelDropdown() {
+        if (!this.channelSelect) return;
+        this.channelSelect.innerHTML = '';
+        
+        const channels = this.compareMode === 'spatial'
+            ? ['Pressure', 'Density', 'Velocity', 'Int. Energy', 'Mass Fraction']
+            : ['Pressure', 'Density', 'Velocity', 'Int. Energy', 'Reacted (Alpha1)', 'Unreacted (Alpha2)', 'Air', 'Overpressure', 'Impulse'];
+            
+        channels.forEach((ch, idx) => {
+            const opt = document.createElement('option');
+            opt.value = String(idx);
+            opt.textContent = ch;
+            if (idx === this.selectedChannel) opt.selected = true;
+            this.channelSelect.appendChild(opt);
+        });
+        
+        if (this.compareMode === 'gauges') {
+            this.xAxisSelect.style.display = 'none';
+            this.xAxisLabel.style.display = 'none';
+        } else {
+            this.xAxisSelect.style.display = '';
+            this.xAxisLabel.style.display = '';
+        }
+    }
+    
+    private updateModelList() {
+        if (!this.legendContainer) return;
+        this.legendContainer.innerHTML = '';
+        
+        const models = this.stateManager.getWorkspaceModels();
+        if (models.length === 0) {
+            this.legendContainer.innerHTML = `<div style="color:#666; font-style:italic; font-size:11px; text-align:center; padding:10px;">No models in workspace</div>`;
+            return;
+        }
+        
+        models.forEach(model => {
+            const item = document.createElement('div');
+            item.style.display = 'flex';
+            item.style.alignItems = 'center';
+            item.style.gap = '8px';
+            item.style.padding = '4px 6px';
+            item.style.borderRadius = '4px';
+            item.style.background = 'rgba(255, 255, 255, 0.02)';
+            item.style.border = '1px solid rgba(255, 255, 255, 0.04)';
+            
+            const color = this.getModelColor(model.id);
+            
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.checked = this.selectedModelIds.has(model.id);
+            checkbox.style.cursor = 'pointer';
+            checkbox.style.accentColor = color;
+            checkbox.onchange = () => {
+                if (checkbox.checked) {
+                    this.selectedModelIds.add(model.id);
+                } else {
+                    this.selectedModelIds.delete(model.id);
+                }
+                this.saveOptions();
+                this.draw();
+            };
+            
+            const colorBadge = document.createElement('div');
+            colorBadge.style.width = '12px';
+            colorBadge.style.height = '12px';
+            colorBadge.style.borderRadius = '3px';
+            colorBadge.style.background = color;
+            colorBadge.style.flexShrink = '0';
+            
+            const nameLabel = document.createElement('span');
+            nameLabel.textContent = model.name;
+            nameLabel.style.fontSize = '11px';
+            nameLabel.style.color = '#eee';
+            nameLabel.style.textOverflow = 'ellipsis';
+            nameLabel.style.overflow = 'hidden';
+            nameLabel.style.whiteSpace = 'nowrap';
+            nameLabel.style.cursor = 'pointer';
+            nameLabel.onclick = () => {
+                checkbox.click();
+            };
+            
+            item.appendChild(checkbox);
+            item.appendChild(colorBadge);
+            item.appendChild(nameLabel);
+            
+            this.legendContainer.appendChild(item);
+        });
+    }
+    
+    private getModelColor(id: string): string {
+        let hash = 0;
+        for (let i = 0; i < id.length; i++) {
+            hash = id.charCodeAt(i) + ((hash << 5) - hash);
+        }
+        const h = Math.abs(hash) % 360;
+        return `hsl(${h}, 85%, 60%)`;
+    }
+    
+    private getGaugeColor(modelId: string, gaugeId: string): string {
+        const key = `${modelId}-${gaugeId}`;
+        let hash = 0;
+        for (let i = 0; i < key.length; i++) {
+            hash = key.charCodeAt(i) + ((hash << 5) - hash);
+        }
+        const h = Math.abs(hash) % 360;
+        return `hsl(${h}, 85%, 60%)`;
+    }
+    
+    private saveOptions() {
+        this.stateManager.updatePanelOptions(this.panelId, {
+            selectedModelIds: Array.from(this.selectedModelIds),
+            channel: this.selectedChannel,
+            isControlsOpen: this.isControlsOpen,
+            xAxisMode: this.xAxisMode,
+            compareMode: this.compareMode
+        });
+    }
+    
+    private handleMouseMove(e: MouseEvent) {
+        if (!this.canvas) return;
+        const rect = this.canvas.getBoundingClientRect();
+        this.hoverX = e.clientX - rect.left;
+        this.hoverY = e.clientY - rect.top;
+        this.draw();
+    }
+    
+    private handleMouseLeave() {
+        this.hoverX = null;
+        this.hoverY = null;
+        this.draw();
+    }
+    
+    private getDefaultBounds() {
+        const models = this.stateManager.getWorkspaceModels();
+        const activeModels = models.filter(m => this.selectedModelIds.has(m.id));
+        
+        let minX = Infinity;
+        let maxX = -Infinity;
+        let minY = Infinity;
+        let maxY = -Infinity;
+        
+        activeModels.forEach(model => {
+            if (this.compareMode === 'spatial') {
+                const solverNode = model.nodes.find(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D');
+                if (!solverNode) return;
+                
+                let telemetryBuffer = this.stateManager.getTelemetry(solverNode.id + "-binary");
+                if (!telemetryBuffer) telemetryBuffer = this.stateManager.getTelemetry(solverNode.id);
+                
+                if (telemetryBuffer && telemetryBuffer instanceof ArrayBuffer) {
+                    const MIN_HEADER = 8;
+                    if (telemetryBuffer.byteLength >= MIN_HEADER) {
+                        const headerView = new DataView(telemetryBuffer);
+                        const n_cells = headerView.getUint32(0, true);
+                        const n_channels = headerView.getUint32(4, true);
+                        const expectedPayload = n_cells * n_channels * 4;
+                        
+                        if (telemetryBuffer.byteLength >= MIN_HEADER + expectedPayload) {
+                            const clampedChannel = Math.max(0, Math.min(this.selectedChannel, n_channels - 1));
+                            const offset = MIN_HEADER + clampedChannel * n_cells * 4;
+                            const yPoints = new Float32Array(telemetryBuffer, offset, n_cells);
+                            
+                            const meshNode = model.nodes.find(n => n.type === 'DomainMesh' || n.type === 'DomainMesh2D' || n.type === 'DomainMesh3D');
+                            const cellSize = Number(meshNode?.parameters?.cell_size ?? 0.001);
+                            
+                            for (let i = 0; i < n_cells; i++) {
+                                const x = this.xAxisMode === 'radius' ? (i + 0.5) * cellSize : i;
+                                if (x < minX) minX = x;
+                                if (x > maxX) maxX = x;
+                            }
+                            
+                            yPoints.forEach(v => {
+                                if (isFinite(v)) {
+                                    if (v < minY) minY = v;
+                                    if (v > maxY) maxY = v;
+                                }
+                            });
+                        }
+                    }
+                }
+            } else {
+                // Virtual Gauges Mode
+                const gaugesNode = model.nodes.find(n => n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D');
+                if (!gaugesNode) return;
+                
+                const history = this.stateManager.getTelemetry(gaugesNode.id);
+                if (history && history.times && history.values && history.times.length > 0) {
+                    const times = history.times;
+                    const values = history.values;
+                    const gaugesList = gaugesNode.parameters?.gauges || [];
+                    
+                    gaugesList.filter((g: any) => g.plot !== false).forEach((g: any) => {
+                        const gData = values[g.id || g.name];
+                        if (gData && gData[this.selectedChannel]) {
+                            const yVals = gData[this.selectedChannel];
+                            for (let i = 0; i < times.length; i++) {
+                                const t = times[i];
+                                if (t < minX) minX = t;
+                                if (t > maxX) maxX = t;
+                                const v = yVals[i] !== undefined ? yVals[i] : 0.0;
+                                if (isFinite(v)) {
+                                    if (v < minY) minY = v;
+                                    if (v > maxY) maxY = v;
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+        });
+        
+        if (minX === Infinity || maxX === -Infinity || minY === Infinity || maxY === -Infinity) {
+            return null;
+        }
+        
+        // Apply default padding
+        const padX = maxX - minX === 0 ? 0.1 : (maxX - minX) * 0.02;
+        let paddedMinX = minX - padX;
+        let paddedMaxX = maxX + padX;
+        
+        const rangeY = maxY - minY === 0 ? 1 : maxY - minY;
+        let paddedMinY = minY - rangeY * 0.05;
+        let paddedMaxY = maxY + rangeY * 0.05;
+        
+        if (paddedMinY >= 0 && this.compareMode === 'spatial' && (this.selectedChannel === 0 || this.selectedChannel === 1 || this.selectedChannel === 3 || this.selectedChannel === 4)) {
+            paddedMinY = Math.max(0, paddedMinY);
+        }
+        
+        return { minX: paddedMinX, maxX: paddedMaxX, minY: paddedMinY, maxY: paddedMaxY };
+    }
+
+    public draw() {
+        if (!this.canvas) return;
+        const dpr = window.devicePixelRatio || 1;
+        const rect = this.canvas.getBoundingClientRect();
+        
+        const cssW = Math.round(rect.width) || 300;
+        const cssH = Math.round(rect.height) || 200;
+        
+        if (this.canvas.width !== cssW * dpr || this.canvas.height !== cssH * dpr) {
+            this.canvas.width = cssW * dpr;
+            this.canvas.height = cssH * dpr;
+        }
+        
+        const ctx = this.canvas.getContext('2d');
+        if (!ctx) return;
+        
+        ctx.save();
+        ctx.scale(dpr, dpr);
+        ctx.clearRect(0, 0, cssW, cssH);
+        
+        const models = this.stateManager.getWorkspaceModels();
+        const activeModels = models.filter(m => this.selectedModelIds.has(m.id));
+        
+        const curves: Array<{
+            xPoints: Float32Array;
+            yPoints: Float32Array;
+            name: string;
+            color: string;
+        }> = [];
+        
+        activeModels.forEach(model => {
+            if (this.compareMode === 'spatial') {
+                const solverNode = model.nodes.find(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D');
+                if (!solverNode) return;
+                
+                let telemetryBuffer = this.stateManager.getTelemetry(solverNode.id + "-binary");
+                if (!telemetryBuffer) telemetryBuffer = this.stateManager.getTelemetry(solverNode.id);
+                
+                if (telemetryBuffer && telemetryBuffer instanceof ArrayBuffer) {
+                    const MIN_HEADER = 8;
+                    if (telemetryBuffer.byteLength >= MIN_HEADER) {
+                        const headerView = new DataView(telemetryBuffer);
+                        const n_cells = headerView.getUint32(0, true);
+                        const n_channels = headerView.getUint32(4, true);
+                        const expectedPayload = n_cells * n_channels * 4;
+                        
+                        if (telemetryBuffer.byteLength >= MIN_HEADER + expectedPayload) {
+                            const clampedChannel = Math.max(0, Math.min(this.selectedChannel, n_channels - 1));
+                            const offset = MIN_HEADER + clampedChannel * n_cells * 4;
+                            const yPoints = new Float32Array(telemetryBuffer, offset, n_cells);
+                            
+                            const meshNode = model.nodes.find(n => n.type === 'DomainMesh' || n.type === 'DomainMesh2D' || n.type === 'DomainMesh3D');
+                            const cellSize = Number(meshNode?.parameters?.cell_size ?? 0.001);
+                            
+                            const xPoints = new Float32Array(n_cells);
+                            for (let i = 0; i < n_cells; i++) {
+                                if (this.xAxisMode === 'radius') {
+                                    xPoints[i] = (i + 0.5) * cellSize;
+                                } else {
+                                    xPoints[i] = i;
+                                }
+                            }
+                            
+                            curves.push({
+                                xPoints,
+                                yPoints,
+                                name: model.name,
+                                color: this.getModelColor(model.id)
+                            });
+                        }
+                    }
+                }
+            } else {
+                // Virtual Gauges Mode
+                const gaugesNode = model.nodes.find(n => n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D');
+                if (!gaugesNode) return;
+                
+                const history = this.stateManager.getTelemetry(gaugesNode.id);
+                if (history && history.times && history.values && history.times.length > 0) {
+                    const times = history.times;
+                    const values = history.values;
+                    const gaugesList = gaugesNode.parameters?.gauges || [];
+                    
+                    gaugesList.filter((g: any) => g.plot !== false).forEach((g: any) => {
+                        const gData = values[g.id || g.name];
+                        if (gData && gData[this.selectedChannel]) {
+                            const yVals = gData[this.selectedChannel];
+                            const xPoints = new Float32Array(times.length);
+                            const yPoints = new Float32Array(times.length);
+                            
+                            for (let i = 0; i < times.length; i++) {
+                                xPoints[i] = times[i];
+                                yPoints[i] = yVals[i] !== undefined ? yVals[i] : 0.0;
+                            }
+                            
+                            curves.push({
+                                xPoints,
+                                yPoints,
+                                name: `${model.name} (${g.id || g.name})`,
+                                color: this.getGaugeColor(model.id, g.id || g.name)
+                            });
+                        }
+                    });
+                }
+            }
+        });
+        
+        if (curves.length === 0) {
+            ctx.fillStyle = '#666';
+            ctx.font = '11px monospace';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            const msg = this.compareMode === 'spatial'
+                ? 'Select models and run simulations to compare spatial profiles...'
+                : 'Select models with virtual gauges and run simulations to compare time-series...';
+            ctx.fillText(msg, cssW / 2, cssH / 2);
+            ctx.restore();
+            return;
+        }
+        
+        const defaults = this.getDefaultBounds();
+        if (!defaults) {
+            ctx.fillStyle = '#666';
+            ctx.font = '11px monospace';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('Waiting for valid simulation data...', cssW / 2, cssH / 2);
+            ctx.restore();
+            return;
+        }
+        
+        let activeMinX = defaults.minX;
+        let activeMaxX = defaults.maxX;
+        const activeMinY = defaults.minY;
+        const activeMaxY = defaults.maxY;
+        
+        if (this.zoomedOrPanned) {
+            activeMinX = this.zoomMinX;
+            activeMaxX = this.zoomMaxX;
+        } else {
+            this.zoomMinX = defaults.minX;
+            this.zoomMaxX = defaults.maxX;
+        }
+        
+        const paddingLeft = 55;
+        const paddingRight = 15;
+        const paddingTop = 25;
+        const paddingBottom = 35;
+        
+        const plotW = cssW - paddingLeft - paddingRight;
+        const plotH = cssH - paddingTop - paddingBottom;
+        
+        if (plotW <= 0 || plotH <= 0) {
+            ctx.restore();
+            return;
+        }
+        
+        // Draw Grid lines
+        ctx.strokeStyle = '#222';
+        ctx.lineWidth = 1;
+        ctx.fillStyle = '#71717a';
+        ctx.font = '9px monospace';
+        
+        // Y Grid & Ticks
+        const ticksY = 5;
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        for (let i = 0; i < ticksY; i++) {
+            const pct = i / (ticksY - 1);
+            const val = activeMinY + pct * (activeMaxY - activeMinY);
+            const y = paddingTop + plotH - pct * plotH;
+            
+            ctx.beginPath();
+            ctx.moveTo(paddingLeft, y);
+            ctx.lineTo(cssW - paddingRight, y);
+            ctx.stroke();
+            
+            ctx.fillText(val.toExponential(2), paddingLeft - 6, y);
+        }
+        
+        // X Grid & Ticks
+        const ticksX = 5;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        for (let i = 0; i < ticksX; i++) {
+            const pct = i / (ticksX - 1);
+            const val = activeMinX + pct * (activeMaxX - activeMinX);
+            const x = paddingLeft + pct * plotW;
+            
+            ctx.beginPath();
+            ctx.moveTo(x, paddingTop);
+            ctx.lineTo(x, cssH - paddingBottom);
+            ctx.stroke();
+            
+            let labelStr = '';
+            if (this.compareMode === 'spatial') {
+                labelStr = this.xAxisMode === 'radius' ? val.toFixed(3) : Math.round(val).toString();
+            } else {
+                labelStr = val.toFixed(5);
+            }
+            ctx.fillText(labelStr, x, cssH - paddingBottom + 6);
+        }
+        
+        // Axis Lines
+        ctx.strokeStyle = '#444';
+        ctx.beginPath();
+        ctx.moveTo(paddingLeft, paddingTop);
+        ctx.lineTo(paddingLeft, cssH - paddingBottom);
+        ctx.lineTo(cssW - paddingRight, cssH - paddingBottom);
+        ctx.stroke();
+        
+        ctx.save();
+        // Clip to the plotting area so lines don't bleed into the axes/padding
+        ctx.beginPath();
+        ctx.rect(paddingLeft, paddingTop, plotW, plotH);
+        ctx.clip();
+
+        // Curves
+        curves.forEach(curve => {
+            ctx.strokeStyle = curve.color;
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            
+            let first = true;
+            for (let i = 0; i < curve.xPoints.length; i++) {
+                const cx = paddingLeft + ((curve.xPoints[i] - activeMinX) / (activeMaxX - activeMinX || 1)) * plotW;
+                const cy = paddingTop + plotH - ((curve.yPoints[i] - activeMinY) / (activeMaxY - activeMinY || 1)) * plotH;
+                
+                if (first) {
+                    ctx.moveTo(cx, cy);
+                    first = false;
+                } else {
+                    ctx.lineTo(cx, cy);
+                }
+            }
+            ctx.stroke();
+        });
+        ctx.restore();
+        
+        // Tooltip Crosshair
+        if (this.hoverX !== null && this.hoverX >= paddingLeft && this.hoverX <= cssW - paddingRight &&
+            this.hoverY !== null && this.hoverY >= paddingTop && this.hoverY <= cssH - paddingBottom) {
+            
+            const hoverRadius = activeMinX + ((this.hoverX - paddingLeft) / plotW) * (activeMaxX - activeMinX);
+            
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.moveTo(this.hoverX, paddingTop);
+            ctx.lineTo(this.hoverX, cssH - paddingBottom);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            
+            const tooltipItems: Array<{ name: string; valStr: string; color: string; cy: number }> = [];
+            
+            curves.forEach(curve => {
+                let bestIdx = 0;
+                let minDiff = Infinity;
+                for (let i = 0; i < curve.xPoints.length; i++) {
+                    const diff = Math.abs(curve.xPoints[i] - hoverRadius);
+                    if (diff < minDiff) {
+                        minDiff = diff;
+                        bestIdx = i;
+                    }
+                }
+                
+                const cx = paddingLeft + ((curve.xPoints[bestIdx] - activeMinX) / (activeMaxX - activeMinX || 1)) * plotW;
+                const cy = paddingTop + plotH - ((curve.yPoints[bestIdx] - activeMinY) / (activeMaxY - activeMinY || 1)) * plotH;
+                
+                ctx.fillStyle = curve.color;
+                ctx.beginPath();
+                ctx.arc(cx, cy, 4, 0, 2 * Math.PI);
+                ctx.fill();
+                
+                tooltipItems.push({
+                    name: curve.name,
+                    valStr: curve.yPoints[bestIdx].toExponential(3),
+                    color: curve.color,
+                    cy: cy
+                });
+            });
+            
+            ctx.save();
+            ctx.font = '10px monospace';
+            
+            let maxNameW = 0;
+            let maxValW = 0;
+            tooltipItems.forEach(item => {
+                maxNameW = Math.max(maxNameW, ctx.measureText(item.name).width);
+                maxValW = Math.max(maxValW, ctx.measureText(item.valStr).width);
+            });
+            
+            const radStr = this.compareMode === 'spatial'
+                ? (this.xAxisMode === 'radius' ? `Radius: ${hoverRadius.toFixed(3)} m` : `Cell ID: ${Math.round(hoverRadius)}`)
+                : `Time: ${hoverRadius.toFixed(5)} s`;
+            const headerW = ctx.measureText(radStr).width;
+            
+            const boxW = Math.max(headerW, maxNameW + maxValW + 20) + 16;
+            const boxH = 16 + (tooltipItems.length + 1) * 14;
+            
+            let tooltipX = this.hoverX + 12;
+            let tooltipY = this.hoverY + 12;
+            
+            if (tooltipX + boxW > cssW) tooltipX = this.hoverX - boxW - 12;
+            if (tooltipY + boxH > cssH) tooltipY = this.hoverY - boxH - 12;
+            
+            ctx.fillStyle = 'rgba(24, 24, 28, 0.95)';
+            ctx.strokeStyle = '#3f3f46';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            if (typeof (ctx as any).roundRect === 'function') {
+                (ctx as any).roundRect(tooltipX, tooltipY, boxW, boxH, 4);
+            } else {
+                ctx.rect(tooltipX, tooltipY, boxW, boxH);
+            }
+            ctx.fill();
+            ctx.stroke();
+            
+            ctx.fillStyle = '#a1a1aa';
+            ctx.fillText(radStr, tooltipX + 8, tooltipY + 18);
+            
+            tooltipItems.forEach((item, idx) => {
+                const itemY = tooltipY + 32 + idx * 14;
+                
+                ctx.fillStyle = item.color;
+                ctx.fillRect(tooltipX + 8, itemY - 6, 8, 8);
+                
+                ctx.fillStyle = '#e4e4e7';
+                ctx.fillText(item.name, tooltipX + 22, itemY);
+                
+                ctx.fillStyle = '#f4f4f5';
+                ctx.textAlign = 'right';
+                ctx.fillText(item.valStr, tooltipX + boxW - 8, itemY);
+                ctx.textAlign = 'left';
+            });
+            ctx.restore();
+        }
+        
+        ctx.restore();
     }
 }
