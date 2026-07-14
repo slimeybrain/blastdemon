@@ -164,7 +164,7 @@ private:
     double det_y = 0.0;
     double det_z = 0.0;
 
-    bool is_ideal_gas;
+    bool is_ideal_gas = false;
 
     // GPU-side gauge variables
     int num_gauges = 0;

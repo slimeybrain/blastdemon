@@ -301,24 +301,30 @@ __device__ RealType minmod_gpu(RealType a, RealType b) {
 
 template <typename RealType>
 __device__ RealType weno3_gpu(RealType vM1, RealType v0, RealType vP1) {
-    RealType d0 = v0 - vM1;
-    RealType d1 = vP1 - v0;
+    double d0 = (double)v0 - (double)vM1;
+    double d1 = (double)vP1 - (double)v0;
     
-    RealType beta0 = d0 * d0;
-    RealType beta1 = d1 * d1;
+    double beta0 = d0 * d0;
+    double beta1 = d1 * d1;
     
-    RealType eps = (RealType)1e-6;
-    RealType alpha0 = (RealType)1.0 / ((RealType)3.0 * (eps + beta0) * (eps + beta0));
-    RealType alpha1 = (RealType)2.0 / ((RealType)3.0 * (eps + beta1) * (eps + beta1));
+    double eps = 1e-6;
+    double alpha0 = (1.0 / 3.0) / ((eps + beta0) * (eps + beta0));
+    double alpha1 = (2.0 / 3.0) / ((eps + beta1) * (eps + beta1));
     
-    RealType sum_alpha = alpha0 + alpha1;
-    RealType w0 = alpha0 / sum_alpha;
-    RealType w1 = alpha1 / sum_alpha;
+    double sum_alpha = alpha0 + alpha1;
+    double w0, w1;
+    if (sum_alpha < 1e-300) {
+        w0 = 1.0 / 3.0;
+        w1 = 2.0 / 3.0;
+    } else {
+        w0 = alpha0 / sum_alpha;
+        w1 = alpha1 / sum_alpha;
+    }
     
-    RealType p0 = v0 + (RealType)0.5 * d0;
-    RealType p1 = v0 + (RealType)0.5 * d1;
+    double p0 = (double)v0 + 0.5 * d0;
+    double p1 = (double)v0 + 0.5 * d1;
     
-    return w0 * p0 + w1 * p1;
+    return (RealType)(w0 * p0 + w1 * p1);
 }
 
 template <typename RealType, bool IsMultiMaterial>

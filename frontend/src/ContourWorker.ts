@@ -18,6 +18,16 @@ let selectedColormap = 'plasma';
 let isAxisymmetric = true;
 let chargeInfo: any = null;
 let detonatorInfo: any = null;
+let showGridlines = false;
+let max_r = 1.0;
+let max_z = 1.0;
+
+// Zoom and pan state
+let zoom = 1.0;
+let panX = 0.0;
+let panY = 0.0;
+let outNr = 0;
+let outNz = 0;
 
 let stride = 1;
 let refreshRate = 0.0; // in seconds
@@ -242,8 +252,6 @@ function render(): void {
     context.imageSmoothingEnabled = false;
 
     let hasHeatmap = false;
-    let outNr = 0;
-    let outNz = 0;
     let nr = 0;
     let nz = 0;
 
@@ -296,11 +304,15 @@ function render(): void {
     }
 
     // Determine domain dimensions for overlay mapping
-    let max_r = 1.0;
-    let max_z = 1.0;
-    if (chargeInfo) {
-        max_r = chargeInfo.max_r || 1.0;
-        max_z = chargeInfo.max_z || 1.0;
+    if (chargeInfo && chargeInfo.max_r) {
+        max_r = chargeInfo.max_r;
+    } else if (detonatorInfo && detonatorInfo.max_r) {
+        max_r = detonatorInfo.max_r;
+    }
+    if (chargeInfo && chargeInfo.max_z) {
+        max_z = chargeInfo.max_z;
+    } else if (detonatorInfo && detonatorInfo.max_z) {
+        max_z = detonatorInfo.max_z;
     }
 
     // Calculate aspect ratio
@@ -320,6 +332,19 @@ function render(): void {
     }
     const dx = (width - dw) / 2;
     const dy = (height - dh) / 2;
+
+    // Draw heatmap and overlays within a clipped and transformed context
+    context.save();
+    context.beginPath();
+    context.rect(dx, dy, dw, dh);
+    context.clip();
+
+    // Zoom and pan around center of the plot
+    const px = dx + dw / 2;
+    const py = dy + dh / 2;
+    context.translate(px + panX, py + panY);
+    context.scale(zoom, zoom);
+    context.translate(-px, -py);
 
     // Draw heatmap
     if (hasHeatmap && tempCanvas) {
@@ -341,7 +366,7 @@ function render(): void {
         // Draw grid placeholder when waiting for telemetry
         context.save();
         context.strokeStyle = 'rgba(71, 85, 105, 0.4)';
-        context.lineWidth = 1;
+        context.lineWidth = 1 / zoom;
         context.strokeRect(dx, dy, dw, dh);
         // Draw center axis if axisymmetric
         if (isAxisymmetric) {
@@ -353,11 +378,49 @@ function render(): void {
         context.restore();
     }
 
+    // Draw cell boundary gridlines if enabled
+    if (showGridlines && nr > 0 && nz > 0) {
+        const cellWidthOnScreen = (isAxisymmetric ? (dw / 2) : dw) / nr * zoom;
+        if (cellWidthOnScreen >= 3) {
+            context.save();
+            context.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+            context.lineWidth = 0.5 / zoom;
+            context.beginPath();
+            
+            // Horizontal lines (z gridlines)
+            for (let j = 0; j <= nz; ++j) {
+                const y = dy + j * dh / nz;
+                context.moveTo(dx, y);
+                context.lineTo(dx + dw, y);
+            }
+            
+            // Vertical lines (r gridlines)
+            if (isAxisymmetric) {
+                for (let i = 0; i <= nr; ++i) {
+                    const xRight = (dx + dw / 2) + i * (dw / 2) / nr;
+                    context.moveTo(xRight, dy);
+                    context.lineTo(xRight, dy + dh);
+                    
+                    const xLeft = (dx + dw / 2) - i * (dw / 2) / nr;
+                    context.moveTo(xLeft, dy);
+                    context.lineTo(xLeft, dy + dh);
+                }
+            } else {
+                for (let i = 0; i <= nr; ++i) {
+                    const x = dx + i * dw / nr;
+                    context.moveTo(x, dy);
+                    context.lineTo(x, dy + dh);
+                }
+            }
+            context.stroke();
+            context.restore();
+        }
+    }
+
     // Render overlays (charge shape and detonator location)
     if (chargeInfo) {
         const { shape, r: cR, z: cZ, radius, height: cH } = chargeInfo;
         context.save();
-        context.lineWidth = 1.5;
         
         const drawOutline = (flipX: boolean) => {
             const getCanvasCoords = (pr: number, pz: number) => {
@@ -387,11 +450,11 @@ function render(): void {
             }
             // Double stroke for maximum visibility (white inside, black outside border)
             context.strokeStyle = '#000000';
-            context.lineWidth = 3;
+            context.lineWidth = 3 / zoom;
             context.stroke();
             
             context.strokeStyle = '#ffffff';
-            context.lineWidth = 1.5;
+            context.lineWidth = 1.5 / zoom;
             context.stroke();
         };
 
@@ -417,10 +480,10 @@ function render(): void {
             const cy = dy + dh - (dZ / max_z) * dh;
 
             context.beginPath();
-            context.arc(cx, cy, 4, 0, 2 * Math.PI);
+            context.arc(cx, cy, 4 / zoom, 0, 2 * Math.PI);
             context.fillStyle = '#ff3b30'; // red detonator dot
             context.strokeStyle = '#ffffff';
-            context.lineWidth = 1.5;
+            context.lineWidth = 1.5 / zoom;
             context.fill();
             context.stroke();
         };
@@ -431,6 +494,8 @@ function render(): void {
         }
         context.restore();
     }
+
+    context.restore(); // Restore transformed context
 
     // Draw grid info overlay (glassmorphism/ HUD styling)
     context.save();
@@ -527,11 +592,162 @@ self.onmessage = (event) => {
         if (typeof data.isAxisymmetric === 'boolean') isAxisymmetric = data.isAxisymmetric;
         if (data.chargeInfo !== undefined) chargeInfo = data.chargeInfo;
         if (data.detonatorInfo !== undefined) detonatorInfo = data.detonatorInfo;
+        if (typeof data.showGridlines === 'boolean') showGridlines = data.showGridlines;
         if (!autoScale) {
             if (typeof data.min === 'number') displayMin = data.min;
             if (typeof data.max === 'number') displayMax = data.max;
         }
+        if (typeof data.max_r === 'number') {
+            max_r = data.max_r;
+        } else if (chargeInfo && chargeInfo.max_r) {
+            max_r = chargeInfo.max_r;
+        } else if (detonatorInfo && detonatorInfo.max_r) {
+            max_r = detonatorInfo.max_r;
+        }
+        if (typeof data.max_z === 'number') {
+            max_z = data.max_z;
+        } else if (chargeInfo && chargeInfo.max_z) {
+            max_z = chargeInfo.max_z;
+        } else if (detonatorInfo && detonatorInfo.max_z) {
+            max_z = detonatorInfo.max_z;
+        }
         range = displayMax - displayMin || 1;
         requestRender();
+        return;
+    }
+
+    if (data.type === 'pan') {
+        const dxVal = data.dx;
+        const dyVal = data.dy;
+        if (zoom > 1.0) {
+            panX += dxVal;
+            panY += dyVal;
+            
+            const aspect = outNr > 0 && outNz > 0
+                ? (isAxisymmetric ? (2 * outNr) / outNz : outNr / outNz)
+                : (isAxisymmetric ? (2 * max_r) / max_z : max_r / max_z);
+
+            let dw = width;
+            let dh = height;
+            if (width / height > aspect) {
+                dw = height * aspect;
+                dh = height;
+            } else {
+                dw = width;
+                dh = width / aspect;
+            }
+            const maxPanX = dw * (zoom - 1) / 2 + dw * 0.2;
+            const maxPanY = dh * (zoom - 1) / 2 + dh * 0.2;
+            panX = Math.max(-maxPanX, Math.min(maxPanX, panX));
+            panY = Math.max(-maxPanY, Math.min(maxPanY, panY));
+            
+            requestRender();
+        }
+        return;
+    }
+
+    if (data.type === 'zoom') {
+        const deltaY = data.deltaY;
+        const mx = data.mx;
+        const my = data.my;
+
+        const aspect = outNr > 0 && outNz > 0
+            ? (isAxisymmetric ? (2 * outNr) / outNz : outNr / outNz)
+            : (isAxisymmetric ? (2 * max_r) / max_z : max_r / max_z);
+
+        let dw = width;
+        let dh = height;
+        if (width / height > aspect) {
+            dw = height * aspect;
+            dh = height;
+        } else {
+            dw = width;
+            dh = width / aspect;
+        }
+        const dx = (width - dw) / 2;
+        const dy = (height - dh) / 2;
+
+        const clampedMx = Math.max(dx, Math.min(dx + dw, mx));
+        const clampedMy = Math.max(dy, Math.min(dy + dh, my));
+
+        const factor = deltaY < 0 ? 1.05 : 0.95;
+        const oldZoom = zoom;
+        let newZoom = zoom * factor;
+        if (newZoom < 1.01) {
+            newZoom = 1.0;
+        }
+        newZoom = Math.max(1.0, Math.min(100.0, newZoom));
+
+        const px = dx + dw / 2;
+        const py = dy + dh / 2;
+
+        if (newZoom > 1.0) {
+            zoom = newZoom;
+            panX = clampedMx - px - (clampedMx - px - panX) * (newZoom / oldZoom);
+            panY = clampedMy - py - (clampedMy - py - panY) * (newZoom / oldZoom);
+            
+            const maxPanX = dw * (zoom - 1) / 2 + dw * 0.2;
+            const maxPanY = dh * (zoom - 1) / 2 + dh * 0.2;
+            panX = Math.max(-maxPanX, Math.min(maxPanX, panX));
+            panY = Math.max(-maxPanY, Math.min(maxPanY, panY));
+        } else {
+            zoom = 1.0;
+            panX = 0;
+            panY = 0;
+        }
+        requestRender();
+        return;
+    }
+
+    if (data.type === 'clickFocus') {
+        const mx = data.mx;
+        const my = data.my;
+
+        const aspect = outNr > 0 && outNz > 0
+            ? (isAxisymmetric ? (2 * outNr) / outNz : outNr / outNz)
+            : (isAxisymmetric ? (2 * max_r) / max_z : max_r / max_z);
+
+        let dw = width;
+        let dh = height;
+        if (width / height > aspect) {
+            dw = height * aspect;
+            dh = height;
+        } else {
+            dw = width;
+            dh = width / aspect;
+        }
+        const dx = (width - dw) / 2;
+        const dy = (height - dh) / 2;
+
+        const clampedMx = Math.max(dx, Math.min(dx + dw, mx));
+        const clampedMy = Math.max(dy, Math.min(dy + dh, my));
+
+        const px = dx + dw / 2;
+        const py = dy + dh / 2;
+
+        if (zoom <= 1.01) {
+            zoom = 3.0;
+            panX = - (clampedMx - px) * 3.0;
+            panY = - (clampedMy - py) * 3.0;
+        } else {
+            panX = panX + (px - clampedMx);
+            panY = panY + (py - clampedMy);
+        }
+
+        const maxPanX = dw * (zoom - 1) / 2 + dw * 0.2;
+        const maxPanY = dh * (zoom - 1) / 2 + dh * 0.2;
+        panX = Math.max(-maxPanX, Math.min(maxPanX, panX));
+        panY = Math.max(-maxPanY, Math.min(maxPanY, panY));
+
+        requestRender();
+        return;
+    }
+
+    if (data.type === 'resetView') {
+        zoom = 1.0;
+        panX = 0.0;
+        panY = 0.0;
+        requestRender();
+        return;
     }
 };

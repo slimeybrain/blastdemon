@@ -1999,10 +1999,13 @@ int main() {
                     std::string precision = msg.value("precision", "double");
                     if (device == "cuda") {
                         global_solver_2d.reset();
-                        if (precision == "single" || precision == "float") {
-                            global_solver_2d_cuda = std::make_unique<CFDSolver2DCudaImpl<float>>(nr, nz, max_r, max_z, gamma);
-                        } else {
-                            global_solver_2d_cuda = std::make_unique<CFDSolver2DCudaImpl<double>>(nr, nz, max_r, max_z, gamma);
+                        {
+                            std::lock_guard<std::mutex> lock(cout_mutex);
+                            if (precision == "single" || precision == "float") {
+                                global_solver_2d_cuda = std::make_unique<CFDSolver2DCudaImpl<float>>(nr, nz, max_r, max_z, gamma);
+                            } else {
+                                global_solver_2d_cuda = std::make_unique<CFDSolver2DCudaImpl<double>>(nr, nz, max_r, max_z, gamma);
+                            }
                         }
                         
                         global_solver_2d_cuda->setFluxScheme(flux_scheme);
@@ -2052,7 +2055,10 @@ int main() {
                             }
                         }
                     } else {
-                        global_solver_2d_cuda.reset();
+                        {
+                            std::lock_guard<std::mutex> lock(cout_mutex);
+                            global_solver_2d_cuda.reset();
+                        }
                         if (precision == "single" || precision == "float") {
                             global_solver_2d = std::make_unique<CFDSolver2DImpl<float>>(nr, nz, max_r, max_z, gamma);
                         } else {
@@ -2140,7 +2146,10 @@ int main() {
                         std::this_thread::sleep_for(std::chrono::milliseconds(5));
                     }
                     global_solver_2d.reset();
-                    global_solver_2d_cuda.reset();
+                    {
+                        std::lock_guard<std::mutex> lock(cout_mutex);
+                        global_solver_2d_cuda.reset();
+                    }
                     global_t2d = 0.0;
                     global_wallclock_2d = 0.0;
                     step_progress_2d = 0;

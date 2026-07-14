@@ -166,15 +166,21 @@ __device__ inline RealType minmod_device(RealType a, RealType b) {
 
 template <typename RealType>
 __device__ inline RealType weno3_device(RealType qm1, RealType q0, RealType qp1) {
-    RealType eps = (RealType)1e-6;
-    RealType beta0 = (qp1 - q0) * (qp1 - q0);
-    RealType beta1 = (q0 - qm1) * (q0 - qm1);
-    RealType alpha0 = (RealType)(2.0 / 3.0) / ((eps + beta0) * (eps + beta0));
-    RealType alpha1 = (RealType)(1.0 / 3.0) / ((eps + beta1) * (eps + beta1));
-    RealType sum_alpha = alpha0 + alpha1;
-    RealType w0 = alpha0 / sum_alpha;
-    RealType w1 = alpha1 / sum_alpha;
-    return w0 * ((RealType)0.5 * q0 + (RealType)0.5 * qp1) + w1 * ((RealType)-0.5 * qm1 + (RealType)1.5 * q0);
+    double eps = 1e-6;
+    double beta0 = (double)(qp1 - q0) * (double)(qp1 - q0);
+    double beta1 = (double)(q0 - qm1) * (double)(q0 - qm1);
+    double alpha0 = (2.0 / 3.0) / ((eps + beta0) * (eps + beta0));
+    double alpha1 = (1.0 / 3.0) / ((eps + beta1) * (eps + beta1));
+    double sum_alpha = alpha0 + alpha1;
+    double w0, w1;
+    if (sum_alpha < 1e-300) {
+        w0 = 2.0 / 3.0;
+        w1 = 1.0 / 3.0;
+    } else {
+        w0 = alpha0 / sum_alpha;
+        w1 = alpha1 / sum_alpha;
+    }
+    return (RealType)(w0 * (0.5 * (double)q0 + 0.5 * (double)qp1) + w1 * (-0.5 * (double)qm1 + 1.5 * (double)q0));
 }
 
 template <typename RealType>
@@ -630,11 +636,11 @@ __global__ void applyProgrammedBurn_kernel(
             RealType rho_expl = arho1 + arho2;
             d_U_pool[pool_idx].E[k] += dF * rho_expl * (RealType)d_materials->detonation_energy;
         }
-        d_U_pool[pool_idx].alpha1[k] = alpha1;
-        d_U_pool[pool_idx].alpha2[k] = alpha2;
-        d_U_pool[pool_idx].arho1[k] = arho1;
-        d_U_pool[pool_idx].arho2[k] = arho2;
     }
+    d_U_pool[pool_idx].alpha1[k] = alpha1;
+    d_U_pool[pool_idx].alpha2[k] = alpha2;
+    d_U_pool[pool_idx].arho1[k] = arho1;
+    d_U_pool[pool_idx].arho2[k] = arho2;
 }
 
 template <typename RealType>
@@ -888,7 +894,7 @@ __global__ void checkTerminationCudaKernel(
 template <typename RealType>
 CFDSolver2DCudaImpl<RealType>::CFDSolver2DCudaImpl(int nr, int nz, double max_r, double max_z, double gamma)
     : nr_cells(nr), nz_cells(nz), max_r(max_r), max_z(max_z), gamma(gamma), currentTime(0.0), currentScheme(RUSANOV),
-      ambient_rho(1.2), ambient_p(101325.0), current_pool_size(0), d_block_maxes(nullptr), d_tile_active_flags(nullptr) {
+      ambient_rho(1.2), ambient_p(101325.0), current_pool_size(0), is_ideal_gas(false), d_block_maxes(nullptr), d_tile_active_flags(nullptr) {
     
     dr = max_r / nr_cells;
     dz = max_z / nz_cells;
@@ -1047,6 +1053,11 @@ void CFDSolver2DCudaImpl<RealType>::setInitialConditionTNT(double explosive_z, d
     this->det_x = 0.0;
     this->det_y = 0.0;
     this->det_z = explosive_z;
+    this->is_ideal_gas = false;
+
+    // Reset tile pool to clear stale states
+    std::fill(host_tile_map.begin(), host_tile_map.end(), -1);
+    current_pool_size = 0;
 
     for (int i = 0; i < nr_cells; ++i) {
         for (int j = 0; j < nz_cells; ++j) {
@@ -1116,6 +1127,11 @@ void CFDSolver2DCudaImpl<RealType>::setInitialConditionFrom1D(double explosive_z
     this->det_x = explosive_r;
     this->det_y = 0.0;
     this->det_z = explosive_z;
+    
+    // Clear and reset tile pool to prevent stale/accumulated state from previous runs
+    std::fill(host_tile_map.begin(), host_tile_map.end(), -1);
+    current_pool_size = 0;
+
     const int K = 5;
     double dr_sub = dr / K;
     double dz_sub = dz / K;
@@ -1327,6 +1343,11 @@ void CFDSolver2DCudaImpl<RealType>::setInitialConditionTNTCylinder(double explos
     this->det_x = 0.0;
     this->det_y = 0.0;
     this->det_z = explosive_z + height / 2.0;
+    this->is_ideal_gas = false;
+
+    // Reset tile pool to clear stale states
+    std::fill(host_tile_map.begin(), host_tile_map.end(), -1);
+    current_pool_size = 0;
 
     for (int i = 0; i < nr_cells; ++i) {
         for (int j = 0; j < nz_cells; ++j) {
@@ -1388,6 +1409,10 @@ void CFDSolver2DCudaImpl<RealType>::setInitialConditionIdealGas(double explosive
     this->det_y = 0.0;
     this->det_z = explosive_z;
     this->is_ideal_gas = true;
+
+    // Reset tile pool to clear stale states
+    std::fill(host_tile_map.begin(), host_tile_map.end(), -1);
+    current_pool_size = 0;
 
     double p_high = (gamma - 1.0) * high_rho * detonation_energy;
 

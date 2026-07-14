@@ -291,15 +291,21 @@ inline RealType minmod(RealType a, RealType b) {
 
 template <typename RealType>
 inline RealType weno3(RealType qm1, RealType q0, RealType qp1) {
-    RealType eps = (RealType)1e-6;
-    RealType beta0 = (qp1 - q0) * (qp1 - q0);
-    RealType beta1 = (q0 - qm1) * (q0 - qm1);
-    RealType alpha0 = (RealType)(2.0 / 3.0) / ((eps + beta0) * (eps + beta0));
-    RealType alpha1 = (RealType)(1.0 / 3.0) / ((eps + beta1) * (eps + beta1));
-    RealType sum_alpha = alpha0 + alpha1;
-    RealType w0 = alpha0 / sum_alpha;
-    RealType w1 = alpha1 / sum_alpha;
-    return w0 * ((RealType)0.5 * q0 + (RealType)0.5 * qp1) + w1 * ((RealType)-0.5 * qm1 + (RealType)1.5 * q0);
+    double eps = 1e-6;
+    double beta0 = (double)(qp1 - q0) * (double)(qp1 - q0);
+    double beta1 = (double)(q0 - qm1) * (double)(q0 - qm1);
+    double alpha0 = (2.0 / 3.0) / ((eps + beta0) * (eps + beta0));
+    double alpha1 = (1.0 / 3.0) / ((eps + beta1) * (eps + beta1));
+    double sum_alpha = alpha0 + alpha1;
+    double w0, w1;
+    if (sum_alpha < 1e-300) {
+        w0 = 2.0 / 3.0;
+        w1 = 1.0 / 3.0;
+    } else {
+        w0 = alpha0 / sum_alpha;
+        w1 = alpha1 / sum_alpha;
+    }
+    return (RealType)(w0 * (0.5 * (double)q0 + 0.5 * (double)qp1) + w1 * (-0.5 * (double)qm1 + 1.5 * (double)q0));
 }
 
 // --------------------------------------------------------------------------------------

@@ -488,7 +488,7 @@ export class GraphRenderer {
                 const gauges = node.parameters?.gauges || [];
                 const currentChannel = Number(node.parameters?.telemetry_channel ?? 0);
                 const has2D = state?.nodes.some(n => n.type === 'DomainMesh2D') || false;
-                this.drawGaugesChart(canvas, data, gauges, currentChannel, has2D);
+                this.drawGaugesChart(canvas, data, gauges, currentChannel, has2D, node.id);
             }
         }
     }
@@ -3213,6 +3213,8 @@ export class GraphRenderer {
             let isAxisymmetric = true;
             let chargeInfo = null;
             let detonatorInfo = null;
+            let max_r = 1.0;
+            let max_z = 1.0;
             if (state) {
                 const conn = state.connections.find(c => c.toNode === node.id && c.toPort === 'in');
                 const solverNode = conn ? state.nodes.find(n => n.id === conn.fromNode) : null;
@@ -3226,8 +3228,8 @@ export class GraphRenderer {
                         isAxisymmetric = (meshNode.parameters?.coordinate_system ?? 'Axisymmetric') === 'Axisymmetric';
                     }
 
-                    const max_r = Number(meshNode?.parameters?.max_r ?? 1.0);
-                    const max_z = Number(meshNode?.parameters?.max_z ?? 1.0);
+                    max_r = Number(meshNode?.parameters?.max_r ?? 1.0);
+                    max_z = Number(meshNode?.parameters?.max_z ?? 1.0);
 
                     let chargeNode = null;
                     // 1. Direct connection to solver's 'charge' port
@@ -3337,7 +3339,10 @@ export class GraphRenderer {
                     max: maxY,
                     isAxisymmetric: isAxisymmetric,
                     chargeInfo: (node.parameters?.show_charge !== false) ? chargeInfo : null,
-                    detonatorInfo: (node.parameters?.show_detonator !== false) ? detonatorInfo : null
+                    detonatorInfo: (node.parameters?.show_detonator !== false) ? detonatorInfo : null,
+                    showGridlines: node.parameters?.show_gridlines === true,
+                    max_r: max_r,
+                    max_z: max_z
                 });
             }
 
@@ -3581,6 +3586,7 @@ export class GraphRenderer {
 
                 const chargeCheckbox = document.createElement('input');
                 chargeCheckbox.type = 'checkbox';
+                chargeCheckbox.className = 'telemetry-charge-checkbox';
                 chargeCheckbox.checked = showCharge;
                 chargeCheckbox.addEventListener('change', () => {
                     this.stateManager.updateNodeParametersInPlace(node.id, {
@@ -3598,6 +3604,7 @@ export class GraphRenderer {
 
                 const detCheckbox = document.createElement('input');
                 detCheckbox.type = 'checkbox';
+                detCheckbox.className = 'telemetry-det-checkbox';
                 detCheckbox.checked = showDetonator;
                 detCheckbox.addEventListener('change', () => {
                     this.stateManager.updateNodeParametersInPlace(node.id, {
@@ -3606,6 +3613,24 @@ export class GraphRenderer {
                 });
                 detToggleGroup.appendChild(detCheckbox);
                 scaleBar.appendChild(detToggleGroup);
+
+                // Show Grid Checkbox [NEW]
+                const showGridlines = node.parameters?.show_gridlines === true;
+                const gridToggleGroup = document.createElement('label');
+                gridToggleGroup.className = 'telemetry-log-checkbox-container';
+                gridToggleGroup.textContent = 'Grid:';
+
+                const gridCheckbox = document.createElement('input');
+                gridCheckbox.type = 'checkbox';
+                gridCheckbox.className = 'telemetry-grid-checkbox';
+                gridCheckbox.checked = showGridlines;
+                gridCheckbox.addEventListener('change', () => {
+                    this.stateManager.updateNodeParametersInPlace(node.id, {
+                        show_gridlines: gridCheckbox.checked
+                    });
+                });
+                gridToggleGroup.appendChild(gridCheckbox);
+                scaleBar.appendChild(gridToggleGroup);
 
                 // Min Text Entry
                 const minLabel = document.createElement('span');
@@ -3669,6 +3694,7 @@ export class GraphRenderer {
                 [
                     logCheckbox, logGroup, lockCheckbox, lockGroup,
                     chargeCheckbox, chargeToggleGroup, detCheckbox, detToggleGroup,
+                    gridCheckbox, gridToggleGroup,
                     minInput, maxInput, setBtn
                 ].forEach(el => {
                     ['mousedown', 'mouseup', 'click'].forEach(evtType => {
@@ -3688,6 +3714,79 @@ export class GraphRenderer {
                 canvas.style.width = '100%';
                 canvas.style.height = '100%';
                 graphBody.appendChild(canvas);
+
+                // Interactive Pan, Zoom, Click-to-Focus event handlers on the Canvas
+                let lastX = 0;
+                let lastY = 0;
+                let startX = 0;
+                let startY = 0;
+
+                canvas.addEventListener('contextmenu', (e) => {
+                    e.preventDefault();
+                });
+
+                canvas.addEventListener('mousedown', (e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    lastX = e.clientX;
+                    lastY = e.clientY;
+                    startX = e.clientX;
+                    startY = e.clientY;
+
+                    const onMouseMove = (me: MouseEvent) => {
+                        const dx = (me.clientX - lastX) / this.zoom;
+                        const dy = (me.clientY - lastY) / this.zoom;
+                        lastX = me.clientX;
+                        lastY = me.clientY;
+                        const worker = this.nodeWorkers.get(node.id);
+                        if (worker) {
+                            worker.postMessage({ type: 'pan', dx, dy });
+                        }
+                    };
+
+                    const onMouseUp = () => {
+                        window.removeEventListener('mousemove', onMouseMove);
+                        window.removeEventListener('mouseup', onMouseUp);
+                    };
+
+                    window.addEventListener('mousemove', onMouseMove);
+                    window.addEventListener('mouseup', onMouseUp);
+                });
+
+                canvas.addEventListener('wheel', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const rect = canvas.getBoundingClientRect();
+                    const mx = e.clientX - rect.left;
+                    const my = e.clientY - rect.top;
+                    const worker = this.nodeWorkers.get(node.id);
+                    if (worker) {
+                        worker.postMessage({ type: 'zoom', deltaY: e.deltaY, mx, my });
+                    }
+                }, { passive: false });
+
+                canvas.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const dist = Math.hypot(e.clientX - startX, e.clientY - startY);
+                    if (dist > 5) {
+                        return; // Ignore click events fired at the end of a drag pan
+                    }
+                    const rect = canvas.getBoundingClientRect();
+                    const mx = e.clientX - rect.left;
+                    const my = e.clientY - rect.top;
+                    const worker = this.nodeWorkers.get(node.id);
+                    if (worker) {
+                        worker.postMessage({ type: 'clickFocus', mx, my });
+                    }
+                });
+
+                canvas.addEventListener('dblclick', (e) => {
+                    e.stopPropagation();
+                    const worker = this.nodeWorkers.get(node.id);
+                    if (worker) {
+                        worker.postMessage({ type: 'resetView' });
+                    }
+                });
 
                 const newWorker = new Worker(new URL('./ContourWorker.ts', import.meta.url), { type: 'module' });
                 this.nodeWorkers.set(node.id, newWorker);
@@ -3714,7 +3813,10 @@ export class GraphRenderer {
                     max: maxY,
                     isAxisymmetric: isAxisymmetric,
                     chargeInfo: (node.parameters?.show_charge !== false) ? chargeInfo : null,
-                    detonatorInfo: (node.parameters?.show_detonator !== false) ? detonatorInfo : null
+                    detonatorInfo: (node.parameters?.show_detonator !== false) ? detonatorInfo : null,
+                    showGridlines: node.parameters?.show_gridlines === true,
+                    max_r: max_r,
+                    max_z: max_z
                 });
 
                 requestAnimationFrame(() => {
@@ -3840,6 +3942,30 @@ export class GraphRenderer {
                         if (maxInput.value !== expectedVal) {
                             maxInput.value = expectedVal;
                         }
+                    }
+                }
+
+                const chargeCheckbox = container.querySelector('.telemetry-charge-checkbox') as HTMLInputElement;
+                if (chargeCheckbox) {
+                    const expected = node.parameters?.show_charge !== false;
+                    if (chargeCheckbox.checked !== expected) {
+                        chargeCheckbox.checked = expected;
+                    }
+                }
+
+                const detCheckbox = container.querySelector('.telemetry-det-checkbox') as HTMLInputElement;
+                if (detCheckbox) {
+                    const expected = node.parameters?.show_detonator !== false;
+                    if (detCheckbox.checked !== expected) {
+                        detCheckbox.checked = expected;
+                    }
+                }
+
+                const gridCheckbox = container.querySelector('.telemetry-grid-checkbox') as HTMLInputElement;
+                if (gridCheckbox) {
+                    const expected = node.parameters?.show_gridlines === true;
+                    if (gridCheckbox.checked !== expected) {
+                        gridCheckbox.checked = expected;
                     }
                 }
             }
@@ -4909,7 +5035,7 @@ export class GraphRenderer {
                 canvas.height = canvas.clientHeight || 100;
                 const history = this.stateManager.getTelemetry(node.id);
                 if (history) {
-                    this.drawGaugesChart(canvas, history, gauges, currentChannel, has2D);
+                    this.drawGaugesChart(canvas, history, gauges, currentChannel, has2D, node.id);
                 }
             }
         };
@@ -4959,10 +5085,21 @@ export class GraphRenderer {
 
         // Add Canvas Container & Canvas
         const canvasContainer = document.createElement('div');
+        canvasContainer.className = 'gauges-canvas-container';
         canvasContainer.style.flex = '1';
         canvasContainer.style.position = 'relative';
         canvasContainer.style.minHeight = '0';
         canvasContainer.style.background = '#1e1e1e';
+        canvasContainer.style.transition = 'outline 0.15s, box-shadow 0.15s';
+        canvasContainer.style.borderRadius = '4px';
+        if (this.focusedChartNodeId === node.id) {
+            canvasContainer.style.outline = '2px solid #38bdf8';
+            canvasContainer.style.outlineOffset = '-2px';
+            canvasContainer.style.boxShadow = '0 0 8px rgba(56, 189, 248, 0.4)';
+        } else {
+            canvasContainer.style.outline = '';
+            canvasContainer.style.boxShadow = '';
+        }
         mainArea.appendChild(canvasContainer);
 
         const canvas = document.createElement('canvas');
@@ -4972,6 +5109,174 @@ export class GraphRenderer {
         canvas.style.width = '100%';
         canvas.style.height = '100%';
         canvasContainer.appendChild(canvas);
+
+        const getActiveGaugesBounds = () => {
+            const history = this.stateManager.getTelemetry(node.id);
+            let minVal = 0;
+            let maxVal = 1;
+            let timesLength = 0;
+            if (history && history.times && history.times.length > 0 && history.values) {
+                timesLength = history.times.length;
+                let minV = Infinity;
+                let maxV = -Infinity;
+                let hasData = false;
+                gauges.filter((g: any) => g.plot !== false).forEach((g: any) => {
+                    const gData = history.values[g.id];
+                    if (gData && gData[currentChannel]) {
+                        const arr = gData[currentChannel];
+                        arr.forEach((v: number) => {
+                            if (isFinite(v)) {
+                                if (v < minV) minV = v;
+                                if (v > maxV) maxV = v;
+                                hasData = true;
+                            }
+                        });
+                    }
+                });
+                if (hasData) {
+                    minVal = minV;
+                    maxVal = maxV;
+                }
+            }
+            const defaultMinX = 0;
+            const defaultMaxX = timesLength - 1 || 1;
+            
+            const zoomedOrPanned = this.gaugesZoomedOrPanned.get(node.id) || false;
+            if (zoomedOrPanned) {
+                return {
+                    minX: this.gaugesZoomMinX.get(node.id) ?? defaultMinX,
+                    maxX: this.gaugesZoomMaxX.get(node.id) ?? defaultMaxX,
+                    minY: minVal,
+                    maxY: maxVal
+                };
+            }
+            return {
+                minX: defaultMinX,
+                maxX: defaultMaxX,
+                minY: minVal,
+                maxY: maxVal
+            };
+        };
+
+        canvas.style.touchAction = 'none';
+
+        canvas.addEventListener('pointerdown', (e) => {
+            e.stopPropagation();
+            
+            if (this.focusedChartNodeId !== node.id) {
+                if (this.focusedChartNodeId) {
+                    const prevNodeEl = this.nodeElements.get(this.focusedChartNodeId);
+                    if (prevNodeEl) {
+                        const container = prevNodeEl.querySelector('.gauges-canvas-container');
+                        if (container) {
+                            (container as HTMLElement).style.outline = '';
+                            (container as HTMLElement).style.boxShadow = '';
+                        }
+                    }
+                }
+                this.focusedChartNodeId = node.id;
+                canvasContainer.style.outline = '2px solid #38bdf8';
+                canvasContainer.style.outlineOffset = '-2px';
+                canvasContainer.style.boxShadow = '0 0 8px rgba(56, 189, 248, 0.4)';
+            }
+            
+            canvas.setPointerCapture(e.pointerId);
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            
+            this.gaugesIsDragging.set(node.id, true);
+            this.gaugesDragStartX.set(node.id, mouseX);
+            
+            const active = getActiveGaugesBounds();
+            this.gaugesDragStartMinX.set(node.id, active.minX);
+            this.gaugesDragStartMaxX.set(node.id, active.maxX);
+            
+            e.preventDefault();
+        });
+
+        canvas.addEventListener('pointermove', (e) => {
+            if (this.gaugesIsDragging.get(node.id) && canvas.hasPointerCapture(e.pointerId)) {
+                e.stopPropagation();
+                const rect = canvas.getBoundingClientRect();
+                const mouseX = e.clientX - rect.left;
+                
+                const dxScreen = mouseX - (this.gaugesDragStartX.get(node.id) ?? 0);
+                
+                const paddingLeft = 38;
+                const paddingRight = 10;
+                const plotWidth = rect.width - paddingLeft - paddingRight;
+                
+                if (plotWidth > 0) {
+                    const startMinX = this.gaugesDragStartMinX.get(node.id) ?? 0;
+                    const startMaxX = this.gaugesDragStartMaxX.get(node.id) ?? 1.0;
+                    const rangeX = startMaxX - startMinX;
+                    const dx = (dxScreen / plotWidth) * rangeX;
+                    
+                    this.gaugesZoomMinX.set(node.id, startMinX - dx);
+                    this.gaugesZoomMaxX.set(node.id, startMaxX - dx);
+                    this.gaugesZoomedOrPanned.set(node.id, true);
+                    
+                    const history = this.stateManager.getTelemetry(node.id);
+                    if (history) {
+                        this.drawGaugesChart(canvas, history, gauges, currentChannel, has2D, node.id);
+                    }
+                }
+            }
+        });
+
+        const releaseGaugesCapture = (e: PointerEvent) => {
+            if (canvas.hasPointerCapture(e.pointerId)) {
+                canvas.releasePointerCapture(e.pointerId);
+                this.gaugesIsDragging.set(node.id, false);
+            }
+        };
+
+        canvas.addEventListener('pointerup', releaseGaugesCapture);
+        canvas.addEventListener('pointercancel', releaseGaugesCapture);
+
+        canvas.addEventListener('wheel', (e) => {
+            e.stopPropagation();
+            if (this.focusedChartNodeId !== node.id) {
+                return;
+            }
+            
+            e.preventDefault();
+            
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            
+            const paddingLeft = 38;
+            const paddingRight = 10;
+            const plotWidth = rect.width - paddingLeft - paddingRight;
+            
+            if (plotWidth <= 0) return;
+            
+            const active = getActiveGaugesBounds();
+            const zoomFactor = e.deltaY > 0 ? 1.1 : 0.9;
+            
+            const pctX = (mouseX - paddingLeft) / plotWidth;
+            const targetX = active.minX + pctX * (active.maxX - active.minX);
+            const newRangeX = (active.maxX - active.minX) * zoomFactor;
+            
+            this.gaugesZoomMinX.set(node.id, targetX - pctX * newRangeX);
+            this.gaugesZoomMaxX.set(node.id, this.gaugesZoomMinX.get(node.id)! + newRangeX);
+            this.gaugesZoomedOrPanned.set(node.id, true);
+            
+            const history = this.stateManager.getTelemetry(node.id);
+            if (history) {
+                this.drawGaugesChart(canvas, history, gauges, currentChannel, has2D, node.id);
+            }
+        }, { passive: false });
+
+        canvas.addEventListener('dblclick', (e) => {
+            e.stopPropagation();
+            this.gaugesZoomedOrPanned.set(node.id, false);
+            const history = this.stateManager.getTelemetry(node.id);
+            if (history) {
+                this.drawGaugesChart(canvas, history, gauges, currentChannel, has2D, node.id);
+            }
+            e.preventDefault();
+        });
 
         // 2. Rebuild Right Collapsible controlsPanel contents
         const oldScrollTop = (controlsPanel.querySelector('.gauges-panel-content') as HTMLElement)?.scrollTop || 0;
@@ -5553,14 +5858,14 @@ export class GraphRenderer {
                 canvas.width = canvas.clientWidth || 250;
                 canvas.height = canvas.clientHeight || 100;
                 if (history) {
-                    this.drawGaugesChart(canvas, history, gauges, currentChannel, has2D);
+                    this.drawGaugesChart(canvas, history, gauges, currentChannel, has2D, node.id);
                 }
             }
         });
         ro.observe(canvasContainer);
     }
 
-    private drawGaugesChart(canvas: HTMLCanvasElement, history: any, gauges: any[], channel: number, has2D: boolean): void {
+    private drawGaugesChart(canvas: HTMLCanvasElement, history: any, gauges: any[], channel: number, has2D: boolean, nodeId: string): void {
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
 
@@ -5610,6 +5915,21 @@ export class GraphRenderer {
             return;
         }
 
+        const defaultMinX = 0;
+        const defaultMaxX = times.length - 1 || 1;
+
+        let activeMinX = defaultMinX;
+        let activeMaxX = defaultMaxX;
+
+        const zoomedOrPanned = this.gaugesZoomedOrPanned.get(nodeId) || false;
+        if (zoomedOrPanned) {
+            activeMinX = this.gaugesZoomMinX.get(nodeId) ?? defaultMinX;
+            activeMaxX = this.gaugesZoomMaxX.get(nodeId) ?? defaultMaxX;
+        } else {
+            this.gaugesZoomMinX.set(nodeId, defaultMinX);
+            this.gaugesZoomMaxX.set(nodeId, defaultMaxX);
+        }
+
         const paddingLeft = 38;
         const paddingRight = 10;
         const paddingY = 15;
@@ -5633,6 +5953,24 @@ export class GraphRenderer {
         ctx.fillText(maxVal.toExponential(1), paddingLeft - 4, paddingY);
         ctx.fillText(minVal.toExponential(1), paddingLeft - 4, height - paddingY);
 
+        // Display start and end times at the bottom of the chart
+        if (times.length > 0) {
+            const tStart = times[Math.max(0, Math.min(times.length - 1, Math.round(activeMinX)))];
+            const tEnd = times[Math.max(0, Math.min(times.length - 1, Math.round(activeMaxX)))];
+            ctx.fillStyle = '#666';
+            ctx.font = '8px monospace';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'top';
+            ctx.fillText(`t=${tStart.toFixed(5)}s`, paddingLeft, height - paddingY + 2);
+            ctx.textAlign = 'right';
+            ctx.fillText(`t=${tEnd.toFixed(5)}s`, width - paddingRight, height - paddingY + 2);
+        }
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(paddingLeft, paddingY, plotWidth, plotHeight);
+        ctx.clip();
+
         // Draw curves
         const colors = ['#38bdf8', '#fb7185', '#34d399', '#fbbf24', '#a78bfa', '#2dd4bf'];
         gauges.filter(g => g.plot !== false).forEach((g, gIdx) => {
@@ -5643,12 +5981,14 @@ export class GraphRenderer {
                 ctx.lineWidth = 1.5;
                 ctx.beginPath();
 
+                let first = true;
                 arr.forEach((v: number, i: number) => {
                     if (i >= times.length) return;
-                    const x = paddingLeft + (i / (times.length - 1)) * plotWidth;
+                    const x = paddingLeft + ((i - activeMinX) / (activeMaxX - activeMinX || 1)) * plotWidth;
                     const y = height - paddingY - ((v - minVal) / range) * plotHeight;
-                    if (i === 0) {
+                    if (first) {
                         ctx.moveTo(x, y);
+                        first = false;
                     } else {
                         ctx.lineTo(x, y);
                     }
@@ -5656,6 +5996,8 @@ export class GraphRenderer {
                 ctx.stroke();
             }
         });
+
+        ctx.restore();
     }
 
     private formatRangeValue(val: number): string {
