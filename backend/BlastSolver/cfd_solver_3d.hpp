@@ -98,6 +98,10 @@ public:
     virtual std::vector<float> extractSlice(const Slice3D& slice) const = 0;
     virtual std::vector<float> getCellValues(int i, int j, int k) const = 0;
 
+    virtual void setGauges(const std::vector<Gauge3D>& gauges) {}
+    virtual void recordGaugesAsync(double t) {}
+    virtual void retrieveNewGaugeSamples(std::vector<double>& times, std::vector<float>& values) {}
+
     virtual void initializeFrom1D(const std::vector<double>& r_1d, const std::vector<MultiMaterialState>& states_1d, double x_expl, double y_expl, double z_expl, double R_remap) = 0;
 
     virtual void setCellStateMulti(int i, int j, int k, const CellState3D<true>& s) = 0;
@@ -197,6 +201,10 @@ public:
     std::vector<float> extractSlice(const Slice3D& slice) const override;
     std::vector<float> getCellValues(int i, int j, int k) const override;
 
+    void setGauges(const std::vector<Gauge3D>& gauges) override;
+    void recordGaugesAsync(double t) override;
+    void retrieveNewGaugeSamples(std::vector<double>& times, std::vector<float>& values) override;
+
     void initializeFrom1D(const std::vector<double>& r_1d, const std::vector<MultiMaterialState>& states_1d, double x_expl, double y_expl, double z_expl, double R_remap) override;
 
     void setCellStateMulti(int i, int j, int k, const CellState3D<true>& s) override;
@@ -209,6 +217,10 @@ public:
     const std::vector<uint8_t>& getActiveTiles() const { return active_tiles; }
 
 private:
+    std::vector<Gauge3D> cpu_gauges;
+    std::vector<double> cpu_gauge_times;
+    std::vector<float> cpu_gauge_values;
+
     void updateActiveRegions();
     void computeFluxes(double dt);
     void applyBC();

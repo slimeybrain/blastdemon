@@ -15,6 +15,8 @@
 #include <chrono>
 #include <fstream>
 #include <dlfcn.h>
+#include <queue>
+#include <condition_variable>
 
 #include <nlohmann/json.hpp>
 #include <filesystem>
@@ -142,6 +144,8 @@ std::string global_model_filename = "";
 void write_gauge_files() {
     std::lock_guard<std::mutex> lock(global_gauges_mutex);
     if (global_gauges.empty()) return;
+    void flush_solver_gauges_locked();
+    flush_solver_gauges_locked();
 
     std::string default_dir = ".";
     try {
@@ -482,6 +486,28 @@ void init_gauges(const nlohmann::json& msg) {
     if (global_vtk_config.vtk_dir.empty()) {
         global_vtk_config.vtk_dir = default_dir;
     }
+
+    if (global_solver_3d) {
+        std::vector<Gauge3D> g3d;
+        for (const auto& g : global_gauges) {
+            if (g.is_3d) g3d.push_back({ g.id, g.x, g.y, g.z });
+            else g3d.push_back({ g.id, g.r, 0.0, g.z });
+        }
+        global_solver_3d->setGauges(g3d);
+    }
+    if (global_solver_2d_cuda) {
+        std::vector<Gauge2D> g2d;
+        for (const auto& g : global_gauges) {
+            g2d.push_back({ g.id, g.r, g.z });
+        }
+        global_solver_2d_cuda->setGauges(g2d);
+    } else if (global_solver_2d) {
+        std::vector<Gauge2D> g2d;
+        for (const auto& g : global_gauges) {
+            g2d.push_back({ g.id, g.r, g.z });
+        }
+        global_solver_2d->setGauges(g2d);
+    }
 }
 
 void record_gauges_1d(double t) {
@@ -520,92 +546,79 @@ void record_gauges_1d(double t) {
 void record_gauges_2d(double t) {
     std::lock_guard<std::mutex> lock(global_gauges_mutex);
     if (global_gauges.empty()) return;
-    
-    int nr = 0, nz = 0;
-    double dr = 0.0, dz = 0.0;
-    double p_atm = 101325.0;
     if (global_solver_2d_cuda) {
-        nr = global_solver_2d_cuda->getNr();
-        nz = global_solver_2d_cuda->getNz();
-        dr = global_solver_2d_cuda->getDr();
-        dz = global_solver_2d_cuda->getDz();
-        p_atm = global_solver_2d_cuda->getAmbientP();
+        global_solver_2d_cuda->recordGaugesAsync(t);
     } else if (global_solver_2d) {
-        nr = global_solver_2d->getNr();
-        nz = global_solver_2d->getNz();
-        dr = global_solver_2d->getDr();
-        dz = global_solver_2d->getDz();
-        p_atm = global_solver_2d->getAmbientP();
-    } else {
-        return;
-    }
-
-    double dt = 0.0;
-    if (!global_gauge_times.empty()) {
-        dt = t - global_gauge_times.back();
-    }
-    global_gauge_times.push_back(t);
-    for (size_t g_idx = 0; g_idx < global_gauges.size(); ++g_idx) {
-        const auto& g = global_gauges[g_idx];
-        int i = std::clamp(static_cast<int>(g.r / dr), 0, nr - 1);
-        int j = std::clamp(static_cast<int>(g.z / dz), 0, nz - 1);
-        
-        std::vector<float> vals(7, 0.0f);
-        if (global_solver_2d_cuda) {
-            vals = global_solver_2d_cuda->getCellValues(i, j);
-        } else if (global_solver_2d) {
-            vals = global_solver_2d->getCellValues(i, j);
-        }
-        
-        for (int ch = 0; ch < 7; ++ch) {
-            global_gauges_history[g_idx].channel_values[ch].push_back(vals[ch]);
-        }
-        double overpressure = vals[0] - p_atm;
-        global_gauges_history[g_idx].channel_values[7].push_back(overpressure);
-
-        double impulse = 0.0;
-        if (!global_gauges_history[g_idx].channel_values[8].empty()) {
-            double prev_imp = global_gauges_history[g_idx].channel_values[8].back();
-            double prev_op = global_gauges_history[g_idx].channel_values[7][global_gauges_history[g_idx].channel_values[7].size() - 2];
-            impulse = prev_imp + 0.5 * (prev_op + overpressure) * dt;
-        }
-        global_gauges_history[g_idx].channel_values[8].push_back(impulse);
+        global_solver_2d->recordGaugesAsync(t);
     }
 }
 
 void record_gauges_3d(double t) {
     std::lock_guard<std::mutex> lock(global_gauges_mutex);
     if (global_gauges.empty() || !global_solver_3d) return;
-    double p_atm = global_solver_3d->getAmbientP();
+    global_solver_3d->recordGaugesAsync(t);
+}
 
-    double dt = 0.0;
-    if (!global_gauge_times.empty()) {
-        dt = t - global_gauge_times.back();
-    }
-    global_gauge_times.push_back(t);
-    for (size_t g_idx = 0; g_idx < global_gauges.size(); ++g_idx) {
-        const auto& g = global_gauges[g_idx];
-        Gauge3D gauge_def;
-        if (g.is_3d) {
-            gauge_def = { g.id, g.x, g.y, g.z };
-        } else {
-            gauge_def = { g.id, g.r, 0.0, g.z }; // Map 2D r,z to 3D x,z
-        }
-        auto vals = global_solver_3d->sampleGauge(gauge_def);
-        for (int ch = 0; ch < 7; ++ch) {
-            global_gauges_history[g_idx].channel_values[ch].push_back(vals[ch]);
-        }
-        double overpressure = vals[0] - p_atm;
-        global_gauges_history[g_idx].channel_values[7].push_back(overpressure);
+void flush_solver_gauges_locked() {
+    if (global_gauges.empty()) return;
 
-        double impulse = 0.0;
-        if (!global_gauges_history[g_idx].channel_values[8].empty()) {
-            double prev_imp = global_gauges_history[g_idx].channel_values[8].back();
-            double prev_op = global_gauges_history[g_idx].channel_values[7][global_gauges_history[g_idx].channel_values[7].size() - 2];
-            impulse = prev_imp + 0.5 * (prev_op + overpressure) * dt;
-        }
-        global_gauges_history[g_idx].channel_values[8].push_back(impulse);
+    std::vector<double> times;
+    std::vector<float> flat_vals;
+
+    if (global_solver_3d) {
+        global_solver_3d->retrieveNewGaugeSamples(times, flat_vals);
+    } else if (global_solver_2d_cuda) {
+        global_solver_2d_cuda->retrieveNewGaugeSamples(times, flat_vals);
+    } else if (global_solver_2d) {
+        global_solver_2d->retrieveNewGaugeSamples(times, flat_vals);
+    } else {
+        return;
     }
+
+    if (times.empty()) return;
+
+    size_t num_gauges = global_gauges.size();
+    size_t num_channels = 7;
+    double p_atm = 101325.0;
+    if (global_solver_3d) {
+        p_atm = global_solver_3d->getAmbientP();
+    } else if (global_solver_2d_cuda) {
+        p_atm = global_solver_2d_cuda->getAmbientP();
+    } else if (global_solver_2d) {
+        p_atm = global_solver_2d->getAmbientP();
+    }
+
+    for (size_t s = 0; s < times.size(); ++s) {
+        double t = times[s];
+        double dt = 0.0;
+        if (!global_gauge_times.empty()) {
+            dt = t - global_gauge_times.back();
+        }
+        global_gauge_times.push_back(t);
+
+        for (size_t g_idx = 0; g_idx < num_gauges; ++g_idx) {
+            for (size_t ch = 0; ch < 7; ++ch) {
+                float val = flat_vals[s * num_gauges * num_channels + g_idx * num_channels + ch];
+                global_gauges_history[g_idx].channel_values[ch].push_back(val);
+            }
+
+            double overpressure = global_gauges_history[g_idx].channel_values[0].back() - p_atm;
+            global_gauges_history[g_idx].channel_values[7].push_back(overpressure);
+
+            double impulse = 0.0;
+            if (!global_gauges_history[g_idx].channel_values[8].empty()) {
+                double prev_imp = global_gauges_history[g_idx].channel_values[8].back();
+                double prev_op = global_gauges_history[g_idx].channel_values[7][global_gauges_history[g_idx].channel_values[7].size() - 2];
+                impulse = prev_imp + 0.5 * (prev_op + overpressure) * dt;
+            }
+            global_gauges_history[g_idx].channel_values[8].push_back(impulse);
+        }
+    }
+}
+
+void flush_solver_gauges() {
+    std::lock_guard<std::mutex> lock(global_gauges_mutex);
+    flush_solver_gauges_locked();
 }
 
 void emit_telemetry(const CFDSolver& solver, double elapsed, bool is_terminated = false);
@@ -1216,54 +1229,227 @@ void emit_resource_pulse() {
     std::cout << pulse.dump() << std::endl;
 }
 
+struct TelemetryPayload {
+    enum Type { TYPE_1D, TYPE_2D, TYPE_3D } type;
+    double elapsed;
+    bool is_terminated;
+    double wallclock;
+    
+    // 1D specific
+    int n_cells = 0;
+    
+    // 2D specific
+    double dt = 0.0;
+    int out_nr = 0;
+    int out_nz = 0;
+    
+    // 3D specific
+    struct SlicePayload {
+        std::string axis;
+        double offset;
+        int stride;
+        std::vector<float> data;
+        int w = 0;
+        int h = 0;
+    };
+    std::vector<SlicePayload> slices;
+    double xmin = 0.0, ymin = 0.0, zmin = 0.0, dx = 0.0;
+    int nx = 0, ny = 0, nz = 0;
 
-void emit_telemetry(const CFDSolver& solver, double elapsed, bool is_terminated) {
-    std::lock_guard<std::mutex> lock(cout_mutex);
-    int n = solver.getNumCells();
+    // Shared grid/frame data
+    std::vector<float> grid_data;
+    
+    // Gauges
+    bool has_gauges = false;
+    std::vector<double> gauge_times;
+    std::vector<GaugeHistory> gauges_history;
+};
 
-    nlohmann::json envelope;
-    envelope["type"] = "TELEMETRY";
-    envelope["time"] = elapsed;
-    envelope["is_terminated"] = is_terminated;
-    envelope["wallclock"] = global_wallclock_1d.load();
+struct AsyncTelemetry {
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::queue<std::unique_ptr<TelemetryPayload>> queue;
+    bool exit_flag = false;
 
-    {
-        std::lock_guard<std::mutex> g_lock(global_gauges_mutex);
-        if (!global_gauges.empty()) {
-            nlohmann::json gh;
+    void push(std::unique_ptr<TelemetryPayload> payload) {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (queue.size() >= 2 && !payload->is_terminated) {
+            if (!queue.front()->is_terminated) {
+                queue.pop();
+            }
+        }
+        queue.push(std::move(payload));
+        cv.notify_one();
+    }
+};
+
+static AsyncTelemetry global_async_telemetry;
+
+void async_telemetry_thread_func() {
+    while (true) {
+        std::unique_ptr<TelemetryPayload> payload;
+        {
+            std::unique_lock<std::mutex> lock(global_async_telemetry.mutex);
+            global_async_telemetry.cv.wait(lock, []() {
+                return !global_async_telemetry.queue.empty() || global_async_telemetry.exit_flag;
+            });
+            if (global_async_telemetry.exit_flag && global_async_telemetry.queue.empty()) {
+                break;
+            }
+            payload = std::move(global_async_telemetry.queue.front());
+            global_async_telemetry.queue.pop();
+        }
+
+        if (!payload) continue;
+
+        std::lock_guard<std::mutex> lock(cout_mutex);
+        nlohmann::json envelope;
+
+        nlohmann::json gh;
+        if (payload->has_gauges) {
             gh["solverTracked"] = true;
-            gh["times"] = global_gauge_times;
+            gh["times"] = payload->gauge_times;
             nlohmann::json vals_obj = nlohmann::json::object();
-            for (const auto& h : global_gauges_history) {
+            for (const auto& h : payload->gauges_history) {
                 nlohmann::json ch_arrays = nlohmann::json::array();
-                for (int ch = 0; ch < 9; ++ch) {
+                int limit = h.channel_values.size();
+                for (int ch = 0; ch < limit; ++ch) {
                     ch_arrays.push_back(h.channel_values[ch]);
                 }
                 vals_obj[h.id] = ch_arrays;
             }
             gh["values"] = vals_obj;
-            envelope["gauges_history"] = gh;
+        }
+
+        if (payload->type == TelemetryPayload::TYPE_1D) {
+            envelope["type"] = "TELEMETRY";
+            envelope["time"] = payload->elapsed;
+            envelope["is_terminated"] = payload->is_terminated;
+            envelope["wallclock"] = payload->wallclock;
+            if (payload->has_gauges) {
+                envelope["gauges_history"] = gh;
+            }
+
+            std::cout << envelope.dump() << std::endl;
+
+            const uint32_t n_cells    = static_cast<uint32_t>(payload->n_cells);
+            const uint32_t n_channels = 7;
+            size_t header_bytes  = sizeof(uint32_t) * 2;
+            size_t payload_bytes = payload->grid_data.size() * sizeof(float);
+            size_t total_bytes   = header_bytes + payload_bytes;
+
+            std::cout << "BIN_FRAME " << total_bytes << "\n";
+            std::cout.write(reinterpret_cast<const char*>(&n_cells),    sizeof(uint32_t));
+            std::cout.write(reinterpret_cast<const char*>(&n_channels), sizeof(uint32_t));
+            std::cout.write(reinterpret_cast<const char*>(payload->grid_data.data()), payload_bytes);
+            std::cout.flush();
+
+        } else if (payload->type == TelemetryPayload::TYPE_2D) {
+            envelope["type"] = "TELEMETRY_2D";
+            envelope["time"] = payload->elapsed;
+            envelope["dt"] = payload->dt;
+            envelope["is_terminated"] = payload->is_terminated;
+            envelope["nr"] = payload->out_nr;
+            envelope["nz"] = payload->out_nz;
+            envelope["wallclock"] = payload->wallclock;
+            if (payload->has_gauges) {
+                envelope["gauges_history"] = gh;
+            }
+
+            std::cout << envelope.dump() << std::endl;
+
+            const uint32_t out_nr_u = static_cast<uint32_t>(payload->out_nr);
+            const uint32_t out_nz_u = static_cast<uint32_t>(payload->out_nz);
+            const uint32_t n_channels_u = 7;
+            size_t header_bytes  = sizeof(uint32_t) * 3;
+            size_t payload_bytes = payload->grid_data.size() * sizeof(float);
+            size_t total_bytes   = header_bytes + payload_bytes;
+
+            std::cout << "BIN_FRAME_2D " << total_bytes << "\n";
+            std::cout.write(reinterpret_cast<const char*>(&out_nr_u),     sizeof(uint32_t));
+            std::cout.write(reinterpret_cast<const char*>(&out_nz_u),     sizeof(uint32_t));
+            std::cout.write(reinterpret_cast<const char*>(&n_channels_u), sizeof(uint32_t));
+            std::cout.write(reinterpret_cast<const char*>(payload->grid_data.data()), payload_bytes);
+            std::cout.flush();
+
+        } else if (payload->type == TelemetryPayload::TYPE_3D) {
+            envelope["type"] = "TELEMETRY_3D";
+            envelope["time"] = payload->elapsed;
+            envelope["dt"] = payload->dt;
+            envelope["is_terminated"] = payload->is_terminated;
+            envelope["wallclock"] = payload->wallclock;
+            envelope["xmin"] = payload->xmin;
+            envelope["ymin"] = payload->ymin;
+            envelope["zmin"] = payload->zmin;
+            envelope["dx"] = payload->dx;
+            envelope["nx"] = payload->nx;
+            envelope["ny"] = payload->ny;
+            envelope["nz"] = payload->nz;
+            if (payload->has_gauges) {
+                envelope["gauges_history"] = gh;
+            }
+
+            std::cout << envelope.dump() << std::endl;
+
+            uint32_t magic = 0x43494c53; // "SLIC"
+            float time_f = (float)payload->elapsed;
+            uint32_t n_slices = payload->slices.size();
+
+            size_t total_payload_bytes = 0;
+            for (const auto& s : payload->slices) {
+                total_payload_bytes += s.data.size() * sizeof(float);
+            }
+
+            size_t header_bytes = 12; // magic (4) + time (4) + n_slices (4)
+            size_t slice_header_bytes = n_slices * 16; // (axis, offset, w, h) per slice
+            size_t total_bytes = header_bytes + slice_header_bytes + total_payload_bytes;
+
+            std::cout << "BIN_FRAME_3D_SLICES " << total_bytes << "\n";
+            std::cout.write(reinterpret_cast<const char*>(&magic), 4);
+            std::cout.write(reinterpret_cast<const char*>(&time_f), 4);
+            std::cout.write(reinterpret_cast<const char*>(&n_slices), 4);
+
+            for (size_t i = 0; i < n_slices; ++i) {
+                const auto& s = payload->slices[i];
+                uint32_t axis_id = (s.axis == "xy" ? 0 : (s.axis == "xz" ? 1 : 2));
+                float offset = (float)s.offset;
+                uint32_t w = s.w;
+                uint32_t h = s.h;
+
+                std::cout.write(reinterpret_cast<const char*>(&axis_id), 4);
+                std::cout.write(reinterpret_cast<const char*>(&offset), 4);
+                std::cout.write(reinterpret_cast<const char*>(&w), 4);
+                std::cout.write(reinterpret_cast<const char*>(&h), 4);
+                std::cout.write(reinterpret_cast<const char*>(s.data.data()), s.data.size() * sizeof(float));
+            }
+            std::cout.flush();
+        }
+    }
+}
+
+
+void emit_telemetry(const CFDSolver& solver, double elapsed, bool is_terminated) {
+    auto payload = std::make_unique<TelemetryPayload>();
+    payload->type = TelemetryPayload::TYPE_1D;
+    payload->elapsed = elapsed;
+    payload->is_terminated = is_terminated;
+    payload->wallclock = global_wallclock_1d.load();
+    payload->n_cells = solver.getNumCells();
+    payload->grid_data = solver.getTelemetryChannels();
+
+    {
+        std::lock_guard<std::mutex> g_lock(global_gauges_mutex);
+        if (!global_gauges.empty()) {
+            payload->has_gauges = true;
+            payload->gauge_times = global_gauge_times;
+            payload->gauges_history = global_gauges_history;
         }
     }
 
-    std::cout << envelope.dump() << std::endl;
-
-    const uint32_t n_cells    = static_cast<uint32_t>(n);
-    const uint32_t n_channels = 7;
-    std::vector<float> frame = solver.getTelemetryChannels();
-    size_t header_bytes  = sizeof(uint32_t) * 2;
-    size_t payload_bytes = frame.size() * sizeof(float);
-    size_t total_bytes   = header_bytes + payload_bytes;
-
-    std::cout << "BIN_FRAME " << total_bytes << "\n";
-    std::cout.write(reinterpret_cast<const char*>(&n_cells),    sizeof(uint32_t));
-    std::cout.write(reinterpret_cast<const char*>(&n_channels), sizeof(uint32_t));
-    std::cout.write(reinterpret_cast<const char*>(frame.data()), payload_bytes);
-    std::cout.flush();
+    global_async_telemetry.push(std::move(payload));
 }
 
 void emit_telemetry_2d(double elapsed, bool is_terminated) {
-    std::lock_guard<std::mutex> lock(cout_mutex);
     if (!has_solver_2d()) return;
 
     int stride = global_telemetry_stride.load();
@@ -1284,135 +1470,85 @@ void emit_telemetry_2d(double elapsed, bool is_terminated) {
 
     int out_nr = (nr + stride - 1) / stride;
     int out_nz = (nz + stride - 1) / stride;
-    int n_channels = 7;
 
-    nlohmann::json envelope;
-    envelope["type"] = "TELEMETRY_2D";
-    envelope["time"] = elapsed;
-    envelope["dt"] = global_dt_2d;
-    envelope["is_terminated"] = is_terminated;
-    envelope["nr"] = out_nr;
-    envelope["nz"] = out_nz;
-    envelope["wallclock"] = global_wallclock_2d.load();
+    auto payload = std::make_unique<TelemetryPayload>();
+    payload->type = TelemetryPayload::TYPE_2D;
+    payload->elapsed = elapsed;
+    payload->dt = global_dt_2d;
+    payload->is_terminated = is_terminated;
+    payload->out_nr = out_nr;
+    payload->out_nz = out_nz;
+    payload->wallclock = global_wallclock_2d.load();
+    payload->grid_data = std::move(downsampled);
 
     {
         std::lock_guard<std::mutex> g_lock(global_gauges_mutex);
         if (!global_gauges.empty()) {
-            nlohmann::json gh;
-            gh["solverTracked"] = true;
-            gh["times"] = global_gauge_times;
-            nlohmann::json vals_obj = nlohmann::json::object();
-            for (const auto& h : global_gauges_history) {
-                nlohmann::json ch_arrays = nlohmann::json::array();
-                for (int ch = 0; ch < 9; ++ch) {
-                    ch_arrays.push_back(h.channel_values[ch]);
-                }
-                vals_obj[h.id] = ch_arrays;
-            }
-            gh["values"] = vals_obj;
-            envelope["gauges_history"] = gh;
+            void flush_solver_gauges_locked();
+            flush_solver_gauges_locked();
+            payload->has_gauges = true;
+            payload->gauge_times = global_gauge_times;
+            payload->gauges_history = global_gauges_history;
         }
     }
 
-    std::cout << envelope.dump() << std::endl;
-
-    const uint32_t out_nr_u = static_cast<uint32_t>(out_nr);
-    const uint32_t out_nz_u = static_cast<uint32_t>(out_nz);
-    const uint32_t n_channels_u = static_cast<uint32_t>(n_channels);
-    size_t header_bytes  = sizeof(uint32_t) * 3;
-    size_t payload_bytes = downsampled.size() * sizeof(float);
-    size_t total_bytes   = header_bytes + payload_bytes;
-
-    std::cout << "BIN_FRAME_2D " << total_bytes << "\n";
-    std::cout.write(reinterpret_cast<const char*>(&out_nr_u),     sizeof(uint32_t));
-    std::cout.write(reinterpret_cast<const char*>(&out_nz_u),     sizeof(uint32_t));
-    std::cout.write(reinterpret_cast<const char*>(&n_channels_u), sizeof(uint32_t));
-    std::cout.write(reinterpret_cast<const char*>(downsampled.data()), payload_bytes);
-    std::cout.flush();
+    global_async_telemetry.push(std::move(payload));
 }
 
 void emit_telemetry_3d(double elapsed, bool is_terminated) {
-    std::lock_guard<std::mutex> lock(cout_mutex);
     if (!global_solver_3d) return;
 
-    nlohmann::json envelope;
-    envelope["type"] = "TELEMETRY_3D";
-    envelope["time"] = elapsed;
-    envelope["dt"] = global_dt_3d;
-    envelope["is_terminated"] = is_terminated;
-    envelope["wallclock"] = global_wallclock_3d.load();
-    envelope["xmin"] = global_solver_3d->getXMin();
-    envelope["ymin"] = global_solver_3d->getYMin();
-    envelope["zmin"] = global_solver_3d->getZMin();
-    envelope["dx"] = global_solver_3d->getCellSize();
-    envelope["nx"] = global_solver_3d->getNx();
-    envelope["ny"] = global_solver_3d->getNy();
-    envelope["nz"] = global_solver_3d->getNz();
+    auto payload = std::make_unique<TelemetryPayload>();
+    payload->type = TelemetryPayload::TYPE_3D;
+    payload->elapsed = elapsed;
+    payload->dt = global_dt_3d;
+    payload->is_terminated = is_terminated;
+    payload->wallclock = global_wallclock_3d.load();
+    payload->xmin = global_solver_3d->getXMin();
+    payload->ymin = global_solver_3d->getYMin();
+    payload->zmin = global_solver_3d->getZMin();
+    payload->dx = global_solver_3d->getCellSize();
+    payload->nx = global_solver_3d->getNx();
+    payload->ny = global_solver_3d->getNy();
+    payload->nz = global_solver_3d->getNz();
 
     {
         std::lock_guard<std::mutex> g_lock(global_gauges_mutex);
         if (!global_gauges.empty()) {
-            nlohmann::json gh;
-            gh["solverTracked"] = true;
-            gh["times"] = global_gauge_times;
-            nlohmann::json vals_obj = nlohmann::json::object();
-            for (const auto& h : global_gauges_history) {
-                nlohmann::json ch_arrays = nlohmann::json::array();
-                for (int ch = 0; ch < 9; ++ch) {
-                    ch_arrays.push_back(h.channel_values[ch]);
-                }
-                vals_obj[h.id] = ch_arrays;
-            }
-            gh["values"] = vals_obj;
-            envelope["gauges_history"] = gh;
+            void flush_solver_gauges_locked();
+            flush_solver_gauges_locked();
+            payload->has_gauges = true;
+            payload->gauge_times = global_gauge_times;
+            payload->gauges_history = global_gauges_history;
         }
     }
 
-    std::cout << envelope.dump() << std::endl;
-
-    // BIN_FRAME_3D_SLICES implementation
-    // Format: "SLIC" magic, time, n_slices, [axis, offset, w, h, data...]
-    uint32_t magic = 0x43494c53; // "SLIC"
-    float time_f = (float)elapsed;
     uint32_t n_slices = global_slices_3d.size();
+    payload->slices.reserve(n_slices);
 
-
-
-    std::vector<std::vector<float>> slice_datas;
-    size_t total_payload_bytes = 0;
     for (const auto& s : global_slices_3d) {
-        auto data = global_solver_3d->extractSlice(s);
-        total_payload_bytes += data.size() * sizeof(float);
-        slice_datas.push_back(std::move(data));
-    }
+        TelemetryPayload::SlicePayload sp;
+        sp.axis = s.axis;
+        sp.offset = s.offset;
+        sp.stride = s.stride;
+        sp.data = global_solver_3d->extractSlice(s);
 
-    size_t header_bytes = 12; // magic (4) + time (4) + n_slices (4)
-    size_t slice_header_bytes = n_slices * 16; // (axis, offset, w, h) per slice
-    size_t total_bytes = header_bytes + slice_header_bytes + total_payload_bytes;
-
-    std::cout << "BIN_FRAME_3D_SLICES " << total_bytes << "\n";
-    std::cout.write(reinterpret_cast<const char*>(&magic), 4);
-    std::cout.write(reinterpret_cast<const char*>(&time_f), 4);
-    std::cout.write(reinterpret_cast<const char*>(&n_slices), 4);
-
-    for (size_t i = 0; i < n_slices; ++i) {
-        const auto& s = global_slices_3d[i];
-        const auto& data = slice_datas[i];
         uint32_t axis_id = (s.axis == "xy" ? 0 : (s.axis == "xz" ? 1 : 2));
-        float offset = (float)s.offset;
-        uint32_t w = 0, h = 0;
         int stride = s.stride > 0 ? s.stride : 1;
-        if (axis_id == 0) { w = (global_solver_3d->getNx() + stride - 1) / stride; h = (global_solver_3d->getNy() + stride - 1) / stride; }
-        else if (axis_id == 1) { w = (global_solver_3d->getNx() + stride - 1) / stride; h = (global_solver_3d->getNz() + stride - 1) / stride; }
-        else { w = (global_solver_3d->getNy() + stride - 1) / stride; h = (global_solver_3d->getNz() + stride - 1) / stride; }
-
-        std::cout.write(reinterpret_cast<const char*>(&axis_id), 4);
-        std::cout.write(reinterpret_cast<const char*>(&offset), 4);
-        std::cout.write(reinterpret_cast<const char*>(&w), 4);
-        std::cout.write(reinterpret_cast<const char*>(&h), 4);
-        std::cout.write(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(float));
+        if (axis_id == 0) {
+            sp.w = (global_solver_3d->getNx() + stride - 1) / stride;
+            sp.h = (global_solver_3d->getNy() + stride - 1) / stride;
+        } else if (axis_id == 1) {
+            sp.w = (global_solver_3d->getNx() + stride - 1) / stride;
+            sp.h = (global_solver_3d->getNz() + stride - 1) / stride;
+        } else {
+            sp.w = (global_solver_3d->getNy() + stride - 1) / stride;
+            sp.h = (global_solver_3d->getNz() + stride - 1) / stride;
+        }
+        payload->slices.push_back(std::move(sp));
     }
-    std::cout.flush();
+
+    global_async_telemetry.push(std::move(payload));
 }
 
 MultiMat::MaterialSet parseMaterialSet(const nlohmann::json& msg) {
@@ -1452,6 +1588,9 @@ MultiMat::MaterialSet parseMaterialSet(const nlohmann::json& msg) {
 int main() {
     std::string line;
 
+    std::thread telemetry_thread(async_telemetry_thread_func);
+    telemetry_thread.detach();
+
     std::thread pulse_thread([]() {
         while (true) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -1477,6 +1616,7 @@ int main() {
                     sim_terminate = false;
                     sim_paused = false;
                     step_progress = 0;
+                    global_wallclock_1d = 0.0;
 
                     int n_cells = msg.at("n_cells").get<int>();
                     double radius = msg.at("domain_radius").get<double>();
@@ -1672,6 +1812,7 @@ int main() {
                     global_solver.reset();
                     global_num_cells = 0;
                     global_t = 0.0;
+                    global_wallclock_1d = 0.0;
                     step_progress = 0;
                 } else if (command == "INIT_2D") {
                     sim2d_terminate = true;
@@ -1681,6 +1822,7 @@ int main() {
                     sim2d_terminate = false;
                     sim2d_paused = false;
                     step_progress_2d = 0;
+                    global_wallclock_2d = 0.0;
 
                     // 2D Nodegraph validation check
                     std::vector<std::string> missing_elements_2d;
@@ -2000,6 +2142,7 @@ int main() {
                     global_solver_2d.reset();
                     global_solver_2d_cuda.reset();
                     global_t2d = 0.0;
+                    global_wallclock_2d = 0.0;
                     step_progress_2d = 0;
                     solver2d_initialized = false;
                 } else if (command == "REMAP") {
@@ -2052,6 +2195,7 @@ int main() {
                         global_solver_2d_cuda->setTime(0.0);
                     }
                     global_t2d = 0.0;
+                    global_wallclock_2d = 0.0;
                     solver2d_initialized = true;
                     emit_kernel_log("REMAP", "1D->2D remap applied successfully.", 0.0, "2d");
                     emit_telemetry_2d(global_t2d, false);
@@ -2088,6 +2232,7 @@ int main() {
                     }
                     global_solver_3d.reset();
                     global_t3d = 0.0;
+                    global_wallclock_3d = 0.0;
                     step_progress_3d = 0;
                 } else if (command == "INIT_3D") {
                     sim3d_terminate = true;

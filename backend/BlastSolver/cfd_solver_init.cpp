@@ -59,11 +59,11 @@ void CFDSolverImpl<RealType, IsMultiMaterial>::setInitialConditionTNT(double exp
             states[i].rho = states[i].arho2 + (1.0 - f_vol) * ambient_rho;
             states[i].p = ambient_p;
             
-            states[i].E = MultiMat::getMixtureEnergy(ambient_p, states[i].rho, 0.0, states[i].alpha2, 0.0, states[i].arho2, gamma, currentMaterials.products, currentMaterials.unreacted);
+            states[i].E = MultiMat::getMixtureEnergy<RealType>((RealType)ambient_p, states[i].rho, (RealType)0.0, states[i].alpha2, (RealType)0.0, states[i].arho2, (RealType)gamma, currentMaterials.products, currentMaterials.unreacted);
         } else {
             states[i].rho = f_vol * high_rho + (1.0 - f_vol) * ambient_rho;
             states[i].p = ambient_p;
-            states[i].E = states[i].rho * MultiMat::getEnergy_IdealGas(ambient_p, states[i].rho, gamma);
+            states[i].E = states[i].rho * MultiMat::getEnergy_IdealGas<RealType>((RealType)ambient_p, states[i].rho, (RealType)gamma);
         }
     }
     active_r_idx = static_cast<int>(explosive_radius / dr) + 8;

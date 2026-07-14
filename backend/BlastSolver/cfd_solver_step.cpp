@@ -284,22 +284,22 @@ void CFDSolverImpl<RealType, IsMultiMaterial>::step(double dt) {
                 if (cancel_flag && cancel_flag->load()) return;
                 RealType r_c = (RealType)(i + 0.5) * (RealType)dr;
 
-                double tmp_alpha1 = (double)U[i].alpha1;
-                double tmp_alpha2 = (double)U[i].alpha2;
-                double tmp_arho1 = (double)U[i].arho1;
-                double tmp_arho2 = (double)U[i].arho2;
-                RealType dF = (RealType)MultiMat::computeProgrammedBurn(
-                    (double)t_step, (double)dt_step,
-                    (double)r_c, 0.0, 0.0,
-                    currentMaterials.det_vel, 0.0,
-                    0.0, 0.0, 0.0,
-                    dr, currentMaterials.products.rho0,
+                RealType tmp_alpha1 = U[i].alpha1;
+                RealType tmp_alpha2 = U[i].alpha2;
+                RealType tmp_arho1 = U[i].arho1;
+                RealType tmp_arho2 = U[i].arho2;
+                RealType dF = MultiMat::computeProgrammedBurn(
+                    t_step, dt_step,
+                    r_c, (RealType)0.0, (RealType)0.0,
+                    (RealType)currentMaterials.det_vel, (RealType)0.0,
+                    (RealType)0.0, (RealType)0.0, (RealType)0.0,
+                    (RealType)dr, (RealType)currentMaterials.products.rho0,
                     tmp_alpha1, tmp_alpha2,
                     tmp_arho1,  tmp_arho2);
-                U[i].alpha1 = (RealType)tmp_alpha1;
-                U[i].alpha2 = (RealType)tmp_alpha2;
-                U[i].arho1 = (RealType)tmp_arho1;
-                U[i].arho2 = (RealType)tmp_arho2;
+                U[i].alpha1 = tmp_alpha1;
+                U[i].alpha2 = tmp_alpha2;
+                U[i].arho1 = tmp_arho1;
+                U[i].arho2 = tmp_arho2;
 
                 if (currentMaterials.detonation_energy > 0.0 && dF > 0.0) {
                     RealType rho_expl = U[i].arho1 + U[i].arho2;

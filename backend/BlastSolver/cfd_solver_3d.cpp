@@ -241,31 +241,33 @@ Flux3DT<RealType, IsMultiMaterial> getRusanovFlux3D(
     Flux3DT<RealType, IsMultiMaterial> fL = physFlux(sL, dir);
     Flux3DT<RealType, IsMultiMaterial> fR = physFlux(sR, dir);
 
-    double cL, cR;
+    RealType cL, cR;
     if constexpr (IsMultiMaterial) {
-        cL = MultiMat::getMixtureSoundSpeed((double)sL.p, (double)sL.rho, (double)sL.alpha1, (double)sL.alpha2, (double)sL.arho1, (double)sL.arho2, (double)gamma, products, unreacted);
-        cR = MultiMat::getMixtureSoundSpeed((double)sR.p, (double)sR.rho, (double)sR.alpha1, (double)sR.alpha2, (double)sR.arho1, (double)sR.arho2, (double)gamma, products, unreacted);
+        cL = MultiMat::getMixtureSoundSpeed(sL.p, sL.rho, sL.alpha1, sL.alpha2, sL.arho1, sL.arho2, gamma, products, unreacted);
+        cR = MultiMat::getMixtureSoundSpeed(sR.p, sR.rho, sR.alpha1, sR.alpha2, sR.arho1, sR.arho2, gamma, products, unreacted);
     } else {
-        cL = std::sqrt((double)gamma * (double)sL.p / std::max(1e-6, (double)sL.rho));
-        cR = std::sqrt((double)gamma * (double)sR.p / std::max(1e-6, (double)sR.rho));
+        cL = std::sqrt(gamma * sL.p / std::max((RealType)1e-6, sL.rho));
+        cR = std::sqrt(gamma * sR.p / std::max((RealType)1e-6, sR.rho));
     }
-    double uL = (dir == 0) ? (double)sL.ux : (dir == 1 ? (double)sL.uy : (double)sL.uz);
-    double uR = (dir == 0) ? (double)sR.ux : (dir == 1 ? (double)sR.uy : (double)sR.uz);
-    double s_max = std::max(std::abs(uL) + cL, std::abs(uR) + cR);
+    RealType uL = (dir == 0) ? sL.ux : (dir == 1 ? sL.uy : sL.uz);
+    RealType uR = (dir == 0) ? sR.ux : (dir == 1 ? sR.uy : sR.uz);
+    using std::abs;
+    using std::max;
+    RealType s_max = max(abs(uL) + cL, abs(uR) + cR);
 
     Flux3DT<RealType, IsMultiMaterial> f;
-    f.rho = (RealType)(0.5 * ((double)fL.rho + (double)fR.rho) - 0.5 * s_max * ((double)sR.rho - (double)sL.rho));
-    f.rhoux = (RealType)(0.5 * ((double)fL.rhoux + (double)fR.rhoux) - 0.5 * s_max * ((double)sR.rho * (double)sR.ux - (double)sL.rho * (double)sL.ux));
-    f.rhouy = (RealType)(0.5 * ((double)fL.rhouy + (double)fR.rhouy) - 0.5 * s_max * ((double)sR.rho * (double)sR.uy - (double)sL.rho * (double)sL.uy));
-    f.rhouz = (RealType)(0.5 * ((double)fL.rhouz + (double)fR.rhouz) - 0.5 * s_max * ((double)sR.rho * (double)sR.uz - (double)sL.rho * (double)sL.uz));
-    f.E = (RealType)(0.5 * ((double)fL.E + (double)fR.E) - 0.5 * s_max * ((double)sR.E - (double)sL.E));
+    f.rho = (RealType)0.5 * (fL.rho + fR.rho) - (RealType)0.5 * s_max * (sR.rho - sL.rho);
+    f.rhoux = (RealType)0.5 * (fL.rhoux + fR.rhoux) - (RealType)0.5 * s_max * (sR.rho * sR.ux - sL.rho * sL.ux);
+    f.rhouy = (RealType)0.5 * (fL.rhouy + fR.rhouy) - (RealType)0.5 * s_max * (sR.rho * sR.uy - sL.rho * sL.uy);
+    f.rhouz = (RealType)0.5 * (fL.rhouz + fR.rhouz) - (RealType)0.5 * s_max * (sR.rho * sR.uz - sL.rho * sL.uz);
+    f.E = (RealType)0.5 * (fL.E + fR.E) - (RealType)0.5 * s_max * (sR.E - sL.E);
     if constexpr (IsMultiMaterial) {
-        f.alpha1 = (RealType)(0.5 * ((double)fL.alpha1 + (double)fR.alpha1) - 0.5 * s_max * ((double)sR.alpha1 - (double)sL.alpha1));
-        f.alpha2 = (RealType)(0.5 * ((double)fL.alpha2 + (double)fR.alpha2) - 0.5 * s_max * ((double)sR.alpha2 - (double)sL.alpha2));
-        f.arho1 = (RealType)(0.5 * ((double)fL.arho1 + (double)fR.arho1) - 0.5 * s_max * ((double)sR.arho1 - (double)sL.arho1));
-        f.arho2 = (RealType)(0.5 * ((double)fL.arho2 + (double)fR.arho2) - 0.5 * s_max * ((double)sR.arho2 - (double)sL.arho2));
+        f.alpha1 = (RealType)0.5 * (fL.alpha1 + fR.alpha1) - (RealType)0.5 * s_max * (sR.alpha1 - sL.alpha1);
+        f.alpha2 = (RealType)0.5 * (fL.alpha2 + fR.alpha2) - (RealType)0.5 * s_max * (sR.alpha2 - sL.alpha2);
+        f.arho1 = (RealType)0.5 * (fL.arho1 + fR.arho1) - (RealType)0.5 * s_max * (sR.arho1 - sL.arho1);
+        f.arho2 = (RealType)0.5 * (fL.arho2 + fR.arho2) - (RealType)0.5 * s_max * (sR.arho2 - sL.arho2);
     }
-    f.v_face = (RealType)(0.5 * (uL + uR));
+    f.v_face = (RealType)0.5 * (uL + uR);
     return f;
 }
 
@@ -275,98 +277,103 @@ Flux3DT<RealType, IsMultiMaterial> getAUSMPlusFlux3D(
     const typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealType, IsMultiMaterial>& sR, 
     int dir, RealType gamma, const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted) {
     
-    double aL, aR;
+    RealType aL, aR;
     if constexpr (IsMultiMaterial) {
-        aL = MultiMat::getMixtureSoundSpeed((double)sL.p, (double)sL.rho, (double)sL.alpha1, (double)sL.alpha2, (double)sL.arho1, (double)sL.arho2, (double)gamma, products, unreacted);
-        aR = MultiMat::getMixtureSoundSpeed((double)sR.p, (double)sR.rho, (double)sR.alpha1, (double)sR.alpha2, (double)sR.arho1, (double)sR.arho2, (double)gamma, products, unreacted);
+        aL = MultiMat::getMixtureSoundSpeed(sL.p, sL.rho, sL.alpha1, sL.alpha2, sL.arho1, sL.arho2, gamma, products, unreacted);
+        aR = MultiMat::getMixtureSoundSpeed(sR.p, sR.rho, sR.alpha1, sR.alpha2, sR.arho1, sR.arho2, gamma, products, unreacted);
     } else {
-        aL = std::sqrt((double)gamma * (double)sL.p / std::max(1e-6, (double)sL.rho));
-        aR = std::sqrt((double)gamma * (double)sR.p / std::max(1e-6, (double)sR.rho));
+        using std::sqrt;
+        aL = sqrt(gamma * sL.p / std::max((RealType)1e-6, sL.rho));
+        aR = sqrt(gamma * sR.p / std::max((RealType)1e-6, sR.rho));
     }
-    double a_half = 0.5 * (aL + aR);
+    RealType a_half = (RealType)0.5 * (aL + aR);
 
-    double uL = (dir == 0) ? (double)sL.ux : (dir == 1 ? (double)sL.uy : (double)sL.uz);
-    double uR = (dir == 0) ? (double)sR.ux : (dir == 1 ? (double)sR.uy : (double)sR.uz);
-    double ML = uL / a_half;
-    double MR = uR / a_half;
+    RealType uL = (dir == 0) ? sL.ux : (dir == 1 ? sL.uy : sL.uz);
+    RealType uR = (dir == 0) ? sR.ux : (dir == 1 ? sR.uy : sR.uz);
+    RealType ML = uL / a_half;
+    RealType MR = uR / a_half;
 
-    double alpha = 3.0 / 16.0;
-    double beta = 1.0 / 8.0;
+    RealType alpha = (RealType)(3.0 / 16.0);
+    RealType beta = (RealType)(1.0 / 8.0);
 
-    auto get_M_plus = [beta](double M) {
-        if (std::abs(M) <= 1.0) {
-            double term = 0.25 * (M + 1.0) * (M + 1.0);
-            return term + beta * (M * M - 1.0) * (M * M - 1.0);
+    auto get_M_plus = [beta](RealType M) {
+        using std::abs;
+        if (abs(M) <= (RealType)1.0) {
+            RealType term = (RealType)0.25 * (M + (RealType)1.0) * (M + (RealType)1.0);
+            return term + beta * (M * M - (RealType)1.0) * (M * M - (RealType)1.0);
         } else {
-            return 0.5 * (M + std::abs(M));
+            return (RealType)0.5 * (M + abs(M));
         }
     };
 
-    auto get_M_minus = [beta](double M) {
-        if (std::abs(M) <= 1.0) {
-            double term = -0.25 * (M - 1.0) * (M - 1.0);
-            return term - beta * (M * M - 1.0) * (M * M - 1.0);
+    auto get_M_minus = [beta](RealType M) {
+        using std::abs;
+        if (abs(M) <= (RealType)1.0) {
+            RealType term = (RealType)-0.25 * (M - (RealType)1.0) * (M - (RealType)1.0);
+            return term - beta * (M * M - (RealType)1.0) * (M * M - (RealType)1.0);
         } else {
-            return 0.5 * (M - std::abs(M));
+            return (RealType)0.5 * (M - abs(M));
         }
     };
 
-    auto get_P_plus = [alpha](double M) {
-        if (std::abs(M) <= 1.0) {
-            double term = 0.25 * (M + 1.0) * (M + 1.0) * (2.0 - M);
-            return term + alpha * M * (M * M - 1.0) * (M * M - 1.0);
+    auto get_P_plus = [alpha](RealType M) {
+        using std::abs;
+        if (abs(M) <= (RealType)1.0) {
+            RealType term = (RealType)0.25 * (M + (RealType)1.0) * (M + (RealType)1.0) * ((RealType)2.0 - M);
+            return term + alpha * M * (M * M - (RealType)1.0) * (M * M - (RealType)1.0);
         } else {
-            return (M >= 0.0) ? 1.0 : 0.0;
+            return (M >= (RealType)0.0) ? (RealType)1.0 : (RealType)0.0;
         }
     };
 
-    auto get_P_minus = [alpha](double M) {
-        if (std::abs(M) <= 1.0) {
-            double term = 0.25 * (M - 1.0) * (M - 1.0) * (2.0 + M);
-            return term - alpha * M * (M * M - 1.0) * (M * M - 1.0);
+    auto get_P_minus = [alpha](RealType M) {
+        using std::abs;
+        if (abs(M) <= (RealType)1.0) {
+            RealType term = (RealType)0.25 * (M - (RealType)1.0) * (M - (RealType)1.0) * ((RealType)2.0 + M);
+            return term - alpha * M * (M * M - (RealType)1.0) * (M * M - (RealType)1.0);
         } else {
-            return (M < 0.0) ? 1.0 : 0.0;
+            return (M < (RealType)0.0) ? (RealType)1.0 : (RealType)0.0;
         }
     };
 
-    double M_half_unmod = get_M_plus(ML) + get_M_minus(MR);
-    double p_half_unmod = get_P_plus(ML) * (double)sL.p + get_P_minus(MR) * (double)sR.p;
+    RealType M_half_unmod = get_M_plus(ML) + get_M_minus(MR);
+    RealType p_half_unmod = get_P_plus(ML) * sL.p + get_P_minus(MR) * sR.p;
     
     // AUSM+-up stabilization terms to prevent carbuncle/cube artifacts
-    double Kp = 0.25;
-    double Ku = 0.75;
-    double rho_half = 0.5 * ((double)sL.rho + (double)sR.rho);
+    RealType Kp = (RealType)0.25;
+    RealType Ku = (RealType)0.75;
+    RealType rho_half = (RealType)0.5 * (sL.rho + sR.rho);
     
-    double M_half = M_half_unmod - Kp * ((double)sR.p - (double)sL.p) / std::max(1e-6, rho_half * a_half * a_half);
-    double p_half = p_half_unmod - Ku * get_P_plus(ML) * get_P_minus(MR) * rho_half * a_half * (uR - uL);
+    RealType M_half = M_half_unmod - Kp * (sR.p - sL.p) / std::max((RealType)1e-6, rho_half * a_half * a_half);
+    RealType p_half = p_half_unmod - Ku * get_P_plus(ML) * get_P_minus(MR) * rho_half * a_half * (uR - uL);
 
     Flux3DT<RealType, IsMultiMaterial> F;
-    if (M_half >= 0.0) {
-        F.rho = (RealType)(M_half * a_half * (double)sL.rho);
-        F.rhoux = (RealType)(M_half * a_half * (double)sL.rho * (double)sL.ux + (dir == 0 ? p_half : 0.0));
-        F.rhouy = (RealType)(M_half * a_half * (double)sL.rho * (double)sL.uy + (dir == 1 ? p_half : 0.0));
-        F.rhouz = (RealType)(M_half * a_half * (double)sL.rho * (double)sL.uz + (dir == 2 ? p_half : 0.0));
-        F.E = (RealType)(M_half * a_half * ((double)sL.E + (double)sL.p));
+    if (M_half >= (RealType)0.0) {
+        F.rho = M_half * a_half * sL.rho;
+        F.rhoux = M_half * a_half * sL.rho * sL.ux + (dir == 0 ? p_half : (RealType)0.0);
+        F.rhouy = M_half * a_half * sL.rho * sL.uy + (dir == 1 ? p_half : (RealType)0.0);
+        F.rhouz = M_half * a_half * sL.rho * sL.uz + (dir == 2 ? p_half : (RealType)0.0);
+        F.E = M_half * a_half * (sL.E + sL.p);
         if constexpr (IsMultiMaterial) {
-            F.alpha1 = (RealType)(M_half * a_half * (double)sL.alpha1);
-            F.alpha2 = (RealType)(M_half * a_half * (double)sL.alpha2);
-            F.arho1 = (RealType)(M_half * a_half * (double)sL.arho1);
-            F.arho2 = (RealType)(M_half * a_half * (double)sL.arho2);
+            F.alpha1 = M_half * a_half * sL.alpha1;
+            F.alpha2 = M_half * a_half * sL.alpha2;
+            F.arho1 = M_half * a_half * sL.arho1;
+            F.arho2 = M_half * a_half * sL.arho2;
         }
     } else {
-        F.rho = (RealType)(M_half * a_half * (double)sR.rho);
-        F.rhoux = (RealType)(M_half * a_half * (double)sR.rho * (double)sR.ux + (dir == 0 ? p_half : 0.0));
-        F.rhouy = (RealType)(M_half * a_half * (double)sR.rho * (double)sR.uy + (dir == 1 ? p_half : 0.0));
-        F.rhouz = (RealType)(M_half * a_half * (double)sR.rho * (double)sR.uz + (dir == 2 ? p_half : 0.0));
-        F.E = (RealType)(M_half * a_half * ((double)sR.E + (double)sR.p));
+        F.rho = M_half * a_half * sR.rho;
+        F.rhoux = M_half * a_half * sR.rho * sR.ux + (dir == 0 ? p_half : (RealType)0.0);
+        F.rhouy = M_half * a_half * sR.rho * sR.uy + (dir == 1 ? p_half : (RealType)0.0);
+        F.rhouz = M_half * a_half * sR.rho * sR.uz + (dir == 2 ? p_half : (RealType)0.0);
+        F.E = M_half * a_half * (sR.E + sR.p);
         if constexpr (IsMultiMaterial) {
-            F.alpha1 = (RealType)(M_half * a_half * (double)sR.alpha1);
-            F.alpha2 = (RealType)(M_half * a_half * (double)sR.alpha2);
-            F.arho1 = (RealType)(M_half * a_half * (double)sR.arho1);
-            F.arho2 = (RealType)(M_half * a_half * (double)sR.arho2);
+            F.alpha1 = M_half * a_half * sR.alpha1;
+            F.alpha2 = M_half * a_half * sR.alpha2;
+            F.arho1 = M_half * a_half * sR.arho1;
+            F.arho2 = M_half * a_half * sR.arho2;
         }
     }
-    F.v_face = (RealType)(M_half * a_half);
+    F.v_face = M_half * a_half;
     return F;
 }
 
@@ -446,7 +453,7 @@ typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealT
 
     RealType ke = (RealType)0.5 * res.rho * (res.ux*res.ux + res.uy*res.uy + res.uz*res.uz);
     if constexpr (IsMultiMaterial) {
-        res.E = (RealType)MultiMat::getMixtureEnergy((double)res.p, (double)res.rho, (double)res.alpha1, (double)res.alpha2, (double)res.arho1, (double)res.arho2, (double)gamma, products, unreacted) + ke;
+        res.E = MultiMat::getMixtureEnergy(res.p, res.rho, res.alpha1, res.alpha2, res.arho1, res.arho2, gamma, products, unreacted) + ke;
     } else {
         res.E = res.p / (gamma - (RealType)1.0) + ke;
     }
@@ -546,32 +553,32 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::applyProgrammedBurn(double dt) 
                     auto& u = U_pool[t_idx];
                     for (int k = 0; k < TILE_SIZE_3D; ++k) {
                         int gz = tz * TILE_SIZE_3D + k;
-                        double z_c = zmin + (gz + 0.5) * cellSize;
+                        RealType z_c = (RealType)zmin + ((RealType)gz + (RealType)0.5) * (RealType)cellSize;
                         for (int j = 0; j < TILE_SIZE_3D; ++j) {
                             int gy = ty * TILE_SIZE_3D + j;
-                            double y_c = ymin + (gy + 0.5) * cellSize;
+                            RealType y_c = (RealType)ymin + ((RealType)gy + (RealType)0.5) * (RealType)cellSize;
                             for (int i = 0; i < TILE_SIZE_3D; ++i) {
                                 int gx = tx * TILE_SIZE_3D + i;
-                                double x_c = xmin + (gx + 0.5) * cellSize;
+                                RealType x_c = (RealType)xmin + ((RealType)gx + (RealType)0.5) * (RealType)cellSize;
                                 int c_idx = i + j * TILE_SIZE_3D + k * TILE_SIZE_3D * TILE_SIZE_3D;
 
-                                double tmp_alpha1 = (double)u.alpha1[c_idx];
-                                double tmp_alpha2 = (double)u.alpha2[c_idx];
-                                double tmp_arho1 = (double)u.arho1[c_idx];
-                                double tmp_arho2 = (double)u.arho2[c_idx];
-                                double dF = MultiMat::computeProgrammedBurn(
-                                    currentTime, dt, x_c, y_c, z_c,
-                                    currentMaterials.det_vel, 0.0, detX, detY, detZ,
-                                    cellSize, currentMaterials.products.rho0,
+                                RealType tmp_alpha1 = u.alpha1[c_idx];
+                                RealType tmp_alpha2 = u.alpha2[c_idx];
+                                RealType tmp_arho1 = u.arho1[c_idx];
+                                RealType tmp_arho2 = u.arho2[c_idx];
+                                RealType dF = MultiMat::computeProgrammedBurn(
+                                    (RealType)currentTime, (RealType)dt, x_c, y_c, z_c,
+                                    (RealType)currentMaterials.det_vel, (RealType)0.0, (RealType)detX, (RealType)detY, (RealType)detZ,
+                                    (RealType)cellSize, (RealType)currentMaterials.products.rho0,
                                     tmp_alpha1, tmp_alpha2, tmp_arho1, tmp_arho2
                                 );
-                                u.alpha1[c_idx] = (RealType)tmp_alpha1;
-                                u.alpha2[c_idx] = (RealType)tmp_alpha2;
-                                u.arho1[c_idx] = (RealType)tmp_arho1;
-                                u.arho2[c_idx] = (RealType)tmp_arho2;
-                                if (currentMaterials.detonation_energy > 0.0 && dF > 0.0) {
-                                    double rho_expl = (double)(u.arho1[c_idx] + u.arho2[c_idx]);
-                                    u.E[c_idx] += (RealType)(dF * rho_expl * currentMaterials.detonation_energy);
+                                u.alpha1[c_idx] = tmp_alpha1;
+                                u.alpha2[c_idx] = tmp_alpha2;
+                                u.arho1[c_idx] = tmp_arho1;
+                                u.arho2[c_idx] = tmp_arho2;
+                                if (currentMaterials.detonation_energy > 0.0 && dF > (RealType)0.0) {
+                                    RealType rho_expl = u.arho1[c_idx] + u.arho2[c_idx];
+                                    u.E[c_idx] += dF * rho_expl * (RealType)currentMaterials.detonation_energy;
                                 }
                             }
                         }
@@ -635,11 +642,11 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::updatePrimitiveFromConservative
                         s.arho1[i] = (s.arho1[i] / sum) * s.rho[i];
                         s.arho2[i] = (s.arho2[i] / sum) * s.rho[i];
                     }
-                    double p_val = MultiMat::getMixturePressure((double)e_int, (double)s.rho[i], (double)s.alpha1[i], (double)s.alpha2[i], (double)s.arho1[i], (double)s.arho2[i], (double)gamma_r, currentMaterials.products, currentMaterials.unreacted);
-                    if (std::isnan(p_val) || std::isinf(p_val) || p_val < 1e-8) {
+                    RealType p_val = MultiMat::getMixturePressure(e_int, s.rho[i], s.alpha1[i], s.alpha2[i], s.arho1[i], s.arho2[i], gamma_r, currentMaterials.products, currentMaterials.unreacted);
+                    if (std::isnan(p_val) || std::isinf(p_val) || p_val < (RealType)1e-8) {
                         bad = true;
                     } else {
-                        s.p[i] = (RealType)p_val;
+                        s.p[i] = p_val;
                         u.alpha1[i] = s.alpha1[i];
                         u.alpha2[i] = s.alpha2[i];
                         u.arho1[i] = s.arho1[i];
@@ -779,25 +786,27 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::applyBC() {}
 
 template <typename RealType, bool IsMultiMaterial>
 double CFDSolver3DImpl<RealType, IsMultiMaterial>::computeStepSize(double cfl) const {
-    double max_s = 1e-6;
+    RealType max_s = (RealType)1e-6;
     #pragma omp parallel for reduction(max:max_s)
     for (int t = 0; t < (int)states_pool.size(); ++t) {
         if (!active_tiles[t]) continue;
         const auto& tile = states_pool[t];
         for (int i = 0; i < TILE_CELLS_3D; ++i) {
-            double u_mag = std::sqrt((double)(tile.ux[i]*tile.ux[i] + tile.uy[i]*tile.uy[i] + tile.uz[i]*tile.uz[i]));
-            double c;
+            using std::sqrt;
+            using std::max;
+            RealType u_mag = sqrt(tile.ux[i]*tile.ux[i] + tile.uy[i]*tile.uy[i] + tile.uz[i]*tile.uz[i]);
+            RealType c;
             if constexpr (IsMultiMaterial) {
-                c = MultiMat::getMixtureSoundSpeed((double)tile.p[i], (double)tile.rho[i], (double)tile.alpha1[i], (double)tile.alpha2[i], (double)tile.arho1[i], (double)tile.arho2[i], gamma, currentMaterials.products, currentMaterials.unreacted);
+                c = MultiMat::getMixtureSoundSpeed(tile.p[i], tile.rho[i], tile.alpha1[i], tile.alpha2[i], tile.arho1[i], tile.arho2[i], (RealType)gamma, currentMaterials.products, currentMaterials.unreacted);
             } else {
-                c = std::sqrt(gamma * (double)tile.p[i] / std::max(1e-6, (double)tile.rho[i]));
+                c = sqrt((RealType)gamma * tile.p[i] / max((RealType)1e-6, tile.rho[i]));
             }
             if (u_mag + c > max_s) {
                 max_s = u_mag + c;
             }
         }
     }
-    return cfl * cellSize / max_s;
+    return cfl * cellSize / (double)max_s;
 }
 
 template <typename RealType, bool IsMultiMaterial>
@@ -984,6 +993,31 @@ template <typename RealType, bool IsMultiMaterial> void CFDSolver3DImpl<RealType
 template <typename RealType, bool IsMultiMaterial> void CFDSolver3DImpl<RealType, IsMultiMaterial>::setSpatialOrder(int order) { spatialOrder = order; }
 template <typename RealType, bool IsMultiMaterial> void CFDSolver3DImpl<RealType, IsMultiMaterial>::setTemporalOrder(int order) { temporalOrder = order; }
 template <typename RealType, bool IsMultiMaterial> bool CFDSolver3DImpl<RealType, IsMultiMaterial>::checkTermination() { return false; }
+
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DImpl<RealType, IsMultiMaterial>::setGauges(const std::vector<Gauge3D>& gauges) {
+    cpu_gauges = gauges;
+    cpu_gauge_times.clear();
+    cpu_gauge_values.clear();
+}
+
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DImpl<RealType, IsMultiMaterial>::recordGaugesAsync(double t) {
+    if (cpu_gauges.empty()) return;
+    cpu_gauge_times.push_back(t);
+    for (const auto& gauge : cpu_gauges) {
+        auto vals = sampleGauge(gauge);
+        cpu_gauge_values.insert(cpu_gauge_values.end(), vals.begin(), vals.end());
+    }
+}
+
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DImpl<RealType, IsMultiMaterial>::retrieveNewGaugeSamples(std::vector<double>& times, std::vector<float>& values) {
+    times = std::move(cpu_gauge_times);
+    values = std::move(cpu_gauge_values);
+    cpu_gauge_times.clear();
+    cpu_gauge_values.clear();
+}
 
 template class CFDSolver3DImpl<float, false>;
 template class CFDSolver3DImpl<float, true>;

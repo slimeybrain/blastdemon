@@ -573,15 +573,24 @@ export class PropertyEditor {
             const timeEl = this.createInputElement(node, 'time_interval', node.parameters['time_interval'] ?? 0.0);
             addRowToPanel('time_interval', 'TIME INTERVAL', timeEl, 0);
 
-            const triggersGrid = document.createElement('div');
-            triggersGrid.style.display = 'grid';
-            triggersGrid.style.gridTemplateColumns = 'repeat(2, 1fr)';
-            triggersGrid.style.gap = '8px';
-            triggersGrid.style.marginTop = '8px';
+            const state = this.stateManager.getCurrentState();
+            const conn = state?.connections.find(c => c.toNode === node.id);
+            const sourceNode = conn ? state?.nodes.find(n => n.id === conn.fromNode) : null;
+            const is3D = sourceNode 
+                ? (sourceNode.type === 'CFDSolver3D') 
+                : (state?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'DomainMesh3D') ?? false);
 
-            triggersGrid.appendChild(createCheckboxField('export_slices', !!node.parameters['export_slices'], 'Export Slices'));
-            triggersGrid.appendChild(createCheckboxField('export_volumes', !!node.parameters['export_volumes'], 'Export Volumes'));
-            panels[0].appendChild(triggersGrid);
+            if (is3D) {
+                const triggersGrid = document.createElement('div');
+                triggersGrid.style.display = 'grid';
+                triggersGrid.style.gridTemplateColumns = 'repeat(2, 1fr)';
+                triggersGrid.style.gap = '8px';
+                triggersGrid.style.marginTop = '8px';
+
+                triggersGrid.appendChild(createCheckboxField('export_slices', !!node.parameters['export_slices'], 'Export Slices'));
+                triggersGrid.appendChild(createCheckboxField('export_volumes', !!node.parameters['export_volumes'], 'Export Volumes'));
+                panels[0].appendChild(triggersGrid);
+            }
 
             // FILES/CONFIG Tab
             const fileEl = this.createInputElement(node, 'custom_filename', node.parameters['custom_filename'] ?? 'vtk_output');

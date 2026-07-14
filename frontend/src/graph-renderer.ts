@@ -61,6 +61,15 @@ export class GraphRenderer {
 
     private gaugesPanelOpen: Map<string, boolean> = new Map();
     private gaugesActiveTab: Map<string, 'list' | 'settings'> = new Map();
+    private focusedChartNodeId: string | null = null;
+    private gaugesZoomedOrPanned: Map<string, boolean> = new Map();
+    private gaugesZoomMinX: Map<string, number> = new Map();
+    private gaugesZoomMaxX: Map<string, number> = new Map();
+    private gaugesIsDragging: Map<string, boolean> = new Map();
+    private gaugesDragStartX: Map<string, number> = new Map();
+    private gaugesDragStartMinX: Map<string, number> = new Map();
+    private gaugesDragStartMaxX: Map<string, number> = new Map();
+
 
     private selectedNodeId: string | null = null;
     private selectedConnection: Connection | null = null;
@@ -508,6 +517,18 @@ export class GraphRenderer {
                 this.selectedModelId = null;
                 this.selectNode(null);
                 this.selectedConnection = null;
+                if (this.focusedChartNodeId) {
+                    const prevFocusedId = this.focusedChartNodeId;
+                    this.focusedChartNodeId = null;
+                    const prevNodeEl = this.nodeElements.get(prevFocusedId);
+                    if (prevNodeEl) {
+                        const container = prevNodeEl.querySelector('.gauges-canvas-container');
+                        if (container) {
+                            (container as HTMLElement).style.outline = '';
+                            (container as HTMLElement).style.boxShadow = '';
+                        }
+                    }
+                }
                 this.render();
             }
         });
@@ -834,6 +855,21 @@ export class GraphRenderer {
     }
 
     private onKeyDown(e: KeyboardEvent): void {
+        if (e.key === 'Escape') {
+            if (this.focusedChartNodeId) {
+                const prevFocusedId = this.focusedChartNodeId;
+                this.focusedChartNodeId = null;
+                const prevNodeEl = this.nodeElements.get(prevFocusedId);
+                if (prevNodeEl) {
+                    const container = prevNodeEl.querySelector('.gauges-canvas-container');
+                    if (container) {
+                        (container as HTMLElement).style.outline = '';
+                        (container as HTMLElement).style.boxShadow = '';
+                    }
+                }
+            }
+        }
+
         if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) return;
 
         // Ctrl+C (Copy Model)
@@ -3931,10 +3967,18 @@ export class GraphRenderer {
             gridInfoDiv = info;
         }
 
+        const state = this.stateManager.getCurrentState();
+        const conn = state?.connections.find(c => c.toNode === node.id);
+        const sourceNode = conn ? state?.nodes.find(n => n.id === conn.fromNode) : null;
+        const is3D = sourceNode 
+            ? (sourceNode.type === 'CFDSolver3D') 
+            : (state?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'DomainMesh3D') ?? false);
+
         for (const key of paramKeys) {
             const value = node.parameters[key];
             if (key === 'gauges' || key === 'slices') continue;
             if (key === 'nr' || key === 'nz' || key === 'n_cells') continue;
+            if (node.type === 'VTKOutput' && !is3D && (key === 'export_slices' || key === 'export_volumes')) continue;
             if ((node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') && key === 'telemetry_channel') continue;
             // DetonatorLocation and DetonatorLocation3D are separate nodes now, showing correct properties
             if (node.type === 'DomainMesh') {
@@ -4009,7 +4053,19 @@ export class GraphRenderer {
             };
 
             let inputEl: HTMLElement;
-            if (dropdowns[key]) {
+            if (typeof value === 'boolean') {
+                inputEl = this.createCustomDropdown(
+                    [
+                        { value: 'true', label: 'True' },
+                        { value: 'false', label: 'False' }
+                    ],
+                    value ? 'true' : 'false',
+                    (newVal) => {
+                        this.stateManager.updateNodeParameters(node.id, { [key]: newVal === 'true' });
+                    },
+                    key
+                );
+            } else if (dropdowns[key]) {
                 inputEl = this.createCustomDropdown(
                     dropdowns[key].map(opt => ({ value: opt, label: opt })),
                     value.toString(),
@@ -4025,7 +4081,14 @@ export class GraphRenderer {
                             'charge_r', 'charge_z', 'charge_radius', 'charge_height',
                             'detonator_r', 'detonator_z', 'detonator_radius'
                         ];
-                        const castValue = numericKeys.includes(key) ? Number(newVal) : newVal;
+                        let castValue: any = newVal;
+                        if (numericKeys.includes(key)) {
+                            castValue = Number(newVal);
+                        } else if (newVal === 'true') {
+                            castValue = true;
+                        } else if (newVal === 'false') {
+                            castValue = false;
+                        }
                         const updates: Record<string, any> = { [key]: castValue };
                         if (node.type === 'Material' && key === 'composition') {
                              const EXPLOSIVE_PRESETS: Record<string, Record<string, number>> = {

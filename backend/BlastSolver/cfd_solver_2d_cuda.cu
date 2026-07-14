@@ -27,7 +27,7 @@ __device__ inline void compute_E_device(CellStateT<RealType>& s, RealType gamma,
     if (is_ideal_gas) {
         s.E = s.p / (gamma - (RealType)1.0) + (RealType)0.5 * s.rho * (s.ur * s.ur + s.uz * s.uz);
     } else {
-        s.E = (RealType)MultiMat::getMixtureEnergy((double)s.p, (double)s.rho, (double)s.alpha1, (double)s.alpha2, (double)s.arho1, (double)s.arho2, (double)gamma, d_materials->products, d_materials->unreacted) + (RealType)0.5 * s.rho * (s.ur * s.ur + s.uz * s.uz);
+        s.E = MultiMat::getMixtureEnergy(s.p, s.rho, s.alpha1, s.alpha2, s.arho1, s.arho2, gamma, d_materials->products, d_materials->unreacted) + (RealType)0.5 * s.rho * (s.ur * s.ur + s.uz * s.uz);
     }
 }
 
@@ -46,7 +46,7 @@ __device__ inline CellStateT<RealType> applyBC_device(CellStateT<RealType> s, in
         if (is_ideal_gas) {
             c = sqrt(gamma * s.p / s.rho);
         } else {
-            c = (RealType)MultiMat::getMixtureSoundSpeed((double)s.p, (double)s.rho, (double)s.alpha1, (double)s.alpha2, (double)s.arho1, (double)s.arho2, (double)gamma, d_materials->products, d_materials->unreacted);
+            c = MultiMat::getMixtureSoundSpeed(s.p, s.rho, s.alpha1, s.alpha2, s.arho1, s.arho2, gamma, d_materials->products, d_materials->unreacted);
         }
         if (normal_vel < (RealType)0.0) {
             // Inflow
@@ -59,7 +59,7 @@ __device__ inline CellStateT<RealType> applyBC_device(CellStateT<RealType> s, in
             s.arho1 = 0.0;
             s.arho2 = 0.0;
             s.E = is_ideal_gas ? (ambient_p / (gamma - (RealType)1.0)) : 
-                  (RealType)(ambient_rho * MultiMat::getEnergy_IdealGas((double)ambient_p, (double)ambient_rho, (double)gamma));
+                  (ambient_rho * MultiMat::getEnergy_IdealGas(ambient_p, ambient_rho, gamma));
         } else if (normal_vel < c) {
             // Subsonic outflow
             s.p = ambient_p;
@@ -123,7 +123,7 @@ __device__ inline CellStateT<RealType> readState_device(
     if (pool_idx == -1) {
         s = { ambient_rho, 0.0, 0.0, ambient_p, 
               is_ideal_gas ? (ambient_p / (gamma - (RealType)1.0)) : 
-              (RealType)(ambient_rho * MultiMat::getEnergy_IdealGas((double)ambient_p, (double)ambient_rho, (double)gamma)), 
+              (ambient_rho * MultiMat::getEnergy_IdealGas(ambient_p, ambient_rho, gamma)), 
               0.0, 0.0, 0.0, 0.0 };
     } else {
         int local_i = i % TILE_SIZE;
@@ -181,72 +181,74 @@ template <typename RealType>
 __device__ inline void calcFluxRusanov_device(const CellStateT<RealType>& sL, const CellStateT<RealType>& sR, RealType gamma, const MultiMat::MaterialSet& mat, 
                             RealType& f_rho, RealType& f_rhour, RealType& f_rhouz, RealType& f_E, 
                             RealType& f_alpha1, RealType& f_alpha2, RealType& f_arho1, RealType& f_arho2, RealType& v_face) {
-    double cL = MultiMat::getMixtureSoundSpeed((double)sL.p, (double)sL.rho, (double)sL.alpha1, (double)sL.alpha2, (double)sL.arho1, (double)sL.arho2, (double)gamma, mat.products, mat.unreacted);
-    double cR = MultiMat::getMixtureSoundSpeed((double)sR.p, (double)sR.rho, (double)sR.alpha1, (double)sR.alpha2, (double)sR.arho1, (double)sR.arho2, (double)gamma, mat.products, mat.unreacted);
-    double val_L = std::abs((double)sL.ur) + cL;
-    double val_R = std::abs((double)sR.ur) + cR;
-    double s_max = (val_L > val_R) ? val_L : val_R;
+    using std::abs;
+    RealType cL = MultiMat::getMixtureSoundSpeed(sL.p, sL.rho, sL.alpha1, sL.alpha2, sL.arho1, sL.arho2, gamma, mat.products, mat.unreacted);
+    RealType cR = MultiMat::getMixtureSoundSpeed(sR.p, sR.rho, sR.alpha1, sR.alpha2, sR.arho1, sR.arho2, gamma, mat.products, mat.unreacted);
+    RealType val_L = abs(sL.ur) + cL;
+    RealType val_R = abs(sR.ur) + cR;
+    RealType s_max = (val_L > val_R) ? val_L : val_R;
 
-    double fL_rho = (double)(sL.rho * sL.ur);
-    double fL_rhour = (double)(sL.rho * sL.ur * sL.ur + sL.p);
-    double fL_rhouz = (double)(sL.rho * sL.ur * sL.uz);
-    double fL_E = (double)(sL.ur * (sL.E + sL.p));
+    RealType fL_rho = sL.rho * sL.ur;
+    RealType fL_rhour = sL.rho * sL.ur * sL.ur + sL.p;
+    RealType fL_rhouz = sL.rho * sL.ur * sL.uz;
+    RealType fL_E = sL.ur * (sL.E + sL.p);
     
-    double fR_rho = (double)(sR.rho * sR.ur);
-    double fR_rhour = (double)(sR.rho * sR.ur * sR.ur + sR.p);
-    double fR_rhouz = (double)(sR.rho * sR.ur * sR.uz);
-    double fR_E = (double)(sR.ur * (sR.E + sR.p));
+    RealType fR_rho = sR.rho * sR.ur;
+    RealType fR_rhour = sR.rho * sR.ur * sR.ur + sR.p;
+    RealType fR_rhouz = sR.rho * sR.ur * sR.uz;
+    RealType fR_E = sR.ur * (sR.E + sR.p);
 
-    double uL_rho = (double)sL.rho, uL_rhour = (double)(sL.rho * sL.ur), uL_rhouz = (double)(sL.rho * sL.uz), uL_E = (double)sL.E;
-    double uR_rho = (double)sR.rho, uR_rhour = (double)(sR.rho * sR.ur), uR_rhouz = (double)(sR.rho * sR.uz), uR_E = (double)sR.E;
+    RealType uL_rho = sL.rho, uL_rhour = sL.rho * sL.ur, uL_rhouz = sL.rho * sL.uz, uL_E = sL.E;
+    RealType uR_rho = sR.rho, uR_rhour = sR.rho * sR.ur, uR_rhouz = sR.rho * sR.uz, uR_E = sR.E;
 
-    f_rho = (RealType)(0.5 * (fL_rho + fR_rho) - 0.5 * s_max * (uR_rho - uL_rho));
-    f_rhour = (RealType)(0.5 * (fL_rhour + fR_rhour) - 0.5 * s_max * (uR_rhour - uL_rhour));
-    f_rhouz = (RealType)(0.5 * (fL_rhouz + fR_rhouz) - 0.5 * s_max * (uR_rhouz - uL_rhouz));
-    f_E = (RealType)(0.5 * (fL_E + fR_E) - 0.5 * s_max * (uR_E - uL_E));
+    f_rho = (RealType)0.5 * (fL_rho + fR_rho) - (RealType)0.5 * s_max * (uR_rho - uL_rho);
+    f_rhour = (RealType)0.5 * (fL_rhour + fR_rhour) - (RealType)0.5 * s_max * (uR_rhour - uL_rhour);
+    f_rhouz = (RealType)0.5 * (fL_rhouz + fR_rhouz) - (RealType)0.5 * s_max * (uR_rhouz - uL_rhouz);
+    f_E = (RealType)0.5 * (fL_E + fR_E) - (RealType)0.5 * s_max * (uR_E - uL_E);
 
-    v_face = (RealType)(0.5 * ((double)sL.ur + (double)sR.ur));
+    v_face = (RealType)0.5 * (sL.ur + sR.ur);
 
-    f_alpha1 = (RealType)(0.5 * ((double)sL.alpha1*(double)sL.ur + (double)sR.alpha1*(double)sR.ur) - 0.5 * s_max * ((double)sR.alpha1 - (double)sL.alpha1));
-    f_alpha2 = (RealType)(0.5 * ((double)sL.alpha2*(double)sL.ur + (double)sR.alpha2*(double)sR.ur) - 0.5 * s_max * ((double)sR.alpha2 - (double)sL.alpha2));
-    f_arho1 = (RealType)(0.5 * ((double)sL.arho1*(double)sL.ur + (double)sR.arho1*(double)sR.ur) - 0.5 * s_max * ((double)sR.arho1 - (double)sL.arho1));
-    f_arho2 = (RealType)(0.5 * ((double)sL.arho2*(double)sL.ur + (double)sR.arho2*(double)sR.ur) - 0.5 * s_max * ((double)sR.arho2 - (double)sL.arho2));
+    f_alpha1 = (RealType)0.5 * (sL.alpha1 * sL.ur + sR.alpha1 * sR.ur) - (RealType)0.5 * s_max * (sR.alpha1 - sL.alpha1);
+    f_alpha2 = (RealType)0.5 * (sL.alpha2 * sL.ur + sR.alpha2 * sR.ur) - (RealType)0.5 * s_max * (sR.alpha2 - sL.alpha2);
+    f_arho1 = (RealType)0.5 * (sL.arho1 * sL.ur + sR.arho1 * sR.ur) - (RealType)0.5 * s_max * (sR.arho1 - sL.arho1);
+    f_arho2 = (RealType)0.5 * (sL.arho2 * sL.ur + sR.arho2 * sR.ur) - (RealType)0.5 * s_max * (sR.arho2 - sL.arho2);
 }
 
 template <typename RealType>
 __device__ inline void calcFluxRusanovZ_device(const CellStateT<RealType>& sL, const CellStateT<RealType>& sR, RealType gamma, const MultiMat::MaterialSet& mat, 
                             RealType& f_rho, RealType& f_rhour, RealType& f_rhouz, RealType& f_E, 
                             RealType& f_alpha1, RealType& f_alpha2, RealType& f_arho1, RealType& f_arho2, RealType& v_face) {
-    double cL = MultiMat::getMixtureSoundSpeed((double)sL.p, (double)sL.rho, (double)sL.alpha1, (double)sL.alpha2, (double)sL.arho1, (double)sL.arho2, (double)gamma, mat.products, mat.unreacted);
-    double cR = MultiMat::getMixtureSoundSpeed((double)sR.p, (double)sR.rho, (double)sR.alpha1, (double)sR.alpha2, (double)sR.arho1, (double)sR.arho2, (double)gamma, mat.products, mat.unreacted);
-    double val_L = std::abs((double)sL.uz) + cL;
-    double val_R = std::abs((double)sR.uz) + cR;
-    double s_max = (val_L > val_R) ? val_L : val_R;
+    using std::abs;
+    RealType cL = MultiMat::getMixtureSoundSpeed(sL.p, sL.rho, sL.alpha1, sL.alpha2, sL.arho1, sL.arho2, gamma, mat.products, mat.unreacted);
+    RealType cR = MultiMat::getMixtureSoundSpeed(sR.p, sR.rho, sR.alpha1, sR.alpha2, sR.arho1, sR.arho2, gamma, mat.products, mat.unreacted);
+    RealType val_L = abs(sL.uz) + cL;
+    RealType val_R = abs(sR.uz) + cR;
+    RealType s_max = (val_L > val_R) ? val_L : val_R;
 
-    double fL_rho = (double)(sL.rho * sL.uz);
-    double fL_rhour = (double)(sL.rho * sL.ur * sL.uz);
-    double fL_rhouz = (double)(sL.rho * sL.uz * sL.uz + sL.p);
-    double fL_E = (double)(sL.uz * (sL.E + sL.p));
+    RealType fL_rho = sL.rho * sL.uz;
+    RealType fL_rhour = sL.rho * sL.ur * sL.uz;
+    RealType fL_rhouz = sL.rho * sL.uz * sL.uz + sL.p;
+    RealType fL_E = sL.uz * (sL.E + sL.p);
     
-    double fR_rho = (double)(sR.rho * sR.uz);
-    double fR_rhour = (double)(sR.rho * sR.ur * sR.uz);
-    double fR_rhouz = (double)(sR.rho * sR.uz * sR.uz + sR.p);
-    double fR_E = (double)(sR.uz * (sR.E + sR.p));
+    RealType fR_rho = sR.rho * sR.uz;
+    RealType fR_rhour = sR.rho * sR.ur * sR.uz;
+    RealType fR_rhouz = sR.rho * sR.uz * sR.uz + sR.p;
+    RealType fR_E = sR.uz * (sR.E + sR.p);
 
-    double uL_rho = (double)sL.rho, uL_rhour = (double)(sL.rho * sL.ur), uL_rhouz = (double)(sL.rho * sL.uz), uL_E = (double)sL.E;
-    double uR_rho = (double)sR.rho, uR_rhour = (double)(sR.rho * sR.ur), uR_rhouz = (double)(sR.rho * sR.uz), uR_E = (double)sR.E;
+    RealType uL_rho = sL.rho, uL_rhour = sL.rho * sL.ur, uL_rhouz = sL.rho * sL.uz, uL_E = sL.E;
+    RealType uR_rho = sR.rho, uR_rhour = sR.rho * sR.ur, uR_rhouz = sR.rho * sR.uz, uR_E = sR.E;
 
-    f_rho = (RealType)(0.5 * (fL_rho + fR_rho) - 0.5 * s_max * (uR_rho - uL_rho));
-    f_rhour = (RealType)(0.5 * (fL_rhour + fR_rhour) - 0.5 * s_max * (uR_rhour - uL_rhour));
-    f_rhouz = (RealType)(0.5 * (fL_rhouz + fR_rhouz) - 0.5 * s_max * (uR_rhouz - uL_rhouz));
-    f_E = (RealType)(0.5 * (fL_E + fR_E) - 0.5 * s_max * (uR_E - uL_E));
+    f_rho = (RealType)0.5 * (fL_rho + fR_rho) - (RealType)0.5 * s_max * (uR_rho - uL_rho);
+    f_rhour = (RealType)0.5 * (fL_rhour + fR_rhour) - (RealType)0.5 * s_max * (uR_rhour - uL_rhour);
+    f_rhouz = (RealType)0.5 * (fL_rhouz + fR_rhouz) - (RealType)0.5 * s_max * (uR_rhouz - uL_rhouz);
+    f_E = (RealType)0.5 * (fL_E + fR_E) - (RealType)0.5 * s_max * (uR_E - uL_E);
 
-    v_face = (RealType)(0.5 * ((double)sL.uz + (double)sR.uz));
+    v_face = (RealType)0.5 * (sL.uz + sR.uz);
 
-    f_alpha1 = (RealType)(0.5 * ((double)sL.alpha1*(double)sL.uz + (double)sR.alpha1*(double)sR.uz) - 0.5 * s_max * ((double)sR.alpha1 - (double)sL.alpha1));
-    f_alpha2 = (RealType)(0.5 * ((double)sL.alpha2*(double)sL.uz + (double)sR.alpha2*(double)sR.uz) - 0.5 * s_max * ((double)sR.alpha2 - (double)sL.alpha2));
-    f_arho1 = (RealType)(0.5 * ((double)sL.arho1*(double)sL.uz + (double)sR.arho1*(double)sR.uz) - 0.5 * s_max * ((double)sR.arho1 - (double)sL.arho1));
-    f_arho2 = (RealType)(0.5 * ((double)sL.arho2*(double)sL.uz + (double)sR.arho2*(double)sR.uz) - 0.5 * s_max * ((double)sR.arho2 - (double)sL.arho2));
+    f_alpha1 = (RealType)0.5 * (sL.alpha1 * sL.uz + sR.alpha1 * sR.uz) - (RealType)0.5 * s_max * (sR.alpha1 - sL.alpha1);
+    f_alpha2 = (RealType)0.5 * (sL.alpha2 * sL.uz + sR.alpha2 * sR.uz) - (RealType)0.5 * s_max * (sR.alpha2 - sL.alpha2);
+    f_arho1 = (RealType)0.5 * (sL.arho1 * sL.uz + sR.arho1 * sR.uz) - (RealType)0.5 * s_max * (sR.arho1 - sL.arho1);
+    f_arho2 = (RealType)0.5 * (sL.arho2 * sL.uz + sR.arho2 * sR.uz) - (RealType)0.5 * s_max * (sR.arho2 - sL.arho2);
 }
 
 template <typename RealType>
@@ -604,33 +606,34 @@ __global__ void applyProgrammedBurn_kernel(
     
     int k = local_i * TILE_SIZE + local_j;
     
-    double r_c = (i + 0.5) * (double)dr;
-    double z_c = (j + 0.5) * (double)dz;
+    RealType r_c = ((RealType)i + (RealType)0.5) * dr;
+    RealType z_c = ((RealType)j + (RealType)0.5) * dz;
     
-    double alpha1 = (double)d_U_pool[pool_idx].alpha1[k];
-    double alpha2 = (double)d_U_pool[pool_idx].alpha2[k];
-    double arho1 = (double)d_U_pool[pool_idx].arho1[k];
-    double arho2 = (double)d_U_pool[pool_idx].arho2[k];
+    RealType alpha1 = d_U_pool[pool_idx].alpha1[k];
+    RealType alpha2 = d_U_pool[pool_idx].alpha2[k];
+    RealType arho1 = d_U_pool[pool_idx].arho1[k];
+    RealType arho2 = d_U_pool[pool_idx].arho2[k];
     
-    double dF = MultiMat::computeProgrammedBurn(
-        (double)currentTime, (double)dt, r_c, 0.0, z_c,
-        d_materials->det_vel, 0.0,
-        (double)det_x, (double)det_y, (double)det_z,
-        fmin((double)dr, (double)dz),
-        d_materials->products.rho0,
+    using std::fmin;
+    RealType dF = MultiMat::computeProgrammedBurn(
+        currentTime, dt, r_c, (RealType)0.0, z_c,
+        (RealType)d_materials->det_vel, (RealType)0.0,
+        det_x, (RealType)0.0, det_z,
+        fmin(dr, dz),
+        (RealType)d_materials->products.rho0,
         alpha1, alpha2,
         arho1, arho2
     );
     
-    if (dF > 0.0) {
+    if (dF > (RealType)0.0) {
         if (d_materials->detonation_energy > 0.0) {
-            double rho_expl = arho1 + arho2;
-            d_U_pool[pool_idx].E[k] += (RealType)(dF * rho_expl * d_materials->detonation_energy);
+            RealType rho_expl = arho1 + arho2;
+            d_U_pool[pool_idx].E[k] += dF * rho_expl * (RealType)d_materials->detonation_energy;
         }
-        d_U_pool[pool_idx].alpha1[k] = (RealType)alpha1;
-        d_U_pool[pool_idx].alpha2[k] = (RealType)alpha2;
-        d_U_pool[pool_idx].arho1[k] = (RealType)arho1;
-        d_U_pool[pool_idx].arho2[k] = (RealType)arho2;
+        d_U_pool[pool_idx].alpha1[k] = alpha1;
+        d_U_pool[pool_idx].alpha2[k] = alpha2;
+        d_U_pool[pool_idx].arho1[k] = arho1;
+        d_U_pool[pool_idx].arho2[k] = arho2;
     }
 }
 
@@ -689,7 +692,7 @@ __global__ void updatePrimitiveFromConservative_kernel(
         }
 
         RealType e_internal = fmax(u_E - ke, p_floor / (gamma - (RealType)1.0));
-        p = (RealType)MultiMat::getMixturePressure((double)e_internal, (double)u_rho, (double)alpha1, (double)alpha2, (double)arho1, (double)arho2, (double)gamma, d_materials->products, d_materials->unreacted);
+        p = MultiMat::getMixturePressure(e_internal, u_rho, alpha1, alpha2, arho1, arho2, gamma, d_materials->products, d_materials->unreacted);
         
         if (isnan(p) || isinf(p) || p < p_floor) {
             bad = true;
@@ -740,17 +743,19 @@ __global__ void computeMaxWaveSpeed_kernel(
     int local_j = threadIdx.y;
     int k = local_i * TILE_SIZE + local_j;
     
-    double p = (double)d_states_pool[pool_idx].p[k];
-    double rho = (double)d_states_pool[pool_idx].rho[k];
-    double alpha1 = (double)d_states_pool[pool_idx].alpha1[k];
-    double alpha2 = (double)d_states_pool[pool_idx].alpha2[k];
-    double arho1 = (double)d_states_pool[pool_idx].arho1[k];
-    double arho2 = (double)d_states_pool[pool_idx].arho2[k];
-    double ur = (double)d_states_pool[pool_idx].ur[k];
-    double uz = (double)d_states_pool[pool_idx].uz[k];
+    RealType p = d_states_pool[pool_idx].p[k];
+    RealType rho = d_states_pool[pool_idx].rho[k];
+    RealType alpha1 = d_states_pool[pool_idx].alpha1[k];
+    RealType alpha2 = d_states_pool[pool_idx].alpha2[k];
+    RealType arho1 = d_states_pool[pool_idx].arho1[k];
+    RealType arho2 = d_states_pool[pool_idx].arho2[k];
+    RealType ur = d_states_pool[pool_idx].ur[k];
+    RealType uz = d_states_pool[pool_idx].uz[k];
     
-    double c = MultiMat::getMixtureSoundSpeed(
-        p, rho, alpha1, alpha2, arho1, arho2, (double)gamma,
+    using std::abs;
+    using std::fmax;
+    RealType c = MultiMat::getMixtureSoundSpeed(
+        p, rho, alpha1, alpha2, arho1, arho2, gamma,
         d_materials->products, d_materials->unreacted
     );
     double s = fmax(fabs(ur), fabs(uz)) + c;
@@ -925,6 +930,12 @@ CFDSolver2DCudaImpl<RealType>::~CFDSolver2DCudaImpl() {
     if (d_block_maxes) cudaFree(d_block_maxes);
     if (d_tile_active_flags) cudaFree(d_tile_active_flags);
     if (d_terminated) cudaFree(d_terminated);
+
+    if (d_gauge_coords) cudaFree(d_gauge_coords);
+    if (d_gauge_results) cudaFree(d_gauge_results);
+    if (host_pinned_gauge_data) cudaFreeHost(host_pinned_gauge_data);
+    if (gauge_stream) cudaStreamDestroy((cudaStream_t)gauge_stream);
+    if (step_done) cudaEventDestroy((cudaEvent_t)step_done);
 }
 
 template <typename RealType>
@@ -1760,6 +1771,157 @@ void get_cuda_vram_info(size_t& free_bytes, size_t& total_bytes) {
         free_bytes = 0;
         total_bytes = 0;
     }
+}
+
+template <typename RealType>
+__global__ void batch_sample_gauges_kernel_2d(
+    const PrimitiveTileT<RealType>* states_pool,
+    const int32_t* tile_map,
+    const GPUGauge2D* gauges,
+    float* out_data,
+    int num_tiles_z,
+    int num_gauges,
+    RealType ambient_p,
+    RealType ambient_rho,
+    RealType gamma,
+    bool is_ideal_gas
+) {
+    int g = blockIdx.x * blockDim.x + threadIdx.x;
+    if (g >= num_gauges) return;
+
+    int tr = gauges[g].tr;
+    int tz = gauges[g].tz;
+    int k = gauges[g].k;
+
+    int pool_idx = tile_map[tr * num_tiles_z + tz];
+    if (pool_idx == -1) {
+        out_data[g * 7 + 0] = (float)ambient_p;
+        out_data[g * 7 + 1] = (float)ambient_rho;
+        out_data[g * 7 + 2] = 0.0f;
+        out_data[g * 7 + 3] = (float)(is_ideal_gas ? (ambient_p / (ambient_rho * (gamma - 1.0))) :
+                              (double)MultiMat::getEnergy_IdealGas(ambient_p, ambient_rho, gamma));
+        out_data[g * 7 + 4] = 0.0f;
+        out_data[g * 7 + 5] = 0.0f;
+        out_data[g * 7 + 6] = 1.0f;
+    } else {
+        const auto& tile = states_pool[pool_idx];
+        out_data[g * 7 + 0] = (float)tile.p[k];
+        out_data[g * 7 + 1] = (float)tile.rho[k];
+        RealType ur = tile.ur[k];
+        RealType uz = tile.uz[k];
+        float u_mag = (float)sqrt((double)(ur * ur + uz * uz));
+        out_data[g * 7 + 2] = u_mag;
+        float e_int = (tile.rho[k] > 0.0f) ? ((float)tile.E[k] / (float)tile.rho[k] - 0.5f * u_mag * u_mag) : 0.0f;
+        out_data[g * 7 + 3] = e_int;
+        out_data[g * 7 + 4] = (float)tile.alpha1[k];
+        out_data[g * 7 + 5] = (float)tile.alpha2[k];
+        out_data[g * 7 + 6] = (float)(1.0f - tile.alpha1[k] - tile.alpha2[k]);
+    }
+}
+
+template <typename RealType>
+void CFDSolver2DCudaImpl<RealType>::setGauges(const std::vector<Gauge2D>& gauges) {
+    if (d_gauge_coords) { cudaFree(d_gauge_coords); d_gauge_coords = nullptr; }
+    if (d_gauge_results) { cudaFree(d_gauge_results); d_gauge_results = nullptr; }
+    if (host_pinned_gauge_data) { cudaFreeHost(host_pinned_gauge_data); host_pinned_gauge_data = nullptr; }
+
+    num_gauges = gauges.size();
+    write_idx = 0;
+    host_pinned_times.clear();
+    buffered_times.clear();
+    buffered_values.clear();
+
+    if (num_gauges == 0) return;
+
+    std::vector<GPUGauge2D> local_gauge_coords(num_gauges);
+    for (size_t g = 0; g < gauges.size(); ++g) {
+        int i = std::clamp(static_cast<int>(gauges[g].r / dr), 0, nr_cells - 1);
+        int j = std::clamp(static_cast<int>(gauges[g].z / dz), 0, nz_cells - 1);
+
+        int tr = i / TILE_SIZE;
+        int tz = j / TILE_SIZE;
+        int k = (i % TILE_SIZE) * TILE_SIZE + (j % TILE_SIZE);
+
+        local_gauge_coords[g].tr = tr;
+        local_gauge_coords[g].tz = tz;
+        local_gauge_coords[g].k = k;
+    }
+
+    CUDA_CHECK(cudaMalloc(&d_gauge_coords, num_gauges * sizeof(GPUGauge2D)));
+    CUDA_CHECK(cudaMemcpy(d_gauge_coords, local_gauge_coords.data(), num_gauges * sizeof(GPUGauge2D), cudaMemcpyHostToDevice));
+
+    CUDA_CHECK(cudaMalloc(&d_gauge_results, num_gauges * 7 * sizeof(float)));
+    CUDA_CHECK(cudaHostAlloc(&host_pinned_gauge_data, host_pinned_capacity * num_gauges * 7 * sizeof(float), cudaHostAllocDefault));
+
+    if (!gauge_stream) {
+        CUDA_CHECK(cudaStreamCreate((cudaStream_t*)&gauge_stream));
+    }
+    if (!step_done) {
+        CUDA_CHECK(cudaEventCreate((cudaEvent_t*)&step_done));
+    }
+}
+
+template <typename RealType>
+void CFDSolver2DCudaImpl<RealType>::recordGaugesAsync(double t) {
+    if (num_gauges == 0) return;
+
+    if (write_idx >= host_pinned_capacity) {
+        std::vector<double> dummy_times;
+        std::vector<float> dummy_vals;
+        retrieveNewGaugeSamples(dummy_times, dummy_vals);
+        buffered_times.insert(buffered_times.end(), dummy_times.begin(), dummy_times.end());
+        buffered_values.insert(buffered_values.end(), dummy_vals.begin(), dummy_vals.end());
+    }
+
+    CUDA_CHECK(cudaEventRecord((cudaEvent_t)step_done, 0));
+    CUDA_CHECK(cudaStreamWaitEvent((cudaStream_t)gauge_stream, (cudaEvent_t)step_done, 0));
+
+    int threads_per_block = 256;
+    int blocks = (num_gauges + threads_per_block - 1) / threads_per_block;
+    batch_sample_gauges_kernel_2d<RealType><<<blocks, threads_per_block, 0, (cudaStream_t)gauge_stream>>>(
+        (const PrimitiveTileT<RealType>*)d_states_pool,
+        (const int32_t*)d_tile_map,
+        (const GPUGauge2D*)d_gauge_coords,
+        (float*)d_gauge_results,
+        num_tiles_z,
+        num_gauges,
+        (RealType)ambient_p,
+        (RealType)ambient_rho,
+        (RealType)gamma,
+        is_ideal_gas
+    );
+    CUDA_CHECK(cudaGetLastError());
+
+    float* dest_ptr = host_pinned_gauge_data + (write_idx * num_gauges * 7);
+    CUDA_CHECK(cudaMemcpyAsync(dest_ptr, d_gauge_results, num_gauges * 7 * sizeof(float), cudaMemcpyDeviceToHost, (cudaStream_t)gauge_stream));
+
+    host_pinned_times.push_back(t);
+    write_idx++;
+}
+
+template <typename RealType>
+void CFDSolver2DCudaImpl<RealType>::retrieveNewGaugeSamples(std::vector<double>& times, std::vector<float>& values) {
+    if (num_gauges == 0) {
+        times.clear();
+        values.clear();
+        return;
+    }
+
+    CUDA_CHECK(cudaStreamSynchronize((cudaStream_t)gauge_stream));
+
+    times = std::move(buffered_times);
+    values = std::move(buffered_values);
+    buffered_times.clear();
+    buffered_values.clear();
+
+    if (write_idx > 0) {
+        times.insert(times.end(), host_pinned_times.begin(), host_pinned_times.end());
+        size_t total_floats = write_idx * num_gauges * 7;
+        values.insert(values.end(), host_pinned_gauge_data, host_pinned_gauge_data + total_floats);
+    }
+
+    write_idx = 0;
+    host_pinned_times.clear();
 }
 
 // Explicit template instantiations

@@ -6,7 +6,7 @@
 template <typename RealType, bool IsMultiMaterial>
 inline RealType getPressure(RealType E_internal, RealType rho, const typename StateTypes<RealType, IsMultiMaterial>::PrimitiveState& s, RealType gamma, const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted) {
     if constexpr (IsMultiMaterial) {
-        return (RealType)MultiMat::getMixturePressure(E_internal, rho, s.alpha1, s.alpha2, s.arho1, s.arho2, gamma, products, unreacted);
+        return MultiMat::getMixturePressure(E_internal, rho, s.alpha1, s.alpha2, s.arho1, s.arho2, gamma, products, unreacted);
     } else {
         return E_internal * (gamma - (RealType)1.0);
     }
@@ -15,7 +15,7 @@ inline RealType getPressure(RealType E_internal, RealType rho, const typename St
 template <typename RealType, bool IsMultiMaterial>
 inline RealType getSoundSpeed(RealType p, RealType rho, const typename StateTypes<RealType, IsMultiMaterial>::PrimitiveState& s, RealType gamma, const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted) {
     if constexpr (IsMultiMaterial) {
-        return (RealType)MultiMat::getMixtureSoundSpeed(p, rho, s.alpha1, s.alpha2, s.arho1, s.arho2, gamma, products, unreacted);
+        return MultiMat::getMixtureSoundSpeed(p, rho, s.alpha1, s.alpha2, s.arho1, s.arho2, gamma, products, unreacted);
     } else {
         return std::sqrt(gamma * p / rho);
     }
@@ -24,7 +24,7 @@ inline RealType getSoundSpeed(RealType p, RealType rho, const typename StateType
 template <typename RealType, bool IsMultiMaterial>
 inline RealType getEnergy(RealType p, RealType rho, const typename StateTypes<RealType, IsMultiMaterial>::PrimitiveState& s, RealType gamma, const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted) {
     if constexpr (IsMultiMaterial) {
-        return (RealType)MultiMat::getMixtureEnergy(p, rho, s.alpha1, s.alpha2, s.arho1, s.arho2, gamma, products, unreacted);
+        return MultiMat::getMixtureEnergy(p, rho, s.alpha1, s.alpha2, s.arho1, s.arho2, gamma, products, unreacted);
     } else {
         return p / (gamma - (RealType)1.0);
     }

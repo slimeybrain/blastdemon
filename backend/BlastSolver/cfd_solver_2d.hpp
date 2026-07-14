@@ -8,6 +8,13 @@
 #include "cfd_states.hpp"
 #include "cfd_tile.hpp"
 
+enum class BCType2D { REFLECTIVE, TRANSMISSIVE, OUTFLOW_RIEMANN };
+
+struct Gauge2D {
+    std::string name;
+    double r, z;
+};
+
 class CFDSolver2D {
 public:
     enum FluxScheme { RUSANOV, AUSM_PLUS };
@@ -73,6 +80,10 @@ public:
     virtual std::vector<State2D> getStates() const = 0;
     virtual std::vector<float> getTelemetry2D(int stride = 1) const = 0;
     virtual std::vector<float> getCellValues(int i, int j) const = 0;
+
+    virtual void setGauges(const std::vector<Gauge2D>& gauges) {}
+    virtual void recordGaugesAsync(double t) {}
+    virtual void retrieveNewGaugeSamples(std::vector<double>& times, std::vector<float>& values) {}
 
     virtual void setSolidVelocities(const double* v) = 0;
     virtual void setSolidMask(const uint8_t* mask) = 0;
@@ -147,6 +158,10 @@ public:
     std::vector<float> getTelemetry2D(int stride = 1) const override;
     std::vector<float> getCellValues(int i, int j) const override;
 
+    void setGauges(const std::vector<Gauge2D>& gauges) override;
+    void recordGaugesAsync(double t) override;
+    void retrieveNewGaugeSamples(std::vector<double>& times, std::vector<float>& values) override;
+
     void setSolidVelocities(const double* v) override;
     void setSolidMask(const uint8_t* mask) override;
 
@@ -202,6 +217,10 @@ private:
     
     std::vector<double> solid_vel;
     std::vector<uint8_t> solid_mask;
+
+    std::vector<Gauge2D> cpu_gauges;
+    std::vector<double> cpu_gauge_times;
+    std::vector<float> cpu_gauge_values;
 };
 
 #endif

@@ -7,6 +7,7 @@
 #include "materials.hpp"
 #include "cfd_states.hpp"
 #include "cfd_tile.hpp"
+#include "cfd_solver_2d.hpp"
 
 class CFDSolver2DCuda {
 public:
@@ -57,11 +58,22 @@ public:
     virtual std::vector<State2D> getStates() = 0;
     virtual std::vector<float> getTelemetry2D(int stride = 1) = 0;
     virtual std::vector<float> getCellValues(int i, int j) = 0;
+
+    virtual void setGauges(const std::vector<Gauge2D>& gauges) {}
+    virtual void recordGaugesAsync(double t) {}
+    virtual void retrieveNewGaugeSamples(std::vector<double>& times, std::vector<float>& values) {}
+
     virtual double getMaxWaveSpeed() = 0;
     virtual bool checkTerminationCondition() = 0;
     virtual bool isIdealGas() const = 0;
     virtual size_t getAllocatedVRAM() const = 0;
     virtual double getAmbientP() const = 0;
+};
+
+struct GPUGauge2D {
+    int tr;
+    int tz;
+    int k;
 };
 
 template <typename RealType>
@@ -117,6 +129,11 @@ public:
     std::vector<State2D> getStates() override;
     std::vector<float> getTelemetry2D(int stride = 1) override;
     std::vector<float> getCellValues(int i, int j) override;
+
+    void setGauges(const std::vector<Gauge2D>& gauges) override;
+    void recordGaugesAsync(double t) override;
+    void retrieveNewGaugeSamples(std::vector<double>& times, std::vector<float>& values) override;
+
     double getMaxWaveSpeed() override;
     bool checkTerminationCondition() override;
     bool isIdealGas() const override { return is_ideal_gas; }
@@ -148,6 +165,23 @@ private:
     double det_z = 0.0;
 
     bool is_ideal_gas;
+
+    // GPU-side gauge variables
+    int num_gauges = 0;
+    void* d_gauge_coords = nullptr;
+    void* d_gauge_results = nullptr;
+    void* gauge_stream = nullptr;
+    void* step_done = nullptr;
+
+    // Host pinned circular buffer
+    float* host_pinned_gauge_data = nullptr;
+    int host_pinned_capacity = 4096;
+    int write_idx = 0;
+    std::vector<double> host_pinned_times;
+
+    // Buffered history for retrieval
+    std::vector<double> buffered_times;
+    std::vector<float> buffered_values;
 
     // Tile management
     int num_tiles_r;

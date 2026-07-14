@@ -726,7 +726,7 @@ __global__ void __launch_bounds__(512) set_initial_condition_kernel(PrimitiveTil
             // The unreacted solid JWL has a large reference pressure at V=1; using
             // amb_p for interface cells would give a negative internal energy via
             // getMixtureEnergy, causing bad-cell resets after the first flux step.
-            RealType p_solid = (RealType)MultiMat::getReferencePressure_Unreacted(d_unreacted);
+            RealType p_solid = (RealType)MultiMat::getReferencePressure_Unreacted<RealType>(d_unreacted);
             // Blend: pure-air cells stay at amb_p, pure-solid cells at p_solid,
             // interface cells interpolate. The smooth ramp S(alpha) in the EoS
             // ensures this pressure is recovered exactly by getMixturePressure.
@@ -902,6 +902,12 @@ CFDSolver3DCuda<RealType, IsMultiMaterial>::~CFDSolver3DCuda() {
     if (d_tile_active_temp) cudaFree(d_tile_active_temp);
     if (d_max_s_buf) cudaFree(d_max_s_buf);
     if (d_slice_buf) cudaFree(d_slice_buf);
+
+    if (d_gauge_coords) cudaFree(d_gauge_coords);
+    if (d_gauge_results) cudaFree(d_gauge_results);
+    if (host_pinned_gauge_data) cudaFreeHost(host_pinned_gauge_data);
+    if (gauge_stream) cudaStreamDestroy((cudaStream_t)gauge_stream);
+    if (step_done) cudaEventDestroy((cudaEvent_t)step_done);
 }
 
 template <typename RealType, bool IsMultiMaterial>
@@ -1459,6 +1465,140 @@ template <typename RealType, bool IsMultiMaterial>
 void CFDSolver3DCuda<RealType, IsMultiMaterial>::setBoundaryConditions(BCType3D xmin, BCType3D xmax, BCType3D ymin, BCType3D ymax, BCType3D zmin, BCType3D zmax) {
     CFDSolver3DImplBase::setBoundaryConditions(xmin, xmax, ymin, ymax, zmin, zmax);
     updateBoundaryConditions();
+}
+template <typename RealType, bool IsMultiMaterial>
+__global__ void batch_sample_gauges_kernel_3d(
+    const PrimitiveTile3D<RealType, IsMultiMaterial>* states,
+    const GPUGauge3D* gauges,
+    float* out_data,
+    int num_gauges
+) {
+    int g = blockIdx.x * blockDim.x + threadIdx.x;
+    if (g >= num_gauges) return;
+
+    int t_idx = gauges[g].t_idx;
+    int c_idx = gauges[g].c_idx;
+
+    const PrimitiveTile3D<RealType, IsMultiMaterial>& tile = states[t_idx];
+
+    out_data[g * 7 + 0] = (float)tile.p[c_idx];
+    out_data[g * 7 + 1] = (float)tile.rho[c_idx];
+    RealType ux = tile.ux[c_idx];
+    RealType uy = tile.uy[c_idx];
+    RealType uz = tile.uz[c_idx];
+    out_data[g * 7 + 2] = (float)sqrt((double)(ux * ux + uy * uy + uz * uz));
+    out_data[g * 7 + 3] = (float)(tile.E[c_idx] / fmax((RealType)1e-6, tile.rho[c_idx]));
+
+    if constexpr (IsMultiMaterial) {
+        out_data[g * 7 + 4] = (float)tile.alpha1[c_idx];
+        out_data[g * 7 + 5] = (float)tile.alpha2[c_idx];
+        out_data[g * 7 + 6] = (float)(1.0 - tile.alpha1[c_idx] - tile.alpha2[c_idx]);
+    } else {
+        out_data[g * 7 + 4] = 0.0f;
+        out_data[g * 7 + 5] = 0.0f;
+        out_data[g * 7 + 6] = 1.0f;
+    }
+}
+
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DCuda<RealType, IsMultiMaterial>::setGauges(const std::vector<Gauge3D>& gauges) {
+    if (d_gauge_coords) { cudaFree(d_gauge_coords); d_gauge_coords = nullptr; }
+    if (d_gauge_results) { cudaFree(d_gauge_results); d_gauge_results = nullptr; }
+    if (host_pinned_gauge_data) { cudaFreeHost(host_pinned_gauge_data); host_pinned_gauge_data = nullptr; }
+
+    num_gauges = gauges.size();
+    write_idx = 0;
+    host_pinned_times.clear();
+    buffered_times.clear();
+    buffered_values.clear();
+
+    if (num_gauges == 0) return;
+
+    std::vector<GPUGauge3D> local_gauge_coords(num_gauges);
+    int ntx = (nx + 7) / 8;
+    int nty = (ny + 7) / 8;
+    for (size_t g = 0; g < gauges.size(); ++g) {
+        int gx = std::clamp((int)((gauges[g].x - xmin) / cellSize), 0, nx - 1);
+        int gy = std::clamp((int)((gauges[g].y - ymin) / cellSize), 0, ny - 1);
+        int gz = std::clamp((int)((gauges[g].z - zmin) / cellSize), 0, nz - 1);
+
+        int tx = gx / TILE_SIZE_3D, ty = gy / TILE_SIZE_3D, tz = gz / TILE_SIZE_3D;
+        int t_idx = tx + ty * ntx + tz * ntx * nty;
+        int lx = gx % TILE_SIZE_3D, ly = gy % TILE_SIZE_3D, lz = gz % TILE_SIZE_3D;
+        int c_idx = lx + ly * 8 + lz * 64;
+
+        local_gauge_coords[g].t_idx = t_idx;
+        local_gauge_coords[g].c_idx = c_idx;
+    }
+
+    CHECK_CUDA(cudaMalloc(&d_gauge_coords, num_gauges * sizeof(GPUGauge3D)));
+    CHECK_CUDA(cudaMemcpy(d_gauge_coords, local_gauge_coords.data(), num_gauges * sizeof(GPUGauge3D), cudaMemcpyHostToDevice));
+
+    CHECK_CUDA(cudaMalloc(&d_gauge_results, num_gauges * 7 * sizeof(float)));
+    CHECK_CUDA(cudaHostAlloc(&host_pinned_gauge_data, host_pinned_capacity * num_gauges * 7 * sizeof(float), cudaHostAllocDefault));
+
+    if (!gauge_stream) {
+        CHECK_CUDA(cudaStreamCreate((cudaStream_t*)&gauge_stream));
+    }
+    if (!step_done) {
+        CHECK_CUDA(cudaEventCreate((cudaEvent_t*)&step_done));
+    }
+}
+
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DCuda<RealType, IsMultiMaterial>::recordGaugesAsync(double t) {
+    if (num_gauges == 0) return;
+
+    if (write_idx >= host_pinned_capacity) {
+        std::vector<double> dummy_times;
+        std::vector<float> dummy_vals;
+        retrieveNewGaugeSamples(dummy_times, dummy_vals);
+        buffered_times.insert(buffered_times.end(), dummy_times.begin(), dummy_times.end());
+        buffered_values.insert(buffered_values.end(), dummy_vals.begin(), dummy_vals.end());
+    }
+
+    CHECK_CUDA(cudaEventRecord((cudaEvent_t)step_done, 0));
+    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)gauge_stream, (cudaEvent_t)step_done, 0));
+
+    int threads_per_block = 256;
+    int blocks = (num_gauges + threads_per_block - 1) / threads_per_block;
+    batch_sample_gauges_kernel_3d<RealType, IsMultiMaterial><<<blocks, threads_per_block, 0, (cudaStream_t)gauge_stream>>>(
+        (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+        (const GPUGauge3D*)d_gauge_coords,
+        (float*)d_gauge_results,
+        num_gauges
+    );
+
+    float* dest_ptr = host_pinned_gauge_data + (write_idx * num_gauges * 7);
+    CHECK_CUDA(cudaMemcpyAsync(dest_ptr, d_gauge_results, num_gauges * 7 * sizeof(float), cudaMemcpyDeviceToHost, (cudaStream_t)gauge_stream));
+
+    host_pinned_times.push_back(t);
+    write_idx++;
+}
+
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DCuda<RealType, IsMultiMaterial>::retrieveNewGaugeSamples(std::vector<double>& times, std::vector<float>& values) {
+    if (num_gauges == 0) {
+        times.clear();
+        values.clear();
+        return;
+    }
+
+    CHECK_CUDA(cudaStreamSynchronize((cudaStream_t)gauge_stream));
+
+    times = std::move(buffered_times);
+    values = std::move(buffered_values);
+    buffered_times.clear();
+    buffered_values.clear();
+
+    if (write_idx > 0) {
+        times.insert(times.end(), host_pinned_times.begin(), host_pinned_times.end());
+        size_t total_floats = write_idx * num_gauges * 7;
+        values.insert(values.end(), host_pinned_gauge_data, host_pinned_gauge_data + total_floats);
+    }
+
+    write_idx = 0;
+    host_pinned_times.clear();
 }
 
 template class CFDSolver3DCuda<float, true>;
