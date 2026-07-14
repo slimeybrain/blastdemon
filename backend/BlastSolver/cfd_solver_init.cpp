@@ -29,6 +29,8 @@ CFDSolverImpl<RealType, IsMultiMaterial>::CFDSolverImpl(int num_cells, double do
         double r_right = (i + 1) * dr;
         geom_V[i] = (4.0 / 3.0) * M_PI * (std::pow(r_right, 3) - std::pow(r_left, 3));
     }
+    
+    MultiMat::initializePrecalculatedTerms(currentMaterials);
 }
 
 template <typename RealType, bool IsMultiMaterial>

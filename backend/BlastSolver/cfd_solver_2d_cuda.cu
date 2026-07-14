@@ -894,7 +894,8 @@ __global__ void checkTerminationCudaKernel(
 template <typename RealType>
 CFDSolver2DCudaImpl<RealType>::CFDSolver2DCudaImpl(int nr, int nz, double max_r, double max_z, double gamma)
     : nr_cells(nr), nz_cells(nz), max_r(max_r), max_z(max_z), gamma(gamma), currentTime(0.0), currentScheme(RUSANOV),
-      ambient_rho(1.2), ambient_p(101325.0), current_pool_size(0), is_ideal_gas(false), d_block_maxes(nullptr), d_tile_active_flags(nullptr) {
+      ambient_rho(1.2), ambient_p(101325.0), current_pool_size(0), is_ideal_gas(false), d_block_maxes(nullptr), d_tile_active_flags(nullptr),
+      d_telemetry_buf(nullptr), telemetry_buf_size(0) {
     
     dr = max_r / nr_cells;
     dz = max_z / nz_cells;
@@ -918,6 +919,7 @@ CFDSolver2DCudaImpl<RealType>::CFDSolver2DCudaImpl(int nr, int nz, double max_r,
     CUDA_CHECK(cudaMalloc(&d_block_maxes, max_active_tiles * sizeof(RealType)));
     CUDA_CHECK(cudaMalloc(&d_tile_active_flags, max_active_tiles * sizeof(uint8_t)));
     
+    MultiMat::initializePrecalculatedTerms(currentMaterials);
     CUDA_CHECK(cudaMalloc(&d_materials, sizeof(MultiMat::MaterialSet)));
     CUDA_CHECK(cudaMemcpy(d_materials, &currentMaterials, sizeof(MultiMat::MaterialSet), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMalloc(&d_terminated, sizeof(int)));
@@ -942,11 +944,13 @@ CFDSolver2DCudaImpl<RealType>::~CFDSolver2DCudaImpl() {
     if (host_pinned_gauge_data) cudaFreeHost(host_pinned_gauge_data);
     if (gauge_stream) cudaStreamDestroy((cudaStream_t)gauge_stream);
     if (step_done) cudaEventDestroy((cudaEvent_t)step_done);
+    if (d_telemetry_buf) cudaFree(d_telemetry_buf);
 }
 
 template <typename RealType>
 void CFDSolver2DCudaImpl<RealType>::setMaterialParameters(const MultiMat::MaterialSet& materials) {
     currentMaterials = materials;
+    MultiMat::initializePrecalculatedTerms(currentMaterials);
     CUDA_CHECK(cudaMemcpy(d_materials, &currentMaterials, sizeof(MultiMat::MaterialSet), cudaMemcpyHostToDevice));
 }
 
@@ -1641,50 +1645,83 @@ std::vector<State2D> CFDSolver2DCudaImpl<RealType>::getStates() {
 }
 
 template <typename RealType>
+__global__ void gatherTelemetry2DKernel(
+    const PrimitiveTileT<RealType>* states_pool,
+    const int32_t* tile_map,
+    float* data,
+    int out_nr, int out_nz, int stride,
+    int nr_cells, int nz_cells, int num_tiles_z,
+    float ambient_p, float ambient_rho) {
+    
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_elements = out_nr * out_nz;
+    if (idx >= total_elements) return;
+    
+    int i = idx / out_nz;
+    int j = idx % out_nz;
+    
+    int src_i = (i * stride < nr_cells) ? i * stride : nr_cells - 1;
+    int src_j = (j * stride < nz_cells) ? j * stride : nz_cells - 1;
+    
+    int tr = src_i / TILE_SIZE;
+    int tz = src_j / TILE_SIZE;
+    int pool_idx = tile_map[tr * num_tiles_z + tz];
+    int dest_stride = total_elements;
+    
+    if (pool_idx == -1) {
+        data[0 * dest_stride + idx] = ambient_p;
+        data[1 * dest_stride + idx] = ambient_rho;
+        data[2 * dest_stride + idx] = 0.0f;
+        data[3 * dest_stride + idx] = 0.0f;
+        data[4 * dest_stride + idx] = ambient_p / 0.4f;
+        data[5 * dest_stride + idx] = 0.0f;
+        data[6 * dest_stride + idx] = 0.0f;
+    } else {
+        int k = (src_i % TILE_SIZE) * TILE_SIZE + (src_j % TILE_SIZE);
+        data[0 * dest_stride + idx] = (float)states_pool[pool_idx].p[k];
+        data[1 * dest_stride + idx] = (float)states_pool[pool_idx].rho[k];
+        data[2 * dest_stride + idx] = (float)states_pool[pool_idx].ur[k];
+        data[3 * dest_stride + idx] = (float)states_pool[pool_idx].uz[k];
+        data[4 * dest_stride + idx] = (float)states_pool[pool_idx].E[k];
+        data[5 * dest_stride + idx] = (float)states_pool[pool_idx].alpha1[k];
+        data[6 * dest_stride + idx] = (float)states_pool[pool_idx].alpha2[k];
+    }
+}
+
+template <typename RealType>
 std::vector<float> CFDSolver2DCudaImpl<RealType>::getTelemetry2D(int stride) {
     if (stride < 1) stride = 1;
     int out_nr = (nr_cells + stride - 1) / stride;
     int out_nz = (nz_cells + stride - 1) / stride;
     int n_ch = 7;
-    std::vector<float> out(n_ch * out_nr * out_nz);
-    float* data = out.data();
-    int dest_stride = out_nr * out_nz;
-
-    if (current_pool_size > 0) {
-        CUDA_CHECK(cudaMemcpy(host_states_pool.data(), d_states_pool, current_pool_size * sizeof(PrimitiveTileT<RealType>), cudaMemcpyDeviceToHost));
-    }
-
-    #pragma omp parallel for collapse(2)
-    for (int i = 0; i < out_nr; ++i) {
-        for (int j = 0; j < out_nz; ++j) {
-            int src_i = std::min(nr_cells - 1, i * stride);
-            int src_j = std::min(nz_cells - 1, j * stride);
-            
-            int tr = src_i / TILE_SIZE;
-            int tz = src_j / TILE_SIZE;
-            int pool_idx = host_tile_map[tr * num_tiles_z + tz];
-            int idx = i * out_nz + j;
-
-            if (pool_idx == -1) {
-                data[0 * dest_stride + idx] = ambient_p;
-                data[1 * dest_stride + idx] = ambient_rho;
-                data[2 * dest_stride + idx] = 0.0;
-                data[3 * dest_stride + idx] = 0.0;
-                data[4 * dest_stride + idx] = ambient_p / 0.4;
-                data[5 * dest_stride + idx] = 0.0;
-                data[6 * dest_stride + idx] = 0.0;
-            } else {
-                int k = (src_i % TILE_SIZE) * TILE_SIZE + (src_j % TILE_SIZE);
-                data[0 * dest_stride + idx] = (float)host_states_pool[pool_idx].p[k];
-                data[1 * dest_stride + idx] = (float)host_states_pool[pool_idx].rho[k];
-                data[2 * dest_stride + idx] = (float)host_states_pool[pool_idx].ur[k];
-                data[3 * dest_stride + idx] = (float)host_states_pool[pool_idx].uz[k];
-                data[4 * dest_stride + idx] = (float)host_states_pool[pool_idx].E[k];
-                data[5 * dest_stride + idx] = (float)host_states_pool[pool_idx].alpha1[k];
-                data[6 * dest_stride + idx] = (float)host_states_pool[pool_idx].alpha2[k];
-            }
+    int total_elements = out_nr * out_nz;
+    size_t req_bytes = n_ch * total_elements * sizeof(float);
+    
+    std::vector<float> out(n_ch * total_elements);
+    
+    if (req_bytes > telemetry_buf_size) {
+        if (d_telemetry_buf) {
+            CUDA_CHECK(cudaFree(d_telemetry_buf));
         }
+        CUDA_CHECK(cudaMalloc(&d_telemetry_buf, req_bytes));
+        telemetry_buf_size = req_bytes;
     }
+    
+    int threads = 256;
+    int blocks = (total_elements + threads - 1) / threads;
+    
+    gatherTelemetry2DKernel<RealType><<<blocks, threads>>>(
+        d_states_pool,
+        d_tile_map,
+        d_telemetry_buf,
+        out_nr, out_nz, stride,
+        nr_cells, nz_cells, num_tiles_z,
+        (float)ambient_p, (float)ambient_rho
+    );
+    CUDA_CHECK(cudaGetLastError());
+    
+    CUDA_CHECK(cudaMemcpy(out.data(), d_telemetry_buf, req_bytes, cudaMemcpyDeviceToHost));
+    
     return out;
 }
 

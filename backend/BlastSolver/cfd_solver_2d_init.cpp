@@ -26,6 +26,8 @@ CFDSolver2DImpl<RealType>::CFDSolver2DImpl(int nr, int nz, double max_r, double 
     dU_pool.clear();
 
     solid_mask.resize(nr_cells * nz_cells, 0);
+    
+    MultiMat::initializePrecalculatedTerms(this->currentMaterials);
 }
 
 template <typename RealType>

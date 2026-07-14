@@ -1582,6 +1582,7 @@ MultiMat::MaterialSet parseMaterialSet(const nlohmann::json& msg) {
         matSet.det_vel   = det_vel;
         matSet.detonation_energy = det_energy;
     }
+    MultiMat::initializePrecalculatedTerms(matSet);
     return matSet;
 }
 
@@ -1589,15 +1590,18 @@ int main() {
     std::string line;
 
     std::thread telemetry_thread(async_telemetry_thread_func);
-    telemetry_thread.detach();
 
+    static std::atomic<bool> global_pulse_cancel{false};
     std::thread pulse_thread([]() {
-        while (true) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            emit_resource_pulse();
+        while (!global_pulse_cancel.load()) {
+            for (int i = 0; i < 10 && !global_pulse_cancel.load(); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            if (!global_pulse_cancel.load()) {
+                emit_resource_pulse();
+            }
         }
     });
-    pulse_thread.detach();
 
     std::thread stdin_listener_thread([]() {
         std::string line;
@@ -2403,6 +2407,23 @@ int main() {
         }
     });
     stdin_listener_thread.join();
+    while (sim_running.load() || sim2d_running.load() || sim3d_running.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
+    global_pulse_cancel.store(true);
+    if (pulse_thread.joinable()) {
+        pulse_thread.join();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(global_async_telemetry.mutex);
+        global_async_telemetry.exit_flag = true;
+        global_async_telemetry.cv.notify_all();
+    }
+    if (telemetry_thread.joinable()) {
+        telemetry_thread.join();
+    }
 
     return 0;
 }

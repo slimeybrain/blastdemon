@@ -9,8 +9,9 @@ template <typename RealType>
 void CFDSolver2DImpl<RealType>::updateActiveRegion() {
     bool expanded = false;
     std::vector<int32_t> new_map = tile_map;
+    std::vector<std::pair<int, int>> new_tiles_to_allocate;
 
-    #pragma omp parallel for collapse(2) shared(expanded, new_map)
+    #pragma omp parallel for collapse(2) shared(expanded, new_map, new_tiles_to_allocate)
     for (int tr = 0; tr < num_tiles_r; ++tr) {
         for (int tz = 0; tz < num_tiles_z; ++tz) {
             int pool_idx = tile_map[tr * num_tiles_z + tz];
@@ -38,7 +39,8 @@ void CFDSolver2DImpl<RealType>::updateActiveRegion() {
                             #pragma omp critical
                             {
                                 if (new_map[n_flat] == -1) {
-                                    new_map[n_flat] = allocateTile(ntr, ntz);
+                                    new_map[n_flat] = -2; // Mark as pending allocation
+                                    new_tiles_to_allocate.push_back({ntr, ntz});
                                     expanded = true;
                                 }
                             }
@@ -50,6 +52,10 @@ void CFDSolver2DImpl<RealType>::updateActiveRegion() {
     }
     
     if (expanded) {
+        for (const auto& coord : new_tiles_to_allocate) {
+            int pool_idx = allocateTile(coord.first, coord.second);
+            new_map[coord.first * num_tiles_z + coord.second] = pool_idx;
+        }
         tile_map = new_map;
     }
 }
@@ -226,6 +232,7 @@ inline CellStateT<RealType> readState(const CFDSolver2DImpl<RealType>* solver, c
             i = solver->getNr() - 1;
         }
     }
+
     if (j < 0) {
         is_outside_j = true;
         if (solver->getBCZmin() == CFDSolver2D::REFLECTIVE) {

@@ -18,6 +18,7 @@ CFDSolver3DImpl<RealType, IsMultiMaterial>::CFDSolver3DImpl(int nx, int ny, int 
     U_prev_pool.resize(total_tiles);
     active_tiles.assign(total_tiles, 0);
     is_ideal_gas_val = !IsMultiMaterial;
+    MultiMat::initializePrecalculatedTerms(currentMaterials);
 }
 
 template <typename RealType, bool IsMultiMaterial>
@@ -30,6 +31,7 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setInitialCondition(const Charg
     ambient_rho = amb_rho;
     ambient_p = amb_p;
     currentMaterials = materials;
+    MultiMat::initializePrecalculatedTerms(currentMaterials);
 
     #pragma omp parallel for
     for (int t = 0; t < (int)states_pool.size(); ++t) {

@@ -19,6 +19,16 @@ namespace MultiMat {
         double rho0;
         double cv;
         double T0;
+
+        // Precalculated terms for fast evaluation
+        double omega_over_R1;
+        double omega_over_R2;
+        double A_over_rho0;
+        double B_over_rho0;
+        double omega_plus_1;
+        double f2_const;
+        double c2_2_const1;
+        double c2_2_const2;
     };
 
     struct MaterialSet {
@@ -27,6 +37,34 @@ namespace MultiMat {
         double det_vel;
         double detonation_energy; // J/kg
     };
+
+    inline void initializePrecalculatedTerms(MaterialSet& matSet) {
+        using std::exp;
+        
+        // Products
+        matSet.products.omega_over_R1 = matSet.products.omega / matSet.products.R1;
+        matSet.products.omega_over_R2 = matSet.products.omega / matSet.products.R2;
+        matSet.products.A_over_rho0 = matSet.products.A / matSet.products.rho0;
+        matSet.products.B_over_rho0 = matSet.products.B / matSet.products.rho0;
+        matSet.products.omega_plus_1 = matSet.products.omega + 1.0;
+        
+        // Unreacted
+        matSet.unreacted.omega_over_R1 = matSet.unreacted.omega / matSet.unreacted.R1;
+        matSet.unreacted.omega_over_R2 = matSet.unreacted.omega / matSet.unreacted.R2;
+        matSet.unreacted.A_over_rho0 = matSet.unreacted.A / matSet.unreacted.rho0;
+        matSet.unreacted.B_over_rho0 = matSet.unreacted.B / matSet.unreacted.rho0;
+        matSet.unreacted.omega_plus_1 = matSet.unreacted.omega + 1.0;
+        
+        // f2_const for unreacted (V2 = 1.0)
+        double V2 = 1.0;
+        matSet.unreacted.f2_const = matSet.unreacted.A * (1.0 - matSet.unreacted.omega / matSet.unreacted.R1) * exp(-matSet.unreacted.R1) +
+                                    matSet.unreacted.B * (1.0 - matSet.unreacted.omega / matSet.unreacted.R2) * exp(-matSet.unreacted.R2);
+        
+        // c2_2 constants for unreacted (V2 = 1.0)
+        matSet.unreacted.c2_2_const1 = (matSet.unreacted.A / matSet.unreacted.rho0) * (matSet.unreacted.R1 - matSet.unreacted.omega - 1.0) * exp(-matSet.unreacted.R1) +
+                                       (matSet.unreacted.B / matSet.unreacted.rho0) * (matSet.unreacted.R2 - matSet.unreacted.omega - 1.0) * exp(-matSet.unreacted.R2);
+        matSet.unreacted.c2_2_const2 = (matSet.unreacted.omega + 1.0) / matSet.unreacted.rho0;
+    }
 
     // Parameters for TNT
     const MaterialSet TNT = {
@@ -81,8 +119,8 @@ __host__ __device__
     inline RealType getEnergy_JWL(RealType p, RealType rho, const JWLParams& jwl) {
         using std::exp;
         RealType V = (RealType)jwl.rho0 / rho;
-        RealType f = (RealType)jwl.A * ((RealType)1.0 - (RealType)jwl.omega / ((RealType)jwl.R1 * V)) * exp(-(RealType)jwl.R1 * V) +
-                     (RealType)jwl.B * ((RealType)1.0 - (RealType)jwl.omega / ((RealType)jwl.R2 * V)) * exp(-(RealType)jwl.R2 * V);
+        RealType f = (RealType)jwl.A * ((RealType)1.0 - (RealType)jwl.omega_over_R1 / V) * exp(-(RealType)jwl.R1 * V) +
+                     (RealType)jwl.B * ((RealType)1.0 - (RealType)jwl.omega_over_R2 / V) * exp(-(RealType)jwl.R2 * V);
         return (p - f) / ((RealType)jwl.omega * rho);
     }
 
@@ -91,12 +129,8 @@ __host__ __device__
 __host__ __device__
 #endif
     inline RealType getReferencePressure_Unreacted(const JWLParams& unreacted) {
-        using std::exp;
         using std::fmax;
-        const RealType V2 = (RealType)1.0;
-        RealType f2 = (RealType)unreacted.A * ((RealType)1.0 - (RealType)unreacted.omega / ((RealType)unreacted.R1 * V2)) * exp(-(RealType)unreacted.R1 * V2) +
-                      (RealType)unreacted.B * ((RealType)1.0 - (RealType)unreacted.omega / ((RealType)unreacted.R2 * V2)) * exp(-(RealType)unreacted.R2 * V2);
-        return fmax((RealType)0.0, f2);
+        return fmax((RealType)0.0, (RealType)unreacted.f2_const);
     }
 
     template <typename RealType>
@@ -104,6 +138,10 @@ __host__ __device__
 __host__ __device__
 #endif
     inline RealType getMixturePressure(RealType E_internal, RealType rho, RealType alpha1, RealType alpha2, RealType arho1, RealType arho2, RealType gamma0, const JWLParams& products, const JWLParams& unreacted) {
+        if (alpha1 + alpha2 < (RealType)1e-8) {
+            return fmax((RealType)1e-6, E_internal * (gamma0 - (RealType)1.0));
+        }
+
         using std::exp;
         using std::fmax;
         using std::fmin;
@@ -126,16 +164,13 @@ __host__ __device__
 
         if (S1 > (RealType)0.0) {
             RealType V1 = (RealType)products.rho0 / rho1_mat;
-            RealType f1 = (RealType)products.A * ((RealType)1.0 - (RealType)products.omega / ((RealType)products.R1 * V1)) * exp(-(RealType)products.R1 * V1) +
-                          (RealType)products.B * ((RealType)1.0 - (RealType)products.omega / ((RealType)products.R2 * V1)) * exp(-(RealType)products.R2 * V1);
+            RealType f1 = (RealType)products.A * ((RealType)1.0 - (RealType)products.omega_over_R1 / V1) * exp(-(RealType)products.R1 * V1) +
+                          (RealType)products.B * ((RealType)1.0 - (RealType)products.omega_over_R2 / V1) * exp(-(RealType)products.R2 * V1);
             sum_alpha_f_omega += alpha1 * S1 * f1 / omega1;
         }
 
         if (S2 > (RealType)0.0) {
-            RealType V2 = (RealType)1.0;
-            RealType f2 = (RealType)unreacted.A * ((RealType)1.0 - (RealType)unreacted.omega / ((RealType)unreacted.R1 * V2)) * exp(-(RealType)unreacted.R1 * V2) +
-                          (RealType)unreacted.B * ((RealType)1.0 - (RealType)unreacted.omega / ((RealType)unreacted.R2 * V2)) * exp(-(RealType)unreacted.R2 * V2);
-            f2 = fmax((RealType)0.0, f2);
+            RealType f2 = (RealType)unreacted.f2_const;
             sum_alpha_f_omega += alpha2 * S2 * f2 / omega2;
         }
 
@@ -168,16 +203,13 @@ __host__ __device__
 
         if (S1 > (RealType)0.0) {
             RealType V1 = (RealType)products.rho0 / rho1_mat;
-            RealType f1 = (RealType)products.A * ((RealType)1.0 - (RealType)products.omega / ((RealType)products.R1 * V1)) * exp(-(RealType)products.R1 * V1) +
-                          (RealType)products.B * ((RealType)1.0 - (RealType)products.omega / ((RealType)products.R2 * V1)) * exp(-(RealType)products.R2 * V1);
+            RealType f1 = (RealType)products.A * ((RealType)1.0 - (RealType)products.omega_over_R1 / V1) * exp(-(RealType)products.R1 * V1) +
+                          (RealType)products.B * ((RealType)1.0 - (RealType)products.omega_over_R2 / V1) * exp(-(RealType)products.R2 * V1);
             sum_alpha_f_omega += alpha1 * S1 * f1 / omega1;
         }
 
         if (S2 > (RealType)0.0) {
-            RealType V2 = (RealType)1.0;
-            RealType f2 = (RealType)unreacted.A * ((RealType)1.0 - (RealType)unreacted.omega / ((RealType)unreacted.R1 * V2)) * exp(-(RealType)unreacted.R1 * V2) +
-                          (RealType)unreacted.B * ((RealType)1.0 - (RealType)unreacted.omega / ((RealType)unreacted.R2 * V2)) * exp(-(RealType)unreacted.R2 * V2);
-            f2 = fmax((RealType)0.0, f2);
+            RealType f2 = (RealType)unreacted.f2_const;
             sum_alpha_f_omega += alpha2 * S2 * f2 / omega2;
         }
 
@@ -193,6 +225,12 @@ __host__ __device__
         using std::sqrt;
         using std::fmax;
         using std::fmin;
+
+        if (alpha1 + alpha2 < (RealType)1e-8) {
+            RealType c2_0 = gamma0 * p / fmax((RealType)1e-6, rho);
+            return sqrt(fmax((RealType)115600.0, c2_0));
+        }
+
         RealType alpha0 = (RealType)1.0 - alpha1 - alpha2;
         if (alpha0 < (RealType)0.0) alpha0 = (RealType)0.0;
 
@@ -210,17 +248,14 @@ __host__ __device__
         RealType c2_1 = (RealType)0.0;
         if (S1 > (RealType)0.0) {
             RealType V1 = (RealType)products.rho0 / rho1_mat;
-            c2_1 = ((RealType)products.A / rho1_mat) * ((RealType)products.R1 * V1 - (RealType)products.omega - (RealType)1.0) * exp(-(RealType)products.R1 * V1) +
-                   ((RealType)products.B / rho1_mat) * ((RealType)products.R2 * V1 - (RealType)products.omega - (RealType)1.0) * exp(-(RealType)products.R2 * V1) +
-                   ((RealType)products.omega + (RealType)1.0) * p / rho1_mat;
+            c2_1 = ((RealType)products.A_over_rho0 * V1) * ((RealType)products.R1 * V1 - (RealType)products.omega_plus_1) * exp(-(RealType)products.R1 * V1) +
+                   ((RealType)products.B_over_rho0 * V1) * ((RealType)products.R2 * V1 - (RealType)products.omega_plus_1) * exp(-(RealType)products.R2 * V1) +
+                   ((RealType)products.omega_plus_1) * p / rho1_mat;
         }
 
         RealType c2_2 = (RealType)0.0;
         if (S2 > (RealType)0.0) {
-            RealType V2 = (RealType)1.0;
-            c2_2 = ((RealType)unreacted.A / (RealType)unreacted.rho0) * ((RealType)unreacted.R1 * V2 - (RealType)unreacted.omega - (RealType)1.0) * exp(-(RealType)unreacted.R1 * V2) +
-                   ((RealType)unreacted.B / (RealType)unreacted.rho0) * ((RealType)unreacted.R2 * V2 - (RealType)unreacted.omega - (RealType)1.0) * exp(-(RealType)unreacted.R2 * V2) +
-                   ((RealType)unreacted.omega + (RealType)1.0) * p / (RealType)unreacted.rho0;
+            c2_2 = (RealType)unreacted.c2_2_const1 + (RealType)unreacted.c2_2_const2 * p;
             c2_2 = fmax((RealType)0.0, c2_2);
         }
 

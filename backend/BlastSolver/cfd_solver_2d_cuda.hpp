@@ -202,6 +202,9 @@ private:
     RealType* d_block_p_ratios;
     uint8_t* d_tile_active_flags;
     int* d_terminated = nullptr;
+
+    float* d_telemetry_buf = nullptr;
+    size_t telemetry_buf_size = 0;
     
     // CPU fallback arrays for initialization
     std::vector<PrimitiveTileT<RealType>> host_states_pool;

@@ -115,7 +115,10 @@ public:
     void setFluxScheme(const std::string& scheme_name) override;
     void setSpatialOrder(int order) override { spatialOrder = order; }
     void setTemporalOrder(int order) override { temporalOrder = order; }
-    void setMaterialParameters(const MultiMat::MaterialSet& materials) override { currentMaterials = materials; }
+    void setMaterialParameters(const MultiMat::MaterialSet& materials) override {
+        currentMaterials = materials;
+        MultiMat::initializePrecalculatedTerms(currentMaterials);
+    }
     void setGamma(double g) override { gamma = g; }
     void setIdealGas(bool val) override { is_ideal_gas = val; }
 
