@@ -4,27 +4,42 @@ export {};
 const VS_SOURCE_2 = `#version 300 es
 layout(location = 0) in vec3 position;
 layout(location = 1) in vec2 texCoord;
+layout(location = 2) in vec2 sliceSize;
 uniform mat4 uProjection;
 uniform mat4 uView;
 uniform mat4 uModel;
 out vec2 vTexCoord;
+out vec2 vSliceSize;
+out vec3 vLocalPos;
+out vec4 vViewPos;
 void main() {
-    gl_Position = uProjection * uView * uModel * vec4(position, 1.0);
+    vLocalPos = position;
+    vViewPos = uView * uModel * vec4(position, 1.0);
+    gl_Position = uProjection * vViewPos;
     vTexCoord = texCoord;
+    vSliceSize = sliceSize;
 }
 `;
 
 const FS_SOURCE_2 = `#version 300 es
 precision highp float;
 in vec2 vTexCoord;
+in vec2 vSliceSize;
+in vec3 vLocalPos;
+in vec4 vViewPos;
 uniform sampler2D uTexture;
 uniform float uAlpha;
 uniform int uColormap;
 uniform float uMin;
 uniform float uMax;
-uniform bool uIsWireframe;
-uniform vec2 uSliceSize;
+uniform bool uUseLogScale;
+uniform int uIsWireframe;
+uniform bool uShowCellEdges;
 uniform bool uInterpolate;
+uniform bool uEnableLighting;
+uniform bool uEnableAO;
+uniform float uAmbientLevel;
+uniform float uSpecularLevel;
 out vec4 outColor;
 
 vec3 colormap_plasma(float t) {
@@ -36,48 +51,118 @@ vec3 colormap_viridis(float t) {
 }
 
 void main() {
-    if (uIsWireframe) {
-        outColor = vec4(0.3, 0.3, 0.4, 1.0);
+    if (uIsWireframe > 0) {
+        if (uIsWireframe == 1) {
+            outColor = vec4(0.3, 0.3, 0.4, 0.8);
+            return;
+        }
+        
+        // Axes Indicator (2=X Red, 3=Y Green, 4=Z Blue)
+        vec4 baseColor = vec4(0.0);
+        if (uIsWireframe == 2) baseColor = vec4(1.0, 0.1, 0.1, 1.0);
+        else if (uIsWireframe == 3) baseColor = vec4(0.1, 1.0, 0.1, 1.0);
+        else if (uIsWireframe == 4) baseColor = vec4(0.2, 0.5, 1.0, 1.0);
+
+        if (uEnableLighting) {
+            vec3 viewPos3 = vViewPos.xyz;
+            vec3 normal = normalize(cross(dFdx(viewPos3), dFdy(viewPos3)));
+            vec3 lightDir = vec3(0.0, 0.0, 1.0);
+            float diff = max(dot(normal, lightDir), 0.0);
+            
+            vec3 reflectDir = reflect(-lightDir, normal);
+            float spec = pow(max(dot(reflectDir, vec3(0.0, 0.0, 1.0)), 0.0), 16.0);
+            
+            float ao = 1.0;
+            if (uEnableAO) {
+                ao = pow(max(normal.z, 0.0), 0.5);
+            }
+            
+            vec3 lit = baseColor.rgb * (uAmbientLevel + 0.7 * diff) + vec3(1.0) * (uSpecularLevel * spec);
+            outColor = vec4(lit * ao, baseColor.a);
+        } else {
+            outColor = baseColor;
+        }
         return;
     }
     vec2 uv = vTexCoord;
     if (!uInterpolate) {
-        vec2 texel = floor(vTexCoord * uSliceSize);
-        uv = (texel + vec2(0.5)) / uSliceSize;
+        vec2 texel = floor(vTexCoord * vSliceSize);
+        uv = (texel + vec2(0.5)) / vSliceSize;
     }
     float raw = texture(uTexture, uv).r;
-    float t = clamp((raw - uMin) / (uMax - uMin), 0.0, 1.0);
+    float t;
+    float denom = uMax - uMin;
+    if (denom < 1e-5) denom = 1e-5;
+    t = clamp((raw - uMin) / denom, 0.0, 1.0);
     vec3 color;
     if (uColormap == 1) color = colormap_viridis(t);
     else color = colormap_plasma(t);
-    outColor = vec4(color, uAlpha);
+    
+    vec4 finalColor = vec4(color, uAlpha);
+    if (uShowCellEdges) {
+        vec2 grid = fract(vTexCoord * vSliceSize);
+        vec2 width = fwidth(vTexCoord * vSliceSize);
+        vec2 edge = smoothstep(width, vec2(0.0), grid) + smoothstep(vec2(1.0) - width, vec2(1.0), grid);
+        float isEdge = max(edge.x, edge.y);
+        finalColor = mix(finalColor, vec4(0.1, 0.1, 0.1, 0.8), isEdge * 0.5);
+    }
+    
+    if (uEnableLighting) {
+        vec3 viewPos3 = vViewPos.xyz;
+        vec3 normal = normalize(cross(dFdx(viewPos3), dFdy(viewPos3)));
+        vec3 lightDir = normalize(vec3(0.5, 0.8, 1.0));
+        float diff = max(dot(normal, lightDir), 0.0) * 0.7 + max(dot(-normal, lightDir), 0.0) * 0.3;
+        
+        vec3 reflectDir = reflect(-lightDir, normal);
+        vec3 viewDir = normalize(-viewPos3);
+        float spec = pow(max(dot(reflectDir, viewDir), 0.0), 32.0);
+        
+        float ao = 1.0;
+        
+        vec3 lit = finalColor.rgb * (uAmbientLevel + 0.7 * diff) + vec3(1.0) * (uSpecularLevel * spec);
+        finalColor = vec4(lit * ao, finalColor.a);
+    }
+    outColor = finalColor;
 }
 `;
 
 const VS_SOURCE_1 = `
 attribute vec3 position;
 attribute vec2 texCoord;
+attribute vec2 sliceSize;
 varying vec2 vTexCoord;
+varying vec2 vSliceSize;
+varying vec3 vLocalPos;
+varying vec4 vViewPos;
 uniform mat4 uProjection;
 uniform mat4 uView;
 uniform mat4 uModel;
 void main() {
-    gl_Position = uProjection * uView * uModel * vec4(position, 1.0);
+    vLocalPos = position;
+    vViewPos = uView * uModel * vec4(position, 1.0);
+    gl_Position = uProjection * vViewPos;
     vTexCoord = texCoord;
+    vSliceSize = sliceSize;
 }
 `;
 
 const FS_SOURCE_1 = `
 precision highp float;
 varying vec2 vTexCoord;
+varying vec2 vSliceSize;
+varying vec3 vLocalPos;
+varying vec4 vViewPos;
 uniform sampler2D uTexture;
 uniform float uAlpha;
 uniform int uColormap;
 uniform float uMin;
 uniform float uMax;
-uniform bool uIsWireframe;
-uniform vec2 uSliceSize;
+uniform int uIsWireframe;
 uniform bool uInterpolate;
+uniform bool uEnableLighting;
+uniform bool uEnableAO;
+uniform float uAmbientLevel;
+uniform float uSpecularLevel;
 
 vec3 colormap_plasma(float t) {
     return vec3(t * 1.5, t * t, 1.0 - t);
@@ -88,21 +173,74 @@ vec3 colormap_viridis(float t) {
 }
 
 void main() {
-    if (uIsWireframe) {
-        gl_FragColor = vec4(0.3, 0.3, 0.4, 1.0);
+    if (uIsWireframe > 0) {
+        if (uIsWireframe == 1) {
+            gl_FragColor = vec4(0.3, 0.3, 0.4, 0.8);
+            return;
+        }
+        
+        // Axes Indicator (2=X Red, 3=Y Green, 4=Z Blue)
+        vec4 baseColor = vec4(0.0);
+        if (uIsWireframe == 2) baseColor = vec4(1.0, 0.1, 0.1, 1.0);
+        else if (uIsWireframe == 3) baseColor = vec4(0.1, 1.0, 0.1, 1.0);
+        else if (uIsWireframe == 4) baseColor = vec4(0.2, 0.5, 1.0, 1.0);
+
+        if (uEnableLighting) {
+            vec3 viewPos3 = vViewPos.xyz;
+            // Analytical normals fallback
+            vec3 normal = vec3(0.0, 0.0, 1.0);
+            #ifdef GL_OES_standard_derivatives
+            normal = normalize(cross(dFdx(viewPos3), dFdy(viewPos3)));
+            #endif
+            vec3 lightDir = vec3(0.0, 0.0, 1.0);
+            float diff = max(dot(normal, lightDir), 0.0);
+            
+            vec3 reflectDir = reflect(-lightDir, normal);
+            float spec = pow(max(dot(reflectDir, vec3(0.0, 0.0, 1.0)), 0.0), 16.0);
+            
+            float ao = 1.0;
+            if (uEnableAO) {
+                ao = pow(max(normal.z, 0.0), 0.5);
+            }
+            
+            vec3 lit = baseColor.rgb * (uAmbientLevel + 0.7 * diff) + vec3(1.0) * (uSpecularLevel * spec);
+            gl_FragColor = vec4(lit * ao, baseColor.a);
+        } else {
+            gl_FragColor = baseColor;
+        }
         return;
     }
     vec2 uv = vTexCoord;
     if (!uInterpolate) {
-        vec2 texel = floor(vTexCoord * uSliceSize);
-        uv = (texel + vec2(0.5)) / uSliceSize;
+        vec2 texel = floor(vTexCoord * vSliceSize);
+        uv = (texel + vec2(0.5)) / vSliceSize;
     }
     float raw = texture2D(uTexture, uv).r;
     float t = clamp((raw - uMin) / (uMax - uMin), 0.0, 1.0);
     vec3 color;
     if (uColormap == 1) color = colormap_viridis(t);
     else color = colormap_plasma(t);
-    gl_FragColor = vec4(color, uAlpha);
+    
+    vec4 finalColor = vec4(color, uAlpha);
+    if (uEnableLighting) {
+        vec3 viewPos3 = vViewPos.xyz;
+        vec3 normal = vec3(0.0, 0.0, 1.0);
+        #ifdef GL_OES_standard_derivatives
+        normal = normalize(cross(dFdx(viewPos3), dFdy(viewPos3)));
+        #endif
+        vec3 lightDir = normalize(vec3(0.5, 0.8, 1.0));
+        float diff = max(dot(normal, lightDir), 0.0) * 0.7 + max(dot(-normal, lightDir), 0.0) * 0.3;
+        
+        vec3 reflectDir = reflect(-lightDir, normal);
+        vec3 viewDir = normalize(-viewPos3);
+        float spec = pow(max(dot(reflectDir, viewDir), 0.0), 32.0);
+        
+        float ao = 1.0;
+        
+        vec3 lit = finalColor.rgb * (uAmbientLevel + 0.7 * diff) + vec3(1.0) * (uSpecularLevel * spec);
+        finalColor = vec4(lit * ao, finalColor.a);
+    }
+    gl_FragColor = finalColor;
 }
 `;
 
@@ -124,14 +262,141 @@ let rotX = 0.5;
 let rotY = 0.5;
 let panX = 0.0;
 let panY = 0.0;
+let cameraEyeX = 0.0;
+let cameraEyeY = 0.0;
+let cameraEyeZ = 0.0;
 
 let colormap = 0;
 let minY = 101325.0;
 let maxY = 1000000.0;
 let autoScale = true;
 let interpolate = false;
+let showGrid = true;
+let showCellEdges = false;
+
+let lightingEnabled = true;
+let aoEnabled = true;
+let specularIntensity = 0.4;
+let ambientLevel = 0.3;
+let sliceOpacities = [1.0, 1.0, 1.0];
 
 let bboxBuffer: WebGLBuffer | null = null;
+let axesBuffer: WebGLBuffer | null = null;
+
+function buildArrow(axis: number, ox: number, oy: number, oz: number): number[] {
+    let D = [0, 0, 0];
+    let U = [0, 0, 0];
+    let V = [0, 0, 0];
+    
+    if (axis === 0) { // X
+        D = [1, 0, 0]; U = [0, 1, 0]; V = [0, 0, 1];
+    } else if (axis === 1) { // Y
+        D = [0, 1, 0]; U = [0, 0, 1]; V = [1, 0, 0];
+    } else { // Z
+        D = [0, 0, 1]; U = [1, 0, 0]; V = [0, 1, 0];
+    }
+
+    const L_shaft = 0.22;
+    const L_total = 0.35;
+    const W_shaft = 0.012;
+    const W_head = 0.028;
+    const N = 12;
+
+    const addVert = (p: number[], list: number[]) => {
+        list.push(p[0], p[1], p[2], 0, 0, 0, 0); // 7 floats per vertex
+    };
+
+    const getPos = (dVal: number, uVal: number, vVal: number) => {
+        return [
+            ox + dVal * D[0] + uVal * U[0] + vVal * V[0],
+            oy + dVal * D[1] + uVal * U[1] + vVal * V[1],
+            oz + dVal * D[2] + uVal * U[2] + vVal * V[2]
+        ];
+    };
+
+    const baseCircle: number[][] = [];
+    const endCircle: number[][] = [];
+    const headBaseCircle: number[][] = [];
+
+    for (let i = 0; i <= N; i++) {
+        const theta = (i % N) * 2 * Math.PI / N;
+        const cosT = Math.cos(theta);
+        const sinT = Math.sin(theta);
+        
+        baseCircle.push(getPos(0, W_shaft/2 * cosT, W_shaft/2 * sinT));
+        endCircle.push(getPos(L_shaft, W_shaft/2 * cosT, W_shaft/2 * sinT));
+        headBaseCircle.push(getPos(L_shaft, W_head/2 * cosT, W_head/2 * sinT));
+    }
+
+    const vertices: number[] = [];
+
+    // Cylinder Sides: N * 2 triangles
+    for (let i = 0; i < N; i++) {
+        const p1 = baseCircle[i];
+        const p2 = baseCircle[i+1];
+        const p3 = endCircle[i];
+        const p4 = endCircle[i+1];
+
+        // Triangle 1: p1, p3, p2
+        addVert(p1, vertices); addVert(p3, vertices); addVert(p2, vertices);
+        // Triangle 2: p2, p3, p4
+        addVert(p2, vertices); addVert(p3, vertices); addVert(p4, vertices);
+    }
+
+    // Cylinder Base Cap: N triangles
+    const centerBase = getPos(0, 0, 0);
+    for (let i = 0; i < N; i++) {
+        addVert(centerBase, vertices);
+        addVert(baseCircle[i+1], vertices);
+        addVert(baseCircle[i], vertices);
+    }
+
+    // Cone Head Sides: N triangles
+    const tip = getPos(L_total, 0, 0);
+    for (let i = 0; i < N; i++) {
+        addVert(headBaseCircle[i], vertices);
+        addVert(headBaseCircle[i+1], vertices);
+        addVert(tip, vertices);
+    }
+
+    // Cone Head Base Cap: N triangles
+    const centerHeadBase = getPos(L_shaft, 0, 0);
+    for (let i = 0; i < N; i++) {
+        addVert(centerHeadBase, vertices);
+        addVert(headBaseCircle[i+1], vertices);
+        addVert(headBaseCircle[i], vertices);
+    }
+
+    return vertices;
+}
+
+function updateAxesGeometry() {
+    const ox = -0.5;
+    const oy = -0.5;
+    const oz = -0.5;
+
+    const axesDataArray: number[] = [];
+    for (let a = 0; a < 3; a++) {
+        axesDataArray.push(...buildArrow(a, ox, oy, oz));
+    }
+    const axesData = new Float32Array(axesDataArray);
+
+    if (gl && axesBuffer) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, axesBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, axesData, gl.DYNAMIC_DRAW);
+    }
+}
+
+function shouldShowCellEdges(): boolean {
+    if (!showCellEdges) return false;
+    const maxN = Math.max(nx, ny, nz) || 1;
+    const h = gl ? gl.canvas.height : 150;
+    const distanceVal = Math.abs(zoom);
+    const fov = 45 * Math.PI / 180;
+    const modelPixelsVal = h / (2.0 * distanceVal * Math.tan(fov / 2.0));
+    const cellPixels = modelPixelsVal / maxN;
+    return cellPixels >= 3.0;
+}
 
 interface SliceData {
     axis: number; // 0=xy, 1=xz, 2=yz
@@ -140,6 +405,8 @@ interface SliceData {
     h: number;
     texture: WebGLTexture;
     buffer: WebGLBuffer;
+    opacity: number;
+    index: number;
 }
 
 let activeSlices: SliceData[] = [];
@@ -206,6 +473,9 @@ function initGL(canvas: HTMLCanvasElement) {
     ]);
     gl.bufferData(gl.ARRAY_BUFFER, box, gl.STATIC_DRAW);
 
+    axesBuffer = gl.createBuffer();
+    updateAxesGeometry();
+
     const vsSource = isWebGL2 ? VS_SOURCE_2 : VS_SOURCE_1;
     const fsSource = isWebGL2 ? FS_SOURCE_2 : FS_SOURCE_1;
     
@@ -230,6 +500,29 @@ function initGL(canvas: HTMLCanvasElement) {
     gl.enable(gl.DEPTH_TEST);
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+}
+
+function getSliceCenterDistance(axis: number, offset: number, eye: number[]): number {
+    const dimX = (nx && dx) ? (nx * dx) : 1.0;
+    const dimY = (ny && dx) ? (ny * dx) : 1.0;
+    const dimZ = (nz && dx) ? (nz * dx) : 1.0;
+
+    let sx = 0;
+    let sy = 0;
+    let sz = 0;
+
+    if (axis === 0) { // XY
+        sz = (offset - zmin) / dimZ - 0.5;
+    } else if (axis === 1) { // XZ
+        sy = (offset - ymin) / dimY - 0.5;
+    } else { // YZ
+        sx = (offset - xmin) / dimX - 0.5;
+    }
+
+    const dxVal = eye[0] - sx;
+    const dyVal = eye[1] - sy;
+    const dzVal = eye[2] - sz;
+    return dxVal * dxVal + dyVal * dyVal + dzVal * dzVal;
 }
 
 function updateMatrices(width: number, height: number) {
@@ -266,6 +559,12 @@ function updateMatrices(width: number, height: number) {
         -sy, sx*cy, cx*cy, 0,
         0, 0, 0, 1
     ]);
+
+    // Camera position in model space
+    const distanceVal = Math.abs(zoom);
+    cameraEyeX = -sy * distanceVal;
+    cameraEyeY = sx * cy * distanceVal;
+    cameraEyeZ = cx * cy * distanceVal;
 }
 
 let xmin = 0.0;
@@ -276,39 +575,39 @@ let nx = 64;
 let ny = 64;
 let nz = 64;
 
-function getSliceGeometry(axis: number, offset: number) {
+function getSliceGeometry(axis: number, offset: number, w: number, h: number) {
     if (axis === 0) { // XY
         const dimZ = (nz && dx) ? (nz * dx) : 1.0;
         const z = (offset - zmin) / dimZ - 0.5;
         return new Float32Array([
-            -0.5, -0.5, z,  0, 0,
-             0.5, -0.5, z,  1, 0,
-             0.5,  0.5, z,  1, 1,
-            -0.5, -0.5, z,  0, 0,
-             0.5,  0.5, z,  1, 1,
-            -0.5,  0.5, z,  0, 1
+            -0.5, -0.5, z,  0, 0,  w, h,
+             0.5, -0.5, z,  1, 0,  w, h,
+             0.5,  0.5, z,  1, 1,  w, h,
+            -0.5, -0.5, z,  0, 0,  w, h,
+             0.5,  0.5, z,  1, 1,  w, h,
+            -0.5,  0.5, z,  0, 1,  w, h
         ]);
     } else if (axis === 1) { // XZ
         const dimY = (ny && dx) ? (ny * dx) : 1.0;
         const y = (offset - ymin) / dimY - 0.5;
         return new Float32Array([
-            -0.5, y, -0.5,  0, 0,
-             0.5, y, -0.5,  1, 0,
-             0.5, y,  0.5,  1, 1,
-            -0.5, y, -0.5,  0, 0,
-             0.5, y,  0.5,  1, 1,
-            -0.5, y,  0.5,  0, 1
+            -0.5, y, -0.5,  0, 0,  w, h,
+             0.5, y, -0.5,  1, 0,  w, h,
+             0.5, y,  0.5,  1, 1,  w, h,
+            -0.5, y, -0.5,  0, 0,  w, h,
+             0.5, y,  0.5,  1, 1,  w, h,
+            -0.5, y,  0.5,  0, 1,  w, h
         ]);
     } else { // YZ
         const dimX = (nx && dx) ? (nx * dx) : 1.0;
         const x = (offset - xmin) / dimX - 0.5;
         return new Float32Array([
-            x, -0.5, -0.5,  0, 0,
-            x,  0.5, -0.5,  1, 0,
-            x,  0.5,  0.5,  1, 1,
-            x, -0.5, -0.5,  0, 0,
-            x,  0.5,  0.5,  1, 1,
-            x, -0.5,  0.5,  0, 1
+            x, -0.5, -0.5,  0, 0,  w, h,
+            x,  0.5, -0.5,  1, 0,  w, h,
+            x,  0.5,  0.5,  1, 1,  w, h,
+            x, -0.5, -0.5,  0, 0,  w, h,
+            x,  0.5,  0.5,  1, 1,  w, h,
+            x, -0.5,  0.5,  0, 1,  w, h
         ]);
     }
 }
@@ -392,6 +691,7 @@ function handleFrame(buffer: ArrayBuffer) {
             }
         }
 
+        const opacity = sliceOpacities[i] !== undefined ? sliceOpacities[i] : 1.0;
         let slice: SliceData;
         if (activeSlices[i]) {
             slice = activeSlices[i];
@@ -399,7 +699,13 @@ function handleFrame(buffer: ArrayBuffer) {
             gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, w, h, 0, format, gl.FLOAT, floatData);
 
             gl.bindBuffer(gl.ARRAY_BUFFER, slice.buffer);
-            gl.bufferData(gl.ARRAY_BUFFER, getSliceGeometry(axis, zOff), gl.STATIC_DRAW);
+            gl.bufferData(gl.ARRAY_BUFFER, getSliceGeometry(axis, zOff, w, h), gl.STATIC_DRAW);
+
+            slice.axis = axis;
+            slice.offset = zOff;
+            slice.w = w;
+            slice.h = h;
+            slice.opacity = opacity;
         } else {
             const tex = gl.createTexture()!;
             gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -412,9 +718,9 @@ function handleFrame(buffer: ArrayBuffer) {
 
             const buf = gl.createBuffer()!;
             gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-            gl.bufferData(gl.ARRAY_BUFFER, getSliceGeometry(axis, zOff), gl.STATIC_DRAW);
+            gl.bufferData(gl.ARRAY_BUFFER, getSliceGeometry(axis, zOff, w, h), gl.STATIC_DRAW);
 
-            slice = { axis, offset: zOff, w, h, texture: tex, buffer: buf };
+            slice = { axis, offset: zOff, w, h, texture: tex, buffer: buf, opacity, index: i };
             activeSlices.push(slice);
         }
         offset = dataStart + (w * h * 4);
@@ -519,38 +825,118 @@ function render() {
     gl.uniform1f(uMax, maxY);
     gl.uniformMatrix4fv(uView, false, viewMatrix);
     gl.uniformMatrix4fv(uModel, false, modelMatrix);
-    gl.uniform1f(uAlpha, 0.7);
+    gl.uniform1f(uAlpha, 1.0); // Will be overwritten per slice
 
+    const uEnableLightLoc = gl.getUniformLocation(program, "uEnableLighting");
+    if (uEnableLightLoc !== null) gl.uniform1i(uEnableLightLoc, lightingEnabled ? 1 : 0);
+
+    const uEnableAOLoc = gl.getUniformLocation(program, "uEnableAO");
+    if (uEnableAOLoc !== null) gl.uniform1i(uEnableAOLoc, aoEnabled ? 1 : 0);
+
+    const uAmbientLoc = gl.getUniformLocation(program, "uAmbientLevel");
+    if (uAmbientLoc !== null) gl.uniform1f(uAmbientLoc, ambientLevel);
+
+    const uSpecularLoc = gl.getUniformLocation(program, "uSpecularLevel");
+    if (uSpecularLoc !== null) gl.uniform1f(uSpecularLoc, specularIntensity);
+
+    // Draw BBox
+    if (showGrid && bboxBuffer) {
+        gl.uniform1i(uIsWF, 1);
+        gl.bindBuffer(gl.ARRAY_BUFFER, bboxBuffer);
+        // Stride is 20 (5 floats * 4 bytes)
+        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 20, 0);
+        gl.enableVertexAttribArray(0);
+        gl.disableVertexAttribArray(1);
+        gl.drawArrays(gl.LINES, 0, 24);
+    }
+
+    // Draw Axes Indicator
+    if (axesBuffer) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, axesBuffer);
+        // Stride is 28 (7 floats * 4 bytes)
+        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 28, 12);
+        gl.enableVertexAttribArray(1);
+        gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 28, 20);
+        gl.enableVertexAttribArray(2);
+
+        for (let a = 0; a < 3; a++) {
+            gl.uniform1i(uIsWF, 2 + a); // 2=X Red, 3=Y Green, 4=Z Blue
+            gl.drawArrays(gl.TRIANGLES, a * 180, 180);
+        }
+    }
+
+    gl.uniform1i(uIsWF, 0);
+    const uShowEdges = gl.getUniformLocation(program, "uShowCellEdges");
+    if (uShowEdges !== null) {
+        gl.uniform1i(uShowEdges, shouldShowCellEdges() ? 1 : 0);
+    }
     const uInterp = gl.getUniformLocation(program, "uInterpolate");
     if (uInterp !== null) {
         gl.uniform1i(uInterp, interpolate ? 1 : 0);
     }
 
-    // Draw BBox
-    gl.uniform1i(uIsWF, 1);
-    gl.bindBuffer(gl.ARRAY_BUFFER, bboxBuffer);
-    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 20, 0);
-    gl.enableVertexAttribArray(0);
-    gl.disableVertexAttribArray(1);
-    gl.drawArrays(gl.LINES, 0, 24);
+    const slicesArrayWebGL = [...activeSlices];
+    if (slicesArrayWebGL.length > 0) {
+        const opaqueSlices = slicesArrayWebGL.filter(s => {
+            const opac = s.opacity;
+            return opac >= 0.999;
+        });
+        const transparentSlices = slicesArrayWebGL.filter(s => {
+            const opac = s.opacity;
+            return opac < 0.999;
+        });
 
-    gl.uniform1i(uIsWF, 0);
-    const uSliceSizeLoc = gl.getUniformLocation(program, "uSliceSize");
-    activeSlices.forEach(slice => {
-        gl!.activeTexture(gl!.TEXTURE0);
-        gl!.bindTexture(gl!.TEXTURE_2D, slice.texture);
-        gl!.bindBuffer(gl!.ARRAY_BUFFER, slice.buffer);
-        if (uSliceSizeLoc !== null) {
-            gl!.uniform2f(uSliceSizeLoc, slice.w, slice.h);
+        // Pass 1: Opaque Slices (depth write enabled)
+        opaqueSlices.forEach(slice => {
+            gl!.activeTexture(gl!.TEXTURE0);
+            gl!.bindTexture(gl!.TEXTURE_2D, slice.texture);
+            gl!.bindBuffer(gl!.ARRAY_BUFFER, slice.buffer);
+
+            // Stride is 28 (7 floats * 4 bytes)
+            gl!.vertexAttribPointer(0, 3, gl!.FLOAT, false, 28, 0);
+            gl!.enableVertexAttribArray(0);
+            gl!.vertexAttribPointer(1, 2, gl!.FLOAT, false, 28, 12);
+            gl!.enableVertexAttribArray(1);
+            gl!.vertexAttribPointer(2, 2, gl!.FLOAT, false, 28, 20);
+            gl!.enableVertexAttribArray(2);
+
+            gl!.uniform1f(uAlpha, 1.0);
+            gl!.drawArrays(gl!.TRIANGLES, 0, 6);
+        });
+
+        // Pass 2: Transparent Slices (depth write disabled, sorted back-to-front)
+        if (transparentSlices.length > 0) {
+            gl.depthMask(false);
+
+            const eye = [cameraEyeX, cameraEyeY, cameraEyeZ];
+            transparentSlices.sort((a, b) => {
+                const distA = getSliceCenterDistance(a.axis, a.offset, eye);
+                const distB = getSliceCenterDistance(b.axis, b.offset, eye);
+                return distB - distA; // Descending: furthest first
+            });
+
+            transparentSlices.forEach(slice => {
+                gl!.activeTexture(gl!.TEXTURE0);
+                gl!.bindTexture(gl!.TEXTURE_2D, slice.texture);
+                gl!.bindBuffer(gl!.ARRAY_BUFFER, slice.buffer);
+
+                // Stride is 28 (7 floats * 4 bytes)
+                gl!.vertexAttribPointer(0, 3, gl!.FLOAT, false, 28, 0);
+                gl!.enableVertexAttribArray(0);
+                gl!.vertexAttribPointer(1, 2, gl!.FLOAT, false, 28, 12);
+                gl!.enableVertexAttribArray(1);
+                gl!.vertexAttribPointer(2, 2, gl!.FLOAT, false, 28, 20);
+                gl!.enableVertexAttribArray(2);
+
+                gl!.uniform1f(uAlpha, slice.opacity);
+                gl!.drawArrays(gl!.TRIANGLES, 0, 6);
+            });
+
+            gl.depthMask(true);
         }
-
-        gl!.vertexAttribPointer(0, 3, gl!.FLOAT, false, 20, 0);
-        gl!.enableVertexAttribArray(0);
-        gl!.vertexAttribPointer(1, 2, gl!.FLOAT, false, 20, 12);
-        gl!.enableVertexAttribArray(1);
-
-        gl!.drawArrays(gl!.TRIANGLES, 0, 6);
-    });
+    }
 }
 
 
@@ -624,6 +1010,14 @@ function render() {
             if (data.maxY !== undefined) maxY = data.maxY;
             if (data.autoScale !== undefined) autoScale = data.autoScale;
             if (data.interpolate !== undefined) interpolate = data.interpolate;
+            if (data.showGrid !== undefined) showGrid = data.showGrid;
+            if (data.showCellEdges !== undefined) showCellEdges = data.showCellEdges;
+            if (data.lightingEnabled !== undefined) lightingEnabled = data.lightingEnabled;
+            if (data.aoEnabled !== undefined) aoEnabled = data.aoEnabled;
+            if (data.specularIntensity !== undefined) specularIntensity = data.specularIntensity;
+            if (data.ambientLevel !== undefined) ambientLevel = data.ambientLevel;
+            if (data.sliceOpacities !== undefined) sliceOpacities = data.sliceOpacities;
+
             if (data.xmin !== undefined) xmin = data.xmin;
             if (data.ymin !== undefined) ymin = data.ymin;
             if (data.zmin !== undefined) zmin = data.zmin;
@@ -631,6 +1025,7 @@ function render() {
             if (data.nx !== undefined) nx = data.nx;
             if (data.ny !== undefined) ny = data.ny;
             if (data.nz !== undefined) nz = data.nz;
+            updateAxesGeometry();
             render();
         }
     } catch (err: any) {

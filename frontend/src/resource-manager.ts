@@ -367,4 +367,18 @@ export class ResourceManager {
             ctx.stroke();
         }
     }
+
+    public resetMetrics(): void {
+        this.updateMetrics({
+            cpu: 0,
+            ram_alloc: 0,
+            ram_system: 0,
+            ram_total: 0,
+            gpu_util: 0,
+            vram_alloc: 0,
+            vram_blastdaemon: 0,
+            vram_total: 0,
+            gpu_temp: 0
+        });
+    }
 }

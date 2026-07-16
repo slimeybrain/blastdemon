@@ -82,6 +82,8 @@ public:
 
     virtual void step(double dt) = 0;
     virtual double computeStepSize(double cfl = 0.4) const = 0;
+    virtual void pause() {}
+    virtual void resume() {}
     virtual bool is_terminated() const = 0;
     virtual double getGamma() const = 0;
 
@@ -111,6 +113,7 @@ public:
     virtual bool isIdealGas() const = 0;
     virtual const MultiMat::MaterialSet& getMaterialParameters() const = 0;
     virtual double getAmbientP() const = 0;
+    virtual size_t getAllocatedVRAM() const { return 0; }
 };
 
 class CFDSolver3DImplBase : public CFDSolver3D {
@@ -249,14 +252,19 @@ public:
         int c_idx = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
 
         CellState3DT<RealType, IsMultiMaterial> s;
-        s.p = tile.p[c_idx]; s.rho = tile.rho[c_idx]; s.E = tile.E[c_idx];
+        s.p = tile.p[c_idx]; s.rho = tile.rho[c_idx];
         s.ux = reflective_x ? -tile.ux[c_idx] : tile.ux[c_idx];
         s.uy = reflective_y ? -tile.uy[c_idx] : tile.uy[c_idx];
         s.uz = reflective_z ? -tile.uz[c_idx] : tile.uz[c_idx];
 
+        RealType ke = (RealType)0.5 * s.rho * (s.ux*s.ux + s.uy*s.uy + s.uz*s.uz);
         if constexpr (IsMultiMaterial) {
             s.alpha1 = tile.alpha1[c_idx]; s.alpha2 = tile.alpha2[c_idx];
             s.arho1 = tile.arho1[c_idx]; s.arho2 = tile.arho2[c_idx];
+            s.E = (RealType)MultiMat::getMixtureEnergy(s.p, s.rho, s.alpha1, s.alpha2, s.arho1, s.arho2, (RealType)gamma, currentMaterials.products, currentMaterials.unreacted) + ke;
+        } else {
+            s.alpha1 = 0.0; s.alpha2 = 0.0; s.arho1 = 0.0; s.arho2 = 0.0;
+            s.E = s.p / ((RealType)gamma - (RealType)1.0) + ke;
         }
         return s;
     }
@@ -287,14 +295,19 @@ public:
         int c_idx = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
 
         CellState3D<IsMultiMaterial> s;
-        s.p = (double)tile.p[c_idx]; s.rho = (double)tile.rho[c_idx]; s.E = (double)tile.E[c_idx];
+        s.p = (double)tile.p[c_idx]; s.rho = (double)tile.rho[c_idx];
         s.ux = reflective_x ? -(double)tile.ux[c_idx] : (double)tile.ux[c_idx];
         s.uy = reflective_y ? -(double)tile.uy[c_idx] : (double)tile.uy[c_idx];
         s.uz = reflective_z ? -(double)tile.uz[c_idx] : (double)tile.uz[c_idx];
 
+        double ke = 0.5 * s.rho * (s.ux*s.ux + s.uy*s.uy + s.uz*s.uz);
         if constexpr (IsMultiMaterial) {
             s.alpha1 = (double)tile.alpha1[c_idx]; s.alpha2 = (double)tile.alpha2[c_idx];
             s.arho1 = (double)tile.arho1[c_idx]; s.arho2 = (double)tile.arho2[c_idx];
+            s.E = (double)MultiMat::getMixtureEnergy(s.p, s.rho, s.alpha1, s.alpha2, s.arho1, s.arho2, (double)gamma, currentMaterials.products, currentMaterials.unreacted) + ke;
+        } else {
+            s.alpha1 = 0.0; s.alpha2 = 0.0; s.arho1 = 0.0; s.arho2 = 0.0;
+            s.E = s.p / ((double)gamma - 1.0) + ke;
         }
         return s;
     }

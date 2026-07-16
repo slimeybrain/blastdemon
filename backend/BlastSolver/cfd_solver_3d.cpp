@@ -15,7 +15,6 @@ CFDSolver3DImpl<RealType, IsMultiMaterial>::CFDSolver3DImpl(int nx, int ny, int 
     int total_tiles = n_tiles_x * n_tiles_y * n_tiles_z;
     states_pool.resize(total_tiles);
     U_pool.resize(total_tiles);
-    U_prev_pool.resize(total_tiles);
     active_tiles.assign(total_tiles, 0);
     is_ideal_gas_val = !IsMultiMaterial;
     MultiMat::initializePrecalculatedTerms(currentMaterials);
@@ -47,10 +46,6 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setInitialCondition(const Charg
             if constexpr (IsMultiMaterial) {
                 temp_s.alpha1 = 0.0; temp_s.alpha2 = 0.0;
                 temp_s.arho1 = 0.0; temp_s.arho2 = 0.0;
-            }
-            tile.E[i] = (RealType)getEnergy3D<IsMultiMaterial>(ambient_p, ambient_rho, temp_s, gamma, materials.products, materials.unreacted);
-            tile.arrival_time[i] = (RealType)-1.0;
-            if constexpr (IsMultiMaterial) {
                 tile.alpha1[i] = 0.0;
                 tile.alpha2[i] = 0.0;
                 tile.arho1[i] = 0.0;
@@ -62,7 +57,7 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setInitialCondition(const Charg
             u_tile.rhoux[i] = 0.0;
             u_tile.rhouy[i] = 0.0;
             u_tile.rhouz[i] = 0.0;
-            u_tile.E[i] = tile.E[i];
+            u_tile.E[i] = (RealType)getEnergy3D<IsMultiMaterial>(ambient_p, ambient_rho, temp_s, gamma, currentMaterials.products, currentMaterials.unreacted);
             if constexpr (IsMultiMaterial) {
                 u_tile.alpha1[i] = 0.0;
                 u_tile.alpha2[i] = 0.0;
@@ -138,16 +133,12 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setInitialCondition(const Charg
                                     double p_high = (gamma - 1.0) * materials.unreacted.rho0 * materials.detonation_energy;
                                     tile.p[c_idx] = (RealType)(f_vol * p_high + (1.0 - f_vol) * ambient_p);
                                 }
-                                tile.E[c_idx] = (RealType)getEnergy3D<IsMultiMaterial>((double)tile.p[c_idx], (double)tile.rho[c_idx], temp_s, gamma, materials.products, materials.unreacted);
-                                double dist = std::sqrt((x_c - charge.x)*(x_c - charge.x) + (y_c - charge.y)*(y_c - charge.y) + (z_c - charge.z)*(z_c - charge.z));
-                                tile.arrival_time[c_idx] = (RealType)(dist / materials.det_vel);
-
                                 auto& u_tile = U_pool[t_idx];
                                 u_tile.rho[c_idx] = tile.rho[c_idx];
                                 u_tile.rhoux[c_idx] = 0.0;
                                 u_tile.rhouy[c_idx] = 0.0;
                                 u_tile.rhouz[c_idx] = 0.0;
-                                u_tile.E[c_idx] = tile.E[c_idx];
+                                u_tile.E[c_idx] = (RealType)getEnergy3D<IsMultiMaterial>((double)tile.p[c_idx], (double)tile.rho[c_idx], temp_s, gamma, currentMaterials.products, currentMaterials.unreacted);
                                 if constexpr (IsMultiMaterial) {
                                     u_tile.alpha1[c_idx] = tile.alpha1[c_idx];
                                     u_tile.alpha2[c_idx] = tile.alpha2[c_idx];
@@ -631,9 +622,8 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::updatePrimitiveFromConservative
                 s.ux[i] = u_rhoux / s.rho[i];
                 s.uy[i] = u_rhouy / s.rho[i];
                 s.uz[i] = u_rhouz / s.rho[i];
-                s.E[i] = u_E;
                 RealType ke = (RealType)0.5 * s.rho[i] * (s.ux[i]*s.ux[i] + s.uy[i]*s.uy[i] + s.uz[i]*s.uz[i]);
-                RealType e_int = s.E[i] - ke;
+                RealType e_int = u_E - ke;
 
                 if constexpr (IsMultiMaterial) {
                     s.alpha1[i] = std::clamp(u.alpha1[i], (RealType)0.0, (RealType)1.0);
@@ -683,13 +673,11 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::updatePrimitiveFromConservative
                     s.alpha1[i] = 0.0; s.alpha2[i] = 0.0;
                     s.arho1[i] = 0.0; s.arho2[i] = 0.0;
                 }
-                s.E[i] = (RealType)getEnergy3D<IsMultiMaterial>(ambient_p, ambient_rho, temp_s, gamma, currentMaterials.products, currentMaterials.unreacted);
-
                 u.rho[i] = (RealType)ambient_rho;
                 u.rhoux[i] = 0.0;
                 u.rhouy[i] = 0.0;
                 u.rhouz[i] = 0.0;
-                u.E[i] = s.E[i];
+                u.E[i] = (RealType)getEnergy3D<IsMultiMaterial>(ambient_p, ambient_rho, temp_s, gamma, currentMaterials.products, currentMaterials.unreacted);
                 if constexpr (IsMultiMaterial) {
                     u.alpha1[i] = 0.0; u.alpha2[i] = 0.0;
                     u.arho1[i] = 0.0; u.arho2[i] = 0.0;
@@ -715,7 +703,14 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
                 u.rhoux[i] = s.rho[i] * s.ux[i];
                 u.rhouy[i] = s.rho[i] * s.uy[i];
                 u.rhouz[i] = s.rho[i] * s.uz[i];
-                u.E[i] = s.E[i];
+                RealType ke = (RealType)0.5 * s.rho[i] * (s.ux[i]*s.ux[i] + s.uy[i]*s.uy[i] + s.uz[i]*s.uz[i]);
+                RealType total_E;
+                if constexpr (IsMultiMaterial) {
+                    total_E = (RealType)MultiMat::getMixtureEnergy((double)s.p[i], (double)s.rho[i], (double)s.alpha1[i], (double)s.alpha2[i], (double)s.arho1[i], (double)s.arho2[i], gamma, currentMaterials.products, currentMaterials.unreacted) + ke;
+                } else {
+                    total_E = s.p[i] / (gamma - (RealType)1.0) + ke;
+                }
+                u.E[i] = total_E;
                 if constexpr (IsMultiMaterial) {
                     u.alpha1[i] = s.alpha1[i]; u.alpha2[i] = s.alpha2[i];
                     u.arho1[i] = s.arho1[i]; u.arho2[i] = s.arho2[i];
@@ -923,15 +918,13 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::initializeFrom1D(const std::vec
                 tile.arho1[i] = 0.0;
                 tile.arho2[i] = 0.0;
             }
-            tile.E[i] = (RealType)getEnergy3D<IsMultiMaterial>(amb_p, amb_rho, temp_s, gamma, currentMaterials.products, currentMaterials.unreacted);
-            tile.arrival_time[i] = (RealType)-1.0;
             tile.floor_status[i] = 0;
 
             u_tile.rho[i] = (RealType)amb_rho;
             u_tile.rhoux[i] = 0.0;
             u_tile.rhouy[i] = 0.0;
             u_tile.rhouz[i] = 0.0;
-            u_tile.E[i] = tile.E[i];
+            u_tile.E[i] = (RealType)getEnergy3D<IsMultiMaterial>(amb_p, amb_rho, temp_s, gamma, currentMaterials.products, currentMaterials.unreacted);
             if constexpr (IsMultiMaterial) {
                 u_tile.alpha1[i] = 0.0;
                 u_tile.alpha2[i] = 0.0;
@@ -952,7 +945,7 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setCellStateMulti(int gx, int g
         int c_idx = (gx % TILE_SIZE_3D) + (gy % TILE_SIZE_3D) * TILE_SIZE_3D + (gz % TILE_SIZE_3D) * TILE_SIZE_3D * TILE_SIZE_3D;
         auto& tile = states_pool[t_idx];
         tile.rho[c_idx] = (RealType)s.rho; tile.ux[c_idx] = (RealType)s.ux; tile.uy[c_idx] = (RealType)s.uy; tile.uz[c_idx] = (RealType)s.uz;
-        tile.p[c_idx] = (RealType)s.p; tile.E[c_idx] = (RealType)s.E;
+        tile.p[c_idx] = (RealType)s.p;
         tile.alpha1[c_idx] = (RealType)s.alpha1; tile.alpha2[c_idx] = (RealType)s.alpha2;
         tile.arho1[c_idx] = (RealType)s.arho1; tile.arho2[c_idx] = (RealType)s.arho2;
         active_tiles[t_idx] = 1;
@@ -968,7 +961,7 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setCellStateIdeal(int gx, int g
     int c_idx = (gx % TILE_SIZE_3D) + (gy % TILE_SIZE_3D) * TILE_SIZE_3D + (gz % TILE_SIZE_3D) * TILE_SIZE_3D * TILE_SIZE_3D;
     auto& tile = states_pool[t_idx];
     tile.rho[c_idx] = (RealType)s.rho; tile.ux[c_idx] = (RealType)s.ux; tile.uy[c_idx] = (RealType)s.uy; tile.uz[c_idx] = (RealType)s.uz;
-    tile.p[c_idx] = (RealType)s.p; tile.E[c_idx] = (RealType)s.E;
+    tile.p[c_idx] = (RealType)s.p;
     active_tiles[t_idx] = 1;
 }
 
@@ -986,7 +979,14 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::commitStates() {
             u_tile.rhoux[i] = state_tile.rho[i] * state_tile.ux[i];
             u_tile.rhouy[i] = state_tile.rho[i] * state_tile.uy[i];
             u_tile.rhouz[i] = state_tile.rho[i] * state_tile.uz[i];
-            u_tile.E[i] = state_tile.E[i];
+            RealType ke = (RealType)0.5 * state_tile.rho[i] * (state_tile.ux[i]*state_tile.ux[i] + state_tile.uy[i]*state_tile.uy[i] + state_tile.uz[i]*state_tile.uz[i]);
+            RealType total_E;
+            if constexpr (IsMultiMaterial) {
+                total_E = (RealType)MultiMat::getMixtureEnergy((double)state_tile.p[i], (double)state_tile.rho[i], (double)state_tile.alpha1[i], (double)state_tile.alpha2[i], (double)state_tile.arho1[i], (double)state_tile.arho2[i], gamma, currentMaterials.products, currentMaterials.unreacted) + ke;
+            } else {
+                total_E = state_tile.p[i] / (gamma - (RealType)1.0) + ke;
+            }
+            u_tile.E[i] = total_E;
             if constexpr (IsMultiMaterial) {
                 u_tile.arho1[i] = state_tile.arho1[i];
                 u_tile.arho2[i] = state_tile.arho2[i];

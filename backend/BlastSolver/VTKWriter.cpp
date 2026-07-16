@@ -509,40 +509,6 @@ void export_vtu_volume_3d(const std::string& filename, const CFDSolver3D& solver
         }
     }
 
-    std::vector<double> rho, p, vel, E, reacted, unreacted, air;
-    if (has_rho) rho.resize(num_cells);
-    if (has_p) p.resize(num_cells);
-    if (has_vel) vel.resize(num_cells);
-    if (has_E) E.resize(num_cells);
-    if (has_reacted) reacted.resize(num_cells);
-    if (has_unreacted) unreacted.resize(num_cells);
-    if (has_air) air.resize(num_cells);
-
-    for (int k = 0; k < nz; ++k) {
-        for (int j = 0; j < ny; ++j) {
-            for (int i = 0; i < nx; ++i) {
-                int c_idx = i + j * nx + k * nx * ny;
-                auto vals = solver.getCellValues(i, j, k);
-                if (has_p) p[c_idx] = vals[0];
-                if (has_rho) rho[c_idx] = vals[1];
-                if (has_vel) vel[c_idx] = vals[2];
-                if (has_E) E[c_idx] = vals[3];
-                if (has_reacted) reacted[c_idx] = vals[4];
-                if (has_unreacted) unreacted[c_idx] = vals[5];
-                if (has_air) air[c_idx] = vals[6];
-            }
-        }
-    }
-
-    out << "<?xml version=\"1.0\"?>\n";
-    if (format == "ASCII") {
-        out << "<VTKFile type=\"UnstructuredGrid\" version=\"0.1\" byte_order=\"LittleEndian\">\n";
-    } else {
-        out << "<VTKFile type=\"UnstructuredGrid\" version=\"0.1\" byte_order=\"LittleEndian\" header_type=\"UInt32\" compressor=\"vtkZLibDataCompressor\">\n";
-    }
-    out << "  <UnstructuredGrid>\n";
-    out << "    <Piece NumberOfPoints=\"" << num_points << "\" NumberOfCells=\"" << num_cells << "\">\n";
-
     // Write Points
     out << "      <Points>\n";
     if (format == "ASCII") {
@@ -555,6 +521,9 @@ void export_vtu_volume_3d(const std::string& filename, const CFDSolver3D& solver
         out << "        </DataArray>\n";
     }
     out << "      </Points>\n";
+
+    points.clear();
+    points.shrink_to_fit();
 
     // Write Cells
     out << "      <Cells>\n";
@@ -583,6 +552,10 @@ void export_vtu_volume_3d(const std::string& filename, const CFDSolver3D& solver
     }
     out << "      </Cells>\n";
 
+    connectivity.clear(); connectivity.shrink_to_fit();
+    offsets.clear(); offsets.shrink_to_fit();
+    types.clear(); types.shrink_to_fit();
+
     // Cell Data
     out << "      <CellData>\n";
     auto writeData = [&](const std::string& name, const std::vector<double>& data) {
@@ -596,13 +569,103 @@ void export_vtu_volume_3d(const std::string& filename, const CFDSolver3D& solver
         }
     };
 
-    if (has_rho) writeData("Density", rho);
-    if (has_p) writeData("Pressure", p);
-    if (has_vel) writeData("Velocity", vel);
-    if (has_E) writeData("Energy", E);
-    if (has_reacted) writeData("Reacted_Explosive", reacted);
-    if (has_unreacted) writeData("Unreacted_Explosive", unreacted);
-    if (has_air) writeData("Air", air);
+    if (has_rho) {
+        std::vector<double> rho(num_cells);
+        for (int k = 0; k < nz; ++k) {
+            for (int j = 0; j < ny; ++j) {
+                for (int i = 0; i < nx; ++i) {
+                    int c_idx = i + j * nx + k * nx * ny;
+                    rho[c_idx] = solver.getCellValues(i, j, k)[1];
+                }
+            }
+        }
+        writeData("Density", rho);
+        rho.clear(); rho.shrink_to_fit();
+    }
+
+    if (has_p) {
+        std::vector<double> p(num_cells);
+        for (int k = 0; k < nz; ++k) {
+            for (int j = 0; j < ny; ++j) {
+                for (int i = 0; i < nx; ++i) {
+                    int c_idx = i + j * nx + k * nx * ny;
+                    p[c_idx] = solver.getCellValues(i, j, k)[0];
+                }
+            }
+        }
+        writeData("Pressure", p);
+        p.clear(); p.shrink_to_fit();
+    }
+
+    if (has_vel) {
+        std::vector<double> vel(num_cells);
+        for (int k = 0; k < nz; ++k) {
+            for (int j = 0; j < ny; ++j) {
+                for (int i = 0; i < nx; ++i) {
+                    int c_idx = i + j * nx + k * nx * ny;
+                    vel[c_idx] = solver.getCellValues(i, j, k)[2];
+                }
+            }
+        }
+        writeData("Velocity", vel);
+        vel.clear(); vel.shrink_to_fit();
+    }
+
+    if (has_E) {
+        std::vector<double> E(num_cells);
+        for (int k = 0; k < nz; ++k) {
+            for (int j = 0; j < ny; ++j) {
+                for (int i = 0; i < nx; ++i) {
+                    int c_idx = i + j * nx + k * nx * ny;
+                    E[c_idx] = solver.getCellValues(i, j, k)[3];
+                }
+            }
+        }
+        writeData("Energy", E);
+        E.clear(); E.shrink_to_fit();
+    }
+
+    if (has_reacted) {
+        std::vector<double> reacted(num_cells);
+        for (int k = 0; k < nz; ++k) {
+            for (int j = 0; j < ny; ++j) {
+                for (int i = 0; i < nx; ++i) {
+                    int c_idx = i + j * nx + k * nx * ny;
+                    reacted[c_idx] = solver.getCellValues(i, j, k)[4];
+                }
+            }
+        }
+        writeData("Reacted_Explosive", reacted);
+        reacted.clear(); reacted.shrink_to_fit();
+    }
+
+    if (has_unreacted) {
+        std::vector<double> unreacted(num_cells);
+        for (int k = 0; k < nz; ++k) {
+            for (int j = 0; j < ny; ++j) {
+                for (int i = 0; i < nx; ++i) {
+                    int c_idx = i + j * nx + k * nx * ny;
+                    unreacted[c_idx] = solver.getCellValues(i, j, k)[5];
+                }
+            }
+        }
+        writeData("Unreacted_Explosive", unreacted);
+        unreacted.clear(); unreacted.shrink_to_fit();
+    }
+
+    if (has_air) {
+        std::vector<double> air(num_cells);
+        for (int k = 0; k < nz; ++k) {
+            for (int j = 0; j < ny; ++j) {
+                for (int i = 0; i < nx; ++i) {
+                    int c_idx = i + j * nx + k * nx * ny;
+                    air[c_idx] = solver.getCellValues(i, j, k)[6];
+                }
+            }
+        }
+        writeData("Air", air);
+        air.clear(); air.shrink_to_fit();
+    }
 
     out << "      </CellData>\n";
     out << "    </Piece>\n";

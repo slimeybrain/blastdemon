@@ -14,7 +14,7 @@ set(CMAKE_CUDA_ARCHITECTURES native)
 if(MSVC)
     add_compile_options(/W4 /O2)
 else()
-    add_compile_options(-Wall -Wextra -O3 -march=native)
+    add_compile_options(-Wall -Wextra -O3 -g -march=native)
 endif()
 
 # OpenMP for CPU 2D solver parallelism

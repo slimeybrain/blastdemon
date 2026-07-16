@@ -29,3 +29,13 @@
 - **Do NOT** open new browser windows or pages.
 - Verify frontend layout, visual changes, and state logic through static analysis, code reviews, unit tests, or manual user inspection rather than invoking automated browser agents.
 
+## 6. Node Parameter Alignment Rule (ABSOLUTE RULE)
+- **Zero Parameter Drift:** Every configuration property / parameter defined on a node MUST be explicitly wired, validated, serialized, and handled by the C++ backend solver. No unused, phantom, or floating parameters are allowed.
+- **Unified Cast Lists:** When adding a new numeric parameter to any node, it MUST be added to the `numericKeys` list in:
+  - `frontend/src/serialization.ts`
+  - `frontend/src/property-editor.ts`
+  - `frontend/src/node-viewer.ts`
+  - `frontend/src/graph-renderer.ts`
+- **Default Parameter Alignment:** Default node parameters MUST be identical between `state-manager.ts` (`defaults` map) and `graph-renderer.ts` (`getDefaultParameters` method) to prevent property inspector and UI anomalies.
+
+

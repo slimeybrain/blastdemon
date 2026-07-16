@@ -164,6 +164,7 @@ networkManager.onOpen(() => {
 
 networkManager.onClose(() => {
     stateManager.setModelStatus('all', stateManager.getStatus());
+    layoutManager.resetAllResourceManagers();
 });
 
 // Event Delegation for Simulation Controls and Menus (since they are injected dynamically)
@@ -1037,7 +1038,7 @@ networkManager.onMessage(async (data) => {
                         const dirPath = lastSlash !== -1 ? filePath.substring(0, lastSlash) : '.';
 
                         model.nodes.forEach(n => {
-                            if (n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D') {
+                            if (n.type === 'VirtualGauges') {
                                 stateManager.updateNodeParameters(n.id, { output_dir: dirPath });
                             }
                             if (n.type === 'VTKOutput' || n.type === 'Telemetry3DViewport') {
@@ -1084,7 +1085,7 @@ networkManager.onMessage(async (data) => {
                             // Update gauge / vtk output directories to this directory path as well
                             if (m.nodes) {
                                 m.nodes.forEach((n: any) => {
-                                    if (n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D') {
+                                    if (n.type === 'VirtualGauges') {
                                         n.parameters = n.parameters || {};
                                         n.parameters.output_dir = dirPath;
                                     } else if (n.type === 'VTKOutput' || n.type === 'Telemetry3DViewport') {
@@ -1120,7 +1121,7 @@ networkManager.onMessage(async (data) => {
                                 const dirPath = lastSlash !== -1 ? filePath.substring(0, lastSlash) : '.';
 
                                 model.nodes.forEach(n => {
-                                    if (n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D') {
+                                    if (n.type === 'VirtualGauges') {
                                         stateManager.updateNodeParameters(n.id, { output_dir: dirPath });
                                     } else if (n.type === 'VTKOutput' || n.type === 'Telemetry3DViewport') {
                                         stateManager.updateNodeParameters(n.id, { vtk_dir: dirPath });
@@ -1272,7 +1273,7 @@ document.getElementById('load-json-file')?.addEventListener('change', (e) => {
                             if (model) {
                                 const dirPath = "/home/chris/antigrav/blastdemon";
                                 model.nodes.forEach(n => {
-                                    if (n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D') {
+                                    if (n.type === 'VirtualGauges') {
                                         if (!n.parameters.output_dir || n.parameters.output_dir === '') {
                                             stateManager.updateNodeParameters(n.id, { output_dir: dirPath });
                                         }
@@ -1312,7 +1313,7 @@ document.getElementById('load-binary-file')?.addEventListener('change', (e) => {
                 if (model) {
                     const dirPath = "/home/chris/antigrav/blastdemon";
                     model.nodes.forEach(n => {
-                        if (n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D') {
+                        if (n.type === 'VirtualGauges') {
                             if (!n.parameters.output_dir || n.parameters.output_dir === '') {
                                 stateManager.updateNodeParameters(n.id, { output_dir: dirPath });
                             }

@@ -423,20 +423,20 @@ void init_gauges(const nlohmann::json& msg) {
                 if (node.contains("parameters") && node["parameters"].contains("gauges")) {
                     for (const auto& gauge : node["parameters"]["gauges"]) {
                         GaugeDef g;
-                        if (type == "VirtualGauges") {
-                            g.id = gauge.value("id", "");
-                            g.r = gauge.value("r", 0.0);
-                            g.z = gauge.value("z", 0.0);
-                            g.x = 0.0;
-                            g.y = 0.0;
-                            g.is_3d = false;
-                        } else {
+                        if (gauge.contains("x") || gauge.contains("y")) {
                             g.id = gauge.value("id", gauge.value("name", ""));
                             g.x = gauge.value("x", 0.0);
                             g.y = gauge.value("y", 0.0);
                             g.z = gauge.value("z", 0.0);
                             g.r = 0.0;
                             g.is_3d = true;
+                        } else {
+                            g.id = gauge.value("id", gauge.value("name", ""));
+                            g.r = gauge.value("r", 0.0);
+                            g.z = gauge.value("z", 0.0);
+                            g.x = 0.0;
+                            g.y = 0.0;
+                            g.is_3d = false;
                         }
                         global_gauges.push_back(g);
                         
@@ -1022,6 +1022,11 @@ typedef struct nvmlUtilization_st {
     unsigned int memory;
 } nvmlUtilization_t;
 
+typedef struct nvmlProcessInfo_st {
+    unsigned int pid;
+    unsigned long long usedGpuMemory;
+} nvmlProcessInfo_t;
+
 typedef void* nvmlDevice_t;
 
 typedef nvmlReturn_t (*nvmlInit_t)();
@@ -1029,6 +1034,8 @@ typedef nvmlReturn_t (*nvmlShutdown_t)();
 typedef nvmlReturn_t (*nvmlDeviceGetHandleByIndex_t)(unsigned int index, nvmlDevice_t* device);
 typedef nvmlReturn_t (*nvmlDeviceGetUtilizationRates_t)(nvmlDevice_t device, nvmlUtilization_t* rates);
 typedef nvmlReturn_t (*nvmlDeviceGetTemperature_t)(nvmlDevice_t device, int sensorType, unsigned int* temp);
+typedef nvmlReturn_t (*nvmlDeviceGetComputeRunningProcesses_t)(nvmlDevice_t device, unsigned int* infoCount, nvmlProcessInfo_t* infos);
+typedef nvmlReturn_t (*nvmlDeviceGetGraphicsRunningProcesses_t)(nvmlDevice_t device, unsigned int* infoCount, nvmlProcessInfo_t* infos);
 
 struct CPUMonitor {
     double last_cpu_time = 0.0;
@@ -1079,6 +1086,8 @@ struct GPUMonitor {
     nvmlDeviceGetHandleByIndex_t p_nvmlDeviceGetHandleByIndex = nullptr;
     nvmlDeviceGetUtilizationRates_t p_nvmlDeviceGetUtilizationRates = nullptr;
     nvmlDeviceGetTemperature_t p_nvmlDeviceGetTemperature = nullptr;
+    nvmlDeviceGetComputeRunningProcesses_t p_nvmlDeviceGetComputeRunningProcesses = nullptr;
+    nvmlDeviceGetGraphicsRunningProcesses_t p_nvmlDeviceGetGraphicsRunningProcesses = nullptr;
 
     GPUMonitor() {
         handle = dlopen("libnvidia-ml.so.1", RTLD_LAZY);
@@ -1092,6 +1101,8 @@ struct GPUMonitor {
             p_nvmlDeviceGetHandleByIndex = (nvmlDeviceGetHandleByIndex_t)dlsym(handle, "nvmlDeviceGetHandleByIndex");
             p_nvmlDeviceGetUtilizationRates = (nvmlDeviceGetUtilizationRates_t)dlsym(handle, "nvmlDeviceGetUtilizationRates");
             p_nvmlDeviceGetTemperature = (nvmlDeviceGetTemperature_t)dlsym(handle, "nvmlDeviceGetTemperature");
+            p_nvmlDeviceGetComputeRunningProcesses = (nvmlDeviceGetComputeRunningProcesses_t)dlsym(handle, "nvmlDeviceGetComputeRunningProcesses");
+            p_nvmlDeviceGetGraphicsRunningProcesses = (nvmlDeviceGetGraphicsRunningProcesses_t)dlsym(handle, "nvmlDeviceGetGraphicsRunningProcesses");
 
             if (p_nvmlInit && p_nvmlShutdown && p_nvmlDeviceGetHandleByIndex &&
                 p_nvmlDeviceGetUtilizationRates && p_nvmlDeviceGetTemperature) {
@@ -1135,6 +1146,40 @@ struct GPUMonitor {
         }
 
         return success;
+    }
+
+    bool get_process_vram(unsigned int pid, unsigned long long& vram_bytes) {
+        if (!initialized) return false;
+
+        if (p_nvmlDeviceGetComputeRunningProcesses) {
+            unsigned int info_count = 64;
+            std::vector<nvmlProcessInfo_t> infos(info_count);
+            nvmlReturn_t ret = p_nvmlDeviceGetComputeRunningProcesses(device, &info_count, infos.data());
+            if (ret == NVML_SUCCESS) {
+                for (unsigned int i = 0; i < info_count; ++i) {
+                    if (infos[i].pid == pid) {
+                        vram_bytes = infos[i].usedGpuMemory;
+                        return true;
+                    }
+                }
+            }
+        }
+
+        if (p_nvmlDeviceGetGraphicsRunningProcesses) {
+            unsigned int info_count = 64;
+            std::vector<nvmlProcessInfo_t> infos(info_count);
+            nvmlReturn_t ret = p_nvmlDeviceGetGraphicsRunningProcesses(device, &info_count, infos.data());
+            if (ret == NVML_SUCCESS) {
+                for (unsigned int i = 0; i < info_count; ++i) {
+                    if (infos[i].pid == pid) {
+                        vram_bytes = infos[i].usedGpuMemory;
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
     }
 };
 
@@ -1205,7 +1250,7 @@ void emit_resource_pulse() {
     bool nvml_ok = gpu_monitor.get_metrics(gpu_util, gpu_temp);
     if (!nvml_ok) {
         // If NVML is not available, we can mock it when the simulation is active
-        if (sim_running || sim2d_running) {
+        if (sim_running || sim2d_running || sim3d_running) {
             gpu_util = total_vram > 0 ? 80.0 : 15.0; // GPU active or CPU active mock
             gpu_temp = total_vram > 0 ? 65.0 : 45.0;
         } else {
@@ -1223,7 +1268,19 @@ void emit_resource_pulse() {
     pulse["gpu_util"] = gpu_util;
     pulse["vram_alloc"] = total_vram - free_vram;
     pulse["vram_total"] = total_vram;
-    pulse["vram_blastdaemon"] = (global_solver_2d_cuda != nullptr) ? global_solver_2d_cuda->getAllocatedVRAM() : 0;
+    
+    size_t blastdemon_vram = 0;
+    unsigned long long nvml_vram = 0;
+    if (gpu_monitor.get_process_vram(getpid(), nvml_vram)) {
+        blastdemon_vram = nvml_vram;
+    } else {
+        if (global_solver_2d_cuda != nullptr) {
+            blastdemon_vram = global_solver_2d_cuda->getAllocatedVRAM();
+        } else if (global_solver_3d != nullptr) {
+            blastdemon_vram = global_solver_3d->getAllocatedVRAM();
+        }
+    }
+    pulse["vram_blastdaemon"] = blastdemon_vram;
     pulse["gpu_temp"] = gpu_temp;
 
     std::cout << pulse.dump() << std::endl;
@@ -1440,9 +1497,15 @@ void emit_telemetry(const CFDSolver& solver, double elapsed, bool is_terminated)
     {
         std::lock_guard<std::mutex> g_lock(global_gauges_mutex);
         if (!global_gauges.empty()) {
-            payload->has_gauges = true;
-            payload->gauge_times = global_gauge_times;
-            payload->gauges_history = global_gauges_history;
+            static auto last_gauge_emit_time = std::chrono::steady_clock::now();
+            auto now = std::chrono::steady_clock::now();
+            bool emit_gauges = is_terminated || (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_gauge_emit_time).count() >= 250);
+            if (emit_gauges) {
+                payload->has_gauges = true;
+                payload->gauge_times = global_gauge_times;
+                payload->gauges_history = global_gauges_history;
+                last_gauge_emit_time = now;
+            }
         }
     }
 
@@ -1484,11 +1547,17 @@ void emit_telemetry_2d(double elapsed, bool is_terminated) {
     {
         std::lock_guard<std::mutex> g_lock(global_gauges_mutex);
         if (!global_gauges.empty()) {
-            void flush_solver_gauges_locked();
-            flush_solver_gauges_locked();
-            payload->has_gauges = true;
-            payload->gauge_times = global_gauge_times;
-            payload->gauges_history = global_gauges_history;
+            static auto last_gauge_emit_time = std::chrono::steady_clock::now();
+            auto now = std::chrono::steady_clock::now();
+            bool emit_gauges = is_terminated || (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_gauge_emit_time).count() >= 250);
+            if (emit_gauges) {
+                void flush_solver_gauges_locked();
+                flush_solver_gauges_locked();
+                payload->has_gauges = true;
+                payload->gauge_times = global_gauge_times;
+                payload->gauges_history = global_gauges_history;
+                last_gauge_emit_time = now;
+            }
         }
     }
 
@@ -1515,11 +1584,17 @@ void emit_telemetry_3d(double elapsed, bool is_terminated) {
     {
         std::lock_guard<std::mutex> g_lock(global_gauges_mutex);
         if (!global_gauges.empty()) {
-            void flush_solver_gauges_locked();
-            flush_solver_gauges_locked();
-            payload->has_gauges = true;
-            payload->gauge_times = global_gauge_times;
-            payload->gauges_history = global_gauges_history;
+            static auto last_gauge_emit_time = std::chrono::steady_clock::now();
+            auto now = std::chrono::steady_clock::now();
+            bool emit_gauges = is_terminated || (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_gauge_emit_time).count() >= 250);
+            if (emit_gauges) {
+                void flush_solver_gauges_locked();
+                flush_solver_gauges_locked();
+                payload->has_gauges = true;
+                payload->gauge_times = global_gauge_times;
+                payload->gauges_history = global_gauges_history;
+                last_gauge_emit_time = now;
+            }
         }
     }
 
@@ -1823,6 +1898,8 @@ int main() {
                     while (sim2d_running.load()) {
                         std::this_thread::sleep_for(std::chrono::milliseconds(5));
                     }
+                    global_solver_2d.reset();
+                    global_solver_2d_cuda.reset();
                     sim2d_terminate = false;
                     sim2d_paused = false;
                     step_progress_2d = 0;
@@ -2252,6 +2329,7 @@ int main() {
                     while (sim3d_running.load()) {
                         std::this_thread::sleep_for(std::chrono::milliseconds(5));
                     }
+                    global_solver_3d.reset();
                     sim3d_terminate = false;
                     sim3d_paused = false;
                     global_t3d = 0.0;
@@ -2394,6 +2472,15 @@ int main() {
                                 }
                             }
                             global_slices_3d.push_back(s);
+                        }
+                    }
+                    if (command == "CONTOUR_CONFIG") {
+                        if (has_solver_2d()) {
+                            emit_telemetry_2d(global_t2d, false);
+                        }
+                    } else if (command == "VIEW3D_CONFIG") {
+                        if (global_solver_3d) {
+                            emit_telemetry_3d(global_t3d, false);
                         }
                     }
                 } else if (command == "WRITE_VTK") {

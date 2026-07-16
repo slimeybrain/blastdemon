@@ -31,6 +31,14 @@ export class LayoutManager {
         });
     }
 
+    public resetAllResourceManagers(): void {
+        this.components.forEach(comp => {
+            if (comp.type === 'RESOURCE_MANAGER') {
+                comp.instance.resetMetrics();
+            }
+        });
+    }
+
     /** Fingerprint that captures only the *structural* shape of the layout (node
      *  IDs, panel types, split directions) but NOT ratio values or options.
      *  This lets us skip full DOM rebuilds when only ratios change (e.g. during
@@ -2435,7 +2443,7 @@ class CompareModelsComponent {
                 }
             } else {
                 // Virtual Gauges Mode
-                const gaugesNode = model.nodes.find(n => n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D');
+                const gaugesNode = model.nodes.find(n => n.type === 'VirtualGauges');
                 if (!gaugesNode) return;
                 
                 const history = this.stateManager.getTelemetry(gaugesNode.id);
@@ -2558,7 +2566,7 @@ class CompareModelsComponent {
                 }
             } else {
                 // Virtual Gauges Mode
-                const gaugesNode = model.nodes.find(n => n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D');
+                const gaugesNode = model.nodes.find(n => n.type === 'VirtualGauges');
                 if (!gaugesNode) return;
                 
                 const history = this.stateManager.getTelemetry(gaugesNode.id);

@@ -75,8 +75,6 @@ struct PrimitiveTile3D<RealType, false> {
     RealType uy[TILE_CELLS_3D];
     RealType uz[TILE_CELLS_3D];
     RealType p[TILE_CELLS_3D];
-    RealType E[TILE_CELLS_3D];
-    RealType arrival_time[TILE_CELLS_3D];
     int floor_status[TILE_CELLS_3D];
 };
 
@@ -87,12 +85,10 @@ struct PrimitiveTile3D<RealType, true> {
     RealType uy[TILE_CELLS_3D];
     RealType uz[TILE_CELLS_3D];
     RealType p[TILE_CELLS_3D];
-    RealType E[TILE_CELLS_3D];
     RealType alpha1[TILE_CELLS_3D];
     RealType alpha2[TILE_CELLS_3D];
     RealType arho1[TILE_CELLS_3D];
     RealType arho2[TILE_CELLS_3D];
-    RealType arrival_time[TILE_CELLS_3D];
     int floor_status[TILE_CELLS_3D];
 };
 

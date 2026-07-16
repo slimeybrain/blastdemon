@@ -349,8 +349,7 @@ export class StateManager {
             'DomainMesh3D': 'node-mesh3d',
             'Charge3D': 'node-charge3d',
             'CFDSolver3D': 'node-solver3d',
-            'Telemetry3DViewport': 'node-viewport3d',
-            'VirtualGauges3D': 'node-gauges3d'
+            'Telemetry3DViewport': 'node-viewport3d'
         };
         const prefix = prefixMap[type] || `node-${type.toLowerCase()}`;
 
@@ -483,6 +482,11 @@ export class StateManager {
         stateCopy.workspaces.forEach(ws => {
             ws.layout = ensureMenuBar(ws.layout);
             ws.modelIds = Array.from(new Set(ws.modelIds));
+        });
+
+        // Constrain all slices to their domain boundaries
+        Object.values(stateCopy.models).forEach(model => {
+            constrainAllSlices(model);
         });
 
 
@@ -631,6 +635,7 @@ export class StateManager {
                 const merged = { ...node.parameters, ...parameters };
                 const updatedKey = Object.keys(parameters).find(k => k === 'charge_mass') || Object.keys(parameters)[0];
                 syncExplosiveParameters(node, merged, model, updatedKey);
+                syncQuantityRanges(node, parameters, merged);
                 node.parameters = merged;
                 console.log("[DEBUG] Node parameters updated in memory. New parameters:", node.parameters);
                 
@@ -638,7 +643,7 @@ export class StateManager {
                     const dependentConns = model.connections.filter(c => c.fromNode === node.id && c.toPort === 'material');
                     dependentConns.forEach(c => {
                         const depNode = model.nodes.find(n => n.id === c.toNode);
-                        if (depNode && (depNode.type === 'Charge1D' || depNode.type === 'Charge2D')) {
+                        if (depNode && (depNode.type === 'Charge1D' || depNode.type === 'Charge2D' || depNode.type === 'Charge3D')) {
                             syncExplosiveParameters(depNode, depNode.parameters, model, 'rho');
                         }
                     });
@@ -668,6 +673,7 @@ export class StateManager {
                 const merged = { ...node.parameters, ...parameters };
                 const updatedKey = Object.keys(parameters).find(k => k === 'charge_mass') || Object.keys(parameters)[0];
                 syncExplosiveParameters(node, merged, model, updatedKey);
+                syncQuantityRanges(node, parameters, merged);
                 
                 for (const [key, value] of Object.entries(merged)) {
                     if (node.parameters[key] !== value) {
@@ -675,12 +681,16 @@ export class StateManager {
                         changed = true;
                     }
                 }
+
+                if (constrainAllSlices(model)) {
+                    changed = true;
+                }
                 
                 if (node.type === 'Material') {
                     const dependentConns = model.connections.filter(c => c.fromNode === node.id && c.toPort === 'material');
                     dependentConns.forEach(c => {
                         const depNode = model.nodes.find(n => n.id === c.toNode);
-                        if (depNode && (depNode.type === 'Charge1D' || depNode.type === 'Charge2D')) {
+                        if (depNode && (depNode.type === 'Charge1D' || depNode.type === 'Charge2D' || depNode.type === 'Charge3D')) {
                             const oldRadius = depNode.parameters['charge_radius'];
                             syncExplosiveParameters(depNode, depNode.parameters, model, 'rho');
                             if (depNode.parameters['charge_radius'] !== oldRadius) {
@@ -922,7 +932,7 @@ export class StateManager {
                          this.telemetryStore.set(connectedNode.id, data);
                          this.notifyTelemetryUpdate(connectedNode.id, data);
                     }
-                } else if (connectedNode.type === 'VirtualGauges' || connectedNode.type === 'VirtualGauges3D') {
+                } else if (connectedNode.type === 'VirtualGauges') {
                     if (data && !(data instanceof ArrayBuffer) && data.gauges_history) {
                          this.telemetryStore.set(connectedNode.id, data.gauges_history);
                          this.notifyTelemetryUpdate(connectedNode.id, data.gauges_history);
@@ -957,7 +967,7 @@ export class StateManager {
         reverseGaugeConnections.forEach(connection => {
             const connectedNode = nodes.find(n => n.id === connection.fromNode);
             if (connectedNode && !updatedNodeIds.has(connectedNode.id)) {
-                if (connectedNode.type === 'VirtualGauges' || connectedNode.type === 'VirtualGauges3D') {
+                if (connectedNode.type === 'VirtualGauges') {
                     if (data && !(data instanceof ArrayBuffer) && data.gauges_history) {
                          this.telemetryStore.set(connectedNode.id, data.gauges_history);
                          this.notifyTelemetryUpdate(connectedNode.id, data.gauges_history);
@@ -1105,10 +1115,16 @@ export class StateManager {
             if (saved) {
                 this.appState = JSON.parse(saved);
                 this.healDuplicateNodeIds();
-                // Self-healing: Ensure all nodes are healed
+                let anyChanged = false;
                 Object.values(this.appState.models).forEach(model => {
                     this.healNodes(model.nodes);
+                    if (constrainAllSlices(model)) {
+                        anyChanged = true;
+                    }
                 });
+                if (anyChanged) {
+                    this.saveWorkspace();
+                }
                 this.history = [JSON.parse(JSON.stringify(this.appState))];
                 this.currentIndex = 0;
                 this.notifyListeners();
@@ -1294,6 +1310,12 @@ export class StateManager {
     }
 
     private healNodes(nodes: Node[], stateObj?: { nodes: Node[], connections: Connection[] }): void {
+        nodes.forEach(node => {
+            if ((node.type as any) === 'VirtualGauges3D') {
+                node.type = 'VirtualGauges';
+            }
+        });
+
         const defaults: Record<string, Record<string, any>> = {
             'DomainMesh': {
                 dimension: '1D',
@@ -1371,7 +1393,11 @@ export class StateManager {
             'TelemetryGraph': {
                 telemetry_channel: 0,
                 x_axis_mode: 'radius',
-                plot_stride: 1
+                plot_stride: 1,
+                min_y: 0,
+                max_y: 1,
+                show_grid: true,
+                colormap: 'plasma'
             },
             'DomainMesh2D': {
                 cell_size: 0.005,
@@ -1394,6 +1420,8 @@ export class StateManager {
                 detonator_z: 0.5
             },
             'RemapNode': {
+                explosive_x: 0.0,
+                explosive_y: 0.0,
                 explosive_z: 0.0,
                 explosive_r: 0.0,
                 remap_radius: 0.5,
@@ -1415,11 +1443,13 @@ export class StateManager {
                 auto_scale: true,
                 log_scale: false,
                 colormap: 'plasma',
+                min_y: 0,
+                max_y: 1,
                 downsample_stride: 1,
                 refresh_rate: 0.0
             },
             'VTKOutput': {
-                vtk_dir: '',
+                vtk_dir: './vtk_output',
                 export_slices: true,
                 export_volumes: false,
                 custom_filename: 'vtk_output',
@@ -1444,8 +1474,10 @@ export class StateManager {
             },
             'Charge3D': {
                 charge_shape: 'Sphere',
+                charge_mass: 6.8277,
                 charge_x: 0.5, charge_y: 0.5, charge_z: 0.5,
                 charge_radius: 0.1,
+                charge_height: 0.2,
                 charge_lx: 0.2, charge_ly: 0.2, charge_lz: 0.2
             },
             'CFDSolver3D': {
@@ -1460,7 +1492,7 @@ export class StateManager {
             'Telemetry3DViewport': {
                 colormap: 'plasma',
                 refresh_rate: 0.033,
-                slices: [{ axis: 'xy', offset: 0.5, quantities: ['pressure'], stride: 1 }],
+                slices: [{ axis: 'xy', offset: 0.5, quantities: ['pressure'], stride: 1, opacity: 1.0, colormap: 'plasma', auto_scale: true, log_scale: false, interpolate: true, min_val: 101325.0, max_val: 101325.0 * 10.0, link_group: 'none' }],
                 log_scale: false,
                 auto_scale: true,
                 min_val: 101325.0,
@@ -1482,26 +1514,6 @@ export class StateManager {
                 qty_reacted: true,
                 qty_unreacted: true,
                 qty_air: true
-            },
-            'VirtualGauges3D': {
-                gauges: [{ name: 'G1', x: 0.6, y: 0.5, z: 0.5 }],
-                export_ascii: false,
-                export_binary: false,
-                export_hdf5: false,
-                ascii_delimiter: 'Comma',
-                ascii_precision: 6,
-                include_header: true,
-                output_dir: '',
-                custom_filename: 'gauges',
-                qty_pressure: true,
-                qty_density: true,
-                qty_velocity: true,
-                qty_energy: true,
-                qty_reacted: true,
-                qty_unreacted: true,
-                qty_air: true,
-                qty_overpressure: true,
-                qty_impulse: true
             }
         };
 
@@ -1526,8 +1538,8 @@ export class StateManager {
             if (!node.displayMode) {
                 node.displayMode = 'expanded';
             }
-            // Self-healing: if charge_radius exists but charge_mass is missing, calculate charge_mass first so it doesn't get overwritten by defaults
-            if ((node.type === 'Charge1D' || node.type === 'Charge2D') && node.parameters['charge_radius'] !== undefined && node.parameters['charge_mass'] === undefined) {
+            // Self-healing: if charge_radius/lx/ly/lz exists but charge_mass is missing, calculate charge_mass first so it doesn't get overwritten by defaults
+            if ((node.type === 'Charge1D' || node.type === 'Charge2D' || node.type === 'Charge3D') && node.parameters['charge_mass'] === undefined) {
                 let rho = 1630.0;
                 let model: { nodes: Node[], connections: Connection[] } | null = stateObj || null;
                 if (!model) {
@@ -1545,13 +1557,19 @@ export class StateManager {
                         }
                     }
                 }
-                const radius = Number(node.parameters['charge_radius']);
                 const shape = node.parameters['charge_shape'] || 'Sphere';
-                const height = Number(node.parameters['charge_height'] !== undefined ? node.parameters['charge_height'] : 0.1);
-                if (shape === 'Cylinder') {
-                    node.parameters['charge_mass'] = Math.PI * radius * radius * height * rho;
-                } else {
+                if (shape === 'Sphere') {
+                    const radius = Number(node.parameters['charge_radius'] !== undefined ? node.parameters['charge_radius'] : 0.1);
                     node.parameters['charge_mass'] = (4.0 / 3.0) * Math.PI * Math.pow(radius, 3.0) * rho;
+                } else if (shape === 'Cylinder') {
+                    const radius = Number(node.parameters['charge_radius'] !== undefined ? node.parameters['charge_radius'] : 0.1);
+                    const height = Number(node.parameters['charge_height'] !== undefined ? node.parameters['charge_height'] : 0.2);
+                    node.parameters['charge_mass'] = Math.PI * radius * radius * height * rho;
+                } else if (shape === 'Block') {
+                    const lx = Number(node.parameters['charge_lx'] !== undefined ? node.parameters['charge_lx'] : 0.2);
+                    const ly = Number(node.parameters['charge_ly'] !== undefined ? node.parameters['charge_ly'] : 0.2);
+                    const lz = Number(node.parameters['charge_lz'] !== undefined ? node.parameters['charge_lz'] : 0.2);
+                    node.parameters['charge_mass'] = lx * ly * lz * rho;
                 }
             }
             const nodeDefaults = defaults[node.type];
@@ -1648,8 +1666,115 @@ function ensureMenuBar(node: LayoutNode): LayoutNode {
     return result;
 }
 
+const DEFAULT_QUANTITY_RANGES: Record<string, [number, number]> = {
+    pressure: [101325.0, 101325.0 * 100.0],
+    density: [1.2, 100.0],
+    velocity: [0.0, 1000.0],
+    energy: [200000.0, 10000000.0],
+    species1: [0.0, 1.0],
+    species2: [0.0, 1.0],
+    species3: [0.0, 1.0]
+};
+
+function syncQuantityRanges(node: Node, parameters: Record<string, any>, merged: Record<string, any>) {
+    if (node.type !== 'Telemetry3DViewport') return;
+
+    if (!merged.quantity_ranges) {
+        merged.quantity_ranges = {
+            pressure: [101325.0, 101325.0 * 100.0],
+            density: [1.2, 100.0],
+            velocity: [0.0, 1000.0],
+            energy: [200000.0, 10000000.0],
+            species1: [0.0, 1.0],
+            species2: [0.0, 1.0],
+            species3: [0.0, 1.0]
+        };
+    }
+
+    const slices = merged.slices || [];
+    const focusedIdx = merged.focusedSliceIndex !== undefined ? merged.focusedSliceIndex : 0;
+    const slice = slices[focusedIdx] || slices[0] || { quantities: ['pressure'] };
+    const qty = slice.quantities?.[0] || 'pressure';
+
+    if (parameters.min_val !== undefined || parameters.max_val !== undefined) {
+        const currentMin = parameters.min_val !== undefined ? parameters.min_val : merged.min_val;
+        const currentMax = parameters.max_val !== undefined ? parameters.max_val : merged.max_val;
+        merged.quantity_ranges[qty] = [currentMin, currentMax];
+    } else {
+        const range = merged.quantity_ranges[qty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0];
+        merged.min_val = range[0];
+        merged.max_val = range[1];
+    }
+}
+
+function constrainAllSlices(model: any): boolean {
+    const meshNode = model.nodes.find((n: any) => n.type === 'DomainMesh3D');
+    if (!meshNode) return false;
+
+    const originX = Number(meshNode.parameters?.origin_x ?? 0.0);
+    const originY = Number(meshNode.parameters?.origin_y ?? 0.0);
+    const originZ = Number(meshNode.parameters?.origin_z ?? 0.0);
+    const dimX = Number(meshNode.parameters?.dim_x ?? 1.0);
+    const dimY = Number(meshNode.parameters?.dim_y ?? 1.0);
+    const dimZ = Number(meshNode.parameters?.dim_z ?? 1.0);
+
+    const xmin = originX, xmax = originX + dimX;
+    const ymin = originY, ymax = originY + dimY;
+    const zmin = originZ, zmax = originZ + dimZ;
+
+    let totalChanged = false;
+    model.nodes.forEach((node: any) => {
+        if (node.type === 'Telemetry3DViewport') {
+            if (!node.parameters.quantity_ranges) {
+                node.parameters.quantity_ranges = {
+                    pressure: [101325.0, 101325.0 * 100.0],
+                    density: [1.2, 100.0],
+                    velocity: [0.0, 1000.0],
+                    energy: [200000.0, 10000000.0],
+                    species1: [0.0, 1.0],
+                    species2: [0.0, 1.0],
+                    species3: [0.0, 1.0]
+                };
+                totalChanged = true;
+            }
+
+            if (node.parameters.slices) {
+                let changed = false;
+                const slices = node.parameters.slices.map((slice: any) => {
+                let minVal = 0.0;
+                let maxVal = 1.0;
+                if (slice.axis === 'xy') {
+                    minVal = zmin;
+                    maxVal = zmax;
+                } else if (slice.axis === 'xz') {
+                    minVal = ymin;
+                    maxVal = ymax;
+                } else if (slice.axis === 'yz') {
+                    minVal = xmin;
+                    maxVal = xmax;
+                }
+
+                const offset = slice.offset !== undefined ? Number(slice.offset) : (minVal + maxVal) / 2;
+                const clamped = Math.max(minVal, Math.min(maxVal, offset));
+                if (Math.abs(clamped - offset) > 1e-6) {
+                    changed = true;
+                    return { ...slice, offset: clamped };
+                }
+                return slice;
+            });
+
+            if (changed) {
+                node.parameters.slices = slices;
+                totalChanged = true;
+            }
+        }
+    }
+});
+    return totalChanged;
+}
+
 function syncExplosiveParameters(node: Node, parameters: Record<string, any>, state: { nodes: Node[], connections: Connection[] } | null, updatedKey?: string): void {
-    if (node.type !== 'Charge1D' && node.type !== 'Charge2D') {
+    if (node.type !== 'Charge1D' && node.type !== 'Charge2D' && node.type !== 'Charge3D') {
         return;
     }
 
@@ -1669,13 +1794,18 @@ function syncExplosiveParameters(node: Node, parameters: Record<string, any>, st
         }
     }
 
-    const height = Number(parameters['charge_height'] !== undefined ? parameters['charge_height'] : 0.1);
-    const radius = Number(parameters['charge_radius'] !== undefined ? parameters['charge_radius'] : 0.05);
+    const height = Number(parameters['charge_height'] !== undefined ? parameters['charge_height'] : 0.2);
+    const radius = Number(parameters['charge_radius'] !== undefined ? parameters['charge_radius'] : 0.1);
     const mass = Number(parameters['charge_mass'] !== undefined ? parameters['charge_mass'] : 0.0);
+    const lx = Number(parameters['charge_lx'] !== undefined ? parameters['charge_lx'] : 0.2);
+    const ly = Number(parameters['charge_ly'] !== undefined ? parameters['charge_ly'] : 0.2);
+    const lz = Number(parameters['charge_lz'] !== undefined ? parameters['charge_lz'] : 0.2);
 
-    if (updatedKey === 'charge_radius') {
+    if (updatedKey === 'charge_radius' || updatedKey === 'charge_height' || updatedKey === 'charge_lx' || updatedKey === 'charge_ly' || updatedKey === 'charge_lz') {
         if (shape === 'Cylinder') {
             parameters['charge_mass'] = Math.PI * radius * radius * height * rho;
+        } else if (shape === 'Block') {
+            parameters['charge_mass'] = lx * ly * lz * rho;
         } else {
             parameters['charge_mass'] = (4.0 / 3.0) * Math.PI * Math.pow(radius, 3.0) * rho;
         }
@@ -1684,6 +1814,20 @@ function syncExplosiveParameters(node: Node, parameters: Record<string, any>, st
             if (shape === 'Cylinder') {
                 if (height > 0) {
                     parameters['charge_radius'] = Math.sqrt(mass / (Math.PI * rho * height));
+                }
+            } else if (shape === 'Block') {
+                const currentVolume = lx * ly * lz;
+                if (currentVolume > 0) {
+                    const targetVolume = mass / rho;
+                    const scaleFactor = Math.pow(targetVolume / currentVolume, 1.0 / 3.0);
+                    parameters['charge_lx'] = lx * scaleFactor;
+                    parameters['charge_ly'] = ly * scaleFactor;
+                    parameters['charge_lz'] = lz * scaleFactor;
+                } else {
+                    const size = Math.pow(mass / rho, 1.0 / 3.0);
+                    parameters['charge_lx'] = size;
+                    parameters['charge_ly'] = size;
+                    parameters['charge_lz'] = size;
                 }
             } else {
                 parameters['charge_radius'] = Math.pow((3.0 * mass) / (4.0 * Math.PI * rho), 1.0 / 3.0);

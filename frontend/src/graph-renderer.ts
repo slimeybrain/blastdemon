@@ -51,6 +51,7 @@ export class GraphRenderer {
     private nodeElements: Map<string, HTMLElement> = new Map();
     private nodeWorkers: Map<string, Worker> = new Map();
     private viewportRanges: Map<string, { min: number, max: number }> = new Map();
+    private viewportDomains: Map<string, { xmin: number, xmax: number, ymin: number, ymax: number, zmin: number, zmax: number }> = new Map();
     private graphFrameCounters: Map<string, number> = new Map();
     /** Set of node IDs whose resize handle is currently being dragged by the user. */
     private nodeUserResizing: Set<string> = new Set();
@@ -59,8 +60,13 @@ export class GraphRenderer {
     /** Pending requestAnimationFrame handle for deferred wire redraws. */
     private connectionRafId: number | null = null;
 
+    private expandedSliceIndices = new Set<string>(); // "nodeId-sliceIdx"
     private gaugesPanelOpen: Map<string, boolean> = new Map();
     private gaugesActiveTab: Map<string, 'list' | 'settings'> = new Map();
+    private tabbedFromId: string | null = null;
+    private isTabbingForward: boolean = false;
+    private isTabbingBackward: boolean = false;
+    private pressedEnterOnId: string | null = null;
     private focusedChartNodeId: string | null = null;
     private gaugesZoomedOrPanned: Map<string, boolean> = new Map();
     private gaugesZoomMinX: Map<string, number> = new Map();
@@ -225,7 +231,7 @@ export class GraphRenderer {
                 const heightDiff = Math.abs((node.height || 0) - newHeight);
                 if (newWidth > 0 && newHeight > 0 && (widthDiff > 4 || heightDiff > 4)) {
                     const userIsResizing = this.nodeUserResizing.has(nodeId);
-                    const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D' || node.type === 'Telemetry3DViewport';
+                    const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport';
                     if (isTelemetry && node.displayMode !== 'compact') {
                         const isTelemetryText = node.type === 'TelemetryText';
                         if (!isTelemetryText || userIsResizing) {
@@ -236,7 +242,7 @@ export class GraphRenderer {
                     }
 
                     // Automatic mode switching for telemetry nodes (only when user is resizing)
-                    if (userIsResizing && (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D' || node.type === 'Telemetry3DViewport')) {
+                    if (userIsResizing && (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport')) {
                         let targetMode: 'compact' | 'normal' | 'expanded' = 'normal';
                         if (newHeight < 60) targetMode = 'compact';
                         else if (newHeight >= 180) targetMode = 'expanded';
@@ -460,6 +466,18 @@ export class GraphRenderer {
                     const bufferCopy = data.slice(0);
                     worker.postMessage({ type: 'frame', data: { buffer: bufferCopy } }, [bufferCopy]);
                 } else if (data.type === 'TELEMETRY_3D') {
+                    const xmax = (data.xmin ?? 0.0) + (data.nx * data.dx || 1.0);
+                    const ymax = (data.ymin ?? 0.0) + (data.ny * data.dx || 1.0);
+                    const zmax = (data.zmin ?? 0.0) + (data.nz * data.dx || 1.0);
+                    this.viewportDomains.set(node.id, {
+                        xmin: data.xmin ?? 0.0,
+                        xmax: xmax,
+                        ymin: data.ymin ?? 0.0,
+                        ymax: ymax,
+                        zmin: data.zmin ?? 0.0,
+                        zmax: zmax
+                    });
+
                     // Forward JSON config settings to the 3D viewport worker if present
                     worker.postMessage({
                         type: 'setConfig',
@@ -477,12 +495,15 @@ export class GraphRenderer {
                             dx: data.dx,
                             nx: data.nx,
                             ny: data.ny,
-                            nz: data.nz
+                            nz: data.nz,
+                            slices: node.parameters?.slices || [],
+                            focusedSliceIndex: node.parameters?.focusedSliceIndex ?? 0,
+                            quantityRanges: node.parameters?.quantity_ranges || {}
                         }
                     });
                 }
             }
-        } else if ((node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') && data) {
+        } else if (node.type === 'VirtualGauges' && data) {
             const canvas = nodeEl.querySelector('canvas') as HTMLCanvasElement;
             if (canvas) {
                 const gauges = node.parameters?.gauges || [];
@@ -733,16 +754,13 @@ export class GraphRenderer {
                 if (toPortId === 'air') return fromType === 'Material';
                 if (toPortId === 'charge') return fromType === 'Charge3D';
                 if (toPortId === 'detonator') return fromType === 'DetonatorLocation3D';
-                if (toPortId === 'gauges') return fromType === 'VirtualGauges3D';
+                if (toPortId === 'gauges') return fromType === 'VirtualGauges';
                 if (toPortId === 'remap') return fromType === 'RemapNode';
                 return false;
             case 'Charge3D':
                 if (toPortId === 'material') return fromType === 'Material';
                 return false;
             case 'Telemetry3DViewport':
-                if (toPortId === 'in') return fromType === 'CFDSolver3D';
-                return false;
-            case 'VirtualGauges3D':
                 if (toPortId === 'in') return fromType === 'CFDSolver3D';
                 return false;
             case 'ThePainter':
@@ -770,7 +788,7 @@ export class GraphRenderer {
                 if (toPortId === 'in') return fromType === 'CFDSolver';
                 return false;
             case 'VirtualGauges':
-                if (toPortId === 'in') return fromType === 'CFDSolver' || fromType === 'CFDSolver2D';
+                if (toPortId === 'in') return fromType === 'CFDSolver' || fromType === 'CFDSolver2D' || fromType === 'CFDSolver3D';
                 return false;
             case 'TelemetryText':
             case 'TelemetryGraph':
@@ -780,7 +798,7 @@ export class GraphRenderer {
                 if (toPortId === 'in') return fromType === 'CFDSolver2D';
                 return false;
             case 'VTKOutput':
-                if (toPortId === 'in') return fromType === 'CFDSolver' || fromType === 'CFDSolver2D';
+                if (toPortId === 'in') return fromType === 'CFDSolver' || fromType === 'CFDSolver2D' || fromType === 'CFDSolver3D';
                 return false;
             default:
                 return false;
@@ -1125,7 +1143,6 @@ export class GraphRenderer {
                     { label: 'Telemetry - Contour (2D)', type: 'TelemetryContour' },
                     { label: 'Telemetry - 3D Viewport', type: 'Telemetry3DViewport' },
                     { label: 'Virtual Gauges', type: 'VirtualGauges' },
-                    { label: 'Virtual Gauges 3D', type: 'VirtualGauges3D' },
                     { label: 'VTK Output Controls', type: 'VTKOutput' }
                 ]
             },
@@ -1314,7 +1331,6 @@ export class GraphRenderer {
             ];
             case 'Charge3D': return [{ id: 'material', label: 'Material' }];
             case 'Telemetry3DViewport': return [{ id: 'in', label: 'Data Stream' }];
-            case 'VirtualGauges3D': return [{ id: 'in', label: 'Solver' }];
             default: return [];
         }
     }
@@ -1336,7 +1352,7 @@ export class GraphRenderer {
             case 'DomainMesh3D': return [{ id: 'mesh', label: 'Mesh Spec' }];
             case 'Charge3D': return [{ id: 'out', label: 'Charge Spec' }];
             case 'CFDSolver3D': return [{ id: 'telemetry', label: 'Telemetry' }];
-            case 'VirtualGauges3D': return [{ id: 'out', label: 'Gauges Spec' }];
+            case 'VirtualGauges': return [{ id: 'out', label: 'Gauges Spec' }];
             default: return [];
         }
     }
@@ -1384,10 +1400,31 @@ export class GraphRenderer {
                 charge_r: 0.0,
                 charge_z: 0.1
             };
-            case 'VirtualGauges': return {
-                gauges: [],
-                telemetry_channel: 0
-            };
+            case 'VirtualGauges': {
+                const state = this.stateManager.getCurrentState();
+                const is3D = state?.nodes.some(n => n.type === 'DomainMesh3D' || n.type === 'CFDSolver3D') || false;
+                return {
+                    gauges: is3D ? [{ id: 'G1', name: 'G1', x: 0.6, y: 0.5, z: 0.5 }] : [],
+                    telemetry_channel: 0,
+                    export_ascii: false,
+                    export_binary: false,
+                    export_hdf5: false,
+                    ascii_delimiter: 'Comma',
+                    ascii_precision: 6,
+                    include_header: true,
+                    output_dir: '',
+                    custom_filename: 'gauges',
+                    qty_pressure: true,
+                    qty_density: true,
+                    qty_velocity: true,
+                    qty_energy: true,
+                    qty_reacted: true,
+                    qty_unreacted: true,
+                    qty_air: true,
+                    qty_overpressure: true,
+                    qty_impulse: true
+                };
+            }
             case 'CFDSolver': return {
                 init_mode: 'Multi-Material JWL',
                 cfl: 0.4,
@@ -1396,10 +1433,17 @@ export class GraphRenderer {
                 temporal_order: 2,
                 precision: 'double'
             };
-            case 'TelemetryGraph': return { telemetry_channel: 0, x_axis_mode: 'radius', plot_stride: 1 };
+            case 'TelemetryGraph': return {
+                telemetry_channel: 0,
+                x_axis_mode: 'radius',
+                plot_stride: 1,
+                min_y: 0,
+                max_y: 1,
+                show_grid: true,
+                colormap: 'plasma'
+            };
             case 'DomainMesh2D': return {
-                nr: 200,
-                nz: 200,
+                cell_size: 0.005,
                 max_r: 1.0,
                 max_z: 1.0,
                 bc_r_min: 'Reflecting',
@@ -1419,6 +1463,8 @@ export class GraphRenderer {
                 detonator_z: 0.5
             };
             case 'RemapNode': return {
+                explosive_x: 0.0,
+                explosive_y: 0.0,
                 explosive_z: 0.0,
                 explosive_r: 0.0,
                 remap_radius: 0.5,
@@ -1441,10 +1487,25 @@ export class GraphRenderer {
                 log_scale: false,
                 colormap: 'plasma',
                 min_y: 0,
-                max_y: 1
+                max_y: 1,
+                downsample_stride: 1,
+                refresh_rate: 0.0
             };
             case 'VTKOutput': return {
-                vtk_dir: './vtk_output'
+                vtk_dir: './vtk_output',
+                export_slices: true,
+                export_volumes: false,
+                custom_filename: 'vtk_output',
+                step_interval: 10,
+                time_interval: 0.0,
+                vtk_format: 'Binary',
+                qty_pressure: true,
+                qty_density: true,
+                qty_velocity: true,
+                qty_energy: true,
+                qty_reacted: true,
+                qty_unreacted: true,
+                qty_air: true
             };
             case 'DomainMesh3D': return {
                 dim_x: 1.0, dim_y: 1.0, dim_z: 1.0,
@@ -1474,11 +1535,33 @@ export class GraphRenderer {
                 auto_scale: true,
                 log_scale: false,
                 show_grid: true,
-                slices: [{ axis: 'xy', offset: 0.5, quantities: ['pressure'] }]
+                interpolate: true,
+                min_val: 101325.0,
+                max_val: 101325.0 * 10.0,
+                slices: [
+                    { axis: 'xy', offset: 0.5, stride: 1, quantities: ['pressure'], opacity: 1.0, colormap: 'plasma', auto_scale: true, log_scale: false, interpolate: true, min_val: 101325.0, max_val: 101325.0 * 10.0, link_group: 'none' }
+                ],
+                lightingEnabled: true,
+                aoEnabled: true,
+                ambientLevel: 0.3,
+                specularIntensity: 0.4,
+                vtk_format: 'Binary',
+                step_interval: 10,
+                time_interval: 0.0,
+                custom_filename: 'vtk_output',
+                vtk_dir: './vtk_output',
+                export_slices: true,
+                export_volumes: false,
+                qty_pressure: true,
+                qty_density: true,
+                qty_velocity: true,
+                qty_energy: true,
+                qty_reacted: true,
+                qty_unreacted: true,
+                qty_air: true,
+                refresh_rate: 0.033
             };
-            case 'VirtualGauges3D': return {
-                gauges: [{ name: 'G1', x: 0.6, y: 0.5, z: 0.5 }]
-            };
+
             default: return {};
         }
     }
@@ -1597,7 +1680,6 @@ export class GraphRenderer {
             case 'Charge3D':        return 'CHARGE3D';
             case 'CFDSolver3D':     return 'SOLVER3D';
             case 'Telemetry3DViewport': return 'VIEW3D';
-            case 'VirtualGauges3D': return 'GAUGES3D';
             default: return (type as string).toUpperCase();
         }
     }
@@ -1625,7 +1707,6 @@ export class GraphRenderer {
             case 'Charge3D':          return 'Charge (3D)';
             case 'CFDSolver3D':       return 'CFD Solver 3D';
             case 'Telemetry3DViewport': return 'Telemetry - 3D Viewport';
-            case 'VirtualGauges3D':   return 'Virtual Gauges 3D';
             default: return type;
         }
     }
@@ -1654,12 +1735,12 @@ export class GraphRenderer {
                 if (!nodeEl) {
                     nodeEl = document.createElement('div');
                     nodeEl.className = 'node';
-                    if (node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D' || node.type === 'Telemetry3DViewport') {
+                    if (node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport') {
                         nodeEl.classList.add('resizable');
-                        if (node.width === undefined) node.width = (node.type === 'Telemetry3DViewport' || node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') ? 450 : ((node.type === 'TelemetryContour') ? 350 : 250);
+                        if (node.width === undefined) node.width = (node.type === 'Telemetry3DViewport' || node.type === 'VirtualGauges') ? 450 : ((node.type === 'TelemetryContour') ? 350 : 250);
                         if (node.height === undefined) {
                             if (node.type === 'Telemetry3DViewport') node.height = 450;
-                            else if (node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') node.height = 300;
+                            else if (node.type === 'TelemetryContour' || node.type === 'VirtualGauges') node.height = 300;
                             else if (node.type === 'TelemetryGraph') node.height = 150;
                             else node.height = 130;
                         }
@@ -1948,7 +2029,7 @@ export class GraphRenderer {
                 const displayMode = node.displayMode || 'expanded';
                 const nodeOrientation = node.orientation || 'HORIZ';
 
-                const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D' || node.type === 'Telemetry3DViewport';
+                const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport';
 
                 // Only override the element's inline width/height from state when the
                 // user is NOT actively dragging the native resize handle. Mid-drag, the
@@ -2207,9 +2288,9 @@ export class GraphRenderer {
                 if (displayMode === 'compact') {
                     contentEl.style.display = 'none';
                 } else if (displayMode === 'normal') {
-                    if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport' || node.type === 'VirtualGauges3D') {
+                    if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport') {
                         contentEl.style.display = 'flex';
-                        if (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') {
+                        if (node.type === 'VirtualGauges') {
                             this.renderVirtualGaugesContent(node, contentEl);
                         } else {
                             this.renderTelemetryContent(node, contentEl);
@@ -2219,12 +2300,12 @@ export class GraphRenderer {
                     }
                 } else {
                     contentEl.style.display = 'flex';
-                    if (node.type !== 'VirtualGauges' && node.type !== 'VirtualGauges3D') {
+                    if (node.type !== 'VirtualGauges') {
                         this.renderNodeParameters(node, contentEl);
                     }
                     if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour' || node.type === 'Telemetry3DViewport') {
                         this.renderTelemetryContent(node, contentEl);
-                    } else if (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') {
+                    } else if (node.type === 'VirtualGauges') {
                         this.renderVirtualGaugesContent(node, contentEl);
                     }
                 }
@@ -2799,7 +2880,15 @@ export class GraphRenderer {
             if (worker) {
                 worker.postMessage({
                     type: 'setConfig',
-                    data: { colormap: currentColorMap, autoScale: autoScale, logScale: node.parameters?.log_scale === true, showGrid: node.parameters?.show_grid !== false }
+                    data: {
+                        colormap: currentColorMap,
+                        autoScale: autoScale,
+                        logScale: node.parameters?.log_scale === true,
+                        showGrid: node.parameters?.show_grid !== false,
+                        slices: node.parameters?.slices || [],
+                        focusedSliceIndex: node.parameters?.focusedSliceIndex ?? 0,
+                        quantityRanges: node.parameters?.quantity_ranges || {}
+                    }
                 });
             }
 
@@ -2918,6 +3007,7 @@ export class GraphRenderer {
                 perspLabel.style.marginLeft = '4px';
                 const perspCheck = document.createElement('input');
                 perspCheck.type = 'checkbox';
+                perspCheck.checked = true;
                 perspCheck.style.margin = '0';
                 perspCheck.style.width = '10px';
                 perspCheck.style.height = '10px';
@@ -2932,7 +3022,7 @@ export class GraphRenderer {
                 viewToolbar.appendChild(perspLabel);
 
                 const fovContainer = document.createElement('div');
-                fovContainer.style.display = 'none';
+                fovContainer.style.display = 'flex';
                 fovContainer.style.alignItems = 'center';
                 fovContainer.style.gap = '2px';
                 const fovSlider = document.createElement('input');
@@ -2990,8 +3080,16 @@ export class GraphRenderer {
                             errorEl.style.borderRadius = '3px';
                         }
                     } else if (e.data && e.data.type === 'rangeUpdated') {
+                        const slices = node.parameters?.slices || [];
+                        const focusedSliceIndex = node.parameters?.focusedSliceIndex ?? 0;
+                        const focusedConfig = slices[focusedSliceIndex] || slices[0] || {};
+                        const focusedQty = focusedConfig.quantities?.[0] || 'pressure';
+                        const ranges = { ...(node.parameters?.quantity_ranges || {}) };
+                        ranges[focusedQty] = [e.data.min, e.data.max];
+
                         this.stateManager.updateNodeParameters(node.id, {
                             auto_scale: false,
+                            quantity_ranges: ranges,
                             min_val: e.data.min,
                             max_val: e.data.max
                         });
@@ -3166,7 +3264,10 @@ export class GraphRenderer {
                         dx: cellSize,
                         nx: nx,
                         ny: ny,
-                        nz: nz
+                        nz: nz,
+                        slices: node.parameters?.slices || [],
+                        focusedSliceIndex: node.parameters?.focusedSliceIndex ?? 0,
+                        quantityRanges: node.parameters?.quantity_ranges || {}
                     }
                 });
             }
@@ -4033,6 +4134,14 @@ export class GraphRenderer {
                         const nr = Math.round(max_r / cellSize);
                         const nz = Math.round(max_z / cellSize);
                         gridInfo.textContent = `Calculated Grid: ${nr} x ${nz} cells (Total: ${(nr * nz).toLocaleString()})`;
+                    } else if (node.type === 'DomainMesh3D') {
+                        const dim_x = Number(node.parameters['dim_x'] ?? 1.0);
+                        const dim_y = Number(node.parameters['dim_y'] ?? 1.0);
+                        const dim_z = Number(node.parameters['dim_z'] ?? 1.0);
+                        const nx = Math.round(dim_x / cellSize);
+                        const ny = Math.round(dim_y / cellSize);
+                        const nz = Math.round(dim_z / cellSize);
+                        gridInfo.textContent = `Calculated Grid: ${nx} x ${ny} x ${nz} cells (Total: ${(nx * ny * nz).toLocaleString()})`;
                     }
                 }
                 return;
@@ -4057,13 +4166,13 @@ export class GraphRenderer {
         }
 
         const paramKeys = Object.keys(node.parameters);
-        if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D') {
+        if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D') {
             paramKeys.sort((a, b) => {
                 if (a === 'cell_size') return -1;
                 if (b === 'cell_size') return 1;
                 return 0;
             });
-        } else if (node.type === 'Charge1D' || node.type === 'Charge2D') {
+        } else if (node.type === 'Charge1D' || node.type === 'Charge2D' || node.type === 'Charge3D') {
             paramKeys.sort((a, b) => {
                 if (a === 'charge_mass') return -1;
                 if (b === 'charge_mass') return 1;
@@ -4072,7 +4181,7 @@ export class GraphRenderer {
         }
         
         let gridInfoDiv: HTMLDivElement | null = null;
-        if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D') {
+        if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D') {
             const cellSize = Number(node.parameters['cell_size'] ?? 0.001);
             const info = document.createElement('div');
             info.className = 'grid-info-display';
@@ -4083,12 +4192,20 @@ export class GraphRenderer {
                 const radius = Number(node.parameters['domain_radius'] ?? 1.0);
                 const n_cells = Math.round(radius / cellSize);
                 info.textContent = `Calculated Grid: ${n_cells.toLocaleString()} cells`;
-            } else {
+            } else if (node.type === 'DomainMesh2D') {
                 const max_r = Number(node.parameters['max_r'] ?? 1.0);
                 const max_z = Number(node.parameters['max_z'] ?? 1.0);
                 const nr = Math.round(max_r / cellSize);
                 const nz = Math.round(max_z / cellSize);
                 info.textContent = `Calculated Grid: ${nr} x ${nz} cells (Total: ${(nr * nz).toLocaleString()})`;
+            } else {
+                const dim_x = Number(node.parameters['dim_x'] ?? 1.0);
+                const dim_y = Number(node.parameters['dim_y'] ?? 1.0);
+                const dim_z = Number(node.parameters['dim_z'] ?? 1.0);
+                const nx = Math.round(dim_x / cellSize);
+                const ny = Math.round(dim_y / cellSize);
+                const nz = Math.round(dim_z / cellSize);
+                info.textContent = `Calculated Grid: ${nx} x ${ny} x ${nz} cells (Total: ${(nx * ny * nz).toLocaleString()})`;
             }
             gridInfoDiv = info;
         }
@@ -4105,7 +4222,7 @@ export class GraphRenderer {
             if (key === 'gauges' || key === 'slices') continue;
             if (key === 'nr' || key === 'nz' || key === 'n_cells') continue;
             if (node.type === 'VTKOutput' && !is3D && (key === 'export_slices' || key === 'export_volumes')) continue;
-            if ((node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') && key === 'telemetry_channel') continue;
+            if (node.type === 'VirtualGauges' && key === 'telemetry_channel') continue;
             // DetonatorLocation and DetonatorLocation3D are separate nodes now, showing correct properties
             if (node.type === 'DomainMesh') {
                 const dim = node.parameters['dimension'] || '1D';
@@ -4128,6 +4245,16 @@ export class GraphRenderer {
             if (node.type === 'Charge2D' || node.type === 'Charge1D') {
                 const shape = node.parameters['charge_shape'] || 'Sphere';
                 if (key === 'charge_height' && shape !== 'Cylinder') continue;
+            }
+            if (node.type === 'Charge3D') {
+                const shape = node.parameters['charge_shape'] || 'Sphere';
+                if (shape === 'Sphere') {
+                    if (key === 'charge_height' || key === 'charge_lx' || key === 'charge_ly' || key === 'charge_lz') continue;
+                } else if (shape === 'Cylinder') {
+                    if (key === 'charge_lx' || key === 'charge_ly' || key === 'charge_lz') continue;
+                } else if (shape === 'Block') {
+                    if (key === 'charge_radius' || key === 'charge_height') continue;
+                }
             }
 
             const row = document.createElement('div');
@@ -4170,7 +4297,7 @@ export class GraphRenderer {
                 'spatial_order': ['1', '2', '3'],
                 'temporal_order': ['1', '2', '3'],
                 'plot_stride': ['1', '2', '5', '10', '20', '50', '100'],
-                charge_shape: ['Sphere', 'Cylinder'],
+                charge_shape: node.type === 'Charge3D' ? ['Sphere', 'Cylinder', 'Block'] : ['Sphere', 'Cylinder'],
                 material_type: ['Air', 'JWL Charge', 'Ideal Gas Charge'],
                 colormap: ['plasma', 'viridis'],
                 auto_scale: ['true', 'false'],
@@ -4201,11 +4328,19 @@ export class GraphRenderer {
                             'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature',
                             'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
                             'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl',
-                            'spatial_order', 'temporal_order', 'gamma', 'plot_stride',
+                            'spatial_order', 'temporal_order', 'gamma', 'plot_stride', 'refresh_rate',
+                            'ascii_precision', 'step_interval', 'time_interval', 'downsample_stride',
+                            'telemetry_channel',
                             // 2D CFD keys
                             'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r',
                             'charge_r', 'charge_z', 'charge_radius', 'charge_height',
-                            'detonator_r', 'detonator_z', 'detonator_radius'
+                            'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
+                            'ideal_gamma', 'ideal_rho_0', 'ideal_e_0',
+                            // 3D CFD keys
+                            'nx', 'ny', 'nz', 'dim_x', 'dim_y', 'dim_z', 'origin_x', 'origin_y', 'origin_z',
+                            'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
+                            'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
+                            'min_y', 'max_y', 'min_val', 'max_val', 'ambientLevel', 'specularIntensity'
                         ];
                         let castValue: any = newVal;
                         if (numericKeys.includes(key)) {
@@ -4896,7 +5031,7 @@ export class GraphRenderer {
             if (node.type === 'TelemetryGraph') return 150;
             if (node.type === 'TelemetryContour') return 300;
             if (node.type === 'Telemetry3DViewport') return 350;
-            if (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') return 200;
+            if (node.type === 'VirtualGauges') return 200;
             base += Math.max(node.inputs.length, node.outputs.length) * 20;
         } else if (displayMode === 'expanded') {
             base += Object.keys(node.parameters).length * 25;
@@ -4904,7 +5039,7 @@ export class GraphRenderer {
             if (node.type === 'TelemetryGraph') base += 120;
             if (node.type === 'TelemetryContour') base += 270;
             if (node.type === 'Telemetry3DViewport') base += 320;
-            if (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') base += 250;
+            if (node.type === 'VirtualGauges') base += 250;
             base += Math.max(node.inputs.length, node.outputs.length) * 20;
         }
         return Math.max(base, 60);
@@ -4913,8 +5048,22 @@ export class GraphRenderer {
     private renderVirtualGaugesContent(node: Node, container: HTMLElement): void {
         const state = this.stateManager.getCurrentState();
         const has2D = state?.nodes.some(n => n.type === 'DomainMesh2D') || false;
-        const is3D = node.type === 'VirtualGauges3D';
+        const is3D = state?.nodes.some(n => n.type === 'DomainMesh3D' || n.type === 'CFDSolver3D') || false;
         const gauges = node.parameters?.gauges || [];
+
+        const setupKeyInterceptors = (input: HTMLInputElement) => {
+            input.onkeydown = (e) => {
+                e.stopPropagation();
+                if (e.key === 'Tab') {
+                    this.tabbedFromId = input.id;
+                    this.isTabbingForward = !e.shiftKey;
+                    this.isTabbingBackward = e.shiftKey;
+                } else if (e.key === 'Enter') {
+                    this.pressedEnterOnId = input.id;
+                    input.blur();
+                }
+            };
+        };
         const ALL_CHANNELS = [
             { id: 0, param: 'qty_pressure',    label: 'Pressure (Pa)' },
             { id: 1, param: 'qty_density',     label: 'Density (kg/m³)' },
@@ -5498,11 +5647,12 @@ export class GraphRenderer {
                     tdId.style.padding = '2px 4px';
                     const inputId = document.createElement('input');
                     inputId.type = 'text';
+                    inputId.id = `gauge-input-${node.id}-${idx}-id`;
                     inputId.value = g.id || g.name || '';
                     inputId.style.width = '100%';
                     inputId.style.fontWeight = 'bold';
                     inputId.onmousedown = (e) => e.stopPropagation();
-                    inputId.onkeydown = (e) => e.stopPropagation();
+                    setupKeyInterceptors(inputId);
                     inputId.addEventListener('change', () => {
                         const val = inputId.value.trim();
                         if (val) {
@@ -5521,11 +5671,12 @@ export class GraphRenderer {
                         tdX.style.padding = '2px 4px';
                         const inputX = document.createElement('input');
                         inputX.type = 'text';
+                        inputX.id = `gauge-input-${node.id}-${idx}-x`;
                         inputX.inputMode = 'decimal';
                         inputX.value = String(g.x ?? 0.5);
                         inputX.style.width = '100%';
                         inputX.onmousedown = (e) => e.stopPropagation();
-                        inputX.onkeydown = (e) => e.stopPropagation();
+                        setupKeyInterceptors(inputX);
                         inputX.addEventListener('change', () => {
                             const val = Number(inputX.value);
                             if (!isNaN(val)) {
@@ -5540,11 +5691,12 @@ export class GraphRenderer {
                         tdY.style.padding = '2px 4px';
                         const inputY = document.createElement('input');
                         inputY.type = 'text';
+                        inputY.id = `gauge-input-${node.id}-${idx}-y`;
                         inputY.inputMode = 'decimal';
                         inputY.value = String(g.y ?? 0.5);
                         inputY.style.width = '100%';
                         inputY.onmousedown = (e) => e.stopPropagation();
-                        inputY.onkeydown = (e) => e.stopPropagation();
+                        setupKeyInterceptors(inputY);
                         inputY.addEventListener('change', () => {
                             const val = Number(inputY.value);
                             if (!isNaN(val)) {
@@ -5559,11 +5711,12 @@ export class GraphRenderer {
                         tdZ.style.padding = '2px 4px';
                         const inputZ = document.createElement('input');
                         inputZ.type = 'text';
+                        inputZ.id = `gauge-input-${node.id}-${idx}-z`;
                         inputZ.inputMode = 'decimal';
                         inputZ.value = String(g.z ?? 0.5);
                         inputZ.style.width = '100%';
                         inputZ.onmousedown = (e) => e.stopPropagation();
-                        inputZ.onkeydown = (e) => e.stopPropagation();
+                        setupKeyInterceptors(inputZ);
                         inputZ.addEventListener('change', () => {
                             const val = Number(inputZ.value);
                             if (!isNaN(val)) {
@@ -5578,11 +5731,12 @@ export class GraphRenderer {
                         tdR.style.padding = '2px 4px';
                         const inputR = document.createElement('input');
                         inputR.type = 'text';
+                        inputR.id = `gauge-input-${node.id}-${idx}-r`;
                         inputR.inputMode = 'decimal';
                         inputR.value = String(g.r ?? 0.1);
                         inputR.style.width = '100%';
                         inputR.onmousedown = (e) => e.stopPropagation();
-                        inputR.onkeydown = (e) => e.stopPropagation();
+                        setupKeyInterceptors(inputR);
                         inputR.addEventListener('change', () => {
                             const val = Number(inputR.value);
                             if (!isNaN(val)) {
@@ -5598,11 +5752,12 @@ export class GraphRenderer {
                             tdZ.style.padding = '2px 4px';
                             const inputZ = document.createElement('input');
                             inputZ.type = 'text';
+                            inputZ.id = `gauge-input-${node.id}-${idx}-z`;
                             inputZ.inputMode = 'decimal';
                             inputZ.value = String(g.z ?? 0.0);
                             inputZ.style.width = '100%';
                             inputZ.onmousedown = (e) => e.stopPropagation();
-                            inputZ.onkeydown = (e) => e.stopPropagation();
+                            setupKeyInterceptors(inputZ);
                             inputZ.addEventListener('change', () => {
                                 const val = Number(inputZ.value);
                                 if (!isNaN(val)) {
@@ -5863,6 +6018,36 @@ export class GraphRenderer {
             }
         });
         ro.observe(canvasContainer);
+
+        // Restore focus if we tabbed or pressed enter
+        if (activeTab === 'list') {
+            const table = container.querySelector('table') as HTMLTableElement;
+            if (table) {
+                const inputs = Array.from(table.querySelectorAll('input[type="text"]')) as HTMLInputElement[];
+                if (this.tabbedFromId) {
+                    const idx = inputs.findIndex(inp => inp.id === this.tabbedFromId);
+                    if (idx !== -1) {
+                        if (this.isTabbingForward && idx < inputs.length - 1) {
+                            inputs[idx + 1].focus();
+                            inputs[idx + 1].select();
+                        } else if (this.isTabbingBackward && idx > 0) {
+                            inputs[idx - 1].focus();
+                            inputs[idx - 1].select();
+                        }
+                    }
+                    this.tabbedFromId = null;
+                    this.isTabbingForward = false;
+                    this.isTabbingBackward = false;
+                } else if (this.pressedEnterOnId) {
+                    const idx = inputs.findIndex(inp => inp.id === this.pressedEnterOnId);
+                    if (idx !== -1) {
+                        inputs[idx].focus();
+                        inputs[idx].select();
+                    }
+                    this.pressedEnterOnId = null;
+                }
+            }
+        }
     }
 
     private drawGaugesChart(canvas: HTMLCanvasElement, history: any, gauges: any[], channel: number, has2D: boolean, nodeId: string): void {
@@ -5893,7 +6078,7 @@ export class GraphRenderer {
         let hasData = false;
 
         gauges.filter(g => g.plot !== false).forEach(g => {
-            const gData = values[g.id];
+            const gData = values[g.id || g.name];
             if (gData && gData[channel]) {
                 const arr = gData[channel];
                 arr.forEach((v: number) => {
@@ -5974,7 +6159,7 @@ export class GraphRenderer {
         // Draw curves
         const colors = ['#38bdf8', '#fb7185', '#34d399', '#fbbf24', '#a78bfa', '#2dd4bf'];
         gauges.filter(g => g.plot !== false).forEach((g, gIdx) => {
-            const gData = values[g.id];
+            const gData = values[g.id || g.name];
             if (gData && gData[channel]) {
                 const arr = gData[channel];
                 ctx.strokeStyle = colors[gIdx % colors.length];
@@ -6007,6 +6192,33 @@ export class GraphRenderer {
         return val.toFixed(1);
     }
 
+    private syncSliceConfig(node: Node, slices: any[]) {
+        const worker = this.nodeWorkers.get(node.id);
+        if (worker) {
+            worker.postMessage({
+                type: 'setConfig',
+                data: {
+                    slices: slices,
+                    focusedSliceIndex: node.parameters?.focusedSliceIndex ?? 0,
+                    quantityRanges: node.parameters?.quantity_ranges || {}
+                }
+            });
+        }
+        
+        const net = (window as any).networkManager;
+        if (net && net.isConnected()) {
+            let targetModelId = node.id;
+            const models = this.stateManager.getAppState().models;
+            for (const [mid, m] of Object.entries(models)) {
+                if (m.nodes.some(n => n.id === node.id)) {
+                    targetModelId = mid;
+                    break;
+                }
+            }
+            net.send({ command: "VIEW3D_CONFIG", modelId: targetModelId, slices });
+        }
+    }
+
     private rebuildSlicesPanel(node: Node, panel: HTMLElement) {
         panel.innerHTML = '';
 
@@ -6024,48 +6236,14 @@ export class GraphRenderer {
             cb.checked = value;
             cb.style.margin = '0';
             cb.style.cursor = 'pointer';
-            cb.onchange = () => {
-                onChange(cb.checked);
-            };
+            cb.onchange = () => onChange(cb.checked);
 
             labelEl.appendChild(cb);
             labelEl.appendChild(document.createTextNode(label));
             return labelEl;
         };
 
-        // 1. Colormap Dropdown
-        const cmRow = document.createElement('div');
-        cmRow.style.display = 'flex';
-        cmRow.style.gap = '6px';
-        cmRow.style.alignItems = 'center';
-        cmRow.style.marginBottom = '6px';
-
-        const cmLabel = document.createElement('span');
-        cmLabel.textContent = 'Colormap:';
-        cmLabel.style.color = '#888';
-        cmLabel.style.fontSize = '9px';
-        cmRow.appendChild(cmLabel);
-
-        const cmSel = document.createElement('select');
-        cmSel.style.flex = '1';
-        cmSel.style.background = '#1a1a1c';
-        cmSel.style.color = '#ccc';
-        cmSel.style.border = '1px solid #333';
-        cmSel.style.borderRadius = '3px';
-        cmSel.style.fontSize = '9px';
-        cmSel.style.padding = '1px';
-        cmSel.innerHTML = '<option value="plasma">Plasma</option><option value="viridis">Viridis</option>';
-        cmSel.value = node.parameters?.colormap || 'plasma';
-        cmSel.onchange = () => {
-            const val = cmSel.value;
-            this.stateManager.updateNodeParametersInPlace(node.id, { colormap: val });
-            const worker = this.nodeWorkers.get(node.id);
-            if (worker) worker.postMessage({ type: 'setConfig', data: { colormap: val } });
-        };
-        cmRow.appendChild(cmSel);
-        panel.appendChild(cmRow);
-
-        // 2. Rate Dropdown
+        // 1. Rate Dropdown (Solver config)
         const rateRow = document.createElement('div');
         rateRow.style.display = 'flex';
         rateRow.style.gap = '6px';
@@ -6116,155 +6294,29 @@ export class GraphRenderer {
         rateRow.appendChild(rateSel);
         panel.appendChild(rateRow);
 
-        const configContainer = document.createElement('div');
-        configContainer.style.display = 'grid';
-        configContainer.style.gridTemplateColumns = '1fr 1fr';
-        configContainer.style.gap = '6px';
-        configContainer.style.marginBottom = '8px';
+        // 2. Global Options (Grid & Cell Edges)
+        const globalConfigContainer = document.createElement('div');
+        globalConfigContainer.style.display = 'grid';
+        globalConfigContainer.style.gridTemplateColumns = '1fr 1fr';
+        globalConfigContainer.style.gap = '6px';
+        globalConfigContainer.style.marginBottom = '8px';
 
-        const autoScaleVal = node.parameters?.auto_scale !== false;
         const showGridVal = node.parameters?.show_grid !== false;
-        const logScaleVal = node.parameters?.log_scale === true;
         const cellEdgesVal = node.parameters?.cell_edges === true;
-        const interpolateVal = node.parameters?.interpolate === true;
 
-        configContainer.appendChild(createCheckbox('Auto Scale', autoScaleVal, (val) => {
-            this.stateManager.updateNodeParametersInPlace(node.id, { auto_scale: val });
-            const worker = this.nodeWorkers.get(node.id);
-            if (worker) worker.postMessage({ type: 'setConfig', data: { autoScale: val } });
-        }));
-        configContainer.appendChild(createCheckbox('Show Grid', showGridVal, (val) => {
+        globalConfigContainer.appendChild(createCheckbox('Show Grid', showGridVal, (val) => {
             this.stateManager.updateNodeParametersInPlace(node.id, { show_grid: val });
             const worker = this.nodeWorkers.get(node.id);
             if (worker) worker.postMessage({ type: 'setConfig', data: { showGrid: val } });
         }));
-        configContainer.appendChild(createCheckbox('Log Scale', logScaleVal, (val) => {
-            this.stateManager.updateNodeParametersInPlace(node.id, { log_scale: val });
-            const worker = this.nodeWorkers.get(node.id);
-            if (worker) worker.postMessage({ type: 'setConfig', data: { useLogScale: val } });
-        }));
-        configContainer.appendChild(createCheckbox('Cell Edges', cellEdgesVal, (val) => {
+        globalConfigContainer.appendChild(createCheckbox('Cell Edges', cellEdgesVal, (val) => {
             this.stateManager.updateNodeParametersInPlace(node.id, { cell_edges: val });
             const worker = this.nodeWorkers.get(node.id);
             if (worker) worker.postMessage({ type: 'setConfig', data: { showCellEdges: val } });
         }));
-        configContainer.appendChild(createCheckbox('Interpolate', interpolateVal, (val) => {
-            this.stateManager.updateNodeParametersInPlace(node.id, { interpolate: val });
-            const worker = this.nodeWorkers.get(node.id);
-            if (worker) worker.postMessage({ type: 'setConfig', data: { interpolate: val } });
-        }));
+        panel.appendChild(globalConfigContainer);
 
-        panel.appendChild(configContainer);
-
-        // Range text displaying actual current min/max of the plotted contour
-        const rangeText = document.createElement('div');
-        rangeText.className = `slices-range-text-${node.id}`;
-        rangeText.style.fontSize = '9px';
-        rangeText.style.color = '#00adff';
-        rangeText.style.marginBottom = '6px';
-        
-        const cached = this.viewportRanges.get(node.id);
-        if (cached) {
-            rangeText.textContent = `Current: [${this.formatRangeValue(cached.min)}, ${this.formatRangeValue(cached.max)}]`;
-        } else {
-            rangeText.textContent = `Current: [N/A]`;
-        }
-        panel.appendChild(rangeText);
-
-        // 3. Min / Max Value Row
-        const rangeRow = document.createElement('div');
-        rangeRow.style.display = 'flex';
-        rangeRow.style.gap = '8px';
-        rangeRow.style.alignItems = 'center';
-        rangeRow.style.marginBottom = '6px';
-
-        const minLabel = document.createElement('span');
-        minLabel.textContent = 'Min:';
-        minLabel.style.color = '#888';
-        minLabel.style.fontSize = '9px';
-        rangeRow.appendChild(minLabel);
-
-        const minInput = document.createElement('input');
-        minInput.type = 'number';
-        minInput.value = String(node.parameters?.min_val ?? 101325.0);
-        minInput.style.width = '60px';
-        minInput.style.background = '#1a1a1c';
-        minInput.style.color = '#ccc';
-        minInput.style.border = '1px solid #333';
-        minInput.style.borderRadius = '3px';
-        minInput.style.fontSize = '9px';
-        minInput.style.padding = '2px';
-        minInput.oninput = () => {
-            const val = Number(minInput.value);
-            const worker = this.nodeWorkers.get(node.id);
-            if (worker) worker.postMessage({ type: 'setConfig', data: { minY: val } });
-        };
-        minInput.onchange = () => {
-            this.stateManager.updateNodeParametersInPlace(node.id, {
-                min_val: Number(minInput.value)
-            });
-        };
-        rangeRow.appendChild(minInput);
-
-        const maxLabel = document.createElement('span');
-        maxLabel.textContent = 'Max:';
-        maxLabel.style.color = '#888';
-        maxLabel.style.fontSize = '9px';
-        rangeRow.appendChild(maxLabel);
-
-        const maxInput = document.createElement('input');
-        maxInput.type = 'number';
-        maxInput.value = String(node.parameters?.max_val ?? 10132500.0);
-        maxInput.style.width = '70px';
-        maxInput.style.background = '#1a1a1c';
-        maxInput.style.color = '#ccc';
-        maxInput.style.border = '1px solid #333';
-        maxInput.style.borderRadius = '3px';
-        maxInput.style.fontSize = '9px';
-        maxInput.style.padding = '2px';
-        maxInput.oninput = () => {
-            const val = Number(maxInput.value);
-            const worker = this.nodeWorkers.get(node.id);
-            if (worker) worker.postMessage({ type: 'setConfig', data: { maxY: val } });
-        };
-        maxInput.onchange = () => {
-            this.stateManager.updateNodeParametersInPlace(node.id, {
-                max_val: Number(maxInput.value)
-            });
-        };
-        rangeRow.appendChild(maxInput);
-
-        panel.appendChild(rangeRow);
-
-        // Scale to Current Button
-        const scaleBtnRow = document.createElement('div');
-        scaleBtnRow.style.display = 'flex';
-        scaleBtnRow.style.justifyContent = 'center';
-        scaleBtnRow.style.marginBottom = '8px';
-
-        const scaleBtn = document.createElement('button');
-        scaleBtn.textContent = '🎯 Scale to Current';
-        scaleBtn.style.width = '100%';
-        scaleBtn.style.background = '#2c2c30';
-        scaleBtn.style.color = '#ccc';
-        scaleBtn.style.border = '1px solid #444';
-        scaleBtn.style.borderRadius = '3px';
-        scaleBtn.style.padding = '3px 6px';
-        scaleBtn.style.cursor = 'pointer';
-        scaleBtn.style.fontSize = '9px';
-        scaleBtn.style.fontWeight = '500';
-        scaleBtn.onmouseover = () => scaleBtn.style.background = '#3c3c40';
-        scaleBtn.onmouseout = () => scaleBtn.style.background = '#2c2c30';
-        scaleBtn.onclick = (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            const worker = this.nodeWorkers.get(node.id);
-            if (worker) worker.postMessage({ type: 'scaleToCurrent' });
-        };
-        scaleBtnRow.appendChild(scaleBtn);
-        panel.appendChild(scaleBtnRow);
-
-        // 4. Active Slices List Title
+        // 3. Active Slices List Title
         const titleRow = document.createElement('div');
         titleRow.style.display = 'flex';
         titleRow.style.justifyContent = 'space-between';
@@ -6280,6 +6332,63 @@ export class GraphRenderer {
         titleSpan.style.fontSize = '9px';
         titleRow.appendChild(titleSpan);
 
+        const getSliceBounds = (axis: string) => {
+            let minVal = 0.0;
+            let maxVal = 1.0;
+            let meshNode: any = null;
+            const models = this.stateManager.getAppState().models;
+            for (const [mid, m] of Object.entries(models)) {
+                if (m.nodes.some(n => n.id === node.id)) {
+                    const solverConn = m.connections.find(c => c.toNode === node.id);
+                    if (solverConn) {
+                        const solverNode = m.nodes.find(n => n.id === solverConn.fromNode);
+                        if (solverNode && (solverNode.type === 'CFDSolver3D' || solverNode.type === 'CFDSolver2D')) {
+                            const connToSolver = m.connections.find(c => c.toNode === solverNode.id);
+                            if (connToSolver) {
+                                meshNode = m.nodes.find(n => n.id === connToSolver.fromNode);
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+
+            if (meshNode && meshNode.type === 'DomainMesh3D') {
+                const originX = Number(meshNode.parameters?.origin_x ?? 0.0);
+                const originY = Number(meshNode.parameters?.origin_y ?? 0.0);
+                const originZ = Number(meshNode.parameters?.origin_z ?? 0.0);
+                const dimX = Number(meshNode.parameters?.dim_x ?? 1.0);
+                const dimY = Number(meshNode.parameters?.dim_y ?? 1.0);
+                const dimZ = Number(meshNode.parameters?.dim_z ?? 1.0);
+
+                if (axis === 'xy') {
+                    minVal = originZ;
+                    maxVal = originZ + dimZ;
+                } else if (axis === 'xz') {
+                    minVal = originY;
+                    maxVal = originY + dimY;
+                } else if (axis === 'yz') {
+                    minVal = originX;
+                    maxVal = originX + dimX;
+                }
+            } else {
+                const cached = this.viewportDomains.get(node.id);
+                if (cached) {
+                    if (axis === 'xy') {
+                        minVal = cached.zmin;
+                        maxVal = cached.zmax;
+                    } else if (axis === 'xz') {
+                        minVal = cached.ymin;
+                        maxVal = cached.ymax;
+                    } else if (axis === 'yz') {
+                        minVal = cached.xmin;
+                        maxVal = cached.xmax;
+                    }
+                }
+            }
+            return { min: minVal, max: maxVal };
+        };
+
         const addBtn = document.createElement('button');
         addBtn.textContent = '+ Add';
         addBtn.style.background = '#00adff';
@@ -6293,74 +6402,204 @@ export class GraphRenderer {
         addBtn.onclick = (e) => {
             e.preventDefault();
             e.stopPropagation();
+
+            const bounds = getSliceBounds('xy');
+            const defaultOffset = (bounds.min + bounds.max) / 2.0;
+
             const slices = node.parameters?.slices ? [...node.parameters.slices] : [];
-            slices.push({ axis: 'xy', offset: 0.5, quantities: ['pressure'], stride: 1 });
+            slices.push({
+                axis: 'xy',
+                offset: defaultOffset,
+                quantities: ['pressure'],
+                stride: 1,
+                opacity: 1.0,
+                colormap: 'plasma',
+                auto_scale: true,
+                log_scale: false,
+                interpolate: true,
+                min_val: 101325.0,
+                max_val: 101325.0 * 10.0,
+                link_group: 'none'
+            });
             this.stateManager.updateNodeParametersInPlace(node.id, { slices });
-            
-            // Forward to running solver
-            const net = (window as any).networkManager;
-            if (net && net.isConnected()) {
-                let targetModelId = node.id;
-                const models = this.stateManager.getAppState().models;
-                for (const [mid, m] of Object.entries(models)) {
-                    if (m.nodes.some(n => n.id === node.id)) {
-                        targetModelId = mid;
-                        break;
-                    }
-                }
-                net.send({ command: "VIEW3D_CONFIG", modelId: targetModelId, slices });
-            }
+            this.syncSliceConfig(node, slices);
+            this.rebuildSlicesPanel(node, panel);
         };
         titleRow.appendChild(addBtn);
         panel.appendChild(titleRow);
 
-        // 5. Slices
+        // 4. Slices List
         const slices = node.parameters?.slices || [];
+        const focusedSliceIndex = node.parameters?.focusedSliceIndex ?? 0;
+        
         slices.forEach((slice: any, idx: number) => {
+            // Apply defaults for missing properties
+            const colormapVal = slice.colormap || 'plasma';
+            const autoScaleVal = slice.auto_scale !== false;
+            const logScaleVal = slice.log_scale === true;
+            const interpolateVal = slice.interpolate !== false;
+            const minRangeVal = slice.min_val !== undefined ? slice.min_val : 101325.0;
+            const maxRangeVal = slice.max_val !== undefined ? slice.max_val : 101325.0 * 10.0;
+            const linkGroup = slice.link_group || 'none';
+            const isExpanded = this.expandedSliceIndices.has(`${node.id}-${idx}`);
+
             const row = document.createElement('div');
-            row.style.background = 'rgba(255,255,255,0.02)';
-            row.style.border = '1px solid rgba(255,255,255,0.05)';
+            row.className = `slice-card-${idx}`;
+            
+            // Link Group styling
+            let borderColor = 'rgba(255,255,255,0.05)';
+            let leftBorder = '1px solid rgba(255,255,255,0.05)';
+            let glowColor = '';
+            if (linkGroup === 'A') {
+                leftBorder = '3px solid #3b82f6';
+                borderColor = 'rgba(59, 130, 246, 0.4)';
+                glowColor = 'rgba(59, 130, 246, 0.05)';
+            } else if (linkGroup === 'B') {
+                leftBorder = '3px solid #10b981';
+                borderColor = 'rgba(16, 185, 129, 0.4)';
+                glowColor = 'rgba(16, 185, 129, 0.05)';
+            } else if (linkGroup === 'C') {
+                leftBorder = '3px solid #f59e0b';
+                borderColor = 'rgba(245, 158, 11, 0.4)';
+                glowColor = 'rgba(245, 158, 11, 0.05)';
+            }
+
+            row.style.background = glowColor || (idx === focusedSliceIndex ? 'rgba(0, 173, 255, 0.04)' : 'rgba(255,255,255,0.02)');
+            row.style.border = idx === focusedSliceIndex ? '1px solid #00adff' : `1px solid ${borderColor}`;
+            row.style.borderLeft = leftBorder;
             row.style.borderRadius = '4px';
             row.style.padding = '4px 6px';
             row.style.display = 'flex';
             row.style.flexDirection = 'column';
             row.style.gap = '4px';
             row.style.marginBottom = '6px';
+            row.style.cursor = 'pointer';
 
+            row.onclick = (e) => {
+                const target = e.target as HTMLElement;
+                if (target.tagName === 'SELECT' || target.tagName === 'INPUT' || target.tagName === 'BUTTON' || target.classList.contains('action-btn')) {
+                    return;
+                }
+                this.stateManager.updateNodeParametersInPlace(node.id, { focusedSliceIndex: idx });
+                this.rebuildSlicesPanel(node, panel);
+            };
+
+            // Helper to update properties with linking propagation
+            const updateSliceParam = (key: string, val: any) => {
+                const updated = [...slices];
+                updated[idx] = { ...updated[idx], [key]: val };
+                
+                const group = updated[idx].link_group || 'none';
+                if (group !== 'none') {
+                    updated.forEach((s, i) => {
+                        if (i !== idx && s.link_group === group) {
+                            if (key === 'quantities') {
+                                updated[i] = { ...updated[i], quantities: [...val] };
+                            } else {
+                                updated[i] = { ...updated[i], [key]: val };
+                            }
+                        }
+                    });
+                }
+                
+                this.stateManager.updateNodeParametersInPlace(node.id, { slices: updated });
+                this.syncSliceConfig(node, updated);
+                this.rebuildSlicesPanel(node, panel);
+            };
+
+            // Header
             const header = document.createElement('div');
             header.style.display = 'flex';
             header.style.justifyContent = 'space-between';
             header.style.alignItems = 'center';
+            header.style.gap = '4px';
 
-            const idxSpan = document.createElement('span');
-            idxSpan.textContent = `Slice #${idx + 1}`;
-            idxSpan.style.color = '#888';
-            idxSpan.style.fontWeight = 'bold';
-            header.appendChild(idxSpan);
+            const linkSel = document.createElement('select');
+            linkSel.className = 'action-btn';
+            linkSel.style.background = linkGroup === 'none' ? '#1a1a1c' : (linkGroup === 'A' ? '#1e3a8a' : (linkGroup === 'B' ? '#064e3b' : '#78350f'));
+            linkSel.style.color = '#ccc';
+            linkSel.style.border = '1px solid #333';
+            linkSel.style.borderRadius = '3px';
+            linkSel.style.fontSize = '8px';
+            linkSel.style.padding = '0px 2px';
+            linkSel.style.cursor = 'pointer';
+            linkSel.innerHTML = `
+                <option value="none">🔗 Unlinked</option>
+                <option value="A">🔗 Link A</option>
+                <option value="B">🔗 Link B</option>
+                <option value="C">🔗 Link C</option>
+            `;
+            linkSel.value = linkGroup;
+            linkSel.onchange = (e) => {
+                e.stopPropagation();
+                const newGroup = linkSel.value;
+                const updated = [...slices];
+                updated[idx] = { ...updated[idx], link_group: newGroup };
+                
+                if (newGroup !== 'none') {
+                    const match = updated.find((s, i) => i !== idx && s.link_group === newGroup);
+                    if (match) {
+                        const keysToCopy = ['quantities', 'stride', 'offset', 'opacity', 'auto_scale', 'log_scale', 'interpolate', 'colormap', 'min_val', 'max_val'];
+                        keysToCopy.forEach(k => {
+                            if (k === 'quantities') {
+                                updated[idx].quantities = [...match.quantities];
+                            } else {
+                                updated[idx][k] = match[k];
+                            }
+                        });
+                    }
+                }
+                
+                this.stateManager.updateNodeParametersInPlace(node.id, { slices: updated });
+                this.syncSliceConfig(node, updated);
+                this.rebuildSlicesPanel(node, panel);
+            };
+            header.appendChild(linkSel);
+
+            const titleSpan = document.createElement('span');
+            titleSpan.textContent = `Slice #${idx + 1}`;
+            titleSpan.style.color = '#ccc';
+            titleSpan.style.fontWeight = 'bold';
+            titleSpan.style.fontSize = '9px';
+            titleSpan.style.flex = '1';
+            titleSpan.style.marginLeft = '4px';
+            header.appendChild(titleSpan);
+
+            const toggleBtn = document.createElement('span');
+            toggleBtn.className = 'action-btn';
+            toggleBtn.textContent = isExpanded ? '▲' : '⚙️';
+            toggleBtn.title = 'Settings';
+            toggleBtn.style.cursor = 'pointer';
+            toggleBtn.style.fontSize = '9px';
+            toggleBtn.style.color = '#888';
+            toggleBtn.style.padding = '0 4px';
+            toggleBtn.onclick = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const keyStr = `${node.id}-${idx}`;
+                if (this.expandedSliceIndices.has(keyStr)) {
+                    this.expandedSliceIndices.delete(keyStr);
+                } else {
+                    this.expandedSliceIndices.add(keyStr);
+                }
+                this.rebuildSlicesPanel(node, panel);
+            };
+            header.appendChild(toggleBtn);
 
             const delBtn = document.createElement('span');
+            delBtn.className = 'action-btn';
             delBtn.textContent = '🗑️';
             delBtn.style.cursor = 'pointer';
             delBtn.style.fontSize = '9px';
+            delBtn.style.paddingLeft = '4px';
             delBtn.onclick = (e) => {
                 e.preventDefault();
                 e.stopPropagation();
                 const updated = slices.filter((_: any, i: number) => i !== idx);
+                this.expandedSliceIndices.delete(`${node.id}-${idx}`);
                 this.stateManager.updateNodeParametersInPlace(node.id, { slices: updated });
-                
-                // Forward to running solver
-                const net = (window as any).networkManager;
-                if (net && net.isConnected()) {
-                    let targetModelId = node.id;
-                    const models = this.stateManager.getAppState().models;
-                    for (const [mid, m] of Object.entries(models)) {
-                        if (m.nodes.some(n => n.id === node.id)) {
-                            targetModelId = mid;
-                            break;
-                        }
-                    }
-                    net.send({ command: "VIEW3D_CONFIG", modelId: targetModelId, slices: updated });
-                }
+                this.syncSliceConfig(node, updated);
+                this.rebuildSlicesPanel(node, panel);
             };
             header.appendChild(delBtn);
             row.appendChild(header);
@@ -6368,10 +6607,9 @@ export class GraphRenderer {
             // Controls grid (Axis, Qty, Stride)
             const grid = document.createElement('div');
             grid.style.display = 'grid';
-            grid.style.gridTemplateColumns = '1fr 1fr 1fr';
+            grid.style.gridTemplateColumns = '1fr 1.2fr 1fr';
             grid.style.gap = '4px';
 
-            // Axis select
             const axisSel = document.createElement('select');
             axisSel.style.background = '#1a1a1c';
             axisSel.style.color = '#ccc';
@@ -6383,27 +6621,28 @@ export class GraphRenderer {
             axisSel.value = slice.axis;
             axisSel.onchange = (e) => {
                 e.stopPropagation();
+                const bounds = getSliceBounds(axisSel.value);
+                const defaultOffset = (bounds.min + bounds.max) / 2.0;
+
                 const updated = [...slices];
-                updated[idx] = { ...slice, axis: axisSel.value };
-                this.stateManager.updateNodeParametersInPlace(node.id, { slices: updated });
+                updated[idx] = { ...slice, axis: axisSel.value, offset: defaultOffset };
                 
-                // Forward to running solver
-                const net = (window as any).networkManager;
-                if (net && net.isConnected()) {
-                    let targetModelId = node.id;
-                    const models = this.stateManager.getAppState().models;
-                    for (const [mid, m] of Object.entries(models)) {
-                        if (m.nodes.some(n => n.id === node.id)) {
-                            targetModelId = mid;
-                            break;
+                // Propagate axis/offset changes to group if linked
+                if (linkGroup !== 'none') {
+                    updated.forEach((s, i) => {
+                        if (i !== idx && s.link_group === linkGroup) {
+                            updated[i].axis = axisSel.value;
+                            updated[i].offset = defaultOffset;
                         }
-                    }
-                    net.send({ command: "VIEW3D_CONFIG", modelId: targetModelId, slices: updated });
+                    });
                 }
+                
+                this.stateManager.updateNodeParametersInPlace(node.id, { slices: updated });
+                this.syncSliceConfig(node, updated);
+                this.rebuildSlicesPanel(node, panel);
             };
             grid.appendChild(axisSel);
 
-            // Qty select
             const qtySel = document.createElement('select');
             qtySel.style.background = '#1a1a1c';
             qtySel.style.color = '#ccc';
@@ -6411,17 +6650,14 @@ export class GraphRenderer {
             qtySel.style.borderRadius = '3px';
             qtySel.style.fontSize = '9px';
             qtySel.style.padding = '1px';
-            qtySel.innerHTML = '<option value="pressure">Pressure</option><option value="density">Density</option><option value="velocity">Velocity</option><option value="energy">Energy</option><option value="species1">Species 1</option><option value="species2">Species 2</option><option value="species3">Species 3</option>';
+            qtySel.innerHTML = '<option value="pressure">Pressure</option><option value="density">Density</option><option value="velocity">Velocity</option><option value="energy">Energy</option><option value="species1">Products</option><option value="species2">Unburnt</option><option value="species3">Air</option>';
             qtySel.value = slice.quantities?.[0] || 'pressure';
             qtySel.onchange = (e) => {
                 e.stopPropagation();
-                const updated = [...slices];
-                updated[idx] = { ...slice, quantities: [qtySel.value] };
-                this.stateManager.updateNodeParametersInPlace(node.id, { slices: updated });
+                updateSliceParam('quantities', [qtySel.value]);
             };
             grid.appendChild(qtySel);
 
-            // Stride select
             const strideSel = document.createElement('select');
             strideSel.style.background = '#1a1a1c';
             strideSel.style.color = '#ccc';
@@ -6433,25 +6669,33 @@ export class GraphRenderer {
             strideSel.value = String(slice.stride || 1);
             strideSel.onchange = (e) => {
                 e.stopPropagation();
-                const updated = [...slices];
-                updated[idx] = { ...slice, stride: Number(strideSel.value) };
-                this.stateManager.updateNodeParametersInPlace(node.id, { slices: updated });
+                updateSliceParam('stride', Number(strideSel.value));
             };
             grid.appendChild(strideSel);
-
             row.appendChild(grid);
 
-            // Slider wrapping
+            // Offset Slider
+            const bounds = getSliceBounds(slice.axis);
+            const stepVal = (bounds.max - bounds.min) / 100.0;
+
             const sliderRow = document.createElement('div');
             sliderRow.style.display = 'flex';
             sliderRow.style.alignItems = 'center';
             sliderRow.style.gap = '4px';
 
+            const offsetLabel = document.createElement('span');
+            offsetLabel.textContent = 'Off:';
+            offsetLabel.style.fontSize = '8px';
+            offsetLabel.style.color = '#888';
+            offsetLabel.style.width = '24px';
+            sliderRow.appendChild(offsetLabel);
+
             const slider = document.createElement('input');
             slider.type = 'range';
-            slider.min = '0';
-            slider.max = '1';
-            slider.step = '0.01';
+            slider.className = 'slice-offset-slider';
+            slider.min = String(bounds.min);
+            slider.max = String(bounds.max);
+            slider.step = String(stepVal);
             slider.value = String(slice.offset);
             slider.style.flex = '1';
             slider.style.height = '3px';
@@ -6459,6 +6703,7 @@ export class GraphRenderer {
 
             const sliderVal = document.createElement('input');
             sliderVal.type = 'number';
+            sliderVal.className = 'slice-offset-val';
             sliderVal.value = String(slice.offset);
             sliderVal.style.width = '35px';
             sliderVal.style.background = '#1a1a1c';
@@ -6473,57 +6718,256 @@ export class GraphRenderer {
                 e.stopPropagation();
                 const val = Number(slider.value);
                 sliderVal.value = String(val);
-                
-                // Update in-place in memory to avoid UI rebuild during drag!
                 slice.offset = val;
                 
-                // Forward to running solver immediately
-                const net = (window as any).networkManager;
-                if (net && net.isConnected()) {
-                    let targetModelId = node.id;
-                    const models = this.stateManager.getAppState().models;
-                    for (const [mid, m] of Object.entries(models)) {
-                        if (m.nodes.some(n => n.id === node.id)) {
-                            targetModelId = mid;
-                            break;
+                if (linkGroup !== 'none') {
+                    slices.forEach((s: any, i: number) => {
+                        if (i !== idx && s.link_group === linkGroup) {
+                            s.offset = val;
+                            const otherRow = panel.querySelector(`.slice-card-${i}`) as HTMLElement;
+                            if (otherRow) {
+                                const otherSlider = otherRow.querySelector('.slice-offset-slider') as HTMLInputElement;
+                                const otherVal = otherRow.querySelector('.slice-offset-val') as HTMLInputElement;
+                                if (otherSlider) otherSlider.value = String(val);
+                                if (otherVal) otherVal.value = String(val);
+                            }
                         }
-                    }
-                    net.send({ command: "VIEW3D_CONFIG", modelId: targetModelId, slices });
+                    });
                 }
+                this.syncSliceConfig(node, slices);
             };
             slider.onchange = (e) => {
                 e.stopPropagation();
-                // Save final value to workspace parameters when drag is released
                 this.stateManager.updateNodeParametersInPlace(node.id, { slices });
             };
 
             sliderVal.onchange = (e) => {
                 e.stopPropagation();
-                const val = Math.max(0, Math.min(1.0, Number(sliderVal.value)));
+                const val = Math.max(bounds.min, Math.min(bounds.max, Number(sliderVal.value)));
                 slider.value = String(val);
                 sliderVal.value = String(val);
-                
-                slice.offset = val;
-                this.stateManager.updateNodeParametersInPlace(node.id, { slices });
-                
-                // Forward to running solver
-                const net = (window as any).networkManager;
-                if (net && net.isConnected()) {
-                    let targetModelId = node.id;
-                    const models = this.stateManager.getAppState().models;
-                    for (const [mid, m] of Object.entries(models)) {
-                        if (m.nodes.some(n => n.id === node.id)) {
-                            targetModelId = mid;
-                            break;
-                        }
-                    }
-                    net.send({ command: "VIEW3D_CONFIG", modelId: targetModelId, slices });
-                }
+                updateSliceParam('offset', val);
             };
 
             sliderRow.appendChild(slider);
             sliderRow.appendChild(sliderVal);
             row.appendChild(sliderRow);
+
+            // Opacity Slider
+            const opacityRow = document.createElement('div');
+            opacityRow.style.display = 'flex';
+            opacityRow.style.alignItems = 'center';
+            opacityRow.style.gap = '4px';
+
+            const opacLabel = document.createElement('span');
+            opacLabel.textContent = 'Opac:';
+            opacLabel.style.fontSize = '8px';
+            opacLabel.style.color = '#888';
+            opacLabel.style.width = '24px';
+            opacityRow.appendChild(opacLabel);
+
+            const opacSlider = document.createElement('input');
+            opacSlider.type = 'range';
+            opacSlider.className = 'slice-opac-slider';
+            opacSlider.min = '0';
+            opacSlider.max = '1';
+            opacSlider.step = '0.05';
+            opacSlider.value = String(slice.opacity !== undefined ? slice.opacity : 1.0);
+            opacSlider.style.flex = '1';
+            opacSlider.style.height = '3px';
+            opacSlider.style.outline = 'none';
+
+            const opacVal = document.createElement('input');
+            opacVal.type = 'number';
+            opacVal.className = 'slice-opac-val';
+            opacVal.value = String(slice.opacity !== undefined ? slice.opacity : 1.0);
+            opacVal.style.width = '35px';
+            opacVal.style.background = '#1a1a1c';
+            opacVal.style.color = '#ccc';
+            opacVal.style.border = '1px solid #333';
+            opacVal.style.borderRadius = '3px';
+            opacVal.style.fontSize = '8px';
+            opacVal.style.padding = '1px';
+            opacVal.style.textAlign = 'center';
+
+            opacSlider.oninput = (e) => {
+                e.stopPropagation();
+                const val = Number(opacSlider.value);
+                opacVal.value = String(val);
+                slice.opacity = val;
+                
+                if (linkGroup !== 'none') {
+                    slices.forEach((s: any, i: number) => {
+                        if (i !== idx && s.link_group === linkGroup) {
+                            s.opacity = val;
+                            const otherRow = panel.querySelector(`.slice-card-${i}`) as HTMLElement;
+                            if (otherRow) {
+                                const otherSlider = otherRow.querySelector('.slice-opac-slider') as HTMLInputElement;
+                                const otherVal = otherRow.querySelector('.slice-opac-val') as HTMLInputElement;
+                                if (otherSlider) otherSlider.value = String(val);
+                                if (otherVal) otherVal.value = String(val);
+                            }
+                        }
+                    });
+                }
+                const worker = this.nodeWorkers.get(node.id);
+                if (worker) {
+                    const opacities = slices.map((s: any) => s.opacity !== undefined ? s.opacity : 1.0);
+                    worker.postMessage({ type: 'setConfig', data: { sliceOpacities: opacities } });
+                }
+            };
+            opacSlider.onchange = (e) => {
+                e.stopPropagation();
+                this.stateManager.updateNodeParametersInPlace(node.id, { slices });
+            };
+
+            opacVal.onchange = (e) => {
+                e.stopPropagation();
+                const val = Math.max(0.0, Math.min(1.0, Number(opacVal.value)));
+                opacSlider.value = String(val);
+                opacVal.value = String(val);
+                updateSliceParam('opacity', val);
+            };
+
+            opacityRow.appendChild(opacSlider);
+            opacityRow.appendChild(opacVal);
+            row.appendChild(opacityRow);
+
+            // Collapsible Extended Settings Panel
+            if (isExpanded) {
+                const subPanel = document.createElement('div');
+                subPanel.style.borderTop = '1px solid #333';
+                subPanel.style.paddingTop = '6px';
+                subPanel.style.marginTop = '4px';
+                subPanel.style.display = 'flex';
+                subPanel.style.flexDirection = 'column';
+                subPanel.style.gap = '4px';
+
+                // Checkboxes Grid
+                const cbGrid = document.createElement('div');
+                cbGrid.style.display = 'grid';
+                cbGrid.style.gridTemplateColumns = '1fr 1fr';
+                cbGrid.style.gap = '4px';
+
+                cbGrid.appendChild(createCheckbox('Auto Range', autoScaleVal, (val) => {
+                    updateSliceParam('auto_scale', val);
+                }));
+                cbGrid.appendChild(createCheckbox('Log Scale', logScaleVal, (val) => {
+                    updateSliceParam('log_scale', val);
+                }));
+                cbGrid.appendChild(createCheckbox('Interpolate', interpolateVal, (val) => {
+                    updateSliceParam('interpolate', val);
+                }));
+                subPanel.appendChild(cbGrid);
+
+                // Colormap select row
+                const cmRow = document.createElement('div');
+                cmRow.style.display = 'flex';
+                cmRow.style.gap = '6px';
+                cmRow.style.alignItems = 'center';
+                
+                const cmLabel = document.createElement('span');
+                cmLabel.textContent = 'Colormap:';
+                cmLabel.style.color = '#888';
+                cmLabel.style.fontSize = '8px';
+                cmRow.appendChild(cmLabel);
+
+                const cmSel = document.createElement('select');
+                cmSel.className = 'action-btn';
+                cmSel.style.flex = '1';
+                cmSel.style.background = '#1a1a1c';
+                cmSel.style.color = '#ccc';
+                cmSel.style.border = '1px solid #333';
+                cmSel.style.borderRadius = '3px';
+                cmSel.style.fontSize = '8px';
+                cmSel.style.padding = '0px 2px';
+                cmSel.innerHTML = '<option value="plasma">Plasma</option><option value="viridis">Viridis</option>';
+                cmSel.value = colormapVal;
+                cmSel.onchange = (e) => {
+                    e.stopPropagation();
+                    updateSliceParam('colormap', cmSel.value);
+                };
+                cmRow.appendChild(cmSel);
+                subPanel.appendChild(cmRow);
+
+                // Min / Max inputs
+                const rangeRow = document.createElement('div');
+                rangeRow.style.display = 'flex';
+                rangeRow.style.gap = '4px';
+                rangeRow.style.alignItems = 'center';
+
+                const minLabel = document.createElement('span');
+                minLabel.textContent = 'Min:';
+                minLabel.style.color = '#888';
+                minLabel.style.fontSize = '8px';
+                rangeRow.appendChild(minLabel);
+
+                const minInput = document.createElement('input');
+                minInput.type = 'number';
+                minInput.className = 'action-btn';
+                minInput.value = String(minRangeVal);
+                minInput.disabled = autoScaleVal;
+                minInput.style.width = '50px';
+                minInput.style.background = autoScaleVal ? '#0c0c0d' : '#1a1a1c';
+                minInput.style.color = autoScaleVal ? '#666' : '#ccc';
+                minInput.style.border = '1px solid #333';
+                minInput.style.borderRadius = '3px';
+                minInput.style.fontSize = '8px';
+                minInput.style.padding = '1px';
+                minInput.onchange = (e) => {
+                    e.stopPropagation();
+                    updateSliceParam('min_val', Number(minInput.value));
+                };
+                rangeRow.appendChild(minInput);
+
+                const maxLabel = document.createElement('span');
+                maxLabel.textContent = 'Max:';
+                maxLabel.style.color = '#888';
+                maxLabel.style.fontSize = '8px';
+                rangeRow.appendChild(maxLabel);
+
+                const maxInput = document.createElement('input');
+                maxInput.type = 'number';
+                maxInput.className = 'action-btn';
+                maxInput.value = String(maxRangeVal);
+                maxInput.disabled = autoScaleVal;
+                maxInput.style.width = '55px';
+                maxInput.style.background = autoScaleVal ? '#0c0c0d' : '#1a1a1c';
+                maxInput.style.color = autoScaleVal ? '#666' : '#ccc';
+                maxInput.style.border = '1px solid #333';
+                maxInput.style.borderRadius = '3px';
+                maxInput.style.fontSize = '8px';
+                maxInput.style.padding = '1px';
+                maxInput.onchange = (e) => {
+                    e.stopPropagation();
+                    updateSliceParam('max_val', Number(maxInput.value));
+                };
+                rangeRow.appendChild(maxInput);
+
+                const scaleBtn = document.createElement('button');
+                scaleBtn.className = 'action-btn';
+                scaleBtn.innerHTML = '🎯';
+                scaleBtn.title = 'Scale to Current Frame';
+                scaleBtn.style.background = '#2c2c30';
+                scaleBtn.style.color = '#ccc';
+                scaleBtn.style.border = '1px solid #444';
+                scaleBtn.style.borderRadius = '3px';
+                scaleBtn.style.padding = '1px 4px';
+                scaleBtn.style.cursor = 'pointer';
+                scaleBtn.style.fontSize = '8px';
+                scaleBtn.onclick = (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const worker = this.nodeWorkers.get(node.id);
+                    if (worker) {
+                        worker.postMessage({ type: 'scaleToCurrent', index: idx });
+                    }
+                };
+                rangeRow.appendChild(scaleBtn);
+
+                subPanel.appendChild(rangeRow);
+                row.appendChild(subPanel);
+            }
 
             panel.appendChild(row);
         });

@@ -41,6 +41,10 @@ export class NodeViewer {
 
     private telemetryBuffer: any = null;
     private renderRequestId: number | null = null;
+    private tabbedFromId: string | null = null;
+    private isTabbingForward: boolean = false;
+    private isTabbingBackward: boolean = false;
+    private pressedEnterOnId: string | null = null;
 
     private lastColor: string | null = null;
     private lastMinY: number | null = null;
@@ -112,7 +116,7 @@ export class NodeViewer {
         }
 
         if (this.lastId === node.id && this.lastType === node.type) {
-            if (node.type !== 'TelemetryText' && node.type !== 'TelemetryGraph' && node.type !== 'VirtualGauges' && node.type !== 'VirtualGauges3D') {
+            if (node.type !== 'TelemetryText' && node.type !== 'TelemetryGraph' && node.type !== 'VirtualGauges') {
                 this.renderStandardNode(node);
             } else if (node.type === 'TelemetryGraph') {
                 // Sync settings from the node parameters (e.g. after model load)
@@ -195,7 +199,7 @@ export class NodeViewer {
             this.renderExpandedText(node);
         } else if (node.type === 'TelemetryGraph') {
             this.renderExpandedGraph(node);
-        } else if (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') {
+        } else if (node.type === 'VirtualGauges') {
             this.renderVirtualGauges(node, oldScrollTop);
         } else if (node.type === 'Telemetry3DViewport') {
             this.renderExpanded3DViewport(node);
@@ -363,6 +367,7 @@ export class NodeViewer {
         perspLabel.style.marginLeft = '4px';
         const perspCheck = document.createElement('input');
         perspCheck.type = 'checkbox';
+        perspCheck.checked = true;
         perspCheck.style.margin = '0';
         perspCheck.onchange = (e) => {
             e.stopPropagation();
@@ -375,7 +380,7 @@ export class NodeViewer {
         controlsRow.appendChild(perspLabel);
 
         const fovContainer = document.createElement('div');
-        fovContainer.style.display = 'none';
+        fovContainer.style.display = 'flex';
         fovContainer.style.alignItems = 'center';
         fovContainer.style.gap = '2px';
         const fovSlider = document.createElement('input');
@@ -395,6 +400,44 @@ export class NodeViewer {
         fovContainer.appendChild(fovLabel);
         fovContainer.appendChild(fovSlider);
         controlsRow.appendChild(fovContainer);
+
+        const lightLabel = document.createElement('label');
+        lightLabel.style.display = 'flex';
+        lightLabel.style.alignItems = 'center';
+        lightLabel.style.gap = '2px';
+        lightLabel.style.color = '#fff';
+        lightLabel.style.fontSize = '11px';
+        lightLabel.style.marginLeft = '4px';
+        const lightCheck = document.createElement('input');
+        lightCheck.type = 'checkbox';
+        lightCheck.checked = true;
+        lightCheck.style.margin = '0';
+        lightCheck.onchange = (e) => {
+            e.stopPropagation();
+            this.chartWorker?.postMessage({ type: 'setConfig', data: { lightingEnabled: lightCheck.checked } });
+        };
+        lightLabel.appendChild(lightCheck);
+        lightLabel.appendChild(document.createTextNode('Lighting'));
+        controlsRow.appendChild(lightLabel);
+
+        const aoLabel = document.createElement('label');
+        aoLabel.style.display = 'flex';
+        aoLabel.style.alignItems = 'center';
+        aoLabel.style.gap = '2px';
+        aoLabel.style.color = '#fff';
+        aoLabel.style.fontSize = '11px';
+        aoLabel.style.marginLeft = '4px';
+        const aoCheck = document.createElement('input');
+        aoCheck.type = 'checkbox';
+        aoCheck.checked = true;
+        aoCheck.style.margin = '0';
+        aoCheck.onchange = (e) => {
+            e.stopPropagation();
+            this.chartWorker?.postMessage({ type: 'setConfig', data: { aoEnabled: aoCheck.checked } });
+        };
+        aoLabel.appendChild(aoCheck);
+        aoLabel.appendChild(document.createTextNode('AO'));
+        controlsRow.appendChild(aoLabel);
 
         container.appendChild(controlsRow);
 
@@ -430,7 +473,11 @@ export class NodeViewer {
             type: 'setConfig',
             data: {
                 colormap: mapSelect.value,
-                autoScale: autoScaleInput.checked
+                autoScale: autoScaleInput.checked,
+                lightingEnabled: true,
+                aoEnabled: true,
+                ambientLevel: 0.3,
+                specularIntensity: 0.4
             }
         });
 
@@ -903,13 +950,13 @@ export class NodeViewer {
         grid.style.alignItems = 'center';
 
         const paramKeys = Object.keys(node.parameters);
-        if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D') {
+        if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D') {
             paramKeys.sort((a, b) => {
                 if (a === 'cell_size') return -1;
                 if (b === 'cell_size') return 1;
                 return 0;
             });
-        } else if (node.type === 'Charge1D' || node.type === 'Charge2D') {
+        } else if (node.type === 'Charge1D' || node.type === 'Charge2D' || node.type === 'Charge3D') {
             paramKeys.sort((a, b) => {
                 if (a === 'charge_mass') return -1;
                 if (b === 'charge_mass') return 1;
@@ -941,6 +988,16 @@ export class NodeViewer {
                 const shape = node.parameters['charge_shape'] || 'Sphere';
                 if (key === 'charge_height' && shape !== 'Cylinder') continue;
             }
+            if (node.type === 'Charge3D') {
+                const shape = node.parameters['charge_shape'] || 'Sphere';
+                if (shape === 'Sphere') {
+                    if (key === 'charge_height' || key === 'charge_lx' || key === 'charge_ly' || key === 'charge_lz') continue;
+                } else if (shape === 'Cylinder') {
+                    if (key === 'charge_lx' || key === 'charge_ly' || key === 'charge_lz') continue;
+                } else if (shape === 'Block') {
+                    if (key === 'charge_radius' || key === 'charge_height') continue;
+                }
+            }
             // DetonatorLocation and DetonatorLocation3D are separate nodes now, showing correct properties
 
             const label = document.createElement('label');
@@ -960,7 +1017,7 @@ export class NodeViewer {
         if (nodeId !== this.currentNodeId) return;
         const state = this.stateManager.getCurrentState();
         const node = state?.nodes.find(n => n.id === nodeId);
-        if (node && (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D')) {
+        if (node && node.type === 'VirtualGauges') {
             if (this.gaugesCanvas) {
                 const gauges = node.parameters?.gauges || [];
                 const has2D = state?.nodes.some(n => n.type === 'DomainMesh2D') || false;
@@ -992,7 +1049,7 @@ export class NodeViewer {
 
         const state = this.stateManager.getCurrentState();
         const has2D = state?.nodes.some(n => n.type === 'DomainMesh2D') || false;
-        const is3D = node.type === 'VirtualGauges3D';
+        const is3D = state?.nodes.some(n => n.type === 'DomainMesh3D' || n.type === 'CFDSolver3D') || false;
 
         const ALL_CHANNELS = [
             { id: 0, param: 'qty_pressure',    label: 'Pressure',          color: '#00f0ff' },
@@ -1340,8 +1397,8 @@ export class NodeViewer {
                 const gauges = node.parameters?.gauges || [];
                 const nextIdx = gauges.length + 1;
                 const newGauge = is3D 
-                    ? { id: `G${nextIdx}`, x: 0.5, y: 0.5, z: 0.5, active: true, plot: true }
-                    : { id: `G${nextIdx}`, r: 0.1, z: 0.0, active: true, plot: true };
+                    ? { id: `G${nextIdx}`, name: `G${nextIdx}`, x: 0.5, y: 0.5, z: 0.5, active: true, plot: true }
+                    : { id: `G${nextIdx}`, name: `G${nextIdx}`, r: 0.1, z: 0.0, active: true, plot: true };
                 const newGauges = [...gauges, newGauge];
                 this.stateManager.updateNodeParameters(node.id, { gauges: newGauges });
                 this.render();
@@ -1635,6 +1692,36 @@ export class NodeViewer {
         });
         this.gaugesResizeObserver.observe(canvas);
 
+        // Restore focus if we tabbed or pressed enter
+        if (this.gaugesActiveTab === 'list') {
+            const table = this.container.querySelector('table') as HTMLTableElement;
+            if (table) {
+                const inputs = Array.from(table.querySelectorAll('input[type="text"]')) as HTMLInputElement[];
+                if (this.tabbedFromId) {
+                    const idx = inputs.findIndex(inp => inp.id === this.tabbedFromId);
+                    if (idx !== -1) {
+                        if (this.isTabbingForward && idx < inputs.length - 1) {
+                            inputs[idx + 1].focus();
+                            inputs[idx + 1].select();
+                        } else if (this.isTabbingBackward && idx > 0) {
+                            inputs[idx - 1].focus();
+                            inputs[idx - 1].select();
+                        }
+                    }
+                    this.tabbedFromId = null;
+                    this.isTabbingForward = false;
+                    this.isTabbingBackward = false;
+                } else if (this.pressedEnterOnId) {
+                    const idx = inputs.findIndex(inp => inp.id === this.pressedEnterOnId);
+                    if (idx !== -1) {
+                        inputs[idx].focus();
+                        inputs[idx].select();
+                    }
+                    this.pressedEnterOnId = null;
+                }
+            }
+        }
+
         showTab(this.gaugesActiveTab, oldScrollTop);
     }
 
@@ -1642,8 +1729,23 @@ export class NodeViewer {
         const tableContainer = this.container.querySelector('.gauges-table-container') as HTMLElement;
         if (!tableContainer) return;
 
+        const state = this.stateManager.getCurrentState();
         const gauges = node.parameters?.gauges || [];
-        const is3D = node.type === 'VirtualGauges3D';
+        const is3D = state?.nodes.some(n => n.type === 'DomainMesh3D' || n.type === 'CFDSolver3D') || false;
+
+        const setupKeyInterceptors = (input: HTMLInputElement) => {
+            input.onkeydown = (e) => {
+                e.stopPropagation();
+                if (e.key === 'Tab') {
+                    this.tabbedFromId = input.id;
+                    this.isTabbingForward = !e.shiftKey;
+                    this.isTabbingBackward = e.shiftKey;
+                } else if (e.key === 'Enter') {
+                    this.pressedEnterOnId = input.id;
+                    input.blur();
+                }
+            };
+        };
         
         const query = this.searchQuery.toLowerCase().trim();
         const filteredGauges = gauges.filter((g: any) => 
@@ -1716,7 +1818,7 @@ export class NodeViewer {
         table.appendChild(thead);
 
         const tbody = document.createElement('tbody');
-        pagedGauges.forEach((g: any) => {
+        pagedGauges.forEach((g: any, idx: number) => {
             const tr = document.createElement('tr');
             tr.style.borderBottom = '1px solid #27272a';
 
@@ -1738,9 +1840,11 @@ export class NodeViewer {
             tdId.style.padding = '6px 8px';
             const inputId = document.createElement('input');
             inputId.type = 'text';
+            inputId.id = `gauge-input-${node.id}-${idx}-id`;
             inputId.value = g.id || g.name || '';
             inputId.style.width = '100%';
             inputId.style.fontWeight = 'bold';
+            setupKeyInterceptors(inputId);
             inputId.addEventListener('change', () => {
                 const val = inputId.value.trim();
                 if (val) {
@@ -1759,9 +1863,11 @@ export class NodeViewer {
                 tdX.style.padding = '6px 8px';
                 const inputX = document.createElement('input');
                 inputX.type = 'text';
+                inputX.id = `gauge-input-${node.id}-${idx}-x`;
                 inputX.inputMode = 'decimal';
                 inputX.value = String(g.x ?? 0.5);
                 inputX.style.width = '100%';
+                setupKeyInterceptors(inputX);
                 inputX.addEventListener('change', () => {
                     const val = Number(inputX.value);
                     if (!isNaN(val)) {
@@ -1776,9 +1882,11 @@ export class NodeViewer {
                 tdY.style.padding = '6px 8px';
                 const inputY = document.createElement('input');
                 inputY.type = 'text';
+                inputY.id = `gauge-input-${node.id}-${idx}-y`;
                 inputY.inputMode = 'decimal';
                 inputY.value = String(g.y ?? 0.5);
                 inputY.style.width = '100%';
+                setupKeyInterceptors(inputY);
                 inputY.addEventListener('change', () => {
                     const val = Number(inputY.value);
                     if (!isNaN(val)) {
@@ -1793,9 +1901,11 @@ export class NodeViewer {
                 tdZ.style.padding = '6px 8px';
                 const inputZ = document.createElement('input');
                 inputZ.type = 'text';
+                inputZ.id = `gauge-input-${node.id}-${idx}-z`;
                 inputZ.inputMode = 'decimal';
                 inputZ.value = String(g.z ?? 0.5);
                 inputZ.style.width = '100%';
+                setupKeyInterceptors(inputZ);
                 inputZ.addEventListener('change', () => {
                     const val = Number(inputZ.value);
                     if (!isNaN(val)) {
@@ -1810,9 +1920,11 @@ export class NodeViewer {
                 tdR.style.padding = '6px 8px';
                 const inputR = document.createElement('input');
                 inputR.type = 'text';
+                inputR.id = `gauge-input-${node.id}-${idx}-r`;
                 inputR.inputMode = 'decimal';
                 inputR.value = String(g.r ?? 0.1);
                 inputR.style.width = '100%';
+                setupKeyInterceptors(inputR);
                 inputR.addEventListener('change', () => {
                     const val = Number(inputR.value);
                     if (!isNaN(val)) {
@@ -1828,9 +1940,11 @@ export class NodeViewer {
                     tdZ.style.padding = '6px 8px';
                     const inputZ = document.createElement('input');
                     inputZ.type = 'text';
+                    inputZ.id = `gauge-input-${node.id}-${idx}-z`;
                     inputZ.inputMode = 'decimal';
                     inputZ.value = String(g.z ?? 0.0);
                     inputZ.style.width = '100%';
+                    setupKeyInterceptors(inputZ);
                     inputZ.addEventListener('change', () => {
                         const val = Number(inputZ.value);
                         if (!isNaN(val)) {
@@ -2146,16 +2260,22 @@ export class NodeViewer {
             'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature',
             'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
             'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl',
-            'spatial_order', 'temporal_order', 'gamma', 'plot_stride',
+            'spatial_order', 'temporal_order', 'gamma', 'plot_stride', 'refresh_rate',
+            'ascii_precision', 'step_interval', 'time_interval', 'downsample_stride',
+            'telemetry_channel',
             // 2D CFD keys
             'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r',
             'charge_r', 'charge_z', 'charge_radius', 'charge_height',
             'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
+            'ideal_gamma', 'ideal_rho_0', 'ideal_e_0',
             // 3D CFD keys
             'nx', 'ny', 'nz', 'dim_x', 'dim_y', 'dim_z', 'origin_x', 'origin_y', 'origin_z',
             'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
-            'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin', 'charge_radius'
+            'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
+            'min_y', 'max_y', 'min_val', 'max_val', 'ambientLevel', 'specularIntensity'
         ];
+
+        const chargeShapeOptions = node.type === 'Charge3D' ? ['Sphere', 'Cylinder', 'Block'] : ['Sphere', 'Cylinder'];
 
         const dropdowns: Record<string, string[]> = {
             'dimension': ['1D', '2D', '3D'],
@@ -2184,7 +2304,7 @@ export class NodeViewer {
             'spatial_order': ['1', '2', '3'],
             'temporal_order': ['1', '2', '3'],
             'plot_stride': ['1', '2', '5', '10', '20', '50', '100'],
-            'charge_shape': ['Sphere', 'Cylinder'],
+            'charge_shape': chargeShapeOptions,
             'material_type': ['Air', 'JWL Charge', 'Ideal Gas Charge']
         };
 

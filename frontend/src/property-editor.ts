@@ -71,6 +71,14 @@ export class PropertyEditor {
                     const nr = Math.round(max_r / cellSize);
                     const nz = Math.round(max_z / cellSize);
                     gridInfo.textContent = `Calculated Grid: ${nr} x ${nz} cells (Total: ${(nr * nz).toLocaleString()})`;
+                } else if (node.type === 'DomainMesh3D') {
+                    const dim_x = Number(node.parameters['dim_x'] ?? 1.0);
+                    const dim_y = Number(node.parameters['dim_y'] ?? 1.0);
+                    const dim_z = Number(node.parameters['dim_z'] ?? 1.0);
+                    const nx = Math.round(dim_x / cellSize);
+                    const ny = Math.round(dim_y / cellSize);
+                    const nz = Math.round(dim_z / cellSize);
+                    gridInfo.textContent = `Calculated Grid: ${nx} x ${ny} x ${nz} cells (Total: ${(nx * ny * nz).toLocaleString()})`;
                 }
             }
 
@@ -209,7 +217,7 @@ export class PropertyEditor {
         }
 
         // Parameters Section
-        if (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D' || node.type === 'VTKOutput' || node.type === 'Telemetry3DViewport') {
+        if (node.type === 'VirtualGauges' || node.type === 'VTKOutput' || node.type === 'Telemetry3DViewport') {
             this.renderTabbedProperties(node);
             return;
         }
@@ -219,13 +227,13 @@ export class PropertyEditor {
         form.onsubmit = (e) => e.preventDefault();
 
         const paramKeys = Object.keys(node.parameters);
-        if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D') {
+        if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D') {
             paramKeys.sort((a, b) => {
                 if (a === 'cell_size') return -1;
                 if (b === 'cell_size') return 1;
                 return 0;
             });
-        } else if (node.type === 'Charge1D' || node.type === 'Charge2D') {
+        } else if (node.type === 'Charge1D' || node.type === 'Charge2D' || node.type === 'Charge3D') {
             paramKeys.sort((a, b) => {
                 if (a === 'charge_mass') return -1;
                 if (b === 'charge_mass') return 1;
@@ -234,7 +242,7 @@ export class PropertyEditor {
         }
         
         let gridInfoDiv: HTMLDivElement | null = null;
-        if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D') {
+        if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D') {
             const cellSize = Number(node.parameters['cell_size'] ?? 0.001);
             const info = document.createElement('div');
             info.id = 'grid-info-display';
@@ -245,12 +253,20 @@ export class PropertyEditor {
                 const radius = Number(node.parameters['domain_radius'] ?? 1.0);
                 const n_cells = Math.round(radius / cellSize);
                 info.textContent = `Calculated Grid: ${n_cells.toLocaleString()} cells`;
-            } else {
+            } else if (node.type === 'DomainMesh2D') {
                 const max_r = Number(node.parameters['max_r'] ?? 1.0);
                 const max_z = Number(node.parameters['max_z'] ?? 1.0);
                 const nr = Math.round(max_r / cellSize);
                 const nz = Math.round(max_z / cellSize);
                 info.textContent = `Calculated Grid: ${nr} x ${nz} cells (Total: ${(nr * nz).toLocaleString()})`;
+            } else {
+                const dim_x = Number(node.parameters['dim_x'] ?? 1.0);
+                const dim_y = Number(node.parameters['dim_y'] ?? 1.0);
+                const dim_z = Number(node.parameters['dim_z'] ?? 1.0);
+                const nx = Math.round(dim_x / cellSize);
+                const ny = Math.round(dim_y / cellSize);
+                const nz = Math.round(dim_z / cellSize);
+                info.textContent = `Calculated Grid: ${nx} x ${ny} x ${nz} cells (Total: ${(nx * ny * nz).toLocaleString()})`;
             }
             gridInfoDiv = info;
         }
@@ -284,6 +300,16 @@ export class PropertyEditor {
             if (node.type === 'Charge2D') {
                 const shape = node.parameters['charge_shape'] || 'Sphere';
                 if (key === 'charge_height' && shape !== 'Cylinder') continue;
+            }
+            if (node.type === 'Charge3D') {
+                const shape = node.parameters['charge_shape'] || 'Sphere';
+                if (shape === 'Sphere') {
+                    if (key === 'charge_height' || key === 'charge_lx' || key === 'charge_ly' || key === 'charge_lz') continue;
+                } else if (shape === 'Cylinder') {
+                    if (key === 'charge_lx' || key === 'charge_ly' || key === 'charge_lz') continue;
+                } else if (shape === 'Block') {
+                    if (key === 'charge_radius' || key === 'charge_height') continue;
+                }
             }
             // DetonatorLocation and DetonatorLocation3D are separate nodes now, showing correct properties
 
@@ -534,7 +560,7 @@ export class PropertyEditor {
             panels[panelIdx].appendChild(row);
         };
 
-        if (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') {
+        if (node.type === 'VirtualGauges') {
             // FORMATS Tab: checkboxes
             const formatsGrid = document.createElement('div');
             formatsGrid.style.display = 'grid';
@@ -612,6 +638,12 @@ export class PropertyEditor {
             const maxEl = this.createInputElement(node, 'max_val', node.parameters['max_val'] ?? 101325.0 * 100.0);
             addRowToPanel('max_val', 'MAX VALUE', maxEl, 0);
 
+            const ambEl = this.createInputElement(node, 'ambientLevel', node.parameters['ambientLevel'] ?? 0.3);
+            addRowToPanel('ambientLevel', 'AMBIENT LEVEL', ambEl, 0);
+
+            const specEl = this.createInputElement(node, 'specularIntensity', node.parameters['specularIntensity'] ?? 0.4);
+            addRowToPanel('specularIntensity', 'SPECULAR LEVEL', specEl, 0);
+
             const cbGrid = document.createElement('div');
             cbGrid.style.display = 'grid';
             cbGrid.style.gridTemplateColumns = 'repeat(2, 1fr)';
@@ -621,6 +653,8 @@ export class PropertyEditor {
             cbGrid.appendChild(createCheckboxField('auto_scale', !!node.parameters['auto_scale'], 'Auto Scale'));
             cbGrid.appendChild(createCheckboxField('show_grid', !!node.parameters['show_grid'], 'Show Grid'));
             cbGrid.appendChild(createCheckboxField('interpolate', !!node.parameters['interpolate'], 'Interpolate'));
+            cbGrid.appendChild(createCheckboxField('lightingEnabled', node.parameters['lightingEnabled'] !== false, 'Enable Lighting'));
+            cbGrid.appendChild(createCheckboxField('aoEnabled', node.parameters['aoEnabled'] !== false, 'Enable AO'));
             panels[0].appendChild(cbGrid);
 
             // SLICES Tab
@@ -681,7 +715,7 @@ export class PropertyEditor {
             qtyGrid.appendChild(createCheckboxField('qty_reacted', !!node.parameters['qty_reacted'], 'Reacted (Alpha1)'));
             qtyGrid.appendChild(createCheckboxField('qty_unreacted', !!node.parameters['qty_unreacted'], 'Unreacted (Alpha2)'));
             qtyGrid.appendChild(createCheckboxField('qty_air', !!node.parameters['qty_air'], 'Air'));
-            if (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') {
+            if (node.type === 'VirtualGauges') {
                 qtyGrid.appendChild(createCheckboxField('qty_overpressure', !!node.parameters['qty_overpressure'], 'Overpressure'));
                 qtyGrid.appendChild(createCheckboxField('qty_impulse', !!node.parameters['qty_impulse'], 'Impulse'));
             }
@@ -755,12 +789,18 @@ export class PropertyEditor {
             'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
             'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl',
             'spatial_order', 'temporal_order', 'gamma', 'plot_stride', 'refresh_rate',
-            'ascii_precision', 'step_interval', 'time_interval',
+            'ascii_precision', 'step_interval', 'time_interval', 'downsample_stride',
+            'telemetry_channel',
             // 2D CFD keys
             'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r',
             'charge_r', 'charge_z', 'charge_radius', 'charge_height',
             'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
-            'ideal_gamma', 'ideal_rho_0', 'ideal_e_0'
+            'ideal_gamma', 'ideal_rho_0', 'ideal_e_0',
+            // 3D CFD keys
+            'nx', 'ny', 'nz', 'dim_x', 'dim_y', 'dim_z', 'origin_x', 'origin_y', 'origin_z',
+            'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
+            'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
+            'min_y', 'max_y', 'min_val', 'max_val', 'ambientLevel', 'specularIntensity'
         ];
 
         const dropdowns: Record<string, string[]> = {
@@ -791,7 +831,7 @@ export class PropertyEditor {
             'spatial_order': ['1', '2', '3'],
             'temporal_order': ['1', '2', '3'],
             'plot_stride': ['1', '2', '5', '10', '20', '50', '100'],
-            'charge_shape': ['Sphere', 'Cylinder'],
+            'charge_shape': node.type === 'Charge3D' ? ['Sphere', 'Cylinder', 'Block'] : ['Sphere', 'Cylinder'],
             'material_type': ['Air', 'JWL Charge', 'Ideal Gas Charge'],
             'colormap': ['plasma', 'viridis', 'rainbow', 'coolwarm', 'cividis', 'grayscale'],
             'refresh_rate': ['0.0', '0.016', '0.033', '0.05', '0.1', '0.2', '0.5', '1.0'],
@@ -933,8 +973,49 @@ export class PropertyEditor {
                 axisSelect.appendChild(option);
             });
             axisSelect.onchange = () => {
+                let newMin = 0.0;
+                let newMax = 1.0;
+                const state = this.stateManager.getCurrentState();
+                const node = state?.nodes.find(n => n.id === this.currentNodeId);
+                if (node) {
+                    let meshNode: any = null;
+                    if (state) {
+                        const solverConn = state.connections.find(c => c.toNode === node.id);
+                        if (solverConn) {
+                            const solverNode = state.nodes.find(n => n.id === solverConn.fromNode);
+                            if (solverNode && (solverNode.type === 'CFDSolver3D' || solverNode.type === 'CFDSolver2D')) {
+                                const connToSolver = state.connections.find(c => c.toNode === solverNode.id);
+                                if (connToSolver) {
+                                    meshNode = state.nodes.find(n => n.id === connToSolver.fromNode);
+                                }
+                            }
+                        }
+                    }
+
+                    if (meshNode && meshNode.type === 'DomainMesh3D') {
+                        const originX = Number(meshNode.parameters?.origin_x ?? 0.0);
+                        const originY = Number(meshNode.parameters?.origin_y ?? 0.0);
+                        const originZ = Number(meshNode.parameters?.origin_z ?? 0.0);
+                        const dimX = Number(meshNode.parameters?.dim_x ?? 1.0);
+                        const dimY = Number(meshNode.parameters?.dim_y ?? 1.0);
+                        const dimZ = Number(meshNode.parameters?.dim_z ?? 1.0);
+
+                        if (axisSelect.value === 'xy') {
+                            newMin = originZ;
+                            newMax = originZ + dimZ;
+                        } else if (axisSelect.value === 'xz') {
+                            newMin = originY;
+                            newMax = originY + dimY;
+                        } else if (axisSelect.value === 'yz') {
+                            newMin = originX;
+                            newMax = originX + dimX;
+                        }
+                    }
+                }
+                const newOffset = (newMin + newMax) / 2.0;
+
                 const updated = [...slices];
-                updated[idx] = { ...slice, axis: axisSelect.value };
+                updated[idx] = { ...slice, axis: axisSelect.value, offset: newOffset };
                 this.updateParameter('slices', updated);
             };
             axisDiv.appendChild(axisSelect);
@@ -989,9 +1070,9 @@ export class PropertyEditor {
                 { value: 'density', label: 'Density' },
                 { value: 'velocity', label: 'Velocity' },
                 { value: 'energy', label: 'Energy' },
-                { value: 'species1', label: 'Species 1' },
-                { value: 'species2', label: 'Species 2' },
-                { value: 'species3', label: 'Species 3' }
+                { value: 'species1', label: 'Products' },
+                { value: 'species2', label: 'Unburnt' },
+                { value: 'species3', label: 'Air' }
             ];
 
             QUANTITIES.forEach(q => {
@@ -1058,7 +1139,36 @@ export class PropertyEditor {
         addBtn.style.fontWeight = 'bold';
         addBtn.onclick = (e) => {
             e.preventDefault();
-            const updated = [...slices, { axis: 'xy', offset: 0.5, quantities: ['pressure'], stride: 1 }];
+
+            let minVal = 0.0;
+            let maxVal = 1.0;
+            const state = this.stateManager.getCurrentState();
+            const node = state?.nodes.find(n => n.id === this.currentNodeId);
+            if (node) {
+                let meshNode: any = null;
+                if (state) {
+                    const solverConn = state.connections.find(c => c.toNode === node.id);
+                    if (solverConn) {
+                        const solverNode = state.nodes.find(n => n.id === solverConn.fromNode);
+                        if (solverNode && (solverNode.type === 'CFDSolver3D' || solverNode.type === 'CFDSolver2D')) {
+                            const connToSolver = state.connections.find(c => c.toNode === solverNode.id);
+                            if (connToSolver) {
+                                meshNode = state.nodes.find(n => n.id === connToSolver.fromNode);
+                            }
+                        }
+                    }
+                }
+
+                if (meshNode && meshNode.type === 'DomainMesh3D') {
+                    const originZ = Number(meshNode.parameters?.origin_z ?? 0.0);
+                    const dimZ = Number(meshNode.parameters?.dim_z ?? 1.0);
+                    minVal = originZ;
+                    maxVal = originZ + dimZ;
+                }
+            }
+            const defaultOffset = (minVal + maxVal) / 2.0;
+
+            const updated = [...slices, { axis: 'xy', offset: defaultOffset, quantities: ['pressure'], stride: 1, opacity: 1.0 }];
             this.updateParameter('slices', updated);
         };
         container.appendChild(addBtn);
@@ -1414,6 +1524,26 @@ export class PropertyEditor {
         }
 
         this.stateManager.updateNodeParameters(this.currentNodeId, updates);
+
+        if (node.type === 'Telemetry3DViewport' && (key === 'slices' || key === 'refresh_rate')) {
+            const net = (window as any).networkManager;
+            if (net && net.isConnected()) {
+                let targetModelId = node.id;
+                const models = this.stateManager.getAppState().models;
+                for (const [mid, m] of Object.entries(models)) {
+                    if (m.nodes.some(n => n.id === node.id)) {
+                        targetModelId = mid;
+                        break;
+                    }
+                }
+                net.send({
+                    command: "VIEW3D_CONFIG",
+                    modelId: targetModelId,
+                    slices: key === 'slices' ? value : (node.parameters.slices || []),
+                    refresh_rate: key === 'refresh_rate' ? Number(value) : Number(node.parameters.refresh_rate ?? 0.033)
+                });
+            }
+        }
         
         const structuralKeys = ['material_type', 'composition', 'dimension', 'charge_shape'];
         this.render(structuralKeys.includes(key));

@@ -672,6 +672,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             const charge_lx = Number(node.parameters?.charge_lx ?? 0.2);
             const charge_ly = Number(node.parameters?.charge_ly ?? 0.2);
             const charge_lz = Number(node.parameters?.charge_lz ?? 0.2);
+            const charge_mass = Number(node.parameters?.charge_mass ?? 0.0);
 
             if (isNaN(cx) || isNaN(cy) || isNaN(cz)) {
                 addMessage(node.id, 'error', "Charge coordinates must be numeric.");
@@ -684,6 +685,9 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             }
             if (shape === 'Cylinder' && (isNaN(charge_radius) || charge_radius <= 0 || isNaN(node.parameters?.charge_height) || Number(node.parameters.charge_height) <= 0)) {
                 addMessage(node.id, 'error', "Cylinder radius and height must be greater than 0.");
+            }
+            if (isNaN(charge_mass) || charge_mass <= 0) {
+                addMessage(node.id, 'error', "Charge mass must be greater than 0.");
             }
 
             // Cross-validation with connected mesh
@@ -711,46 +715,76 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             }
         }
 
-        if (node.type === 'VirtualGauges3D') {
+        if (node.type === 'VirtualGauges') {
             const gauges = node.parameters?.gauges || [];
             
             // Connection checks
             const conn = state.connections.find(c => c.toNode === node.id && c.toPort === 'in');
-            if (!conn) {
-                addMessage(node.id, 'warning', `Not connected to any CFD Solver. No telemetry data will be received.`);
-            } else {
+            if (conn) {
                 const fromNode = state.nodes.find(n => n.id === conn.fromNode);
-                if (!fromNode || fromNode.type !== 'CFDSolver3D') {
-                    const connKey = `${conn.fromNode}:${conn.fromPort}->${conn.toNode}:${conn.toPort}`;
-                    flawedConnections.set(connKey, "VirtualGauges3D must be connected to a CFD Solver 3D.");
-                    addMessage(node.id, 'error', "VirtualGauges3D must be connected to a CFD Solver 3D.");
-                } else {
-                    // Cross-validate gauge coordinates with domain bounds
-                    const meshConn3D = state.connections.find(c => c.toNode === fromNode.id && c.toPort === 'mesh');
-                    if (meshConn3D) {
-                        const meshNode = state.nodes.find(n => n.id === meshConn3D.fromNode);
-                        if (meshNode && meshNode.type === 'DomainMesh3D') {
-                            const dimX = Number(meshNode.parameters?.dim_x ?? 1.0);
-                            const dimY = Number(meshNode.parameters?.dim_y ?? 1.0);
-                            const dimZ = Number(meshNode.parameters?.dim_z ?? 1.0);
-                            const originX = Number(meshNode.parameters?.origin_x ?? 0.0);
-                            const originY = Number(meshNode.parameters?.origin_y ?? 0.0);
-                            const originZ = Number(meshNode.parameters?.origin_z ?? 0.0);
+                if (fromNode) {
+                    if (fromNode.type === 'CFDSolver3D') {
+                        const meshConn3D = state.connections.find(c => c.toNode === fromNode.id && c.toPort === 'mesh');
+                        if (meshConn3D) {
+                            const meshNode = state.nodes.find(n => n.id === meshConn3D.fromNode);
+                            if (meshNode && meshNode.type === 'DomainMesh3D') {
+                                const dimX = Number(meshNode.parameters?.dim_x ?? 1.0);
+                                const dimY = Number(meshNode.parameters?.dim_y ?? 1.0);
+                                const dimZ = Number(meshNode.parameters?.dim_z ?? 1.0);
+                                const originX = Number(meshNode.parameters?.origin_x ?? 0.0);
+                                const originY = Number(meshNode.parameters?.origin_y ?? 0.0);
+                                const originZ = Number(meshNode.parameters?.origin_z ?? 0.0);
 
+                                gauges.forEach((g: any) => {
+                                    const gx = Number(g.x ?? 0.5);
+                                    const gy = Number(g.y ?? 0.5);
+                                    const gz = Number(g.z ?? 0.5);
+                                    const name = g.name || g.id || "Unnamed";
+
+                                    if (gx < originX || gx > originX + dimX) {
+                                        addMessage(node.id, 'warning', `Gauge "${name}" position (x = ${gx}) is outside the mesh domain [${originX}, ${originX + dimX}].`);
+                                    }
+                                    if (gy < originY || gy > originY + dimY) {
+                                        addMessage(node.id, 'warning', `Gauge "${name}" position (y = ${gy}) is outside the mesh domain [${originY}, ${originY + dimY}].`);
+                                    }
+                                    if (gz < originZ || gz > originZ + dimZ) {
+                                        addMessage(node.id, 'warning', `Gauge "${name}" position (z = ${gz}) is outside the mesh domain [${originZ}, ${originZ + dimZ}].`);
+                                    }
+                                });
+                            }
+                        }
+                    } else if (fromNode.type === 'CFDSolver2D') {
+                        const meshConn2D = state.connections.find(c => c.toNode === fromNode.id && c.toPort === 'mesh');
+                        if (meshConn2D) {
+                            const meshNode = state.nodes.find(n => n.id === meshConn2D.fromNode);
+                            if (meshNode && meshNode.type === 'DomainMesh2D') {
+                                const maxR = Number(meshNode.parameters?.max_r ?? 1.0);
+                                const maxZ = Number(meshNode.parameters?.max_z ?? 1.0);
+
+                                gauges.forEach((g: any) => {
+                                    const gr = Number(g.r ?? 0.1);
+                                    const gz = Number(g.z ?? 0.0);
+                                    const name = g.name || g.id || "Unnamed";
+
+                                    if (gr < 0 || gr > maxR) {
+                                        addMessage(node.id, 'warning', `Gauge "${name}" position (r = ${gr}) is outside the mesh domain [0, ${maxR}].`);
+                                    }
+                                    if (gz < 0 || gz > maxZ) {
+                                        addMessage(node.id, 'warning', `Gauge "${name}" position (z = ${gz}) is outside the mesh domain [0, ${maxZ}].`);
+                                    }
+                                });
+                            }
+                        }
+                    } else if (fromNode.type === 'CFDSolver') {
+                        const meshNode = state.nodes.find(n => n.type === 'DomainMesh');
+                        if (meshNode) {
+                            const radius = Number(meshNode.parameters?.domain_radius ?? 1.0);
                             gauges.forEach((g: any) => {
-                                const gx = Number(g.x ?? 0.5);
-                                const gy = Number(g.y ?? 0.5);
-                                const gz = Number(g.z ?? 0.5);
+                                const gr = Number(g.r ?? 0.1);
                                 const name = g.name || g.id || "Unnamed";
 
-                                if (gx < originX || gx > originX + dimX) {
-                                    addMessage(node.id, 'warning', `Gauge "${name}" position (x = ${gx}) is outside the mesh domain [${originX}, ${originX + dimX}].`);
-                                }
-                                if (gy < originY || gy > originY + dimY) {
-                                    addMessage(node.id, 'warning', `Gauge "${name}" position (y = ${gy}) is outside the mesh domain [${originY}, ${originY + dimY}].`);
-                                }
-                                if (gz < originZ || gz > originZ + dimZ) {
-                                    addMessage(node.id, 'warning', `Gauge "${name}" position (z = ${gz}) is outside the mesh domain [${originZ}, ${originZ + dimZ}].`);
+                                if (gr < 0 || gr > radius) {
+                                    addMessage(node.id, 'warning', `Gauge "${name}" position (r = ${gr}) is outside the mesh domain [0, ${radius}].`);
                                 }
                             });
                         }
@@ -759,8 +793,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             }
         }
 
-        // --- 6. Telemetry & Output Node Validations ---
-        if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour' || node.type === 'VTKOutput' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport' || node.type === 'VirtualGauges3D') {
+        if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour' || node.type === 'VTKOutput' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport') {
             const conn = state.connections.find(c => c.toNode === node.id && c.toPort === 'in');
             if (!conn) {
                 addMessage(node.id, 'warning', `Not connected to any CFD Solver. No data will be received.`);
@@ -772,7 +805,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                         flawedConnections.set(connKey, "TelemetryContour requires a 2D CFD Solver source.");
                         addMessage(node.id, 'error', "TelemetryContour requires a 2D CFD Solver source.");
                     }
-                } else if (node.type === 'Telemetry3DViewport' || node.type === 'VirtualGauges3D') {
+                } else if (node.type === 'Telemetry3DViewport') {
                     if (!fromNode || fromNode.type !== 'CFDSolver3D') {
                         const connKey = `${conn.fromNode}:${conn.fromPort}->${conn.toNode}:${conn.toPort}`;
                         flawedConnections.set(connKey, `${node.type} requires a 3D CFD Solver source.`);

@@ -19,18 +19,19 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature',
         'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
         'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl',
-        'spatial_order', 'temporal_order',
-        'n_cells', 'gamma', 'explosive_radius', 'ambient_rho',
-        'step_interval', 'time_interval',
+        'spatial_order', 'temporal_order', 'gamma', 'plot_stride', 'refresh_rate',
+        'ascii_precision', 'step_interval', 'time_interval', 'downsample_stride',
+        'telemetry_channel',
         // 2D CFD keys
-        'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_r', 'remap_radius', 'trigger_value',
+        'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r',
         'charge_r', 'charge_z', 'charge_radius', 'charge_height',
-        'detonator_r', 'detonator_z', 'detonator_radius',
+        'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
         'ideal_gamma', 'ideal_rho_0', 'ideal_e_0',
         // 3D CFD keys
         'nx', 'ny', 'nz', 'dim_x', 'dim_y', 'dim_z', 'origin_x', 'origin_y', 'origin_z',
         'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
-        'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin'
+        'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
+        'min_y', 'max_y', 'min_val', 'max_val', 'ambientLevel', 'specularIntensity'
     ];
 
     const flattenedParams: Record<string, any> = {};
@@ -464,7 +465,13 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         flattenedParams['ambient_rho'] = p / (287.058 * t);
 
         if (!flattenedParams['device']) flattenedParams['device'] = 'cpu';
-        if (!flattenedParams['init_mode']) flattenedParams['init_mode'] = 'Multi-Material JWL';
+        if (!flattenedParams['init_mode']) {
+            if (flattenedParams['explosive_type'] === 'MaterialIdealGas') {
+                flattenedParams['init_mode'] = 'Ideal Gas';
+            } else {
+                flattenedParams['init_mode'] = 'Multi-Material JWL';
+            }
+        }
         if (!flattenedParams['flux_scheme']) flattenedParams['flux_scheme'] = 'AUSM+';
         if (flattenedParams['spatial_order'] === undefined) flattenedParams['spatial_order'] = 2;
         if (flattenedParams['temporal_order'] === undefined) flattenedParams['temporal_order'] = 2;

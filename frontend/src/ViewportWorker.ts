@@ -11,8 +11,12 @@ uniform mat4 uView;
 uniform mat4 uModel;
 out vec2 vTexCoord;
 out vec2 vSliceSize;
+out vec3 vLocalPos;
+out vec4 vViewPos;
 void main() {
-    gl_Position = uProjection * uView * uModel * vec4(position, 1.0);
+    vLocalPos = position;
+    vViewPos = uView * uModel * vec4(position, 1.0);
+    gl_Position = uProjection * vViewPos;
     vTexCoord = texCoord;
     vSliceSize = sliceSize;
 }
@@ -22,6 +26,8 @@ const FS_SOURCE_2 = `#version 300 es
 precision highp float;
 in vec2 vTexCoord;
 in vec2 vSliceSize;
+in vec3 vLocalPos;
+in vec4 vViewPos;
 uniform sampler2D uTexture;
 uniform float uAlpha;
 uniform int uColormap;
@@ -31,6 +37,10 @@ uniform bool uUseLogScale;
 uniform int uIsWireframe;
 uniform bool uShowCellEdges;
 uniform bool uInterpolate;
+uniform bool uEnableLighting;
+uniform bool uEnableAO;
+uniform float uAmbientLevel;
+uniform float uSpecularLevel;
 out vec4 outColor;
 
 vec3 colormap_plasma(float t) {
@@ -45,14 +55,33 @@ void main() {
     if (uIsWireframe > 0) {
         if (uIsWireframe == 1) {
             outColor = vec4(0.3, 0.3, 0.4, 0.8);
-        } else if (uIsWireframe == 2) {
-            outColor = vec4(1.0, 0.1, 0.1, 1.0); // X Red
-        } else if (uIsWireframe == 3) {
-            outColor = vec4(0.1, 1.0, 0.1, 1.0); // Y Green
-        } else if (uIsWireframe == 4) {
-            outColor = vec4(0.2, 0.5, 1.0, 1.0); // Z Blue
+            return;
+        }
+        
+        // Axes Indicator (2=X Red, 3=Y Green, 4=Z Blue)
+        vec4 baseColor = vec4(0.0);
+        if (uIsWireframe == 2) baseColor = vec4(1.0, 0.1, 0.1, 1.0);
+        else if (uIsWireframe == 3) baseColor = vec4(0.1, 1.0, 0.1, 1.0);
+        else if (uIsWireframe == 4) baseColor = vec4(0.2, 0.5, 1.0, 1.0);
+
+        if (uEnableLighting) {
+            vec3 viewPos3 = vViewPos.xyz;
+            vec3 normal = normalize(cross(dFdx(viewPos3), dFdy(viewPos3)));
+            vec3 lightDir = vec3(0.0, 0.0, 1.0);
+            float diff = max(dot(normal, lightDir), 0.0);
+            
+            vec3 reflectDir = reflect(-lightDir, normal);
+            float spec = pow(max(dot(reflectDir, vec3(0.0, 0.0, 1.0)), 0.0), 16.0);
+            
+            float ao = 1.0;
+            if (uEnableAO) {
+                ao = pow(max(normal.z, 0.0), 0.5);
+            }
+            
+            vec3 lit = baseColor.rgb * (uAmbientLevel + 0.7 * diff) + vec3(1.0) * (uSpecularLevel * spec);
+            outColor = vec4(lit * ao, baseColor.a);
         } else {
-            outColor = vec4(0.15, 0.15, 0.18, 0.6); // Cell Edges
+            outColor = baseColor;
         }
         return;
     }
@@ -87,6 +116,22 @@ void main() {
         float isEdge = max(edge.x, edge.y);
         finalColor = mix(finalColor, vec4(0.1, 0.1, 0.1, 0.8), isEdge * 0.5);
     }
+    
+    if (uEnableLighting) {
+        vec3 viewPos3 = vViewPos.xyz;
+        vec3 normal = normalize(cross(dFdx(viewPos3), dFdy(viewPos3)));
+        vec3 lightDir = normalize(vec3(0.5, 0.8, 1.0));
+        float diff = max(dot(normal, lightDir), 0.0) * 0.7 + max(dot(-normal, lightDir), 0.0) * 0.3;
+        
+        vec3 reflectDir = reflect(-lightDir, normal);
+        vec3 viewDir = normalize(-viewPos3);
+        float spec = pow(max(dot(reflectDir, viewDir), 0.0), 32.0);
+        
+        float ao = 1.0;
+        
+        vec3 lit = finalColor.rgb * (uAmbientLevel + 0.7 * diff) + vec3(1.0) * (uSpecularLevel * spec);
+        finalColor = vec4(lit * ao, finalColor.a);
+    }
     outColor = finalColor;
 }
 `;
@@ -97,11 +142,15 @@ attribute vec2 texCoord;
 attribute vec2 sliceSize;
 varying vec2 vTexCoord;
 varying vec2 vSliceSize;
+varying vec3 vLocalPos;
+varying vec4 vViewPos;
 uniform mat4 uProjection;
 uniform mat4 uView;
 uniform mat4 uModel;
 void main() {
-    gl_Position = uProjection * uView * uModel * vec4(position, 1.0);
+    vLocalPos = position;
+    vViewPos = uView * uModel * vec4(position, 1.0);
+    gl_Position = uProjection * vViewPos;
     vTexCoord = texCoord;
     vSliceSize = sliceSize;
 }
@@ -111,6 +160,8 @@ const FS_SOURCE_1 = `
 precision highp float;
 varying vec2 vTexCoord;
 varying vec2 vSliceSize;
+varying vec3 vLocalPos;
+varying vec4 vViewPos;
 uniform sampler2D uTexture;
 uniform float uAlpha;
 uniform int uColormap;
@@ -120,6 +171,10 @@ uniform bool uUseLogScale;
 uniform int uIsWireframe;
 uniform bool uShowCellEdges;
 uniform bool uInterpolate;
+uniform bool uEnableLighting;
+uniform bool uEnableAO;
+uniform float uAmbientLevel;
+uniform float uSpecularLevel;
 
 vec3 colormap_plasma(float t) {
     return vec3(t * 1.5, t * t, 1.0 - t);
@@ -133,14 +188,37 @@ void main() {
     if (uIsWireframe > 0) {
         if (uIsWireframe == 1) {
             gl_FragColor = vec4(0.3, 0.3, 0.4, 0.8);
-        } else if (uIsWireframe == 2) {
-            gl_FragColor = vec4(1.0, 0.1, 0.1, 1.0);
-        } else if (uIsWireframe == 3) {
-            gl_FragColor = vec4(0.1, 1.0, 0.1, 1.0);
-        } else if (uIsWireframe == 4) {
-            gl_FragColor = vec4(0.2, 0.5, 1.0, 1.0);
+            return;
+        }
+        
+        // Axes Indicator (2=X Red, 3=Y Green, 4=Z Blue)
+        vec4 baseColor = vec4(0.0);
+        if (uIsWireframe == 2) baseColor = vec4(1.0, 0.1, 0.1, 1.0);
+        else if (uIsWireframe == 3) baseColor = vec4(0.1, 1.0, 0.1, 1.0);
+        else if (uIsWireframe == 4) baseColor = vec4(0.2, 0.5, 1.0, 1.0);
+
+        if (uEnableLighting) {
+            vec3 viewPos3 = vViewPos.xyz;
+            // Analytical normals fallback
+            vec3 normal = vec3(0.0, 0.0, 1.0);
+            #ifdef GL_OES_standard_derivatives
+            normal = normalize(cross(dFdx(viewPos3), dFdy(viewPos3)));
+            #endif
+            vec3 lightDir = vec3(0.0, 0.0, 1.0);
+            float diff = max(dot(normal, lightDir), 0.0);
+            
+            vec3 reflectDir = reflect(-lightDir, normal);
+            float spec = pow(max(dot(reflectDir, vec3(0.0, 0.0, 1.0)), 0.0), 16.0);
+            
+            float ao = 1.0;
+            if (uEnableAO) {
+                ao = pow(max(normal.z, 0.0), 0.5);
+            }
+            
+            vec3 lit = baseColor.rgb * (uAmbientLevel + 0.7 * diff) + vec3(1.0) * (uSpecularLevel * spec);
+            gl_FragColor = vec4(lit * ao, baseColor.a);
         } else {
-            gl_FragColor = vec4(0.15, 0.15, 0.18, 0.6);
+            gl_FragColor = baseColor;
         }
         return;
     }
@@ -174,6 +252,25 @@ void main() {
             finalColor = mix(finalColor, vec4(0.1, 0.1, 0.1, 0.8), 0.4);
         }
     }
+    
+    if (uEnableLighting) {
+        vec3 viewPos3 = vViewPos.xyz;
+        vec3 normal = vec3(0.0, 0.0, 1.0);
+        #ifdef GL_OES_standard_derivatives
+        normal = normalize(cross(dFdx(viewPos3), dFdy(viewPos3)));
+        #endif
+        vec3 lightDir = normalize(vec3(0.5, 0.8, 1.0));
+        float diff = max(dot(normal, lightDir), 0.0) * 0.7 + max(dot(-normal, lightDir), 0.0) * 0.3;
+        
+        vec3 reflectDir = reflect(-lightDir, normal);
+        vec3 viewDir = normalize(-viewPos3);
+        float spec = pow(max(dot(reflectDir, viewDir), 0.0), 32.0);
+        
+        float ao = 1.0;
+        
+        vec3 lit = finalColor.rgb * (uAmbientLevel + 0.7 * diff) + vec3(1.0) * (uSpecularLevel * spec);
+        finalColor = vec4(lit * ao, finalColor.a);
+    }
     gl_FragColor = finalColor;
 }
 `;
@@ -184,6 +281,8 @@ struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) texCoord: vec2<f32>,
     @location(1) sliceSize: vec2<f32>,
+    @location(2) vLocalPos: vec3<f32>,
+    @location(3) vViewPos: vec4<f32>,
 }
 
 struct Uniforms {
@@ -198,6 +297,10 @@ struct Uniforms {
     isWireframe: f32,
     showCellEdges: f32,
     interpolate: f32,
+    enableLighting: f32,
+    enableAO: f32,
+    ambientLevel: f32,
+    specularLevel: f32,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -207,9 +310,11 @@ struct Uniforms {
 @vertex
 fn vs_main(@location(0) pos: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) size: vec2<f32>) -> VertexOutput {
     var out: VertexOutput;
-    out.position = uniforms.projection * uniforms.view * uniforms.model * vec4<f32>(pos, 1.0);
+    out.vViewPos = uniforms.view * uniforms.model * vec4<f32>(pos, 1.0);
+    out.position = uniforms.projection * out.vViewPos;
     out.texCoord = uv;
     out.sliceSize = size;
+    out.vLocalPos = pos;
     return out;
 }
 
@@ -222,18 +327,40 @@ fn colormap_viridis(t: f32) -> vec3<f32> {
 }
 
 @fragment
-fn fs_main(@location(0) texCoord: vec2<f32>, @location(1) sliceSize: vec2<f32>) -> @location(0) vec4<f32> {
+fn fs_main(@location(0) texCoord: vec2<f32>, @location(1) sliceSize: vec2<f32>, @location(2) vLocalPos: vec3<f32>, @location(3) vViewPos: vec4<f32>) -> @location(0) vec4<f32> {
     if (uniforms.isWireframe > 0.5) {
         if (uniforms.isWireframe < 1.5) {
             return vec4<f32>(0.3, 0.3, 0.4, 0.8); // Bounding box: grey
-        } else if (uniforms.isWireframe < 2.5) {
-            return vec4<f32>(1.0, 0.1, 0.1, 1.0); // X-axis: Red
+        }
+        
+        // Axes Indicator (2=X Red, 3=Y Green, 4=Z Blue)
+        var baseColor = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        if (uniforms.isWireframe < 2.5) {
+            baseColor = vec4<f32>(1.0, 0.1, 0.1, 1.0);
         } else if (uniforms.isWireframe < 3.5) {
-            return vec4<f32>(0.1, 1.0, 0.1, 1.0); // Y-axis: Green
+            baseColor = vec4<f32>(0.1, 1.0, 0.1, 1.0);
         } else if (uniforms.isWireframe < 4.5) {
-            return vec4<f32>(0.2, 0.5, 1.0, 1.0); // Z-axis: Blue
+            baseColor = vec4<f32>(0.2, 0.5, 1.0, 1.0);
+        }
+
+        if (uniforms.enableLighting > 0.5) {
+            let viewPos3 = vViewPos.xyz;
+            let normal = normalize(cross(dpdx(viewPos3), dpdy(viewPos3)));
+            let lightDir = vec3<f32>(0.0, 0.0, 1.0);
+            let diff = max(dot(normal, lightDir), 0.0);
+            
+            let reflectDir = reflect(-lightDir, normal);
+            let spec = pow(max(dot(reflectDir, vec3<f32>(0.0, 0.0, 1.0)), 0.0), 16.0);
+            
+            var ao = 1.0;
+            if (uniforms.enableAO > 0.5) {
+                ao = pow(max(normal.z, 0.0), 0.5);
+            }
+            
+            let lit = baseColor.rgb * (uniforms.ambientLevel + 0.7 * diff) + vec3<f32>(1.0) * (uniforms.specularLevel * spec);
+            return vec4<f32>(lit * ao, baseColor.a);
         } else {
-            return vec4<f32>(0.15, 0.15, 0.18, 0.6); // Cell Edges grid
+            return baseColor;
         }
     }
     var uv = texCoord;
@@ -279,6 +406,23 @@ fn fs_main(@location(0) texCoord: vec2<f32>, @location(1) sliceSize: vec2<f32>) 
         finalColor = mix(finalColor, vec4<f32>(0.1, 0.1, 0.1, 0.8), isEdge * 0.5);
     }
 
+    if (uniforms.enableLighting > 0.5) {
+        let viewPos3 = vViewPos.xyz;
+        let normal = normalize(cross(dpdx(viewPos3), dpdy(viewPos3)));
+        
+        let lightDir = normalize(vec3<f32>(0.5, 0.8, 1.0));
+        let diff = max(dot(normal, lightDir), 0.0) * 0.7 + max(dot(-normal, lightDir), 0.0) * 0.3;
+        
+        let reflectDir = reflect(-lightDir, normal);
+        let viewDir = normalize(-viewPos3);
+        let spec = pow(max(dot(reflectDir, viewDir), 0.0), 32.0);
+        
+        var ao = 1.0;
+        
+        let lit = finalColor.rgb * (uniforms.ambientLevel + 0.7 * diff) + vec3<f32>(1.0, 1.0, 1.0) * (uniforms.specularLevel * spec);
+        finalColor = vec4<f32>(lit * ao, finalColor.a);
+    }
+
     return finalColor;
 }
 `;
@@ -293,11 +437,13 @@ let is2DFallback = false;
 let gpuDevice: any = null;
 let gpuContext: any = null;
 let gpuPipeline: any = null;
+let gpuSlicePipeline: any = null;
 let gpuLinePipeline: any = null;
 let gpuSampler: any = null;
 let gpuUniformBuffer: any = null;
 let gpuUniformBufferWF: any = null;
 let gpuAxesUniformBuffers: any[] = [];
+let gpuSliceUniformBuffers: { [axis: number]: any } = {};
 let cachedMsaaColorTexture: any = null;
 let cachedMsaaColorView: any = null;
 let cachedDepthTexture: any = null;
@@ -322,8 +468,11 @@ let yaw = 1.107;
 let targetX = 0.0;
 let targetY = 0.0;
 let targetZ = 0.0;
-let usePerspective = false;
+let usePerspective = true;
 let fov = 45.0;
+let cameraEyeX = 0.0;
+let cameraEyeY = 0.0;
+let cameraEyeZ = 0.0;
 
 // Contour Visualization Configurations
 let colormap = 0; // 0=plasma, 1=viridis
@@ -341,6 +490,11 @@ interface CachedSlice {
     w: number;
     h: number;
     data: Float32Array;
+    minY?: number;
+    maxY?: number;
+    colormap?: string;
+    useLogScale?: boolean;
+    interpolate?: boolean;
 }
 let cachedSlices: CachedSlice[] = [];
 
@@ -357,6 +511,146 @@ let nz = 64;
 let gpuAxesBuffer: any = null;
 let axesBuffer: WebGLBuffer | null = null;
 
+// Lighting / Shadow / Opacity Configurations
+let lightingEnabled = true;
+let aoEnabled = true;
+let specularIntensity = 0.4;
+let ambientLevel = 0.3;
+let sliceOpacities = [1.0, 1.0, 1.0]; // xy, xz, yz
+
+const DEFAULT_QUANTITY_RANGES: Record<string, [number, number]> = {
+    pressure: [101325.0, 101325.0 * 100.0],
+    density: [1.2, 100.0],
+    velocity: [0.0, 1000.0],
+    energy: [200000.0, 10000000.0],
+    species1: [0.0, 1.0],
+    species2: [0.0, 1.0],
+    species3: [0.0, 1.0]
+};
+
+let slicesConfig: any[] = [];
+let quantityRanges: Record<string, [number, number]> = {};
+let focusedSliceIndex = 0;
+
+function buildArrow(axis: number, ox: number, oy: number, oz: number): number[] {
+    let D = [0, 0, 0];
+    let U = [0, 0, 0];
+    let V = [0, 0, 0];
+    
+    if (axis === 0) { // X
+        D = [1, 0, 0]; U = [0, 1, 0]; V = [0, 0, 1];
+    } else if (axis === 1) { // Y
+        D = [0, 1, 0]; U = [0, 0, 1]; V = [1, 0, 0];
+    } else { // Z
+        D = [0, 0, 1]; U = [1, 0, 0]; V = [0, 1, 0];
+    }
+
+    const L_shaft = 0.22;
+    const L_total = 0.35;
+    const W_shaft = 0.012;
+    const W_head = 0.028;
+    const N = 12;
+
+    const addVert = (p: number[], list: number[]) => {
+        list.push(p[0], p[1], p[2], 0, 0, 0, 0); // 7 floats per vertex
+    };
+
+    const getPos = (dVal: number, uVal: number, vVal: number) => {
+        return [
+            ox + dVal * D[0] + uVal * U[0] + vVal * V[0],
+            oy + dVal * D[1] + uVal * U[1] + vVal * V[1],
+            oz + dVal * D[2] + uVal * U[2] + vVal * V[2]
+        ];
+    };
+
+    const baseCircle: number[][] = [];
+    const endCircle: number[][] = [];
+    const headBaseCircle: number[][] = [];
+
+    for (let i = 0; i <= N; i++) {
+        const theta = (i % N) * 2 * Math.PI / N;
+        const cosT = Math.cos(theta);
+        const sinT = Math.sin(theta);
+        
+        baseCircle.push(getPos(0, W_shaft/2 * cosT, W_shaft/2 * sinT));
+        endCircle.push(getPos(L_shaft, W_shaft/2 * cosT, W_shaft/2 * sinT));
+        headBaseCircle.push(getPos(L_shaft, W_head/2 * cosT, W_head/2 * sinT));
+    }
+
+    const vertices: number[] = [];
+
+    // Cylinder Sides: N * 2 triangles
+    for (let i = 0; i < N; i++) {
+        const p1 = baseCircle[i];
+        const p2 = baseCircle[i+1];
+        const p3 = endCircle[i];
+        const p4 = endCircle[i+1];
+
+        // Triangle 1: p1, p3, p2
+        addVert(p1, vertices); addVert(p3, vertices); addVert(p2, vertices);
+        // Triangle 2: p2, p3, p4
+        addVert(p2, vertices); addVert(p3, vertices); addVert(p4, vertices);
+    }
+
+    // Cylinder Base Cap: N triangles
+    const centerBase = getPos(0, 0, 0);
+    for (let i = 0; i < N; i++) {
+        addVert(centerBase, vertices);
+        addVert(baseCircle[i+1], vertices);
+        addVert(baseCircle[i], vertices);
+    }
+
+    // Cone Head Sides: N triangles
+    const tip = getPos(L_total, 0, 0);
+    for (let i = 0; i < N; i++) {
+        addVert(headBaseCircle[i], vertices);
+        addVert(headBaseCircle[i+1], vertices);
+        addVert(tip, vertices);
+    }
+
+    // Cone Head Base Cap: N triangles
+    const centerHeadBase = getPos(L_shaft, 0, 0);
+    for (let i = 0; i < N; i++) {
+        addVert(centerHeadBase, vertices);
+        addVert(headBaseCircle[i+1], vertices);
+        addVert(headBaseCircle[i], vertices);
+    }
+
+    return vertices;
+}
+
+function updateAxesGeometry() {
+    const ox = -0.5;
+    const oy = -0.5;
+    const oz = -0.5;
+
+    const axesDataArray: number[] = [];
+    for (let a = 0; a < 3; a++) {
+        axesDataArray.push(...buildArrow(a, ox, oy, oz));
+    }
+    const axesData = new Float32Array(axesDataArray);
+
+    if (isWebGPU && gpuDevice && gpuAxesBuffer) {
+        gpuDevice.queue.writeBuffer(gpuAxesBuffer, 0, axesData.buffer);
+    } else if (gl && axesBuffer) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, axesBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, axesData, gl.DYNAMIC_DRAW);
+    }
+}
+
+function shouldShowCellEdges(): boolean {
+    if (!showCellEdges) return false;
+    const maxN = Math.max(nx, ny, nz) || 1;
+    const h = canvasHeight();
+    let modelPixels = h / distance;
+    if (usePerspective) {
+        const fovRad = (fov * Math.PI) / 180;
+        modelPixels = h / (2.0 * distance * Math.tan(fovRad / 2.0));
+    }
+    const cellPixels = modelPixels / maxN;
+    return cellPixels >= 3.0;
+}
+
 interface SliceDataWebGPU {
     axis: number;
     offset: number;
@@ -366,6 +660,13 @@ interface SliceDataWebGPU {
     gpuTextureView: any;
     vertexBuffer: any;
     bindGroup: any;
+    opacity: number;
+    index: number;
+    minY?: number;
+    maxY?: number;
+    colormap?: string;
+    useLogScale?: boolean;
+    interpolate?: boolean;
 }
 
 interface SliceDataWebGL {
@@ -375,6 +676,13 @@ interface SliceDataWebGL {
     h: number;
     texture: WebGLTexture;
     buffer: WebGLBuffer;
+    opacity: number;
+    index: number;
+    minY?: number;
+    maxY?: number;
+    colormap?: string;
+    useLogScale?: boolean;
+    interpolate?: boolean;
 }
 
 interface SliceData2D {
@@ -385,8 +693,8 @@ interface SliceData2D {
     data: Float32Array;
 }
 
-let activeSlicesWebGPU: { [axis: number]: SliceDataWebGPU } = {};
-let activeSlicesWebGL: { [axis: number]: SliceDataWebGL } = {};
+let activeSlicesWebGPU: { [index: number]: SliceDataWebGPU } = {};
+let activeSlicesWebGL: { [index: number]: SliceDataWebGL } = {};
 let activeSlices2D: SliceData2D[] = [];
 
 let hasFloatLinear = false;
@@ -485,6 +793,43 @@ async function initContext(canvas: OffscreenCanvas) {
                         }
                     });
 
+                    gpuSlicePipeline = gpuDevice.createRenderPipeline({
+                        layout: pipelineLayout,
+                        vertex: {
+                            module: shaderModule,
+                            entryPoint: 'vs_main',
+                            buffers: [{
+                                arrayStride: 28, // 7 floats (x, y, z, u, v, w, h)
+                                attributes: [
+                                    { shaderLocation: 0, offset: 0, format: 'float32x3' }, // position
+                                    { shaderLocation: 1, offset: 12, format: 'float32x2' }, // texCoord
+                                    { shaderLocation: 2, offset: 20, format: 'float32x2' } // sliceSize
+                                ]
+                            }]
+                        },
+                        fragment: {
+                            module: shaderModule,
+                            entryPoint: 'fs_main',
+                            targets: [{
+                                format: nav.gpu.getPreferredCanvasFormat(),
+                                blend: {
+                                    color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+                                    alpha: { srcFactor: 'one', dstFactor: 'zero', operation: 'add' }
+                                }
+                            }]
+                        },
+                        primitive: { topology: 'triangle-list' },
+                        multisample: { count: 4 },
+                        depthStencil: {
+                            depthWriteEnabled: false,
+                            depthCompare: 'less-equal',
+                            format: 'depth24plus'
+                        }
+                    });
+
+                    // Bounding Box setup and BBox/Axes buffer initialization
+                    updateAxesGeometry();
+
                     // Create separate line pipeline for bounding box wireframe
                     gpuLinePipeline = gpuDevice.createRenderPipeline({
                         layout: pipelineLayout,
@@ -527,18 +872,18 @@ async function initContext(canvas: OffscreenCanvas) {
 
                     // GPUBufferUsage: UNIFORM = 64, COPY_DST = 8
                     gpuUniformBuffer = gpuDevice.createBuffer({
-                        size: 224, // 16*4*3 + 8*4 bytes (padded)
+                        size: 256, // 16*4*3 + 16*4 bytes (padded)
                         usage: 64 | 8
                     });
                     gpuUniformBufferWF = gpuDevice.createBuffer({
-                        size: 224,
+                        size: 256,
                         usage: 64 | 8
                     });
 
                     gpuAxesUniformBuffers = [];
                     for (let a = 0; a < 3; a++) {
                         const buf = gpuDevice.createBuffer({
-                            size: 224,
+                            size: 256,
                             usage: 64 | 8
                         });
                         gpuAxesUniformBuffers.push(buf);
@@ -555,22 +900,12 @@ async function initContext(canvas: OffscreenCanvas) {
                     new Float32Array(gpuBBoxBuffer.getMappedRange()).set(box);
                     gpuBBoxBuffer.unmap();
 
-                    // Build static Axes GPU buffer
-                    const axesLines = new Float32Array([
-                        -0.5, -0.5, -0.5, 0, 0,
-                        -0.2, -0.5, -0.5, 0, 0,
-                        -0.5, -0.5, -0.5, 0, 0,
-                        -0.5, -0.2, -0.5, 0, 0,
-                        -0.5, -0.5, -0.5, 0, 0,
-                        -0.5, -0.5, -0.2, 0, 0
-                    ]);
+                    // Build dynamic Axes GPU buffer
                     gpuAxesBuffer = gpuDevice.createBuffer({
-                        size: axesLines.byteLength,
-                        usage: 32,
-                        mappedAtCreation: true
+                        size: 15120, // 3 arrows * 180 vertices * 7 floats * 4 bytes
+                        usage: 32 | 8 // VERTEX | COPY_DST
                     });
-                    new Float32Array(gpuAxesBuffer.getMappedRange()).set(axesLines);
-                    gpuAxesBuffer.unmap();
+                    updateAxesGeometry();
 
                     const dummyTex = gpuDevice.createTexture({
                         size: [1, 1, 1],
@@ -650,16 +985,7 @@ async function initGL(canvas: OffscreenCanvas) {
     gl.bufferData(gl.ARRAY_BUFFER, getBBoxVertices(), gl.STATIC_DRAW);
 
     axesBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, axesBuffer);
-    const axesLines = new Float32Array([
-        -0.5, -0.5, -0.5, 0, 0,
-        -0.2, -0.5, -0.5, 0, 0,
-        -0.5, -0.5, -0.5, 0, 0,
-        -0.5, -0.2, -0.5, 0, 0,
-        -0.5, -0.5, -0.5, 0, 0,
-        -0.5, -0.5, -0.2, 0, 0
-    ]);
-    gl.bufferData(gl.ARRAY_BUFFER, axesLines, gl.STATIC_DRAW);
+    updateAxesGeometry();
 
     const vsSource = isWebGL2 ? VS_SOURCE_2 : VS_SOURCE_1;
     const fsSource = isWebGL2 ? FS_SOURCE_2 : FS_SOURCE_1;
@@ -704,6 +1030,29 @@ function subtract(a: number[], b: number[]) { return [a[0]-b[0], a[1]-b[1], a[2]
 function cross(a: number[], b: number[]) { return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]; }
 function normalize(a: number[]) { let len = Math.hypot(a[0], a[1], a[2]); if (len>0) { return [a[0]/len, a[1]/len, a[2]/len]; } return [0,0,0]; }
 
+function getSliceCenterDistance(axis: number, offset: number, eye: number[]): number {
+    const dimX = (nx && dx) ? (nx * dx) : 1.0;
+    const dimY = (ny && dx) ? (ny * dx) : 1.0;
+    const dimZ = (nz && dx) ? (nz * dx) : 1.0;
+
+    let sx = 0;
+    let sy = 0;
+    let sz = 0;
+
+    if (axis === 0) { // XY
+        sz = (offset - zmin) / dimZ - 0.5;
+    } else if (axis === 1) { // XZ
+        sy = (offset - ymin) / dimY - 0.5;
+    } else { // YZ
+        sx = (offset - xmin) / dimX - 0.5;
+    }
+
+    const dxVal = eye[0] - sx;
+    const dyVal = eye[1] - sy;
+    const dzVal = eye[2] - sz;
+    return dxVal * dxVal + dyVal * dyVal + dzVal * dzVal;
+}
+
 function updateMatrices(width: number, height: number) {
     const w = width > 0 ? width : 1;
     const h = height > 0 ? height : 1;
@@ -730,11 +1079,11 @@ function updateMatrices(width: number, height: number) {
     ]);
 
     // View matrix (LookAt)
-    let eyeX = targetX + distance * Math.cos(pitch) * Math.sin(yaw);
-    let eyeY = targetY + distance * Math.cos(pitch) * Math.cos(yaw);
-    let eyeZ = targetZ + distance * Math.sin(pitch);
+    cameraEyeX = targetX + distance * Math.cos(pitch) * Math.sin(yaw);
+    cameraEyeY = targetY + distance * Math.cos(pitch) * Math.cos(yaw);
+    cameraEyeZ = targetZ + distance * Math.sin(pitch);
     
-    let eye = [eyeX, eyeY, eyeZ];
+    let eye = [cameraEyeX, cameraEyeY, cameraEyeZ];
     let center = [targetX, targetY, targetZ];
     let up = [0, 0, 1]; // Z is up
 
@@ -858,25 +1207,78 @@ function handleFrame(buffer: ArrayBuffer) {
         cacheOffset = dataStart + (w * h * 4);
     }
 
-    // Compute combined scaling range across ALL slices
-    let globalMin = Infinity;
-    let globalMax = -Infinity;
-    cachedSlices.forEach(s => {
-        for (let j = 0; j < s.data.length; j++) {
-            const v = s.data[j];
+    // Compute dynamic min/max per quantity
+    const dynamicMinMax: Record<string, { min: number, max: number }> = {};
+    for (let i = 0; i < cachedSlices.length; i++) {
+        const slice = cachedSlices[i];
+        const config = slicesConfig[i] || {};
+        const qty = config.quantities?.[0] || 'pressure';
+
+        let sliceMin = Infinity;
+        let sliceMax = -Infinity;
+        for (let j = 0; j < slice.data.length; j++) {
+            const v = slice.data[j];
             if (isFinite(v)) {
-                if (v < globalMin) globalMin = v;
-                if (v > globalMax) globalMax = v;
+                if (v < sliceMin) sliceMin = v;
+                if (v > sliceMax) sliceMax = v;
             }
         }
-    });
 
-    if (globalMin < globalMax) {
-        if (autoScale) {
-            minY = globalMin;
-            maxY = globalMax;
+        if (sliceMin < sliceMax) {
+            if (!dynamicMinMax[qty]) {
+                dynamicMinMax[qty] = { min: sliceMin, max: sliceMax };
+            } else {
+                dynamicMinMax[qty].min = Math.min(dynamicMinMax[qty].min, sliceMin);
+                dynamicMinMax[qty].max = Math.max(dynamicMinMax[qty].max, sliceMax);
+            }
         }
-        self.postMessage({ type: 'currentRange', min: globalMin, max: globalMax });
+    }
+
+    // Assign slice-specific ranges and configs
+    for (let i = 0; i < cachedSlices.length; i++) {
+        const slice = cachedSlices[i];
+        const config = slicesConfig[i] || {};
+        const qty = config.quantities?.[0] || 'pressure';
+        const sliceAutoScale = config.auto_scale !== false;
+        const colormapVal = config.colormap || 'plasma';
+        const logVal = config.log_scale === true;
+        const interpVal = config.interpolate !== false;
+        
+        let sliceMinY = minY;
+        let sliceMaxY = maxY;
+
+        if (sliceAutoScale) {
+            const dyn = dynamicMinMax[qty];
+            if (dyn && dyn.min < dyn.max) {
+                sliceMinY = dyn.min;
+                sliceMaxY = dyn.max;
+            } else {
+                const range = config.min_val !== undefined ? [config.min_val, config.max_val] : (quantityRanges[qty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0]);
+                sliceMinY = range[0];
+                sliceMaxY = range[1];
+            }
+        } else {
+            const range = config.min_val !== undefined ? [config.min_val, config.max_val] : (quantityRanges[qty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0]);
+            sliceMinY = range[0];
+            sliceMaxY = range[1];
+        }
+
+        slice.minY = sliceMinY;
+        slice.maxY = sliceMaxY;
+        slice.colormap = colormapVal;
+        slice.useLogScale = logVal;
+        slice.interpolate = interpVal;
+    }
+
+    // Send dynamic min/max range of the currently focused quantity back to the main thread
+    const focusedConfig = slicesConfig[focusedSliceIndex] || slicesConfig[0] || {};
+    const focusedQty = focusedConfig.quantities?.[0] || 'pressure';
+    const dyn = dynamicMinMax[focusedQty];
+    if (dyn && dyn.min < dyn.max) {
+        self.postMessage({ type: 'currentRange', min: dyn.min, max: dyn.max });
+    } else {
+        const range = quantityRanges[focusedQty] || DEFAULT_QUANTITY_RANGES[focusedQty] || [0.0, 1.0];
+        self.postMessage({ type: 'currentRange', min: range[0], max: range[1] });
     }
 
     if (is2DFallback) {
@@ -923,48 +1325,54 @@ function padFloatData(src: Float32Array, w: number, h: number): { data: Float32A
             const w = sliceObj.w;
             const h = sliceObj.h;
             const floatData = sliceObj.data;
+            const opacity = sliceOpacities[i] !== undefined ? sliceOpacities[i] : 1.0;
 
             let slice: SliceDataWebGPU;
             const geo = getSliceGeometry(axis, zOff, w, h);
 
-            if (activeSlicesWebGPU[axis]) {
-                slice = activeSlicesWebGPU[axis];
+            if (activeSlicesWebGPU[i]) {
+                slice = activeSlicesWebGPU[i];
                 if (slice.w !== w || slice.h !== h) {
                     slice.gpuTexture.destroy();
                     slice.gpuTexture = gpuDevice.createTexture({
                         size: [w, h, 1],
                         format: 'r32float',
-                        // GPUTextureUsage: TEXTURE_BINDING = 4, COPY_DST = 2
                         usage: 4 | 2
                     });
                     slice.gpuTextureView = slice.gpuTexture.createView();
                     slice.w = w; slice.h = h;
+
+                    if (!gpuSliceUniformBuffers[i]) {
+                        gpuSliceUniformBuffers[i] = gpuDevice.createBuffer({
+                            size: 256,
+                            usage: 64 | 8
+                        });
+                    }
+
                     slice.bindGroup = gpuDevice.createBindGroup({
                         layout: bindGroupLayout,
                         entries: [
-                            { binding: 0, resource: { buffer: gpuUniformBuffer! } },
+                            { binding: 0, resource: { buffer: gpuSliceUniformBuffers[i] } },
                             { binding: 1, resource: slice.gpuTextureView },
                             { binding: 2, resource: gpuSampler! }
                         ]
                     });
                 }
-                // Pad the Float32Array to meet WebGPU 256-byte row alignment requirement
                 const paddedResult = padFloatData(floatData, w, h);
-                // Write Texture
                 gpuDevice.queue.writeTexture(
                     { texture: slice.gpuTexture },
                     paddedResult.data,
                     { bytesPerRow: paddedResult.bytesPerRow },
                     [w, h, 1]
                 );
-                // Write Geometry
                 gpuDevice.queue.writeBuffer(slice.vertexBuffer, 0, geo);
-                slice.axis = axis; slice.offset = zOff;
+                slice.axis = axis; slice.offset = zOff; slice.opacity = opacity;
+                slice.minY = sliceObj.minY; slice.maxY = sliceObj.maxY;
+                slice.colormap = sliceObj.colormap; slice.useLogScale = sliceObj.useLogScale; slice.interpolate = sliceObj.interpolate;
             } else {
                 const tex = gpuDevice.createTexture({
                     size: [w, h, 1],
                     format: 'r32float',
-                    // GPUTextureUsage: TEXTURE_BINDING = 4, COPY_DST = 2
                     usage: 4 | 2
                 });
                 const paddedResult = padFloatData(floatData, w, h);
@@ -978,22 +1386,28 @@ function padFloatData(src: Float32Array, w: number, h: number): { data: Float32A
 
                 const vb = gpuDevice.createBuffer({
                     size: geo.byteLength,
-                    // GPUBufferUsage: VERTEX = 32, COPY_DST = 8
                     usage: 32 | 8
                 });
                 gpuDevice.queue.writeBuffer(vb, 0, geo);
 
+                if (!gpuSliceUniformBuffers[i]) {
+                    gpuSliceUniformBuffers[i] = gpuDevice.createBuffer({
+                        size: 256,
+                        usage: 64 | 8
+                    });
+                }
+
                 const bindGroup = gpuDevice.createBindGroup({
                     layout: bindGroupLayout,
                     entries: [
-                        { binding: 0, resource: { buffer: gpuUniformBuffer! } },
+                        { binding: 0, resource: { buffer: gpuSliceUniformBuffers[i] } },
                         { binding: 1, resource: texView },
                         { binding: 2, resource: gpuSampler! }
                     ]
                 });
 
-                slice = { axis, offset: zOff, w, h, gpuTexture: tex, gpuTextureView: texView, vertexBuffer: vb, bindGroup };
-                activeSlicesWebGPU[axis] = slice;
+                slice = { axis, offset: zOff, w, h, gpuTexture: tex, gpuTextureView: texView, vertexBuffer: vb, bindGroup, opacity, index: i, minY: sliceObj.minY, maxY: sliceObj.maxY, colormap: sliceObj.colormap, useLogScale: sliceObj.useLogScale, interpolate: sliceObj.interpolate };
+                activeSlicesWebGPU[i] = slice;
             }
         });
         return;
@@ -1020,15 +1434,27 @@ function padFloatData(src: Float32Array, w: number, h: number): { data: Float32A
         const w = sliceObj.w;
         const h = sliceObj.h;
         const floatData = sliceObj.data;
+        const opacity = sliceOpacities[i] !== undefined ? sliceOpacities[i] : 1.0;
 
         let slice: SliceDataWebGL;
-        if (activeSlicesWebGL[axis]) {
-            slice = activeSlicesWebGL[axis];
+        if (activeSlicesWebGL[i]) {
+            slice = activeSlicesWebGL[i];
             activeGl.bindTexture(activeGl.TEXTURE_2D, slice.texture);
             activeGl.texImage2D(activeGl.TEXTURE_2D, 0, internalFormat, w, h, 0, format, activeGl.FLOAT, floatData);
 
             activeGl.bindBuffer(activeGl.ARRAY_BUFFER, slice.buffer);
             activeGl.bufferData(activeGl.ARRAY_BUFFER, getSliceGeometry(axis, zOff, w, h), activeGl.STATIC_DRAW);
+
+            slice.axis = axis;
+            slice.offset = zOff;
+            slice.w = w;
+            slice.h = h;
+            slice.opacity = opacity;
+            slice.minY = sliceObj.minY;
+            slice.maxY = sliceObj.maxY;
+            slice.colormap = sliceObj.colormap;
+            slice.useLogScale = sliceObj.useLogScale;
+            slice.interpolate = sliceObj.interpolate;
         } else {
             const tex = activeGl.createTexture()!;
             activeGl.bindTexture(activeGl.TEXTURE_2D, tex);
@@ -1043,8 +1469,8 @@ function padFloatData(src: Float32Array, w: number, h: number): { data: Float32A
             activeGl.bindBuffer(activeGl.ARRAY_BUFFER, buf);
             activeGl.bufferData(activeGl.ARRAY_BUFFER, getSliceGeometry(axis, zOff, w, h), activeGl.STATIC_DRAW);
 
-            slice = { axis, offset: zOff, w, h, texture: tex, buffer: buf };
-            activeSlicesWebGL[axis] = slice;
+            slice = { axis, offset: zOff, w, h, texture: tex, buffer: buf, opacity, index: i, minY: sliceObj.minY, maxY: sliceObj.maxY, colormap: sliceObj.colormap, useLogScale: sliceObj.useLogScale, interpolate: sliceObj.interpolate };
+            activeSlicesWebGL[i] = slice;
         }
     });
 }
@@ -1166,27 +1592,30 @@ function render() {
 
     if (isWebGPU && gpuDevice && gpuContext) {
         // Build uniforms data float buffer
-        const uniformData = new Float32Array(56); // 16*3 floats (matrices) + 8 floats (with padding)
+        const uniformData = new Float32Array(64); // 256 bytes
         uniformData.set(projectionMatrix, 0);
         uniformData.set(viewMatrix, 16);
         uniformData.set(modelMatrix, 32);
-        uniformData[48] = 0.7; // Alpha
-        uniformData[49] = colormap; // Colormap
+        uniformData[48] = 1.0; // Alpha
+        uniformData[49] = colormap;
         uniformData[50] = minY;
         uniformData[51] = maxY;
-        // Float views for WebGPU uniform alignment padding
-        const intView = new Int32Array(uniformData.buffer);
-        intView[52] = useLogScale ? 1 : 0;
-        intView[53] = 0; // Wireframe boolean placeholder
-        intView[54] = showCellEdges ? 1 : 0;
-        intView[55] = interpolate ? 1 : 0;
+        
+        uniformData[52] = useLogScale ? 1.0 : 0.0;
+        uniformData[53] = 0.0; // isWireframe placeholder
+        uniformData[54] = shouldShowCellEdges() ? 1.0 : 0.0;
+        uniformData[55] = interpolate ? 1.0 : 0.0;
+        
+        uniformData[56] = lightingEnabled ? 1.0 : 0.0;
+        uniformData[57] = aoEnabled ? 1.0 : 0.0;
+        uniformData[58] = ambientLevel;
+        uniformData[59] = specularIntensity;
         
         gpuDevice.queue.writeBuffer(gpuUniformBuffer!, 0, uniformData.buffer);
 
         // Build uniforms data for Wireframe (isWireframe = 1.0)
         const uniformDataWF = new Float32Array(uniformData);
-        const intViewWF = new Int32Array(uniformDataWF.buffer);
-        intViewWF[53] = 1; // set isWireframe to 1
+        uniformDataWF[53] = 1.0; // set isWireframe to 1.0
         gpuDevice.queue.writeBuffer(gpuUniformBufferWF!, 0, uniformDataWF.buffer);
 
         const commandEncoder = gpuDevice.createCommandEncoder();
@@ -1259,8 +1688,8 @@ function render() {
         }
 
         // Draw Axes Indicator
-        if (gpuAxesBuffer && gpuLinePipeline && gpuAxesUniformBuffers.length === 3) {
-            passEncoder.setPipeline(gpuLinePipeline);
+        if (gpuAxesBuffer && gpuPipeline && gpuAxesUniformBuffers.length === 3) {
+            passEncoder.setPipeline(gpuPipeline);
             for (let a = 0; a < 3; a++) {
                 const axesData = new Float32Array(uniformData);
                 const axesInt = new Int32Array(axesData.buffer);
@@ -1278,19 +1707,93 @@ function render() {
 
                 passEncoder.setBindGroup(0, axesBindGroup);
                 passEncoder.setVertexBuffer(0, gpuAxesBuffer);
-                passEncoder.draw(2, 1, a * 2, 0);
+                passEncoder.draw(180, 1, a * 180, 0);
             }
         }
 
         // 2. Draw Slices
         const slicesArray = Object.values(activeSlicesWebGPU);
         if (slicesArray.length > 0) {
-            passEncoder.setPipeline(gpuPipeline!);
-            slicesArray.forEach(slice => {
-                passEncoder.setBindGroup(0, slice.bindGroup);
-                passEncoder.setVertexBuffer(0, slice.vertexBuffer);
-                passEncoder.draw(6);
+            const opaqueSlices = slicesArray.filter(s => {
+                const opac = s.opacity !== undefined ? s.opacity : 1.0;
+                return opac >= 0.999;
             });
+            const transparentSlices = slicesArray.filter(s => {
+                const opac = s.opacity !== undefined ? s.opacity : 1.0;
+                return opac < 0.999;
+            });
+
+            // Pass 1: Opaque Slices (depth write enabled)
+            if (opaqueSlices.length > 0) {
+                passEncoder.setPipeline(gpuPipeline!);
+                opaqueSlices.forEach(slice => {
+                    if (!gpuSliceUniformBuffers[slice.index]) {
+                        gpuSliceUniformBuffers[slice.index] = gpuDevice.createBuffer({
+                            size: 256,
+                            usage: 64 | 8
+                        });
+                        slice.bindGroup = gpuDevice.createBindGroup({
+                            layout: bindGroupLayout,
+                            entries: [
+                                { binding: 0, resource: { buffer: gpuSliceUniformBuffers[slice.index] } },
+                                { binding: 1, resource: slice.gpuTextureView },
+                                { binding: 2, resource: gpuSampler! }
+                            ]
+                        });
+                    }
+                    const sliceUniformData = new Float32Array(uniformData);
+                    sliceUniformData[48] = 1.0;
+                    sliceUniformData[49] = slice.colormap === 'viridis' ? 1.0 : 0.0;
+                    sliceUniformData[50] = slice.minY ?? minY;
+                    sliceUniformData[51] = slice.maxY ?? maxY;
+                    sliceUniformData[52] = slice.useLogScale ? 1.0 : 0.0;
+                    sliceUniformData[55] = slice.interpolate ? 1.0 : 0.0;
+                    gpuDevice.queue.writeBuffer(gpuSliceUniformBuffers[slice.index], 0, sliceUniformData.buffer);
+
+                    passEncoder.setBindGroup(0, slice.bindGroup);
+                    passEncoder.setVertexBuffer(0, slice.vertexBuffer);
+                    passEncoder.draw(6);
+                });
+            }
+
+            // Pass 2: Transparent Slices (depth write disabled, sorted back-to-front)
+            if (transparentSlices.length > 0) {
+                passEncoder.setPipeline(gpuSlicePipeline!);
+                const eye = [cameraEyeX, cameraEyeY, cameraEyeZ];
+                transparentSlices.sort((a, b) => {
+                    const distA = getSliceCenterDistance(a.axis, a.offset, eye);
+                    const distB = getSliceCenterDistance(b.axis, b.offset, eye);
+                    return distB - distA; // Descending: furthest first
+                });
+                transparentSlices.forEach(slice => {
+                    if (!gpuSliceUniformBuffers[slice.index]) {
+                        gpuSliceUniformBuffers[slice.index] = gpuDevice.createBuffer({
+                            size: 256,
+                            usage: 64 | 8
+                        });
+                        slice.bindGroup = gpuDevice.createBindGroup({
+                            layout: bindGroupLayout,
+                            entries: [
+                                { binding: 0, resource: { buffer: gpuSliceUniformBuffers[slice.index] } },
+                                { binding: 1, resource: slice.gpuTextureView },
+                                { binding: 2, resource: gpuSampler! }
+                            ]
+                        });
+                    }
+                    const sliceUniformData = new Float32Array(uniformData);
+                    sliceUniformData[48] = slice.opacity;
+                    sliceUniformData[49] = slice.colormap === 'viridis' ? 1.0 : 0.0;
+                    sliceUniformData[50] = slice.minY ?? minY;
+                    sliceUniformData[51] = slice.maxY ?? maxY;
+                    sliceUniformData[52] = slice.useLogScale ? 1.0 : 0.0;
+                    sliceUniformData[55] = slice.interpolate ? 1.0 : 0.0;
+                    gpuDevice.queue.writeBuffer(gpuSliceUniformBuffers[slice.index], 0, sliceUniformData.buffer);
+
+                    passEncoder.setBindGroup(0, slice.bindGroup);
+                    passEncoder.setVertexBuffer(0, slice.vertexBuffer);
+                    passEncoder.draw(6);
+                });
+            }
         }
 
         passEncoder.end();
@@ -1321,7 +1824,19 @@ function render() {
     gl.uniform1i(uUseLog, useLogScale ? 1 : 0);
     gl.uniformMatrix4fv(uView, false, viewMatrix);
     gl.uniformMatrix4fv(uModel, false, modelMatrix);
-    gl.uniform1f(uAlpha, 0.7);
+    gl.uniform1f(uAlpha, 1.0); // Will be overwritten per slice
+
+    const uEnableLightLoc = gl.getUniformLocation(program, "uEnableLighting");
+    if (uEnableLightLoc !== null) gl.uniform1i(uEnableLightLoc, lightingEnabled ? 1 : 0);
+
+    const uEnableAOLoc = gl.getUniformLocation(program, "uEnableAO");
+    if (uEnableAOLoc !== null) gl.uniform1i(uEnableAOLoc, aoEnabled ? 1 : 0);
+
+    const uAmbientLoc = gl.getUniformLocation(program, "uAmbientLevel");
+    if (uAmbientLoc !== null) gl.uniform1f(uAmbientLoc, ambientLevel);
+
+    const uSpecularLoc = gl.getUniformLocation(program, "uSpecularLevel");
+    if (uSpecularLoc !== null) gl.uniform1f(uSpecularLoc, specularIntensity);
 
     // Draw BBox
     if (showGrid && bboxBuffer) {
@@ -1337,42 +1852,104 @@ function render() {
     // Draw Axes Indicator
     if (axesBuffer) {
         gl.bindBuffer(gl.ARRAY_BUFFER, axesBuffer);
-        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 20, 0);
+        // Stride is 28 (7 floats * 4 bytes)
+        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
         gl.enableVertexAttribArray(0);
-        gl.disableVertexAttribArray(1);
-        gl.disableVertexAttribArray(2);
+        gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 28, 12);
+        gl.enableVertexAttribArray(1);
+        gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 28, 20);
+        gl.enableVertexAttribArray(2);
 
         for (let a = 0; a < 3; a++) {
             gl.uniform1i(uIsWF, 2 + a); // 2=X Red, 3=Y Green, 4=Z Blue
-            gl.drawArrays(gl.LINES, a * 2, 2);
+            gl.drawArrays(gl.TRIANGLES, a * 180, 180);
         }
     }
 
     gl.uniform1i(uIsWF, 0);
     const uShowEdges = gl.getUniformLocation(program, "uShowCellEdges");
     if (uShowEdges !== null) {
-        gl.uniform1i(uShowEdges, showCellEdges ? 1 : 0);
+        gl.uniform1i(uShowEdges, shouldShowCellEdges() ? 1 : 0);
     }
     const uInterp = gl.getUniformLocation(program, "uInterpolate");
     if (uInterp !== null) {
         gl.uniform1i(uInterp, interpolate ? 1 : 0);
     }
 
-    Object.values(activeSlicesWebGL).forEach(slice => {
-        gl!.activeTexture(gl!.TEXTURE0);
-        gl!.bindTexture(gl!.TEXTURE_2D, slice.texture);
-        gl!.bindBuffer(gl!.ARRAY_BUFFER, slice.buffer);
+    const slicesArrayWebGL = Object.values(activeSlicesWebGL);
+    if (slicesArrayWebGL.length > 0) {
+        const opaqueSlices = slicesArrayWebGL.filter(s => {
+            const opac = s.opacity;
+            return opac >= 0.999;
+        });
+        const transparentSlices = slicesArrayWebGL.filter(s => {
+            const opac = s.opacity;
+            return opac < 0.999;
+        });
 
-        // Stride is 28 (7 floats * 4 bytes)
-        gl!.vertexAttribPointer(0, 3, gl!.FLOAT, false, 28, 0);
-        gl!.enableVertexAttribArray(0);
-        gl!.vertexAttribPointer(1, 2, gl!.FLOAT, false, 28, 12);
-        gl!.enableVertexAttribArray(1);
-        gl!.vertexAttribPointer(2, 2, gl!.FLOAT, false, 28, 20);
-        gl!.enableVertexAttribArray(2);
+        // Pass 1: Opaque Slices (depth write enabled)
+        opaqueSlices.forEach(slice => {
+            gl!.activeTexture(gl!.TEXTURE0);
+            gl!.bindTexture(gl!.TEXTURE_2D, slice.texture);
+            gl!.bindBuffer(gl!.ARRAY_BUFFER, slice.buffer);
 
-        gl!.drawArrays(gl!.TRIANGLES, 0, 6);
-    });
+            // Stride is 28 (7 floats * 4 bytes)
+            gl!.vertexAttribPointer(0, 3, gl!.FLOAT, false, 28, 0);
+            gl!.enableVertexAttribArray(0);
+            gl!.vertexAttribPointer(1, 2, gl!.FLOAT, false, 28, 12);
+            gl!.enableVertexAttribArray(1);
+            gl!.vertexAttribPointer(2, 2, gl!.FLOAT, false, 28, 20);
+            gl!.enableVertexAttribArray(2);
+
+            gl!.uniform1f(uMin, slice.minY ?? minY);
+            gl!.uniform1f(uMax, slice.maxY ?? maxY);
+            gl!.uniform1i(uColormap, slice.colormap === 'viridis' ? 1 : 0);
+            gl!.uniform1i(uUseLog, slice.useLogScale ? 1 : 0);
+            if (uInterp !== null) {
+                gl!.uniform1i(uInterp, slice.interpolate ? 1 : 0);
+            }
+            gl!.uniform1f(uAlpha, 1.0);
+            gl!.drawArrays(gl!.TRIANGLES, 0, 6);
+        });
+
+        // Pass 2: Transparent Slices (depth write disabled, sorted back-to-front)
+        if (transparentSlices.length > 0) {
+            gl.depthMask(false);
+
+            const eye = [cameraEyeX, cameraEyeY, cameraEyeZ];
+            transparentSlices.sort((a, b) => {
+                const distA = getSliceCenterDistance(a.axis, a.offset, eye);
+                const distB = getSliceCenterDistance(b.axis, b.offset, eye);
+                return distB - distA; // Descending: furthest first
+            });
+
+            transparentSlices.forEach(slice => {
+                gl!.activeTexture(gl!.TEXTURE0);
+                gl!.bindTexture(gl!.TEXTURE_2D, slice.texture);
+                gl!.bindBuffer(gl!.ARRAY_BUFFER, slice.buffer);
+
+                // Stride is 28 (7 floats * 4 bytes)
+                gl!.vertexAttribPointer(0, 3, gl!.FLOAT, false, 28, 0);
+                gl!.enableVertexAttribArray(0);
+                gl!.vertexAttribPointer(1, 2, gl!.FLOAT, false, 28, 12);
+                gl!.enableVertexAttribArray(1);
+                gl!.vertexAttribPointer(2, 2, gl!.FLOAT, false, 28, 20);
+                gl!.enableVertexAttribArray(2);
+
+                gl!.uniform1f(uMin, slice.minY ?? minY);
+                gl!.uniform1f(uMax, slice.maxY ?? maxY);
+                gl!.uniform1i(uColormap, slice.colormap === 'viridis' ? 1 : 0);
+                gl!.uniform1i(uUseLog, slice.useLogScale ? 1 : 0);
+                if (uInterp !== null) {
+                    gl!.uniform1i(uInterp, slice.interpolate ? 1 : 0);
+                }
+                gl!.uniform1f(uAlpha, slice.opacity);
+                gl!.drawArrays(gl!.TRIANGLES, 0, 6);
+            });
+
+            gl.depthMask(true);
+        }
+    }
 }
 
 function canvasWidth(): number {
@@ -1497,24 +2074,87 @@ self.onmessage = async (e) => {
             if (data.nz !== undefined) nz = data.nz;
             if (data.usePerspective !== undefined) usePerspective = data.usePerspective;
             if (data.fov !== undefined) fov = data.fov;
+            if (data.lightingEnabled !== undefined) lightingEnabled = data.lightingEnabled;
+            if (data.aoEnabled !== undefined) aoEnabled = data.aoEnabled;
+            if (data.specularIntensity !== undefined) specularIntensity = data.specularIntensity;
+            if (data.ambientLevel !== undefined) ambientLevel = data.ambientLevel;
+            if (data.sliceOpacities !== undefined) sliceOpacities = data.sliceOpacities;
+            if (data.slices !== undefined) slicesConfig = data.slices;
+            if (data.quantityRanges !== undefined) quantityRanges = data.quantityRanges;
+            if (data.focusedSliceIndex !== undefined) focusedSliceIndex = data.focusedSliceIndex;
 
             // Recalculate autoScale range immediately using cached frame data
             if (autoScale && cachedSlices.length > 0) {
-                let globalMin = Infinity;
-                let globalMax = -Infinity;
-                cachedSlices.forEach(s => {
-                    for (let j = 0; j < s.data.length; j++) {
-                        const v = s.data[j];
+                const dynamicMinMax: Record<string, { min: number, max: number }> = {};
+                for (let i = 0; i < cachedSlices.length; i++) {
+                    const slice = cachedSlices[i];
+                    const config = slicesConfig[i] || {};
+                    const qty = config.quantities?.[0] || 'pressure';
+
+                    let sliceMin = Infinity;
+                    let sliceMax = -Infinity;
+                    for (let j = 0; j < slice.data.length; j++) {
+                        const v = slice.data[j];
                         if (isFinite(v)) {
-                            if (v < globalMin) globalMin = v;
-                            if (v > globalMax) globalMax = v;
+                            if (v < sliceMin) sliceMin = v;
+                            if (v > sliceMax) sliceMax = v;
                         }
                     }
-                });
-                if (globalMin < globalMax) {
-                    minY = globalMin;
-                    maxY = globalMax;
+
+                    if (sliceMin < sliceMax) {
+                        if (!dynamicMinMax[qty]) {
+                            dynamicMinMax[qty] = { min: sliceMin, max: sliceMax };
+                        } else {
+                            dynamicMinMax[qty].min = Math.min(dynamicMinMax[qty].min, sliceMin);
+                            dynamicMinMax[qty].max = Math.max(dynamicMinMax[qty].max, sliceMax);
+                        }
+                    }
                 }
+
+                for (let i = 0; i < cachedSlices.length; i++) {
+                    const slice = cachedSlices[i];
+                    const config = slicesConfig[i] || {};
+                    const qty = config.quantities?.[0] || 'pressure';
+                    let sliceMinY = minY;
+                    let sliceMaxY = maxY;
+
+                    const dyn = dynamicMinMax[qty];
+                    if (dyn && dyn.min < dyn.max) {
+                        sliceMinY = dyn.min;
+                        sliceMaxY = dyn.max;
+                    } else {
+                        const range = quantityRanges[qty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0];
+                        sliceMinY = range[0];
+                        sliceMaxY = range[1];
+                    }
+
+                    slice.minY = sliceMinY;
+                    slice.maxY = sliceMaxY;
+                }
+
+                const focusedConfig = slicesConfig[focusedSliceIndex] || slicesConfig[0] || {};
+                const focusedQty = focusedConfig.quantities?.[0] || 'pressure';
+                const dyn = dynamicMinMax[focusedQty];
+                if (dyn && dyn.min < dyn.max) {
+                    minY = dyn.min;
+                    maxY = dyn.max;
+                    self.postMessage({ type: 'currentRange', min: dyn.min, max: dyn.max });
+                }
+            } else if (!autoScale && cachedSlices.length > 0) {
+                for (let i = 0; i < cachedSlices.length; i++) {
+                    const slice = cachedSlices[i];
+                    const config = slicesConfig[i] || {};
+                    const qty = config.quantities?.[0] || 'pressure';
+                    const range = quantityRanges[qty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0];
+                    slice.minY = range[0];
+                    slice.maxY = range[1];
+                }
+                const focusedConfig = slicesConfig[focusedSliceIndex] || slicesConfig[0] || {};
+                const focusedQty = focusedConfig.quantities?.[0] || 'pressure';
+                const range = quantityRanges[focusedQty] || DEFAULT_QUANTITY_RANGES[focusedQty] || [0.0, 1.0];
+                minY = range[0];
+                maxY = range[1];
+                self.postMessage({ type: 'currentRange', min: range[0], max: range[1] });
             }
 
             let sizeChanged = false;
@@ -1529,25 +2169,50 @@ self.onmessage = async (e) => {
             if (sizeChanged) {
                 updateMatrices(canvasWidth(), canvasHeight());
             }
+            updateAxesGeometry();
             render();
         } else if (type === "scaleToCurrent") {
             if (cachedSlices.length > 0) {
+                const focusedConfig = slicesConfig[focusedSliceIndex] || slicesConfig[0] || {};
+                const focusedQty = focusedConfig.quantities?.[0] || 'pressure';
+
                 let globalMin = Infinity;
                 let globalMax = -Infinity;
-                cachedSlices.forEach(s => {
-                    for (let j = 0; j < s.data.length; j++) {
-                        const v = s.data[j];
-                        if (isFinite(v)) {
-                            if (v < globalMin) globalMin = v;
-                            if (v > globalMax) globalMax = v;
+                cachedSlices.forEach((s, i) => {
+                    const config = slicesConfig[i] || {};
+                    const qty = config.quantities?.[0] || 'pressure';
+                    if (qty === focusedQty) {
+                        for (let j = 0; j < s.data.length; j++) {
+                            const v = s.data[j];
+                            if (isFinite(v)) {
+                                if (v < globalMin) globalMin = v;
+                                if (v > globalMax) globalMax = v;
+                            }
                         }
                     }
                 });
+
                 if (globalMin < globalMax) {
+                    if (!quantityRanges[focusedQty]) {
+                        quantityRanges[focusedQty] = [globalMin, globalMax];
+                    } else {
+                        quantityRanges[focusedQty][0] = globalMin;
+                        quantityRanges[focusedQty][1] = globalMax;
+                    }
+                    autoScale = false;
+
+                    cachedSlices.forEach((s, i) => {
+                        const config = slicesConfig[i] || {};
+                        const qty = config.quantities?.[0] || 'pressure';
+                        if (qty === focusedQty) {
+                            s.minY = globalMin;
+                            s.maxY = globalMax;
+                        }
+                    });
+
                     minY = globalMin;
                     maxY = globalMax;
-                    autoScale = false;
-                    self.postMessage({ type: 'rangeUpdated', min: minY, max: maxY });
+                    self.postMessage({ type: 'rangeUpdated', min: globalMin, max: globalMax });
                     render();
                 }
             }

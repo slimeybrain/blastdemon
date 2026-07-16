@@ -680,6 +680,17 @@ Returns `{model1dId, model2dId, processId: model2dId}` or `null`. The `processId
 - `send(message)`: serializes to string if object; logs `[DEBUG] RAW INIT PAYLOAD` for INIT commands.
 - Binary frames bypass the JSON parse branch in `onmessage`.
 
+### 10.6 Node Parameter Alignment and Unified Casting
+
+To prevent parameter drift and mismatched data types (such as numbers being mapped as strings) between the user interface properties and backend C++ solver parsing:
+
+1. **Unified Casting Lists**: Any numeric node parameter MUST be registered in the `numericKeys` lists in:
+   - `serialization.ts` (so that it gets cast to a number when generating JSON solver payloads)
+   - `property-editor.ts` (so that property inputs cast values before updating state parameters)
+   - `node-viewer.ts` (so that custom panel overlays parse values correctly)
+   - `graph-renderer.ts` (so that inline dropdown handlers cast option selections correctly)
+2. **Synchronized Defaults**: Default parameters for any node type must remain identical between `state-manager.ts` (`defaults` map) and `graph-renderer.ts` (`getDefaultParameters` method) to ensure consistency when creating or healing nodes.
+
 ---
 
 ## 11. UI Panel Components
