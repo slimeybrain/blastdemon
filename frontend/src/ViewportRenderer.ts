@@ -93,7 +93,16 @@ void main() {
     float t;
     float denom = uMax - uMin;
     if (denom < 1e-5) denom = 1e-5;
-    t = clamp((raw - uMin) / denom, 0.0, 1.0);
+    if (uUseLogScale) {
+        float logMin = log(max(uMin, 1e-5));
+        float logMax = log(max(uMax, 1e-5));
+        float logVal = log(max(raw, 1e-5));
+        float logDenom = logMax - logMin;
+        if (logDenom < 1e-5) logDenom = 1e-5;
+        t = clamp((logVal - logMin) / logDenom, 0.0, 1.0);
+    } else {
+        t = clamp((raw - uMin) / denom, 0.0, 1.0);
+    }
     vec3 color;
     if (uColormap == 1) color = colormap_viridis(t);
     else color = colormap_plasma(t);
@@ -157,6 +166,7 @@ uniform float uAlpha;
 uniform int uColormap;
 uniform float uMin;
 uniform float uMax;
+uniform bool uUseLogScale;
 uniform int uIsWireframe;
 uniform bool uInterpolate;
 uniform bool uEnableLighting;
@@ -216,7 +226,19 @@ void main() {
         uv = (texel + vec2(0.5)) / vSliceSize;
     }
     float raw = texture2D(uTexture, uv).r;
-    float t = clamp((raw - uMin) / (uMax - uMin), 0.0, 1.0);
+    float t;
+    float denom = uMax - uMin;
+    if (denom < 1e-5) denom = 1e-5;
+    if (uUseLogScale) {
+        float logMin = log(max(uMin, 1e-5));
+        float logMax = log(max(uMax, 1e-5));
+        float logVal = log(max(raw, 1e-5));
+        float logDenom = logMax - logMin;
+        if (logDenom < 1e-5) logDenom = 1e-5;
+        t = clamp((logVal - logMin) / logDenom, 0.0, 1.0);
+    } else {
+        t = clamp((raw - uMin) / denom, 0.0, 1.0);
+    }
     vec3 color;
     if (uColormap == 1) color = colormap_viridis(t);
     else color = colormap_plasma(t);
@@ -270,6 +292,7 @@ let colormap = 0;
 let minY = 101325.0;
 let maxY = 1000000.0;
 let autoScale = true;
+let useLogScale = false;
 let interpolate = false;
 let showGrid = true;
 let showCellEdges = false;
@@ -279,6 +302,17 @@ let aoEnabled = true;
 let specularIntensity = 0.4;
 let ambientLevel = 0.3;
 let sliceOpacities = [1.0, 1.0, 1.0];
+let slicesConfig: any[] = [];
+
+const DEFAULT_QUANTITY_RANGES: Record<string, [number, number]> = {
+    pressure: [101325.0, 101325.0 * 100.0],
+    density: [1.2, 100.0],
+    velocity: [0.0, 1000.0],
+    energy: [200000.0, 10000000.0],
+    species1: [0.0, 1.0],
+    species2: [0.0, 1.0],
+    species3: [0.0, 1.0]
+};
 
 let bboxBuffer: WebGLBuffer | null = null;
 let axesBuffer: WebGLBuffer | null = null;
@@ -407,6 +441,11 @@ interface SliceData {
     buffer: WebGLBuffer;
     opacity: number;
     index: number;
+    minY?: number;
+    maxY?: number;
+    colormap?: string;
+    useLogScale?: boolean;
+    interpolate?: boolean;
 }
 
 let activeSlices: SliceData[] = [];
@@ -418,6 +457,11 @@ interface SliceData2D {
     w: number;
     h: number;
     data: Float32Array;
+    minY?: number;
+    maxY?: number;
+    colormap?: string;
+    useLogScale?: boolean;
+    interpolate?: boolean;
 }
 let activeSlices2D: SliceData2D[] = [];
 
@@ -620,35 +664,80 @@ function handleFrame(buffer: ArrayBuffer) {
     const time = view.getFloat32(4, true);
     const numSlices = view.getUint32(8, true);
 
-    if (is2DFallback) {
-        activeSlices2D = [];
-        let offset = 12;
-        for (let i = 0; i < numSlices; i++) {
-            const axis = view.getUint32(offset, true);
-            const zOff = view.getFloat32(offset + 4, true);
-            const w = view.getUint32(offset + 8, true);
-            const h = view.getUint32(offset + 12, true);
-            const dataStart = offset + 16;
-            const floatData = new Float32Array(buffer.slice(dataStart, dataStart + w * h * 4));
-            activeSlices2D.push({ axis, offset: zOff, w, h, data: floatData });
-            offset = dataStart + (w * h * 4);
+    const sliceDataArray = [];
+    let offset = 12;
+    for (let i = 0; i < numSlices; i++) {
+        const axis = view.getUint32(offset, true);
+        const zOff = view.getFloat32(offset + 4, true);
+        const w = view.getUint32(offset + 8, true);
+        const h = view.getUint32(offset + 12, true);
+        const dataStart = offset + 16;
+        const floatData = new Float32Array(buffer, dataStart, w * h);
 
-            if (autoScale) {
-                let minVal = Infinity;
-                let maxVal = -Infinity;
-                for (let j = 0; j < floatData.length; j++) {
-                    const v = floatData[j];
-                    if (isFinite(v)) {
-                        if (v < minVal) minVal = v;
-                        if (v > maxVal) maxVal = v;
-                    }
-                }
-                if (minVal < maxVal) {
-                    minY = minVal;
-                    maxY = maxVal;
-                }
+        const config = slicesConfig[i] || {};
+        const qty = config.quantities?.[0] || 'pressure';
+        const sliceAutoScale = config.auto_scale !== false;
+        const colormapVal = config.colormap || 'plasma';
+        const logVal = config.log_scale === true;
+        const interpVal = config.interpolate !== false;
+
+        let sliceMin = Infinity;
+        let sliceMax = -Infinity;
+        for (let j = 0; j < floatData.length; j++) {
+            const v = floatData[j];
+            if (isFinite(v)) {
+                if (v < sliceMin) sliceMin = v;
+                if (v > sliceMax) sliceMax = v;
             }
         }
+
+        let sliceMinY = minY;
+        let sliceMaxY = maxY;
+
+        if (sliceAutoScale) {
+            if (sliceMin < sliceMax) {
+                sliceMinY = sliceMin;
+                sliceMaxY = sliceMax;
+            } else {
+                const range = config.min_val !== undefined && config.max_val !== undefined ? [config.min_val, config.max_val] : (DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0]);
+                sliceMinY = range[0];
+                sliceMaxY = range[1];
+            }
+        } else {
+            const range = config.min_val !== undefined && config.max_val !== undefined ? [config.min_val, config.max_val] : (DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0]);
+            sliceMinY = range[0];
+            sliceMaxY = range[1];
+        }
+
+        sliceDataArray.push({
+            axis,
+            offset: zOff,
+            w,
+            h,
+            floatData,
+            minY: sliceMinY,
+            maxY: sliceMaxY,
+            colormap: colormapVal,
+            useLogScale: logVal,
+            interpolate: interpVal
+        });
+
+        offset = dataStart + (w * h * 4);
+    }
+
+    if (is2DFallback) {
+        activeSlices2D = sliceDataArray.map(s => ({
+            axis: s.axis,
+            offset: s.offset,
+            w: s.w,
+            h: s.h,
+            data: new Float32Array(s.floatData),
+            minY: s.minY,
+            maxY: s.maxY,
+            colormap: s.colormap,
+            useLogScale: s.useLogScale,
+            interpolate: s.interpolate
+        }));
         return;
     }
 
@@ -666,65 +755,59 @@ function handleFrame(buffer: ArrayBuffer) {
     const internalFormat = isWebGL2 ? gl.R32F : gl.LUMINANCE;
     const format = isWebGL2 ? gl.RED : gl.LUMINANCE;
 
-    let offset = 12;
-    for (let i = 0; i < numSlices; i++) {
-        const axis = view.getUint32(offset, true);
-        const zOff = view.getFloat32(offset + 4, true);
-        const w = view.getUint32(offset + 8, true);
-        const h = view.getUint32(offset + 12, true);
-        const dataStart = offset + 16;
-        const floatData = new Float32Array(buffer, dataStart, w * h);
-
-        if (autoScale) {
-            let minVal = Infinity;
-            let maxVal = -Infinity;
-            for (let j = 0; j < floatData.length; j++) {
-                const v = floatData[j];
-                if (isFinite(v)) {
-                    if (v < minVal) minVal = v;
-                    if (v > maxVal) maxVal = v;
-                }
-            }
-            if (minVal < maxVal) {
-                minY = minVal;
-                maxY = maxVal;
-            }
-        }
-
+    sliceDataArray.forEach((sliceObj, i) => {
         const opacity = sliceOpacities[i] !== undefined ? sliceOpacities[i] : 1.0;
         let slice: SliceData;
         if (activeSlices[i]) {
             slice = activeSlices[i];
-            gl.bindTexture(gl.TEXTURE_2D, slice.texture);
-            gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, w, h, 0, format, gl.FLOAT, floatData);
+            gl!.bindTexture(gl!.TEXTURE_2D, slice.texture);
+            gl!.texImage2D(gl!.TEXTURE_2D, 0, internalFormat, sliceObj.w, sliceObj.h, 0, format, gl!.FLOAT, sliceObj.floatData);
 
-            gl.bindBuffer(gl.ARRAY_BUFFER, slice.buffer);
-            gl.bufferData(gl.ARRAY_BUFFER, getSliceGeometry(axis, zOff, w, h), gl.STATIC_DRAW);
+            gl!.bindBuffer(gl!.ARRAY_BUFFER, slice.buffer);
+            gl!.bufferData(gl!.ARRAY_BUFFER, getSliceGeometry(sliceObj.axis, sliceObj.offset, sliceObj.w, sliceObj.h), gl!.STATIC_DRAW);
 
-            slice.axis = axis;
-            slice.offset = zOff;
-            slice.w = w;
-            slice.h = h;
+            slice.axis = sliceObj.axis;
+            slice.offset = sliceObj.offset;
+            slice.w = sliceObj.w;
+            slice.h = sliceObj.h;
             slice.opacity = opacity;
+            slice.minY = sliceObj.minY;
+            slice.maxY = sliceObj.maxY;
+            slice.colormap = sliceObj.colormap;
+            slice.useLogScale = sliceObj.useLogScale;
+            slice.interpolate = sliceObj.interpolate;
         } else {
-            const tex = gl.createTexture()!;
-            gl.bindTexture(gl.TEXTURE_2D, tex);
-            const filter = hasFloatLinear ? gl.LINEAR : gl.NEAREST;
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-            gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, w, h, 0, format, gl.FLOAT, floatData);
+            const tex = gl!.createTexture()!;
+            gl!.bindTexture(gl!.TEXTURE_2D, tex);
+            const filter = hasFloatLinear ? gl!.LINEAR : gl!.NEAREST;
+            gl!.texParameteri(gl!.TEXTURE_2D, gl!.TEXTURE_MIN_FILTER, filter);
+            gl!.texParameteri(gl!.TEXTURE_2D, gl!.TEXTURE_MAG_FILTER, filter);
+            gl!.texParameteri(gl!.TEXTURE_2D, gl!.TEXTURE_WRAP_S, gl!.CLAMP_TO_EDGE);
+            gl!.texParameteri(gl!.TEXTURE_2D, gl!.TEXTURE_WRAP_T, gl!.CLAMP_TO_EDGE);
+            gl!.texImage2D(gl!.TEXTURE_2D, 0, internalFormat, sliceObj.w, sliceObj.h, 0, format, gl!.FLOAT, sliceObj.floatData);
 
-            const buf = gl.createBuffer()!;
-            gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-            gl.bufferData(gl.ARRAY_BUFFER, getSliceGeometry(axis, zOff, w, h), gl.STATIC_DRAW);
+            const buf = gl!.createBuffer()!;
+            gl!.bindBuffer(gl!.ARRAY_BUFFER, buf);
+            gl!.bufferData(gl!.ARRAY_BUFFER, getSliceGeometry(sliceObj.axis, sliceObj.offset, sliceObj.w, sliceObj.h), gl!.STATIC_DRAW);
 
-            slice = { axis, offset: zOff, w, h, texture: tex, buffer: buf, opacity, index: i };
+            slice = {
+                axis: sliceObj.axis,
+                offset: sliceObj.offset,
+                w: sliceObj.w,
+                h: sliceObj.h,
+                texture: tex,
+                buffer: buf,
+                opacity,
+                index: i,
+                minY: sliceObj.minY,
+                maxY: sliceObj.maxY,
+                colormap: sliceObj.colormap,
+                useLogScale: sliceObj.useLogScale,
+                interpolate: sliceObj.interpolate
+            };
             activeSlices.push(slice);
         }
-        offset = dataStart + (w * h * 4);
-    }
+    });
 }
 
 // 2D Projection helper matrix math
@@ -774,11 +857,26 @@ function render2D() {
         const tempCtx = tempCanvas.getContext("2d")!;
         const imgData = tempCtx.createImageData(slice.w, slice.h);
         
+        const sliceMinY = slice.minY ?? minY;
+        const sliceMaxY = slice.maxY ?? maxY;
+        const sliceLogScale = slice.useLogScale === true;
+        const sliceColormap = slice.colormap || 'plasma';
+
         for (let i = 0; i < slice.w * slice.h; i++) {
             const val = slice.data[i];
-            const t = Math.max(0.0, Math.min(1.0, (val - minY) / (maxY - minY)));
+            let t = 0.0;
+            if (sliceLogScale) {
+                const logMin = Math.log(Math.max(sliceMinY, 1e-5));
+                const logMax = Math.log(Math.max(sliceMaxY, 1e-5));
+                const logVal = Math.log(Math.max(val, 1e-5));
+                const logDenom = logMax - logMin;
+                t = Math.max(0.0, Math.min(1.0, (logVal - logMin) / (logDenom < 1e-5 ? 1e-5 : logDenom)));
+            } else {
+                const denom = sliceMaxY - sliceMinY;
+                t = Math.max(0.0, Math.min(1.0, (val - sliceMinY) / (denom < 1e-5 ? 1e-5 : denom)));
+            }
             let r = 0, g = 0, b = 0;
-            if (colormap === 1) { // Viridis
+            if (sliceColormap === 'viridis') {
                 r = Math.round((1.0 - t) * 255);
                 g = Math.round(t * 255);
                 b = Math.round((0.5 + 0.5 * t) * 255);
@@ -817,6 +915,7 @@ function render() {
     const uColormap = gl.getUniformLocation(program, "uColormap");
     const uMin = gl.getUniformLocation(program, "uMin");
     const uMax = gl.getUniformLocation(program, "uMax");
+    const uUseLog = gl.getUniformLocation(program, "uUseLogScale");
     const uIsWF = gl.getUniformLocation(program, "uIsWireframe");
 
     gl.uniformMatrix4fv(uProj, false, projectionMatrix);
@@ -902,6 +1001,13 @@ function render() {
             gl!.vertexAttribPointer(2, 2, gl!.FLOAT, false, 28, 20);
             gl!.enableVertexAttribArray(2);
 
+            gl!.uniform1f(uMin, slice.minY ?? minY);
+            gl!.uniform1f(uMax, slice.maxY ?? maxY);
+            gl!.uniform1i(uColormap, slice.colormap === 'viridis' ? 1 : 0);
+            gl!.uniform1i(uUseLog, slice.useLogScale ? 1 : 0);
+            if (uInterp !== null) {
+                gl!.uniform1i(uInterp, slice.interpolate ? 1 : 0);
+            }
             gl!.uniform1f(uAlpha, 1.0);
             gl!.drawArrays(gl!.TRIANGLES, 0, 6);
         });
@@ -930,6 +1036,13 @@ function render() {
                 gl!.vertexAttribPointer(2, 2, gl!.FLOAT, false, 28, 20);
                 gl!.enableVertexAttribArray(2);
 
+                gl!.uniform1f(uMin, slice.minY ?? minY);
+                gl!.uniform1f(uMax, slice.maxY ?? maxY);
+                gl!.uniform1i(uColormap, slice.colormap === 'viridis' ? 1 : 0);
+                gl!.uniform1i(uUseLog, slice.useLogScale ? 1 : 0);
+                if (uInterp !== null) {
+                    gl!.uniform1i(uInterp, slice.interpolate ? 1 : 0);
+                }
                 gl!.uniform1f(uAlpha, slice.opacity);
                 gl!.drawArrays(gl!.TRIANGLES, 0, 6);
             });
@@ -1009,6 +1122,7 @@ function render() {
             if (data.minY !== undefined) minY = data.minY;
             if (data.maxY !== undefined) maxY = data.maxY;
             if (data.autoScale !== undefined) autoScale = data.autoScale;
+            if (data.useLogScale !== undefined) useLogScale = data.useLogScale;
             if (data.interpolate !== undefined) interpolate = data.interpolate;
             if (data.showGrid !== undefined) showGrid = data.showGrid;
             if (data.showCellEdges !== undefined) showCellEdges = data.showCellEdges;
@@ -1017,6 +1131,25 @@ function render() {
             if (data.specularIntensity !== undefined) specularIntensity = data.specularIntensity;
             if (data.ambientLevel !== undefined) ambientLevel = data.ambientLevel;
             if (data.sliceOpacities !== undefined) sliceOpacities = data.sliceOpacities;
+            if (data.slices !== undefined) {
+                slicesConfig = data.slices;
+                slicesConfig.forEach((config: any, i: number) => {
+                    if (activeSlices[i]) {
+                        activeSlices[i].opacity = config.opacity !== undefined ? config.opacity : 1.0;
+                        activeSlices[i].colormap = config.colormap || 'plasma';
+                        activeSlices[i].useLogScale = config.log_scale === true;
+                        activeSlices[i].interpolate = config.interpolate !== false;
+                        activeSlices[i].minY = config.min_val;
+                        activeSlices[i].maxY = config.max_val;
+                    }
+                    if (activeSlices2D[i]) {
+                        activeSlices2D[i].colormap = config.colormap || 'plasma';
+                        activeSlices2D[i].useLogScale = config.log_scale === true;
+                        activeSlices2D[i].minY = config.min_val;
+                        activeSlices2D[i].maxY = config.max_val;
+                    }
+                });
+            }
 
             if (data.xmin !== undefined) xmin = data.xmin;
             if (data.ymin !== undefined) ymin = data.ymin;

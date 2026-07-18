@@ -84,8 +84,16 @@ export class NetworkManager {
         this.openCallbacks.push(callback);
     }
 
+    public offOpen(callback: () => void): void {
+        this.openCallbacks = this.openCallbacks.filter(cb => cb !== callback);
+    }
+
     public onClose(callback: () => void): void {
         this.closeCallbacks.push(callback);
+    }
+
+    public offClose(callback: () => void): void {
+        this.closeCallbacks = this.closeCallbacks.filter(cb => cb !== callback);
     }
 
     public close(): void {

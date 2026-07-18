@@ -553,6 +553,35 @@ export class PropertyEditor {
                     projInfo.textContent = `Project Folder: ${projDir}`;
                     row.appendChild(projInfo);
                 }
+            } else if (key === 'stl_file') {
+                const wrapper = document.createElement('div');
+                wrapper.style.display = 'flex';
+                wrapper.style.gap = '8px';
+                wrapper.style.alignItems = 'center';
+                
+                inputEl.style.flex = '1';
+                wrapper.appendChild(inputEl);
+                
+                const browseBtn = document.createElement('button');
+                browseBtn.type = 'button';
+                browseBtn.textContent = 'Browse';
+                browseBtn.style.padding = '4px 8px';
+                browseBtn.style.background = '#333';
+                browseBtn.style.color = '#fff';
+                browseBtn.style.border = '1px solid #555';
+                browseBtn.style.cursor = 'pointer';
+                browseBtn.onclick = () => {
+                    const startPath = node.parameters[key] || '';
+                    const browser = new HostFileBrowserModal((window as any).networkManager, 'open', 'select_file', (path) => {
+                        this.updateParameter(key, path);
+                        const rand = Math.floor(Math.random() * 1000000);
+                        const simpleHash = 'stl_' + rand.toString(36);
+                        this.updateParameter('geometry_hash', simpleHash);
+                    });
+                    browser.open(startPath);
+                };
+                wrapper.appendChild(browseBtn);
+                row.appendChild(wrapper);
             } else {
                 row.appendChild(inputEl);
             }
@@ -1523,7 +1552,18 @@ export class PropertyEditor {
             updates['composition'] = 'Custom';
         }
 
-        this.stateManager.updateNodeParameters(this.currentNodeId, updates);
+        const visualKeys = [
+            'colormap', 'refresh_rate', 'min_val', 'max_val', 'ambientLevel', 
+            'specularIntensity', 'log_scale', 'auto_scale', 'show_grid', 
+            'interpolate', 'lightingEnabled', 'aoEnabled', 'slices', 
+            'focusedSliceIndex', 'show_stl', 'stl_wireframe', 'stl_solids', 'stl_opacity'
+        ];
+
+        if (node.type === 'Telemetry3DViewport' && visualKeys.includes(key)) {
+            this.stateManager.updateNodeParametersInPlace(this.currentNodeId, updates);
+        } else {
+            this.stateManager.updateNodeParameters(this.currentNodeId, updates);
+        }
 
         if (node.type === 'Telemetry3DViewport' && (key === 'slices' || key === 'refresh_rate')) {
             const net = (window as any).networkManager;
@@ -1545,7 +1585,7 @@ export class PropertyEditor {
             }
         }
         
-        const structuralKeys = ['material_type', 'composition', 'dimension', 'charge_shape'];
+        const structuralKeys = ['material_type', 'composition', 'dimension', 'charge_shape', 'init_mode'];
         this.render(structuralKeys.includes(key));
     }
 
@@ -1585,6 +1625,8 @@ export class PropertyEditor {
                 return 'Controls saving simulation state snapshots in standard VTK XML Unstructured Grid (.vtu) format for external visualizers like Paraview.';
             case 'VirtualGauges':
                 return 'Virtual gauges. Records and tracks simulation variables (pressure, density, velocity, species) at discrete coordinates over time.';
+            case 'STLGeometry':
+                return 'STL Geometry boundary. Specifies the STL file path for Immersed Boundary Method solid obstacles in 3D.';
             default:
                 return 'Simulation graph node.';
         }

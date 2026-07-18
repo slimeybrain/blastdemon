@@ -121,6 +121,16 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
         });
 
+        // Trace STL Geometry for CFD Solver 3D
+        const stlConn = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'stl');
+        if (stlConn) {
+            const stlNode = state.nodes.find(n => n.id === stlConn.fromNode);
+            if (stlNode && stlNode.type === 'STLGeometry') {
+                flattenedParams['stl_file'] = stlNode.parameters.stl_file || '';
+                flattenedParams['geometry_hash'] = stlNode.parameters.geometry_hash || '';
+            }
+        }
+
         // Trace Mesh 3D
         const meshConn3D = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'mesh');
         if (meshConn3D) {

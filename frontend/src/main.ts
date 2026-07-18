@@ -6,6 +6,48 @@ import { LayoutManager } from './layout-manager.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
 import { CustomDialog } from './custom-dialog.js';
 
+// Redirect console.error and unhandled errors to WebSocket (once connected)
+const originalConsoleError = console.error;
+const pendingLogs: string[] = [];
+
+function sendLogToBroker(msg: string) {
+    const net = (window as any).networkManager;
+    if (net && net.isConnected()) {
+        net.send({
+            command: "BROWSER_LOG",
+            message: msg
+        });
+    } else {
+        pendingLogs.push(msg);
+    }
+}
+
+// Flush pending logs when connected
+window.addEventListener('load', () => {
+    setInterval(() => {
+        const net = (window as any).networkManager;
+        if (net && net.isConnected() && pendingLogs.length > 0) {
+            while (pendingLogs.length > 0) {
+                const log = pendingLogs.shift();
+                if (log) net.send({ command: "BROWSER_LOG", message: log });
+            }
+        }
+    }, 1000);
+});
+
+console.error = function(...args) {
+    originalConsoleError.apply(console, args);
+    sendLogToBroker("[CONSOLE_ERROR] " + args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+};
+
+window.addEventListener('error', (event) => {
+    sendLogToBroker("[UNHANDLED_ERROR] " + event.message + " at " + event.filename + ":" + event.lineno + ":" + event.colno);
+});
+
+window.addEventListener('unhandledrejection', (event) => {
+    sendLogToBroker("[UNHANDLED_REJECTION] " + String(event.reason));
+});
+
 console.log("BlastDaemon Workspace Initializing (Recursive Layout)...");
 
 const initialState: SimulationState = {
@@ -1018,6 +1060,32 @@ networkManager.onMessage(async (data) => {
 
     try {
         const dataJson = JSON.parse(data);
+        if (dataJson.type === 'load_stl_response') {
+            if (dataJson.status === 'success') {
+                const verts = new Float32Array(dataJson.vertices);
+                const modelId = dataJson.modelId;
+                const state = stateManager.getSimulationState(modelId);
+                const vpNodes = state?.nodes.filter(n => n.type === 'Telemetry3DViewport') || [];
+                if (vpNodes.length > 0) {
+                    layoutManager.components.forEach(comp => {
+                        if (comp.type === 'TELEMETRY_3D' && comp.instance) {
+                            comp.instance.setSTLGeometry(verts);
+                        }
+                    });
+                    layoutManager.components.forEach(comp => {
+                        if (comp.type === 'NODE_GRAPH' && comp.instance) {
+                            vpNodes.forEach(vpNode => {
+                                comp.instance.setSTLGeometry(vpNode.id, verts);
+                            });
+                        }
+                    });
+                }
+            } else {
+                console.error("Broker failed to load STL geometry: " + dataJson.error);
+            }
+            return;
+        }
+
         if (dataJson.type === 'save_model_response') {
             if (dataJson.status === 'success') {
                 let modelId = dataJson.modelId;

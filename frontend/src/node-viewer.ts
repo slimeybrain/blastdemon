@@ -116,7 +116,7 @@ export class NodeViewer {
         }
 
         if (this.lastId === node.id && this.lastType === node.type) {
-            if (node.type !== 'TelemetryText' && node.type !== 'TelemetryGraph' && node.type !== 'VirtualGauges') {
+            if (node.type !== 'TelemetryText' && node.type !== 'TelemetryGraph' && node.type !== 'VirtualGauges' && node.type !== 'Telemetry3DViewport') {
                 this.renderStandardNode(node);
             } else if (node.type === 'TelemetryGraph') {
                 // Sync settings from the node parameters (e.g. after model load)
@@ -182,6 +182,18 @@ export class NodeViewer {
                         domainRadius: domainRadius
                     });
                 }
+            } else if (node.type === 'Telemetry3DViewport') {
+                const colormapVal = node.parameters?.colormap || 'plasma';
+                const autoScaleVal = node.parameters?.autoScale !== false;
+                const slices = node.parameters?.slices || [];
+                this.chartWorker?.postMessage({
+                    type: 'setConfig',
+                    data: {
+                        colormap: colormapVal,
+                        autoScale: autoScaleVal,
+                        slices: slices
+                    }
+                });
             }
             return;
         }
@@ -474,6 +486,7 @@ export class NodeViewer {
             data: {
                 colormap: mapSelect.value,
                 autoScale: autoScaleInput.checked,
+                slices: node.parameters?.slices || [],
                 lightingEnabled: true,
                 aoEnabled: true,
                 ambientLevel: 0.3,

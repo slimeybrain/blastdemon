@@ -388,51 +388,145 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             }
         }
 
-        // Charge 3D connection check
-        const chargeConn3D = state.connections.find(c => c.toNode === solver3D.id && c.toPort === 'charge');
-        if (chargeConn3D) {
-            const chargeNode3D = state.nodes.find(n => n.id === chargeConn3D.fromNode);
-            if (!chargeNode3D || chargeNode3D.type !== 'Charge3D') {
-                const connKey = `${chargeConn3D.fromNode}:${chargeConn3D.fromPort}->${chargeConn3D.toNode}:${chargeConn3D.toPort}`;
-                flawedConnections.set(connKey, "Only Charge3D node can be connected to the Charge input of CFD Solver 3D.");
-                addMessage(solver3D.id, 'error', "Only Charge3D node can be connected to the Charge input of CFD Solver 3D.");
+        const initMode3D = solver3D.parameters?.init_mode || 'From1D';
+
+        if (initMode3D === 'From1D') {
+            // Remap connection check
+            const remapConn3D = state.connections.find(c => c.toNode === solver3D.id && c.toPort === 'remap');
+            if (!remapConn3D) {
+                addMessage(solver3D.id, 'error', "No Remap node connected to CFD Solver 3D. A RemapNode is required for From1D mode.");
             } else {
-                // Check if Charge3D has a Material node connected
-                const matConn = state.connections.find(c => c.toNode === chargeNode3D.id && c.toPort === 'material');
-                if (!matConn) {
-                    addMessage(chargeNode3D.id, 'error', "No Material connected to Charge 3D.");
+                const remapNode3D = state.nodes.find(n => n.id === remapConn3D.fromNode);
+                if (!remapNode3D || remapNode3D.type !== 'RemapNode') {
+                    const connKey = `${remapConn3D.fromNode}:${remapConn3D.fromPort}->${remapConn3D.toNode}:${remapConn3D.toPort}`;
+                    flawedConnections.set(connKey, "Only RemapNode can be connected to the Remap input of CFD Solver 3D.");
+                    addMessage(solver3D.id, 'error', "Only RemapNode can be connected to the Remap input of CFD Solver 3D.");
+                }
+            }
+
+            // Ignored inputs warning
+            const ignoredPorts = ['charge', 'detonator'];
+            ignoredPorts.forEach(port => {
+                const conn = state.connections.find(c => c.toNode === solver3D.id && c.toPort === port);
+                if (conn) {
+                    addMessage(solver3D.id, 'warning', `Input connected to '${port}' port is ignored when Init Mode is 'From1D'.`);
+                    const connectedNode = state.nodes.find(n => n.id === conn.fromNode);
+                    if (connectedNode) {
+                        addMessage(connectedNode.id, 'warning', `This node is ignored because the connected CFD Solver 3D Init Mode is 'From1D'.`);
+                    }
+                }
+            });
+
+        } else if (initMode3D === 'Multi-Material JWL') {
+            // Charge 3D connection check
+            const chargeConn3D = state.connections.find(c => c.toNode === solver3D.id && c.toPort === 'charge');
+            if (!chargeConn3D) {
+                addMessage(solver3D.id, 'error', "No Charge node connected to CFD Solver 3D. A Charge3D node is required for Multi-Material JWL mode.");
+            } else {
+                const chargeNode3D = state.nodes.find(n => n.id === chargeConn3D.fromNode);
+                if (!chargeNode3D || chargeNode3D.type !== 'Charge3D') {
+                    const connKey = `${chargeConn3D.fromNode}:${chargeConn3D.fromPort}->${chargeConn3D.toNode}:${chargeConn3D.toPort}`;
+                    flawedConnections.set(connKey, "Only Charge3D node can be connected to the Charge input of CFD Solver 3D.");
+                    addMessage(solver3D.id, 'error', "Only Charge3D node can be connected to the Charge input of CFD Solver 3D.");
                 } else {
-                    const matNode = state.nodes.find(n => n.id === matConn.fromNode);
-                    if (!matNode || matNode.type !== 'Material') {
-                        const connKey = `${matConn.fromNode}:${matConn.fromPort}->${matConn.toNode}:${matConn.toPort}`;
-                        flawedConnections.set(connKey, "Only Material node can be connected to the Material input of Charge 3D.");
-                        addMessage(chargeNode3D.id, 'error', "Only Material node can be connected to the Material input of Charge 3D.");
+                    const matConn = state.connections.find(c => c.toNode === chargeNode3D.id && c.toPort === 'material');
+                    if (!matConn) {
+                        addMessage(chargeNode3D.id, 'error', "No Material connected to Charge 3D.");
+                    } else {
+                        const matNode = state.nodes.find(n => n.id === matConn.fromNode);
+                        if (!matNode || matNode.type !== 'Material') {
+                            const connKey = `${matConn.fromNode}:${matConn.fromPort}->${matConn.toNode}:${matConn.toPort}`;
+                            flawedConnections.set(connKey, "Only Material node can be connected to the Material input of Charge 3D.");
+                            addMessage(chargeNode3D.id, 'error', "Only Material node can be connected to the Material input of Charge 3D.");
+                        } else {
+                            const matType = matNode.parameters?.material_type || 'Air';
+                            if (matType !== 'JWL Charge') {
+                                addMessage(chargeNode3D.id, 'error', "CFD Solver 3D in JWL mode requires a 'JWL Charge' material type connected to the Charge node.");
+                            }
+                        }
                     }
                 }
             }
-        }
 
-        // Detonator connection check
-        const detConn3D = state.connections.find(c => c.toNode === solver3D.id && c.toPort === 'detonator');
-        if (!detConn3D) {
-            addMessage(solver3D.id, 'error', "No Detonator node connected to CFD Solver 3D. A DetonatorLocation3D node is required.");
-        } else {
-            const detNode3D = state.nodes.find(n => n.id === detConn3D.fromNode);
-            if (!detNode3D || detNode3D.type !== 'DetonatorLocation3D') {
-                const connKey = `${detConn3D.fromNode}:${detConn3D.fromPort}->${detConn3D.toNode}:${detConn3D.toPort}`;
-                flawedConnections.set(connKey, "Only DetonatorLocation3D node can be connected to the Detonator input of CFD Solver 3D.");
-                addMessage(solver3D.id, 'error', "Only DetonatorLocation3D node can be connected to the Detonator input of CFD Solver 3D.");
+            // Detonator connection check
+            const detConn3D = state.connections.find(c => c.toNode === solver3D.id && c.toPort === 'detonator');
+            if (!detConn3D) {
+                addMessage(solver3D.id, 'error', "No Detonator node connected to CFD Solver 3D. A DetonatorLocation3D node is required for Multi-Material JWL mode.");
+            } else {
+                const detNode3D = state.nodes.find(n => n.id === detConn3D.fromNode);
+                if (!detNode3D || detNode3D.type !== 'DetonatorLocation3D') {
+                    const connKey = `${detConn3D.fromNode}:${detConn3D.fromPort}->${detConn3D.toNode}:${detConn3D.toPort}`;
+                    flawedConnections.set(connKey, "Only DetonatorLocation3D node can be connected to the Detonator input of CFD Solver 3D.");
+                    addMessage(solver3D.id, 'error', "Only DetonatorLocation3D node can be connected to the Detonator input of CFD Solver 3D.");
+                }
             }
+
+            // Ignored inputs warning
+            const ignoredPorts = ['remap'];
+            ignoredPorts.forEach(port => {
+                const conn = state.connections.find(c => c.toNode === solver3D.id && c.toPort === port);
+                if (conn) {
+                    addMessage(solver3D.id, 'warning', `Input connected to '${port}' port is ignored when Init Mode is 'Multi-Material JWL'.`);
+                    const connectedNode = state.nodes.find(n => n.id === conn.fromNode);
+                    if (connectedNode) {
+                        addMessage(connectedNode.id, 'warning', `This node is ignored because the connected CFD Solver 3D Init Mode is 'Multi-Material JWL'.`);
+                    }
+                }
+            });
+
+        } else if (initMode3D === 'Ideal Gas') {
+            // Charge 3D connection check
+            const chargeConn3D = state.connections.find(c => c.toNode === solver3D.id && c.toPort === 'charge');
+            if (!chargeConn3D) {
+                addMessage(solver3D.id, 'error', "No Charge node connected to CFD Solver 3D. A Charge3D node is required for Ideal Gas mode.");
+            } else {
+                const chargeNode3D = state.nodes.find(n => n.id === chargeConn3D.fromNode);
+                if (!chargeNode3D || chargeNode3D.type !== 'Charge3D') {
+                    const connKey = `${chargeConn3D.fromNode}:${chargeConn3D.fromPort}->${chargeConn3D.toNode}:${chargeConn3D.toPort}`;
+                    flawedConnections.set(connKey, "Only Charge3D node can be connected to the Charge input of CFD Solver 3D.");
+                    addMessage(solver3D.id, 'error', "Only Charge3D node can be connected to the Charge input of CFD Solver 3D.");
+                } else {
+                    const matConn = state.connections.find(c => c.toNode === chargeNode3D.id && c.toPort === 'material');
+                    if (!matConn) {
+                        addMessage(chargeNode3D.id, 'error', "No Material connected to Charge 3D.");
+                    } else {
+                        const matNode = state.nodes.find(n => n.id === matConn.fromNode);
+                        if (!matNode || matNode.type !== 'Material') {
+                            const connKey = `${matConn.fromNode}:${matConn.fromPort}->${matConn.toNode}:${matConn.toPort}`;
+                            flawedConnections.set(connKey, "Only Material node can be connected to the Material input of Charge 3D.");
+                            addMessage(chargeNode3D.id, 'error', "Only Material node can be connected to the Material input of Charge 3D.");
+                        } else {
+                            const matType = matNode.parameters?.material_type || 'Air';
+                            if (matType !== 'Ideal Gas Charge') {
+                                addMessage(chargeNode3D.id, 'error', "CFD Solver 3D in Ideal Gas mode requires an 'Ideal Gas Charge' material type connected to the Charge node.");
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Ignored inputs warning
+            const ignoredPorts = ['remap', 'detonator'];
+            ignoredPorts.forEach(port => {
+                const conn = state.connections.find(c => c.toNode === solver3D.id && c.toPort === port);
+                if (conn) {
+                    addMessage(solver3D.id, 'warning', `Input connected to '${port}' port is ignored when Init Mode is 'Ideal Gas'.`);
+                    const connectedNode = state.nodes.find(n => n.id === conn.fromNode);
+                    if (connectedNode) {
+                        addMessage(connectedNode.id, 'warning', `This node is ignored because the connected CFD Solver 3D Init Mode is 'Ideal Gas'.`);
+                    }
+                }
+            });
         }
 
-        // Remap connection check
-        const remapConn3D = state.connections.find(c => c.toNode === solver3D.id && c.toPort === 'remap');
-        if (remapConn3D) {
-            const remapNode3D = state.nodes.find(n => n.id === remapConn3D.fromNode);
-            if (!remapNode3D || remapNode3D.type !== 'RemapNode') {
-                const connKey = `${remapConn3D.fromNode}:${remapConn3D.fromPort}->${remapConn3D.toNode}:${remapConn3D.toPort}`;
-                flawedConnections.set(connKey, "Only RemapNode can be connected to the Remap input of CFD Solver 3D.");
-                addMessage(solver3D.id, 'error', "Only RemapNode can be connected to the Remap input of CFD Solver 3D.");
+        // STL Geometry connection check
+        const stlConn3D = state.connections.find(c => c.toNode === solver3D.id && c.toPort === 'stl');
+        if (stlConn3D) {
+            const stlNode3D = state.nodes.find(n => n.id === stlConn3D.fromNode);
+            if (!stlNode3D || stlNode3D.type !== 'STLGeometry') {
+                const connKey = `${stlConn3D.fromNode}:${stlConn3D.fromPort}->${stlConn3D.toNode}:${stlConn3D.toPort}`;
+                flawedConnections.set(connKey, "Only STLGeometry node can be connected to the STL input of CFD Solver 3D.");
+                addMessage(solver3D.id, 'error', "Only STLGeometry node can be connected to the STL input of CFD Solver 3D.");
             }
         }
     });

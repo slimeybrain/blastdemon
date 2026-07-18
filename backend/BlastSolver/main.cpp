@@ -1312,6 +1312,8 @@ struct TelemetryPayload {
     std::vector<SlicePayload> slices;
     double xmin = 0.0, ymin = 0.0, zmin = 0.0, dx = 0.0;
     int nx = 0, ny = 0, nz = 0;
+    double total_mass = 0.0;
+    double total_energy = 0.0;
 
     // Shared grid/frame data
     std::vector<float> grid_data;
@@ -1442,6 +1444,8 @@ void async_telemetry_thread_func() {
             envelope["nx"] = payload->nx;
             envelope["ny"] = payload->ny;
             envelope["nz"] = payload->nz;
+            envelope["total_mass"] = payload->total_mass;
+            envelope["total_energy"] = payload->total_energy;
             if (payload->has_gauges) {
                 envelope["gauges_history"] = gh;
             }
@@ -1580,6 +1584,10 @@ void emit_telemetry_3d(double elapsed, bool is_terminated) {
     payload->nx = global_solver_3d->getNx();
     payload->ny = global_solver_3d->getNy();
     payload->nz = global_solver_3d->getNz();
+
+    auto totals = global_solver_3d->getConservationTotals();
+    payload->total_mass = totals.first;
+    payload->total_energy = totals.second;
 
     {
         std::lock_guard<std::mutex> g_lock(global_gauges_mutex);
@@ -2449,6 +2457,10 @@ int main() {
                         map_bc_3d(msg.value("bc_y_min", "Reflecting")), map_bc_3d(msg.value("bc_y_max", "Transmitting")),
                         map_bc_3d(msg.value("bc_z_min", "Reflecting")), map_bc_3d(msg.value("bc_z_max", "Transmitting"))
                     );
+
+                    std::string stl_file = msg.value("stl_file", "");
+                    std::string geometry_hash = msg.value("geometry_hash", "");
+                    global_solver_3d->setGeometry(stl_file, geometry_hash);
 
                     init_gauges(msg);
                     emit_kernel_log("SYSTEM", "3D Solver Initialized", 0.0, "3d");

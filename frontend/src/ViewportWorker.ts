@@ -58,11 +58,13 @@ void main() {
             return;
         }
         
-        // Axes Indicator (2=X Red, 3=Y Green, 4=Z Blue)
+        // Axes Indicator / STL Geometry
         vec4 baseColor = vec4(0.0);
         if (uIsWireframe == 2) baseColor = vec4(1.0, 0.1, 0.1, 1.0);
         else if (uIsWireframe == 3) baseColor = vec4(0.1, 1.0, 0.1, 1.0);
         else if (uIsWireframe == 4) baseColor = vec4(0.2, 0.5, 1.0, 1.0);
+        else if (uIsWireframe == 5) baseColor = vec4(0.35, 0.5, 0.75, uAlpha);
+        else if (uIsWireframe == 6) baseColor = vec4(0.0, 0.8, 1.0, 0.8);
 
         if (uEnableLighting) {
             vec3 viewPos3 = vViewPos.xyz;
@@ -191,11 +193,13 @@ void main() {
             return;
         }
         
-        // Axes Indicator (2=X Red, 3=Y Green, 4=Z Blue)
+        // Axes Indicator / STL Geometry
         vec4 baseColor = vec4(0.0);
         if (uIsWireframe == 2) baseColor = vec4(1.0, 0.1, 0.1, 1.0);
         else if (uIsWireframe == 3) baseColor = vec4(0.1, 1.0, 0.1, 1.0);
         else if (uIsWireframe == 4) baseColor = vec4(0.2, 0.5, 1.0, 1.0);
+        else if (uIsWireframe == 5) baseColor = vec4(0.35, 0.5, 0.75, uAlpha);
+        else if (uIsWireframe == 6) baseColor = vec4(0.0, 0.8, 1.0, 0.8);
 
         if (uEnableLighting) {
             vec3 viewPos3 = vViewPos.xyz;
@@ -333,7 +337,7 @@ fn fs_main(@location(0) texCoord: vec2<f32>, @location(1) sliceSize: vec2<f32>, 
             return vec4<f32>(0.3, 0.3, 0.4, 0.8); // Bounding box: grey
         }
         
-        // Axes Indicator (2=X Red, 3=Y Green, 4=Z Blue)
+        // Axes Indicator / STL Geometry
         var baseColor = vec4<f32>(0.0, 0.0, 0.0, 1.0);
         if (uniforms.isWireframe < 2.5) {
             baseColor = vec4<f32>(1.0, 0.1, 0.1, 1.0);
@@ -341,6 +345,10 @@ fn fs_main(@location(0) texCoord: vec2<f32>, @location(1) sliceSize: vec2<f32>, 
             baseColor = vec4<f32>(0.1, 1.0, 0.1, 1.0);
         } else if (uniforms.isWireframe < 4.5) {
             baseColor = vec4<f32>(0.2, 0.5, 1.0, 1.0);
+        } else if (uniforms.isWireframe < 5.5) {
+            baseColor = vec4<f32>(0.35, 0.5, 0.75, uniforms.alpha);
+        } else if (uniforms.isWireframe < 6.5) {
+            baseColor = vec4<f32>(0.0, 0.8, 1.0, 0.8);
         }
 
         if (uniforms.enableLighting > 0.5) {
@@ -439,9 +447,12 @@ let gpuContext: any = null;
 let gpuPipeline: any = null;
 let gpuSlicePipeline: any = null;
 let gpuLinePipeline: any = null;
+let gpuSTLLinePipeline: any = null;
 let gpuSampler: any = null;
 let gpuUniformBuffer: any = null;
 let gpuUniformBufferWF: any = null;
+let gpuSTLUniformSolid: any = null;
+let gpuSTLUniformWireframe: any = null;
 let gpuAxesUniformBuffers: any[] = [];
 let gpuSliceUniformBuffers: { [axis: number]: any } = {};
 let cachedMsaaColorTexture: any = null;
@@ -483,6 +494,20 @@ let showGrid = true;
 let useLogScale = false;
 let showCellEdges = false;
 let interpolate = false;
+
+// STL Geometry Buffers & Settings
+let rawSTLVertices: Float32Array | null = null;
+let transformedSTLVertices: Float32Array | null = null;
+let gpuSTLBuffer: any = null;
+let gpuSTLIndexBuffer: any = null;
+let stlBuffer: WebGLBuffer | null = null;
+let stlIndexBuffer: WebGLBuffer | null = null;
+let stlIndexCount = 0;
+
+let showSTL = true;
+let stlWireframe = false;
+let stlSolids = true;
+let stlOpacity = 0.5;
 
 interface CachedSlice {
     axis: number;
@@ -638,6 +663,96 @@ function updateAxesGeometry() {
     }
 }
 
+function updateSTLGeometry() {
+    if (!rawSTLVertices || rawSTLVertices.length === 0) {
+        transformedSTLVertices = null;
+        if (gpuSTLBuffer) {
+            gpuSTLBuffer.destroy();
+            gpuSTLBuffer = null;
+        }
+        if (gpuSTLIndexBuffer) {
+            gpuSTLIndexBuffer.destroy();
+            gpuSTLIndexBuffer = null;
+        }
+        if (gl) {
+            if (stlBuffer) {
+                gl.deleteBuffer(stlBuffer);
+                stlBuffer = null;
+            }
+            if (stlIndexBuffer) {
+                gl.deleteBuffer(stlIndexBuffer);
+                stlIndexBuffer = null;
+            }
+        }
+        stlIndexCount = 0;
+        return;
+    }
+
+    const sizeX = nx * dx || 1.0;
+    const sizeY = ny * dx || 1.0;
+    const sizeZ = nz * dx || 1.0;
+
+    const count = rawSTLVertices.length / 3;
+    const data = new Float32Array(count * 7);
+
+    for (let i = 0; i < count; i++) {
+        data[i * 7 + 0] = rawSTLVertices[i * 3 + 0];
+        data[i * 7 + 1] = rawSTLVertices[i * 3 + 1];
+        data[i * 7 + 2] = rawSTLVertices[i * 3 + 2];
+        
+        data[i * 7 + 3] = 0.0;
+        data[i * 7 + 4] = 0.0;
+        data[i * 7 + 5] = 0.0;
+        data[i * 7 + 6] = 0.0;
+    }
+
+    transformedSTLVertices = data;
+
+    const numTriangles = count / 3;
+    const indices = new Uint32Array(numTriangles * 6);
+    for (let i = 0; i < numTriangles; i++) {
+        indices[i * 6 + 0] = i * 3 + 0;
+        indices[i * 6 + 1] = i * 3 + 1;
+        indices[i * 6 + 2] = i * 3 + 1;
+        indices[i * 6 + 3] = i * 3 + 2;
+        indices[i * 6 + 4] = i * 3 + 2;
+        indices[i * 6 + 5] = i * 3 + 0;
+    }
+    stlIndexCount = indices.length;
+
+    if (isWebGPU && gpuDevice) {
+        if (gpuSTLBuffer) gpuSTLBuffer.destroy();
+        gpuSTLBuffer = gpuDevice.createBuffer({
+            size: data.byteLength,
+            usage: 32 | 8,
+            mappedAtCreation: true
+        });
+        new Float32Array(gpuSTLBuffer.getMappedRange()).set(data);
+        gpuSTLBuffer.unmap();
+
+        if (gpuSTLIndexBuffer) gpuSTLIndexBuffer.destroy();
+        gpuSTLIndexBuffer = gpuDevice.createBuffer({
+            size: indices.byteLength,
+            usage: 16 | 8,
+            mappedAtCreation: true
+        });
+        new Uint32Array(gpuSTLIndexBuffer.getMappedRange()).set(indices);
+        gpuSTLIndexBuffer.unmap();
+    } else if (gl) {
+        if (!stlBuffer) {
+            stlBuffer = gl.createBuffer();
+        }
+        gl.bindBuffer(gl.ARRAY_BUFFER, stlBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+
+        if (!stlIndexBuffer) {
+            stlIndexBuffer = gl.createBuffer();
+        }
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, stlIndexBuffer);
+        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
+    }
+}
+
 function shouldShowCellEdges(): boolean {
     if (!showCellEdges) return false;
     const maxN = Math.max(nx, ny, nz) || 1;
@@ -696,6 +811,7 @@ interface SliceData2D {
 let activeSlicesWebGPU: { [index: number]: SliceDataWebGPU } = {};
 let activeSlicesWebGL: { [index: number]: SliceDataWebGL } = {};
 let activeSlices2D: SliceData2D[] = [];
+let cachedDynamicMinMax: Record<string, { min: number, max: number }> = {};
 
 let hasFloatLinear = false;
 const nav = typeof navigator !== 'undefined' ? (navigator as any) : null;
@@ -865,6 +981,41 @@ async function initContext(canvas: OffscreenCanvas) {
                         }
                     });
 
+                    // Create separate line pipeline for STL wireframe
+                    gpuSTLLinePipeline = gpuDevice.createRenderPipeline({
+                        layout: pipelineLayout,
+                        vertex: {
+                            module: shaderModule,
+                            entryPoint: 'vs_main',
+                            buffers: [{
+                                arrayStride: 28,
+                                attributes: [
+                                    { shaderLocation: 0, offset: 0, format: 'float32x3' },
+                                    { shaderLocation: 1, offset: 12, format: 'float32x2' },
+                                    { shaderLocation: 2, offset: 20, format: 'float32x2' }
+                                ]
+                            }]
+                        },
+                        fragment: {
+                            module: shaderModule,
+                            entryPoint: 'fs_main',
+                            targets: [{
+                                format: nav.gpu.getPreferredCanvasFormat(),
+                                blend: {
+                                    color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+                                    alpha: { srcFactor: 'one', dstFactor: 'zero', operation: 'add' }
+                                }
+                            }]
+                        },
+                        primitive: { topology: 'line-list' },
+                        multisample: { count: 4 },
+                        depthStencil: {
+                            depthWriteEnabled: true,
+                            depthCompare: 'less-equal',
+                            format: 'depth24plus'
+                        }
+                    });
+
                     gpuSampler = gpuDevice.createSampler({
                         magFilter: isFilterable ? 'linear' : 'nearest',
                         minFilter: isFilterable ? 'linear' : 'nearest'
@@ -876,6 +1027,14 @@ async function initContext(canvas: OffscreenCanvas) {
                         usage: 64 | 8
                     });
                     gpuUniformBufferWF = gpuDevice.createBuffer({
+                        size: 256,
+                        usage: 64 | 8
+                    });
+                    gpuSTLUniformSolid = gpuDevice.createBuffer({
+                        size: 256,
+                        usage: 64 | 8
+                    });
+                    gpuSTLUniformWireframe = gpuDevice.createBuffer({
                         size: 256,
                         usage: 64 | 8
                     });
@@ -906,6 +1065,7 @@ async function initContext(canvas: OffscreenCanvas) {
                         usage: 32 | 8 // VERTEX | COPY_DST
                     });
                     updateAxesGeometry();
+                    updateSTLGeometry();
 
                     const dummyTex = gpuDevice.createTexture({
                         size: [1, 1, 1],
@@ -978,6 +1138,7 @@ async function initGL(canvas: OffscreenCanvas) {
     } else {
         gl.getExtension("OES_texture_float");
         hasFloatLinear = !!gl.getExtension("OES_texture_float_linear");
+        gl.getExtension("OES_element_index_uint");
     }
 
     bboxBuffer = gl.createBuffer();
@@ -986,6 +1147,7 @@ async function initGL(canvas: OffscreenCanvas) {
 
     axesBuffer = gl.createBuffer();
     updateAxesGeometry();
+    updateSTLGeometry();
 
     const vsSource = isWebGL2 ? VS_SOURCE_2 : VS_SOURCE_1;
     const fsSource = isWebGL2 ? FS_SOURCE_2 : FS_SOURCE_1;
@@ -1178,6 +1340,25 @@ function getSliceGeometry(axis: number, offset: number, w: number, h: number) {
         ]);
     }
 }
+// Helper to copy and pad Float32Array rows to satisfy WebGPU bytesPerRow alignment (multiple of 256 bytes)
+function padFloatData(src: Float32Array, w: number, h: number): { data: Float32Array, bytesPerRow: number } {
+    const bytesPerPixel = 4; // float32
+    const srcRowBytes = w * bytesPerPixel;
+    const destRowBytes = Math.ceil(srcRowBytes / 256) * 256;
+    const destW = destRowBytes / bytesPerPixel;
+
+    if (destRowBytes === srcRowBytes) {
+        return { data: src, bytesPerRow: destRowBytes };
+    }
+
+    const padded = new Float32Array(destW * h);
+    for (let y = 0; y < h; y++) {
+        const srcOffset = y * w;
+        const destOffset = y * destW;
+        padded.set(src.subarray(srcOffset, srcOffset + w), destOffset);
+    }
+    return { data: padded, bytesPerRow: destRowBytes };
+}
 
 function handleFrame(buffer: ArrayBuffer) {
     const view = new DataView(buffer);
@@ -1207,13 +1388,17 @@ function handleFrame(buffer: ArrayBuffer) {
         cacheOffset = dataStart + (w * h * 4);
     }
 
-    // Compute dynamic min/max per quantity
-    const dynamicMinMax: Record<string, { min: number, max: number }> = {};
+    // Assign slice-specific ranges and configs
+    const sliceRanges: { min: number, max: number }[] = [];
     for (let i = 0; i < cachedSlices.length; i++) {
         const slice = cachedSlices[i];
         const config = slicesConfig[i] || {};
         const qty = config.quantities?.[0] || 'pressure';
-
+        const sliceAutoScale = config.auto_scale !== false;
+        const colormapVal = config.colormap || 'plasma';
+        const logVal = config.log_scale === true;
+        const interpVal = config.interpolate !== false;
+        
         let sliceMin = Infinity;
         let sliceMax = -Infinity;
         for (let j = 0; j < slice.data.length; j++) {
@@ -1224,41 +1409,20 @@ function handleFrame(buffer: ArrayBuffer) {
             }
         }
 
-        if (sliceMin < sliceMax) {
-            if (!dynamicMinMax[qty]) {
-                dynamicMinMax[qty] = { min: sliceMin, max: sliceMax };
-            } else {
-                dynamicMinMax[qty].min = Math.min(dynamicMinMax[qty].min, sliceMin);
-                dynamicMinMax[qty].max = Math.max(dynamicMinMax[qty].max, sliceMax);
-            }
-        }
-    }
-
-    // Assign slice-specific ranges and configs
-    for (let i = 0; i < cachedSlices.length; i++) {
-        const slice = cachedSlices[i];
-        const config = slicesConfig[i] || {};
-        const qty = config.quantities?.[0] || 'pressure';
-        const sliceAutoScale = config.auto_scale !== false;
-        const colormapVal = config.colormap || 'plasma';
-        const logVal = config.log_scale === true;
-        const interpVal = config.interpolate !== false;
-        
         let sliceMinY = minY;
         let sliceMaxY = maxY;
 
         if (sliceAutoScale) {
-            const dyn = dynamicMinMax[qty];
-            if (dyn && dyn.min < dyn.max) {
-                sliceMinY = dyn.min;
-                sliceMaxY = dyn.max;
+            if (sliceMin < sliceMax) {
+                sliceMinY = sliceMin;
+                sliceMaxY = sliceMax;
             } else {
-                const range = config.min_val !== undefined ? [config.min_val, config.max_val] : (quantityRanges[qty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0]);
+                const range = config.min_val !== undefined && config.max_val !== undefined ? [config.min_val, config.max_val] : (quantityRanges[qty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0]);
                 sliceMinY = range[0];
                 sliceMaxY = range[1];
             }
         } else {
-            const range = config.min_val !== undefined ? [config.min_val, config.max_val] : (quantityRanges[qty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0]);
+            const range = config.min_val !== undefined && config.max_val !== undefined ? [config.min_val, config.max_val] : (quantityRanges[qty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0]);
             sliceMinY = range[0];
             sliceMaxY = range[1];
         }
@@ -1268,44 +1432,43 @@ function handleFrame(buffer: ArrayBuffer) {
         slice.colormap = colormapVal;
         slice.useLogScale = logVal;
         slice.interpolate = interpVal;
+
+        if (sliceMin < sliceMax) {
+            sliceRanges.push({ min: sliceMin, max: sliceMax });
+        } else {
+            const range = config.min_val !== undefined && config.max_val !== undefined ? [config.min_val, config.max_val] : (quantityRanges[qty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0]);
+            sliceRanges.push({ min: range[0], max: range[1] });
+        }
     }
 
-    // Send dynamic min/max range of the currently focused quantity back to the main thread
-    const focusedConfig = slicesConfig[focusedSliceIndex] || slicesConfig[0] || {};
-    const focusedQty = focusedConfig.quantities?.[0] || 'pressure';
-    const dyn = dynamicMinMax[focusedQty];
-    if (dyn && dyn.min < dyn.max) {
-        self.postMessage({ type: 'currentRange', min: dyn.min, max: dyn.max });
-    } else {
-        const range = quantityRanges[focusedQty] || DEFAULT_QUANTITY_RANGES[focusedQty] || [0.0, 1.0];
-        self.postMessage({ type: 'currentRange', min: range[0], max: range[1] });
+    self.postMessage({ type: 'sliceRanges', ranges: sliceRanges });
+
+    // Send dynamic min/max range of the currently focused slice back to the main thread
+    const focusedSlice = cachedSlices[focusedSliceIndex] || cachedSlices[0];
+    if (focusedSlice) {
+        let sliceMin = Infinity;
+        let sliceMax = -Infinity;
+        for (let j = 0; j < focusedSlice.data.length; j++) {
+            const v = focusedSlice.data[j];
+            if (isFinite(v)) {
+                if (v < sliceMin) sliceMin = v;
+                if (v > sliceMax) sliceMax = v;
+            }
+        }
+        if (sliceMin < sliceMax) {
+            self.postMessage({ type: 'currentRange', min: sliceMin, max: sliceMax });
+        } else {
+            const focusedConfig = slicesConfig[focusedSliceIndex] || slicesConfig[0] || {};
+            const focusedQty = focusedConfig.quantities?.[0] || 'pressure';
+            const range = focusedConfig.min_val !== undefined && focusedConfig.max_val !== undefined ? [focusedConfig.min_val, focusedConfig.max_val] : (quantityRanges[focusedQty] || DEFAULT_QUANTITY_RANGES[focusedQty] || [0.0, 1.0]);
+            self.postMessage({ type: 'currentRange', min: range[0], max: range[1] });
+        }
     }
 
     if (is2DFallback) {
         activeSlices2D = cachedSlices;
         return;
     }
-
-// Helper to copy and pad Float32Array rows to satisfy WebGPU bytesPerRow alignment (multiple of 256 bytes)
-function padFloatData(src: Float32Array, w: number, h: number): { data: Float32Array, bytesPerRow: number } {
-    const bytesPerPixel = 4; // float32
-    const srcRowBytes = w * bytesPerPixel;
-    const destRowBytes = Math.ceil(srcRowBytes / 256) * 256;
-    const destW = destRowBytes / bytesPerPixel;
-
-    if (destRowBytes === srcRowBytes) {
-        return { data: src, bytesPerRow: destRowBytes };
-    }
-
-    const padded = new Float32Array(destW * h);
-    for (let y = 0; y < h; y++) {
-        const srcOffset = y * w;
-        const destOffset = y * destW;
-        padded.set(src.subarray(srcOffset, srcOffset + w), destOffset);
-    }
-    return { data: padded, bytesPerRow: destRowBytes };
-}
-
     // We clear slices on size changes or if configuration changes
     let sizeChanged = false;
     // We will clear the maps if sizeChanged is detected via setConfig or when numSlices doesn't match active count
@@ -1711,6 +1874,75 @@ function render() {
             }
         }
 
+        // Draw STL Geometry
+        if (showSTL && gpuSTLBuffer && transformedSTLVertices && gpuSTLUniformSolid && gpuSTLUniformWireframe) {
+            const count = transformedSTLVertices.length / 7;
+            const dummyTexView = Object.values(activeSlicesWebGPU)[0]?.gpuTextureView || gpuDummyTextureView;
+
+            const sizeX = nx * dx || 1.0;
+            const sizeY = ny * dx || 1.0;
+            const sizeZ = nz * dx || 1.0;
+            const sx = 1.0 / sizeX;
+            const sy = 1.0 / sizeY;
+            const sz = 1.0 / sizeZ;
+            const tx = -xmin * sx - 0.5;
+            const ty = -ymin * sy - 0.5;
+            const tz = -zmin * sz - 0.5;
+
+            const stlModel = new Float32Array([
+                sx, 0, 0, 0,
+                0, sy, 0, 0,
+                0, 0, sz, 0,
+                tx, ty, tz, 1
+            ]);
+            const stlFinalModel = multiplyMatrices(modelMatrix, stlModel);
+
+            if (stlSolids && gpuPipeline) {
+                const uSolid = new Float32Array(uniformData);
+                uSolid.set(stlFinalModel, 32);
+                uSolid[48] = stlOpacity;
+                uSolid[53] = 5.0;
+                gpuDevice.queue.writeBuffer(gpuSTLUniformSolid, 0, uSolid.buffer);
+
+                const solidBindGroup = gpuDevice.createBindGroup({
+                    layout: bindGroupLayout,
+                    entries: [
+                        { binding: 0, resource: { buffer: gpuSTLUniformSolid } },
+                        { binding: 1, resource: dummyTexView },
+                        { binding: 2, resource: gpuSampler! }
+                    ]
+                });
+
+                passEncoder.setPipeline(gpuPipeline);
+                passEncoder.setBindGroup(0, solidBindGroup);
+                passEncoder.setVertexBuffer(0, gpuSTLBuffer);
+                passEncoder.draw(count);
+            }
+
+            if (stlWireframe && gpuLinePipeline) {
+                const uWire = new Float32Array(uniformData);
+                uWire.set(stlFinalModel, 32);
+                uWire[48] = 0.8;
+                uWire[53] = 6.0;
+                gpuDevice.queue.writeBuffer(gpuSTLUniformWireframe, 0, uWire.buffer);
+
+                const wireBindGroup = gpuDevice.createBindGroup({
+                    layout: bindGroupLayout,
+                    entries: [
+                        { binding: 0, resource: { buffer: gpuSTLUniformWireframe } },
+                        { binding: 1, resource: dummyTexView },
+                        { binding: 2, resource: gpuSampler! }
+                    ]
+                });
+
+                passEncoder.setPipeline(gpuSTLLinePipeline);
+                passEncoder.setBindGroup(0, wireBindGroup);
+                passEncoder.setVertexBuffer(0, gpuSTLBuffer);
+                passEncoder.setIndexBuffer(gpuSTLIndexBuffer, 'uint32');
+                passEncoder.drawIndexed(stlIndexCount);
+            }
+        }
+
         // 2. Draw Slices
         const slicesArray = Object.values(activeSlicesWebGPU);
         if (slicesArray.length > 0) {
@@ -1866,6 +2098,54 @@ function render() {
         }
     }
 
+    // Draw STL Geometry fallback in WebGL
+    if (showSTL && stlBuffer && transformedSTLVertices) {
+        const count = transformedSTLVertices.length / 7;
+
+        const sizeX = nx * dx || 1.0;
+        const sizeY = ny * dx || 1.0;
+        const sizeZ = nz * dx || 1.0;
+        const sx = 1.0 / sizeX;
+        const sy = 1.0 / sizeY;
+        const sz = 1.0 / sizeZ;
+        const tx = -xmin * sx - 0.5;
+        const ty = -ymin * sy - 0.5;
+        const tz = -zmin * sz - 0.5;
+
+        const stlModel = new Float32Array([
+            sx, 0, 0, 0,
+            0, sy, 0, 0,
+            0, 0, sz, 0,
+            tx, ty, tz, 1
+        ]);
+        const stlFinalModel = multiplyMatrices(modelMatrix, stlModel);
+        gl.uniformMatrix4fv(uModel, false, stlFinalModel);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, stlBuffer);
+        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 28, 12);
+        gl.enableVertexAttribArray(1);
+        gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 28, 20);
+        gl.enableVertexAttribArray(2);
+
+        if (stlSolids) {
+            gl.uniform1i(uIsWF, 5);
+            gl.uniform1f(uAlpha, stlOpacity);
+            gl.drawArrays(gl.TRIANGLES, 0, count);
+        }
+
+        if (stlWireframe && stlIndexBuffer && stlIndexCount > 0) {
+            gl.uniform1i(uIsWF, 6);
+            gl.uniform1f(uAlpha, 0.8);
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, stlIndexBuffer);
+            gl.drawElements(gl.LINES, stlIndexCount, gl.UNSIGNED_INT, 0);
+        }
+
+        // Restore base model matrix for slices
+        gl.uniformMatrix4fv(uModel, false, modelMatrix);
+    }
+
     gl.uniform1i(uIsWF, 0);
     const uShowEdges = gl.getUniformLocation(program, "uShowCellEdges");
     if (uShowEdges !== null) {
@@ -1978,6 +2258,10 @@ self.onmessage = async (e) => {
             await initContext(canvas);
             updateMatrices(w, h);
             render();
+        } else if (type === "setSTLGeometry") {
+            rawSTLVertices = data.vertices;
+            updateSTLGeometry();
+            render();
         } else if (type === "resize") {
             const w = data.width > 0 ? data.width : 300;
             const h = data.height > 0 ? data.height : 150;
@@ -2079,17 +2363,255 @@ self.onmessage = async (e) => {
             if (data.specularIntensity !== undefined) specularIntensity = data.specularIntensity;
             if (data.ambientLevel !== undefined) ambientLevel = data.ambientLevel;
             if (data.sliceOpacities !== undefined) sliceOpacities = data.sliceOpacities;
-            if (data.slices !== undefined) slicesConfig = data.slices;
+            if (data.slices !== undefined) {
+                slicesConfig = data.slices;
+                
+                // Ensure cachedSlices length matches slicesConfig length if we have at least one valid slice
+                if (cachedSlices.length > 0) {
+                    while (cachedSlices.length < slicesConfig.length) {
+                        const i = cachedSlices.length;
+                        const config = slicesConfig[i];
+                        const refSlice = cachedSlices[0];
+                        const w = refSlice ? refSlice.w : 64;
+                        const h = refSlice ? refSlice.h : 64;
+                        const dummyData = new Float32Array(w * h);
+                        if (refSlice && refSlice.data.length > 0) {
+                            dummyData.fill(refSlice.data[0]);
+                        }
+                        cachedSlices.push({
+                            axis: config.axis === 'xy' ? 0 : config.axis === 'xz' ? 1 : 2,
+                            offset: config.offset,
+                            w,
+                            h,
+                            data: dummyData,
+                            minY: config.min_val ?? 101325.0,
+                            maxY: config.max_val ?? 1013250.0,
+                            colormap: config.colormap || 'plasma',
+                            useLogScale: config.log_scale === true,
+                            interpolate: config.interpolate !== false
+                        });
+                    }
+                    if (cachedSlices.length > slicesConfig.length) {
+                        // Destroy resources for slices that are being deleted
+                        for (let i = slicesConfig.length; i < cachedSlices.length; i++) {
+                            if (isWebGPU && activeSlicesWebGPU[i]) {
+                                activeSlicesWebGPU[i].gpuTexture.destroy();
+                                activeSlicesWebGPU[i].vertexBuffer.destroy();
+                                delete activeSlicesWebGPU[i];
+                            }
+                            if (gl && activeSlicesWebGL[i]) {
+                                gl.deleteTexture(activeSlicesWebGL[i].texture);
+                                gl.deleteBuffer(activeSlicesWebGL[i].buffer);
+                                delete activeSlicesWebGL[i];
+                            }
+                        }
+                        cachedSlices = cachedSlices.slice(0, slicesConfig.length);
+                    }
+                }
+                
+                // Now, update cachedSlices configurations in-place
+                cachedSlices.forEach((sliceObj, i) => {
+                    const config = slicesConfig[i];
+                    if (!config) return;
+                    sliceObj.axis = config.axis === 'xy' ? 0 : config.axis === 'xz' ? 1 : 2;
+                    sliceObj.offset = config.offset;
+                    sliceObj.minY = config.min_val ?? sliceObj.minY;
+                    sliceObj.maxY = config.max_val ?? sliceObj.maxY;
+                    sliceObj.colormap = config.colormap || 'plasma';
+                    sliceObj.useLogScale = config.log_scale === true;
+                    sliceObj.interpolate = config.interpolate !== false;
+                });
+
+                // Update active slices (WebGL / WebGPU) immediately so they are in sync!
+                if (isWebGPU && gpuDevice) {
+                    cachedSlices.forEach((sliceObj, i) => {
+                        const axis = sliceObj.axis;
+                        const zOff = sliceObj.offset;
+                        const w = sliceObj.w;
+                        const h = sliceObj.h;
+                        const floatData = sliceObj.data;
+                        const opacity = sliceOpacities[i] !== undefined ? sliceOpacities[i] : 1.0;
+                        const geo = getSliceGeometry(axis, zOff, w, h);
+
+                        if (activeSlicesWebGPU[i]) {
+                            const slice = activeSlicesWebGPU[i];
+                            if (slice.w !== w || slice.h !== h) {
+                                slice.gpuTexture.destroy();
+                                slice.gpuTexture = gpuDevice.createTexture({
+                                    size: [w, h, 1],
+                                    format: 'r32float',
+                                    usage: 4 | 2
+                                });
+                                slice.gpuTextureView = slice.gpuTexture.createView();
+                                slice.w = w; slice.h = h;
+
+                                if (!gpuSliceUniformBuffers[i]) {
+                                    gpuSliceUniformBuffers[i] = gpuDevice.createBuffer({
+                                        size: 256,
+                                        usage: 64 | 8
+                                    });
+                                }
+                                slice.bindGroup = gpuDevice.createBindGroup({
+                                    layout: bindGroupLayout,
+                                    entries: [
+                                        { binding: 0, resource: { buffer: gpuSliceUniformBuffers[i] } },
+                                        { binding: 1, resource: slice.gpuTextureView },
+                                        { binding: 2, resource: gpuSampler! }
+                                    ]
+                                });
+                            }
+                            const paddedResult = padFloatData(floatData, w, h);
+                            gpuDevice.queue.writeTexture(
+                                { texture: slice.gpuTexture },
+                                paddedResult.data,
+                                { bytesPerRow: paddedResult.bytesPerRow },
+                                [w, h, 1]
+                            );
+                            gpuDevice.queue.writeBuffer(slice.vertexBuffer, 0, geo);
+                            slice.axis = axis;
+                            slice.offset = zOff;
+                            slice.opacity = opacity;
+                            slice.minY = sliceObj.minY;
+                            slice.maxY = sliceObj.maxY;
+                            slice.colormap = sliceObj.colormap;
+                            slice.useLogScale = sliceObj.useLogScale;
+                            slice.interpolate = sliceObj.interpolate;
+                        } else {
+                            const tex = gpuDevice.createTexture({
+                                size: [w, h, 1],
+                                format: 'r32float',
+                                usage: 4 | 2
+                            });
+                            const paddedResult = padFloatData(floatData, w, h);
+                            gpuDevice.queue.writeTexture(
+                                { texture: tex },
+                                paddedResult.data,
+                                { bytesPerRow: paddedResult.bytesPerRow },
+                                [w, h, 1]
+                            );
+                            const texView = tex.createView();
+
+                            const vb = gpuDevice.createBuffer({
+                                size: geo.byteLength,
+                                usage: 32 | 8
+                            });
+                            gpuDevice.queue.writeBuffer(vb, 0, geo);
+
+                            if (!gpuSliceUniformBuffers[i]) {
+                                gpuSliceUniformBuffers[i] = gpuDevice.createBuffer({
+                                    size: 256,
+                                    usage: 64 | 8
+                                });
+                            }
+
+                            const bindGroup = gpuDevice.createBindGroup({
+                                layout: bindGroupLayout,
+                                entries: [
+                                    { binding: 0, resource: { buffer: gpuSliceUniformBuffers[i] } },
+                                    { binding: 1, resource: texView },
+                                    { binding: 2, resource: gpuSampler! }
+                                ]
+                            });
+
+                            activeSlicesWebGPU[i] = {
+                                axis,
+                                offset: zOff,
+                                w,
+                                h,
+                                gpuTexture: tex,
+                                gpuTextureView: texView,
+                                vertexBuffer: vb,
+                                bindGroup,
+                                opacity,
+                                index: i,
+                                minY: sliceObj.minY,
+                                maxY: sliceObj.maxY,
+                                colormap: sliceObj.colormap,
+                                useLogScale: sliceObj.useLogScale,
+                                interpolate: sliceObj.interpolate
+                            };
+                        }
+                    });
+                } else if (gl) {
+                    const activeGl = gl;
+                    const internalFormat = isWebGL2 ? activeGl.R32F : activeGl.LUMINANCE;
+                    const format = isWebGL2 ? activeGl.RED : activeGl.LUMINANCE;
+
+                    cachedSlices.forEach((sliceObj, i) => {
+                        const axis = sliceObj.axis;
+                        const zOff = sliceObj.offset;
+                        const w = sliceObj.w;
+                        const h = sliceObj.h;
+                        const floatData = sliceObj.data;
+                        const opacity = sliceOpacities[i] !== undefined ? sliceOpacities[i] : 1.0;
+                        const axisNum = axis;
+
+                        if (activeSlicesWebGL[i]) {
+                            const slice = activeSlicesWebGL[i];
+                            activeGl.bindTexture(activeGl.TEXTURE_2D, slice.texture);
+                            activeGl.texImage2D(activeGl.TEXTURE_2D, 0, internalFormat, w, h, 0, format, activeGl.FLOAT, floatData);
+
+                            activeGl.bindBuffer(activeGl.ARRAY_BUFFER, slice.buffer);
+                            activeGl.bufferData(activeGl.ARRAY_BUFFER, getSliceGeometry(axisNum, zOff, w, h), activeGl.STATIC_DRAW);
+
+                            slice.axis = axisNum;
+                            slice.offset = zOff;
+                            slice.w = w;
+                            slice.h = h;
+                            slice.opacity = opacity;
+                            slice.minY = sliceObj.minY;
+                            slice.maxY = sliceObj.maxY;
+                            slice.colormap = sliceObj.colormap;
+                            slice.useLogScale = sliceObj.useLogScale;
+                            slice.interpolate = sliceObj.interpolate;
+                        } else {
+                            const tex = activeGl.createTexture()!;
+                            activeGl.bindTexture(activeGl.TEXTURE_2D, tex);
+                            const filter = hasFloatLinear ? activeGl.LINEAR : activeGl.NEAREST;
+                            activeGl.texParameteri(activeGl.TEXTURE_2D, activeGl.TEXTURE_MIN_FILTER, filter);
+                            activeGl.texParameteri(activeGl.TEXTURE_2D, activeGl.TEXTURE_MAG_FILTER, filter);
+                            activeGl.texParameteri(activeGl.TEXTURE_2D, activeGl.TEXTURE_WRAP_S, activeGl.CLAMP_TO_EDGE);
+                            activeGl.texParameteri(activeGl.TEXTURE_2D, activeGl.TEXTURE_WRAP_T, activeGl.CLAMP_TO_EDGE);
+                            activeGl.texImage2D(activeGl.TEXTURE_2D, 0, internalFormat, w, h, 0, format, activeGl.FLOAT, floatData);
+
+                            const buf = activeGl.createBuffer()!;
+                            activeGl.bindBuffer(activeGl.ARRAY_BUFFER, buf);
+                            activeGl.bufferData(activeGl.ARRAY_BUFFER, getSliceGeometry(axisNum, zOff, w, h), activeGl.STATIC_DRAW);
+
+                            activeSlicesWebGL[i] = {
+                                axis: axisNum,
+                                offset: zOff,
+                                w,
+                                h,
+                                texture: tex,
+                                buffer: buf,
+                                opacity,
+                                index: i,
+                                minY: sliceObj.minY,
+                                maxY: sliceObj.maxY,
+                                colormap: sliceObj.colormap,
+                                useLogScale: sliceObj.useLogScale,
+                                interpolate: sliceObj.interpolate
+                            };
+                        }
+                    });
+                }
+            }
             if (data.quantityRanges !== undefined) quantityRanges = data.quantityRanges;
             if (data.focusedSliceIndex !== undefined) focusedSliceIndex = data.focusedSliceIndex;
+            if (data.showSTL !== undefined) showSTL = data.showSTL;
+            if (data.stlWireframe !== undefined) stlWireframe = data.stlWireframe;
+            if (data.stlSolids !== undefined) stlSolids = data.stlSolids;
+            if (data.stlOpacity !== undefined) stlOpacity = data.stlOpacity;
 
-            // Recalculate autoScale range immediately using cached frame data
-            if (autoScale && cachedSlices.length > 0) {
-                const dynamicMinMax: Record<string, { min: number, max: number }> = {};
+            // Recalculate range immediately using cached frame data
+            if (cachedSlices.length > 0) {
+                const sliceRanges: { min: number, max: number }[] = [];
                 for (let i = 0; i < cachedSlices.length; i++) {
                     const slice = cachedSlices[i];
                     const config = slicesConfig[i] || {};
                     const qty = config.quantities?.[0] || 'pressure';
+                    const sliceAutoScale = config.auto_scale !== false;
 
                     let sliceMin = Infinity;
                     let sliceMax = -Infinity;
@@ -2101,60 +2623,70 @@ self.onmessage = async (e) => {
                         }
                     }
 
-                    if (sliceMin < sliceMax) {
-                        if (!dynamicMinMax[qty]) {
-                            dynamicMinMax[qty] = { min: sliceMin, max: sliceMax };
-                        } else {
-                            dynamicMinMax[qty].min = Math.min(dynamicMinMax[qty].min, sliceMin);
-                            dynamicMinMax[qty].max = Math.max(dynamicMinMax[qty].max, sliceMax);
-                        }
-                    }
-                }
-
-                for (let i = 0; i < cachedSlices.length; i++) {
-                    const slice = cachedSlices[i];
-                    const config = slicesConfig[i] || {};
-                    const qty = config.quantities?.[0] || 'pressure';
                     let sliceMinY = minY;
                     let sliceMaxY = maxY;
 
-                    const dyn = dynamicMinMax[qty];
-                    if (dyn && dyn.min < dyn.max) {
-                        sliceMinY = dyn.min;
-                        sliceMaxY = dyn.max;
+                    if (sliceAutoScale) {
+                        if (sliceMin < sliceMax) {
+                            sliceMinY = sliceMin;
+                            sliceMaxY = sliceMax;
+                        } else {
+                            const range = config.min_val !== undefined && config.max_val !== undefined ? [config.min_val, config.max_val] : (quantityRanges[qty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0]);
+                            sliceMinY = range[0];
+                            sliceMaxY = range[1];
+                        }
                     } else {
-                        const range = quantityRanges[qty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0];
+                        const range = config.min_val !== undefined && config.max_val !== undefined ? [config.min_val, config.max_val] : (quantityRanges[qty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0]);
                         sliceMinY = range[0];
                         sliceMaxY = range[1];
                     }
 
                     slice.minY = sliceMinY;
                     slice.maxY = sliceMaxY;
+                    
+                    // Update active slice properties as well
+                    if (isWebGPU && activeSlicesWebGPU[i]) {
+                        activeSlicesWebGPU[i].minY = sliceMinY;
+                        activeSlicesWebGPU[i].maxY = sliceMaxY;
+                    } else if (gl && activeSlicesWebGL[i]) {
+                        activeSlicesWebGL[i].minY = sliceMinY;
+                        activeSlicesWebGL[i].maxY = sliceMaxY;
+                    }
+
+                    if (sliceMin < sliceMax) {
+                        sliceRanges.push({ min: sliceMin, max: sliceMax });
+                    } else {
+                        const range = config.min_val !== undefined && config.max_val !== undefined ? [config.min_val, config.max_val] : (quantityRanges[qty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0]);
+                        sliceRanges.push({ min: range[0], max: range[1] });
+                    }
                 }
 
-                const focusedConfig = slicesConfig[focusedSliceIndex] || slicesConfig[0] || {};
-                const focusedQty = focusedConfig.quantities?.[0] || 'pressure';
-                const dyn = dynamicMinMax[focusedQty];
-                if (dyn && dyn.min < dyn.max) {
-                    minY = dyn.min;
-                    maxY = dyn.max;
-                    self.postMessage({ type: 'currentRange', min: dyn.min, max: dyn.max });
+                self.postMessage({ type: 'sliceRanges', ranges: sliceRanges });
+
+                const focusedSlice = cachedSlices[focusedSliceIndex] || cachedSlices[0];
+                if (focusedSlice) {
+                    let sliceMin = Infinity;
+                    let sliceMax = -Infinity;
+                    for (let j = 0; j < focusedSlice.data.length; j++) {
+                        const v = focusedSlice.data[j];
+                        if (isFinite(v)) {
+                            if (v < sliceMin) sliceMin = v;
+                            if (v > sliceMax) sliceMax = v;
+                        }
+                    }
+                    if (sliceMin < sliceMax) {
+                        minY = sliceMin;
+                        maxY = sliceMax;
+                        self.postMessage({ type: 'currentRange', min: sliceMin, max: sliceMax });
+                    } else {
+                        const focusedConfig = slicesConfig[focusedSliceIndex] || slicesConfig[0] || {};
+                        const focusedQty = focusedConfig.quantities?.[0] || 'pressure';
+                        const range = focusedConfig.min_val !== undefined && focusedConfig.max_val !== undefined ? [focusedConfig.min_val, focusedConfig.max_val] : (quantityRanges[focusedQty] || DEFAULT_QUANTITY_RANGES[focusedQty] || [0.0, 1.0]);
+                        minY = range[0];
+                        maxY = range[1];
+                        self.postMessage({ type: 'currentRange', min: range[0], max: range[1] });
+                    }
                 }
-            } else if (!autoScale && cachedSlices.length > 0) {
-                for (let i = 0; i < cachedSlices.length; i++) {
-                    const slice = cachedSlices[i];
-                    const config = slicesConfig[i] || {};
-                    const qty = config.quantities?.[0] || 'pressure';
-                    const range = quantityRanges[qty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0];
-                    slice.minY = range[0];
-                    slice.maxY = range[1];
-                }
-                const focusedConfig = slicesConfig[focusedSliceIndex] || slicesConfig[0] || {};
-                const focusedQty = focusedConfig.quantities?.[0] || 'pressure';
-                const range = quantityRanges[focusedQty] || DEFAULT_QUANTITY_RANGES[focusedQty] || [0.0, 1.0];
-                minY = range[0];
-                maxY = range[1];
-                self.postMessage({ type: 'currentRange', min: range[0], max: range[1] });
             }
 
             let sizeChanged = false;
@@ -2168,51 +2700,37 @@ self.onmessage = async (e) => {
 
             if (sizeChanged) {
                 updateMatrices(canvasWidth(), canvasHeight());
+                updateSTLGeometry();
             }
             updateAxesGeometry();
             render();
         } else if (type === "scaleToCurrent") {
-            if (cachedSlices.length > 0) {
-                const focusedConfig = slicesConfig[focusedSliceIndex] || slicesConfig[0] || {};
-                const focusedQty = focusedConfig.quantities?.[0] || 'pressure';
-
-                let globalMin = Infinity;
-                let globalMax = -Infinity;
-                cachedSlices.forEach((s, i) => {
-                    const config = slicesConfig[i] || {};
-                    const qty = config.quantities?.[0] || 'pressure';
-                    if (qty === focusedQty) {
-                        for (let j = 0; j < s.data.length; j++) {
-                            const v = s.data[j];
-                            if (isFinite(v)) {
-                                if (v < globalMin) globalMin = v;
-                                if (v > globalMax) globalMax = v;
-                            }
-                        }
+            const idx = e.data.index !== undefined ? e.data.index : focusedSliceIndex;
+            const slice = cachedSlices[idx];
+            if (slice) {
+                let sliceMin = Infinity;
+                let sliceMax = -Infinity;
+                for (let j = 0; j < slice.data.length; j++) {
+                    const v = slice.data[j];
+                    if (isFinite(v)) {
+                        if (v < sliceMin) sliceMin = v;
+                        if (v > sliceMax) sliceMax = v;
                     }
-                });
+                }
 
-                if (globalMin < globalMax) {
-                    if (!quantityRanges[focusedQty]) {
-                        quantityRanges[focusedQty] = [globalMin, globalMax];
-                    } else {
-                        quantityRanges[focusedQty][0] = globalMin;
-                        quantityRanges[focusedQty][1] = globalMax;
+                if (sliceMin < sliceMax) {
+                    slice.minY = sliceMin;
+                    slice.maxY = sliceMax;
+                    
+                    if (isWebGPU && activeSlicesWebGPU[idx]) {
+                        activeSlicesWebGPU[idx].minY = sliceMin;
+                        activeSlicesWebGPU[idx].maxY = sliceMax;
+                    } else if (gl && activeSlicesWebGL[idx]) {
+                        activeSlicesWebGL[idx].minY = sliceMin;
+                        activeSlicesWebGL[idx].maxY = sliceMax;
                     }
-                    autoScale = false;
 
-                    cachedSlices.forEach((s, i) => {
-                        const config = slicesConfig[i] || {};
-                        const qty = config.quantities?.[0] || 'pressure';
-                        if (qty === focusedQty) {
-                            s.minY = globalMin;
-                            s.maxY = globalMax;
-                        }
-                    });
-
-                    minY = globalMin;
-                    maxY = globalMax;
-                    self.postMessage({ type: 'rangeUpdated', min: globalMin, max: globalMax });
+                    self.postMessage({ type: 'rangeUpdated', index: idx, min: sliceMin, max: sliceMax });
                     render();
                 }
             }

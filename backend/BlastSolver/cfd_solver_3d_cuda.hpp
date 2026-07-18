@@ -14,7 +14,8 @@ class CFDSolver3DCuda : public CFDSolver3DImplBase {
     // GPU pointers and internal state
     mutable void* d_states = nullptr;
     mutable void* d_U = nullptr;
-    mutable void* d_U_prev = nullptr;
+    mutable void* d_dU = nullptr;
+    mutable void* d_geom = nullptr;
     mutable void* d_active_tiles = nullptr;
     mutable void* d_max_s_buf = nullptr;
     mutable void* d_slice_buf = nullptr;
@@ -47,8 +48,10 @@ class CFDSolver3DCuda : public CFDSolver3DImplBase {
     mutable bool is_paged_out = false;
     mutable std::vector<PrimitiveTile3D<RealType, IsMultiMaterial>> paged_states;
     mutable std::vector<ConservativeTile3D<RealType, IsMultiMaterial>> paged_U;
-    mutable std::vector<ConservativeTile3D<RealType, IsMultiMaterial>> paged_U_prev;
-    mutable bool has_paged_U_prev = false;
+    mutable std::vector<ConservativeTile3D<RealType, IsMultiMaterial>> paged_dU;
+    mutable bool has_paged_dU = false;
+    mutable std::vector<GeometryTile3D> paged_geom;
+    mutable bool has_paged_geom = false;
     mutable std::vector<uint8_t> paged_active_tiles;
     mutable std::vector<uint8_t> paged_tile_active_temp;
     mutable std::vector<GPUGauge3D> paged_gauge_coords;
@@ -79,6 +82,8 @@ public:
 
     void step(double dt) override;
     double computeStepSize(double cfl = 0.4) const override;
+    void setGeometry(const std::string& stl_filepath, const std::string& geometry_hash) override;
+    std::pair<double, double> getConservationTotals() const override;
 
     std::vector<float> sampleGauge(const Gauge3D& gauge) const override;
     std::vector<float> extractSlice(const Slice3D& slice) const override;
@@ -98,6 +103,7 @@ public:
     const void* getDeviceStates() const { return d_states; }
     const void* getDeviceU() const { return d_U; }
     const void* getDeviceActiveTiles() const { return d_active_tiles; }
+    void* getDeviceGeom() const { return d_geom; }
 };
 
 #endif

@@ -114,6 +114,8 @@ public:
     virtual const MultiMat::MaterialSet& getMaterialParameters() const = 0;
     virtual double getAmbientP() const = 0;
     virtual size_t getAllocatedVRAM() const { return 0; }
+    virtual void setGeometry(const std::string& stl_filepath, const std::string& geometry_hash) = 0;
+    virtual std::pair<double, double> getConservationTotals() const = 0;
 };
 
 class CFDSolver3DImplBase : public CFDSolver3D {
@@ -178,14 +180,17 @@ public:
     bool is_terminated() const override { return terminated; }
     double getGamma() const override { return gamma; }
     void setGamma(double g) { gamma = g; }
+    void setGeometry(const std::string& stl_filepath, const std::string& geometry_hash) override {}
+    std::pair<double, double> getConservationTotals() const override { return {0.0, 0.0}; }
 };
 
 template <typename RealType, bool IsMultiMaterial>
 class CFDSolver3DImpl : public CFDSolver3DImplBase {
     std::vector<PrimitiveTile3D<RealType, IsMultiMaterial>> states_pool;
     std::vector<ConservativeTile3D<RealType, IsMultiMaterial>> U_pool;
-    std::vector<ConservativeTile3D<RealType, IsMultiMaterial>> U_prev_pool;
+    std::vector<ConservativeTile3D<RealType, IsMultiMaterial>> dU_pool;
     std::vector<uint8_t> active_tiles;
+    std::vector<GeometryTile3D> geom_pool;
 
     int n_tiles_x, n_tiles_y, n_tiles_z;
 
@@ -199,6 +204,8 @@ public:
 
     void step(double dt) override;
     double computeStepSize(double cfl = 0.4) const override;
+    void setGeometry(const std::string& stl_filepath, const std::string& geometry_hash) override;
+    std::pair<double, double> getConservationTotals() const override;
 
     std::vector<float> sampleGauge(const Gauge3D& gauge) const override;
     std::vector<float> extractSlice(const Slice3D& slice) const override;
@@ -218,6 +225,7 @@ public:
     const std::vector<PrimitiveTile3D<RealType, IsMultiMaterial>>& getStatesPool() const { return states_pool; }
     const std::vector<ConservativeTile3D<RealType, IsMultiMaterial>>& getUPool() const { return U_pool; }
     const std::vector<uint8_t>& getActiveTiles() const { return active_tiles; }
+    std::vector<GeometryTile3D>& getGeomPool() { return geom_pool; }
 
 private:
     std::vector<Gauge3D> cpu_gauges;
@@ -225,7 +233,7 @@ private:
     std::vector<float> cpu_gauge_values;
 
     void updateActiveRegions();
-    void computeFluxes(double dt);
+    void computeFluxes(double dt, std::vector<ConservativeTile3D<RealType, IsMultiMaterial>>& target_pool);
     void applyBC();
     void applyProgrammedBurn(double dt);
     void updatePrimitiveFromConservative();
@@ -237,20 +245,24 @@ public:
     };
 
     inline CellState3DT<RealType, IsMultiMaterial> sampleStateInternal(int gx, int gy, int gz) const {
+        return sampleStateInternalWithMirror(gx, gy, gz, false);
+    }
+
+    inline CellState3DT<RealType, IsMultiMaterial> sampleStateInternalWithMirror(int gx, int gy, int gz, bool enable_mirror) const {
         bool reflective_x = false, reflective_y = false, reflective_z = false;
 
         applyBC3DHelper(gx, nx, bcXmin, bcXmax, reflective_x);
         applyBC3DHelper(gy, ny, bcYmin, bcYmax, reflective_y);
         applyBC3DHelper(gz, nz, bcZmin, bcZmax, reflective_z);
 
-        gx = std::clamp(gx, 0, nx - 1);
-        gy = std::clamp(gy, 0, ny - 1);
-        gz = std::clamp(gz, 0, nz - 1);
+        int clamped_gx = std::clamp(gx, 0, nx - 1);
+        int clamped_gy = std::clamp(gy, 0, ny - 1);
+        int clamped_gz = std::clamp(gz, 0, nz - 1);
 
-        int t_idx = (gx >> 3) + (gy >> 3) * n_tiles_x + (gz >> 3) * n_tiles_x * n_tiles_y;
+        int t_idx = (clamped_gx >> 3) + (clamped_gy >> 3) * n_tiles_x + (clamped_gz >> 3) * n_tiles_x * n_tiles_y;
+        int c_idx = (clamped_gx & 7) + (clamped_gy & 7) * 8 + (clamped_gz & 7) * 64;
+
         const auto& tile = states_pool[t_idx];
-        int c_idx = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
-
         CellState3DT<RealType, IsMultiMaterial> s;
         s.p = tile.p[c_idx]; s.rho = tile.rho[c_idx];
         s.ux = reflective_x ? -tile.ux[c_idx] : tile.ux[c_idx];
@@ -280,20 +292,190 @@ public:
     }
 
     inline CellState3D<IsMultiMaterial> sampleState(int gx, int gy, int gz) const {
+        return sampleStateWithMirror(gx, gy, gz, true);
+    }
+
+    inline CellState3D<IsMultiMaterial> sampleStateWithMirror(int gx, int gy, int gz, bool enable_mirror) const {
         bool reflective_x = false, reflective_y = false, reflective_z = false;
 
         applyBC3DHelper(gx, nx, bcXmin, bcXmax, reflective_x);
         applyBC3DHelper(gy, ny, bcYmin, bcYmax, reflective_y);
         applyBC3DHelper(gz, nz, bcZmin, bcZmax, reflective_z);
 
-        gx = std::clamp(gx, 0, nx - 1);
-        gy = std::clamp(gy, 0, ny - 1);
-        gz = std::clamp(gz, 0, nz - 1);
+        int clamped_gx = std::clamp(gx, 0, nx - 1);
+        int clamped_gy = std::clamp(gy, 0, ny - 1);
+        int clamped_gz = std::clamp(gz, 0, nz - 1);
 
-        int t_idx = (gx >> 3) + (gy >> 3) * n_tiles_x + (gz >> 3) * n_tiles_x * n_tiles_y;
+        int t_idx = (clamped_gx >> 3) + (clamped_gy >> 3) * n_tiles_x + (clamped_gz >> 3) * n_tiles_x * n_tiles_y;
+        int c_idx = (clamped_gx & 7) + (clamped_gy & 7) * 8 + (clamped_gz & 7) * 64;
+
+        if (enable_mirror && !geom_pool.empty() && geom_pool[t_idx].cells[c_idx].is_boundary) {
+            float nx_b = geom_pool[t_idx].cells[c_idx].nx;
+            float ny_b = geom_pool[t_idx].cells[c_idx].ny;
+            float nz_b = geom_pool[t_idx].cells[c_idx].nz;
+
+            float n_len = std::sqrt(nx_b*nx_b + ny_b*ny_b + nz_b*nz_b);
+            if (n_len > 1e-3f) {
+                float nx_u = nx_b / n_len;
+                float ny_u = ny_b / n_len;
+                float nz_u = nz_b / n_len;
+
+                double x_G = xmin + (gx + 0.5) * cellSize;
+                double y_G = ymin + (gy + 0.5) * cellSize;
+                double z_G = zmin + (gz + 0.5) * cellSize;
+
+                double x_IP = x_G + 1.5 * cellSize * nx_u;
+                double y_IP = y_G + 1.5 * cellSize * ny_u;
+                double z_IP = z_G + 1.5 * cellSize * nz_u;
+
+                double x_nd = (x_IP - xmin) / cellSize - 0.5;
+                double y_nd = (y_IP - ymin) / cellSize - 0.5;
+                double z_nd = (z_IP - zmin) / cellSize - 0.5;
+
+                int i0 = (int)std::floor(x_nd);
+                int j0 = (int)std::floor(y_nd);
+                int k0 = (int)std::floor(z_nd);
+                int i1 = i0 + 1;
+                int j1 = j0 + 1;
+                int k1 = k0 + 1;
+
+                double wx = x_nd - i0;
+                double wy = y_nd - j0;
+                double wz = z_nd - k0;
+
+                auto is_solid = [&](int i, int j, int k) {
+                    if (geom_pool.empty()) return false;
+                    int ci = std::clamp(i, 0, nx - 1);
+                    int cj = std::clamp(j, 0, ny - 1);
+                    int ck = std::clamp(k, 0, nz - 1);
+                    int t = (ci >> 3) + (cj >> 3) * n_tiles_x + (ck >> 3) * n_tiles_x * n_tiles_y;
+                    int c = (ci & 7) + (cj & 7) * 8 + (ck & 7) * 64;
+                    return geom_pool[t].cells[c].is_boundary;
+                };
+
+                double w[8];
+                w[0] = (1.0 - wx) * (1.0 - wy) * (1.0 - wz);
+                w[1] = wx * (1.0 - wy) * (1.0 - wz);
+                w[2] = (1.0 - wx) * wy * (1.0 - wz);
+                w[3] = wx * wy * (1.0 - wz);
+                w[4] = (1.0 - wx) * (1.0 - wy) * wz;
+                w[5] = wx * (1.0 - wy) * wz;
+                w[6] = (1.0 - wx) * wy * wz;
+                w[7] = wx * wy * wz;
+
+                bool solid_mask[8];
+                solid_mask[0] = is_solid(i0, j0, k0);
+                solid_mask[1] = is_solid(i1, j0, k0);
+                solid_mask[2] = is_solid(i0, j1, k0);
+                solid_mask[3] = is_solid(i1, j1, k0);
+                solid_mask[4] = is_solid(i0, j0, k1);
+                solid_mask[5] = is_solid(i1, j0, k1);
+                solid_mask[6] = is_solid(i0, j1, k1);
+                solid_mask[7] = is_solid(i1, j1, k1);
+
+                double sum_w = 0.0;
+                for (int c = 0; c < 8; ++c) {
+                    if (solid_mask[c]) {
+                        w[c] = 0.0;
+                    } else {
+                        sum_w += w[c];
+                    }
+                }
+
+                if (sum_w > 1e-6) {
+                    double inv_sum = 1.0 / sum_w;
+                    for (int c = 0; c < 8; ++c) w[c] *= inv_sum;
+
+                    auto s000 = sampleStateWithMirror(i0, j0, k0, false);
+                    auto s100 = sampleStateWithMirror(i1, j0, k0, false);
+                    auto s010 = sampleStateWithMirror(i0, j1, k0, false);
+                    auto s110 = sampleStateWithMirror(i1, j1, k0, false);
+                    auto s001 = sampleStateWithMirror(i0, j0, k1, false);
+                    auto s101 = sampleStateWithMirror(i1, j0, k1, false);
+                    auto s011 = sampleStateWithMirror(i0, j1, k1, false);
+                    auto s111 = sampleStateWithMirror(i1, j1, k1, false);
+
+                    double rho_i = w[0]*s000.rho + w[1]*s100.rho + w[2]*s010.rho + w[3]*s110.rho +
+                                   w[4]*s001.rho + w[5]*s101.rho + w[6]*s011.rho + w[7]*s111.rho;
+                    double ux_i = w[0]*s000.ux + w[1]*s100.ux + w[2]*s010.ux + w[3]*s110.ux +
+                                  w[4]*s001.ux + w[5]*s101.ux + w[6]*s011.ux + w[7]*s111.ux;
+                    double uy_i = w[0]*s000.uy + w[1]*s100.uy + w[2]*s010.uy + w[3]*s110.uy +
+                                  w[4]*s001.uy + w[5]*s101.uy + w[6]*s011.uy + w[7]*s111.uy;
+                    double uz_i = w[0]*s000.uz + w[1]*s100.uz + w[2]*s010.uz + w[3]*s110.uz +
+                                  w[4]*s001.uz + w[5]*s101.uz + w[6]*s011.uz + w[7]*s111.uz;
+                    double p_i = w[0]*s000.p + w[1]*s100.p + w[2]*s010.p + w[3]*s110.p +
+                                 w[4]*s001.p + w[5]*s101.p + w[6]*s011.p + w[7]*s111.p;
+
+                    CellState3D<IsMultiMaterial> s_ghost;
+                    s_ghost.rho = rho_i;
+                    s_ghost.p = p_i;
+
+                    double u_dot_n = ux_i * nx_u + uy_i * ny_u + uz_i * nz_u;
+                    s_ghost.ux = ux_i - 2.0 * u_dot_n * nx_u;
+                    s_ghost.uy = uy_i - 2.0 * u_dot_n * ny_u;
+                    s_ghost.uz = uz_i - 2.0 * u_dot_n * nz_u;
+
+                    if constexpr (IsMultiMaterial) {
+                        s_ghost.alpha1 = w[0]*s000.alpha1 + w[1]*s100.alpha1 + w[2]*s010.alpha1 + w[3]*s110.alpha1 +
+                                         w[4]*s001.alpha1 + w[5]*s101.alpha1 + w[6]*s011.alpha1 + w[7]*s111.alpha1;
+                        s_ghost.alpha2 = w[0]*s000.alpha2 + w[1]*s100.alpha2 + w[2]*s010.alpha2 + w[3]*s110.alpha2 +
+                                         w[4]*s001.alpha2 + w[5]*s101.alpha2 + w[6]*s011.alpha2 + w[7]*s111.alpha2;
+                        s_ghost.arho1 = w[0]*s000.arho1 + w[1]*s100.arho1 + w[2]*s010.arho1 + w[3]*s110.arho1 +
+                                        w[4]*s001.arho1 + w[5]*s101.arho1 + w[6]*s011.arho1 + w[7]*s111.arho1;
+                        s_ghost.arho2 = w[0]*s000.arho2 + w[1]*s100.arho2 + w[2]*s010.arho2 + w[3]*s110.arho2 +
+                                        w[4]*s001.arho2 + w[5]*s101.arho2 + w[6]*s011.arho2 + w[7]*s111.arho2;
+                    } else {
+                        s_ghost.alpha1 = 0.0; s_ghost.alpha2 = 0.0; s_ghost.arho1 = 0.0; s_ghost.arho2 = 0.0;
+                    }
+
+                    double ke = 0.5 * s_ghost.rho * (s_ghost.ux*s_ghost.ux + s_ghost.uy*s_ghost.uy + s_ghost.uz*s_ghost.uz);
+                    if constexpr (IsMultiMaterial) {
+                        s_ghost.E = MultiMat::getMixtureEnergy(s_ghost.p, s_ghost.rho, s_ghost.alpha1, s_ghost.alpha2, s_ghost.arho1, s_ghost.arho2, gamma, currentMaterials.products, currentMaterials.unreacted) + ke;
+                    } else {
+                        s_ghost.E = s_ghost.p / (gamma - 1.0) + ke;
+                    }
+                    return s_ghost;
+                }
+            }
+
+            int best_dx = 0, best_dy = 0, best_dz = 0;
+            float max_dot = -1e9f;
+            const int dirs[6][3] = {
+                {1, 0, 0}, {-1, 0, 0},
+                {0, 1, 0}, {0, -1, 0},
+                {0, 0, 1}, {0, 0, -1}
+            };
+            for (int d = 0; d < 6; ++d) {
+                int ngx = gx + dirs[d][0];
+                int ngy = gy + dirs[d][1];
+                int ngz = gz + dirs[d][2];
+                if (ngx >= 0 && ngx < nx && ngy >= 0 && ngy < ny && ngz >= 0 && ngz < nz) {
+                    int nt_idx = (ngx >> 3) + (ngy >> 3) * n_tiles_x + (ngz >> 3) * n_tiles_x * n_tiles_y;
+                    int nc_idx = (ngx & 7) + (ngy & 7) * 8 + (ngz & 7) * 64;
+                    if (!geom_pool[nt_idx].cells[nc_idx].is_boundary) {
+                        float dot = dirs[d][0] * nx_b + dirs[d][1] * ny_b + dirs[d][2] * nz_b;
+                        if (dot > max_dot) {
+                            max_dot = dot;
+                            best_dx = dirs[d][0];
+                            best_dy = dirs[d][1];
+                            best_dz = dirs[d][2];
+                        }
+                    }
+                }
+            }
+
+            if (max_dot > -1e8f) {
+                auto s_fluid = sampleStateWithMirror(gx + best_dx, gy + best_dy, gz + best_dz, false);
+                auto s_ghost = s_fluid;
+                double u_dot_n = s_fluid.ux * nx_b + s_fluid.uy * ny_b + s_fluid.uz * nz_b;
+                s_ghost.ux = s_fluid.ux - 2.0 * u_dot_n * nx_b;
+                s_ghost.uy = s_fluid.uy - 2.0 * u_dot_n * ny_b;
+                s_ghost.uz = s_fluid.uz - 2.0 * u_dot_n * nz_b;
+                return s_ghost;
+            }
+        }
+
         const auto& tile = states_pool[t_idx];
-        int c_idx = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
-
         CellState3D<IsMultiMaterial> s;
         s.p = (double)tile.p[c_idx]; s.rho = (double)tile.rho[c_idx];
         s.ux = reflective_x ? -(double)tile.ux[c_idx] : (double)tile.ux[c_idx];

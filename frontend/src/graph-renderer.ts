@@ -50,6 +50,8 @@ export class GraphRenderer {
 
     private nodeElements: Map<string, HTMLElement> = new Map();
     private nodeWorkers: Map<string, Worker> = new Map();
+    private currentSTLPaths: Map<string, string | null> = new Map();
+    private openListener: (() => void) | null = null;
     private viewportRanges: Map<string, { min: number, max: number }> = new Map();
     private viewportDomains: Map<string, { xmin: number, xmax: number, ymin: number, ymax: number, zmin: number, zmax: number }> = new Map();
     private graphFrameCounters: Map<string, number> = new Map();
@@ -166,6 +168,15 @@ export class GraphRenderer {
         parent.appendChild(this.viewport);
 
         this.initEventListeners();
+        
+        const net = (window as any).networkManager;
+        if (net) {
+            this.openListener = () => {
+                this.currentSTLPaths.clear();
+                this.render();
+            };
+            net.onOpen(this.openListener);
+        }
         
         // Load settings from panel options state
         const state = this.stateManager.getCurrentState();
@@ -321,6 +332,10 @@ export class GraphRenderer {
         this.stateManager.offStateChange(this.stateListener);
         this.stateManager.offTelemetryUpdate(this.telemetryListener);
         this.stateManager.offSelectionChange(this.selectionListener);
+        const net = (window as any).networkManager;
+        if (net && this.openListener) {
+            net.offOpen(this.openListener);
+        }
         this.nodeWorkers.forEach(worker => worker.terminate());
         if (this.resizeObserver) this.resizeObserver.disconnect();
         if (this.nodeResizeObserver) this.nodeResizeObserver.disconnect();
@@ -498,7 +513,11 @@ export class GraphRenderer {
                             nz: data.nz,
                             slices: node.parameters?.slices || [],
                             focusedSliceIndex: node.parameters?.focusedSliceIndex ?? 0,
-                            quantityRanges: node.parameters?.quantity_ranges || {}
+                            quantityRanges: node.parameters?.quantity_ranges || {},
+                            showSTL: node.parameters?.show_stl !== false,
+                            stlWireframe: node.parameters?.stl_wireframe === true,
+                            stlSolids: node.parameters?.stl_solids !== false,
+                            stlOpacity: node.parameters?.stl_opacity ?? 0.5
                         }
                     });
                 }
@@ -754,6 +773,7 @@ export class GraphRenderer {
                 if (toPortId === 'air') return fromType === 'Material';
                 if (toPortId === 'charge') return fromType === 'Charge3D';
                 if (toPortId === 'detonator') return fromType === 'DetonatorLocation3D';
+                if (toPortId === 'stl') return fromType === 'STLGeometry';
                 if (toPortId === 'gauges') return fromType === 'VirtualGauges';
                 if (toPortId === 'remap') return fromType === 'RemapNode';
                 return false;
@@ -1132,6 +1152,7 @@ export class GraphRenderer {
                     { label: 'Domain Mesh 3D', type: 'DomainMesh3D' },
                     { label: 'Detonator Location 3D', type: 'DetonatorLocation3D' },
                     { label: '3D Charge', type: 'Charge3D' },
+                    { label: 'STL Geometry 3D', type: 'STLGeometry' },
                     { label: 'CFD Solver 3D', type: 'CFDSolver3D' }
                 ]
             },
@@ -1278,8 +1299,8 @@ export class GraphRenderer {
         const newNode: Node = {
             id, type, x, y,
             displayMode: 'expanded',
-            inputs: this.getDefaultInputs(type),
-            outputs: this.getDefaultOutputs(type),
+            inputs: this.stateManager.getDefaultInputs(type),
+            outputs: this.stateManager.getDefaultOutputs(type),
             parameters: this.getDefaultParameters(type)
         };
 
@@ -1299,62 +1320,6 @@ export class GraphRenderer {
 
         state.nodes.push(newNode);
         this.stateManager.pushState(state);
-    }
-
-    private getDefaultInputs(type: NodeType): Port[] {
-        switch (type) {
-            case 'ThePainter': return [{ id: 'mesh', label: 'Mesh' }, { id: 'air', label: 'Air' }, { id: 'explosive', label: 'Charge' }];
-            case 'CFDSolver': return [{ id: 'in', label: 'Initial State' }];
-            case 'TelemetryText':
-            case 'TelemetryGraph': return [{ id: 'in', label: 'Data Stream' }];
-            case 'CFDSolver2D': return [
-                { id: 'mesh', label: 'Mesh' },
-                { id: 'detonator', label: 'Detonator' },
-                { id: 'explosive', label: 'Charge' },
-                { id: 'hardware', label: 'Hardware' },
-                { id: 'air', label: 'Air' },
-                { id: 'remap', label: 'Remap' }
-            ];
-            case 'Charge1D':
-            case 'Charge2D': return [{ id: 'material', label: 'Material' }];
-            case 'RemapNode': return [{ id: 'in', label: '1D Solver' }];
-            case 'TelemetryContour': return [{ id: 'in', label: 'Data Stream' }];
-            case 'VTKOutput': return [{ id: 'in', label: 'Solver' }];
-            case 'VirtualGauges': return [{ id: 'in', label: 'Solver Output' }];
-            case 'CFDSolver3D': return [
-                { id: 'mesh', label: 'Mesh' },
-                { id: 'air', label: 'Air' },
-                { id: 'charge', label: 'Charge' },
-                { id: 'detonator', label: 'Detonator' },
-                { id: 'gauges', label: 'Gauges' },
-                { id: 'remap', label: 'Remap' }
-            ];
-            case 'Charge3D': return [{ id: 'material', label: 'Material' }];
-            case 'Telemetry3DViewport': return [{ id: 'in', label: 'Data Stream' }];
-            default: return [];
-        }
-    }
-
-    private getDefaultOutputs(type: NodeType): Port[] {
-        switch (type) {
-            case 'DomainMesh': return [{ id: 'out', label: 'Mesh' }];
-            case 'Material': return [{ id: 'out', label: 'Material' }];
-            case 'Charge1D':
-            case 'Charge2D': return [{ id: 'out', label: 'Charge' }];
-            case 'ThePainter': return [{ id: 'out', label: 'State' }];
-            case 'CFDSolver': return [{ id: 'telemetry', label: 'Telemetry' }];
-            case 'DomainMesh2D': return [{ id: 'mesh', label: 'Mesh Spec' }];
-            case 'DetonatorLocation':
-            case 'DetonatorLocation3D': return [{ id: 'detonator', label: 'Detonator Spec' }];
-            case 'RemapNode': return [{ id: 'remap', label: 'Remap Spec' }];
-            case 'HardwareConfig': return [{ id: 'hardware', label: 'Hardware Spec' }];
-            case 'CFDSolver2D': return [{ id: 'telemetry', label: 'Telemetry' }];
-            case 'DomainMesh3D': return [{ id: 'mesh', label: 'Mesh Spec' }];
-            case 'Charge3D': return [{ id: 'out', label: 'Charge Spec' }];
-            case 'CFDSolver3D': return [{ id: 'telemetry', label: 'Telemetry' }];
-            case 'VirtualGauges': return [{ id: 'out', label: 'Gauges Spec' }];
-            default: return [];
-        }
     }
 
     private getDefaultParameters(type: NodeType): any {
@@ -1523,12 +1488,16 @@ export class GraphRenderer {
             };
             case 'CFDSolver3D': return {
                 cfl: 0.4,
+                device: 'cpu',
                 init_mode: 'From1D',
                 flux_scheme: 'AUSM+',
                 spatial_order: 2,
                 temporal_order: 2,
-                precision: 'single',
-                device: 'cpu'
+                precision: 'single'
+            };
+            case 'STLGeometry': return {
+                stl_file: '',
+                geometry_hash: ''
             };
             case 'Telemetry3DViewport': return {
                 colormap: 'plasma',
@@ -1559,6 +1528,10 @@ export class GraphRenderer {
                 qty_reacted: true,
                 qty_unreacted: true,
                 qty_air: true,
+                show_stl: true,
+                stl_wireframe: false,
+                stl_solids: true,
+                stl_opacity: 0.5,
                 refresh_rate: 0.033
             };
 
@@ -1680,6 +1653,7 @@ export class GraphRenderer {
             case 'Charge3D':        return 'CHARGE3D';
             case 'CFDSolver3D':     return 'SOLVER3D';
             case 'Telemetry3DViewport': return 'VIEW3D';
+            case 'STLGeometry':     return 'STL';
             default: return (type as string).toUpperCase();
         }
     }
@@ -1707,6 +1681,7 @@ export class GraphRenderer {
             case 'Charge3D':          return 'Charge (3D)';
             case 'CFDSolver3D':       return 'CFD Solver 3D';
             case 'Telemetry3DViewport': return 'Telemetry - 3D Viewport';
+            case 'STLGeometry':       return 'STL Geometry 3D';
             default: return type;
         }
     }
@@ -2605,6 +2580,7 @@ export class GraphRenderer {
 
     private getPortColorClass(nodeType: string, portId: string): string {
         if (nodeType === 'DomainMesh' || nodeType === 'DomainMesh2D' || portId === 'mesh') return 'domain';
+        if (nodeType === 'STLGeometry' || portId === 'stl') return 'domain';
         if (nodeType === 'Charge1D' || nodeType === 'Charge2D' || portId === 'explosive') return 'explosive';
         if (portId === 'ideal_gas') return 'material';
         if (nodeType === 'DetonatorLocation' || nodeType === 'DetonatorLocation3D' || portId === 'detonator') return 'detonator';
@@ -2887,9 +2863,34 @@ export class GraphRenderer {
                         showGrid: node.parameters?.show_grid !== false,
                         slices: node.parameters?.slices || [],
                         focusedSliceIndex: node.parameters?.focusedSliceIndex ?? 0,
-                        quantityRanges: node.parameters?.quantity_ranges || {}
+                        quantityRanges: node.parameters?.quantity_ranges || {},
+                        showSTL: node.parameters?.show_stl !== false,
+                        stlWireframe: node.parameters?.stl_wireframe === true,
+                        stlSolids: node.parameters?.stl_solids !== false,
+                        stlOpacity: node.parameters?.stl_opacity ?? 0.5
                     }
                 });
+            }
+
+            const stlPath = this.getSTLFilePath(node.id);
+            const cachedSTLPath = this.currentSTLPaths.get(node.id);
+            if (stlPath !== cachedSTLPath) {
+                if (stlPath) {
+                    const net = (window as any).networkManager;
+                    if (net && net.isConnected()) {
+                        this.currentSTLPaths.set(node.id, stlPath);
+                        const models = this.stateManager.getAllModels();
+                        const model = models.find(m => m.nodes.some(n => n.id === node.id));
+                        net.send({
+                            command: "LOAD_STL_GEOMETRY",
+                            filePath: stlPath,
+                            modelId: model ? model.id : ""
+                        });
+                    }
+                } else {
+                    this.currentSTLPaths.set(node.id, null);
+                    worker?.postMessage({ type: 'setSTLGeometry', data: { vertices: null } });
+                }
             }
 
             if (!container.querySelector('canvas')) {
@@ -3123,6 +3124,7 @@ export class GraphRenderer {
 
                 // Find connected domain mesh dimensions and configure worker
                 let dimX = 1.0, dimY = 1.0, dimZ = 1.0, cellSize = 0.01;
+                let originX = 0.0, originY = 0.0, originZ = 0.0;
                 const state = this.stateManager.getCurrentState();
                 if (state) {
                     const connToViewport = state.connections.find(c => c.toNode === node.id);
@@ -3137,6 +3139,9 @@ export class GraphRenderer {
                                     dimY = Number(meshNode.parameters?.dim_y ?? 1.0);
                                     dimZ = Number(meshNode.parameters?.dim_z ?? 1.0);
                                     cellSize = Number(meshNode.parameters?.cell_size ?? 0.01);
+                                    originX = Number(meshNode.parameters?.origin_x ?? 0.0);
+                                    originY = Number(meshNode.parameters?.origin_y ?? 0.0);
+                                    originZ = Number(meshNode.parameters?.origin_z ?? 0.0);
                                 }
                             }
                         }
@@ -3148,9 +3153,9 @@ export class GraphRenderer {
                 newWorker.postMessage({
                     type: 'setConfig',
                     data: {
-                        xmin: 0.0,
-                        ymin: 0.0,
-                        zmin: 0.0,
+                        xmin: originX,
+                        ymin: originY,
+                        zmin: originZ,
                         dx: cellSize,
                         nx: nx,
                         ny: ny,
@@ -3225,6 +3230,7 @@ export class GraphRenderer {
             // Sync configuration and domain mesh dimensions on every graph render pass
             if (worker) {
                 let dimX = 1.0, dimY = 1.0, dimZ = 1.0, cellSize = 0.01;
+                let originX = 0.0, originY = 0.0, originZ = 0.0;
                 const state = this.stateManager.getCurrentState();
                 if (state) {
                     const connToViewport = state.connections.find(c => c.toNode === node.id);
@@ -3239,6 +3245,9 @@ export class GraphRenderer {
                                     dimY = Number(meshNode.parameters?.dim_y ?? 1.0);
                                     dimZ = Number(meshNode.parameters?.dim_z ?? 1.0);
                                     cellSize = Number(meshNode.parameters?.cell_size ?? 0.01);
+                                    originX = Number(meshNode.parameters?.origin_x ?? 0.0);
+                                    originY = Number(meshNode.parameters?.origin_y ?? 0.0);
+                                    originZ = Number(meshNode.parameters?.origin_z ?? 0.0);
                                 }
                             }
                         }
@@ -3258,9 +3267,9 @@ export class GraphRenderer {
                         useLogScale: node.parameters?.log_scale === true,
                         showCellEdges: node.parameters?.cell_edges === true,
                         interpolate: node.parameters?.interpolate === true,
-                        xmin: 0.0,
-                        ymin: 0.0,
-                        zmin: 0.0,
+                        xmin: originX,
+                        ymin: originY,
+                        zmin: originZ,
                         dx: cellSize,
                         nx: nx,
                         ny: ny,
@@ -4714,7 +4723,48 @@ export class GraphRenderer {
                     }
                     this.stateManager.updateNodeParameters(node.id, updates);
                 });
-                inputEl = input;
+
+                if (key === 'stl_file') {
+                    const wrapper = document.createElement('div');
+                    wrapper.style.display = 'flex';
+                    wrapper.style.gap = '4px';
+                    wrapper.style.alignItems = 'center';
+                    wrapper.style.width = '100%';
+
+                    input.style.flex = '1';
+                    wrapper.appendChild(input);
+
+                    const browseBtn = document.createElement('button');
+                    browseBtn.type = 'button';
+                    browseBtn.textContent = '...';
+                    browseBtn.style.padding = '1px 4px';
+                    browseBtn.style.background = '#333';
+                    browseBtn.style.color = '#fff';
+                    browseBtn.style.border = '1px solid #555';
+                    browseBtn.style.cursor = 'pointer';
+                    browseBtn.style.fontSize = 'var(--font-xs)';
+                    browseBtn.onclick = (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const startPath = node.parameters[key] || '';
+                        const browser = new HostFileBrowserModal(
+                            (window as any).networkManager,
+                            'open',
+                            'select_file',
+                            (path: string) => {
+                                this.stateManager.updateNodeParameters(node.id, { [key]: path });
+                                const rand = Math.floor(Math.random() * 1000000);
+                                const simpleHash = 'stl_' + rand.toString(36);
+                                this.stateManager.updateNodeParameters(node.id, { geometry_hash: simpleHash });
+                            }
+                        );
+                        browser.open(startPath);
+                    };
+                    wrapper.appendChild(browseBtn);
+                    inputEl = wrapper;
+                } else {
+                    inputEl = input;
+                }
             }
 
             inputEl.addEventListener('mousedown', (e) => e.stopPropagation());
@@ -4828,6 +4878,8 @@ export class GraphRenderer {
                 return 'VTK output controls. Saves simulation snapshots in VTK XML Unstructured Grid (.vtu) format to the specified directory. Files are compatible with ParaView, VisIt, and other VTK-based post-processors.';
             case 'VirtualGauges':
                 return 'Virtual gauges. Records and tracks simulation variables (pressure, density, velocity, species) at discrete coordinates over time.';
+            case 'STLGeometry':
+                return 'STL Geometry configuration. Defines the path to the STL file representing the solid boundary mesh for Immersed Boundary method, and a unique hash representing it.';
             default:
                 return 'Simulation graph node.';
         }
@@ -6224,6 +6276,7 @@ export class GraphRenderer {
 
         const createCheckbox = (label: string, value: boolean, onChange: (val: boolean) => void) => {
             const labelEl = document.createElement('label');
+            labelEl.onclick = (e) => e.stopPropagation();
             labelEl.style.display = 'flex';
             labelEl.style.alignItems = 'center';
             labelEl.style.gap = '4px';
@@ -6477,7 +6530,7 @@ export class GraphRenderer {
 
             row.onclick = (e) => {
                 const target = e.target as HTMLElement;
-                if (target.tagName === 'SELECT' || target.tagName === 'INPUT' || target.tagName === 'BUTTON' || target.classList.contains('action-btn')) {
+                if (target.tagName === 'SELECT' || target.tagName === 'INPUT' || target.tagName === 'BUTTON' || target.tagName === 'LABEL' || target.classList.contains('action-btn')) {
                     return;
                 }
                 this.stateManager.updateNodeParametersInPlace(node.id, { focusedSliceIndex: idx });
@@ -6606,6 +6659,7 @@ export class GraphRenderer {
 
             // Controls grid (Axis, Qty, Stride)
             const grid = document.createElement('div');
+            grid.onclick = (e) => e.stopPropagation();
             grid.style.display = 'grid';
             grid.style.gridTemplateColumns = '1fr 1.2fr 1fr';
             grid.style.gap = '4px';
@@ -6679,6 +6733,7 @@ export class GraphRenderer {
             const stepVal = (bounds.max - bounds.min) / 100.0;
 
             const sliderRow = document.createElement('div');
+            sliderRow.onclick = (e) => e.stopPropagation();
             sliderRow.style.display = 'flex';
             sliderRow.style.alignItems = 'center';
             sliderRow.style.gap = '4px';
@@ -6755,6 +6810,7 @@ export class GraphRenderer {
 
             // Opacity Slider
             const opacityRow = document.createElement('div');
+            opacityRow.onclick = (e) => e.stopPropagation();
             opacityRow.style.display = 'flex';
             opacityRow.style.alignItems = 'center';
             opacityRow.style.gap = '4px';
@@ -6836,6 +6892,7 @@ export class GraphRenderer {
             // Collapsible Extended Settings Panel
             if (isExpanded) {
                 const subPanel = document.createElement('div');
+                subPanel.onclick = (e) => e.stopPropagation();
                 subPanel.style.borderTop = '1px solid #333';
                 subPanel.style.paddingTop = '6px';
                 subPanel.style.marginTop = '4px';
@@ -6971,6 +7028,35 @@ export class GraphRenderer {
 
             panel.appendChild(row);
         });
+    }
+
+    public setSTLGeometry(nodeId: string, vertices: Float32Array | null): void {
+        const worker = this.nodeWorkers.get(nodeId);
+        if (worker) {
+            worker.postMessage({
+                type: 'setSTLGeometry',
+                data: { vertices }
+            });
+        }
+    }
+
+    private getSTLFilePath(nodeId: string): string | null {
+        const state = this.stateManager.getCurrentState();
+        if (!state) return null;
+        const connToViewport = state.connections.find(c => c.toNode === nodeId);
+        if (connToViewport) {
+            const solverNode = state.nodes.find(n => n.id === connToViewport.fromNode);
+            if (solverNode && solverNode.type === 'CFDSolver3D') {
+                const connToSolver = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'stl');
+                if (connToSolver) {
+                    const stlNode = state.nodes.find(n => n.id === connToSolver.fromNode);
+                    if (stlNode && stlNode.type === 'STLGeometry') {
+                        return stlNode.parameters.stl_file || null;
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     private validateGraph(state: SimulationState): {

@@ -1,4 +1,4 @@
-import { SimulationState, SimulationStatus, LayoutNode, PanelNode, SplitNode, LayoutDirection, PanelType, Model, Workspace, AppState, Node, Connection, NodeType } from './types.js';
+import { SimulationState, SimulationStatus, LayoutNode, PanelNode, SplitNode, LayoutDirection, PanelType, Model, Workspace, AppState, Node, Connection, NodeType, Port } from './types.js';
 
 export class StateManager {
     private appState: AppState;
@@ -349,7 +349,8 @@ export class StateManager {
             'DomainMesh3D': 'node-mesh3d',
             'Charge3D': 'node-charge3d',
             'CFDSolver3D': 'node-solver3d',
-            'Telemetry3DViewport': 'node-viewport3d'
+            'Telemetry3DViewport': 'node-viewport3d',
+            'STLGeometry': 'node-stl'
         };
         const prefix = prefixMap[type] || `node-${type.toLowerCase()}`;
 
@@ -1314,6 +1315,8 @@ export class StateManager {
             if ((node.type as any) === 'VirtualGauges3D') {
                 node.type = 'VirtualGauges';
             }
+            node.inputs = this.getDefaultInputs(node.type);
+            node.outputs = this.getDefaultOutputs(node.type);
         });
 
         const defaults: Record<string, Record<string, any>> = {
@@ -1419,6 +1422,10 @@ export class StateManager {
                 detonator_y: 0.5,
                 detonator_z: 0.5
             },
+            'STLGeometry': {
+                stl_file: '',
+                geometry_hash: ''
+            },
             'RemapNode': {
                 explosive_x: 0.0,
                 explosive_y: 0.0,
@@ -1513,7 +1520,11 @@ export class StateManager {
                 qty_energy: true,
                 qty_reacted: true,
                 qty_unreacted: true,
-                qty_air: true
+                qty_air: true,
+                show_stl: true,
+                stl_wireframe: false,
+                stl_solids: true,
+                stl_opacity: 0.5
             }
         };
 
@@ -1524,6 +1535,10 @@ export class StateManager {
             if (node.type === 'CFDSolver' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver3D') {
                 delete node.parameters['output_mode'];
                 delete node.parameters['output_interval'];
+            }
+            if (node.type === 'CFDSolver3D') {
+                delete node.parameters['stl_file'];
+                delete node.parameters['geometry_hash'];
             }
             if (node.type === 'DomainMesh') {
                 if (node.parameters['x_min_bc'] !== undefined) {
@@ -1606,6 +1621,64 @@ export class StateManager {
         appStateCopy.activeWorkspaceId = workspace.id;
 
         this.loadAppState(appStateCopy);
+    }
+
+    getDefaultInputs(type: NodeType): Port[] {
+        switch (type) {
+            case 'ThePainter': return [{ id: 'mesh', label: 'Mesh' }, { id: 'air', label: 'Air' }, { id: 'explosive', label: 'Charge' }];
+            case 'CFDSolver': return [{ id: 'in', label: 'Initial State' }];
+            case 'TelemetryText':
+            case 'TelemetryGraph': return [{ id: 'in', label: 'Data Stream' }];
+            case 'CFDSolver2D': return [
+                { id: 'mesh', label: 'Mesh' },
+                { id: 'detonator', label: 'Detonator' },
+                { id: 'explosive', label: 'Charge' },
+                { id: 'hardware', label: 'Hardware' },
+                { id: 'air', label: 'Air' },
+                { id: 'remap', label: 'Remap' }
+            ];
+            case 'Charge1D':
+            case 'Charge2D': return [{ id: 'material', label: 'Material' }];
+            case 'RemapNode': return [{ id: 'in', label: '1D Solver' }];
+            case 'TelemetryContour': return [{ id: 'in', label: 'Data Stream' }];
+            case 'VTKOutput': return [{ id: 'in', label: 'Solver' }];
+            case 'VirtualGauges': return [{ id: 'in', label: 'Solver Output' }];
+            case 'CFDSolver3D': return [
+                { id: 'mesh', label: 'Mesh' },
+                { id: 'air', label: 'Air' },
+                { id: 'charge', label: 'Charge' },
+                { id: 'detonator', label: 'Detonator' },
+                { id: 'stl', label: 'STL Geometry' },
+                { id: 'gauges', label: 'Gauges' },
+                { id: 'remap', label: 'Remap' }
+            ];
+            case 'Charge3D': return [{ id: 'material', label: 'Material' }];
+            case 'Telemetry3DViewport': return [{ id: 'in', label: 'Data Stream' }];
+            default: return [];
+        }
+    }
+
+    getDefaultOutputs(type: NodeType): Port[] {
+        switch (type) {
+            case 'DomainMesh': return [{ id: 'out', label: 'Mesh' }];
+            case 'Material': return [{ id: 'out', label: 'Material' }];
+            case 'Charge1D':
+            case 'Charge2D': return [{ id: 'out', label: 'Charge' }];
+            case 'ThePainter': return [{ id: 'out', label: 'State' }];
+            case 'CFDSolver': return [{ id: 'telemetry', label: 'Telemetry' }];
+            case 'DomainMesh2D': return [{ id: 'mesh', label: 'Mesh Spec' }];
+            case 'DetonatorLocation':
+            case 'DetonatorLocation3D': return [{ id: 'detonator', label: 'Detonator Spec' }];
+            case 'RemapNode': return [{ id: 'remap', label: 'Remap Spec' }];
+            case 'HardwareConfig': return [{ id: 'hardware', label: 'Hardware Spec' }];
+            case 'CFDSolver2D': return [{ id: 'telemetry', label: 'Telemetry' }];
+            case 'DomainMesh3D': return [{ id: 'mesh', label: 'Mesh Spec' }];
+            case 'Charge3D': return [{ id: 'out', label: 'Charge Spec' }];
+            case 'CFDSolver3D': return [{ id: 'telemetry', label: 'Telemetry' }];
+            case 'VirtualGauges': return [{ id: 'out', label: 'Gauges Spec' }];
+            case 'STLGeometry': return [{ id: 'stl', label: 'STL Geometry' }];
+            default: return [];
+        }
     }
 }
 

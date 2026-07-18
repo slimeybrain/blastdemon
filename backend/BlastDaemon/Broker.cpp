@@ -278,6 +278,12 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
     std::string command = payload.value("command", "");
     std::string modelId = payload.value("modelId", "default");
 
+    if (command == "BROWSER_LOG") {
+        std::string message = payload.value("message", "");
+        std::cout << "[BROWSER] " << message << std::endl;
+        return;
+    }
+
     if (command == "SAVE_MODEL_FILE") {
         std::string filePath = payload.value("filePath", "");
         std::string fileContent = payload.value("fileContent", "");
@@ -385,6 +391,77 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
             resp["status"] = "error";
             resp["error"] = "Failed to open file for reading at: " + filePath;
             std::cerr << "[Broker] [ERROR] Failed to load model from path: " << filePath << std::endl;
+        }
+
+        if (client) {
+            send_websocket_text(client, resp.dump());
+        }
+        return;
+    }
+
+    if (command == "LOAD_STL_GEOMETRY") {
+        std::string filePath = payload.value("filePath", "");
+        nlohmann::json resp;
+        resp["type"] = "load_stl_response";
+        resp["modelId"] = modelId;
+        resp["filePath"] = filePath;
+
+        try {
+            std::ifstream file(filePath, std::ios::binary);
+            if (!file.is_open()) {
+                throw std::runtime_error("Failed to open STL file: " + filePath);
+            }
+
+            file.seekg(0, std::ios::end);
+            size_t file_size = file.tellg();
+            file.seekg(0, std::ios::beg);
+
+            std::vector<float> coords;
+            bool parsed = false;
+
+            if (file_size >= 84) {
+                char header[80];
+                file.read(header, 80);
+                uint32_t num_triangles = 0;
+                file.read(reinterpret_cast<char*>(&num_triangles), 4);
+
+                size_t expected_binary_size = 84 + static_cast<size_t>(num_triangles) * 50;
+                if (file_size == expected_binary_size) {
+                    coords.reserve(num_triangles * 9);
+                    for (uint32_t i = 0; i < num_triangles; ++i) {
+                        float data[12];
+                        file.read(reinterpret_cast<char*>(data), 48);
+                        uint16_t attr;
+                        file.read(reinterpret_cast<char*>(&attr), 2);
+                        coords.insert(coords.end(), data + 3, data + 12);
+                    }
+                    parsed = true;
+                }
+            }
+
+            if (!parsed) {
+                file.clear();
+                file.seekg(0, std::ios::beg);
+                std::string word;
+                float x, y, z;
+                while (file >> word) {
+                    if (word == "vertex") {
+                        if (file >> x >> y >> z) {
+                            coords.push_back(x);
+                            coords.push_back(y);
+                            coords.push_back(z);
+                        }
+                    }
+                }
+            }
+
+            resp["status"] = "success";
+            resp["vertices"] = coords;
+            std::cout << "[Broker] Successfully loaded STL file " << filePath << " with " << (coords.size() / 9) << " triangles." << std::endl;
+        } catch (const std::exception& e) {
+            resp["status"] = "error";
+            resp["error"] = e.what();
+            std::cerr << "[Broker] [ERROR] Failed to load STL: " << e.what() << std::endl;
         }
 
         if (client) {

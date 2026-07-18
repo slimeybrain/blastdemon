@@ -48,6 +48,7 @@ add_executable(BlastSolver
     # 2D CUDA solver
     backend/BlastSolver/cfd_solver_2d_cuda.cu
     # 3D Solver
+    backend/BlastSolver/ImmersedBoundary.cpp
     backend/BlastSolver/cfd_solver_3d.cpp
     backend/BlastSolver/cfd_solver_3d_cuda.cu
     backend/BlastSolver/remapper_3d.cpp
@@ -91,6 +92,7 @@ endif()
 # test_cuda_solver binary
 add_executable(test_cuda_solver
     backend/BlastSolver/test_cuda_solver.cu
+    backend/BlastSolver/ImmersedBoundary.cpp
     backend/BlastSolver/cfd_solver_3d.cpp
     backend/BlastSolver/cfd_solver_3d_cuda.cu
     backend/BlastSolver/remapper_3d.cpp

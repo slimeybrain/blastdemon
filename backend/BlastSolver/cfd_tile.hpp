@@ -92,4 +92,15 @@ struct PrimitiveTile3D<RealType, true> {
     int floor_status[TILE_CELLS_3D];
 };
 
+struct GeometryPayload {
+    float nx;
+    float ny;
+    float nz;
+    bool is_boundary;
+};
+
+struct GeometryTile3D {
+    GeometryPayload cells[TILE_CELLS_3D];
+};
+
 #endif // CFD_TILE_HPP

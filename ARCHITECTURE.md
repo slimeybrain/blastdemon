@@ -44,6 +44,7 @@ blastdemon/
 │       ├── remapper_3d.cpp             # 1D→3D state remap
 │       ├── cfd_states.hpp       # All primitive/conservative state structs
 │       ├── cfd_tile.hpp         # Tile SoA layout definitions
+│       ├── ImmersedBoundary.hpp/.cpp   # STL reader, voxelizer & immersed boundary conditions
 │       ├── materials.hpp        # EOS functions, JWL params, programmed burn
 │       ├── HDF5Writer.hpp/.cpp  # HDF5 volumetric output
 │       ├── XDMFWriter.hpp/.cpp  # XDMF metadata wrapper
@@ -458,6 +459,56 @@ GPU version of the 3D solver. Uses:
 - `d_max_s_buf`: wave speed reduction buffer
 - `d_slice_buf`: temporary slice extraction buffer
 - `temp_h_states`, `temp_h_active`: host-side mirrors for the 1D remap phase
+
+### 6.8 Immersed Boundary Method & STL Voxelization (STL-Fluid Interaction)
+
+The system supports complex solid boundary definitions via STL (Stereolithography) geometry files imported into the 3D solver. This is handled using an Immersed Boundary Method (IBM) with a slip boundary condition on a voxelized Cartesian grid, implemented across [ImmersedBoundary.hpp](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/ImmersedBoundary.hpp) and [ImmersedBoundary.cpp](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/ImmersedBoundary.cpp).
+
+#### 6.8.1 Geometry Loading & Pipeline
+1. **Frontend Selection**: The user places an `STLGeometry` node in the node graph and enters the file path. The node’s output connects to the `stl` port of the `CFDSolver3D` node.
+2. **WebSocket STL Request**: In the 3D telemetry panel, a change in path triggers the client to send a `LOAD_STL_GEOMETRY` text command with the absolute `filePath` to the Broker.
+3. **Broker Parsing**: The Broker ([Broker.cpp](file:///home/chris/antigrav/blastdemon/backend/BlastDaemon/Broker.cpp)) parses the STL file from disk:
+   - It distinguishes binary vs. ASCII STL formats dynamically.
+   - For binary, it reads the 80-byte header, the 32-bit triangle count, and loops to extract 48-byte records (12 floats for normals and 3 vertices per triangle).
+   - For ASCII, it parses the coordinates from `"vertex"` block statements.
+   - The Broker returns the coordinates as a flat array of floats inside a `load_stl_response` JSON message. The client loads these vertices and transfers them to the WebGPU/WebGL2 viewport worker ([ViewportWorker.ts](file:///home/chris/antigrav/blastdemon/frontend/src/ViewportWorker.ts)) for rendering.
+4. **Solver Setup**: When the simulation starts, the connected `STLGeometry` node parameters (`stl_file` and `geometry_hash`) are serialized via [serialization.ts](file:///home/chris/antigrav/blastdemon/frontend/src/serialization.ts) into the `INIT_3D` command payload sent to the solver process.
+
+#### 6.8.2 Voxelization Algorithm ([voxelize_stl](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/ImmersedBoundary.cpp#L151))
+When the 3D Solver is initialized, it calls `voxelize_stl()` to convert the triangulated boundary mesh into a discretized Cartesian representation of `GeometryTile3D` blocks containing [GeometryPayload](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/cfd_tile.hpp#L95) cells:
+- **Geometry Cache**: Voxelization is computationally expensive. The solver caches the resulting voxelized grid (`global_geometry_tiles`) in memory, keyed on a composite cache key: the STL path, size, modification time (mtime), grid size, cell size, and grid offsets (`xmin`, `ymin`, `zmin`). If the parameters match the cache, it bypasses the parsing and voxelization entirely.
+- **OpenMP / CUDA Parallelism**: Voxelization runs in parallel. On the CPU, it uses OpenMP `#pragma omp parallel for` loop parallelization. On the GPU, the CUDA kernel [voxelize_triangles_kernel](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/cfd_solver_3d_cuda.cu#L110) handles the triangle-box intersections in parallel.
+- **Boundary Cell Intersections**:
+  - The cell is flagged as a boundary cell if its center $P = (x_c, y_c, z_c)$ lies within a proximity threshold of $0.8 \cdot \Delta x$ from a triangle (checked in [is_cell_intersected](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/ImmersedBoundary.cpp#L103) / [is_cell_intersected_gpu](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/cfd_solver_3d_cuda.cu#L73)):
+    1. Distance to the plane containing the triangle is calculated: $d_{\text{perp}} = (P - V_0) \cdot N_{\text{unit}}$. If $|d_{\text{perp}}| > \text{threshold}$, the cell does not intersect.
+    2. The projection $P_{\text{proj}} = P - d_{\text{perp}} \cdot N_{\text{unit}}$ is checked using barycentric coordinates to verify if it lies inside the triangle boundary.
+    3. If outside, the shortest distance from $P$ to the three triangle edge segments is calculated and clamped. If it is within the threshold, the cell intersects.
+  - Normal vectors for all intersecting triangles are accumulated at the cell's index. They are normalized at the end to obtain the average local boundary normal vector:
+    $$N_{\text{accum}} = \sum T_k.normal \quad \Longrightarrow \quad n_b = \frac{N_{\text{accum}}}{\|N_{\text{accum}}\|_2}$$
+- **Watertight Interior Ray-Casting**:
+  - To classify pure solid cells inside a closed (watertight) STL, the voxelizer shoots rays along the X-axis for every row of cells $(gy, gz)$ from $(xmin - \Delta x)$ to $xmax$.
+  - Intersections of the ray with candidate triangles (whose bounding boxes overlap with the ray's $Y$-$Z$ coordinate) are computed using the Möller-Trumbore ray-triangle intersection algorithm ([ray_triangle_intersect](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/ImmersedBoundary.hpp#L92)).
+  - The intersections are sorted along X. Any grid cell center $x_c$ that has an odd number of intersection points to its left is marked as `is_inside = true`.
+- **Payload Packing**:
+  - Cells intersected by the mesh boundary are marked with `is_boundary = true` and the normalized boundary normal $(nx_b, ny_b, nz_b)$ is packed.
+  - Cells entirely inside the solid geometry (but not on the boundary) are packed with `is_boundary = true` and $(0, 0, 0)$ normals (pure solid cell).
+  - Ambient fluid cells are packed with `is_boundary = false`.
+
+#### 6.8.3 Immersed Boundary Condition Enforcements
+To enforce a solid slip wall boundary condition at the fluid-geometry interface, the solver utilizes a dynamic **Ghost-Cell Method** during spatial reconstruction and stencil sampling:
+- **Mirroring Stencil**: When the solver reconstructs primitive variables at cell faces, it samples cell values from a stencil. If a cell is marked as a boundary/solid cell (`is_boundary == true`), it calls [sampleStateWithMirror](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/cfd_solver_3d.hpp#L339) (CPU) or [sample_gpu](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/cfd_solver_3d_cuda.cu#L258) (GPU).
+- **Fluid Neighbor Selection**:
+  1. The solver reads the surface normal vector $n_b = (nx_b, ny_b, nz_b)$ for the solid cell.
+  2. It inspects the 6 orthogonal neighbors: $(+1, 0, 0), (-1, 0, 0), (0, +1, 0), (0, -1, 0), (0, 0, +1), (0, 0, -1)$.
+  3. It filters out any neighbors that are also solid/boundary cells.
+  4. Among the remaining fluid cells, it selects the fluid neighbor cell in the direction that maximizes the dot product with $n_b$ (pointing outwards into the fluid domain).
+- **Ghost State Reflection**:
+  - The ghost cell copies all thermodynamic quantities (density, pressure, energy, and material volume fractions) from the selected fluid neighbor:
+    $$State_{\text{ghost}} = State_{\text{fluid}}$$
+  - The velocity vector is reflected across the surface normal $n_b$ to enforce zero-through-flow:
+    $$u_{\text{dot\_n}} = u_{\text{fluid}} \cdot n_b = u_{\text{fluid},x} \cdot nx_b + u_{\text{fluid},y} \cdot ny_b + u_{\text{fluid},z} \cdot nz_b$$
+    $$u_{\text{ghost}} = u_{\text{fluid}} - 2 \cdot u_{\text{dot\_n}} \cdot n_b$$
+  - This dynamically populates the ghost cell with reflected velocities, producing a slip boundary condition at the physical solid boundary and preventing any fluid from crossing into the solid domain.
 
 ---
 

@@ -29,6 +29,11 @@ export class Telemetry3DViewport {
     private stateManager: StateManager;
     private panelId: string;
     private stateListener: () => void;
+    private netCallback: ((data: string | ArrayBuffer) => void) | null = null;
+    private openListener: (() => void) | null = null;
+    private currentSTLPath: string | null = null;
+    private debugOverlay: HTMLElement | null = null;
+    private hasTelemetryGrid = false;
 
     // Overlay Elements
     private controlsOverlay: HTMLElement | null = null;
@@ -37,6 +42,7 @@ export class Telemetry3DViewport {
     private expandedSliceIndices = new Set<number>();
     private needsSlicesRebuild = true;
     private isOpen = true;
+    private latestSliceRanges: { min: number, max: number }[] = [];
 
     constructor(container: HTMLElement, panelId: string, stateManager: StateManager) {
         this.container = container;
@@ -75,16 +81,37 @@ export class Telemetry3DViewport {
             } else if (type === 'rangeUpdated') {
                 const vpNode = this.getViewportNode();
                 if (vpNode) {
-                    const { quantity: focusedQty } = getFocusedQuantityAndRange(vpNode);
-                    const ranges = { ...(vpNode.parameters.quantity_ranges || {}) };
-                    ranges[focusedQty] = [min, max];
-                    this.stateManager.updateNodeParameters(vpNode.id, {
-                        auto_scale: false,
-                        quantity_ranges: ranges,
-                        min_val: min,
-                        max_val: max
-                    });
+                    const { index, min, max } = e.data;
+                    if (index !== undefined) {
+                        const slices = vpNode.parameters.slices ? [...vpNode.parameters.slices] : [];
+                        if (slices[index]) {
+                            const updates = {
+                                auto_scale: false,
+                                min_val: min,
+                                max_val: max
+                            };
+                            slices[index] = {
+                                ...slices[index],
+                                ...updates
+                            };
+                            this.propagateLinkGroup(slices, index, updates);
+                            this.updateSlices(slices);
+                        }
+                    } else {
+                        const { quantity: focusedQty } = getFocusedQuantityAndRange(vpNode);
+                        const ranges = { ...(vpNode.parameters.quantity_ranges || {}) };
+                        ranges[focusedQty] = [min, max];
+                        this.stateManager.updateNodeParametersInPlace(vpNode.id, {
+                            auto_scale: false,
+                            quantity_ranges: ranges,
+                            min_val: min,
+                            max_val: max
+                        });
+                    }
                 }
+            } else if (type === 'sliceRanges') {
+                this.latestSliceRanges = e.data.ranges;
+                this.syncControls();
             } else if (type === 'currentRange') {
                 const rangeLabel = document.getElementById(`viewport-current-range-${this.panelId}`);
                 if (rangeLabel) {
@@ -108,17 +135,70 @@ export class Telemetry3DViewport {
         this.initInteraction();
         this.buildOverlay();
 
+        // Diagnostic Overlay for STL Loading
+        this.debugOverlay = document.createElement('div');
+        this.debugOverlay.id = `viewport-debug-stl-${this.panelId}`;
+        this.debugOverlay.style.position = 'absolute';
+        this.debugOverlay.style.top = '10px';
+        this.debugOverlay.style.left = '10px';
+        this.debugOverlay.style.color = '#ffaa00';
+        this.debugOverlay.style.background = 'rgba(0, 0, 0, 0.7)';
+        this.debugOverlay.style.padding = '4px 8px';
+        this.debugOverlay.style.borderRadius = '4px';
+        this.debugOverlay.style.fontSize = '10px';
+        this.debugOverlay.style.fontFamily = 'monospace';
+        this.debugOverlay.style.pointerEvents = 'none';
+        this.debugOverlay.style.zIndex = '100';
+        this.debugOverlay.innerHTML = 'STL Status: Initializing...';
+        this.container.appendChild(this.debugOverlay);
+
         new ResizeObserver(entries => {
             for (let entry of entries) {
+                const dpr = window.devicePixelRatio || 1;
                 this.worker.postMessage({
                     type: 'resize',
                     data: {
-                        width: entry.contentRect.width,
-                        height: entry.contentRect.height
+                        width: entry.contentRect.width * dpr,
+                        height: entry.contentRect.height * dpr
                     }
                 });
             }
         }).observe(this.container);
+
+        const net = (window as any).networkManager;
+        if (net) {
+            this.openListener = () => {
+                this.currentSTLPath = null;
+                this.syncControls();
+            };
+            net.onOpen(this.openListener);
+
+            this.netCallback = (data: string | ArrayBuffer) => {
+                if (typeof data === 'string') {
+                    try {
+                        const msg = JSON.parse(data);
+                        if (msg.type === 'load_stl_response') {
+                            if (msg.status === 'success' && msg.vertices) {
+                                if (this.debugOverlay) {
+                                    this.debugOverlay.innerHTML += `<br>Load: SUCCESS (${msg.vertices.length / 3} vertices)`;
+                                }
+                                const verts = new Float32Array(msg.vertices);
+                                this.worker.postMessage({
+                                    type: 'setSTLGeometry',
+                                    data: { vertices: verts }
+                                });
+                            } else {
+                                if (this.debugOverlay) {
+                                    this.debugOverlay.innerHTML += `<br>Load: ERROR (${msg.error})`;
+                                }
+                                console.error("[Viewport] Failed to load STL:", msg.error);
+                            }
+                        }
+                    } catch (e) {}
+                }
+            };
+            net.onMessage(this.netCallback);
+        }
 
         this.stateListener = () => this.syncControls();
         this.stateManager.onStateChange(this.stateListener);
@@ -277,6 +357,10 @@ export class Telemetry3DViewport {
         const lightingSection = this.createSection(content, 'Lighting & Shadows');
         this.buildLightingControls(lightingSection);
 
+        // Section 1.6: STL Geometry
+        const stlSection = this.createSection(content, 'STL Boundary Mesh');
+        this.buildSTLControls(stlSection);
+
         // Section 2: Slice Settings
         const sliceSection = this.createSection(content, 'Active Slices');
         this.sliceListContainer = document.createElement('div');
@@ -356,7 +440,7 @@ export class Telemetry3DViewport {
         gridCb.onchange = () => {
             const vpNode = this.getViewportNode();
             if (vpNode) {
-                this.stateManager.updateNodeParameters(vpNode.id, { show_grid: gridCb.checked });
+                this.stateManager.updateNodeParametersInPlace(vpNode.id, { show_grid: gridCb.checked });
                 this.worker.postMessage({ type: 'setConfig', data: { showGrid: gridCb.checked } });
             }
         };
@@ -377,7 +461,7 @@ export class Telemetry3DViewport {
         edgesCb.onchange = () => {
             const vpNode = this.getViewportNode();
             if (vpNode) {
-                this.stateManager.updateNodeParameters(vpNode.id, { cell_edges: edgesCb.checked });
+                this.stateManager.updateNodeParametersInPlace(vpNode.id, { cell_edges: edgesCb.checked });
                 this.worker.postMessage({ type: 'setConfig', data: { showCellEdges: edgesCb.checked } });
             }
         };
@@ -418,7 +502,7 @@ export class Telemetry3DViewport {
         lightCb.onchange = () => {
             const vpNode = this.getViewportNode();
             if (vpNode) {
-                this.stateManager.updateNodeParameters(vpNode.id, { lightingEnabled: lightCb.checked });
+                this.stateManager.updateNodeParametersInPlace(vpNode.id, { lightingEnabled: lightCb.checked });
                 this.worker.postMessage({ type: 'setConfig', data: { lightingEnabled: lightCb.checked } });
             }
         };
@@ -439,7 +523,7 @@ export class Telemetry3DViewport {
         aoCb.onchange = () => {
             const vpNode = this.getViewportNode();
             if (vpNode) {
-                this.stateManager.updateNodeParameters(vpNode.id, { aoEnabled: aoCb.checked });
+                this.stateManager.updateNodeParametersInPlace(vpNode.id, { aoEnabled: aoCb.checked });
                 this.worker.postMessage({ type: 'setConfig', data: { aoEnabled: aoCb.checked } });
             }
         };
@@ -468,7 +552,7 @@ export class Telemetry3DViewport {
             ambLabel.innerHTML = `Ambient Level: ${Number(ambSlider.value).toFixed(2)}`;
             const vpNode = this.getViewportNode();
             if (vpNode) {
-                this.stateManager.updateNodeParameters(vpNode.id, { ambientLevel: Number(ambSlider.value) });
+                this.stateManager.updateNodeParametersInPlace(vpNode.id, { ambientLevel: Number(ambSlider.value) });
                 this.worker.postMessage({ type: 'setConfig', data: { ambientLevel: Number(ambSlider.value) } });
             }
         };
@@ -497,7 +581,7 @@ export class Telemetry3DViewport {
             specLabel.innerHTML = `Specular Level: ${Number(specSlider.value).toFixed(2)}`;
             const vpNode = this.getViewportNode();
             if (vpNode) {
-                this.stateManager.updateNodeParameters(vpNode.id, { specularIntensity: Number(specSlider.value) });
+                this.stateManager.updateNodeParametersInPlace(vpNode.id, { specularIntensity: Number(specSlider.value) });
                 this.worker.postMessage({ type: 'setConfig', data: { specularIntensity: Number(specSlider.value) } });
             }
         };
@@ -617,23 +701,40 @@ export class Telemetry3DViewport {
 
     private getViewportNode(): Node | null {
         const ws = this.stateManager.getActiveWorkspace();
-        if (!ws || !ws.activeModelId) return null;
-        const state = this.stateManager.getSimulationState(ws.activeModelId);
-        return state?.nodes.find(n => n.type === 'Telemetry3DViewport') || null;
+        if (!ws) return null;
+        if (ws.activeModelId) {
+            const state = this.stateManager.getSimulationState(ws.activeModelId);
+            const node = state?.nodes.find(n => n.type === 'Telemetry3DViewport');
+            if (node) return node;
+        }
+
+        // Fallback: search all models in the workspace
+        const allModels = this.stateManager.getWorkspaceModels();
+        for (const m of allModels) {
+            const node = m.nodes.find(n => n.type === 'Telemetry3DViewport');
+            if (node) return node;
+        }
+        return null;
     }
 
-    private getSolverNode(): Node | null {
-        const ws = this.stateManager.getActiveWorkspace();
-        if (!ws || !ws.activeModelId) return null;
-        const state = this.stateManager.getSimulationState(ws.activeModelId);
-        return state?.nodes.find(n => n.type === 'CFDSolver3D') || null;
-    }
+
 
     private updateSlices(slices: any[]) {
         const vpNode = this.getViewportNode();
         if (!vpNode) return;
         this.stateManager.updateNodeParametersInPlace(vpNode.id, { slices });
         
+        const opacities = slices.map((s: any) => s.opacity !== undefined ? s.opacity : 1.0);
+        this.worker.postMessage({
+            type: 'setConfig',
+            data: {
+                slices: slices,
+                sliceOpacities: opacities,
+                focusedSliceIndex: vpNode.parameters.focusedSliceIndex ?? 0,
+                quantityRanges: vpNode.parameters.quantity_ranges || {}
+            }
+        });
+
         const net = (window as any).networkManager;
         if (net && net.isConnected()) {
             let targetModelId = vpNode.id;
@@ -655,18 +756,47 @@ export class Telemetry3DViewport {
     private getMeshNode() {
         const vpNode = this.getViewportNode();
         if (!vpNode) return null;
-        const state = this.stateManager.getCurrentState();
-        if (state) {
-            const connToViewport = state.connections.find(c => c.toNode === vpNode.id);
-            if (connToViewport) {
-                const solverNode = state.nodes.find(n => n.id === connToViewport.fromNode);
-                if (solverNode) {
-                    const connToSolver = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'mesh');
-                    if (connToSolver) {
-                        return state.nodes.find(n => n.id === connToSolver.fromNode) || null;
-                    }
+
+        const allModels = this.stateManager.getWorkspaceModels();
+        let targetModel: any = null;
+        for (const m of allModels) {
+            if (m.nodes.some(n => n.id === vpNode.id)) {
+                targetModel = m;
+                break;
+            }
+        }
+        if (!targetModel) return null;
+
+        const connToViewport = targetModel.connections.find((c: any) => c.toNode === vpNode.id);
+        if (connToViewport) {
+            const solverNode = targetModel.nodes.find((n: any) => n.id === connToViewport.fromNode);
+            if (solverNode) {
+                const connToSolver = targetModel.connections.find((c: any) => c.toNode === solverNode.id && c.toPort === 'mesh');
+                if (connToSolver) {
+                    return targetModel.nodes.find((n: any) => n.id === connToSolver.fromNode) || null;
                 }
             }
+        }
+        return null;
+    }
+
+    private getSolverNode(): Node | null {
+        const vpNode = this.getViewportNode();
+        if (!vpNode) return null;
+
+        const allModels = this.stateManager.getWorkspaceModels();
+        let targetModel: any = null;
+        for (const m of allModels) {
+            if (m.nodes.some(n => n.id === vpNode.id)) {
+                targetModel = m;
+                break;
+            }
+        }
+        if (!targetModel) return null;
+
+        const connToViewport = targetModel.connections.find((c: any) => c.toNode === vpNode.id);
+        if (connToViewport) {
+            return targetModel.nodes.find((n: any) => n.id === connToViewport.fromNode) || null;
         }
         return null;
     }
@@ -707,6 +837,22 @@ export class Telemetry3DViewport {
         }
     }
 
+    private propagateLinkGroup(slices: any[], index: number, updates: any) {
+        const group = slices[index].link_group || 'none';
+        if (group === 'none') return;
+        for (const [key, value] of Object.entries(updates)) {
+            slices.forEach((s, i) => {
+                if (i !== index && s.link_group === group) {
+                    if (key === 'quantities') {
+                        slices[i].quantities = [...(value as string[])];
+                    } else {
+                        slices[i][key] = value;
+                    }
+                }
+            });
+        }
+    }
+
     private updateSliceProperty(index: number, updates: any) {
         const vpNode = this.getViewportNode();
         if (!vpNode) return;
@@ -731,23 +877,8 @@ export class Telemetry3DViewport {
                     }
                 }
             } else {
-                const group = slices[index].link_group || 'none';
-                if (group !== 'none') {
-                    const key = Object.keys(updates)[0];
-                    if (key) {
-                        slices.forEach((s, i) => {
-                            if (i !== index && s.link_group === group) {
-                                if (key === 'quantities') {
-                                    slices[i].quantities = [...updates.quantities];
-                                } else {
-                                    slices[i][key] = updates[key];
-                                }
-                            }
-                        });
-                    }
-                }
+                this.propagateLinkGroup(slices, index, updates);
             }
-            this.needsSlicesRebuild = true;
             this.updateSlices(slices);
         }
     }
@@ -757,36 +888,95 @@ export class Telemetry3DViewport {
         const solverNode = this.getSolverNode();
         if (!vpNode) return;
 
-        // Resolve connected DomainMesh3D
-        let meshNode: any = null;
-        const state = this.stateManager.getCurrentState();
-        if (state) {
-            const connToViewport = state.connections.find(c => c.toNode === vpNode.id);
-            if (connToViewport) {
-                const solverNode = state.nodes.find(n => n.id === connToViewport.fromNode);
-                if (solverNode) {
-                    const connToSolver = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'mesh');
-                    if (connToSolver) {
-                        meshNode = state.nodes.find(n => n.id === connToSolver.fromNode);
-                    }
-                }
+        // Reset hasTelemetryGrid if simulation is stopped/terminated/uninitialized
+        const allModels = this.stateManager.getWorkspaceModels();
+        let targetModelId: string | null = null;
+        for (const m of allModels) {
+            if (m.nodes.some(n => n.id === vpNode.id)) {
+                targetModelId = m.id;
+                break;
             }
         }
+        const status = targetModelId ? this.stateManager.getModelStatus(targetModelId) : 'UNINITIALIZED';
+        if (status === 'UNINITIALIZED' || status === 'TERMINATED') {
+            this.hasTelemetryGrid = false;
+        }
+
+        // Resolve connected DomainMesh3D
+        const meshNode = this.getMeshNode();
 
         // 1. Sync Render Settings
         const gridCb = document.getElementById('viewport-grid-cb') as HTMLInputElement;
-        if (gridCb && document.activeElement !== gridCb) {
+        if (gridCb) {
             gridCb.checked = vpNode.parameters.show_grid !== false;
+        }
+
+        // 1.0b Sync STL Geometry controls
+        const stlShowCb = document.getElementById('viewport-stl-show-cb') as HTMLInputElement;
+        if (stlShowCb) {
+            stlShowCb.checked = vpNode.parameters.show_stl !== false;
+        }
+
+        const stlWfCb = document.getElementById('viewport-stl-wf-cb') as HTMLInputElement;
+        if (stlWfCb) {
+            stlWfCb.checked = !!vpNode.parameters.stl_wireframe;
+        }
+
+        const stlSolidsCb = document.getElementById('viewport-stl-solids-cb') as HTMLInputElement;
+        if (stlSolidsCb) {
+            stlSolidsCb.checked = vpNode.parameters.stl_solids !== false;
+        }
+
+        const stlOpacSlider = document.getElementById('viewport-stl-opacity-slider') as HTMLInputElement;
+        const stlOpacLabel = stlOpacSlider?.parentElement?.querySelector('span') as HTMLElement;
+        if (stlOpacSlider && document.activeElement !== stlOpacSlider) {
+            const val = vpNode.parameters.stl_opacity ?? 0.5;
+            stlOpacSlider.value = val.toString();
+            if (stlOpacLabel) stlOpacLabel.innerHTML = `Opacity: ${Number(val).toFixed(2)}`;
+        }
+
+        // 1.0c Detect STL file path changes and load
+        const stlPath = this.getSTLFilePath();
+        const net = (window as any).networkManager;
+        const netConn = net ? net.isConnected() : false;
+        if (this.debugOverlay) {
+            this.debugOverlay.innerHTML = `STL Path: ${stlPath || 'None'}<br>Conn: ${netConn}<br>Cache: ${this.currentSTLPath || 'None'}`;
+        }
+
+        if (stlPath !== this.currentSTLPath) {
+            if (stlPath) {
+                if (net && net.isConnected()) {
+                    this.currentSTLPath = stlPath;
+                    let targetModelId = "";
+                    if (vpNode) {
+                        const allModels = this.stateManager.getWorkspaceModels();
+                        for (const m of allModels) {
+                            if (m.nodes.some(n => n.id === vpNode.id)) {
+                                targetModelId = m.id;
+                                break;
+                            }
+                        }
+                    }
+                    net.send({
+                        command: "LOAD_STL_GEOMETRY",
+                        filePath: stlPath,
+                        modelId: targetModelId
+                    });
+                }
+            } else {
+                this.currentSTLPath = null;
+                this.worker.postMessage({ type: 'setSTLGeometry', data: { vertices: null } });
+            }
         }
 
         // 1.1 Sync Lighting & Shadows
         const lightCb = document.getElementById('viewport-lighting-cb') as HTMLInputElement;
-        if (lightCb && document.activeElement !== lightCb) {
+        if (lightCb) {
             lightCb.checked = vpNode.parameters.lightingEnabled !== false;
         }
 
         const aoCb = document.getElementById('viewport-ao-cb') as HTMLInputElement;
-        if (aoCb && document.activeElement !== aoCb) {
+        if (aoCb) {
             aoCb.checked = vpNode.parameters.aoEnabled !== false;
         }
 
@@ -807,7 +997,7 @@ export class Telemetry3DViewport {
         }
 
         const edgesCb = document.getElementById('viewport-edges-cb') as HTMLInputElement;
-        if (edgesCb && document.activeElement !== edgesCb) {
+        if (edgesCb) {
             edgesCb.checked = vpNode.parameters.cell_edges === true;
         }
         // 2. Sync Slices Row list
@@ -816,16 +1006,21 @@ export class Telemetry3DViewport {
             const currentRows = this.sliceListContainer.children.length;
             if (this.needsSlicesRebuild || currentRows !== slices.length) {
                 this.sliceListContainer.innerHTML = '';
+                this.needsSlicesRebuild = false;
                 const focusedSliceIndex = vpNode.parameters.focusedSliceIndex ?? 0;
-                
+
                 slices.forEach((slice: any, idx: number) => {
                     // Apply defaults
                     const colormapVal = slice.colormap || 'plasma';
                     const autoScaleVal = slice.auto_scale !== false;
                     const logScaleVal = slice.log_scale === true;
                     const interpolateVal = slice.interpolate !== false;
-                    const minRangeVal = slice.min_val !== undefined ? slice.min_val : 101325.0;
-                    const maxRangeVal = slice.max_val !== undefined ? slice.max_val : 101325.0 * 10.0;
+                    let minRangeVal = slice.min_val !== undefined ? slice.min_val : 101325.0;
+                    let maxRangeVal = slice.max_val !== undefined ? slice.max_val : 101325.0 * 10.0;
+                    if (autoScaleVal && this.latestSliceRanges && this.latestSliceRanges[idx]) {
+                        minRangeVal = this.latestSliceRanges[idx].min;
+                        maxRangeVal = this.latestSliceRanges[idx].max;
+                    }
                     const linkGroup = slice.link_group || 'none';
                     const isExpanded = this.expandedSliceIndices.has(idx);
 
@@ -862,10 +1057,10 @@ export class Telemetry3DViewport {
 
                     row.onclick = (e) => {
                         const target = e.target as HTMLElement;
-                        if (target.tagName === 'SELECT' || target.tagName === 'INPUT' || target.tagName === 'BUTTON' || target.classList.contains('action-btn')) {
+                        if (target.tagName === 'SELECT' || target.tagName === 'INPUT' || target.tagName === 'BUTTON' || target.tagName === 'LABEL' || target.classList.contains('action-btn')) {
                             return;
                         }
-                        this.stateManager.updateNodeParameters(vpNode.id, { focusedSliceIndex: idx });
+                        this.stateManager.updateNodeParametersInPlace(vpNode.id, { focusedSliceIndex: idx });
                     };
 
                     // Header
@@ -943,11 +1138,14 @@ export class Telemetry3DViewport {
 
                     // Controls Grid
                     const grid = document.createElement('div');
+                    grid.onclick = (e) => e.stopPropagation();
                     grid.style.display = 'grid';
                     grid.style.gridTemplateColumns = '1fr 1.2fr 1fr';
                     grid.style.gap = '4px';
 
                     const axisSel = document.createElement('select');
+                    axisSel.id = `viewport-${this.panelId}-slice-axis-${idx}`;
+                    axisSel.className = 'slice-axis-sel';
                     this.applySelectStyle(axisSel);
                     axisSel.style.width = '100%';
                     axisSel.innerHTML = '<option value="xy">XY</option><option value="xz">XZ</option><option value="yz">YZ</option>';
@@ -957,24 +1155,22 @@ export class Telemetry3DViewport {
                         const bounds = getSliceBounds(axisSel.value, meshNode);
                         const defaultOffset = (bounds.min + bounds.max) / 2.0;
                         
-                        const updated = [...slices];
-                        updated[idx] = { ...slice, axis: axisSel.value, offset: defaultOffset };
-                        
-                        if (linkGroup !== 'none') {
-                            updated.forEach((s, i) => {
-                                if (i !== idx && s.link_group === linkGroup) {
-                                    updated[i].axis = axisSel.value;
-                                    updated[i].offset = defaultOffset;
-                                }
-                            });
+                        const vp = this.getViewportNode();
+                        if (!vp) return;
+                        const currentSlices = vp.parameters.slices ? [...vp.parameters.slices] : [];
+                        if (currentSlices[idx]) {
+                            const updates = { axis: axisSel.value, offset: defaultOffset };
+                            currentSlices[idx] = { ...currentSlices[idx], ...updates };
+                            this.propagateLinkGroup(currentSlices, idx, updates);
+                            this.needsSlicesRebuild = true;
+                            this.updateSlices(currentSlices);
                         }
-                        
-                        this.needsSlicesRebuild = true;
-                        this.updateSlices(updated);
                     };
                     grid.appendChild(axisSel);
 
                     const qSel = document.createElement('select');
+                    qSel.id = `viewport-${this.panelId}-slice-qty-${idx}`;
+                    qSel.className = 'slice-qty-sel';
                     this.applySelectStyle(qSel);
                     qSel.style.width = '100%';
                     qSel.innerHTML = '<option value="pressure">Pressure</option><option value="density">Density</option><option value="velocity">Velocity</option><option value="energy">Energy</option><option value="species1">Products</option><option value="species2">Unburnt</option><option value="species3">Air</option>';
@@ -986,6 +1182,8 @@ export class Telemetry3DViewport {
                     grid.appendChild(qSel);
 
                     const strideSel = document.createElement('select');
+                    strideSel.id = `viewport-${this.panelId}-slice-stride-${idx}`;
+                    strideSel.className = 'slice-stride-sel';
                     this.applySelectStyle(strideSel);
                     strideSel.style.width = '100%';
                     strideSel.innerHTML = '<option value="1">1:1</option><option value="2">1:2</option><option value="4">1:4</option><option value="8">1:8</option><option value="16">1:16</option>';
@@ -1002,12 +1200,14 @@ export class Telemetry3DViewport {
                     const stepVal = Math.max(0.001, (bounds.max - bounds.min) / 100);
 
                     const offWrap = document.createElement('div');
+                    offWrap.onclick = (e) => e.stopPropagation();
                     offWrap.style.display = 'flex';
                     offWrap.style.alignItems = 'center';
                     offWrap.style.gap = '6px';
                     offWrap.innerHTML = '<span style="font-size:8px;color:#aaa;min-width:30px">Offset</span>';
 
                     const offSlider = document.createElement('input');
+                    offSlider.id = `viewport-${this.panelId}-slice-offset-${idx}`;
                     offSlider.type = 'range';
                     offSlider.className = 'slice-offset-slider';
                     offSlider.min = bounds.min.toString();
@@ -1032,34 +1232,48 @@ export class Telemetry3DViewport {
                         e.stopPropagation();
                         const val = Number(offSlider.value);
                         offInp.value = String(val);
-                        slice.offset = val;
                         
-                        if (linkGroup !== 'none') {
-                            slices.forEach((s: any, i: number) => {
-                                if (i !== idx && s.link_group === linkGroup) {
-                                    s.offset = val;
-                                    const otherRow = this.sliceListContainer!.querySelector(`.slice-card-${i}`) as HTMLElement;
-                                    if (otherRow) {
-                                        const otherSlider = otherRow.querySelector('.slice-offset-slider') as HTMLInputElement;
-                                        const otherVal = otherRow.querySelector('.slice-offset-val') as HTMLInputElement;
-                                        if (otherSlider) otherSlider.value = String(val);
-                                        if (otherVal) otherVal.value = String(val);
+                        const vp = this.getViewportNode();
+                        if (!vp) return;
+                        const currentSlices = vp.parameters.slices ? [...vp.parameters.slices] : [];
+                        if (currentSlices[idx]) {
+                            currentSlices[idx] = { ...currentSlices[idx], offset: val };
+                            if (linkGroup !== 'none') {
+                                currentSlices.forEach((s: any, i: number) => {
+                                    if (i !== idx && s.link_group === linkGroup) {
+                                        currentSlices[i] = { ...s, offset: val };
+                                        const otherRow = this.sliceListContainer!.querySelector(`.slice-card-${i}`) as HTMLElement;
+                                        if (otherRow) {
+                                            const otherSlider = otherRow.querySelector('.slice-offset-slider') as HTMLInputElement;
+                                            const otherVal = otherRow.querySelector('.slice-offset-val') as HTMLInputElement;
+                                            if (otherSlider) otherSlider.value = String(val);
+                                            if (otherVal) otherVal.value = String(val);
+                                        }
                                     }
+                                });
+                            }
+                            this.worker.postMessage({
+                                type: 'setConfig',
+                                data: {
+                                    slices: currentSlices,
+                                    focusedSliceIndex: vp.parameters.focusedSliceIndex ?? 0,
+                                    quantityRanges: vp.parameters.quantity_ranges || {}
                                 }
                             });
                         }
-                        this.worker.postMessage({
-                            type: 'setConfig',
-                            data: {
-                                slices: slices,
-                                focusedSliceIndex: vpNode.parameters.focusedSliceIndex ?? 0,
-                                quantityRanges: vpNode.parameters.quantity_ranges || {}
-                            }
-                        });
                     };
                     offSlider.onchange = (e) => {
                         e.stopPropagation();
-                        this.updateSlices(slices);
+                        const vp = this.getViewportNode();
+                        if (!vp) return;
+                        const currentSlices = vp.parameters.slices ? [...vp.parameters.slices] : [];
+                        const val = Number(offSlider.value);
+                        if (currentSlices[idx]) {
+                            const updates = { offset: val };
+                            currentSlices[idx] = { ...currentSlices[idx], ...updates };
+                            this.propagateLinkGroup(currentSlices, idx, updates);
+                            this.updateSlices(currentSlices);
+                        }
                     };
 
                     offInp.onchange = (e) => {
@@ -1076,6 +1290,7 @@ export class Telemetry3DViewport {
 
                     // Opacity Slider
                     const opacWrap = document.createElement('div');
+                    opacWrap.onclick = (e) => e.stopPropagation();
                     opacWrap.style.display = 'flex';
                     opacWrap.style.alignItems = 'center';
                     opacWrap.style.gap = '6px';
@@ -1107,28 +1322,42 @@ export class Telemetry3DViewport {
                         e.stopPropagation();
                         const val = Number(opacSlider.value);
                         opacInp.value = String(val);
-                        slice.opacity = val;
                         
-                        if (linkGroup !== 'none') {
-                            slices.forEach((s: any, i: number) => {
-                                if (i !== idx && s.link_group === linkGroup) {
-                                    s.opacity = val;
-                                    const otherRow = this.sliceListContainer!.querySelector(`.slice-card-${i}`) as HTMLElement;
-                                    if (otherRow) {
-                                        const otherSlider = otherRow.querySelector('.slice-opac-slider') as HTMLInputElement;
-                                        const otherVal = otherRow.querySelector('.slice-opac-val') as HTMLInputElement;
-                                        if (otherSlider) otherSlider.value = String(val);
-                                        if (otherVal) otherVal.value = String(val);
+                        const vp = this.getViewportNode();
+                        if (!vp) return;
+                        const currentSlices = vp.parameters.slices ? [...vp.parameters.slices] : [];
+                        if (currentSlices[idx]) {
+                            currentSlices[idx] = { ...currentSlices[idx], opacity: val };
+                            if (linkGroup !== 'none') {
+                                currentSlices.forEach((s: any, i: number) => {
+                                    if (i !== idx && s.link_group === linkGroup) {
+                                        currentSlices[i] = { ...s, opacity: val };
+                                        const otherRow = this.sliceListContainer!.querySelector(`.slice-card-${i}`) as HTMLElement;
+                                        if (otherRow) {
+                                            const otherSlider = otherRow.querySelector('.slice-opac-slider') as HTMLInputElement;
+                                            const otherVal = otherRow.querySelector('.slice-opac-val') as HTMLInputElement;
+                                            if (otherSlider) otherSlider.value = String(val);
+                                            if (otherVal) otherVal.value = String(val);
+                                        }
                                     }
-                                }
-                            });
+                                });
+                            }
+                            const opacities = currentSlices.map((s: any) => s.opacity !== undefined ? s.opacity : 1.0);
+                            this.worker.postMessage({ type: 'setConfig', data: { sliceOpacities: opacities } });
                         }
-                        const opacities = slices.map((s: any) => s.opacity !== undefined ? s.opacity : 1.0);
-                        this.worker.postMessage({ type: 'setConfig', data: { sliceOpacities: opacities } });
                     };
                     opacSlider.onchange = (e) => {
                         e.stopPropagation();
-                        this.updateSlices(slices);
+                        const vp = this.getViewportNode();
+                        if (!vp) return;
+                        const currentSlices = vp.parameters.slices ? [...vp.parameters.slices] : [];
+                        const val = Number(opacSlider.value);
+                        if (currentSlices[idx]) {
+                            const updates = { opacity: val };
+                            currentSlices[idx] = { ...currentSlices[idx], ...updates };
+                            this.propagateLinkGroup(currentSlices, idx, updates);
+                            this.updateSlices(currentSlices);
+                        }
                     };
 
                     opacInp.onchange = (e) => {
@@ -1146,6 +1375,7 @@ export class Telemetry3DViewport {
                     // Extended Sub-panel
                     if (isExpanded) {
                         const subPanel = document.createElement('div');
+                        subPanel.onclick = (e) => e.stopPropagation();
                         subPanel.style.borderTop = '1px solid rgba(255,255,255,0.06)';
                         subPanel.style.paddingTop = '6px';
                         subPanel.style.marginTop = '4px';
@@ -1155,6 +1385,7 @@ export class Telemetry3DViewport {
 
                         const createCheckbox = (labelStr: string, checkedVal: boolean, onCbChange: (v: boolean) => void) => {
                             const lbl = document.createElement('label');
+                            lbl.onclick = (e) => e.stopPropagation();
                             lbl.style.display = 'flex';
                             lbl.style.alignItems = 'center';
                             lbl.style.gap = '4px';
@@ -1194,6 +1425,7 @@ export class Telemetry3DViewport {
                         cmRow.style.alignItems = 'center';
                         cmRow.innerHTML = '<span style="font-size:9px;color:#aaa">Colormap</span>';
                         const cmSel = document.createElement('select');
+                        cmSel.className = 'slice-colormap-sel';
                         this.applySelectStyle(cmSel);
                         cmSel.innerHTML = '<option value="plasma">Plasma</option><option value="viridis">Viridis</option>';
                         cmSel.value = colormapVal;
@@ -1218,7 +1450,7 @@ export class Telemetry3DViewport {
 
                         const minInput = document.createElement('input');
                         minInput.type = 'number';
-                        minInput.className = 'action-btn';
+                        minInput.className = 'action-btn slice-min-input';
                         minInput.value = String(minRangeVal);
                         minInput.disabled = autoScaleVal;
                         minInput.style.width = '45px';
@@ -1242,7 +1474,7 @@ export class Telemetry3DViewport {
 
                         const maxInput = document.createElement('input');
                         maxInput.type = 'number';
-                        maxInput.className = 'action-btn';
+                        maxInput.className = 'action-btn slice-max-input';
                         maxInput.value = String(maxRangeVal);
                         maxInput.disabled = autoScaleVal;
                         maxInput.style.width = '48px';
@@ -1318,15 +1550,15 @@ export class Telemetry3DViewport {
                     const bounds = getSliceBounds(slice.axis, meshNode);
 
                     // Sync basic selects if not active
-                    const axisSel = row.querySelector('select:nth-of-type(2)') as HTMLSelectElement;
+                    const axisSel = row.querySelector('.slice-axis-sel') as HTMLSelectElement;
                     if (axisSel && document.activeElement !== axisSel) {
                         axisSel.value = slice.axis;
                     }
-                    const qSel = row.querySelector('select:nth-of-type(3)') as HTMLSelectElement;
+                    const qSel = row.querySelector('.slice-qty-sel') as HTMLSelectElement;
                     if (qSel && document.activeElement !== qSel) {
                         qSel.value = slice.quantities?.[0] || 'pressure';
                     }
-                    const strideSel = row.querySelector('select:nth-of-type(4)') as HTMLSelectElement;
+                    const strideSel = row.querySelector('.slice-stride-sel') as HTMLSelectElement;
                     if (strideSel && document.activeElement !== strideSel) {
                         strideSel.value = String(slice.stride || 1);
                     }
@@ -1353,6 +1585,50 @@ export class Telemetry3DViewport {
                     const opacInp = row.querySelector('.slice-opac-val') as HTMLInputElement;
                     if (opacInp && document.activeElement !== opacInp) {
                         opacInp.value = (slice.opacity !== undefined ? slice.opacity : 1.0).toString();
+                    }
+
+                    // Sync sub-panel inputs if expanded
+                    const autoScaleVal = slice.auto_scale !== false;
+                    let minRangeVal = slice.min_val !== undefined ? slice.min_val : 101325.0;
+                    let maxRangeVal = slice.max_val !== undefined ? slice.max_val : 101325.0 * 10.0;
+                    if (autoScaleVal && this.latestSliceRanges && this.latestSliceRanges[idx]) {
+                        minRangeVal = this.latestSliceRanges[idx].min;
+                        maxRangeVal = this.latestSliceRanges[idx].max;
+                    }
+
+                    // Sync checkboxes
+                    const checkboxes = row.querySelectorAll('input[type="checkbox"]') as NodeListOf<HTMLInputElement>;
+                    if (checkboxes.length >= 3) {
+                        checkboxes[0].checked = autoScaleVal;
+                        checkboxes[1].checked = slice.log_scale === true;
+                        checkboxes[2].checked = slice.interpolate !== false;
+                    }
+
+                    // Sync colormap
+                    const cmSel = row.querySelector('.slice-colormap-sel') as HTMLSelectElement;
+                    if (cmSel && document.activeElement !== cmSel) {
+                        cmSel.value = slice.colormap || 'plasma';
+                    }
+
+                    // Sync min / max inputs
+                    const minInput = row.querySelector('.slice-min-input') as HTMLInputElement;
+                    if (minInput) {
+                        minInput.disabled = autoScaleVal;
+                        minInput.style.background = autoScaleVal ? '#0c0c0d' : '#1a1a1c';
+                        minInput.style.color = autoScaleVal ? '#666' : '#ccc';
+                        if (document.activeElement !== minInput) {
+                            minInput.value = String(minRangeVal);
+                        }
+                    }
+
+                    const maxInput = row.querySelector('.slice-max-input') as HTMLInputElement;
+                    if (maxInput) {
+                        maxInput.disabled = autoScaleVal;
+                        maxInput.style.background = autoScaleVal ? '#0c0c0d' : '#1a1a1c';
+                        maxInput.style.color = autoScaleVal ? '#666' : '#ccc';
+                        if (document.activeElement !== maxInput) {
+                            maxInput.value = String(maxRangeVal);
+                        }
                     }
                 });
             }
@@ -1420,28 +1696,37 @@ export class Telemetry3DViewport {
 
         const { min: syncFocusedMin, max: syncFocusedMax } = getFocusedQuantityAndRange(vpNode);
 
+        const configData: any = {
+            colormap: vpNode.parameters.colormap || 'plasma',
+            minY: syncFocusedMin,
+            maxY: syncFocusedMax,
+            autoScale: vpNode.parameters.auto_scale !== false,
+            showGrid: vpNode.parameters.show_grid !== false,
+            useLogScale: vpNode.parameters.log_scale === true,
+            showCellEdges: vpNode.parameters.cell_edges === true,
+            interpolate: vpNode.parameters.interpolate === true,
+            showSTL: vpNode.parameters.show_stl !== false,
+            stlWireframe: !!vpNode.parameters.stl_wireframe,
+            stlSolids: vpNode.parameters.stl_solids !== false,
+            stlOpacity: vpNode.parameters.stl_opacity ?? 0.5,
+            slices: vpNode.parameters.slices || [],
+            focusedSliceIndex: vpNode.parameters.focusedSliceIndex ?? 0,
+            quantityRanges: vpNode.parameters.quantity_ranges || {}
+        };
+
+        if (!this.hasTelemetryGrid) {
+            configData.xmin = xmin;
+            configData.ymin = ymin;
+            configData.zmin = zmin;
+            configData.dx = cellSize;
+            configData.nx = nx;
+            configData.ny = ny;
+            configData.nz = nz;
+        }
+
         this.worker.postMessage({
             type: 'setConfig',
-            data: {
-                colormap: vpNode.parameters.colormap || 'plasma',
-                minY: syncFocusedMin,
-                maxY: syncFocusedMax,
-                autoScale: vpNode.parameters.auto_scale !== false,
-                showGrid: vpNode.parameters.show_grid !== false,
-                useLogScale: vpNode.parameters.log_scale === true,
-                showCellEdges: vpNode.parameters.cell_edges === true,
-                interpolate: vpNode.parameters.interpolate === true,
-                xmin: xmin,
-                ymin: ymin,
-                zmin: zmin,
-                dx: cellSize,
-                nx: nx,
-                ny: ny,
-                nz: nz,
-                slices: vpNode.parameters.slices || [],
-                focusedSliceIndex: vpNode.parameters.focusedSliceIndex ?? 0,
-                quantityRanges: vpNode.parameters.quantity_ranges || {}
-            }
+            data: configData
         });
     }
 
@@ -1451,6 +1736,7 @@ export class Telemetry3DViewport {
 
     public updateTelemetry(data: any) {
         if (data && data.type === 'TELEMETRY_3D') {
+            this.hasTelemetryGrid = true;
             this.worker.postMessage({
                 type: 'setConfig',
                 data: {
@@ -1480,10 +1766,150 @@ export class Telemetry3DViewport {
         if (this.floatOpenBtn && this.floatOpenBtn.parentNode !== this.container) {
             this.container.appendChild(this.floatOpenBtn);
         }
+        if (this.debugOverlay && this.debugOverlay.parentNode !== this.container) {
+            this.container.appendChild(this.debugOverlay);
+        }
+    }
+
+    private buildSTLControls(parent: HTMLElement) {
+        // Show STL Mesh checkbox
+        const showRow = document.createElement('label');
+        showRow.style.display = 'flex';
+        showRow.style.alignItems = 'center';
+        showRow.style.gap = '6px';
+        showRow.style.cursor = 'pointer';
+        
+        const showCb = document.createElement('input');
+        showCb.type = 'checkbox';
+        showCb.id = 'viewport-stl-show-cb';
+        showCb.onchange = () => {
+            const vpNode = this.getViewportNode();
+            if (vpNode) {
+                this.stateManager.updateNodeParametersInPlace(vpNode.id, { show_stl: showCb.checked });
+                this.worker.postMessage({ type: 'setConfig', data: { showSTL: showCb.checked } });
+            }
+        };
+        showRow.appendChild(showCb);
+        showRow.appendChild(document.createTextNode('Show STL Mesh'));
+        parent.appendChild(showRow);
+
+        // Wireframe toggle
+        const wfRow = document.createElement('label');
+        wfRow.style.display = 'flex';
+        wfRow.style.alignItems = 'center';
+        wfRow.style.gap = '6px';
+        wfRow.style.cursor = 'pointer';
+        
+        const wfCb = document.createElement('input');
+        wfCb.type = 'checkbox';
+        wfCb.id = 'viewport-stl-wf-cb';
+        wfCb.onchange = () => {
+            const vpNode = this.getViewportNode();
+            if (vpNode) {
+                this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_wireframe: wfCb.checked });
+                this.worker.postMessage({ type: 'setConfig', data: { stlWireframe: wfCb.checked } });
+            }
+        };
+        wfRow.appendChild(wfCb);
+        wfRow.appendChild(document.createTextNode('Show Wireframe'));
+        parent.appendChild(wfRow);
+
+        // Solids toggle
+        const solidsRow = document.createElement('label');
+        solidsRow.style.display = 'flex';
+        solidsRow.style.alignItems = 'center';
+        solidsRow.style.gap = '6px';
+        solidsRow.style.cursor = 'pointer';
+        
+        const solidsCb = document.createElement('input');
+        solidsCb.type = 'checkbox';
+        solidsCb.id = 'viewport-stl-solids-cb';
+        solidsCb.onchange = () => {
+            const vpNode = this.getViewportNode();
+            if (vpNode) {
+                this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_solids: solidsCb.checked });
+                this.worker.postMessage({ type: 'setConfig', data: { stlSolids: solidsCb.checked } });
+            }
+        };
+        solidsRow.appendChild(solidsCb);
+        solidsRow.appendChild(document.createTextNode('Show Solids'));
+        parent.appendChild(solidsRow);
+
+        // Opacity Slider
+        const opacWrap = document.createElement('div');
+        opacWrap.style.display = 'flex';
+        opacWrap.style.flexDirection = 'column';
+        opacWrap.style.gap = '2px';
+        
+        const opacLabel = document.createElement('span');
+        opacLabel.style.fontSize = '8px';
+        opacLabel.style.color = '#aaa';
+        
+        const opacSlider = document.createElement('input');
+        opacSlider.type = 'range';
+        opacSlider.id = 'viewport-stl-opacity-slider';
+        opacSlider.min = '0';
+        opacSlider.max = '1';
+        opacSlider.step = '0.05';
+        opacSlider.style.width = '100%';
+        opacSlider.oninput = () => {
+            opacLabel.innerHTML = `Opacity: ${Number(opacSlider.value).toFixed(2)}`;
+            const vpNode = this.getViewportNode();
+            if (vpNode) {
+                this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_opacity: Number(opacSlider.value) });
+                this.worker.postMessage({ type: 'setConfig', data: { stlOpacity: Number(opacSlider.value) } });
+            }
+        };
+        opacWrap.appendChild(opacLabel);
+        opacWrap.appendChild(opacSlider);
+        parent.appendChild(opacWrap);
+    }
+
+    private getSTLFilePath(): string | null {
+        const vpNode = this.getViewportNode();
+        if (!vpNode) return null;
+
+        // Find which model in the workspace contains this viewport node
+        const allModels = this.stateManager.getWorkspaceModels();
+        let targetModel: any = null;
+        for (const m of allModels) {
+            if (m.nodes.some(n => n.id === vpNode.id)) {
+                targetModel = m;
+                break;
+            }
+        }
+        if (!targetModel) return null;
+
+        const connToViewport = targetModel.connections.find((c: any) => c.toNode === vpNode.id);
+        if (connToViewport) {
+            const solverNode = targetModel.nodes.find((n: any) => n.id === connToViewport.fromNode);
+            if (solverNode && solverNode.type === 'CFDSolver3D') {
+                const connToSolver = targetModel.connections.find((c: any) => c.toNode === solverNode.id && c.toPort === 'stl');
+                if (connToSolver) {
+                    const stlNode = targetModel.nodes.find((n: any) => n.id === connToSolver.fromNode);
+                    if (stlNode && stlNode.type === 'STLGeometry') {
+                        return stlNode.parameters.stl_file || null;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    public setSTLGeometry(vertices: Float32Array | null): void {
+        this.worker.postMessage({
+            type: 'setSTLGeometry',
+            data: { vertices }
+        });
     }
 
     public destroy() {
         this.stateManager.offStateChange(this.stateListener);
+        const net = (window as any).networkManager;
+        if (net) {
+            if (this.netCallback) net.offMessage(this.netCallback);
+            if (this.openListener) net.offOpen(this.openListener);
+        }
         this.worker.terminate();
         this.canvas.remove();
         if (this.controlsOverlay) this.controlsOverlay.remove();
