@@ -515,12 +515,14 @@ __device__ RealType weno3_gpu(RealType vM1, RealType v0, RealType vP1) {
 
 // Why this works:
 // By projecting the Image Point from the deep solid target, but restricting the IDW sampling strictly to the verified fluid neighborhood of the querying cell, we generate a perfectly continuous, anti-aliased gradient for the WENO3 stencil. This eliminates all lumps and carbuncles. Furthermore, this topology mathematically guarantees that the ray cannot pierce a 1-cell thick wall or sample the wrong side of an urban gap, providing indestructible geometric stability.
+// Specifying the reconstruction direction (dir) decouples normal reflection components at sharp convex corners, eliminating artificial stagnation pressure artifacts on the GPU.
 template <typename RealType, bool IsMultiMaterial>
 __device__ GPUCellStateT<RealType> sample_gpu(
     const PrimitiveTile3D<RealType, IsMultiMaterial>* states,
     const GeometryTile3D* geom,
     int target_x, int target_y, int target_z,
-    int qx, int qy, int qz
+    int qx, int qy, int qz,
+    int dir
 ) {
     bool is_solid = false;
     if (target_x >= 0 && target_x < d_nx && target_y >= 0 && target_y < d_ny && target_z >= 0 && target_z < d_nz) {
@@ -542,24 +544,7 @@ __device__ GPUCellStateT<RealType> sample_gpu(
     float nx = 0.0f, ny = 0.0f, nz = 0.0f;
     get_solid_normal_gpu(geom, bx, by, bz, nx, ny, nz);
     
-    float n_len = sqrt(nx*nx + ny*ny + nz*nz);
-    if (n_len > 1e-3f) {
-        nx /= n_len;
-        ny /= n_len;
-        nz /= n_len;
-    } else {
-        float dx_dir = (float)(qx - target_x);
-        float dy_dir = (float)(qy - target_y);
-        float dz_dir = (float)(qz - target_z);
-        float len_dir = sqrt(dx_dir*dx_dir + dy_dir*dy_dir + dz_dir*dz_dir);
-        if (len_dir > 1e-3f) {
-            nx = dx_dir / len_dir;
-            ny = dy_dir / len_dir;
-            nz = dz_dir / len_dir;
-        }
-    }
-    
-    // Auto-Orient the Normal (Thin-Wall Fix #1):
+    // Auto-Orient the True Normal first:
     float dx_f = (float)(qx - bx);
     float dy_f = (float)(qy - by);
     float dz_f = (float)(qz - bz);
@@ -570,10 +555,82 @@ __device__ GPUCellStateT<RealType> sample_gpu(
         nz = -nz;
     }
     
-    // Project the Image Point:
-    float p_img_x = (float)target_x + nx * 1.5f;
-    float p_img_y = (float)target_y + ny * 1.5f;
-    float p_img_z = (float)target_z + nz * 1.5f;
+    // Keep true oriented normal for image point projection and visibility check:
+    float nx_true = nx;
+    float ny_true = ny;
+    float nz_true = nz;
+    float n_len_true = sqrt(nx_true*nx_true + ny_true*ny_true + nz_true*nz_true);
+    if (n_len_true > 1e-3f) {
+        nx_true /= n_len_true;
+        ny_true /= n_len_true;
+        nz_true /= n_len_true;
+    } else {
+        float dx_dir = (float)(qx - target_x);
+        float dy_dir = (float)(qy - target_y);
+        float dz_dir = (float)(qz - target_z);
+        float len_dir = sqrt(dx_dir*dx_dir + dy_dir*dy_dir + dz_dir*dz_dir);
+        if (len_dir > 1e-3f) {
+            nx_true = dx_dir / len_dir;
+            ny_true = dy_dir / len_dir;
+            nz_true = dz_dir / len_dir;
+        }
+    }
+    
+    // Decouple normal for velocity reflection:
+    float nx_dec = nx_true;
+    float ny_dec = ny_true;
+    float nz_dec = nz_true;
+    if (dir == 0) {
+        ny_dec = 0.0f;
+        nz_dec = 0.0f;
+    } else if (dir == 1) {
+        nx_dec = 0.0f;
+        nz_dec = 0.0f;
+    } else if (dir == 2) {
+        nx_dec = 0.0f;
+        ny_dec = 0.0f;
+    }
+    float n_len_dec = sqrt(nx_dec*nx_dec + ny_dec*ny_dec + nz_dec*nz_dec);
+    if (n_len_dec > 1e-3f) {
+        nx_dec /= n_len_dec;
+        ny_dec /= n_len_dec;
+        nz_dec /= n_len_dec;
+    } else {
+        nx_dec = nx_true;
+        ny_dec = ny_true;
+        nz_dec = nz_true;
+    }
+
+    // Topological Corner Detection:
+    // Count solid cells in 3x3x3 neighborhood of target solid cell
+    int solid_count = 0;
+    for (int sz = -1; sz <= 1; ++sz) {
+        int nz_val = target_z + sz;
+        for (int sy = -1; sy <= 1; ++sy) {
+            int ny_val = target_y + sy;
+            for (int sx = -1; sx <= 1; ++sx) {
+                int nx_val = target_x + sx;
+                if (nx_val >= 0 && nx_val < d_nx && ny_val >= 0 && ny_val < d_ny && nz_val >= 0 && nz_val < d_nz) {
+                    if (is_solid_cell_gpu(geom, nx_val, ny_val, nz_val)) {
+                        solid_count++;
+                    }
+                } else {
+                    solid_count++; // Treat out of bounds as solid
+                }
+            }
+        }
+    }
+    bool is_convex_corner = (solid_count <= 14);
+
+    // Adaptive normal selection:
+    float nx_reflect = is_convex_corner ? nx_dec : nx_true;
+    float ny_reflect = is_convex_corner ? ny_dec : ny_true;
+    float nz_reflect = is_convex_corner ? nz_dec : nz_true;
+    
+    // Project along the adaptive normal:
+    float p_img_x = (float)target_x + nx_reflect * 1.5f;
+    float p_img_y = (float)target_y + ny_reflect * 1.5f;
+    float p_img_z = (float)target_z + nz_reflect * 1.5f;
     
     // Query-Centered IDW Gathering (Thin-Wall Fix #2 & Gap Fix)
     float sum_rho = 0.0f;
@@ -599,6 +656,13 @@ __device__ GPUCellStateT<RealType> sample_gpu(
                 
                 if (is_solid_cell_gpu(geom, nx_val, ny_val, nz_val)) continue;
                 
+                // Visibility Half-Space Clipping using the adaptive normal:
+                float dx_plane = (float)nx_val - (float)target_x;
+                float dy_plane = (float)ny_val - (float)target_y;
+                float dz_plane = (float)nz_val - (float)target_z;
+                float dot_plane = dx_plane * nx_reflect + dy_plane * ny_reflect + dz_plane * nz_reflect;
+                if (dot_plane <= 0.0f) continue;
+
                 float dx_n = (float)nx_val - p_img_x;
                 float dy_n = (float)ny_val - p_img_y;
                 float dz_n = (float)nz_val - p_img_z;
@@ -643,10 +707,10 @@ __device__ GPUCellStateT<RealType> sample_gpu(
         }
     }
     
-    float u_dot_n = (float)s_ghost.ux * nx + (float)s_ghost.uy * ny + (float)s_ghost.uz * nz;
-    s_ghost.ux = (RealType)((float)s_ghost.ux - 2.0f * u_dot_n * nx);
-    s_ghost.uy = (RealType)((float)s_ghost.uy - 2.0f * u_dot_n * ny);
-    s_ghost.uz = (RealType)((float)s_ghost.uz - 2.0f * u_dot_n * nz);
+    float u_dot_n = (float)s_ghost.ux * nx_reflect + (float)s_ghost.uy * ny_reflect + (float)s_ghost.uz * nz_reflect;
+    s_ghost.ux = (RealType)((float)s_ghost.ux - 2.0f * u_dot_n * nx_reflect);
+    s_ghost.uy = (RealType)((float)s_ghost.uy - 2.0f * u_dot_n * ny_reflect);
+    s_ghost.uz = (RealType)((float)s_ghost.uz - 2.0f * u_dot_n * nz_reflect);
     s_ghost.E = 0.0;
     
     return s_ghost;
@@ -667,11 +731,11 @@ __device__ void reconstruct_gpu(
     int dy = (dir == 1 ? 1 : 0);
     int dz = (dir == 2 ? 1 : 0);
 
-    GPUCellStateT<RealType> sM1 = sample_gpu<RealType, IsMultiMaterial>(states, geom, gx - dx, gy - dy, gz - dz, qx, qy, qz);
-    GPUCellStateT<RealType> sP0 = sample_gpu<RealType, IsMultiMaterial>(states, geom, gx, gy, gz, qx, qy, qz);
+    GPUCellStateT<RealType> sM1 = sample_gpu<RealType, IsMultiMaterial>(states, geom, gx - dx, gy - dy, gz - dz, qx, qy, qz, dir);
+    GPUCellStateT<RealType> sP0 = sample_gpu<RealType, IsMultiMaterial>(states, geom, gx, gy, gz, qx, qy, qz, dir);
 
-    GPUCellStateT<RealType> sM2 = is_solid_cell_gpu(geom, gx - 2*dx, gy - 2*dy, gz - 2*dz) ? sM1 : sample_gpu<RealType, IsMultiMaterial>(states, geom, gx - 2*dx, gy - 2*dy, gz - 2*dz, qx, qy, qz);
-    GPUCellStateT<RealType> sP1 = is_solid_cell_gpu(geom, gx + dx, gy + dy, gz + dz) ? sP0 : sample_gpu<RealType, IsMultiMaterial>(states, geom, gx + dx, gy + dy, gz + dz, qx, qy, qz);
+    GPUCellStateT<RealType> sM2 = sample_gpu<RealType, IsMultiMaterial>(states, geom, gx - 2*dx, gy - 2*dy, gz - 2*dz, qx, qy, qz, dir);
+    GPUCellStateT<RealType> sP1 = sample_gpu<RealType, IsMultiMaterial>(states, geom, gx + dx, gy + dy, gz + dz, qx, qy, qz, dir);
 
     auto reconstruct_channel = [&](RealType vM2, RealType vM1, RealType vP0, RealType vP1, RealType& vL, RealType& vR) {
         if (d_spatialOrder == 1 || force_first_order_L || force_first_order_R) {

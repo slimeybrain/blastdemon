@@ -246,9 +246,11 @@ public:
 
     // Why this works:
     // By projecting the Image Point from the deep solid target, but restricting the IDW sampling strictly to the verified fluid neighborhood of the querying cell, we generate a perfectly continuous, anti-aliased gradient for the WENO3 stencil. This eliminates all lumps and carbuncles. Furthermore, this topology mathematically guarantees that the ray cannot pierce a 1-cell thick wall or sample the wrong side of an urban gap, providing indestructible geometric stability.
+    // Specifying the reconstruction direction (dir) decouples normal reflection components at sharp convex corners, eliminating artificial stagnation artifacts.
     inline CellState3DT<RealType, IsMultiMaterial> sampleStateInternalIDW(
         int target_x, int target_y, int target_z,
-        int qx, int qy, int qz
+        int qx, int qy, int qz,
+        int dir
     ) const {
         bool is_target_solid = false;
         if (target_x >= 0 && target_x < nx && target_y >= 0 && target_y < ny && target_z >= 0 && target_z < nz) {
@@ -277,23 +279,7 @@ public:
             nz_b = cell.nz;
         }
 
-        float n_len = std::sqrt(nx_b*nx_b + ny_b*ny_b + nz_b*nz_b);
-        if (n_len > 1e-3f) {
-            nx_b /= n_len;
-            ny_b /= n_len;
-            nz_b /= n_len;
-        } else {
-            float dx_dir = (float)(qx - target_x);
-            float dy_dir = (float)(qy - target_y);
-            float dz_dir = (float)(qz - target_z);
-            float len_dir = std::sqrt(dx_dir*dx_dir + dy_dir*dy_dir + dz_dir*dz_dir);
-            if (len_dir > 1e-3f) {
-                nx_b = dx_dir / len_dir;
-                ny_b = dy_dir / len_dir;
-                nz_b = dz_dir / len_dir;
-            }
-        }
-
+        // Auto-Orient the True Normal first:
         float dx_f = (float)(qx - bx);
         float dy_f = (float)(qy - by);
         float dz_f = (float)(qz - bz);
@@ -304,9 +290,86 @@ public:
             nz_b = -nz_b;
         }
 
-        float p_img_x = (float)target_x + nx_b * 1.5f;
-        float p_img_y = (float)target_y + ny_b * 1.5f;
-        float p_img_z = (float)target_z + nz_b * 1.5f;
+        // Keep the true oriented normal for flat/diagonal walls:
+        float nx_true = nx_b;
+        float ny_true = ny_b;
+        float nz_true = nz_b;
+        float n_len_true = std::sqrt(nx_true*nx_true + ny_true*ny_true + nz_true*nz_true);
+        if (n_len_true > 1e-3f) {
+            nx_true /= n_len_true;
+            ny_true /= n_len_true;
+            nz_true /= n_len_true;
+        } else {
+            float dx_dir = (float)(qx - target_x);
+            float dy_dir = (float)(qy - target_y);
+            float dz_dir = (float)(qz - target_z);
+            float len_dir = std::sqrt(dx_dir*dx_dir + dy_dir*dy_dir + dz_dir*dz_dir);
+            if (len_dir > 1e-3f) {
+                nx_true = dx_dir / len_dir;
+                ny_true = dy_dir / len_dir;
+                nz_true = dz_dir / len_dir;
+            }
+        }
+
+        // Decouple normal for velocity reflection and corner clipping:
+        float nx_dec = nx_true;
+        float ny_dec = ny_true;
+        float nz_dec = nz_true;
+        if (dir == 0) {
+            ny_dec = 0.0f;
+            nz_dec = 0.0f;
+        } else if (dir == 1) {
+            nx_dec = 0.0f;
+            nz_dec = 0.0f;
+        } else if (dir == 2) {
+            nx_dec = 0.0f;
+            ny_dec = 0.0f;
+        }
+        float n_len_dec = std::sqrt(nx_dec*nx_dec + ny_dec*ny_dec + nz_dec*nz_dec);
+        if (n_len_dec > 1e-3f) {
+            nx_dec /= n_len_dec;
+            ny_dec /= n_len_dec;
+            nz_dec /= n_len_dec;
+        } else {
+            nx_dec = nx_true;
+            ny_dec = ny_true;
+            nz_dec = nz_true;
+        }
+
+        // Topological Corner Detection:
+        // Count solid cells in 3x3x3 neighborhood of target solid cell
+        int solid_count = 0;
+        for (int sz = -1; sz <= 1; ++sz) {
+            int nz_val = target_z + sz;
+            for (int sy = -1; sy <= 1; ++sy) {
+                int ny_val = target_y + sy;
+                for (int sx = -1; sx <= 1; ++sx) {
+                    int nx_val = target_x + sx;
+                    if (nx_val >= 0 && nx_val < nx && ny_val >= 0 && ny_val < ny && nz_val >= 0 && nz_val < nz) {
+                        int t_idx = (nx_val >> 3) + (ny_val >> 3) * n_tiles_x + (nz_val >> 3) * n_tiles_x * n_tiles_y;
+                        int c_idx = (nx_val & 7) + (ny_val & 7) * 8 + (nz_val & 7) * 64;
+                        if (geom_pool[t_idx].cells[c_idx].is_boundary) {
+                            solid_count++;
+                        }
+                    } else {
+                        solid_count++; // boundary conditions treat out of bounds as solid
+                    }
+                }
+            }
+        }
+        bool is_convex_corner = (solid_count <= 14);
+
+        // Adaptive normal selection:
+        // Use true normal for flat/diagonal walls (smooth anti-aliased slip)
+        // Use decoupled normal for convex corners/edges (prevents multi-dimensional stagnation pressure bleeding)
+        float nx_reflect = is_convex_corner ? nx_dec : nx_true;
+        float ny_reflect = is_convex_corner ? ny_dec : ny_true;
+        float nz_reflect = is_convex_corner ? nz_dec : nz_true;
+
+        // Project along the adaptive normal
+        float p_img_x = (float)target_x + nx_reflect * 1.5f;
+        float p_img_y = (float)target_y + ny_reflect * 1.5f;
+        float p_img_z = (float)target_z + nz_reflect * 1.5f;
 
         float sum_rho = 0.0f, sum_ux = 0.0f, sum_uy = 0.0f, sum_uz = 0.0f, sum_p = 0.0f;
         float sum_alpha1 = 0.0f, sum_alpha2 = 0.0f, sum_arho1 = 0.0f, sum_arho2 = 0.0f;
@@ -325,6 +388,13 @@ public:
                     int t_neigh = (nx_val >> 3) + (ny_val >> 3) * n_tiles_x + (nz_val >> 3) * n_tiles_x * n_tiles_y;
                     int c_neigh = (nx_val & 7) + (ny_val & 7) * 8 + (nz_val & 7) * 64;
                     if (geom_pool[t_neigh].cells[c_neigh].is_boundary) continue;
+
+                    // Visibility Half-Space Clipping using the adaptive normal:
+                    float dx_plane = (float)nx_val - (float)target_x;
+                    float dy_plane = (float)ny_val - (float)target_y;
+                    float dz_plane = (float)nz_val - (float)target_z;
+                    float dot_plane = dx_plane * nx_reflect + dy_plane * ny_reflect + dz_plane * nz_reflect;
+                    if (dot_plane <= 0.0f) continue;
 
                     float dx_n = (float)nx_val - p_img_x;
                     float dy_n = (float)ny_val - p_img_y;
@@ -355,25 +425,22 @@ public:
             s_ghost = sampleStateInternal(qx, qy, qz);
         } else {
             float inv_W = 1.0f / W_total;
-            s_ghost.rho = (RealType)(sum_rho * inv_W);
-            s_ghost.ux = (RealType)(sum_ux * inv_W);
-            s_ghost.uy = (RealType)(sum_uy * inv_W);
-            s_ghost.uz = (RealType)(sum_uz * inv_W);
-            s_ghost.p = (RealType)(sum_p * inv_W);
-            if constexpr (IsMultiMaterial) {
-                s_ghost.alpha1 = (RealType)(sum_alpha1 * inv_W);
-                s_ghost.alpha2 = (RealType)(sum_alpha2 * inv_W);
-                s_ghost.arho1 = (RealType)(sum_arho1 * inv_W);
-                s_ghost.arho2 = (RealType)(sum_arho2 * inv_W);
-            } else {
-                s_ghost.alpha1 = 0.0; s_ghost.alpha2 = 0.0; s_ghost.arho1 = 0.0; s_ghost.arho2 = 0.0;
-            }
+            s_ghost.rho = sum_rho * inv_W;
+            s_ghost.ux = sum_ux * inv_W;
+            s_ghost.uy = sum_uy * inv_W;
+            s_ghost.uz = sum_uz * inv_W;
+            s_ghost.p = sum_p * inv_W;
+            s_ghost.alpha1 = sum_alpha1 * inv_W;
+            s_ghost.alpha2 = sum_alpha2 * inv_W;
+            s_ghost.arho1 = sum_arho1 * inv_W;
+            s_ghost.arho2 = sum_arho2 * inv_W;
         }
 
-        float u_dot_n = (float)s_ghost.ux * nx_b + (float)s_ghost.uy * ny_b + (float)s_ghost.uz * nz_b;
-        s_ghost.ux = (RealType)((float)s_ghost.ux - 2.0f * u_dot_n * nx_b);
-        s_ghost.uy = (RealType)((float)s_ghost.uy - 2.0f * u_dot_n * ny_b);
-        s_ghost.uz = (RealType)((float)s_ghost.uz - 2.0f * u_dot_n * nz_b);
+        // Reflect velocity across the adaptive normal:
+        float u_dot_n = (float)s_ghost.ux * nx_reflect + (float)s_ghost.uy * ny_reflect + (float)s_ghost.uz * nz_reflect;
+        s_ghost.ux = (RealType)((float)s_ghost.ux - 2.0f * u_dot_n * nx_reflect);
+        s_ghost.uy = (RealType)((float)s_ghost.uy - 2.0f * u_dot_n * ny_reflect);
+        s_ghost.uz = (RealType)((float)s_ghost.uz - 2.0f * u_dot_n * nz_reflect);
 
         RealType ke = (RealType)0.5 * s_ghost.rho * (s_ghost.ux*s_ghost.ux + s_ghost.uy*s_ghost.uy + s_ghost.uz*s_ghost.uz);
         if constexpr (IsMultiMaterial) {

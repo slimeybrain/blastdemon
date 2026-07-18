@@ -523,10 +523,10 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::computeFluxes(double dt, std::v
                                 RealType fxL_alpha1 = 0.0, fxL_alpha2 = 0.0, fxL_arho1 = 0.0, fxL_arho2 = 0.0, fxL_v_face = 0.0;
 
                                 {
-                                    auto sL2 = is_solid(gx - 2, gy, gz) ? sampleStateInternalIDW(gx - 1, gy, gz, gx, gy, gz) : sampleStateInternalIDW(gx - 2, gy, gz, gx, gy, gz);
-                                    auto sL1 = sampleStateInternalIDW(gx - 1, gy, gz, gx, gy, gz);
+                                    auto sL2 = sampleStateInternalIDW(gx - 2, gy, gz, gx, gy, gz, 0);
+                                    auto sL1 = sampleStateInternalIDW(gx - 1, gy, gz, gx, gy, gz, 0);
                                     auto sR1 = sC;
-                                    auto sR2 = is_solid(gx + 1, gy, gz) ? sR1 : sampleStateInternalIDW(gx + 1, gy, gz, gx, gy, gz);
+                                    auto sR2 = sampleStateInternalIDW(gx + 1, gy, gz, gx, gy, gz, 0);
                                     auto fxL = get_f(reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted),
                                                      reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted), 0);
                                     fxL_rho = fxL.rho; fxL_rhoux = fxL.rhoux; fxL_rhouy = fxL.rhouy; fxL_rhouz = fxL.rhouz; fxL_E = fxL.E;
@@ -540,10 +540,10 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::computeFluxes(double dt, std::v
                                 RealType fxR_alpha1 = 0.0, fxR_alpha2 = 0.0, fxR_arho1 = 0.0, fxR_arho2 = 0.0, fxR_v_face = 0.0;
 
                                 {
-                                    auto sL2 = is_solid(gx - 1, gy, gz) ? sC : sampleStateInternalIDW(gx - 1, gy, gz, gx, gy, gz);
+                                    auto sL2 = sampleStateInternalIDW(gx - 1, gy, gz, gx, gy, gz, 0);
                                     auto sL1 = sC;
-                                    auto sR1 = sampleStateInternalIDW(gx + 1, gy, gz, gx, gy, gz);
-                                    auto sR2 = is_solid(gx + 2, gy, gz) ? sR1 : sampleStateInternalIDW(gx + 2, gy, gz, gx, gy, gz);
+                                    auto sR1 = sampleStateInternalIDW(gx + 1, gy, gz, gx, gy, gz, 0);
+                                    auto sR2 = sampleStateInternalIDW(gx + 2, gy, gz, gx, gy, gz, 0);
                                     auto fxR = get_f(reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted),
                                                      reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted), 0);
                                     fxR_rho = fxR.rho; fxR_rhoux = fxR.rhoux; fxR_rhouy = fxR.rhouy; fxR_rhouz = fxR.rhouz; fxR_E = fxR.E;
@@ -558,10 +558,10 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::computeFluxes(double dt, std::v
                                 RealType fyB_alpha1 = 0.0, fyB_alpha2 = 0.0, fyB_arho1 = 0.0, fyB_arho2 = 0.0, fyB_v_face = 0.0;
 
                                 {
-                                    auto sL2 = is_solid(gx, gy - 2, gz) ? sampleStateInternalIDW(gx, gy - 1, gz, gx, gy, gz) : sampleStateInternalIDW(gx, gy - 2, gz, gx, gy, gz);
-                                    auto sL1 = sampleStateInternalIDW(gx, gy - 1, gz, gx, gy, gz);
+                                    auto sL2 = sampleStateInternalIDW(gx, gy - 2, gz, gx, gy, gz, 1);
+                                    auto sL1 = sampleStateInternalIDW(gx, gy - 1, gz, gx, gy, gz, 1);
                                     auto sR1 = sC;
-                                    auto sR2 = is_solid(gx, gy + 1, gz) ? sR1 : sampleStateInternalIDW(gx, gy + 1, gz, gx, gy, gz);
+                                    auto sR2 = sampleStateInternalIDW(gx, gy + 1, gz, gx, gy, gz, 1);
                                     auto fyB = get_f(reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted),
                                                      reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted), 1);
                                     fyB_rho = fyB.rho; fyB_rhoux = fyB.rhoux; fyB_rhouy = fyB.rhouy; fyB_rhouz = fyB.rhouz; fyB_E = fyB.E;
@@ -575,10 +575,10 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::computeFluxes(double dt, std::v
                                 RealType fyT_alpha1 = 0.0, fyT_alpha2 = 0.0, fyT_arho1 = 0.0, fyT_arho2 = 0.0, fyT_v_face = 0.0;
 
                                 {
-                                    auto sL2 = is_solid(gx, gy - 1, gz) ? sC : sampleStateInternalIDW(gx, gy - 1, gz, gx, gy, gz);
+                                    auto sL2 = sampleStateInternalIDW(gx, gy - 1, gz, gx, gy, gz, 1);
                                     auto sL1 = sC;
-                                    auto sR1 = sampleStateInternalIDW(gx, gy + 1, gz, gx, gy, gz);
-                                    auto sR2 = is_solid(gx, gy + 2, gz) ? sR1 : sampleStateInternalIDW(gx, gy + 2, gz, gx, gy, gz);
+                                    auto sR1 = sampleStateInternalIDW(gx, gy + 1, gz, gx, gy, gz, 1);
+                                    auto sR2 = sampleStateInternalIDW(gx, gy + 2, gz, gx, gy, gz, 1);
                                     auto fyT = get_f(reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted),
                                                      reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted), 1);
                                     fyT_rho = fyT.rho; fyT_rhoux = fyT.rhoux; fyT_rhouy = fyT.rhouy; fyT_rhouz = fyT.rhouz; fyT_E = fyT.E;
@@ -593,10 +593,10 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::computeFluxes(double dt, std::v
                                 RealType fzD_alpha1 = 0.0, fzD_alpha2 = 0.0, fzD_arho1 = 0.0, fzD_arho2 = 0.0, fzD_v_face = 0.0;
 
                                 {
-                                    auto sL2 = is_solid(gx, gy, gz - 2) ? sampleStateInternalIDW(gx, gy, gz - 1, gx, gy, gz) : sampleStateInternalIDW(gx, gy, gz - 2, gx, gy, gz);
-                                    auto sL1 = sampleStateInternalIDW(gx, gy, gz - 1, gx, gy, gz);
+                                    auto sL2 = sampleStateInternalIDW(gx, gy, gz - 2, gx, gy, gz, 2);
+                                    auto sL1 = sampleStateInternalIDW(gx, gy, gz - 1, gx, gy, gz, 2);
                                     auto sR1 = sC;
-                                    auto sR2 = is_solid(gx, gy, gz + 1) ? sR1 : sampleStateInternalIDW(gx, gy, gz + 1, gx, gy, gz);
+                                    auto sR2 = sampleStateInternalIDW(gx, gy, gz + 1, gx, gy, gz, 2);
                                     auto fzD = get_f(reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted),
                                                      reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted), 2);
                                     fzD_rho = fzD.rho; fzD_rhoux = fzD.rhoux; fzD_rhouy = fzD.rhouy; fzD_rhouz = fzD.rhouz; fzD_E = fzD.E;
@@ -610,10 +610,10 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::computeFluxes(double dt, std::v
                                 RealType fzU_alpha1 = 0.0, fzU_alpha2 = 0.0, fzU_arho1 = 0.0, fzU_arho2 = 0.0, fzU_v_face = 0.0;
 
                                 {
-                                    auto sL2 = is_solid(gx, gy, gz - 1) ? sC : sampleStateInternalIDW(gx, gy, gz - 1, gx, gy, gz);
+                                    auto sL2 = sampleStateInternalIDW(gx, gy, gz - 1, gx, gy, gz, 2);
                                     auto sL1 = sC;
-                                    auto sR1 = sampleStateInternalIDW(gx, gy, gz + 1, gx, gy, gz);
-                                    auto sR2 = is_solid(gx, gy, gz + 2) ? sR1 : sampleStateInternalIDW(gx, gy, gz + 2, gx, gy, gz);
+                                    auto sR1 = sampleStateInternalIDW(gx, gy, gz + 1, gx, gy, gz, 2);
+                                    auto sR2 = sampleStateInternalIDW(gx, gy, gz + 2, gx, gy, gz, 2);
                                     auto fzU = get_f(reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted),
                                                      reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted), 2);
                                     fzU_rho = fzU.rho; fzU_rhoux = fzU.rhoux; fzU_rhouy = fzU.rhouy; fzU_rhouz = fzU.rhouz; fzU_E = fzU.E;
