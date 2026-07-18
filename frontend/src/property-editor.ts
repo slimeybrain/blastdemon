@@ -19,6 +19,7 @@ export class PropertyEditor {
         parent.appendChild(this.container);
 
         this.stateManager = stateManager;
+        this.currentNodeId = this.stateManager.getSelectedNodeId();
         this.listener = () => {
             const state = this.stateManager.getCurrentState();
             const node = state?.nodes.find(n => n.id === this.currentNodeId);
@@ -1048,11 +1049,16 @@ export class PropertyEditor {
             axisSelect.style.fontSize = 'var(--font-xs)';
             axisSelect.style.padding = '2px';
             
-            ['xy', 'xz', 'yz'].forEach(opt => {
+            const axisOptions = [
+                { value: 'yz', label: 'X-Normal' },
+                { value: 'xz', label: 'Y-Normal' },
+                { value: 'xy', label: 'Z-Normal' }
+            ];
+            axisOptions.forEach(opt => {
                 const option = document.createElement('option');
-                option.value = opt;
-                option.text = opt.toUpperCase();
-                if (opt === slice.axis) option.selected = true;
+                option.value = opt.value;
+                option.text = opt.label;
+                if (opt.value === slice.axis) option.selected = true;
                 axisSelect.appendChild(option);
             });
             axisSelect.value = slice.axis;

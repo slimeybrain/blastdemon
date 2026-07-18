@@ -678,8 +678,8 @@ function handleFrame(buffer: ArrayBuffer) {
         const floatData = new Float32Array(buffer, dataStart, w * h);
 
         const config = slicesConfig[i] || {};
-        const useAxis = config.axis !== undefined ? (config.axis === 'xy' ? 0 : (config.axis === 'xz' ? 1 : 2)) : axis;
-        const useOffset = config.offset !== undefined ? config.offset : zOff;
+        const useAxis = axis;
+        const useOffset = zOff;
 
         const qty = config.quantities?.[0] || 'pressure';
         const sliceAutoScale = config.auto_scale !== false;
@@ -1141,6 +1141,14 @@ function render() {
                 slicesConfig = data.slices;
                 slicesConfig.forEach((config: any, i: number) => {
                     if (activeSlices[i]) {
+                        const targetAxis = config.axis === 'xy' ? 0 : config.axis === 'xz' ? 1 : 2;
+                        if (targetAxis === activeSlices[i].axis) {
+                            activeSlices[i].offset = config.offset;
+                            if (gl) {
+                                gl.bindBuffer(gl.ARRAY_BUFFER, activeSlices[i].buffer);
+                                gl.bufferData(gl.ARRAY_BUFFER, getSliceGeometry(activeSlices[i].axis, activeSlices[i].offset, activeSlices[i].w, activeSlices[i].h), gl.STATIC_DRAW);
+                            }
+                        }
                         activeSlices[i].opacity = config.opacity !== undefined ? config.opacity : 1.0;
                         activeSlices[i].colormap = config.colormap || 'plasma';
                         activeSlices[i].useLogScale = config.log_scale === true;
@@ -1149,6 +1157,10 @@ function render() {
                         activeSlices[i].maxY = config.max_val;
                     }
                     if (activeSlices2D[i]) {
+                        const targetAxis = config.axis === 'xy' ? 0 : config.axis === 'xz' ? 1 : 2;
+                        if (targetAxis === activeSlices2D[i].axis) {
+                            activeSlices2D[i].offset = config.offset;
+                        }
                         activeSlices2D[i].colormap = config.colormap || 'plasma';
                         activeSlices2D[i].useLogScale = config.log_scale === true;
                         activeSlices2D[i].minY = config.min_val;

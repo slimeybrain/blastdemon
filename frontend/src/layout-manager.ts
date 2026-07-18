@@ -21,6 +21,9 @@ export class LayoutManager {
         this.stateManager = stateManager;
 
         this.stateManager.onStateChange((state) => this.render(state));
+        this.stateManager.onSelectionChange((nodeId) => {
+            this.setSelectedNodeOnAllPropertiesPanels(nodeId);
+        });
     }
 
     public broadcastResourceData(data: any): void {
@@ -855,7 +858,7 @@ export class LayoutManager {
     private renderTelemetry3D(node: PanelNode, container: HTMLElement): void {
         let comp = this.components.get(node.id);
         if (!comp) {
-            const viewport = new Telemetry3DViewport(container, node.id, this.stateManager);
+            const viewport = new Telemetry3DViewport(container, node.id, this.stateManager, '-telemetry');
             comp = { type: 'TELEMETRY_3D', instance: viewport, container };
             this.components.set(node.id, comp);
         } else {
@@ -917,7 +920,6 @@ export class LayoutManager {
             const renderer = new GraphRenderer(container, this.stateManager, node.id);
             renderer.onNodeSelected = (nodeId) => {
                 this.stateManager.setSelectedNode(nodeId);
-                this.setSelectedNodeOnAllPropertiesPanels(nodeId);
             };
             comp = { type: 'NODE_GRAPH', instance: renderer };
             this.components.set(node.id, comp);

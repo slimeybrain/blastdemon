@@ -1,8 +1,8 @@
 import { StateManager } from './state-manager.js';
-import { createViewportRenderer } from './ViewportRenderer.js';
 import { Node, NodeType } from './types.js';
 import { PropertyEditor } from './property-editor.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
+import { Telemetry3DViewport } from './telemetry-3d-viewport.js';
 
 export class NodeViewer {
     private container: HTMLElement;
@@ -14,6 +14,7 @@ export class NodeViewer {
     private propertyEditor: PropertyEditor | null = null;
     private chartWorker: Worker | null = null;
     private chartCanvas: HTMLCanvasElement | null = null;
+    private viewport3D: Telemetry3DViewport | null = null;
 
     private lastType: NodeType | null = null;
     private lastId: string | null = null;
@@ -84,6 +85,10 @@ export class NodeViewer {
 
     public destroy(): void {
         this.stopRenderLoop();
+        if (this.viewport3D) {
+            this.viewport3D.destroy();
+            this.viewport3D = null;
+        }
         this.stateManager.offStateChange(this.stateListener);
         this.stateManager.offTelemetryUpdate(this.telemetryListener);
         if (this.chartWorker) this.chartWorker.terminate();
@@ -93,6 +98,10 @@ export class NodeViewer {
     public setNode(nodeId: string | null): void {
         if (this.currentNodeId === nodeId) return;
         this.stopRenderLoop();
+        if (this.viewport3D) {
+            this.viewport3D.destroy();
+            this.viewport3D = null;
+        }
         this.currentNodeId = nodeId;
         this.render();
     }
@@ -183,17 +192,7 @@ export class NodeViewer {
                     });
                 }
             } else if (node.type === 'Telemetry3DViewport') {
-                const colormapVal = node.parameters?.colormap || 'plasma';
-                const autoScaleVal = node.parameters?.autoScale !== false;
-                const slices = node.parameters?.slices || [];
-                this.chartWorker?.postMessage({
-                    type: 'setConfig',
-                    data: {
-                        colormap: colormapVal,
-                        autoScale: autoScaleVal,
-                        slices: slices
-                    }
-                });
+                // Slices and visual parameters are synchronized automatically via Telemetry3DViewport's state listener
             }
             return;
         }
@@ -291,295 +290,38 @@ export class NodeViewer {
         this.stopRenderLoop();
         if (this.chartWorker) {
             this.chartWorker.terminate();
+            this.chartWorker = null;
+        }
+        if (this.viewport3D) {
+            this.viewport3D.destroy();
+            this.viewport3D = null;
         }
 
-        const container = document.createElement('div');
-        container.style.display = 'flex';
-        container.style.flexDirection = 'column';
-        container.style.height = '100%';
-        container.style.width = '100%';
+        const wrapper = document.createElement('div');
+        wrapper.style.width = '100%';
+        wrapper.style.height = '100%';
+        wrapper.style.position = 'relative';
+        this.container.appendChild(wrapper);
 
-        const controlsRow = document.createElement('div');
-        controlsRow.className = 'node-viewer-header';
-        controlsRow.style.padding = '10px';
-        controlsRow.style.borderBottom = '1px solid var(--border-color)';
-        controlsRow.style.display = 'flex';
-        controlsRow.style.gap = '10px';
-        controlsRow.style.alignItems = 'center';
+        this.viewport3D = new Telemetry3DViewport(wrapper, node.id, this.stateManager, '-viewer');
+    }
 
-        const title = document.createElement('h3');
-        title.textContent = '3D Viewport: ' + node.id;
-        title.style.margin = '0';
-        title.style.marginRight = 'auto';
-        controlsRow.appendChild(title);
-
-        const mapSelect = document.createElement('select');
-        mapSelect.className = 'dark-input';
-        ['plasma', 'viridis'].forEach(m => {
-            const opt = document.createElement('option');
-            opt.value = m;
-            opt.textContent = m.toUpperCase();
-            if (node.parameters?.colormap === m) opt.selected = true;
-            mapSelect.appendChild(opt);
-        });
-
-        const scaleLabel = document.createElement('label');
-        scaleLabel.style.display = 'flex';
-        scaleLabel.style.alignItems = 'center';
-        scaleLabel.style.gap = '5px';
-        scaleLabel.style.fontSize = '12px';
-        scaleLabel.style.color = 'var(--text-dim)';
-        const autoScaleInput = document.createElement('input');
-        autoScaleInput.type = 'checkbox';
-        autoScaleInput.checked = node.parameters?.autoScale !== false;
-        scaleLabel.appendChild(autoScaleInput);
-        scaleLabel.appendChild(document.createTextNode('Auto Scale'));
-
-        controlsRow.appendChild(mapSelect);
-        controlsRow.appendChild(scaleLabel);
-
-        const createViewBtn = (label: string, onClick: () => void) => {
-            const btn = document.createElement('button');
-            btn.textContent = label;
-            btn.style.cursor = 'pointer';
-            btn.style.fontSize = '11px';
-            btn.style.padding = '2px 6px';
-            btn.style.background = '#2c2c30';
-            btn.style.color = '#fff';
-            btn.style.border = '1px solid rgba(255,255,255,0.1)';
-            btn.style.borderRadius = '4px';
-            btn.onclick = () => {
-                if (this.chartWorker) onClick();
-            };
-            return btn;
-        };
-
-        controlsRow.appendChild(createViewBtn('X', () => {
-            this.chartWorker?.postMessage({ type: 'setView', data: { pitch: 0, yaw: Math.PI / 2 } });
-        }));
-        controlsRow.appendChild(createViewBtn('Y', () => {
-            this.chartWorker?.postMessage({ type: 'setView', data: { pitch: 0, yaw: 0 } });
-        }));
-        controlsRow.appendChild(createViewBtn('Z', () => {
-            this.chartWorker?.postMessage({ type: 'setView', data: { pitch: Math.PI / 2, yaw: 0 } });
-        }));
-        controlsRow.appendChild(createViewBtn('Reset', () => {
-            this.chartWorker?.postMessage({
-                type: 'setView',
-                data: { pitch: 0.42, yaw: 1.107, distance: 3.0, targetX: 0, targetY: 0, targetZ: 0 }
-            });
-        }));
-
-        const perspLabel = document.createElement('label');
-        perspLabel.style.display = 'flex';
-        perspLabel.style.alignItems = 'center';
-        perspLabel.style.gap = '2px';
-        perspLabel.style.color = '#fff';
-        perspLabel.style.fontSize = '11px';
-        perspLabel.style.marginLeft = '4px';
-        const perspCheck = document.createElement('input');
-        perspCheck.type = 'checkbox';
-        perspCheck.checked = true;
-        perspCheck.style.margin = '0';
-        perspCheck.onchange = (e) => {
-            e.stopPropagation();
-            const usePersp = perspCheck.checked;
-            fovContainer.style.display = usePersp ? 'flex' : 'none';
-            this.chartWorker?.postMessage({ type: 'setConfig', data: { usePerspective: usePersp } });
-        };
-        perspLabel.appendChild(perspCheck);
-        perspLabel.appendChild(document.createTextNode('Persp'));
-        controlsRow.appendChild(perspLabel);
-
-        const fovContainer = document.createElement('div');
-        fovContainer.style.display = 'flex';
-        fovContainer.style.alignItems = 'center';
-        fovContainer.style.gap = '2px';
-        const fovSlider = document.createElement('input');
-        fovSlider.type = 'range';
-        fovSlider.min = '10';
-        fovSlider.max = '120';
-        fovSlider.value = '45';
-        fovSlider.style.width = '60px';
-        fovSlider.oninput = (e) => {
-            e.stopPropagation();
-            this.chartWorker?.postMessage({ type: 'setConfig', data: { fov: parseFloat(fovSlider.value) } });
-        };
-        const fovLabel = document.createElement('span');
-        fovLabel.textContent = 'FOV';
-        fovLabel.style.color = '#fff';
-        fovLabel.style.fontSize = '11px';
-        fovContainer.appendChild(fovLabel);
-        fovContainer.appendChild(fovSlider);
-        controlsRow.appendChild(fovContainer);
-
-        const lightLabel = document.createElement('label');
-        lightLabel.style.display = 'flex';
-        lightLabel.style.alignItems = 'center';
-        lightLabel.style.gap = '2px';
-        lightLabel.style.color = '#fff';
-        lightLabel.style.fontSize = '11px';
-        lightLabel.style.marginLeft = '4px';
-        const lightCheck = document.createElement('input');
-        lightCheck.type = 'checkbox';
-        lightCheck.checked = true;
-        lightCheck.style.margin = '0';
-        lightCheck.onchange = (e) => {
-            e.stopPropagation();
-            this.chartWorker?.postMessage({ type: 'setConfig', data: { lightingEnabled: lightCheck.checked } });
-        };
-        lightLabel.appendChild(lightCheck);
-        lightLabel.appendChild(document.createTextNode('Lighting'));
-        controlsRow.appendChild(lightLabel);
-
-        const aoLabel = document.createElement('label');
-        aoLabel.style.display = 'flex';
-        aoLabel.style.alignItems = 'center';
-        aoLabel.style.gap = '2px';
-        aoLabel.style.color = '#fff';
-        aoLabel.style.fontSize = '11px';
-        aoLabel.style.marginLeft = '4px';
-        const aoCheck = document.createElement('input');
-        aoCheck.type = 'checkbox';
-        aoCheck.checked = true;
-        aoCheck.style.margin = '0';
-        aoCheck.onchange = (e) => {
-            e.stopPropagation();
-            this.chartWorker?.postMessage({ type: 'setConfig', data: { aoEnabled: aoCheck.checked } });
-        };
-        aoLabel.appendChild(aoCheck);
-        aoLabel.appendChild(document.createTextNode('AO'));
-        controlsRow.appendChild(aoLabel);
-
-        container.appendChild(controlsRow);
-
-        const canvasContainer = document.createElement('div');
-        canvasContainer.style.flex = '1';
-        canvasContainer.style.position = 'relative';
-        
-        const canvas = document.createElement('canvas');
-        canvas.style.width = '100%';
-        canvas.style.height = '100%';
-        canvas.style.display = 'block';
-        canvasContainer.appendChild(canvas);
-        container.appendChild(canvasContainer);
-
-        this.container.appendChild(container);
-
-        const renderer = createViewportRenderer();
-        this.chartWorker = {
-            postMessage: (msg: any) => renderer.postMessage(msg),
-            terminate: () => {}
-        } as any;
-
-        this.chartWorker!.postMessage({
-            type: 'init',
-            data: {
-                canvas: canvas,
-                width: canvasContainer.clientWidth || 300,
-                height: canvasContainer.clientHeight || 200
-            }
-        });
-
-        this.chartWorker!.postMessage({
-            type: 'setConfig',
-            data: {
-                colormap: mapSelect.value,
-                autoScale: autoScaleInput.checked,
-                slices: node.parameters?.slices || [],
-                lightingEnabled: true,
-                aoEnabled: true,
-                ambientLevel: 0.3,
-                specularIntensity: 0.4
-            }
-        });
-
-        mapSelect.addEventListener('change', () => {
-            if (this.chartWorker) {
-                this.chartWorker.postMessage({
-                    type: 'setConfig',
-                    data: { colormap: mapSelect.value }
-                });
-            }
-        });
-
-        autoScaleInput.addEventListener('change', () => {
-            if (this.chartWorker) {
-                this.chartWorker.postMessage({
-                    type: 'setConfig',
-                    data: { autoScale: autoScaleInput.checked }
-                });
-            }
-        });
-
-        let isDragging = false;
-        let dragMode: 'orbit' | 'pan' = 'orbit';
-        let lastX = 0;
-        let lastY = 0;
-
-        canvas.addEventListener('contextmenu', (e) => {
-            e.preventDefault();
-        });
-
-        canvas.addEventListener('mousedown', (e) => {
-            e.stopPropagation();
-            e.preventDefault();
-            isDragging = true;
-            lastX = e.clientX;
-            lastY = e.clientY;
-            if (e.button === 2 || e.shiftKey || e.button === 1) {
-                dragMode = 'pan';
-            } else {
-                dragMode = 'orbit';
-            }
-        });
-
-        window.addEventListener('mousemove', (e) => {
-            if (!isDragging) return;
-            const dx = e.clientX - lastX;
-            const dy = e.clientY - lastY;
-            lastX = e.clientX;
-            lastY = e.clientY;
-            if (this.chartWorker) {
-                if (dragMode === 'pan') {
-                    this.chartWorker.postMessage({ type: 'input', data: { dpx: dx, dpy: dy } });
-                } else {
-                    this.chartWorker.postMessage({ type: 'input', data: { drx: dy, dry: dx } });
-                }
-            }
-        });
-
-        window.addEventListener('mouseup', () => { isDragging = false; });
-
-        canvas.addEventListener('wheel', (e) => {
-            console.log('[Debug] 3D viewport wheel event fired (node-viewer)');
-            e.preventDefault();
-            e.stopPropagation();
-            e.stopImmediatePropagation();
-            if (this.chartWorker) {
-                this.chartWorker.postMessage({ type: 'input', data: { dy: e.deltaY } });
-            }
-        }, { passive: false, capture: true });
-
-
-        const ro = new ResizeObserver(() => {
-            if (this.chartWorker) {
-                this.chartWorker.postMessage({
-                    type: 'resize',
-                    data: {
-                        width: canvasContainer.clientWidth || 300,
-                        height: canvasContainer.clientHeight || 200
-                    }
-                });
-            }
-        });
-        ro.observe(canvasContainer);
-
-        const initialData = this.stateManager.getTelemetry(node.id);
-        if (initialData instanceof ArrayBuffer) {
-            this.chartWorker?.postMessage({ type: 'frame', data: { buffer: initialData } });
+    public pushFrame(buffer: ArrayBuffer): void {
+        if (this.viewport3D) {
+            this.viewport3D.pushFrame(buffer);
         }
-        this.startRenderLoop();
+    }
+
+    public updateTelemetry(data: any): void {
+        if (this.viewport3D) {
+            this.viewport3D.updateTelemetry(data);
+        }
+    }
+
+    public setSTLGeometry(vertices: Float32Array | null): void {
+        if (this.viewport3D) {
+            this.viewport3D.setSTLGeometry(vertices);
+        }
     }
 
     private renderExpandedGraph(node: Node): void {
@@ -2174,12 +1916,28 @@ export class NodeViewer {
                             this.chartWorker.postMessage(this.telemetryBuffer, [this.telemetryBuffer]);
                         }
                     } else {
-                        const pressureData = this.telemetryBuffer.data || this.telemetryBuffer.telemetry;
-                        if (pressureData && (Array.isArray(pressureData) || pressureData instanceof Float32Array)) {
+                        if (node?.type === 'Telemetry3DViewport' && this.telemetryBuffer.type === 'TELEMETRY_3D') {
+                            const data = this.telemetryBuffer;
                             this.chartWorker.postMessage({
-                                type: 'frame',
-                                data: pressureData
+                                type: 'setConfig',
+                                data: {
+                                    xmin: data.xmin,
+                                    ymin: data.ymin,
+                                    zmin: data.zmin,
+                                    dx: data.dx,
+                                    nx: data.nx,
+                                    ny: data.ny,
+                                    nz: data.nz
+                                }
                             });
+                        } else {
+                            const pressureData = this.telemetryBuffer.data || this.telemetryBuffer.telemetry;
+                            if (pressureData && (Array.isArray(pressureData) || pressureData instanceof Float32Array)) {
+                                this.chartWorker.postMessage({
+                                    type: 'frame',
+                                    data: pressureData
+                                });
+                            }
                         }
                     }
                     this.telemetryBuffer = null;

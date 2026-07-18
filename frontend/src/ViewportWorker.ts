@@ -1382,9 +1382,8 @@ function handleFrame(buffer: ArrayBuffer) {
         const dataStart = cacheOffset + 16;
         const floatData = new Float32Array(buffer, dataStart, w * h);
 
-        const config = slicesConfig[i] || {};
-        const useAxis = config.axis !== undefined ? (config.axis === 'xy' ? 0 : (config.axis === 'xz' ? 1 : 2)) : axis;
-        const useOffset = config.offset !== undefined ? config.offset : zOff;
+        const useAxis = axis;
+        const useOffset = zOff;
 
         cachedSlices.push({
             axis: useAxis,
@@ -2421,8 +2420,10 @@ self.onmessage = async (e) => {
                 cachedSlices.forEach((sliceObj, i) => {
                     const config = slicesConfig[i];
                     if (!config) return;
-                    sliceObj.axis = config.axis === 'xy' ? 0 : config.axis === 'xz' ? 1 : 2;
-                    sliceObj.offset = config.offset;
+                    const targetAxis = config.axis === 'xy' ? 0 : config.axis === 'xz' ? 1 : 2;
+                    if (targetAxis === sliceObj.axis) {
+                        sliceObj.offset = config.offset;
+                    }
                     sliceObj.minY = config.min_val ?? sliceObj.minY;
                     sliceObj.maxY = config.max_val ?? sliceObj.maxY;
                     sliceObj.colormap = config.colormap || 'plasma';

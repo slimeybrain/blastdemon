@@ -48,10 +48,17 @@ export class Telemetry3DViewport {
     private latestSliceRanges: { min: number, max: number }[] = [];
     private _lastSliceKey: string = '';
 
-    constructor(container: HTMLElement, panelId: string, stateManager: StateManager) {
+    private viewTypeSuffix: string;
+
+    private getElId(base: string): string {
+        return `${base}-${this.panelId}${this.viewTypeSuffix}`;
+    }
+
+    constructor(container: HTMLElement, panelId: string, stateManager: StateManager, viewTypeSuffix: string = '') {
         this.container = container;
         this.panelId = panelId;
         this.stateManager = stateManager;
+        this.viewTypeSuffix = viewTypeSuffix;
 
         // Container relative positioning
         this.container.style.position = 'relative';
@@ -63,12 +70,12 @@ export class Telemetry3DViewport {
         this.canvas.style.display = 'block';
         this.container.appendChild(this.canvas);
 
-        this.worker = new Worker(new URL('./ViewportWorker.ts?v=' + Date.now(), import.meta.url), { type: 'module' });
+        this.worker = new Worker(new URL('./ViewportWorker.ts', import.meta.url), { type: 'module' });
 
         this.worker.onmessage = (e) => {
             const { type, renderer, min, max } = e.data;
             if (type === 'rendererInfo') {
-                const badge = document.getElementById(`viewport-renderer-badge-${this.panelId}`);
+                const badge = document.getElementById(this.getElId('viewport-renderer-badge'));
                 if (badge) {
                     badge.innerHTML = renderer;
                     if (renderer === 'WebGPU') {
@@ -115,9 +122,9 @@ export class Telemetry3DViewport {
                 }
             } else if (type === 'sliceRanges') {
                 this.latestSliceRanges = e.data.ranges;
-                this.syncControls();
+                this.syncControls(false);
             } else if (type === 'currentRange') {
-                const rangeLabel = document.getElementById(`viewport-current-range-${this.panelId}`);
+                const rangeLabel = document.getElementById(this.getElId('viewport-current-range'));
                 if (rangeLabel) {
                     rangeLabel.textContent = `Current: [${this.formatRangeValue(min)}, ${this.formatRangeValue(max)}]`;
                 }
@@ -204,6 +211,11 @@ export class Telemetry3DViewport {
             net.onMessage(this.netCallback);
         }
 
+        const cachedConfig = this.stateManager.getTelemetry(this.panelId + "-config-3d");
+        if (cachedConfig) {
+            this.updateTelemetry(cachedConfig);
+        }
+
         this.stateListener = () => this.syncControls();
         this.stateManager.onStateChange(this.stateListener);
         this.syncControls();
@@ -220,6 +232,7 @@ export class Telemetry3DViewport {
         });
 
         this.canvas.addEventListener('mousedown', (e) => {
+            e.stopPropagation();
             e.preventDefault();
             isDragging = true;
             lastX = e.clientX;
@@ -250,20 +263,23 @@ export class Telemetry3DViewport {
         });
 
         this.canvas.addEventListener('wheel', (e) => {
+            console.log('[Debug] 3D viewport wheel event fired');
             e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
             this.worker.postMessage({ type: 'input', data: { dy: e.deltaY } });
         }, { passive: false });
     }
 
 
     private buildOverlay() {
-        // 1. Floating gear button when closed
+        // 1. Floating gear button when closed (on the right side)
         this.floatOpenBtn = document.createElement('button');
         this.floatOpenBtn.innerHTML = '⚙️ Controls';
         this.applyButtonStyle(this.floatOpenBtn);
         this.floatOpenBtn.style.position = 'absolute';
         this.floatOpenBtn.style.top = '10px';
-        this.floatOpenBtn.style.left = '10px';
+        this.floatOpenBtn.style.right = '10px';
         this.floatOpenBtn.style.display = 'none';
         this.floatOpenBtn.style.zIndex = '12';
         this.floatOpenBtn.onclick = () => {
@@ -273,11 +289,11 @@ export class Telemetry3DViewport {
         };
         this.container.appendChild(this.floatOpenBtn);
 
-        // 2. Controls Panel Overlay
+        // 2. Controls Panel Overlay (on the right side)
         this.controlsOverlay = document.createElement('div');
         this.controlsOverlay.style.position = 'absolute';
         this.controlsOverlay.style.top = '10px';
-        this.controlsOverlay.style.left = '10px';
+        this.controlsOverlay.style.right = '10px';
         this.controlsOverlay.style.bottom = '10px';
         this.controlsOverlay.style.width = '290px';
         this.controlsOverlay.style.background = 'rgba(20, 20, 22, 0.85)';
@@ -312,8 +328,8 @@ export class Telemetry3DViewport {
         title.style.letterSpacing = '0.5px';
         titleWrap.appendChild(title);
 
-        const badge = document.createElement('span');
-        badge.id = `viewport-renderer-badge-${this.panelId}`;
+        const badge = document.getElementById(this.getElId('viewport-renderer-badge')) || document.createElement('span');
+        badge.id = this.getElId('viewport-renderer-badge');
         badge.innerHTML = 'Detecting...';
         badge.style.fontSize = '8px';
         badge.style.padding = '2px 5px';
@@ -329,7 +345,7 @@ export class Telemetry3DViewport {
         header.appendChild(titleWrap);
 
         const closeBtn = document.createElement('button');
-        closeBtn.innerHTML = '◀';
+        closeBtn.innerHTML = '▶';
         closeBtn.style.background = 'none';
         closeBtn.style.border = 'none';
         closeBtn.style.color = '#aaa';
@@ -379,10 +395,6 @@ export class Telemetry3DViewport {
         addSliceBtn.style.marginTop = '8px';
         addSliceBtn.onclick = () => this.addSlice();
         sliceSection.appendChild(addSliceBtn);
-
-        // Section 3: Solver Configurations
-        const solverSection = this.createSection(content, 'Solver Config');
-        this.buildSolverControls(solverSection);
     }
 
     private createSection(parent: HTMLElement, titleText: string): HTMLElement {
@@ -442,7 +454,7 @@ export class Telemetry3DViewport {
         
         const gridCb = document.createElement('input');
         gridCb.type = 'checkbox';
-        gridCb.id = 'viewport-grid-cb';
+        gridCb.id = this.getElId('viewport-grid-cb');
         // FIX 1/5: Initialize from saved state so value is correct on load
         gridCb.checked = vpNode ? (vpNode.parameters.show_grid !== false) : true;
         gridCb.onchange = () => {
@@ -465,7 +477,7 @@ export class Telemetry3DViewport {
         
         const edgesCb = document.createElement('input');
         edgesCb.type = 'checkbox';
-        edgesCb.id = 'viewport-edges-cb';
+        edgesCb.id = this.getElId('viewport-edges-cb');
         // FIX 1/5: Initialize from saved state
         edgesCb.checked = vpNode ? (!!vpNode.parameters.cell_edges) : false;
         edgesCb.onchange = () => {
@@ -478,6 +490,62 @@ export class Telemetry3DViewport {
         edgesRow.appendChild(edgesCb);
         edgesRow.appendChild(document.createTextNode('Show Cell Edges'));
         parent.appendChild(edgesRow);
+
+        // Refresh rate dropdown
+        const rateRow = document.createElement('div');
+        rateRow.style.display = 'flex';
+        rateRow.style.flexDirection = 'column';
+        rateRow.style.gap = '4px';
+        rateRow.style.marginTop = '6px';
+
+        const rateLbl = document.createElement('div');
+        rateLbl.style.fontSize = '9px';
+        rateLbl.style.color = '#aaa';
+        rateLbl.textContent = 'Refresh Rate';
+        rateRow.appendChild(rateLbl);
+
+        const rateSel = document.createElement('select');
+        rateSel.id = this.getElId('viewport-refresh-rate-sel');
+        this.applySelectStyle(rateSel);
+        rateSel.innerHTML = `
+            <option value="0.0">Max Rate (0s)</option>
+            <option value="0.016">60 FPS (0.016s)</option>
+            <option value="0.033">30 FPS (0.033s)</option>
+            <option value="0.05">20 FPS (0.05s)</option>
+            <option value="0.1">10 FPS (0.1s)</option>
+            <option value="0.2">5 FPS (0.2s)</option>
+            <option value="0.5">2 FPS (0.5s)</option>
+            <option value="1.0">1 FPS (1.0s)</option>
+        `;
+        rateSel.value = vpNode ? String(vpNode.parameters.refresh_rate ?? 0.033) : '0.033';
+        
+        this.bindEditingEvents(rateSel, () => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                const val = Number(rateSel.value);
+                this.stateManager.updateNodeParametersInPlace(vp.id, { refresh_rate: val });
+                
+                const net = (window as any).networkManager;
+                if (net && net.isConnected()) {
+                    let targetModelId = vp.id;
+                    const models = this.stateManager.getAppState().models;
+                    for (const [mid, m] of Object.entries(models)) {
+                        if (m.nodes.some(n => n.id === vp.id)) {
+                            targetModelId = mid;
+                            break;
+                        }
+                    }
+                    net.send({
+                        command: "VIEW3D_CONFIG",
+                        modelId: targetModelId,
+                        refresh_rate: val,
+                        slices: vp.parameters.slices || []
+                    });
+                }
+            }
+        });
+        rateRow.appendChild(rateSel);
+        parent.appendChild(rateRow);
 
         // Recenter view button
         const recenterRow = document.createElement('div');
@@ -515,7 +583,7 @@ export class Telemetry3DViewport {
         
         const lightCb = document.createElement('input');
         lightCb.type = 'checkbox';
-        lightCb.id = 'viewport-lighting-cb';
+        lightCb.id = this.getElId('viewport-lighting-cb');
         lightCb.checked = initLighting;
         lightCb.onchange = () => {
             const vp = this.getViewportNode();
@@ -537,7 +605,7 @@ export class Telemetry3DViewport {
         
         const aoCb = document.createElement('input');
         aoCb.type = 'checkbox';
-        aoCb.id = 'viewport-ao-cb';
+        aoCb.id = this.getElId('viewport-ao-cb');
         aoCb.checked = initAO;
         aoCb.onchange = () => {
             const vp = this.getViewportNode();
@@ -564,7 +632,7 @@ export class Telemetry3DViewport {
         
         const ambSlider = document.createElement('input');
         ambSlider.type = 'range';
-        ambSlider.id = 'viewport-ambient-slider';
+        ambSlider.id = this.getElId('viewport-ambient-slider');
         ambSlider.min = '0';
         ambSlider.max = '1';
         ambSlider.step = '0.05';
@@ -597,7 +665,7 @@ export class Telemetry3DViewport {
         
         const specSlider = document.createElement('input');
         specSlider.type = 'range';
-        specSlider.id = 'viewport-specular-slider';
+        specSlider.id = this.getElId('viewport-specular-slider');
         specSlider.min = '0';
         specSlider.max = '1';
         specSlider.step = '0.05';
@@ -617,92 +685,7 @@ export class Telemetry3DViewport {
         parent.appendChild(specWrap);
     }
 
-    private buildSolverControls(parent: HTMLElement) {
-        // Device
-        const devRow = document.createElement('div');
-        devRow.style.display = 'flex';
-        devRow.style.justifyContent = 'space-between';
-        devRow.style.alignItems = 'center';
-        devRow.innerHTML = '<span>Device</span>';
-        const devSel = document.createElement('select');
-        devSel.id = 'solver-device-sel';
-        this.applySelectStyle(devSel);
-        devSel.innerHTML = '<option value="cpu">CPU (Multi-thread)</option><option value="cuda">GPU (CUDA)</option>';
-        devSel.onchange = () => {
-            const solver = this.getSolverNode();
-            if (solver) this.stateManager.updateNodeParameters(solver.id, { device: devSel.value });
-        };
-        devRow.appendChild(devSel);
-        parent.appendChild(devRow);
 
-        // Init Mode
-        const initRow = document.createElement('div');
-        initRow.style.display = 'flex';
-        initRow.style.justifyContent = 'space-between';
-        initRow.style.alignItems = 'center';
-        initRow.innerHTML = '<span>Init Mode</span>';
-        const initSel = document.createElement('select');
-        initSel.id = 'solver-initmode-sel';
-        this.applySelectStyle(initSel);
-        initSel.innerHTML = '<option value="From1D">From 1D Remap</option><option value="Multi-Material JWL">JWL Multi-Mat</option><option value="Ideal Gas">Ideal Gas</option>';
-        initSel.onchange = () => {
-            const solver = this.getSolverNode();
-            if (solver) this.stateManager.updateNodeParameters(solver.id, { init_mode: initSel.value });
-        };
-        initRow.appendChild(initSel);
-        parent.appendChild(initRow);
-
-        // Flux Scheme
-        const fluxRow = document.createElement('div');
-        fluxRow.style.display = 'flex';
-        fluxRow.style.justifyContent = 'space-between';
-        fluxRow.style.alignItems = 'center';
-        fluxRow.innerHTML = '<span>Flux Scheme</span>';
-        const fluxSel = document.createElement('select');
-        fluxSel.id = 'solver-flux-sel';
-        this.applySelectStyle(fluxSel);
-        fluxSel.innerHTML = '<option value="AUSM+">AUSM+</option><option value="Rusanov">Rusanov</option>';
-        fluxSel.onchange = () => {
-            const solver = this.getSolverNode();
-            if (solver) this.stateManager.updateNodeParameters(solver.id, { flux_scheme: fluxSel.value });
-        };
-        fluxRow.appendChild(fluxSel);
-        parent.appendChild(fluxRow);
-
-        // Spatial Order
-        const spRow = document.createElement('div');
-        spRow.style.display = 'flex';
-        spRow.style.justifyContent = 'space-between';
-        spRow.style.alignItems = 'center';
-        spRow.innerHTML = '<span>Spatial Order</span>';
-        const spSel = document.createElement('select');
-        spSel.id = 'solver-sporder-sel';
-        this.applySelectStyle(spSel);
-        spSel.innerHTML = '<option value="1">1st Order</option><option value="2">2nd Order</option>';
-        spSel.onchange = () => {
-            const solver = this.getSolverNode();
-            if (solver) this.stateManager.updateNodeParameters(solver.id, { spatial_order: Number(spSel.value) });
-        };
-        spRow.appendChild(spSel);
-        parent.appendChild(spRow);
-
-        // Temporal Order
-        const tempRow = document.createElement('div');
-        tempRow.style.display = 'flex';
-        tempRow.style.justifyContent = 'space-between';
-        tempRow.style.alignItems = 'center';
-        tempRow.innerHTML = '<span>Temporal Order</span>';
-        const tempSel = document.createElement('select');
-        tempSel.id = 'solver-temporder-sel';
-        this.applySelectStyle(tempSel);
-        tempSel.innerHTML = '<option value="1">1st Order</option><option value="2">2nd Order (RK2)</option>';
-        tempSel.onchange = () => {
-            const solver = this.getSolverNode();
-            if (solver) this.stateManager.updateNodeParameters(solver.id, { temporal_order: Number(tempSel.value) });
-        };
-        tempRow.appendChild(tempSel);
-        parent.appendChild(tempRow);
-    }
 
     private applySelectStyle(sel: HTMLSelectElement) {
         sel.style.background = '#1e1e20';
@@ -775,6 +758,7 @@ export class Telemetry3DViewport {
             net.send({
                 command: "VIEW3D_CONFIG",
                 modelId: targetModelId,
+                refresh_rate: Number(vpNode.parameters.refresh_rate ?? 0.033),
                 slices: slices
             });
         }
@@ -935,7 +919,7 @@ export class Telemetry3DViewport {
         }
     }
 
-    private syncControls() {
+    private syncControls(postToWorker: boolean = true) {
         const vpNode = this.getViewportNode();
         if (!vpNode) return;
 
@@ -945,20 +929,25 @@ export class Telemetry3DViewport {
         const meshNode = this.getMeshNode();
 
         // 1. Sync Render Settings
-        const gridCb = document.getElementById('viewport-grid-cb') as HTMLInputElement;
+        const gridCb = document.getElementById(this.getElId('viewport-grid-cb')) as HTMLInputElement;
         if (gridCb && document.activeElement !== gridCb) gridCb.checked = vpNode.parameters.show_grid !== false;
 
-        const edgesCb = document.getElementById('viewport-edges-cb') as HTMLInputElement;
+        const edgesCb = document.getElementById(this.getElId('viewport-edges-cb')) as HTMLInputElement;
         if (edgesCb && document.activeElement !== edgesCb) edgesCb.checked = !!vpNode.parameters.cell_edges;
 
+        const rateSel = document.getElementById(this.getElId('viewport-refresh-rate-sel')) as HTMLSelectElement;
+        if (rateSel && rateSel.dataset.editing !== 'true' && document.activeElement !== rateSel) {
+            rateSel.value = String(vpNode.parameters.refresh_rate ?? 0.033);
+        }
+
         // FIX 1: Sync lighting/AO checkboxes and sliders from state
-        const lightCb = document.getElementById('viewport-lighting-cb') as HTMLInputElement;
+        const lightCb = document.getElementById(this.getElId('viewport-lighting-cb')) as HTMLInputElement;
         if (lightCb && document.activeElement !== lightCb) lightCb.checked = vpNode.parameters.lightingEnabled !== false;
 
-        const aoCb = document.getElementById('viewport-ao-cb') as HTMLInputElement;
+        const aoCb = document.getElementById(this.getElId('viewport-ao-cb')) as HTMLInputElement;
         if (aoCb && document.activeElement !== aoCb) aoCb.checked = vpNode.parameters.aoEnabled !== false;
 
-        const ambSlider = document.getElementById('viewport-ambient-slider') as HTMLInputElement;
+        const ambSlider = document.getElementById(this.getElId('viewport-ambient-slider')) as HTMLInputElement;
         if (ambSlider && document.activeElement !== ambSlider) {
             const val = vpNode.parameters.ambientLevel ?? 0.3;
             ambSlider.value = String(val);
@@ -966,7 +955,7 @@ export class Telemetry3DViewport {
             if (ambLabel) ambLabel.innerHTML = `Ambient Level: ${Number(val).toFixed(2)}`;
         }
 
-        const specSlider = document.getElementById('viewport-specular-slider') as HTMLInputElement;
+        const specSlider = document.getElementById(this.getElId('viewport-specular-slider')) as HTMLInputElement;
         if (specSlider && document.activeElement !== specSlider) {
             const val = vpNode.parameters.specularIntensity ?? 0.4;
             specSlider.value = String(val);
@@ -974,16 +963,16 @@ export class Telemetry3DViewport {
             if (specLabel) specLabel.innerHTML = `Specular Level: ${Number(val).toFixed(2)}`;
         }
 
-        const stlShowCb = document.getElementById('viewport-stl-show-cb') as HTMLInputElement;
+        const stlShowCb = document.getElementById(this.getElId('viewport-stl-show-cb')) as HTMLInputElement;
         if (stlShowCb) stlShowCb.checked = vpNode.parameters.show_stl !== false;
 
-        const stlWfCb = document.getElementById('viewport-stl-wf-cb') as HTMLInputElement;
+        const stlWfCb = document.getElementById(this.getElId('viewport-stl-wf-cb')) as HTMLInputElement;
         if (stlWfCb) stlWfCb.checked = !!vpNode.parameters.stl_wireframe;
 
-        const stlSolidsCb = document.getElementById('viewport-stl-solids-cb') as HTMLInputElement;
+        const stlSolidsCb = document.getElementById(this.getElId('viewport-stl-solids-cb')) as HTMLInputElement;
         if (stlSolidsCb) stlSolidsCb.checked = vpNode.parameters.stl_solids !== false;
 
-        const stlOpacSlider = document.getElementById('viewport-stl-opacity-slider') as HTMLInputElement;
+        const stlOpacSlider = document.getElementById(this.getElId('viewport-stl-opacity-slider')) as HTMLInputElement;
         const stlOpacLabel = stlOpacSlider?.parentElement?.querySelector('span') as HTMLElement;
         if (stlOpacSlider && document.activeElement !== stlOpacSlider) {
             const val = vpNode.parameters.stl_opacity ?? 0.5;
@@ -1098,9 +1087,9 @@ export class Telemetry3DViewport {
                     // FIX 2: Add class so fast-path syncControls can find and update it
                     axisSel.className = 'slice-axis-sel';
                     this.applySelectStyle(axisSel);
-                    axisSel.innerHTML = '<option value="xy">XY</option><option value="xz">XZ</option><option value="yz">YZ</option>';
+                    axisSel.innerHTML = '<option value="yz">X-Normal</option><option value="xz">Y-Normal</option><option value="xy">Z-Normal</option>';
                     axisSel.value = slice.axis;
-                    axisSel.onchange = () => this.updateSliceProperty(idx, { axis: axisSel.value });
+                    this.bindEditingEvents(axisSel, () => this.updateSliceProperty(idx, { axis: axisSel.value }));
                     grid.appendChild(axisSel);
 
                     const qSel = document.createElement('select');
@@ -1108,18 +1097,16 @@ export class Telemetry3DViewport {
                     this.applySelectStyle(qSel);
                     qSel.innerHTML = '<option value="pressure">Pressure</option><option value="density">Density</option><option value="velocity">Velocity</option><option value="energy">Energy</option><option value="species1">Products</option><option value="species2">Unburnt</option><option value="species3">Air</option><option value="solid">Solid Cells</option><option value="overpressure">Peak Overpressure</option><option value="impulse">Peak Impulse</option>';
                     qSel.value = qty;
-                    qSel.onchange = () => this.updateSliceProperty(idx, { quantities: [qSel.value] });
+                    this.bindEditingEvents(qSel, () => this.updateSliceProperty(idx, { quantities: [qSel.value] }));
                     grid.appendChild(qSel);
 
                     const strideSel = document.createElement('select');
+                    strideSel.className = 'slice-stride-sel';
                     this.applySelectStyle(strideSel);
                     strideSel.style.width = '100%';
                     strideSel.innerHTML = '<option value="1">1:1</option><option value="2">1:2</option><option value="4">1:4</option><option value="8">1:8</option><option value="16">1:16</option>';
                     strideSel.value = String(slice.stride || 1);
-                    strideSel.onchange = (e) => {
-                        e.stopPropagation();
-                        this.updateSliceProperty(idx, { stride: Number(strideSel.value) });
-                    };
+                    this.bindEditingEvents(strideSel, () => this.updateSliceProperty(idx, { stride: Number(strideSel.value) }));
                     grid.appendChild(strideSel);
                     row.appendChild(grid);
 
@@ -1156,6 +1143,7 @@ export class Telemetry3DViewport {
                     offInp.style.textAlign = 'center';
                     offInp.value = slice.offset.toString();
 
+                    this.bindEditingEvents(offSlider);
                     offSlider.oninput = (e) => {
                         e.stopPropagation();
                         const val = Number(offSlider.value);
@@ -1170,13 +1158,12 @@ export class Telemetry3DViewport {
                         }
                     };
 
-                    offInp.onchange = (e) => {
-                        e.stopPropagation();
+                    this.bindEditingEvents(offInp, () => {
                         const val = Math.max(bounds.min, Math.min(bounds.max, Number(offInp.value)));
                         offSlider.value = val.toString();
                         offInp.value = val.toString();
                         this.updateSliceProperty(idx, { offset: val });
-                    };
+                    });
 
                     offWrap.appendChild(offSlider);
                     offWrap.appendChild(offInp);
@@ -1212,6 +1199,7 @@ export class Telemetry3DViewport {
                     opacInp.style.textAlign = 'center';
                     opacInp.value = (slice.opacity !== undefined ? slice.opacity : 1.0).toString();
 
+                    this.bindEditingEvents(opacSlider);
                     opacSlider.oninput = (e) => {
                         e.stopPropagation();
                         const val = Number(opacSlider.value);
@@ -1226,13 +1214,12 @@ export class Telemetry3DViewport {
                         }
                     };
 
-                    opacInp.onchange = (e) => {
-                        e.stopPropagation();
+                    this.bindEditingEvents(opacInp, () => {
                         const val = Math.max(0.0, Math.min(1.0, Number(opacInp.value)));
                         opacSlider.value = val.toString();
                         opacInp.value = val.toString();
                         this.updateSliceProperty(idx, { opacity: val });
-                    };
+                    });
 
                     opacWrap.appendChild(opacSlider);
                     opacWrap.appendChild(opacInp);
@@ -1260,7 +1247,7 @@ export class Telemetry3DViewport {
                             cb.type = 'checkbox';
                             cb.checked = checkedVal;
                             cb.style.margin = '0';
-                            cb.onchange = () => onCbChange(cb.checked);
+                            this.bindEditingEvents(cb, () => onCbChange(cb.checked));
                             lbl.appendChild(cb);
                             lbl.appendChild(document.createTextNode(labelStr));
                             return lbl;
@@ -1293,10 +1280,7 @@ export class Telemetry3DViewport {
                         this.applySelectStyle(cmSel);
                         cmSel.innerHTML = '<option value="plasma">Plasma</option><option value="viridis">Viridis</option>';
                         cmSel.value = colormapVal;
-                        cmSel.onchange = (e) => {
-                            e.stopPropagation();
-                            this.updateSliceProperty(idx, { colormap: cmSel.value });
-                        };
+                        this.bindEditingEvents(cmSel, () => this.updateSliceProperty(idx, { colormap: cmSel.value }));
                         cmRow.appendChild(cmSel);
                         subPanel.appendChild(cmRow);
 
@@ -1324,10 +1308,9 @@ export class Telemetry3DViewport {
                         minInput.style.borderRadius = '3px';
                         minInput.style.fontSize = '8px';
                         minInput.style.padding = '1px';
-                        minInput.onchange = (e) => {
-                            e.stopPropagation();
+                        this.bindEditingEvents(minInput, () => {
                             this.updateSliceProperty(idx, { min_val: Number(minInput.value) });
-                        };
+                        });
                         rangeRow.appendChild(minInput);
 
                         const maxLabel = document.createElement('span');
@@ -1348,10 +1331,9 @@ export class Telemetry3DViewport {
                         maxInput.style.borderRadius = '3px';
                         maxInput.style.fontSize = '8px';
                         maxInput.style.padding = '1px';
-                        maxInput.onchange = (e) => {
-                            e.stopPropagation();
+                        this.bindEditingEvents(maxInput, () => {
                             this.updateSliceProperty(idx, { max_val: Number(maxInput.value) });
-                        };
+                        });
                         rangeRow.appendChild(maxInput);
 
                         const scaleBtn = document.createElement('button');
@@ -1396,15 +1378,15 @@ export class Telemetry3DViewport {
 
                     // Sync basic selects if not active
                     const axisSel = row.querySelector('.slice-axis-sel') as HTMLSelectElement;
-                    if (axisSel && document.activeElement !== axisSel) {
+                    if (axisSel && axisSel.dataset.editing !== 'true' && document.activeElement !== axisSel) {
                         axisSel.value = slice.axis;
                     }
                     const qSel = row.querySelector('.slice-qty-sel') as HTMLSelectElement;
-                    if (qSel && document.activeElement !== qSel) {
+                    if (qSel && qSel.dataset.editing !== 'true' && document.activeElement !== qSel) {
                         qSel.value = slice.quantities?.[0] || 'pressure';
                     }
                     const strideSel = row.querySelector('.slice-stride-sel') as HTMLSelectElement;
-                    if (strideSel && document.activeElement !== strideSel) {
+                    if (strideSel && strideSel.dataset.editing !== 'true' && document.activeElement !== strideSel) {
                         strideSel.value = String(slice.stride || 1);
                     }
 
@@ -1414,21 +1396,21 @@ export class Telemetry3DViewport {
                         offSlider.min = bounds.min.toString();
                         offSlider.max = bounds.max.toString();
                         offSlider.step = Math.max(0.001, (bounds.max - bounds.min) / 100).toString();
-                        if (document.activeElement !== offSlider) {
+                        if (offSlider.dataset.editing !== 'true' && document.activeElement !== offSlider) {
                             offSlider.value = slice.offset.toString();
                         }
                     }
                     const offInp = row.querySelector('.slice-offset-val') as HTMLInputElement;
-                    if (offInp && document.activeElement !== offInp) {
+                    if (offInp && offInp.dataset.editing !== 'true' && document.activeElement !== offInp) {
                         offInp.value = slice.offset.toString();
                     }
 
                     const opacSlider = row.querySelector('.slice-opac-slider') as HTMLInputElement;
-                    if (opacSlider && document.activeElement !== opacSlider) {
+                    if (opacSlider && opacSlider.dataset.editing !== 'true' && document.activeElement !== opacSlider) {
                         opacSlider.value = (slice.opacity !== undefined ? slice.opacity : 1.0).toString();
                     }
                     const opacInp = row.querySelector('.slice-opac-val') as HTMLInputElement;
-                    if (opacInp && document.activeElement !== opacInp) {
+                    if (opacInp && opacInp.dataset.editing !== 'true' && document.activeElement !== opacInp) {
                         opacInp.value = (slice.opacity !== undefined ? slice.opacity : 1.0).toString();
                     }
 
@@ -1444,14 +1426,20 @@ export class Telemetry3DViewport {
                     // Sync checkboxes
                     const checkboxes = row.querySelectorAll('input[type="checkbox"]') as NodeListOf<HTMLInputElement>;
                     if (checkboxes.length >= 3) {
-                        checkboxes[0].checked = autoScaleVal;
-                        checkboxes[1].checked = slice.log_scale === true;
-                        checkboxes[2].checked = slice.interpolate !== false;
+                        if (checkboxes[0].dataset.editing !== 'true' && document.activeElement !== checkboxes[0]) {
+                            checkboxes[0].checked = autoScaleVal;
+                        }
+                        if (checkboxes[1].dataset.editing !== 'true' && document.activeElement !== checkboxes[1]) {
+                            checkboxes[1].checked = slice.log_scale === true;
+                        }
+                        if (checkboxes[2].dataset.editing !== 'true' && document.activeElement !== checkboxes[2]) {
+                            checkboxes[2].checked = slice.interpolate !== false;
+                        }
                     }
 
                     // Sync colormap
                     const cmSel = row.querySelector('.slice-colormap-sel') as HTMLSelectElement;
-                    if (cmSel && document.activeElement !== cmSel) {
+                    if (cmSel && cmSel.dataset.editing !== 'true' && document.activeElement !== cmSel) {
                         cmSel.value = slice.colormap || 'plasma';
                     }
 
@@ -1461,7 +1449,7 @@ export class Telemetry3DViewport {
                         minInput.disabled = autoScaleVal;
                         minInput.style.background = autoScaleVal ? '#0c0c0d' : '#1a1a1c';
                         minInput.style.color = autoScaleVal ? '#666' : '#ccc';
-                        if (document.activeElement !== minInput) {
+                        if (minInput.dataset.editing !== 'true' && document.activeElement !== minInput) {
                             minInput.value = String(minRangeVal);
                         }
                     }
@@ -1471,7 +1459,7 @@ export class Telemetry3DViewport {
                         maxInput.disabled = autoScaleVal;
                         maxInput.style.background = autoScaleVal ? '#0c0c0d' : '#1a1a1c';
                         maxInput.style.color = autoScaleVal ? '#666' : '#ccc';
-                        if (document.activeElement !== maxInput) {
+                        if (maxInput.dataset.editing !== 'true' && document.activeElement !== maxInput) {
                             maxInput.value = String(maxRangeVal);
                         }
                     }
@@ -1479,49 +1467,25 @@ export class Telemetry3DViewport {
             }
 
             // Sync configuration to WebWorker
-            const opacities = slices.map((s: any) => s.opacity !== undefined ? s.opacity : 1.0);
-            this.worker.postMessage({
-                type: 'setConfig',
-                data: {
-                    lightingEnabled: vpNode.parameters.lightingEnabled !== false,
-                    aoEnabled: vpNode.parameters.aoEnabled !== false,
-                    ambientLevel: vpNode.parameters.ambientLevel ?? 0.3,
-                    specularIntensity: vpNode.parameters.specularIntensity ?? 0.4,
-                    sliceOpacities: opacities,
-                    slices: slices,
-                    focusedSliceIndex: vpNode.parameters.focusedSliceIndex ?? 0,
-                    quantityRanges: vpNode.parameters.quantity_ranges || {}
-                }
-            });
-        }
-
-        // 3. Sync Solver parameters
-        if (solverNode) {
-            const devSel = document.getElementById('solver-device-sel') as HTMLSelectElement;
-            if (devSel && document.activeElement !== devSel) {
-                devSel.value = solverNode.parameters.device || 'cpu';
-            }
-
-            const initSel = document.getElementById('solver-initmode-sel') as HTMLSelectElement;
-            if (initSel && document.activeElement !== initSel) {
-                initSel.value = solverNode.parameters.init_mode || 'From1D';
-            }
-
-            const fluxSel = document.getElementById('solver-flux-sel') as HTMLSelectElement;
-            if (fluxSel && document.activeElement !== fluxSel) {
-                fluxSel.value = solverNode.parameters.flux_scheme || 'AUSM+';
-            }
-
-            const spSel = document.getElementById('solver-sporder-sel') as HTMLSelectElement;
-            if (spSel && document.activeElement !== spSel) {
-                spSel.value = (solverNode.parameters.spatial_order ?? 2).toString();
-            }
-
-            const tempSel = document.getElementById('solver-temporder-sel') as HTMLSelectElement;
-            if (tempSel && document.activeElement !== tempSel) {
-                tempSel.value = (solverNode.parameters.temporal_order ?? 2).toString();
+            if (postToWorker) {
+                const opacities = slices.map((s: any) => s.opacity !== undefined ? s.opacity : 1.0);
+                this.worker.postMessage({
+                    type: 'setConfig',
+                    data: {
+                        lightingEnabled: vpNode.parameters.lightingEnabled !== false,
+                        aoEnabled: vpNode.parameters.aoEnabled !== false,
+                        ambientLevel: vpNode.parameters.ambientLevel ?? 0.3,
+                        specularIntensity: vpNode.parameters.specularIntensity ?? 0.4,
+                        sliceOpacities: opacities,
+                        slices: slices,
+                        focusedSliceIndex: vpNode.parameters.focusedSliceIndex ?? 0,
+                        quantityRanges: vpNode.parameters.quantity_ranges || {}
+                    }
+                });
             }
         }
+
+
 
         // 4. Find connected domain mesh dimensions and configure worker
         let dimX = 1.0, dimY = 1.0, dimZ = 1.0, cellSize = 0.01;
@@ -1562,7 +1526,17 @@ export class Telemetry3DViewport {
             quantityRanges: vpNode.parameters.quantity_ranges || {}
         };
 
-        if (!this.hasTelemetryGrid) {
+        const cachedConfig = this.stateManager.getTelemetry(vpNode.id + "-config-3d");
+        if (cachedConfig) {
+            this.hasTelemetryGrid = true;
+            configData.xmin = cachedConfig.xmin;
+            configData.ymin = cachedConfig.ymin;
+            configData.zmin = cachedConfig.zmin;
+            configData.dx = cachedConfig.dx;
+            configData.nx = cachedConfig.nx;
+            configData.ny = cachedConfig.ny;
+            configData.nz = cachedConfig.nz;
+        } else if (!this.hasTelemetryGrid) {
             configData.xmin = xmin;
             configData.ymin = ymin;
             configData.zmin = zmin;
@@ -1572,10 +1546,12 @@ export class Telemetry3DViewport {
             configData.nz = nz;
         }
 
-        this.worker.postMessage({
-            type: 'setConfig',
-            data: configData
-        });
+        if (postToWorker) {
+            this.worker.postMessage({
+                type: 'setConfig',
+                data: configData
+            });
+        }
     }
 
     public pushFrame(buffer: ArrayBuffer) {
@@ -1629,7 +1605,7 @@ export class Telemetry3DViewport {
         
         const showCb = document.createElement('input');
         showCb.type = 'checkbox';
-        showCb.id = 'viewport-stl-show-cb';
+        showCb.id = this.getElId('viewport-stl-show-cb');
         showCb.onchange = () => {
             const vpNode = this.getViewportNode();
             if (vpNode) {
@@ -1650,7 +1626,7 @@ export class Telemetry3DViewport {
         
         const wfCb = document.createElement('input');
         wfCb.type = 'checkbox';
-        wfCb.id = 'viewport-stl-wf-cb';
+        wfCb.id = this.getElId('viewport-stl-wf-cb');
         wfCb.onchange = () => {
             const vpNode = this.getViewportNode();
             if (vpNode) {
@@ -1671,7 +1647,7 @@ export class Telemetry3DViewport {
         
         const solidsCb = document.createElement('input');
         solidsCb.type = 'checkbox';
-        solidsCb.id = 'viewport-stl-solids-cb';
+        solidsCb.id = this.getElId('viewport-stl-solids-cb');
         solidsCb.onchange = () => {
             const vpNode = this.getViewportNode();
             if (vpNode) {
@@ -1695,7 +1671,7 @@ export class Telemetry3DViewport {
         
         const opacSlider = document.createElement('input');
         opacSlider.type = 'range';
-        opacSlider.id = 'viewport-stl-opacity-slider';
+        opacSlider.id = this.getElId('viewport-stl-opacity-slider');
         opacSlider.min = '0';
         opacSlider.max = '1';
         opacSlider.step = '0.05';
@@ -1742,6 +1718,16 @@ export class Telemetry3DViewport {
             }
         }
         return null;
+    }
+
+    private bindEditingEvents(el: HTMLElement, onAction?: () => void) {
+        el.addEventListener('focus', () => { el.dataset.editing = 'true'; });
+        el.addEventListener('mousedown', () => { el.dataset.editing = 'true'; });
+        el.addEventListener('blur', () => { delete el.dataset.editing; });
+        el.addEventListener('change', () => {
+            delete el.dataset.editing;
+            if (onAction) onAction();
+        });
     }
 
     public setSTLGeometry(vertices: Float32Array | null): void {

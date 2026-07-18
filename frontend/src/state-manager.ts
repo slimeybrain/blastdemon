@@ -941,6 +941,9 @@ export class StateManager {
                 } else if (connectedNode.type === 'TelemetryContour' || connectedNode.type === 'Telemetry3DViewport') {
                     if (data instanceof ArrayBuffer || (data && data.type === 'TELEMETRY_3D')) {
                          this.telemetryStore.set(connectedNode.id, data);
+                         if (data && data.type === 'TELEMETRY_3D') {
+                             this.telemetryStore.set(connectedNode.id + "-config-3d", data);
+                         }
                          this.notifyTelemetryUpdate(connectedNode.id, data);
                     }
                 } else if (connectedNode.type === 'TelemetryText') {

@@ -1050,6 +1050,7 @@ networkManager.onMessage(async (data) => {
             if (type === 'CFDSolver3D') {
                 layoutManager.components.forEach(comp => {
                     if (comp.type === 'TELEMETRY_3D') comp.instance.pushFrame(payloadBuffer.slice(0));
+                    if (comp.type === 'NODE_VIEWER' && comp.instance) comp.instance.pushFrame(payloadBuffer.slice(0));
                 });
             }
         }
@@ -1077,6 +1078,11 @@ networkManager.onMessage(async (data) => {
                             vpNodes.forEach(vpNode => {
                                 comp.instance.setSTLGeometry(vpNode.id, verts);
                             });
+                        }
+                    });
+                    layoutManager.components.forEach(comp => {
+                        if (comp.type === 'NODE_VIEWER' && comp.instance) {
+                            comp.instance.setSTLGeometry(verts);
                         }
                     });
                 }
@@ -1307,6 +1313,7 @@ networkManager.onMessage(async (data) => {
                 if (dataJson.type === 'TELEMETRY_3D') {
                     layoutManager.components.forEach(comp => {
                         if (comp.type === 'TELEMETRY_3D') comp.instance.updateTelemetry(dataJson);
+                        if (comp.type === 'NODE_VIEWER' && comp.instance) comp.instance.updateTelemetry(dataJson);
                     });
                 }
             }
