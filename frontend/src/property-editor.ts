@@ -9,6 +9,8 @@ export class PropertyEditor {
     private currentNodeId: string | null = null;
     private listener: ((state: any) => void) | null = null;
     private activeTabIdx: number = 0;
+    private _forceNextFull: boolean = false;
+    private _lastSlicesJson: string = '';
 
     constructor(parent: HTMLElement, stateManager: StateManager) {
         this.container = document.createElement('div');
@@ -17,8 +19,25 @@ export class PropertyEditor {
         parent.appendChild(this.container);
 
         this.stateManager = stateManager;
-        this.listener = () => this.render();
+        this.listener = () => {
+            const state = this.stateManager.getCurrentState();
+            const node = state?.nodes.find(n => n.id === this.currentNodeId);
+            let force = false;
+            if (node) {
+                const slicesJson = JSON.stringify(node.parameters.slices || []);
+                if (slicesJson !== this._lastSlicesJson) {
+                    this._lastSlicesJson = slicesJson;
+                    force = true;
+                }
+            }
+            this.render(force);
+        };
         this.stateManager.onStateChange(this.listener);
+        
+        const state = this.stateManager.getCurrentState();
+        const node = state?.nodes.find(n => n.id === this.currentNodeId);
+        this._lastSlicesJson = node ? JSON.stringify(node.parameters.slices || []) : '';
+        
         this.render();
     }
 
@@ -33,10 +52,21 @@ export class PropertyEditor {
         if (this.currentNodeId === nodeId) return;
         this.currentNodeId = nodeId;
         this.activeTabIdx = 0;
+        
+        const state = this.stateManager.getCurrentState();
+        const node = state?.nodes.find(n => n.id === nodeId);
+        this._lastSlicesJson = node ? JSON.stringify(node.parameters.slices || []) : '';
+        
         this.render(true);
     }
 
     private render(forceFull: boolean = false): void {
+        // Consume the _forceNextFull flag set by updateSlicesInPlace so that
+        // slice add/remove always causes a full DOM rebuild, not a fast-path no-op.
+        if (this._forceNextFull) {
+            this._forceNextFull = false;
+            forceFull = true;
+        }
         if (!this.currentNodeId) {
             this.container.innerHTML = '<div style="padding: 20px; color: #666;">No node selected</div>';
             return;
@@ -52,9 +82,14 @@ export class PropertyEditor {
 
         if (!forceFull && this.container.querySelector('form')) {
             for (const [key, value] of Object.entries(node.parameters)) {
-                const input = this.container.querySelector(`[data-key="${key}"]`) as HTMLInputElement | HTMLSelectElement;
-                if (input && document.activeElement !== input) {
-                    input.value = value.toString();
+                const el = this.container.querySelector(`[data-key="${key}"]`) as HTMLInputElement | HTMLSelectElement;
+                if (el && document.activeElement !== el) {
+                    // FIX 8: Handle checkbox type — setting .value does nothing for checkboxes
+                    if ((el as HTMLInputElement).type === 'checkbox') {
+                        (el as HTMLInputElement).checked = !!value;
+                    } else {
+                        el.value = value.toString();
+                    }
                 }
             }
 
@@ -72,9 +107,15 @@ export class PropertyEditor {
                     const nz = Math.round(max_z / cellSize);
                     gridInfo.textContent = `Calculated Grid: ${nr} x ${nz} cells (Total: ${(nr * nz).toLocaleString()})`;
                 } else if (node.type === 'DomainMesh3D') {
-                    const dim_x = Number(node.parameters['dim_x'] ?? 1.0);
-                    const dim_y = Number(node.parameters['dim_y'] ?? 1.0);
-                    const dim_z = Number(node.parameters['dim_z'] ?? 1.0);
+                    const xmin = Number(node.parameters['xmin'] ?? 0.0);
+                    const xmax = Number(node.parameters['xmax'] ?? 1.0);
+                    const ymin = Number(node.parameters['ymin'] ?? 0.0);
+                    const ymax = Number(node.parameters['ymax'] ?? 1.0);
+                    const zmin = Number(node.parameters['zmin'] ?? 0.0);
+                    const zmax = Number(node.parameters['zmax'] ?? 1.0);
+                    const dim_x = xmax - xmin;
+                    const dim_y = ymax - ymin;
+                    const dim_z = zmax - zmin;
                     const nx = Math.round(dim_x / cellSize);
                     const ny = Math.round(dim_y / cellSize);
                     const nz = Math.round(dim_z / cellSize);
@@ -260,9 +301,15 @@ export class PropertyEditor {
                 const nz = Math.round(max_z / cellSize);
                 info.textContent = `Calculated Grid: ${nr} x ${nz} cells (Total: ${(nr * nz).toLocaleString()})`;
             } else {
-                const dim_x = Number(node.parameters['dim_x'] ?? 1.0);
-                const dim_y = Number(node.parameters['dim_y'] ?? 1.0);
-                const dim_z = Number(node.parameters['dim_z'] ?? 1.0);
+                const xmin = Number(node.parameters['xmin'] ?? 0.0);
+                const xmax = Number(node.parameters['xmax'] ?? 1.0);
+                const ymin = Number(node.parameters['ymin'] ?? 0.0);
+                const ymax = Number(node.parameters['ymax'] ?? 1.0);
+                const zmin = Number(node.parameters['zmin'] ?? 0.0);
+                const zmax = Number(node.parameters['zmax'] ?? 1.0);
+                const dim_x = xmax - xmin;
+                const dim_y = ymax - ymin;
+                const dim_z = zmax - zmin;
                 const nx = Math.round(dim_x / cellSize);
                 const ny = Math.round(dim_y / cellSize);
                 const nz = Math.round(dim_z / cellSize);
@@ -479,6 +526,8 @@ export class PropertyEditor {
             cb.checked = value;
             cb.style.cursor = 'pointer';
             cb.style.width = 'auto';
+            // FIX 8: Add data-key so fast-path render can sync checkbox state
+            cb.dataset.key = key;
             cb.onchange = () => {
                 this.updateParameter(key, cb.checked);
             };
@@ -678,9 +727,10 @@ export class PropertyEditor {
             cbGrid.style.gridTemplateColumns = 'repeat(2, 1fr)';
             cbGrid.style.gap = '8px';
             cbGrid.style.marginTop = '8px';
+            // FIX 5: Use !== false for show_grid so it defaults to true (matches overlay and state defaults)
             cbGrid.appendChild(createCheckboxField('log_scale', !!node.parameters['log_scale'], 'Log Scale'));
             cbGrid.appendChild(createCheckboxField('auto_scale', !!node.parameters['auto_scale'], 'Auto Scale'));
-            cbGrid.appendChild(createCheckboxField('show_grid', !!node.parameters['show_grid'], 'Show Grid'));
+            cbGrid.appendChild(createCheckboxField('show_grid', node.parameters['show_grid'] !== false, 'Show Grid'));
             cbGrid.appendChild(createCheckboxField('interpolate', !!node.parameters['interpolate'], 'Interpolate'));
             cbGrid.appendChild(createCheckboxField('lightingEnabled', node.parameters['lightingEnabled'] !== false, 'Enable Lighting'));
             cbGrid.appendChild(createCheckboxField('aoEnabled', node.parameters['aoEnabled'] !== false, 'Enable AO'));
@@ -727,6 +777,8 @@ export class PropertyEditor {
             qtyGrid.appendChild(createCheckboxField('qty_reacted', !!node.parameters['qty_reacted'], 'Reacted (Alpha1)'));
             qtyGrid.appendChild(createCheckboxField('qty_unreacted', !!node.parameters['qty_unreacted'], 'Unreacted (Alpha2)'));
             qtyGrid.appendChild(createCheckboxField('qty_air', !!node.parameters['qty_air'], 'Air'));
+            qtyGrid.appendChild(createCheckboxField('qty_overpressure', !!node.parameters['qty_overpressure'], 'Overpressure'));
+            qtyGrid.appendChild(createCheckboxField('qty_impulse', !!node.parameters['qty_impulse'], 'Impulse'));
             panels[3].appendChild(qtyGrid);
         }
 
@@ -744,7 +796,7 @@ export class PropertyEditor {
             qtyGrid.appendChild(createCheckboxField('qty_reacted', !!node.parameters['qty_reacted'], 'Reacted (Alpha1)'));
             qtyGrid.appendChild(createCheckboxField('qty_unreacted', !!node.parameters['qty_unreacted'], 'Unreacted (Alpha2)'));
             qtyGrid.appendChild(createCheckboxField('qty_air', !!node.parameters['qty_air'], 'Air'));
-            if (node.type === 'VirtualGauges') {
+            if (node.type === 'VirtualGauges' || node.type === 'VTKOutput') {
                 qtyGrid.appendChild(createCheckboxField('qty_overpressure', !!node.parameters['qty_overpressure'], 'Overpressure'));
                 qtyGrid.appendChild(createCheckboxField('qty_impulse', !!node.parameters['qty_impulse'], 'Impulse'));
             }
@@ -826,7 +878,7 @@ export class PropertyEditor {
             'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
             'ideal_gamma', 'ideal_rho_0', 'ideal_e_0',
             // 3D CFD keys
-            'nx', 'ny', 'nz', 'dim_x', 'dim_y', 'dim_z', 'origin_x', 'origin_y', 'origin_z',
+            'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
             'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
             'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
             'min_y', 'max_y', 'min_val', 'max_val', 'ambientLevel', 'specularIntensity'
@@ -865,7 +917,8 @@ export class PropertyEditor {
             'colormap': ['plasma', 'viridis', 'rainbow', 'coolwarm', 'cividis', 'grayscale'],
             'refresh_rate': ['0.0', '0.016', '0.033', '0.05', '0.1', '0.2', '0.5', '1.0'],
             'ascii_delimiter': ['Comma', 'Tab', 'Space'],
-            'vtk_format': ['ASCII', 'Binary', 'Compressed Binary']
+            'vtk_format': ['ASCII', 'Binary', 'Compressed Binary'],
+            'voxelization_method': ['watertight_floodfill', 'watertight_raycast', 'thin_shell', 'winding_number']
         };
 
         if (dropdowns[key]) {
@@ -883,6 +936,7 @@ export class PropertyEditor {
                 if (opt === value.toString()) option.selected = true;
                 select.appendChild(option);
             });
+            select.value = value.toString();
 
             select.addEventListener('change', () => {
                 let val: any = select.value;
@@ -967,7 +1021,7 @@ export class PropertyEditor {
             delBtn.onclick = (e) => {
                 e.preventDefault();
                 const updated = slices.filter((_: any, i: number) => i !== idx);
-                this.updateParameter('slices', updated);
+                this.updateSlicesInPlace(updated);
             };
             rowHeader.appendChild(delBtn);
             row.appendChild(rowHeader);
@@ -1001,6 +1055,7 @@ export class PropertyEditor {
                 if (opt === slice.axis) option.selected = true;
                 axisSelect.appendChild(option);
             });
+            axisSelect.value = slice.axis;
             axisSelect.onchange = () => {
                 let newMin = 0.0;
                 let newMax = 1.0;
@@ -1013,7 +1068,7 @@ export class PropertyEditor {
                         if (solverConn) {
                             const solverNode = state.nodes.find(n => n.id === solverConn.fromNode);
                             if (solverNode && (solverNode.type === 'CFDSolver3D' || solverNode.type === 'CFDSolver2D')) {
-                                const connToSolver = state.connections.find(c => c.toNode === solverNode.id);
+                                const connToSolver = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'mesh');
                                 if (connToSolver) {
                                     meshNode = state.nodes.find(n => n.id === connToSolver.fromNode);
                                 }
@@ -1022,22 +1077,22 @@ export class PropertyEditor {
                     }
 
                     if (meshNode && meshNode.type === 'DomainMesh3D') {
-                        const originX = Number(meshNode.parameters?.origin_x ?? 0.0);
-                        const originY = Number(meshNode.parameters?.origin_y ?? 0.0);
-                        const originZ = Number(meshNode.parameters?.origin_z ?? 0.0);
-                        const dimX = Number(meshNode.parameters?.dim_x ?? 1.0);
-                        const dimY = Number(meshNode.parameters?.dim_y ?? 1.0);
-                        const dimZ = Number(meshNode.parameters?.dim_z ?? 1.0);
+                        const xmin = Number(meshNode.parameters?.xmin ?? 0.0);
+                        const xmax = Number(meshNode.parameters?.xmax ?? 1.0);
+                        const ymin = Number(meshNode.parameters?.ymin ?? 0.0);
+                        const ymax = Number(meshNode.parameters?.ymax ?? 1.0);
+                        const zmin = Number(meshNode.parameters?.zmin ?? 0.0);
+                        const zmax = Number(meshNode.parameters?.zmax ?? 1.0);
 
                         if (axisSelect.value === 'xy') {
-                            newMin = originZ;
-                            newMax = originZ + dimZ;
+                            newMin = zmin;
+                            newMax = zmax;
                         } else if (axisSelect.value === 'xz') {
-                            newMin = originY;
-                            newMax = originY + dimY;
+                            newMin = ymin;
+                            newMax = ymax;
                         } else if (axisSelect.value === 'yz') {
-                            newMin = originX;
-                            newMax = originX + dimX;
+                            newMin = xmin;
+                            newMax = xmax;
                         }
                     }
                 }
@@ -1045,7 +1100,7 @@ export class PropertyEditor {
 
                 const updated = [...slices];
                 updated[idx] = { ...slice, axis: axisSelect.value, offset: newOffset };
-                this.updateParameter('slices', updated);
+                this.updateSlicesInPlace(updated);
             };
             axisDiv.appendChild(axisSelect);
             inputsRow.appendChild(axisDiv);
@@ -1072,7 +1127,7 @@ export class PropertyEditor {
             offsetInput.onchange = () => {
                 const updated = [...slices];
                 updated[idx] = { ...slice, offset: Number(offsetInput.value) };
-                this.updateParameter('slices', updated);
+                this.updateSlicesInPlace(updated);
             };
             offsetDiv.appendChild(offsetInput);
             inputsRow.appendChild(offsetDiv);
@@ -1101,7 +1156,10 @@ export class PropertyEditor {
                 { value: 'energy', label: 'Energy' },
                 { value: 'species1', label: 'Products' },
                 { value: 'species2', label: 'Unburnt' },
-                { value: 'species3', label: 'Air' }
+                { value: 'species3', label: 'Air' },
+                { value: 'solid', label: 'Solid Cells' },
+                { value: 'overpressure', label: 'Peak Overpressure' },
+                { value: 'impulse', label: 'Peak Impulse' }
             ];
 
             QUANTITIES.forEach(q => {
@@ -1111,10 +1169,11 @@ export class PropertyEditor {
                 if (slice.quantities && slice.quantities[0] === q.value) option.selected = true;
                 qtySelect.appendChild(option);
             });
+            qtySelect.value = slice.quantities && slice.quantities[0] ? slice.quantities[0] : 'pressure';
             qtySelect.onchange = () => {
                 const updated = [...slices];
                 updated[idx] = { ...slice, quantities: [qtySelect.value] };
-                this.updateParameter('slices', updated);
+                this.updateSlicesInPlace(updated);
             };
             qtyDiv.appendChild(qtySelect);
             inputsRow.appendChild(qtyDiv);
@@ -1143,10 +1202,11 @@ export class PropertyEditor {
                 if ((slice.stride || 1) === st) option.selected = true;
                 strideSelect.appendChild(option);
             });
+            strideSelect.value = String(slice.stride || 1);
             strideSelect.onchange = () => {
                 const updated = [...slices];
                 updated[idx] = { ...slice, stride: Number(strideSelect.value) };
-                this.updateParameter('slices', updated);
+                this.updateSlicesInPlace(updated);
             };
             strideDiv.appendChild(strideSelect);
             inputsRow.appendChild(strideDiv);
@@ -1189,20 +1249,44 @@ export class PropertyEditor {
                 }
 
                 if (meshNode && meshNode.type === 'DomainMesh3D') {
-                    const originZ = Number(meshNode.parameters?.origin_z ?? 0.0);
-                    const dimZ = Number(meshNode.parameters?.dim_z ?? 1.0);
-                    minVal = originZ;
-                    maxVal = originZ + dimZ;
+                    const zmin = Number(meshNode.parameters?.zmin ?? 0.0);
+                    const zmax = Number(meshNode.parameters?.zmax ?? 1.0);
+                    minVal = zmin;
+                    maxVal = zmax;
                 }
             }
             const defaultOffset = (minVal + maxVal) / 2.0;
 
-            const updated = [...slices, { axis: 'xy', offset: defaultOffset, quantities: ['pressure'], stride: 1, opacity: 1.0 }];
-            this.updateParameter('slices', updated);
+            // FIX 6: Create complete slice object with all required fields (matches overlay's addSlice structure)
+            const updated = [...slices, {
+                axis: 'xy',
+                offset: defaultOffset,
+                quantities: ['pressure'],
+                stride: 1,
+                opacity: 1.0,
+                colormap: 'plasma',
+                auto_scale: true,
+                log_scale: false,
+                interpolate: true,
+                min_val: 101325.0,
+                max_val: 101325.0 * 10.0
+            }];
+            // FIX 4: Use in-place update (no undo entry, no simulation reset) for interactive slice control
+            this.updateSlicesInPlace(updated);
         };
         container.appendChild(addBtn);
     }
 
+
+    // FIX 4: For interactive slice mutations, use in-place update to avoid polluting undo history
+    // and avoid incorrectly resetting simulation status (matches overlay panel behavior).
+    // Set _forceNextFull so the state-change notification causes an immediate full DOM rebuild
+    // (slice add/remove changes list structure, which the fast-path cannot handle).
+    private updateSlicesInPlace(slices: any[]): void {
+        if (!this.currentNodeId) return;
+        this._forceNextFull = true;
+        this.stateManager.updateNodeParametersInPlace(this.currentNodeId, { slices });
+    }
 
     private updateParameter(key: string, value: any): void {
         if (!this.currentNodeId) return;
@@ -1212,6 +1296,12 @@ export class PropertyEditor {
         if (!node) return;
 
         const updates: Record<string, any> = { [key]: value };
+
+        if (node.type === 'STLGeometry' && key === 'voxelization_method') {
+            const rand = Math.floor(Math.random() * 1000000);
+            const simpleHash = 'stl_' + rand.toString(36);
+            updates['geometry_hash'] = simpleHash;
+        }
 
         if (node.type === 'Material' && key === 'composition') {
             const EXPLOSIVE_PRESETS: Record<string, Record<string, number>> = {

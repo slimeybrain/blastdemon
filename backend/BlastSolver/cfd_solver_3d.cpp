@@ -23,7 +23,7 @@ CFDSolver3DImpl<RealType, IsMultiMaterial>::CFDSolver3DImpl(int nx, int ny, int 
     geom_pool.resize(total_tiles);
     #pragma omp parallel for
     for (int t = 0; t < total_tiles; ++t) {
-        std::fill(geom_pool[t].cells, geom_pool[t].cells + TILE_CELLS_3D, GeometryPayload{0.0f, 0.0f, 0.0f, false});
+        std::fill(geom_pool[t].cells, geom_pool[t].cells + TILE_CELLS_3D, GeometryPayload{0, 0, 0, false});
     }
     is_ideal_gas_val = !IsMultiMaterial;
     MultiMat::initializePrecalculatedTerms(currentMaterials);
@@ -61,6 +61,9 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setInitialCondition(const Charg
                 tile.arho2[i] = 0.0;
             }
             tile.floor_status[i] = 0;
+            tile.peak_overpressure[i] = 0.0;
+            tile.running_impulse[i] = 0.0;
+            tile.peak_impulse[i] = 0.0;
 
             u_tile.rho[i] = (RealType)ambient_rho;
             u_tile.rhoux[i] = 0.0;
@@ -949,6 +952,24 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
 
     updatePrimitiveFromConservative();
     applyBC();
+
+    #pragma omp parallel for
+    for (int t = 0; t < (int)states_pool.size(); ++t) {
+        if (!active_tiles[t]) continue;
+        auto& tile = states_pool[t];
+        for (int i = 0; i < TILE_CELLS_3D; ++i) {
+            RealType op = tile.p[i] - (RealType)ambient_p;
+            if (op < (RealType)0.0) op = (RealType)0.0;
+            if (op > tile.peak_overpressure[i]) {
+                tile.peak_overpressure[i] = op;
+            }
+            tile.running_impulse[i] += op * (RealType)dt;
+            if (tile.running_impulse[i] > tile.peak_impulse[i]) {
+                tile.peak_impulse[i] = tile.running_impulse[i];
+            }
+        }
+    }
+
     currentTime += dt;
     updateActiveRegions();
 }
@@ -999,12 +1020,20 @@ std::vector<float> CFDSolver3DImpl<RealType, IsMultiMaterial>::sampleGauge(const
 template <typename RealType, bool IsMultiMaterial>
 std::vector<float> CFDSolver3DImpl<RealType, IsMultiMaterial>::getCellValues(int gx, int gy, int gz) const {
     auto s = sampleState(gx, gy, gz);
-    std::vector<float> vals(7, 0.0f);
+    std::vector<float> vals(10, 0.0f);
     vals[0] = (float)s.p; vals[1] = (float)s.rho;
     vals[2] = (float)std::sqrt(s.ux*s.ux + s.uy*s.uy + s.uz*s.uz);
     vals[3] = (float)(s.E / std::max(s.rho, 1e-6));
     if constexpr (IsMultiMaterial) { vals[4] = (float)s.alpha1; vals[5] = (float)s.alpha2; vals[6] = (float)(1.0 - s.alpha1 - s.alpha2); }
     else { vals[6] = 1.0f; }
+
+    if (!geom_pool.empty()) {
+        int t = (gx >> 3) + (gy >> 3) * n_tiles_x + (gz >> 3) * n_tiles_x * n_tiles_y;
+        int c = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
+        vals[7] = geom_pool[t].cells[c].is_boundary ? 1.0f : 0.0f;
+    }
+    vals[8] = (float)s.peak_overpressure;
+    vals[9] = (float)s.peak_impulse;
     return vals;
 }
 
@@ -1014,13 +1043,26 @@ std::vector<float> CFDSolver3DImpl<RealType, IsMultiMaterial>::extractSlice(cons
     std::string qty = (slice.quantities.empty()) ? "pressure" : slice.quantities[0];
     int stride = slice.stride > 0 ? slice.stride : 1;
 
-    auto getVal = [&](const CellState3D<IsMultiMaterial>& s) -> float {
+    auto is_solid = [&](int cx, int cy, int cz) {
+        if (geom_pool.empty()) return false;
+        if (cx < 0 || cx >= nx || cy < 0 || cy >= ny || cz < 0 || cz >= nz) return false;
+        int t = (cx >> 3) + (cy >> 3) * n_tiles_x + (cz >> 3) * n_tiles_x * n_tiles_y;
+        int c = (cx & 7) + (cy & 7) * 8 + (cz & 7) * 64;
+        return geom_pool[t].cells[c].is_boundary;
+    };
+
+    auto getVal = [&](const CellState3D<IsMultiMaterial>& s, int gx_c, int gy_c, int gz_c) -> float {
+        if (qty == "solid" || qty == "solid_cells") {
+            return is_solid(gx_c, gy_c, gz_c) ? 1.0f : 0.0f;
+        }
         if (qty == "density" || qty == "rho") return (float)s.rho;
         if (qty == "velocity" || qty == "speed") return (float)std::sqrt(s.ux*s.ux + s.uy*s.uy + s.uz*s.uz);
         if (qty == "energy" || qty == "internal_energy") return (float)(s.E / std::max(s.rho, 1e-6));
         if (qty == "species1" || qty == "alpha1") return (float)s.alpha1;
         if (qty == "species2" || qty == "alpha2") return (float)s.alpha2;
         if (qty == "species3") return (float)(1.0 - s.alpha1 - s.alpha2);
+        if (qty == "overpressure" || qty == "peak_overpressure") return (float)s.peak_overpressure;
+        if (qty == "impulse" || qty == "peak_impulse") return (float)s.peak_impulse;
         return (float)s.p;
     };
 
@@ -1031,7 +1073,9 @@ std::vector<float> CFDSolver3DImpl<RealType, IsMultiMaterial>::extractSlice(cons
         data.resize(out_nx * out_ny);
         for (int gy = 0; gy < out_ny; ++gy) {
             for (int gx = 0; gx < out_nx; ++gx) {
-                data[gx + gy * out_nx] = getVal(sampleState(gx * stride, gy * stride, gz));
+                int gxc = gx * stride;
+                int gyc = gy * stride;
+                data[gx + gy * out_nx] = getVal(sampleState(gxc, gyc, gz), gxc, gyc, gz);
             }
         }
     } else if (slice.axis == "xz") {
@@ -1041,7 +1085,9 @@ std::vector<float> CFDSolver3DImpl<RealType, IsMultiMaterial>::extractSlice(cons
         data.resize(out_nx * out_nz);
         for (int gz = 0; gz < out_nz; ++gz) {
             for (int gx = 0; gx < out_nx; ++gx) {
-                data[gx + gz * out_nx] = getVal(sampleState(gx * stride, gy, gz * stride));
+                int gxc = gx * stride;
+                int gzc = gz * stride;
+                data[gx + gz * out_nx] = getVal(sampleState(gxc, gy, gzc), gxc, gy, gzc);
             }
         }
     } else if (slice.axis == "yz") {
@@ -1051,7 +1097,9 @@ std::vector<float> CFDSolver3DImpl<RealType, IsMultiMaterial>::extractSlice(cons
         data.resize(out_ny * out_nz);
         for (int gz = 0; gz < out_nz; ++gz) {
             for (int gy = 0; gy < out_ny; ++gy) {
-                data[gy + gz * out_ny] = getVal(sampleState(gx, gy * stride, gz * stride));
+                int gyc = gy * stride;
+                int gzc = gz * stride;
+                data[gy + gz * out_ny] = getVal(sampleState(gx, gyc, gzc), gx, gyc, gzc);
             }
         }
     }
@@ -1088,6 +1136,9 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::initializeFrom1D(const std::vec
                 tile.arho2[i] = 0.0;
             }
             tile.floor_status[i] = 0;
+            tile.peak_overpressure[i] = 0.0;
+            tile.running_impulse[i] = 0.0;
+            tile.peak_impulse[i] = 0.0;
 
             u_tile.rho[i] = (RealType)amb_rho;
             u_tile.rhoux[i] = 0.0;
@@ -1117,6 +1168,9 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setCellStateMulti(int gx, int g
         tile.p[c_idx] = (RealType)s.p;
         tile.alpha1[c_idx] = (RealType)s.alpha1; tile.alpha2[c_idx] = (RealType)s.alpha2;
         tile.arho1[c_idx] = (RealType)s.arho1; tile.arho2[c_idx] = (RealType)s.arho2;
+        tile.peak_overpressure[c_idx] = 0.0;
+        tile.running_impulse[c_idx] = 0.0;
+        tile.peak_impulse[c_idx] = 0.0;
         active_tiles[t_idx] = 1;
     }
 }
@@ -1131,6 +1185,9 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setCellStateIdeal(int gx, int g
     auto& tile = states_pool[t_idx];
     tile.rho[c_idx] = (RealType)s.rho; tile.ux[c_idx] = (RealType)s.ux; tile.uy[c_idx] = (RealType)s.uy; tile.uz[c_idx] = (RealType)s.uz;
     tile.p[c_idx] = (RealType)s.p;
+    tile.peak_overpressure[c_idx] = 0.0;
+    tile.running_impulse[c_idx] = 0.0;
+    tile.peak_impulse[c_idx] = 0.0;
     active_tiles[t_idx] = 1;
 }
 
@@ -1197,15 +1254,20 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::retrieveNewGaugeSamples(std::ve
 }
 
 template <typename RealType, bool IsMultiMaterial>
-void CFDSolver3DImpl<RealType, IsMultiMaterial>::setGeometry(const std::string& stl_filepath, const std::string& geometry_hash) {
+void CFDSolver3DImpl<RealType, IsMultiMaterial>::setGeometry(const std::string& stl_filepath, const std::string& geometry_hash, const std::string& voxelization_method,
+                                                             const std::atomic<bool>* terminate_flag,
+                                                             std::function<void(double)> progress_callback) {
     voxelize_stl(
         stl_filepath,
         geometry_hash,
+        voxelization_method,
         geom_pool,
         nx, ny, nz,
         cellSize,
         xmin, ymin, zmin,
-        n_tiles_x, n_tiles_y, n_tiles_z
+        n_tiles_x, n_tiles_y, n_tiles_z,
+        terminate_flag,
+        progress_callback
     );
 }
 

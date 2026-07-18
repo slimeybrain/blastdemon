@@ -2,6 +2,7 @@
 #define CFD_SOLVER_3D_HPP
 
 #include <vector>
+#include <functional>
 #include <string>
 #include <atomic>
 #include <memory>
@@ -38,6 +39,7 @@ struct Slice3D {
 template <bool IsMultiMaterial>
 struct CellState3D {
     Real rho, ux, uy, uz, p, E, alpha1, alpha2, arho1, arho2;
+    Real peak_overpressure, peak_impulse;
 };
 
 template <bool IsMultiMaterial>
@@ -114,7 +116,9 @@ public:
     virtual const MultiMat::MaterialSet& getMaterialParameters() const = 0;
     virtual double getAmbientP() const = 0;
     virtual size_t getAllocatedVRAM() const { return 0; }
-    virtual void setGeometry(const std::string& stl_filepath, const std::string& geometry_hash) = 0;
+    virtual void setGeometry(const std::string& stl_filepath, const std::string& geometry_hash, const std::string& voxelization_method,
+                             const std::atomic<bool>* terminate_flag = nullptr,
+                             std::function<void(double)> progress_callback = nullptr) = 0;
     virtual std::pair<double, double> getConservationTotals() const = 0;
 };
 
@@ -180,7 +184,9 @@ public:
     bool is_terminated() const override { return terminated; }
     double getGamma() const override { return gamma; }
     void setGamma(double g) { gamma = g; }
-    void setGeometry(const std::string& stl_filepath, const std::string& geometry_hash) override {}
+    void setGeometry(const std::string& stl_filepath, const std::string& geometry_hash, const std::string& voxelization_method,
+                     const std::atomic<bool>* terminate_flag = nullptr,
+                     std::function<void(double)> progress_callback = nullptr) override {}
     std::pair<double, double> getConservationTotals() const override { return {0.0, 0.0}; }
 };
 
@@ -204,7 +210,9 @@ public:
 
     void step(double dt) override;
     double computeStepSize(double cfl = 0.4) const override;
-    void setGeometry(const std::string& stl_filepath, const std::string& geometry_hash) override;
+    void setGeometry(const std::string& stl_filepath, const std::string& geometry_hash, const std::string& voxelization_method,
+                     const std::atomic<bool>* terminate_flag = nullptr,
+                     std::function<void(double)> progress_callback = nullptr) override;
     std::pair<double, double> getConservationTotals() const override;
 
     std::vector<float> sampleGauge(const Gauge3D& gauge) const override;
@@ -242,6 +250,7 @@ public:
     template <typename RT, bool MM>
     struct CellState3DT {
         RT rho, ux, uy, uz, p, E, alpha1, alpha2, arho1, arho2;
+        RT peak_overpressure, peak_impulse;
     };
 
     // Why this works:
@@ -377,6 +386,7 @@ public:
 
         float sum_rho = 0.0f, sum_ux = 0.0f, sum_uy = 0.0f, sum_uz = 0.0f, sum_p = 0.0f;
         float sum_alpha1 = 0.0f, sum_alpha2 = 0.0f, sum_arho1 = 0.0f, sum_arho2 = 0.0f;
+        float sum_peak_op = 0.0f, sum_peak_imp = 0.0f;
         float W_total = 0.0f;
 
         for (int k = -1; k <= 1; ++k) {
@@ -413,6 +423,8 @@ public:
                     sum_uy += w * (float)s_neighbor.uy;
                     sum_uz += w * (float)s_neighbor.uz;
                     sum_p += w * (float)s_neighbor.p;
+                    sum_peak_op += w * (float)s_neighbor.peak_overpressure;
+                    sum_peak_imp += w * (float)s_neighbor.peak_impulse;
                     if constexpr (IsMultiMaterial) {
                         sum_alpha1 += w * (float)s_neighbor.alpha1;
                         sum_alpha2 += w * (float)s_neighbor.alpha2;
@@ -434,6 +446,8 @@ public:
             s_ghost.uy = sum_uy * inv_W;
             s_ghost.uz = sum_uz * inv_W;
             s_ghost.p = sum_p * inv_W;
+            s_ghost.peak_overpressure = sum_peak_op * inv_W;
+            s_ghost.peak_impulse = sum_peak_imp * inv_W;
             s_ghost.alpha1 = sum_alpha1 * inv_W;
             s_ghost.alpha2 = sum_alpha2 * inv_W;
             s_ghost.arho1 = sum_arho1 * inv_W;
@@ -483,6 +497,8 @@ public:
         s.uz = reflective_z ? -tile.uz[c_idx] : tile.uz[c_idx];
 
         RealType ke = (RealType)0.5 * s.rho * (s.ux*s.ux + s.uy*s.uy + s.uz*s.uz);
+        s.peak_overpressure = tile.peak_overpressure[c_idx];
+        s.peak_impulse = tile.peak_impulse[c_idx];
         if constexpr (IsMultiMaterial) {
             s.alpha1 = tile.alpha1[c_idx]; s.alpha2 = tile.alpha2[c_idx];
             s.arho1 = tile.arho1[c_idx]; s.arho2 = tile.arho2[c_idx];
@@ -618,10 +634,16 @@ public:
                                   w[4]*s001.uz + w[5]*s101.uz + w[6]*s011.uz + w[7]*s111.uz;
                     double p_i = w[0]*s000.p + w[1]*s100.p + w[2]*s010.p + w[3]*s110.p +
                                  w[4]*s001.p + w[5]*s101.p + w[6]*s011.p + w[7]*s111.p;
+                    double peak_op_i = w[0]*s000.peak_overpressure + w[1]*s100.peak_overpressure + w[2]*s010.peak_overpressure + w[3]*s110.peak_overpressure +
+                                       w[4]*s001.peak_overpressure + w[5]*s101.peak_overpressure + w[6]*s011.peak_overpressure + w[7]*s111.peak_overpressure;
+                    double peak_imp_i = w[0]*s000.peak_impulse + w[1]*s100.peak_impulse + w[2]*s010.peak_impulse + w[3]*s110.peak_impulse +
+                                        w[4]*s001.peak_impulse + w[5]*s101.peak_impulse + w[6]*s011.peak_impulse + w[7]*s111.peak_impulse;
 
                     CellState3D<IsMultiMaterial> s_ghost;
                     s_ghost.rho = rho_i;
                     s_ghost.p = p_i;
+                    s_ghost.peak_overpressure = peak_op_i;
+                    s_ghost.peak_impulse = peak_imp_i;
 
                     double u_dot_n = ux_i * nx_u + uy_i * ny_u + uz_i * nz_u;
                     s_ghost.ux = ux_i - 2.0 * u_dot_n * nx_u;
@@ -694,6 +716,8 @@ public:
         s.ux = reflective_x ? -(double)tile.ux[c_idx] : (double)tile.ux[c_idx];
         s.uy = reflective_y ? -(double)tile.uy[c_idx] : (double)tile.uy[c_idx];
         s.uz = reflective_z ? -(double)tile.uz[c_idx] : (double)tile.uz[c_idx];
+        s.peak_overpressure = (double)tile.peak_overpressure[c_idx];
+        s.peak_impulse = (double)tile.peak_impulse[c_idx];
 
         double ke = 0.5 * s.rho * (s.ux*s.ux + s.uy*s.uy + s.uz*s.uz);
         if constexpr (IsMultiMaterial) {

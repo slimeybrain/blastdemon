@@ -2282,7 +2282,7 @@ export class NodeViewer {
             'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
             'ideal_gamma', 'ideal_rho_0', 'ideal_e_0',
             // 3D CFD keys
-            'nx', 'ny', 'nz', 'dim_x', 'dim_y', 'dim_z', 'origin_x', 'origin_y', 'origin_z',
+            'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
             'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
             'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
             'min_y', 'max_y', 'min_val', 'max_val', 'ambientLevel', 'specularIntensity'
@@ -2320,6 +2320,29 @@ export class NodeViewer {
             'charge_shape': chargeShapeOptions,
             'material_type': ['Air', 'JWL Charge', 'Ideal Gas Charge']
         };
+
+        if (typeof value === 'boolean') {
+            const select = document.createElement('select');
+            select.style.width = '100%';
+            select.style.background = '#252526';
+            select.style.color = '#ccc';
+            select.style.border = '1px solid #444';
+            select.style.padding = '4px';
+            select.style.fontSize = 'var(--font-sm)';
+
+            ['true', 'false'].forEach(opt => {
+                const option = document.createElement('option');
+                option.value = opt;
+                option.text = opt === 'true' ? 'True' : 'False';
+                if ((opt === 'true') === value) option.selected = true;
+                select.appendChild(option);
+            });
+
+            select.addEventListener('change', () => {
+                this.updateParameter(node, key, select.value === 'true');
+            });
+            return select;
+        }
 
         if (dropdowns[key]) {
             const select = document.createElement('select');

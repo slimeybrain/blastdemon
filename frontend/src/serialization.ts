@@ -28,7 +28,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
         'ideal_gamma', 'ideal_rho_0', 'ideal_e_0',
         // 3D CFD keys
-        'nx', 'ny', 'nz', 'dim_x', 'dim_y', 'dim_z', 'origin_x', 'origin_y', 'origin_z',
+        'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
         'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
         'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
         'min_y', 'max_y', 'min_val', 'max_val', 'ambientLevel', 'specularIntensity'
@@ -128,6 +128,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             if (stlNode && stlNode.type === 'STLGeometry') {
                 flattenedParams['stl_file'] = stlNode.parameters.stl_file || '';
                 flattenedParams['geometry_hash'] = stlNode.parameters.geometry_hash || '';
+                flattenedParams['voxelization_method'] = stlNode.parameters.voxelization_method || 'watertight_floodfill';
             }
         }
 
@@ -458,16 +459,22 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         flattenedParams['max_z'] = maxZ;
     } else if (command === "INIT_3D") {
         const cellSize = flattenedParams['cell_size'] || 0.01;
-        const dimX = flattenedParams['dim_x'] || 1.0;
-        const dimY = flattenedParams['dim_y'] || 1.0;
-        const dimZ = flattenedParams['dim_z'] || 1.0;
+        const xmin = flattenedParams['xmin'] !== undefined ? flattenedParams['xmin'] : 0.0;
+        const xmax = flattenedParams['xmax'] !== undefined ? flattenedParams['xmax'] : 1.0;
+        const ymin = flattenedParams['ymin'] !== undefined ? flattenedParams['ymin'] : 0.0;
+        const ymax = flattenedParams['ymax'] !== undefined ? flattenedParams['ymax'] : 1.0;
+        const zmin = flattenedParams['zmin'] !== undefined ? flattenedParams['zmin'] : 0.0;
+        const zmax = flattenedParams['zmax'] !== undefined ? flattenedParams['zmax'] : 1.0;
+        const dimX = xmax - xmin;
+        const dimY = ymax - ymin;
+        const dimZ = zmax - zmin;
 
         flattenedParams['nx'] = Math.round(dimX / cellSize);
         flattenedParams['ny'] = Math.round(dimY / cellSize);
         flattenedParams['nz'] = Math.round(dimZ / cellSize);
-        flattenedParams['xmin'] = flattenedParams['origin_x'] || 0.0;
-        flattenedParams['ymin'] = flattenedParams['origin_y'] || 0.0;
-        flattenedParams['zmin'] = flattenedParams['origin_z'] || 0.0;
+        flattenedParams['xmin'] = xmin;
+        flattenedParams['ymin'] = ymin;
+        flattenedParams['zmin'] = zmin;
 
         if (!flattenedParams['gamma']) flattenedParams['gamma'] = 1.4;
         const p = flattenedParams['atm_pressure'] || 101325.0;

@@ -19,10 +19,12 @@ struct Slice3D;
 
 void export_vtu_slice_3d(const std::string& filename, const CFDSolver3D& solver, const Slice3D& slice, const std::string& format,
                          bool has_p, bool has_rho, bool has_vel, bool has_E,
-                         bool has_reacted, bool has_unreacted, bool has_air);
+                         bool has_reacted, bool has_unreacted, bool has_air,
+                         bool has_solid = true, bool has_overpressure = true, bool has_impulse = true);
 
 void export_vtu_volume_3d(const std::string& filename, const CFDSolver3D& solver, const std::string& format,
                           bool has_p, bool has_rho, bool has_vel, bool has_E,
-                          bool has_reacted, bool has_unreacted, bool has_air);
+                          bool has_reacted, bool has_unreacted, bool has_air,
+                          bool has_solid = true, bool has_overpressure = true, bool has_impulse = true);
 
 #endif

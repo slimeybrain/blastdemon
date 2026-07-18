@@ -550,7 +550,10 @@ const DEFAULT_QUANTITY_RANGES: Record<string, [number, number]> = {
     energy: [200000.0, 10000000.0],
     species1: [0.0, 1.0],
     species2: [0.0, 1.0],
-    species3: [0.0, 1.0]
+    species3: [0.0, 1.0],
+    solid: [0.0, 1.0],
+    overpressure: [0.0, 101325.0 * 99.0],
+    impulse: [0.0, 10000.0]
 };
 
 let slicesConfig: any[] = [];
@@ -1378,9 +1381,14 @@ function handleFrame(buffer: ArrayBuffer) {
         const h = view.getUint32(cacheOffset + 12, true);
         const dataStart = cacheOffset + 16;
         const floatData = new Float32Array(buffer, dataStart, w * h);
+
+        const config = slicesConfig[i] || {};
+        const useAxis = config.axis !== undefined ? (config.axis === 'xy' ? 0 : (config.axis === 'xz' ? 1 : 2)) : axis;
+        const useOffset = config.offset !== undefined ? config.offset : zOff;
+
         cachedSlices.push({
-            axis,
-            offset: zOff,
+            axis: useAxis,
+            offset: useOffset,
             w,
             h,
             data: new Float32Array(floatData)

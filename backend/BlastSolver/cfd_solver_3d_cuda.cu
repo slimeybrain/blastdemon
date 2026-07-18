@@ -189,6 +189,9 @@ __global__ void __launch_bounds__(512) initialize_ambient_kernel(PrimitiveTile3D
     }
     
     states[t_idx].floor_status[c_idx] = 0;
+    states[t_idx].peak_overpressure[c_idx] = 0.0;
+    states[t_idx].running_impulse[c_idx] = 0.0;
+    states[t_idx].peak_impulse[c_idx] = 0.0;
 
     U[t_idx].rho[c_idx] = amb_rho;
     U[t_idx].rhoux[c_idx] = 0;
@@ -243,6 +246,7 @@ __global__ void __launch_bounds__(512) commit_states_kernel(PrimitiveTile3D<Real
 template <typename RealType>
 struct GPUCellStateT {
     RealType rho, ux, uy, uz, p, E, alpha1, alpha2, arho1, arho2;
+    RealType peak_overpressure, peak_impulse;
 };
 
 __device__ __noinline__ bool is_solid_cell_gpu(const GeometryTile3D* geom, int i, int j, int k) {
@@ -310,6 +314,8 @@ __device__ __noinline__ GPUCellStateT<RealType> sample_gpu_raw(const PrimitiveTi
     s.uz = rz ? -tile.uz[c_idx] : tile.uz[c_idx];
     s.p = tile.p[c_idx];
     s.E = 0.0;
+    s.peak_overpressure = tile.peak_overpressure[c_idx];
+    s.peak_impulse = tile.peak_impulse[c_idx];
     if constexpr (IsMultiMaterial) {
         s.alpha1 = tile.alpha1[c_idx];
         s.alpha2 = tile.alpha2[c_idx];
@@ -1257,6 +1263,9 @@ __global__ void __launch_bounds__(512) set_initial_condition_kernel(PrimitiveTil
     states[t_idx].uy[c_idx] = 0;
     states[t_idx].uz[c_idx] = 0;
     states[t_idx].p[c_idx] = p;
+    states[t_idx].peak_overpressure[c_idx] = 0.0;
+    states[t_idx].running_impulse[c_idx] = 0.0;
+    states[t_idx].peak_impulse[c_idx] = 0.0;
     
     RealType init_E;
     if constexpr (IsMultiMaterial) {
@@ -1315,6 +1324,8 @@ __device__ float get_value_by_qty(const PrimitiveTile3D<RealType, IsMultiMateria
         if constexpr (IsMultiMaterial) return (float)(1.0 - tile.alpha1[c_idx] - tile.alpha2[c_idx]);
         return 1.0f;
     }
+    if (qty_id == 8) return (float)tile.peak_overpressure[c_idx];
+    if (qty_id == 9) return (float)tile.peak_impulse[c_idx];
     return (float)tile.p[c_idx];
 }
 
@@ -1349,6 +1360,8 @@ __device__ float get_value_by_qty_struct(const GPUCellStateT<RealType>& tile, in
         if constexpr (IsMultiMaterial) return (float)(1.0 - tile.alpha1 - tile.alpha2);
         return 1.0f;
     }
+    if (qty_id == 8) return (float)tile.peak_overpressure;
+    if (qty_id == 9) return (float)tile.peak_impulse;
     return (float)tile.p;
 }
 
@@ -1451,6 +1464,11 @@ __device__ GPUCellStateT<RealType> sample_state_with_mirror_gpu(
                 sC.uy = uy_i - 2.0 * u_dot_n * ny_u;
                 sC.uz = uz_i - 2.0 * u_dot_n * nz_u;
 
+                sC.peak_overpressure = w[0]*s000.peak_overpressure + w[1]*s100.peak_overpressure + w[2]*s010.peak_overpressure + w[3]*s110.peak_overpressure +
+                                       w[4]*s001.peak_overpressure + w[5]*s101.peak_overpressure + w[6]*s011.peak_overpressure + w[7]*s111.peak_overpressure;
+                sC.peak_impulse = w[0]*s000.peak_impulse + w[1]*s100.peak_impulse + w[2]*s010.peak_impulse + w[3]*s110.peak_impulse +
+                                  w[4]*s001.peak_impulse + w[5]*s101.peak_impulse + w[6]*s011.peak_impulse + w[7]*s111.peak_impulse;
+
                 if constexpr (IsMultiMaterial) {
                     sC.alpha1 = w[0]*s000.alpha1 + w[1]*s100.alpha1 + w[2]*s010.alpha1 + w[3]*s110.alpha1 +
                                 w[4]*s001.alpha1 + w[5]*s101.alpha1 + w[6]*s011.alpha1 + w[7]*s111.alpha1;
@@ -1488,6 +1506,8 @@ __device__ GPUCellStateT<RealType> sample_state_with_mirror_gpu(
                 if (max_dot > -1e8f) {
                     auto sn = sample_gpu_raw<RealType, IsMultiMaterial>(states, gx+best_dx, gy+best_dy, gz+best_dz);
                     sC.rho = sn.rho; sC.p = sn.p;
+                    sC.peak_overpressure = sn.peak_overpressure;
+                    sC.peak_impulse = sn.peak_impulse;
                     if constexpr (IsMultiMaterial) {
                         sC.alpha1=sn.alpha1; sC.alpha2=sn.alpha2; sC.arho1=sn.arho1; sC.arho2=sn.arho2;
                     }
@@ -1538,8 +1558,26 @@ __global__ void extract_slice_kernel(const PrimitiveTile3D<RealType, IsMultiMate
         gx = max(0, min(nx - 1, gx));
     }
 
-    GPUCellStateT<RealType> sC = sample_state_with_mirror_gpu<RealType, IsMultiMaterial>(states, geom, gx, gy, gz, xmin, ymin, zmin, dx);
-    data[i + j * w] = get_value_by_qty_struct<RealType, IsMultiMaterial>(sC, qty_id);
+    if (qty_id == 7) {
+        if (geom == nullptr) {
+            data[i + j * w] = 0.0f;
+        } else {
+            int tx = gx / 8;
+            int ty = gy / 8;
+            int tz = gz / 8;
+            int ttx = (nx + 7) / 8;
+            int tty = (ny + 7) / 8;
+            int t_idx = tx + ty * ttx + tz * ttx * tty;
+            int cx = gx % 8;
+            int cy = gy % 8;
+            int cz = gz % 8;
+            int c_idx = cx + cy * 8 + cz * 64;
+            data[i + j * w] = geom[t_idx].cells[c_idx].is_boundary ? 1.0f : 0.0f;
+        }
+    } else {
+        GPUCellStateT<RealType> sC = sample_state_with_mirror_gpu<RealType, IsMultiMaterial>(states, geom, gx, gy, gz, xmin, ymin, zmin, dx);
+        data[i + j * w] = get_value_by_qty_struct<RealType, IsMultiMaterial>(sC, qty_id);
+    }
 }
 
 template <typename RealType, bool IsMultiMaterial>
@@ -1868,6 +1906,42 @@ __global__ void __launch_bounds__(512) williamson_stage_B_kernel_3d(Conservative
 }
 
 template <typename RealType, bool IsMultiMaterial>
+__global__ void __launch_bounds__(512) update_peak_quantities_kernel_3d(
+    PrimitiveTile3D<RealType, IsMultiMaterial>* states,
+    const uint8_t* active_tiles,
+    RealType ambient_p,
+    RealType dt
+) {
+    int tx = blockIdx.x;
+    int ty = blockIdx.y;
+    int tz = blockIdx.z;
+    int t_idx = tx + ty * d_ntx + tz * d_ntx * d_nty;
+
+    if (!active_tiles[t_idx]) return;
+
+    int lx = threadIdx.x;
+    int ly = threadIdx.y;
+    int lz = threadIdx.z;
+    int c_idx = lx + ly * TILE_SIZE_3D + lz * TILE_SIZE_3D * TILE_SIZE_3D;
+
+    int gx = tx * TILE_SIZE_3D + lx;
+    int gy = ty * TILE_SIZE_3D + ly;
+    int gz = tz * TILE_SIZE_3D + lz;
+
+    if (gx >= d_nx || gy >= d_ny || gz >= d_nz) return;
+
+    RealType op = states[t_idx].p[c_idx] - ambient_p;
+    if (op < (RealType)0.0) op = (RealType)0.0;
+    if (op > states[t_idx].peak_overpressure[c_idx]) {
+        states[t_idx].peak_overpressure[c_idx] = op;
+    }
+    states[t_idx].running_impulse[c_idx] += op * dt;
+    if (states[t_idx].running_impulse[c_idx] > states[t_idx].peak_impulse[c_idx]) {
+        states[t_idx].peak_impulse[c_idx] = states[t_idx].running_impulse[c_idx];
+    }
+}
+
+template <typename RealType, bool IsMultiMaterial>
 void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
     ensure_paged_in();
     RealType dt_r = (RealType)dt;
@@ -1911,6 +1985,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
 
     update_primitive_kernel_3d<RealType, IsMultiMaterial><<<blocks, threads>>>((PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states, (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U, (const uint8_t*)d_active_tiles, (const GeometryTile3D*)d_geom);
     apply_bc_kernel_3d<RealType, IsMultiMaterial><<<blocks, threads>>>((PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states, nx, ny, nz);
+    update_peak_quantities_kernel_3d<RealType, IsMultiMaterial><<<blocks, threads>>>((PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states, (const uint8_t*)d_active_tiles, (RealType)ambient_p, dt_r);
     
     CHECK_CUDA(cudaDeviceSynchronize());
     currentTime += dt;
@@ -2047,7 +2122,7 @@ std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::getCellValues(int
         last_cached_tile_idx = t_idx;
     }
 
-    std::vector<float> vals(7, 0.0f);
+    std::vector<float> vals(10, 0.0f);
     vals[0] = (float)cached_tile.p[c_idx]; vals[1] = (float)cached_tile.rho[c_idx];
     vals[2] = (float)sqrt((double)(cached_tile.ux[c_idx]*cached_tile.ux[c_idx] + cached_tile.uy[c_idx]*cached_tile.uy[c_idx] + cached_tile.uz[c_idx]*cached_tile.uz[c_idx]));
 
@@ -2066,6 +2141,14 @@ std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::getCellValues(int
     } else {
         vals[6] = 1.0f;
     }
+
+    if (d_geom != nullptr) {
+        GeometryTile3D cached_geom_tile;
+        CHECK_CUDA(cudaMemcpy(&cached_geom_tile, (const GeometryTile3D*)d_geom + t_idx, sizeof(GeometryTile3D), cudaMemcpyDeviceToHost));
+        vals[7] = cached_geom_tile.cells[c_idx].is_boundary ? 1.0f : 0.0f;
+    }
+    vals[8] = (float)cached_tile.peak_overpressure[c_idx];
+    vals[9] = (float)cached_tile.peak_impulse[c_idx];
     return vals;
 }
 
@@ -2092,6 +2175,9 @@ std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::extractSlice(cons
     else if (qty == "species1" || qty == "alpha1") qty_id = 4;
     else if (qty == "species2" || qty == "alpha2") qty_id = 5;
     else if (qty == "species3") qty_id = 6;
+    else if (qty == "solid") qty_id = 7;
+    else if (qty == "overpressure" || qty == "peak_overpressure") qty_id = 8;
+    else if (qty == "impulse" || qty == "peak_impulse") qty_id = 9;
 
     CHECK_CUDA(cudaMalloc(&d_slice_buf, w * h * sizeof(float)));
 
@@ -2268,6 +2354,9 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setCellStateMulti(int i, int j,
                             tile->arho2[c] = 0.0;
                         }
                         tile->floor_status[c] = 0;
+                        tile->peak_overpressure[c] = 0.0;
+                        tile->running_impulse[c] = 0.0;
+                        tile->peak_impulse[c] = 0.0;
                     }
                     h_tiles[t_idx] = tile;
                     std::cout << "[CUDA TILE ACTIVE] " << t_idx << " (tx=" << tx << ", ty=" << ty << ", tz=" << tz << ")\n";
@@ -2335,6 +2424,9 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setCellStateIdeal(int i, int j,
                             tile->arho2[c] = 0.0;
                         }
                         tile->floor_status[c] = 0;
+                        tile->peak_overpressure[c] = 0.0;
+                        tile->running_impulse[c] = 0.0;
+                        tile->peak_impulse[c] = 0.0;
                     }
                     h_tiles[t_idx] = tile;
                     std::cout << "[CUDA TILE ACTIVE] " << t_idx << " (tx=" << tx << ", ty=" << ty << ", tz=" << tz << ")\n";
@@ -2544,7 +2636,9 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::retrieveNewGaugeSamples(std::ve
 }
 
 template <typename RealType, bool IsMultiMaterial>
-void CFDSolver3DCuda<RealType, IsMultiMaterial>::setGeometry(const std::string& stl_filepath, const std::string& geometry_hash) {
+void CFDSolver3DCuda<RealType, IsMultiMaterial>::setGeometry(const std::string& stl_filepath, const std::string& geometry_hash, const std::string& voxelization_method,
+                                                             const std::atomic<bool>* terminate_flag,
+                                                             std::function<void(double)> progress_callback) {
     ensure_paged_in();
 
     int ntx = (nx + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
@@ -2556,16 +2650,21 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setGeometry(const std::string& 
     voxelize_stl(
         stl_filepath,
         geometry_hash,
+        voxelization_method,
         host_geom,
         nx, ny, nz,
         cellSize,
         xmin, ymin, zmin,
-        ntx, nty, ntz
+        ntx, nty, ntz,
+        terminate_flag,
+        progress_callback
     );
+
+    if (terminate_flag && terminate_flag->load()) return;
 
     // Copy to GPU
     CHECK_CUDA(cudaMemcpy(d_geom, host_geom.data(), total_tiles * sizeof(GeometryTile3D), cudaMemcpyHostToDevice));
-    std::cout << "[INFO] Watertight 3D geometry loaded onto GPU." << std::endl;
+    std::cout << "[INFO] 3D geometry loaded onto GPU." << std::endl;
 
     // Diagnostic check
     int boundary_count = 0;

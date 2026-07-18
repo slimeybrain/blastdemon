@@ -8,7 +8,10 @@ const DEFAULT_QUANTITY_RANGES: Record<string, [number, number]> = {
     energy: [200000.0, 10000000.0],
     species1: [0.0, 1.0],
     species2: [0.0, 1.0],
-    species3: [0.0, 1.0]
+    species3: [0.0, 1.0],
+    solid: [0.0, 1.0],
+    overpressure: [0.0, 101325.0 * 99.0],
+    impulse: [0.0, 10000.0]
 };
 
 function getFocusedQuantityAndRange(vpNode: any): { quantity: string, min: number, max: number } {
@@ -43,6 +46,7 @@ export class Telemetry3DViewport {
     private needsSlicesRebuild = true;
     private isOpen = true;
     private latestSliceRanges: { min: number, max: number }[] = [];
+    private _lastSliceKey: string = '';
 
     constructor(container: HTMLElement, panelId: string, stateManager: StateManager) {
         this.container = container;
@@ -94,7 +98,7 @@ export class Telemetry3DViewport {
                                 ...slices[index],
                                 ...updates
                             };
-                            this.propagateLinkGroup(slices, index, updates);
+                            this.propagateSliceQuantitySettings(slices, index, updates);
                             this.updateSlices(slices);
                         }
                     } else {
@@ -427,6 +431,8 @@ export class Telemetry3DViewport {
     }
 
     private buildRenderControls(parent: HTMLElement) {
+        const vpNode = this.getViewportNode();
+
         // Grid (bbox) toggle
         const gridRow = document.createElement('label');
         gridRow.style.display = 'flex';
@@ -437,10 +443,12 @@ export class Telemetry3DViewport {
         const gridCb = document.createElement('input');
         gridCb.type = 'checkbox';
         gridCb.id = 'viewport-grid-cb';
+        // FIX 1/5: Initialize from saved state so value is correct on load
+        gridCb.checked = vpNode ? (vpNode.parameters.show_grid !== false) : true;
         gridCb.onchange = () => {
-            const vpNode = this.getViewportNode();
-            if (vpNode) {
-                this.stateManager.updateNodeParametersInPlace(vpNode.id, { show_grid: gridCb.checked });
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { show_grid: gridCb.checked });
                 this.worker.postMessage({ type: 'setConfig', data: { showGrid: gridCb.checked } });
             }
         };
@@ -458,10 +466,12 @@ export class Telemetry3DViewport {
         const edgesCb = document.createElement('input');
         edgesCb.type = 'checkbox';
         edgesCb.id = 'viewport-edges-cb';
+        // FIX 1/5: Initialize from saved state
+        edgesCb.checked = vpNode ? (!!vpNode.parameters.cell_edges) : false;
         edgesCb.onchange = () => {
-            const vpNode = this.getViewportNode();
-            if (vpNode) {
-                this.stateManager.updateNodeParametersInPlace(vpNode.id, { cell_edges: edgesCb.checked });
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { cell_edges: edgesCb.checked });
                 this.worker.postMessage({ type: 'setConfig', data: { showCellEdges: edgesCb.checked } });
             }
         };
@@ -489,6 +499,13 @@ export class Telemetry3DViewport {
     }
 
     private buildLightingControls(parent: HTMLElement) {
+        // FIX 1: Read initial values from state so sliders are persistent
+        const vpNode = this.getViewportNode();
+        const initLighting = vpNode ? (vpNode.parameters.lightingEnabled !== false) : true;
+        const initAO = vpNode ? (vpNode.parameters.aoEnabled !== false) : true;
+        const initAmb = vpNode ? (vpNode.parameters.ambientLevel ?? 0.3) : 0.3;
+        const initSpec = vpNode ? (vpNode.parameters.specularIntensity ?? 0.4) : 0.4;
+
         // Lighting toggle
         const lightRow = document.createElement('label');
         lightRow.style.display = 'flex';
@@ -499,10 +516,11 @@ export class Telemetry3DViewport {
         const lightCb = document.createElement('input');
         lightCb.type = 'checkbox';
         lightCb.id = 'viewport-lighting-cb';
+        lightCb.checked = initLighting;
         lightCb.onchange = () => {
-            const vpNode = this.getViewportNode();
-            if (vpNode) {
-                this.stateManager.updateNodeParametersInPlace(vpNode.id, { lightingEnabled: lightCb.checked });
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { lightingEnabled: lightCb.checked });
                 this.worker.postMessage({ type: 'setConfig', data: { lightingEnabled: lightCb.checked } });
             }
         };
@@ -520,10 +538,11 @@ export class Telemetry3DViewport {
         const aoCb = document.createElement('input');
         aoCb.type = 'checkbox';
         aoCb.id = 'viewport-ao-cb';
+        aoCb.checked = initAO;
         aoCb.onchange = () => {
-            const vpNode = this.getViewportNode();
-            if (vpNode) {
-                this.stateManager.updateNodeParametersInPlace(vpNode.id, { aoEnabled: aoCb.checked });
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { aoEnabled: aoCb.checked });
                 this.worker.postMessage({ type: 'setConfig', data: { aoEnabled: aoCb.checked } });
             }
         };
@@ -540,6 +559,8 @@ export class Telemetry3DViewport {
         const ambLabel = document.createElement('span');
         ambLabel.style.fontSize = '8px';
         ambLabel.style.color = '#aaa';
+        // FIX 1: Set initial label from saved state
+        ambLabel.innerHTML = `Ambient Level: ${Number(initAmb).toFixed(2)}`;
         
         const ambSlider = document.createElement('input');
         ambSlider.type = 'range';
@@ -548,11 +569,13 @@ export class Telemetry3DViewport {
         ambSlider.max = '1';
         ambSlider.step = '0.05';
         ambSlider.style.width = '100%';
+        // FIX 1: Initialize slider position from saved state
+        ambSlider.value = String(initAmb);
         ambSlider.oninput = () => {
             ambLabel.innerHTML = `Ambient Level: ${Number(ambSlider.value).toFixed(2)}`;
-            const vpNode = this.getViewportNode();
-            if (vpNode) {
-                this.stateManager.updateNodeParametersInPlace(vpNode.id, { ambientLevel: Number(ambSlider.value) });
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { ambientLevel: Number(ambSlider.value) });
                 this.worker.postMessage({ type: 'setConfig', data: { ambientLevel: Number(ambSlider.value) } });
             }
         };
@@ -569,6 +592,8 @@ export class Telemetry3DViewport {
         const specLabel = document.createElement('span');
         specLabel.style.fontSize = '8px';
         specLabel.style.color = '#aaa';
+        // FIX 1: Set initial label from saved state
+        specLabel.innerHTML = `Specular Level: ${Number(initSpec).toFixed(2)}`;
         
         const specSlider = document.createElement('input');
         specSlider.type = 'range';
@@ -577,11 +602,13 @@ export class Telemetry3DViewport {
         specSlider.max = '1';
         specSlider.step = '0.05';
         specSlider.style.width = '100%';
+        // FIX 1: Initialize slider position from saved state
+        specSlider.value = String(initSpec);
         specSlider.oninput = () => {
             specLabel.innerHTML = `Specular Level: ${Number(specSlider.value).toFixed(2)}`;
-            const vpNode = this.getViewportNode();
-            if (vpNode) {
-                this.stateManager.updateNodeParametersInPlace(vpNode.id, { specularIntensity: Number(specSlider.value) });
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { specularIntensity: Number(specSlider.value) });
                 this.worker.postMessage({ type: 'setConfig', data: { specularIntensity: Number(specSlider.value) } });
             }
         };
@@ -807,19 +834,33 @@ export class Telemetry3DViewport {
         const slices = vpNode.parameters.slices ? [...vpNode.parameters.slices] : [];
         const bounds = getSliceBounds('xy', this.getMeshNode());
         const defaultOffset = (bounds.min + bounds.max) / 2.0;
+
+        const defaultQty = 'pressure';
+        let auto_scale = true;
+        let min_val = 101325.0;
+        let max_val = 101325.0 * 10.0;
+
+        const ranges = vpNode.parameters.quantity_ranges || {};
+        if (ranges[defaultQty]) {
+            [min_val, max_val] = ranges[defaultQty];
+        } else {
+            const range = DEFAULT_QUANTITY_RANGES[defaultQty] || [0.0, 1.0];
+            min_val = range[0];
+            max_val = range[1];
+        }
+
         slices.push({
             axis: 'xy',
             offset: defaultOffset,
-            quantities: ['pressure'],
+            quantities: [defaultQty],
             stride: 1,
             opacity: 1.0,
             colormap: 'plasma',
-            auto_scale: true,
+            auto_scale,
             log_scale: false,
             interpolate: true,
-            min_val: 101325.0,
-            max_val: 101325.0 * 10.0,
-            link_group: 'none'
+            min_val,
+            max_val
         });
         this.needsSlicesRebuild = true;
         this.updateSlices(slices);
@@ -837,17 +878,21 @@ export class Telemetry3DViewport {
         }
     }
 
-    private propagateLinkGroup(slices: any[], index: number, updates: any) {
-        const group = slices[index].link_group || 'none';
-        if (group === 'none') return;
-        for (const [key, value] of Object.entries(updates)) {
+    private propagateSliceQuantitySettings(slices: any[], index: number, updates: any) {
+        const currentSlice = slices[index];
+        const currentQty = currentSlice.quantities?.[0] || 'pressure';
+
+        // 1. Propagate updates to all other slices of the same quantity
+        const keysToSync = ['min_val', 'max_val', 'auto_scale', 'log_scale'];
+        const hasSyncKey = Object.keys(updates).some(k => keysToSync.includes(k));
+        if (hasSyncKey) {
             slices.forEach((s, i) => {
-                if (i !== index && s.link_group === group) {
-                    if (key === 'quantities') {
-                        slices[i].quantities = [...(value as string[])];
-                    } else {
-                        slices[i][key] = value;
-                    }
+                if (i !== index && (s.quantities?.[0] === currentQty)) {
+                    keysToSync.forEach(k => {
+                        if (updates[k] !== undefined) {
+                            s[k] = updates[k];
+                        }
+                    });
                 }
             });
         }
@@ -858,74 +903,85 @@ export class Telemetry3DViewport {
         if (!vpNode) return;
         const slices = vpNode.parameters.slices ? [...vpNode.parameters.slices] : [];
         if (slices.length > index) {
-            slices[index] = { ...slices[index], ...updates };
+            const oldQty = slices[index].quantities?.[0];
+            const newQty = updates.quantities?.[0];
             
-            // Handle Link Group Settings propagation
-            if (updates.link_group !== undefined) {
-                const newGroup = updates.link_group;
-                if (newGroup !== 'none') {
-                    const match = slices.find((s, i) => i !== index && s.link_group === newGroup);
-                    if (match) {
-                        const keysToCopy = ['quantities', 'stride', 'offset', 'opacity', 'auto_scale', 'log_scale', 'interpolate', 'colormap', 'min_val', 'max_val'];
-                        keysToCopy.forEach(k => {
-                            if (k === 'quantities') {
-                                slices[index].quantities = [...match.quantities];
-                            } else {
-                                slices[index][k] = match[k];
-                            }
-                        });
-                    }
-                }
-            } else {
-                this.propagateLinkGroup(slices, index, updates);
+            // If changing axis, compute new offset (midpoint of the new axis bounds)
+            if (updates.axis && updates.axis !== slices[index].axis) {
+                const meshNode = this.getMeshNode();
+                const bounds = getSliceBounds(updates.axis, meshNode);
+                updates.offset = (bounds.min + bounds.max) / 2.0;
             }
+            
+            slices[index] = { ...slices[index], ...updates };
+
+            // If changing quantity, apply existing global range for that qty if exists
+            if (newQty && newQty !== oldQty) {
+                const ranges = vpNode.parameters.quantity_ranges || {};
+                if (ranges[newQty]) {
+                    slices[index].min_val = ranges[newQty][0];
+                    slices[index].max_val = ranges[newQty][1];
+                    slices[index].auto_scale = false;
+                } else {
+                    const range = DEFAULT_QUANTITY_RANGES[newQty] || [0.0, 1.0];
+                    slices[index].min_val = range[0];
+                    slices[index].max_val = range[1];
+                    slices[index].auto_scale = true;
+                }
+            }
+
+            this.propagateSliceQuantitySettings(slices, index, updates);
             this.updateSlices(slices);
         }
     }
 
     private syncControls() {
         const vpNode = this.getViewportNode();
-        const solverNode = this.getSolverNode();
         if (!vpNode) return;
 
-        // Reset hasTelemetryGrid if simulation is stopped/terminated/uninitialized
-        const allModels = this.stateManager.getWorkspaceModels();
-        let targetModelId: string | null = null;
-        for (const m of allModels) {
-            if (m.nodes.some(n => n.id === vpNode.id)) {
-                targetModelId = m.id;
-                break;
-            }
-        }
-        const status = targetModelId ? this.stateManager.getModelStatus(targetModelId) : 'UNINITIALIZED';
-        if (status === 'UNINITIALIZED' || status === 'TERMINATED') {
-            this.hasTelemetryGrid = false;
-        }
+        const solverNode = this.getSolverNode();
 
         // Resolve connected DomainMesh3D
         const meshNode = this.getMeshNode();
 
         // 1. Sync Render Settings
         const gridCb = document.getElementById('viewport-grid-cb') as HTMLInputElement;
-        if (gridCb) {
-            gridCb.checked = vpNode.parameters.show_grid !== false;
+        if (gridCb && document.activeElement !== gridCb) gridCb.checked = vpNode.parameters.show_grid !== false;
+
+        const edgesCb = document.getElementById('viewport-edges-cb') as HTMLInputElement;
+        if (edgesCb && document.activeElement !== edgesCb) edgesCb.checked = !!vpNode.parameters.cell_edges;
+
+        // FIX 1: Sync lighting/AO checkboxes and sliders from state
+        const lightCb = document.getElementById('viewport-lighting-cb') as HTMLInputElement;
+        if (lightCb && document.activeElement !== lightCb) lightCb.checked = vpNode.parameters.lightingEnabled !== false;
+
+        const aoCb = document.getElementById('viewport-ao-cb') as HTMLInputElement;
+        if (aoCb && document.activeElement !== aoCb) aoCb.checked = vpNode.parameters.aoEnabled !== false;
+
+        const ambSlider = document.getElementById('viewport-ambient-slider') as HTMLInputElement;
+        if (ambSlider && document.activeElement !== ambSlider) {
+            const val = vpNode.parameters.ambientLevel ?? 0.3;
+            ambSlider.value = String(val);
+            const ambLabel = ambSlider.previousElementSibling as HTMLElement;
+            if (ambLabel) ambLabel.innerHTML = `Ambient Level: ${Number(val).toFixed(2)}`;
         }
 
-        // 1.0b Sync STL Geometry controls
-        const stlShowCb = document.getElementById('viewport-stl-show-cb') as HTMLInputElement;
-        if (stlShowCb) {
-            stlShowCb.checked = vpNode.parameters.show_stl !== false;
+        const specSlider = document.getElementById('viewport-specular-slider') as HTMLInputElement;
+        if (specSlider && document.activeElement !== specSlider) {
+            const val = vpNode.parameters.specularIntensity ?? 0.4;
+            specSlider.value = String(val);
+            const specLabel = specSlider.previousElementSibling as HTMLElement;
+            if (specLabel) specLabel.innerHTML = `Specular Level: ${Number(val).toFixed(2)}`;
         }
+
+        const stlShowCb = document.getElementById('viewport-stl-show-cb') as HTMLInputElement;
+        if (stlShowCb) stlShowCb.checked = vpNode.parameters.show_stl !== false;
 
         const stlWfCb = document.getElementById('viewport-stl-wf-cb') as HTMLInputElement;
-        if (stlWfCb) {
-            stlWfCb.checked = !!vpNode.parameters.stl_wireframe;
-        }
+        if (stlWfCb) stlWfCb.checked = !!vpNode.parameters.stl_wireframe;
 
         const stlSolidsCb = document.getElementById('viewport-stl-solids-cb') as HTMLInputElement;
-        if (stlSolidsCb) {
-            stlSolidsCb.checked = vpNode.parameters.stl_solids !== false;
-        }
+        if (stlSolidsCb) stlSolidsCb.checked = vpNode.parameters.stl_solids !== false;
 
         const stlOpacSlider = document.getElementById('viewport-stl-opacity-slider') as HTMLInputElement;
         const stlOpacLabel = stlOpacSlider?.parentElement?.querySelector('span') as HTMLElement;
@@ -935,33 +991,13 @@ export class Telemetry3DViewport {
             if (stlOpacLabel) stlOpacLabel.innerHTML = `Opacity: ${Number(val).toFixed(2)}`;
         }
 
-        // 1.0c Detect STL file path changes and load
         const stlPath = this.getSTLFilePath();
-        const net = (window as any).networkManager;
-        const netConn = net ? net.isConnected() : false;
-        if (this.debugOverlay) {
-            this.debugOverlay.innerHTML = `STL Path: ${stlPath || 'None'}<br>Conn: ${netConn}<br>Cache: ${this.currentSTLPath || 'None'}`;
-        }
-
         if (stlPath !== this.currentSTLPath) {
             if (stlPath) {
+                const net = (window as any).networkManager;
                 if (net && net.isConnected()) {
                     this.currentSTLPath = stlPath;
-                    let targetModelId = "";
-                    if (vpNode) {
-                        const allModels = this.stateManager.getWorkspaceModels();
-                        for (const m of allModels) {
-                            if (m.nodes.some(n => n.id === vpNode.id)) {
-                                targetModelId = m.id;
-                                break;
-                            }
-                        }
-                    }
-                    net.send({
-                        command: "LOAD_STL_GEOMETRY",
-                        filePath: stlPath,
-                        modelId: targetModelId
-                    });
+                    net.send({ command: "LOAD_STL_GEOMETRY", filePath: stlPath, modelId: vpNode.id });
                 }
             } else {
                 this.currentSTLPath = null;
@@ -969,85 +1005,43 @@ export class Telemetry3DViewport {
             }
         }
 
-        // 1.1 Sync Lighting & Shadows
-        const lightCb = document.getElementById('viewport-lighting-cb') as HTMLInputElement;
-        if (lightCb) {
-            lightCb.checked = vpNode.parameters.lightingEnabled !== false;
-        }
-
-        const aoCb = document.getElementById('viewport-ao-cb') as HTMLInputElement;
-        if (aoCb) {
-            aoCb.checked = vpNode.parameters.aoEnabled !== false;
-        }
-
-        const ambSlider = document.getElementById('viewport-ambient-slider') as HTMLInputElement;
-        const ambLabel = ambSlider?.parentElement?.querySelector('span') as HTMLElement;
-        if (ambSlider && document.activeElement !== ambSlider) {
-            const val = vpNode.parameters.ambientLevel ?? 0.3;
-            ambSlider.value = val.toString();
-            if (ambLabel) ambLabel.innerHTML = `Ambient Level: ${Number(val).toFixed(2)}`;
-        }
-
-        const specSlider = document.getElementById('viewport-specular-slider') as HTMLInputElement;
-        const specLabel = specSlider?.parentElement?.querySelector('span') as HTMLElement;
-        if (specSlider && document.activeElement !== specSlider) {
-            const val = vpNode.parameters.specularIntensity ?? 0.4;
-            specSlider.value = val.toString();
-            if (specLabel) specLabel.innerHTML = `Specular Level: ${Number(val).toFixed(2)}`;
-        }
-
-        const edgesCb = document.getElementById('viewport-edges-cb') as HTMLInputElement;
-        if (edgesCb) {
-            edgesCb.checked = vpNode.parameters.cell_edges === true;
-        }
         // 2. Sync Slices Row list
         const slices = vpNode.parameters.slices || [];
         if (this.sliceListContainer) {
             const currentRows = this.sliceListContainer.children.length;
+            // FIX 3: Force rebuild if slice structure changed externally (e.g. axis/qty changed from sidebar)
+            const currSliceKey = slices.map((s: any) => `${s.axis}:${s.quantities?.[0]}`).join(',');
+            if (currSliceKey !== this._lastSliceKey) {
+                this.needsSlicesRebuild = true;
+            }
+            this._lastSliceKey = currSliceKey;
             if (this.needsSlicesRebuild || currentRows !== slices.length) {
                 this.sliceListContainer.innerHTML = '';
                 this.needsSlicesRebuild = false;
                 const focusedSliceIndex = vpNode.parameters.focusedSliceIndex ?? 0;
 
                 slices.forEach((slice: any, idx: number) => {
-                    // Apply defaults
+                    const qty = slice.quantities?.[0] || 'pressure';
                     const colormapVal = slice.colormap || 'plasma';
                     const autoScaleVal = slice.auto_scale !== false;
                     const logScaleVal = slice.log_scale === true;
                     const interpolateVal = slice.interpolate !== false;
-                    let minRangeVal = slice.min_val !== undefined ? slice.min_val : 101325.0;
-                    let maxRangeVal = slice.max_val !== undefined ? slice.max_val : 101325.0 * 10.0;
+                    
+                    const ranges = vpNode.parameters.quantity_ranges || {};
+                    const range = ranges[qty] || [slice.min_val, slice.max_val];
+                    let minRangeVal = (range[0] !== undefined) ? range[0] : 101325.0;
+                    let maxRangeVal = (range[1] !== undefined) ? range[1] : 101325.0 * 10.0;
                     if (autoScaleVal && this.latestSliceRanges && this.latestSliceRanges[idx]) {
                         minRangeVal = this.latestSliceRanges[idx].min;
                         maxRangeVal = this.latestSliceRanges[idx].max;
                     }
-                    const linkGroup = slice.link_group || 'none';
+                    
                     const isExpanded = this.expandedSliceIndices.has(idx);
 
                     const row = document.createElement('div');
                     row.className = `slice-card-${idx}`;
-                    
-                    // Link Group styling
-                    let borderColor = 'rgba(255,255,255,0.06)';
-                    let leftBorder = '1px solid rgba(255,255,255,0.06)';
-                    let glowColor = '';
-                    if (linkGroup === 'A') {
-                        leftBorder = '3px solid #3b82f6';
-                        borderColor = 'rgba(59, 130, 246, 0.4)';
-                        glowColor = 'rgba(59, 130, 246, 0.05)';
-                    } else if (linkGroup === 'B') {
-                        leftBorder = '3px solid #10b981';
-                        borderColor = 'rgba(16, 185, 129, 0.4)';
-                        glowColor = 'rgba(16, 185, 129, 0.05)';
-                    } else if (linkGroup === 'C') {
-                        leftBorder = '3px solid #f59e0b';
-                        borderColor = 'rgba(245, 158, 11, 0.4)';
-                        glowColor = 'rgba(245, 158, 11, 0.05)';
-                    }
-
-                    row.style.background = glowColor || (idx === focusedSliceIndex ? 'rgba(0, 173, 255, 0.05)' : 'rgba(255,255,255,0.03)');
-                    row.style.border = idx === focusedSliceIndex ? '1px solid #00adff' : `1px solid ${borderColor}`;
-                    row.style.borderLeft = leftBorder;
+                    row.style.background = idx === focusedSliceIndex ? 'rgba(0, 173, 255, 0.05)' : 'rgba(255,255,255,0.03)';
+                    row.style.border = idx === focusedSliceIndex ? '1px solid #00adff' : '1px solid rgba(255,255,255,0.06)';
                     row.style.borderRadius = '4px';
                     row.style.padding = '6px';
                     row.style.display = 'flex';
@@ -1057,133 +1051,67 @@ export class Telemetry3DViewport {
 
                     row.onclick = (e) => {
                         const target = e.target as HTMLElement;
-                        if (target.tagName === 'SELECT' || target.tagName === 'INPUT' || target.tagName === 'BUTTON' || target.tagName === 'LABEL' || target.classList.contains('action-btn')) {
+                        if (
+                            target.closest('input') || 
+                            target.closest('select') || 
+                            target.closest('option') || 
+                            target.closest('button') || 
+                            target.closest('label')
+                        ) {
                             return;
                         }
                         this.stateManager.updateNodeParametersInPlace(vpNode.id, { focusedSliceIndex: idx });
                     };
 
-                    // Header
                     const rowHeader = document.createElement('div');
                     rowHeader.style.display = 'flex';
                     rowHeader.style.justifyContent = 'space-between';
                     rowHeader.style.alignItems = 'center';
-                    rowHeader.style.gap = '4px';
-
-                    const linkSel = document.createElement('select');
-                    linkSel.className = 'action-btn';
-                    linkSel.style.background = linkGroup === 'none' ? '#1a1a1c' : (linkGroup === 'A' ? '#1e3a8a' : (linkGroup === 'B' ? '#064e3b' : '#78350f'));
-                    linkSel.style.color = '#ccc';
-                    linkSel.style.border = '1px solid #333';
-                    linkSel.style.borderRadius = '3px';
-                    linkSel.style.fontSize = '8px';
-                    linkSel.style.padding = '0px 2px';
-                    linkSel.style.cursor = 'pointer';
-                    linkSel.innerHTML = `
-                        <option value="none">🔗 Unlinked</option>
-                        <option value="A">🔗 Link A</option>
-                        <option value="B">🔗 Link B</option>
-                        <option value="C">🔗 Link C</option>
-                    `;
-                    linkSel.value = linkGroup;
-                    linkSel.onchange = (e) => {
-                        e.stopPropagation();
-                        this.updateSliceProperty(idx, { link_group: linkSel.value });
-                    };
-                    rowHeader.appendChild(linkSel);
-
+                    
                     const titleSpan = document.createElement('span');
                     titleSpan.textContent = `Slice #${idx + 1}`;
                     titleSpan.style.color = '#ccc';
                     titleSpan.style.fontWeight = 'bold';
                     titleSpan.style.fontSize = '9px';
-                    titleSpan.style.flex = '1';
-                    titleSpan.style.marginLeft = '4px';
                     rowHeader.appendChild(titleSpan);
 
                     const toggleBtn = document.createElement('span');
-                    toggleBtn.className = 'action-btn';
                     toggleBtn.textContent = isExpanded ? '▲' : '⚙️';
-                    toggleBtn.title = 'Settings';
                     toggleBtn.style.cursor = 'pointer';
                     toggleBtn.style.fontSize = '9px';
-                    toggleBtn.style.color = '#888';
-                    toggleBtn.style.padding = '0 4px';
                     toggleBtn.onclick = (e) => {
-                        e.preventDefault();
                         e.stopPropagation();
-                        if (this.expandedSliceIndices.has(idx)) {
-                            this.expandedSliceIndices.delete(idx);
-                        } else {
-                            this.expandedSliceIndices.add(idx);
-                        }
+                        if (this.expandedSliceIndices.has(idx)) this.expandedSliceIndices.delete(idx);
+                        else this.expandedSliceIndices.add(idx);
                         this.needsSlicesRebuild = true;
                         this.syncControls();
                     };
                     rowHeader.appendChild(toggleBtn);
-
-                    const delBtn = document.createElement('button');
-                    delBtn.innerHTML = '🗑️';
-                    delBtn.style.background = 'none';
-                    delBtn.style.border = 'none';
-                    delBtn.style.color = '#d9534f';
-                    delBtn.style.cursor = 'pointer';
-                    delBtn.style.fontSize = '10px';
-                    delBtn.onclick = (e) => {
-                        e.stopPropagation();
-                        this.deleteSlice(idx);
-                    };
-                    rowHeader.appendChild(delBtn);
                     row.appendChild(rowHeader);
 
-                    // Controls Grid
                     const grid = document.createElement('div');
-                    grid.onclick = (e) => e.stopPropagation();
                     grid.style.display = 'grid';
                     grid.style.gridTemplateColumns = '1fr 1.2fr 1fr';
                     grid.style.gap = '4px';
 
                     const axisSel = document.createElement('select');
-                    axisSel.id = `viewport-${this.panelId}-slice-axis-${idx}`;
+                    // FIX 2: Add class so fast-path syncControls can find and update it
                     axisSel.className = 'slice-axis-sel';
                     this.applySelectStyle(axisSel);
-                    axisSel.style.width = '100%';
                     axisSel.innerHTML = '<option value="xy">XY</option><option value="xz">XZ</option><option value="yz">YZ</option>';
                     axisSel.value = slice.axis;
-                    axisSel.onchange = (e) => {
-                        e.stopPropagation();
-                        const bounds = getSliceBounds(axisSel.value, meshNode);
-                        const defaultOffset = (bounds.min + bounds.max) / 2.0;
-                        
-                        const vp = this.getViewportNode();
-                        if (!vp) return;
-                        const currentSlices = vp.parameters.slices ? [...vp.parameters.slices] : [];
-                        if (currentSlices[idx]) {
-                            const updates = { axis: axisSel.value, offset: defaultOffset };
-                            currentSlices[idx] = { ...currentSlices[idx], ...updates };
-                            this.propagateLinkGroup(currentSlices, idx, updates);
-                            this.needsSlicesRebuild = true;
-                            this.updateSlices(currentSlices);
-                        }
-                    };
+                    axisSel.onchange = () => this.updateSliceProperty(idx, { axis: axisSel.value });
                     grid.appendChild(axisSel);
 
                     const qSel = document.createElement('select');
-                    qSel.id = `viewport-${this.panelId}-slice-qty-${idx}`;
                     qSel.className = 'slice-qty-sel';
                     this.applySelectStyle(qSel);
-                    qSel.style.width = '100%';
-                    qSel.innerHTML = '<option value="pressure">Pressure</option><option value="density">Density</option><option value="velocity">Velocity</option><option value="energy">Energy</option><option value="species1">Products</option><option value="species2">Unburnt</option><option value="species3">Air</option>';
-                    qSel.value = slice.quantities?.[0] || 'pressure';
-                    qSel.onchange = (e) => {
-                        e.stopPropagation();
-                        this.updateSliceProperty(idx, { quantities: [qSel.value] });
-                    };
+                    qSel.innerHTML = '<option value="pressure">Pressure</option><option value="density">Density</option><option value="velocity">Velocity</option><option value="energy">Energy</option><option value="species1">Products</option><option value="species2">Unburnt</option><option value="species3">Air</option><option value="solid">Solid Cells</option><option value="overpressure">Peak Overpressure</option><option value="impulse">Peak Impulse</option>';
+                    qSel.value = qty;
+                    qSel.onchange = () => this.updateSliceProperty(idx, { quantities: [qSel.value] });
                     grid.appendChild(qSel);
 
                     const strideSel = document.createElement('select');
-                    strideSel.id = `viewport-${this.panelId}-slice-stride-${idx}`;
-                    strideSel.className = 'slice-stride-sel';
                     this.applySelectStyle(strideSel);
                     strideSel.style.width = '100%';
                     strideSel.innerHTML = '<option value="1">1:1</option><option value="2">1:2</option><option value="4">1:4</option><option value="8">1:8</option><option value="16">1:16</option>';
@@ -1238,40 +1166,6 @@ export class Telemetry3DViewport {
                         const currentSlices = vp.parameters.slices ? [...vp.parameters.slices] : [];
                         if (currentSlices[idx]) {
                             currentSlices[idx] = { ...currentSlices[idx], offset: val };
-                            if (linkGroup !== 'none') {
-                                currentSlices.forEach((s: any, i: number) => {
-                                    if (i !== idx && s.link_group === linkGroup) {
-                                        currentSlices[i] = { ...s, offset: val };
-                                        const otherRow = this.sliceListContainer!.querySelector(`.slice-card-${i}`) as HTMLElement;
-                                        if (otherRow) {
-                                            const otherSlider = otherRow.querySelector('.slice-offset-slider') as HTMLInputElement;
-                                            const otherVal = otherRow.querySelector('.slice-offset-val') as HTMLInputElement;
-                                            if (otherSlider) otherSlider.value = String(val);
-                                            if (otherVal) otherVal.value = String(val);
-                                        }
-                                    }
-                                });
-                            }
-                            this.worker.postMessage({
-                                type: 'setConfig',
-                                data: {
-                                    slices: currentSlices,
-                                    focusedSliceIndex: vp.parameters.focusedSliceIndex ?? 0,
-                                    quantityRanges: vp.parameters.quantity_ranges || {}
-                                }
-                            });
-                        }
-                    };
-                    offSlider.onchange = (e) => {
-                        e.stopPropagation();
-                        const vp = this.getViewportNode();
-                        if (!vp) return;
-                        const currentSlices = vp.parameters.slices ? [...vp.parameters.slices] : [];
-                        const val = Number(offSlider.value);
-                        if (currentSlices[idx]) {
-                            const updates = { offset: val };
-                            currentSlices[idx] = { ...currentSlices[idx], ...updates };
-                            this.propagateLinkGroup(currentSlices, idx, updates);
                             this.updateSlices(currentSlices);
                         }
                     };
@@ -1328,34 +1222,6 @@ export class Telemetry3DViewport {
                         const currentSlices = vp.parameters.slices ? [...vp.parameters.slices] : [];
                         if (currentSlices[idx]) {
                             currentSlices[idx] = { ...currentSlices[idx], opacity: val };
-                            if (linkGroup !== 'none') {
-                                currentSlices.forEach((s: any, i: number) => {
-                                    if (i !== idx && s.link_group === linkGroup) {
-                                        currentSlices[i] = { ...s, opacity: val };
-                                        const otherRow = this.sliceListContainer!.querySelector(`.slice-card-${i}`) as HTMLElement;
-                                        if (otherRow) {
-                                            const otherSlider = otherRow.querySelector('.slice-opac-slider') as HTMLInputElement;
-                                            const otherVal = otherRow.querySelector('.slice-opac-val') as HTMLInputElement;
-                                            if (otherSlider) otherSlider.value = String(val);
-                                            if (otherVal) otherVal.value = String(val);
-                                        }
-                                    }
-                                });
-                            }
-                            const opacities = currentSlices.map((s: any) => s.opacity !== undefined ? s.opacity : 1.0);
-                            this.worker.postMessage({ type: 'setConfig', data: { sliceOpacities: opacities } });
-                        }
-                    };
-                    opacSlider.onchange = (e) => {
-                        e.stopPropagation();
-                        const vp = this.getViewportNode();
-                        if (!vp) return;
-                        const currentSlices = vp.parameters.slices ? [...vp.parameters.slices] : [];
-                        const val = Number(opacSlider.value);
-                        if (currentSlices[idx]) {
-                            const updates = { opacity: val };
-                            currentSlices[idx] = { ...currentSlices[idx], ...updates };
-                            this.propagateLinkGroup(currentSlices, idx, updates);
                             this.updateSlices(currentSlices);
                         }
                     };
@@ -1375,7 +1241,6 @@ export class Telemetry3DViewport {
                     // Extended Sub-panel
                     if (isExpanded) {
                         const subPanel = document.createElement('div');
-                        subPanel.onclick = (e) => e.stopPropagation();
                         subPanel.style.borderTop = '1px solid rgba(255,255,255,0.06)';
                         subPanel.style.paddingTop = '6px';
                         subPanel.style.marginTop = '4px';
@@ -1385,7 +1250,6 @@ export class Telemetry3DViewport {
 
                         const createCheckbox = (labelStr: string, checkedVal: boolean, onCbChange: (v: boolean) => void) => {
                             const lbl = document.createElement('label');
-                            lbl.onclick = (e) => e.stopPropagation();
                             lbl.style.display = 'flex';
                             lbl.style.alignItems = 'center';
                             lbl.style.gap = '4px';
@@ -1525,27 +1389,8 @@ export class Telemetry3DViewport {
 
                     const linkGroup = slice.link_group || 'none';
 
-                    // Sync borders
-                    let borderColor = 'rgba(255,255,255,0.06)';
-                    let leftBorder = '1px solid rgba(255,255,255,0.06)';
-                    let glowColor = '';
-                    if (linkGroup === 'A') {
-                        leftBorder = '3px solid #3b82f6';
-                        borderColor = 'rgba(59, 130, 246, 0.4)';
-                        glowColor = 'rgba(59, 130, 246, 0.05)';
-                    } else if (linkGroup === 'B') {
-                        leftBorder = '3px solid #10b981';
-                        borderColor = 'rgba(16, 185, 129, 0.4)';
-                        glowColor = 'rgba(16, 185, 129, 0.05)';
-                    } else if (linkGroup === 'C') {
-                        leftBorder = '3px solid #f59e0b';
-                        borderColor = 'rgba(245, 158, 11, 0.4)';
-                        glowColor = 'rgba(245, 158, 11, 0.05)';
-                    }
-
-                    row.style.background = glowColor || (idx === focusedSliceIndex ? 'rgba(0, 173, 255, 0.05)' : 'rgba(255,255,255,0.03)');
-                    row.style.border = idx === focusedSliceIndex ? '1px solid #00adff' : `1px solid ${borderColor}`;
-                    row.style.borderLeft = leftBorder;
+                    row.style.background = idx === focusedSliceIndex ? 'rgba(0, 173, 255, 0.05)' : 'rgba(255,255,255,0.03)';
+                    row.style.border = idx === focusedSliceIndex ? '1px solid #00adff' : '1px solid rgba(255,255,255,0.06)';
 
                     const bounds = getSliceBounds(slice.axis, meshNode);
 
@@ -1682,12 +1527,15 @@ export class Telemetry3DViewport {
         let dimX = 1.0, dimY = 1.0, dimZ = 1.0, cellSize = 0.01;
         let xmin = 0.0, ymin = 0.0, zmin = 0.0;
         if (meshNode && meshNode.type === 'DomainMesh3D') {
-            dimX = Number(meshNode.parameters?.dim_x ?? 1.0);
-            dimY = Number(meshNode.parameters?.dim_y ?? 1.0);
-            dimZ = Number(meshNode.parameters?.dim_z ?? 1.0);
-            xmin = Number(meshNode.parameters?.origin_x ?? 0.0);
-            ymin = Number(meshNode.parameters?.origin_y ?? 0.0);
-            zmin = Number(meshNode.parameters?.origin_z ?? 0.0);
+            xmin = Number(meshNode.parameters?.xmin ?? 0.0);
+            const xmax = Number(meshNode.parameters?.xmax ?? 1.0);
+            ymin = Number(meshNode.parameters?.ymin ?? 0.0);
+            const ymax = Number(meshNode.parameters?.ymax ?? 1.0);
+            zmin = Number(meshNode.parameters?.zmin ?? 0.0);
+            const zmax = Number(meshNode.parameters?.zmax ?? 1.0);
+            dimX = xmax - xmin;
+            dimY = ymax - ymin;
+            dimZ = zmax - zmin;
             cellSize = Number(meshNode.parameters?.cell_size ?? 0.01);
         }
         const nx = Math.round(dimX / cellSize);
@@ -1921,21 +1769,21 @@ function getSliceBounds(axis: string, meshNode: any) {
     let min = 0.0;
     let max = 1.0;
     if (meshNode && meshNode.type === 'DomainMesh3D') {
-        const originX = Number(meshNode.parameters?.origin_x ?? 0.0);
-        const originY = Number(meshNode.parameters?.origin_y ?? 0.0);
-        const originZ = Number(meshNode.parameters?.origin_z ?? 0.0);
-        const dimX = Number(meshNode.parameters?.dim_x ?? 1.0);
-        const dimY = Number(meshNode.parameters?.dim_y ?? 1.0);
-        const dimZ = Number(meshNode.parameters?.dim_z ?? 1.0);
+        const xmin = Number(meshNode.parameters?.xmin ?? 0.0);
+        const xmax = Number(meshNode.parameters?.xmax ?? 1.0);
+        const ymin = Number(meshNode.parameters?.ymin ?? 0.0);
+        const ymax = Number(meshNode.parameters?.ymax ?? 1.0);
+        const zmin = Number(meshNode.parameters?.zmin ?? 0.0);
+        const zmax = Number(meshNode.parameters?.zmax ?? 1.0);
         if (axis === 'xy') {
-            min = originZ;
-            max = originZ + dimZ;
+            min = zmin;
+            max = zmax;
         } else if (axis === 'xz') {
-            min = originY;
-            max = originY + dimY;
+            min = ymin;
+            max = ymax;
         } else if (axis === 'yz') {
-            min = originX;
-            max = originX + dimX;
+            min = xmin;
+            max = xmax;
         }
     }
     return { min, max };

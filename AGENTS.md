@@ -37,5 +37,7 @@
   - `frontend/src/node-viewer.ts`
   - `frontend/src/graph-renderer.ts`
 - **Default Parameter Alignment:** Default node parameters MUST be identical between `state-manager.ts` (`defaults` map) and `graph-renderer.ts` (`getDefaultParameters` method) to prevent property inspector and UI anomalies.
+- **Dropdown and Widget Uniformity:** When a node parameter has discrete options (like an enum or fixed choice list), ensure it is styled and rendered as a dropdown selector or other appropriate widget *both* in the sidebar property editor (`frontend/src/property-editor.ts`) and on the node canvas representation (`frontend/src/graph-renderer.ts`). Never leave it as a plain text input when options are pre-defined.
+
 
 

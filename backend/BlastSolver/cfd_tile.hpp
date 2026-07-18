@@ -76,6 +76,9 @@ struct PrimitiveTile3D<RealType, false> {
     RealType uz[TILE_CELLS_3D];
     RealType p[TILE_CELLS_3D];
     int floor_status[TILE_CELLS_3D];
+    RealType peak_overpressure[TILE_CELLS_3D];
+    RealType running_impulse[TILE_CELLS_3D];
+    RealType peak_impulse[TILE_CELLS_3D];
 };
 
 template <typename RealType>
@@ -90,12 +93,15 @@ struct PrimitiveTile3D<RealType, true> {
     RealType arho1[TILE_CELLS_3D];
     RealType arho2[TILE_CELLS_3D];
     int floor_status[TILE_CELLS_3D];
+    RealType peak_overpressure[TILE_CELLS_3D];
+    RealType running_impulse[TILE_CELLS_3D];
+    RealType peak_impulse[TILE_CELLS_3D];
 };
 
 struct GeometryPayload {
-    float nx;
-    float ny;
-    float nz;
+    int8_t nx;
+    int8_t ny;
+    int8_t nz;
     bool is_boundary;
 };
 

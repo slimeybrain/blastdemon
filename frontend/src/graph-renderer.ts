@@ -3,6 +3,19 @@ import { StateManager } from './state-manager.js';
 import { validateSimulationState } from './validation.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
 
+const DEFAULT_QUANTITY_RANGES: Record<string, [number, number]> = {
+    pressure: [101325.0, 101325.0 * 100.0],
+    density: [1.2, 100.0],
+    velocity: [0.0, 1000.0],
+    energy: [200000.0, 10000000.0],
+    species1: [0.0, 1.0],
+    species2: [0.0, 1.0],
+    species3: [0.0, 1.0],
+    solid: [0.0, 1.0],
+    overpressure: [0.0, 101325.0 * 99.0],
+    impulse: [0.0, 10000.0]
+};
+
 
 const SVG_ICONS = {
     horiz: `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="display:block;"><rect x="1" y="4" width="5" height="8" rx="1"/><rect x="10" y="4" width="5" height="8" rx="1"/><path d="M6 8h4"/></svg>`,
@@ -1470,11 +1483,14 @@ export class GraphRenderer {
                 qty_energy: true,
                 qty_reacted: true,
                 qty_unreacted: true,
-                qty_air: true
+                qty_air: true,
+                qty_overpressure: true,
+                qty_impulse: true
             };
             case 'DomainMesh3D': return {
-                dim_x: 1.0, dim_y: 1.0, dim_z: 1.0,
-                origin_x: 0.0, origin_y: 0.0, origin_z: 0.0,
+                xmin: 0.0, xmax: 1.0,
+                ymin: 0.0, ymax: 1.0,
+                zmin: 0.0, zmax: 1.0,
                 cell_size: 0.01,
                 bc_x_min: 'Reflecting', bc_x_max: 'Transmitting',
                 bc_y_min: 'Reflecting', bc_y_max: 'Transmitting',
@@ -1497,7 +1513,8 @@ export class GraphRenderer {
             };
             case 'STLGeometry': return {
                 stl_file: '',
-                geometry_hash: ''
+                geometry_hash: '',
+                voxelization_method: 'watertight_floodfill'
             };
             case 'Telemetry3DViewport': return {
                 colormap: 'plasma',
@@ -1508,7 +1525,7 @@ export class GraphRenderer {
                 min_val: 101325.0,
                 max_val: 101325.0 * 10.0,
                 slices: [
-                    { axis: 'xy', offset: 0.5, stride: 1, quantities: ['pressure'], opacity: 1.0, colormap: 'plasma', auto_scale: true, log_scale: false, interpolate: true, min_val: 101325.0, max_val: 101325.0 * 10.0, link_group: 'none' }
+                    { axis: 'xy', offset: 0.5, stride: 1, quantities: ['pressure'], opacity: 1.0, colormap: 'plasma', auto_scale: true, log_scale: false, interpolate: true, min_val: 101325.0, max_val: 101325.0 * 10.0 }
                 ],
                 lightingEnabled: true,
                 aoEnabled: true,
@@ -1528,6 +1545,8 @@ export class GraphRenderer {
                 qty_reacted: true,
                 qty_unreacted: true,
                 qty_air: true,
+                qty_overpressure: true,
+                qty_impulse: true,
                 show_stl: true,
                 stl_wireframe: false,
                 stl_solids: true,
@@ -3096,7 +3115,10 @@ export class GraphRenderer {
                         });
                         const slicesPanel = container.querySelector('.node-slices-panel') as HTMLElement;
                         if (slicesPanel) {
-                            this.rebuildSlicesPanel(node, slicesPanel);
+                            const isInteracting = slicesPanel.contains(document.activeElement);
+                            if (!isInteracting) {
+                                this.rebuildSlicesPanel(node, slicesPanel);
+                            }
                         }
                     } else if (e.data && e.data.type === 'currentRange') {
                         this.viewportRanges.set(node.id, { min: e.data.min, max: e.data.max });
@@ -3135,13 +3157,19 @@ export class GraphRenderer {
                             if (connToSolver) {
                                 const meshNode = state.nodes.find(n => n.id === connToSolver.fromNode);
                                 if (meshNode && meshNode.type === 'DomainMesh3D') {
-                                    dimX = Number(meshNode.parameters?.dim_x ?? 1.0);
-                                    dimY = Number(meshNode.parameters?.dim_y ?? 1.0);
-                                    dimZ = Number(meshNode.parameters?.dim_z ?? 1.0);
+                                    const xmin = Number(meshNode.parameters?.xmin ?? 0.0);
+                                    const xmax = Number(meshNode.parameters?.xmax ?? 1.0);
+                                    const ymin = Number(meshNode.parameters?.ymin ?? 0.0);
+                                    const ymax = Number(meshNode.parameters?.ymax ?? 1.0);
+                                    const zmin = Number(meshNode.parameters?.zmin ?? 0.0);
+                                    const zmax = Number(meshNode.parameters?.zmax ?? 1.0);
+                                    dimX = xmax - xmin;
+                                    dimY = ymax - ymin;
+                                    dimZ = zmax - zmin;
                                     cellSize = Number(meshNode.parameters?.cell_size ?? 0.01);
-                                    originX = Number(meshNode.parameters?.origin_x ?? 0.0);
-                                    originY = Number(meshNode.parameters?.origin_y ?? 0.0);
-                                    originZ = Number(meshNode.parameters?.origin_z ?? 0.0);
+                                    originX = xmin;
+                                    originY = ymin;
+                                    originZ = zmin;
                                 }
                             }
                         }
@@ -3241,13 +3269,19 @@ export class GraphRenderer {
                             if (connToSolver) {
                                 const meshNode = state.nodes.find(n => n.id === connToSolver.fromNode);
                                 if (meshNode && meshNode.type === 'DomainMesh3D') {
-                                    dimX = Number(meshNode.parameters?.dim_x ?? 1.0);
-                                    dimY = Number(meshNode.parameters?.dim_y ?? 1.0);
-                                    dimZ = Number(meshNode.parameters?.dim_z ?? 1.0);
+                                    const xmin = Number(meshNode.parameters?.xmin ?? 0.0);
+                                    const xmax = Number(meshNode.parameters?.xmax ?? 1.0);
+                                    const ymin = Number(meshNode.parameters?.ymin ?? 0.0);
+                                    const ymax = Number(meshNode.parameters?.ymax ?? 1.0);
+                                    const zmin = Number(meshNode.parameters?.zmin ?? 0.0);
+                                    const zmax = Number(meshNode.parameters?.zmax ?? 1.0);
+                                    dimX = xmax - xmin;
+                                    dimY = ymax - ymin;
+                                    dimZ = zmax - zmin;
                                     cellSize = Number(meshNode.parameters?.cell_size ?? 0.01);
-                                    originX = Number(meshNode.parameters?.origin_x ?? 0.0);
-                                    originY = Number(meshNode.parameters?.origin_y ?? 0.0);
-                                    originZ = Number(meshNode.parameters?.origin_z ?? 0.0);
+                                    originX = xmin;
+                                    originY = ymin;
+                                    originZ = zmin;
                                 }
                             }
                         }
@@ -3283,7 +3317,10 @@ export class GraphRenderer {
 
             const slicesPanel = container.querySelector('.node-slices-panel') as HTMLElement;
             if (slicesPanel) {
-                this.rebuildSlicesPanel(node, slicesPanel);
+                const isInteracting = slicesPanel.contains(document.activeElement);
+                if (!isInteracting) {
+                    this.rebuildSlicesPanel(node, slicesPanel);
+                }
             }
         } else if (node.type === 'TelemetryContour') {
             const CHANNELS: { label: string }[] = [
@@ -4144,9 +4181,16 @@ export class GraphRenderer {
                         const nz = Math.round(max_z / cellSize);
                         gridInfo.textContent = `Calculated Grid: ${nr} x ${nz} cells (Total: ${(nr * nz).toLocaleString()})`;
                     } else if (node.type === 'DomainMesh3D') {
-                        const dim_x = Number(node.parameters['dim_x'] ?? 1.0);
-                        const dim_y = Number(node.parameters['dim_y'] ?? 1.0);
-                        const dim_z = Number(node.parameters['dim_z'] ?? 1.0);
+                        const xmin = Number(node.parameters['xmin'] ?? node.parameters['origin_x'] ?? 0.0);
+                        const xmax = Number(node.parameters['xmax'] ?? (xmin + (node.parameters['dim_x'] ?? 1.0)));
+                        const ymin = Number(node.parameters['ymin'] ?? node.parameters['origin_y'] ?? 0.0);
+                        const ymax = Number(node.parameters['ymax'] ?? (ymin + (node.parameters['dim_y'] ?? 1.0)));
+                        const zmin = Number(node.parameters['zmin'] ?? node.parameters['origin_z'] ?? 0.0);
+                        const zmax = Number(node.parameters['zmax'] ?? (zmin + (node.parameters['dim_z'] ?? 1.0)));
+                        
+                        const dim_x = xmax - xmin;
+                        const dim_y = ymax - ymin;
+                        const dim_z = zmax - zmin;
                         const nx = Math.round(dim_x / cellSize);
                         const ny = Math.round(dim_y / cellSize);
                         const nz = Math.round(dim_z / cellSize);
@@ -4208,9 +4252,16 @@ export class GraphRenderer {
                 const nz = Math.round(max_z / cellSize);
                 info.textContent = `Calculated Grid: ${nr} x ${nz} cells (Total: ${(nr * nz).toLocaleString()})`;
             } else {
-                const dim_x = Number(node.parameters['dim_x'] ?? 1.0);
-                const dim_y = Number(node.parameters['dim_y'] ?? 1.0);
-                const dim_z = Number(node.parameters['dim_z'] ?? 1.0);
+                const xmin = Number(node.parameters['xmin'] ?? node.parameters['origin_x'] ?? 0.0);
+                const xmax = Number(node.parameters['xmax'] ?? (xmin + (node.parameters['dim_x'] ?? 1.0)));
+                const ymin = Number(node.parameters['ymin'] ?? node.parameters['origin_y'] ?? 0.0);
+                const ymax = Number(node.parameters['ymax'] ?? (ymin + (node.parameters['dim_y'] ?? 1.0)));
+                const zmin = Number(node.parameters['zmin'] ?? node.parameters['origin_z'] ?? 0.0);
+                const zmax = Number(node.parameters['zmax'] ?? (zmin + (node.parameters['dim_z'] ?? 1.0)));
+                
+                const dim_x = xmax - xmin;
+                const dim_y = ymax - ymin;
+                const dim_z = zmax - zmin;
                 const nx = Math.round(dim_x / cellSize);
                 const ny = Math.round(dim_y / cellSize);
                 const nz = Math.round(dim_z / cellSize);
@@ -4311,7 +4362,8 @@ export class GraphRenderer {
                 colormap: ['plasma', 'viridis'],
                 auto_scale: ['true', 'false'],
                 log_scale: ['true', 'false'],
-                show_grid: ['true', 'false']
+                show_grid: ['true', 'false'],
+                'voxelization_method': ['watertight_floodfill', 'watertight_raycast', 'thin_shell', 'winding_number']
             };
 
             let inputEl: HTMLElement;
@@ -4346,7 +4398,7 @@ export class GraphRenderer {
                             'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
                             'ideal_gamma', 'ideal_rho_0', 'ideal_e_0',
                             // 3D CFD keys
-                            'nx', 'ny', 'nz', 'dim_x', 'dim_y', 'dim_z', 'origin_x', 'origin_y', 'origin_z',
+                            'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
                             'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
                             'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
                             'min_y', 'max_y', 'min_val', 'max_val', 'ambientLevel', 'specularIntensity'
@@ -4693,6 +4745,11 @@ export class GraphRenderer {
                                     Object.assign(updates, preset);
                                 }
                             }
+                        }
+                        if (node.type === 'STLGeometry' && key === 'voxelization_method') {
+                            const rand = Math.floor(Math.random() * 1000000);
+                            const simpleHash = 'stl_' + rand.toString(36);
+                            updates['geometry_hash'] = simpleHash;
                         }
                         this.stateManager.updateNodeParameters(node.id, updates);
                     },
@@ -6276,7 +6333,6 @@ export class GraphRenderer {
 
         const createCheckbox = (label: string, value: boolean, onChange: (val: boolean) => void) => {
             const labelEl = document.createElement('label');
-            labelEl.onclick = (e) => e.stopPropagation();
             labelEl.style.display = 'flex';
             labelEl.style.alignItems = 'center';
             labelEl.style.gap = '4px';
@@ -6396,7 +6452,7 @@ export class GraphRenderer {
                     if (solverConn) {
                         const solverNode = m.nodes.find(n => n.id === solverConn.fromNode);
                         if (solverNode && (solverNode.type === 'CFDSolver3D' || solverNode.type === 'CFDSolver2D')) {
-                            const connToSolver = m.connections.find(c => c.toNode === solverNode.id);
+                            const connToSolver = m.connections.find(c => c.toNode === solverNode.id && c.toPort === 'mesh');
                             if (connToSolver) {
                                 meshNode = m.nodes.find(n => n.id === connToSolver.fromNode);
                             }
@@ -6407,22 +6463,22 @@ export class GraphRenderer {
             }
 
             if (meshNode && meshNode.type === 'DomainMesh3D') {
-                const originX = Number(meshNode.parameters?.origin_x ?? 0.0);
-                const originY = Number(meshNode.parameters?.origin_y ?? 0.0);
-                const originZ = Number(meshNode.parameters?.origin_z ?? 0.0);
-                const dimX = Number(meshNode.parameters?.dim_x ?? 1.0);
-                const dimY = Number(meshNode.parameters?.dim_y ?? 1.0);
-                const dimZ = Number(meshNode.parameters?.dim_z ?? 1.0);
+                const xmin = Number(meshNode.parameters?.xmin ?? meshNode.parameters?.origin_x ?? 0.0);
+                const xmax = Number(meshNode.parameters?.xmax ?? (xmin + (meshNode.parameters?.dim_x ?? 1.0)));
+                const ymin = Number(meshNode.parameters?.ymin ?? meshNode.parameters?.origin_y ?? 0.0);
+                const ymax = Number(meshNode.parameters?.ymax ?? (ymin + (meshNode.parameters?.dim_y ?? 1.0)));
+                const zmin = Number(meshNode.parameters?.zmin ?? meshNode.parameters?.origin_z ?? 0.0);
+                const zmax = Number(meshNode.parameters?.zmax ?? (zmin + (meshNode.parameters?.dim_z ?? 1.0)));
 
                 if (axis === 'xy') {
-                    minVal = originZ;
-                    maxVal = originZ + dimZ;
+                    minVal = zmin;
+                    maxVal = zmax;
                 } else if (axis === 'xz') {
-                    minVal = originY;
-                    maxVal = originY + dimY;
+                    minVal = ymin;
+                    maxVal = ymax;
                 } else if (axis === 'yz') {
-                    minVal = originX;
-                    maxVal = originX + dimX;
+                    minVal = xmin;
+                    maxVal = xmax;
                 }
             } else {
                 const cached = this.viewportDomains.get(node.id);
@@ -6460,19 +6516,36 @@ export class GraphRenderer {
             const defaultOffset = (bounds.min + bounds.max) / 2.0;
 
             const slices = node.parameters?.slices ? [...node.parameters.slices] : [];
+            const defaultQty = 'pressure';
+            let auto_scale = true;
+            let log_scale = false;
+            let min_val = 101325.0;
+            let max_val = 101325.0 * 10.0;
+
+            const match = slices.find((s: any) => s.quantities?.[0] === defaultQty);
+            if (match) {
+                auto_scale = match.auto_scale;
+                log_scale = match.log_scale;
+                min_val = match.min_val;
+                max_val = match.max_val;
+            } else {
+                const range = DEFAULT_QUANTITY_RANGES[defaultQty] || [0.0, 1.0];
+                min_val = range[0];
+                max_val = range[1];
+            }
+
             slices.push({
                 axis: 'xy',
                 offset: defaultOffset,
-                quantities: ['pressure'],
+                quantities: [defaultQty],
                 stride: 1,
                 opacity: 1.0,
                 colormap: 'plasma',
-                auto_scale: true,
-                log_scale: false,
+                auto_scale,
+                log_scale,
                 interpolate: true,
-                min_val: 101325.0,
-                max_val: 101325.0 * 10.0,
-                link_group: 'none'
+                min_val,
+                max_val
             });
             this.stateManager.updateNodeParametersInPlace(node.id, { slices });
             this.syncSliceConfig(node, slices);
@@ -6499,27 +6572,8 @@ export class GraphRenderer {
             const row = document.createElement('div');
             row.className = `slice-card-${idx}`;
             
-            // Link Group styling
-            let borderColor = 'rgba(255,255,255,0.05)';
-            let leftBorder = '1px solid rgba(255,255,255,0.05)';
-            let glowColor = '';
-            if (linkGroup === 'A') {
-                leftBorder = '3px solid #3b82f6';
-                borderColor = 'rgba(59, 130, 246, 0.4)';
-                glowColor = 'rgba(59, 130, 246, 0.05)';
-            } else if (linkGroup === 'B') {
-                leftBorder = '3px solid #10b981';
-                borderColor = 'rgba(16, 185, 129, 0.4)';
-                glowColor = 'rgba(16, 185, 129, 0.05)';
-            } else if (linkGroup === 'C') {
-                leftBorder = '3px solid #f59e0b';
-                borderColor = 'rgba(245, 158, 11, 0.4)';
-                glowColor = 'rgba(245, 158, 11, 0.05)';
-            }
-
-            row.style.background = glowColor || (idx === focusedSliceIndex ? 'rgba(0, 173, 255, 0.04)' : 'rgba(255,255,255,0.02)');
-            row.style.border = idx === focusedSliceIndex ? '1px solid #00adff' : `1px solid ${borderColor}`;
-            row.style.borderLeft = leftBorder;
+            row.style.background = idx === focusedSliceIndex ? 'rgba(0, 173, 255, 0.04)' : 'rgba(255,255,255,0.02)';
+            row.style.border = idx === focusedSliceIndex ? '1px solid #00adff' : '1px solid rgba(255,255,255,0.05)';
             row.style.borderRadius = '4px';
             row.style.padding = '4px 6px';
             row.style.display = 'flex';
@@ -6530,27 +6584,55 @@ export class GraphRenderer {
 
             row.onclick = (e) => {
                 const target = e.target as HTMLElement;
-                if (target.tagName === 'SELECT' || target.tagName === 'INPUT' || target.tagName === 'BUTTON' || target.tagName === 'LABEL' || target.classList.contains('action-btn')) {
+                if (
+                    target.closest('input') || 
+                    target.closest('select') || 
+                    target.closest('option') || 
+                    target.closest('button') || 
+                    target.closest('label') || 
+                    target.classList.contains('action-btn')
+                ) {
                     return;
                 }
                 this.stateManager.updateNodeParametersInPlace(node.id, { focusedSliceIndex: idx });
                 this.rebuildSlicesPanel(node, panel);
             };
 
-            // Helper to update properties with linking propagation
+            // Helper to update properties with quantity-based synchronization
             const updateSliceParam = (key: string, val: any) => {
                 const updated = [...slices];
-                updated[idx] = { ...updated[idx], [key]: val };
-                
-                const group = updated[idx].link_group || 'none';
-                if (group !== 'none') {
+                const oldQty = updated[idx].quantities?.[0];
+
+                if (key === 'quantities') {
+                    const newQty = val[0];
+                    updated[idx] = { ...updated[idx], quantities: val };
+                    // Apply existing ranges from another slice showing the new quantity if one exists
+                    if (newQty && newQty !== oldQty) {
+                        const match = updated.find((s, i) => i !== idx && s.quantities?.[0] === newQty);
+                        if (match) {
+                            updated[idx].min_val = match.min_val;
+                            updated[idx].max_val = match.max_val;
+                            updated[idx].auto_scale = match.auto_scale;
+                            updated[idx].log_scale = match.log_scale;
+                        } else {
+                            const range = DEFAULT_QUANTITY_RANGES[newQty] || [0.0, 1.0];
+                            updated[idx].min_val = range[0];
+                            updated[idx].max_val = range[1];
+                            updated[idx].auto_scale = true;
+                            updated[idx].log_scale = false;
+                        }
+                    }
+                } else {
+                    updated[idx] = { ...updated[idx], [key]: val };
+                }
+
+                // Propagate ranges and log_scale settings to other slices of the same quantity
+                const currentQty = updated[idx].quantities?.[0] || 'pressure';
+                const keysToSync = ['min_val', 'max_val', 'auto_scale', 'log_scale'];
+                if (keysToSync.includes(key)) {
                     updated.forEach((s, i) => {
-                        if (i !== idx && s.link_group === group) {
-                            if (key === 'quantities') {
-                                updated[i] = { ...updated[i], quantities: [...val] };
-                            } else {
-                                updated[i] = { ...updated[i], [key]: val };
-                            }
+                        if (i !== idx && s.quantities?.[0] === currentQty) {
+                            updated[i] = { ...s, [key]: val };
                         }
                     });
                 }
@@ -6566,48 +6648,6 @@ export class GraphRenderer {
             header.style.justifyContent = 'space-between';
             header.style.alignItems = 'center';
             header.style.gap = '4px';
-
-            const linkSel = document.createElement('select');
-            linkSel.className = 'action-btn';
-            linkSel.style.background = linkGroup === 'none' ? '#1a1a1c' : (linkGroup === 'A' ? '#1e3a8a' : (linkGroup === 'B' ? '#064e3b' : '#78350f'));
-            linkSel.style.color = '#ccc';
-            linkSel.style.border = '1px solid #333';
-            linkSel.style.borderRadius = '3px';
-            linkSel.style.fontSize = '8px';
-            linkSel.style.padding = '0px 2px';
-            linkSel.style.cursor = 'pointer';
-            linkSel.innerHTML = `
-                <option value="none">🔗 Unlinked</option>
-                <option value="A">🔗 Link A</option>
-                <option value="B">🔗 Link B</option>
-                <option value="C">🔗 Link C</option>
-            `;
-            linkSel.value = linkGroup;
-            linkSel.onchange = (e) => {
-                e.stopPropagation();
-                const newGroup = linkSel.value;
-                const updated = [...slices];
-                updated[idx] = { ...updated[idx], link_group: newGroup };
-                
-                if (newGroup !== 'none') {
-                    const match = updated.find((s, i) => i !== idx && s.link_group === newGroup);
-                    if (match) {
-                        const keysToCopy = ['quantities', 'stride', 'offset', 'opacity', 'auto_scale', 'log_scale', 'interpolate', 'colormap', 'min_val', 'max_val'];
-                        keysToCopy.forEach(k => {
-                            if (k === 'quantities') {
-                                updated[idx].quantities = [...match.quantities];
-                            } else {
-                                updated[idx][k] = match[k];
-                            }
-                        });
-                    }
-                }
-                
-                this.stateManager.updateNodeParametersInPlace(node.id, { slices: updated });
-                this.syncSliceConfig(node, updated);
-                this.rebuildSlicesPanel(node, panel);
-            };
-            header.appendChild(linkSel);
 
             const titleSpan = document.createElement('span');
             titleSpan.textContent = `Slice #${idx + 1}`;
@@ -6681,16 +6721,6 @@ export class GraphRenderer {
                 const updated = [...slices];
                 updated[idx] = { ...slice, axis: axisSel.value, offset: defaultOffset };
                 
-                // Propagate axis/offset changes to group if linked
-                if (linkGroup !== 'none') {
-                    updated.forEach((s, i) => {
-                        if (i !== idx && s.link_group === linkGroup) {
-                            updated[i].axis = axisSel.value;
-                            updated[i].offset = defaultOffset;
-                        }
-                    });
-                }
-                
                 this.stateManager.updateNodeParametersInPlace(node.id, { slices: updated });
                 this.syncSliceConfig(node, updated);
                 this.rebuildSlicesPanel(node, panel);
@@ -6704,7 +6734,7 @@ export class GraphRenderer {
             qtySel.style.borderRadius = '3px';
             qtySel.style.fontSize = '9px';
             qtySel.style.padding = '1px';
-            qtySel.innerHTML = '<option value="pressure">Pressure</option><option value="density">Density</option><option value="velocity">Velocity</option><option value="energy">Energy</option><option value="species1">Products</option><option value="species2">Unburnt</option><option value="species3">Air</option>';
+            qtySel.innerHTML = '<option value="pressure">Pressure</option><option value="density">Density</option><option value="velocity">Velocity</option><option value="energy">Energy</option><option value="species1">Products</option><option value="species2">Unburnt</option><option value="species3">Air</option><option value="solid">Solid Cells</option><option value="overpressure">Peak Overpressure</option><option value="impulse">Peak Impulse</option>';
             qtySel.value = slice.quantities?.[0] || 'pressure';
             qtySel.onchange = (e) => {
                 e.stopPropagation();
@@ -6773,27 +6803,11 @@ export class GraphRenderer {
                 e.stopPropagation();
                 const val = Number(slider.value);
                 sliderVal.value = String(val);
-                slice.offset = val;
                 
-                if (linkGroup !== 'none') {
-                    slices.forEach((s: any, i: number) => {
-                        if (i !== idx && s.link_group === linkGroup) {
-                            s.offset = val;
-                            const otherRow = panel.querySelector(`.slice-card-${i}`) as HTMLElement;
-                            if (otherRow) {
-                                const otherSlider = otherRow.querySelector('.slice-offset-slider') as HTMLInputElement;
-                                const otherVal = otherRow.querySelector('.slice-offset-val') as HTMLInputElement;
-                                if (otherSlider) otherSlider.value = String(val);
-                                if (otherVal) otherVal.value = String(val);
-                            }
-                        }
-                    });
-                }
-                this.syncSliceConfig(node, slices);
-            };
-            slider.onchange = (e) => {
-                e.stopPropagation();
-                this.stateManager.updateNodeParametersInPlace(node.id, { slices });
+                const updated = [...slices];
+                updated[idx] = { ...slice, offset: val };
+                this.stateManager.updateNodeParametersInPlace(node.id, { slices: updated });
+                this.syncSliceConfig(node, updated);
             };
 
             sliderVal.onchange = (e) => {
@@ -6850,31 +6864,16 @@ export class GraphRenderer {
                 e.stopPropagation();
                 const val = Number(opacSlider.value);
                 opacVal.value = String(val);
-                slice.opacity = val;
                 
-                if (linkGroup !== 'none') {
-                    slices.forEach((s: any, i: number) => {
-                        if (i !== idx && s.link_group === linkGroup) {
-                            s.opacity = val;
-                            const otherRow = panel.querySelector(`.slice-card-${i}`) as HTMLElement;
-                            if (otherRow) {
-                                const otherSlider = otherRow.querySelector('.slice-opac-slider') as HTMLInputElement;
-                                const otherVal = otherRow.querySelector('.slice-opac-val') as HTMLInputElement;
-                                if (otherSlider) otherSlider.value = String(val);
-                                if (otherVal) otherVal.value = String(val);
-                            }
-                        }
-                    });
-                }
+                const updated = [...slices];
+                updated[idx] = { ...slice, opacity: val };
+                this.stateManager.updateNodeParametersInPlace(node.id, { slices: updated });
+                
                 const worker = this.nodeWorkers.get(node.id);
                 if (worker) {
-                    const opacities = slices.map((s: any) => s.opacity !== undefined ? s.opacity : 1.0);
-                    worker.postMessage({ type: 'setConfig', data: { sliceOpacities: opacities } });
+                    const opacities = updated.map((s: any) => s.opacity !== undefined ? s.opacity : 1.0);
+                    worker.postMessage({ type: 'setConfig', data: { sliceOpacities: opacities, slices: updated } });
                 }
-            };
-            opacSlider.onchange = (e) => {
-                e.stopPropagation();
-                this.stateManager.updateNodeParametersInPlace(node.id, { slices });
             };
 
             opacVal.onchange = (e) => {
@@ -6892,7 +6891,6 @@ export class GraphRenderer {
             // Collapsible Extended Settings Panel
             if (isExpanded) {
                 const subPanel = document.createElement('div');
-                subPanel.onclick = (e) => e.stopPropagation();
                 subPanel.style.borderTop = '1px solid #333';
                 subPanel.style.paddingTop = '6px';
                 subPanel.style.marginTop = '4px';

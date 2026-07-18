@@ -697,21 +697,21 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                     if (meshConn3D) {
                         const meshNode = state.nodes.find(n => n.id === meshConn3D.fromNode);
                         if (meshNode && meshNode.type === 'DomainMesh3D') {
-                            const dimX = Number(meshNode.parameters?.dim_x ?? 1.0);
-                            const dimY = Number(meshNode.parameters?.dim_y ?? 1.0);
-                            const dimZ = Number(meshNode.parameters?.dim_z ?? 1.0);
-                            const originX = Number(meshNode.parameters?.origin_x ?? 0.0);
-                            const originY = Number(meshNode.parameters?.origin_y ?? 0.0);
-                            const originZ = Number(meshNode.parameters?.origin_z ?? 0.0);
+                            const xmin = Number(meshNode.parameters?.xmin ?? 0.0);
+                            const xmax = Number(meshNode.parameters?.xmax ?? 1.0);
+                            const ymin = Number(meshNode.parameters?.ymin ?? 0.0);
+                            const ymax = Number(meshNode.parameters?.ymax ?? 1.0);
+                            const zmin = Number(meshNode.parameters?.zmin ?? 0.0);
+                            const zmax = Number(meshNode.parameters?.zmax ?? 1.0);
 
-                            if (detX < originX || detX > originX + dimX) {
-                                addMessage(node.id, 'warning', `Detonator position (x = ${detX}) is outside the mesh domain [${originX}, ${originX + dimX}].`);
+                            if (detX < xmin || detX > xmax) {
+                                addMessage(node.id, 'warning', `Detonator position (x = ${detX}) is outside the mesh domain [${xmin}, ${xmax}].`);
                             }
-                            if (detY < originY || detY > originY + dimY) {
-                                addMessage(node.id, 'warning', `Detonator position (y = ${detY}) is outside the mesh domain [${originY}, ${originY + dimY}].`);
+                            if (detY < ymin || detY > ymax) {
+                                addMessage(node.id, 'warning', `Detonator position (y = ${detY}) is outside the mesh domain [${ymin}, ${ymax}].`);
                             }
-                            if (detZ < originZ || detZ > originZ + dimZ) {
-                                addMessage(node.id, 'warning', `Detonator position (z = ${detZ}) is outside the mesh domain [${originZ}, ${originZ + dimZ}].`);
+                            if (detZ < zmin || detZ > zmax) {
+                                addMessage(node.id, 'warning', `Detonator position (z = ${detZ}) is outside the mesh domain [${zmin}, ${zmax}].`);
                             }
                         }
                     }
@@ -793,14 +793,14 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                     if (meshConn3D) {
                         const meshNode = state.nodes.find(n => n.id === meshConn3D.fromNode);
                         if (meshNode && meshNode.type === 'DomainMesh3D') {
-                            const dimX = Number(meshNode.parameters?.dim_x ?? 1.0);
-                            const dimY = Number(meshNode.parameters?.dim_y ?? 1.0);
-                            const dimZ = Number(meshNode.parameters?.dim_z ?? 1.0);
-                            const originX = Number(meshNode.parameters?.origin_x ?? 0.0);
-                            const originY = Number(meshNode.parameters?.origin_y ?? 0.0);
-                            const originZ = Number(meshNode.parameters?.origin_z ?? 0.0);
+                            const xmin = Number(meshNode.parameters?.xmin ?? 0.0);
+                            const xmax = Number(meshNode.parameters?.xmax ?? 1.0);
+                            const ymin = Number(meshNode.parameters?.ymin ?? 0.0);
+                            const ymax = Number(meshNode.parameters?.ymax ?? 1.0);
+                            const zmin = Number(meshNode.parameters?.zmin ?? 0.0);
+                            const zmax = Number(meshNode.parameters?.zmax ?? 1.0);
 
-                            if (cx < originX || cx > originX + dimX || cy < originY || cy > originY + dimY || cz < originZ || cz > originZ + dimZ) {
+                            if (cx < xmin || cx > xmax || cy < ymin || cy > ymax || cz < zmin || cz > zmax) {
                                 addMessage(node.id, 'warning', `Charge center (${cx}, ${cy}, ${cz}) is outside the mesh domain.`);
                             }
                         }
@@ -822,12 +822,12 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                         if (meshConn3D) {
                             const meshNode = state.nodes.find(n => n.id === meshConn3D.fromNode);
                             if (meshNode && meshNode.type === 'DomainMesh3D') {
-                                const dimX = Number(meshNode.parameters?.dim_x ?? 1.0);
-                                const dimY = Number(meshNode.parameters?.dim_y ?? 1.0);
-                                const dimZ = Number(meshNode.parameters?.dim_z ?? 1.0);
-                                const originX = Number(meshNode.parameters?.origin_x ?? 0.0);
-                                const originY = Number(meshNode.parameters?.origin_y ?? 0.0);
-                                const originZ = Number(meshNode.parameters?.origin_z ?? 0.0);
+                                const xmin = Number(meshNode.parameters?.xmin ?? 0.0);
+                                const xmax = Number(meshNode.parameters?.xmax ?? 1.0);
+                                const ymin = Number(meshNode.parameters?.ymin ?? 0.0);
+                                const ymax = Number(meshNode.parameters?.ymax ?? 1.0);
+                                const zmin = Number(meshNode.parameters?.zmin ?? 0.0);
+                                const zmax = Number(meshNode.parameters?.zmax ?? 1.0);
 
                                 gauges.forEach((g: any) => {
                                     const gx = Number(g.x ?? 0.5);
@@ -835,14 +835,14 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                                     const gz = Number(g.z ?? 0.5);
                                     const name = g.name || g.id || "Unnamed";
 
-                                    if (gx < originX || gx > originX + dimX) {
-                                        addMessage(node.id, 'warning', `Gauge "${name}" position (x = ${gx}) is outside the mesh domain [${originX}, ${originX + dimX}].`);
+                                    if (gx < xmin || gx > xmax) {
+                                        addMessage(node.id, 'warning', `Gauge "${name}" position (x = ${gx}) is outside the mesh domain [${xmin}, ${xmax}].`);
                                     }
-                                    if (gy < originY || gy > originY + dimY) {
-                                        addMessage(node.id, 'warning', `Gauge "${name}" position (y = ${gy}) is outside the mesh domain [${originY}, ${originY + dimY}].`);
+                                    if (gy < ymin || gy > ymax) {
+                                        addMessage(node.id, 'warning', `Gauge "${name}" position (y = ${gy}) is outside the mesh domain [${ymin}, ${ymax}].`);
                                     }
-                                    if (gz < originZ || gz > originZ + dimZ) {
-                                        addMessage(node.id, 'warning', `Gauge "${name}" position (z = ${gz}) is outside the mesh domain [${originZ}, ${originZ + dimZ}].`);
+                                    if (gz < zmin || gz > zmax) {
+                                        addMessage(node.id, 'warning', `Gauge "${name}" position (z = ${gz}) is outside the mesh domain [${zmin}, ${zmax}].`);
                                     }
                                 });
                             }
@@ -925,21 +925,27 @@ export function validateSimulationState(state: SimulationState): ValidationResul
     // DomainMesh3D validation
     state.nodes.filter(n => n.type === 'DomainMesh3D').forEach(mesh3D => {
         const cellSize = Number(mesh3D.parameters?.cell_size || 0.01);
-        const dimX = Number(mesh3D.parameters?.dim_x || 1.0);
-        const dimY = Number(mesh3D.parameters?.dim_y || 1.0);
-        const dimZ = Number(mesh3D.parameters?.dim_z || 1.0);
+        const xmin = Number(mesh3D.parameters?.xmin ?? 0.0);
+        const xmax = Number(mesh3D.parameters?.xmax ?? 1.0);
+        const ymin = Number(mesh3D.parameters?.ymin ?? 0.0);
+        const ymax = Number(mesh3D.parameters?.ymax ?? 1.0);
+        const zmin = Number(mesh3D.parameters?.zmin ?? 0.0);
+        const zmax = Number(mesh3D.parameters?.zmax ?? 1.0);
+        const dimX = xmax - xmin;
+        const dimY = ymax - ymin;
+        const dimZ = zmax - zmin;
 
         if (isNaN(cellSize) || cellSize <= 0) {
             addMessage(mesh3D.id, 'error', "Mesh Cell Size must be greater than 0.");
         }
         if (isNaN(dimX) || dimX <= 0) {
-            addMessage(mesh3D.id, 'error', "Mesh dimension X (dim_x) must be greater than 0.");
+            addMessage(mesh3D.id, 'error', "Mesh dimension X (xmax - xmin) must be greater than 0.");
         }
         if (isNaN(dimY) || dimY <= 0) {
-            addMessage(mesh3D.id, 'error', "Mesh dimension Y (dim_y) must be greater than 0.");
+            addMessage(mesh3D.id, 'error', "Mesh dimension Y (ymax - ymin) must be greater than 0.");
         }
         if (isNaN(dimZ) || dimZ <= 0) {
-            addMessage(mesh3D.id, 'error', "Mesh dimension Z (dim_z) must be greater than 0.");
+            addMessage(mesh3D.id, 'error', "Mesh dimension Z (zmax - zmin) must be greater than 0.");
         }
         if (cellSize >= dimX || cellSize >= dimY || cellSize >= dimZ) {
             addMessage(mesh3D.id, 'error', "Mesh Cell Size must be smaller than domain dimensions.");

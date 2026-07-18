@@ -55,27 +55,39 @@ inline void get_file_metadata(const std::string& path, long long& size, long lon
     }
 }
 
+#include <functional>
+#include <atomic>
+
 std::vector<Triangle> read_stl(const std::string& filepath);
 
 void voxelize_stl(
     const std::string& stl_filepath,
     const std::string& geometry_hash,
+    const std::string& voxelization_method,
     std::vector<GeometryTile3D>& geom_pool,
     int nx, int ny, int nz,
     double cellSize,
     double xmin, double ymin, double zmin,
-    int n_tiles_x, int n_tiles_y, int n_tiles_z
+    int n_tiles_x, int n_tiles_y, int n_tiles_z,
+    const std::atomic<bool>* terminate_flag = nullptr,
+    std::function<void(double)> progress_callback = nullptr
 );
 
 HD_FUNC inline GeometryPayload pack_geometry_payload(bool is_boundary, float nx, float ny, float nz) {
-    if (!is_boundary) return {0.0f, 0.0f, 0.0f, false};
+    if (!is_boundary) return {0, 0, 0, false};
     float len = sqrtf(nx*nx + ny*ny + nz*nz);
     if (len > 1e-6f) {
         nx /= len; ny /= len; nz /= len;
     } else {
         nx = 1.0f; ny = 0.0f; nz = 0.0f;
     }
-    return {nx, ny, nz, true};
+    float n_x_scaled = nx * 127.0f;
+    float n_y_scaled = ny * 127.0f;
+    float n_z_scaled = nz * 127.0f;
+    int8_t qx = static_cast<int8_t>(n_x_scaled > 127.0f ? 127.0f : (n_x_scaled < -127.0f ? -127.0f : n_x_scaled));
+    int8_t qy = static_cast<int8_t>(n_y_scaled > 127.0f ? 127.0f : (n_y_scaled < -127.0f ? -127.0f : n_y_scaled));
+    int8_t qz = static_cast<int8_t>(n_z_scaled > 127.0f ? 127.0f : (n_z_scaled < -127.0f ? -127.0f : n_z_scaled));
+    return {qx, qy, qz, true};
 }
 
 HD_FUNC inline void unpack_geometry_payload(const GeometryPayload& payload, bool& is_boundary, float& nx, float& ny, float& nz) {
@@ -84,9 +96,9 @@ HD_FUNC inline void unpack_geometry_payload(const GeometryPayload& payload, bool
         nx = 0.0f; ny = 0.0f; nz = 0.0f;
         return;
     }
-    nx = payload.nx;
-    ny = payload.ny;
-    nz = payload.nz;
+    nx = static_cast<float>(payload.nx) / 127.0f;
+    ny = static_cast<float>(payload.ny) / 127.0f;
+    nz = static_cast<float>(payload.nz) / 127.0f;
 }
 
 HD_FUNC inline bool ray_triangle_intersect(

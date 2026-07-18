@@ -1424,7 +1424,8 @@ export class StateManager {
             },
             'STLGeometry': {
                 stl_file: '',
-                geometry_hash: ''
+                geometry_hash: '',
+                voxelization_method: 'watertight_floodfill'
             },
             'RemapNode': {
                 explosive_x: 0.0,
@@ -1469,11 +1470,14 @@ export class StateManager {
                 qty_energy: true,
                 qty_reacted: true,
                 qty_unreacted: true,
-                qty_air: true
+                qty_air: true,
+                qty_overpressure: true,
+                qty_impulse: true
             },
             'DomainMesh3D': {
-                dim_x: 1.0, dim_y: 1.0, dim_z: 1.0,
-                origin_x: 0.0, origin_y: 0.0, origin_z: 0.0,
+                xmin: 0.0, xmax: 1.0,
+                ymin: 0.0, ymax: 1.0,
+                zmin: 0.0, zmax: 1.0,
                 cell_size: 0.01,
                 bc_x_min: 'Reflecting', bc_x_max: 'Transmitting',
                 bc_y_min: 'Reflecting', bc_y_max: 'Transmitting',
@@ -1499,13 +1503,19 @@ export class StateManager {
             'Telemetry3DViewport': {
                 colormap: 'plasma',
                 refresh_rate: 0.033,
-                slices: [{ axis: 'xy', offset: 0.5, quantities: ['pressure'], stride: 1, opacity: 1.0, colormap: 'plasma', auto_scale: true, log_scale: false, interpolate: true, min_val: 101325.0, max_val: 101325.0 * 10.0, link_group: 'none' }],
+                slices: [{ axis: 'xy', offset: 0.5, quantities: ['pressure'], stride: 1, opacity: 1.0, colormap: 'plasma', auto_scale: true, log_scale: false, interpolate: true, min_val: 101325.0, max_val: 101325.0 * 10.0 }],
                 log_scale: false,
                 auto_scale: true,
                 min_val: 101325.0,
                 max_val: 101325.0 * 100.0,
                 show_grid: true,
+                cell_edges: false,
                 interpolate: false,
+                // Lighting — explicit defaults so overlay sliders initialise correctly (FIX 1)
+                lightingEnabled: true,
+                aoEnabled: true,
+                ambientLevel: 0.3,
+                specularIntensity: 0.4,
                 // VTK / File outputs
                 vtk_dir: '',
                 export_slices: true,
@@ -1521,6 +1531,8 @@ export class StateManager {
                 qty_reacted: true,
                 qty_unreacted: true,
                 qty_air: true,
+                qty_overpressure: true,
+                qty_impulse: true,
                 show_stl: true,
                 stl_wireframe: false,
                 stl_solids: true,
@@ -1549,6 +1561,32 @@ export class StateManager {
                     node.parameters['right_bc'] = node.parameters['x_max_bc'];
                     delete node.parameters['x_max_bc'];
                 }
+            }
+            if (node.type === 'DomainMesh3D') {
+                if (node.parameters['xmin'] === undefined && node.parameters['origin_x'] !== undefined) {
+                    const ox = Number(node.parameters['origin_x'] ?? 0.0);
+                    const dx = Number(node.parameters['dim_x'] ?? 1.0);
+                    node.parameters['xmin'] = ox;
+                    node.parameters['xmax'] = ox + dx;
+                }
+                if (node.parameters['ymin'] === undefined && node.parameters['origin_y'] !== undefined) {
+                    const oy = Number(node.parameters['origin_y'] ?? 0.0);
+                    const dy = Number(node.parameters['dim_y'] ?? 1.0);
+                    node.parameters['ymin'] = oy;
+                    node.parameters['ymax'] = oy + dy;
+                }
+                if (node.parameters['zmin'] === undefined && node.parameters['origin_z'] !== undefined) {
+                    const oz = Number(node.parameters['origin_z'] ?? 0.0);
+                    const dz = Number(node.parameters['dim_z'] ?? 1.0);
+                    node.parameters['zmin'] = oz;
+                    node.parameters['zmax'] = oz + dz;
+                }
+                delete node.parameters['dim_x'];
+                delete node.parameters['dim_y'];
+                delete node.parameters['dim_z'];
+                delete node.parameters['origin_x'];
+                delete node.parameters['origin_y'];
+                delete node.parameters['origin_z'];
             }
             if (!node.displayMode) {
                 node.displayMode = 'expanded';
@@ -1746,7 +1784,10 @@ const DEFAULT_QUANTITY_RANGES: Record<string, [number, number]> = {
     energy: [200000.0, 10000000.0],
     species1: [0.0, 1.0],
     species2: [0.0, 1.0],
-    species3: [0.0, 1.0]
+    species3: [0.0, 1.0],
+    solid: [0.0, 1.0],
+    overpressure: [0.0, 101325.0 * 99.0],
+    impulse: [0.0, 10000.0]
 };
 
 function syncQuantityRanges(node: Node, parameters: Record<string, any>, merged: Record<string, any>) {
@@ -1760,7 +1801,10 @@ function syncQuantityRanges(node: Node, parameters: Record<string, any>, merged:
             energy: [200000.0, 10000000.0],
             species1: [0.0, 1.0],
             species2: [0.0, 1.0],
-            species3: [0.0, 1.0]
+            species3: [0.0, 1.0],
+            solid: [0.0, 1.0],
+            overpressure: [0.0, 101325.0 * 99.0],
+            impulse: [0.0, 10000.0]
         };
     }
 
@@ -1784,16 +1828,12 @@ function constrainAllSlices(model: any): boolean {
     const meshNode = model.nodes.find((n: any) => n.type === 'DomainMesh3D');
     if (!meshNode) return false;
 
-    const originX = Number(meshNode.parameters?.origin_x ?? 0.0);
-    const originY = Number(meshNode.parameters?.origin_y ?? 0.0);
-    const originZ = Number(meshNode.parameters?.origin_z ?? 0.0);
-    const dimX = Number(meshNode.parameters?.dim_x ?? 1.0);
-    const dimY = Number(meshNode.parameters?.dim_y ?? 1.0);
-    const dimZ = Number(meshNode.parameters?.dim_z ?? 1.0);
-
-    const xmin = originX, xmax = originX + dimX;
-    const ymin = originY, ymax = originY + dimY;
-    const zmin = originZ, zmax = originZ + dimZ;
+    const xmin = Number(meshNode.parameters?.xmin ?? 0.0);
+    const xmax = Number(meshNode.parameters?.xmax ?? 1.0);
+    const ymin = Number(meshNode.parameters?.ymin ?? 0.0);
+    const ymax = Number(meshNode.parameters?.ymax ?? 1.0);
+    const zmin = Number(meshNode.parameters?.zmin ?? 0.0);
+    const zmax = Number(meshNode.parameters?.zmax ?? 1.0);
 
     let totalChanged = false;
     model.nodes.forEach((node: any) => {
@@ -1806,7 +1846,8 @@ function constrainAllSlices(model: any): boolean {
                     energy: [200000.0, 10000000.0],
                     species1: [0.0, 1.0],
                     species2: [0.0, 1.0],
-                    species3: [0.0, 1.0]
+                    species3: [0.0, 1.0],
+                    solid: [0.0, 1.0]
                 };
                 totalChanged = true;
             }

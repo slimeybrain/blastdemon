@@ -269,7 +269,8 @@ void export_vtk_particles(const std::string& filename, int num_particles,
 
 void export_vtu_slice_3d(const std::string& filename, const CFDSolver3D& solver, const Slice3D& slice, const std::string& format,
                          bool has_p, bool has_rho, bool has_vel, bool has_E,
-                         bool has_reacted, bool has_unreacted, bool has_air) {
+                         bool has_reacted, bool has_unreacted, bool has_air,
+                         bool has_solid, bool has_overpressure, bool has_impulse) {
     std::ofstream out(filename);
     if (!out) return;
 
@@ -334,7 +335,7 @@ void export_vtu_slice_3d(const std::string& filename, const CFDSolver3D& solver,
         }
     }
 
-    std::vector<double> rho, p, vel, E, reacted, unreacted, air;
+    std::vector<double> rho, p, vel, E, reacted, unreacted, air, solid, overpressure, impulse;
     if (has_rho) rho.resize(num_cells);
     if (has_p) p.resize(num_cells);
     if (has_vel) vel.resize(num_cells);
@@ -342,6 +343,9 @@ void export_vtu_slice_3d(const std::string& filename, const CFDSolver3D& solver,
     if (has_reacted) reacted.resize(num_cells);
     if (has_unreacted) unreacted.resize(num_cells);
     if (has_air) air.resize(num_cells);
+    if (has_solid) solid.resize(num_cells);
+    if (has_overpressure) overpressure.resize(num_cells);
+    if (has_impulse) impulse.resize(num_cells);
 
     for (int j = 0; j < h; ++j) {
         for (int i = 0; i < w; ++i) {
@@ -368,6 +372,9 @@ void export_vtu_slice_3d(const std::string& filename, const CFDSolver3D& solver,
             if (has_reacted) reacted[idx] = vals[4];
             if (has_unreacted) unreacted[idx] = vals[5];
             if (has_air) air[idx] = vals[6];
+            if (has_solid && vals.size() >= 8) solid[idx] = vals[7];
+            if (has_overpressure && vals.size() >= 9) overpressure[idx] = vals[8];
+            if (has_impulse && vals.size() >= 10) impulse[idx] = vals[9];
         }
     }
 
@@ -440,6 +447,9 @@ void export_vtu_slice_3d(const std::string& filename, const CFDSolver3D& solver,
     if (has_reacted) writeData("Reacted_Explosive", reacted);
     if (has_unreacted) writeData("Unreacted_Explosive", unreacted);
     if (has_air) writeData("Air", air);
+    if (has_solid) writeData("Solid", solid);
+    if (has_overpressure) writeData("Peak_Overpressure", overpressure);
+    if (has_impulse) writeData("Peak_Impulse", impulse);
 
     out << "      </CellData>\n";
     out << "    </Piece>\n";
@@ -451,7 +461,8 @@ void export_vtu_slice_3d(const std::string& filename, const CFDSolver3D& solver,
 
 void export_vtu_volume_3d(const std::string& filename, const CFDSolver3D& solver, const std::string& format,
                           bool has_p, bool has_rho, bool has_vel, bool has_E,
-                          bool has_reacted, bool has_unreacted, bool has_air) {
+                          bool has_reacted, bool has_unreacted, bool has_air,
+                          bool has_solid, bool has_overpressure, bool has_impulse) {
     std::ofstream out(filename);
     if (!out) return;
 
@@ -665,6 +676,50 @@ void export_vtu_volume_3d(const std::string& filename, const CFDSolver3D& solver
         }
         writeData("Air", air);
         air.clear(); air.shrink_to_fit();
+    }
+
+    if (has_solid) {
+        std::vector<double> solid(num_cells);
+        for (int k = 0; k < nz; ++k) {
+            for (int j = 0; j < ny; ++j) {
+                for (int i = 0; i < nx; ++i) {
+                    int c_idx = i + j * nx + k * nx * ny;
+                    auto vals = solver.getCellValues(i, j, k);
+                    solid[c_idx] = (vals.size() >= 8) ? vals[7] : 0.0;
+                }
+            }
+        }
+        writeData("Solid", solid);
+        solid.clear(); solid.shrink_to_fit();
+    }
+    if (has_overpressure) {
+        std::vector<double> overpressure(num_cells);
+        for (int k = 0; k < nz; ++k) {
+            for (int j = 0; j < ny; ++j) {
+                for (int i = 0; i < nx; ++i) {
+                    int c_idx = i + j * nx + k * nx * ny;
+                    auto vals = solver.getCellValues(i, j, k);
+                    overpressure[c_idx] = (vals.size() >= 9) ? vals[8] : 0.0;
+                }
+            }
+        }
+        writeData("Peak_Overpressure", overpressure);
+        overpressure.clear(); overpressure.shrink_to_fit();
+    }
+
+    if (has_impulse) {
+        std::vector<double> impulse(num_cells);
+        for (int k = 0; k < nz; ++k) {
+            for (int j = 0; j < ny; ++j) {
+                for (int i = 0; i < nx; ++i) {
+                    int c_idx = i + j * nx + k * nx * ny;
+                    auto vals = solver.getCellValues(i, j, k);
+                    impulse[c_idx] = (vals.size() >= 10) ? vals[9] : 0.0;
+                }
+            }
+        }
+        writeData("Peak_Impulse", impulse);
+        impulse.clear(); impulse.shrink_to_fit();
     }
 
     out << "      </CellData>\n";
