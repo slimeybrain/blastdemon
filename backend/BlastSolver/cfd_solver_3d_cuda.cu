@@ -602,14 +602,14 @@ __device__ GPUCellStateT<RealType> sample_gpu(
     }
 
     // Topological Corner Detection:
-    // Count solid cells in 3x3x3 neighborhood of target solid cell
+    // Count solid cells in 3x3x3 neighborhood of the surface boundary cell bx, by, bz
     int solid_count = 0;
     for (int sz = -1; sz <= 1; ++sz) {
-        int nz_val = target_z + sz;
+        int nz_val = bz + sz;
         for (int sy = -1; sy <= 1; ++sy) {
-            int ny_val = target_y + sy;
+            int ny_val = by + sy;
             for (int sx = -1; sx <= 1; ++sx) {
-                int nx_val = target_x + sx;
+                int nx_val = bx + sx;
                 if (nx_val >= 0 && nx_val < d_nx && ny_val >= 0 && ny_val < d_ny && nz_val >= 0 && nz_val < d_nz) {
                     if (is_solid_cell_gpu(geom, nx_val, ny_val, nz_val)) {
                         solid_count++;
@@ -627,10 +627,14 @@ __device__ GPUCellStateT<RealType> sample_gpu(
     float ny_reflect = is_convex_corner ? ny_dec : ny_true;
     float nz_reflect = is_convex_corner ? nz_dec : nz_true;
     
+    // Adaptive projection distance:
+    // 0.5 for corners to minimize extrapolation error near the singularity, 1.5 for flat/diagonal walls
+    float proj_dist = is_convex_corner ? 0.5f : 1.5f;
+    
     // Project along the adaptive normal:
-    float p_img_x = (float)target_x + nx_reflect * 1.5f;
-    float p_img_y = (float)target_y + ny_reflect * 1.5f;
-    float p_img_z = (float)target_z + nz_reflect * 1.5f;
+    float p_img_x = (float)target_x + nx_reflect * proj_dist;
+    float p_img_y = (float)target_y + ny_reflect * proj_dist;
+    float p_img_z = (float)target_z + nz_reflect * proj_dist;
     
     // Query-Centered IDW Gathering (Thin-Wall Fix #2 & Gap Fix)
     float sum_rho = 0.0f;
@@ -707,10 +711,13 @@ __device__ GPUCellStateT<RealType> sample_gpu(
         }
     }
     
-    float u_dot_n = (float)s_ghost.ux * nx_reflect + (float)s_ghost.uy * ny_reflect + (float)s_ghost.uz * nz_reflect;
-    s_ghost.ux = (RealType)((float)s_ghost.ux - 2.0f * u_dot_n * nx_reflect);
-    s_ghost.uy = (RealType)((float)s_ghost.uy - 2.0f * u_dot_n * ny_reflect);
-    s_ghost.uz = (RealType)((float)s_ghost.uz - 2.0f * u_dot_n * nz_reflect);
+    // Reflect velocity across the adaptive normal (disabled for convex corners to prevent artificial blunt blockage):
+    if (!is_convex_corner) {
+        float u_dot_n = (float)s_ghost.ux * nx_reflect + (float)s_ghost.uy * ny_reflect + (float)s_ghost.uz * nz_reflect;
+        s_ghost.ux = (RealType)((float)s_ghost.ux - 2.0f * u_dot_n * nx_reflect);
+        s_ghost.uy = (RealType)((float)s_ghost.uy - 2.0f * u_dot_n * ny_reflect);
+        s_ghost.uz = (RealType)((float)s_ghost.uz - 2.0f * u_dot_n * nz_reflect);
+    }
     s_ghost.E = 0.0;
     
     return s_ghost;

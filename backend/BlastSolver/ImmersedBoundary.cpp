@@ -209,7 +209,7 @@ void voxelize_stl(
         std::fill(geom_pool[t].cells, geom_pool[t].cells + TILE_CELLS_3D, GeometryPayload{0.0f, 0.0f, 0.0f, false});
     }
 
-    float threshold = 0.8f * (float)cellSize;
+    float threshold = 0.5f * (float)cellSize;
 
     // Normal accumulator for boundary cells
     std::unordered_map<int, Point3D> temp_normals;
