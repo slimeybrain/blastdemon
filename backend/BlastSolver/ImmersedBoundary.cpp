@@ -211,8 +211,9 @@ void voxelize_stl(
 
     float threshold = 0.5f * (float)cellSize;
 
-    // Normal accumulator for boundary cells
-    std::unordered_map<int, Point3D> temp_normals;
+    // Normal accumulator and boundary flag vectors to avoid std::unordered_map hashing overhead
+    std::vector<Point3D> accumulated_normals(total_tiles * TILE_CELLS_3D, Point3D{0.0f, 0.0f, 0.0f});
+    std::vector<uint8_t> has_boundary(total_tiles * TILE_CELLS_3D, 0);
 
     for (int i = 0; i < (int)triangles.size(); ++i) {
         const auto& tri = triangles[i];
@@ -267,18 +268,41 @@ void voxelize_stl(
                         int idx = cx + cy * TILE_SIZE_3D + cz * TILE_SIZE_3D * TILE_SIZE_3D;
                         
                         int linear_idx = t_idx * TILE_CELLS_3D + idx;
-                        temp_normals[linear_idx].x += N_accum.x;
-                        temp_normals[linear_idx].y += N_accum.y;
-                        temp_normals[linear_idx].z += N_accum.z;
+                        accumulated_normals[linear_idx].x += N_accum.x;
+                        accumulated_normals[linear_idx].y += N_accum.y;
+                        accumulated_normals[linear_idx].z += N_accum.z;
+                        has_boundary[linear_idx] = 1;
                     }
                 }
             }
         }
     }
 
-    // Watertight interior voxelization via ray-casting
+    // Watertight interior voxelization via ray-casting using a Y-Z grid binning acceleration structure
+    std::cout << "[INFO] Binning triangles into Y-Z grid..." << std::endl;
+    std::vector<std::vector<int>> grid_triangles(ny * nz);
+    for (int i = 0; i < (int)triangles.size(); ++i) {
+        const auto& tri = triangles[i];
+        float min_y = std::min({tri.v0.y, tri.v1.y, tri.v2.y});
+        float max_y = std::max({tri.v0.y, tri.v1.y, tri.v2.y});
+        float min_z = std::min({tri.v0.z, tri.v1.z, tri.v2.z});
+        float max_z = std::max({tri.v0.z, tri.v1.z, tri.v2.z});
+
+        int gy_min = std::clamp(static_cast<int>(std::floor((min_y - ymin) / cellSize)), 0, ny - 1);
+        int gy_max = std::clamp(static_cast<int>(std::floor((max_y - ymin) / cellSize)), 0, ny - 1);
+        int gz_min = std::clamp(static_cast<int>(std::floor((min_z - zmin) / cellSize)), 0, nz - 1);
+        int gz_max = std::clamp(static_cast<int>(std::floor((max_z - zmin) / cellSize)), 0, nz - 1);
+
+        for (int gz = gz_min; gz <= gz_max; ++gz) {
+            for (int gy = gy_min; gy <= gy_max; ++gy) {
+                grid_triangles[gy + gz * ny].push_back(i);
+            }
+        }
+    }
+
     std::cout << "[INFO] Performing watertight interior voxelization..." << std::endl;
-    std::vector<bool> is_inside(total_tiles * TILE_CELLS_3D, false);
+    // Use std::vector<uint8_t> to be thread-safe under parallel for collapse
+    std::vector<uint8_t> is_inside(total_tiles * TILE_CELLS_3D, 0);
 
     #pragma omp parallel for collapse(2)
     for (int gz = 0; gz < nz; ++gz) {
@@ -286,23 +310,14 @@ void voxelize_stl(
             float y_ray = (float)(ymin + (gy + 0.5f + 1.234e-4f) * cellSize);
             float z_ray = (float)(zmin + (gz + 0.5f + 5.678e-4f) * cellSize);
 
-            std::vector<Triangle> candidates;
-            for (const auto& tri : triangles) {
-                float min_y = std::min({tri.v0.y, tri.v1.y, tri.v2.y});
-                float max_y = std::max({tri.v0.y, tri.v1.y, tri.v2.y});
-                float min_z = std::min({tri.v0.z, tri.v1.z, tri.v2.z});
-                float max_z = std::max({tri.v0.z, tri.v1.z, tri.v2.z});
-                if (y_ray >= min_y && y_ray <= max_y && z_ray >= min_z && z_ray <= max_z) {
-                    candidates.push_back(tri);
-                }
-            }
-
-            if (candidates.empty()) continue;
+            const auto& candidate_indices = grid_triangles[gy + gz * ny];
+            if (candidate_indices.empty()) continue;
 
             std::vector<float> intersects;
             Point3D O = { (float)xmin - (float)cellSize, y_ray, z_ray };
             Point3D D = { 1.0f, 0.0f, 0.0f };
-            for (const auto& tri : candidates) {
+            for (int idx : candidate_indices) {
+                const auto& tri = triangles[idx];
                 float t;
                 if (ray_triangle_intersect(O, D, tri.v0, tri.v1, tri.v2, t)) {
                     intersects.push_back(O.x + t);
@@ -329,7 +344,7 @@ void voxelize_stl(
                     int cy = gy % TILE_SIZE_3D;
                     int cz = gz % TILE_SIZE_3D;
                     int idx = cx + cy * TILE_SIZE_3D + cz * TILE_SIZE_3D * TILE_SIZE_3D;
-                    is_inside[t_idx * TILE_CELLS_3D + idx] = true;
+                    is_inside[t_idx * TILE_CELLS_3D + idx] = 1;
                 }
             }
         }
@@ -339,11 +354,10 @@ void voxelize_stl(
     for (int t = 0; t < total_tiles; ++t) {
         for (int i = 0; i < TILE_CELLS_3D; ++i) {
             int linear_idx = t * TILE_CELLS_3D + i;
-            auto it = temp_normals.find(linear_idx);
-            if (it != temp_normals.end()) {
-                float nx_val = it->second.x;
-                float ny_val = it->second.y;
-                float nz_val = it->second.z;
+            if (has_boundary[linear_idx]) {
+                float nx_val = accumulated_normals[linear_idx].x;
+                float ny_val = accumulated_normals[linear_idx].y;
+                float nz_val = accumulated_normals[linear_idx].z;
                 float nlen = std::sqrt(nx_val*nx_val + ny_val*ny_val + nz_val*nz_val);
                 if (nlen > 1e-6f) {
                     nx_val /= nlen; ny_val /= nlen; nz_val /= nlen;
