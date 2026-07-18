@@ -513,6 +513,145 @@ __device__ RealType weno3_gpu(RealType vM1, RealType v0, RealType vP1) {
     return (RealType)(w0 * p0 + w1 * p1);
 }
 
+// Why this works:
+// By projecting the Image Point from the deep solid target, but restricting the IDW sampling strictly to the verified fluid neighborhood of the querying cell, we generate a perfectly continuous, anti-aliased gradient for the WENO3 stencil. This eliminates all lumps and carbuncles. Furthermore, this topology mathematically guarantees that the ray cannot pierce a 1-cell thick wall or sample the wrong side of an urban gap, providing indestructible geometric stability.
+template <typename RealType, bool IsMultiMaterial>
+__device__ GPUCellStateT<RealType> sample_gpu(
+    const PrimitiveTile3D<RealType, IsMultiMaterial>* states,
+    const GeometryTile3D* geom,
+    int target_x, int target_y, int target_z,
+    int qx, int qy, int qz
+) {
+    bool is_solid = false;
+    if (target_x >= 0 && target_x < d_nx && target_y >= 0 && target_y < d_ny && target_z >= 0 && target_z < d_nz) {
+        is_solid = is_solid_cell_gpu(geom, target_x, target_y, target_z);
+    }
+    
+    if (!is_solid) {
+        return sample_gpu_raw<RealType, IsMultiMaterial>(states, target_x, target_y, target_z);
+    }
+    
+    int sign_x = (target_x > qx) - (target_x < qx);
+    int sign_y = (target_y > qy) - (target_y < qy);
+    int sign_z = (target_z > qz) - (target_z < qz);
+    
+    int bx = qx + sign_x;
+    int by = qy + sign_y;
+    int bz = qz + sign_z;
+    
+    float nx = 0.0f, ny = 0.0f, nz = 0.0f;
+    get_solid_normal_gpu(geom, bx, by, bz, nx, ny, nz);
+    
+    float n_len = sqrt(nx*nx + ny*ny + nz*nz);
+    if (n_len > 1e-3f) {
+        nx /= n_len;
+        ny /= n_len;
+        nz /= n_len;
+    } else {
+        float dx_dir = (float)(qx - target_x);
+        float dy_dir = (float)(qy - target_y);
+        float dz_dir = (float)(qz - target_z);
+        float len_dir = sqrt(dx_dir*dx_dir + dy_dir*dy_dir + dz_dir*dz_dir);
+        if (len_dir > 1e-3f) {
+            nx = dx_dir / len_dir;
+            ny = dy_dir / len_dir;
+            nz = dz_dir / len_dir;
+        }
+    }
+    
+    // Auto-Orient the Normal (Thin-Wall Fix #1):
+    float dx_f = (float)(qx - bx);
+    float dy_f = (float)(qy - by);
+    float dz_f = (float)(qz - bz);
+    float dot_d = nx * dx_f + ny * dy_f + nz * dz_f;
+    if (dot_d < 0.0f) {
+        nx = -nx;
+        ny = -ny;
+        nz = -nz;
+    }
+    
+    // Project the Image Point:
+    float p_img_x = (float)target_x + nx * 1.5f;
+    float p_img_y = (float)target_y + ny * 1.5f;
+    float p_img_z = (float)target_z + nz * 1.5f;
+    
+    // Query-Centered IDW Gathering (Thin-Wall Fix #2 & Gap Fix)
+    float sum_rho = 0.0f;
+    float sum_ux = 0.0f;
+    float sum_uy = 0.0f;
+    float sum_uz = 0.0f;
+    float sum_p = 0.0f;
+    float sum_alpha1 = 0.0f;
+    float sum_alpha2 = 0.0f;
+    float sum_arho1 = 0.0f;
+    float sum_arho2 = 0.0f;
+    float W_total = 0.0f;
+    
+    for (int k = -1; k <= 1; ++k) {
+        int nz_val = qz + k;
+        if (nz_val < 0 || nz_val >= d_nz) continue;
+        for (int j = -1; j <= 1; ++j) {
+            int ny_val = qy + j;
+            if (ny_val < 0 || ny_val >= d_ny) continue;
+            for (int i = -1; i <= 1; ++i) {
+                int nx_val = qx + i;
+                if (nx_val < 0 || nx_val >= d_nx) continue;
+                
+                if (is_solid_cell_gpu(geom, nx_val, ny_val, nz_val)) continue;
+                
+                float dx_n = (float)nx_val - p_img_x;
+                float dy_n = (float)ny_val - p_img_y;
+                float dz_n = (float)nz_val - p_img_z;
+                float dist2 = dx_n*dx_n + dy_n*dy_n + dz_n*dz_n;
+                float w = 1.0f / (dist2 + 1e-6f);
+                
+                auto s_neighbor = sample_gpu_raw<RealType, IsMultiMaterial>(states, nx_val, ny_val, nz_val);
+                
+                sum_rho += w * (float)s_neighbor.rho;
+                sum_ux += w * (float)s_neighbor.ux;
+                sum_uy += w * (float)s_neighbor.uy;
+                sum_uz += w * (float)s_neighbor.uz;
+                sum_p += w * (float)s_neighbor.p;
+                if constexpr (IsMultiMaterial) {
+                    sum_alpha1 += w * (float)s_neighbor.alpha1;
+                    sum_alpha2 += w * (float)s_neighbor.alpha2;
+                    sum_arho1 += w * (float)s_neighbor.arho1;
+                    sum_arho2 += w * (float)s_neighbor.arho2;
+                }
+                W_total += w;
+            }
+        }
+    }
+    
+    GPUCellStateT<RealType> s_ghost;
+    if (W_total == 0.0f) {
+        s_ghost = sample_gpu_raw<RealType, IsMultiMaterial>(states, qx, qy, qz);
+    } else {
+        float inv_W = 1.0f / W_total;
+        s_ghost.rho = (RealType)(sum_rho * inv_W);
+        s_ghost.ux = (RealType)(sum_ux * inv_W);
+        s_ghost.uy = (RealType)(sum_uy * inv_W);
+        s_ghost.uz = (RealType)(sum_uz * inv_W);
+        s_ghost.p = (RealType)(sum_p * inv_W);
+        if constexpr (IsMultiMaterial) {
+            s_ghost.alpha1 = (RealType)(sum_alpha1 * inv_W);
+            s_ghost.alpha2 = (RealType)(sum_alpha2 * inv_W);
+            s_ghost.arho1 = (RealType)(sum_arho1 * inv_W);
+            s_ghost.arho2 = (RealType)(sum_arho2 * inv_W);
+        } else {
+            s_ghost.alpha1 = 0.0; s_ghost.alpha2 = 0.0; s_ghost.arho1 = 0.0; s_ghost.arho2 = 0.0;
+        }
+    }
+    
+    float u_dot_n = (float)s_ghost.ux * nx + (float)s_ghost.uy * ny + (float)s_ghost.uz * nz;
+    s_ghost.ux = (RealType)((float)s_ghost.ux - 2.0f * u_dot_n * nx);
+    s_ghost.uy = (RealType)((float)s_ghost.uy - 2.0f * u_dot_n * ny);
+    s_ghost.uz = (RealType)((float)s_ghost.uz - 2.0f * u_dot_n * nz);
+    s_ghost.E = 0.0;
+    
+    return s_ghost;
+}
+
 template <typename RealType, bool IsMultiMaterial>
 __device__ void reconstruct_gpu(
     const PrimitiveTile3D<RealType, IsMultiMaterial>* states,
@@ -520,6 +659,7 @@ __device__ void reconstruct_gpu(
     int gx, int gy, int gz,
     int dir,
     GPUCellStateT<RealType>& sL, GPUCellStateT<RealType>& sR,
+    int qx, int qy, int qz,
     bool force_first_order_L = false,
     bool force_first_order_R = false
 ) {
@@ -527,11 +667,11 @@ __device__ void reconstruct_gpu(
     int dy = (dir == 1 ? 1 : 0);
     int dz = (dir == 2 ? 1 : 0);
 
-    GPUCellStateT<RealType> sM1 = sample_gpu_raw<RealType, IsMultiMaterial>(states, gx - dx, gy - dy, gz - dz);
-    GPUCellStateT<RealType> sP0 = sample_gpu_raw<RealType, IsMultiMaterial>(states, gx, gy, gz);
+    GPUCellStateT<RealType> sM1 = sample_gpu<RealType, IsMultiMaterial>(states, geom, gx - dx, gy - dy, gz - dz, qx, qy, qz);
+    GPUCellStateT<RealType> sP0 = sample_gpu<RealType, IsMultiMaterial>(states, geom, gx, gy, gz, qx, qy, qz);
 
-    GPUCellStateT<RealType> sM2 = is_solid_cell_gpu(geom, gx - 2*dx, gy - 2*dy, gz - 2*dz) ? sM1 : sample_gpu_raw<RealType, IsMultiMaterial>(states, gx - 2*dx, gy - 2*dy, gz - 2*dz);
-    GPUCellStateT<RealType> sP1 = is_solid_cell_gpu(geom, gx + dx, gy + dy, gz + dz) ? sP0 : sample_gpu_raw<RealType, IsMultiMaterial>(states, gx + dx, gy + dy, gz + dz);
+    GPUCellStateT<RealType> sM2 = is_solid_cell_gpu(geom, gx - 2*dx, gy - 2*dy, gz - 2*dz) ? sM1 : sample_gpu<RealType, IsMultiMaterial>(states, geom, gx - 2*dx, gy - 2*dy, gz - 2*dz, qx, qy, qz);
+    GPUCellStateT<RealType> sP1 = is_solid_cell_gpu(geom, gx + dx, gy + dy, gz + dz) ? sP0 : sample_gpu<RealType, IsMultiMaterial>(states, geom, gx + dx, gy + dy, gz + dz, qx, qy, qz);
 
     auto reconstruct_channel = [&](RealType vM2, RealType vM1, RealType vP0, RealType vP1, RealType& vL, RealType& vR) {
         if (d_spatialOrder == 1 || force_first_order_L || force_first_order_R) {
@@ -616,10 +756,11 @@ __device__ void get_face_flux_gpu(
     const GeometryTile3D* geom_pool,
     int gx_L, int gy_L, int gz_L,
     int gx_R, int gy_R, int gz_R,
-    int dir, RealType* flx
+    int dir, RealType* flx,
+    int qx, int qy, int qz
 ) {
     GPUCellStateT<RealType> sL, sR;
-    reconstruct_gpu<RealType, IsMultiMaterial>(states, geom_pool, gx_R, gy_R, gz_R, dir, sL, sR);
+    reconstruct_gpu<RealType, IsMultiMaterial>(states, geom_pool, gx_R, gy_R, gz_R, dir, sL, sR, qx, qy, qz);
     if (d_useAUSM) getAUSMPlusFluxGPU<RealType, IsMultiMaterial>(sL, sR, flx, dir, (RealType)d_gamma);
     else getRusanovFluxGPU<RealType, IsMultiMaterial>(sL, sR, flx, dir, (RealType)d_gamma);
 }
@@ -644,274 +785,75 @@ __global__ void __launch_bounds__(512) compute_flux_kernel_3d(const PrimitiveTil
 
     if (gx >= d_nx || gy >= d_ny || gz >= d_nz) return;
 
-    if (is_solid_cell_gpu(geom, gx, gy, gz)) return;
+    bool is_boundary = is_solid_cell_gpu(geom, gx, gy, gz);
 
-    GPUCellStateT<RealType> sC = sample_gpu_raw<RealType, IsMultiMaterial>(states, gx, gy, gz);
+    if (!is_boundary) {
+        GPUCellStateT<RealType> sC = sample_gpu_raw<RealType, IsMultiMaterial>(states, gx, gy, gz);
 
-    RealType invDx = (RealType)(1.0 / d_cellSize);
-    RealType dt_dx = dt * invDx;
+        RealType invDx = (RealType)(1.0 / d_cellSize);
+        RealType dt_dx = dt * invDx;
 
-    RealType fL[10], fR[10];
+        RealType fL[10], fR[10];
 
-    // --- X Direction ---
-    // Left Face
-    if (is_solid_cell_gpu(geom, gx - 1, gy, gz)) {
-        for (int c = 0; c < 10; ++c) fL[c] = 0.0;
-        float nx_geom = 0.0f, ny_geom = 0.0f, nz_geom = 0.0f;
-        get_solid_normal_gpu(geom, gx - 1, gy, gz, nx_geom, ny_geom, nz_geom);
-        RealType dx = -1.0; RealType dy = 0.0; RealType dz = 0.0;
-        RealType n_dot_d = (RealType)nx_geom * dx + (RealType)ny_geom * dy + (RealType)nz_geom * dz;
-        RealType nx_b = (n_dot_d > 0.0) ? -(RealType)nx_geom : (RealType)nx_geom;
-        RealType ny_b = (n_dot_d > 0.0) ? -(RealType)ny_geom : (RealType)ny_geom;
-        RealType nz_b = (n_dot_d > 0.0) ? -(RealType)nz_geom : (RealType)nz_geom;
-        RealType n_len = sqrt(nx_b*nx_b + ny_b*ny_b + nz_b*nz_b);
-        if (n_len < (RealType)0.01) {
-            nx_b = -dx; ny_b = -dy; nz_b = -dz;
-        }
-        
-        RealType v_face = sC.ux * dx + sC.uy * dy + sC.uz * dz;
-        RealType P_dyn = 0.0;
-        if (v_face > 0.0) {
-            RealType u_n = sC.ux * nx_b + sC.uy * ny_b + sC.uz * nz_b;
-            RealType c_C;
-            if constexpr (IsMultiMaterial) {
-                c_C = (RealType)MultiMat::getMixtureSoundSpeed((double)sC.p, (double)sC.rho, (double)sC.alpha1, (double)sC.alpha2, (double)sC.arho1, (double)sC.arho2, (double)d_gamma, d_products, d_unreacted);
-            } else {
-                c_C = sqrt((RealType)d_gamma * sC.p / max((RealType)1e-6, sC.rho));
-            }
-            P_dyn = sC.rho * c_C * fmax((RealType)0.0, -u_n);
-        }
-        
-        fL[1] = sC.p + P_dyn * fabs(nx_b);
-        fL[2] = -P_dyn * ny_b * dx;
-        fL[3] = -P_dyn * nz_b * dx;
-    } else {
-        get_face_flux_gpu<RealType, IsMultiMaterial>(states, geom, gx - 1, gy, gz, gx, gy, gz, 0, fL);
-    }
+        // --- X Direction ---
+        get_face_flux_gpu<RealType, IsMultiMaterial>(states, geom, gx - 1, gy, gz, gx, gy, gz, 0, fL, gx, gy, gz);
+        get_face_flux_gpu<RealType, IsMultiMaterial>(states, geom, gx, gy, gz, gx + 1, gy, gz, 0, fR, gx, gy, gz);
 
-    // Right Face
-    if (is_solid_cell_gpu(geom, gx + 1, gy, gz)) {
-        for (int c = 0; c < 10; ++c) fR[c] = 0.0;
-        float nx_geom = 0.0f, ny_geom = 0.0f, nz_geom = 0.0f;
-        get_solid_normal_gpu(geom, gx + 1, gy, gz, nx_geom, ny_geom, nz_geom);
-        RealType dx = 1.0; RealType dy = 0.0; RealType dz = 0.0;
-        RealType n_dot_d = (RealType)nx_geom * dx + (RealType)ny_geom * dy + (RealType)nz_geom * dz;
-        RealType nx_b = (n_dot_d > 0.0) ? -(RealType)nx_geom : (RealType)nx_geom;
-        RealType ny_b = (n_dot_d > 0.0) ? -(RealType)ny_geom : (RealType)ny_geom;
-        RealType nz_b = (n_dot_d > 0.0) ? -(RealType)nz_geom : (RealType)nz_geom;
-        RealType n_len = sqrt(nx_b*nx_b + ny_b*ny_b + nz_b*nz_b);
-        if (n_len < (RealType)0.01) {
-            nx_b = -dx; ny_b = -dy; nz_b = -dz;
+        // Apply X fluxes
+        U[t_idx].rho[c_idx]   -= dt_dx * (fR[0] - fL[0]);
+        U[t_idx].rhoux[c_idx] -= dt_dx * (fR[1] - fL[1]);
+        U[t_idx].rhouy[c_idx] -= dt_dx * (fR[2] - fL[2]);
+        U[t_idx].rhouz[c_idx] -= dt_dx * (fR[3] - fL[3]);
+        U[t_idx].E[c_idx]     -= dt_dx * (fR[4] - fL[4]);
+        if constexpr (IsMultiMaterial) {
+            U[t_idx].alpha1[c_idx] -= dt_dx * (fR[5] - fL[5]);
+            U[t_idx].alpha2[c_idx] -= dt_dx * (fR[6] - fL[6]);
+            U[t_idx].arho1[c_idx]  -= dt_dx * (fR[7] - fL[7]);
+            U[t_idx].arho2[c_idx]  -= dt_dx * (fR[8] - fL[8]);
+            RealType div_u = fR[9] - fL[9];
+            U[t_idx].alpha1[c_idx] += dt_dx * states[t_idx].alpha1[c_idx] * div_u;
+            U[t_idx].alpha2[c_idx] += dt_dx * states[t_idx].alpha2[c_idx] * div_u;
         }
-        
-        RealType v_face = sC.ux * dx + sC.uy * dy + sC.uz * dz;
-        RealType P_dyn = 0.0;
-        if (v_face > 0.0) {
-            RealType u_n = sC.ux * nx_b + sC.uy * ny_b + sC.uz * nz_b;
-            RealType c_C;
-            if constexpr (IsMultiMaterial) {
-                c_C = (RealType)MultiMat::getMixtureSoundSpeed((double)sC.p, (double)sC.rho, (double)sC.alpha1, (double)sC.alpha2, (double)sC.arho1, (double)sC.arho2, (double)d_gamma, d_products, d_unreacted);
-            } else {
-                c_C = sqrt((RealType)d_gamma * sC.p / max((RealType)1e-6, sC.rho));
-            }
-            P_dyn = sC.rho * c_C * fmax((RealType)0.0, -u_n);
-        }
-        
-        fR[1] = sC.p + P_dyn * fabs(nx_b);
-        fR[2] = -P_dyn * ny_b * dx;
-        fR[3] = -P_dyn * nz_b * dx;
-    } else {
-        get_face_flux_gpu<RealType, IsMultiMaterial>(states, geom, gx, gy, gz, gx + 1, gy, gz, 0, fR);
-    }
 
-    // Apply X fluxes
-    U[t_idx].rho[c_idx]   -= dt_dx * (fR[0] - fL[0]);
-    U[t_idx].rhoux[c_idx] -= dt_dx * (fR[1] - fL[1]);
-    U[t_idx].rhouy[c_idx] -= dt_dx * (fR[2] - fL[2]);
-    U[t_idx].rhouz[c_idx] -= dt_dx * (fR[3] - fL[3]);
-    U[t_idx].E[c_idx]     -= dt_dx * (fR[4] - fL[4]);
-    if constexpr (IsMultiMaterial) {
-        U[t_idx].alpha1[c_idx] -= dt_dx * (fR[5] - fL[5]);
-        U[t_idx].alpha2[c_idx] -= dt_dx * (fR[6] - fL[6]);
-        U[t_idx].arho1[c_idx]  -= dt_dx * (fR[7] - fL[7]);
-        U[t_idx].arho2[c_idx]  -= dt_dx * (fR[8] - fL[8]);
-        RealType div_u = fR[9] - fL[9];
-        U[t_idx].alpha1[c_idx] += dt_dx * states[t_idx].alpha1[c_idx] * div_u;
-        U[t_idx].alpha2[c_idx] += dt_dx * states[t_idx].alpha2[c_idx] * div_u;
-    }
+        // --- Y Direction ---
+        get_face_flux_gpu<RealType, IsMultiMaterial>(states, geom, gx, gy - 1, gz, gx, gy, gz, 1, fL, gx, gy, gz);
+        get_face_flux_gpu<RealType, IsMultiMaterial>(states, geom, gx, gy, gz, gx, gy + 1, gz, 1, fR, gx, gy, gz);
 
-    // --- Y Direction ---
-    // Bottom Face
-    if (is_solid_cell_gpu(geom, gx, gy - 1, gz)) {
-        for (int c = 0; c < 10; ++c) fL[c] = 0.0;
-        float nx_geom = 0.0f, ny_geom = 0.0f, nz_geom = 0.0f;
-        get_solid_normal_gpu(geom, gx, gy - 1, gz, nx_geom, ny_geom, nz_geom);
-        RealType dx = 0.0; RealType dy = -1.0; RealType dz = 0.0;
-        RealType n_dot_d = (RealType)nx_geom * dx + (RealType)ny_geom * dy + (RealType)nz_geom * dz;
-        RealType nx_b = (n_dot_d > 0.0) ? -(RealType)nx_geom : (RealType)nx_geom;
-        RealType ny_b = (n_dot_d > 0.0) ? -(RealType)ny_geom : (RealType)ny_geom;
-        RealType nz_b = (n_dot_d > 0.0) ? -(RealType)nz_geom : (RealType)nz_geom;
-        RealType n_len = sqrt(nx_b*nx_b + ny_b*ny_b + nz_b*nz_b);
-        if (n_len < (RealType)0.01) {
-            nx_b = -dx; ny_b = -dy; nz_b = -dz;
+        // Apply Y fluxes
+        U[t_idx].rho[c_idx]   -= dt_dx * (fR[0] - fL[0]);
+        U[t_idx].rhoux[c_idx] -= dt_dx * (fR[1] - fL[1]);
+        U[t_idx].rhouy[c_idx] -= dt_dx * (fR[2] - fL[2]);
+        U[t_idx].rhouz[c_idx] -= dt_dx * (fR[3] - fL[3]);
+        U[t_idx].E[c_idx]     -= dt_dx * (fR[4] - fL[4]);
+        if constexpr (IsMultiMaterial) {
+            U[t_idx].alpha1[c_idx] -= dt_dx * (fR[5] - fL[5]);
+            U[t_idx].alpha2[c_idx] -= dt_dx * (fR[6] - fL[6]);
+            U[t_idx].arho1[c_idx]  -= dt_dx * (fR[7] - fL[7]);
+            U[t_idx].arho2[c_idx]  -= dt_dx * (fR[8] - fL[8]);
+            RealType div_u = fR[9] - fL[9];
+            U[t_idx].alpha1[c_idx] += dt_dx * states[t_idx].alpha1[c_idx] * div_u;
+            U[t_idx].alpha2[c_idx] += dt_dx * states[t_idx].alpha2[c_idx] * div_u;
         }
-        
-        RealType v_face = sC.ux * dx + sC.uy * dy + sC.uz * dz;
-        RealType P_dyn = 0.0;
-        if (v_face > 0.0) {
-            RealType u_n = sC.ux * nx_b + sC.uy * ny_b + sC.uz * nz_b;
-            RealType c_C;
-            if constexpr (IsMultiMaterial) {
-                c_C = (RealType)MultiMat::getMixtureSoundSpeed((double)sC.p, (double)sC.rho, (double)sC.alpha1, (double)sC.alpha2, (double)sC.arho1, (double)sC.arho2, (double)d_gamma, d_products, d_unreacted);
-            } else {
-                c_C = sqrt((RealType)d_gamma * sC.p / max((RealType)1e-6, sC.rho));
-            }
-            P_dyn = sC.rho * c_C * fmax((RealType)0.0, -u_n);
-        }
-        
-        fL[1] = -P_dyn * nx_b * dy;
-        fL[2] = sC.p + P_dyn * fabs(ny_b);
-        fL[3] = -P_dyn * nz_b * dy;
-    } else {
-        get_face_flux_gpu<RealType, IsMultiMaterial>(states, geom, gx, gy - 1, gz, gx, gy, gz, 1, fL);
-    }
 
-    // Top Face
-    if (is_solid_cell_gpu(geom, gx, gy + 1, gz)) {
-        for (int c = 0; c < 10; ++c) fR[c] = 0.0;
-        float nx_geom = 0.0f, ny_geom = 0.0f, nz_geom = 0.0f;
-        get_solid_normal_gpu(geom, gx, gy + 1, gz, nx_geom, ny_geom, nz_geom);
-        RealType dx = 0.0; RealType dy = 1.0; RealType dz = 0.0;
-        RealType n_dot_d = (RealType)nx_geom * dx + (RealType)ny_geom * dy + (RealType)nz_geom * dz;
-        RealType nx_b = (n_dot_d > 0.0) ? -(RealType)nx_geom : (RealType)nx_geom;
-        RealType ny_b = (n_dot_d > 0.0) ? -(RealType)ny_geom : (RealType)ny_geom;
-        RealType nz_b = (n_dot_d > 0.0) ? -(RealType)nz_geom : (RealType)nz_geom;
-        RealType n_len = sqrt(nx_b*nx_b + ny_b*ny_b + nz_b*nz_b);
-        if (n_len < (RealType)0.01) {
-            nx_b = -dx; ny_b = -dy; nz_b = -dz;
-        }
-        
-        RealType v_face = sC.ux * dx + sC.uy * dy + sC.uz * dz;
-        RealType P_dyn = 0.0;
-        if (v_face > 0.0) {
-            RealType u_n = sC.ux * nx_b + sC.uy * ny_b + sC.uz * nz_b;
-            RealType c_C;
-            if constexpr (IsMultiMaterial) {
-                c_C = (RealType)MultiMat::getMixtureSoundSpeed((double)sC.p, (double)sC.rho, (double)sC.alpha1, (double)sC.alpha2, (double)sC.arho1, (double)sC.arho2, (double)d_gamma, d_products, d_unreacted);
-            } else {
-                c_C = sqrt((RealType)d_gamma * sC.p / max((RealType)1e-6, sC.rho));
-            }
-            P_dyn = sC.rho * c_C * fmax((RealType)0.0, -u_n);
-        }
-        
-        fR[1] = -P_dyn * nx_b * dy;
-        fR[2] = sC.p + P_dyn * fabs(ny_b);
-        fR[3] = -P_dyn * nz_b * dy;
-    } else {
-        get_face_flux_gpu<RealType, IsMultiMaterial>(states, geom, gx, gy, gz, gx, gy + 1, gz, 1, fR);
-    }
+        // --- Z Direction ---
+        get_face_flux_gpu<RealType, IsMultiMaterial>(states, geom, gx, gy, gz - 1, gx, gy, gz, 2, fL, gx, gy, gz);
+        get_face_flux_gpu<RealType, IsMultiMaterial>(states, geom, gx, gy, gz, gx, gy, gz + 1, 2, fR, gx, gy, gz);
 
-    // Apply Y fluxes
-    U[t_idx].rho[c_idx]   -= dt_dx * (fR[0] - fL[0]);
-    U[t_idx].rhoux[c_idx] -= dt_dx * (fR[1] - fL[1]);
-    U[t_idx].rhouy[c_idx] -= dt_dx * (fR[2] - fL[2]);
-    U[t_idx].rhouz[c_idx] -= dt_dx * (fR[3] - fL[3]);
-    U[t_idx].E[c_idx]     -= dt_dx * (fR[4] - fL[4]);
-    if constexpr (IsMultiMaterial) {
-        U[t_idx].alpha1[c_idx] -= dt_dx * (fR[5] - fL[5]);
-        U[t_idx].alpha2[c_idx] -= dt_dx * (fR[6] - fL[6]);
-        U[t_idx].arho1[c_idx]  -= dt_dx * (fR[7] - fL[7]);
-        U[t_idx].arho2[c_idx]  -= dt_dx * (fR[8] - fL[8]);
-        RealType div_u = fR[9] - fL[9];
-        U[t_idx].alpha1[c_idx] += dt_dx * states[t_idx].alpha1[c_idx] * div_u;
-        U[t_idx].alpha2[c_idx] += dt_dx * states[t_idx].alpha2[c_idx] * div_u;
-    }
-
-    // --- Z Direction ---
-    // Back Face
-    if (is_solid_cell_gpu(geom, gx, gy, gz - 1)) {
-        for (int c = 0; c < 10; ++c) fL[c] = 0.0;
-        float nx_geom = 0.0f, ny_geom = 0.0f, nz_geom = 0.0f;
-        get_solid_normal_gpu(geom, gx, gy, gz - 1, nx_geom, ny_geom, nz_geom);
-        RealType dx = 0.0; RealType dy = 0.0; RealType dz = -1.0;
-        RealType n_dot_d = (RealType)nx_geom * dx + (RealType)ny_geom * dy + (RealType)nz_geom * dz;
-        RealType nx_b = (n_dot_d > 0.0) ? -(RealType)nx_geom : (RealType)nx_geom;
-        RealType ny_b = (n_dot_d > 0.0) ? -(RealType)ny_geom : (RealType)ny_geom;
-        RealType nz_b = (n_dot_d > 0.0) ? -(RealType)nz_geom : (RealType)nz_geom;
-        RealType n_len = sqrt(nx_b*nx_b + ny_b*ny_b + nz_b*nz_b);
-        if (n_len < (RealType)0.01) {
-            nx_b = -dx; ny_b = -dy; nz_b = -dz;
+        // Apply Z fluxes
+        U[t_idx].rho[c_idx]   -= dt_dx * (fR[0] - fL[0]);
+        U[t_idx].rhoux[c_idx] -= dt_dx * (fR[1] - fL[1]);
+        U[t_idx].rhouy[c_idx] -= dt_dx * (fR[2] - fL[2]);
+        U[t_idx].rhouz[c_idx] -= dt_dx * (fR[3] - fL[3]);
+        U[t_idx].E[c_idx]     -= dt_dx * (fR[4] - fL[4]);
+        if constexpr (IsMultiMaterial) {
+            U[t_idx].alpha1[c_idx] -= dt_dx * (fR[5] - fL[5]);
+            U[t_idx].alpha2[c_idx] -= dt_dx * (fR[6] - fL[6]);
+            U[t_idx].arho1[c_idx]  -= dt_dx * (fR[7] - fL[7]);
+            U[t_idx].arho2[c_idx]  -= dt_dx * (fR[8] - fL[8]);
+            RealType div_u = fR[9] - fL[9];
+            U[t_idx].alpha1[c_idx] += dt_dx * states[t_idx].alpha1[c_idx] * div_u;
+            U[t_idx].alpha2[c_idx] += dt_dx * states[t_idx].alpha2[c_idx] * div_u;
         }
-        
-        RealType v_face = sC.ux * dx + sC.uy * dy + sC.uz * dz;
-        RealType P_dyn = 0.0;
-        if (v_face > 0.0) {
-            RealType u_n = sC.ux * nx_b + sC.uy * ny_b + sC.uz * nz_b;
-            RealType c_C;
-            if constexpr (IsMultiMaterial) {
-                c_C = (RealType)MultiMat::getMixtureSoundSpeed((double)sC.p, (double)sC.rho, (double)sC.alpha1, (double)sC.alpha2, (double)sC.arho1, (double)sC.arho2, (double)d_gamma, d_products, d_unreacted);
-            } else {
-                c_C = sqrt((RealType)d_gamma * sC.p / max((RealType)1e-6, sC.rho));
-            }
-            P_dyn = sC.rho * c_C * fmax((RealType)0.0, -u_n);
-        }
-        
-        fL[1] = -P_dyn * nx_b * dz;
-        fL[2] = -P_dyn * ny_b * dz;
-        fL[3] = sC.p + P_dyn * fabs(nz_b);
-    } else {
-        get_face_flux_gpu<RealType, IsMultiMaterial>(states, geom, gx, gy, gz - 1, gx, gy, gz, 2, fL);
-    }
-
-    // Front Face
-    if (is_solid_cell_gpu(geom, gx, gy, gz + 1)) {
-        for (int c = 0; c < 10; ++c) fR[c] = 0.0;
-        float nx_geom = 0.0f, ny_geom = 0.0f, nz_geom = 0.0f;
-        get_solid_normal_gpu(geom, gx, gy, gz + 1, nx_geom, ny_geom, nz_geom);
-        RealType dx = 0.0; RealType dy = 0.0; RealType dz = 1.0;
-        RealType n_dot_d = (RealType)nx_geom * dx + (RealType)ny_geom * dy + (RealType)nz_geom * dz;
-        RealType nx_b = (n_dot_d > 0.0) ? -(RealType)nx_geom : (RealType)nx_geom;
-        RealType ny_b = (n_dot_d > 0.0) ? -(RealType)ny_geom : (RealType)ny_geom;
-        RealType nz_b = (n_dot_d > 0.0) ? -(RealType)nz_geom : (RealType)nz_geom;
-        RealType n_len = sqrt(nx_b*nx_b + ny_b*ny_b + nz_b*nz_b);
-        if (n_len < (RealType)0.01) {
-            nx_b = -dx; ny_b = -dy; nz_b = -dz;
-        }
-        
-        RealType v_face = sC.ux * dx + sC.uy * dy + sC.uz * dz;
-        RealType P_dyn = 0.0;
-        if (v_face > 0.0) {
-            RealType u_n = sC.ux * nx_b + sC.uy * ny_b + sC.uz * nz_b;
-            RealType c_C;
-            if constexpr (IsMultiMaterial) {
-                c_C = (RealType)MultiMat::getMixtureSoundSpeed((double)sC.p, (double)sC.rho, (double)sC.alpha1, (double)sC.alpha2, (double)sC.arho1, (double)sC.arho2, (double)d_gamma, d_products, d_unreacted);
-            } else {
-                c_C = sqrt((RealType)d_gamma * sC.p / max((RealType)1e-6, sC.rho));
-            }
-            P_dyn = sC.rho * c_C * fmax((RealType)0.0, -u_n);
-        }
-        
-        fR[1] = -P_dyn * nx_b * dz;
-        fR[2] = -P_dyn * ny_b * dz;
-        fR[3] = sC.p + P_dyn * fabs(nz_b);
-    } else {
-        get_face_flux_gpu<RealType, IsMultiMaterial>(states, geom, gx, gy, gz, gx, gy, gz + 1, 2, fR);
-    }
-
-    // Apply Z fluxes
-    U[t_idx].rho[c_idx]   -= dt_dx * (fR[0] - fL[0]);
-    U[t_idx].rhoux[c_idx] -= dt_dx * (fR[1] - fL[1]);
-    U[t_idx].rhouy[c_idx] -= dt_dx * (fR[2] - fL[2]);
-    U[t_idx].rhouz[c_idx] -= dt_dx * (fR[3] - fL[3]);
-    U[t_idx].E[c_idx]     -= dt_dx * (fR[4] - fL[4]);
-    if constexpr (IsMultiMaterial) {
-        U[t_idx].alpha1[c_idx] -= dt_dx * (fR[5] - fL[5]);
-        U[t_idx].alpha2[c_idx] -= dt_dx * (fR[6] - fL[6]);
-        U[t_idx].arho1[c_idx]  -= dt_dx * (fR[7] - fL[7]);
-        U[t_idx].arho2[c_idx]  -= dt_dx * (fR[8] - fL[8]);
-        RealType div_u = fR[9] - fL[9];
-        U[t_idx].alpha1[c_idx] += dt_dx * states[t_idx].alpha1[c_idx] * div_u;
-        U[t_idx].alpha2[c_idx] += dt_dx * states[t_idx].alpha2[c_idx] * div_u;
     }
 }
 

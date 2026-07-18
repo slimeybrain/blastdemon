@@ -500,295 +500,145 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::computeFluxes(double dt, std::v
                                 return geom_pool[t].cells[c].is_boundary;
                             };
 
-                            if (is_solid(gx, gy, gz)) continue;
+                            bool is_boundary = is_solid(gx, gy, gz);
+                            if (!is_boundary) {
+                                auto sC = sampleStateInternal(gx, gy, gz);
 
-                            auto sC = sampleStateInternal(gx, gy, gz);
+                                auto get_f = [&](const CellState3DT<RealType, IsMultiMaterial>& L, const CellState3DT<RealType, IsMultiMaterial>& R, int d) {
+                                    return useAUSM ? getAUSMPlusFlux3D<RealType, IsMultiMaterial>(L, R, d, gamma_r, currentMaterials.products, currentMaterials.unreacted) : getRusanovFlux3D<RealType, IsMultiMaterial>(L, R, d, gamma_r, currentMaterials.products, currentMaterials.unreacted);
+                                };
 
-                            auto get_solid_normal = [&](int cx, int cy, int cz, float& nx_b, float& ny_b, float& nz_b) {
-                                if (geom_pool.empty()) return false;
-                                int ci = std::clamp(cx, 0, nx - 1);
-                                int cj = std::clamp(cy, 0, ny - 1);
-                                int ck = std::clamp(cz, 0, nz - 1);
-                                int t = (ci >> 3) + (cj >> 3) * n_tiles_x + (ck >> 3) * n_tiles_x * n_tiles_y;
-                                int c = (ci & 7) + (cj & 7) * 8 + (ck & 7) * 64;
-                                bool is_b = false;
-                                unpack_geometry_payload(geom_pool[t].cells[c], is_b, nx_b, ny_b, nz_b);
-                                return is_b;
-                            };
+                                auto get_c = [&](const CellState3DT<RealType, IsMultiMaterial>& state) {
+                                    if constexpr (IsMultiMaterial) {
+                                        return (RealType)MultiMat::getMixtureSoundSpeed((double)state.p, (double)state.rho, (double)state.alpha1, (double)state.alpha2, (double)state.arho1, (double)state.arho2, (double)gamma_r, currentMaterials.products, currentMaterials.unreacted);
+                                    } else {
+                                        return (RealType)std::sqrt(gamma_r * state.p / std::max((RealType)1e-6, state.rho));
+                                    }
+                                };
 
-                            auto get_f = [&](const CellState3DT<RealType, IsMultiMaterial>& L, const CellState3DT<RealType, IsMultiMaterial>& R, int d) {
-                                return useAUSM ? getAUSMPlusFlux3D<RealType, IsMultiMaterial>(L, R, d, gamma_r, currentMaterials.products, currentMaterials.unreacted) : getRusanovFlux3D<RealType, IsMultiMaterial>(L, R, d, gamma_r, currentMaterials.products, currentMaterials.unreacted);
-                            };
+                                RealType dt_dx = dt_r * invDx;
 
-                            auto get_c = [&](const CellState3DT<RealType, IsMultiMaterial>& state) {
+                                // X-Fluxes
+                                RealType fxL_rho = 0.0, fxL_rhoux = 0.0, fxL_rhouy = 0.0, fxL_rhouz = 0.0, fxL_E = 0.0;
+                                RealType fxL_alpha1 = 0.0, fxL_alpha2 = 0.0, fxL_arho1 = 0.0, fxL_arho2 = 0.0, fxL_v_face = 0.0;
+
+                                {
+                                    auto sL2 = is_solid(gx - 2, gy, gz) ? sampleStateInternalIDW(gx - 1, gy, gz, gx, gy, gz) : sampleStateInternalIDW(gx - 2, gy, gz, gx, gy, gz);
+                                    auto sL1 = sampleStateInternalIDW(gx - 1, gy, gz, gx, gy, gz);
+                                    auto sR1 = sC;
+                                    auto sR2 = is_solid(gx + 1, gy, gz) ? sR1 : sampleStateInternalIDW(gx + 1, gy, gz, gx, gy, gz);
+                                    auto fxL = get_f(reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted),
+                                                     reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted), 0);
+                                    fxL_rho = fxL.rho; fxL_rhoux = fxL.rhoux; fxL_rhouy = fxL.rhouy; fxL_rhouz = fxL.rhouz; fxL_E = fxL.E;
+                                    fxL_v_face = fxL.v_face;
+                                    if constexpr (IsMultiMaterial) {
+                                        fxL_alpha1 = fxL.alpha1; fxL_alpha2 = fxL.alpha2; fxL_arho1 = fxL.arho1; fxL_arho2 = fxL.arho2;
+                                    }
+                                }
+
+                                RealType fxR_rho = 0.0, fxR_rhoux = 0.0, fxR_rhouy = 0.0, fxR_rhouz = 0.0, fxR_E = 0.0;
+                                RealType fxR_alpha1 = 0.0, fxR_alpha2 = 0.0, fxR_arho1 = 0.0, fxR_arho2 = 0.0, fxR_v_face = 0.0;
+
+                                {
+                                    auto sL2 = is_solid(gx - 1, gy, gz) ? sC : sampleStateInternalIDW(gx - 1, gy, gz, gx, gy, gz);
+                                    auto sL1 = sC;
+                                    auto sR1 = sampleStateInternalIDW(gx + 1, gy, gz, gx, gy, gz);
+                                    auto sR2 = is_solid(gx + 2, gy, gz) ? sR1 : sampleStateInternalIDW(gx + 2, gy, gz, gx, gy, gz);
+                                    auto fxR = get_f(reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted),
+                                                     reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted), 0);
+                                    fxR_rho = fxR.rho; fxR_rhoux = fxR.rhoux; fxR_rhouy = fxR.rhouy; fxR_rhouz = fxR.rhouz; fxR_E = fxR.E;
+                                    fxR_v_face = fxR.v_face;
+                                    if constexpr (IsMultiMaterial) {
+                                        fxR_alpha1 = fxR.alpha1; fxR_alpha2 = fxR.alpha2; fxR_arho1 = fxR.arho1; fxR_arho2 = fxR.arho2;
+                                    }
+                                }
+
+                                // Y-Fluxes
+                                RealType fyB_rho = 0.0, fyB_rhoux = 0.0, fyB_rhouy = 0.0, fyB_rhouz = 0.0, fyB_E = 0.0;
+                                RealType fyB_alpha1 = 0.0, fyB_alpha2 = 0.0, fyB_arho1 = 0.0, fyB_arho2 = 0.0, fyB_v_face = 0.0;
+
+                                {
+                                    auto sL2 = is_solid(gx, gy - 2, gz) ? sampleStateInternalIDW(gx, gy - 1, gz, gx, gy, gz) : sampleStateInternalIDW(gx, gy - 2, gz, gx, gy, gz);
+                                    auto sL1 = sampleStateInternalIDW(gx, gy - 1, gz, gx, gy, gz);
+                                    auto sR1 = sC;
+                                    auto sR2 = is_solid(gx, gy + 1, gz) ? sR1 : sampleStateInternalIDW(gx, gy + 1, gz, gx, gy, gz);
+                                    auto fyB = get_f(reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted),
+                                                     reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted), 1);
+                                    fyB_rho = fyB.rho; fyB_rhoux = fyB.rhoux; fyB_rhouy = fyB.rhouy; fyB_rhouz = fyB.rhouz; fyB_E = fyB.E;
+                                    fyB_v_face = fyB.v_face;
+                                    if constexpr (IsMultiMaterial) {
+                                        fyB_alpha1 = fyB.alpha1; fyB_alpha2 = fyB.alpha2; fyB_arho1 = fyB.arho1; fyB_arho2 = fyB.arho2;
+                                    }
+                                }
+
+                                RealType fyT_rho = 0.0, fyT_rhoux = 0.0, fyT_rhouy = 0.0, fyT_rhouz = 0.0, fyT_E = 0.0;
+                                RealType fyT_alpha1 = 0.0, fyT_alpha2 = 0.0, fyT_arho1 = 0.0, fyT_arho2 = 0.0, fyT_v_face = 0.0;
+
+                                {
+                                    auto sL2 = is_solid(gx, gy - 1, gz) ? sC : sampleStateInternalIDW(gx, gy - 1, gz, gx, gy, gz);
+                                    auto sL1 = sC;
+                                    auto sR1 = sampleStateInternalIDW(gx, gy + 1, gz, gx, gy, gz);
+                                    auto sR2 = is_solid(gx, gy + 2, gz) ? sR1 : sampleStateInternalIDW(gx, gy + 2, gz, gx, gy, gz);
+                                    auto fyT = get_f(reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted),
+                                                     reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted), 1);
+                                    fyT_rho = fyT.rho; fyT_rhoux = fyT.rhoux; fyT_rhouy = fyT.rhouy; fyT_rhouz = fyT.rhouz; fyT_E = fyT.E;
+                                    fyT_v_face = fyT.v_face;
+                                    if constexpr (IsMultiMaterial) {
+                                        fyT_alpha1 = fyT.alpha1; fyT_alpha2 = fyT.alpha2; fyT_arho1 = fyT.arho1; fyT_arho2 = fyT.arho2;
+                                    }
+                                }
+
+                                // Z-Fluxes
+                                RealType fzD_rho = 0.0, fzD_rhoux = 0.0, fzD_rhouy = 0.0, fzD_rhouz = 0.0, fzD_E = 0.0;
+                                RealType fzD_alpha1 = 0.0, fzD_alpha2 = 0.0, fzD_arho1 = 0.0, fzD_arho2 = 0.0, fzD_v_face = 0.0;
+
+                                {
+                                    auto sL2 = is_solid(gx, gy, gz - 2) ? sampleStateInternalIDW(gx, gy, gz - 1, gx, gy, gz) : sampleStateInternalIDW(gx, gy, gz - 2, gx, gy, gz);
+                                    auto sL1 = sampleStateInternalIDW(gx, gy, gz - 1, gx, gy, gz);
+                                    auto sR1 = sC;
+                                    auto sR2 = is_solid(gx, gy, gz + 1) ? sR1 : sampleStateInternalIDW(gx, gy, gz + 1, gx, gy, gz);
+                                    auto fzD = get_f(reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted),
+                                                     reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted), 2);
+                                    fzD_rho = fzD.rho; fzD_rhoux = fzD.rhoux; fzD_rhouy = fzD.rhouy; fzD_rhouz = fzD.rhouz; fzD_E = fzD.E;
+                                    fzD_v_face = fzD.v_face;
+                                    if constexpr (IsMultiMaterial) {
+                                        fzD_alpha1 = fzD.alpha1; fzD_alpha2 = fzD.alpha2; fzD_arho1 = fzD.arho1; fzD_arho2 = fzD.arho2;
+                                    }
+                                }
+
+                                RealType fzU_rho = 0.0, fzU_rhoux = 0.0, fzU_rhouy = 0.0, fzU_rhouz = 0.0, fzU_E = 0.0;
+                                RealType fzU_alpha1 = 0.0, fzU_alpha2 = 0.0, fzU_arho1 = 0.0, fzU_arho2 = 0.0, fzU_v_face = 0.0;
+
+                                {
+                                    auto sL2 = is_solid(gx, gy, gz - 1) ? sC : sampleStateInternalIDW(gx, gy, gz - 1, gx, gy, gz);
+                                    auto sL1 = sC;
+                                    auto sR1 = sampleStateInternalIDW(gx, gy, gz + 1, gx, gy, gz);
+                                    auto sR2 = is_solid(gx, gy, gz + 2) ? sR1 : sampleStateInternalIDW(gx, gy, gz + 2, gx, gy, gz);
+                                    auto fzU = get_f(reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted),
+                                                     reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted), 2);
+                                    fzU_rho = fzU.rho; fzU_rhoux = fzU.rhoux; fzU_rhouy = fzU.rhouy; fzU_rhouz = fzU.rhouz; fzU_E = fzU.E;
+                                    fzU_v_face = fzU.v_face;
+                                    if constexpr (IsMultiMaterial) {
+                                        fzU_alpha1 = fzU.alpha1; fzU_alpha2 = fzU.alpha2; fzU_arho1 = fzU.arho1; fzU_arho2 = fzU.arho2;
+                                    }
+                                }
+
+                                u.rho[idx] -= dt_dx * (fxR_rho - fxL_rho + fyT_rho - fyB_rho + fzU_rho - fzD_rho);
+                                u.rhoux[idx] -= dt_dx * (fxR_rhoux - fxL_rhoux + fyT_rhoux - fyB_rhoux + fzU_rhoux - fzD_rhoux);
+                                u.rhouy[idx] -= dt_dx * (fxR_rhouy - fxL_rhouy + fyT_rhouy - fyB_rhouy + fzU_rhouy - fzD_rhouy);
+                                u.rhouz[idx] -= dt_dx * (fxR_rhouz - fxL_rhouz + fyT_rhouz - fyB_rhouz + fzU_rhouz - fzD_rhouz);
+                                u.E[idx] -= dt_dx * (fxR_E - fxL_E + fyT_E - fyB_E + fzU_E - fzD_E);
+
                                 if constexpr (IsMultiMaterial) {
-                                    return (RealType)MultiMat::getMixtureSoundSpeed((double)state.p, (double)state.rho, (double)state.alpha1, (double)state.alpha2, (double)state.arho1, (double)state.arho2, (double)gamma_r, currentMaterials.products, currentMaterials.unreacted);
-                                } else {
-                                    return (RealType)std::sqrt(gamma_r * state.p / std::max((RealType)1e-6, state.rho));
-                                }
-                            };
+                                    u.alpha1[idx] -= dt_dx * (fxR_alpha1 - fxL_alpha1 + fyT_alpha1 - fyB_alpha1 + fzU_alpha1 - fzD_alpha1);
+                                    u.alpha2[idx] -= dt_dx * (fxR_alpha2 - fxL_alpha2 + fyT_alpha2 - fyB_alpha2 + fzU_alpha2 - fzD_alpha2);
+                                    
+                                    RealType div_u = fxR_v_face - fxL_v_face + fyT_v_face - fyB_v_face + fzU_v_face - fzD_v_face;
+                                    u.alpha1[idx] += dt_dx * sC.alpha1 * div_u;
+                                    u.alpha2[idx] += dt_dx * sC.alpha2 * div_u;
 
-                            RealType dt_dx = dt_r * invDx;
-
-                            // X-Fluxes
-                            RealType fxL_rho = 0.0, fxL_rhoux = 0.0, fxL_rhouy = 0.0, fxL_rhouz = 0.0, fxL_E = 0.0;
-                            RealType fxL_alpha1 = 0.0, fxL_alpha2 = 0.0, fxL_arho1 = 0.0, fxL_arho2 = 0.0, fxL_v_face = 0.0;
-
-                            if (is_solid(gx - 1, gy, gz)) {
-                                float nx_geom = 0.0f, ny_geom = 0.0f, nz_geom = 0.0f;
-                                get_solid_normal(gx - 1, gy, gz, nx_geom, ny_geom, nz_geom);
-                                RealType dx = -1.0; RealType dy = 0.0; RealType dz = 0.0;
-                                RealType n_dot_d = (RealType)nx_geom * dx + (RealType)ny_geom * dy + (RealType)nz_geom * dz;
-                                RealType nx_b = (n_dot_d > 0.0) ? -(RealType)nx_geom : (RealType)nx_geom;
-                                RealType ny_b = (n_dot_d > 0.0) ? -(RealType)ny_geom : (RealType)ny_geom;
-                                RealType nz_b = (n_dot_d > 0.0) ? -(RealType)nz_geom : (RealType)nz_geom;
-                                RealType n_len = std::sqrt(nx_b*nx_b + ny_b*ny_b + nz_b*nz_b);
-                                if (n_len < (RealType)0.01) {
-                                    nx_b = -dx; ny_b = -dy; nz_b = -dz;
+                                    u.arho1[idx] -= dt_dx * (fxR_arho1 - fxL_arho1 + fyT_arho1 - fyB_arho1 + fzU_arho1 - fzD_arho1);
                                 }
-                                RealType v_face = sC.ux * dx + sC.uy * dy + sC.uz * dz;
-                                RealType P_dyn = 0.0;
-                                if (v_face > 0.0) {
-                                    RealType u_n = sC.ux * nx_b + sC.uy * ny_b + sC.uz * nz_b;
-                                    RealType c_C = get_c(sC);
-                                    P_dyn = sC.rho * c_C * std::max((RealType)0.0, -u_n);
-                                }
-                                
-                                fxL_rhoux = sC.p + P_dyn * std::abs(nx_b);
-                                fxL_rhouy = -P_dyn * ny_b * dx;
-                                fxL_rhouz = -P_dyn * nz_b * dx;
-                            } else {
-                                auto sL2 = is_solid(gx - 2, gy, gz) ? sampleStateInternal(gx - 1, gy, gz) : sampleStateInternal(gx - 2, gy, gz);
-                                auto sL1 = sampleStateInternal(gx - 1, gy, gz);
-                                auto sR1 = sC;
-                                auto sR2 = is_solid(gx + 1, gy, gz) ? sR1 : sampleStateInternal(gx + 1, gy, gz);
-                                auto fxL = get_f(reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted),
-                                                 reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted), 0);
-                                fxL_rho = fxL.rho; fxL_rhoux = fxL.rhoux; fxL_rhouy = fxL.rhouy; fxL_rhouz = fxL.rhouz; fxL_E = fxL.E;
-                                fxL_v_face = fxL.v_face;
-                                if constexpr (IsMultiMaterial) {
-                                    fxL_alpha1 = fxL.alpha1; fxL_alpha2 = fxL.alpha2; fxL_arho1 = fxL.arho1; fxL_arho2 = fxL.arho2;
-                                }
-                            }
-
-                            RealType fxR_rho = 0.0, fxR_rhoux = 0.0, fxR_rhouy = 0.0, fxR_rhouz = 0.0, fxR_E = 0.0;
-                            RealType fxR_alpha1 = 0.0, fxR_alpha2 = 0.0, fxR_arho1 = 0.0, fxR_arho2 = 0.0, fxR_v_face = 0.0;
-
-                            if (is_solid(gx + 1, gy, gz)) {
-                                float nx_geom = 0.0f, ny_geom = 0.0f, nz_geom = 0.0f;
-                                get_solid_normal(gx + 1, gy, gz, nx_geom, ny_geom, nz_geom);
-                                RealType dx = 1.0; RealType dy = 0.0; RealType dz = 0.0;
-                                RealType n_dot_d = (RealType)nx_geom * dx + (RealType)ny_geom * dy + (RealType)nz_geom * dz;
-                                RealType nx_b = (n_dot_d > 0.0) ? -(RealType)nx_geom : (RealType)nx_geom;
-                                RealType ny_b = (n_dot_d > 0.0) ? -(RealType)ny_geom : (RealType)ny_geom;
-                                RealType nz_b = (n_dot_d > 0.0) ? -(RealType)nz_geom : (RealType)nz_geom;
-                                RealType n_len = std::sqrt(nx_b*nx_b + ny_b*ny_b + nz_b*nz_b);
-                                if (n_len < (RealType)0.01) {
-                                    nx_b = -dx; ny_b = -dy; nz_b = -dz;
-                                }
-                                RealType v_face = sC.ux * dx + sC.uy * dy + sC.uz * dz;
-                                RealType P_dyn = 0.0;
-                                if (v_face > 0.0) {
-                                    RealType u_n = sC.ux * nx_b + sC.uy * ny_b + sC.uz * nz_b;
-                                    RealType c_C = get_c(sC);
-                                    P_dyn = sC.rho * c_C * std::max((RealType)0.0, -u_n);
-                                }
-                                
-                                fxR_rhoux = sC.p + P_dyn * std::abs(nx_b);
-                                fxR_rhouy = -P_dyn * ny_b * dx;
-                                fxR_rhouz = -P_dyn * nz_b * dx;
-                            } else {
-                                auto sL2 = is_solid(gx - 1, gy, gz) ? sC : sampleStateInternal(gx - 1, gy, gz);
-                                auto sL1 = sC;
-                                auto sR1 = sampleStateInternal(gx + 1, gy, gz);
-                                auto sR2 = is_solid(gx + 2, gy, gz) ? sR1 : sampleStateInternal(gx + 2, gy, gz);
-                                auto fxR = get_f(reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted),
-                                                 reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted), 0);
-                                fxR_rho = fxR.rho; fxR_rhoux = fxR.rhoux; fxR_rhouy = fxR.rhouy; fxR_rhouz = fxR.rhouz; fxR_E = fxR.E;
-                                fxR_v_face = fxR.v_face;
-                                if constexpr (IsMultiMaterial) {
-                                    fxR_alpha1 = fxR.alpha1; fxR_alpha2 = fxR.alpha2; fxR_arho1 = fxR.arho1; fxR_arho2 = fxR.arho2;
-                                }
-                            }
-
-                            // Y-Fluxes
-                            RealType fyB_rho = 0.0, fyB_rhoux = 0.0, fyB_rhouy = 0.0, fyB_rhouz = 0.0, fyB_E = 0.0;
-                            RealType fyB_alpha1 = 0.0, fyB_alpha2 = 0.0, fyB_arho1 = 0.0, fyB_arho2 = 0.0, fyB_v_face = 0.0;
-
-                            if (is_solid(gx, gy - 1, gz)) {
-                                float nx_geom = 0.0f, ny_geom = 0.0f, nz_geom = 0.0f;
-                                get_solid_normal(gx, gy - 1, gz, nx_geom, ny_geom, nz_geom);
-                                RealType dx = 0.0; RealType dy = -1.0; RealType dz = 0.0;
-                                RealType n_dot_d = (RealType)nx_geom * dx + (RealType)ny_geom * dy + (RealType)nz_geom * dz;
-                                RealType nx_b = (n_dot_d > 0.0) ? -(RealType)nx_geom : (RealType)nx_geom;
-                                RealType ny_b = (n_dot_d > 0.0) ? -(RealType)ny_geom : (RealType)ny_geom;
-                                RealType nz_b = (n_dot_d > 0.0) ? -(RealType)nz_geom : (RealType)nz_geom;
-                                RealType n_len = std::sqrt(nx_b*nx_b + ny_b*ny_b + nz_b*nz_b);
-                                if (n_len < (RealType)0.01) {
-                                    nx_b = -dx; ny_b = -dy; nz_b = -dz;
-                                }
-                                RealType v_face = sC.ux * dx + sC.uy * dy + sC.uz * dz;
-                                RealType P_dyn = 0.0;
-                                if (v_face > 0.0) {
-                                    RealType u_n = sC.ux * nx_b + sC.uy * ny_b + sC.uz * nz_b;
-                                    RealType c_C = get_c(sC);
-                                    P_dyn = sC.rho * c_C * std::max((RealType)0.0, -u_n);
-                                }
-                                
-                                fyB_rhoux = -P_dyn * nx_b * dy;
-                                fyB_rhouy = sC.p + P_dyn * std::abs(ny_b);
-                                fyB_rhouz = -P_dyn * nz_b * dy;
-                            } else {
-                                auto sL2 = is_solid(gx, gy - 2, gz) ? sampleStateInternal(gx, gy - 1, gz) : sampleStateInternal(gx, gy - 2, gz);
-                                auto sL1 = sampleStateInternal(gx, gy - 1, gz);
-                                auto sR1 = sC;
-                                auto sR2 = is_solid(gx, gy + 1, gz) ? sR1 : sampleStateInternal(gx, gy + 1, gz);
-                                auto fyB = get_f(reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted),
-                                                 reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted), 1);
-                                fyB_rho = fyB.rho; fyB_rhoux = fyB.rhoux; fyB_rhouy = fyB.rhouy; fyB_rhouz = fyB.rhouz; fyB_E = fyB.E;
-                                fyB_v_face = fyB.v_face;
-                                if constexpr (IsMultiMaterial) {
-                                    fyB_alpha1 = fyB.alpha1; fyB_alpha2 = fyB.alpha2; fyB_arho1 = fyB.arho1; fyB_arho2 = fyB.arho2;
-                                }
-                            }
-
-                            RealType fyT_rho = 0.0, fyT_rhoux = 0.0, fyT_rhouy = 0.0, fyT_rhouz = 0.0, fyT_E = 0.0;
-                            RealType fyT_alpha1 = 0.0, fyT_alpha2 = 0.0, fyT_arho1 = 0.0, fyT_arho2 = 0.0, fyT_v_face = 0.0;
-
-                            if (is_solid(gx, gy + 1, gz)) {
-                                float nx_geom = 0.0f, ny_geom = 0.0f, nz_geom = 0.0f;
-                                get_solid_normal(gx, gy + 1, gz, nx_geom, ny_geom, nz_geom);
-                                RealType dx = 0.0; RealType dy = 1.0; RealType dz = 0.0;
-                                RealType n_dot_d = (RealType)nx_geom * dx + (RealType)ny_geom * dy + (RealType)nz_geom * dz;
-                                RealType nx_b = (n_dot_d > 0.0) ? -(RealType)nx_geom : (RealType)nx_geom;
-                                RealType ny_b = (n_dot_d > 0.0) ? -(RealType)ny_geom : (RealType)ny_geom;
-                                RealType nz_b = (n_dot_d > 0.0) ? -(RealType)nz_geom : (RealType)nz_geom;
-                                RealType n_len = std::sqrt(nx_b*nx_b + ny_b*ny_b + nz_b*nz_b);
-                                if (n_len < (RealType)0.01) {
-                                    nx_b = -dx; ny_b = -dy; nz_b = -dz;
-                                }
-                                RealType v_face = sC.ux * dx + sC.uy * dy + sC.uz * dz;
-                                RealType P_dyn = 0.0;
-                                if (v_face > 0.0) {
-                                    RealType u_n = sC.ux * nx_b + sC.uy * ny_b + sC.uz * nz_b;
-                                    RealType c_C = get_c(sC);
-                                    P_dyn = sC.rho * c_C * std::max((RealType)0.0, -u_n);
-                                }
-                                
-                                fyT_rhoux = -P_dyn * nx_b * dy;
-                                fyT_rhouy = sC.p + P_dyn * std::abs(ny_b);
-                                fyT_rhouz = -P_dyn * nz_b * dy;
-                            } else {
-                                auto sL2 = is_solid(gx, gy - 1, gz) ? sC : sampleStateInternal(gx, gy - 1, gz);
-                                auto sL1 = sC;
-                                auto sR1 = sampleStateInternal(gx, gy + 1, gz);
-                                auto sR2 = is_solid(gx, gy + 2, gz) ? sR1 : sampleStateInternal(gx, gy + 2, gz);
-                                auto fyT = get_f(reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted),
-                                                 reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted), 1);
-                                fyT_rho = fyT.rho; fyT_rhoux = fyT.rhoux; fyT_rhouy = fyT.rhouy; fyT_rhouz = fyT.rhouz; fyT_E = fyT.E;
-                                fyT_v_face = fyT.v_face;
-                                if constexpr (IsMultiMaterial) {
-                                    fyT_alpha1 = fyT.alpha1; fyT_alpha2 = fyT.alpha2; fyT_arho1 = fyT.arho1; fyT_arho2 = fyT.arho2;
-                                }
-                            }
-
-                            // Z-Fluxes
-                            RealType fzD_rho = 0.0, fzD_rhoux = 0.0, fzD_rhouy = 0.0, fzD_rhouz = 0.0, fzD_E = 0.0;
-                            RealType fzD_alpha1 = 0.0, fzD_alpha2 = 0.0, fzD_arho1 = 0.0, fzD_arho2 = 0.0, fzD_v_face = 0.0;
-
-                            if (is_solid(gx, gy, gz - 1)) {
-                                float nx_geom = 0.0f, ny_geom = 0.0f, nz_geom = 0.0f;
-                                get_solid_normal(gx, gy, gz - 1, nx_geom, ny_geom, nz_geom);
-                                RealType dx = 0.0; RealType dy = 0.0; RealType dz = -1.0;
-                                RealType n_dot_d = (RealType)nx_geom * dx + (RealType)ny_geom * dy + (RealType)nz_geom * dz;
-                                RealType nx_b = (n_dot_d > 0.0) ? -(RealType)nx_geom : (RealType)nx_geom;
-                                RealType ny_b = (n_dot_d > 0.0) ? -(RealType)ny_geom : (RealType)ny_geom;
-                                RealType nz_b = (n_dot_d > 0.0) ? -(RealType)nz_geom : (RealType)nz_geom;
-                                RealType n_len = std::sqrt(nx_b*nx_b + ny_b*ny_b + nz_b*nz_b);
-                                if (n_len < (RealType)0.01) {
-                                    nx_b = -dx; ny_b = -dy; nz_b = -dz;
-                                }
-                                RealType v_face = sC.ux * dx + sC.uy * dy + sC.uz * dz;
-                                RealType P_dyn = 0.0;
-                                if (v_face > 0.0) {
-                                    RealType u_n = sC.ux * nx_b + sC.uy * ny_b + sC.uz * nz_b;
-                                    RealType c_C = get_c(sC);
-                                    P_dyn = sC.rho * c_C * std::max((RealType)0.0, -u_n);
-                                }
-                                
-                                fzD_rhoux = -P_dyn * nx_b * dz;
-                                fzD_rhouy = -P_dyn * ny_b * dz;
-                                fzD_rhouz = sC.p + P_dyn * std::abs(nz_b);
-                            } else {
-                                auto sL2 = is_solid(gx, gy, gz - 2) ? sampleStateInternal(gx, gy, gz - 1) : sampleStateInternal(gx, gy, gz - 2);
-                                auto sL1 = sampleStateInternal(gx, gy, gz - 1);
-                                auto sR1 = sC;
-                                auto sR2 = is_solid(gx, gy, gz + 1) ? sR1 : sampleStateInternal(gx, gy, gz + 1);
-                                auto fzD = get_f(reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted),
-                                                 reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted), 2);
-                                fzD_rho = fzD.rho; fzD_rhoux = fzD.rhoux; fzD_rhouy = fzD.rhouy; fzD_rhouz = fzD.rhouz; fzD_E = fzD.E;
-                                fzD_v_face = fzD.v_face;
-                                if constexpr (IsMultiMaterial) {
-                                    fzD_alpha1 = fzD.alpha1; fzD_alpha2 = fzD.alpha2; fzD_arho1 = fzD.arho1; fzD_arho2 = fzD.arho2;
-                                }
-                            }
-
-                            RealType fzU_rho = 0.0, fzU_rhoux = 0.0, fzU_rhouy = 0.0, fzU_rhouz = 0.0, fzU_E = 0.0;
-                            RealType fzU_alpha1 = 0.0, fzU_alpha2 = 0.0, fzU_arho1 = 0.0, fzU_arho2 = 0.0, fzU_v_face = 0.0;
-
-                            if (is_solid(gx, gy, gz + 1)) {
-                                float nx_geom = 0.0f, ny_geom = 0.0f, nz_geom = 0.0f;
-                                get_solid_normal(gx, gy, gz + 1, nx_geom, ny_geom, nz_geom);
-                                RealType dx = 0.0; RealType dy = 0.0; RealType dz = 1.0;
-                                RealType n_dot_d = (RealType)nx_geom * dx + (RealType)ny_geom * dy + (RealType)nz_geom * dz;
-                                RealType nx_b = (n_dot_d > 0.0) ? -(RealType)nx_geom : (RealType)nx_geom;
-                                RealType ny_b = (n_dot_d > 0.0) ? -(RealType)ny_geom : (RealType)ny_geom;
-                                RealType nz_b = (n_dot_d > 0.0) ? -(RealType)nz_geom : (RealType)nz_geom;
-                                RealType n_len = std::sqrt(nx_b*nx_b + ny_b*ny_b + nz_b*nz_b);
-                                if (n_len < (RealType)0.01) {
-                                    nx_b = -dx; ny_b = -dy; nz_b = -dz;
-                                }
-                                RealType v_face = sC.ux * dx + sC.uy * dy + sC.uz * dz;
-                                RealType P_dyn = 0.0;
-                                if (v_face > 0.0) {
-                                    RealType u_n = sC.ux * nx_b + sC.uy * ny_b + sC.uz * nz_b;
-                                    RealType c_C = get_c(sC);
-                                    P_dyn = sC.rho * c_C * std::max((RealType)0.0, -u_n);
-                                }
-                                
-                                fzU_rhoux = -P_dyn * nx_b * dz;
-                                fzU_rhouy = -P_dyn * ny_b * dz;
-                                fzU_rhouz = sC.p + P_dyn * std::abs(nz_b);
-                            } else {
-                                auto sL2 = is_solid(gx, gy, gz - 1) ? sC : sampleStateInternal(gx, gy, gz - 1);
-                                auto sL1 = sC;
-                                auto sR1 = sampleStateInternal(gx, gy, gz + 1);
-                                auto sR2 = is_solid(gx, gy, gz + 2) ? sR1 : sampleStateInternal(gx, gy, gz + 2);
-                                auto fzU = get_f(reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted),
-                                                 reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted), 2);
-                                fzU_rho = fzU.rho; fzU_rhoux = fzU.rhoux; fzU_rhouy = fzU.rhouy; fzU_rhouz = fzU.rhouz; fzU_E = fzU.E;
-                                fzU_v_face = fzU.v_face;
-                                if constexpr (IsMultiMaterial) {
-                                    fzU_alpha1 = fzU.alpha1; fzU_alpha2 = fzU.alpha2; fzU_arho1 = fzU.arho1; fzU_arho2 = fzU.arho2;
-                                }
-                            }
-
-                            u.rho[idx] -= dt_dx * (fxR_rho - fxL_rho + fyT_rho - fyB_rho + fzU_rho - fzD_rho);
-                            u.rhoux[idx] -= dt_dx * (fxR_rhoux - fxL_rhoux + fyT_rhoux - fyB_rhoux + fzU_rhoux - fzD_rhoux);
-                            u.rhouy[idx] -= dt_dx * (fxR_rhouy - fxL_rhouy + fyT_rhouy - fyB_rhouy + fzU_rhouy - fzD_rhouy);
-                            u.rhouz[idx] -= dt_dx * (fxR_rhouz - fxL_rhouz + fyT_rhouz - fyB_rhouz + fzU_rhouz - fzD_rhouz);
-                            u.E[idx] -= dt_dx * (fxR_E - fxL_E + fyT_E - fyB_E + fzU_E - fzD_E);
-
-                            if constexpr (IsMultiMaterial) {
-                                u.alpha1[idx] -= dt_dx * (fxR_alpha1 - fxL_alpha1 + fyT_alpha1 - fyB_alpha1 + fzU_alpha1 - fzD_alpha1);
-                                u.alpha2[idx] -= dt_dx * (fxR_alpha2 - fxL_alpha2 + fyT_alpha2 - fyB_alpha2 + fzU_alpha2 - fzD_alpha2);
-                                
-                                RealType div_u = fxR_v_face - fxL_v_face + fyT_v_face - fyB_v_face + fzU_v_face - fzD_v_face;
-                                u.alpha1[idx] += dt_dx * sC.alpha1 * div_u;
-                                u.alpha2[idx] += dt_dx * sC.alpha2 * div_u;
-
-                                u.arho1[idx] -= dt_dx * (fxR_arho1 - fxL_arho1 + fyT_arho1 - fyB_arho1 + fzU_arho1 - fzD_arho1);
-                                u.arho2[idx] -= dt_dx * (fxR_arho2 - fxL_arho2 + fyT_arho2 - fyB_arho2 + fzU_arho2 - fzD_arho2);
                             }
                         }
                     }
