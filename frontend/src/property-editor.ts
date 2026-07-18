@@ -708,7 +708,7 @@ export class PropertyEditor {
             const cmapEl = this.createInputElement(node, 'colormap', node.parameters['colormap'] ?? 'plasma');
             addRowToPanel('colormap', 'COLORMAP', cmapEl, 0);
 
-            const rateEl = this.createInputElement(node, 'refresh_rate', node.parameters['refresh_rate'] ?? 0.033);
+            const rateEl = this.createInputElement(node, 'refresh_rate', node.parameters['refresh_rate'] ?? 2.0);
             addRowToPanel('refresh_rate', 'REFRESH RATE (SECONDS)', rateEl, 0);
 
             const minEl = this.createInputElement(node, 'min_val', node.parameters['min_val'] ?? 101325.0);
@@ -916,7 +916,7 @@ export class PropertyEditor {
             'charge_shape': node.type === 'Charge3D' ? ['Sphere', 'Cylinder', 'Block'] : ['Sphere', 'Cylinder'],
             'material_type': ['Air', 'JWL Charge', 'Ideal Gas Charge'],
             'colormap': ['plasma', 'viridis', 'rainbow', 'coolwarm', 'cividis', 'grayscale'],
-            'refresh_rate': ['0.0', '0.016', '0.033', '0.05', '0.1', '0.2', '0.5', '1.0'],
+            'refresh_rate': ['0.0', '0.016', '0.033', '0.05', '0.1', '0.2', '0.5', '1.0', '2.0', '5.0', '10.0'],
             'ascii_delimiter': ['Comma', 'Tab', 'Space'],
             'vtk_format': ['ASCII', 'Binary', 'Compressed Binary'],
             'voxelization_method': ['watertight_floodfill', 'watertight_raycast', 'thin_shell', 'winding_number']
@@ -1676,7 +1676,7 @@ export class PropertyEditor {
                     command: "VIEW3D_CONFIG",
                     modelId: targetModelId,
                     slices: key === 'slices' ? value : (node.parameters.slices || []),
-                    refresh_rate: key === 'refresh_rate' ? Number(value) : Number(node.parameters.refresh_rate ?? 0.033)
+                    refresh_rate: key === 'refresh_rate' ? Number(value) : Number(node.parameters.refresh_rate ?? 2.0)
                 });
             }
         }

@@ -51,6 +51,7 @@ std::mutex cout_mutex;
 
 std::unique_ptr<CFDSolver> global_solver = nullptr;
 double global_t = 0.0;
+double global_dt_1d = 0.0;
 
 // 2D State
 std::atomic<bool> sim2d_running{false};
@@ -687,6 +688,7 @@ void worker_thread_func() {
 
         auto step_start = std::chrono::steady_clock::now();
         double dt = global_solver->computeStepSize(global_cfl.load());
+        global_dt_1d = dt;
         global_solver->step(dt);
         auto step_end = std::chrono::steady_clock::now();
         global_wallclock_1d = global_wallclock_1d.load() + std::chrono::duration<double>(step_end - step_start).count();
@@ -1455,9 +1457,9 @@ struct TelemetryPayload {
     
     // 1D specific
     int n_cells = 0;
+    double dt = 0.0;
     
     // 2D specific
-    double dt = 0.0;
     int out_nr = 0;
     int out_nz = 0;
     
@@ -1544,6 +1546,7 @@ void async_telemetry_thread_func() {
         if (payload->type == TelemetryPayload::TYPE_1D) {
             envelope["type"] = "TELEMETRY";
             envelope["time"] = payload->elapsed;
+            envelope["dt"] = payload->dt;
             envelope["is_terminated"] = payload->is_terminated;
             envelope["wallclock"] = payload->wallclock;
             if (payload->has_gauges) {
@@ -1654,6 +1657,7 @@ void emit_telemetry(const CFDSolver& solver, double elapsed, bool is_terminated)
     auto payload = std::make_unique<TelemetryPayload>();
     payload->type = TelemetryPayload::TYPE_1D;
     payload->elapsed = elapsed;
+    payload->dt = global_dt_1d;
     payload->is_terminated = is_terminated;
     payload->wallclock = global_wallclock_1d.load();
     payload->n_cells = solver.getNumCells();

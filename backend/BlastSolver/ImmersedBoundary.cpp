@@ -669,6 +669,65 @@ void voxelize_stl(
         }
     }
 
+    std::cout << "[INFO] Cleaning up voxelized geometry (removing isolated fluid cells)..." << std::endl;
+    int num_removed = 0;
+    for (int iter = 0; iter < 3; ++iter) {
+        int removed_this_iter = 0;
+        std::vector<GeometryTile3D> new_geom_pool = geom_pool;
+        
+        #pragma omp parallel for reduction(+:removed_this_iter)
+        for (int gz = 0; gz < nz; ++gz) {
+            for (int gy = 0; gy < ny; ++gy) {
+                for (int gx = 0; gx < nx; ++gx) {
+                    int tx = gx / TILE_SIZE_3D;
+                    int ty = gy / TILE_SIZE_3D;
+                    int tz = gz / TILE_SIZE_3D;
+                    int t_idx = tx + ty * n_tiles_x + tz * n_tiles_x * n_tiles_y;
+                    int cx = gx % TILE_SIZE_3D;
+                    int cy = gy % TILE_SIZE_3D;
+                    int cz = gz % TILE_SIZE_3D;
+                    int idx = cx + cy * TILE_SIZE_3D + cz * TILE_SIZE_3D * TILE_SIZE_3D;
+                    
+                    if (!geom_pool[t_idx].cells[idx].is_boundary) {
+                        int solid_neighbors = 0;
+                        
+                        auto is_solid = [&](int x, int y, int z) {
+                            if (x < 0 || x >= nx || y < 0 || y >= ny || z < 0 || z >= nz) return false;
+                            int ntx = x / TILE_SIZE_3D;
+                            int nty = y / TILE_SIZE_3D;
+                            int ntz = z / TILE_SIZE_3D;
+                            int nt_idx = ntx + nty * n_tiles_x + ntz * n_tiles_x * n_tiles_y;
+                            int ncx = x % TILE_SIZE_3D;
+                            int ncy = y % TILE_SIZE_3D;
+                            int ncz = z % TILE_SIZE_3D;
+                            int nidx = ncx + ncy * TILE_SIZE_3D + ncz * TILE_SIZE_3D * TILE_SIZE_3D;
+                            return geom_pool[nt_idx].cells[nidx].is_boundary;
+                        };
+                        
+                        if (is_solid(gx+1, gy, gz)) solid_neighbors++;
+                        if (is_solid(gx-1, gy, gz)) solid_neighbors++;
+                        if (is_solid(gx, gy+1, gz)) solid_neighbors++;
+                        if (is_solid(gx, gy-1, gz)) solid_neighbors++;
+                        if (is_solid(gx, gy, gz+1)) solid_neighbors++;
+                        if (is_solid(gx, gy, gz-1)) solid_neighbors++;
+                        
+                        if (solid_neighbors >= 5) {
+                            new_geom_pool[t_idx].cells[idx] = pack_geometry_payload(true, 0.0f, 0.0f, 0.0f);
+                            removed_this_iter++;
+                        }
+                    }
+                }
+            }
+        }
+        geom_pool = new_geom_pool;
+        num_removed += removed_this_iter;
+        if (removed_this_iter == 0) break;
+    }
+    
+    if (num_removed > 0) {
+        std::cout << "[INFO] Removed " << num_removed << " isolated fluid cells / dead ends to improve stability." << std::endl;
+    }
+
     global_geometry_tiles = geom_pool;
     global_geometry_hash = geometry_hash;
     global_geometry_nx = nx;

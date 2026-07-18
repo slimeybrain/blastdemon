@@ -1516,7 +1516,7 @@ export class GraphRenderer {
                 stl_wireframe: false,
                 stl_solids: true,
                 stl_opacity: 0.5,
-                refresh_rate: 0.033
+                refresh_rate: 2.0
             };
 
             default: return {};
@@ -2869,13 +2869,16 @@ export class GraphRenderer {
 
             const RATES = [
                 { value: '0', label: 'Max FPS' },
+                { value: '0.016', label: '60 FPS (0.016s)' },
+                { value: '0.033', label: '30 FPS (0.033s)' },
                 { value: '0.05', label: '20 FPS (0.05s)' },
-                { value: '0.1', label: '10/s' },
-                { value: '0.2', label: '5/s' },
-                { value: '0.5', label: '2/s' },
-                { value: '1.0', label: '1/s' },
-                { value: '2.0', label: '0.5/s' },
-                { value: '5.0', label: 'Manual' }
+                { value: '0.1', label: '10 FPS (0.1s)' },
+                { value: '0.2', label: '5 FPS (0.2s)' },
+                { value: '0.5', label: '2 FPS (0.5s)' },
+                { value: '1.0', label: '1 FPS (1.0s)' },
+                { value: '2.0', label: '0.5 FPS (2.0s)' },
+                { value: '5.0', label: '0.2 FPS (5.0s)' },
+                { value: '10.0', label: '0.1 FPS (10.0s)' }
             ];
 
             const state = this.stateManager.getCurrentState();

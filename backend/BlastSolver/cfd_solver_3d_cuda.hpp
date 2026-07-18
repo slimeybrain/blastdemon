@@ -19,7 +19,14 @@ class CFDSolver3DCuda : public CFDSolver3DImplBase {
     mutable void* d_active_tiles = nullptr;
     mutable void* d_max_s_buf = nullptr;
     mutable void* d_slice_buf = nullptr;
+    mutable size_t d_slice_buf_capacity = 0;
     mutable void* d_tile_active_temp = nullptr;
+    mutable void* d_active_tile_indices = nullptr;  // int* compact index buffer
+    mutable void* d_active_count = nullptr;          // int* device counter
+    mutable int h_num_active_tiles = 0;              // host-side cached count
+    mutable void* d_tile_mass = nullptr;
+    mutable void* d_tile_energy = nullptr;
+    mutable void* d_tile_is_near_boundary = nullptr;
 
     // GPU-side gauge variables
     int num_gauges = 0;
@@ -54,6 +61,8 @@ class CFDSolver3DCuda : public CFDSolver3DImplBase {
     mutable bool has_paged_geom = false;
     mutable std::vector<uint8_t> paged_active_tiles;
     mutable std::vector<uint8_t> paged_tile_active_temp;
+    mutable std::vector<uint8_t> paged_tile_is_near_boundary;
+    mutable bool has_paged_tile_is_near_boundary = false;
     mutable std::vector<GPUGauge3D> paged_gauge_coords;
     mutable bool has_paged_gauges = false;
 
@@ -62,6 +71,7 @@ public:
 
 private:
     void updateActiveRegions();
+    void rebuildActiveIndex();
     void ensure_paged_in() const;
     void ensure_paged_out() const;
 

@@ -865,7 +865,8 @@ export class StateManager {
             }
             if (data.type === 'TELEMETRY' || data.type === 'TELEMETRY_2D' || data.type === 'TELEMETRY_3D') {
                 const wcStr = data.wallclock !== undefined ? `, Wallclock: ${Number(data.wallclock).toFixed(4)}s` : '';
-                return `[${timestamp}] [SOLVER] Time: ${data.time?.toExponential(6) || '0'}${wcStr}, Terminated: ${data.is_terminated || false}`;
+                const dtStr = data.dt !== undefined ? `, dt: ${Number(data.dt).toExponential(6)}s` : '';
+                return `[${timestamp}] [SOLVER] Time: ${data.time?.toExponential(6) || '0'}${dtStr}${wcStr}, Terminated: ${data.is_terminated || false}`;
             }
             if (data.type === 'resource_pulse') {
                 return `[${timestamp}] [RESOURCES] CPU: ${data.metrics?.cpu?.toFixed(1)}%, RAM: ${data.metrics?.ram?.toFixed(1)}%`;
@@ -1505,7 +1506,7 @@ export class StateManager {
             },
             'Telemetry3DViewport': {
                 colormap: 'plasma',
-                refresh_rate: 0.033,
+                refresh_rate: 2.0,
                 slices: [{ axis: 'xy', offset: 0.5, quantities: ['pressure'], stride: 1, opacity: 1.0, colormap: 'plasma', auto_scale: true, log_scale: false, interpolate: true, min_val: 101325.0, max_val: 101325.0 * 10.0 }],
                 log_scale: false,
                 auto_scale: true,

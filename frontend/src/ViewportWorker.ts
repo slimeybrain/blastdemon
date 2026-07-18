@@ -1,6 +1,18 @@
 // ViewportWorker.ts
 export {};
 
+function getColormapIndex(name?: string): number {
+    switch (name) {
+        case 'viridis': return 1;
+        case 'rainbow': return 2;
+        case 'coolwarm': return 3;
+        case 'cividis': return 4;
+        case 'grayscale': return 5;
+        case 'plasma':
+        default: return 0;
+    }
+}
+
 // --- WebGL Shader Sources ---
 const VS_SOURCE_2 = `#version 300 es
 layout(location = 0) in vec3 position;
@@ -50,6 +62,61 @@ vec3 colormap_plasma(float t) {
 vec3 colormap_viridis(float t) {
     return vec3(1.0 - t, t, 0.5 + 0.5 * t);
 }
+
+vec3 colormap_rainbow(float t) {
+    float r = 0.0, g = 0.0, b = 0.0;
+    if (t < 0.25) {
+        float localT = t / 0.25;
+        r = 0.0; g = localT; b = 1.0;
+    } else if (t < 0.5) {
+        float localT = (t - 0.25) / 0.25;
+        r = 0.0; g = 1.0; b = 1.0 - localT;
+    } else if (t < 0.75) {
+        float localT = (t - 0.5) / 0.25;
+        r = localT; g = 1.0; b = 0.0;
+    } else {
+        float localT = (t - 0.75) / 0.25;
+        r = 1.0; g = 1.0 - localT; b = 0.0;
+    }
+    return vec3(r, g, b);
+}
+
+vec3 colormap_coolwarm(float t) {
+    float r = 0.0, g = 0.0, b = 0.0;
+    if (t < 0.5) {
+        float localT = t / 0.5;
+        r = (59.0 + localT * 161.0) / 255.0;
+        g = (76.0 + localT * 144.0) / 255.0;
+        b = (192.0 + localT * 28.0) / 255.0;
+    } else {
+        float localT = (t - 0.5) / 0.5;
+        r = (220.0 + localT * 9.0) / 255.0;
+        g = (220.0 - localT * 184.0) / 255.0;
+        b = (220.0 - localT * 161.0) / 255.0;
+    }
+    return vec3(r, g, b);
+}
+
+vec3 colormap_cividis(float t) {
+    float r = 0.0, g = 0.0, b = 0.0;
+    if (t < 0.5) {
+        float localT = t / 0.5;
+        r = (0.0 + localT * 84.0) / 255.0;
+        g = (33.0 + localT * 79.0) / 255.0;
+        b = (84.0 + localT * 53.0) / 255.0;
+    } else {
+        float localT = (t - 0.5) / 0.5;
+        r = (84.0 + localT * 168.0) / 255.0;
+        g = (112.0 + localT * 102.0) / 255.0;
+        b = (137.0 - localT * 86.0) / 255.0;
+    }
+    return vec3(r, g, b);
+}
+
+vec3 colormap_grayscale(float t) {
+    return vec3(t, t, t);
+}
+
 
 void main() {
     if (uIsWireframe > 0) {
@@ -108,6 +175,10 @@ void main() {
     }
     vec3 color;
     if (uColormap == 1) color = colormap_viridis(t);
+    else if (uColormap == 2) color = colormap_rainbow(t);
+    else if (uColormap == 3) color = colormap_coolwarm(t);
+    else if (uColormap == 4) color = colormap_cividis(t);
+    else if (uColormap == 5) color = colormap_grayscale(t);
     else color = colormap_plasma(t);
     
     vec4 finalColor = vec4(color, uAlpha);
@@ -186,6 +257,61 @@ vec3 colormap_viridis(float t) {
     return vec3(1.0 - t, t, 0.5 + 0.5 * t);
 }
 
+vec3 colormap_rainbow(float t) {
+    float r = 0.0, g = 0.0, b = 0.0;
+    if (t < 0.25) {
+        float localT = t / 0.25;
+        r = 0.0; g = localT; b = 1.0;
+    } else if (t < 0.5) {
+        float localT = (t - 0.25) / 0.25;
+        r = 0.0; g = 1.0; b = 1.0 - localT;
+    } else if (t < 0.75) {
+        float localT = (t - 0.5) / 0.25;
+        r = localT; g = 1.0; b = 0.0;
+    } else {
+        float localT = (t - 0.75) / 0.25;
+        r = 1.0; g = 1.0 - localT; b = 0.0;
+    }
+    return vec3(r, g, b);
+}
+
+vec3 colormap_coolwarm(float t) {
+    float r = 0.0, g = 0.0, b = 0.0;
+    if (t < 0.5) {
+        float localT = t / 0.5;
+        r = (59.0 + localT * 161.0) / 255.0;
+        g = (76.0 + localT * 144.0) / 255.0;
+        b = (192.0 + localT * 28.0) / 255.0;
+    } else {
+        float localT = (t - 0.5) / 0.5;
+        r = (220.0 + localT * 9.0) / 255.0;
+        g = (220.0 - localT * 184.0) / 255.0;
+        b = (220.0 - localT * 161.0) / 255.0;
+    }
+    return vec3(r, g, b);
+}
+
+vec3 colormap_cividis(float t) {
+    float r = 0.0, g = 0.0, b = 0.0;
+    if (t < 0.5) {
+        float localT = t / 0.5;
+        r = (0.0 + localT * 84.0) / 255.0;
+        g = (33.0 + localT * 79.0) / 255.0;
+        b = (84.0 + localT * 53.0) / 255.0;
+    } else {
+        float localT = (t - 0.5) / 0.5;
+        r = (84.0 + localT * 168.0) / 255.0;
+        g = (112.0 + localT * 102.0) / 255.0;
+        b = (137.0 - localT * 86.0) / 255.0;
+    }
+    return vec3(r, g, b);
+}
+
+vec3 colormap_grayscale(float t) {
+    return vec3(t, t, t);
+}
+
+
 void main() {
     if (uIsWireframe > 0) {
         if (uIsWireframe == 1) {
@@ -247,6 +373,10 @@ void main() {
     }
     vec3 color;
     if (uColormap == 1) color = colormap_viridis(t);
+    else if (uColormap == 2) color = colormap_rainbow(t);
+    else if (uColormap == 3) color = colormap_coolwarm(t);
+    else if (uColormap == 4) color = colormap_cividis(t);
+    else if (uColormap == 5) color = colormap_grayscale(t);
     else color = colormap_plasma(t);
     
     vec4 finalColor = vec4(color, uAlpha);
@@ -330,6 +460,61 @@ fn colormap_viridis(t: f32) -> vec3<f32> {
     return vec3<f32>(1.0 - t, t, 0.5 + 0.5 * t);
 }
 
+fn colormap_rainbow(t: f32) -> vec3<f32> {
+    var r: f32 = 0.0; var g: f32 = 0.0; var b: f32 = 0.0;
+    if (t < 0.25) {
+        let localT = t / 0.25;
+        r = 0.0; g = localT; b = 1.0;
+    } else if (t < 0.5) {
+        let localT = (t - 0.25) / 0.25;
+        r = 0.0; g = 1.0; b = 1.0 - localT;
+    } else if (t < 0.75) {
+        let localT = (t - 0.5) / 0.25;
+        r = localT; g = 1.0; b = 0.0;
+    } else {
+        let localT = (t - 0.75) / 0.25;
+        r = 1.0; g = 1.0 - localT; b = 0.0;
+    }
+    return vec3<f32>(r, g, b);
+}
+
+fn colormap_coolwarm(t: f32) -> vec3<f32> {
+    var r: f32 = 0.0; var g: f32 = 0.0; var b: f32 = 0.0;
+    if (t < 0.5) {
+        let localT = t / 0.5;
+        r = (59.0 + localT * 161.0) / 255.0;
+        g = (76.0 + localT * 144.0) / 255.0;
+        b = (192.0 + localT * 28.0) / 255.0;
+    } else {
+        let localT = (t - 0.5) / 0.5;
+        r = (220.0 + localT * 9.0) / 255.0;
+        g = (220.0 - localT * 184.0) / 255.0;
+        b = (220.0 - localT * 161.0) / 255.0;
+    }
+    return vec3<f32>(r, g, b);
+}
+
+fn colormap_cividis(t: f32) -> vec3<f32> {
+    var r: f32 = 0.0; var g: f32 = 0.0; var b: f32 = 0.0;
+    if (t < 0.5) {
+        let localT = t / 0.5;
+        r = (0.0 + localT * 84.0) / 255.0;
+        g = (33.0 + localT * 79.0) / 255.0;
+        b = (84.0 + localT * 53.0) / 255.0;
+    } else {
+        let localT = (t - 0.5) / 0.5;
+        r = (84.0 + localT * 168.0) / 255.0;
+        g = (112.0 + localT * 102.0) / 255.0;
+        b = (137.0 - localT * 86.0) / 255.0;
+    }
+    return vec3<f32>(r, g, b);
+}
+
+fn colormap_grayscale(t: f32) -> vec3<f32> {
+    return vec3<f32>(t, t, t);
+}
+
+
 @fragment
 fn fs_main(@location(0) texCoord: vec2<f32>, @location(1) sliceSize: vec2<f32>, @location(2) vLocalPos: vec3<f32>, @location(3) vViewPos: vec4<f32>) -> @location(0) vec4<f32> {
     if (uniforms.isWireframe > 0.5) {
@@ -395,7 +580,15 @@ fn fs_main(@location(0) texCoord: vec2<f32>, @location(1) sliceSize: vec2<f32>, 
         t = clamp((raw - uniforms.minVal) / denom, 0.0, 1.0);
     }
     var color: vec3<f32>;
-    if (uniforms.colormap > 0.5) {
+    if (uniforms.colormap > 4.5) {
+        color = colormap_grayscale(t);
+    } else if (uniforms.colormap > 3.5) {
+        color = colormap_cividis(t);
+    } else if (uniforms.colormap > 2.5) {
+        color = colormap_coolwarm(t);
+    } else if (uniforms.colormap > 1.5) {
+        color = colormap_rainbow(t);
+    } else if (uniforms.colormap > 0.5) {
         color = colormap_viridis(t);
     } else {
         color = colormap_plasma(t);
@@ -1982,7 +2175,7 @@ function render() {
                     }
                     const sliceUniformData = new Float32Array(uniformData);
                     sliceUniformData[48] = 1.0;
-                    sliceUniformData[49] = slice.colormap === 'viridis' ? 1.0 : 0.0;
+                    sliceUniformData[49] = getColormapIndex(slice.colormap);
                     sliceUniformData[50] = slice.minY ?? minY;
                     sliceUniformData[51] = slice.maxY ?? maxY;
                     sliceUniformData[52] = slice.useLogScale ? 1.0 : 0.0;
@@ -2021,7 +2214,7 @@ function render() {
                     }
                     const sliceUniformData = new Float32Array(uniformData);
                     sliceUniformData[48] = slice.opacity;
-                    sliceUniformData[49] = slice.colormap === 'viridis' ? 1.0 : 0.0;
+                    sliceUniformData[49] = getColormapIndex(slice.colormap);
                     sliceUniformData[50] = slice.minY ?? minY;
                     sliceUniformData[51] = slice.maxY ?? maxY;
                     sliceUniformData[52] = slice.useLogScale ? 1.0 : 0.0;
@@ -2190,7 +2383,7 @@ function render() {
 
             gl!.uniform1f(uMin, slice.minY ?? minY);
             gl!.uniform1f(uMax, slice.maxY ?? maxY);
-            gl!.uniform1i(uColormap, slice.colormap === 'viridis' ? 1 : 0);
+            gl!.uniform1i(uColormap, getColormapIndex(slice.colormap));
             gl!.uniform1i(uUseLog, slice.useLogScale ? 1 : 0);
             if (uInterp !== null) {
                 gl!.uniform1i(uInterp, slice.interpolate ? 1 : 0);
@@ -2225,7 +2418,7 @@ function render() {
 
                 gl!.uniform1f(uMin, slice.minY ?? minY);
                 gl!.uniform1f(uMax, slice.maxY ?? maxY);
-                gl!.uniform1i(uColormap, slice.colormap === 'viridis' ? 1 : 0);
+                gl!.uniform1i(uColormap, getColormapIndex(slice.colormap));
                 gl!.uniform1i(uUseLog, slice.useLogScale ? 1 : 0);
                 if (uInterp !== null) {
                     gl!.uniform1i(uInterp, slice.interpolate ? 1 : 0);
@@ -2344,8 +2537,7 @@ self.onmessage = async (e) => {
             render();
         } else if (type === "setConfig") {
             if (data.colormap !== undefined) {
-                if (data.colormap === 'viridis') colormap = 1;
-                else colormap = 0;
+                colormap = getColormapIndex(data.colormap);
             }
             if (data.minY !== undefined) minY = data.minY;
             if (data.min !== undefined) minY = data.min;

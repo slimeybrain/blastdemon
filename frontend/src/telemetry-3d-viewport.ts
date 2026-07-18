@@ -516,8 +516,11 @@ export class Telemetry3DViewport {
             <option value="0.2">5 FPS (0.2s)</option>
             <option value="0.5">2 FPS (0.5s)</option>
             <option value="1.0">1 FPS (1.0s)</option>
+            <option value="2.0">0.5 FPS (2.0s)</option>
+            <option value="5.0">0.2 FPS (5.0s)</option>
+            <option value="10.0">0.1 FPS (10.0s)</option>
         `;
-        rateSel.value = vpNode ? String(vpNode.parameters.refresh_rate ?? 0.033) : '0.033';
+        rateSel.value = vpNode ? String(vpNode.parameters.refresh_rate ?? 2.0) : '2.0';
         
         this.bindEditingEvents(rateSel, () => {
             const vp = this.getViewportNode();
@@ -758,7 +761,7 @@ export class Telemetry3DViewport {
             net.send({
                 command: "VIEW3D_CONFIG",
                 modelId: targetModelId,
-                refresh_rate: Number(vpNode.parameters.refresh_rate ?? 0.033),
+                refresh_rate: Number(vpNode.parameters.refresh_rate ?? 2.0),
                 slices: slices
             });
         }
@@ -937,7 +940,7 @@ export class Telemetry3DViewport {
 
         const rateSel = document.getElementById(this.getElId('viewport-refresh-rate-sel')) as HTMLSelectElement;
         if (rateSel && rateSel.dataset.editing !== 'true' && document.activeElement !== rateSel) {
-            rateSel.value = String(vpNode.parameters.refresh_rate ?? 0.033);
+            rateSel.value = String(vpNode.parameters.refresh_rate ?? 2.0);
         }
 
         // FIX 1: Sync lighting/AO checkboxes and sliders from state
@@ -1075,7 +1078,24 @@ export class Telemetry3DViewport {
                         this.needsSlicesRebuild = true;
                         this.syncControls();
                     };
-                    rowHeader.appendChild(toggleBtn);
+
+                    const deleteBtn = document.createElement('span');
+                    deleteBtn.textContent = '❌';
+                    deleteBtn.style.cursor = 'pointer';
+                    deleteBtn.style.fontSize = '8px';
+                    deleteBtn.style.marginLeft = '8px';
+                    deleteBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        this.deleteSlice(idx);
+                    };
+
+                    const btnsWrap = document.createElement('div');
+                    btnsWrap.style.display = 'flex';
+                    btnsWrap.style.alignItems = 'center';
+                    btnsWrap.appendChild(toggleBtn);
+                    btnsWrap.appendChild(deleteBtn);
+
+                    rowHeader.appendChild(btnsWrap);
                     row.appendChild(rowHeader);
 
                     const grid = document.createElement('div');
@@ -1278,7 +1298,7 @@ export class Telemetry3DViewport {
                         const cmSel = document.createElement('select');
                         cmSel.className = 'slice-colormap-sel';
                         this.applySelectStyle(cmSel);
-                        cmSel.innerHTML = '<option value="plasma">Plasma</option><option value="viridis">Viridis</option>';
+                        cmSel.innerHTML = '<option value="plasma">Plasma</option><option value="viridis">Viridis</option><option value="rainbow">Rainbow</option><option value="coolwarm">CoolWarm</option><option value="cividis">Cividis</option><option value="grayscale">Grayscale</option>';
                         cmSel.value = colormapVal;
                         this.bindEditingEvents(cmSel, () => this.updateSliceProperty(idx, { colormap: cmSel.value }));
                         cmRow.appendChild(cmSel);
