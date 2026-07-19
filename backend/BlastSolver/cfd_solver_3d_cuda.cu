@@ -599,9 +599,13 @@ __device__ __forceinline__ GPUCellStateT<RealType> sample_gpu(
         ny_dec /= n_len_dec;
         nz_dec /= n_len_dec;
     } else {
-        nx_dec = nx_true;
-        ny_dec = ny_true;
-        nz_dec = nz_true;
+        float sign_dir = 0.0f;
+        if (dir == 0) sign_dir = (qx >= target_x) ? 1.0f : -1.0f;
+        else if (dir == 1) sign_dir = (qy >= target_y) ? 1.0f : -1.0f;
+        else if (dir == 2) sign_dir = (qz >= target_z) ? 1.0f : -1.0f;
+        nx_dec = (dir == 0) ? sign_dir : 0.0f;
+        ny_dec = (dir == 1) ? sign_dir : 0.0f;
+        nz_dec = (dir == 2) ? sign_dir : 0.0f;
     }
 
     // Topological Corner Detection:
@@ -715,12 +719,12 @@ __device__ __forceinline__ GPUCellStateT<RealType> sample_gpu(
         }
     }
     
-    // ALWAYS reflect velocity across the Cartesian face normal (nx_dec) to guarantee ZERO mass flux
-    // through the solid boundary face in the dimensionally-split Riemann solver.
-    float u_dot_n = (float)s_ghost.ux * nx_dec + (float)s_ghost.uy * ny_dec + (float)s_ghost.uz * nz_dec;
-    s_ghost.ux = (RealType)((float)s_ghost.ux - 2.0f * u_dot_n * nx_dec);
-    s_ghost.uy = (RealType)((float)s_ghost.uy - 2.0f * u_dot_n * ny_dec);
-    s_ghost.uz = (RealType)((float)s_ghost.uz - 2.0f * u_dot_n * nz_dec);
+    // ALWAYS reflect velocity across the TRUE STL normal to ensure smooth slip flow
+    // over stair-stepped voxelization artifacts, sacrificing strict mass conservation for flow quality.
+    float u_dot_n = (float)s_ghost.ux * nx_true + (float)s_ghost.uy * ny_true + (float)s_ghost.uz * nz_true;
+    s_ghost.ux = (RealType)((float)s_ghost.ux - 2.0f * u_dot_n * nx_true);
+    s_ghost.uy = (RealType)((float)s_ghost.uy - 2.0f * u_dot_n * ny_true);
+    s_ghost.uz = (RealType)((float)s_ghost.uz - 2.0f * u_dot_n * nz_true);
     
     s_ghost.E = 0.0;
     

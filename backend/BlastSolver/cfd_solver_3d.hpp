@@ -340,9 +340,13 @@ public:
             ny_dec /= n_len_dec;
             nz_dec /= n_len_dec;
         } else {
-            nx_dec = nx_true;
-            ny_dec = ny_true;
-            nz_dec = nz_true;
+            float sign_dir = 0.0f;
+            if (dir == 0) sign_dir = (qx >= target_x) ? 1.0f : -1.0f;
+            else if (dir == 1) sign_dir = (qy >= target_y) ? 1.0f : -1.0f;
+            else if (dir == 2) sign_dir = (qz >= target_z) ? 1.0f : -1.0f;
+            nx_dec = (dir == 0) ? sign_dir : 0.0f;
+            ny_dec = (dir == 1) ? sign_dir : 0.0f;
+            nz_dec = (dir == 2) ? sign_dir : 0.0f;
         }
 
         // Topological Corner Detection:
@@ -454,13 +458,11 @@ public:
             s_ghost.arho2 = sum_arho2 * inv_W;
         }
 
-        // Reflect velocity across the adaptive normal (disabled for convex corners to prevent artificial blunt blockage):
-        if (!is_convex_corner) {
-            float u_dot_n = (float)s_ghost.ux * nx_reflect + (float)s_ghost.uy * ny_reflect + (float)s_ghost.uz * nz_reflect;
-            s_ghost.ux = (RealType)((float)s_ghost.ux - 2.0f * u_dot_n * nx_reflect);
-            s_ghost.uy = (RealType)((float)s_ghost.uy - 2.0f * u_dot_n * ny_reflect);
-            s_ghost.uz = (RealType)((float)s_ghost.uz - 2.0f * u_dot_n * nz_reflect);
-        }
+        // ALWAYS reflect velocity across the TRUE STL normal to ensure smooth slip flow
+        float u_dot_n = (float)s_ghost.ux * nx_true + (float)s_ghost.uy * ny_true + (float)s_ghost.uz * nz_true;
+        s_ghost.ux = (RealType)((float)s_ghost.ux - 2.0f * u_dot_n * nx_true);
+        s_ghost.uy = (RealType)((float)s_ghost.uy - 2.0f * u_dot_n * ny_true);
+        s_ghost.uz = (RealType)((float)s_ghost.uz - 2.0f * u_dot_n * nz_true);
 
         RealType ke = (RealType)0.5 * s_ghost.rho * (s_ghost.ux*s_ghost.ux + s_ghost.uy*s_ghost.uy + s_ghost.uz*s_ghost.uz);
         if constexpr (IsMultiMaterial) {
