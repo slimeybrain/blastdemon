@@ -233,8 +233,8 @@ inline float signed_solid_angle(const Point3D& p, const Point3D& v0, const Point
     return 2.0f * std::atan2(det, denom);
 }
 
-void voxelize_stl(
-    const std::string& stl_filepath,
+void voxelize_geometry(
+    const std::vector<Triangle>& triangles,
     const std::string& geometry_hash,
     const std::string& voxelization_method,
     std::vector<GeometryTile3D>& geom_pool,
@@ -246,16 +246,8 @@ void voxelize_stl(
     std::function<void(double)> progress_callback
 ) {
     if (progress_callback) progress_callback(0.01);
-    long long current_size = 0;
-    long long current_mtime = 0;
-    if (!stl_filepath.empty()) {
-        get_file_metadata(stl_filepath, current_size, current_mtime);
-    }
 
     if (geometry_hash == global_geometry_hash &&
-        stl_filepath == global_geometry_stl_filepath &&
-        current_size == global_geometry_stl_size &&
-        current_mtime == global_geometry_stl_mtime &&
         !global_geometry_tiles.empty() &&
         global_geometry_tiles.size() == (size_t)geom_pool.size() &&
         global_geometry_nx == nx &&
@@ -269,11 +261,11 @@ void voxelize_stl(
         for (int t = 0; t < (int)geom_pool.size(); ++t) {
             geom_pool[t] = global_geometry_tiles[t];
         }
-        std::cout << "[INFO] Loaded 3D geometry from cache (hash: " << geometry_hash << ", path: " << stl_filepath << ")" << std::endl;
+        std::cout << "[INFO] Loaded 3D geometry from cache (hash: " << geometry_hash << ")" << std::endl;
         return;
     }
 
-    if (stl_filepath.empty()) {
+    if (triangles.empty()) {
         int total_tiles = n_tiles_x * n_tiles_y * n_tiles_z;
         #pragma omp parallel for
         for (int t = 0; t < total_tiles; ++t) {
@@ -282,18 +274,10 @@ void voxelize_stl(
         return;
     }
 
-    std::vector<Triangle> triangles;
-    try {
-        triangles = read_stl(stl_filepath);
-    } catch (const std::exception& e) {
-        std::cerr << "[ERROR] Failed to load STL: " << e.what() << std::endl;
-        return;
-    }
-
     if (terminate_flag && terminate_flag->load()) return;
     if (progress_callback) progress_callback(0.1);
 
-    std::cout << "[INFO] Loaded STL geometry: " << stl_filepath << " (" << triangles.size() << " triangles) using method: " << voxelization_method << std::endl;
+    std::cout << "[INFO] Voxelizing 3D geometry (" << triangles.size() << " triangles) using method: " << voxelization_method << std::endl;
 
     int total_tiles = n_tiles_x * n_tiles_y * n_tiles_z;
     #pragma omp parallel for
@@ -564,8 +548,8 @@ void voxelize_stl(
                             float x_c = (float)(xmin + (gx + 0.5f) * cellSize);
                             int count = 0;
                             for (float xi : intersects) {
-                                if (xi < x_c) count++;
-                                else break;
+                                  if (xi < x_c) count++;
+                                  else break;
                             }
                             if (count % 2 == 1) {
                                 int tx = gx / TILE_SIZE_3D;
@@ -734,17 +718,86 @@ void voxelize_stl(
     global_geometry_ny = ny;
     global_geometry_nz = nz;
     global_geometry_cellSize = cellSize;
-    global_geometry_stl_filepath = stl_filepath;
-    long long written_size = 0;
-    long long written_mtime = 0;
-    if (!stl_filepath.empty()) {
-        get_file_metadata(stl_filepath, written_size, written_mtime);
-    }
-    global_geometry_stl_size = written_size;
-    global_geometry_stl_mtime = written_mtime;
     global_geometry_xmin = xmin;
     global_geometry_ymin = ymin;
     global_geometry_zmin = zmin;
     if (progress_callback) progress_callback(1.0);
     std::cout << "[INFO] Voxelization complete. Geometry cached with hash: " << geometry_hash << std::endl;
 }
+
+void voxelize_stl(
+    const std::string& stl_filepath,
+    const std::string& geometry_hash,
+    const std::string& voxelization_method,
+    std::vector<GeometryTile3D>& geom_pool,
+    int nx, int ny, int nz,
+    double cellSize,
+    double xmin, double ymin, double zmin,
+    int n_tiles_x, int n_tiles_y, int n_tiles_z,
+    const std::atomic<bool>* terminate_flag,
+    std::function<void(double)> progress_callback
+) {
+    if (progress_callback) progress_callback(0.01);
+    long long current_size = 0;
+    long long current_mtime = 0;
+    if (!stl_filepath.empty()) {
+        get_file_metadata(stl_filepath, current_size, current_mtime);
+    }
+
+    if (geometry_hash == global_geometry_hash &&
+        stl_filepath == global_geometry_stl_filepath &&
+        current_size == global_geometry_stl_size &&
+        current_mtime == global_geometry_stl_mtime &&
+        !global_geometry_tiles.empty() &&
+        global_geometry_tiles.size() == (size_t)geom_pool.size() &&
+        global_geometry_nx == nx &&
+        global_geometry_ny == ny &&
+        global_geometry_nz == nz &&
+        std::abs(global_geometry_cellSize - cellSize) < 1e-9 &&
+        std::abs(global_geometry_xmin - xmin) < 1e-9 &&
+        std::abs(global_geometry_ymin - ymin) < 1e-9 &&
+        std::abs(global_geometry_zmin - zmin) < 1e-9) {
+        #pragma omp parallel for
+        for (int t = 0; t < (int)geom_pool.size(); ++t) {
+            geom_pool[t] = global_geometry_tiles[t];
+        }
+        std::cout << "[INFO] Loaded 3D geometry from cache (hash: " << geometry_hash << ", path: " << stl_filepath << ")" << std::endl;
+        return;
+    }
+
+    if (stl_filepath.empty()) {
+        int total_tiles = n_tiles_x * n_tiles_y * n_tiles_z;
+        #pragma omp parallel for
+        for (int t = 0; t < total_tiles; ++t) {
+            std::fill(geom_pool[t].cells, geom_pool[t].cells + TILE_CELLS_3D, GeometryPayload{0, 0, 0, false});
+        }
+        return;
+    }
+
+    std::vector<Triangle> triangles;
+    try {
+        triangles = read_stl(stl_filepath);
+    } catch (const std::exception& e) {
+        std::cerr << "[ERROR] Failed to load STL: " << e.what() << std::endl;
+        return;
+    }
+
+    voxelize_geometry(
+        triangles,
+        geometry_hash,
+        voxelization_method,
+        geom_pool,
+        nx, ny, nz,
+        cellSize,
+        xmin, ymin, zmin,
+        n_tiles_x, n_tiles_y, n_tiles_z,
+        terminate_flag,
+        progress_callback
+    );
+
+    global_geometry_stl_filepath = stl_filepath;
+    global_geometry_stl_size = current_size;
+    global_geometry_stl_mtime = current_mtime;
+}
+
+

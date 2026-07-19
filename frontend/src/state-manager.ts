@@ -384,7 +384,8 @@ export class StateManager {
             'Charge3D': 'node-charge3d',
             'CFDSolver3D': 'node-solver3d',
             'Telemetry3DViewport': 'node-viewport3d',
-            'STLGeometry': 'node-stl'
+            'STLGeometry': 'node-stl',
+            'PrimitiveGeometry3D': 'node-stl'
         };
         const prefix = prefixMap[type] || `node-${type.toLowerCase()}`;
 
@@ -1480,6 +1481,10 @@ export class StateManager {
                 geometry_hash: '',
                 voxelization_method: 'watertight_floodfill'
             },
+            'PrimitiveGeometry3D': {
+                primitives: [],
+                voxelization_method: 'watertight_floodfill'
+            },
             'RemapNode': {
                 explosive_x: 0.0,
                 explosive_y: 0.0,
@@ -1589,7 +1594,9 @@ export class StateManager {
                 show_stl: true,
                 stl_wireframe: false,
                 stl_solids: true,
-                stl_opacity: 0.5
+                stl_opacity: 0.5,
+                show_gauges: true,
+                gauge_size: 0.03
             }
         };
 
@@ -1767,7 +1774,8 @@ export class StateManager {
             case 'Charge3D': return [{ id: 'out', label: 'Charge Spec' }];
             case 'CFDSolver3D': return [{ id: 'telemetry', label: 'Telemetry' }];
             case 'VirtualGauges': return [{ id: 'out', label: 'Gauges Spec' }];
-            case 'STLGeometry': return [{ id: 'stl', label: 'STL Geometry' }];
+            case 'STLGeometry':
+            case 'PrimitiveGeometry3D': return [{ id: 'stl', label: 'STL Geometry' }];
             default: return [];
         }
     }

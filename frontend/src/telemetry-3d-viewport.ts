@@ -35,6 +35,7 @@ export class Telemetry3DViewport {
     private netCallback: ((data: string | ArrayBuffer) => void) | null = null;
     private openListener: (() => void) | null = null;
     private currentSTLPath: string | null = null;
+    private currentGeometryHash: string | null = null;
     private debugOverlay: HTMLElement | null = null;
     private hasTelemetryGrid = false;
 
@@ -181,6 +182,8 @@ export class Telemetry3DViewport {
         const net = (window as any).networkManager;
         if (net) {
             this.openListener = () => {
+                // Force geometry re-request on every new broker connection
+                this.currentGeometryHash = null;
                 this.currentSTLPath = null;
                 this.syncControls();
             };
@@ -191,10 +194,12 @@ export class Telemetry3DViewport {
                     try {
                         const msg = JSON.parse(data);
                         if (msg.type === 'load_stl_response') {
-                            if (msg.modelId && msg.modelId !== this.getCurrentModelId()) return;
+                            // Check model ID if we have a definite binding, otherwise accept all
+                            const myModelId = this.getCurrentModelId();
+                            if (msg.modelId && myModelId && msg.modelId !== myModelId) return;
                             if (msg.status === 'success' && msg.vertices) {
                                 if (this.debugOverlay) {
-                                    this.debugOverlay.innerHTML += `<br>Load: SUCCESS (${msg.vertices.length / 3} vertices)`;
+                                    this.debugOverlay.innerHTML = `Load: OK (${(msg.vertices.length / 3).toFixed(0)} verts from model ${msg.modelId})`;
                                 }
                                 const verts = new Float32Array(msg.vertices);
                                 this.worker.postMessage({
@@ -203,9 +208,9 @@ export class Telemetry3DViewport {
                                 });
                             } else {
                                 if (this.debugOverlay) {
-                                    this.debugOverlay.innerHTML += `<br>Load: ERROR (${msg.error})`;
+                                    this.debugOverlay.innerHTML = `Load: ERROR (${msg.error})`;
                                 }
-                                console.error("[Viewport] Failed to load STL:", msg.error);
+                                console.error("[Viewport] Failed to load geometry:", msg.error);
                             }
                         }
                     } catch (e) {}
@@ -383,6 +388,10 @@ export class Telemetry3DViewport {
         // Section 1.6: STL Geometry
         const stlSection = this.createSection(content, 'STL Boundary Mesh');
         this.buildSTLControls(stlSection);
+ 
+        // Section 1.7: Virtual Gauges
+        const gaugesSection = this.createSection(content, 'Virtual Gauges');
+        this.buildGaugeControls(gaugesSection);
 
         // Section 2: Slice Settings
         const sliceSection = this.createSection(content, 'Active Slices');
@@ -998,16 +1007,62 @@ export class Telemetry3DViewport {
             if (stlOpacLabel) stlOpacLabel.innerHTML = `Opacity: ${Number(val).toFixed(2)}`;
         }
 
-        const stlPath = this.getSTLFilePath();
-        if (stlPath !== this.currentSTLPath) {
-            if (stlPath) {
+        const showGauges = vpNode.parameters.show_gauges !== false;
+        const gaugeSize = vpNode.parameters.gauge_size ?? 0.03;
+        const gauges = this.getVirtualGauges();
+
+        const showGaugesCb = document.getElementById(this.getElId('viewport-gauges-show-cb')) as HTMLInputElement;
+        if (showGaugesCb) showGaugesCb.checked = showGauges;
+
+        const gaugeSizeSlider = document.getElementById(this.getElId('viewport-gauge-size-slider')) as HTMLInputElement;
+        const gaugeSizeLabel = gaugeSizeSlider?.parentElement?.querySelector('span') as HTMLElement;
+        if (gaugeSizeSlider && document.activeElement !== gaugeSizeSlider) {
+            gaugeSizeSlider.value = String(gaugeSize);
+            if (gaugeSizeLabel) gaugeSizeLabel.innerHTML = `Marker Size: ${Number(gaugeSize).toFixed(3)}`;
+        }
+
+        if (postToWorker) {
+            this.worker.postMessage({
+                type: 'setConfig',
+                data: {
+                    showGauges,
+                    gaugeSize,
+                    gauges
+                }
+            });
+        }
+
+        const geomNode = this.getGeometryNode();
+        let geomHash = '';
+        if (geomNode) {
+            if (geomNode.type === 'STLGeometry') {
+                geomHash = (geomNode.parameters.stl_file || '') + '_' + (geomNode.parameters.geometry_hash || '');
+            } else if (geomNode.type === 'PrimitiveGeometry3D') {
+                const primsStr = JSON.stringify(geomNode.parameters.primitives || []) + '_' + (geomNode.parameters.voxelization_method || 'watertight_floodfill');
+                let hash = 5381;
+                for (let i = 0; i < primsStr.length; i++) {
+                    hash = ((hash << 5) + hash) + primsStr.charCodeAt(i);
+                    hash = hash & hash;
+                }
+                geomHash = 'prims_' + Math.abs(hash).toString(16);
+            }
+        }
+
+        if (geomHash !== this.currentGeometryHash) {
+            if (geomNode) {
                 const net = (window as any).networkManager;
                 if (net && net.isConnected()) {
-                    this.currentSTLPath = stlPath;
-                    net.send({ command: "LOAD_STL_GEOMETRY", filePath: stlPath, modelId: this.getCurrentModelId() });
+                    // Only stamp hash AFTER successfully dispatching the request
+                    this.currentGeometryHash = geomHash;
+                    if (geomNode.type === 'STLGeometry') {
+                        net.send({ command: "LOAD_STL_GEOMETRY", filePath: geomNode.parameters.stl_file || '', modelId: this.getCurrentModelId() });
+                    } else if (geomNode.type === 'PrimitiveGeometry3D') {
+                        net.send({ command: "LOAD_PRIMITIVE_GEOMETRY", primitives: geomNode.parameters.primitives || [], modelId: this.getCurrentModelId() });
+                    }
                 }
+                // If not connected, do NOT update hash so we retry when connected
             } else {
-                this.currentSTLPath = null;
+                this.currentGeometryHash = geomHash;
                 this.worker.postMessage({ type: 'setSTLGeometry', data: { vertices: null } });
             }
         }
@@ -1591,15 +1646,22 @@ export class Telemetry3DViewport {
 
     public getCurrentModelId(): string | null {
         const vpNode = this.getViewportNode();
-        if (!vpNode) return null;
-
-        const allModels = this.stateManager.getAllModels();
-        for (const m of Object.values(allModels)) {
-            if (m.nodes.some(n => n.id === vpNode.id)) {
-                return m.id;
+        if (vpNode) {
+            const allModels = this.stateManager.getAllModels();
+            for (const m of Object.values(allModels)) {
+                if (m.nodes.some(n => n.id === vpNode.id)) {
+                    return m.id;
+                }
             }
         }
-        return null;
+        // If viewportNodeId is set but didn't match a canvas node, check if it's a model ID directly
+        if (this.viewportNodeId) {
+            const allModels = this.stateManager.getAllModels();
+            const matchedModel = allModels.find(m => m.id === this.viewportNodeId);
+            if (matchedModel) return matchedModel.id;
+        }
+        const ws = this.stateManager.getActiveWorkspace();
+        return ws ? ws.activeModelId : null;
     }
 
     public pushFrame(buffer: ArrayBuffer, modelId?: string) {
@@ -1643,6 +1705,9 @@ export class Telemetry3DViewport {
         if (this.debugOverlay && this.debugOverlay.parentNode !== this.container) {
             this.container.appendChild(this.debugOverlay);
         }
+
+        // Force geometry reload
+        this.currentGeometryHash = '';
     }
 
     private buildSTLControls(parent: HTMLElement) {
@@ -1770,6 +1835,164 @@ export class Telemetry3DViewport {
         return null;
     }
 
+    private getGeometryNode(): Node | null {
+        const vpNode = this.getViewportNode();
+        const allModels = this.stateManager.getAllModels();
+        let targetModel: any = null;
+
+        if (vpNode) {
+            for (const m of Object.values(allModels)) {
+                if (m.nodes.some(n => n.id === vpNode.id)) {
+                    targetModel = m;
+                    break;
+                }
+            }
+        }
+
+        // If viewportNodeId is actually a model ID, use that model directly
+        if (!targetModel && this.viewportNodeId) {
+            targetModel = allModels.find(m => m.id === this.viewportNodeId) || null;
+        }
+
+        if (!targetModel) {
+            const ws = this.stateManager.getActiveWorkspace();
+            if (ws && ws.activeModelId) {
+                targetModel = allModels.find(m => m.id === ws.activeModelId);
+            }
+        }
+
+        if (!targetModel) return null;
+
+        // 1. Try viewport connection path
+        if (vpNode) {
+            const connToViewport = targetModel.connections.find((c: any) => c.toNode === vpNode.id);
+            if (connToViewport) {
+                const solverNode = targetModel.nodes.find((n: any) => n.id === connToViewport.fromNode);
+                if (solverNode && solverNode.type === 'CFDSolver3D') {
+                    const connToSolver = targetModel.connections.find((c: any) => c.toNode === solverNode.id && c.toPort === 'stl');
+                    if (connToSolver) {
+                        const geomNode = targetModel.nodes.find((n: any) => n.id === connToSolver.fromNode);
+                        if (geomNode && (geomNode.type === 'STLGeometry' || geomNode.type === 'PrimitiveGeometry3D')) {
+                            return geomNode;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Fallback: Find geometry connected to any CFDSolver3D in the model
+        const solverNode = targetModel.nodes.find((n: any) => n.type === 'CFDSolver3D');
+        if (solverNode) {
+            const connToSolver = targetModel.connections.find((c: any) => c.toNode === solverNode.id && c.toPort === 'stl');
+            if (connToSolver) {
+                const geomNode = targetModel.nodes.find((n: any) => n.id === connToSolver.fromNode);
+                if (geomNode && (geomNode.type === 'STLGeometry' || geomNode.type === 'PrimitiveGeometry3D')) {
+                    return geomNode;
+                }
+            }
+        }
+
+        // 3. Last fallback: Find first geometry node in the model
+        const fallbackGeom = targetModel.nodes.find((n: any) => n.type === 'STLGeometry' || n.type === 'PrimitiveGeometry3D');
+        return fallbackGeom || null;
+    }
+
+    private getVirtualGauges(): any[] {
+        const vpNode = this.getViewportNode();
+        if (!vpNode) return [];
+
+        const allModels = this.stateManager.getAllModels();
+        let targetModel: any = null;
+        for (const m of Object.values(allModels)) {
+            if (m.nodes.some(n => n.id === vpNode.id)) {
+                targetModel = m;
+                break;
+            }
+        }
+        if (!targetModel) {
+            const ws = this.stateManager.getActiveWorkspace();
+            if (ws && ws.activeModelId) {
+                targetModel = allModels.find(m => m.id === ws.activeModelId);
+            }
+        }
+        if (!targetModel) return [];
+
+        const connToViewport = targetModel.connections.find((c: any) => c.toNode === vpNode.id);
+        if (connToViewport) {
+            const solverNode = targetModel.nodes.find((n: any) => n.id === connToViewport.fromNode);
+            if (solverNode && solverNode.type === 'CFDSolver3D') {
+                const connToSolver = targetModel.connections.find((c: any) => c.toNode === solverNode.id && c.toPort === 'gauges');
+                if (connToSolver) {
+                    const gaugesNode = targetModel.nodes.find((n: any) => n.id === connToSolver.fromNode);
+                    if (gaugesNode && gaugesNode.type === 'VirtualGauges') {
+                        return gaugesNode.parameters.gauges || [];
+                    }
+                }
+            }
+        }
+        return [];
+    }
+
+    private buildGaugeControls(parent: HTMLElement) {
+        const vpNode = this.getViewportNode();
+        const initShow = vpNode ? (vpNode.parameters.show_gauges !== false) : true;
+        const initSize = vpNode ? (vpNode.parameters.gauge_size ?? 0.03) : 0.03;
+
+        // Show Gauges toggle
+        const showRow = document.createElement('label');
+        showRow.style.display = 'flex';
+        showRow.style.alignItems = 'center';
+        showRow.style.gap = '6px';
+        showRow.style.cursor = 'pointer';
+
+        const showCb = document.createElement('input');
+        showCb.type = 'checkbox';
+        showCb.id = this.getElId('viewport-gauges-show-cb');
+        showCb.checked = initShow;
+        showCb.onchange = () => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { show_gauges: showCb.checked });
+                const gauges = this.getVirtualGauges();
+                this.worker.postMessage({ type: 'setConfig', data: { showGauges: showCb.checked, gauges } });
+            }
+        };
+        showRow.appendChild(showCb);
+        showRow.appendChild(document.createTextNode('Show Gauge Locations'));
+        parent.appendChild(showRow);
+
+        // Gauge Size Slider
+        const sizeWrap = document.createElement('div');
+        sizeWrap.style.display = 'flex';
+        sizeWrap.style.flexDirection = 'column';
+        sizeWrap.style.gap = '2px';
+
+        const sizeLabel = document.createElement('span');
+        sizeLabel.style.fontSize = '8px';
+        sizeLabel.style.color = '#aaa';
+        sizeLabel.innerHTML = `Marker Size: ${Number(initSize).toFixed(3)}`;
+
+        const sizeSlider = document.createElement('input');
+        sizeSlider.type = 'range';
+        sizeSlider.id = this.getElId('viewport-gauge-size-slider');
+        sizeSlider.min = '0.005';
+        sizeSlider.max = '0.2';
+        sizeSlider.step = '0.005';
+        sizeSlider.style.width = '100%';
+        sizeSlider.value = String(initSize);
+        sizeSlider.oninput = () => {
+            sizeLabel.innerHTML = `Marker Size: ${Number(sizeSlider.value).toFixed(3)}`;
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { gauge_size: Number(sizeSlider.value) });
+                this.worker.postMessage({ type: 'setConfig', data: { gaugeSize: Number(sizeSlider.value) } });
+            }
+        };
+        sizeWrap.appendChild(sizeLabel);
+        sizeWrap.appendChild(sizeSlider);
+        parent.appendChild(sizeWrap);
+    }
+
     private bindEditingEvents(el: HTMLElement, onAction?: () => void) {
         el.addEventListener('focus', () => { el.dataset.editing = 'true'; });
         el.addEventListener('mousedown', () => { el.dataset.editing = 'true'; });
@@ -1781,7 +2004,11 @@ export class Telemetry3DViewport {
     }
 
     public setSTLGeometry(vertices: Float32Array | null, modelId?: string): void {
-        if (modelId && this.getCurrentModelId() !== modelId) return;
+        // Only filter if we have a definite model binding AND the IDs don't match
+        if (modelId) {
+            const myModelId = this.getCurrentModelId();
+            if (myModelId && myModelId !== modelId) return;
+        }
         this.worker.postMessage({
             type: 'setSTLGeometry',
             data: { vertices }

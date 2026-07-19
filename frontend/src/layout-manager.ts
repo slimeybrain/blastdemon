@@ -626,13 +626,39 @@ export class LayoutManager {
                     ? state.nodes.filter(n => n.type === 'Telemetry3DViewport')
                     : state.nodes;
 
-                targetNodes.forEach(n => {
-                    const opt = document.createElement('option');
-                    opt.value = n.id;
-                    opt.textContent = `${n.type}: ${n.id}`;
-                    if (n.id === node.targetNodeId) opt.selected = true;
-                    subSelect.appendChild(opt);
-                });
+                if (node.panelType === 'TELEMETRY_3D') {
+                    // Offer models as choices so panels work without a canvas Telemetry3DViewport node
+                    const allModels = this.stateManager.getWorkspaceModels();
+                    const has3DModels = allModels.some(m => m.nodes.some(n => n.type === 'CFDSolver3D'));
+
+                    if (targetNodes.length > 0) {
+                        // Prefer canvas Telemetry3DViewport nodes if they exist
+                        targetNodes.forEach(n => {
+                            const opt = document.createElement('option');
+                            opt.value = n.id;
+                            opt.textContent = `${n.type}: ${n.id.slice(-6)}`;
+                            if (n.id === node.targetNodeId) opt.selected = true;
+                            subSelect.appendChild(opt);
+                        });
+                    }
+
+                    // Always also list 3D models by name for direct binding
+                    allModels.filter(m => m.nodes.some(n => n.type === 'CFDSolver3D')).forEach(m => {
+                        const opt = document.createElement('option');
+                        opt.value = m.id;  // store model ID
+                        opt.textContent = `📦 ${m.name || m.id.slice(-6)}`;
+                        if (m.id === node.targetNodeId) opt.selected = true;
+                        subSelect.appendChild(opt);
+                    });
+                } else {
+                    targetNodes.forEach(n => {
+                        const opt = document.createElement('option');
+                        opt.value = n.id;
+                        opt.textContent = `${n.type}: ${n.id}`;
+                        if (n.id === node.targetNodeId) opt.selected = true;
+                        subSelect.appendChild(opt);
+                    });
+                }
             }
             subSelect.onchange = () => this.stateManager.setPanelType(node.id, node.panelType, subSelect.value);
             leftSide.appendChild(subSelect);
@@ -891,6 +917,30 @@ export class LayoutManager {
                 setTimeout(() => {
                     this.stateManager.setPanelType(node.id, 'TELEMETRY_3D', unclaimed.id);
                 }, 0);
+            } else {
+                // No canvas Telemetry3DViewport nodes — auto-bind to a 3D model by ID
+                const claimedModelIds = new Set<string>();
+                const collectClaimedModels = (layoutNode: LayoutNode) => {
+                    if (layoutNode.type === 'panel' && layoutNode.panelType === 'TELEMETRY_3D' && layoutNode.targetNodeId) {
+                        claimedModelIds.add(layoutNode.targetNodeId);
+                    } else if (layoutNode.type === 'split') {
+                        collectClaimedModels(layoutNode.firstChild);
+                        collectClaimedModels(layoutNode.secondChild);
+                    }
+                };
+                if (activeWs) collectClaimedModels(activeWs.layout);
+
+                const allModels = this.stateManager.getWorkspaceModels();
+                const unclaimedModel = allModels.find(m =>
+                    m.nodes.some(n => n.type === 'CFDSolver3D') && !claimedModelIds.has(m.id)
+                );
+                if (unclaimedModel) {
+                    console.log(`[Layout] Auto-assigning model ${unclaimedModel.id} to 3D panel ${node.id}`);
+                    node.targetNodeId = unclaimedModel.id;
+                    setTimeout(() => {
+                        this.stateManager.setPanelType(node.id, 'TELEMETRY_3D', unclaimedModel.id);
+                    }, 0);
+                }
             }
         }
 

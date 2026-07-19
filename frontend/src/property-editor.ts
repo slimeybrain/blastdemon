@@ -11,6 +11,7 @@ export class PropertyEditor {
     private activeTabIdx: number = 0;
     private _forceNextFull: boolean = false;
     private _lastSlicesJson: string = '';
+    private selectedPrimitiveIndex: number = 0;
 
     constructor(parent: HTMLElement, stateManager: StateManager) {
         this.container = document.createElement('div');
@@ -261,6 +262,10 @@ export class PropertyEditor {
         // Parameters Section
         if (node.type === 'VirtualGauges' || node.type === 'VTKOutput' || node.type === 'Telemetry3DViewport') {
             this.renderTabbedProperties(node);
+            return;
+        }
+        if (node.type === 'PrimitiveGeometry3D') {
+            this.renderPrimitiveGeometryEditor(node);
             return;
         }
  
@@ -738,6 +743,7 @@ export class PropertyEditor {
             cbGrid.appendChild(createCheckboxField('show_stl', node.parameters['show_stl'] !== false, 'Show STL'));
             cbGrid.appendChild(createCheckboxField('stl_wireframe', !!node.parameters['stl_wireframe'], 'STL Wireframe'));
             cbGrid.appendChild(createCheckboxField('stl_solids', node.parameters['stl_solids'] !== false, 'STL Solids'));
+            cbGrid.appendChild(createCheckboxField('show_gauges', node.parameters['show_gauges'] !== false, 'Show Gauges'));
             panels[0].appendChild(cbGrid);
 
             const opacRow = document.createElement('div');
@@ -762,6 +768,29 @@ export class PropertyEditor {
             };
             opacRow.appendChild(opacSlider);
             panels[0].appendChild(opacRow);
+
+            const gaugeSizeRow = document.createElement('div');
+            gaugeSizeRow.style.marginTop = '8px';
+            const gaugeSizeLabel = document.createElement('label');
+            gaugeSizeLabel.style.display = 'block';
+            gaugeSizeLabel.style.fontSize = 'var(--font-sm)';
+            gaugeSizeLabel.style.color = '#888';
+            gaugeSizeLabel.textContent = `GAUGE SIZE: ${Number(node.parameters['gauge_size'] ?? 0.03).toFixed(3)}`;
+            gaugeSizeRow.appendChild(gaugeSizeLabel);
+
+            const gaugeSizeSlider = document.createElement('input');
+            gaugeSizeSlider.type = 'range';
+            gaugeSizeSlider.min = '0.005';
+            gaugeSizeSlider.max = '0.2';
+            gaugeSizeSlider.step = '0.005';
+            gaugeSizeSlider.value = String(node.parameters['gauge_size'] ?? 0.03);
+            gaugeSizeSlider.style.width = '100%';
+            gaugeSizeSlider.oninput = () => {
+                gaugeSizeLabel.textContent = `GAUGE SIZE: ${Number(gaugeSizeSlider.value).toFixed(3)}`;
+                this.updateParameter('gauge_size', Number(gaugeSizeSlider.value));
+            };
+            gaugeSizeRow.appendChild(gaugeSizeSlider);
+            panels[0].appendChild(gaugeSizeRow);
 
             // SLICES Tab
             this.renderTelemetry3DViewportSlices(node, panels[1]);
@@ -908,7 +937,7 @@ export class PropertyEditor {
             'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
             'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
             'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
-            'min_y', 'max_y', 'min_val', 'max_val', 'ambientLevel', 'specularIntensity'
+            'min_y', 'max_y', 'min_val', 'max_val', 'ambientLevel', 'specularIntensity', 'gauge_size'
         ];
 
         const dropdowns: Record<string, string[]> = {
@@ -993,6 +1022,279 @@ export class PropertyEditor {
         });
 
         return input;
+    }
+
+    private renderPrimitiveGeometryEditor(node: Node): void {
+        const primitives = node.parameters.primitives || [];
+        const voxelizationMethod = node.parameters.voxelization_method || 'watertight_floodfill';
+
+        const header = document.createElement('div');
+        header.style.padding = '10px';
+        header.style.borderBottom = '1px solid #3c3c3c';
+        header.style.marginBottom = '10px';
+
+        const title = document.createElement('h3');
+        title.style.margin = '0 0 5px 0';
+        title.style.fontSize = 'var(--font-md)';
+        title.style.color = '#fff';
+        title.textContent = 'Primitive Geometry Editor';
+        header.appendChild(title);
+
+        const desc = document.createElement('div');
+        desc.style.fontSize = 'var(--font-xs)';
+        desc.style.color = '#888';
+        desc.textContent = 'Define analytic primitive shapes to voxelize into solid reflecting obstacles.';
+        header.appendChild(desc);
+        this.container.appendChild(header);
+
+        const voxDiv = document.createElement('div');
+        voxDiv.style.padding = '0 10px 10px 10px';
+        voxDiv.style.display = 'flex';
+        voxDiv.style.flexDirection = 'column';
+        voxDiv.style.gap = '4px';
+
+        const voxLabel = document.createElement('label');
+        voxLabel.style.fontSize = 'var(--font-xs)';
+        voxLabel.style.color = '#888';
+        voxLabel.style.fontWeight = 'bold';
+        voxLabel.textContent = 'VOXELIZATION METHOD';
+        voxDiv.appendChild(voxLabel);
+
+        const voxSelect = document.createElement('select');
+        voxSelect.style.width = '100%';
+        voxSelect.style.background = '#252526';
+        voxSelect.style.color = '#ccc';
+        voxSelect.style.border = '1px solid #444';
+        voxSelect.style.padding = '4px';
+        voxSelect.style.fontSize = 'var(--font-sm)';
+
+        const methods = [
+            { value: 'watertight_floodfill', label: 'Watertight Floodfill' },
+            { value: 'watertight_raycast', label: 'Watertight Raycast' },
+            { value: 'thin_shell', label: 'Thin Shell' },
+            { value: 'winding_number', label: 'Winding Number' }
+        ];
+        methods.forEach(m => {
+            const opt = document.createElement('option');
+            opt.value = m.value;
+            opt.text = m.label;
+            if (m.value === voxelizationMethod) opt.selected = true;
+            voxSelect.appendChild(opt);
+        });
+        voxSelect.onchange = () => {
+            this.stateManager.updateNodeParameters(node.id, {
+                voxelization_method: voxSelect.value
+            });
+        };
+        voxDiv.appendChild(voxSelect);
+        this.container.appendChild(voxDiv);
+
+        const layout = document.createElement('div');
+        layout.style.display = 'flex';
+        layout.style.height = 'calc(100% - 130px)';
+        layout.style.borderTop = '1px solid #3c3c3c';
+
+        const leftPane = document.createElement('div');
+        leftPane.style.width = '40%';
+        leftPane.style.borderRight = '1px solid #3c3c3c';
+        leftPane.style.display = 'flex';
+        leftPane.style.flexDirection = 'column';
+        leftPane.style.background = '#1e1e1e';
+
+        const leftHeader = document.createElement('div');
+        leftHeader.style.padding = '8px';
+        leftHeader.style.borderBottom = '1px solid #2d2d2d';
+        leftHeader.style.display = 'flex';
+        leftHeader.style.flexDirection = 'column';
+        leftHeader.style.gap = '6px';
+
+        const addLabel = document.createElement('div');
+        addLabel.style.fontSize = '10px';
+        addLabel.style.color = '#888';
+        addLabel.style.fontWeight = 'bold';
+        addLabel.textContent = 'ADD SHAPE';
+        leftHeader.appendChild(addLabel);
+
+        const addButtonsDiv = document.createElement('div');
+        addButtonsDiv.style.display = 'flex';
+        addButtonsDiv.style.gap = '4px';
+
+        const createAddBtn = (labelStr: string, shapeType: string, defaultParams: any) => {
+            const btn = document.createElement('button');
+            btn.textContent = labelStr;
+            btn.style.flex = '1';
+            btn.style.padding = '4px 2px';
+            btn.style.fontSize = 'var(--font-xs)';
+            btn.style.background = '#252526';
+            btn.style.color = '#fff';
+            btn.style.border = '1px solid #444';
+            btn.style.cursor = 'pointer';
+            btn.style.borderRadius = '3px';
+            btn.onclick = (e) => {
+                e.preventDefault();
+                const updated = [...primitives, { type: shapeType, ...defaultParams }];
+                this.selectedPrimitiveIndex = updated.length - 1;
+                this.stateManager.updateNodeParameters(node.id, { primitives: updated });
+            };
+            return btn;
+        };
+
+        addButtonsDiv.appendChild(createAddBtn('Cube', 'cuboid', { xmin: 0.0, xmax: 0.2, ymin: 0.0, ymax: 0.2, zmin: 0.0, zmax: 0.2 }));
+        addButtonsDiv.appendChild(createAddBtn('Cyl', 'cylinder', { x: 0.5, y: 0.5, z: 0.5, radius: 0.1, length: 0.2, orientation: 'Z' }));
+        addButtonsDiv.appendChild(createAddBtn('Wedge', 'wedge', { xmin: 0.0, xmax: 0.2, ymin: 0.0, ymax: 0.2, zmin: 0.0, zmax: 0.2, orientation: '+X' }));
+        leftHeader.appendChild(addButtonsDiv);
+        leftPane.appendChild(leftHeader);
+
+        const shapeList = document.createElement('div');
+        shapeList.style.flex = '1';
+        shapeList.style.overflowY = 'auto';
+        shapeList.style.display = 'flex';
+        shapeList.style.flexDirection = 'column';
+
+        if (this.selectedPrimitiveIndex >= primitives.length) {
+            this.selectedPrimitiveIndex = primitives.length - 1;
+        }
+        if (this.selectedPrimitiveIndex < 0 && primitives.length > 0) {
+            this.selectedPrimitiveIndex = 0;
+        }
+
+        primitives.forEach((prim: any, idx: number) => {
+            const item = document.createElement('div');
+            item.style.padding = '8px';
+            item.style.borderBottom = '1px solid #2d2d2d';
+            item.style.display = 'flex';
+            item.style.justifyContent = 'space-between';
+            item.style.alignItems = 'center';
+            item.style.cursor = 'pointer';
+            item.style.background = idx === this.selectedPrimitiveIndex ? '#37373d' : 'transparent';
+
+            const name = document.createElement('span');
+            name.style.fontSize = 'var(--font-xs)';
+            name.style.color = idx === this.selectedPrimitiveIndex ? '#fff' : '#ccc';
+            name.textContent = `${idx + 1}. ${prim.type.toUpperCase()}`;
+            item.appendChild(name);
+
+            const delBtn = document.createElement('button');
+            delBtn.innerHTML = '✕';
+            delBtn.style.background = 'transparent';
+            delBtn.style.border = 'none';
+            delBtn.style.color = '#ef4444';
+            delBtn.style.cursor = 'pointer';
+            delBtn.style.fontSize = '12px';
+            delBtn.onclick = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const updated = primitives.filter((_: any, i: number) => i !== idx);
+                if (this.selectedPrimitiveIndex >= updated.length) {
+                    this.selectedPrimitiveIndex = updated.length - 1;
+                }
+                this.stateManager.updateNodeParameters(node.id, { primitives: updated });
+            };
+            item.appendChild(delBtn);
+
+            item.onclick = () => {
+                this.selectedPrimitiveIndex = idx;
+                this.render(true);
+            };
+
+            shapeList.appendChild(item);
+        });
+
+        leftPane.appendChild(shapeList);
+        layout.appendChild(leftPane);
+
+        const rightPane = document.createElement('div');
+        rightPane.style.width = '60%';
+        rightPane.style.padding = '10px';
+        rightPane.style.overflowY = 'auto';
+        rightPane.style.display = 'flex';
+        rightPane.style.flexDirection = 'column';
+        rightPane.style.gap = '8px';
+
+        const activePrim = primitives[this.selectedPrimitiveIndex];
+        if (activePrim) {
+            const paneTitle = document.createElement('div');
+            paneTitle.style.fontWeight = 'bold';
+            paneTitle.style.fontSize = 'var(--font-sm)';
+            paneTitle.style.color = '#569cd6';
+            paneTitle.textContent = `SHAPE #${this.selectedPrimitiveIndex + 1} (${activePrim.type.toUpperCase()})`;
+            rightPane.appendChild(paneTitle);
+
+            const form = document.createElement('form');
+            form.style.display = 'flex';
+            form.style.flexDirection = 'column';
+            form.style.gap = '8px';
+
+            const updatePrimVal = (key: string, val: any) => {
+                const updated = [...primitives];
+                updated[this.selectedPrimitiveIndex] = { ...activePrim, [key]: val };
+                this.stateManager.updateNodeParameters(node.id, { primitives: updated });
+            };
+
+            Object.entries(activePrim).forEach(([key, value]) => {
+                if (key === 'type') return;
+
+                const row = document.createElement('div');
+                row.style.display = 'flex';
+                row.style.flexDirection = 'column';
+                row.style.gap = '4px';
+
+                const label = document.createElement('label');
+                label.style.fontSize = 'var(--font-xs)';
+                label.style.color = '#888';
+                label.textContent = key.toUpperCase();
+                row.appendChild(label);
+
+                if (key === 'orientation') {
+                    const select = document.createElement('select');
+                    select.style.background = '#252526';
+                    select.style.color = '#ccc';
+                    select.style.border = '1px solid #444';
+                    select.style.padding = '4px';
+                    select.style.fontSize = 'var(--font-sm)';
+
+                    const opts = activePrim.type === 'cylinder' ? ['X', 'Y', 'Z'] : ['+X', '-X', '+Y', '-Y'];
+                    opts.forEach(o => {
+                        const opt = document.createElement('option');
+                        opt.value = o;
+                        opt.text = o;
+                        if (o === value) opt.selected = true;
+                        select.appendChild(opt);
+                    });
+                    select.onchange = () => {
+                        updatePrimVal(key, select.value);
+                    };
+                    row.appendChild(select);
+                } else {
+                    const input = document.createElement('input');
+                    input.type = 'number';
+                    input.step = 'any';
+                    input.style.background = '#252526';
+                    input.style.color = '#ccc';
+                    input.style.border = '1px solid #444';
+                    input.style.padding = '4px';
+                    input.style.fontSize = 'var(--font-sm)';
+                    input.value = String(value);
+                    input.oninput = () => {
+                        updatePrimVal(key, Number(input.value));
+                    };
+                    row.appendChild(input);
+                }
+                form.appendChild(row);
+            });
+            rightPane.appendChild(form);
+        } else {
+            const placeholder = document.createElement('div');
+            placeholder.style.color = '#666';
+            placeholder.style.fontSize = 'var(--font-sm)';
+            placeholder.style.textAlign = 'center';
+            placeholder.style.marginTop = '40px';
+            placeholder.textContent = 'Select or add a primitive shape to begin.';
+            rightPane.appendChild(placeholder);
+        }
+
+        layout.appendChild(rightPane);
+        this.container.appendChild(layout);
     }
 
     private renderTelemetry3DViewportSlices(node: Node, container: HTMLElement): void {
@@ -1749,6 +2051,8 @@ export class PropertyEditor {
                 return 'Virtual gauges. Records and tracks simulation variables (pressure, density, velocity, species) at discrete coordinates over time.';
             case 'STLGeometry':
                 return 'STL Geometry boundary. Specifies the STL file path for Immersed Boundary Method solid obstacles in 3D.';
+            case 'PrimitiveGeometry3D':
+                return 'Primitive Geometry boundary. Specifies analytic cuboids, cylinders, or wedges for Immersed Boundary Method solid obstacles in 3D.';
             default:
                 return 'Simulation graph node.';
         }

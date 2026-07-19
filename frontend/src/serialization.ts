@@ -31,7 +31,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
         'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
         'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
-        'min_y', 'max_y', 'min_val', 'max_val', 'ambientLevel', 'specularIntensity'
+        'min_y', 'max_y', 'min_val', 'max_val', 'ambientLevel', 'specularIntensity', 'gauge_size'
     ];
 
     const flattenedParams: Record<string, any> = {};
@@ -121,13 +121,23 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
         });
 
-        // Trace STL Geometry for CFD Solver 3D
+        // Trace STL or Primitive Geometry for CFD Solver 3D
         const stlConn = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'stl');
         if (stlConn) {
             const stlNode = state.nodes.find(n => n.id === stlConn.fromNode);
             if (stlNode && stlNode.type === 'STLGeometry') {
                 flattenedParams['stl_file'] = stlNode.parameters.stl_file || '';
                 flattenedParams['geometry_hash'] = stlNode.parameters.geometry_hash || '';
+                flattenedParams['voxelization_method'] = stlNode.parameters.voxelization_method || 'watertight_floodfill';
+            } else if (stlNode && stlNode.type === 'PrimitiveGeometry3D') {
+                flattenedParams['primitives'] = stlNode.parameters.primitives || [];
+                const primsStr = JSON.stringify(stlNode.parameters.primitives || []) + '_' + (stlNode.parameters.voxelization_method || 'watertight_floodfill');
+                let hash = 5381;
+                for (let i = 0; i < primsStr.length; i++) {
+                    hash = ((hash << 5) + hash) + primsStr.charCodeAt(i);
+                    hash = hash & hash;
+                }
+                flattenedParams['geometry_hash'] = 'prims_' + Math.abs(hash).toString(16);
                 flattenedParams['voxelization_method'] = stlNode.parameters.voxelization_method || 'watertight_floodfill';
             }
         }

@@ -523,10 +523,10 @@ export function validateSimulationState(state: SimulationState): ValidationResul
         const stlConn3D = state.connections.find(c => c.toNode === solver3D.id && c.toPort === 'stl');
         if (stlConn3D) {
             const stlNode3D = state.nodes.find(n => n.id === stlConn3D.fromNode);
-            if (!stlNode3D || stlNode3D.type !== 'STLGeometry') {
+            if (!stlNode3D || (stlNode3D.type !== 'STLGeometry' && stlNode3D.type !== 'PrimitiveGeometry3D')) {
                 const connKey = `${stlConn3D.fromNode}:${stlConn3D.fromPort}->${stlConn3D.toNode}:${stlConn3D.toPort}`;
-                flawedConnections.set(connKey, "Only STLGeometry node can be connected to the STL input of CFD Solver 3D.");
-                addMessage(solver3D.id, 'error', "Only STLGeometry node can be connected to the STL input of CFD Solver 3D.");
+                flawedConnections.set(connKey, "Only STLGeometry or PrimitiveGeometry3D node can be connected to the STL input of CFD Solver 3D.");
+                addMessage(solver3D.id, 'error', "Only STLGeometry or PrimitiveGeometry3D node can be connected to the STL input of CFD Solver 3D.");
             }
         }
     });

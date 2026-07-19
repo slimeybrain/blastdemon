@@ -751,7 +751,7 @@ export class GraphRenderer {
                 if (toPortId === 'air') return fromType === 'Material';
                 if (toPortId === 'charge') return fromType === 'Charge3D';
                 if (toPortId === 'detonator') return fromType === 'DetonatorLocation3D';
-                if (toPortId === 'stl') return fromType === 'STLGeometry';
+                if (toPortId === 'stl') return fromType === 'STLGeometry' || fromType === 'PrimitiveGeometry3D';
                 if (toPortId === 'gauges') return fromType === 'VirtualGauges';
                 if (toPortId === 'remap') return fromType === 'RemapNode';
                 return false;
@@ -1131,6 +1131,7 @@ export class GraphRenderer {
                     { label: 'Detonator Location 3D', type: 'DetonatorLocation3D' },
                     { label: '3D Charge', type: 'Charge3D' },
                     { label: 'STL Geometry 3D', type: 'STLGeometry' },
+                    { label: 'Primitive Geometry 3D', type: 'PrimitiveGeometry3D' },
                     { label: 'CFD Solver 3D', type: 'CFDSolver3D' }
                 ]
             },
@@ -1529,7 +1530,9 @@ export class GraphRenderer {
                 stl_wireframe: false,
                 stl_solids: true,
                 stl_opacity: 0.5,
-                refresh_rate: 2.0
+                refresh_rate: 2.0,
+                show_gauges: true,
+                gauge_size: 0.03
             };
 
             default: return {};
@@ -1650,7 +1653,8 @@ export class GraphRenderer {
             case 'Charge3D':        return 'CHARGE3D';
             case 'CFDSolver3D':     return 'SOLVER3D';
             case 'Telemetry3DViewport': return 'VIEW3D';
-            case 'STLGeometry':     return 'STL';
+            case 'STLGeometry':
+            case 'PrimitiveGeometry3D': return 'STL';
             default: return (type as string).toUpperCase();
         }
     }
@@ -1679,6 +1683,7 @@ export class GraphRenderer {
             case 'CFDSolver3D':       return 'CFD Solver 3D';
             case 'Telemetry3DViewport': return 'Telemetry - 3D Viewport';
             case 'STLGeometry':       return 'STL Geometry 3D';
+            case 'PrimitiveGeometry3D': return 'Primitive Geometry 3D';
             default: return type;
         }
     }
@@ -1712,13 +1717,14 @@ export class GraphRenderer {
                 if (!nodeEl) {
                     nodeEl = document.createElement('div');
                     nodeEl.className = 'node';
-                    if (node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport') {
+                    if (node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport' || node.type === 'PrimitiveGeometry3D') {
                         nodeEl.classList.add('resizable');
-                        if (node.width === undefined) node.width = (node.type === 'Telemetry3DViewport' || node.type === 'VirtualGauges') ? 450 : ((node.type === 'TelemetryContour') ? 350 : 250);
+                        if (node.width === undefined) node.width = (node.type === 'Telemetry3DViewport' || node.type === 'VirtualGauges') ? 450 : ((node.type === 'TelemetryContour') ? 350 : ((node.type === 'PrimitiveGeometry3D') ? 320 : 250));
                         if (node.height === undefined) {
                             if (node.type === 'Telemetry3DViewport') node.height = 450;
                             else if (node.type === 'TelemetryContour' || node.type === 'VirtualGauges') node.height = 300;
                             else if (node.type === 'TelemetryGraph') node.height = 150;
+                            else if (node.type === 'PrimitiveGeometry3D') node.height = 320;
                             else node.height = 130;
                         }
 
@@ -2006,7 +2012,7 @@ export class GraphRenderer {
                 const displayMode = node.displayMode || 'expanded';
                 const nodeOrientation = node.orientation || 'HORIZ';
 
-                const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport';
+                const isTelemetry = node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport' || node.type === 'PrimitiveGeometry3D';
 
                 // Only override the element's inline width/height from state when the
                 // user is NOT actively dragging the native resize handle. Mid-drag, the
@@ -2016,6 +2022,9 @@ export class GraphRenderer {
                 if (!isBeingResized) {
                     if (node.width !== undefined && displayMode !== 'compact' && isTelemetry) {
                         const newWidth = `${node.width}px`;
+                        if (nodeEl.style.width !== newWidth) nodeEl.style.width = newWidth;
+                    } else if (node.type === 'PrimitiveGeometry3D' && displayMode === 'expanded') {
+                        const newWidth = '320px';
                         if (nodeEl.style.width !== newWidth) nodeEl.style.width = newWidth;
                     } else if (node.type === 'STLGeometry' && displayMode === 'expanded') {
                         const stlFile = node.parameters['stl_file'] || '';
@@ -3660,6 +3669,10 @@ export class GraphRenderer {
             if (form) form.remove();
             return;
         }
+        if (node.type === 'PrimitiveGeometry3D') {
+            this.renderPrimitiveGeometryNodeCanvasEditor(node, container);
+            return;
+        }
         container.style.overflow = 'visible';
         let form = container.querySelector('.node-params-form') as HTMLFormElement;
         if (form) {
@@ -3814,7 +3827,7 @@ export class GraphRenderer {
 
         for (const key of paramKeys) {
             const value = node.parameters[key];
-            if (key === 'gauges' || key === 'slices') continue;
+            if (key === 'gauges' || key === 'slices' || key === 'primitives') continue;
             if (key === 'nr' || key === 'nz' || key === 'n_cells') continue;
             if (node.type === 'VTKOutput' && !is3D && (key === 'export_slices' || key === 'export_volumes')) continue;
             if (node.type === 'VirtualGauges' && key === 'telemetry_channel') continue;
@@ -3936,7 +3949,7 @@ export class GraphRenderer {
                             'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
                             'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
                             'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
-                            'min_y', 'max_y', 'min_val', 'max_val', 'ambientLevel', 'specularIntensity'
+                            'min_y', 'max_y', 'min_val', 'max_val', 'ambientLevel', 'specularIntensity', 'gauge_size'
                         ];
                         let castValue: any = newVal;
                         if (numericKeys.includes(key)) {
@@ -4366,6 +4379,7 @@ export class GraphRenderer {
         if (gridInfoDiv) {
             form.appendChild(gridInfoDiv);
         }
+
         container.appendChild(form);
     }
 
@@ -4661,6 +4675,9 @@ export class GraphRenderer {
         const displayMode = node.displayMode || 'expanded';
         if (displayMode === 'compact') return 100;
         if (node.width !== undefined) return node.width;
+        if (node.type === 'PrimitiveGeometry3D' && displayMode === 'expanded') {
+            return 320;
+        }
         if (node.type === 'STLGeometry' && displayMode === 'expanded') {
             const stlFile = node.parameters['stl_file'] || '';
             return Math.max(180, Math.ceil(stlFile.length * 6) + 65);
@@ -4682,6 +4699,9 @@ export class GraphRenderer {
             if (node.type === 'VirtualGauges') return 200;
             base += Math.max(node.inputs.length, node.outputs.length) * 20;
         } else if (displayMode === 'expanded') {
+            if (node.type === 'PrimitiveGeometry3D') {
+                return 320;
+            }
             base += Object.keys(node.parameters).length * 25;
             if (node.type === 'TelemetryText') base += 100;
             if (node.type === 'TelemetryGraph') base += 120;
@@ -4691,6 +4711,226 @@ export class GraphRenderer {
             base += Math.max(node.inputs.length, node.outputs.length) * 20;
         }
         return Math.max(base, 60);
+    }
+
+    private renderPrimitiveGeometryNodeCanvasEditor(node: Node, container: HTMLElement): void {
+        container.style.overflow = 'visible';
+        let form = container.querySelector('.node-params-form') as HTMLFormElement;
+        if (!form) {
+            form = document.createElement('form');
+            form.className = 'node-params-form';
+            form.style.padding = '6px';
+            form.style.display = 'flex';
+            form.style.flexDirection = 'column';
+            form.style.gap = '6px';
+            form.style.height = '100%';
+            form.style.boxSizing = 'border-box';
+            form.onsubmit = (e) => e.preventDefault();
+            container.appendChild(form);
+        } else {
+            const activeInput = document.activeElement as HTMLElement;
+            if (activeInput && form.contains(activeInput)) {
+                return;
+            }
+            form.innerHTML = '';
+        }
+
+        form.addEventListener('mousedown', (e) => e.stopPropagation());
+
+        const primitives = node.parameters.primitives || [];
+        const voxelizationMethod = node.parameters.voxelization_method || 'watertight_floodfill';
+
+        const voxRow = document.createElement('div');
+        voxRow.style.display = 'flex';
+        voxRow.style.flexDirection = 'column';
+        voxRow.style.gap = '2px';
+
+        const voxLabel = document.createElement('label');
+        voxLabel.style.fontSize = '9px';
+        voxLabel.style.color = '#888';
+        voxLabel.style.fontWeight = 'bold';
+        voxLabel.textContent = 'VOXELIZATION METHOD';
+        voxRow.appendChild(voxLabel);
+
+        const voxSelect = this.createCustomDropdown(
+            [
+                { value: 'watertight_floodfill', label: 'Watertight Floodfill' },
+                { value: 'watertight_raycast', label: 'Watertight Raycast' },
+                { value: 'thin_shell', label: 'Thin Shell' },
+                { value: 'winding_number', label: 'Winding Number' }
+            ],
+            voxelizationMethod,
+            (newVal) => {
+                this.stateManager.updateNodeParameters(node.id, { voxelization_method: newVal });
+            },
+            'voxelization_method'
+        );
+        voxRow.appendChild(voxSelect);
+        form.appendChild(voxRow);
+
+        const addRow = document.createElement('div');
+        addRow.style.display = 'flex';
+        addRow.style.gap = '4px';
+        addRow.style.marginTop = '2px';
+
+        const createAddBtn = (labelStr: string, shapeType: string, defaultParams: any) => {
+            const btn = document.createElement('button');
+            btn.textContent = `+ ${labelStr}`;
+            btn.style.flex = '1';
+            btn.style.padding = '3px 0';
+            btn.style.fontSize = '9px';
+            btn.style.background = '#333';
+            btn.style.color = '#fff';
+            btn.style.border = '1px solid #555';
+            btn.style.cursor = 'pointer';
+            btn.style.borderRadius = '3px';
+            btn.onclick = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const updated = [...primitives, { type: shapeType, ...defaultParams }];
+                this.stateManager.updateNodeParameters(node.id, { primitives: updated });
+            };
+            return btn;
+        };
+
+        addRow.appendChild(createAddBtn('Cube', 'cuboid', { xmin: 0.0, xmax: 0.2, ymin: 0.0, ymax: 0.2, zmin: 0.0, zmax: 0.2 }));
+        addRow.appendChild(createAddBtn('Cyl', 'cylinder', { x: 0.5, y: 0.5, z: 0.5, radius: 0.1, length: 0.2, orientation: 'Z' }));
+        addRow.appendChild(createAddBtn('Wedge', 'wedge', { xmin: 0.0, xmax: 0.2, ymin: 0.0, ymax: 0.2, zmin: 0.0, zmax: 0.2, orientation: '+X' }));
+        form.appendChild(addRow);
+
+        const scrollContainer = document.createElement('div');
+        scrollContainer.style.flex = '1';
+        scrollContainer.style.minHeight = '120px';
+        scrollContainer.style.overflowY = 'auto';
+        scrollContainer.style.display = 'flex';
+        scrollContainer.style.flexDirection = 'column';
+        scrollContainer.style.gap = '8px';
+        scrollContainer.style.marginTop = '4px';
+        scrollContainer.style.border = '1px solid #222';
+        scrollContainer.style.background = '#151515';
+        scrollContainer.style.padding = '4px';
+        scrollContainer.style.borderRadius = '4px';
+
+        primitives.forEach((prim: any, idx: number) => {
+            const item = document.createElement('div');
+            item.style.background = '#202020';
+            item.style.border = '1px solid #3c3c3c';
+            item.style.borderRadius = '3px';
+            item.style.padding = '4px';
+            item.style.display = 'flex';
+            item.style.flexDirection = 'column';
+            item.style.gap = '4px';
+
+            const titleRow = document.createElement('div');
+            titleRow.style.display = 'flex';
+            titleRow.style.justifyContent = 'space-between';
+            titleRow.style.alignItems = 'center';
+            titleRow.style.borderBottom = '1px solid #2d2d2d';
+            titleRow.style.paddingBottom = '2px';
+
+            const itemTitle = document.createElement('span');
+            itemTitle.style.fontSize = '9px';
+            itemTitle.style.fontWeight = 'bold';
+            itemTitle.style.color = '#569cd6';
+            itemTitle.textContent = `#${idx + 1} ${prim.type.toUpperCase()}`;
+            titleRow.appendChild(itemTitle);
+
+            const delBtn = document.createElement('button');
+            delBtn.innerHTML = '✕';
+            delBtn.style.background = 'transparent';
+            delBtn.style.border = 'none';
+            delBtn.style.color = '#ef4444';
+            delBtn.style.cursor = 'pointer';
+            delBtn.style.fontSize = '10px';
+            delBtn.onclick = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const updated = primitives.filter((_: any, i: number) => i !== idx);
+                this.stateManager.updateNodeParameters(node.id, { primitives: updated });
+            };
+            titleRow.appendChild(delBtn);
+            item.appendChild(titleRow);
+
+            const grid = document.createElement('div');
+            grid.style.display = 'grid';
+            grid.style.gridTemplateColumns = '1fr 1fr';
+            grid.style.gap = '6px';
+            grid.style.padding = '4px 0';
+
+            const updatePrimVal = (key: string, val: any) => {
+                const updated = [...primitives];
+                updated[idx] = { ...prim, [key]: val };
+                this.stateManager.updateNodeParameters(node.id, { primitives: updated });
+            };
+
+            Object.entries(prim).forEach(([key, value]) => {
+                if (key === 'type') return;
+
+                const inputRow = document.createElement('div');
+                inputRow.style.display = 'flex';
+                inputRow.style.flexDirection = 'column';
+                inputRow.style.gap = '2px';
+
+                const label = document.createElement('span');
+                label.style.fontSize = '8px';
+                label.style.color = '#aaa';
+                label.style.fontWeight = 'bold';
+                label.textContent = key.toUpperCase();
+                inputRow.appendChild(label);
+
+                if (key === 'orientation') {
+                    const select = document.createElement('select');
+                    select.style.background = '#151515';
+                    select.style.color = '#ccc';
+                    select.style.border = '1px solid #444';
+                    select.style.fontSize = '9px';
+                    select.style.padding = '2px';
+
+                    const opts = prim.type === 'cylinder' ? ['X', 'Y', 'Z'] : ['+X', '-X', '+Y', '-Y'];
+                    opts.forEach(o => {
+                        const opt = document.createElement('option');
+                        opt.value = o;
+                        opt.text = o;
+                        if (o === value) opt.selected = true;
+                        select.appendChild(opt);
+                    });
+                    select.onchange = () => {
+                        updatePrimVal(key, select.value);
+                    };
+                    inputRow.appendChild(select);
+                } else {
+                    const input = document.createElement('input');
+                    input.type = 'number';
+                    input.step = 'any';
+                    input.style.background = '#151515';
+                    input.style.color = '#ccc';
+                    input.style.border = '1px solid #444';
+                    input.style.fontSize = '9px';
+                    input.style.padding = '2px';
+                    input.value = String(value);
+                    input.oninput = () => {
+                        updatePrimVal(key, Number(input.value));
+                    };
+                    inputRow.appendChild(input);
+                }
+                grid.appendChild(inputRow);
+            });
+
+            item.appendChild(grid);
+            scrollContainer.appendChild(item);
+        });
+
+        if (primitives.length === 0) {
+            const empty = document.createElement('div');
+            empty.style.color = '#666';
+            empty.style.fontSize = '9px';
+            empty.style.textAlign = 'center';
+            empty.style.padding = '20px 0';
+            empty.textContent = 'No shapes configured. Add one above.';
+            scrollContainer.appendChild(empty);
+        }
+
+        form.appendChild(scrollContainer);
     }
 
     private renderVirtualGaugesContent(node: Node, container: HTMLElement): void {

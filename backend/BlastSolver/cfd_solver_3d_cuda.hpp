@@ -74,6 +74,7 @@ private:
     void rebuildActiveIndex();
     void ensure_paged_in() const;
     void ensure_paged_out() const;
+    void loadGeometryToGPU(const std::vector<GeometryTile3D>& host_geom, const std::atomic<bool>* terminate_flag);
 
 public:
     void updateBoundaryConditions();
@@ -95,6 +96,9 @@ public:
     void setGeometry(const std::string& stl_filepath, const std::string& geometry_hash, const std::string& voxelization_method,
                      const std::atomic<bool>* terminate_flag = nullptr,
                      std::function<void(double)> progress_callback = nullptr) override;
+    void setGeometryTriangles(const std::vector<Triangle>& triangles, const std::string& geometry_hash, const std::string& voxelization_method,
+                              const std::atomic<bool>* terminate_flag = nullptr,
+                              std::function<void(double)> progress_callback = nullptr) override;
     std::pair<double, double> getConservationTotals() const override;
 
     std::vector<float> sampleGauge(const Gauge3D& gauge) const override;

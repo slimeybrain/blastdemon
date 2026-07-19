@@ -13,6 +13,7 @@
 #include <fstream>
 #include <filesystem>
 #include "ProcessManager.hpp"
+#include "PrimitiveGeometry.hpp"
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -462,6 +463,43 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
             resp["status"] = "error";
             resp["error"] = e.what();
             std::cerr << "[Broker] [ERROR] Failed to load STL: " << e.what() << std::endl;
+        }
+
+        if (client) {
+            send_websocket_text(client, resp.dump());
+        }
+        return;
+     }
+
+    if (command == "LOAD_PRIMITIVE_GEOMETRY") {
+        nlohmann::json primitives = payload.value("primitives", nlohmann::json::array());
+        nlohmann::json resp;
+        resp["type"] = "load_stl_response";
+        resp["modelId"] = modelId;
+        resp["filePath"] = "";
+
+        try {
+            std::vector<Triangle> triangles = generate_primitives_triangles(primitives);
+            std::vector<float> coords;
+            coords.reserve(triangles.size() * 9);
+            for (const auto& tri : triangles) {
+                coords.push_back(tri.v0.x);
+                coords.push_back(tri.v0.y);
+                coords.push_back(tri.v0.z);
+                coords.push_back(tri.v1.x);
+                coords.push_back(tri.v1.y);
+                coords.push_back(tri.v1.z);
+                coords.push_back(tri.v2.x);
+                coords.push_back(tri.v2.y);
+                coords.push_back(tri.v2.z);
+            }
+            resp["status"] = "success";
+            resp["vertices"] = coords;
+            std::cout << "[Broker] Successfully generated primitive geometry with " << triangles.size() << " triangles." << std::endl;
+        } catch (const std::exception& e) {
+            resp["status"] = "error";
+            resp["error"] = e.what();
+            std::cerr << "[Broker] [ERROR] Failed to generate primitive geometry: " << e.what() << std::endl;
         }
 
         if (client) {

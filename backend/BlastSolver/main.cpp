@@ -19,6 +19,7 @@
 #include <condition_variable>
 
 #include <nlohmann/json.hpp>
+#include "PrimitiveGeometry.hpp"
 #include <filesystem>
 #include "cfd_solver.hpp"
 #include "cfd_solver_2d.hpp"
@@ -902,7 +903,12 @@ void init_3d_thread_func(nlohmann::json msg) {
             return;
         }
 
-        local_solver_3d->setGeometry(stl_file, geometry_hash, voxel_method, &sim3d_terminate, progress_callback);
+        if (msg.contains("primitives") && msg["primitives"].is_array() && !msg["primitives"].empty()) {
+            std::vector<Triangle> triangles = generate_primitives_triangles(msg["primitives"]);
+            local_solver_3d->setGeometryTriangles(triangles, geometry_hash, voxel_method, &sim3d_terminate, progress_callback);
+        } else {
+            local_solver_3d->setGeometry(stl_file, geometry_hash, voxel_method, &sim3d_terminate, progress_callback);
+        }
 
         if (sim3d_terminate.load()) {
             std::cout << "[INFO] 3D initialization terminated/cancelled." << std::endl;

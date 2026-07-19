@@ -1272,6 +1272,24 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setGeometry(const std::string& 
 }
 
 template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DImpl<RealType, IsMultiMaterial>::setGeometryTriangles(const std::vector<Triangle>& triangles, const std::string& geometry_hash, const std::string& voxelization_method,
+                                                                      const std::atomic<bool>* terminate_flag,
+                                                                      std::function<void(double)> progress_callback) {
+    voxelize_geometry(
+        triangles,
+        geometry_hash,
+        voxelization_method,
+        geom_pool,
+        nx, ny, nz,
+        cellSize,
+        xmin, ymin, zmin,
+        n_tiles_x, n_tiles_y, n_tiles_z,
+        terminate_flag,
+        progress_callback
+    );
+}
+
+template <typename RealType, bool IsMultiMaterial>
 std::pair<double, double> CFDSolver3DImpl<RealType, IsMultiMaterial>::getConservationTotals() const {
     double total_mass = 0.0;
     double total_energy = 0.0;

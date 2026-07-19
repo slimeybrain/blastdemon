@@ -1084,30 +1084,28 @@ networkManager.onMessage(async (data) => {
                 const modelId = dataJson.modelId;
                 const state = stateManager.getSimulationState(modelId);
                 const vpNodes = state?.nodes.filter(n => n.type === 'Telemetry3DViewport') || [];
-                if (vpNodes.length > 0) {
-                    layoutManager.components.forEach(comp => {
-                        if (comp.type === 'TELEMETRY_3D' && comp.instance) {
-                            comp.instance.setSTLGeometry(verts, modelId);
-                        }
-                    });
-                    
-                    const activeModelId = stateManager.getActiveWorkspace()?.activeModelId;
-                    if (modelId === activeModelId) {
-                        layoutManager.components.forEach(comp => {
-                            if (comp.type === 'NODE_GRAPH' && comp.instance) {
-                                vpNodes.forEach(vpNode => {
-                                    comp.instance.setSTLGeometry(vpNode.id, verts);
-                                });
-                            }
-                        });
+                layoutManager.components.forEach(comp => {
+                    if (comp.type === 'TELEMETRY_3D' && comp.instance) {
+                        comp.instance.setSTLGeometry(verts, modelId);
                     }
-                    
+                });
+                
+                const activeModelId = stateManager.getActiveWorkspace()?.activeModelId;
+                if (modelId === activeModelId && vpNodes.length > 0) {
                     layoutManager.components.forEach(comp => {
-                        if (comp.type === 'NODE_VIEWER' && comp.instance) {
-                            comp.instance.setSTLGeometry(verts, modelId);
+                        if (comp.type === 'NODE_GRAPH' && comp.instance) {
+                            vpNodes.forEach(vpNode => {
+                                comp.instance.setSTLGeometry(vpNode.id, verts);
+                            });
                         }
                     });
                 }
+                
+                layoutManager.components.forEach(comp => {
+                    if (comp.type === 'NODE_VIEWER' && comp.instance) {
+                        comp.instance.setSTLGeometry(verts, modelId);
+                    }
+                });
             } else {
                 console.error("Broker failed to load STL geometry: " + dataJson.error);
             }

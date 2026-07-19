@@ -9,6 +9,7 @@
 #include "materials.hpp"
 #include "cfd_states.hpp"
 #include "cfd_tile.hpp"
+#include "PrimitiveGeometry.hpp"
 
 enum class BCType3D {
     REFLECTIVE = 0,
@@ -119,6 +120,9 @@ public:
     virtual void setGeometry(const std::string& stl_filepath, const std::string& geometry_hash, const std::string& voxelization_method,
                              const std::atomic<bool>* terminate_flag = nullptr,
                              std::function<void(double)> progress_callback = nullptr) = 0;
+    virtual void setGeometryTriangles(const std::vector<Triangle>& triangles, const std::string& geometry_hash, const std::string& voxelization_method,
+                                      const std::atomic<bool>* terminate_flag = nullptr,
+                                      std::function<void(double)> progress_callback = nullptr) = 0;
     virtual std::pair<double, double> getConservationTotals() const = 0;
 };
 
@@ -187,6 +191,9 @@ public:
     void setGeometry(const std::string& stl_filepath, const std::string& geometry_hash, const std::string& voxelization_method,
                      const std::atomic<bool>* terminate_flag = nullptr,
                      std::function<void(double)> progress_callback = nullptr) override {}
+    void setGeometryTriangles(const std::vector<Triangle>& triangles, const std::string& geometry_hash, const std::string& voxelization_method,
+                              const std::atomic<bool>* terminate_flag = nullptr,
+                              std::function<void(double)> progress_callback = nullptr) override {}
     std::pair<double, double> getConservationTotals() const override { return {0.0, 0.0}; }
 };
 
@@ -213,6 +220,9 @@ public:
     void setGeometry(const std::string& stl_filepath, const std::string& geometry_hash, const std::string& voxelization_method,
                      const std::atomic<bool>* terminate_flag = nullptr,
                      std::function<void(double)> progress_callback = nullptr) override;
+    void setGeometryTriangles(const std::vector<Triangle>& triangles, const std::string& geometry_hash, const std::string& voxelization_method,
+                              const std::atomic<bool>* terminate_flag = nullptr,
+                              std::function<void(double)> progress_callback = nullptr) override;
     std::pair<double, double> getConservationTotals() const override;
 
     std::vector<float> sampleGauge(const Gauge3D& gauge) const override;

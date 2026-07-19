@@ -131,15 +131,37 @@ void main() {
             if (uIsWireframe == 2) baseColor = vec4(1.0, 0.1, 0.1, 1.0);
             else if (uIsWireframe == 3) baseColor = vec4(0.1, 1.0, 0.1, 1.0);
             else if (uIsWireframe == 4) baseColor = vec4(0.2, 0.5, 1.0, 1.0);
-            outColor = baseColor;
+            
+            if (uEnableLighting) {
+                vec3 viewPos3 = vViewPos.xyz;
+                vec3 normal = normalize(cross(dFdx(viewPos3), dFdy(viewPos3)));
+                vec3 lightDir = vec3(0.0, 0.0, 1.0);
+                float diff = max(dot(normal, lightDir), 0.0);
+                
+                vec3 reflectDir = reflect(-lightDir, normal);
+                float spec = pow(max(dot(reflectDir, vec3(0.0, 0.0, 1.0)), 0.0), 16.0);
+                
+                float ao = 1.0;
+                if (uEnableAO) {
+                    ao = pow(max(normal.z, 0.0), 0.5);
+                }
+                
+                vec3 lit = baseColor.rgb * (uAmbientLevel + 0.7 * diff) + vec3(1.0) * (uSpecularLevel * spec);
+                outColor = vec4(lit * ao, baseColor.a);
+            } else {
+                outColor = baseColor;
+            }
             return;
         }
 
-        // STL Geometry (5 = Solid, 6 = Wireframe, 7 = Solid + Wireframe)
+        // STL Geometry (5 = Solid, 6 = Wireframe, 7 = Solid + Wireframe) or Gauges (8 = Solid Spheres)
         if (uIsWireframe >= 5) {
             vec4 baseColor = vec4(0.35, 0.5, 0.75, uAlpha);
+            if (uIsWireframe == 8) {
+                baseColor = vec4(1.0, 0.66, 0.0, 1.0);
+            }
             
-            if (uIsWireframe == 5) {
+            if (uIsWireframe == 5 || uIsWireframe == 8) {
                 if (uEnableLighting) {
                     vec3 viewPos3 = vViewPos.xyz;
                     vec3 normal = normalize(cross(dFdx(viewPos3), dFdy(viewPos3)));
@@ -370,15 +392,37 @@ void main() {
             if (uIsWireframe == 2) baseColor = vec4(1.0, 0.1, 0.1, 1.0);
             else if (uIsWireframe == 3) baseColor = vec4(0.1, 1.0, 0.1, 1.0);
             else if (uIsWireframe == 4) baseColor = vec4(0.2, 0.5, 1.0, 1.0);
-            gl_FragColor = baseColor;
+            
+            if (uEnableLighting) {
+                vec3 viewPos3 = vViewPos.xyz;
+                vec3 normal = vec3(0.0, 0.0, 1.0);
+                #ifdef GL_OES_standard_derivatives
+                normal = normalize(cross(dFdx(viewPos3), dFdy(viewPos3)));
+                #endif
+                vec3 lightDir = vec3(0.0, 0.0, 1.0);
+                float diff = max(dot(normal, lightDir), 0.0);
+                vec3 reflectDir = reflect(-lightDir, normal);
+                float spec = pow(max(dot(reflectDir, vec3(0.0, 0.0, 1.0)), 0.0), 16.0);
+                float ao = 1.0;
+                if (uEnableAO) {
+                    ao = pow(max(normal.z, 0.0), 0.5);
+                }
+                vec3 lit = baseColor.rgb * (uAmbientLevel + 0.7 * diff) + vec3(1.0) * (uSpecularLevel * spec);
+                gl_FragColor = vec4(lit * ao, baseColor.a);
+            } else {
+                gl_FragColor = baseColor;
+            }
             return;
         }
 
-        // STL Geometry (5 = Solid, 6 = Wireframe, 7 = Solid + Wireframe)
+        // STL Geometry (5 = Solid, 6 = Wireframe, 7 = Solid + Wireframe) or Gauges (8 = Solid Spheres)
         if (uIsWireframe >= 5) {
             vec4 baseColor = vec4(0.35, 0.5, 0.75, uAlpha);
+            if (uIsWireframe == 8) {
+                baseColor = vec4(1.0, 0.66, 0.0, 1.0);
+            }
             
-            if (uIsWireframe == 5) {
+            if (uIsWireframe == 5 || uIsWireframe == 8) {
                 if (uEnableLighting) {
                     vec3 viewPos3 = vViewPos.xyz;
                     vec3 normal = vec3(0.0, 0.0, 1.0);
@@ -617,8 +661,8 @@ fn fs_main(@location(0) texCoord: vec2<f32>, @location(1) sliceSize: vec2<f32>, 
             return vec4<f32>(0.3, 0.3, 0.4, 0.8); // Bounding box: grey
         }
         
-        // Axes Indicator (2.0, 3.0, 4.0)
-        if (uniforms.isWireframe < 4.5) {
+        // Axes Indicator (2.0, 3.0, 4.0) or Gauges (8.0)
+        if (uniforms.isWireframe < 4.5 || uniforms.isWireframe > 7.5) {
             var baseColor = vec4<f32>(0.0, 0.0, 0.0, 1.0);
             if (uniforms.isWireframe < 2.5) {
                 baseColor = vec4<f32>(1.0, 0.1, 0.1, 1.0);
@@ -626,12 +670,28 @@ fn fs_main(@location(0) texCoord: vec2<f32>, @location(1) sliceSize: vec2<f32>, 
                 baseColor = vec4<f32>(0.1, 1.0, 0.1, 1.0);
             } else if (uniforms.isWireframe < 4.5) {
                 baseColor = vec4<f32>(0.2, 0.5, 1.0, 1.0);
+            } else if (uniforms.isWireframe > 7.5) {
+                baseColor = vec4<f32>(1.0, 0.66, 0.0, 1.0);
+            }
+            if (uniforms.enableLighting > 0.5) {
+                let viewPos3 = vViewPos.xyz;
+                let normal = normalize(cross(dpdx(viewPos3), dpdy(viewPos3)));
+                let lightDir = vec3<f32>(0.0, 0.0, 1.0);
+                let diff = max(dot(normal, lightDir), 0.0);
+                let reflectDir = reflect(-lightDir, normal);
+                let spec = pow(max(dot(reflectDir, vec3<f32>(0.0, 0.0, 1.0)), 0.0), 16.0);
+                var ao = 1.0;
+                if (uniforms.enableAO > 0.5) {
+                    ao = pow(max(normal.z, 0.0), 0.5);
+                }
+                let lit = baseColor.rgb * (uniforms.ambientLevel + 0.7 * diff) + vec3<f32>(1.0) * (uniforms.specularLevel * spec);
+                return vec4<f32>(lit * ao, baseColor.a);
             }
             return baseColor;
         }
 
         // STL Geometry (5.0 = Solid, 6.0 = Wireframe, 7.0 = Solid + Wireframe)
-        if (uniforms.isWireframe >= 4.5) {
+        if (uniforms.isWireframe >= 4.5 && uniforms.isWireframe < 7.5) {
             let baseColor = vec4<f32>(0.35, 0.5, 0.75, uniforms.alpha);
             
             if (uniforms.isWireframe < 5.5) {
@@ -835,6 +895,16 @@ let stlWireframe = false;
 let stlSolids = true;
 let stlOpacity = 0.5;
 
+// Virtual Gauges Settings
+let showGauges = true;
+let gaugeSize = 0.03;
+let gaugesList: any[] = [];
+let gaugesBuffer: WebGLBuffer | null = null;
+let gaugesCount = 0;
+let gpuGaugesBuffer: any = null;
+let gpuGaugesCount = 0;
+let gpuUniformBufferGauges: any = null;
+
 interface CachedSlice {
     axis: number;
     offset: number;
@@ -974,9 +1044,9 @@ function buildArrow(axis: number, ox: number, oy: number, oz: number): number[] 
 }
 
 function updateAxesGeometry() {
-    const ox = -0.5;
-    const oy = -0.5;
-    const oz = -0.5;
+    const ox = 0;
+    const oy = 0;
+    const oz = 0;
 
     const axesDataArray: number[] = [];
     for (let a = 0; a < 3; a++) {
@@ -1374,6 +1444,10 @@ async function initContext(canvas: OffscreenCanvas) {
                         size: 256,
                         usage: 64 | 8
                     });
+                    gpuUniformBufferGauges = gpuDevice.createBuffer({
+                        size: 256,
+                        usage: 64 | 8
+                    });
                     gpuSTLUniformSolid = gpuDevice.createBuffer({
                         size: 256,
                         usage: 64 | 8
@@ -1442,6 +1516,92 @@ async function initContext(canvas: OffscreenCanvas) {
         is2DFallback = true;
         self.postMessage({ type: 'rendererInfo', renderer: '2D Fallback' });
         console.log("[ViewportWorker] 2D Fallback Initialized.");
+    }
+}
+
+function getSphereVertices(cx: number, cy: number, cz: number, r: number): number[] {
+    const verts: number[] = [];
+    const rings = 8;
+    const sectors = 8;
+    
+    const addTri = (p1: number[], p2: number[], p3: number[]) => {
+        // Stride 7: x, y, z, u, v, w, h
+        verts.push(...p1, 0, 0, 0, 0);
+        verts.push(...p2, 0, 0, 0, 0);
+        verts.push(...p3, 0, 0, 0, 0);
+    };
+
+    const grid: number[][][] = [];
+    for (let ring = 0; ring <= rings; ring++) {
+        const phi = (ring * Math.PI) / rings;
+        const ringVerts: number[][] = [];
+        for (let sector = 0; sector <= sectors; sector++) {
+            const theta = (sector * 2 * Math.PI) / sectors;
+            const x = cx + r * Math.sin(phi) * Math.cos(theta);
+            const y = cy + r * Math.sin(phi) * Math.sin(theta);
+            const z = cz + r * Math.cos(phi);
+            ringVerts.push([x, y, z]);
+        }
+        grid.push(ringVerts);
+    }
+
+    for (let r_idx = 0; r_idx < rings; r_idx++) {
+        for (let s = 0; s < sectors; s++) {
+            const p00 = grid[r_idx][s];
+            const p10 = grid[r_idx+1][s];
+            const p01 = grid[r_idx][s+1];
+            const p11 = grid[r_idx+1][s+1];
+
+            addTri(p00, p10, p01);
+            addTri(p01, p10, p11);
+        }
+    }
+    return verts;
+}
+
+function updateGaugesGeometry() {
+    const s = gaugeSize;
+    const dimX = (nx && dx) ? (nx * dx) : 1.0;
+    const dimY = (ny && dx) ? (ny * dx) : 1.0;
+    const dimZ = (nz && dx) ? (nz * dx) : 1.0;
+
+    let verts: number[] = [];
+    for (const g of gaugesList) {
+        const gx = Number(g.x ?? 0.5);
+        const gy = Number(g.y ?? 0.5);
+        const gz = Number(g.z ?? 0.5);
+        const px = (gx - xmin) / dimX - 0.5;
+        const py = (gy - ymin) / dimY - 0.5;
+        const pz = (gz - zmin) / dimZ - 0.5;
+
+        const sphereVerts = getSphereVertices(px, py, pz, s);
+        verts.push(...sphereVerts);
+    }
+
+    if (gl) {
+        if (!gaugesBuffer) {
+            gaugesBuffer = gl.createBuffer();
+        }
+        gl.bindBuffer(gl.ARRAY_BUFFER, gaugesBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.STATIC_DRAW);
+        gaugesCount = verts.length / 7;
+    }
+
+    if (gpuDevice) {
+        if (gpuGaugesBuffer) {
+            gpuGaugesBuffer.destroy();
+            gpuGaugesBuffer = null;
+        }
+        gpuGaugesCount = verts.length / 7;
+        if (verts.length > 0) {
+            gpuGaugesBuffer = gpuDevice.createBuffer({
+                size: verts.length * 4,
+                usage: 8 | 4, // VERTEX | COPY_DST
+                mappedAtCreation: true
+            });
+            new Float32Array(gpuGaugesBuffer.getMappedRange()).set(verts);
+            gpuGaugesBuffer.unmap();
+        }
     }
 }
 
@@ -2093,6 +2253,33 @@ function render2D() {
         const size = Math.min(width, height) * 0.65;
         ctx2D.drawImage(tempCanvas, (width - size)/2, (height - size)/2, size, size);
     }
+
+    if (showGauges && gaugesList && gaugesList.length > 0) {
+        const dimX = (nx && dx) ? (nx * dx) : 1.0;
+        const dimY = (ny && dx) ? (ny * dx) : 1.0;
+        const dimZ = (nz && dx) ? (nz * dx) : 1.0;
+        ctx2D.fillStyle = "#ffaa00";
+        ctx2D.strokeStyle = "#ffaa00";
+        ctx2D.lineWidth = 2;
+        for (const g of gaugesList) {
+            const gx = Number(g.x ?? 0.5);
+            const gy = Number(g.y ?? 0.5);
+            const gz = Number(g.z ?? 0.5);
+            const px = (gx - xmin) / dimX - 0.5;
+            const py = (gy - ymin) / dimY - 0.5;
+            const pz = (gz - zmin) / dimZ - 0.5;
+            const pt = projectPoint([px, py, pz], mvp, width, height);
+
+            ctx2D.beginPath();
+            ctx2D.arc(pt.x, pt.y, 6, 0, 2 * Math.PI);
+            ctx2D.fill();
+            
+            ctx2D.fillStyle = "#ffffff";
+            ctx2D.font = "bold 9px sans-serif";
+            ctx2D.fillText(g.id || g.name || "", pt.x + 8, pt.y - 4);
+            ctx2D.fillStyle = "#ffaa00";
+        }
+    }
 }
 
 function render() {
@@ -2201,8 +2388,23 @@ function render() {
         // Draw Axes Indicator
         if (gpuAxesBuffer && gpuPipeline && gpuAxesUniformBuffers.length === 3) {
             passEncoder.setPipeline(gpuPipeline);
+            const sizeX = nx * dx || 1.0;
+            const sizeY = ny * dx || 1.0;
+            const sizeZ = nz * dx || 1.0;
+            const maxSize = Math.max(sizeX, sizeY, sizeZ);
+            const sX = sizeX / maxSize;
+            const sY = sizeY / maxSize;
+            const sZ = sizeZ / maxSize;
+            const axesModelMatrix = new Float32Array([
+                1, 0, 0, 0,
+                0, 1, 0, 0,
+                0, 0, 1, 0,
+                -sX/2, -sY/2, -sZ/2, 1
+            ]);
+
             for (let a = 0; a < 3; a++) {
                 const axesData = new Float32Array(uniformData);
+                axesData.set(axesModelMatrix, 32);
                 const axesInt = new Int32Array(axesData.buffer);
                 axesInt[53] = 2 + a; // isWireframe = 2, 3, 4
                 gpuDevice.queue.writeBuffer(gpuAxesUniformBuffers[a], 0, axesData.buffer);
@@ -2286,6 +2488,28 @@ function render() {
                 passEncoder.setVertexBuffer(0, gpuSTLBuffer);
                 passEncoder.draw(count);
             }
+        }
+
+        // Draw Gauges in WebGPU
+        if (showGauges && gpuGaugesBuffer && gpuGaugesCount > 0 && gpuPipeline && gpuUniformBufferGauges) {
+            const uGauges = new Float32Array(uniformData);
+            uGauges[48] = 1.0; // alpha = 1.0
+            uGauges[53] = 8.0; // set isWireframe to 8.0 (gauges mode)
+            gpuDevice.queue.writeBuffer(gpuUniformBufferGauges, 0, uGauges.buffer);
+
+            const gaugesBindGroup = gpuDevice.createBindGroup({
+                layout: bindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: gpuUniformBufferGauges } },
+                    { binding: 1, resource: Object.values(activeSlicesWebGPU)[0]?.gpuTextureView || gpuDummyTextureView },
+                    { binding: 2, resource: gpuSampler! }
+                ]
+            });
+
+            passEncoder.setPipeline(gpuPipeline);
+            passEncoder.setBindGroup(0, gaugesBindGroup);
+            passEncoder.setVertexBuffer(0, gpuGaugesBuffer);
+            passEncoder.draw(gpuGaugesCount);
         }
 
         // 2. Draw Slices
@@ -2428,6 +2652,21 @@ function render() {
 
     // Draw Axes Indicator
     if (axesBuffer) {
+        const sizeX = nx * dx || 1.0;
+        const sizeY = ny * dx || 1.0;
+        const sizeZ = nz * dx || 1.0;
+        const maxSize = Math.max(sizeX, sizeY, sizeZ);
+        const sX = sizeX / maxSize;
+        const sY = sizeY / maxSize;
+        const sZ = sizeZ / maxSize;
+        const axesModelMatrix = new Float32Array([
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            -sX/2, -sY/2, -sZ/2, 1
+        ]);
+        gl.uniformMatrix4fv(uModel, false, axesModelMatrix);
+
         gl.bindBuffer(gl.ARRAY_BUFFER, axesBuffer);
         // Stride is 28 (7 floats * 4 bytes)
         gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
@@ -2441,6 +2680,7 @@ function render() {
             gl.uniform1i(uIsWF, 2 + a); // 2=X Red, 3=Y Green, 4=Z Blue
             gl.drawArrays(gl.TRIANGLES, a * 180, 180);
         }
+        gl.uniformMatrix4fv(uModel, false, modelMatrix);
     }
 
     // Draw STL Geometry fallback in WebGL
@@ -2486,6 +2726,20 @@ function render() {
 
         // Restore base model matrix for slices
         gl.uniformMatrix4fv(uModel, false, modelMatrix);
+    }
+
+    // Draw Gauges in WebGL fallback
+    if (showGauges && gaugesBuffer && gaugesCount > 0) {
+        gl.uniform1i(uIsWF, 8); // uIsWireframe = 8 (Gauges color & solid mode)
+        gl.uniform1f(uAlpha, 1.0);
+        gl.bindBuffer(gl.ARRAY_BUFFER, gaugesBuffer);
+        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 28, 12);
+        gl.enableVertexAttribArray(1);
+        gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 28, 20);
+        gl.enableVertexAttribArray(2);
+        gl.drawArrays(gl.TRIANGLES, 0, gaugesCount);
     }
 
     gl.uniform1i(uIsWF, 0);
@@ -2704,6 +2958,24 @@ self.onmessage = async (e) => {
             if (data.specularIntensity !== undefined) specularIntensity = data.specularIntensity;
             if (data.ambientLevel !== undefined) ambientLevel = data.ambientLevel;
             if (data.sliceOpacities !== undefined) sliceOpacities = data.sliceOpacities;
+
+            let gaugesChanged = false;
+            if (data.showGauges !== undefined) showGauges = data.showGauges;
+            if (data.gaugeSize !== undefined) {
+                gaugeSize = data.gaugeSize;
+                gaugesChanged = true;
+            }
+            if (data.gauges !== undefined) {
+                gaugesList = data.gauges;
+                gaugesChanged = true;
+            }
+            if (data.xmin !== undefined || data.ymin !== undefined || data.zmin !== undefined || data.dx !== undefined || data.nx !== undefined || data.ny !== undefined || data.nz !== undefined) {
+                gaugesChanged = true;
+                updateSTLGeometry();
+            }
+            if (gaugesChanged) {
+                updateGaugesGeometry();
+            }
             if (data.slices !== undefined) {
                 slicesConfig = data.slices;
                 

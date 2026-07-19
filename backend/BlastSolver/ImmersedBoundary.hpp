@@ -18,14 +18,10 @@
 #define HD_FUNC
 #endif
 
-struct Point3D {
-    float x, y, z;
-};
+#include "PrimitiveGeometry.hpp"
 
-struct Triangle {
-    Point3D v0, v1, v2;
-    Point3D normal;
-};
+#include <functional>
+#include <atomic>
 
 // Global cache
 extern std::string global_geometry_hash;
@@ -42,9 +38,6 @@ extern double global_geometry_ymin;
 extern double global_geometry_zmin;
 
 inline void get_file_metadata(const std::string& path, long long& size, long long& mtime) {
-#ifdef _WIN32
-    // Windows stat implementation if needed, but since we are on Linux:
-#endif
     struct stat st;
     if (stat(path.c_str(), &st) == 0) {
         size = st.st_size;
@@ -55,10 +48,20 @@ inline void get_file_metadata(const std::string& path, long long& size, long lon
     }
 }
 
-#include <functional>
-#include <atomic>
-
 std::vector<Triangle> read_stl(const std::string& filepath);
+
+void voxelize_geometry(
+    const std::vector<Triangle>& triangles,
+    const std::string& geometry_hash,
+    const std::string& voxelization_method,
+    std::vector<GeometryTile3D>& geom_pool,
+    int nx, int ny, int nz,
+    double cellSize,
+    double xmin, double ymin, double zmin,
+    int n_tiles_x, int n_tiles_y, int n_tiles_z,
+    const std::atomic<bool>* terminate_flag = nullptr,
+    std::function<void(double)> progress_callback = nullptr
+);
 
 void voxelize_stl(
     const std::string& stl_filepath,
