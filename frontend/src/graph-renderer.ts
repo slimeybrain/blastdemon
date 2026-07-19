@@ -92,6 +92,7 @@ export class GraphRenderer {
     private gaugesDragStartX: Map<string, number> = new Map();
     private gaugesDragStartMinX: Map<string, number> = new Map();
     private gaugesDragStartMaxX: Map<string, number> = new Map();
+    private gaugesPanelWidth: Map<string, number> = new Map();
 
 
     private selectedNodeId: string | null = null;
@@ -4984,6 +4985,7 @@ export class GraphRenderer {
         let mainArea = container.querySelector('.gauges-main-area') as HTMLElement;
         let controlsPanel = container.querySelector('.gauges-controls-panel') as HTMLElement;
         let toggleBtn = container.querySelector('.gauges-toggle-btn') as HTMLElement;
+        let splitter = container.querySelector('.gauges-panel-splitter') as HTMLElement;
 
         if (!mainArea || !controlsPanel || !toggleBtn) {
             container.innerHTML = '';
@@ -5015,6 +5017,10 @@ export class GraphRenderer {
             controlsPanel.style.transition = 'width 0.15s, padding 0.15s, border-left 0.15s';
             container.appendChild(controlsPanel);
 
+            splitter = document.createElement('div');
+            splitter.className = 'gauges-panel-splitter';
+            container.insertBefore(splitter, controlsPanel);
+
             toggleBtn = document.createElement('button');
             toggleBtn.className = 'gauges-toggle-btn';
             toggleBtn.style.position = 'absolute';
@@ -5032,18 +5038,62 @@ export class GraphRenderer {
             mainArea.appendChild(toggleBtn);
         }
 
+        if (splitter) {
+            const newSplitter = splitter.cloneNode(true) as HTMLElement;
+            splitter.parentNode?.replaceChild(newSplitter, splitter);
+            splitter = newSplitter;
+            splitter.onmousedown = (e) => e.stopPropagation();
+
+            splitter.addEventListener('mousedown', (e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                const startX = e.clientX;
+                const startW = controlsPanel.offsetWidth;
+                controlsPanel.style.transition = 'none';
+
+                const onMove = (me: MouseEvent) => {
+                    const dx = (me.clientX - startX) / this.zoom;
+                    const newW = Math.max(160, Math.min(600, startW - dx));
+                    controlsPanel.style.width = `${newW}px`;
+                    this.gaugesPanelWidth.set(node.id, newW);
+
+                    const canvas = mainArea.querySelector('canvas') as HTMLCanvasElement;
+                    if (canvas) {
+                        canvas.width = canvas.clientWidth || 250;
+                        canvas.height = canvas.clientHeight || 100;
+                        const history = this.stateManager.getTelemetry(node.id);
+                        if (history) {
+                            this.drawGaugesChart(canvas, history, gauges, currentChannel, has2D, node.id);
+                        }
+                    }
+                };
+
+                const onUp = () => {
+                    controlsPanel.style.transition = 'width 0.15s, padding 0.15s, border-left 0.15s';
+                    window.removeEventListener('mousemove', onMove);
+                    window.removeEventListener('mouseup', onUp);
+                };
+
+                window.addEventListener('mousemove', onMove);
+                window.addEventListener('mouseup', onUp);
+            });
+        }
+
         // Apply open/collapsed state classes and sizes
         const panelOpen = this.gaugesPanelOpen.get(node.id) !== false;
         if (panelOpen) {
-            controlsPanel.style.width = '200px';
+            const preferredW = this.gaugesPanelWidth.get(node.id) ?? 260;
+            controlsPanel.style.width = `${preferredW}px`;
             controlsPanel.style.padding = '8px';
             controlsPanel.style.borderLeft = '1px solid #222';
             toggleBtn.textContent = '▶ Hide';
+            if (splitter) splitter.style.display = 'block';
         } else {
             controlsPanel.style.width = '0px';
             controlsPanel.style.padding = '0px';
             controlsPanel.style.borderLeft = 'none';
             toggleBtn.textContent = '◀ Controls';
+            if (splitter) splitter.style.display = 'none';
         }
 
         // Toggle panel click handler
@@ -5054,15 +5104,18 @@ export class GraphRenderer {
             this.gaugesPanelOpen.set(node.id, nextOpen);
 
             if (nextOpen) {
-                controlsPanel.style.width = '200px';
+                const preferredW = this.gaugesPanelWidth.get(node.id) ?? 260;
+                controlsPanel.style.width = `${preferredW}px`;
                 controlsPanel.style.padding = '8px';
                 controlsPanel.style.borderLeft = '1px solid #222';
                 toggleBtn.textContent = '▶ Hide';
+                if (splitter) splitter.style.display = 'block';
             } else {
                 controlsPanel.style.width = '0px';
                 controlsPanel.style.padding = '0px';
                 controlsPanel.style.borderLeft = 'none';
                 toggleBtn.textContent = '◀ Controls';
+                if (splitter) splitter.style.display = 'none';
             }
 
             // Redraw chart canvas on layout transition
@@ -5473,13 +5526,14 @@ export class GraphRenderer {
                 table.style.borderCollapse = 'collapse';
                 table.style.fontSize = '9px';
                 table.style.color = '#ccc';
+                table.style.tableLayout = 'fixed';
 
                 const thead = document.createElement('thead');
                 thead.style.borderBottom = '1px solid #333';
                 thead.style.background = '#1a1a1c';
                 const headerTr = document.createElement('tr');
                 const thSel = document.createElement('th');
-                thSel.style.width = '20px';
+                thSel.style.width = '24px';
                 thSel.style.textAlign = 'center';
                 const masterCheck = document.createElement('input');
                 masterCheck.type = 'checkbox';
@@ -5495,18 +5549,18 @@ export class GraphRenderer {
 
                 if (is3D) {
                     headerTr.insertAdjacentHTML('beforeend', `
-                        <th style="text-align:left;padding:2px 4px;">ID</th>
-                        <th style="text-align:left;padding:2px 4px;">X</th>
-                        <th style="text-align:left;padding:2px 4px;">Y</th>
-                        <th style="text-align:left;padding:2px 4px;">Z</th>
-                        <th></th>
+                        <th style="text-align:left;padding:2px 4px;width:40px;">ID</th>
+                        <th style="text-align:left;padding:2px 4px;width:55px;">X</th>
+                        <th style="text-align:left;padding:2px 4px;width:55px;">Y</th>
+                        <th style="text-align:left;padding:2px 4px;width:55px;">Z</th>
+                        <th style="width:20px;"></th>
                     `);
                 } else {
                     headerTr.insertAdjacentHTML('beforeend', `
-                        <th style="text-align:left;padding:2px 4px;">ID</th>
-                        <th style="text-align:left;padding:2px 4px;">R</th>
-                        ${has2D ? '<th style="text-align:left;padding:2px 4px;">Z</th>' : ''}
-                        <th></th>
+                        <th style="text-align:left;padding:2px 4px;width:40px;">ID</th>
+                        <th style="text-align:left;padding:2px 4px;width:75px;">R</th>
+                        ${has2D ? '<th style="text-align:left;padding:2px 4px;width:75px;">Z</th>' : ''}
+                        <th style="width:20px;"></th>
                     `);
                 }
                 thead.appendChild(headerTr);

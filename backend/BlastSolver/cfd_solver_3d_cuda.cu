@@ -2271,6 +2271,49 @@ std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::sampleGauge(const
     int gy = std::clamp((int)((gauge.y - ymin) / cellSize), 0, ny - 1);
     int gz = std::clamp((int)((gauge.z - zmin) / cellSize), 0, nz - 1);
 
+    // Apply the same obstacle-snapping logic as setGauges so one-off samples are consistent.
+    {
+        int ntx_sg = (nx + 7) / 8;
+        const bool has_geom_sg = !global_geometry_tiles.empty()
+                               && (int)global_geometry_tiles.size() == ntx_sg * ((ny+7)/8) * ((nz+7)/8);
+        auto sg_is_solid = [&](int i, int j, int k) -> bool {
+            if (!has_geom_sg) return false;
+            if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) return false;
+            int ti = i/TILE_SIZE_3D, tj = j/TILE_SIZE_3D, tk = k/TILE_SIZE_3D;
+            int t = ti + tj*ntx_sg + tk*ntx_sg*((ny+7)/8);
+            int c = (i&7) + (j&7)*8 + (k&7)*64;
+            return global_geometry_tiles[t].cells[c].is_boundary;
+        };
+        auto sg_is_contact = [&](int i, int j, int k) -> bool {
+            const int fd[6][3]={{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+            for (auto& d : fd) if (sg_is_solid(i+d[0],j+d[1],k+d[2])) return true;
+            return false;
+        };
+        if (has_geom_sg) {
+            bool near = sg_is_solid(gx, gy, gz);
+            if (!near) {
+                for (int dz=-2; dz<=2 && !near; ++dz)
+                for (int dy=-2; dy<=2 && !near; ++dy)
+                for (int dx=-2; dx<=2 && !near; ++dx)
+                    if (std::sqrt((float)(dx*dx+dy*dy+dz*dz)) <= 1.999f && sg_is_solid(gx+dx,gy+dy,gz+dz)) near = true;
+            }
+            if (near) {
+                int bx=-1,by=-1,bz=-1; float bd=1e9f;
+                int fx=-1,fy=-1,fz=-1; float fd2=1e9f;
+                for (int dz=-3;dz<=3;++dz) for (int dy=-3;dy<=3;++dy) for (int dx=-3;dx<=3;++dx) {
+                    int cx=gx+dx,cy=gy+dy,cz=gz+dz;
+                    if (cx<0||cx>=nx||cy<0||cy>=ny||cz<0||cz>=nz) continue;
+                    if (sg_is_solid(cx,cy,cz)) continue;
+                    float d2=std::sqrt((float)(dx*dx+dy*dy+dz*dz));
+                    if (sg_is_contact(cx,cy,cz) && d2<bd) { bd=d2; bx=cx; by=cy; bz=cz; }
+                    if (d2<fd2) { fd2=d2; fx=cx; fy=cy; fz=cz; }
+                }
+                if (bx>=0) { gx=bx; gy=by; gz=bz; }
+                else if (fx>=0) { gx=fx; gy=fy; gz=fz; }
+            }
+        }
+    }
+
     int tx = gx / TILE_SIZE_3D, ty = gy / TILE_SIZE_3D, tz = gz / TILE_SIZE_3D;
     int t_idx = tx + ty * ((nx+7)/8) + tz * ((nx+7)/8) * ((ny+7)/8);
     int lx = gx % TILE_SIZE_3D, ly = gy % TILE_SIZE_3D, lz = gz % TILE_SIZE_3D;
@@ -2798,10 +2841,114 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setGauges(const std::vector<Gau
     std::vector<GPUGauge3D> local_gauge_coords(num_gauges);
     int ntx = (nx + 7) / 8;
     int nty = (ny + 7) / 8;
+
+    // Helper: look up is_boundary for a cell (i,j,k) using the global host geometry cache.
+    // Returns false if no geometry is loaded or coords are out of range.
+    const bool has_geom = !global_geometry_tiles.empty()
+                          && (int)global_geometry_tiles.size() == ntx * ((ny + 7) / 8) * ((nz + 7) / 8);
+
+    auto cell_is_solid = [&](int i, int j, int k) -> bool {
+        if (!has_geom) return false;
+        if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) return false;
+        int ti = i / TILE_SIZE_3D, tj = j / TILE_SIZE_3D, tk = k / TILE_SIZE_3D;
+        int nty_local = (ny + 7) / 8;
+        int t = ti + tj * ntx + tk * ntx * nty_local;
+        int c = (i & 7) + (j & 7) * 8 + (k & 7) * 64;
+        return global_geometry_tiles[t].cells[c].is_boundary;
+    };
+
+    // Returns true if the fluid cell (i,j,k) has at least one solid face-neighbour,
+    // i.e., it is directly in contact with the obstacle surface.
+    auto cell_is_boundary_contact = [&](int i, int j, int k) -> bool {
+        const int face_dirs[6][3] = {
+            {1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}
+        };
+        for (auto& d : face_dirs) {
+            if (cell_is_solid(i + d[0], j + d[1], k + d[2])) return true;
+        }
+        return false;
+    };
+
     for (size_t g = 0; g < gauges.size(); ++g) {
         int gx = std::clamp((int)((gauges[g].x - xmin) / cellSize), 0, nx - 1);
         int gy = std::clamp((int)((gauges[g].y - ymin) / cellSize), 0, ny - 1);
         int gz = std::clamp((int)((gauges[g].z - zmin) / cellSize), 0, nz - 1);
+
+        // --- Automatic gauge snapping (internal only; user coordinates are unchanged) ---
+        // If geometry is loaded, check whether the gauge is inside a solid or within
+        // 1.999 cells of one.  If so, snap the internal extraction cell to the nearest
+        // fluid cell that is in direct contact with the obstacle, so that pressure
+        // readings on building facades etc. are physically correct.
+        if (has_geom) {
+            const int SNAP_RADIUS = 2;   // covers the 1.999-cell threshold
+            bool gauge_is_solid = cell_is_solid(gx, gy, gz);
+
+            // Check whether the gauge is within SNAP_RADIUS cells of any solid.
+            bool near_solid = gauge_is_solid;
+            if (!near_solid) {
+                for (int dz = -SNAP_RADIUS; dz <= SNAP_RADIUS && !near_solid; ++dz)
+                for (int dy = -SNAP_RADIUS; dy <= SNAP_RADIUS && !near_solid; ++dy)
+                for (int dx = -SNAP_RADIUS; dx <= SNAP_RADIUS && !near_solid; ++dx) {
+                    float dist = std::sqrt((float)(dx*dx + dy*dy + dz*dz));
+                    if (dist <= 1.999f && cell_is_solid(gx+dx, gy+dy, gz+dz))
+                        near_solid = true;
+                }
+            }
+
+            if (near_solid) {
+                // Search within SNAP_RADIUS+1 cells for the nearest boundary-contact
+                // fluid cell, then fall back to any fluid cell if none is found.
+                int best_x = -1, best_y = -1, best_z = -1;
+                float best_dist_contact = 1e9f;
+                float best_dist_fluid   = 1e9f;
+                int   bf_x = -1, bf_y = -1, bf_z = -1;  // nearest plain fluid fallback
+
+                const int SEARCH_RADIUS = SNAP_RADIUS + 1;
+                for (int dz = -SEARCH_RADIUS; dz <= SEARCH_RADIUS; ++dz)
+                for (int dy = -SEARCH_RADIUS; dy <= SEARCH_RADIUS; ++dy)
+                for (int dx = -SEARCH_RADIUS; dx <= SEARCH_RADIUS; ++dx) {
+                    int cx = gx + dx, cy = gy + dy, cz = gz + dz;
+                    if (cx < 0 || cx >= nx || cy < 0 || cy >= ny || cz < 0 || cz >= nz) continue;
+                    if (cell_is_solid(cx, cy, cz)) continue;
+
+                    float dist = std::sqrt((float)(dx*dx + dy*dy + dz*dz));
+
+                    // Track nearest boundary-contact cell.
+                    if (cell_is_boundary_contact(cx, cy, cz)) {
+                        if (dist < best_dist_contact) {
+                            best_dist_contact = dist;
+                            best_x = cx; best_y = cy; best_z = cz;
+                        }
+                    }
+                    // Also track nearest any-fluid as a fallback.
+                    if (dist < best_dist_fluid) {
+                        best_dist_fluid = dist;
+                        bf_x = cx; bf_y = cy; bf_z = cz;
+                    }
+                }
+
+                int snap_x, snap_y, snap_z;
+                if (best_x >= 0) {
+                    // Found a boundary-contact fluid cell — use it.
+                    snap_x = best_x; snap_y = best_y; snap_z = best_z;
+                } else if (bf_x >= 0) {
+                    // No boundary-contact cell found; fall back to nearest fluid cell.
+                    snap_x = bf_x; snap_y = bf_y; snap_z = bf_z;
+                } else {
+                    // No fluid cell in range at all — keep original (degenerate grid).
+                    snap_x = gx; snap_y = gy; snap_z = gz;
+                }
+
+                if (snap_x != gx || snap_y != gy || snap_z != gz) {
+                    std::cout << "[GAUGE SNAP] Gauge '" << gauges[g].name
+                              << "' adjusted from cell (" << gx << "," << gy << "," << gz << ")"
+                              << " to boundary-contact cell (" << snap_x << "," << snap_y << "," << snap_z << ")"
+                              << " (dist=" << best_dist_contact << " cells)\n";
+                    gx = snap_x; gy = snap_y; gz = snap_z;
+                }
+            }
+        }
+        // -------------------------------------------------------------------------
 
         int tx = gx / TILE_SIZE_3D, ty = gy / TILE_SIZE_3D, tz = gz / TILE_SIZE_3D;
         int t_idx = tx + ty * ntx + tz * ntx * nty;

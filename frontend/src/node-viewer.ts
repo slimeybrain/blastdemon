@@ -26,6 +26,7 @@ export class NodeViewer {
     private gaugesCanvas: HTMLCanvasElement | null = null;
     private gaugesResizeObserver: ResizeObserver | null = null;
     private gaugesPanelOpen: boolean = true;
+    private gaugesPanelWidth: number = 320;
     private gaugesActiveTab: 'list' | 'settings' = 'list';
     private gaugesZoomedOrPanned: boolean = false;
     private gaugesZoomMinX: number = 0;
@@ -1067,7 +1068,12 @@ export class NodeViewer {
             this.gaugesPanelOpen = true;
             floatBtn.style.display = 'none';
             const controlsPanel = panel.querySelector('.gauges-controls-panel') as HTMLElement;
-            if (controlsPanel) controlsPanel.style.display = 'flex';
+            if (controlsPanel) {
+                controlsPanel.style.display = 'flex';
+                controlsPanel.style.width = `${this.gaugesPanelWidth}px`;
+            }
+            const splitter = panel.querySelector('.gauges-panel-splitter') as HTMLElement;
+            if (splitter) splitter.style.display = 'block';
             // Force redraw/resize of canvas since layout changed
             if (this.gaugesCanvas) {
                 this.gaugesCanvas.width = this.gaugesCanvas.clientWidth;
@@ -1083,7 +1089,45 @@ export class NodeViewer {
         const controlsPanel = document.createElement('div');
         controlsPanel.className = 'gauges-controls-panel';
         controlsPanel.style.display = this.gaugesPanelOpen ? 'flex' : 'none';
+        controlsPanel.style.width = `${this.gaugesPanelWidth}px`;
+
+        const splitter = document.createElement('div');
+        splitter.className = 'gauges-panel-splitter';
+        splitter.style.display = this.gaugesPanelOpen ? 'block' : 'none';
+
+        panel.appendChild(splitter);
         panel.appendChild(controlsPanel);
+
+        splitter.addEventListener('mousedown', (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            const startX = e.clientX;
+            const startW = controlsPanel.offsetWidth;
+            controlsPanel.style.transition = 'none';
+
+            const onMove = (me: MouseEvent) => {
+                const dx = me.clientX - startX;
+                const newW = Math.max(160, Math.min(600, startW - dx));
+                controlsPanel.style.width = `${newW}px`;
+                this.gaugesPanelWidth = newW;
+
+                if (this.gaugesCanvas) {
+                    this.gaugesCanvas.width = this.gaugesCanvas.clientWidth;
+                    this.gaugesCanvas.height = this.gaugesCanvas.clientHeight;
+                    const history = this.stateManager.getTelemetry(node.id);
+                    this.drawGaugesChart(this.gaugesCanvas, history, node.parameters?.gauges || [], this.gaugesChannel, has2D);
+                }
+            };
+
+            const onUp = () => {
+                controlsPanel.style.transition = 'width 0.15s, padding 0.15s, border-left 0.15s';
+                window.removeEventListener('mousemove', onMove);
+                window.removeEventListener('mouseup', onUp);
+            };
+
+            window.addEventListener('mousemove', onMove);
+            window.addEventListener('mouseup', onUp);
+        });
 
         // Controls Panel Header
         const controlsHeader = document.createElement('div');
@@ -1101,6 +1145,8 @@ export class NodeViewer {
             this.gaugesPanelOpen = false;
             controlsPanel.style.display = 'none';
             floatBtn.style.display = 'block';
+            const splitter = panel.querySelector('.gauges-panel-splitter') as HTMLElement;
+            if (splitter) splitter.style.display = 'none';
             // Force redraw/resize of canvas since layout changed
             if (this.gaugesCanvas) {
                 this.gaugesCanvas.width = this.gaugesCanvas.clientWidth;
@@ -1549,11 +1595,12 @@ export class NodeViewer {
         table.className = 'gauges-table';
         table.style.width = '100%';
         table.style.borderCollapse = 'collapse';
+        table.style.tableLayout = 'fixed';
 
         const thead = document.createElement('thead');
         const headerTr = document.createElement('tr');
         const thSel = document.createElement('th');
-        thSel.style.width = '30px';
+        thSel.style.width = '25px';
         thSel.style.textAlign = 'center';
         const masterCheck = document.createElement('input');
         masterCheck.type = 'checkbox';
@@ -1569,18 +1616,18 @@ export class NodeViewer {
 
         if (is3D) {
             headerTr.insertAdjacentHTML('beforeend', `
-                <th style="width: 60px;">ID</th>
-                <th>X (m)</th>
-                <th>Y (m)</th>
-                <th>Z (m)</th>
-                <th style="width: 40px; text-align: center;">Actions</th>
+                <th style="width: 50px;">ID</th>
+                <th style="width: 60px;">X (m)</th>
+                <th style="width: 60px;">Y (m)</th>
+                <th style="width: 60px;">Z (m)</th>
+                <th style="width: 30px; text-align: center;">Actions</th>
             `);
         } else {
             headerTr.insertAdjacentHTML('beforeend', `
-                <th style="width: 60px;">ID</th>
-                <th>R (m)</th>
-                ${has2D ? '<th>Z (m)</th>' : ''}
-                <th style="width: 40px; text-align: center;">Actions</th>
+                <th style="width: 50px;">ID</th>
+                <th style="width: 80px;">R (m)</th>
+                ${has2D ? '<th style="width: 80px;">Z (m)</th>' : ''}
+                <th style="width: 30px; text-align: center;">Actions</th>
             `);
         }
         thead.appendChild(headerTr);
