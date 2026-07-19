@@ -608,7 +608,7 @@ export class LayoutManager {
         select.onchange = () => this.stateManager.setPanelType(node.id, select.value as PanelType);
         leftSide.appendChild(select);
 
-        if (node.panelType === 'NODE_VIEWER') {
+                if (node.panelType === 'NODE_VIEWER' || node.panelType === 'TELEMETRY_3D') {
             const subSelect = document.createElement('select');
             subSelect.className = 'node-sub-select';
             subSelect.style.marginLeft = '4px';
@@ -618,11 +618,15 @@ export class LayoutManager {
             if (state) {
                 const placeholder = document.createElement('option');
                 placeholder.value = "";
-                placeholder.textContent = "-- Select Node --";
+                placeholder.textContent = node.panelType === 'TELEMETRY_3D' ? "-- Select Viewport --" : "-- Select Node --";
                 if (!node.targetNodeId) placeholder.selected = true;
                 subSelect.appendChild(placeholder);
 
-                state.nodes.forEach(n => {
+                const targetNodes = node.panelType === 'TELEMETRY_3D'
+                    ? state.nodes.filter(n => n.type === 'Telemetry3DViewport')
+                    : state.nodes;
+
+                targetNodes.forEach(n => {
                     const opt = document.createElement('option');
                     opt.value = n.id;
                     opt.textContent = `${n.type}: ${n.id}`;
@@ -630,7 +634,7 @@ export class LayoutManager {
                     subSelect.appendChild(opt);
                 });
             }
-            subSelect.onchange = () => this.stateManager.setPanelType(node.id, 'NODE_VIEWER', subSelect.value);
+            subSelect.onchange = () => this.stateManager.setPanelType(node.id, node.panelType, subSelect.value);
             leftSide.appendChild(subSelect);
         }
 
@@ -856,9 +860,43 @@ export class LayoutManager {
     }
 
     private renderTelemetry3D(node: PanelNode, container: HTMLElement): void {
+        // Auto-assign targetNodeId to an unclaimed Telemetry3DViewport if it is currently null/empty
+        if (!node.targetNodeId) {
+            const allModels = this.stateManager.getWorkspaceModels();
+            const vpNodes: any[] = [];
+            allModels.forEach(m => {
+                vpNodes.push(...m.nodes.filter(n => n.type === 'Telemetry3DViewport'));
+            });
+
+            const claimedIds = new Set<string>();
+            const collectClaimed = (layoutNode: LayoutNode) => {
+                if (layoutNode.type === 'panel') {
+                    if (layoutNode.panelType === 'TELEMETRY_3D' && layoutNode.targetNodeId) {
+                        claimedIds.add(layoutNode.targetNodeId);
+                    }
+                } else if (layoutNode.type === 'split') {
+                    collectClaimed(layoutNode.firstChild);
+                    collectClaimed(layoutNode.secondChild);
+                }
+            };
+            const activeWs = this.stateManager.getActiveWorkspace();
+            if (activeWs) {
+                collectClaimed(activeWs.layout);
+            }
+
+            const unclaimed = vpNodes.find(n => !claimedIds.has(n.id));
+            if (unclaimed) {
+                console.log(`[Layout] Auto-assigning unclaimed viewport ${unclaimed.id} to panel ${node.id}`);
+                node.targetNodeId = unclaimed.id;
+                setTimeout(() => {
+                    this.stateManager.setPanelType(node.id, 'TELEMETRY_3D', unclaimed.id);
+                }, 0);
+            }
+        }
+
         let comp = this.components.get(node.id);
         if (!comp) {
-            const viewport = new Telemetry3DViewport(container, node.id, this.stateManager, '-telemetry');
+            const viewport = new Telemetry3DViewport(container, node.id, this.stateManager, '-telemetry', node.targetNodeId);
             comp = { type: 'TELEMETRY_3D', instance: viewport, container };
             this.components.set(node.id, comp);
         } else {
@@ -866,6 +904,7 @@ export class LayoutManager {
                 comp.container = container;
             }
             comp.instance.attachTo(container);
+            comp.instance.setViewportNodeId(node.targetNodeId);
         }
     }
 
@@ -1238,16 +1277,7 @@ class OutlinerComponent {
             header.style.background = '#252526';
             header.style.border = '1px solid #333';
 
-            const getColors = (id: string) => {
-                let hash = 0;
-                for (let i = 0; i < id.length; i++) {
-                    hash = id.charCodeAt(i) + ((hash << 5) - hash);
-                }
-                const h = Math.abs(hash) % 360;
-                return `hsl(${h}, 75%, 60%)`;
-            };
-
-            const accentColor = getColors(model.id);
+            const accentColor = this.stateManager.getModelColors(model.id).base;
             const isActive = ws.activeModelId === model.id;
 
             const left = document.createElement('div');
@@ -1580,15 +1610,7 @@ class ExecutionManagerComponent {
         const metaDiv = document.createElement('div');
         metaDiv.className = 'execution-target-meta';
 
-        const getColors = (id: string) => {
-            let hash = 0;
-            for (let i = 0; i < id.length; i++) {
-                hash = id.charCodeAt(i) + ((hash << 5) - hash);
-            }
-            const h = Math.abs(hash) % 360;
-            return `hsl(${h}, 75%, 60%)`;
-        };
-        const accentColor = getColors(model.id);
+        const accentColor = this.stateManager.getModelColors(model.id).base;
 
         const nameSpan = document.createElement('span');
         nameSpan.className = 'execution-target-name';
@@ -2353,12 +2375,7 @@ class CompareModelsComponent {
     }
     
     private getModelColor(id: string): string {
-        let hash = 0;
-        for (let i = 0; i < id.length; i++) {
-            hash = id.charCodeAt(i) + ((hash << 5) - hash);
-        }
-        const h = Math.abs(hash) % 360;
-        return `hsl(${h}, 85%, 60%)`;
+        return this.stateManager.getModelColors(id).base;
     }
     
     private getGaugeColor(modelId: string, gaugeId: string): string {

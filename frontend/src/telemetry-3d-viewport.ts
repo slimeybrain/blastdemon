@@ -49,16 +49,18 @@ export class Telemetry3DViewport {
     private _lastSliceKey: string = '';
 
     private viewTypeSuffix: string;
+    private viewportNodeId: string | null = null;
 
     private getElId(base: string): string {
         return `${base}-${this.panelId}${this.viewTypeSuffix}`;
     }
 
-    constructor(container: HTMLElement, panelId: string, stateManager: StateManager, viewTypeSuffix: string = '') {
+    constructor(container: HTMLElement, panelId: string, stateManager: StateManager, viewTypeSuffix: string = '', viewportNodeId?: string | null) {
         this.container = container;
         this.panelId = panelId;
         this.stateManager = stateManager;
         this.viewTypeSuffix = viewTypeSuffix;
+        this.viewportNodeId = viewportNodeId || null;
 
         // Container relative positioning
         this.container.style.position = 'relative';
@@ -189,6 +191,7 @@ export class Telemetry3DViewport {
                     try {
                         const msg = JSON.parse(data);
                         if (msg.type === 'load_stl_response') {
+                            if (msg.modelId && msg.modelId !== this.getCurrentModelId()) return;
                             if (msg.status === 'success' && msg.vertices) {
                                 if (this.debugOverlay) {
                                     this.debugOverlay.innerHTML += `<br>Load: SUCCESS (${msg.vertices.length / 3} vertices)`;
@@ -712,7 +715,19 @@ export class Telemetry3DViewport {
         inp.style.width = '90%';
     }
 
+    public setViewportNodeId(id: string | null): void {
+        this.viewportNodeId = id;
+    }
+
     private getViewportNode(): Node | null {
+        if (this.viewportNodeId) {
+            const allModels = this.stateManager.getAllModels();
+            for (const m of Object.values(allModels)) {
+                const node = m.nodes.find(n => n.id === this.viewportNodeId);
+                if (node) return node;
+            }
+        }
+
         const ws = this.stateManager.getActiveWorkspace();
         if (!ws) return null;
         if (ws.activeModelId) {
@@ -771,9 +786,9 @@ export class Telemetry3DViewport {
         const vpNode = this.getViewportNode();
         if (!vpNode) return null;
 
-        const allModels = this.stateManager.getWorkspaceModels();
+        const allModels = this.stateManager.getAllModels();
         let targetModel: any = null;
-        for (const m of allModels) {
+        for (const m of Object.values(allModels)) {
             if (m.nodes.some(n => n.id === vpNode.id)) {
                 targetModel = m;
                 break;
@@ -798,9 +813,9 @@ export class Telemetry3DViewport {
         const vpNode = this.getViewportNode();
         if (!vpNode) return null;
 
-        const allModels = this.stateManager.getWorkspaceModels();
+        const allModels = this.stateManager.getAllModels();
         let targetModel: any = null;
-        for (const m of allModels) {
+        for (const m of Object.values(allModels)) {
             if (m.nodes.some(n => n.id === vpNode.id)) {
                 targetModel = m;
                 break;
@@ -989,7 +1004,7 @@ export class Telemetry3DViewport {
                 const net = (window as any).networkManager;
                 if (net && net.isConnected()) {
                     this.currentSTLPath = stlPath;
-                    net.send({ command: "LOAD_STL_GEOMETRY", filePath: stlPath, modelId: vpNode.id });
+                    net.send({ command: "LOAD_STL_GEOMETRY", filePath: stlPath, modelId: this.getCurrentModelId() });
                 }
             } else {
                 this.currentSTLPath = null;
@@ -1511,12 +1526,12 @@ export class Telemetry3DViewport {
         let dimX = 1.0, dimY = 1.0, dimZ = 1.0, cellSize = 0.01;
         let xmin = 0.0, ymin = 0.0, zmin = 0.0;
         if (meshNode && meshNode.type === 'DomainMesh3D') {
-            xmin = Number(meshNode.parameters?.xmin ?? 0.0);
-            const xmax = Number(meshNode.parameters?.xmax ?? 1.0);
-            ymin = Number(meshNode.parameters?.ymin ?? 0.0);
-            const ymax = Number(meshNode.parameters?.ymax ?? 1.0);
-            zmin = Number(meshNode.parameters?.zmin ?? 0.0);
-            const zmax = Number(meshNode.parameters?.zmax ?? 1.0);
+            xmin = Number(meshNode.parameters?.xmin ?? meshNode.parameters?.x_min ?? 0.0);
+            const xmax = Number(meshNode.parameters?.xmax ?? meshNode.parameters?.x_max ?? 1.0);
+            ymin = Number(meshNode.parameters?.ymin ?? meshNode.parameters?.y_min ?? 0.0);
+            const ymax = Number(meshNode.parameters?.ymax ?? meshNode.parameters?.y_max ?? 1.0);
+            zmin = Number(meshNode.parameters?.zmin ?? meshNode.parameters?.z_min ?? 0.0);
+            const zmax = Number(meshNode.parameters?.zmax ?? meshNode.parameters?.z_max ?? 1.0);
             dimX = xmax - xmin;
             dimY = ymax - ymin;
             dimZ = zmax - zmin;
@@ -1574,11 +1589,26 @@ export class Telemetry3DViewport {
         }
     }
 
-    public pushFrame(buffer: ArrayBuffer) {
+    public getCurrentModelId(): string | null {
+        const vpNode = this.getViewportNode();
+        if (!vpNode) return null;
+
+        const allModels = this.stateManager.getAllModels();
+        for (const m of Object.values(allModels)) {
+            if (m.nodes.some(n => n.id === vpNode.id)) {
+                return m.id;
+            }
+        }
+        return null;
+    }
+
+    public pushFrame(buffer: ArrayBuffer, modelId?: string) {
+        if (modelId && this.getCurrentModelId() !== modelId) return;
         this.worker.postMessage({ type: 'frame', data: { buffer } }, [buffer]);
     }
 
-    public updateTelemetry(data: any) {
+    public updateTelemetry(data: any, modelId?: string) {
+        if (modelId && this.getCurrentModelId() !== modelId) return;
         if (data && data.type === 'TELEMETRY_3D') {
             this.hasTelemetryGrid = true;
             this.worker.postMessage({
@@ -1713,10 +1743,10 @@ export class Telemetry3DViewport {
         const vpNode = this.getViewportNode();
         if (!vpNode) return null;
 
-        // Find which model in the workspace contains this viewport node
-        const allModels = this.stateManager.getWorkspaceModels();
+        // Find which model globally contains this viewport node
+        const allModels = this.stateManager.getAllModels();
         let targetModel: any = null;
-        for (const m of allModels) {
+        for (const m of Object.values(allModels)) {
             if (m.nodes.some(n => n.id === vpNode.id)) {
                 targetModel = m;
                 break;
@@ -1750,7 +1780,8 @@ export class Telemetry3DViewport {
         });
     }
 
-    public setSTLGeometry(vertices: Float32Array | null): void {
+    public setSTLGeometry(vertices: Float32Array | null, modelId?: string): void {
+        if (modelId && this.getCurrentModelId() !== modelId) return;
         this.worker.postMessage({
             type: 'setSTLGeometry',
             data: { vertices }
@@ -1775,12 +1806,12 @@ function getSliceBounds(axis: string, meshNode: any) {
     let min = 0.0;
     let max = 1.0;
     if (meshNode && meshNode.type === 'DomainMesh3D') {
-        const xmin = Number(meshNode.parameters?.xmin ?? 0.0);
-        const xmax = Number(meshNode.parameters?.xmax ?? 1.0);
-        const ymin = Number(meshNode.parameters?.ymin ?? 0.0);
-        const ymax = Number(meshNode.parameters?.ymax ?? 1.0);
-        const zmin = Number(meshNode.parameters?.zmin ?? 0.0);
-        const zmax = Number(meshNode.parameters?.zmax ?? 1.0);
+        const xmin = Number(meshNode.parameters?.xmin ?? meshNode.parameters?.x_min ?? 0.0);
+        const xmax = Number(meshNode.parameters?.xmax ?? meshNode.parameters?.x_max ?? 1.0);
+        const ymin = Number(meshNode.parameters?.ymin ?? meshNode.parameters?.y_min ?? 0.0);
+        const ymax = Number(meshNode.parameters?.ymax ?? meshNode.parameters?.y_max ?? 1.0);
+        const zmin = Number(meshNode.parameters?.zmin ?? meshNode.parameters?.z_min ?? 0.0);
+        const zmax = Number(meshNode.parameters?.zmax ?? meshNode.parameters?.z_max ?? 1.0);
         if (axis === 'xy') {
             min = zmin;
             max = zmax;

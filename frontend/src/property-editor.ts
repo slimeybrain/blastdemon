@@ -735,7 +735,33 @@ export class PropertyEditor {
             cbGrid.appendChild(createCheckboxField('interpolate', !!node.parameters['interpolate'], 'Interpolate'));
             cbGrid.appendChild(createCheckboxField('lightingEnabled', node.parameters['lightingEnabled'] !== false, 'Enable Lighting'));
             cbGrid.appendChild(createCheckboxField('aoEnabled', node.parameters['aoEnabled'] !== false, 'Enable AO'));
+            cbGrid.appendChild(createCheckboxField('show_stl', node.parameters['show_stl'] !== false, 'Show STL'));
+            cbGrid.appendChild(createCheckboxField('stl_wireframe', !!node.parameters['stl_wireframe'], 'STL Wireframe'));
+            cbGrid.appendChild(createCheckboxField('stl_solids', node.parameters['stl_solids'] !== false, 'STL Solids'));
             panels[0].appendChild(cbGrid);
+
+            const opacRow = document.createElement('div');
+            opacRow.style.marginTop = '8px';
+            const opacLabel = document.createElement('label');
+            opacLabel.style.display = 'block';
+            opacLabel.style.fontSize = 'var(--font-sm)';
+            opacLabel.style.color = '#888';
+            opacLabel.textContent = `STL OPACITY: ${Number(node.parameters['stl_opacity'] ?? 0.5).toFixed(2)}`;
+            opacRow.appendChild(opacLabel);
+
+            const opacSlider = document.createElement('input');
+            opacSlider.type = 'range';
+            opacSlider.min = '0';
+            opacSlider.max = '1';
+            opacSlider.step = '0.05';
+            opacSlider.value = String(node.parameters['stl_opacity'] ?? 0.5);
+            opacSlider.style.width = '100%';
+            opacSlider.oninput = () => {
+                opacLabel.textContent = `STL OPACITY: ${Number(opacSlider.value).toFixed(2)}`;
+                this.updateParameter('stl_opacity', Number(opacSlider.value));
+            };
+            opacRow.appendChild(opacSlider);
+            panels[0].appendChild(opacRow);
 
             // SLICES Tab
             this.renderTelemetry3DViewportSlices(node, panels[1]);

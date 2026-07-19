@@ -306,21 +306,35 @@ export class NodeViewer {
         this.viewport3D = new Telemetry3DViewport(wrapper, node.id, this.stateManager, '-viewer');
     }
 
-    public pushFrame(buffer: ArrayBuffer): void {
+    public getCurrentModelId(): string | null {
+        if (!this.currentNodeId) return null;
+        const allModels = this.stateManager.getWorkspaceModels();
+        for (const m of allModels) {
+            if (m.nodes.some(n => n.id === this.currentNodeId)) {
+                return m.id;
+            }
+        }
+        return null;
+    }
+
+    public pushFrame(buffer: ArrayBuffer, modelId?: string): void {
+        if (modelId && this.getCurrentModelId() !== modelId) return;
         if (this.viewport3D) {
-            this.viewport3D.pushFrame(buffer);
+            this.viewport3D.pushFrame(buffer, modelId);
         }
     }
 
-    public updateTelemetry(data: any): void {
+    public updateTelemetry(data: any, modelId?: string): void {
+        if (modelId && this.getCurrentModelId() !== modelId) return;
         if (this.viewport3D) {
-            this.viewport3D.updateTelemetry(data);
+            this.viewport3D.updateTelemetry(data, modelId);
         }
     }
 
-    public setSTLGeometry(vertices: Float32Array | null): void {
+    public setSTLGeometry(vertices: Float32Array | null, modelId?: string): void {
+        if (modelId && this.getCurrentModelId() !== modelId) return;
         if (this.viewport3D) {
-            this.viewport3D.setSTLGeometry(vertices);
+            this.viewport3D.setSTLGeometry(vertices, modelId);
         }
     }
 

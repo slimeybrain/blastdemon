@@ -459,12 +459,12 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         flattenedParams['max_z'] = maxZ;
     } else if (command === "INIT_3D") {
         const cellSize = flattenedParams['cell_size'] || 0.01;
-        const xmin = flattenedParams['xmin'] !== undefined ? flattenedParams['xmin'] : 0.0;
-        const xmax = flattenedParams['xmax'] !== undefined ? flattenedParams['xmax'] : 1.0;
-        const ymin = flattenedParams['ymin'] !== undefined ? flattenedParams['ymin'] : 0.0;
-        const ymax = flattenedParams['ymax'] !== undefined ? flattenedParams['ymax'] : 1.0;
-        const zmin = flattenedParams['zmin'] !== undefined ? flattenedParams['zmin'] : 0.0;
-        const zmax = flattenedParams['zmax'] !== undefined ? flattenedParams['zmax'] : 1.0;
+        const xmin = flattenedParams['xmin'] !== undefined ? flattenedParams['xmin'] : (flattenedParams['x_min'] !== undefined ? flattenedParams['x_min'] : 0.0);
+        const xmax = flattenedParams['xmax'] !== undefined ? flattenedParams['xmax'] : (flattenedParams['x_max'] !== undefined ? flattenedParams['x_max'] : 1.0);
+        const ymin = flattenedParams['ymin'] !== undefined ? flattenedParams['ymin'] : (flattenedParams['y_min'] !== undefined ? flattenedParams['y_min'] : 0.0);
+        const ymax = flattenedParams['ymax'] !== undefined ? flattenedParams['ymax'] : (flattenedParams['y_max'] !== undefined ? flattenedParams['y_max'] : 1.0);
+        const zmin = flattenedParams['zmin'] !== undefined ? flattenedParams['zmin'] : (flattenedParams['z_min'] !== undefined ? flattenedParams['z_min'] : 0.0);
+        const zmax = flattenedParams['zmax'] !== undefined ? flattenedParams['zmax'] : (flattenedParams['z_max'] !== undefined ? flattenedParams['z_max'] : 1.0);
         const dimX = xmax - xmin;
         const dimY = ymax - ymin;
         const dimZ = zmax - zmin;

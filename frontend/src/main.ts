@@ -635,6 +635,20 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
     }
 
     const model    = stateManager.getAllModels().find(m => m.id === modelId);
+    
+    if (model) {
+        const solver1Ds = model.nodes.filter(n => n.type === 'CFDSolver');
+        const solver2Ds = model.nodes.filter(n => n.type === 'CFDSolver2D');
+        const solver3Ds = model.nodes.filter(n => n.type === 'CFDSolver3D');
+        const totalSolvers = solver1Ds.length + solver2Ds.length + solver3Ds.length;
+        if (totalSolvers > 1) {
+            const msg = "Multiple solvers detected on the same canvas! BlastDaemon architecture requires exactly ONE solver per model tab. Please cut and paste your second simulation into a 'New Model'.";
+            stateManager.pushTelemetry(modelId, "[ERROR] " + msg);
+            alert(msg);
+            return;
+        }
+    }
+
     const has2D    = model?.nodes.some(n => n.type === 'CFDSolver2D') || false;
     const pipeline = findRemapPipeline(modelId);
     const has3D      = model?.nodes.some(n => n.type === 'CFDSolver3D') || false;
@@ -850,6 +864,7 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
             if (state) {
                 if (pipeline) {
                     const payload = serializeForSolver(state, "INIT_3D", modelId, model?.filename);
+                    console.log(`[INIT_3D] Payload for ${modelId}:`, JSON.parse(payload));
                     networkManager.send(payload);
                     sendView3DConfig(modelId);
                     if (tryRemapFrom1D(modelId, pipeline)) {
@@ -857,6 +872,7 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
                     }
                 } else {
                     const payload = serializeForSolver(state, "INIT_3D", modelId, model?.filename);
+                    console.log(`[INIT_3D] Payload for ${modelId}:`, JSON.parse(payload));
                     networkManager.send(payload);
                     sendView3DConfig(modelId);
                     stateManager.setModelStatus(modelId, 'INITIALIZED');
@@ -919,6 +935,7 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
                 const state = stateManager.getSimulationState(modelId);
                 if (state) {
                     const payload = serializeForSolver(state, "INIT_3D", modelId, model?.filename);
+                    console.log(`[INIT_3D] Payload for ${modelId}:`, JSON.parse(payload));
                     networkManager.send(payload);
                     sendView3DConfig(modelId);
                     networkManager.send({ command: "EXEC_ALL_3D", modelId: modelId, cfl });
@@ -1049,8 +1066,8 @@ networkManager.onMessage(async (data) => {
             // Forward 3D slices to viewport
             if (type === 'CFDSolver3D') {
                 layoutManager.components.forEach(comp => {
-                    if (comp.type === 'TELEMETRY_3D') comp.instance.pushFrame(payloadBuffer.slice(0));
-                    if (comp.type === 'NODE_VIEWER' && comp.instance) comp.instance.pushFrame(payloadBuffer.slice(0));
+                    if (comp.type === 'TELEMETRY_3D') comp.instance.pushFrame(payloadBuffer.slice(0), modelId);
+                    if (comp.type === 'NODE_VIEWER' && comp.instance) comp.instance.pushFrame(payloadBuffer.slice(0), modelId);
                 });
             }
         }
@@ -1070,19 +1087,24 @@ networkManager.onMessage(async (data) => {
                 if (vpNodes.length > 0) {
                     layoutManager.components.forEach(comp => {
                         if (comp.type === 'TELEMETRY_3D' && comp.instance) {
-                            comp.instance.setSTLGeometry(verts);
+                            comp.instance.setSTLGeometry(verts, modelId);
                         }
                     });
-                    layoutManager.components.forEach(comp => {
-                        if (comp.type === 'NODE_GRAPH' && comp.instance) {
-                            vpNodes.forEach(vpNode => {
-                                comp.instance.setSTLGeometry(vpNode.id, verts);
-                            });
-                        }
-                    });
+                    
+                    const activeModelId = stateManager.getActiveWorkspace()?.activeModelId;
+                    if (modelId === activeModelId) {
+                        layoutManager.components.forEach(comp => {
+                            if (comp.type === 'NODE_GRAPH' && comp.instance) {
+                                vpNodes.forEach(vpNode => {
+                                    comp.instance.setSTLGeometry(vpNode.id, verts);
+                                });
+                            }
+                        });
+                    }
+                    
                     layoutManager.components.forEach(comp => {
                         if (comp.type === 'NODE_VIEWER' && comp.instance) {
-                            comp.instance.setSTLGeometry(verts);
+                            comp.instance.setSTLGeometry(verts, modelId);
                         }
                     });
                 }
@@ -1312,8 +1334,8 @@ networkManager.onMessage(async (data) => {
                 }
                 if (dataJson.type === 'TELEMETRY_3D') {
                     layoutManager.components.forEach(comp => {
-                        if (comp.type === 'TELEMETRY_3D') comp.instance.updateTelemetry(dataJson);
-                        if (comp.type === 'NODE_VIEWER' && comp.instance) comp.instance.updateTelemetry(dataJson);
+                        if (comp.type === 'TELEMETRY_3D') comp.instance.updateTelemetry(dataJson, modelId);
+                        if (comp.type === 'NODE_VIEWER' && comp.instance) comp.instance.updateTelemetry(dataJson, modelId);
                     });
                 }
             }

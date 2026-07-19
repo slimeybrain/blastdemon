@@ -125,32 +125,77 @@ void main() {
             return;
         }
         
-        // Axes Indicator / STL Geometry
-        vec4 baseColor = vec4(0.0);
-        if (uIsWireframe == 2) baseColor = vec4(1.0, 0.1, 0.1, 1.0);
-        else if (uIsWireframe == 3) baseColor = vec4(0.1, 1.0, 0.1, 1.0);
-        else if (uIsWireframe == 4) baseColor = vec4(0.2, 0.5, 1.0, 1.0);
-        else if (uIsWireframe == 5) baseColor = vec4(0.35, 0.5, 0.75, uAlpha);
-        else if (uIsWireframe == 6) baseColor = vec4(0.0, 0.8, 1.0, 0.8);
+        // Axes Indicator (2, 3, 4)
+        if (uIsWireframe >= 2 && uIsWireframe <= 4) {
+            vec4 baseColor = vec4(0.0);
+            if (uIsWireframe == 2) baseColor = vec4(1.0, 0.1, 0.1, 1.0);
+            else if (uIsWireframe == 3) baseColor = vec4(0.1, 1.0, 0.1, 1.0);
+            else if (uIsWireframe == 4) baseColor = vec4(0.2, 0.5, 1.0, 1.0);
+            outColor = baseColor;
+            return;
+        }
 
-        if (uEnableLighting) {
-            vec3 viewPos3 = vViewPos.xyz;
-            vec3 normal = normalize(cross(dFdx(viewPos3), dFdy(viewPos3)));
-            vec3 lightDir = vec3(0.0, 0.0, 1.0);
-            float diff = max(dot(normal, lightDir), 0.0);
+        // STL Geometry (5 = Solid, 6 = Wireframe, 7 = Solid + Wireframe)
+        if (uIsWireframe >= 5) {
+            vec4 baseColor = vec4(0.35, 0.5, 0.75, uAlpha);
             
-            vec3 reflectDir = reflect(-lightDir, normal);
-            float spec = pow(max(dot(reflectDir, vec3(0.0, 0.0, 1.0)), 0.0), 16.0);
+            if (uIsWireframe == 5) {
+                if (uEnableLighting) {
+                    vec3 viewPos3 = vViewPos.xyz;
+                    vec3 normal = normalize(cross(dFdx(viewPos3), dFdy(viewPos3)));
+                    vec3 lightDir = vec3(0.0, 0.0, 1.0);
+                    float diff = max(dot(normal, lightDir), 0.0);
+                    vec3 reflectDir = reflect(-lightDir, normal);
+                    float spec = pow(max(dot(reflectDir, vec3(0.0, 0.0, 1.0)), 0.0), 16.0);
+                    float ao = 1.0;
+                    if (uEnableAO) {
+                        ao = pow(max(normal.z, 0.0), 0.5);
+                    }
+                    vec3 lit = baseColor.rgb * (uAmbientLevel + 0.7 * diff) + vec3(1.0) * (uSpecularLevel * spec);
+                    outColor = vec4(lit * ao, baseColor.a);
+                } else {
+                    outColor = baseColor;
+                }
+                return;
+            }
+
+            // Barycentric Wireframe Rendering
+            vec3 barycentric = vec3(vTexCoord, vSliceSize.x);
+            vec3 d = fwidth(barycentric);
+            // Antialiased line width of ~1.2 pixels
+            vec3 a3 = smoothstep(vec3(0.0), d * 1.2, barycentric);
+            float edgeFactor = min(min(a3.x, a3.y), a3.z);
             
-            float ao = 1.0;
-            if (uEnableAO) {
-                ao = pow(max(normal.z, 0.0), 0.5);
+            // Wireframe color: cyan/blue-grey
+            vec4 wireColor = vec4(0.0, 0.8, 1.0, 0.8);
+            
+            if (uIsWireframe == 6) {
+                if (edgeFactor > 0.99) discard;
+                outColor = vec4(wireColor.rgb, wireColor.a * (1.0 - edgeFactor));
+                return;
             }
             
-            vec3 lit = baseColor.rgb * (uAmbientLevel + 0.7 * diff) + vec3(1.0) * (uSpecularLevel * spec);
-            outColor = vec4(lit * ao, baseColor.a);
-        } else {
-            outColor = baseColor;
+            if (uIsWireframe == 7) {
+                vec4 litColor;
+                if (uEnableLighting) {
+                    vec3 viewPos3 = vViewPos.xyz;
+                    vec3 normal = normalize(cross(dFdx(viewPos3), dFdy(viewPos3)));
+                    vec3 lightDir = vec3(0.0, 0.0, 1.0);
+                    float diff = max(dot(normal, lightDir), 0.0);
+                    vec3 reflectDir = reflect(-lightDir, normal);
+                    float spec = pow(max(dot(reflectDir, vec3(0.0, 0.0, 1.0)), 0.0), 16.0);
+                    float ao = 1.0;
+                    if (uEnableAO) {
+                        ao = pow(max(normal.z, 0.0), 0.5);
+                    }
+                    vec3 lit = baseColor.rgb * (uAmbientLevel + 0.7 * diff) + vec3(1.0) * (uSpecularLevel * spec);
+                    litColor = vec4(lit * ao, baseColor.a);
+                } else {
+                    litColor = baseColor;
+                }
+                outColor = mix(wireColor, litColor, edgeFactor);
+                return;
+            }
         }
         return;
     }
@@ -319,36 +364,86 @@ void main() {
             return;
         }
         
-        // Axes Indicator / STL Geometry
-        vec4 baseColor = vec4(0.0);
-        if (uIsWireframe == 2) baseColor = vec4(1.0, 0.1, 0.1, 1.0);
-        else if (uIsWireframe == 3) baseColor = vec4(0.1, 1.0, 0.1, 1.0);
-        else if (uIsWireframe == 4) baseColor = vec4(0.2, 0.5, 1.0, 1.0);
-        else if (uIsWireframe == 5) baseColor = vec4(0.35, 0.5, 0.75, uAlpha);
-        else if (uIsWireframe == 6) baseColor = vec4(0.0, 0.8, 1.0, 0.8);
+        // Axes Indicator (2, 3, 4)
+        if (uIsWireframe >= 2 && uIsWireframe <= 4) {
+            vec4 baseColor = vec4(0.0);
+            if (uIsWireframe == 2) baseColor = vec4(1.0, 0.1, 0.1, 1.0);
+            else if (uIsWireframe == 3) baseColor = vec4(0.1, 1.0, 0.1, 1.0);
+            else if (uIsWireframe == 4) baseColor = vec4(0.2, 0.5, 1.0, 1.0);
+            gl_FragColor = baseColor;
+            return;
+        }
 
-        if (uEnableLighting) {
-            vec3 viewPos3 = vViewPos.xyz;
-            // Analytical normals fallback
-            vec3 normal = vec3(0.0, 0.0, 1.0);
+        // STL Geometry (5 = Solid, 6 = Wireframe, 7 = Solid + Wireframe)
+        if (uIsWireframe >= 5) {
+            vec4 baseColor = vec4(0.35, 0.5, 0.75, uAlpha);
+            
+            if (uIsWireframe == 5) {
+                if (uEnableLighting) {
+                    vec3 viewPos3 = vViewPos.xyz;
+                    vec3 normal = vec3(0.0, 0.0, 1.0);
+                    #ifdef GL_OES_standard_derivatives
+                    normal = normalize(cross(dFdx(viewPos3), dFdy(viewPos3)));
+                    #endif
+                    vec3 lightDir = vec3(0.0, 0.0, 1.0);
+                    float diff = max(dot(normal, lightDir), 0.0);
+                    vec3 reflectDir = reflect(-lightDir, normal);
+                    float spec = pow(max(dot(reflectDir, vec3(0.0, 0.0, 1.0)), 0.0), 16.0);
+                    float ao = 1.0;
+                    if (uEnableAO) {
+                        ao = pow(max(normal.z, 0.0), 0.5);
+                    }
+                    vec3 lit = baseColor.rgb * (uAmbientLevel + 0.7 * diff) + vec3(1.0) * (uSpecularLevel * spec);
+                    gl_FragColor = vec4(lit * ao, baseColor.a);
+                } else {
+                    gl_FragColor = baseColor;
+                }
+                return;
+            }
+
+            // Barycentric Wireframe Rendering
+            vec3 barycentric = vec3(vTexCoord, vSliceSize.x);
+            float edgeFactor = 1.0;
             #ifdef GL_OES_standard_derivatives
-            normal = normalize(cross(dFdx(viewPos3), dFdy(viewPos3)));
+            vec3 d = fwidth(barycentric);
+            vec3 a3 = smoothstep(vec3(0.0), d * 1.2, barycentric);
+            edgeFactor = min(min(a3.x, a3.y), a3.z);
+            #else
+            edgeFactor = step(0.015, min(min(barycentric.x, barycentric.y), barycentric.z));
             #endif
-            vec3 lightDir = vec3(0.0, 0.0, 1.0);
-            float diff = max(dot(normal, lightDir), 0.0);
             
-            vec3 reflectDir = reflect(-lightDir, normal);
-            float spec = pow(max(dot(reflectDir, vec3(0.0, 0.0, 1.0)), 0.0), 16.0);
+            vec4 wireColor = vec4(0.0, 0.8, 1.0, 0.8);
             
-            float ao = 1.0;
-            if (uEnableAO) {
-                ao = pow(max(normal.z, 0.0), 0.5);
+            if (uIsWireframe == 6) {
+                if (edgeFactor > 0.99) discard;
+                gl_FragColor = vec4(wireColor.rgb, wireColor.a * (1.0 - edgeFactor));
+                return;
             }
             
-            vec3 lit = baseColor.rgb * (uAmbientLevel + 0.7 * diff) + vec3(1.0) * (uSpecularLevel * spec);
-            gl_FragColor = vec4(lit * ao, baseColor.a);
-        } else {
-            gl_FragColor = baseColor;
+            if (uIsWireframe == 7) {
+                vec4 litColor;
+                if (uEnableLighting) {
+                    vec3 viewPos3 = vViewPos.xyz;
+                    vec3 normal = vec3(0.0, 0.0, 1.0);
+                    #ifdef GL_OES_standard_derivatives
+                    normal = normalize(cross(dFdx(viewPos3), dFdy(viewPos3)));
+                    #endif
+                    vec3 lightDir = vec3(0.0, 0.0, 1.0);
+                    float diff = max(dot(normal, lightDir), 0.0);
+                    vec3 reflectDir = reflect(-lightDir, normal);
+                    float spec = pow(max(dot(reflectDir, vec3(0.0, 0.0, 1.0)), 0.0), 16.0);
+                    float ao = 1.0;
+                    if (uEnableAO) {
+                        ao = pow(max(normal.z, 0.0), 0.5);
+                    }
+                    vec3 lit = baseColor.rgb * (uAmbientLevel + 0.7 * diff) + vec3(1.0) * (uSpecularLevel * spec);
+                    litColor = vec4(lit * ao, baseColor.a);
+                } else {
+                    litColor = baseColor;
+                }
+                gl_FragColor = mix(wireColor, litColor, edgeFactor);
+                return;
+            }
         }
         return;
     }
@@ -522,38 +617,76 @@ fn fs_main(@location(0) texCoord: vec2<f32>, @location(1) sliceSize: vec2<f32>, 
             return vec4<f32>(0.3, 0.3, 0.4, 0.8); // Bounding box: grey
         }
         
-        // Axes Indicator / STL Geometry
-        var baseColor = vec4<f32>(0.0, 0.0, 0.0, 1.0);
-        if (uniforms.isWireframe < 2.5) {
-            baseColor = vec4<f32>(1.0, 0.1, 0.1, 1.0);
-        } else if (uniforms.isWireframe < 3.5) {
-            baseColor = vec4<f32>(0.1, 1.0, 0.1, 1.0);
-        } else if (uniforms.isWireframe < 4.5) {
-            baseColor = vec4<f32>(0.2, 0.5, 1.0, 1.0);
-        } else if (uniforms.isWireframe < 5.5) {
-            baseColor = vec4<f32>(0.35, 0.5, 0.75, uniforms.alpha);
-        } else if (uniforms.isWireframe < 6.5) {
-            baseColor = vec4<f32>(0.0, 0.8, 1.0, 0.8);
+        // Axes Indicator (2.0, 3.0, 4.0)
+        if (uniforms.isWireframe < 4.5) {
+            var baseColor = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+            if (uniforms.isWireframe < 2.5) {
+                baseColor = vec4<f32>(1.0, 0.1, 0.1, 1.0);
+            } else if (uniforms.isWireframe < 3.5) {
+                baseColor = vec4<f32>(0.1, 1.0, 0.1, 1.0);
+            } else if (uniforms.isWireframe < 4.5) {
+                baseColor = vec4<f32>(0.2, 0.5, 1.0, 1.0);
+            }
+            return baseColor;
         }
 
-        if (uniforms.enableLighting > 0.5) {
-            let viewPos3 = vViewPos.xyz;
-            let normal = normalize(cross(dpdx(viewPos3), dpdy(viewPos3)));
-            let lightDir = vec3<f32>(0.0, 0.0, 1.0);
-            let diff = max(dot(normal, lightDir), 0.0);
+        // STL Geometry (5.0 = Solid, 6.0 = Wireframe, 7.0 = Solid + Wireframe)
+        if (uniforms.isWireframe >= 4.5) {
+            let baseColor = vec4<f32>(0.35, 0.5, 0.75, uniforms.alpha);
             
-            let reflectDir = reflect(-lightDir, normal);
-            let spec = pow(max(dot(reflectDir, vec3<f32>(0.0, 0.0, 1.0)), 0.0), 16.0);
+            if (uniforms.isWireframe < 5.5) {
+                // Solid only (5.0)
+                if (uniforms.enableLighting > 0.5) {
+                    let viewPos3 = vViewPos.xyz;
+                    let normal = normalize(cross(dpdx(viewPos3), dpdy(viewPos3)));
+                    let lightDir = vec3<f32>(0.0, 0.0, 1.0);
+                    let diff = max(dot(normal, lightDir), 0.0);
+                    let reflectDir = reflect(-lightDir, normal);
+                    let spec = pow(max(dot(reflectDir, vec3<f32>(0.0, 0.0, 1.0)), 0.0), 16.0);
+                    var ao = 1.0;
+                    if (uniforms.enableAO > 0.5) {
+                        ao = pow(max(normal.z, 0.0), 0.5);
+                    }
+                    let lit = baseColor.rgb * (uniforms.ambientLevel + 0.7 * diff) + vec3<f32>(1.0) * (uniforms.specularLevel * spec);
+                    return vec4<f32>(lit * ao, baseColor.a);
+                } else {
+                    return baseColor;
+                }
+            }
+
+            // Barycentric Wireframe Rendering
+            let barycentric = vec3<f32>(texCoord, sliceSize.x);
+            let d = fwidth(barycentric);
+            let a3 = smoothstep(vec3<f32>(0.0, 0.0, 0.0), d * 1.2, barycentric);
+            let edgeFactor = min(min(a3.x, a3.y), a3.z);
             
-            var ao = 1.0;
-            if (uniforms.enableAO > 0.5) {
-                ao = pow(max(normal.z, 0.0), 0.5);
+            let wireColor = vec4<f32>(0.0, 0.8, 1.0, 0.8);
+            
+            if (uniforms.isWireframe < 6.5) {
+                // Wireframe only (6.0)
+                if (edgeFactor > 0.99) {
+                    discard;
+                }
+                return vec4<f32>(wireColor.rgb, wireColor.a * (1.0 - edgeFactor));
             }
             
-            let lit = baseColor.rgb * (uniforms.ambientLevel + 0.7 * diff) + vec3<f32>(1.0) * (uniforms.specularLevel * spec);
-            return vec4<f32>(lit * ao, baseColor.a);
-        } else {
-            return baseColor;
+            // Solid + Wireframe (7.0)
+            var litColor = baseColor;
+            if (uniforms.enableLighting > 0.5) {
+                let viewPos3 = vViewPos.xyz;
+                let normal = normalize(cross(dpdx(viewPos3), dpdy(viewPos3)));
+                let lightDir = vec3<f32>(0.0, 0.0, 1.0);
+                let diff = max(dot(normal, lightDir), 0.0);
+                let reflectDir = reflect(-lightDir, normal);
+                let spec = pow(max(dot(reflectDir, vec3<f32>(0.0, 0.0, 1.0)), 0.0), 16.0);
+                var ao = 1.0;
+                if (uniforms.enableAO > 0.5) {
+                    ao = pow(max(normal.z, 0.0), 0.5);
+                }
+                let lit = baseColor.rgb * (uniforms.ambientLevel + 0.7 * diff) + vec3<f32>(1.0) * (uniforms.specularLevel * spec);
+                litColor = vec4<f32>(lit * ao, baseColor.a);
+            }
+            return mix(wireColor, litColor, edgeFactor);
         }
     }
     var uv = texCoord;
@@ -896,9 +1029,22 @@ function updateSTLGeometry() {
         data[i * 7 + 1] = rawSTLVertices[i * 3 + 1];
         data[i * 7 + 2] = rawSTLVertices[i * 3 + 2];
         
-        data[i * 7 + 3] = 0.0;
-        data[i * 7 + 4] = 0.0;
-        data[i * 7 + 5] = 0.0;
+        // Barycentric coordinates: 
+        // Vertex 0: (1, 0, 0), Vertex 1: (0, 1, 0), Vertex 2: (0, 0, 1)
+        const triVertexIndex = i % 3;
+        if (triVertexIndex === 0) {
+            data[i * 7 + 3] = 1.0;
+            data[i * 7 + 4] = 0.0;
+            data[i * 7 + 5] = 0.0;
+        } else if (triVertexIndex === 1) {
+            data[i * 7 + 3] = 0.0;
+            data[i * 7 + 4] = 1.0;
+            data[i * 7 + 5] = 0.0;
+        } else {
+            data[i * 7 + 3] = 0.0;
+            data[i * 7 + 4] = 0.0;
+            data[i * 7 + 5] = 1.0;
+        }
         data[i * 7 + 6] = 0.0;
     }
 
@@ -1208,7 +1354,9 @@ async function initContext(canvas: OffscreenCanvas) {
                         depthStencil: {
                             depthWriteEnabled: true,
                             depthCompare: 'less-equal',
-                            format: 'depth24plus'
+                            format: 'depth24plus',
+                            depthBias: -2,
+                            depthBiasSlopeScale: -1.5
                         }
                     });
 
@@ -2101,7 +2249,7 @@ function render() {
                 const uSolid = new Float32Array(uniformData);
                 uSolid.set(stlFinalModel, 32);
                 uSolid[48] = stlOpacity;
-                uSolid[53] = 5.0;
+                uSolid[53] = stlWireframe ? 7.0 : 5.0; // 7.0 for Solid + Wireframe, 5.0 for Solid only
                 gpuDevice.queue.writeBuffer(gpuSTLUniformSolid, 0, uSolid.buffer);
 
                 const solidBindGroup = gpuDevice.createBindGroup({
@@ -2117,13 +2265,11 @@ function render() {
                 passEncoder.setBindGroup(0, solidBindGroup);
                 passEncoder.setVertexBuffer(0, gpuSTLBuffer);
                 passEncoder.draw(count);
-            }
-
-            if (stlWireframe && gpuLinePipeline) {
+            } else if (stlWireframe && gpuPipeline) {
                 const uWire = new Float32Array(uniformData);
                 uWire.set(stlFinalModel, 32);
-                uWire[48] = 0.8;
-                uWire[53] = 6.0;
+                uWire[48] = 0.0;
+                uWire[53] = 6.0; // 6.0 for Wireframe only
                 gpuDevice.queue.writeBuffer(gpuSTLUniformWireframe, 0, uWire.buffer);
 
                 const wireBindGroup = gpuDevice.createBindGroup({
@@ -2135,11 +2281,10 @@ function render() {
                     ]
                 });
 
-                passEncoder.setPipeline(gpuSTLLinePipeline);
+                passEncoder.setPipeline(gpuPipeline);
                 passEncoder.setBindGroup(0, wireBindGroup);
                 passEncoder.setVertexBuffer(0, gpuSTLBuffer);
-                passEncoder.setIndexBuffer(gpuSTLIndexBuffer, 'uint32');
-                passEncoder.drawIndexed(stlIndexCount);
+                passEncoder.draw(count);
             }
         }
 
@@ -2330,16 +2475,13 @@ function render() {
         gl.enableVertexAttribArray(2);
 
         if (stlSolids) {
-            gl.uniform1i(uIsWF, 5);
+            gl.uniform1i(uIsWF, stlWireframe ? 7 : 5); // 7 = Solid + Wireframe, 5 = Solid only
             gl.uniform1f(uAlpha, stlOpacity);
             gl.drawArrays(gl.TRIANGLES, 0, count);
-        }
-
-        if (stlWireframe && stlIndexBuffer && stlIndexCount > 0) {
-            gl.uniform1i(uIsWF, 6);
-            gl.uniform1f(uAlpha, 0.8);
-            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, stlIndexBuffer);
-            gl.drawElements(gl.LINES, stlIndexCount, gl.UNSIGNED_INT, 0);
+        } else if (stlWireframe) {
+            gl.uniform1i(uIsWF, 6); // 6 = Wireframe only
+            gl.uniform1f(uAlpha, 0.0);
+            gl.drawArrays(gl.TRIANGLES, 0, count);
         }
 
         // Restore base model matrix for slices

@@ -1272,6 +1272,19 @@ export class GraphRenderer {
         const state = this.stateManager.getCurrentState();
         if (!state) return;
 
+        const isSolver = (t: string) => ['CFDSolver', 'CFDSolver2D', 'CFDSolver3D'].includes(t);
+        const isMesh = (t: string) => ['DomainMesh', 'DomainMesh2D', 'DomainMesh3D'].includes(t);
+
+        if (isSolver(type) && state.nodes.some(n => isSolver(n.type))) {
+            alert(`You can only have one CFD Solver per model canvas. Please create a 'New Model' from the top menu for a separate simulation.`);
+            return;
+        }
+
+        if (isMesh(type) && state.nodes.some(n => isMesh(n.type))) {
+            alert(`You can only have one Domain Mesh per model canvas. Please create a 'New Model' from the top menu for a separate simulation.`);
+            return;
+        }
+
         const id = this.stateManager.generateUniqueNodeId(type);
 
         const newNode: Node = {
@@ -2004,6 +2017,11 @@ export class GraphRenderer {
                     if (node.width !== undefined && displayMode !== 'compact' && isTelemetry) {
                         const newWidth = `${node.width}px`;
                         if (nodeEl.style.width !== newWidth) nodeEl.style.width = newWidth;
+                    } else if (node.type === 'STLGeometry' && displayMode === 'expanded') {
+                        const stlFile = node.parameters['stl_file'] || '';
+                        const calculatedWidth = Math.max(180, Math.ceil(stlFile.length * 6) + 65);
+                        const newWidth = `${calculatedWidth}px`;
+                        if (nodeEl.style.width !== newWidth) nodeEl.style.width = newWidth;
                     } else {
                         nodeEl.style.width = '';
                     }
@@ -2281,15 +2299,7 @@ export class GraphRenderer {
     }
 
     private getModelColors(modelId: string): { base: string, faint: string } {
-        let hash = 0;
-        for (let i = 0; i < modelId.length; i++) {
-            hash = modelId.charCodeAt(i) + ((hash << 5) - hash);
-        }
-        const h = Math.abs(hash) % 360;
-        return {
-            base: `hsl(${h}, 75%, 60%)`,
-            faint: `hsla(${h}, 75%, 60%, 0.04)`
-        };
+        return this.stateManager.getModelColors(modelId);
     }
 
     private updateModelRegions(): void {
@@ -2841,7 +2851,7 @@ export class GraphRenderer {
                 wrapper.style.position = 'relative';
                 container.appendChild(wrapper);
 
-                const vp = new Telemetry3DViewport(wrapper, node.id, this.stateManager, '-graph');
+                const vp = new Telemetry3DViewport(wrapper, `vp-${node.id}`, this.stateManager, '-graph', node.id);
                 this.viewport3Ds.set(node.id, vp);
             }
         } else if (node.type === 'TelemetryContour') {
@@ -4651,6 +4661,10 @@ export class GraphRenderer {
         const displayMode = node.displayMode || 'expanded';
         if (displayMode === 'compact') return 100;
         if (node.width !== undefined) return node.width;
+        if (node.type === 'STLGeometry' && displayMode === 'expanded') {
+            const stlFile = node.parameters['stl_file'] || '';
+            return Math.max(180, Math.ceil(stlFile.length * 6) + 65);
+        }
         return 200;
     }
 

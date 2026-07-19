@@ -237,6 +237,40 @@ export class StateManager {
         }
     }
 
+    getModelColors(modelId: string): { base: string, faint: string } {
+        const allModels = this.getAllModels();
+        const idx = allModels.findIndex(m => m.id === modelId);
+        
+        const palette = [
+            { h: 217, s: 90, l: 60 }, // Blue
+            { h: 0, s: 85, l: 60 },   // Red
+            { h: 142, s: 70, l: 50 }, // Emerald
+            { h: 38, s: 90, l: 50 },  // Amber
+            { h: 262, s: 80, l: 60 }, // Purple
+            { h: 327, s: 75, l: 55 }, // Pink
+            { h: 187, s: 90, l: 45 }, // Cyan
+            { h: 25, s: 95, l: 55 },  // Orange
+            { h: 171, s: 75, l: 45 }, // Teal
+            { h: 84, s: 80, l: 48 },  // Lime
+            { h: 200, s: 85, l: 65 }, // Light Blue
+            { h: 345, s: 80, l: 55 }, // Crimson
+            { h: 105, s: 65, l: 45 }, // Forest Green
+            { h: 45, s: 95, l: 55 },  // Yellow-Orange
+            { h: 280, s: 70, l: 65 }, // Violet
+            { h: 310, s: 70, l: 50 }, // Magenta
+            { h: 160, s: 85, l: 40 }, // Mint
+            { h: 15, s: 85, l: 50 },  // Rust
+            { h: 230, s: 75, l: 65 }, // Indigo
+            { h: 65, s: 80, l: 45 }   // Olive
+        ];
+        
+        const color = idx !== -1 ? palette[idx % palette.length] : { h: 0, s: 0, l: 50 };
+        return {
+            base: `hsl(${color.h}, ${color.s}%, ${color.l}%)`,
+            faint: `hsla(${color.h}, ${color.s}%, ${color.l}%, 0.04)`
+        };
+    }
+
     // Model management
     createModel(name?: string): Model {
         const modelId = `model-${Math.random().toString(36).substr(2, 9)}`;
@@ -1309,6 +1343,21 @@ export class StateManager {
                             conn.toNode = modelIdMap.get(conn.toNode)!;
                         }
                     });
+
+                    // Walk the layout tree and update targetNodeId references
+                    const updatePanelTargetId = (layoutNode: LayoutNode) => {
+                        if (!layoutNode) return;
+                        if (layoutNode.type === 'panel') {
+                            if (layoutNode.targetNodeId && modelIdMap.has(layoutNode.targetNodeId)) {
+                                console.log(`[HEAL] Updating layout panel ${layoutNode.id} targetNodeId from ${layoutNode.targetNodeId} to ${modelIdMap.get(layoutNode.targetNodeId)}`);
+                                layoutNode.targetNodeId = modelIdMap.get(layoutNode.targetNodeId)!;
+                            }
+                        } else if (layoutNode.type === 'split') {
+                            updatePanelTargetId(layoutNode.firstChild);
+                            updatePanelTargetId(layoutNode.secondChild);
+                        }
+                    };
+                    updatePanelTargetId(ws.layout);
                 });
             }
         });
