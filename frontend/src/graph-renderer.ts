@@ -1278,12 +1278,17 @@ export class GraphRenderer {
         const isSolver = (t: string) => ['CFDSolver', 'CFDSolver2D', 'CFDSolver3D'].includes(t);
         const isMesh = (t: string) => ['DomainMesh', 'DomainMesh2D', 'DomainMesh3D'].includes(t);
 
-        if (isSolver(type) && state.nodes.some(n => isSolver(n.type))) {
+        const ws = this.stateManager.getActiveWorkspace();
+        const activeModelId = ws ? ws.activeModelId : null;
+        const activeModelState = activeModelId ? this.stateManager.getSimulationState(activeModelId) : null;
+        const targetNodes = activeModelState ? activeModelState.nodes : state.nodes;
+
+        if (isSolver(type) && targetNodes.some(n => isSolver(n.type))) {
             alert(`You can only have one CFD Solver per model canvas. Please create a 'New Model' from the top menu for a separate simulation.`);
             return;
         }
 
-        if (isMesh(type) && state.nodes.some(n => isMesh(n.type))) {
+        if (isMesh(type) && targetNodes.some(n => isMesh(n.type))) {
             alert(`You can only have one Domain Mesh per model canvas. Please create a 'New Model' from the top menu for a separate simulation.`);
             return;
         }
@@ -1438,7 +1443,11 @@ export class GraphRenderer {
                 cfl: 0.35,
                 flux_scheme: 'AUSM+',
                 spatial_order: 2,
-                temporal_order: 2
+                temporal_order: 2,
+                mesh_type: 'regular',
+                amr_max_levels: 3,
+                amr_threshold: 0.05,
+                amr_coarsen_ratio: 0.2
             };
             case 'TelemetryContour': return {
                 telemetry_channel: 0,
@@ -2915,12 +2924,14 @@ export class GraphRenderer {
             let detonatorInfo = null;
             let max_r = 1.0;
             let max_z = 1.0;
+            let solverNode: any = null;
+            let meshNode: any = null;
             if (state) {
                 const conn = state.connections.find(c => c.toNode === node.id && c.toPort === 'in');
-                const solverNode = conn ? state.nodes.find(n => n.id === conn.fromNode) : null;
+                solverNode = conn ? state.nodes.find(n => n.id === conn.fromNode) : null;
                 if (solverNode && solverNode.type === 'CFDSolver2D') {
                     const meshConn = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'mesh');
-                    let meshNode = meshConn ? state.nodes.find(n => n.id === meshConn.fromNode && n.type === 'DomainMesh2D') : null;
+                    meshNode = meshConn ? state.nodes.find(n => n.id === meshConn.fromNode && n.type === 'DomainMesh2D') : null;
                     if (!meshNode) {
                         meshNode = state.nodes.find(n => n.type === 'DomainMesh2D') || null;
                     }
@@ -3042,7 +3053,11 @@ export class GraphRenderer {
                     detonatorInfo: (node.parameters?.show_detonator !== false) ? detonatorInfo : null,
                     showGridlines: node.parameters?.show_gridlines === true,
                     max_r: max_r,
-                    max_z: max_z
+                    max_z: max_z,
+                    meshType: solverNode?.parameters?.mesh_type || 'regular',
+                    amrMaxLevels: Math.max(1, Number(solverNode?.parameters?.amr_max_levels ?? 3)),
+                    baseNr: meshNode ? (Math.round(max_r / (Number(meshNode.parameters?.cell_size) || 0.05)) || 128) : 128,
+                    baseNz: meshNode ? (Math.round(max_z / (Number(meshNode.parameters?.cell_size) || 0.05)) || 128) : 128
                 });
             }
 
@@ -3516,7 +3531,11 @@ export class GraphRenderer {
                     detonatorInfo: (node.parameters?.show_detonator !== false) ? detonatorInfo : null,
                     showGridlines: node.parameters?.show_gridlines === true,
                     max_r: max_r,
-                    max_z: max_z
+                    max_z: max_z,
+                    meshType: solverNode?.parameters?.mesh_type || 'regular',
+                    amrMaxLevels: Math.max(1, Number(solverNode?.parameters?.amr_max_levels ?? 3)),
+                    baseNr: meshNode ? (Math.round(max_r / (Number(meshNode.parameters?.cell_size) || 0.05)) || 128) : 128,
+                    baseNz: meshNode ? (Math.round(max_z / (Number(meshNode.parameters?.cell_size) || 0.05)) || 128) : 128
                 });
 
                 requestAnimationFrame(() => {
@@ -3886,6 +3905,7 @@ export class GraphRenderer {
             row.appendChild(label);
 
             const dropdowns: Record<string, string[]> = {
+                'mesh_type': ['regular', 'amr'],
                 'dimension': ['1D', '2D', '3D'],
                 'x_min_bc': ['Reflecting', 'Transmitting', 'Terminate'],
                 'x_max_bc': ['Reflecting', 'Transmitting', 'Terminate'],
@@ -3959,7 +3979,8 @@ export class GraphRenderer {
                             'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
                             'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
                             'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
-                            'min_y', 'max_y', 'min_val', 'max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'obstacles_opacity'
+                            'min_y', 'max_y', 'min_val', 'max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'obstacles_opacity',
+                            'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio'
                         ];
                         let castValue: any = newVal;
                         if (numericKeys.includes(key)) {

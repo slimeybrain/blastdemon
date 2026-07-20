@@ -640,9 +640,13 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
                         const std::string m3 = "BIN_FRAME_3D_SLICES ";
                         const std::string m2_a = "BIN2D_FRAME ";
                         const std::string m2_b = "BIN_FRAME_2D ";
+                        const std::string m2_amr = "BIN2D_AMR_FRAME ";
                         if (accumulator.size() >= m3.size() &&
                             std::equal(m3.begin(), m3.end(), accumulator.begin())) {
                             marker = m3;
+                        } else if (accumulator.size() >= m2_amr.size() &&
+                            std::equal(m2_amr.begin(), m2_amr.end(), accumulator.begin())) {
+                            marker = m2_amr;
                         } else if (accumulator.size() >= m2_a.size() &&
                             std::equal(m2_a.begin(), m2_a.end(), accumulator.begin())) {
                             marker = m2_a;

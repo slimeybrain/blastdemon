@@ -21,6 +21,10 @@ let detonatorInfo: any = null;
 let showGridlines = false;
 let max_r = 1.0;
 let max_z = 1.0;
+let meshType = 'regular';
+let amrMaxLevels = 3;
+let baseNr = 128;
+let baseNz = 128;
 
 // Zoom and pan state
 let zoom = 1.0;
@@ -69,6 +73,70 @@ function extractChannel2D(buffer: ArrayBuffer, channel: number): { data: Float32
     const floatData = new Float32Array(buffer, byteOffset, nr * nz);
 
     return { data: floatData, nr, nz };
+}
+
+interface AMRLeafTile {
+    r_idx: number;
+    z_idx: number;
+    level: number;
+    data: Float32Array;
+}
+
+function extractAMRChannel2D(buffer: ArrayBuffer, channel: number): AMRLeafTile[] | null {
+    if (buffer.byteLength < 8) return null;
+
+    const view = new DataView(buffer);
+    const num_leaves = view.getUint32(0, true);
+    const n_channels = view.getUint32(4, true);
+
+    // 2 floats metadata + 256 cells * n_channels floats
+    const floatsPerTile = 2 + 256 * n_channels;
+    const expectedBytes = 8 + num_leaves * floatsPerTile * 4;
+    if (buffer.byteLength < expectedBytes) return null;
+
+    const tiles: AMRLeafTile[] = [];
+    const clampedChannel = Math.max(0, Math.min(channel, n_channels - 1));
+
+    for (let l = 0; l < num_leaves; ++l) {
+        const offset = 8 + l * floatsPerTile * 4;
+        const meta1 = view.getUint32(offset, true);
+        const meta2 = view.getUint32(offset + 4, true);
+
+        const r_idx = meta1 >>> 16;
+        const z_idx = meta1 & 0xFFFF;
+        const level = (meta2 >>> 8) & 0xFF;
+
+        const tileData = new Float32Array(256);
+        for (let c = 0; c < 256; ++c) {
+            const cellOffset = offset + 8 + c * n_channels * 4 + clampedChannel * 4;
+            tileData[c] = view.getFloat32(cellOffset, true);
+        }
+
+        tiles.push({ r_idx, z_idx, level, data: tileData });
+    }
+
+    return tiles;
+}
+
+function updateAutoScaleAMR(tiles: AMRLeafTile[]): void {
+    if (!autoScale) return;
+    let min = Infinity;
+    let max = -Infinity;
+    for (const tile of tiles) {
+        for (let i = 0; i < tile.data.length; ++i) {
+            const v = tile.data[i];
+            if (isFinite(v)) {
+                if (v < min) min = v;
+                if (v > max) max = v;
+            }
+        }
+    }
+    if (min !== Infinity && max !== -Infinity) {
+        displayMin = min;
+        displayMax = max;
+        range = max - min || 1;
+        self.postMessage({ type: 'bounds', minY: displayMin, maxY: displayMax });
+    }
 }
 
 // Inferno/Plasma inspired palette (existing default)
@@ -254,52 +322,121 @@ function render(): void {
     let hasHeatmap = false;
     let nr = 0;
     let nz = 0;
+    let amrTiles: AMRLeafTile[] | null = null;
 
-    const frameInfo = lastBuffer ? extractChannel2D(lastBuffer, selectedChannel) : null;
-    if (frameInfo) {
-        const { data, nr: cellNr, nz: cellNz } = frameInfo;
-        nr = cellNr;
-        nz = cellNz;
+    if (meshType === 'amr') {
+        const tiles = lastBuffer ? extractAMRChannel2D(lastBuffer, selectedChannel) : null;
+        if (tiles) {
+            amrTiles = tiles;
+            updateAutoScaleAMR(tiles);
 
-        // Update scale
-        updateAutoScale(data);
+            const maxLvl = Math.max(0, amrMaxLevels - 1);
+            const scaleFactor = 1 << maxLvl;
+            outNr = (baseNr || 128) * scaleFactor;
+            outNz = (baseNz || 128) * scaleFactor;
 
-        // Calculate out dimensions based on stride
-        outNr = Math.ceil(nr / stride);
-        outNz = Math.ceil(nz / stride);
+            if (!isFinite(outNr) || isNaN(outNr) || outNr <= 0) outNr = 128;
+            if (!isFinite(outNz) || isNaN(outNz) || outNz <= 0) outNz = 128;
 
-        // Initialise or resize temporary offscreen canvas for raw grid
-        if (!tempCanvas || tempCanvas.width !== outNr || tempCanvas.height !== outNz) {
-            tempCanvas = new OffscreenCanvas(outNr, outNz);
-            tempCtx = tempCanvas.getContext('2d');
-        }
-
-        if (tempCtx) {
-            // Build the image data for the raw outNr x outNz grid
-            const imgData = tempCtx.createImageData(outNr, outNz);
-            const pixels = imgData.data;
-
-            for (let i = 0; i < outNr; ++i) {
-                for (let j = 0; j < outNz; ++j) {
-                    const rawI = Math.min(nr - 1, i * stride);
-                    const rawJ = Math.min(nz - 1, j * stride);
-                    const solverIdx = rawI * nz + rawJ;
-                    const val = data[solverIdx];
-
-                    const col = getColor(val, displayMin, displayMax);
-                    
-                    // Flip y-coordinate for intuitive contour plot (z vertical)
-                    const canvasY = outNz - 1 - j;
-                    const pixelIdx = (canvasY * outNr + i) * 4;
-
-                    pixels[pixelIdx + 0] = col.r;
-                    pixels[pixelIdx + 1] = col.g;
-                    pixels[pixelIdx + 2] = col.b;
-                    pixels[pixelIdx + 3] = 255; // Alpha
-                }
+            if (!tempCanvas || tempCanvas.width !== outNr || tempCanvas.height !== outNz) {
+                tempCanvas = new OffscreenCanvas(outNr, outNz);
+                tempCtx = tempCanvas.getContext('2d');
             }
-            tempCtx.putImageData(imgData, 0, 0);
-            hasHeatmap = true;
+
+            if (tempCtx) {
+                tempCtx.fillStyle = '#000000';
+                tempCtx.fillRect(0, 0, outNr, outNz);
+
+                const imgData = tempCtx.createImageData(outNr, outNz);
+                const pixels = imgData.data;
+
+                for (const tile of tiles) {
+                    const cellSizeInFinestPixels = 1 << (maxLvl - tile.level);
+                    const tileWidthInFinestPixels = 16 * cellSizeInFinestPixels;
+                    const startX = tile.r_idx * tileWidthInFinestPixels;
+                    const startY = tile.z_idx * tileWidthInFinestPixels;
+
+                    for (let i = 0; i < 16; ++i) {
+                        for (let j = 0; j < 16; ++j) {
+                            const val = tile.data[i * 16 + j];
+                            const col = getColor(val, displayMin, displayMax);
+
+                            const cellStartX = startX + i * cellSizeInFinestPixels;
+                            const cellStartY = startY + j * cellSizeInFinestPixels;
+
+                            for (let ii = 0; ii < cellSizeInFinestPixels; ++ii) {
+                                const px = cellStartX + ii;
+                                if (px < 0 || px >= outNr) continue;
+
+                                for (let jj = 0; jj < cellSizeInFinestPixels; ++jj) {
+                                    const py_raw = cellStartY + jj;
+                                    if (py_raw < 0 || py_raw >= outNz) continue;
+
+                                    const py = outNz - 1 - py_raw;
+                                    const pixelIdx = (py * outNr + px) * 4;
+
+                                    pixels[pixelIdx + 0] = col.r;
+                                    pixels[pixelIdx + 1] = col.g;
+                                    pixels[pixelIdx + 2] = col.b;
+                                    pixels[pixelIdx + 3] = 255;
+                                }
+                            }
+                        }
+                    }
+                }
+                tempCtx.putImageData(imgData, 0, 0);
+                hasHeatmap = true;
+                nr = baseNr;
+                nz = baseNz;
+            }
+        }
+    } else {
+        const frameInfo = lastBuffer ? extractChannel2D(lastBuffer, selectedChannel) : null;
+        if (frameInfo) {
+            const { data, nr: cellNr, nz: cellNz } = frameInfo;
+            nr = cellNr;
+            nz = cellNz;
+
+            // Update scale
+            updateAutoScale(data);
+
+            // Calculate out dimensions based on stride
+            outNr = Math.ceil(nr / stride);
+            outNz = Math.ceil(nz / stride);
+
+            // Initialise or resize temporary offscreen canvas for raw grid
+            if (!tempCanvas || tempCanvas.width !== outNr || tempCanvas.height !== outNz) {
+                tempCanvas = new OffscreenCanvas(outNr, outNz);
+                tempCtx = tempCanvas.getContext('2d');
+            }
+
+            if (tempCtx) {
+                // Build the image data for the raw outNr x outNz grid
+                const imgData = tempCtx.createImageData(outNr, outNz);
+                const pixels = imgData.data;
+
+                for (let i = 0; i < outNr; ++i) {
+                    for (let j = 0; j < outNz; ++j) {
+                        const rawI = Math.min(nr - 1, i * stride);
+                        const rawJ = Math.min(nz - 1, j * stride);
+                        const solverIdx = rawI * nz + rawJ;
+                        const val = data[solverIdx];
+
+                        const col = getColor(val, displayMin, displayMax);
+                        
+                        // Flip y-coordinate for intuitive contour plot (z vertical)
+                        const canvasY = outNz - 1 - j;
+                        const pixelIdx = (canvasY * outNr + i) * 4;
+
+                        pixels[pixelIdx + 0] = col.r;
+                        pixels[pixelIdx + 1] = col.g;
+                        pixels[pixelIdx + 2] = col.b;
+                        pixels[pixelIdx + 3] = 255; // Alpha
+                    }
+                }
+                tempCtx.putImageData(imgData, 0, 0);
+                hasHeatmap = true;
+            }
         }
     }
 
@@ -379,41 +516,97 @@ function render(): void {
     }
 
     // Draw cell boundary gridlines if enabled
-    if (showGridlines && nr > 0 && nz > 0) {
-        const cellWidthOnScreen = (isAxisymmetric ? (dw / 2) : dw) / nr * zoom;
-        if (cellWidthOnScreen >= 3) {
+    if (showGridlines) {
+        if (meshType === 'amr' && amrTiles) {
             context.save();
             context.strokeStyle = 'rgba(255, 255, 255, 0.15)';
             context.lineWidth = 0.5 / zoom;
             context.beginPath();
-            
-            // Horizontal lines (z gridlines)
-            for (let j = 0; j <= nz; ++j) {
-                const y = dy + j * dh / nz;
-                context.moveTo(dx, y);
-                context.lineTo(dx + dw, y);
-            }
-            
-            // Vertical lines (r gridlines)
-            if (isAxisymmetric) {
-                for (let i = 0; i <= nr; ++i) {
-                    const xRight = (dx + dw / 2) + i * (dw / 2) / nr;
-                    context.moveTo(xRight, dy);
-                    context.lineTo(xRight, dy + dh);
-                    
-                    const xLeft = (dx + dw / 2) - i * (dw / 2) / nr;
-                    context.moveTo(xLeft, dy);
-                    context.lineTo(xLeft, dy + dh);
+
+            for (const tile of amrTiles) {
+                const factor = 1.0 / (1 << tile.level);
+                const tileWidth = 16 * (max_r / baseNr) * factor;
+                const tileHeight = 16 * (max_z / baseNz) * factor;
+                const rMin = tile.r_idx * tileWidth;
+                const zMin = tile.z_idx * tileHeight;
+
+                const cellW = tileWidth / 16;
+                const cellH = tileHeight / 16;
+
+                // Draw tile boundary and internal cell lines
+                for (let i = 0; i <= 16; ++i) {
+                    const r = rMin + i * cellW;
+                    let cx1 = dx + dw / 2;
+                    if (isAxisymmetric) {
+                        cx1 += (r / max_r) * (dw / 2);
+                    } else {
+                        cx1 = dx + (r / max_r) * dw;
+                    }
+                    const cy1 = dy + dh - (zMin / max_z) * dh;
+                    const cy2 = dy + dh - ((zMin + tileHeight) / max_z) * dh;
+
+                    context.moveTo(cx1, cy1);
+                    context.lineTo(cx1, cy2);
+
+                    if (isAxisymmetric) {
+                        const cx2 = dx + dw / 2 - (r / max_r) * (dw / 2);
+                        context.moveTo(cx2, cy1);
+                        context.lineTo(cx2, cy2);
+                    }
                 }
-            } else {
-                for (let i = 0; i <= nr; ++i) {
-                    const x = dx + i * dw / nr;
-                    context.moveTo(x, dy);
-                    context.lineTo(x, dy + dh);
+
+                for (let j = 0; j <= 16; ++j) {
+                    const z = zMin + j * cellH;
+                    const cy = dy + dh - (z / max_z) * dh;
+                    let cx1 = dx;
+                    let cx2 = dx + dw;
+                    if (isAxisymmetric) {
+                        const rMax = rMin + tileWidth;
+                        cx1 = dx + dw / 2 - (rMax / max_r) * (dw / 2);
+                        cx2 = dx + dw / 2 + (rMax / max_r) * (dw / 2);
+                    }
+                    context.moveTo(cx1, cy);
+                    context.lineTo(cx2, cy);
                 }
             }
             context.stroke();
             context.restore();
+        } else if (nr > 0 && nz > 0) {
+            const cellWidthOnScreen = (isAxisymmetric ? (dw / 2) : dw) / nr * zoom;
+            if (cellWidthOnScreen >= 3) {
+                context.save();
+                context.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+                context.lineWidth = 0.5 / zoom;
+                context.beginPath();
+                
+                // Horizontal lines (z gridlines)
+                for (let j = 0; j <= nz; ++j) {
+                    const y = dy + j * dh / nz;
+                    context.moveTo(dx, y);
+                    context.lineTo(dx + dw, y);
+                }
+                
+                // Vertical lines (r gridlines)
+                if (isAxisymmetric) {
+                    for (let i = 0; i <= nr; ++i) {
+                        const xRight = (dx + dw / 2) + i * (dw / 2) / nr;
+                        context.moveTo(xRight, dy);
+                        context.lineTo(xRight, dy + dh);
+                        
+                        const xLeft = (dx + dw / 2) - i * (dw / 2) / nr;
+                        context.moveTo(xLeft, dy);
+                        context.lineTo(xLeft, dy + dh);
+                    }
+                } else {
+                    for (let i = 0; i <= nr; ++i) {
+                        const x = dx + i * dw / nr;
+                        context.moveTo(x, dy);
+                        context.lineTo(x, dy + dh);
+                    }
+                }
+                context.stroke();
+                context.restore();
+            }
         }
     }
 
@@ -502,7 +695,11 @@ function render(): void {
     context.font = '11px monospace';
     context.fillStyle = '#94a3b8';
     if (hasHeatmap) {
-        context.fillText(`Mesh: ${nr} × ${nz} (Render: ${outNr} × ${outNz})`, 15, 20);
+        if (meshType === 'amr' && amrTiles) {
+            context.fillText(`Mesh: AMR ${amrTiles.length} active leaves (Max Level: ${amrMaxLevels})`, 15, 20);
+        } else {
+            context.fillText(`Mesh: ${nr} × ${nz} (Render: ${outNr} × ${outNz})`, 15, 20);
+        }
         context.fillText(`Range: [${displayMin.toExponential(2)}, ${displayMax.toExponential(2)}]`, 15, 35);
     } else {
         context.fillText('Waiting for telemetry...', 15, 20);
@@ -583,6 +780,10 @@ self.onmessage = (event) => {
     }
 
     if (data.type === 'setConfig') {
+        if (typeof data.meshType === 'string') meshType = data.meshType;
+        if (typeof data.amrMaxLevels === 'number') amrMaxLevels = data.amrMaxLevels;
+        if (typeof data.baseNr === 'number') baseNr = data.baseNr;
+        if (typeof data.baseNz === 'number') baseNz = data.baseNz;
         if (typeof data.channel === 'number') selectedChannel = data.channel;
         if (typeof data.stride === 'number') stride = data.stride;
         if (typeof data.refreshRate === 'number') refreshRate = data.refreshRate;

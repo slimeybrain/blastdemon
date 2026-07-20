@@ -45,8 +45,10 @@ add_executable(BlastSolver
     backend/BlastSolver/cfd_solver_2d_init.cpp
     backend/BlastSolver/cfd_solver_2d_step.cpp
     backend/BlastSolver/cfd_solver_2d_fluxes.cpp
+    backend/BlastSolver/cfd_solver_2d_amr.cpp
     # 2D CUDA solver
     backend/BlastSolver/cfd_solver_2d_cuda.cu
+    backend/BlastSolver/cfd_solver_2d_amr_cuda.cu
     # 3D Solver
     backend/BlastSolver/ImmersedBoundary.cpp
     backend/BlastSolver/cfd_solver_3d.cpp

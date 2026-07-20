@@ -1502,7 +1502,11 @@ export class StateManager {
                 cfl: 0.35,
                 flux_scheme: 'AUSM+',
                 spatial_order: 2,
-                temporal_order: 2
+                temporal_order: 2,
+                mesh_type: 'regular',
+                amr_max_levels: 3,
+                amr_threshold: 0.05,
+                amr_coarsen_ratio: 0.2
             },
             'TelemetryContour': {
                 telemetry_channel: 0,

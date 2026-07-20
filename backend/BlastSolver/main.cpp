@@ -27,6 +27,8 @@
 #include "cfd_solver.hpp"
 #include "cfd_solver_2d.hpp"
 #include "cfd_solver_2d_cuda.hpp"
+#include "cfd_solver_2d_amr.hpp"
+#include "cfd_solver_2d_amr_cuda.hpp"
 #include "cfd_solver_3d.hpp"
 #include "cfd_solver_3d_cuda.hpp"
 #include "HDF5Writer.hpp"
@@ -73,6 +75,7 @@ std::unique_ptr<CFDSolver2D> global_solver_2d = nullptr;
 std::unique_ptr<CFDSolver2DCuda> global_solver_2d_cuda = nullptr;
 double global_t2d = 0.0;
 double global_dt_2d = 0.0;
+std::atomic<bool> global_is_amr_2d{false};
 
 // 3D State
 std::atomic<bool> sim3d_running{false};
@@ -365,36 +368,12 @@ void write_vtk_outputs(int step, double time) {
                                  true, has_overpressure, has_impulse);
         }
     } else if (global_solver_2d_cuda || global_solver_2d) {
-        std::vector<State2D> states;
-        int nr = 0, nz = 0;
-        double dr = 0.0, dz = 0.0;
-        if (global_solver_2d_cuda) {
-            states = global_solver_2d_cuda->getStates();
-            nr = global_solver_2d_cuda->getNr();
-            nz = global_solver_2d_cuda->getNz();
-            dr = global_solver_2d_cuda->getDr();
-            dz = global_solver_2d_cuda->getDz();
-        } else {
-            states = global_solver_2d->getStates();
-            nr = global_solver_2d->getNr();
-            nz = global_solver_2d->getNz();
-            dr = global_solver_2d->getDr();
-            dz = global_solver_2d->getDz();
-        }
-
-        std::vector<double> rho(states.size()), ur(states.size()), uz(states.size()), p(states.size()), E(states.size()), alpha1(states.size()), alpha2(states.size());
-        for (size_t idx = 0; idx < states.size(); ++idx) {
-            rho[idx] = states[idx].rho;
-            ur[idx] = states[idx].ur;
-            uz[idx] = states[idx].uz;
-            p[idx] = states[idx].p;
-            E[idx] = states[idx].E;
-            alpha1[idx] = states[idx].alpha1;
-            alpha2[idx] = states[idx].alpha2;
-        }
-
         std::string filename = out_dir + "/" + global_vtk_config.custom_filename + "_" + std::to_string(step) + ".vtu";
-        export_vtu_2d(filename, nr, nz, dr, dz, rho, ur, uz, p, E, alpha1, alpha2);
+        if (global_solver_2d_cuda) {
+            global_solver_2d_cuda->exportVTK(filename);
+        } else if (global_solver_2d) {
+            global_solver_2d->exportVTK(filename);
+        }
     } else if (global_solver) {
         // Do not output VTU files for 1D models
     }
@@ -1251,8 +1230,13 @@ void worker_2d_thread_func() {
         auto step_start = std::chrono::steady_clock::now();
         double dt = 0.0;
         if (global_solver_2d_cuda) {
-            double max_s = global_solver_2d_cuda->getMaxWaveSpeed();
-            dt = global_cfl_2d.load() * std::min(global_solver_2d_cuda->getDr(), global_solver_2d_cuda->getDz()) / max_s;
+            if (global_is_amr_2d) {
+                dt = global_solver_2d_cuda->getMaxWaveSpeed();
+                dt = dt * (global_cfl_2d.load() / 0.35);
+            } else {
+                double max_s = global_solver_2d_cuda->getMaxWaveSpeed();
+                dt = global_cfl_2d.load() * std::min(global_solver_2d_cuda->getDr(), global_solver_2d_cuda->getDz()) / max_s;
+            }
             global_solver_2d_cuda->step(dt);
         } else if (global_solver_2d) {
             dt = global_solver_2d->computeStepSize(global_cfl_2d.load());
@@ -1614,7 +1598,7 @@ void emit_resource_pulse() {
 }
 
 struct TelemetryPayload {
-    enum Type { TYPE_1D, TYPE_2D, TYPE_3D } type;
+    enum Type { TYPE_1D, TYPE_2D, TYPE_3D, TYPE_2D_AMR } type;
     double elapsed;
     bool is_terminated;
     double wallclock;
@@ -1759,6 +1743,23 @@ void async_telemetry_thread_func() {
             std::cout.write(reinterpret_cast<const char*>(payload->grid_data.data()), payload_bytes);
             std::cout.flush();
 
+        } else if (payload->type == TelemetryPayload::TYPE_2D_AMR) {
+            envelope["type"] = "TELEMETRY_2D";
+            envelope["time"] = payload->elapsed;
+            envelope["dt"] = payload->dt;
+            envelope["is_terminated"] = payload->is_terminated;
+            envelope["wallclock"] = payload->wallclock;
+            if (payload->has_gauges) {
+                envelope["gauges_history"] = gh;
+            }
+
+            std::cout << envelope.dump() << std::endl;
+
+            size_t payload_bytes = payload->grid_data.size() * sizeof(float);
+            std::cout << "BIN2D_AMR_FRAME " << payload_bytes << "\n";
+            std::cout.write(reinterpret_cast<const char*>(payload->grid_data.data()), payload_bytes);
+            std::cout.flush();
+
         } else if (payload->type == TelemetryPayload::TYPE_3D) {
             envelope["type"] = "TELEMETRY_3D";
             envelope["time"] = payload->elapsed;
@@ -1868,7 +1869,7 @@ void emit_telemetry_2d(double elapsed, bool is_terminated) {
     int out_nz = (nz + stride - 1) / stride;
 
     auto payload = std::make_unique<TelemetryPayload>();
-    payload->type = TelemetryPayload::TYPE_2D;
+    payload->type = global_is_amr_2d ? TelemetryPayload::TYPE_2D_AMR : TelemetryPayload::TYPE_2D;
     payload->elapsed = elapsed;
     payload->dt = global_dt_2d;
     payload->is_terminated = is_terminated;
@@ -2417,15 +2418,29 @@ int main() {
                     global_t2d = 0.0;
                     global_dt_2d = 0.0;
 
+                    std::string mesh_type = msg.value("mesh_type", "regular");
+                    global_is_amr_2d = (mesh_type == "amr");
+                    int amr_max_levels = msg.value("amr_max_levels", 3);
+                    double amr_threshold = msg.value("amr_threshold", 0.05);
+                    double amr_coarsen_ratio = msg.value("amr_coarsen_ratio", 0.2);
+
                     std::string precision = msg.value("precision", "double");
                     if (device == "cuda") {
                         global_solver_2d.reset();
                         {
                             std::lock_guard<std::mutex> lock(cout_mutex);
                             if (precision == "single" || precision == "float") {
-                                global_solver_2d_cuda = std::make_unique<CFDSolver2DCudaImpl<float>>(nr, nz, max_r, max_z, gamma);
+                                if (mesh_type == "amr") {
+                                    global_solver_2d_cuda = std::make_unique<CFDSolver2DAMRCudaImpl<float>>(nr, nz, max_r, max_z, gamma, amr_max_levels, amr_threshold, amr_coarsen_ratio);
+                                } else {
+                                    global_solver_2d_cuda = std::make_unique<CFDSolver2DCudaImpl<float>>(nr, nz, max_r, max_z, gamma);
+                                }
                             } else {
-                                global_solver_2d_cuda = std::make_unique<CFDSolver2DCudaImpl<double>>(nr, nz, max_r, max_z, gamma);
+                                if (mesh_type == "amr") {
+                                    global_solver_2d_cuda = std::make_unique<CFDSolver2DAMRCudaImpl<double>>(nr, nz, max_r, max_z, gamma, amr_max_levels, amr_threshold, amr_coarsen_ratio);
+                                } else {
+                                    global_solver_2d_cuda = std::make_unique<CFDSolver2DCudaImpl<double>>(nr, nz, max_r, max_z, gamma);
+                                }
                             }
                         }
                         
@@ -2449,10 +2464,10 @@ int main() {
                             double explosive_z = msg.value("charge_z", msg.value("explosive_z", 0.0));
                             double explosive_radius = msg.value("charge_radius", msg.value("explosive_radius", 0.1));
                             
-                            global_solver_2d_cuda->setInitialConditionIdealGas(explosive_z, explosive_radius, high_rho, det_energy, ambient_rho, ambient_p);
                             double detonator_r = msg.value("detonator_r", 0.0);
                             double detonator_z = msg.value("detonator_z", explosive_z);
                             global_solver_2d_cuda->setDetonatorLocation(detonator_r, detonator_z);
+                            global_solver_2d_cuda->setInitialConditionIdealGas(explosive_z, explosive_radius, high_rho, det_energy, ambient_rho, ambient_p);
                         } else if (init_mode == "Multi-Material JWL" || init_mode == "JWL") {
                             double high_rho = msg.value("high_rho", msg.value("rho", 1630.0));
                             double ambient_rho = msg.value("ambient_rho", 1.225648589);
@@ -2464,15 +2479,15 @@ int main() {
                             if (charge_shape == "Cylinder" || charge_shape == "cylinder") {
                                 double charge_radius = msg.value("charge_radius", 0.1);
                                 double charge_height = msg.value("charge_height", 0.2);
-                                global_solver_2d_cuda->setInitialConditionTNTCylinder(explosive_z, charge_radius, charge_height, high_rho, ambient_rho, ambient_p);
                                 double detonator_r = msg.value("detonator_r", 0.0);
                                 double detonator_z = msg.value("detonator_z", explosive_z + charge_height / 2.0);
                                 global_solver_2d_cuda->setDetonatorLocation(detonator_r, detonator_z);
+                                global_solver_2d_cuda->setInitialConditionTNTCylinder(explosive_z, charge_radius, charge_height, high_rho, ambient_rho, ambient_p);
                             } else {
-                                global_solver_2d_cuda->setInitialConditionTNT(explosive_z, explosive_radius, high_rho, ambient_rho, ambient_p);
                                 double detonator_r = msg.value("detonator_r", 0.0);
                                 double detonator_z = msg.value("detonator_z", explosive_z);
                                 global_solver_2d_cuda->setDetonatorLocation(detonator_r, detonator_z);
+                                global_solver_2d_cuda->setInitialConditionTNT(explosive_z, explosive_radius, high_rho, ambient_rho, ambient_p);
                             }
                         }
                     } else {
@@ -2481,9 +2496,17 @@ int main() {
                             global_solver_2d_cuda.reset();
                         }
                         if (precision == "single" || precision == "float") {
-                            global_solver_2d = std::make_unique<CFDSolver2DImpl<float>>(nr, nz, max_r, max_z, gamma);
+                            if (mesh_type == "amr") {
+                                global_solver_2d = std::make_unique<CFDSolver2DAMRImpl<float>>(nr, nz, max_r, max_z, gamma, amr_max_levels, amr_threshold, amr_coarsen_ratio);
+                            } else {
+                                global_solver_2d = std::make_unique<CFDSolver2DImpl<float>>(nr, nz, max_r, max_z, gamma);
+                            }
                         } else {
-                            global_solver_2d = std::make_unique<CFDSolver2DImpl<double>>(nr, nz, max_r, max_z, gamma);
+                            if (mesh_type == "amr") {
+                                global_solver_2d = std::make_unique<CFDSolver2DAMRImpl<double>>(nr, nz, max_r, max_z, gamma, amr_max_levels, amr_threshold, amr_coarsen_ratio);
+                            } else {
+                                global_solver_2d = std::make_unique<CFDSolver2DImpl<double>>(nr, nz, max_r, max_z, gamma);
+                            }
                         }
                         
                         global_solver_2d->setFluxScheme(flux_scheme);
@@ -2492,7 +2515,7 @@ int main() {
                         global_solver_2d->setBCTypes(r_min_bc, r_max_bc, z_min_bc, z_max_bc);
                         global_solver_2d->setMaterialParameters(matSet);
                         global_solver_2d->setCoordinateSystemCartesian(coord_sys == "Cartesian");
-
+ 
                         std::string init_mode = msg.value("init_mode", "Ideal Gas");
                         if (init_mode == "Ideal Gas" || msg.value("explosive_type", "") == "MaterialIdealGas") {
                             double det_energy = msg.value("detonation_energy", 4520000.0);
@@ -2502,10 +2525,10 @@ int main() {
                             double explosive_z = msg.value("charge_z", msg.value("explosive_z", 0.0));
                             double explosive_radius = msg.value("charge_radius", msg.value("explosive_radius", 0.1));
                             
-                            global_solver_2d->setInitialConditionIdealGas(explosive_z, explosive_radius, high_rho, det_energy, ambient_rho, ambient_p);
                             double detonator_r = msg.value("detonator_r", 0.0);
                             double detonator_z = msg.value("detonator_z", explosive_z);
                             global_solver_2d->setDetonatorLocation(detonator_r, detonator_z);
+                            global_solver_2d->setInitialConditionIdealGas(explosive_z, explosive_radius, high_rho, det_energy, ambient_rho, ambient_p);
                         } else if (init_mode == "Multi-Material JWL" || init_mode == "JWL") {
                             double high_rho = msg.value("high_rho", msg.value("rho", 1630.0));
                             double ambient_rho = msg.value("ambient_rho", 1.225648589);
@@ -2517,15 +2540,15 @@ int main() {
                             if (charge_shape == "Cylinder" || charge_shape == "cylinder") {
                                 double charge_radius = msg.value("charge_radius", 0.1);
                                 double charge_height = msg.value("charge_height", 0.2);
-                                global_solver_2d->setInitialConditionTNTCylinder(explosive_z, charge_radius, charge_height, high_rho, ambient_rho, ambient_p);
                                 double detonator_r = msg.value("detonator_r", 0.0);
                                 double detonator_z = msg.value("detonator_z", explosive_z + charge_height / 2.0);
                                 global_solver_2d->setDetonatorLocation(detonator_r, detonator_z);
+                                global_solver_2d->setInitialConditionTNTCylinder(explosive_z, charge_radius, charge_height, high_rho, ambient_rho, ambient_p);
                             } else {
-                                global_solver_2d->setInitialConditionTNT(explosive_z, explosive_radius, high_rho, ambient_rho, ambient_p);
                                 double detonator_r = msg.value("detonator_r", 0.0);
                                 double detonator_z = msg.value("detonator_z", explosive_z);
                                 global_solver_2d->setDetonatorLocation(detonator_r, detonator_z);
+                                global_solver_2d->setInitialConditionTNT(explosive_z, explosive_radius, high_rho, ambient_rho, ambient_p);
                             }
                         }
                     }

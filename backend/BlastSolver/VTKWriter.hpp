@@ -3,10 +3,22 @@
 
 #include <string>
 #include <vector>
+#include <cstdint>
 
 void export_vtu_1d(const std::string& filename, int n_cells, double dr, const std::vector<double>& rho, const std::vector<double>& u, const std::vector<double>& p, const std::vector<double>& E, const std::vector<double>& alpha1, const std::vector<double>& alpha2);
 
 void export_vtu_2d(const std::string& filename, int nr, int nz, double dr, double dz, const std::vector<double>& rho, const std::vector<double>& ur, const std::vector<double>& uz, const std::vector<double>& p, const std::vector<double>& E, const std::vector<double>& alpha1, const std::vector<double>& alpha2);
+
+void export_vtu_amr_2d(const std::string& filename,
+                       const std::vector<double>& points,
+                       const std::vector<int32_t>& connectivity,
+                       const std::vector<int32_t>& offsets,
+                       const std::vector<uint8_t>& types,
+                       const std::vector<double>& rho,
+                       const std::vector<double>& ur,
+                       const std::vector<double>& uz,
+                       const std::vector<double>& p,
+                       const std::vector<double>& level);
 
 void export_vtk_particles(const std::string& filename, int num_particles,
                            const double* pos_x, const double* pos_y,

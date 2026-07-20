@@ -68,6 +68,8 @@ public:
     virtual bool isIdealGas() const = 0;
     virtual size_t getAllocatedVRAM() const = 0;
     virtual double getAmbientP() const = 0;
+
+    virtual void exportVTK(const std::string& filename) = 0;
 };
 
 struct GPUGauge2D {
@@ -139,6 +141,8 @@ public:
     bool isIdealGas() const override { return is_ideal_gas; }
     size_t getAllocatedVRAM() const override;
     double getAmbientP() const override { return ambient_p; }
+
+    void exportVTK(const std::string& filename) override;
 
 private:
     int nr_cells;

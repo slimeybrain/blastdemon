@@ -87,6 +87,8 @@ public:
 
     virtual void setSolidVelocities(const double* v) = 0;
     virtual void setSolidMask(const uint8_t* mask) = 0;
+
+    virtual void exportVTK(const std::string& filename) const = 0;
 };
 
 template <typename RealType>
@@ -167,6 +169,8 @@ public:
 
     void setSolidVelocities(const double* v) override;
     void setSolidMask(const uint8_t* mask) override;
+
+    void exportVTK(const std::string& filename) const override;
 
 private:
     int nr_cells;

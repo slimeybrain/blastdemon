@@ -1,4 +1,5 @@
 #include "cfd_solver_2d_cuda.hpp"
+#include "VTKWriter.hpp"
 #include <omp.h>
 #include <cuda_runtime.h>
 #include <iostream>
@@ -1984,6 +1985,26 @@ void CFDSolver2DCudaImpl<RealType>::retrieveNewGaugeSamples(std::vector<double>&
 
     write_idx = 0;
     host_pinned_times.clear();
+}
+
+template <typename RealType>
+void CFDSolver2DCudaImpl<RealType>::exportVTK(const std::string& filename) {
+    int nr = getNr();
+    int nz = getNz();
+    double dr = getDr();
+    double dz = getDz();
+    auto states = getStates();
+    std::vector<double> rho(states.size()), ur(states.size()), uz(states.size()), p(states.size()), E(states.size()), alpha1(states.size()), alpha2(states.size());
+    for (size_t idx = 0; idx < states.size(); ++idx) {
+        rho[idx] = states[idx].rho;
+        ur[idx] = states[idx].ur;
+        uz[idx] = states[idx].uz;
+        p[idx] = states[idx].p;
+        E[idx] = states[idx].E;
+        alpha1[idx] = states[idx].alpha1;
+        alpha2[idx] = states[idx].alpha2;
+    }
+    export_vtu_2d(filename, nr, nz, dr, dz, rho, ur, uz, p, E, alpha1, alpha2);
 }
 
 // Explicit template instantiations

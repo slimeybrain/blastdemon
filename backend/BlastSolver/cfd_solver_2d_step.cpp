@@ -1,4 +1,6 @@
 #include "cfd_solver_2d.hpp"
+#include "VTKWriter.hpp"
+#include "cfd_2d_math_kernels.hpp"
 #include <cmath>
 #include <iostream>
 #include <algorithm>
@@ -157,18 +159,11 @@ void CFDSolver2DImpl<RealType>::updatePrimitiveFromConservative() {
 // --------------------------------------------------------------------------------------
 // Helper to read state safely given a global coordinate
 template <typename RealType>
-struct CellStateT {
-    RealType rho, ur, uz, p, E, alpha1, alpha2, arho1, arho2;
-};
+using CellStateT = CellState2DT<RealType>;
 
 template <typename RealType>
 inline void compute_E_cpu(CellStateT<RealType>& s, RealType gamma, const MultiMat::MaterialSet& mat, bool is_ideal_gas) {
-    if (s.rho < (RealType)1e-10 || s.p < (RealType)1e-10) return;
-    if (is_ideal_gas) {
-        s.E = s.p / (gamma - (RealType)1.0) + (RealType)0.5 * s.rho * (s.ur * s.ur + s.uz * s.uz);
-    } else {
-        s.E = MultiMat::getMixtureEnergy(s.p, s.rho, s.alpha1, s.alpha2, s.arho1, s.arho2, gamma, mat.products, mat.unreacted) + (RealType)0.5 * s.rho * (s.ur * s.ur + s.uz * s.uz);
-    }
+    compute_E_kernel(s, gamma, mat, is_ideal_gas);
 }
 
 template <typename RealType>
@@ -292,27 +287,12 @@ inline CellStateT<RealType> readState(const CFDSolver2DImpl<RealType>* solver, c
 // Helpers for spatial reconstruction on CPU
 template <typename RealType>
 inline RealType minmod(RealType a, RealType b) {
-    if (a * b <= 0) return 0.0;
-    return (std::abs(a) < std::abs(b)) ? a : b;
+    return minmod_kernel(a, b);
 }
 
 template <typename RealType>
 inline RealType weno3(RealType qm1, RealType q0, RealType qp1) {
-    double eps = 1e-6;
-    double beta0 = (double)(qp1 - q0) * (double)(qp1 - q0);
-    double beta1 = (double)(q0 - qm1) * (double)(q0 - qm1);
-    double alpha0 = (2.0 / 3.0) / ((eps + beta0) * (eps + beta0));
-    double alpha1 = (1.0 / 3.0) / ((eps + beta1) * (eps + beta1));
-    double sum_alpha = alpha0 + alpha1;
-    double w0, w1;
-    if (sum_alpha < 1e-300) {
-        w0 = 2.0 / 3.0;
-        w1 = 1.0 / 3.0;
-    } else {
-        w0 = alpha0 / sum_alpha;
-        w1 = alpha1 / sum_alpha;
-    }
-    return (RealType)(w0 * (0.5 * (double)q0 + 0.5 * (double)qp1) + w1 * (-0.5 * (double)qm1 + 1.5 * (double)q0));
+    return weno3_kernel(qm1, q0, qp1);
 }
 
 // --------------------------------------------------------------------------------------
@@ -320,73 +300,15 @@ inline RealType weno3(RealType qm1, RealType q0, RealType qp1) {
 template <typename RealType>
 inline void calcFluxRusanov(const CellStateT<RealType>& sL, const CellStateT<RealType>& sR, RealType gamma, const MultiMat::MaterialSet& mat, 
                             RealType& f_rho, RealType& f_rhour, RealType& f_rhouz, RealType& f_E, 
-                            RealType& f_alpha1, RealType& f_alpha2, RealType& f_arho1, RealType& f_arho2, RealType& v_face) {
-    using std::abs;
-    using std::max;
-    RealType cL = MultiMat::getMixtureSoundSpeed(sL.p, sL.rho, sL.alpha1, sL.alpha2, sL.arho1, sL.arho2, gamma, mat.products, mat.unreacted);
-    RealType cR = MultiMat::getMixtureSoundSpeed(sR.p, sR.rho, sR.alpha1, sR.alpha2, sR.arho1, sR.arho2, gamma, mat.products, mat.unreacted);
-    RealType s_max = max(abs(sL.ur) + cL, abs(sR.ur) + cR);
-
-    RealType fL_rho = sL.rho * sL.ur;
-    RealType fL_rhour = sL.rho * sL.ur * sL.ur + sL.p;
-    RealType fL_rhouz = sL.rho * sL.ur * sL.uz;
-    RealType fL_E = sL.ur * (sL.E + sL.p);
-    
-    RealType fR_rho = sR.rho * sR.ur;
-    RealType fR_rhour = sR.rho * sR.ur * sR.ur + sR.p;
-    RealType fR_rhouz = sR.rho * sR.ur * sR.uz;
-    RealType fR_E = sR.ur * (sR.E + sR.p);
-
-    RealType uL_rho = sL.rho, uL_rhour = sL.rho * sL.ur, uL_rhouz = sL.rho * sL.uz, uL_E = sL.E;
-    RealType uR_rho = sR.rho, uR_rhour = sR.rho * sR.ur, uR_rhouz = sR.rho * sR.uz, uR_E = sR.E;
-
-    f_rho = (RealType)0.5 * (fL_rho + fR_rho) - (RealType)0.5 * s_max * (uR_rho - uL_rho);
-    f_rhour = (RealType)0.5 * (fL_rhour + fR_rhour) - (RealType)0.5 * s_max * (uR_rhour - uL_rhour);
-    f_rhouz = (RealType)0.5 * (fL_rhouz + fR_rhouz) - (RealType)0.5 * s_max * (uR_rhouz - uL_rhouz);
-    f_E = (RealType)0.5 * (fL_E + fR_E) - (RealType)0.5 * s_max * (uR_E - uL_E);
-
-    v_face = (RealType)0.5 * (sL.ur + sR.ur);
-
-    f_alpha1 = (RealType)0.5 * (sL.alpha1 * sL.ur + sR.alpha1 * sR.ur) - (RealType)0.5 * s_max * (sR.alpha1 - sL.alpha1);
-    f_alpha2 = (RealType)0.5 * (sL.alpha2 * sL.ur + sR.alpha2 * sR.ur) - (RealType)0.5 * s_max * (sR.alpha2 - sL.alpha2);
-    f_arho1 = (RealType)0.5 * (sL.arho1 * sL.ur + sR.arho1 * sR.ur) - (RealType)0.5 * s_max * (sR.arho1 - sL.arho1);
-    f_arho2 = (RealType)0.5 * (sL.arho2 * sL.ur + sR.arho2 * sR.ur) - (RealType)0.5 * s_max * (sR.arho2 - sL.arho2);
+                            RealType& f_alpha1, RealType& f_alpha2, RealType& f_arho1, RealType& f_arho2, RealType& v_face, bool is_ideal_gas) {
+    calcFluxRusanov_kernel(sL, sR, gamma, mat, f_rho, f_rhour, f_rhouz, f_E, f_alpha1, f_alpha2, f_arho1, f_arho2, v_face, is_ideal_gas);
 }
 
 template <typename RealType>
 inline void calcFluxRusanovZ(const CellStateT<RealType>& sL, const CellStateT<RealType>& sR, RealType gamma, const MultiMat::MaterialSet& mat, 
                              RealType& f_rho, RealType& f_rhour, RealType& f_rhouz, RealType& f_E, 
-                             RealType& f_alpha1, RealType& f_alpha2, RealType& f_arho1, RealType& f_arho2, RealType& v_face) {
-    using std::abs;
-    using std::max;
-    RealType cL = MultiMat::getMixtureSoundSpeed(sL.p, sL.rho, sL.alpha1, sL.alpha2, sL.arho1, sL.arho2, gamma, mat.products, mat.unreacted);
-    RealType cR = MultiMat::getMixtureSoundSpeed(sR.p, sR.rho, sR.alpha1, sR.alpha2, sR.arho1, sR.arho2, gamma, mat.products, mat.unreacted);
-    RealType s_max = max(abs(sL.uz) + cL, abs(sR.uz) + cR);
-
-    RealType fL_rho = sL.rho * sL.uz;
-    RealType fL_rhour = sL.rho * sL.ur * sL.uz;
-    RealType fL_rhouz = sL.rho * sL.uz * sL.uz + sL.p;
-    RealType fL_E = sL.uz * (sL.E + sL.p);
-    
-    RealType fR_rho = sR.rho * sR.uz;
-    RealType fR_rhour = sR.rho * sR.ur * sR.uz;
-    RealType fR_rhouz = sR.rho * sR.uz * sR.uz + sR.p;
-    RealType fR_E = sR.uz * (sR.E + sR.p);
-
-    RealType uL_rho = sL.rho, uL_rhour = sL.rho * sL.ur, uL_rhouz = sL.rho * sL.uz, uL_E = sL.E;
-    RealType uR_rho = sR.rho, uR_rhour = sR.rho * sR.ur, uR_rhouz = sR.rho * sR.uz, uR_E = sR.E;
-
-    f_rho = (RealType)0.5 * (fL_rho + fR_rho) - (RealType)0.5 * s_max * (uR_rho - uL_rho);
-    f_rhour = (RealType)0.5 * (fL_rhour + fR_rhour) - (RealType)0.5 * s_max * (uR_rhour - uL_rhour);
-    f_rhouz = (RealType)0.5 * (fL_rhouz + fR_rhouz) - (RealType)0.5 * s_max * (uR_rhouz - uL_rhouz);
-    f_E = (RealType)0.5 * (fL_E + fR_E) - (RealType)0.5 * s_max * (uR_E - uL_E);
-
-    v_face = (RealType)0.5 * (sL.uz + sR.uz);
-
-    f_alpha1 = (RealType)0.5 * (sL.alpha1 * sL.uz + sR.alpha1 * sR.uz) - (RealType)0.5 * s_max * (sR.alpha1 - sL.alpha1);
-    f_alpha2 = (RealType)0.5 * (sL.alpha2 * sL.uz + sR.alpha2 * sR.uz) - (RealType)0.5 * s_max * (sR.alpha2 - sL.alpha2);
-    f_arho1 = (RealType)0.5 * (sL.arho1 * sL.uz + sR.arho1 * sR.uz) - (RealType)0.5 * s_max * (sR.arho1 - sL.arho1);
-    f_arho2 = (RealType)0.5 * (sL.arho2 * sL.uz + sR.arho2 * sR.uz) - (RealType)0.5 * s_max * (sR.arho2 - sL.arho2);
+                             RealType& f_alpha1, RealType& f_alpha2, RealType& f_arho1, RealType& f_arho2, RealType& v_face, bool is_ideal_gas) {
+    calcFluxRusanovZ_kernel(sL, sR, gamma, mat, f_rho, f_rhour, f_rhouz, f_E, f_alpha1, f_alpha2, f_arho1, f_arho2, v_face, is_ideal_gas);
 }
 
 // --------------------------------------------------------------------------------------
@@ -639,15 +561,15 @@ void CFDSolver2DImpl<RealType>::computeTileRHS(int pool_idx, int tr, int tz, dou
 
             RealType fr_L_rho, fr_L_rhour, fr_L_rhouz, fr_L_E, fr_L_a1, fr_L_a2, fr_L_ar1, fr_L_ar2, v_face_rL;
             RealType fr_R_rho, fr_R_rhour, fr_R_rhouz, fr_R_E, fr_R_a1, fr_R_a2, fr_R_ar1, fr_R_ar2, v_face_rR;
-            
-            calcFluxRusanov(s_faceL_L, s_faceL_R, gamma_r, currentMaterials, fr_L_rho, fr_L_rhour, fr_L_rhouz, fr_L_E, fr_L_a1, fr_L_a2, fr_L_ar1, fr_L_ar2, v_face_rL);
-            calcFluxRusanov(s_faceR_L, s_faceR_R, gamma_r, currentMaterials, fr_R_rho, fr_R_rhour, fr_R_rhouz, fr_R_E, fr_R_a1, fr_R_a2, fr_R_ar1, fr_R_ar2, v_face_rR);
+
+            calcFluxRusanov(s_faceL_L, s_faceL_R, gamma_r, currentMaterials, fr_L_rho, fr_L_rhour, fr_L_rhouz, fr_L_E, fr_L_a1, fr_L_a2, fr_L_ar1, fr_L_ar2, v_face_rL, is_ideal_gas);
+            calcFluxRusanov(s_faceR_L, s_faceR_R, gamma_r, currentMaterials, fr_R_rho, fr_R_rhour, fr_R_rhouz, fr_R_E, fr_R_a1, fr_R_a2, fr_R_ar1, fr_R_ar2, v_face_rR, is_ideal_gas);
             
             RealType fz_B_rho, fz_B_rhour, fz_B_rhouz, fz_B_E, fz_B_a1, fz_B_a2, fz_B_ar1, fz_B_ar2, v_face_zB;
             RealType fz_T_rho, fz_T_rhour, fz_T_rhouz, fz_T_E, fz_T_a1, fz_T_a2, fz_T_ar1, fz_T_ar2, v_face_zT;
-
-            calcFluxRusanovZ(s_faceB_L, s_faceB_R, gamma_r, currentMaterials, fz_B_rho, fz_B_rhour, fz_B_rhouz, fz_B_E, fz_B_a1, fz_B_a2, fz_B_ar1, fz_B_ar2, v_face_zB);
-            calcFluxRusanovZ(s_faceT_L, s_faceT_R, gamma_r, currentMaterials, fz_T_rho, fz_T_rhour, fz_T_rhouz, fz_T_E, fz_T_a1, fz_T_a2, fz_T_ar1, fz_T_ar2, v_face_zT);
+ 
+            calcFluxRusanovZ(s_faceB_L, s_faceB_R, gamma_r, currentMaterials, fz_B_rho, fz_B_rhour, fz_B_rhouz, fz_B_E, fz_B_a1, fz_B_a2, fz_B_ar1, fz_B_ar2, v_face_zB, is_ideal_gas);
+            calcFluxRusanovZ(s_faceT_L, s_faceT_R, gamma_r, currentMaterials, fz_T_rho, fz_T_rhour, fz_T_rhouz, fz_T_E, fz_T_a1, fz_T_a2, fz_T_ar1, fz_T_ar2, v_face_zT, is_ideal_gas);
 
             RealType r_center = (RealType)(i + 0.5) * dr_r;
             RealType r_left = (RealType)i * dr_r;
@@ -978,6 +900,26 @@ void CFDSolver2DImpl<RealType>::retrieveNewGaugeSamples(std::vector<double>& tim
     values = std::move(cpu_gauge_values);
     cpu_gauge_times.clear();
     cpu_gauge_values.clear();
+}
+
+template <typename RealType>
+void CFDSolver2DImpl<RealType>::exportVTK(const std::string& filename) const {
+    int nr = getNr();
+    int nz = getNz();
+    double dr = getDr();
+    double dz = getDz();
+    auto states = getStates();
+    std::vector<double> rho(states.size()), ur(states.size()), uz(states.size()), p(states.size()), E(states.size()), alpha1(states.size()), alpha2(states.size());
+    for (size_t idx = 0; idx < states.size(); ++idx) {
+        rho[idx] = states[idx].rho;
+        ur[idx] = states[idx].ur;
+        uz[idx] = states[idx].uz;
+        p[idx] = states[idx].p;
+        E[idx] = states[idx].E;
+        alpha1[idx] = states[idx].alpha1;
+        alpha2[idx] = states[idx].alpha2;
+    }
+    export_vtu_2d(filename, nr, nz, dr, dz, rho, ur, uz, p, E, alpha1, alpha2);
 }
 
 // Explicit instantiations

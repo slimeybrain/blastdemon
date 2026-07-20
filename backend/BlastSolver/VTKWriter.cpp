@@ -729,3 +729,58 @@ void export_vtu_volume_3d(const std::string& filename, const CFDSolver3D& solver
 
     out.close();
 }
+
+void export_vtu_amr_2d(const std::string& filename,
+                       const std::vector<double>& points,
+                       const std::vector<int32_t>& connectivity,
+                       const std::vector<int32_t>& offsets,
+                       const std::vector<uint8_t>& types,
+                       const std::vector<double>& rho,
+                       const std::vector<double>& ur,
+                       const std::vector<double>& uz,
+                       const std::vector<double>& p,
+                       const std::vector<double>& level) {
+    std::ofstream out(filename);
+    if (!out) return;
+
+    int num_points = points.size() / 3;
+    int num_cells = offsets.size();
+
+    out << "<?xml version=\"1.0\"?>\n";
+    out << "<VTKFile type=\"UnstructuredGrid\" version=\"0.1\" byte_order=\"LittleEndian\" header_type=\"UInt32\" compressor=\"vtkZLibDataCompressor\">\n";
+    out << "  <UnstructuredGrid>\n";
+    out << "    <Piece NumberOfPoints=\"" << num_points << "\" NumberOfCells=\"" << num_cells << "\">\n";
+
+    out << "      <Points>\n";
+    out << "        <DataArray type=\"Float64\" Name=\"Points\" NumberOfComponents=\"3\" format=\"binary\">\n";
+    out << "          " << binary_encode(points) << "\n";
+    out << "        </DataArray>\n";
+    out << "      </Points>\n";
+
+    out << "      <Cells>\n";
+    out << "        <DataArray type=\"Int32\" Name=\"connectivity\" format=\"binary\">\n";
+    out << "          " << binary_encode(connectivity) << "\n";
+    out << "        </DataArray>\n";
+
+    out << "        <DataArray type=\"Int32\" Name=\"offsets\" format=\"binary\">\n";
+    out << "          " << binary_encode(offsets) << "\n";
+    out << "        </DataArray>\n";
+
+    out << "        <DataArray type=\"UInt8\" Name=\"types\" format=\"binary\">\n";
+    out << "          " << binary_encode(types) << "\n";
+    out << "        </DataArray>\n";
+    out << "      </Cells>\n";
+
+    out << "      <CellData>\n";
+    out << "        <DataArray type=\"Float64\" Name=\"Density\" format=\"binary\">\n          " << binary_encode(rho) << "\n        </DataArray>\n";
+    out << "        <DataArray type=\"Float64\" Name=\"Pressure\" format=\"binary\">\n          " << binary_encode(p) << "\n        </DataArray>\n";
+    out << "        <DataArray type=\"Float64\" Name=\"VelocityR\" format=\"binary\">\n          " << binary_encode(ur) << "\n        </DataArray>\n";
+    out << "        <DataArray type=\"Float64\" Name=\"VelocityZ\" format=\"binary\">\n          " << binary_encode(uz) << "\n        </DataArray>\n";
+    out << "        <DataArray type=\"Float64\" Name=\"AMRLevel\" format=\"binary\">\n          " << binary_encode(level) << "\n        </DataArray>\n";
+    out << "      </CellData>\n";
+    out << "    </Piece>\n";
+    out << "  </UnstructuredGrid>\n";
+    out << "</VTKFile>\n";
+
+    out.close();
+}
