@@ -578,6 +578,20 @@ __device__ __forceinline__ GPUCellStateT<RealType> sample_gpu(
             nz_true = dz_dir / len_dir;
         }
     }
+
+    // Option B: Decouple boundary normal components at domain boundaries
+    bool decoupled = false;
+    if (bx == 0 || bx == d_nx - 1) { nx_true = 0.0f; decoupled = true; }
+    if (by == 0 || by == d_ny - 1) { ny_true = 0.0f; decoupled = true; }
+    if (bz == 0 || bz == d_nz - 1) { nz_true = 0.0f; decoupled = true; }
+    if (decoupled) {
+        float n_len_dec = sqrt(nx_true*nx_true + ny_true*ny_true + nz_true*nz_true);
+        if (n_len_dec > 1e-3f) {
+            nx_true /= n_len_dec;
+            ny_true /= n_len_dec;
+            nz_true /= n_len_dec;
+        }
+    }
     
     // Decouple normal for velocity reflection:
     float nx_dec = nx_true;
@@ -1523,6 +1537,24 @@ __device__ GPUCellStateT<RealType> sample_state_with_mirror_gpu(
             float ny_u = ny_b / n_len;
             float nz_u = nz_b / n_len;
 
+            int clamped_gx = gx < 0 ? 0 : (gx >= d_nx ? d_nx - 1 : gx);
+            int clamped_gy = gy < 0 ? 0 : (gy >= d_ny ? d_ny - 1 : gy);
+            int clamped_gz = gz < 0 ? 0 : (gz >= d_nz ? d_nz - 1 : gz);
+
+            // Option B: Decouple boundary normal components at domain boundaries
+            bool decoupled = false;
+            if (clamped_gx == 0 || clamped_gx == d_nx - 1) { nx_u = 0.0f; decoupled = true; }
+            if (clamped_gy == 0 || clamped_gy == d_ny - 1) { ny_u = 0.0f; decoupled = true; }
+            if (clamped_gz == 0 || clamped_gz == d_nz - 1) { nz_u = 0.0f; decoupled = true; }
+            if (decoupled) {
+                float n_len_dec = sqrt(nx_u*nx_u + ny_u*ny_u + nz_u*nz_u);
+                if (n_len_dec > 1e-3f) {
+                    nx_u /= n_len_dec;
+                    ny_u /= n_len_dec;
+                    nz_u /= n_len_dec;
+                }
+            }
+
             double x_G = xmin + (gx + 0.5) * cellSize;
             double y_G = ymin + (gy + 0.5) * cellSize;
             double z_G = zmin + (gz + 0.5) * cellSize;
@@ -1670,6 +1702,32 @@ __device__ GPUCellStateT<RealType> sample_state_with_mirror_gpu(
 }
 
 template <typename RealType, bool IsMultiMaterial>
+__global__ void extract_obstacles_kernel(
+    const PrimitiveTile3D<RealType, IsMultiMaterial>* states,
+    const GeometryTile3D* geom,
+    const GPUObstacleFace* faces,
+    float* out_buf,
+    int num_faces,
+    int qty_id) {
+
+    int f = blockIdx.x * blockDim.x + threadIdx.x;
+    if (f >= num_faces) return;
+
+    GPUObstacleFace face = faces[f];
+    int t_idx = face.t_idx;
+    int c_idx = face.c_idx;
+
+    RealType val = 0.0;
+    if (qty_id == 7) { // solid
+        val = (geom && geom[t_idx].cells[c_idx].is_boundary) ? 1.0 : 0.0;
+    } else {
+        val = get_value_by_qty<RealType, IsMultiMaterial>(states[t_idx], c_idx, qty_id);
+    }
+
+    out_buf[f] = (float)val;
+}
+
+template <typename RealType, bool IsMultiMaterial>
 __global__ void extract_slice_kernel(const PrimitiveTile3D<RealType, IsMultiMaterial>* states, const GeometryTile3D* geom, float* data, int nx, int ny, int nz, int axis, double offset, double xmin, double ymin, double zmin, double dx, int qty_id, int stride) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     int j = blockIdx.y * blockDim.y + threadIdx.y;
@@ -1803,6 +1861,7 @@ CFDSolver3DCuda<RealType, IsMultiMaterial>::~CFDSolver3DCuda() {
     if (host_pinned_gauge_data) cudaFreeHost(host_pinned_gauge_data);
     if (gauge_stream) cudaStreamDestroy((cudaStream_t)gauge_stream);
     if (step_done) cudaEventDestroy((cudaEvent_t)step_done);
+    if (d_obstacle_faces) cudaFree(d_obstacle_faces);
 }
 
 template <typename RealType, bool IsMultiMaterial>
@@ -1858,6 +1917,14 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::ensure_paged_out() const {
         has_paged_tile_is_near_boundary = false;
     }
 
+    if (d_obstacle_faces && num_obstacle_faces > 0) {
+        paged_obstacle_faces.resize(num_obstacle_faces);
+        CHECK_CUDA(cudaMemcpy(paged_obstacle_faces.data(), d_obstacle_faces, num_obstacle_faces * sizeof(GPUObstacleFace), cudaMemcpyDeviceToHost));
+        has_paged_obstacle_faces = true;
+    } else {
+        has_paged_obstacle_faces = false;
+    }
+
     if (d_states) { cudaFree(d_states); d_states = nullptr; }
     if (d_U) { cudaFree(d_U); d_U = nullptr; }
     if (d_dU) { cudaFree(d_dU); d_dU = nullptr; }
@@ -1873,6 +1940,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::ensure_paged_out() const {
     if (d_tile_is_near_boundary) { cudaFree(d_tile_is_near_boundary); d_tile_is_near_boundary = nullptr; }
     if (d_gauge_coords) { cudaFree(d_gauge_coords); d_gauge_coords = nullptr; }
     if (d_gauge_results) { cudaFree(d_gauge_results); d_gauge_results = nullptr; }
+    if (d_obstacle_faces) { cudaFree(d_obstacle_faces); d_obstacle_faces = nullptr; }
 
     is_paged_out = true;
 }
@@ -1913,6 +1981,10 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::ensure_paged_in() const {
         CHECK_CUDA(cudaMalloc(&d_gauge_results, num_gauges * 7 * sizeof(float)));
     }
 
+    if (has_paged_obstacle_faces && num_obstacle_faces > 0) {
+        CHECK_CUDA(cudaMalloc(&d_obstacle_faces, num_obstacle_faces * sizeof(GPUObstacleFace)));
+    }
+
     CHECK_CUDA(cudaMemcpy(d_states, paged_states.data(), total_tiles * sizeof(PrimitiveTile3D<RealType, IsMultiMaterial>), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(d_U, paged_U.data(), total_tiles * sizeof(ConservativeTile3D<RealType, IsMultiMaterial>), cudaMemcpyHostToDevice));
     if (has_paged_dU) {
@@ -1934,6 +2006,10 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::ensure_paged_in() const {
         CHECK_CUDA(cudaMemcpy(d_gauge_coords, paged_gauge_coords.data(), num_gauges * sizeof(GPUGauge3D), cudaMemcpyHostToDevice));
     }
 
+    if (has_paged_obstacle_faces && num_obstacle_faces > 0) {
+        CHECK_CUDA(cudaMemcpy(d_obstacle_faces, paged_obstacle_faces.data(), num_obstacle_faces * sizeof(GPUObstacleFace), cudaMemcpyHostToDevice));
+    }
+
     paged_states.clear(); paged_states.shrink_to_fit();
     paged_U.clear(); paged_U.shrink_to_fit();
     paged_dU.clear(); paged_dU.shrink_to_fit();
@@ -1942,6 +2018,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::ensure_paged_in() const {
     paged_tile_active_temp.clear(); paged_tile_active_temp.shrink_to_fit();
     paged_tile_is_near_boundary.clear(); paged_tile_is_near_boundary.shrink_to_fit();
     paged_gauge_coords.clear(); paged_gauge_coords.shrink_to_fit();
+    paged_obstacle_faces.clear(); paged_obstacle_faces.shrink_to_fit();
 
     // Rebuild compact active tile index after paging in
     const_cast<CFDSolver3DCuda*>(this)->rebuildActiveIndex();
@@ -2396,16 +2473,7 @@ template <typename RealType, bool IsMultiMaterial>
 std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::extractSlice(const Slice3D& slice) const {
     ensure_paged_in();
     std::vector<float> h_data;
-    int axis = (slice.axis == "xy" ? 0 : (slice.axis == "xz" ? 1 : 2));
-    int stride = slice.stride > 0 ? slice.stride : 1;
-    int w = 0, h = 0;
-    if (axis == 0) { w = (nx + stride - 1) / stride; h = (ny + stride - 1) / stride; }
-    else if (axis == 1) { w = (nx + stride - 1) / stride; h = (nz + stride - 1) / stride; }
-    else { w = (ny + stride - 1) / stride; h = (nz + stride - 1) / stride; }
-
-    h_data.resize(w * h, 0.0f);
-    dim3 blocks((w+15)/16, (h+15)/16);
-    dim3 threads(16, 16);
+    bool is_obstacles = (slice.axis == "obstacles");
 
     std::string qty = (slice.quantities.empty()) ? "pressure" : slice.quantities[0];
     int qty_id = 0;
@@ -2419,10 +2487,48 @@ std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::extractSlice(cons
     else if (qty == "overpressure" || qty == "peak_overpressure") qty_id = 8;
     else if (qty == "impulse" || qty == "peak_impulse") qty_id = 9;
 
+    if (is_obstacles) {
+        if (num_obstacle_faces == 0 || d_obstacle_faces == nullptr) {
+            return h_data;
+        }
+        h_data.resize(num_obstacle_faces, 0.0f);
+        size_t required_size = (size_t)num_obstacle_faces * sizeof(float);
+        if (d_slice_buf_capacity < required_size) {
+            if (d_slice_buf) cudaFree(d_slice_buf);
+            d_slice_buf_capacity = required_size;
+            CHECK_CUDA(cudaMalloc(&d_slice_buf, d_slice_buf_capacity));
+        }
+
+        dim3 threads(256);
+        dim3 blocks((num_obstacle_faces + 255) / 256);
+        extract_obstacles_kernel<RealType, IsMultiMaterial><<<blocks, threads>>>(
+            (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+            (const GeometryTile3D*)d_geom,
+            (const GPUObstacleFace*)d_obstacle_faces,
+            (float*)d_slice_buf,
+            num_obstacle_faces,
+            qty_id
+        );
+        CHECK_CUDA(cudaDeviceSynchronize());
+        CHECK_CUDA(cudaMemcpy(h_data.data(), d_slice_buf, required_size, cudaMemcpyDeviceToHost));
+        return h_data;
+    }
+
+    int axis = (slice.axis == "xy" ? 0 : (slice.axis == "xz" ? 1 : 2));
+    int stride = slice.stride > 0 ? slice.stride : 1;
+    int w = 0, h = 0;
+    if (axis == 0) { w = (nx + stride - 1) / stride; h = (ny + stride - 1) / stride; }
+    else if (axis == 1) { w = (nx + stride - 1) / stride; h = (nz + stride - 1) / stride; }
+    else { w = (ny + stride - 1) / stride; h = (nz + stride - 1) / stride; }
+
+    h_data.resize(w * h, 0.0f);
+    dim3 blocks((w+15)/16, (h+15)/16);
+    dim3 threads(16, 16);
+
     size_t required_size = (size_t)w * (size_t)h * sizeof(float);
-    if (d_slice_buf_capacity == 0) {
-        // Fallback in case of unexpected paged-out state
-        d_slice_buf_capacity = std::max({ (size_t)nx * ny, (size_t)nx * nz, (size_t)ny * nz }) * sizeof(float);
+    if (d_slice_buf_capacity < required_size) {
+        if (d_slice_buf) cudaFree(d_slice_buf);
+        d_slice_buf_capacity = required_size;
         CHECK_CUDA(cudaMalloc(&d_slice_buf, d_slice_buf_capacity));
     }
 
@@ -3087,6 +3193,34 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setGeometryTriangles(const std:
 }
 
 template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DCuda<RealType, IsMultiMaterial>::setGeometryPrimitives(const nlohmann::json& primitives, const std::string& geometry_hash, const std::string& voxelization_method,
+                                                                      const std::atomic<bool>* terminate_flag,
+                                                                      std::function<void(double)> progress_callback) {
+    ensure_paged_in();
+
+    int ntx = (nx + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    int nty = (ny + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    int ntz = (nz + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    int total_tiles = ntx * nty * ntz;
+
+    std::vector<GeometryTile3D> host_geom(total_tiles);
+    voxelize_primitives(
+        primitives,
+        geometry_hash,
+        voxelization_method,
+        host_geom,
+        nx, ny, nz,
+        cellSize,
+        xmin, ymin, zmin,
+        ntx, nty, ntz,
+        terminate_flag,
+        progress_callback
+    );
+
+    loadGeometryToGPU(host_geom, terminate_flag);
+}
+
+template <typename RealType, bool IsMultiMaterial>
 void CFDSolver3DCuda<RealType, IsMultiMaterial>::loadGeometryToGPU(const std::vector<GeometryTile3D>& host_geom, const std::atomic<bool>* terminate_flag) {
     if (terminate_flag && terminate_flag->load()) return;
 
@@ -3277,6 +3411,45 @@ size_t CFDSolver3DCuda<RealType, IsMultiMaterial>::getAllocatedVRAM() const {
         total += num_gauges * 7 * sizeof(float);
     }
     return total;
+}
+
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DCuda<RealType, IsMultiMaterial>::uploadObstacleFaces(const std::vector<ObstacleFace>& faces) {
+    ensure_paged_in();
+    if (d_obstacle_faces) {
+        cudaFree(d_obstacle_faces);
+        d_obstacle_faces = nullptr;
+    }
+
+    num_obstacle_faces = faces.size();
+    if (num_obstacle_faces == 0) return;
+
+    std::vector<GPUObstacleFace> local_faces(num_obstacle_faces);
+    int ntx = (nx + 7) / 8;
+    int nty = (ny + 7) / 8;
+
+    for (size_t f = 0; f < faces.size(); ++f) {
+        const auto& face = faces[f];
+        int i = face.gx_fluid;
+        int j = face.gy_fluid;
+        int k = face.gz_fluid;
+
+        if (i < 0) i = 0; if (i >= nx) i = nx - 1;
+        if (j < 0) j = 0; if (j >= ny) j = ny - 1;
+        if (k < 0) k = 0; if (k >= nz) k = nz - 1;
+
+        int ti = i / 8;
+        int tj = j / 8;
+        int tk = k / 8;
+        int t = ti + tj * ntx + tk * ntx * nty;
+        int c = (i & 7) + (j & 7) * 8 + (k & 7) * 64;
+
+        local_faces[f].t_idx = t;
+        local_faces[f].c_idx = c;
+    }
+
+    CHECK_CUDA(cudaMalloc(&d_obstacle_faces, num_obstacle_faces * sizeof(GPUObstacleFace)));
+    CHECK_CUDA(cudaMemcpy(d_obstacle_faces, local_faces.data(), num_obstacle_faces * sizeof(GPUObstacleFace), cudaMemcpyHostToDevice));
 }
 
 template class CFDSolver3DCuda<float, true>;

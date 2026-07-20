@@ -800,4 +800,171 @@ void voxelize_stl(
     global_geometry_stl_mtime = current_mtime;
 }
 
+void voxelize_primitives(
+    const nlohmann::json& primitives_json,
+    const std::string& geometry_hash,
+    const std::string& voxelization_method,
+    std::vector<GeometryTile3D>& geom_pool,
+    int nx, int ny, int nz,
+    double cellSize,
+    double xmin, double ymin, double zmin,
+    int n_tiles_x, int n_tiles_y, int n_tiles_z,
+    const std::atomic<bool>* terminate_flag,
+    std::function<void(double)> progress_callback
+) {
+    if (progress_callback) progress_callback(0.01);
+
+    if (geometry_hash == global_geometry_hash &&
+        !global_geometry_tiles.empty() &&
+        global_geometry_tiles.size() == (size_t)geom_pool.size() &&
+        global_geometry_nx == nx &&
+        global_geometry_ny == ny &&
+        global_geometry_nz == nz &&
+        std::abs(global_geometry_cellSize - cellSize) < 1e-9 &&
+        std::abs(global_geometry_xmin - xmin) < 1e-9 &&
+        std::abs(global_geometry_ymin - ymin) < 1e-9 &&
+        std::abs(global_geometry_zmin - zmin) < 1e-9) {
+        #pragma omp parallel for
+        for (int t = 0; t < (int)geom_pool.size(); ++t) {
+            geom_pool[t] = global_geometry_tiles[t];
+        }
+        std::cout << "[INFO] Loaded 3D primitive geometry from cache (hash: " << geometry_hash << ")" << std::endl;
+        if (progress_callback) progress_callback(1.0);
+        return;
+    }
+
+    int total_tiles = n_tiles_x * n_tiles_y * n_tiles_z;
+    #pragma omp parallel for
+    for (int t = 0; t < total_tiles; ++t) {
+        std::fill(geom_pool[t].cells, geom_pool[t].cells + TILE_CELLS_3D, GeometryPayload{0, 0, 0, false});
+    }
+
+    if (!primitives_json.is_array() || primitives_json.empty()) {
+        if (progress_callback) progress_callback(1.0);
+        return;
+    }
+
+    int num_prims = primitives_json.size();
+    for (int p_idx = 0; p_idx < num_prims; ++p_idx) {
+        if (terminate_flag && terminate_flag->load()) return;
+
+        const auto& item = primitives_json[p_idx];
+        bool subtractive = item.value("subtractive", false);
+
+        nlohmann::json single_prim_arr = nlohmann::json::array();
+        single_prim_arr.push_back(item);
+
+        std::vector<Triangle> triangles = generate_primitives_triangles(single_prim_arr);
+        if (triangles.empty()) continue;
+
+        std::vector<GeometryTile3D> temp_geom(total_tiles);
+        std::string prim_voxel_method = item.value("voxelization_method", voxelization_method);
+        if (subtractive && prim_voxel_method == "thin_shell") {
+            prim_voxel_method = "watertight_floodfill";
+        }
+        voxelize_geometry(
+            triangles,
+            "__temp_primitive_" + std::to_string(p_idx) + "__",
+            prim_voxel_method,
+            temp_geom,
+            nx, ny, nz,
+            cellSize,
+            xmin, ymin, zmin,
+            n_tiles_x, n_tiles_y, n_tiles_z,
+            terminate_flag,
+            nullptr
+        );
+
+        #pragma omp parallel for
+        for (int t = 0; t < total_tiles; ++t) {
+            for (int i = 0; i < TILE_CELLS_3D; ++i) {
+                if (temp_geom[t].cells[i].is_boundary) {
+                    if (subtractive) {
+                        geom_pool[t].cells[i] = GeometryPayload{0, 0, 0, false};
+                    } else {
+                        geom_pool[t].cells[i] = temp_geom[t].cells[i];
+                    }
+                }
+            }
+        }
+
+        if (progress_callback) {
+            progress_callback(0.1 + 0.8 * (double)(p_idx + 1) / num_prims);
+        }
+    }
+
+    std::cout << "[INFO] Cleaning up final voxelized primitives geometry (removing isolated fluid cells)..." << std::endl;
+    int num_removed = 0;
+    for (int iter = 0; iter < 3; ++iter) {
+        int removed_this_iter = 0;
+        std::vector<GeometryTile3D> new_geom_pool = geom_pool;
+        
+        #pragma omp parallel for reduction(+:removed_this_iter)
+        for (int gz = 0; gz < nz; ++gz) {
+            for (int gy = 0; gy < ny; ++gy) {
+                for (int gx = 0; gx < nx; ++gx) {
+                    int tx = gx / TILE_SIZE_3D;
+                    int ty = gy / TILE_SIZE_3D;
+                    int tz = gz / TILE_SIZE_3D;
+                    int t_idx = tx + ty * n_tiles_x + tz * n_tiles_x * n_tiles_y;
+                    int cx = gx % TILE_SIZE_3D;
+                    int cy = gy % TILE_SIZE_3D;
+                    int cz = gz % TILE_SIZE_3D;
+                    int idx = cx + cy * TILE_SIZE_3D + cz * TILE_SIZE_3D * TILE_SIZE_3D;
+                    
+                    if (!geom_pool[t_idx].cells[idx].is_boundary) {
+                        int solid_neighbors = 0;
+                        
+                        auto is_solid = [&](int x, int y, int z) {
+                            if (x < 0 || x >= nx || y < 0 || y >= ny || z < 0 || z >= nz) return false;
+                            int ntx = x / TILE_SIZE_3D;
+                            int nty = y / TILE_SIZE_3D;
+                            int ntz = z / TILE_SIZE_3D;
+                            int nt_idx = ntx + nty * n_tiles_x + ntz * n_tiles_x * n_tiles_y;
+                            int ncx = x % TILE_SIZE_3D;
+                            int ncy = y % TILE_SIZE_3D;
+                            int ncz = z % TILE_SIZE_3D;
+                            int nidx = ncx + ncy * TILE_SIZE_3D + ncz * TILE_SIZE_3D * TILE_SIZE_3D;
+                            return geom_pool[nt_idx].cells[nidx].is_boundary;
+                        };
+                        
+                        if (is_solid(gx+1, gy, gz)) solid_neighbors++;
+                        if (is_solid(gx-1, gy, gz)) solid_neighbors++;
+                        if (is_solid(gx, gy+1, gz)) solid_neighbors++;
+                        if (is_solid(gx, gy-1, gz)) solid_neighbors++;
+                        if (is_solid(gx, gy, gz+1)) solid_neighbors++;
+                        if (is_solid(gx, gy, gz-1)) solid_neighbors++;
+                        
+                        if (solid_neighbors >= 5) {
+                            new_geom_pool[t_idx].cells[idx] = pack_geometry_payload(true, 0.0f, 0.0f, 0.0f);
+                            removed_this_iter++;
+                        }
+                    }
+                }
+            }
+        }
+        geom_pool = new_geom_pool;
+        num_removed += removed_this_iter;
+        if (removed_this_iter == 0) break;
+    }
+    
+    if (num_removed > 0) {
+        std::cout << "[INFO] Removed " << num_removed << " isolated fluid cells / dead ends to improve stability." << std::endl;
+    }
+
+    global_geometry_tiles = geom_pool;
+    global_geometry_hash = geometry_hash;
+    global_geometry_nx = nx;
+    global_geometry_ny = ny;
+    global_geometry_nz = nz;
+    global_geometry_cellSize = cellSize;
+    global_geometry_xmin = xmin;
+    global_geometry_ymin = ymin;
+    global_geometry_zmin = zmin;
+
+    if (progress_callback) progress_callback(1.0);
+    std::cout << "[INFO] Voxelization of primitives complete. Geometry cached with hash: " << geometry_hash << std::endl;
+}
+
+
 

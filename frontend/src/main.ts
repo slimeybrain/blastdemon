@@ -681,7 +681,17 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
         if (m) {
             const view3DNode = m.nodes.find(n => n.type === 'Telemetry3DViewport');
             if (view3DNode) {
-                const slices = view3DNode.parameters?.slices || [];
+                const showObstacles = view3DNode.parameters?.show_obstacles === true;
+                const obstaclesQuantity = view3DNode.parameters?.obstacles_quantity || 'pressure';
+                const slices = [...(view3DNode.parameters?.slices || [])];
+                if (showObstacles) {
+                    slices.push({
+                        axis: 'obstacles',
+                        offset: 0.0,
+                        quantities: [obstaclesQuantity],
+                        stride: 1
+                    });
+                }
                 const rate = Number(view3DNode.parameters?.refresh_rate ?? 0.0);
                 networkManager.send({
                     command: "VIEW3D_CONFIG",

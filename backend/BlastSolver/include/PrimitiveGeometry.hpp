@@ -32,7 +32,7 @@ inline std::vector<Triangle> generate_cuboid_triangles(double xmin, double xmax,
         triangles.push_back({v0, v2, v3, normal});
     };
 
-    add_face(p0, p1, p2, p3, {0.f, 0.f, -1.f}); // Bottom
+    add_face(p0, p3, p2, p1, {0.f, 0.f, -1.f}); // Bottom (corrected winding)
     add_face(p4, p5, p6, p7, {0.f, 0.f, 1.f});  // Top
     add_face(p0, p1, p5, p4, {0.f, -1.f, 0.f}); // Front
     add_face(p2, p3, p7, p6, {0.f, 1.f, 0.f});  // Back
@@ -66,8 +66,8 @@ inline std::vector<Triangle> generate_cylinder_triangles(double x_c, double y_c,
             float ny = (float)cos((theta1 + theta2)/2.0);
             float nz = (float)sin((theta1 + theta2)/2.0);
             Point3D normal_side = {0.0f, ny, nz};
-            triangles.push_back({b1, t1, t2, normal_side});
-            triangles.push_back({b1, t2, b2, normal_side});
+            triangles.push_back({b1, b2, t2, normal_side}); // Corrected winding
+            triangles.push_back({b1, t2, t1, normal_side}); // Corrected winding
 
             Point3D bc = {x_min, (float)y_c, (float)z_c};
             triangles.push_back({bc, b2, b1, {-1.f, 0.f, 0.f}});
@@ -94,8 +94,8 @@ inline std::vector<Triangle> generate_cylinder_triangles(double x_c, double y_c,
             float nx = (float)cos((theta1 + theta2)/2.0);
             float nz = (float)sin((theta1 + theta2)/2.0);
             Point3D normal_side = {nx, 0.0f, nz};
-            triangles.push_back({b1, t2, t1, normal_side});
-            triangles.push_back({b1, b2, t2, normal_side});
+            triangles.push_back({b1, t1, t2, normal_side}); // Corrected winding
+            triangles.push_back({b1, t2, b2, normal_side}); // Corrected winding
 
             Point3D bc = {(float)x_c, y_min, (float)z_c};
             triangles.push_back({bc, b1, b2, {0.f, -1.f, 0.f}});
@@ -122,8 +122,8 @@ inline std::vector<Triangle> generate_cylinder_triangles(double x_c, double y_c,
             float nx = (float)cos((theta1 + theta2)/2.0);
             float ny = (float)sin((theta1 + theta2)/2.0);
             Point3D normal_side = {nx, ny, 0.0f};
-            triangles.push_back({b1, t1, t2, normal_side});
-            triangles.push_back({b1, t2, b2, normal_side});
+            triangles.push_back({b1, b2, t2, normal_side}); // Corrected winding
+            triangles.push_back({b1, t2, t1, normal_side}); // Corrected winding
 
             Point3D bc = {(float)x_c, (float)y_c, z_min};
             triangles.push_back({bc, b2, b1, {0.f, 0.f, -1.f}});
@@ -157,6 +157,18 @@ inline std::vector<Triangle> generate_wedge_triangles(double xmin, double xmax, 
         float dz = z2 - z1;
         float len = sqrt(dy*dy + dz*dz);
         n_slope = {0.f, -dz/len, dy/len};
+
+        triangles.push_back({v0, v4, v3, n_bottom});
+        triangles.push_back({v0, v1, v4, n_bottom});
+
+        triangles.push_back({v1, v2, v5, n_vertical});
+        triangles.push_back({v1, v5, v4, n_vertical});
+
+        triangles.push_back({v0, v3, v5, n_slope});
+        triangles.push_back({v0, v5, v2, n_slope});
+
+        triangles.push_back({v0, v2, v1, n_cap1});
+        triangles.push_back({v3, v4, v5, n_cap2});
     } else if (orientation == "-X" || orientation == "-x") {
         v0 = {x2, y1, z1}; v1 = {x1, y1, z1}; v2 = {x1, y1, z2};
         v3 = {x2, y2, z1}; v4 = {x1, y2, z1}; v5 = {x1, y2, z2};
@@ -170,6 +182,18 @@ inline std::vector<Triangle> generate_wedge_triangles(double xmin, double xmax, 
         float dz = z2 - z1;
         float len = sqrt(dx*dx + dz*dz);
         n_slope = {dz/len, 0.f, dx/len};
+
+        triangles.push_back({v0, v1, v4, n_bottom});
+        triangles.push_back({v0, v4, v3, n_bottom});
+
+        triangles.push_back({v1, v2, v5, n_vertical});
+        triangles.push_back({v1, v5, v4, n_vertical});
+
+        triangles.push_back({v0, v3, v5, n_slope});
+        triangles.push_back({v0, v5, v2, n_slope});
+
+        triangles.push_back({v0, v2, v1, n_cap1});
+        triangles.push_back({v3, v4, v5, n_cap2});
     } else if (orientation == "-Y" || orientation == "-y") {
         v0 = {x1, y2, z1}; v1 = {x1, y1, z1}; v2 = {x1, y1, z2};
         v3 = {x2, y2, z1}; v4 = {x2, y1, z1}; v5 = {x2, y1, z2};
@@ -183,6 +207,18 @@ inline std::vector<Triangle> generate_wedge_triangles(double xmin, double xmax, 
         float dz = z2 - z1;
         float len = sqrt(dy*dy + dz*dz);
         n_slope = {0.f, dz/len, dy/len};
+
+        triangles.push_back({v0, v4, v1, n_bottom});
+        triangles.push_back({v0, v3, v4, n_bottom});
+
+        triangles.push_back({v1, v5, v2, n_vertical});
+        triangles.push_back({v1, v4, v5, n_vertical});
+
+        triangles.push_back({v0, v5, v3, n_slope});
+        triangles.push_back({v0, v2, v5, n_slope});
+
+        triangles.push_back({v0, v1, v2, n_cap1});
+        triangles.push_back({v3, v5, v4, n_cap2});
     } else { // "+X" and fallback
         v0 = {x1, y1, z1}; v1 = {x2, y1, z1}; v2 = {x2, y1, z2};
         v3 = {x1, y2, z1}; v4 = {x2, y2, z1}; v5 = {x2, y2, z2};
@@ -196,19 +232,19 @@ inline std::vector<Triangle> generate_wedge_triangles(double xmin, double xmax, 
         float dz = z2 - z1;
         float len = sqrt(dx*dx + dz*dz);
         n_slope = {-dz/len, 0.f, dx/len};
+
+        triangles.push_back({v0, v4, v1, n_bottom});
+        triangles.push_back({v0, v3, v4, n_bottom});
+
+        triangles.push_back({v1, v5, v2, n_vertical});
+        triangles.push_back({v1, v4, v5, n_vertical});
+
+        triangles.push_back({v0, v5, v3, n_slope});
+        triangles.push_back({v0, v2, v5, n_slope});
+
+        triangles.push_back({v0, v1, v2, n_cap1});
+        triangles.push_back({v3, v5, v4, n_cap2});
     }
-
-    triangles.push_back({v0, v4, v1, n_bottom});
-    triangles.push_back({v0, v3, v4, n_bottom});
-
-    triangles.push_back({v1, v5, v2, n_vertical});
-    triangles.push_back({v1, v4, v5, n_vertical});
-
-    triangles.push_back({v0, v2, v5, n_slope});
-    triangles.push_back({v0, v5, v3, n_slope});
-
-    triangles.push_back({v0, v1, v2, n_cap1});
-    triangles.push_back({v3, v5, v4, n_cap2});
 
     return triangles;
 }

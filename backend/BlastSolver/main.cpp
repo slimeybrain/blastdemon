@@ -18,8 +18,11 @@
 #include <queue>
 #include <condition_variable>
 
+#include <omp.h>
 #include <nlohmann/json.hpp>
 #include "PrimitiveGeometry.hpp"
+#include "ImmersedBoundary.hpp"
+#include <unordered_map>
 #include <filesystem>
 #include "cfd_solver.hpp"
 #include "cfd_solver_2d.hpp"
@@ -78,6 +81,7 @@ std::atomic<bool> sim3d_terminate{false};
 std::atomic<bool> sim3d_init_in_progress{false};
 std::unique_ptr<CFDSolver3D> global_solver_3d = nullptr;
 std::vector<Slice3D> global_slices_3d;
+std::vector<ObstacleFace> global_obstacle_faces;
 double global_t3d = 0.0;
 double global_dt_3d = 0.0;
 std::atomic<int> step_progress_3d{0};
@@ -777,6 +781,149 @@ void worker_thread_func() {
     global_exec_until_end = false;
 }
 
+extern std::vector<GeometryTile3D> global_geometry_tiles;
+
+void generateObstacleMesh(int nx, int ny, int nz, double cellSize, double xmin, double ymin, double zmin) {
+    global_obstacle_faces.clear();
+    if (global_geometry_tiles.empty()) return;
+
+    // 1. Flatten the solid cell lookup into a contiguous 1D vector (Single-threaded)
+    std::vector<uint8_t> solid_mask(nx * ny * nz, 0);
+
+    auto is_solid_raw = [&](int i, int j, int k) -> bool {
+        int ti = i / 8, tj = j / 8, tk = k / 8;
+        int ntx = (nx + 7) / 8;
+        int nty = (ny + 7) / 8;
+        int t = ti + tj * ntx + tk * ntx * nty;
+        int c = (i & 7) + (j & 7) * 8 + (k & 7) * 64;
+        if (t < 0 || t >= (int)global_geometry_tiles.size()) return false;
+        return global_geometry_tiles[t].cells[c].is_boundary;
+    };
+
+    for (int k = 0; k < nz; ++k) {
+        for (int j = 0; j < ny; ++j) {
+            for (int i = 0; i < nx; ++i) {
+                solid_mask[i + j * nx + k * nx * ny] = is_solid_raw(i, j, k) ? 1 : 0;
+            }
+        }
+    }
+
+    // 2. Sequential face generation
+    for (int gz = 0; gz < nz; ++gz) {
+        for (int gy = 0; gy < ny; ++gy) {
+            for (int gx = 0; gx < nx; ++gx) {
+                size_t idx = gx + gy * nx + gz * nx * ny;
+                if (solid_mask[idx]) continue; // Fluid cell checks neighbors
+
+                double x0 = xmin + gx * cellSize;
+                double x1 = xmin + (gx + 1) * cellSize;
+                double y0 = ymin + gy * cellSize;
+                double y1 = ymin + (gy + 1) * cellSize;
+                double z0 = zmin + gz * cellSize;
+                double z1 = zmin + (gz + 1) * cellSize;
+
+                // left (-x)
+                if (gx > 0 && solid_mask[idx - 1]) {
+                    ObstacleFace face;
+                    face.gx_fluid = gx; face.gy_fluid = gy; face.gz_fluid = gz;
+                    face.px[0] = x0; face.px[1] = x0; face.px[2] = x0; face.px[3] = x0;
+                    face.py[0] = y0; face.py[1] = y0; face.py[2] = y1; face.py[3] = y1;
+                    face.pz[0] = z0; face.pz[1] = z1; face.pz[2] = z1; face.pz[3] = z0;
+                    global_obstacle_faces.push_back(face);
+                }
+                // right (+x)
+                if (gx < nx - 1 && solid_mask[idx + 1]) {
+                    ObstacleFace face;
+                    face.gx_fluid = gx; face.gy_fluid = gy; face.gz_fluid = gz;
+                    face.px[0] = x1; face.px[1] = x1; face.px[2] = x1; face.px[3] = x1;
+                    face.py[0] = y0; face.py[1] = y1; face.py[2] = y1; face.py[3] = y0;
+                    face.pz[0] = z0; face.pz[1] = z0; face.pz[2] = z1; face.pz[3] = z1;
+                    global_obstacle_faces.push_back(face);
+                }
+                // bottom (-y)
+                if (gy > 0 && solid_mask[idx - nx]) {
+                    ObstacleFace face;
+                    face.gx_fluid = gx; face.gy_fluid = gy; face.gz_fluid = gz;
+                    face.px[0] = x0; face.px[1] = x1; face.px[2] = x1; face.px[3] = x0;
+                    face.py[0] = y0; face.py[1] = y0; face.py[2] = y0; face.py[3] = y0;
+                    face.pz[0] = z0; face.pz[1] = z0; face.pz[2] = z1; face.pz[3] = z1;
+                    global_obstacle_faces.push_back(face);
+                }
+                // top (+y)
+                if (gy < ny - 1 && solid_mask[idx + nx]) {
+                    ObstacleFace face;
+                    face.gx_fluid = gx; face.gy_fluid = gy; face.gz_fluid = gz;
+                    face.px[0] = x0; face.px[1] = x0; face.px[2] = x1; face.px[3] = x1;
+                    face.py[0] = y1; face.py[1] = y1; face.py[2] = y1; face.py[3] = y1;
+                    face.pz[0] = z0; face.pz[1] = z1; face.pz[2] = z1; face.pz[3] = z0;
+                    global_obstacle_faces.push_back(face);
+                }
+                // back (-z)
+                if (gz > 0 && solid_mask[idx - nx * ny]) {
+                    ObstacleFace face;
+                    face.gx_fluid = gx; face.gy_fluid = gy; face.gz_fluid = gz;
+                    face.px[0] = x0; face.px[1] = x0; face.px[2] = x1; face.px[3] = x1;
+                    face.py[0] = y0; face.py[1] = y1; face.py[2] = y1; face.py[3] = y0;
+                    face.pz[0] = z0; face.pz[1] = z0; face.pz[2] = z0; face.pz[3] = z0;
+                    global_obstacle_faces.push_back(face);
+                }
+                // front (+z)
+                if (gz < nz - 1 && solid_mask[idx + nx * ny]) {
+                    ObstacleFace face;
+                    face.gx_fluid = gx; face.gy_fluid = gy; face.gz_fluid = gz;
+                    face.px[0] = x0; face.px[1] = x1; face.px[2] = x1; face.px[3] = x0;
+                    face.py[0] = y0; face.py[1] = y0; face.py[2] = y1; face.py[3] = y1;
+                    face.pz[0] = z1; face.pz[1] = z1; face.pz[2] = z1; face.pz[3] = z1;
+                    global_obstacle_faces.push_back(face);
+                }
+            }
+        }
+    }
+}
+
+void sendObstacleMeshToFrontend(const std::string& modelId) {
+    if (global_obstacle_faces.empty()) return;
+
+    // If the mesh is too large, do not send the full vertices/cells lists to the frontend
+    // to prevent memory exhaustion (OOM), WebSocket pipeline blocking, and browser crashes.
+    if (global_obstacle_faces.size() > 100000) {
+        std::cout << "[INFO] Obstacle mesh is too large (" << global_obstacle_faces.size()
+                  << " faces). Skipping transmission to frontend to preserve memory and performance." << std::endl;
+        nlohmann::json msg;
+        msg["type"] = "obstacles_mesh";
+        msg["modelId"] = modelId;
+        msg["vertices"] = nlohmann::json::array();
+        msg["cells"] = nlohmann::json::array();
+        std::cout << msg.dump() << std::endl;
+        return;
+    }
+
+    std::stringstream ss;
+    ss << std::fixed << std::setprecision(5);
+    ss << "{\"type\":\"obstacles_mesh\",\"modelId\":\"" << modelId << "\",\"vertices\":[";
+
+    for (size_t f = 0; f < global_obstacle_faces.size(); ++f) {
+        const auto& face = global_obstacle_faces[f];
+        if (f > 0) ss << ",";
+        ss << face.px[0] << "," << face.py[0] << "," << face.pz[0] << ","
+           << face.px[1] << "," << face.py[1] << "," << face.pz[1] << ","
+           << face.px[2] << "," << face.py[2] << "," << face.pz[2] << ","
+           << face.px[3] << "," << face.py[3] << "," << face.pz[3];
+    }
+
+    ss << "],\"cells\":[";
+
+    for (size_t f = 0; f < global_obstacle_faces.size(); ++f) {
+        const auto& face = global_obstacle_faces[f];
+        if (f > 0) ss << ",";
+        ss << face.gx_fluid << "," << face.gy_fluid << "," << face.gz_fluid;
+    }
+
+    ss << "]}";
+
+    std::cout << ss.str() << std::endl;
+}
+
 void init_3d_thread_func(nlohmann::json msg) {
     sim3d_init_in_progress = true;
     try {
@@ -904,8 +1051,7 @@ void init_3d_thread_func(nlohmann::json msg) {
         }
 
         if (msg.contains("primitives") && msg["primitives"].is_array() && !msg["primitives"].empty()) {
-            std::vector<Triangle> triangles = generate_primitives_triangles(msg["primitives"]);
-            local_solver_3d->setGeometryTriangles(triangles, geometry_hash, voxel_method, &sim3d_terminate, progress_callback);
+            local_solver_3d->setGeometryPrimitives(msg["primitives"], geometry_hash, voxel_method, &sim3d_terminate, progress_callback);
         } else {
             local_solver_3d->setGeometry(stl_file, geometry_hash, voxel_method, &sim3d_terminate, progress_callback);
         }
@@ -916,9 +1062,21 @@ void init_3d_thread_func(nlohmann::json msg) {
             return;
         }
 
+        std::cout << "[DEBUG] Voxelization finished. Generating obstacle mesh..." << std::endl;
+        // Generate obstacle faces mesh and pass them to solver
+        generateObstacleMesh(nx, ny, nz, cellSize, xmin, ymin, zmin);
+        std::cout << "[DEBUG] Obstacle mesh generated with " << global_obstacle_faces.size() << " faces. Uploading..." << std::endl;
+        local_solver_3d->uploadObstacleFaces(global_obstacle_faces);
+
+        std::cout << "[DEBUG] Obstacle faces uploaded. Committing solver..." << std::endl;
         // Commit to global solver
         global_solver_3d = std::move(local_solver_3d);
 
+        std::cout << "[DEBUG] Solver committed. Sending mesh to frontend..." << std::endl;
+        // Broadcast obstacle mesh JSON to frontend
+        sendObstacleMeshToFrontend(msg.value("modelId", ""));
+
+        std::cout << "[DEBUG] Mesh sent. Initializing gauges..." << std::endl;
         init_gauges(msg);
         emit_kernel_log("SYSTEM", "3D Solver Initialized", 0.0, "3d");
         emit_telemetry_3d(0.0, false);
@@ -1642,7 +1800,7 @@ void async_telemetry_thread_func() {
 
             for (size_t i = 0; i < n_slices; ++i) {
                 const auto& s = payload->slices[i];
-                uint32_t axis_id = (s.axis == "xy" ? 0 : (s.axis == "xz" ? 1 : 2));
+                uint32_t axis_id = (s.axis == "xy" ? 0 : (s.axis == "xz" ? 1 : (s.axis == "yz" ? 2 : 3)));
                 float offset = (float)s.offset;
                 uint32_t w = s.w;
                 uint32_t h = s.h;
@@ -1787,7 +1945,7 @@ void emit_telemetry_3d(double elapsed, bool is_terminated) {
         sp.stride = s.stride;
         sp.data = global_solver_3d->extractSlice(s);
 
-        uint32_t axis_id = (s.axis == "xy" ? 0 : (s.axis == "xz" ? 1 : 2));
+        uint32_t axis_id = (s.axis == "xy" ? 0 : (s.axis == "xz" ? 1 : (s.axis == "yz" ? 2 : 3)));
         int stride = s.stride > 0 ? s.stride : 1;
         if (axis_id == 0) {
             sp.w = (global_solver_3d->getNx() + stride - 1) / stride;
@@ -1795,9 +1953,12 @@ void emit_telemetry_3d(double elapsed, bool is_terminated) {
         } else if (axis_id == 1) {
             sp.w = (global_solver_3d->getNx() + stride - 1) / stride;
             sp.h = (global_solver_3d->getNz() + stride - 1) / stride;
-        } else {
+        } else if (axis_id == 2) {
             sp.w = (global_solver_3d->getNy() + stride - 1) / stride;
             sp.h = (global_solver_3d->getNz() + stride - 1) / stride;
+        } else {
+            sp.w = sp.data.size();
+            sp.h = 1;
         }
         payload->slices.push_back(std::move(sp));
     }

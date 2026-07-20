@@ -37,6 +37,16 @@ struct Slice3D {
     int stride = 1;
 };
 
+struct ObstacleFace {
+    int gx_fluid, gy_fluid, gz_fluid;
+    float px[4], py[4], pz[4];
+};
+
+struct GPUObstacleFace {
+    int t_idx;
+    int c_idx;
+};
+
 template <bool IsMultiMaterial>
 struct CellState3D {
     Real rho, ux, uy, uz, p, E, alpha1, alpha2, arho1, arho2;
@@ -123,6 +133,10 @@ public:
     virtual void setGeometryTriangles(const std::vector<Triangle>& triangles, const std::string& geometry_hash, const std::string& voxelization_method,
                                       const std::atomic<bool>* terminate_flag = nullptr,
                                       std::function<void(double)> progress_callback = nullptr) = 0;
+    virtual void setGeometryPrimitives(const nlohmann::json& primitives, const std::string& geometry_hash, const std::string& voxelization_method,
+                                       const std::atomic<bool>* terminate_flag = nullptr,
+                                       std::function<void(double)> progress_callback = nullptr) = 0;
+    virtual void uploadObstacleFaces(const std::vector<ObstacleFace>& faces) {}
     virtual std::pair<double, double> getConservationTotals() const = 0;
 };
 
@@ -194,6 +208,9 @@ public:
     void setGeometryTriangles(const std::vector<Triangle>& triangles, const std::string& geometry_hash, const std::string& voxelization_method,
                               const std::atomic<bool>* terminate_flag = nullptr,
                               std::function<void(double)> progress_callback = nullptr) override {}
+    void setGeometryPrimitives(const nlohmann::json& primitives, const std::string& geometry_hash, const std::string& voxelization_method,
+                               const std::atomic<bool>* terminate_flag = nullptr,
+                               std::function<void(double)> progress_callback = nullptr) override {}
     std::pair<double, double> getConservationTotals() const override { return {0.0, 0.0}; }
 };
 
@@ -204,6 +221,7 @@ class CFDSolver3DImpl : public CFDSolver3DImplBase {
     std::vector<ConservativeTile3D<RealType, IsMultiMaterial>> dU_pool;
     std::vector<uint8_t> active_tiles;
     std::vector<GeometryTile3D> geom_pool;
+    std::vector<ObstacleFace> obstacle_faces;
 
     int n_tiles_x, n_tiles_y, n_tiles_z;
 
@@ -223,6 +241,10 @@ public:
     void setGeometryTriangles(const std::vector<Triangle>& triangles, const std::string& geometry_hash, const std::string& voxelization_method,
                               const std::atomic<bool>* terminate_flag = nullptr,
                               std::function<void(double)> progress_callback = nullptr) override;
+    void setGeometryPrimitives(const nlohmann::json& primitives, const std::string& geometry_hash, const std::string& voxelization_method,
+                               const std::atomic<bool>* terminate_flag = nullptr,
+                               std::function<void(double)> progress_callback = nullptr) override;
+    void uploadObstacleFaces(const std::vector<ObstacleFace>& faces) override;
     std::pair<double, double> getConservationTotals() const override;
 
     std::vector<float> sampleGauge(const Gauge3D& gauge) const override;
@@ -327,6 +349,20 @@ public:
                 nx_true = dx_dir / len_dir;
                 ny_true = dy_dir / len_dir;
                 nz_true = dz_dir / len_dir;
+            }
+        }
+
+        // Option B: Decouple boundary normal components at domain boundaries
+        bool decoupled = false;
+        if (bx == 0 || bx == nx - 1) { nx_true = 0.0f; decoupled = true; }
+        if (by == 0 || by == ny - 1) { ny_true = 0.0f; decoupled = true; }
+        if (bz == 0 || bz == nz - 1) { nz_true = 0.0f; decoupled = true; }
+        if (decoupled) {
+            float n_len_dec = std::sqrt(nx_true*nx_true + ny_true*ny_true + nz_true*nz_true);
+            if (n_len_dec > 1e-3f) {
+                nx_true /= n_len_dec;
+                ny_true /= n_len_dec;
+                nz_true /= n_len_dec;
             }
         }
 
@@ -561,6 +597,20 @@ public:
                 float ny_u = ny_b / n_len;
                 float nz_u = nz_b / n_len;
 
+                // Option B: Decouple boundary normal components at domain boundaries
+                bool decoupled = false;
+                if (clamped_gx == 0 || clamped_gx == nx - 1) { nx_u = 0.0f; decoupled = true; }
+                if (clamped_gy == 0 || clamped_gy == ny - 1) { ny_u = 0.0f; decoupled = true; }
+                if (clamped_gz == 0 || clamped_gz == nz - 1) { nz_u = 0.0f; decoupled = true; }
+                if (decoupled) {
+                    float n_len_dec = std::sqrt(nx_u*nx_u + ny_u*ny_u + nz_u*nz_u);
+                    if (n_len_dec > 1e-3f) {
+                        nx_u /= n_len_dec;
+                        ny_u /= n_len_dec;
+                        nz_u /= n_len_dec;
+                    }
+                }
+
                 double x_G = xmin + (gx + 0.5) * cellSize;
                 double y_G = ymin + (gy + 0.5) * cellSize;
                 double z_G = zmin + (gz + 0.5) * cellSize;
@@ -714,10 +764,25 @@ public:
             if (max_dot > -1e8f) {
                 auto s_fluid = sampleStateWithMirror(gx + best_dx, gy + best_dy, gz + best_dz, false);
                 auto s_ghost = s_fluid;
-                double u_dot_n = s_fluid.ux * nx_b + s_fluid.uy * ny_b + s_fluid.uz * nz_b;
-                s_ghost.ux = s_fluid.ux - 2.0 * u_dot_n * nx_b;
-                s_ghost.uy = s_fluid.uy - 2.0 * u_dot_n * ny_b;
-                s_ghost.uz = s_fluid.uz - 2.0 * u_dot_n * nz_b;
+                float nx_dec = nx_b;
+                float ny_dec = ny_b;
+                float nz_dec = nz_b;
+                bool decoupled = false;
+                if (clamped_gx == 0 || clamped_gx == nx - 1) { nx_dec = 0.0f; decoupled = true; }
+                if (clamped_gy == 0 || clamped_gy == ny - 1) { ny_dec = 0.0f; decoupled = true; }
+                if (clamped_gz == 0 || clamped_gz == nz - 1) { nz_dec = 0.0f; decoupled = true; }
+                if (decoupled) {
+                    float n_len_dec = std::sqrt(nx_dec*nx_dec + ny_dec*ny_dec + nz_dec*nz_dec);
+                    if (n_len_dec > 1e-3f) {
+                        nx_dec /= n_len_dec;
+                        ny_dec /= n_len_dec;
+                        nz_dec /= n_len_dec;
+                    }
+                }
+                double u_dot_n = s_fluid.ux * nx_dec + s_fluid.uy * ny_dec + s_fluid.uz * nz_dec;
+                s_ghost.ux = s_fluid.ux - 2.0 * u_dot_n * nx_dec;
+                s_ghost.uy = s_fluid.uy - 2.0 * u_dot_n * ny_dec;
+                s_ghost.uz = s_fluid.uz - 2.0 * u_dot_n * nz_dec;
                 return s_ghost;
             }
         }

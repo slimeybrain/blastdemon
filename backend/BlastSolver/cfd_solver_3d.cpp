@@ -1066,6 +1066,15 @@ std::vector<float> CFDSolver3DImpl<RealType, IsMultiMaterial>::extractSlice(cons
         return (float)s.p;
     };
 
+    if (slice.axis == "obstacles") {
+        data.resize(obstacle_faces.size(), 0.0f);
+        for (size_t f = 0; f < obstacle_faces.size(); ++f) {
+            const auto& face = obstacle_faces[f];
+            data[f] = getVal(sampleState(face.gx_fluid, face.gy_fluid, face.gz_fluid), face.gx_fluid, face.gy_fluid, face.gz_fluid);
+        }
+        return data;
+    }
+
     if (slice.axis == "xy") {
         int gz = std::clamp((int)((slice.offset - zmin) / cellSize), 0, nz - 1);
         int out_nx = (nx + stride - 1) / stride;
@@ -1229,6 +1238,11 @@ template <typename RealType, bool IsMultiMaterial> void CFDSolver3DImpl<RealType
 template <typename RealType, bool IsMultiMaterial> bool CFDSolver3DImpl<RealType, IsMultiMaterial>::checkTermination() { return false; }
 
 template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DImpl<RealType, IsMultiMaterial>::uploadObstacleFaces(const std::vector<ObstacleFace>& faces) {
+    obstacle_faces = faces;
+}
+
+template <typename RealType, bool IsMultiMaterial>
 void CFDSolver3DImpl<RealType, IsMultiMaterial>::setGauges(const std::vector<Gauge3D>& gauges) {
     cpu_gauges = gauges;
     cpu_gauge_times.clear();
@@ -1277,6 +1291,24 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setGeometryTriangles(const std:
                                                                       std::function<void(double)> progress_callback) {
     voxelize_geometry(
         triangles,
+        geometry_hash,
+        voxelization_method,
+        geom_pool,
+        nx, ny, nz,
+        cellSize,
+        xmin, ymin, zmin,
+        n_tiles_x, n_tiles_y, n_tiles_z,
+        terminate_flag,
+        progress_callback
+    );
+}
+
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DImpl<RealType, IsMultiMaterial>::setGeometryPrimitives(const nlohmann::json& primitives, const std::string& geometry_hash, const std::string& voxelization_method,
+                                                                       const std::atomic<bool>* terminate_flag,
+                                                                       std::function<void(double)> progress_callback) {
+    voxelize_primitives(
+        primitives,
         geometry_hash,
         voxelization_method,
         geom_pool,

@@ -31,7 +31,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
         'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
         'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
-        'min_y', 'max_y', 'min_val', 'max_val', 'ambientLevel', 'specularIntensity', 'gauge_size'
+        'min_y', 'max_y', 'min_val', 'max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'obstacles_opacity'
     ];
 
     const flattenedParams: Record<string, any> = {};

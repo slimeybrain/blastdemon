@@ -779,7 +779,7 @@ export class PropertyEditor {
             gaugeSizeRow.appendChild(gaugeSizeLabel);
 
             const gaugeSizeSlider = document.createElement('input');
-            gaugeSizeSlider.type = 'range';
+                gaugeSizeSlider.type = 'range';
             gaugeSizeSlider.min = '0.005';
             gaugeSizeSlider.max = '0.2';
             gaugeSizeSlider.step = '0.005';
@@ -791,6 +791,47 @@ export class PropertyEditor {
             };
             gaugeSizeRow.appendChild(gaugeSizeSlider);
             panels[0].appendChild(gaugeSizeRow);
+
+            // Obstacles Section
+            const obsDivider = document.createElement('div');
+            obsDivider.style.borderTop = '1px solid #333';
+            obsDivider.style.margin = '12px 0 8px 0';
+            panels[0].appendChild(obsDivider);
+
+            const cbGridObs = document.createElement('div');
+            cbGridObs.style.display = 'grid';
+            cbGridObs.style.gridTemplateColumns = 'repeat(2, 1fr)';
+            cbGridObs.style.gap = '8px';
+            cbGridObs.appendChild(createCheckboxField('show_obstacles', !!node.parameters['show_obstacles'], 'Show Obstacles'));
+            cbGridObs.appendChild(createCheckboxField('obstacles_gridlines', node.parameters['obstacles_gridlines'] !== false, 'Obstacles Grid'));
+            cbGridObs.appendChild(createCheckboxField('obstacles_lighting', node.parameters['obstacles_lighting'] !== false, 'Obstacles Lighting'));
+            panels[0].appendChild(cbGridObs);
+
+            const obsQtyEl = this.createInputElement(node, 'obstacles_quantity', node.parameters['obstacles_quantity'] ?? 'pressure');
+            addRowToPanel('obstacles_quantity', 'OBSTACLES QTY', obsQtyEl, 0);
+
+            const obsOpacRow = document.createElement('div');
+            obsOpacRow.style.marginTop = '8px';
+            const obsOpacLabel = document.createElement('label');
+            obsOpacLabel.style.display = 'block';
+            obsOpacLabel.style.fontSize = 'var(--font-sm)';
+            obsOpacLabel.style.color = '#888';
+            obsOpacLabel.textContent = `OBSTACLES OPACITY: ${Number(node.parameters['obstacles_opacity'] ?? 1.0).toFixed(2)}`;
+            obsOpacRow.appendChild(obsOpacLabel);
+
+            const obsOpacSlider = document.createElement('input');
+            obsOpacSlider.type = 'range';
+            obsOpacSlider.min = '0';
+            obsOpacSlider.max = '1';
+            obsOpacSlider.step = '0.05';
+            obsOpacSlider.value = String(node.parameters['obstacles_opacity'] ?? 1.0);
+            obsOpacSlider.style.width = '100%';
+            obsOpacSlider.oninput = () => {
+                obsOpacLabel.textContent = `OBSTACLES OPACITY: ${Number(obsOpacSlider.value).toFixed(2)}`;
+                this.updateParameter('obstacles_opacity', Number(obsOpacSlider.value));
+            };
+            obsOpacRow.appendChild(obsOpacSlider);
+            panels[0].appendChild(obsOpacRow);
 
             // SLICES Tab
             this.renderTelemetry3DViewportSlices(node, panels[1]);
@@ -937,7 +978,7 @@ export class PropertyEditor {
             'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
             'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
             'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
-            'min_y', 'max_y', 'min_val', 'max_val', 'ambientLevel', 'specularIntensity', 'gauge_size'
+            'min_y', 'max_y', 'min_val', 'max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'obstacles_opacity'
         ];
 
         const dropdowns: Record<string, string[]> = {
@@ -974,7 +1015,8 @@ export class PropertyEditor {
             'refresh_rate': ['0.0', '0.016', '0.033', '0.05', '0.1', '0.2', '0.5', '1.0', '2.0', '5.0', '10.0'],
             'ascii_delimiter': ['Comma', 'Tab', 'Space'],
             'vtk_format': ['ASCII', 'Binary', 'Compressed Binary'],
-            'voxelization_method': ['watertight_floodfill', 'watertight_raycast', 'thin_shell', 'winding_number']
+            'voxelization_method': ['watertight_floodfill', 'watertight_raycast', 'thin_shell', 'winding_number'],
+            'obstacles_quantity': ['pressure', 'density', 'velocity', 'energy', 'species1', 'species2', 'species3', 'peak_overpressure', 'peak_impulse']
         };
 
         if (dropdowns[key]) {
@@ -1132,16 +1174,17 @@ export class PropertyEditor {
             btn.style.borderRadius = '3px';
             btn.onclick = (e) => {
                 e.preventDefault();
-                const updated = [...primitives, { type: shapeType, ...defaultParams }];
+                const nameStr = `${shapeType.charAt(0).toUpperCase() + shapeType.slice(1)} ${primitives.length + 1}`;
+                const updated = [...primitives, { type: shapeType, name: nameStr, subtractive: false, ...defaultParams }];
                 this.selectedPrimitiveIndex = updated.length - 1;
                 this.stateManager.updateNodeParameters(node.id, { primitives: updated });
             };
             return btn;
         };
 
-        addButtonsDiv.appendChild(createAddBtn('Cube', 'cuboid', { xmin: 0.0, xmax: 0.2, ymin: 0.0, ymax: 0.2, zmin: 0.0, zmax: 0.2 }));
-        addButtonsDiv.appendChild(createAddBtn('Cyl', 'cylinder', { x: 0.5, y: 0.5, z: 0.5, radius: 0.1, length: 0.2, orientation: 'Z' }));
-        addButtonsDiv.appendChild(createAddBtn('Wedge', 'wedge', { xmin: 0.0, xmax: 0.2, ymin: 0.0, ymax: 0.2, zmin: 0.0, zmax: 0.2, orientation: '+X' }));
+        addButtonsDiv.appendChild(createAddBtn('Cube', 'cuboid', { xmin: 0.0, xmax: 0.2, ymin: 0.0, ymax: 0.2, zmin: 0.0, zmax: 0.2, voxelization_method: 'watertight_floodfill' }));
+        addButtonsDiv.appendChild(createAddBtn('Cyl', 'cylinder', { x: 0.5, y: 0.5, z: 0.5, radius: 0.1, length: 0.2, orientation: 'Z', voxelization_method: 'watertight_floodfill' }));
+        addButtonsDiv.appendChild(createAddBtn('Wedge', 'wedge', { xmin: 0.0, xmax: 0.2, ymin: 0.0, ymax: 0.2, zmin: 0.0, zmax: 0.2, orientation: '+X', voxelization_method: 'watertight_floodfill' }));
         leftHeader.appendChild(addButtonsDiv);
         leftPane.appendChild(leftHeader);
 
@@ -1171,7 +1214,7 @@ export class PropertyEditor {
             const name = document.createElement('span');
             name.style.fontSize = 'var(--font-xs)';
             name.style.color = idx === this.selectedPrimitiveIndex ? '#fff' : '#ccc';
-            name.textContent = `${idx + 1}. ${prim.type.toUpperCase()}`;
+            name.textContent = `${idx + 1}. ${prim.name || prim.type.toUpperCase()}`;
             item.appendChild(name);
 
             const delBtn = document.createElement('button');
@@ -1245,7 +1288,59 @@ export class PropertyEditor {
                 label.textContent = key.toUpperCase();
                 row.appendChild(label);
 
-                if (key === 'orientation') {
+                if (key === 'name') {
+                    const input = document.createElement('input');
+                    input.type = 'text';
+                    input.style.background = '#252526';
+                    input.style.color = '#ccc';
+                    input.style.border = '1px solid #444';
+                    input.style.padding = '4px';
+                    input.style.fontSize = 'var(--font-sm)';
+                    input.value = String(value);
+                    input.onchange = () => {
+                        updatePrimVal(key, input.value);
+                    };
+                    row.appendChild(input);
+                } else if (key === 'subtractive') {
+                    const labelCheckbox = document.createElement('label');
+                    labelCheckbox.style.display = 'flex';
+                    labelCheckbox.style.alignItems = 'center';
+                    labelCheckbox.style.gap = '6px';
+                    labelCheckbox.style.fontSize = 'var(--font-sm)';
+                    labelCheckbox.style.color = '#ccc';
+                    labelCheckbox.style.cursor = 'pointer';
+
+                    const checkbox = document.createElement('input');
+                    checkbox.type = 'checkbox';
+                    checkbox.checked = !!value;
+                    checkbox.onchange = () => {
+                        updatePrimVal(key, checkbox.checked);
+                    };
+                    labelCheckbox.appendChild(checkbox);
+                    labelCheckbox.appendChild(document.createTextNode('Subtractive Shape'));
+                    row.innerHTML = '';
+                    row.appendChild(labelCheckbox);
+                } else if (key === 'voxelization_method') {
+                    const select = document.createElement('select');
+                    select.style.background = '#252526';
+                    select.style.color = '#ccc';
+                    select.style.border = '1px solid #444';
+                    select.style.padding = '4px';
+                    select.style.fontSize = 'var(--font-sm)';
+
+                    const opts = ['watertight_floodfill', 'watertight_raycast', 'thin_shell', 'winding_number'];
+                    opts.forEach(o => {
+                        const opt = document.createElement('option');
+                        opt.value = o;
+                        opt.text = o.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+                        if (o === value) opt.selected = true;
+                        select.appendChild(opt);
+                    });
+                    select.onchange = () => {
+                        updatePrimVal(key, select.value);
+                    };
+                    row.appendChild(select);
+                } else if (key === 'orientation') {
                     const select = document.createElement('select');
                     select.style.background = '#252526';
                     select.style.color = '#ccc';
@@ -1275,7 +1370,7 @@ export class PropertyEditor {
                     input.style.padding = '4px';
                     input.style.fontSize = 'var(--font-sm)';
                     input.value = String(value);
-                    input.oninput = () => {
+                    input.onchange = () => {
                         updatePrimVal(key, Number(input.value));
                     };
                     row.appendChild(input);
@@ -1980,7 +2075,8 @@ export class PropertyEditor {
             'colormap', 'refresh_rate', 'min_val', 'max_val', 'ambientLevel', 
             'specularIntensity', 'log_scale', 'auto_scale', 'show_grid', 
             'interpolate', 'lightingEnabled', 'aoEnabled', 'slices', 
-            'focusedSliceIndex', 'show_stl', 'stl_wireframe', 'stl_solids', 'stl_opacity'
+            'focusedSliceIndex', 'show_stl', 'stl_wireframe', 'stl_solids', 'stl_opacity',
+            'show_obstacles', 'obstacles_gridlines', 'obstacles_lighting', 'obstacles_opacity', 'obstacles_quantity'
         ];
 
         if (node.type === 'Telemetry3DViewport' && visualKeys.includes(key)) {
@@ -1989,7 +2085,7 @@ export class PropertyEditor {
             this.stateManager.updateNodeParameters(this.currentNodeId, updates);
         }
 
-        if (node.type === 'Telemetry3DViewport' && (key === 'slices' || key === 'refresh_rate')) {
+        if (node.type === 'Telemetry3DViewport' && (key === 'slices' || key === 'refresh_rate' || key === 'show_obstacles' || key === 'obstacles_quantity')) {
             const net = (window as any).networkManager;
             if (net && net.isConnected()) {
                 let targetModelId = node.id;
@@ -2000,10 +2096,21 @@ export class PropertyEditor {
                         break;
                     }
                 }
+                const showObstacles = key === 'show_obstacles' ? value : (node.parameters.show_obstacles === true);
+                const obstaclesQuantity = key === 'obstacles_quantity' ? value : (node.parameters.obstacles_quantity || 'pressure');
+                const slices = [...(key === 'slices' ? value : (node.parameters.slices || []))];
+                if (showObstacles) {
+                    slices.push({
+                        axis: 'obstacles',
+                        offset: 0.0,
+                        quantities: [obstaclesQuantity],
+                        stride: 1
+                    });
+                }
                 net.send({
                     command: "VIEW3D_CONFIG",
                     modelId: targetModelId,
-                    slices: key === 'slices' ? value : (node.parameters.slices || []),
+                    slices: slices,
                     refresh_rate: key === 'refresh_rate' ? Number(value) : Number(node.parameters.refresh_rate ?? 2.0)
                 });
             }

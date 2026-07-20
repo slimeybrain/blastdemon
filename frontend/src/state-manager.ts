@@ -1596,13 +1596,32 @@ export class StateManager {
                 stl_solids: true,
                 stl_opacity: 0.5,
                 show_gauges: true,
-                gauge_size: 0.03
+                gauge_size: 0.03,
+                show_obstacles: false,
+                obstacles_gridlines: true,
+                obstacles_lighting: true,
+                obstacles_opacity: 1.0,
+                obstacles_quantity: 'pressure'
             }
         };
 
         nodes.forEach(node => {
             if (!node.parameters) {
                 node.parameters = {};
+            }
+            if (node.type === 'PrimitiveGeometry3D') {
+                const prims = node.parameters.primitives || [];
+                prims.forEach((prim: any, idx: number) => {
+                    if (prim.name === undefined) {
+                        prim.name = `${prim.type.charAt(0).toUpperCase() + prim.type.slice(1)} ${idx + 1}`;
+                    }
+                    if (prim.subtractive === undefined) {
+                        prim.subtractive = false;
+                    }
+                    if (prim.voxelization_method === undefined) {
+                        prim.voxelization_method = 'watertight_floodfill';
+                    }
+                });
             }
             if (node.type === 'CFDSolver' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver3D') {
                 delete node.parameters['output_mode'];

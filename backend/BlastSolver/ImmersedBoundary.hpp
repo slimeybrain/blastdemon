@@ -76,6 +76,20 @@ void voxelize_stl(
     std::function<void(double)> progress_callback = nullptr
 );
 
+void voxelize_primitives(
+    const nlohmann::json& primitives_json,
+    const std::string& geometry_hash,
+    const std::string& voxelization_method,
+    std::vector<GeometryTile3D>& geom_pool,
+    int nx, int ny, int nz,
+    double cellSize,
+    double xmin, double ymin, double zmin,
+    int n_tiles_x, int n_tiles_y, int n_tiles_z,
+    const std::atomic<bool>* terminate_flag = nullptr,
+    std::function<void(double)> progress_callback = nullptr
+);
+
+
 HD_FUNC inline GeometryPayload pack_geometry_payload(bool is_boundary, float nx, float ny, float nz) {
     if (!is_boundary) return {0, 0, 0, false};
     float len = sqrtf(nx*nx + ny*ny + nz*nz);

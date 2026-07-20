@@ -202,15 +202,27 @@ export class Telemetry3DViewport {
                                     this.debugOverlay.innerHTML = `Load: OK (${(msg.vertices.length / 3).toFixed(0)} verts from model ${msg.modelId})`;
                                 }
                                 const verts = new Float32Array(msg.vertices);
+                                const flags = msg.subtractive_flags ? new Float32Array(msg.subtractive_flags) : null;
                                 this.worker.postMessage({
                                     type: 'setSTLGeometry',
-                                    data: { vertices: verts }
+                                    data: { vertices: verts, subtractive_flags: flags }
                                 });
                             } else {
                                 if (this.debugOverlay) {
                                     this.debugOverlay.innerHTML = `Load: ERROR (${msg.error})`;
                                 }
                                 console.error("[Viewport] Failed to load geometry:", msg.error);
+                            }
+                        } else if (msg.type === 'obstacles_mesh') {
+                            const myModelId = this.getCurrentModelId();
+                            if (msg.modelId && myModelId && msg.modelId !== myModelId) return;
+                            if (msg.vertices && msg.cells) {
+                                const verts = new Float32Array(msg.vertices);
+                                const cells = new Int32Array(msg.cells);
+                                this.worker.postMessage({
+                                    type: 'setObstaclesGeometry',
+                                    data: { vertices: verts, cells: cells }
+                                });
                             }
                         }
                     } catch (e) {}
@@ -388,6 +400,10 @@ export class Telemetry3DViewport {
         // Section 1.6: STL Geometry
         const stlSection = this.createSection(content, 'STL Boundary Mesh');
         this.buildSTLControls(stlSection);
+
+        // Section 1.65: Obstacle Surfaces
+        const obsSection = this.createSection(content, 'Obstacle Surfaces');
+        this.buildObstacleControls(obsSection);
  
         // Section 1.7: Virtual Gauges
         const gaugesSection = this.createSection(content, 'Virtual Gauges');
@@ -939,6 +955,14 @@ export class Telemetry3DViewport {
                     slices[index].max_val = range[1];
                     slices[index].auto_scale = true;
                 }
+
+                // Automatically disable interpolation for solid cells (discrete mask)
+                // and enable it for continuous physical quantities.
+                if (newQty === 'solid') {
+                    slices[index].interpolate = false;
+                } else {
+                    slices[index].interpolate = true;
+                }
             }
 
             this.propagateSliceQuantitySettings(slices, index, updates);
@@ -1005,6 +1029,35 @@ export class Telemetry3DViewport {
             const val = vpNode.parameters.stl_opacity ?? 0.5;
             stlOpacSlider.value = val.toString();
             if (stlOpacLabel) stlOpacLabel.innerHTML = `Opacity: ${Number(val).toFixed(2)}`;
+        }
+
+        // Obstacles Sync
+        const obsShowCb = document.getElementById(this.getElId('viewport-obs-show-cb')) as HTMLInputElement;
+        if (obsShowCb && document.activeElement !== obsShowCb) {
+            obsShowCb.checked = vpNode.parameters.show_obstacles === true;
+        }
+
+        const obsGridCb = document.getElementById(this.getElId('viewport-obs-grid-cb')) as HTMLInputElement;
+        if (obsGridCb && document.activeElement !== obsGridCb) {
+            obsGridCb.checked = vpNode.parameters.obstacles_gridlines !== false;
+        }
+
+        const obsLightCb = document.getElementById(this.getElId('viewport-obs-light-cb')) as HTMLInputElement;
+        if (obsLightCb && document.activeElement !== obsLightCb) {
+            obsLightCb.checked = vpNode.parameters.obstacles_lighting !== false;
+        }
+
+        const obsQtySel = document.getElementById(this.getElId('viewport-obs-qty-sel')) as HTMLSelectElement;
+        if (obsQtySel && obsQtySel.dataset.editing !== 'true' && document.activeElement !== obsQtySel) {
+            obsQtySel.value = vpNode.parameters.obstacles_quantity || 'pressure';
+        }
+
+        const obsOpacSlider = document.getElementById(this.getElId('viewport-obs-opacity-slider')) as HTMLInputElement;
+        const obsOpacLabel = obsOpacSlider?.parentElement?.querySelector('span') as HTMLElement;
+        if (obsOpacSlider && document.activeElement !== obsOpacSlider) {
+            const val = vpNode.parameters.obstacles_opacity ?? 1.0;
+            obsOpacSlider.value = String(val);
+            if (obsOpacLabel) obsOpacLabel.innerHTML = `Opacity: ${Number(val).toFixed(2)}`;
         }
 
         const showGauges = vpNode.parameters.show_gauges !== false;
@@ -1613,7 +1666,12 @@ export class Telemetry3DViewport {
             stlOpacity: vpNode.parameters.stl_opacity ?? 0.5,
             slices: vpNode.parameters.slices || [],
             focusedSliceIndex: vpNode.parameters.focusedSliceIndex ?? 0,
-            quantityRanges: vpNode.parameters.quantity_ranges || {}
+            quantityRanges: vpNode.parameters.quantity_ranges || {},
+            showObstacles: vpNode.parameters.show_obstacles === true,
+            obstaclesGridlines: vpNode.parameters.obstacles_gridlines !== false,
+            obstaclesLighting: vpNode.parameters.obstacles_lighting !== false,
+            obstaclesOpacity: vpNode.parameters.obstacles_opacity ?? 1.0,
+            obstaclesQuantity: vpNode.parameters.obstacles_quantity || 'pressure'
         };
 
         const cachedConfig = this.stateManager.getTelemetry(vpNode.id + "-config-3d");
@@ -1799,6 +1857,199 @@ export class Telemetry3DViewport {
                 this.worker.postMessage({ type: 'setConfig', data: { stlOpacity: Number(opacSlider.value) } });
             }
         };
+        opacWrap.appendChild(opacLabel);
+        opacWrap.appendChild(opacSlider);
+        parent.appendChild(opacWrap);
+    }
+
+    private buildObstacleControls(parent: HTMLElement) {
+        const vpNode = this.getViewportNode();
+        const initShow = vpNode ? (vpNode.parameters.show_obstacles === true) : false;
+        const initGrid = vpNode ? (vpNode.parameters.obstacles_gridlines !== false) : true;
+        const initLight = vpNode ? (vpNode.parameters.obstacles_lighting !== false) : true;
+        const initOpacity = vpNode ? (vpNode.parameters.obstacles_opacity ?? 1.0) : 1.0;
+        const initQty = vpNode ? (vpNode.parameters.obstacles_quantity || 'pressure') : 'pressure';
+
+        // Show Obstacles toggle
+        const showRow = document.createElement('label');
+        showRow.style.display = 'flex';
+        showRow.style.alignItems = 'center';
+        showRow.style.gap = '6px';
+        showRow.style.cursor = 'pointer';
+
+        const showCb = document.createElement('input');
+        showCb.type = 'checkbox';
+        showCb.id = this.getElId('viewport-obs-show-cb');
+        showCb.checked = initShow;
+        showCb.onchange = () => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { show_obstacles: showCb.checked });
+                this.worker.postMessage({ type: 'setConfig', data: { showObstacles: showCb.checked } });
+                // Re-send slices config because the virtual obstacles slice is appended dynamically based on show_obstacles
+                const net = (window as any).networkManager;
+                if (net && net.isConnected()) {
+                    let targetModelId = vp.id;
+                    const models = this.stateManager.getAppState().models;
+                    for (const [mid, m] of Object.entries(models)) {
+                        if (m.nodes.some(n => n.id === vp.id)) {
+                            targetModelId = mid;
+                            break;
+                        }
+                    }
+                    const obstaclesQuantity = vp.parameters.obstacles_quantity || 'pressure';
+                    const slices = [...(vp.parameters.slices || [])];
+                    if (showCb.checked) {
+                        slices.push({
+                            axis: 'obstacles',
+                            offset: 0.0,
+                            quantities: [obstaclesQuantity],
+                            stride: 1
+                        });
+                    }
+                    net.send({
+                        command: "VIEW3D_CONFIG",
+                        modelId: targetModelId,
+                        slices: slices,
+                        refresh_rate: Number(vp.parameters.refresh_rate ?? 2.0)
+                    });
+                }
+                this.syncControls(true);
+            }
+        };
+        this.bindEditingEvents(showCb);
+        showRow.appendChild(showCb);
+        showRow.appendChild(document.createTextNode('Show Obstacles'));
+        parent.appendChild(showRow);
+
+        // Gridlines toggle
+        const gridRow = document.createElement('label');
+        gridRow.style.display = 'flex';
+        gridRow.style.alignItems = 'center';
+        gridRow.style.gap = '6px';
+        gridRow.style.cursor = 'pointer';
+
+        const gridCb = document.createElement('input');
+        gridCb.type = 'checkbox';
+        gridCb.id = this.getElId('viewport-obs-grid-cb');
+        gridCb.checked = initGrid;
+        gridCb.onchange = () => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { obstacles_gridlines: gridCb.checked });
+                this.worker.postMessage({ type: 'setConfig', data: { obstaclesGridlines: gridCb.checked } });
+            }
+        };
+        this.bindEditingEvents(gridCb);
+        gridRow.appendChild(gridCb);
+        gridRow.appendChild(document.createTextNode('Show Gridlines'));
+        parent.appendChild(gridRow);
+
+        // Lighting toggle
+        const lightRow = document.createElement('label');
+        lightRow.style.display = 'flex';
+        lightRow.style.alignItems = 'center';
+        lightRow.style.gap = '6px';
+        lightRow.style.cursor = 'pointer';
+
+        const lightCb = document.createElement('input');
+        lightCb.type = 'checkbox';
+        lightCb.id = this.getElId('viewport-obs-light-cb');
+        lightCb.checked = initLight;
+        lightCb.onchange = () => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { obstacles_lighting: lightCb.checked });
+                this.worker.postMessage({ type: 'setConfig', data: { obstaclesLighting: lightCb.checked } });
+            }
+        };
+        this.bindEditingEvents(lightCb);
+        lightRow.appendChild(lightCb);
+        lightRow.appendChild(document.createTextNode('Enable Lighting'));
+        parent.appendChild(lightRow);
+
+        // Quantity selector
+        const qtyRow = document.createElement('div');
+        qtyRow.style.display = 'flex';
+        qtyRow.style.justifyContent = 'space-between';
+        qtyRow.style.alignItems = 'center';
+        qtyRow.style.marginTop = '4px';
+        qtyRow.innerHTML = '<span style="font-size:11px;color:#aaa">Quantity</span>';
+
+        const qtySel = document.createElement('select');
+        qtySel.id = this.getElId('viewport-obs-qty-sel');
+        this.applySelectStyle(qtySel);
+        qtySel.innerHTML = '<option value="pressure">Pressure</option><option value="density">Density</option><option value="velocity">Speed</option><option value="energy">Energy</option><option value="species1">Reacted (Alpha1)</option><option value="species2">Unreacted (Alpha2)</option><option value="species3">Air</option><option value="peak_overpressure">Peak Overpressure</option><option value="peak_impulse">Peak Impulse</option>';
+        qtySel.value = initQty;
+        qtySel.onchange = () => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { obstacles_quantity: qtySel.value });
+                this.worker.postMessage({ type: 'setConfig', data: { obstaclesQuantity: qtySel.value } });
+                // Re-send slice config so backend starts extracting the new quantity
+                const net = (window as any).networkManager;
+                if (net && net.isConnected()) {
+                    let targetModelId = vp.id;
+                    const models = this.stateManager.getAppState().models;
+                    for (const [mid, m] of Object.entries(models)) {
+                        if (m.nodes.some(n => n.id === vp.id)) {
+                            targetModelId = mid;
+                            break;
+                        }
+                    }
+                    const showObstacles = vp.parameters.show_obstacles === true;
+                    const slices = [...(vp.parameters.slices || [])];
+                    if (showObstacles) {
+                        slices.push({
+                            axis: 'obstacles',
+                            offset: 0.0,
+                            quantities: [qtySel.value],
+                            stride: 1
+                        });
+                    }
+                    net.send({
+                        command: "VIEW3D_CONFIG",
+                        modelId: targetModelId,
+                        slices: slices,
+                        refresh_rate: Number(vp.parameters.refresh_rate ?? 2.0)
+                    });
+                }
+                this.syncControls(true);
+            }
+        };
+        this.bindEditingEvents(qtySel);
+        qtyRow.appendChild(qtySel);
+        parent.appendChild(qtyRow);
+
+        // Opacity Slider
+        const opacWrap = document.createElement('div');
+        opacWrap.style.display = 'flex';
+        opacWrap.style.flexDirection = 'column';
+        opacWrap.style.gap = '2px';
+        opacWrap.style.marginTop = '4px';
+
+        const opacLabel = document.createElement('span');
+        opacLabel.style.fontSize = '8px';
+        opacLabel.style.color = '#aaa';
+        opacLabel.innerHTML = `Opacity: ${Number(initOpacity).toFixed(2)}`;
+
+        const opacSlider = document.createElement('input');
+        opacSlider.type = 'range';
+        opacSlider.id = this.getElId('viewport-obs-opacity-slider');
+        opacSlider.min = '0';
+        opacSlider.max = '1';
+        opacSlider.step = '0.05';
+        opacSlider.style.width = '100%';
+        opacSlider.value = String(initOpacity);
+        opacSlider.oninput = () => {
+            opacLabel.innerHTML = `Opacity: ${Number(opacSlider.value).toFixed(2)}`;
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { obstacles_opacity: Number(opacSlider.value) });
+                this.worker.postMessage({ type: 'setConfig', data: { obstaclesOpacity: Number(opacSlider.value) } });
+            }
+        };
+        this.bindEditingEvents(opacSlider);
         opacWrap.appendChild(opacLabel);
         opacWrap.appendChild(opacSlider);
         parent.appendChild(opacWrap);

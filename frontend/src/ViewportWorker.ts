@@ -117,9 +117,63 @@ vec3 colormap_grayscale(float t) {
     return vec3(t, t, t);
 }
 
+vec3 getColormapColor(float t, int cmap) {
+    if (cmap == 1) return colormap_viridis(t);
+    if (cmap == 2) return colormap_rainbow(t);
+    if (cmap == 3) return colormap_coolwarm(t);
+    if (cmap == 4) return colormap_cividis(t);
+    if (cmap == 5) return colormap_grayscale(t);
+    return colormap_plasma(t);
+}
+
+float getT(float raw, float minVal, float maxVal, bool useLogScale) {
+    float t;
+    float denom = maxVal - minVal;
+    if (denom < 1e-5) denom = 1e-5;
+    if (useLogScale) {
+        float logMin = log(max(minVal, 1e-5));
+        float logMax = log(max(maxVal, 1e-5));
+        float logVal = log(max(raw, 1e-5));
+        float logDenom = logMax - logMin;
+        if (logDenom < 1e-5) logDenom = 1e-5;
+        t = clamp((logVal - logMin) / logDenom, 0.0, 1.0);
+    } else {
+        t = clamp((raw - minVal) / denom, 0.0, 1.0);
+    }
+    return t;
+}
 
 void main() {
     if (uIsWireframe > 0) {
+        if (uIsWireframe >= 9 && uIsWireframe <= 11) {
+            if (uIsWireframe == 10) {
+                outColor = vec4(0.0, 0.0, 0.0, uAlpha);
+                return;
+            }
+            float val = vSliceSize.y;
+            float t = getT(val, uMin, uMax, uUseLogScale);
+            vec3 col = getColormapColor(t, uColormap);
+            vec4 baseColor = vec4(col, uAlpha);
+            
+            if (uIsWireframe == 9 && uEnableLighting) {
+                vec3 viewPos3 = vViewPos.xyz;
+                vec3 normal = normalize(cross(dFdx(viewPos3), dFdy(viewPos3)));
+                vec3 lightDir = vec3(0.0, 0.0, 1.0);
+                float diff = max(dot(normal, lightDir), 0.0);
+                vec3 reflectDir = reflect(-lightDir, normal);
+                float spec = pow(max(dot(reflectDir, vec3(0.0, 0.0, 1.0)), 0.0), 16.0);
+                float ao = 1.0;
+                if (uEnableAO) {
+                    ao = pow(max(normal.z, 0.0), 0.5);
+                }
+                vec3 lit = baseColor.rgb * (uAmbientLevel + 0.7 * diff) + vec3(1.0) * (uSpecularLevel * spec);
+                outColor = vec4(lit * ao, baseColor.a);
+            } else {
+                outColor = baseColor;
+            }
+            return;
+        }
+
         if (uIsWireframe == 1) {
             outColor = vec4(0.3, 0.3, 0.4, 0.8);
             return;
@@ -159,6 +213,8 @@ void main() {
             vec4 baseColor = vec4(0.35, 0.5, 0.75, uAlpha);
             if (uIsWireframe == 8) {
                 baseColor = vec4(1.0, 0.66, 0.0, 1.0);
+            } else if (vSliceSize.y > 0.5) {
+                baseColor = vec4(1.0, 0.2, 0.2, uAlpha * 0.4);
             }
             
             if (uIsWireframe == 5 || uIsWireframe == 8) {
@@ -190,6 +246,9 @@ void main() {
             
             // Wireframe color: cyan/blue-grey
             vec4 wireColor = vec4(0.0, 0.8, 1.0, 0.8);
+            if (vSliceSize.y > 0.5) {
+                wireColor = vec4(1.0, 0.1, 0.1, 0.8);
+            }
             
             if (uIsWireframe == 6) {
                 if (edgeFactor > 0.99) discard;
@@ -221,32 +280,42 @@ void main() {
         }
         return;
     }
-    vec2 uv = vTexCoord;
-    if (!uInterpolate) {
-        vec2 texel = floor(vTexCoord * vSliceSize);
-        uv = (texel + vec2(0.5)) / vSliceSize;
-    }
-    float raw = texture(uTexture, uv).r;
-    float t;
-    float denom = uMax - uMin;
-    if (denom < 1e-5) denom = 1e-5;
-    if (uUseLogScale) {
-        float logMin = log(max(uMin, 1e-5));
-        float logMax = log(max(uMax, 1e-5));
-        float logVal = log(max(raw, 1e-5));
-        float logDenom = logMax - logMin;
-        if (logDenom < 1e-5) logDenom = 1e-5;
-        t = clamp((logVal - logMin) / logDenom, 0.0, 1.0);
-    } else {
-        t = clamp((raw - uMin) / denom, 0.0, 1.0);
-    }
     vec3 color;
-    if (uColormap == 1) color = colormap_viridis(t);
-    else if (uColormap == 2) color = colormap_rainbow(t);
-    else if (uColormap == 3) color = colormap_coolwarm(t);
-    else if (uColormap == 4) color = colormap_cividis(t);
-    else if (uColormap == 5) color = colormap_grayscale(t);
-    else color = colormap_plasma(t);
+    if (!uInterpolate) {
+        vec2 texel = vTexCoord * vSliceSize - 0.5;
+        vec2 iTexel = floor(texel);
+        vec2 f = fract(texel);
+        vec2 df = fwidth(texel);
+        vec2 w = clamp((f - vec2(0.5)) / max(df, vec2(1e-5)) + vec2(0.5), 0.0, 1.0);
+
+        vec2 uv00 = (iTexel + vec2(0.5, 0.5)) / vSliceSize;
+        vec2 uv10 = (iTexel + vec2(1.5, 0.5)) / vSliceSize;
+        vec2 uv01 = (iTexel + vec2(0.5, 1.5)) / vSliceSize;
+        vec2 uv11 = (iTexel + vec2(1.5, 1.5)) / vSliceSize;
+
+        float r00 = texture(uTexture, uv00).r;
+        float r10 = texture(uTexture, uv10).r;
+        float r01 = texture(uTexture, uv01).r;
+        float r11 = texture(uTexture, uv11).r;
+
+        float t00 = getT(r00, uMin, uMax, uUseLogScale);
+        float t10 = getT(r10, uMin, uMax, uUseLogScale);
+        float t01 = getT(r01, uMin, uMax, uUseLogScale);
+        float t11 = getT(r11, uMin, uMax, uUseLogScale);
+
+        vec3 c00 = getColormapColor(t00, uColormap);
+        vec3 c10 = getColormapColor(t10, uColormap);
+        vec3 c01 = getColormapColor(t01, uColormap);
+        vec3 c11 = getColormapColor(t11, uColormap);
+
+        vec3 c0 = mix(c00, c10, w.x);
+        vec3 c1 = mix(c01, c11, w.x);
+        color = mix(c0, c1, w.y);
+    } else {
+        float raw = texture(uTexture, vTexCoord).r;
+        float t = getT(raw, uMin, uMax, uUseLogScale);
+        color = getColormapColor(t, uColormap);
+    }
     
     vec4 finalColor = vec4(color, uAlpha);
     if (uShowCellEdges) {
@@ -297,6 +366,7 @@ void main() {
 `;
 
 const FS_SOURCE_1 = `
+#extension GL_OES_standard_derivatives : enable
 precision highp float;
 varying vec2 vTexCoord;
 varying vec2 vSliceSize;
@@ -378,9 +448,66 @@ vec3 colormap_grayscale(float t) {
     return vec3(t, t, t);
 }
 
+vec3 getColormapColor(float t, int cmap) {
+    if (cmap == 1) return colormap_viridis(t);
+    if (cmap == 2) return colormap_rainbow(t);
+    if (cmap == 3) return colormap_coolwarm(t);
+    if (cmap == 4) return colormap_cividis(t);
+    if (cmap == 5) return colormap_grayscale(t);
+    return colormap_plasma(t);
+}
+
+float getT(float raw, float minVal, float maxVal, bool useLogScale) {
+    float t;
+    float denom = maxVal - minVal;
+    if (denom < 1e-5) denom = 1e-5;
+    if (useLogScale) {
+        float logMin = log(max(minVal, 1e-5));
+        float logMax = log(max(maxVal, 1e-5));
+        float logVal = log(max(raw, 1e-5));
+        float logDenom = logMax - logMin;
+        if (logDenom < 1e-5) logDenom = 1e-5;
+        t = clamp((logVal - logMin) / logDenom, 0.0, 1.0);
+    } else {
+        t = clamp((raw - minVal) / denom, 0.0, 1.0);
+    }
+    return t;
+}
 
 void main() {
     if (uIsWireframe > 0) {
+        if (uIsWireframe >= 9 && uIsWireframe <= 11) {
+            if (uIsWireframe == 10) {
+                gl_FragColor = vec4(0.0, 0.0, 0.0, uAlpha);
+                return;
+            }
+            float val = vSliceSize.y;
+            float t = getT(val, uMin, uMax, uUseLogScale);
+            vec3 col = getColormapColor(t, uColormap);
+            vec4 baseColor = vec4(col, uAlpha);
+            
+            if (uIsWireframe == 9 && uEnableLighting) {
+                vec3 viewPos3 = vViewPos.xyz;
+                vec3 normal = vec3(0.0, 0.0, 1.0);
+                #ifdef GL_OES_standard_derivatives
+                normal = normalize(cross(dFdx(viewPos3), dFdy(viewPos3)));
+                #endif
+                vec3 lightDir = vec3(0.0, 0.0, 1.0);
+                float diff = max(dot(normal, lightDir), 0.0);
+                vec3 reflectDir = reflect(-lightDir, normal);
+                float spec = pow(max(dot(reflectDir, vec3(0.0, 0.0, 1.0)), 0.0), 16.0);
+                float ao = 1.0;
+                if (uEnableAO) {
+                    ao = pow(max(normal.z, 0.0), 0.5);
+                }
+                vec3 lit = baseColor.rgb * (uAmbientLevel + 0.7 * diff) + vec3(1.0) * (uSpecularLevel * spec);
+                gl_FragColor = vec4(lit * ao, baseColor.a);
+            } else {
+                gl_FragColor = baseColor;
+            }
+            return;
+        }
+
         if (uIsWireframe == 1) {
             gl_FragColor = vec4(0.3, 0.3, 0.4, 0.8);
             return;
@@ -491,32 +618,46 @@ void main() {
         }
         return;
     }
-    vec2 uv = vTexCoord;
-    if (!uInterpolate) {
-        vec2 texel = floor(vTexCoord * vSliceSize);
-        uv = (texel + vec2(0.5)) / vSliceSize;
-    }
-    float raw = texture2D(uTexture, uv).r;
-    float t;
-    float denom = uMax - uMin;
-    if (denom < 1e-5) denom = 1e-5;
-    if (uUseLogScale) {
-        float logMin = log(max(uMin, 1e-5));
-        float logMax = log(max(uMax, 1e-5));
-        float logVal = log(max(raw, 1e-5));
-        float logDenom = logMax - logMin;
-        if (logDenom < 1e-5) logDenom = 1e-5;
-        t = clamp((logVal - logMin) / logDenom, 0.0, 1.0);
-    } else {
-        t = clamp((raw - uMin) / denom, 0.0, 1.0);
-    }
     vec3 color;
-    if (uColormap == 1) color = colormap_viridis(t);
-    else if (uColormap == 2) color = colormap_rainbow(t);
-    else if (uColormap == 3) color = colormap_coolwarm(t);
-    else if (uColormap == 4) color = colormap_cividis(t);
-    else if (uColormap == 5) color = colormap_grayscale(t);
-    else color = colormap_plasma(t);
+    if (!uInterpolate) {
+        vec2 texel = vTexCoord * vSliceSize - 0.5;
+        vec2 iTexel = floor(texel);
+        vec2 f = fract(texel);
+        #ifdef GL_OES_standard_derivatives
+        vec2 df = fwidth(texel);
+        vec2 w = clamp((f - vec2(0.5)) / max(df, vec2(1e-5)) + vec2(0.5), 0.0, 1.0);
+        #else
+        vec2 w = step(0.5, f);
+        #endif
+
+        vec2 uv00 = (iTexel + vec2(0.5, 0.5)) / vSliceSize;
+        vec2 uv10 = (iTexel + vec2(1.5, 0.5)) / vSliceSize;
+        vec2 uv01 = (iTexel + vec2(0.5, 1.5)) / vSliceSize;
+        vec2 uv11 = (iTexel + vec2(1.5, 1.5)) / vSliceSize;
+
+        float r00 = texture2D(uTexture, uv00).r;
+        float r10 = texture2D(uTexture, uv10).r;
+        float r01 = texture2D(uTexture, uv01).r;
+        float r11 = texture2D(uTexture, uv11).r;
+
+        float t00 = getT(r00, uMin, uMax, uUseLogScale);
+        float t10 = getT(r10, uMin, uMax, uUseLogScale);
+        float t01 = getT(r01, uMin, uMax, uUseLogScale);
+        float t11 = getT(r11, uMin, uMax, uUseLogScale);
+
+        vec3 c00 = getColormapColor(t00, uColormap);
+        vec3 c10 = getColormapColor(t10, uColormap);
+        vec3 c01 = getColormapColor(t01, uColormap);
+        vec3 c11 = getColormapColor(t11, uColormap);
+
+        vec3 c0 = mix(c00, c10, w.x);
+        vec3 c1 = mix(c01, c11, w.x);
+        color = mix(c0, c1, w.y);
+    } else {
+        float raw = texture2D(uTexture, vTexCoord).r;
+        float t = getT(raw, uMin, uMax, uUseLogScale);
+        color = getColormapColor(t, uColormap);
+    }
     
     vec4 finalColor = vec4(color, uAlpha);
     if (uShowCellEdges) {
@@ -653,6 +794,41 @@ fn colormap_grayscale(t: f32) -> vec3<f32> {
     return vec3<f32>(t, t, t);
 }
 
+fn getColormapColor(t: f32, cmap: f32) -> vec3<f32> {
+    if (cmap > 4.5) {
+        return colormap_grayscale(t);
+    } else if (cmap > 3.5) {
+        return colormap_cividis(t);
+    } else if (cmap > 2.5) {
+        return colormap_coolwarm(t);
+    } else if (cmap > 1.5) {
+        return colormap_rainbow(t);
+    } else if (cmap > 0.5) {
+        return colormap_viridis(t);
+    }
+    return colormap_plasma(t);
+}
+
+fn getT(raw: f32, minVal: f32, maxVal: f32, useLogScale: f32) -> f32 {
+    var t = 0.0;
+    var denom = maxVal - minVal;
+    if (denom < 1e-5) {
+        denom = 1e-5;
+    }
+    if (useLogScale > 0.5) {
+        let logMin = log(max(minVal, 1e-5));
+        let logMax = log(max(maxVal, 1e-5));
+        let logVal = log(max(raw, 1e-5));
+        var logDenom = logMax - logMin;
+        if (logDenom < 1e-5) {
+            logDenom = 1e-5;
+        }
+        t = clamp((logVal - logMin) / logDenom, 0.0, 1.0);
+    } else {
+        t = clamp((raw - minVal) / denom, 0.0, 1.0);
+    }
+    return t;
+}
 
 @fragment
 fn fs_main(@location(0) texCoord: vec2<f32>, @location(1) sliceSize: vec2<f32>, @location(2) vLocalPos: vec3<f32>, @location(3) vViewPos: vec4<f32>) -> @location(0) vec4<f32> {
@@ -692,7 +868,10 @@ fn fs_main(@location(0) texCoord: vec2<f32>, @location(1) sliceSize: vec2<f32>, 
 
         // STL Geometry (5.0 = Solid, 6.0 = Wireframe, 7.0 = Solid + Wireframe)
         if (uniforms.isWireframe >= 4.5 && uniforms.isWireframe < 7.5) {
-            let baseColor = vec4<f32>(0.35, 0.5, 0.75, uniforms.alpha);
+            var baseColor = vec4<f32>(0.35, 0.5, 0.75, uniforms.alpha);
+            if (sliceSize.y > 0.5) {
+                baseColor = vec4<f32>(1.0, 0.2, 0.2, uniforms.alpha * 0.4);
+            }
             
             if (uniforms.isWireframe < 5.5) {
                 // Solid only (5.0)
@@ -720,7 +899,10 @@ fn fs_main(@location(0) texCoord: vec2<f32>, @location(1) sliceSize: vec2<f32>, 
             let a3 = smoothstep(vec3<f32>(0.0, 0.0, 0.0), d * 1.2, barycentric);
             let edgeFactor = min(min(a3.x, a3.y), a3.z);
             
-            let wireColor = vec4<f32>(0.0, 0.8, 1.0, 0.8);
+            var wireColor = vec4<f32>(0.0, 0.8, 1.0, 0.8);
+            if (sliceSize.y > 0.5) {
+                wireColor = vec4<f32>(1.0, 0.1, 0.1, 0.8);
+            }
             
             if (uniforms.isWireframe < 6.5) {
                 // Wireframe only (6.0)
@@ -749,42 +931,41 @@ fn fs_main(@location(0) texCoord: vec2<f32>, @location(1) sliceSize: vec2<f32>, 
             return mix(wireColor, litColor, edgeFactor);
         }
     }
-    var uv = texCoord;
-    if (uniforms.interpolate < 0.5) {
-        let texel = floor(texCoord * sliceSize);
-        uv = (texel + vec2<f32>(0.5, 0.5)) / sliceSize;
-    }
-    let raw = textureSample(uTexture, uSampler, uv).r;
-    var t = 0.0;
-    var denom = uniforms.maxVal - uniforms.minVal;
-    if (denom < 1e-5) {
-        denom = 1e-5;
-    }
-    if (uniforms.useLogScale > 0.5) {
-        let logMin = log(max(uniforms.minVal, 1e-5));
-        let logMax = log(max(uniforms.maxVal, 1e-5));
-        let logVal = log(max(raw, 1e-5));
-        var logDenom = logMax - logMin;
-        if (logDenom < 1e-5) {
-            logDenom = 1e-5;
-        }
-        t = clamp((logVal - logMin) / logDenom, 0.0, 1.0);
-    } else {
-        t = clamp((raw - uniforms.minVal) / denom, 0.0, 1.0);
-    }
     var color: vec3<f32>;
-    if (uniforms.colormap > 4.5) {
-        color = colormap_grayscale(t);
-    } else if (uniforms.colormap > 3.5) {
-        color = colormap_cividis(t);
-    } else if (uniforms.colormap > 2.5) {
-        color = colormap_coolwarm(t);
-    } else if (uniforms.colormap > 1.5) {
-        color = colormap_rainbow(t);
-    } else if (uniforms.colormap > 0.5) {
-        color = colormap_viridis(t);
+    if (uniforms.interpolate < 0.5) {
+        let texel = texCoord * sliceSize - vec2<f32>(0.5, 0.5);
+        let iTexel = floor(texel);
+        let fTexel = fract(texel);
+        let df = fwidth(texel);
+        let w = clamp((fTexel - vec2<f32>(0.5, 0.5)) / max(df, vec2<f32>(1e-5, 1e-5)) + vec2<f32>(0.5, 0.5), vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
+
+        let uv00 = (iTexel + vec2<f32>(0.5, 0.5)) / sliceSize;
+        let uv10 = (iTexel + vec2<f32>(1.5, 0.5)) / sliceSize;
+        let uv01 = (iTexel + vec2<f32>(0.5, 1.5)) / sliceSize;
+        let uv11 = (iTexel + vec2<f32>(1.5, 1.5)) / sliceSize;
+
+        let r00 = textureSample(uTexture, uSampler, uv00).r;
+        let r10 = textureSample(uTexture, uSampler, uv10).r;
+        let r01 = textureSample(uTexture, uSampler, uv01).r;
+        let r11 = textureSample(uTexture, uSampler, uv11).r;
+
+        let t00 = getT(r00, uniforms.minVal, uniforms.maxVal, uniforms.useLogScale);
+        let t10 = getT(r10, uniforms.minVal, uniforms.maxVal, uniforms.useLogScale);
+        let t01 = getT(r01, uniforms.minVal, uniforms.maxVal, uniforms.useLogScale);
+        let t11 = getT(r11, uniforms.minVal, uniforms.maxVal, uniforms.useLogScale);
+
+        let c00 = getColormapColor(t00, uniforms.colormap);
+        let c10 = getColormapColor(t10, uniforms.colormap);
+        let c01 = getColormapColor(t01, uniforms.colormap);
+        let c11 = getColormapColor(t11, uniforms.colormap);
+
+        let c0 = mix(c00, c10, w.x);
+        let c1 = mix(c01, c11, w.x);
+        color = mix(c0, c1, w.y);
     } else {
-        color = colormap_plasma(t);
+        let raw = textureSample(uTexture, uSampler, texCoord).r;
+        let t = getT(raw, uniforms.minVal, uniforms.maxVal, uniforms.useLogScale);
+        color = getColormapColor(t, uniforms.colormap);
     }
 
     var finalColor = vec4<f32>(color, uniforms.alpha);
@@ -835,6 +1016,8 @@ let gpuSlicePipeline: any = null;
 let gpuLinePipeline: any = null;
 let gpuSTLLinePipeline: any = null;
 let gpuSampler: any = null;
+let gpuSamplerLinear: any = null;
+let gpuSamplerNearest: any = null;
 let gpuUniformBuffer: any = null;
 let gpuUniformBufferWF: any = null;
 let gpuSTLUniformSolid: any = null;
@@ -883,6 +1066,7 @@ let interpolate = false;
 
 // STL Geometry Buffers & Settings
 let rawSTLVertices: Float32Array | null = null;
+let rawSTLSubtractiveFlags: Float32Array | null = null;
 let transformedSTLVertices: Float32Array | null = null;
 let gpuSTLBuffer: any = null;
 let gpuSTLIndexBuffer: any = null;
@@ -904,6 +1088,29 @@ let gaugesCount = 0;
 let gpuGaugesBuffer: any = null;
 let gpuGaugesCount = 0;
 let gpuUniformBufferGauges: any = null;
+
+// Obstacles Settings
+let showObstacles = false;
+let obstaclesGridlines = true;
+let obstaclesLighting = true;
+let obstaclesOpacity = 1.0;
+let obstaclesQuantity = 'pressure';
+
+// Obstacles Mesh Buffers
+let rawObstacleVertices: Float32Array | null = null;
+let rawObstacleCells: Int32Array | null = null;
+let obstacleBuffer: WebGLBuffer | null = null;
+let obstacleWireIndexBuffer: WebGLBuffer | null = null;
+let obstacleTriIndexBuffer: WebGLBuffer | null = null;
+let obstacleTriIndexCount = 0;
+let obstacleWireIndexCount = 0;
+let latestObstaclesData: Float32Array | null = null;
+
+let gpuObstaclesVertexBuffer: any = null;
+let gpuObstaclesTriIndexBuffer: any = null;
+let gpuObstaclesWireIndexBuffer: any = null;
+let gpuUniformBufferObstaclesSolid: any = null;
+let gpuUniformBufferObstaclesWire: any = null;
 
 interface CachedSlice {
     axis: number;
@@ -1115,7 +1322,8 @@ function updateSTLGeometry() {
             data[i * 7 + 4] = 0.0;
             data[i * 7 + 5] = 1.0;
         }
-        data[i * 7 + 6] = 0.0;
+        // Use the subtractive flag if provided
+        data[i * 7 + 6] = (rawSTLSubtractiveFlags && i < rawSTLSubtractiveFlags.length) ? rawSTLSubtractiveFlags[i] : 0.0;
     }
 
     transformedSTLVertices = data;
@@ -1162,6 +1370,217 @@ function updateSTLGeometry() {
         }
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, stlIndexBuffer);
         gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
+    }
+}
+
+function rebuildObstaclesGL() {
+    if (!gl || !rawObstacleVertices || !rawObstacleCells) return;
+
+    const numFaces = rawObstacleVertices.length / 12;
+    const vertexData = new Float32Array(numFaces * 4 * 7);
+
+    for (let f = 0; f < numFaces; ++f) {
+        const val = latestObstaclesData ? latestObstaclesData[f] : 0.0;
+        const corners = [
+            [0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]
+        ];
+
+        for (let v = 0; v < 4; ++v) {
+            const vIdx = f * 4 + v;
+            const dest = vIdx * 7;
+
+            // position
+            vertexData[dest + 0] = rawObstacleVertices[f * 12 + v * 3 + 0];
+            vertexData[dest + 1] = rawObstacleVertices[f * 12 + v * 3 + 1];
+            vertexData[dest + 2] = rawObstacleVertices[f * 12 + v * 3 + 2];
+
+            // texCoord / barycentric
+            vertexData[dest + 3] = corners[v][0];
+            vertexData[dest + 4] = corners[v][1];
+
+            // sliceSize
+            vertexData[dest + 5] = 0.0;
+            vertexData[dest + 6] = val;
+        }
+    }
+
+    if (!obstacleBuffer) {
+        obstacleBuffer = gl.createBuffer();
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, obstacleBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, vertexData, gl.STATIC_DRAW);
+
+    if (!obstacleTriIndexBuffer) {
+        obstacleTriIndexBuffer = gl.createBuffer();
+        const indices = new Uint32Array(numFaces * 6);
+        for (let f = 0; f < numFaces; ++f) {
+            const v0 = f * 4 + 0;
+            const v1 = f * 4 + 1;
+            const v2 = f * 4 + 2;
+            const v3 = f * 4 + 3;
+
+            indices[f * 6 + 0] = v0;
+            indices[f * 6 + 1] = v1;
+            indices[f * 6 + 2] = v2;
+
+            indices[f * 6 + 3] = v0;
+            indices[f * 6 + 4] = v2;
+            indices[f * 6 + 5] = v3;
+        }
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, obstacleTriIndexBuffer);
+        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
+        obstacleTriIndexCount = numFaces * 6;
+    }
+
+    if (!obstacleWireIndexBuffer) {
+        obstacleWireIndexBuffer = gl.createBuffer();
+        const indices = new Uint32Array(numFaces * 8);
+        for (let f = 0; f < numFaces; ++f) {
+            const v0 = f * 4 + 0;
+            const v1 = f * 4 + 1;
+            const v2 = f * 4 + 2;
+            const v3 = f * 4 + 3;
+
+            indices[f * 8 + 0] = v0; indices[f * 8 + 1] = v1;
+            indices[f * 8 + 2] = v1; indices[f * 8 + 3] = v2;
+            indices[f * 8 + 4] = v2; indices[f * 8 + 5] = v3;
+            indices[f * 8 + 6] = v3; indices[f * 8 + 7] = v0;
+        }
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, obstacleWireIndexBuffer);
+        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
+        obstacleWireIndexCount = numFaces * 8;
+    }
+}
+
+function rebuildObstaclesWebGPU() {
+    if (!gpuDevice || !rawObstacleVertices) return;
+
+    const numFaces = rawObstacleVertices.length / 12;
+    const vertexData = new Float32Array(numFaces * 4 * 7);
+
+    for (let f = 0; f < numFaces; ++f) {
+        const val = latestObstaclesData ? latestObstaclesData[f] : 0.0;
+        const corners = [
+            [0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]
+        ];
+
+        for (let v = 0; v < 4; ++v) {
+            const vIdx = f * 4 + v;
+            const dest = vIdx * 7;
+
+            // position
+            vertexData[dest + 0] = rawObstacleVertices[f * 12 + v * 3 + 0];
+            vertexData[dest + 1] = rawObstacleVertices[f * 12 + v * 3 + 1];
+            vertexData[dest + 2] = rawObstacleVertices[f * 12 + v * 3 + 2];
+
+            // texCoord / barycentric
+            vertexData[dest + 3] = corners[v][0];
+            vertexData[dest + 4] = corners[v][1];
+
+            // sliceSize
+            vertexData[dest + 5] = 0.0;
+            vertexData[dest + 6] = val;
+        }
+    }
+
+    if (gpuObstaclesVertexBuffer) gpuObstaclesVertexBuffer.destroy();
+    gpuObstaclesVertexBuffer = gpuDevice.createBuffer({
+        size: vertexData.byteLength,
+        usage: 32 | 8,
+        mappedAtCreation: true
+    });
+    new Float32Array(gpuObstaclesVertexBuffer.getMappedRange()).set(vertexData);
+    gpuObstaclesVertexBuffer.unmap();
+
+    if (!gpuObstaclesTriIndexBuffer) {
+        const indices = new Uint32Array(numFaces * 6);
+        for (let f = 0; f < numFaces; ++f) {
+            const v0 = f * 4 + 0;
+            const v1 = f * 4 + 1;
+            const v2 = f * 4 + 2;
+            const v3 = f * 4 + 3;
+
+            indices[f * 6 + 0] = v0;
+            indices[f * 6 + 1] = v1;
+            indices[f * 6 + 2] = v2;
+
+            indices[f * 6 + 3] = v0;
+            indices[f * 6 + 4] = v2;
+            indices[f * 6 + 5] = v3;
+        }
+        gpuObstaclesTriIndexBuffer = gpuDevice.createBuffer({
+            size: indices.byteLength,
+            usage: 16 | 8,
+            mappedAtCreation: true
+        });
+        new Uint32Array(gpuObstaclesTriIndexBuffer.getMappedRange()).set(indices);
+        gpuObstaclesTriIndexBuffer.unmap();
+        obstacleTriIndexCount = numFaces * 6;
+    }
+
+    if (!gpuObstaclesWireIndexBuffer) {
+        const indices = new Uint32Array(numFaces * 8);
+        for (let f = 0; f < numFaces; ++f) {
+            const v0 = f * 4 + 0;
+            const v1 = f * 4 + 1;
+            const v2 = f * 4 + 2;
+            const v3 = f * 4 + 3;
+
+            indices[f * 8 + 0] = v0; indices[f * 8 + 1] = v1;
+            indices[f * 8 + 2] = v1; indices[f * 8 + 3] = v2;
+            indices[f * 8 + 4] = v2; indices[f * 8 + 5] = v3;
+            indices[f * 8 + 6] = v3; indices[f * 8 + 7] = v0;
+        }
+        gpuObstaclesWireIndexBuffer = gpuDevice.createBuffer({
+            size: indices.byteLength,
+            usage: 16 | 8,
+            mappedAtCreation: true
+        });
+        new Uint32Array(gpuObstaclesWireIndexBuffer.getMappedRange()).set(indices);
+        gpuObstaclesWireIndexBuffer.unmap();
+        obstacleWireIndexCount = numFaces * 8;
+    }
+}
+
+function updateObstaclesGeometry() {
+    if (!rawObstacleVertices || rawObstacleVertices.length === 0) {
+        if (gpuObstaclesVertexBuffer) {
+            gpuObstaclesVertexBuffer.destroy();
+            gpuObstaclesVertexBuffer = null;
+        }
+        if (gpuObstaclesTriIndexBuffer) {
+            gpuObstaclesTriIndexBuffer.destroy();
+            gpuObstaclesTriIndexBuffer = null;
+        }
+        if (gpuObstaclesWireIndexBuffer) {
+            gpuObstaclesWireIndexBuffer.destroy();
+            gpuObstaclesWireIndexBuffer = null;
+        }
+        if (gl) {
+            if (obstacleBuffer) {
+                gl.deleteBuffer(obstacleBuffer);
+                obstacleBuffer = null;
+            }
+            if (obstacleTriIndexBuffer) {
+                gl.deleteBuffer(obstacleTriIndexBuffer);
+                obstacleTriIndexBuffer = null;
+            }
+            if (obstacleWireIndexBuffer) {
+                gl.deleteBuffer(obstacleWireIndexBuffer);
+                obstacleWireIndexBuffer = null;
+            }
+        }
+        obstacleTriIndexCount = 0;
+        obstacleWireIndexCount = 0;
+        return;
+    }
+
+    if (gl) {
+        rebuildObstaclesGL();
+    }
+
+    if (isWebGPU && gpuDevice) {
+        rebuildObstaclesWebGPU();
     }
 }
 
@@ -1430,10 +1849,15 @@ async function initContext(canvas: OffscreenCanvas) {
                         }
                     });
 
-                    gpuSampler = gpuDevice.createSampler({
+                    gpuSamplerLinear = gpuDevice.createSampler({
                         magFilter: isFilterable ? 'linear' : 'nearest',
                         minFilter: isFilterable ? 'linear' : 'nearest'
                     });
+                    gpuSamplerNearest = gpuDevice.createSampler({
+                        magFilter: 'nearest',
+                        minFilter: 'nearest'
+                    });
+                    gpuSampler = gpuSamplerLinear;
 
                     // GPUBufferUsage: UNIFORM = 64, COPY_DST = 8
                     gpuUniformBuffer = gpuDevice.createBuffer({
@@ -1886,13 +2310,18 @@ function handleFrame(buffer: ArrayBuffer) {
         const useAxis = axis;
         const useOffset = zOff;
 
-        cachedSlices.push({
-            axis: useAxis,
-            offset: useOffset,
-            w,
-            h,
-            data: new Float32Array(floatData)
-        });
+        if (useAxis === 3) {
+            latestObstaclesData = new Float32Array(floatData);
+            updateObstaclesGeometry();
+        } else {
+            cachedSlices.push({
+                axis: useAxis,
+                offset: useOffset,
+                w,
+                h,
+                data: new Float32Array(floatData)
+            });
+        }
         cacheOffset = dataStart + (w * h * 4);
     }
 
@@ -2003,6 +2432,7 @@ function handleFrame(buffer: ArrayBuffer) {
 
             if (activeSlicesWebGPU[i]) {
                 slice = activeSlicesWebGPU[i];
+                let recreateBindGroup = false;
                 if (slice.w !== w || slice.h !== h) {
                     slice.gpuTexture.destroy();
                     slice.gpuTexture = gpuDevice.createTexture({
@@ -2012,20 +2442,22 @@ function handleFrame(buffer: ArrayBuffer) {
                     });
                     slice.gpuTextureView = slice.gpuTexture.createView();
                     slice.w = w; slice.h = h;
+                    recreateBindGroup = true;
+                }
 
+                if (recreateBindGroup) {
                     if (!gpuSliceUniformBuffers[i]) {
                         gpuSliceUniformBuffers[i] = gpuDevice.createBuffer({
                             size: 256,
                             usage: 64 | 8
                         });
                     }
-
                     slice.bindGroup = gpuDevice.createBindGroup({
                         layout: bindGroupLayout,
                         entries: [
                             { binding: 0, resource: { buffer: gpuSliceUniformBuffers[i] } },
                             { binding: 1, resource: slice.gpuTextureView },
-                            { binding: 2, resource: gpuSampler! }
+                            { binding: 2, resource: gpuSamplerLinear! }
                         ]
                     });
                 }
@@ -2073,7 +2505,7 @@ function handleFrame(buffer: ArrayBuffer) {
                     entries: [
                         { binding: 0, resource: { buffer: gpuSliceUniformBuffers[i] } },
                         { binding: 1, resource: texView },
-                        { binding: 2, resource: gpuSampler! }
+                        { binding: 2, resource: gpuSamplerLinear! }
                     ]
                 });
 
@@ -2112,6 +2544,12 @@ function handleFrame(buffer: ArrayBuffer) {
             slice = activeSlicesWebGL[i];
             activeGl.bindTexture(activeGl.TEXTURE_2D, slice.texture);
             activeGl.texImage2D(activeGl.TEXTURE_2D, 0, internalFormat, w, h, 0, format, activeGl.FLOAT, floatData);
+
+            const filter = hasFloatLinear ? activeGl.LINEAR : activeGl.NEAREST;
+            activeGl.texParameteri(activeGl.TEXTURE_2D, activeGl.TEXTURE_MIN_FILTER, filter);
+            activeGl.texParameteri(activeGl.TEXTURE_2D, activeGl.TEXTURE_MAG_FILTER, filter);
+            activeGl.texParameteri(activeGl.TEXTURE_2D, activeGl.TEXTURE_WRAP_S, activeGl.CLAMP_TO_EDGE);
+            activeGl.texParameteri(activeGl.TEXTURE_2D, activeGl.TEXTURE_WRAP_T, activeGl.CLAMP_TO_EDGE);
 
             activeGl.bindBuffer(activeGl.ARRAY_BUFFER, slice.buffer);
             activeGl.bufferData(activeGl.ARRAY_BUFFER, getSliceGeometry(axis, zOff, w, h), activeGl.STATIC_DRAW);
@@ -2512,6 +2950,92 @@ function render() {
             passEncoder.draw(gpuGaugesCount);
         }
 
+        // Draw Obstacles in WebGPU
+        if (showObstacles && gpuObstaclesVertexBuffer && obstacleTriIndexCount > 0 && gpuPipeline) {
+            if (!gpuUniformBufferObstaclesSolid) {
+                gpuUniformBufferObstaclesSolid = gpuDevice.createBuffer({
+                    size: 256,
+                    usage: 64 | 8
+                });
+            }
+            if (!gpuUniformBufferObstaclesWire) {
+                gpuUniformBufferObstaclesWire = gpuDevice.createBuffer({
+                    size: 256,
+                    usage: 64 | 8
+                });
+            }
+
+            const sizeX = nx * dx || 1.0;
+            const sizeY = ny * dx || 1.0;
+            const sizeZ = nz * dx || 1.0;
+            const sx = 1.0 / sizeX;
+            const sy = 1.0 / sizeY;
+            const sz = 1.0 / sizeZ;
+            const tx = -xmin * sx - 0.5;
+            const ty = -ymin * sy - 0.5;
+            const tz = -zmin * sz - 0.5;
+
+            const obsModel = new Float32Array([
+                sx, 0, 0, 0,
+                0, sy, 0, 0,
+                0, 0, sz, 0,
+                tx, ty, tz, 1
+            ]);
+            const obsFinalModel = multiplyMatrices(modelMatrix, obsModel);
+
+            // Write solid uniforms
+            const uSolid = new Float32Array(uniformData);
+            uSolid.set(obsFinalModel, 32);
+            uSolid[48] = obstaclesOpacity;
+            uSolid[53] = obstaclesLighting ? 9.0 : 11.0;
+            gpuDevice.queue.writeBuffer(gpuUniformBufferObstaclesSolid, 0, uSolid.buffer);
+
+            // Write wireframe uniforms
+            const uWire = new Float32Array(uniformData);
+            uWire.set(obsFinalModel, 32);
+            uWire[48] = 1.0;
+            uWire[53] = 10.0;
+            gpuDevice.queue.writeBuffer(gpuUniformBufferObstaclesWire, 0, uWire.buffer);
+
+            const dummyTexView = Object.values(activeSlicesWebGPU)[0]?.gpuTextureView || gpuDummyTextureView;
+
+            // Draw Solid Pass
+            if (obstaclesOpacity > 0.0 && gpuObstaclesTriIndexBuffer) {
+                const solidBindGroup = gpuDevice.createBindGroup({
+                    layout: bindGroupLayout,
+                    entries: [
+                        { binding: 0, resource: { buffer: gpuUniformBufferObstaclesSolid } },
+                        { binding: 1, resource: dummyTexView },
+                        { binding: 2, resource: gpuSampler! }
+                    ]
+                });
+
+                passEncoder.setPipeline(gpuPipeline);
+                passEncoder.setBindGroup(0, solidBindGroup);
+                passEncoder.setVertexBuffer(0, gpuObstaclesVertexBuffer);
+                passEncoder.setIndexBuffer(gpuObstaclesTriIndexBuffer, 'uint32');
+                passEncoder.drawIndexed(obstacleTriIndexCount);
+            }
+
+            // Draw Wireframe Pass
+            if (obstaclesGridlines && gpuObstaclesWireIndexBuffer && gpuLinePipeline) {
+                const wireBindGroup = gpuDevice.createBindGroup({
+                    layout: bindGroupLayout,
+                    entries: [
+                        { binding: 0, resource: { buffer: gpuUniformBufferObstaclesWire } },
+                        { binding: 1, resource: dummyTexView },
+                        { binding: 2, resource: gpuSampler! }
+                    ]
+                });
+
+                passEncoder.setPipeline(gpuLinePipeline);
+                passEncoder.setBindGroup(0, wireBindGroup);
+                passEncoder.setVertexBuffer(0, gpuObstaclesVertexBuffer);
+                passEncoder.setIndexBuffer(gpuObstaclesWireIndexBuffer, 'uint32');
+                passEncoder.drawIndexed(obstacleWireIndexCount);
+            }
+        }
+
         // 2. Draw Slices
         const slicesArray = Object.values(activeSlicesWebGPU);
         if (slicesArray.length > 0) {
@@ -2742,6 +3266,55 @@ function render() {
         gl.drawArrays(gl.TRIANGLES, 0, gaugesCount);
     }
 
+    // Draw Obstacle Surfaces in WebGL fallback
+    if (showObstacles && obstacleBuffer && obstacleTriIndexCount > 0) {
+        const sizeX = nx * dx || 1.0;
+        const sizeY = ny * dx || 1.0;
+        const sizeZ = nz * dx || 1.0;
+        const sx = 1.0 / sizeX;
+        const sy = 1.0 / sizeY;
+        const sz = 1.0 / sizeZ;
+        const tx = -xmin * sx - 0.5;
+        const ty = -ymin * sy - 0.5;
+        const tz = -zmin * sz - 0.5;
+
+        const obsModel = new Float32Array([
+            sx, 0, 0, 0,
+            0, sy, 0, 0,
+            0, 0, sz, 0,
+            tx, ty, tz, 1
+        ]);
+        const obsFinalModel = multiplyMatrices(modelMatrix, obsModel);
+        gl.uniformMatrix4fv(uModel, false, obsFinalModel);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, obstacleBuffer);
+        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 28, 12);
+        gl.enableVertexAttribArray(1);
+        gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 28, 20);
+        gl.enableVertexAttribArray(2);
+
+        // Solid pass
+        if (obstaclesOpacity > 0.0) {
+            gl.uniform1i(uIsWF, obstaclesLighting ? 9 : 11);
+            gl.uniform1f(uAlpha, obstaclesOpacity);
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, obstacleTriIndexBuffer);
+            gl.drawElements(gl.TRIANGLES, obstacleTriIndexCount, gl.UNSIGNED_INT, 0);
+        }
+
+        // Gridlines pass
+        if (obstaclesGridlines) {
+            gl.uniform1i(uIsWF, 10);
+            gl.uniform1f(uAlpha, 1.0);
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, obstacleWireIndexBuffer);
+            gl.drawElements(gl.LINES, obstacleWireIndexCount, gl.UNSIGNED_INT, 0);
+        }
+
+        // Restore base model matrix
+        gl.uniformMatrix4fv(uModel, false, modelMatrix);
+    }
+
     gl.uniform1i(uIsWF, 0);
     const uShowEdges = gl.getUniformLocation(program, "uShowCellEdges");
     if (uShowEdges !== null) {
@@ -2856,7 +3429,33 @@ self.onmessage = async (e) => {
             render();
         } else if (type === "setSTLGeometry") {
             rawSTLVertices = data.vertices;
+            rawSTLSubtractiveFlags = data.subtractive_flags;
             updateSTLGeometry();
+            render();
+        } else if (type === "setObstaclesGeometry") {
+            rawObstacleVertices = data.vertices;
+            rawObstacleCells = data.cells;
+            if (gl) {
+                if (obstacleTriIndexBuffer) {
+                    gl.deleteBuffer(obstacleTriIndexBuffer);
+                    obstacleTriIndexBuffer = null;
+                }
+                if (obstacleWireIndexBuffer) {
+                    gl.deleteBuffer(obstacleWireIndexBuffer);
+                    obstacleWireIndexBuffer = null;
+                }
+            }
+            if (isWebGPU && gpuDevice) {
+                if (gpuObstaclesTriIndexBuffer) {
+                    gpuObstaclesTriIndexBuffer.destroy();
+                    gpuObstaclesTriIndexBuffer = null;
+                }
+                if (gpuObstaclesWireIndexBuffer) {
+                    gpuObstaclesWireIndexBuffer.destroy();
+                    gpuObstaclesWireIndexBuffer = null;
+                }
+            }
+            updateObstaclesGeometry();
             render();
         } else if (type === "resize") {
             const w = data.width > 0 ? data.width : 300;
@@ -2959,6 +3558,12 @@ self.onmessage = async (e) => {
             if (data.ambientLevel !== undefined) ambientLevel = data.ambientLevel;
             if (data.sliceOpacities !== undefined) sliceOpacities = data.sliceOpacities;
 
+            if (data.showObstacles !== undefined) showObstacles = data.showObstacles;
+            if (data.obstaclesGridlines !== undefined) obstaclesGridlines = data.obstaclesGridlines;
+            if (data.obstaclesLighting !== undefined) obstaclesLighting = data.obstaclesLighting;
+            if (data.obstaclesOpacity !== undefined) obstaclesOpacity = data.obstaclesOpacity;
+            if (data.obstaclesQuantity !== undefined) obstaclesQuantity = data.obstaclesQuantity;
+
             let gaugesChanged = false;
             if (data.showGauges !== undefined) showGauges = data.showGauges;
             if (data.gaugeSize !== undefined) {
@@ -3050,6 +3655,7 @@ self.onmessage = async (e) => {
 
                         if (activeSlicesWebGPU[i]) {
                             const slice = activeSlicesWebGPU[i];
+                            let recreateBindGroup = false;
                             if (slice.w !== w || slice.h !== h) {
                                 slice.gpuTexture.destroy();
                                 slice.gpuTexture = gpuDevice.createTexture({
@@ -3059,7 +3665,10 @@ self.onmessage = async (e) => {
                                 });
                                 slice.gpuTextureView = slice.gpuTexture.createView();
                                 slice.w = w; slice.h = h;
+                                recreateBindGroup = true;
+                            }
 
+                            if (recreateBindGroup) {
                                 if (!gpuSliceUniformBuffers[i]) {
                                     gpuSliceUniformBuffers[i] = gpuDevice.createBuffer({
                                         size: 256,
@@ -3071,7 +3680,7 @@ self.onmessage = async (e) => {
                                     entries: [
                                         { binding: 0, resource: { buffer: gpuSliceUniformBuffers[i] } },
                                         { binding: 1, resource: slice.gpuTextureView },
-                                        { binding: 2, resource: gpuSampler! }
+                                        { binding: 2, resource: gpuSamplerLinear! }
                                     ]
                                 });
                             }
@@ -3124,7 +3733,7 @@ self.onmessage = async (e) => {
                                 entries: [
                                     { binding: 0, resource: { buffer: gpuSliceUniformBuffers[i] } },
                                     { binding: 1, resource: texView },
-                                    { binding: 2, resource: gpuSampler! }
+                                    { binding: 2, resource: gpuSamplerLinear! }
                                 ]
                             });
 

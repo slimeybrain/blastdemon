@@ -34,6 +34,10 @@ class CFDSolver3DCuda : public CFDSolver3DImplBase {
     mutable void* d_gauge_results = nullptr;
     void* gauge_stream = nullptr;
     void* step_done = nullptr;
+    int num_obstacle_faces = 0;
+    mutable void* d_obstacle_faces = nullptr;
+    mutable bool has_paged_obstacle_faces = false;
+    mutable std::vector<GPUObstacleFace> paged_obstacle_faces;
 
     // Host pinned circular buffer
     float* host_pinned_gauge_data = nullptr;
@@ -99,6 +103,10 @@ public:
     void setGeometryTriangles(const std::vector<Triangle>& triangles, const std::string& geometry_hash, const std::string& voxelization_method,
                               const std::atomic<bool>* terminate_flag = nullptr,
                               std::function<void(double)> progress_callback = nullptr) override;
+    void setGeometryPrimitives(const nlohmann::json& primitives, const std::string& geometry_hash, const std::string& voxelization_method,
+                               const std::atomic<bool>* terminate_flag = nullptr,
+                               std::function<void(double)> progress_callback = nullptr) override;
+    void uploadObstacleFaces(const std::vector<ObstacleFace>& faces) override;
     std::pair<double, double> getConservationTotals() const override;
 
     std::vector<float> sampleGauge(const Gauge3D& gauge) const override;

@@ -479,23 +479,36 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
         resp["filePath"] = "";
 
         try {
-            std::vector<Triangle> triangles = generate_primitives_triangles(primitives);
             std::vector<float> coords;
-            coords.reserve(triangles.size() * 9);
-            for (const auto& tri : triangles) {
-                coords.push_back(tri.v0.x);
-                coords.push_back(tri.v0.y);
-                coords.push_back(tri.v0.z);
-                coords.push_back(tri.v1.x);
-                coords.push_back(tri.v1.y);
-                coords.push_back(tri.v1.z);
-                coords.push_back(tri.v2.x);
-                coords.push_back(tri.v2.y);
-                coords.push_back(tri.v2.z);
+            std::vector<float> subtractive_flags;
+            
+            for (const auto& item : primitives) {
+                bool subtractive = item.value("subtractive", false);
+                nlohmann::json single_arr = nlohmann::json::array();
+                single_arr.push_back(item);
+                std::vector<Triangle> triangles = generate_primitives_triangles(single_arr);
+                
+                for (const auto& tri : triangles) {
+                    coords.push_back(tri.v0.x);
+                    coords.push_back(tri.v0.y);
+                    coords.push_back(tri.v0.z);
+                    coords.push_back(tri.v1.x);
+                    coords.push_back(tri.v1.y);
+                    coords.push_back(tri.v1.z);
+                    coords.push_back(tri.v2.x);
+                    coords.push_back(tri.v2.y);
+                    coords.push_back(tri.v2.z);
+                    
+                    float flag_val = subtractive ? 1.0f : 0.0f;
+                    subtractive_flags.push_back(flag_val);
+                    subtractive_flags.push_back(flag_val);
+                    subtractive_flags.push_back(flag_val);
+                }
             }
             resp["status"] = "success";
             resp["vertices"] = coords;
-            std::cout << "[Broker] Successfully generated primitive geometry with " << triangles.size() << " triangles." << std::endl;
+            resp["subtractive_flags"] = subtractive_flags;
+            std::cout << "[Broker] Successfully generated primitive geometry with " << (coords.size() / 9) << " triangles." << std::endl;
         } catch (const std::exception& e) {
             resp["status"] = "error";
             resp["error"] = e.what();
@@ -677,16 +690,20 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
                                              std::distance(accumulator.begin(), nl_it));
                             if (!line.empty() && line.back() == '\r') line.pop_back();
                             if (!line.empty()) {
-                                try {
-                                    nlohmann::json log_json = nlohmann::json::parse(line);
-                                    log_json["modelId"] = modelId;
-                                    send_websocket_text(client, log_json.dump());
-                                } catch (...) {
-                                    nlohmann::json log_envelope;
-                                    log_envelope["type"] = "log";
-                                    log_envelope["modelId"] = modelId;
-                                    log_envelope["message"] = line;
-                                    send_websocket_text(client, log_envelope.dump());
+                                if (line.rfind("{\"type\":\"obstacles_mesh\"", 0) == 0) {
+                                    send_websocket_text(client, line);
+                                } else {
+                                    try {
+                                        nlohmann::json log_json = nlohmann::json::parse(line);
+                                        log_json["modelId"] = modelId;
+                                        send_websocket_text(client, log_json.dump());
+                                    } catch (...) {
+                                        nlohmann::json log_envelope;
+                                        log_envelope["type"] = "log";
+                                        log_envelope["modelId"] = modelId;
+                                        log_envelope["message"] = line;
+                                        send_websocket_text(client, log_envelope.dump());
+                                    }
                                 }
                             }
                             accumulator.erase(accumulator.begin(), nl_it + 1);

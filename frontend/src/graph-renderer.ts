@@ -79,6 +79,7 @@ export class GraphRenderer {
 
     private expandedSliceIndices = new Set<string>(); // "nodeId-sliceIdx"
     private gaugesPanelOpen: Map<string, boolean> = new Map();
+    private focusedPrimitiveIndexMap: Map<string, number> = new Map();
     private gaugesActiveTab: Map<string, 'list' | 'settings'> = new Map();
     private tabbedFromId: string | null = null;
     private isTabbingForward: boolean = false;
@@ -1533,7 +1534,12 @@ export class GraphRenderer {
                 stl_opacity: 0.5,
                 refresh_rate: 2.0,
                 show_gauges: true,
-                gauge_size: 0.03
+                gauge_size: 0.03,
+                show_obstacles: false,
+                obstacles_gridlines: true,
+                obstacles_lighting: true,
+                obstacles_opacity: 1.0,
+                obstacles_quantity: 'pressure'
             };
 
             default: return {};
@@ -1720,12 +1726,14 @@ export class GraphRenderer {
                     nodeEl.className = 'node';
                     if (node.type === 'TelemetryGraph' || node.type === 'TelemetryText' || node.type === 'TelemetryContour' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport' || node.type === 'PrimitiveGeometry3D') {
                         nodeEl.classList.add('resizable');
-                        if (node.width === undefined) node.width = (node.type === 'Telemetry3DViewport' || node.type === 'VirtualGauges') ? 450 : ((node.type === 'TelemetryContour') ? 350 : ((node.type === 'PrimitiveGeometry3D') ? 320 : 250));
+                        if (node.width === undefined) node.width = (node.type === 'Telemetry3DViewport' || node.type === 'VirtualGauges') ? 450 : ((node.type === 'TelemetryContour') ? 350 : ((node.type === 'PrimitiveGeometry3D') ? 460 : 250));
                         if (node.height === undefined) {
-                            if (node.type === 'Telemetry3DViewport') node.height = 450;
-                            else if (node.type === 'TelemetryContour' || node.type === 'VirtualGauges') node.height = 300;
-                            else if (node.type === 'TelemetryGraph') node.height = 150;
-                            else if (node.type === 'PrimitiveGeometry3D') node.height = 320;
+                            if (node.type === 'TelemetryText') node.height = 230;
+                            else if (node.type === 'TelemetryGraph') node.height = 270;
+                            else if (node.type === 'TelemetryContour') node.height = 300;
+                            else if (node.type === 'Telemetry3DViewport') node.height = 350;
+                            else if (node.type === 'VirtualGauges') node.height = 280;
+                            else if (node.type === 'PrimitiveGeometry3D') node.height = 280;
                             else node.height = 130;
                         }
 
@@ -3912,7 +3920,8 @@ export class GraphRenderer {
                 auto_scale: ['true', 'false'],
                 log_scale: ['true', 'false'],
                 show_grid: ['true', 'false'],
-                'voxelization_method': ['watertight_floodfill', 'watertight_raycast', 'thin_shell', 'winding_number']
+                'voxelization_method': ['watertight_floodfill', 'watertight_raycast', 'thin_shell', 'winding_number'],
+                'obstacles_quantity': ['pressure', 'density', 'velocity', 'energy', 'species1', 'species2', 'species3', 'peak_overpressure', 'peak_impulse']
             };
 
             let inputEl: HTMLElement;
@@ -3950,7 +3959,7 @@ export class GraphRenderer {
                             'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
                             'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
                             'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
-                            'min_y', 'max_y', 'min_val', 'max_val', 'ambientLevel', 'specularIntensity', 'gauge_size'
+                            'min_y', 'max_y', 'min_val', 'max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'obstacles_opacity'
                         ];
                         let castValue: any = newVal;
                         if (numericKeys.includes(key)) {
@@ -4677,7 +4686,7 @@ export class GraphRenderer {
         if (displayMode === 'compact') return 100;
         if (node.width !== undefined) return node.width;
         if (node.type === 'PrimitiveGeometry3D' && displayMode === 'expanded') {
-            return 320;
+            return 460;
         }
         if (node.type === 'STLGeometry' && displayMode === 'expanded') {
             const stlFile = node.parameters['stl_file'] || '';
@@ -4701,7 +4710,7 @@ export class GraphRenderer {
             base += Math.max(node.inputs.length, node.outputs.length) * 20;
         } else if (displayMode === 'expanded') {
             if (node.type === 'PrimitiveGeometry3D') {
-                return 320;
+                return 280;
             }
             base += Object.keys(node.parameters).length * 25;
             if (node.type === 'TelemetryText') base += 100;
@@ -4717,6 +4726,17 @@ export class GraphRenderer {
     private renderPrimitiveGeometryNodeCanvasEditor(node: Node, container: HTMLElement): void {
         container.style.overflow = 'visible';
         let form = container.querySelector('.node-params-form') as HTMLFormElement;
+        
+        // Save focus and cursor selection state
+        const activeInput = document.activeElement as HTMLElement;
+        const activeInputId = (activeInput && form && form.contains(activeInput)) ? activeInput.id : null;
+        let selectionStart: number | null = null;
+        let selectionEnd: number | null = null;
+        if (activeInput instanceof HTMLInputElement && (activeInput.type === 'text' || activeInput.type === 'number')) {
+            selectionStart = activeInput.selectionStart;
+            selectionEnd = activeInput.selectionEnd;
+        }
+
         if (!form) {
             form = document.createElement('form');
             form.className = 'node-params-form';
@@ -4729,10 +4749,6 @@ export class GraphRenderer {
             form.onsubmit = (e) => e.preventDefault();
             container.appendChild(form);
         } else {
-            const activeInput = document.activeElement as HTMLElement;
-            if (activeInput && form.contains(activeInput)) {
-                return;
-            }
             form.innerHTML = '';
         }
 
@@ -4741,6 +4757,7 @@ export class GraphRenderer {
         const primitives = node.parameters.primitives || [];
         const voxelizationMethod = node.parameters.voxelization_method || 'watertight_floodfill';
 
+        // Voxelization Method Dropdown
         const voxRow = document.createElement('div');
         voxRow.style.display = 'flex';
         voxRow.style.flexDirection = 'column';
@@ -4769,17 +4786,203 @@ export class GraphRenderer {
         voxRow.appendChild(voxSelect);
         form.appendChild(voxRow);
 
+        // Active shape index
+        let focusedIdx = this.focusedPrimitiveIndexMap.get(node.id) ?? 0;
+        if (focusedIdx >= primitives.length) {
+            focusedIdx = primitives.length - 1;
+        }
+        if (focusedIdx < 0) {
+            focusedIdx = 0;
+        }
+        this.focusedPrimitiveIndexMap.set(node.id, focusedIdx);
+
+        // Split Layout Container
+        const splitContainer = document.createElement('div');
+        splitContainer.style.display = 'flex';
+        splitContainer.style.flex = '1';
+        splitContainer.style.gap = '6px';
+        splitContainer.style.minHeight = '0'; // Crucial for nested flex scrolling
+
+        // --- Left Pane (List & Reordering) ---
+        const leftPane = document.createElement('div');
+        leftPane.style.width = '190px';
+        leftPane.style.display = 'flex';
+        leftPane.style.flexDirection = 'column';
+        leftPane.style.gap = '4px';
+        leftPane.style.minHeight = '0';
+
+        const listContainer = document.createElement('div');
+        listContainer.style.flex = '1';
+        listContainer.style.overflowY = 'auto';
+        listContainer.style.display = 'flex';
+        listContainer.style.flexDirection = 'column';
+        listContainer.style.gap = '3px';
+        listContainer.style.border = '1px solid #333';
+        listContainer.style.background = '#151515';
+        listContainer.style.padding = '3px';
+        listContainer.style.borderRadius = '4px';
+
+        primitives.forEach((prim: any, idx: number) => {
+            const item = document.createElement('div');
+            item.style.background = idx === focusedIdx ? '#2d2d30' : '#1e1e1e';
+            item.style.border = idx === focusedIdx ? '1px solid #007acc' : '1px solid #3c3c3c';
+            item.style.borderRadius = '3px';
+            item.style.padding = '2px 4px';
+            item.style.display = 'flex';
+            item.style.alignItems = 'center';
+            item.style.gap = '4px';
+            item.style.cursor = 'pointer';
+
+            item.onclick = (e) => {
+                this.focusedPrimitiveIndexMap.set(node.id, idx);
+                this.renderPrimitiveGeometryNodeCanvasEditor(node, container);
+            };
+
+            // tiny reordering arrows
+            const arrowsDiv = document.createElement('div');
+            arrowsDiv.style.display = 'flex';
+            arrowsDiv.style.flexDirection = 'column';
+            arrowsDiv.style.alignItems = 'center';
+            arrowsDiv.style.gap = '1px';
+
+            const upArrow = document.createElement('button');
+            upArrow.textContent = '▲';
+            upArrow.style.padding = '0';
+            upArrow.style.background = 'transparent';
+            upArrow.style.color = idx > 0 ? '#aaa' : '#444';
+            upArrow.style.border = 'none';
+            upArrow.style.fontSize = '8px';
+            upArrow.style.cursor = idx > 0 ? 'pointer' : 'default';
+            upArrow.disabled = idx === 0;
+            upArrow.onclick = (e) => {
+                e.stopPropagation();
+                const updated = [...primitives];
+                const temp = updated[idx];
+                updated[idx] = updated[idx - 1];
+                updated[idx - 1] = temp;
+                this.focusedPrimitiveIndexMap.set(node.id, idx - 1);
+                this.stateManager.updateNodeParameters(node.id, { primitives: updated });
+            };
+            arrowsDiv.appendChild(upArrow);
+
+            const downArrow = document.createElement('button');
+            downArrow.textContent = '▼';
+            downArrow.style.padding = '0';
+            downArrow.style.background = 'transparent';
+            downArrow.style.color = idx < primitives.length - 1 ? '#aaa' : '#444';
+            downArrow.style.border = 'none';
+            downArrow.style.fontSize = '8px';
+            downArrow.style.cursor = idx < primitives.length - 1 ? 'pointer' : 'default';
+            downArrow.disabled = idx === primitives.length - 1;
+            downArrow.onclick = (e) => {
+                e.stopPropagation();
+                const updated = [...primitives];
+                const temp = updated[idx];
+                updated[idx] = updated[idx + 1];
+                updated[idx + 1] = temp;
+                this.focusedPrimitiveIndexMap.set(node.id, idx + 1);
+                this.stateManager.updateNodeParameters(node.id, { primitives: updated });
+            };
+            arrowsDiv.appendChild(downArrow);
+            item.appendChild(arrowsDiv);
+
+            // Name Input
+            const nameInput = document.createElement('input');
+            nameInput.type = 'text';
+            nameInput.id = `prim-name-${node.id}-${idx}`;
+            nameInput.value = prim.name || `${prim.type.charAt(0).toUpperCase() + prim.type.slice(1)} ${idx + 1}`;
+            nameInput.style.flex = '1';
+            nameInput.style.minWidth = '0';
+            nameInput.style.background = 'transparent';
+            nameInput.style.color = '#fff';
+            nameInput.style.border = 'none';
+            nameInput.style.fontSize = '9px';
+            nameInput.style.padding = '0';
+            nameInput.onchange = (e) => {
+                const updated = [...primitives];
+                updated[idx] = { ...prim, name: nameInput.value };
+                this.stateManager.updateNodeParameters(node.id, { primitives: updated });
+            };
+            nameInput.onclick = (e) => {
+                e.stopPropagation();
+                if (focusedIdx !== idx) {
+                    this.focusedPrimitiveIndexMap.set(node.id, idx);
+                    this.renderPrimitiveGeometryNodeCanvasEditor(node, container);
+                }
+            };
+            nameInput.onmousedown = (e) => e.stopPropagation();
+            nameInput.onkeydown = (e) => e.stopPropagation();
+            item.appendChild(nameInput);
+
+            // Subtractive toggle label
+            const subLabel = document.createElement('label');
+            subLabel.style.display = 'flex';
+            subLabel.style.alignItems = 'center';
+            subLabel.style.gap = '2px';
+            subLabel.style.fontSize = '8px';
+            subLabel.style.color = '#aaa';
+            subLabel.style.cursor = 'pointer';
+            subLabel.textContent = 'Sub';
+            subLabel.onclick = (e) => e.stopPropagation();
+
+            const subCheckbox = document.createElement('input');
+            subCheckbox.type = 'checkbox';
+            subCheckbox.id = `prim-sub-${node.id}-${idx}`;
+            subCheckbox.checked = !!prim.subtractive;
+            subCheckbox.style.margin = '0';
+            subCheckbox.style.cursor = 'pointer';
+            subCheckbox.onchange = () => {
+                const updated = [...primitives];
+                updated[idx] = { ...prim, subtractive: subCheckbox.checked };
+                this.stateManager.updateNodeParameters(node.id, { primitives: updated });
+            };
+            subCheckbox.onclick = (e) => e.stopPropagation();
+            subCheckbox.onmousedown = (e) => e.stopPropagation();
+            subLabel.insertBefore(subCheckbox, subLabel.firstChild);
+            item.appendChild(subLabel);
+
+            // Delete button
+            const delBtn = document.createElement('button');
+            delBtn.innerHTML = '✕';
+            delBtn.style.background = 'transparent';
+            delBtn.style.border = 'none';
+            delBtn.style.color = '#ef4444';
+            delBtn.style.cursor = 'pointer';
+            delBtn.style.fontSize = '9px';
+            delBtn.style.padding = '0 2px';
+            delBtn.onclick = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const updated = primitives.filter((_: any, i: number) => i !== idx);
+                this.stateManager.updateNodeParameters(node.id, { primitives: updated });
+            };
+            item.appendChild(delBtn);
+
+            listContainer.appendChild(item);
+        });
+
+        if (primitives.length === 0) {
+            const empty = document.createElement('div');
+            empty.style.color = '#666';
+            empty.style.fontSize = '9px';
+            empty.style.textAlign = 'center';
+            empty.style.padding = '20px 0';
+            empty.textContent = 'No shapes. Add below.';
+            listContainer.appendChild(empty);
+        }
+        leftPane.appendChild(listContainer);
+
+        // Add Shape Buttons (Bottom of left pane)
         const addRow = document.createElement('div');
         addRow.style.display = 'flex';
-        addRow.style.gap = '4px';
-        addRow.style.marginTop = '2px';
+        addRow.style.gap = '3px';
 
         const createAddBtn = (labelStr: string, shapeType: string, defaultParams: any) => {
             const btn = document.createElement('button');
             btn.textContent = `+ ${labelStr}`;
             btn.style.flex = '1';
-            btn.style.padding = '3px 0';
-            btn.style.fontSize = '9px';
+            btn.style.padding = '2px 0';
+            btn.style.fontSize = '8px';
             btn.style.background = '#333';
             btn.style.color = '#fff';
             btn.style.border = '1px solid #555';
@@ -4788,89 +4991,63 @@ export class GraphRenderer {
             btn.onclick = (e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                const updated = [...primitives, { type: shapeType, ...defaultParams }];
+                const nameStr = `${shapeType.charAt(0).toUpperCase() + shapeType.slice(1)} ${primitives.length + 1}`;
+                const updated = [...primitives, { type: shapeType, name: nameStr, subtractive: false, ...defaultParams }];
+                this.focusedPrimitiveIndexMap.set(node.id, updated.length - 1);
                 this.stateManager.updateNodeParameters(node.id, { primitives: updated });
             };
             return btn;
         };
 
-        addRow.appendChild(createAddBtn('Cube', 'cuboid', { xmin: 0.0, xmax: 0.2, ymin: 0.0, ymax: 0.2, zmin: 0.0, zmax: 0.2 }));
-        addRow.appendChild(createAddBtn('Cyl', 'cylinder', { x: 0.5, y: 0.5, z: 0.5, radius: 0.1, length: 0.2, orientation: 'Z' }));
-        addRow.appendChild(createAddBtn('Wedge', 'wedge', { xmin: 0.0, xmax: 0.2, ymin: 0.0, ymax: 0.2, zmin: 0.0, zmax: 0.2, orientation: '+X' }));
-        form.appendChild(addRow);
+        addRow.appendChild(createAddBtn('Cube', 'cuboid', { xmin: 0.0, xmax: 0.2, ymin: 0.0, ymax: 0.2, zmin: 0.0, zmax: 0.2, voxelization_method: 'watertight_floodfill' }));
+        addRow.appendChild(createAddBtn('Cyl', 'cylinder', { x: 0.5, y: 0.5, z: 0.5, radius: 0.1, length: 0.2, orientation: 'Z', voxelization_method: 'watertight_floodfill' }));
+        addRow.appendChild(createAddBtn('Wedge', 'wedge', { xmin: 0.0, xmax: 0.2, ymin: 0.0, ymax: 0.2, zmin: 0.0, zmax: 0.2, orientation: '+X', voxelization_method: 'watertight_floodfill' }));
+        leftPane.appendChild(addRow);
+        splitContainer.appendChild(leftPane);
 
-        const scrollContainer = document.createElement('div');
-        scrollContainer.style.flex = '1';
-        scrollContainer.style.minHeight = '120px';
-        scrollContainer.style.overflowY = 'auto';
-        scrollContainer.style.display = 'flex';
-        scrollContainer.style.flexDirection = 'column';
-        scrollContainer.style.gap = '8px';
-        scrollContainer.style.marginTop = '4px';
-        scrollContainer.style.border = '1px solid #222';
-        scrollContainer.style.background = '#151515';
-        scrollContainer.style.padding = '4px';
-        scrollContainer.style.borderRadius = '4px';
+        // --- Right Pane (Properties of focused shape) ---
+        const rightPane = document.createElement('div');
+        rightPane.style.flex = '1';
+        rightPane.style.display = 'flex';
+        rightPane.style.flexDirection = 'column';
+        rightPane.style.gap = '4px';
+        rightPane.style.overflowY = 'auto';
+        rightPane.style.border = '1px solid #333';
+        rightPane.style.background = '#181818';
+        rightPane.style.padding = '4px';
+        rightPane.style.borderRadius = '4px';
+        rightPane.style.minHeight = '0';
 
-        primitives.forEach((prim: any, idx: number) => {
-            const item = document.createElement('div');
-            item.style.background = '#202020';
-            item.style.border = '1px solid #3c3c3c';
-            item.style.borderRadius = '3px';
-            item.style.padding = '4px';
-            item.style.display = 'flex';
-            item.style.flexDirection = 'column';
-            item.style.gap = '4px';
-
-            const titleRow = document.createElement('div');
-            titleRow.style.display = 'flex';
-            titleRow.style.justifyContent = 'space-between';
-            titleRow.style.alignItems = 'center';
-            titleRow.style.borderBottom = '1px solid #2d2d2d';
-            titleRow.style.paddingBottom = '2px';
-
-            const itemTitle = document.createElement('span');
-            itemTitle.style.fontSize = '9px';
-            itemTitle.style.fontWeight = 'bold';
-            itemTitle.style.color = '#569cd6';
-            itemTitle.textContent = `#${idx + 1} ${prim.type.toUpperCase()}`;
-            titleRow.appendChild(itemTitle);
-
-            const delBtn = document.createElement('button');
-            delBtn.innerHTML = '✕';
-            delBtn.style.background = 'transparent';
-            delBtn.style.border = 'none';
-            delBtn.style.color = '#ef4444';
-            delBtn.style.cursor = 'pointer';
-            delBtn.style.fontSize = '10px';
-            delBtn.onclick = (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                const updated = primitives.filter((_: any, i: number) => i !== idx);
-                this.stateManager.updateNodeParameters(node.id, { primitives: updated });
-            };
-            titleRow.appendChild(delBtn);
-            item.appendChild(titleRow);
+        const activePrim = primitives[focusedIdx];
+        if (activePrim) {
+            const title = document.createElement('div');
+            title.style.fontSize = '9px';
+            title.style.fontWeight = 'bold';
+            title.style.color = '#569cd6';
+            title.style.borderBottom = '1px solid #2d2d2d';
+            title.style.paddingBottom = '2px';
+            title.style.marginBottom = '4px';
+            title.textContent = activePrim.name || `Shape #${focusedIdx + 1}`;
+            rightPane.appendChild(title);
 
             const grid = document.createElement('div');
             grid.style.display = 'grid';
             grid.style.gridTemplateColumns = '1fr 1fr';
-            grid.style.gap = '6px';
-            grid.style.padding = '4px 0';
+            grid.style.gap = '4px';
 
             const updatePrimVal = (key: string, val: any) => {
                 const updated = [...primitives];
-                updated[idx] = { ...prim, [key]: val };
+                updated[focusedIdx] = { ...activePrim, [key]: val };
                 this.stateManager.updateNodeParameters(node.id, { primitives: updated });
             };
 
-            Object.entries(prim).forEach(([key, value]) => {
-                if (key === 'type') return;
+            Object.entries(activePrim).forEach(([key, value]) => {
+                if (key === 'type' || key === 'name' || key === 'subtractive') return;
 
                 const inputRow = document.createElement('div');
                 inputRow.style.display = 'flex';
                 inputRow.style.flexDirection = 'column';
-                inputRow.style.gap = '2px';
+                inputRow.style.gap = '1px';
 
                 const label = document.createElement('span');
                 label.style.fontSize = '8px';
@@ -4879,15 +5056,30 @@ export class GraphRenderer {
                 label.textContent = key.toUpperCase();
                 inputRow.appendChild(label);
 
-                if (key === 'orientation') {
+                if (key === 'voxelization_method') {
+                    const select = this.createCustomDropdown(
+                        [
+                            { value: 'watertight_floodfill', label: 'Watertight Floodfill' },
+                            { value: 'watertight_raycast', label: 'Watertight Raycast' },
+                            { value: 'thin_shell', label: 'Thin Shell' },
+                            { value: 'winding_number', label: 'Winding Number' }
+                        ],
+                        String(value),
+                        (newVal) => {
+                            updatePrimVal(key, newVal);
+                        }
+                    );
+                    inputRow.appendChild(select);
+                } else if (key === 'orientation') {
                     const select = document.createElement('select');
+                    select.id = `prim-orient-${node.id}-${focusedIdx}`;
                     select.style.background = '#151515';
                     select.style.color = '#ccc';
                     select.style.border = '1px solid #444';
                     select.style.fontSize = '9px';
-                    select.style.padding = '2px';
+                    select.style.padding = '1px';
 
-                    const opts = prim.type === 'cylinder' ? ['X', 'Y', 'Z'] : ['+X', '-X', '+Y', '-Y'];
+                    const opts = activePrim.type === 'cylinder' ? ['X', 'Y', 'Z'] : ['+X', '-X', '+Y', '-Y'];
                     opts.forEach(o => {
                         const opt = document.createElement('option');
                         opt.value = o;
@@ -4902,36 +5094,52 @@ export class GraphRenderer {
                 } else {
                     const input = document.createElement('input');
                     input.type = 'number';
+                    input.id = `prim-prop-${node.id}-${focusedIdx}-${key}`;
                     input.step = 'any';
                     input.style.background = '#151515';
                     input.style.color = '#ccc';
                     input.style.border = '1px solid #444';
                     input.style.fontSize = '9px';
-                    input.style.padding = '2px';
+                    input.style.padding = '1px 2px';
                     input.value = String(value);
-                    input.oninput = () => {
+                    input.onchange = () => {
                         updatePrimVal(key, Number(input.value));
                     };
+                    input.onmousedown = (e) => e.stopPropagation();
+                    input.onkeydown = (e) => e.stopPropagation();
                     inputRow.appendChild(input);
                 }
                 grid.appendChild(inputRow);
             });
 
-            item.appendChild(grid);
-            scrollContainer.appendChild(item);
-        });
-
-        if (primitives.length === 0) {
-            const empty = document.createElement('div');
-            empty.style.color = '#666';
-            empty.style.fontSize = '9px';
-            empty.style.textAlign = 'center';
-            empty.style.padding = '20px 0';
-            empty.textContent = 'No shapes configured. Add one above.';
-            scrollContainer.appendChild(empty);
+            rightPane.appendChild(grid);
+        } else {
+            const emptyLabel = document.createElement('div');
+            emptyLabel.style.color = '#666';
+            emptyLabel.style.fontSize = '9px';
+            emptyLabel.style.textAlign = 'center';
+            emptyLabel.style.padding = '40px 0';
+            emptyLabel.textContent = 'Select a shape to view parameters.';
+            rightPane.appendChild(emptyLabel);
         }
+        splitContainer.appendChild(rightPane);
 
-        form.appendChild(scrollContainer);
+        form.appendChild(splitContainer);
+
+        // Restore focus and cursor selection state
+        if (activeInputId) {
+            const el = form.querySelector(`#${activeInputId}`) as HTMLElement;
+            if (el) {
+                el.focus();
+                if (el instanceof HTMLInputElement && selectionStart !== null && selectionEnd !== null) {
+                    try {
+                        el.setSelectionRange(selectionStart, selectionEnd);
+                    } catch (e) {
+                        // ignore if element type doesn't support selection range
+                    }
+                }
+            }
+        }
     }
 
     private renderVirtualGaugesContent(node: Node, container: HTMLElement): void {
