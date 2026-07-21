@@ -41,6 +41,27 @@ std::string get_absolute_path(const std::string& path, const std::string& base_d
     return base_dir + "/" + path;
 }
 
+inline int get_json_int(const nlohmann::json& j, const std::string& key, int default_val) {
+    if (!j.contains(key) || j[key].is_null()) return default_val;
+    if (j[key].is_number_integer()) return j[key].get<int>();
+    if (j[key].is_number_float()) return static_cast<int>(j[key].get<double>());
+    if (j[key].is_string()) {
+        try { return std::stoi(j[key].get<std::string>()); }
+        catch (...) { return default_val; }
+    }
+    return default_val;
+}
+
+inline double get_json_double(const nlohmann::json& j, const std::string& key, double default_val) {
+    if (!j.contains(key) || j[key].is_null()) return default_val;
+    if (j[key].is_number()) return j[key].get<double>();
+    if (j[key].is_string()) {
+        try { return std::stod(j[key].get<std::string>()); }
+        catch (...) { return default_val; }
+    }
+    return default_val;
+}
+
 
 // Global shared state for Phase 16.0 - Zero-Omission Architecture
 std::atomic<bool> sim_running{false};
@@ -2427,15 +2448,22 @@ int main() {
 
                     std::string mesh_type = msg.value("mesh_type", "regular");
                     global_is_amr_2d = (mesh_type == "amr");
-                    int amr_max_levels = msg.value("amr_max_levels", 3);
-                    double amr_threshold = msg.value("amr_threshold", 0.05);
-                    double amr_coarsen_ratio = msg.value("amr_coarsen_ratio", 0.2);
+                    int amr_max_levels = get_json_int(msg, "amr_max_levels", 3);
+                    double amr_threshold = get_json_double(msg, "amr_threshold", 0.05);
+                    double amr_coarsen_ratio = get_json_double(msg, "amr_coarsen_ratio", 0.2);
+
+                    amr_max_levels = std::clamp(amr_max_levels, 1, 6);
+                    if (amr_threshold <= 0.0 || std::isnan(amr_threshold)) amr_threshold = 0.05;
+                    if (amr_coarsen_ratio <= 0.0 || std::isnan(amr_coarsen_ratio) || amr_coarsen_ratio >= amr_threshold) {
+                        amr_coarsen_ratio = amr_threshold * 0.4;
+                    }
 
                     std::string precision = msg.value("precision", "double");
                     if (device == "cuda") {
-                        global_solver_2d.reset();
                         {
                             std::lock_guard<std::mutex> lock(cout_mutex);
+                            global_solver_2d.reset();
+                            global_solver_2d_cuda.reset();
                             if (precision == "single" || precision == "float") {
                                 if (mesh_type == "amr") {
                                     global_solver_2d_cuda = std::make_unique<CFDSolver2DAMRCudaImpl<float>>(nr, nz, max_r, max_z, gamma, amr_max_levels, amr_threshold, amr_coarsen_ratio);

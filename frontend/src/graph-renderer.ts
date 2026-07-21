@@ -3,6 +3,7 @@ import { StateManager } from './state-manager.js';
 import { Telemetry3DViewport } from './telemetry-3d-viewport.js';
 import { validateSimulationState } from './validation.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
+import { CustomDialog } from './custom-dialog.js';
 
 const DEFAULT_QUANTITY_RANGES: Record<string, [number, number]> = {
     pressure: [101325.0, 101325.0 * 100.0],
@@ -1034,6 +1035,18 @@ export class GraphRenderer {
         if (rightClickedModelId) {
             const model = this.stateManager.getAllModels().find(m => m.id === rightClickedModelId);
             if (model) {
+                const renameItem = document.createElement('div');
+                renameItem.className = 'context-menu-item';
+                renameItem.innerHTML = `✏️ Rename Model <b>${model.name}</b>...`;
+                renameItem.onclick = async () => {
+                    menu.remove();
+                    const newName = await CustomDialog.prompt("Enter new model name:", model.name, "Rename Model");
+                    if (newName && newName.trim() && newName.trim() !== model.name) {
+                        this.stateManager.renameModel(model.id, newName.trim());
+                    }
+                };
+                menu.appendChild(renameItem);
+
                 const copyItem = document.createElement('div');
                 copyItem.className = 'context-menu-item';
                 copyItem.innerHTML = `📋 Copy Model <b>${model.name}</b>`;
@@ -1047,6 +1060,18 @@ export class GraphRenderer {
         } else if (this.selectedModelId) {
             const model = this.stateManager.getAllModels().find(m => m.id === this.selectedModelId);
             if (model) {
+                const renameItem = document.createElement('div');
+                renameItem.className = 'context-menu-item';
+                renameItem.innerHTML = `✏️ Rename Selected Model <b>${model.name}</b>...`;
+                renameItem.onclick = async () => {
+                    menu.remove();
+                    const newName = await CustomDialog.prompt("Enter new model name:", model.name, "Rename Model");
+                    if (newName && newName.trim() && newName.trim() !== model.name) {
+                        this.stateManager.renameModel(model.id, newName.trim());
+                    }
+                };
+                menu.appendChild(renameItem);
+
                 const copyItem = document.createElement('div');
                 copyItem.className = 'context-menu-item';
                 copyItem.innerHTML = `📋 Copy Selected Model <b>${model.name}</b>`;
@@ -2436,8 +2461,19 @@ export class GraphRenderer {
                 this.render();
             };
 
+            const handleModelDblClick = async (e: MouseEvent) => {
+                e.stopPropagation();
+                e.preventDefault();
+                const newName = await CustomDialog.prompt("Enter new model name:", model.name, "Rename Model");
+                if (newName && newName.trim() && newName.trim() !== model.name) {
+                    this.stateManager.renameModel(model.id, newName.trim());
+                }
+            };
+
             rect.addEventListener('mousedown', handleModelMouseDown);
             label.addEventListener('mousedown', handleModelMouseDown);
+            rect.addEventListener('dblclick', handleModelDblClick);
+            label.addEventListener('dblclick', handleModelDblClick);
         });
     }
 
@@ -3057,7 +3093,7 @@ export class GraphRenderer {
                     meshType: solverNode?.parameters?.mesh_type || 'regular',
                     amrMaxLevels: Math.max(1, Number(solverNode?.parameters?.amr_max_levels ?? 3)),
                     baseNr: meshNode ? (solverNode?.parameters?.mesh_type === 'amr' ? Math.ceil((Math.round(max_r / (Number(meshNode.parameters?.cell_size) || 0.05)) || 128) / 16) * 16 : (Math.round(max_r / (Number(meshNode.parameters?.cell_size) || 0.05)) || 128)) : 128,
-                    baseNz: meshNode ? (Math.round(max_z / (Number(meshNode.parameters?.cell_size) || 0.05)) || 128) : 128
+                    baseNz: meshNode ? (solverNode?.parameters?.mesh_type === 'amr' ? Math.ceil((Math.round(max_z / (Number(meshNode.parameters?.cell_size) || 0.05)) || 128) / 16) * 16 : (Math.round(max_z / (Number(meshNode.parameters?.cell_size) || 0.05)) || 128)) : 128
                 });
             }
 

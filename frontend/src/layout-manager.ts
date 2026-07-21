@@ -1111,6 +1111,7 @@ class MenuBarComponent {
                 <span class="menu-title">File</span>
                 <div class="dropdown-content">
                     <div id="menu-new-model">New Model</div>
+                    <div id="menu-rename-model">Rename Active Model...</div>
                     <div class="menu-separator"></div>
                     <div id="menu-load-json">Load Model (JSON)...</div>
                     <div id="menu-save-json">Save Model (JSON)</div>
@@ -1349,6 +1350,48 @@ class OutlinerComponent {
             nameSpan.textContent = model.name;
             nameSpan.style.fontWeight = 'bold';
             nameSpan.style.color = accentColor;
+            nameSpan.style.cursor = 'pointer';
+            nameSpan.title = 'Double-click to rename';
+
+            const startRename = (e: Event) => {
+                e.stopPropagation();
+                const oldName = model.name;
+                const input = document.createElement('input');
+                input.type = 'text';
+                input.value = oldName;
+                input.style.fontSize = '11px';
+                input.style.fontWeight = 'bold';
+                input.style.background = '#1e1e24';
+                input.style.border = '1px solid #00f0ff';
+                input.style.color = '#fff';
+                input.style.padding = '0 2px';
+                input.style.outline = 'none';
+                input.style.width = '100px';
+
+                const finishRename = () => {
+                    const newName = input.value.trim();
+                    if (newName && newName !== oldName) {
+                        this.stateManager.renameModel(model.id, newName);
+                    } else {
+                        nameSpan.textContent = oldName;
+                    }
+                };
+
+                input.addEventListener('blur', finishRename);
+                input.addEventListener('keydown', (ev) => {
+                    if (ev.key === 'Enter') finishRename();
+                    if (ev.key === 'Escape') {
+                        nameSpan.textContent = oldName;
+                    }
+                });
+
+                nameSpan.innerHTML = '';
+                nameSpan.appendChild(input);
+                input.focus();
+                input.select();
+            };
+
+            nameSpan.addEventListener('dblclick', startRename);
             info.appendChild(nameSpan);
 
             const fileSpan = document.createElement('span');
@@ -1365,6 +1408,21 @@ class OutlinerComponent {
             right.style.display = 'flex';
             right.style.alignItems = 'center';
             
+            const renameModelBtn = document.createElement('button');
+            renameModelBtn.innerHTML = '✏️';
+            renameModelBtn.title = 'Rename Model';
+            renameModelBtn.style.background = 'none';
+            renameModelBtn.style.border = 'none';
+            renameModelBtn.style.color = '#888';
+            renameModelBtn.style.cursor = 'pointer';
+            renameModelBtn.style.fontSize = '11px';
+            renameModelBtn.style.padding = '0 4px';
+            renameModelBtn.style.lineHeight = '1';
+            renameModelBtn.onmouseenter = () => renameModelBtn.style.color = '#00f0ff';
+            renameModelBtn.onmouseleave = () => renameModelBtn.style.color = '#888';
+            renameModelBtn.onclick = startRename;
+            right.appendChild(renameModelBtn);
+
             const closeModelBtn = document.createElement('button');
             closeModelBtn.innerHTML = '×';
             closeModelBtn.title = 'Close Model';
@@ -1666,8 +1724,62 @@ class ExecutionManagerComponent {
         nameSpan.className = 'execution-target-name';
         nameSpan.textContent = model.name;
         nameSpan.style.color = accentColor;
+        nameSpan.style.cursor = 'pointer';
+        nameSpan.title = 'Double-click to rename';
+
+        const startRename = (e: Event) => {
+            e.stopPropagation();
+            const oldName = model.name;
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.value = oldName;
+            input.style.fontSize = '11px';
+            input.style.fontWeight = 'bold';
+            input.style.background = '#1e1e24';
+            input.style.border = '1px solid #00f0ff';
+            input.style.color = '#fff';
+            input.style.padding = '0 2px';
+            input.style.outline = 'none';
+            input.style.width = '100px';
+
+            const finishRename = () => {
+                const newName = input.value.trim();
+                if (newName && newName !== oldName) {
+                    this.stateManager.renameModel(model.id, newName);
+                } else {
+                    nameSpan.textContent = oldName;
+                }
+            };
+
+            input.addEventListener('blur', finishRename);
+            input.addEventListener('keydown', (ev) => {
+                if (ev.key === 'Enter') finishRename();
+                if (ev.key === 'Escape') {
+                    nameSpan.textContent = oldName;
+                }
+            });
+
+            nameSpan.innerHTML = '';
+            nameSpan.appendChild(input);
+            input.focus();
+            input.select();
+        };
+
+        nameSpan.addEventListener('dblclick', startRename);
+
+        const renameBtn = document.createElement('span');
+        renameBtn.innerHTML = '✏️';
+        renameBtn.title = 'Rename Model';
+        renameBtn.style.cursor = 'pointer';
+        renameBtn.style.fontSize = '11px';
+        renameBtn.style.marginLeft = '6px';
+        renameBtn.style.opacity = '0.6';
+        renameBtn.onmouseenter = () => renameBtn.style.opacity = '1';
+        renameBtn.onmouseleave = () => renameBtn.style.opacity = '0.6';
+        renameBtn.onclick = startRename;
 
         metaDiv.appendChild(nameSpan);
+        metaDiv.appendChild(renameBtn);
         headerRow.appendChild(metaDiv);
 
         const badge = document.createElement('div');

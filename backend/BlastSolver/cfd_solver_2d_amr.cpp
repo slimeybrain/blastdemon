@@ -1456,11 +1456,13 @@ void CFDSolver2DAMRImpl<RealType>::refineNode(int node_idx) {
         int z_quad = (quadrant == 2 || quadrant == 3) ? 1 : 0;
         
         for (int ci = 0; ci < AMR_TILE_DIM; ++ci) {
-            int pi = (ci / 2) + r_quad * 8 + 1;
+            int local_ci = std::max(0, std::min(15, ci - 2));
+            int pi = (ci < 2) ? 1 : ((ci > 17) ? 18 : (local_ci / 2) + r_quad * 8 + 2);
             double xfrac = (ci % 2 == 0) ? -0.25 : 0.25;
             
             for (int cj = 0; cj < AMR_TILE_DIM; ++cj) {
-                int pj = (cj / 2) + z_quad * 8 + 1;
+                int local_cj = std::max(0, std::min(15, cj - 2));
+                int pj = (cj < 2) ? 1 : ((cj > 17) ? 18 : (local_cj / 2) + z_quad * 8 + 2);
                 double yfrac = (cj % 2 == 0) ? -0.25 : 0.25;
                 
                 int pk = pi * AMR_TILE_DIM + pj;
@@ -1880,18 +1882,42 @@ std::vector<double> CFDSolver2DAMRImpl<RealType>::getLocalTimesteps(double cfl) 
 
 template <typename RealType>
 bool CFDSolver2DAMRImpl<RealType>::checkTerminationCondition() const {
-    // Terminate if shock wave hits the outer domain boundary
+    double threshold = 1.05 * ambient_p_val;
     for (size_t n = 0; n < amr_nodes.size(); ++n) {
         const auto& node = amr_nodes[n];
         if (node.tile_id != -1 && node.is_active) {
-            // Check if boundary nodes have high pressure
-            bool is_outer_boundary = (node.r_max >= max_r_coord - 1e-5) || (node.z_max >= max_z_coord - 1e-5);
-            if (is_outer_boundary) {
-                const auto& S = states_pool[node.tile_id];
-                for (int k = 0; k < AMR_TILE_DIM * AMR_TILE_DIM; ++k) {
-                    if (S.p[k] > ambient_p_val * 1.5) {
-                        return true;
-                    }
+            const auto& S = states_pool[node.tile_id];
+
+            if (bc_r_min == OUTFLOW_RIEMANN && node.r_min <= 1e-5) {
+                int ti = 2; // Innermost boundary interior cell
+                for (int j = 0; j < 16; ++j) {
+                    int tj = j + 2;
+                    int k = ti * AMR_TILE_DIM + tj;
+                    if (S.p[k] > threshold) return true;
+                }
+            }
+            if (bc_r_max == OUTFLOW_RIEMANN && node.r_max >= max_r_coord - 1e-5) {
+                int ti = 17; // Outermost boundary interior cell
+                for (int j = 0; j < 16; ++j) {
+                    int tj = j + 2;
+                    int k = ti * AMR_TILE_DIM + tj;
+                    if (S.p[k] > threshold) return true;
+                }
+            }
+            if (bc_z_min == OUTFLOW_RIEMANN && node.z_min <= 1e-5) {
+                int tj = 2; // Innermost boundary interior cell
+                for (int i = 0; i < 16; ++i) {
+                    int ti = i + 2;
+                    int k = ti * AMR_TILE_DIM + tj;
+                    if (S.p[k] > threshold) return true;
+                }
+            }
+            if (bc_z_max == OUTFLOW_RIEMANN && node.z_max >= max_z_coord - 1e-5) {
+                int tj = 17; // Outermost boundary interior cell
+                for (int i = 0; i < 16; ++i) {
+                    int ti = i + 2;
+                    int k = ti * AMR_TILE_DIM + tj;
+                    if (S.p[k] > threshold) return true;
                 }
             }
         }

@@ -222,6 +222,21 @@ document.addEventListener('click', async (e) => {
         }
     }
 
+    if (target.id === 'menu-rename-model') {
+        const activeWs = stateManager.getActiveWorkspace();
+        if (activeWs.activeModelId) {
+            const model = stateManager.getWorkspaceModels().find(m => m.id === activeWs.activeModelId);
+            if (model) {
+                const newName = await CustomDialog.prompt("Enter new model name:", model.name, "Rename Model");
+                if (newName && newName.trim() && newName.trim() !== model.name) {
+                    stateManager.renameModel(model.id, newName.trim());
+                }
+            }
+        } else {
+            await CustomDialog.alert("No active model to rename.");
+        }
+    }
+
     if (target.id === 'menu-load-json') {
         const activeWs = stateManager.getActiveWorkspace();
         const startPath = activeWs.activeModelId 
