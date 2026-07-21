@@ -537,6 +537,54 @@ __global__ void computeTileRHS_AMR_kernel(
         CLAMP(s_faceL_L) CLAMP(s_faceL_R) CLAMP(s_faceR_L) CLAMP(s_faceR_R)
         CLAMP(s_faceB_L) CLAMP(s_faceB_R) CLAMP(s_faceT_L) CLAMP(s_faceT_R)
         #undef CLAMP
+    } else if (spatial_order == 3) {
+        CellState2DT<RealType> s_LL = readStateLocal(ti - 2, tj);
+        CellState2DT<RealType> s_RR = readStateLocal(ti + 2, tj);
+        CellState2DT<RealType> s_BB = readStateLocal(ti, tj - 2);
+        CellState2DT<RealType> s_TT = readStateLocal(ti, tj + 2);
+
+        #define RECONSTRUCT_WENO(L, R, LL, RR, fl_L, fl_R, fr_L, fr_R, field) \
+            fl_L.field = weno3_kernel(LL.field, L.field, s_c.field); \
+            fl_R.field = weno3_kernel(R.field, s_c.field, L.field); \
+            fr_L.field = weno3_kernel(L.field, s_c.field, R.field); \
+            fr_R.field = weno3_kernel(RR.field, R.field, s_c.field);
+
+        RECONSTRUCT_WENO(s_L, s_R, s_LL, s_RR, s_faceL_L, s_faceL_R, s_faceR_L, s_faceR_R, rho)
+        RECONSTRUCT_WENO(s_L, s_R, s_LL, s_RR, s_faceL_L, s_faceL_R, s_faceR_L, s_faceR_R, ur)
+        RECONSTRUCT_WENO(s_L, s_R, s_LL, s_RR, s_faceL_L, s_faceL_R, s_faceR_L, s_faceR_R, uz)
+        RECONSTRUCT_WENO(s_L, s_R, s_LL, s_RR, s_faceL_L, s_faceL_R, s_faceR_L, s_faceR_R, p)
+
+        RECONSTRUCT_WENO(s_B, s_T, s_BB, s_TT, s_faceB_L, s_faceB_R, s_faceT_L, s_faceT_R, rho)
+        RECONSTRUCT_WENO(s_B, s_T, s_BB, s_TT, s_faceB_L, s_faceB_R, s_faceT_L, s_faceT_R, ur)
+        RECONSTRUCT_WENO(s_B, s_T, s_BB, s_TT, s_faceB_L, s_faceB_R, s_faceT_L, s_faceT_R, uz)
+        RECONSTRUCT_WENO(s_B, s_T, s_BB, s_TT, s_faceB_L, s_faceB_R, s_faceT_L, s_faceT_R, p)
+        #undef RECONSTRUCT_WENO
+
+        #define RECONSTRUCT_MM(L, R, LL, RR, fl_L, fl_R, fr_L, fr_R, field) \
+            fl_L.field = L.field + (RealType)0.5 * minmod_gpu(L.field - LL.field, s_c.field - L.field); \
+            fl_R.field = s_c.field - (RealType)0.5 * minmod_gpu(s_c.field - L.field, R.field - s_c.field); \
+            fr_L.field = s_c.field + (RealType)0.5 * minmod_gpu(s_c.field - L.field, R.field - s_c.field); \
+            fr_R.field = R.field - (RealType)0.5 * minmod_gpu(R.field - s_c.field, RR.field - R.field);
+
+        RECONSTRUCT_MM(s_L, s_R, s_LL, s_RR, s_faceL_L, s_faceL_R, s_faceR_L, s_faceR_R, alpha1)
+        RECONSTRUCT_MM(s_L, s_R, s_LL, s_RR, s_faceL_L, s_faceL_R, s_faceR_L, s_faceR_R, alpha2)
+        RECONSTRUCT_MM(s_L, s_R, s_LL, s_RR, s_faceL_L, s_faceL_R, s_faceR_L, s_faceR_R, arho1)
+        RECONSTRUCT_MM(s_L, s_R, s_LL, s_RR, s_faceL_L, s_faceL_R, s_faceR_L, s_faceR_R, arho2)
+
+        RECONSTRUCT_MM(s_B, s_T, s_BB, s_TT, s_faceB_L, s_faceB_R, s_faceT_L, s_faceT_R, alpha1)
+        RECONSTRUCT_MM(s_B, s_T, s_BB, s_TT, s_faceB_L, s_faceB_R, s_faceT_L, s_faceT_R, alpha2)
+        RECONSTRUCT_MM(s_B, s_T, s_BB, s_TT, s_faceB_L, s_faceB_R, s_faceT_L, s_faceT_R, arho1)
+        RECONSTRUCT_MM(s_B, s_T, s_BB, s_TT, s_faceB_L, s_faceB_R, s_faceT_L, s_faceT_R, arho2)
+        #undef RECONSTRUCT_MM
+
+        #define CLAMP(face) \
+            face.alpha1 = max((RealType)0.0, min((RealType)1.0, face.alpha1)); \
+            face.alpha2 = max((RealType)0.0, min((RealType)1.0, face.alpha2)); \
+            compute_E_kernel(face, gamma, mat, is_ideal_gas);
+
+        CLAMP(s_faceL_L) CLAMP(s_faceL_R) CLAMP(s_faceR_L) CLAMP(s_faceR_R)
+        CLAMP(s_faceB_L) CLAMP(s_faceB_R) CLAMP(s_faceT_L) CLAMP(s_faceT_R)
+        #undef CLAMP
     }
 
     RealType fr_L_rho, fr_L_rhour, fr_L_rhouz, fr_L_E, fr_L_a1, fr_L_a2, fr_L_ar1, fr_L_ar2, v_face_rL;
