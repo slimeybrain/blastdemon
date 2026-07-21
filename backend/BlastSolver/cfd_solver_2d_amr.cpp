@@ -10,7 +10,7 @@ template <typename RealType>
 CFDSolver2DAMRImpl<RealType>::CFDSolver2DAMRImpl(int nr, int nz, double max_r, double max_z, double gamma, int max_levels, double threshold, double coarsen_ratio)
     : level0_nr(nr), level0_nz(nz), max_r_coord(max_r), max_z_coord(max_z),
       time_val(0.0), gamma_val(gamma), is_ideal_gas_val(true),
-      amr_max_levels_val(max_levels), amr_threshold_val(threshold), amr_coarsen_ratio_val(coarsen_ratio),
+      amr_max_levels_val(max_levels), amr_threshold_val(threshold), amr_coarsen_ratio_val(coarsen_ratio), adapt_step_counter(0),
       flux_scheme_name("AUSM+"), spatial_order_val(2), temporal_order_val(2),
       bc_r_min(REFLECTIVE), bc_r_max(OUTFLOW_RIEMANN), bc_z_min(REFLECTIVE), bc_z_max(OUTFLOW_RIEMANN),
       is_cartesian(false), detonator_r_coord(0.0), detonator_z_coord(0.0),
@@ -1220,6 +1220,43 @@ double CFDSolver2DAMRImpl<RealType>::computeTileLoehnerError(int tile_id) const 
     if (tile_id == -1 || tile_id >= (int)states_pool.size()) return 0.0;
     const auto& S = states_pool[tile_id];
 
+    // 1. Compute maximum single-cell neighbor relative jump across internal cells (i=2..17, j=2..17)
+    double max_cell_jump = 0.0;
+
+    for (int i = 2; i < 18; ++i) {
+        for (int j = 2; j < 18; ++j) {
+            int k   = i * AMR_TILE_DIM + j;
+            int kr1 = (i + 1) * AMR_TILE_DIM + j;
+            int kz1 = i * AMR_TILE_DIM + (j + 1);
+
+            double p_c = (double)S.p[k];
+            double rho_c = (double)S.rho[k];
+            double a1_c = (double)S.alpha1[k];
+
+            double p_r = (double)S.p[kr1];
+            double rho_r = (double)S.rho[kr1];
+            double a1_r = (double)S.alpha1[kr1];
+
+            double p_z = (double)S.p[kz1];
+            double rho_z = (double)S.rho[kz1];
+            double a1_z = (double)S.alpha1[kz1];
+
+            double jump_p = std::max(std::abs(p_r - p_c), std::abs(p_z - p_c)) / (p_c + 1e-5);
+            double jump_rho = std::max(std::abs(rho_r - rho_c), std::abs(rho_z - rho_c)) / (rho_c + 1e-5);
+            double jump_a1 = std::max(std::abs(a1_r - a1_c), std::abs(a1_z - a1_c));
+
+            double cell_jump = std::max({jump_p, jump_rho, jump_a1});
+            if (cell_jump > max_cell_jump) max_cell_jump = cell_jump;
+        }
+    }
+
+    // Cell-level shock jump cutoff:
+    // A true shock front or material interface has a cell-to-cell jump >= 3% (0.03).
+    // Smooth expansion waves and ambient sound waves have cell-to-cell jumps < 0.5% (0.005).
+    if (max_cell_jump < 0.03) {
+        return 0.0;
+    }
+
     const double eps = 0.02;
     double max_err = 0.0;
 
@@ -1261,7 +1298,9 @@ double CFDSolver2DAMRImpl<RealType>::computeTileLoehnerError(int tile_id) const 
             if (cell_err > max_err) max_err = cell_err;
         }
     }
-    return max_err;
+
+    double shock_weight = std::min(1.0, max_cell_jump / 0.03);
+    return max_err * shock_weight;
 }
 
 template <typename RealType>
@@ -1298,13 +1337,27 @@ bool CFDSolver2DAMRImpl<RealType>::shouldCoarsenNode(int parent_idx) {
 
 template <typename RealType>
 int CFDSolver2DAMRImpl<RealType>::findLeafNodeAtCoords(double r, double z) const {
-    for (size_t n = 0; n < amr_nodes.size(); ++n) {
-        const auto& node = amr_nodes[n];
-        if (node.is_active && node.tile_id != -1 &&
-            r >= node.r_min && r < node.r_max &&
-            z >= node.z_min && z < node.z_max) {
-            return (int)n;
+    if (r < 0.0 || r >= max_r_coord || z < 0.0 || z >= max_z_coord) return -1;
+    double tile_w = TILE_SIZE * dr_base;
+    double tile_h = TILE_SIZE * dz_base;
+    int r0 = (int)(r / tile_w);
+    int z0 = (int)(z / tile_h);
+    if (r0 < 0 || r0 >= level0_num_tiles_r || z0 < 0 || z0 >= level0_num_tiles_z) return -1;
+
+    int curr = r0 * level0_num_tiles_z + z0;
+    while (curr != -1 && curr < (int)amr_nodes.size()) {
+        if (amr_nodes[curr].children[0] == -1) {
+            if (amr_nodes[curr].is_active && amr_nodes[curr].tile_id != -1) {
+                return curr;
+            }
+            return -1;
         }
+        double mid_r = 0.5 * (amr_nodes[curr].r_min + amr_nodes[curr].r_max);
+        double mid_z = 0.5 * (amr_nodes[curr].z_min + amr_nodes[curr].z_max);
+        int bit_r = (r >= mid_r) ? 1 : 0;
+        int bit_z = (z >= mid_z) ? 1 : 0;
+        int quadrant = bit_r + 2 * bit_z;
+        curr = amr_nodes[curr].children[quadrant];
     }
     return -1;
 }
@@ -1321,10 +1374,12 @@ bool CFDSolver2DAMRImpl<RealType>::canCoarsenParent(int parent_idx) const {
     double tile_dr = parent.r_max - parent.r_min;
     double tile_dz = parent.z_max - parent.z_min;
 
-    double sample_r[4] = { parent.r_min - 0.25 * tile_dr, parent.r_max + 0.25 * tile_dr, mid_r, mid_r };
-    double sample_z[4] = { mid_z, mid_z, parent.z_min - 0.25 * tile_dz, parent.z_max + 0.25 * tile_dz };
+    double sample_r[8] = { parent.r_min - 0.25 * tile_dr, parent.r_max + 0.25 * tile_dr, mid_r, mid_r,
+                           parent.r_min - 0.25 * tile_dr, parent.r_max + 0.25 * tile_dr, parent.r_min - 0.25 * tile_dr, parent.r_max + 0.25 * tile_dr };
+    double sample_z[8] = { mid_z, mid_z, parent.z_min - 0.25 * tile_dz, parent.z_max + 0.25 * tile_dz,
+                           parent.z_min - 0.25 * tile_dz, parent.z_min - 0.25 * tile_dz, parent.z_max + 0.25 * tile_dz, parent.z_max + 0.25 * tile_dz };
 
-    for (int d = 0; d < 4; ++d) {
+    for (int d = 0; d < 8; ++d) {
         if (sample_r[d] < 0.0 || sample_r[d] >= max_r_coord || sample_z[d] < 0.0 || sample_z[d] >= max_z_coord) continue;
         int nb_idx = findLeafNodeAtCoords(sample_r[d], sample_z[d]);
         if (nb_idx != -1 && amr_nodes[nb_idx].tile_id != -1 && amr_nodes[nb_idx].is_active) {
@@ -1342,86 +1397,100 @@ void CFDSolver2DAMRImpl<RealType>::adaptMesh() {
     updatePrimitiveFromConservative();
     fillGhostCells();
 
-    std::vector<bool> to_refine(amr_nodes.size(), false);
-    std::vector<bool> flagged_by_error(amr_nodes.size(), false);
+    bool topology_changed = true;
+    while (topology_changed) {
+        topology_changed = false;
 
-    // 2. Direct refinement triggering
-    for (size_t n = 0; n < amr_nodes.size(); ++n) {
-        const auto& node = amr_nodes[n];
-        if (node.tile_id == -1 || !node.is_active) continue;
+        std::vector<bool> to_refine(amr_nodes.size(), false);
+        std::vector<bool> flagged_by_error(amr_nodes.size(), false);
 
-        if (shouldRefineNode(n)) {
-            flagged_by_error[n] = true;
-            to_refine[n] = true;
-        }
-    }
+        // 2. Direct refinement triggering
+        for (size_t n = 0; n < amr_nodes.size(); ++n) {
+            const auto& node = amr_nodes[n];
+            if (node.tile_id == -1 || !node.is_active) continue;
 
-    // Add 1-tile safety buffer ring ONLY around SAME-LEVEL active neighbors of error-flagged nodes
-    for (size_t n = 0; n < amr_nodes.size(); ++n) {
-        if (!flagged_by_error[n]) continue;
-        const auto& node = amr_nodes[n];
-
-        double mid_r = 0.5 * (node.r_min + node.r_max);
-        double mid_z = 0.5 * (node.z_min + node.z_max);
-        double tile_dr = node.r_max - node.r_min;
-        double tile_dz = node.z_max - node.z_min;
-
-        double sample_r[8] = { node.r_min - 0.25 * tile_dr, node.r_max + 0.25 * tile_dr, mid_r, mid_r,
-                               node.r_min - 0.25 * tile_dr, node.r_max + 0.25 * tile_dr, node.r_min - 0.25 * tile_dr, node.r_max + 0.25 * tile_dr };
-        double sample_z[8] = { mid_z, mid_z, node.z_min - 0.25 * tile_dz, node.z_max + 0.25 * tile_dz,
-                               node.z_min - 0.25 * tile_dz, node.z_min - 0.25 * tile_dz, node.z_max + 0.25 * tile_dz, node.z_max + 0.25 * tile_dz };
-
-        for (int d = 0; d < 8; ++d) {
-            if (sample_r[d] < 0.0 || sample_r[d] >= max_r_coord || sample_z[d] < 0.0 || sample_z[d] >= max_z_coord) continue;
-            int nb_idx = findLeafNodeAtCoords(sample_r[d], sample_z[d]);
-            if (nb_idx != -1 && amr_nodes[nb_idx].tile_id != -1 && amr_nodes[nb_idx].is_active) {
-                if (amr_nodes[nb_idx].level == node.level && !to_refine[nb_idx]) {
-                    to_refine[nb_idx] = true;
-                }
+            if (shouldRefineNode(n)) {
+                flagged_by_error[n] = true;
+                to_refine[n] = true;
             }
         }
-    }
 
-    // 3. Graded 2:1 Level Balance Enforcer using exact spatial leaf lookup across all 8 neighbor directions
-    bool changed = true;
-    while (changed) {
-        changed = false;
+        // Add 1-tile safety buffer ring around error-flagged nodes
         for (size_t n = 0; n < amr_nodes.size(); ++n) {
-            if (!to_refine[n]) continue;
+            if (!flagged_by_error[n]) continue;
             const auto& node = amr_nodes[n];
-            if (node.tile_id == -1) continue;
 
-            int target_level = node.level + 1;
-            if (target_level >= amr_max_levels_val) continue;
-
-            double mid_r = 0.5 * (node.r_min + node.r_max);
-            double mid_z = 0.5 * (node.z_min + node.z_max);
             double tile_dr = node.r_max - node.r_min;
             double tile_dz = node.z_max - node.z_min;
 
-            double sample_r[8] = { node.r_min - 0.25 * tile_dr, node.r_max + 0.25 * tile_dr, mid_r, mid_r,
-                                   node.r_min - 0.25 * tile_dr, node.r_max + 0.25 * tile_dr, node.r_min - 0.25 * tile_dr, node.r_max + 0.25 * tile_dr };
-            double sample_z[8] = { mid_z, mid_z, node.z_min - 0.25 * tile_dz, node.z_max + 0.25 * tile_dz,
-                                   node.z_min - 0.25 * tile_dz, node.z_min - 0.25 * tile_dz, node.z_max + 0.25 * tile_dz, node.z_max + 0.25 * tile_dz };
+            for (int edge = 0; edge < 4; ++edge) {
+                for (int s = 0; s < 4; ++s) {
+                    double frac = (s + 0.5) / 4.0;
+                    double sr = 0.0, sz = 0.0;
+                    if (edge == 0) { sr = node.r_min - 0.1 * tile_dr; sz = node.z_min + frac * tile_dz; }
+                    else if (edge == 1) { sr = node.r_max + 0.1 * tile_dr; sz = node.z_min + frac * tile_dz; }
+                    else if (edge == 2) { sr = node.r_min + frac * tile_dr; sz = node.z_min - 0.1 * tile_dz; }
+                    else if (edge == 3) { sr = node.r_min + frac * tile_dr; sz = node.z_max + 0.1 * tile_dz; }
 
-            for (int d = 0; d < 8; ++d) {
-                if (sample_r[d] < 0.0 || sample_r[d] >= max_r_coord || sample_z[d] < 0.0 || sample_z[d] >= max_z_coord) continue;
-                int nb_idx = findLeafNodeAtCoords(sample_r[d], sample_z[d]);
-                if (nb_idx != -1 && amr_nodes[nb_idx].tile_id != -1 && amr_nodes[nb_idx].is_active) {
-                    const auto& nb_node = amr_nodes[nb_idx];
-                    if (nb_node.level < node.level && !to_refine[nb_idx]) {
-                        to_refine[nb_idx] = true;
-                        changed = true;
+                    if (sr < 0.0 || sr >= max_r_coord || sz < 0.0 || sz >= max_z_coord) continue;
+                    int nb_idx = findLeafNodeAtCoords(sr, sz);
+                    if (nb_idx != -1 && amr_nodes[nb_idx].tile_id != -1 && amr_nodes[nb_idx].is_active) {
+                        if (amr_nodes[nb_idx].level == node.level && !to_refine[nb_idx]) {
+                            to_refine[nb_idx] = true;
+                        }
                     }
                 }
             }
         }
-    }
 
-    std::vector<int> nodes_to_refine;
-    for (size_t n = 0; n < amr_nodes.size(); ++n) {
-        if (to_refine[n] && amr_nodes[n].level < amr_max_levels_val - 1 && amr_nodes[n].is_active) {
-            nodes_to_refine.push_back(n);
+        // 3. Absolute 2:1 Level Balance Enforcer across ALL active leaves
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (size_t n = 0; n < amr_nodes.size(); ++n) {
+                const auto& node = amr_nodes[n];
+                if (node.tile_id == -1 || !node.is_active) continue;
+
+                int eff_level = node.level + (to_refine[n] ? 1 : 0);
+                if (eff_level >= amr_max_levels_val) continue;
+
+                double tile_dr = node.r_max - node.r_min;
+                double tile_dz = node.z_max - node.z_min;
+
+                for (int edge = 0; edge < 4; ++edge) {
+                    for (int s = 0; s < 4; ++s) {
+                        double frac = (s + 0.5) / 4.0;
+                        double sr = 0.0, sz = 0.0;
+                        if (edge == 0) { sr = node.r_min - 0.1 * tile_dr; sz = node.z_min + frac * tile_dz; }
+                        else if (edge == 1) { sr = node.r_max + 0.1 * tile_dr; sz = node.z_min + frac * tile_dz; }
+                        else if (edge == 2) { sr = node.r_min + frac * tile_dr; sz = node.z_min - 0.1 * tile_dz; }
+                        else if (edge == 3) { sr = node.r_min + frac * tile_dr; sz = node.z_max + 0.1 * tile_dz; }
+
+                        if (sr < 0.0 || sr >= max_r_coord || sz < 0.0 || sz >= max_z_coord) continue;
+                        int nb_idx = findLeafNodeAtCoords(sr, sz);
+                        if (nb_idx != -1 && amr_nodes[nb_idx].tile_id != -1 && amr_nodes[nb_idx].is_active) {
+                            int nb_eff_level = amr_nodes[nb_idx].level + (to_refine[nb_idx] ? 1 : 0);
+                            if (eff_level - nb_eff_level > 1 && !to_refine[nb_idx]) {
+                                to_refine[nb_idx] = true;
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        std::vector<int> nodes_to_refine;
+        for (size_t n = 0; n < amr_nodes.size(); ++n) {
+            if (to_refine[n] && amr_nodes[n].level < amr_max_levels_val - 1 && amr_nodes[n].is_active) {
+                nodes_to_refine.push_back(n);
+            }
+        }
+
+        if (!nodes_to_refine.empty()) {
+            for (int idx : nodes_to_refine) refineNode(idx);
+            rebuildNeighborPointers();
+            topology_changed = true;
         }
     }
 
@@ -1431,36 +1500,23 @@ void CFDSolver2DAMRImpl<RealType>::adaptMesh() {
         const auto& node = amr_nodes[n];
         if (node.children[0] != -1 && node.tile_id != -1) {
             bool all_children_leaves = true;
-            bool any_child_refining = false;
             for (int c = 0; c < 4; ++c) {
                 int child_idx = node.children[c];
                 if (child_idx == -1 || amr_nodes[child_idx].children[0] != -1) {
                     all_children_leaves = false;
                 }
-                if (child_idx != -1 && to_refine[child_idx]) {
-                    any_child_refining = true;
-                }
             }
-            if (all_children_leaves && !any_child_refining && shouldCoarsenNode(n) && canCoarsenParent(n)) {
+            if (all_children_leaves && shouldCoarsenNode(n) && canCoarsenParent(n)) {
                 parents_to_coarsen.push_back(n);
             }
         }
     }
 
-    // Execution of Refinement and Coarsening
-    for (int idx : nodes_to_refine) {
-        refineNode(idx);
-    }
+    for (int idx : parents_to_coarsen) coarsenNode(idx);
 
-    for (int idx : parents_to_coarsen) {
-        coarsenNode(idx);
-    }
-
-    if (!nodes_to_refine.empty() || !parents_to_coarsen.empty()) {
-        rebuildNeighborPointers();
-        updatePrimitiveFromConservative();
-        fillGhostCells();
-    }
+    rebuildNeighborPointers();
+    updatePrimitiveFromConservative();
+    fillGhostCells();
 }
 
 template <typename RealType>
@@ -1776,41 +1832,58 @@ void CFDSolver2DAMRImpl<RealType>::applyInitialConditionToNode(int node_idx, dou
     const auto& node = amr_nodes[node_idx];
     auto& U = U_pool[node.tile_id];
     double factor = 1.0 / (1 << node.level);
+    double dr_cell = dr_base * factor;
+    double dz_cell = dz_base * factor;
 
     for (int i = 0; i < 16; ++i) {
-        double cell_r = node.r_min + (i + 0.5) * dr_base * factor;
+        double r_left = node.r_min + i * dr_cell;
         for (int j = 0; j < 16; ++j) {
-            double cell_z = node.z_min + (j + 0.5) * dz_base * factor;
+            double z_bottom = node.z_min + j * dz_cell;
             int k = (i + 2) * AMR_TILE_DIM + (j + 2);
 
-            bool inside_charge = false;
-            if (is_cylinder) {
-                inside_charge = (cell_r <= explosive_radius) && (std::abs(cell_z - explosive_z) <= charge_height / 2.0);
-            } else {
-                double dist = std::sqrt(cell_r * cell_r + (cell_z - explosive_z) * (cell_z - explosive_z));
-                inside_charge = (dist <= explosive_radius);
-            }
-
-            if (inside_charge) {
-                if (is_tnt) {
-                    U.rho[k] = (RealType)high_rho;
-                    U.rhour[k] = 0.0;
-                    U.rhouz[k] = 0.0;
-                    U.alpha1[k] = 1.0;
-                    U.alpha2[k] = 0.0;
-                    U.arho1[k] = (RealType)high_rho;
-                    U.arho2[k] = 0.0;
-                    U.E[k] = (RealType)(high_rho * MultiMat::getEnergy_IdealGas(ambient_p, high_rho, gamma_val));
-                } else {
-                    U.rho[k] = (RealType)high_rho;
-                    U.rhour[k] = 0.0;
-                    U.rhouz[k] = 0.0;
-                    U.alpha1[k] = 0.0;
-                    U.alpha2[k] = 1.0;
-                    U.arho1[k] = 0.0;
-                    U.arho2[k] = (RealType)high_rho;
-                    U.E[k] = (RealType)(high_rho * detonation_energy);
+            double sum_w = 0.0;
+            double sum_w_inside = 0.0;
+            for (int ki = 0; ki < 8; ++ki) {
+                double r_sub = r_left + (ki + 0.5) * (dr_cell / 8.0);
+                double w = is_cartesian ? 1.0 : r_sub;
+                for (int kj = 0; kj < 8; ++kj) {
+                    double z_sub = z_bottom + (kj + 0.5) * (dz_cell / 8.0);
+                    bool inside = false;
+                    if (is_cylinder) {
+                        inside = (r_sub <= explosive_radius) && (std::abs(z_sub - explosive_z) <= charge_height / 2.0);
+                    } else {
+                        double dist = std::sqrt(r_sub * r_sub + (z_sub - explosive_z) * (z_sub - explosive_z));
+                        inside = (dist <= explosive_radius);
+                    }
+                    if (inside) sum_w_inside += w;
+                    sum_w += w;
                 }
+            }
+            double f_vol = sum_w_inside / sum_w;
+
+            if (f_vol > 0.0) {
+                double alpha_expl = f_vol;
+                double arho_expl = f_vol * high_rho;
+                double rho = arho_expl + (1.0 - f_vol) * ambient_rho;
+                double E_expl = is_tnt ? (high_rho * MultiMat::getEnergy_IdealGas(ambient_p, high_rho, gamma_val)) : (high_rho * detonation_energy);
+                double E_air = ambient_p / (gamma_val - 1.0);
+                double E_total = f_vol * E_expl + (1.0 - f_vol) * E_air;
+
+                U.rho[k] = (RealType)rho;
+                U.rhour[k] = 0.0;
+                U.rhouz[k] = 0.0;
+                if (is_tnt) {
+                    U.alpha1[k] = (RealType)alpha_expl;
+                    U.alpha2[k] = 0.0;
+                    U.arho1[k] = (RealType)arho_expl;
+                    U.arho2[k] = 0.0;
+                } else {
+                    U.alpha1[k] = 0.0;
+                    U.alpha2[k] = (RealType)alpha_expl;
+                    U.arho1[k] = 0.0;
+                    U.arho2[k] = (RealType)arho_expl;
+                }
+                U.E[k] = (RealType)E_total;
             } else {
                 U.rho[k] = (RealType)ambient_rho;
                 U.rhour[k] = 0.0;
@@ -1892,8 +1965,11 @@ void CFDSolver2DAMRImpl<RealType>::step(double dt) {
 
     time_val += dt;
 
-    // Adapt mesh at the end of timestep
-    adaptMesh();
+    // Adapt mesh periodically (every 5 steps) to minimize re-gridding overhead
+    adapt_step_counter++;
+    if (adapt_step_counter % 5 == 0) {
+        adaptMesh();
+    }
 }
 
 template <typename RealType>
@@ -2103,6 +2179,56 @@ std::vector<float> CFDSolver2DAMRImpl<RealType>::getTelemetry2D(int stride) cons
         }
     }
     return data;
+}
+
+template <typename RealType>
+void CFDSolver2DAMRImpl<RealType>::setGauges(const std::vector<Gauge2D>& gauges) {
+    cpu_gauges = gauges;
+    cpu_gauge_times.clear();
+    cpu_gauge_values.clear();
+}
+
+template <typename RealType>
+void CFDSolver2DAMRImpl<RealType>::recordGaugesAsync(double t) {
+    if (cpu_gauges.empty()) return;
+    cpu_gauge_times.push_back(t);
+    for (const auto& gauge : cpu_gauges) {
+        int n_idx = findLeafNodeAtCoords(gauge.r, gauge.z);
+        if (n_idx == -1) {
+            cpu_gauge_values.push_back((float)ambient_p_val);
+            cpu_gauge_values.push_back((float)ambient_rho_val);
+            cpu_gauge_values.push_back(0.0f);
+            cpu_gauge_values.push_back(0.0f);
+            cpu_gauge_values.push_back((float)(ambient_p_val / (gamma_val - 1.0)));
+            cpu_gauge_values.push_back(0.0f);
+            cpu_gauge_values.push_back(0.0f);
+        } else {
+            const auto& node = amr_nodes[n_idx];
+            const auto& S = states_pool[node.tile_id];
+            double factor = 1.0 / (1 << node.level);
+            int local_i = (int)((gauge.r - node.r_min) / (dr_base * factor));
+            int local_j = (int)((gauge.z - node.z_min) / (dz_base * factor));
+            local_i = std::max(0, std::min(15, local_i));
+            local_j = std::max(0, std::min(15, local_j));
+            int k = (local_i + 2) * AMR_TILE_DIM + (local_j + 2);
+
+            cpu_gauge_values.push_back((float)S.p[k]);
+            cpu_gauge_values.push_back((float)S.rho[k]);
+            cpu_gauge_values.push_back((float)S.ur[k]);
+            cpu_gauge_values.push_back((float)S.uz[k]);
+            cpu_gauge_values.push_back((float)S.E[k]);
+            cpu_gauge_values.push_back((float)S.alpha1[k]);
+            cpu_gauge_values.push_back((float)S.alpha2[k]);
+        }
+    }
+}
+
+template <typename RealType>
+void CFDSolver2DAMRImpl<RealType>::retrieveNewGaugeSamples(std::vector<double>& times, std::vector<float>& values) {
+    times = std::move(cpu_gauge_times);
+    values = std::move(cpu_gauge_values);
+    cpu_gauge_times.clear();
+    cpu_gauge_values.clear();
 }
 
 template <typename RealType>

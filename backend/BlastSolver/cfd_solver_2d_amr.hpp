@@ -83,6 +83,7 @@ private:
     int amr_max_levels_val;
     double amr_threshold_val;
     double amr_coarsen_ratio_val;
+    int adapt_step_counter;
 
     std::string flux_scheme_name;
     int spatial_order_val;
@@ -204,10 +205,19 @@ public:
     virtual std::vector<float> getTelemetry2D(int stride = 1) const override;
     virtual std::vector<float> getCellValues(int i, int j) const override;
 
+    virtual void setGauges(const std::vector<Gauge2D>& gauges) override;
+    virtual void recordGaugesAsync(double t) override;
+    virtual void retrieveNewGaugeSamples(std::vector<double>& times, std::vector<float>& values) override;
+
     virtual void setSolidVelocities(const double* v) override;
     virtual void setSolidMask(const uint8_t* mask) override;
 
     virtual void exportVTK(const std::string& filename) const override;
+
+private:
+    std::vector<Gauge2D> cpu_gauges;
+    std::vector<double> cpu_gauge_times;
+    std::vector<float> cpu_gauge_values;
 };
 
 #endif // CFD_SOLVER_2D_AMR_HPP

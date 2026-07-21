@@ -368,6 +368,20 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 }
             }
         }
+        // Trace gauges and VTK output connected to CFDSolver2D
+        const solver2DConns = state.connections.filter(c => c.fromNode === solverNode2D.id || c.toNode === solverNode2D.id);
+        for (const conn of solver2DConns) {
+            const otherId = conn.fromNode === solverNode2D.id ? conn.toNode : conn.fromNode;
+            const targetNode = state.nodes.find(n => n.id === otherId);
+            if (targetNode && targetNode.type === 'VirtualGauges') {
+                flattenedParams['gauges'] = targetNode.parameters?.gauges || [];
+            }
+            if (targetNode && targetNode.type === 'VTKOutput') {
+                Object.entries(targetNode.parameters).forEach(([key, value]) => {
+                    flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                });
+            }
+        }
     }
 
     // Derived parameters for backend (Zero-Omission Phase)
@@ -444,12 +458,11 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             flattenedParams['charge_radius'] = 0.05;
         }
 
-        // Only default to 'From1D' when a 1D solver is actually present in the graph.
-        // Otherwise infer from the connected explosive type so the 2D worker
-        // initialises directly instead of waiting for a remap that will never come.
-        if (!flattenedParams['init_mode']) {
-            const has1DSolver = state.nodes.some(n => n.type === 'CFDSolver');
-            if (has1DSolver) {
+        // Only default to 'From1D' when a RemapNode connection is actually present in the model graph.
+        // Otherwise infer from the connected explosive type so the 2D worker initialises directly.
+        const remapConn2D = solverNode2D ? state.connections.find(c => c.toNode === solverNode2D.id && c.toPort === 'remap') : null;
+        if (!remapConn2D || flattenedParams['init_mode'] === 'From1D') {
+            if (remapConn2D) {
                 flattenedParams['init_mode'] = 'From1D';
             } else if (flattenedParams['explosive_type'] === 'MaterialIdealGas') {
                 flattenedParams['init_mode'] = 'Ideal Gas';
@@ -457,6 +470,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 flattenedParams['init_mode'] = 'JWL';
             }
         }
+
         if (!flattenedParams['composition']) flattenedParams['composition'] = 'TNT';
         if (!flattenedParams['device']) flattenedParams['device'] = 'cpu';
 
@@ -464,8 +478,13 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         const maxR = flattenedParams['max_r'] || 1.0;
         const maxZ = flattenedParams['max_z'] || 1.0;
 
-        flattenedParams['nr'] = Math.round(maxR / cellSize);
-        flattenedParams['nz'] = Math.round(maxZ / cellSize);
+        if (flattenedParams['mesh_type'] === 'amr') {
+            flattenedParams['nr'] = Math.ceil((Math.round(maxR / cellSize) || 128) / 16) * 16;
+            flattenedParams['nz'] = Math.ceil((Math.round(maxZ / cellSize) || 128) / 16) * 16;
+        } else {
+            flattenedParams['nr'] = Math.round(maxR / cellSize);
+            flattenedParams['nz'] = Math.round(maxZ / cellSize);
+        }
         flattenedParams['max_r'] = maxR;
         flattenedParams['max_z'] = maxZ;
     } else if (command === "INIT_3D") {
@@ -493,8 +512,11 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         flattenedParams['ambient_rho'] = p / (287.058 * t);
 
         if (!flattenedParams['device']) flattenedParams['device'] = 'cpu';
-        if (!flattenedParams['init_mode']) {
-            if (flattenedParams['explosive_type'] === 'MaterialIdealGas') {
+        const remapConn3D = solverNode3D ? state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'remap') : null;
+        if (!remapConn3D || flattenedParams['init_mode'] === 'From1D') {
+            if (remapConn3D) {
+                flattenedParams['init_mode'] = 'From1D';
+            } else if (flattenedParams['explosive_type'] === 'MaterialIdealGas') {
                 flattenedParams['init_mode'] = 'Ideal Gas';
             } else {
                 flattenedParams['init_mode'] = 'Multi-Material JWL';

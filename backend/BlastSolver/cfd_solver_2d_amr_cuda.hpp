@@ -6,6 +6,7 @@
 #include <vector>
 #include <string>
 #include <memory>
+#include <cstdint>
 
 struct GPUNode2D {
     int tile_id;
@@ -16,6 +17,11 @@ struct GPUNode2D {
     double z_min;
     int r_idx;
     int z_idx;
+};
+
+struct RefineJobGPU {
+    int parent_tile_id;
+    int child_tile_ids[4];
 };
 
 template <typename RealType>
@@ -82,11 +88,36 @@ private:
     size_t current_allocated_capacity;
     size_t current_tree_capacity;
 
+    // Persistent GPU scratch for restriction and wave speed
+    int* d_level_parent_node_ids;
+    int* d_level_parent_offsets;
+    int* d_level_parent_counts;
+    size_t current_level_parent_capacity;
+    std::vector<int> h_level_parent_offsets_cached;
+    std::vector<int> h_level_parent_counts_cached;
+    float* d_tile_min_dts;
+    float* d_global_min_dt;
+    size_t current_tile_dts_capacity;
+    float* d_tile_errors = nullptr;
+    size_t current_tile_errors_capacity = 0;
+    float* host_pinned_tile_errors = nullptr;
+
+    int adapt_step_counter;
+
     // GPU tree nodes representation for ghost-cell updates
     GPUNode2D* d_amr_nodes;
 
+    struct LevelActiveTiles {
+        int* d_tile_ids = nullptr;
+        int* d_node_ids = nullptr;
+        int count = 0;
+        size_t capacity = 0;
+    };
+    std::vector<LevelActiveTiles> level_active_tiles;
+
     int allocateTile();
     void freeTile(int tile_id);
+    void growTilePoolsGPU();
     void rebuildNeighborPointers();
     int findNeighborNode(int node_idx, int dir);
     int findNodeByCoords(int r_idx, int z_idx, int level);
@@ -98,7 +129,7 @@ private:
 
     void fillGhostCellsGPU();
     void computeRHSGPU(double A_coeff, double dt);
-    void applyLSRK3StepGPU(int stage, double dt);
+    void applyLSRK3StepGPU(int stage, double dt, int target_level = -1);
     void updatePrimitiveGPU();
 
     void restrictAllGPU();
@@ -109,7 +140,7 @@ private:
     bool shouldRefineNodeCPU(int node_idx);
     bool shouldCoarsenNodeCPU(int parent_idx);
     bool canCoarsenParentCPU(int parent_idx) const;
-    void refineNodeCPU(int node_idx);
+    RefineJobGPU refineNodeCPU(int node_idx);
     void coarsenNodeCPU(int parent_idx);
 
     void applyInitialConditionToNode(int node_idx, double explosive_z, double explosive_radius, double high_rho, double detonation_energy, double ambient_rho, double ambient_p, bool is_tnt, bool is_cylinder = false, double charge_height = 0.0);
@@ -145,6 +176,7 @@ public:
     void setCoordinateSystemCartesian(bool cartesian) { is_cartesian_val = cartesian; }
 
     void step(double dt) override;
+    double stepBatch(int num_steps, double cfl) override;
     void run(double duration) override;
 
     int getNr() const override { return level0_nr; }
@@ -170,8 +202,17 @@ public:
     bool isIdealGas() const override { return is_ideal_gas_val; }
     size_t getAllocatedVRAM() const override;
     double getAmbientP() const override { return ambient_p_val; }
+    void setGauges(const std::vector<Gauge2D>& gauges) override;
+    void recordGaugesAsync(double t) override;
+    void retrieveNewGaugeSamples(std::vector<double>& times, std::vector<float>& values) override;
 
     void exportVTK(const std::string& filename) override;
+
+private:
+    float* host_pinned_min_dt = nullptr;
+    std::vector<Gauge2D> cpu_gauges;
+    std::vector<double> cpu_gauge_times;
+    std::vector<float> cpu_gauge_values;
 };
 
 #endif // CFD_SOLVER_2D_AMR_CUDA_HPP

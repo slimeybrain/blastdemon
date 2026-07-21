@@ -39,6 +39,7 @@ public:
     virtual void setIdealGas(bool val) = 0;
 
     virtual void step(double dt) = 0;
+    virtual double stepBatch(int num_steps, double cfl) { (void)num_steps; (void)cfl; return getTime(); }
     virtual void run(double duration) = 0;
 
     virtual int getNr() const = 0;

@@ -2966,10 +2966,13 @@ export class GraphRenderer {
                 const conn = state.connections.find(c => c.toNode === node.id && c.toPort === 'in');
                 solverNode = conn ? state.nodes.find(n => n.id === conn.fromNode) : null;
                 if (solverNode && solverNode.type === 'CFDSolver2D') {
+                    const ownerModel = this.stateManager.getAllModels().find(m => m.nodes.some(n => n.id === solverNode.id));
+                    const modelNodes = ownerModel ? ownerModel.nodes : state.nodes;
+
                     const meshConn = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'mesh');
-                    meshNode = meshConn ? state.nodes.find(n => n.id === meshConn.fromNode && n.type === 'DomainMesh2D') : null;
+                    meshNode = meshConn ? modelNodes.find(n => n.id === meshConn.fromNode && n.type === 'DomainMesh2D') : null;
                     if (!meshNode) {
-                        meshNode = state.nodes.find(n => n.type === 'DomainMesh2D') || null;
+                        meshNode = modelNodes.find(n => n.type === 'DomainMesh2D') || null;
                     }
                     if (meshNode) {
                         isAxisymmetric = (meshNode.parameters?.coordinate_system ?? 'Axisymmetric') === 'Axisymmetric';
@@ -2981,11 +2984,11 @@ export class GraphRenderer {
                     let chargeNode = null;
                     // 1. Direct connection to solver's 'charge' port
                     const solverChargeConn = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'charge');
-                    chargeNode = solverChargeConn ? state.nodes.find(n => n.id === solverChargeConn.fromNode && n.type === 'Charge2D') : null;
+                    chargeNode = solverChargeConn ? modelNodes.find(n => n.id === solverChargeConn.fromNode && n.type === 'Charge2D') : null;
 
                     // 2. Connection fallback for 2D
                     if (!chargeNode) {
-                        chargeNode = state.nodes.find(n => n.type === 'Charge2D') || null;
+                        chargeNode = modelNodes.find(n => n.type === 'Charge2D') || null;
                     }
 
                     if (chargeNode) {

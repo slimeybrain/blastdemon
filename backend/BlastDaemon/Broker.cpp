@@ -576,30 +576,36 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
         // direct-init deadlock, and has been removed.
         // ────────────────────────────────────────────────────────────────────────
 
-        if ((command == "INIT_2D" || command == "INIT" || command == "INIT_3D") && active_processes.count(modelId) && active_processes[modelId]) {
-            // Try to route INIT, INIT_2D, or INIT_3D to the existing process. The child may not
-            // yet have entered its read loop, so retry for up to 200 ms before
-            // giving up and spawning a fresh process.
-            auto& existing = active_processes[modelId];
-            bool routed = false;
-            for (int attempt = 0; attempt < 20; ++attempt) {
-                if (existing->isRunning()) {
-                    if (existing->writeStdin(json_str + "\n\n")) {
-                        std::cout << "[DEBUG] Routing " << command << " to existing process for modelId "
-                                  << modelId << " (attempt " << attempt + 1 << ")" << std::endl;
-                        routed = true;
-                        break;
+        std::string init_mode_val = payload.value("init_mode", "");
+        bool is_remap = (command == "INIT_2D" && init_mode_val == "From1D");
+
+        if (active_processes.count(modelId) && active_processes[modelId]) {
+            if (is_remap) {
+                // Route to existing process for 1D->2D remap pipeline
+                auto& existing = active_processes[modelId];
+                bool routed = false;
+                for (int attempt = 0; attempt < 20; ++attempt) {
+                    if (existing->isRunning()) {
+                        if (existing->writeStdin(json_str + "\n\n")) {
+                            std::cout << "[DEBUG] Routing " << command << " to existing process for modelId "
+                                      << modelId << " (attempt " << attempt + 1 << ")" << std::endl;
+                            routed = true;
+                            break;
+                        }
                     }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
-                // Child may be in startup, give it 10 ms and retry.
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                if (routed) return;
+                std::cerr << "[WARN] Existing process for " << modelId
+                          << " died before " << command << " could be routed — spawning fresh." << std::endl;
+                existing->terminate();
+                active_processes.erase(modelId);
+            } else {
+                // Fresh initialization or reset: terminate stale process so new solver process gets clean state
+                std::cout << "[INFO] Terminating existing solver process for modelId " << modelId << " to ensure clean re-initialization." << std::endl;
+                active_processes[modelId]->terminate();
+                active_processes.erase(modelId);
             }
-            if (routed) return;
-            // Process died between commands — fall through and spawn fresh.
-            std::cerr << "[WARN] Existing process for " << modelId
-                      << " died before " << command << " could be routed — spawning fresh." << std::endl;
-            existing->terminate();
-            active_processes.erase(modelId);
         }
 
         // Kill any stale process for this model before spawning a fresh one.

@@ -1,0 +1,2 @@
+{"command":"INIT_2D","nr":16,"nz":32,"max_r":4.0,"max_z":8.0,"mesh_type":"amr","amr_max_levels":5,"amr_threshold":0.05,"amr_coarsen_ratio":0.8,"device":"cuda","init_mode":"Ideal Gas","charge_shape":"Sphere","charge_radius":0.05,"charge_r":0.0,"charge_z":0.3,"charge_mass":1.0,"explosive_type":"MaterialExplosive","rho":1630,"detonation_energy":4290000,"ambient_rho":1.225,"atm_pressure":101325.0,"gamma":1.4,"flux_scheme":"AUSM+","spatial_order":2,"temporal_order":2}
+{"command":"EXEC_ALL_2D","cfl":0.4,"duration":0.001,"downsample_stride":1}

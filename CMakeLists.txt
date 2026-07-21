@@ -107,55 +107,59 @@ if(OpenMP_CXX_FOUND)
     target_compile_options(test_cuda_solver PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler -fopenmp>)
 endif()
 target_link_libraries(test_cuda_solver PRIVATE ${CMAKE_DL_LIBS} ZLIB::ZLIB)
-# test_amr_2d_debug binary
-add_executable(test_amr_2d_debug
-    backend/BlastSolver/test_amr_2d_debug.cpp
-    backend/BlastSolver/cfd_solver_2d_init.cpp
-    backend/BlastSolver/cfd_solver_2d_step.cpp
-    backend/BlastSolver/cfd_solver_2d_fluxes.cpp
-    backend/BlastSolver/cfd_solver_2d_amr.cpp
-    backend/BlastSolver/cfd_solver_2d_cuda.cu
-    backend/BlastSolver/cfd_solver_2d_amr_cuda.cu
-    backend/BlastSolver/VTKWriter.cpp
-)
-target_include_directories(test_amr_2d_debug PRIVATE backend/BlastSolver/include)
-set_target_properties(test_amr_2d_debug PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-target_compile_options(test_amr_2d_debug PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3>)
-if(OpenMP_CXX_FOUND)
-    target_link_libraries(test_amr_2d_debug PRIVATE OpenMP::OpenMP_CXX)
-    target_compile_options(test_amr_2d_debug PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler -fopenmp>)
-endif()
-target_link_libraries(test_amr_2d_debug PRIVATE ${CMAKE_DL_LIBS} ZLIB::ZLIB)
-if(HDF5_FOUND)
-    target_include_directories(test_amr_2d_debug PRIVATE ${HDF5_INCLUDE_DIRS})
-    target_link_libraries(test_amr_2d_debug PRIVATE ${HDF5_LIBRARIES})
-else()
-    target_compile_definitions(test_amr_2d_debug PRIVATE NO_HDF5)
+# Optional test binaries (built only if source files exist)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/backend/BlastSolver/test_amr_2d_debug.cpp")
+    add_executable(test_amr_2d_debug
+        backend/BlastSolver/test_amr_2d_debug.cpp
+        backend/BlastSolver/cfd_solver_2d_init.cpp
+        backend/BlastSolver/cfd_solver_2d_step.cpp
+        backend/BlastSolver/cfd_solver_2d_fluxes.cpp
+        backend/BlastSolver/cfd_solver_2d_amr.cpp
+        backend/BlastSolver/cfd_solver_2d_cuda.cu
+        backend/BlastSolver/cfd_solver_2d_amr_cuda.cu
+        backend/BlastSolver/VTKWriter.cpp
+    )
+    target_include_directories(test_amr_2d_debug PRIVATE backend/BlastSolver/include)
+    set_target_properties(test_amr_2d_debug PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+    target_compile_options(test_amr_2d_debug PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3>)
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(test_amr_2d_debug PRIVATE OpenMP::OpenMP_CXX)
+        target_compile_options(test_amr_2d_debug PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler -fopenmp>)
+    endif()
+    target_link_libraries(test_amr_2d_debug PRIVATE ${CMAKE_DL_LIBS} ZLIB::ZLIB)
+    if(HDF5_FOUND)
+        target_include_directories(test_amr_2d_debug PRIVATE ${HDF5_INCLUDE_DIRS})
+        target_link_libraries(test_amr_2d_debug PRIVATE ${HDF5_LIBRARIES})
+    else()
+        target_compile_definitions(test_amr_2d_debug PRIVATE NO_HDF5)
+    endif()
 endif()
 
-add_executable(test_amr_2d_compare
-    backend/BlastSolver/test_amr_2d_compare.cpp
-    backend/BlastSolver/cfd_solver_2d_init.cpp
-    backend/BlastSolver/cfd_solver_2d_step.cpp
-    backend/BlastSolver/cfd_solver_2d_fluxes.cpp
-    backend/BlastSolver/cfd_solver_2d_amr.cpp
-    backend/BlastSolver/cfd_solver_2d_cuda.cu
-    backend/BlastSolver/cfd_solver_2d_amr_cuda.cu
-    backend/BlastSolver/VTKWriter.cpp
-)
-target_include_directories(test_amr_2d_compare PRIVATE backend/BlastSolver/include)
-set_target_properties(test_amr_2d_compare PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-target_compile_options(test_amr_2d_compare PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3>)
-if(OpenMP_CXX_FOUND)
-    target_link_libraries(test_amr_2d_compare PRIVATE OpenMP::OpenMP_CXX)
-    target_compile_options(test_amr_2d_compare PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler -fopenmp>)
-endif()
-target_link_libraries(test_amr_2d_compare PRIVATE ${CMAKE_DL_LIBS} ZLIB::ZLIB)
-if(HDF5_FOUND)
-    target_include_directories(test_amr_2d_compare PRIVATE ${HDF5_INCLUDE_DIRS})
-    target_link_libraries(test_amr_2d_compare PRIVATE ${HDF5_LIBRARIES})
-else()
-    target_compile_definitions(test_amr_2d_compare PRIVATE NO_HDF5)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/backend/BlastSolver/test_amr_2d_compare.cpp")
+    add_executable(test_amr_2d_compare
+        backend/BlastSolver/test_amr_2d_compare.cpp
+        backend/BlastSolver/cfd_solver_2d_init.cpp
+        backend/BlastSolver/cfd_solver_2d_step.cpp
+        backend/BlastSolver/cfd_solver_2d_fluxes.cpp
+        backend/BlastSolver/cfd_solver_2d_amr.cpp
+        backend/BlastSolver/cfd_solver_2d_cuda.cu
+        backend/BlastSolver/cfd_solver_2d_amr_cuda.cu
+        backend/BlastSolver/VTKWriter.cpp
+    )
+    target_include_directories(test_amr_2d_compare PRIVATE backend/BlastSolver/include)
+    set_target_properties(test_amr_2d_compare PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+    target_compile_options(test_amr_2d_compare PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3>)
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(test_amr_2d_compare PRIVATE OpenMP::OpenMP_CXX)
+        target_compile_options(test_amr_2d_compare PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler -fopenmp>)
+    endif()
+    target_link_libraries(test_amr_2d_compare PRIVATE ${CMAKE_DL_LIBS} ZLIB::ZLIB)
+    if(HDF5_FOUND)
+        target_include_directories(test_amr_2d_compare PRIVATE ${HDF5_INCLUDE_DIRS})
+        target_link_libraries(test_amr_2d_compare PRIVATE ${HDF5_LIBRARIES})
+    else()
+        target_compile_definitions(test_amr_2d_compare PRIVATE NO_HDF5)
+    endif()
 endif()
 
 

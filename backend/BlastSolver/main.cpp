@@ -1254,13 +1254,21 @@ void worker_2d_thread_func() {
         double dt = 0.0;
         if (global_solver_2d_cuda) {
             if (global_is_amr_2d) {
-                dt = global_solver_2d_cuda->getMaxWaveSpeed();
-                dt = dt * (global_cfl_2d.load() / 0.35);
+                int batch_size = 20;
+                if (!global_exec_until_end_2d.load()) {
+                    int remaining = global_target_steps_2d.load();
+                    if (remaining > 0 && remaining < batch_size) batch_size = remaining;
+                }
+                dt = global_solver_2d_cuda->stepBatch(batch_size, global_cfl_2d.load());
+                step_count += (batch_size - 1);
+                if (!global_exec_until_end_2d.load()) {
+                    global_target_steps_2d -= (batch_size - 1);
+                }
             } else {
                 double max_s = global_solver_2d_cuda->getMaxWaveSpeed();
                 dt = global_cfl_2d.load() * std::min(global_solver_2d_cuda->getDr(), global_solver_2d_cuda->getDz()) / max_s;
+                global_solver_2d_cuda->step(dt);
             }
-            global_solver_2d_cuda->step(dt);
         } else if (global_solver_2d) {
             dt = global_solver_2d->computeStepSize(global_cfl_2d.load());
             global_solver_2d->step(dt);
@@ -2407,6 +2415,7 @@ int main() {
                     std::string device = msg.value("device", "cpu");
                     double gamma = msg.value("gamma", 1.4);
                     double cfl = msg.value("cfl", 0.35);
+                    global_cfl_2d = cfl;
                     
                     std::string flux_scheme = msg.value("flux_scheme", "AUSM+");
                     int spatial_order = msg.value("spatial_order", 2);

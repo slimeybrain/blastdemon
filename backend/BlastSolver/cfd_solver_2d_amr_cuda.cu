@@ -3,15 +3,17 @@
 #include <iostream>
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <stdint.h>
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 
 // CUDA Error checking helper
-#define checkCudaError(val) check((val), #val, __FILE__, __LINE__)
-inline void check(cudaError_t result, char const *const func, const char *const file, int const line) {
-    if (result != cudaSuccess) {
-        std::cerr << "CUDA error at " << file << ":" << line << " code=" << result << " \"" << cudaGetErrorString(result) << "\" in " << func << std::endl;
-        exit(EXIT_FAILURE);
+#define checkCudaError(ans) { gpuAssert((ans), __FILE__, __LINE__); }
+inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort = true) {
+    if (code != cudaSuccess) {
+        std::cerr << "GPUassert: " << cudaGetErrorString(code) << " " << file << " " << line << std::endl;
+        if (abort) exit(code);
     }
 }
 
@@ -25,6 +27,12 @@ __device__ inline RealType minmod_gpu(RealType a, RealType b) {
     RealType abs_a = (a < (RealType)0.0) ? -a : a;
     RealType abs_b = (b < (RealType)0.0) ? -b : b;
     return (abs_a < abs_b) ? a : b;
+}
+
+template <typename RealType>
+__device__ inline RealType van_leer_gpu(RealType a, RealType b) {
+    if (a * b <= (RealType)0.0) return (RealType)0.0;
+    return (RealType)2.0 * a * b / (a + b);
 }
 
 __device__ inline int findNodeByCoordsGPU(
@@ -303,13 +311,13 @@ __global__ void fillGhostCells_AMR_kernel(
                                                  : ((Nb.*field)[(ic+1) * AMR_TILE_DIM + jc] - v);
                 double diff_r_left  = (ic <= 2)  ? ((Nb.*field)[3 * AMR_TILE_DIM + jc] - (Nb.*field)[2 * AMR_TILE_DIM + jc])
                                                  : (v - (Nb.*field)[(ic-1) * AMR_TILE_DIM + jc]);
-                double vr = minmod_gpu(diff_r_right, diff_r_left);
+                double vr = van_leer_gpu(diff_r_right, diff_r_left);
 
                 double diff_z_top    = (jc >= 17) ? ((Nb.*field)[ic * AMR_TILE_DIM + 17] - (Nb.*field)[ic * AMR_TILE_DIM + 16])
                                                   : ((Nb.*field)[ic * AMR_TILE_DIM + jc + 1] - v);
                 double diff_z_bottom = (jc <= 2)  ? ((Nb.*field)[ic * AMR_TILE_DIM + 3] - (Nb.*field)[ic * AMR_TILE_DIM + 2])
                                                   : (v - (Nb.*field)[ic * AMR_TILE_DIM + jc - 1]);
-                double vz = minmod_gpu(diff_z_top, diff_z_bottom);
+                double vz = van_leer_gpu(diff_z_top, diff_z_bottom);
 
                 return (RealType)(v + xfrac * vr + yfrac * vz);
             };
@@ -463,8 +471,31 @@ __global__ void computeTileRHS_AMR_kernel(
     int node_idx = active_node_ids[tile_idx];
     auto node = nodes[node_idx];
     int pool_idx = node.tile_id;
-    auto& T = states_pool[pool_idx];
+    const auto& T = states_pool[pool_idx];
     auto& dU = dU_pool[pool_idx];
+    __shared__ RealType sm_rho[AMR_TILE_DIM * AMR_TILE_DIM];
+    __shared__ RealType sm_ur[AMR_TILE_DIM * AMR_TILE_DIM];
+    __shared__ RealType sm_uz[AMR_TILE_DIM * AMR_TILE_DIM];
+    __shared__ RealType sm_p[AMR_TILE_DIM * AMR_TILE_DIM];
+    __shared__ RealType sm_E[AMR_TILE_DIM * AMR_TILE_DIM];
+    __shared__ RealType sm_alpha1[AMR_TILE_DIM * AMR_TILE_DIM];
+    __shared__ RealType sm_alpha2[AMR_TILE_DIM * AMR_TILE_DIM];
+    __shared__ RealType sm_arho1[AMR_TILE_DIM * AMR_TILE_DIM];
+    __shared__ RealType sm_arho2[AMR_TILE_DIM * AMR_TILE_DIM];
+
+    int flat_tid = threadIdx.y * 16 + threadIdx.x; // 0..255
+    for (int idx = flat_tid; idx < AMR_TILE_DIM * AMR_TILE_DIM; idx += 256) {
+        sm_rho[idx]    = T.rho[idx];
+        sm_ur[idx]     = T.ur[idx];
+        sm_uz[idx]     = T.uz[idx];
+        sm_p[idx]      = T.p[idx];
+        sm_E[idx]      = T.E[idx];
+        sm_alpha1[idx] = T.alpha1[idx];
+        sm_alpha2[idx] = T.alpha2[idx];
+        sm_arho1[idx]  = T.arho1[idx];
+        sm_arho2[idx]  = T.arho2[idx];
+    }
+    __syncthreads();
 
     int i = threadIdx.x; // 0..15
     int j = threadIdx.y; // 0..15
@@ -479,7 +510,7 @@ __global__ void computeTileRHS_AMR_kernel(
 
     auto readStateLocal = [&](int ii, int jj) {
         int idx = ii * AMR_TILE_DIM + jj;
-        CellState2DT<RealType> s = { T.rho[idx], T.ur[idx], T.uz[idx], T.p[idx], T.E[idx], T.alpha1[idx], T.alpha2[idx], T.arho1[idx], T.arho2[idx] };
+        CellState2DT<RealType> s = { sm_rho[idx], sm_ur[idx], sm_uz[idx], sm_p[idx], sm_E[idx], sm_alpha1[idx], sm_alpha2[idx], sm_arho1[idx], sm_arho2[idx] };
         return s;
     };
 
@@ -782,6 +813,152 @@ __global__ void restrictNode_AMR_kernel(
 }
 
 template <typename RealType>
+__global__ void prolongateChildTiles_AMR_kernel(
+    const RefineJobGPU* jobs,
+    int num_jobs,
+    AMRConservativeTileT<RealType>* d_U_pool) {
+
+    int job_idx = blockIdx.x;
+    if (job_idx >= num_jobs) return;
+
+    RefineJobGPU job = jobs[job_idx];
+    int p_id = job.parent_tile_id;
+    if (p_id == -1) return;
+
+    int i = threadIdx.x;
+    int j = threadIdx.y;
+    int child_k = (i + 2) * AMR_TILE_DIM + (j + 2);
+
+    for (int q = 0; q < 4; ++q) {
+        int c_id = job.child_tile_ids[q];
+        if (c_id == -1) continue;
+
+        int r_off = (q & 1) ? 8 : 0;
+        int z_off = (q >= 2) ? 8 : 0;
+
+        int pi = 2 + r_off + i / 2;
+        int pj = 2 + z_off + j / 2;
+        int parent_k = pi * AMR_TILE_DIM + pj;
+
+        d_U_pool[c_id].rho[child_k]     = d_U_pool[p_id].rho[parent_k];
+        d_U_pool[c_id].rhour[child_k]   = d_U_pool[p_id].rhour[parent_k];
+        d_U_pool[c_id].rhouz[child_k]   = d_U_pool[p_id].rhouz[parent_k];
+        d_U_pool[c_id].E[child_k]       = d_U_pool[p_id].E[parent_k];
+        d_U_pool[c_id].alpha1[child_k]  = d_U_pool[p_id].alpha1[parent_k];
+        d_U_pool[c_id].alpha2[child_k]  = d_U_pool[p_id].alpha2[parent_k];
+        d_U_pool[c_id].arho1[child_k]   = d_U_pool[p_id].arho1[parent_k];
+        d_U_pool[c_id].arho2[child_k]   = d_U_pool[p_id].arho2[parent_k];
+    }
+}
+
+template <typename RealType>
+__global__ void computeTileMinDt_AMR_kernel(
+    GPUNode2D* nodes,
+    int* active_node_ids,
+    int active_leaves_count,
+    const AMRPrimitiveTileT<RealType>* states_pool,
+    RealType gamma,
+    MultiMat::MaterialSet mat,
+    bool is_ideal_gas,
+    double dr_base,
+    double dz_base,
+    double cfl,
+    float* tile_min_dts) {
+
+    int tile_idx = blockIdx.x;
+    if (tile_idx >= active_leaves_count) return;
+
+    int node_idx = active_node_ids[tile_idx];
+    auto node = nodes[node_idx];
+    const auto& S = states_pool[node.tile_id];
+
+    int i = threadIdx.x;
+    int j = threadIdx.y;
+    int k = (i + 2) * AMR_TILE_DIM + (j + 2);
+
+    double factor = 1.0 / (1 << node.level);
+    double dr = dr_base * factor;
+    double dz = dz_base * factor;
+
+    double cell_dt = 1e20;
+    if (S.rho[k] >= (RealType)1e-10) {
+        double c;
+        if (is_ideal_gas) {
+            c = math_sqrt(gamma * math_max(S.p[k], (RealType)1e-8) / math_max(S.rho[k], (RealType)1e-8));
+        } else {
+            c = MultiMat::getMixtureSoundSpeed(S.p[k], S.rho[k], S.alpha1[k], S.alpha2[k], S.arho1[k], S.arho2[k], gamma, mat.products, mat.unreacted);
+        }
+        double speed_r = math_abs(S.ur[k]) + c;
+        double speed_z = math_abs(S.uz[k]) + c;
+        cell_dt = cfl * math_min(dr / (speed_r + 1e-12), dz / (speed_z + 1e-12));
+    }
+
+    __shared__ float sm_min_dt[256];
+    int tid = j * 16 + i;
+    sm_min_dt[tid] = (float)cell_dt;
+    __syncthreads();
+
+    for (int stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            sm_min_dt[tid] = fminf(sm_min_dt[tid], sm_min_dt[tid + stride]);
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        tile_min_dts[tile_idx] = sm_min_dt[0];
+    }
+}
+
+__global__ void reduceMinDt_AMR_kernel(const float* tile_min_dts, int count, float* global_min_dt) {
+    __shared__ float sm[256];
+    int tid = threadIdx.x;
+    float val = 1e20f;
+
+    for (int i = tid; i < count; i += blockDim.x) {
+        float t_val = tile_min_dts[i];
+        if (t_val < val) val = t_val;
+    }
+    sm[tid] = val;
+    __syncthreads();
+
+    for (int stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            sm[tid] = fminf(sm[tid], sm[tid + stride]);
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        *global_min_dt = sm[0];
+    }
+}
+
+inline void launchReduceMinDt_AMR(const float* tile_min_dts, int count, float* global_min_dt) {
+    reduceMinDt_AMR_kernel<<<1, 256>>>(tile_min_dts, count, global_min_dt);
+}
+
+inline void launchComputeTileMinDt_AMR(
+    GPUNode2D* nodes, int* active_node_ids, int active_leaves_count,
+    const AMRPrimitiveTileT<float>* states_pool, float gamma,
+    MultiMat::MaterialSet mat, bool is_ideal_gas, double dr_base, double dz_base,
+    double cfl, float* tile_min_dts) {
+    computeTileMinDt_AMR_kernel<float><<<active_leaves_count, dim3(16, 16)>>>(
+        nodes, active_node_ids, active_leaves_count, states_pool, gamma, mat, is_ideal_gas, dr_base, dz_base, cfl, tile_min_dts
+    );
+}
+
+inline void launchComputeTileMinDt_AMR(
+    GPUNode2D* nodes, int* active_node_ids, int active_leaves_count,
+    const AMRPrimitiveTileT<double>* states_pool, double gamma,
+    MultiMat::MaterialSet mat, bool is_ideal_gas, double dr_base, double dz_base,
+    double cfl, float* tile_min_dts) {
+    computeTileMinDt_AMR_kernel<double><<<active_leaves_count, dim3(16, 16)>>>(
+        nodes, active_node_ids, active_leaves_count, states_pool, gamma, mat, is_ideal_gas, dr_base, dz_base, cfl, tile_min_dts
+    );
+}
+
+template <typename RealType>
 __global__ void updatePrimitiveFromConservative_AMR_kernel(
     int* active_tile_ids,
     int active_leaves_count,
@@ -926,6 +1103,130 @@ __global__ void updatePrimitiveFromConservative_AMR_kernel(
     }
 }
 
+template <typename RealType>
+__global__ void applyFluxCorrectionGPU_kernel(
+    GPUNode2D* nodes, int* active_node_ids, int active_leaves_count,
+    AMRConservativeTileT<RealType>* U_pool, AMRFaceFluxT<RealType>* node_boundary_fluxes,
+    double B_coeff, double dt, double dr_base, double dz_base, bool is_cartesian);
+
+template <typename RealType>
+__global__ void computeTileLoehnerError_AMR_kernel(
+    const GPUNode2D* nodes, const int* active_node_ids, int active_leaves_count,
+    const AMRPrimitiveTileT<RealType>* states_pool, float* tile_errors);
+
+inline void launchFillGhostCells_AMR(
+    GPUNode2D* nodes, int total_nodes, int level0_tiles_r, int level0_tiles_z,
+    int* active_node_ids, int active_leaves_count, AMRPrimitiveTileT<float>* states_pool,
+    CFDSolver2DCuda::BCType bc_r_min, CFDSolver2DCuda::BCType bc_r_max,
+    CFDSolver2DCuda::BCType bc_z_min, CFDSolver2DCuda::BCType bc_z_max,
+    float ambient_rho, float ambient_p, float gamma, MultiMat::MaterialSet mat,
+    bool is_ideal_gas, double dr_base, double dz_base) {
+    fillGhostCells_AMR_kernel<float><<<active_leaves_count, 64>>>(
+        nodes, total_nodes, level0_tiles_r, level0_tiles_z, active_node_ids, active_leaves_count,
+        states_pool, bc_r_min, bc_r_max, bc_z_min, bc_z_max, ambient_rho, ambient_p, gamma, mat, is_ideal_gas, dr_base, dz_base);
+}
+
+inline void launchFillGhostCells_AMR(
+    GPUNode2D* nodes, int total_nodes, int level0_tiles_r, int level0_tiles_z,
+    int* active_node_ids, int active_leaves_count, AMRPrimitiveTileT<double>* states_pool,
+    CFDSolver2DCuda::BCType bc_r_min, CFDSolver2DCuda::BCType bc_r_max,
+    CFDSolver2DCuda::BCType bc_z_min, CFDSolver2DCuda::BCType bc_z_max,
+    double ambient_rho, double ambient_p, double gamma, MultiMat::MaterialSet mat,
+    bool is_ideal_gas, double dr_base, double dz_base) {
+    fillGhostCells_AMR_kernel<double><<<active_leaves_count, 64>>>(
+        nodes, total_nodes, level0_tiles_r, level0_tiles_z, active_node_ids, active_leaves_count,
+        states_pool, bc_r_min, bc_r_max, bc_z_min, bc_z_max, ambient_rho, ambient_p, gamma, mat, is_ideal_gas, dr_base, dz_base);
+}
+
+inline void launchComputeTileRHS_AMR(
+    GPUNode2D* nodes, int* active_node_ids, int active_leaves_count,
+    AMRPrimitiveTileT<float>* states_pool, AMRConservativeTileT<float>* dU_pool,
+    AMRFaceFluxT<float>* node_boundary_fluxes, float A_coeff, float dt, float gamma, MultiMat::MaterialSet mat,
+    bool is_ideal_gas, double dr_base, double dz_base, int order) {
+    computeTileRHS_AMR_kernel<float><<<active_leaves_count, dim3(16, 16)>>>(
+        nodes, active_node_ids, active_leaves_count, states_pool, dU_pool, node_boundary_fluxes, A_coeff, dt, gamma, mat, is_ideal_gas, dr_base, dz_base, order);
+}
+inline void launchComputeTileRHS_AMR(
+    GPUNode2D* nodes, int* active_node_ids, int active_leaves_count,
+    AMRPrimitiveTileT<double>* states_pool, AMRConservativeTileT<double>* dU_pool,
+    AMRFaceFluxT<double>* node_boundary_fluxes, double A_coeff, double dt, double gamma, MultiMat::MaterialSet mat,
+    bool is_ideal_gas, double dr_base, double dz_base, int order) {
+    computeTileRHS_AMR_kernel<double><<<active_leaves_count, dim3(16, 16)>>>(
+        nodes, active_node_ids, active_leaves_count, states_pool, dU_pool, node_boundary_fluxes, A_coeff, dt, gamma, mat, is_ideal_gas, dr_base, dz_base, order);
+}
+
+inline void launchUpdateConservativeRKStage_AMR(
+    int count, int* active_tile_ids, AMRConservativeTileT<float>* U_pool,
+    AMRConservativeTileT<float>* dU_pool, float dt) {
+    updateConservativeRKStage_AMR_kernel<float><<<count, dim3(16, 16)>>>(active_tile_ids, count, U_pool, dU_pool, dt);
+}
+inline void launchUpdateConservativeRKStage_AMR(
+    int count, int* active_tile_ids, AMRConservativeTileT<double>* U_pool,
+    AMRConservativeTileT<double>* dU_pool, double dt) {
+    updateConservativeRKStage_AMR_kernel<double><<<count, dim3(16, 16)>>>(active_tile_ids, count, U_pool, dU_pool, dt);
+}
+
+inline void launchApplyFluxCorrectionGPU(
+    int flux_blocks, GPUNode2D* nodes, int* active_node_ids, int active_leaves_count,
+    AMRConservativeTileT<float>* U_pool, AMRFaceFluxT<float>* node_boundary_fluxes,
+    double B_coeff, double dt, double dr_base, double dz_base, bool is_cartesian) {
+    applyFluxCorrectionGPU_kernel<float><<<flux_blocks, 256>>>(
+        nodes, active_node_ids, active_leaves_count, U_pool, node_boundary_fluxes, B_coeff, dt, dr_base, dz_base, is_cartesian);
+}
+inline void launchApplyFluxCorrectionGPU(
+    int flux_blocks, GPUNode2D* nodes, int* active_node_ids, int active_leaves_count,
+    AMRConservativeTileT<double>* U_pool, AMRFaceFluxT<double>* node_boundary_fluxes,
+    double B_coeff, double dt, double dr_base, double dz_base, bool is_cartesian) {
+    applyFluxCorrectionGPU_kernel<double><<<flux_blocks, 256>>>(
+        nodes, active_node_ids, active_leaves_count, U_pool, node_boundary_fluxes, B_coeff, dt, dr_base, dz_base, is_cartesian);
+}
+
+inline void launchUpdatePrimitiveFromConservative_AMR(
+    int* active_tile_ids, int active_leaves_count,
+    AMRConservativeTileT<float>* U_pool, AMRPrimitiveTileT<float>* states_pool,
+    float gamma, MultiMat::MaterialSet mat, bool is_ideal_gas, float ambient_rho, float ambient_p) {
+    updatePrimitiveFromConservative_AMR_kernel<float><<<active_leaves_count, dim3(16, 16)>>>(
+        active_tile_ids, active_leaves_count, U_pool, states_pool, gamma, mat, is_ideal_gas, ambient_rho, ambient_p);
+}
+inline void launchUpdatePrimitiveFromConservative_AMR(
+    int* active_tile_ids, int active_leaves_count,
+    AMRConservativeTileT<double>* U_pool, AMRPrimitiveTileT<double>* states_pool,
+    double gamma, MultiMat::MaterialSet mat, bool is_ideal_gas, double ambient_rho, double ambient_p) {
+    updatePrimitiveFromConservative_AMR_kernel<double><<<active_leaves_count, dim3(16, 16)>>>(
+        active_tile_ids, active_leaves_count, U_pool, states_pool, gamma, mat, is_ideal_gas, ambient_rho, ambient_p);
+}
+
+inline void launchRestrictNode_AMR(
+    GPUNode2D* nodes, int* parent_node_ids, int count, AMRConservativeTileT<float>* U_pool, double dr_base, bool is_cartesian) {
+    restrictNode_AMR_kernel<float><<<count, dim3(16, 16)>>>(nodes, parent_node_ids, count, U_pool, dr_base, is_cartesian);
+}
+inline void launchRestrictNode_AMR(
+    GPUNode2D* nodes, int* parent_node_ids, int count, AMRConservativeTileT<double>* U_pool, double dr_base, bool is_cartesian) {
+    restrictNode_AMR_kernel<double><<<count, dim3(16, 16)>>>(nodes, parent_node_ids, count, U_pool, dr_base, is_cartesian);
+}
+
+inline void launchComputeTileLoehnerError_AMR(
+    const GPUNode2D* nodes, const int* active_node_ids, int active_leaves_count,
+    const AMRPrimitiveTileT<float>* states_pool, float* tile_errors) {
+    computeTileLoehnerError_AMR_kernel<float><<<active_leaves_count, dim3(16, 16)>>>(
+        nodes, active_node_ids, active_leaves_count, states_pool, tile_errors);
+}
+inline void launchComputeTileLoehnerError_AMR(
+    const GPUNode2D* nodes, const int* active_node_ids, int active_leaves_count,
+    const AMRPrimitiveTileT<double>* states_pool, float* tile_errors) {
+    computeTileLoehnerError_AMR_kernel<double><<<active_leaves_count, dim3(16, 16)>>>(
+        nodes, active_node_ids, active_leaves_count, states_pool, tile_errors);
+}
+
+inline void launchProlongateChildTiles_AMR(
+    int count, const RefineJobGPU* refine_jobs, AMRConservativeTileT<float>* U_pool) {
+    prolongateChildTiles_AMR_kernel<float><<<count, dim3(16, 16)>>>(refine_jobs, count, U_pool);
+}
+inline void launchProlongateChildTiles_AMR(
+    int count, const RefineJobGPU* refine_jobs, AMRConservativeTileT<double>* U_pool) {
+    prolongateChildTiles_AMR_kernel<double><<<count, dim3(16, 16)>>>(refine_jobs, count, U_pool);
+}
+
 // --------------------------------------------------------------------------------------
 // Host Class Methods for CFDSolver2DAMRCudaImpl
 // --------------------------------------------------------------------------------------
@@ -943,8 +1244,10 @@ CFDSolver2DAMRCudaImpl<RealType>::CFDSolver2DAMRCudaImpl(int nr, int nz, double 
       ambient_rho_val(1.225), ambient_p_val(101325.0), detonator_r_coord(0.0), detonator_z_coord(0.0),
       d_states_pool(nullptr), d_U_pool(nullptr), d_dU_pool(nullptr), allocated_tiles_capacity(0),
       d_active_node_ids(nullptr), d_active_tile_ids(nullptr), active_leaves_count(0),
-      d_allocated_node_ids(nullptr), d_allocated_tile_ids(nullptr), allocated_nodes_count(0), d_amr_nodes(nullptr),
-      current_active_capacity(0), current_allocated_capacity(0), current_tree_capacity(0) {
+      d_allocated_node_ids(nullptr), d_allocated_tile_ids(nullptr), allocated_nodes_count(0),
+      current_active_capacity(0), current_allocated_capacity(0), current_tree_capacity(0),
+       d_level_parent_node_ids(nullptr), d_level_parent_offsets(nullptr), d_level_parent_counts(nullptr), current_level_parent_capacity(0),
+       d_tile_min_dts(nullptr), d_global_min_dt(nullptr), current_tile_dts_capacity(0), adapt_step_counter(0), d_amr_nodes(nullptr) {
 
     level0_num_tiles_r = (nr + TILE_SIZE - 1) / TILE_SIZE;
     dr_base = max_r / (level0_num_tiles_r * TILE_SIZE);
@@ -988,6 +1291,49 @@ CFDSolver2DAMRCudaImpl<RealType>::~CFDSolver2DAMRCudaImpl() {
     if (d_allocated_tile_ids) checkCudaError(cudaFree(d_allocated_tile_ids));
     if (d_amr_nodes) checkCudaError(cudaFree(d_amr_nodes));
     if (d_node_boundary_fluxes) checkCudaError(cudaFree(d_node_boundary_fluxes));
+    if (d_level_parent_node_ids) checkCudaError(cudaFree(d_level_parent_node_ids));
+    if (d_level_parent_offsets) checkCudaError(cudaFree(d_level_parent_offsets));
+    if (d_level_parent_counts) checkCudaError(cudaFree(d_level_parent_counts));
+    if (d_tile_min_dts) checkCudaError(cudaFree(d_tile_min_dts));
+    if (d_global_min_dt) checkCudaError(cudaFree(d_global_min_dt));
+    if (host_pinned_min_dt) checkCudaError(cudaFreeHost(host_pinned_min_dt));
+    if (d_tile_errors) checkCudaError(cudaFree(d_tile_errors));
+    if (host_pinned_tile_errors) checkCudaError(cudaFreeHost(host_pinned_tile_errors));
+    for (auto& lvl : level_active_tiles) {
+        if (lvl.d_tile_ids) checkCudaError(cudaFree(lvl.d_tile_ids));
+        if (lvl.d_node_ids) checkCudaError(cudaFree(lvl.d_node_ids));
+    }
+}
+
+template <typename RealType>
+void CFDSolver2DAMRCudaImpl<RealType>::growTilePoolsGPU() {
+    if (states_pool.size() <= allocated_tiles_capacity) return;
+
+    size_t old_cap = allocated_tiles_capacity;
+    size_t new_cap = states_pool.size() * 2;
+
+    AMRPrimitiveTileT<RealType>* new_d_states = nullptr;
+    AMRConservativeTileT<RealType>* new_d_U = nullptr;
+    AMRConservativeTileT<RealType>* new_d_dU = nullptr;
+
+    checkCudaError(cudaMalloc(&new_d_states, new_cap * sizeof(AMRPrimitiveTileT<RealType>)));
+    checkCudaError(cudaMalloc(&new_d_U, new_cap * sizeof(AMRConservativeTileT<RealType>)));
+    checkCudaError(cudaMalloc(&new_d_dU, new_cap * sizeof(AMRConservativeTileT<RealType>)));
+
+    if (old_cap > 0 && d_states_pool) {
+        checkCudaError(cudaMemcpy(new_d_states, d_states_pool, old_cap * sizeof(AMRPrimitiveTileT<RealType>), cudaMemcpyDeviceToDevice));
+        checkCudaError(cudaMemcpy(new_d_U, d_U_pool, old_cap * sizeof(AMRConservativeTileT<RealType>), cudaMemcpyDeviceToDevice));
+        checkCudaError(cudaMemcpy(new_d_dU, d_dU_pool, old_cap * sizeof(AMRConservativeTileT<RealType>), cudaMemcpyDeviceToDevice));
+
+        checkCudaError(cudaFree(d_states_pool));
+        checkCudaError(cudaFree(d_U_pool));
+        checkCudaError(cudaFree(d_dU_pool));
+    }
+
+    d_states_pool = new_d_states;
+    d_U_pool = new_d_U;
+    d_dU_pool = new_d_dU;
+    allocated_tiles_capacity = new_cap;
 }
 
 template <typename RealType>
@@ -1236,18 +1582,75 @@ void CFDSolver2DAMRCudaImpl<RealType>::syncTreeToGPU() {
     checkCudaError(cudaMemcpy(d_active_tile_ids, active_tile_ids.data(), active_leaves_count * sizeof(int), cudaMemcpyHostToDevice));
     checkCudaError(cudaMemcpy(d_allocated_node_ids, allocated_node_ids.data(), allocated_nodes_count * sizeof(int), cudaMemcpyHostToDevice));
     checkCudaError(cudaMemcpy(d_allocated_tile_ids, allocated_tile_ids.data(), allocated_nodes_count * sizeof(int), cudaMemcpyHostToDevice));
+
+    // Precalculate persistent level parent arrays for fast GPU restriction
+    h_level_parent_offsets_cached.assign(amr_max_levels_val, 0);
+    h_level_parent_counts_cached.assign(amr_max_levels_val, 0);
+    std::vector<int> h_all_level_parents;
+
+    for (int lvl = amr_max_levels_val - 2; lvl >= 0; --lvl) {
+        h_level_parent_offsets_cached[lvl] = (int)h_all_level_parents.size();
+        int count = 0;
+        for (size_t n = 0; n < amr_nodes.size(); ++n) {
+            if (amr_nodes[n].level == lvl && amr_nodes[n].children[0] != -1) {
+                h_all_level_parents.push_back((int)n);
+                count++;
+            }
+        }
+        h_level_parent_counts_cached[lvl] = count;
+    }
+
+    if (h_all_level_parents.size() > current_level_parent_capacity) {
+        if (d_level_parent_node_ids) checkCudaError(cudaFree(d_level_parent_node_ids));
+        current_level_parent_capacity = std::max((size_t)1, h_all_level_parents.size() * 2);
+        checkCudaError(cudaMalloc(&d_level_parent_node_ids, current_level_parent_capacity * sizeof(int)));
+    }
+
+    if (!h_all_level_parents.empty()) {
+        checkCudaError(cudaMemcpy(d_level_parent_node_ids, h_all_level_parents.data(), h_all_level_parents.size() * sizeof(int), cudaMemcpyHostToDevice));
+    }
+
+    // Populate level_active_tiles for level subcycling
+    level_active_tiles.resize(amr_max_levels_val);
+    std::vector<std::vector<int>> h_level_active_tile_ids(amr_max_levels_val);
+    std::vector<std::vector<int>> h_level_active_node_ids(amr_max_levels_val);
+
+    for (size_t n = 0; n < amr_nodes.size(); ++n) {
+        if (amr_nodes[n].tile_id != -1 && amr_nodes[n].is_active) {
+            int lvl = amr_nodes[n].level;
+            if (lvl >= 0 && lvl < amr_max_levels_val) {
+                h_level_active_tile_ids[lvl].push_back(amr_nodes[n].tile_id);
+                h_level_active_node_ids[lvl].push_back((int)n);
+            }
+        }
+    }
+
+    for (int lvl = 0; lvl < amr_max_levels_val; ++lvl) {
+        int cnt = (int)h_level_active_tile_ids[lvl].size();
+        level_active_tiles[lvl].count = cnt;
+        if ((size_t)cnt > level_active_tiles[lvl].capacity) {
+            if (level_active_tiles[lvl].d_tile_ids) checkCudaError(cudaFree(level_active_tiles[lvl].d_tile_ids));
+            if (level_active_tiles[lvl].d_node_ids) checkCudaError(cudaFree(level_active_tiles[lvl].d_node_ids));
+            level_active_tiles[lvl].capacity = std::max((size_t)1, (size_t)cnt * 2);
+            checkCudaError(cudaMalloc(&level_active_tiles[lvl].d_tile_ids, level_active_tiles[lvl].capacity * sizeof(int)));
+            checkCudaError(cudaMalloc(&level_active_tiles[lvl].d_node_ids, level_active_tiles[lvl].capacity * sizeof(int)));
+        }
+        if (cnt > 0) {
+            checkCudaError(cudaMemcpy(level_active_tiles[lvl].d_tile_ids, h_level_active_tile_ids[lvl].data(), cnt * sizeof(int), cudaMemcpyHostToDevice));
+            checkCudaError(cudaMemcpy(level_active_tiles[lvl].d_node_ids, h_level_active_node_ids[lvl].data(), cnt * sizeof(int), cudaMemcpyHostToDevice));
+        }
+    }
 }
 
 template <typename RealType>
 void CFDSolver2DAMRCudaImpl<RealType>::fillGhostCellsGPU() {
-    fillGhostCells_AMR_kernel<RealType><<<allocated_nodes_count, 64>>>(
-        d_amr_nodes, (int)amr_nodes.size(), level0_num_tiles_r, level0_num_tiles_z,
-        d_allocated_node_ids, allocated_nodes_count, d_states_pool,
-        bc_r_min, bc_r_max, bc_z_min, bc_z_max,
-        (RealType)ambient_rho_val, (RealType)ambient_p_val, (RealType)gamma_val,
-        materials_val, is_ideal_gas_val, dr_base, dz_base
+    launchFillGhostCells_AMR(
+        this->d_amr_nodes, (int)this->amr_nodes.size(), this->level0_num_tiles_r, this->level0_num_tiles_z,
+        this->d_allocated_node_ids, this->allocated_nodes_count, this->d_states_pool,
+        this->bc_r_min, this->bc_r_max, this->bc_z_min, this->bc_z_max,
+        (RealType)this->ambient_rho_val, (RealType)this->ambient_p_val, (RealType)this->gamma_val,
+        this->materials_val, this->is_ideal_gas_val, this->dr_base, this->dz_base
     );
-    checkCudaError(cudaDeviceSynchronize());
 }
 
 template <typename RealType>
@@ -1260,7 +1663,8 @@ __global__ void applyFluxCorrectionGPU_kernel(
     double B_coeff,
     double dt,
     double dr_base,
-    double dz_base)
+    double dz_base,
+    bool is_cartesian)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= active_leaves_count * 4 * 16) return;
@@ -1322,9 +1726,14 @@ __global__ void applyFluxCorrectionGPU_kernel(
             RealType fine_sum; \
             if (d == 0 || d == 1) { \
                 fine_sum = (RealType)0.5 * (f_flux.field[f_idx1] + f_flux.field[f_idx2]); \
-                atomicAdd(&U_pool[node.tile_id].field[ck], (RealType)B_coeff * sign * (RealType)(dt / dr_c) * (r_face / r_c) * (c_flux.field[c] - fine_sum)); \
+                RealType r_scale = is_cartesian ? (RealType)1.0 : (r_face / r_c); \
+                atomicAdd(&U_pool[node.tile_id].field[ck], (RealType)B_coeff * sign * (RealType)(dt / dr_c) * r_scale * (c_flux.field[c] - fine_sum)); \
             } else { \
-                fine_sum = (RealType)0.5 * (f_flux.field[f_idx1] * r_f1 + f_flux.field[f_idx2] * r_f2) / r_c; \
+                if (is_cartesian) { \
+                    fine_sum = (RealType)0.5 * (f_flux.field[f_idx1] + f_flux.field[f_idx2]); \
+                } else { \
+                    fine_sum = (RealType)0.5 * (f_flux.field[f_idx1] * r_f1 + f_flux.field[f_idx2] * r_f2) / r_c; \
+                } \
                 atomicAdd(&U_pool[node.tile_id].field[ck], (RealType)B_coeff * sign * (RealType)(dt / dz_c) * (c_flux.field[c] - fine_sum)); \
             } \
         }
@@ -1338,18 +1747,15 @@ __global__ void applyFluxCorrectionGPU_kernel(
 
 template <typename RealType>
 void CFDSolver2DAMRCudaImpl<RealType>::computeRHSGPU(double A_coeff, double dt) {
-    computeTileRHS_AMR_kernel<RealType><<<active_leaves_count, dim3(16, 16)>>>(
-        d_amr_nodes, d_active_node_ids, active_leaves_count, d_states_pool, d_dU_pool, d_node_boundary_fluxes,
-        (RealType)A_coeff, (RealType)dt, (RealType)gamma_val, materials_val, is_ideal_gas_val,
-        dr_base, dz_base, spatial_order_val
+    launchComputeTileRHS_AMR(
+        this->d_amr_nodes, this->d_active_node_ids, this->active_leaves_count, this->d_states_pool, this->d_dU_pool, this->d_node_boundary_fluxes,
+        (RealType)A_coeff, (RealType)dt, (RealType)this->gamma_val, this->materials_val, this->is_ideal_gas_val,
+        this->dr_base, this->dz_base, this->spatial_order_val
     );
-    checkCudaError(cudaDeviceSynchronize());
-
-    // Flux correction is no longer applied here. It is applied after updateConservative.
 }
 
 template <typename RealType>
-void CFDSolver2DAMRCudaImpl<RealType>::applyLSRK3StepGPU(int stage, double dt) {
+void CFDSolver2DAMRCudaImpl<RealType>::applyLSRK3StepGPU(int stage, double dt, int target_level) {
     const double A[3] = {0.0, -5.0/9.0, -153.0/128.0};
     const double B[3] = {1.0/3.0, 15.0/16.0, 8.0/15.0};
 
@@ -1359,64 +1765,64 @@ void CFDSolver2DAMRCudaImpl<RealType>::applyLSRK3StepGPU(int stage, double dt) {
     fillGhostCellsGPU();
     computeRHSGPU(A[stage], dt);
 
-    updateConservativeRKStage_AMR_kernel<RealType><<<active_leaves_count, dim3(16, 16)>>>(
-        d_active_tile_ids, active_leaves_count, d_U_pool, d_dU_pool, (RealType)B[stage]
-    );
-    checkCudaError(cudaDeviceSynchronize());
+    if (target_level >= 0 && target_level < amr_max_levels_val) {
+        int cnt = level_active_tiles[target_level].count;
+        if (cnt > 0) {
+            launchUpdateConservativeRKStage_AMR(
+                cnt, level_active_tiles[target_level].d_tile_ids, this->d_U_pool, this->d_dU_pool, (RealType)B[stage]
+            );
+        }
+    } else {
+        launchUpdateConservativeRKStage_AMR(
+            this->active_leaves_count, this->d_active_tile_ids, this->d_U_pool, this->d_dU_pool, (RealType)B[stage]
+        );
+    }
 
     int total_flux_threads = active_leaves_count * 4 * 16;
     int flux_blocks = (total_flux_threads + 255) / 256;
     if (flux_blocks > 0) {
-        applyFluxCorrectionGPU_kernel<RealType><<<flux_blocks, 256>>>(
-            d_amr_nodes,
-            d_active_node_ids,
-            active_leaves_count,
-            d_U_pool,
-            d_node_boundary_fluxes,
+        launchApplyFluxCorrectionGPU(
+            flux_blocks,
+            this->d_amr_nodes,
+            this->d_active_node_ids,
+            this->active_leaves_count,
+            this->d_U_pool,
+            this->d_node_boundary_fluxes,
             B[stage],
             dt,
-            dr_base,
-            dz_base
+            this->dr_base,
+            this->dz_base,
+            this->is_cartesian_val
         );
-        checkCudaError(cudaDeviceSynchronize());
     }
 }
 
 template <typename RealType>
 void CFDSolver2DAMRCudaImpl<RealType>::updatePrimitiveGPU() {
-    updatePrimitiveFromConservative_AMR_kernel<RealType><<<allocated_nodes_count, dim3(16, 16)>>>(
-        d_allocated_tile_ids, allocated_nodes_count, d_U_pool, d_states_pool,
-        (RealType)gamma_val, materials_val, is_ideal_gas_val,
-        (RealType)ambient_rho_val, (RealType)ambient_p_val
+    launchUpdatePrimitiveFromConservative_AMR(
+        this->d_allocated_tile_ids, this->allocated_nodes_count, this->d_U_pool, this->d_states_pool,
+        (RealType)this->gamma_val, this->materials_val, this->is_ideal_gas_val,
+        (RealType)this->ambient_rho_val, (RealType)this->ambient_p_val
     );
-    checkCudaError(cudaDeviceSynchronize());
 }
 
 template <typename RealType>
 void CFDSolver2DAMRCudaImpl<RealType>::restrictAllGPU() {
+    if (!d_level_parent_node_ids || h_level_parent_counts_cached.empty()) return;
+
     for (int lvl = amr_max_levels_val - 2; lvl >= 0; --lvl) {
-        std::vector<int> level_parent_node_ids;
-        for (size_t n = 0; n < amr_nodes.size(); ++n) {
-            if (amr_nodes[n].level == lvl && amr_nodes[n].children[0] != -1) {
-                level_parent_node_ids.push_back((int)n);
-            }
-        }
-        if (level_parent_node_ids.empty()) continue;
+        int count = h_level_parent_counts_cached[lvl];
+        if (count == 0) continue;
+        int offset = h_level_parent_offsets_cached[lvl];
 
-        int* d_level_parent_ids = nullptr;
-        checkCudaError(cudaMalloc(&d_level_parent_ids, level_parent_node_ids.size() * sizeof(int)));
-        checkCudaError(cudaMemcpy(d_level_parent_ids, level_parent_node_ids.data(), level_parent_node_ids.size() * sizeof(int), cudaMemcpyHostToDevice));
-
-        restrictNode_AMR_kernel<RealType><<<level_parent_node_ids.size(), dim3(16, 16)>>>(
-            d_amr_nodes,
-            d_level_parent_ids,
-            (int)level_parent_node_ids.size(),
-            d_U_pool,
-            dr_base,
-            is_cartesian_val
+        launchRestrictNode_AMR(
+            this->d_amr_nodes,
+            this->d_level_parent_node_ids + offset,
+            count,
+            this->d_U_pool,
+            this->dr_base,
+            this->is_cartesian_val
         );
-        checkCudaError(cudaDeviceSynchronize());
-        cudaFree(d_level_parent_ids);
     }
 }
 
@@ -1577,12 +1983,82 @@ void CFDSolver2DAMRCudaImpl<RealType>::restrictNodeCPU(int node_idx) {
             U_parent.arho2[k_dest] = U_parent.arho2[k_src];
         }
     }
+
+    auto& S_parent = states_pool[node.tile_id];
+    for (int k = 0; k < AMR_TILE_DIM * AMR_TILE_DIM; ++k) {
+        RealType r_rho = U_parent.rho[k];
+        RealType r_rhour = U_parent.rhour[k];
+        RealType r_rhouz = U_parent.rhouz[k];
+        RealType r_E = U_parent.E[k];
+        RealType r_a1 = U_parent.alpha1[k];
+        RealType r_a2 = U_parent.alpha2[k];
+
+        RealType rho_safe = std::max(r_rho, (RealType)1e-10);
+        RealType ur = r_rhour / rho_safe;
+        RealType uz = r_rhouz / rho_safe;
+        RealType ke = (RealType)0.5 * rho_safe * (ur * ur + uz * uz);
+        RealType e_int = std::max((RealType)1e-8, r_E - ke);
+
+        RealType p;
+        if (is_ideal_gas_val) {
+            p = e_int * ((RealType)gamma_val - (RealType)1.0);
+        } else {
+            p = MultiMat::getMixturePressure(e_int, rho_safe, r_a1, r_a2, U_parent.arho1[k], U_parent.arho2[k], (RealType)gamma_val, materials_val.products, materials_val.unreacted);
+        }
+
+        S_parent.rho[k] = rho_safe;
+        S_parent.ur[k] = ur;
+        S_parent.uz[k] = uz;
+        S_parent.p[k] = std::max((RealType)ambient_p_val, p);
+        S_parent.E[k] = r_E;
+        S_parent.alpha1[k] = r_a1;
+        S_parent.alpha2[k] = r_a2;
+        S_parent.arho1[k] = U_parent.arho1[k];
+        S_parent.arho2[k] = U_parent.arho2[k];
+    }
 }
 
 template <typename RealType>
 double CFDSolver2DAMRCudaImpl<RealType>::computeTileLoehnerErrorCPU(int tile_id) const {
     if (tile_id == -1 || tile_id >= (int)states_pool.size()) return 0.0;
     const auto& S = states_pool[tile_id];
+
+    // 1. Compute maximum single-cell neighbor relative jump across internal cells (i=2..17, j=2..17)
+    double max_cell_jump = 0.0;
+
+    for (int i = 2; i < 18; ++i) {
+        for (int j = 2; j < 18; ++j) {
+            int k   = i * AMR_TILE_DIM + j;
+            int kr1 = (i + 1) * AMR_TILE_DIM + j;
+            int kz1 = i * AMR_TILE_DIM + (j + 1);
+
+            double p_c = (double)S.p[k];
+            double rho_c = (double)S.rho[k];
+            double a1_c = (double)S.alpha1[k];
+
+            double p_r = (double)S.p[kr1];
+            double rho_r = (double)S.rho[kr1];
+            double a1_r = (double)S.alpha1[kr1];
+
+            double p_z = (double)S.p[kz1];
+            double rho_z = (double)S.rho[kz1];
+            double a1_z = (double)S.alpha1[kz1];
+
+            double jump_p = std::max(std::abs(p_r - p_c), std::abs(p_z - p_c)) / (p_c + 1e-5);
+            double jump_rho = std::max(std::abs(rho_r - rho_c), std::abs(rho_z - rho_c)) / (rho_c + 1e-5);
+            double jump_a1 = std::max(std::abs(a1_r - a1_c), std::abs(a1_z - a1_c));
+
+            double cell_jump = std::max({jump_p, jump_rho, jump_a1});
+            if (cell_jump > max_cell_jump) max_cell_jump = cell_jump;
+        }
+    }
+
+    // Cell-level shock jump cutoff:
+    // A true shock front or material interface has a cell-to-cell jump >= 3% (0.03).
+    // Smooth expansion waves and ambient sound waves have cell-to-cell jumps < 0.5% (0.005).
+    if (max_cell_jump < 0.03) {
+        return 0.0;
+    }
 
     const double eps = 0.02;
     double max_err = 0.0;
@@ -1625,7 +2101,9 @@ double CFDSolver2DAMRCudaImpl<RealType>::computeTileLoehnerErrorCPU(int tile_id)
             if (cell_err > max_err) max_err = cell_err;
         }
     }
-    return max_err;
+
+    double shock_weight = std::min(1.0, max_cell_jump / 0.03);
+    return max_err * shock_weight;
 }
 
 template <typename RealType>
@@ -1662,13 +2140,27 @@ bool CFDSolver2DAMRCudaImpl<RealType>::shouldCoarsenNodeCPU(int parent_idx) {
 
 template <typename RealType>
 int CFDSolver2DAMRCudaImpl<RealType>::findLeafNodeAtCoordsCPU(double r, double z) const {
-    for (size_t n = 0; n < amr_nodes.size(); ++n) {
-        const auto& node = amr_nodes[n];
-        if (node.is_active && node.tile_id != -1 &&
-            r >= node.r_min && r < node.r_max &&
-            z >= node.z_min && z < node.z_max) {
-            return (int)n;
+    if (r < 0.0 || r >= max_r_coord || z < 0.0 || z >= max_z_coord) return -1;
+    double tile_w = TILE_SIZE * dr_base;
+    double tile_h = TILE_SIZE * dz_base;
+    int r0 = (int)(r / tile_w);
+    int z0 = (int)(z / tile_h);
+    if (r0 < 0 || r0 >= level0_num_tiles_r || z0 < 0 || z0 >= level0_num_tiles_z) return -1;
+
+    int curr = r0 * level0_num_tiles_z + z0;
+    while (curr != -1 && curr < (int)amr_nodes.size()) {
+        if (amr_nodes[curr].children[0] == -1) {
+            if (amr_nodes[curr].is_active && amr_nodes[curr].tile_id != -1) {
+                return curr;
+            }
+            return -1;
         }
+        double mid_r = 0.5 * (amr_nodes[curr].r_min + amr_nodes[curr].r_max);
+        double mid_z = 0.5 * (amr_nodes[curr].z_min + amr_nodes[curr].z_max);
+        int bit_r = (r >= mid_r) ? 1 : 0;
+        int bit_z = (z >= mid_z) ? 1 : 0;
+        int quadrant = bit_r + 2 * bit_z;
+        curr = amr_nodes[curr].children[quadrant];
     }
     return -1;
 }
@@ -1679,125 +2171,245 @@ bool CFDSolver2DAMRCudaImpl<RealType>::canCoarsenParentCPU(int parent_idx) const
     if (parent.tile_id == -1 || parent.children[0] == -1) return false;
 
     int parent_level = parent.level;
-
-    double mid_r = 0.5 * (parent.r_min + parent.r_max);
-    double mid_z = 0.5 * (parent.z_min + parent.z_max);
     double tile_dr = parent.r_max - parent.r_min;
     double tile_dz = parent.z_max - parent.z_min;
 
-    double sample_r[4] = { parent.r_min - 0.25 * tile_dr, parent.r_max + 0.25 * tile_dr, mid_r, mid_r };
-    double sample_z[4] = { mid_z, mid_z, parent.z_min - 0.25 * tile_dz, parent.z_max + 0.25 * tile_dz };
+    for (int edge = 0; edge < 4; ++edge) {
+        for (int s = 0; s < 4; ++s) {
+            double frac = (s + 0.5) / 4.0;
+            double sr = 0.0, sz = 0.0;
+            if (edge == 0) { // Left
+                sr = parent.r_min - 0.1 * tile_dr;
+                sz = parent.z_min + frac * tile_dz;
+            } else if (edge == 1) { // Right
+                sr = parent.r_max + 0.1 * tile_dr;
+                sz = parent.z_min + frac * tile_dz;
+            } else if (edge == 2) { // Bottom
+                sr = parent.r_min + frac * tile_dr;
+                sz = parent.z_min - 0.1 * tile_dz;
+            } else if (edge == 3) { // Top
+                sr = parent.r_min + frac * tile_dr;
+                sz = parent.z_max + 0.1 * tile_dz;
+            }
 
-    for (int d = 0; d < 4; ++d) {
-        if (sample_r[d] < 0.0 || sample_r[d] >= max_r_coord || sample_z[d] < 0.0 || sample_z[d] >= max_z_coord) continue;
-        int nb_idx = findLeafNodeAtCoordsCPU(sample_r[d], sample_z[d]);
-        if (nb_idx != -1 && amr_nodes[nb_idx].tile_id != -1 && amr_nodes[nb_idx].is_active) {
-            int nb_level = amr_nodes[nb_idx].level;
-            if (nb_level > parent_level + 1) return false;
+            if (sr < 0.0 || sr >= max_r_coord || sz < 0.0 || sz >= max_z_coord) continue;
+            int nb_idx = findLeafNodeAtCoordsCPU(sr, sz);
+            if (nb_idx != -1 && amr_nodes[nb_idx].tile_id != -1 && amr_nodes[nb_idx].is_active) {
+                int nb_level = amr_nodes[nb_idx].level;
+                if (nb_level > parent_level + 1) return false;
+            }
         }
     }
     return true;
 }
 
 template <typename RealType>
+__global__ void computeTileLoehnerError_AMR_kernel(
+    const GPUNode2D* nodes,
+    const int* active_node_ids,
+    int active_leaves_count,
+    const AMRPrimitiveTileT<RealType>* states_pool,
+    float* tile_errors) {
+
+    int tile_idx = blockIdx.x;
+    if (tile_idx >= active_leaves_count) return;
+
+    int node_idx = active_node_ids[tile_idx];
+    auto node = nodes[node_idx];
+    const auto& S = states_pool[node.tile_id];
+
+    int i = threadIdx.x;
+    int j = threadIdx.y;
+    int ti = i + 2;
+    int tj = j + 2;
+    int k = ti * AMR_TILE_DIM + tj;
+
+    double p_c = (double)S.p[k];
+    double p_e = (double)S.p[(ti + 1) * AMR_TILE_DIM + tj];
+    double p_w = (double)S.p[(ti - 1) * AMR_TILE_DIM + tj];
+    double p_n = (double)S.p[ti * AMR_TILE_DIM + (tj + 1)];
+    double p_s = (double)S.p[ti * AMR_TILE_DIM + (tj - 1)];
+
+    double rho_c = (double)S.rho[k];
+    double rho_e = (double)S.rho[(ti + 1) * AMR_TILE_DIM + tj];
+    double rho_w = (double)S.rho[(ti - 1) * AMR_TILE_DIM + tj];
+    double rho_n = (double)S.rho[ti * AMR_TILE_DIM + (tj + 1)];
+    double rho_s = (double)S.rho[ti * AMR_TILE_DIM + (tj - 1)];
+
+    double cell_jump_p = math_max(math_max(math_abs(p_e - p_c), math_abs(p_w - p_c)), math_max(math_abs(p_n - p_c), math_abs(p_s - p_c))) / (p_c + 1e-12);
+    double cell_jump_rho = math_max(math_max(math_abs(rho_e - rho_c), math_abs(rho_w - rho_c)), math_max(math_abs(rho_n - rho_c), math_abs(rho_s - rho_c))) / (rho_c + 1e-12);
+    double max_cell_jump = math_max(cell_jump_p, cell_jump_rho);
+
+    double cell_err = 0.0;
+    if (max_cell_jump >= 0.03) {
+        double eps = 0.01;
+        double d2_r_p = math_abs(p_e - 2.0 * p_c + p_w);
+        double d1_r_p = math_abs(p_e - p_c) + math_abs(p_c - p_w) + eps * math_abs(p_c);
+        double err_r_p = d2_r_p / (d1_r_p + 1e-12);
+
+        double d2_z_p = math_abs(p_n - 2.0 * p_c + p_s);
+        double d1_z_p = math_abs(p_n - p_c) + math_abs(p_c - p_s) + eps * math_abs(p_c);
+        double err_z_p = d2_z_p / (d1_z_p + 1e-12);
+
+        double d2_r_rho = math_abs(rho_e - 2.0 * rho_c + rho_w);
+        double d1_r_rho = math_abs(rho_e - rho_c) + math_abs(rho_c - rho_w) + eps * math_abs(rho_c);
+        double err_r_rho = d2_r_rho / (d1_r_rho + 1e-12);
+
+        double d2_z_rho = math_abs(rho_n - 2.0 * rho_c + rho_s);
+        double d1_z_rho = math_abs(rho_n - rho_c) + math_abs(rho_c - rho_s) + eps * math_abs(rho_c);
+        double err_z_rho = d2_z_rho / (d1_z_rho + 1e-12);
+
+        cell_err = math_max(math_max(err_r_p, err_z_p), math_max(err_r_rho, err_z_rho));
+        double shock_weight = math_min(1.0, max_cell_jump / 0.03);
+        cell_err *= shock_weight;
+    }
+
+    __shared__ float sm_err[256];
+    int tid = j * 16 + i;
+    sm_err[tid] = (float)cell_err;
+    __syncthreads();
+
+    for (int stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            sm_err[tid] = fmaxf(sm_err[tid], sm_err[tid + stride]);
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        tile_errors[tile_idx] = sm_err[0];
+    }
+}
+
+template <typename RealType>
 void CFDSolver2DAMRCudaImpl<RealType>::adaptMeshCPU() {
-    syncPoolsToCPU();
+    if (active_leaves_count == 0) return;
 
-    // 1. Run restriction sweep first so parent nodes have up-to-date conservative variables
-    for (int lvl = amr_max_levels_val - 2; lvl >= 0; --lvl) {
-        for (size_t n = 0; n < amr_nodes.size(); ++n) {
-            if (amr_nodes[n].level == lvl && amr_nodes[n].children[0] != -1) {
-                restrictNodeCPU(n);
+    restrictAllCPU();
+
+    if (active_leaves_count > (int)current_tile_errors_capacity) {
+        if (d_tile_errors) checkCudaError(cudaFree(d_tile_errors));
+        current_tile_errors_capacity = active_leaves_count * 2;
+        checkCudaError(cudaMalloc(&d_tile_errors, current_tile_errors_capacity * sizeof(float)));
+        if (host_pinned_tile_errors) checkCudaError(cudaFreeHost(host_pinned_tile_errors));
+        checkCudaError(cudaMallocHost(&host_pinned_tile_errors, current_tile_errors_capacity * sizeof(float)));
+    }
+
+    launchComputeTileLoehnerError_AMR(
+        this->d_amr_nodes, this->d_active_node_ids, this->active_leaves_count, this->d_states_pool, this->d_tile_errors
+    );
+
+    checkCudaError(cudaMemcpy(host_pinned_tile_errors, d_tile_errors, active_leaves_count * sizeof(float), cudaMemcpyDeviceToHost));
+
+    std::vector<float> node_errors(amr_nodes.size(), 0.0f);
+    int leaf_idx = 0;
+    for (size_t n = 0; n < amr_nodes.size(); ++n) {
+        if (amr_nodes[n].tile_id != -1 && amr_nodes[n].is_active) {
+            if (leaf_idx < active_leaves_count) {
+                node_errors[n] = host_pinned_tile_errors[leaf_idx++];
             }
         }
     }
 
-    // Sync restricted conservative variables to GPU, compute primitives, fill ghost cells, and sync back to CPU
-    syncPoolsToGPU();
-    updatePrimitiveGPU();
-    fillGhostCellsGPU();
-    syncPoolsToCPU();
+    std::vector<RefineJobGPU> refine_jobs;
+    bool topology_changed = true;
+    while (topology_changed) {
+        topology_changed = false;
 
-    std::vector<bool> to_refine(amr_nodes.size(), false);
-    std::vector<bool> flagged_by_error(amr_nodes.size(), false);
+        std::vector<bool> to_refine(amr_nodes.size(), false);
+        std::vector<bool> flagged_by_error(amr_nodes.size(), false);
 
-    // 2. Direct refinement triggering
-    for (size_t n = 0; n < amr_nodes.size(); ++n) {
-        const auto& node = amr_nodes[n];
-        if (node.tile_id == -1 || !node.is_active) continue;
-
-        if (shouldRefineNodeCPU(n)) {
-            flagged_by_error[n] = true;
-            to_refine[n] = true;
-        }
-    }
-
-    // Add 1-tile safety buffer ring ONLY around SAME-LEVEL active neighbors of error-flagged nodes
-    for (size_t n = 0; n < amr_nodes.size(); ++n) {
-        if (!flagged_by_error[n]) continue;
-        const auto& node = amr_nodes[n];
-
-        double mid_r = 0.5 * (node.r_min + node.r_max);
-        double mid_z = 0.5 * (node.z_min + node.z_max);
-        double tile_dr = node.r_max - node.r_min;
-        double tile_dz = node.z_max - node.z_min;
-
-        double sample_r[8] = { node.r_min - 0.25 * tile_dr, node.r_max + 0.25 * tile_dr, mid_r, mid_r,
-                               node.r_min - 0.25 * tile_dr, node.r_max + 0.25 * tile_dr, node.r_min - 0.25 * tile_dr, node.r_max + 0.25 * tile_dr };
-        double sample_z[8] = { mid_z, mid_z, node.z_min - 0.25 * tile_dz, node.z_max + 0.25 * tile_dz,
-                               node.z_min - 0.25 * tile_dz, node.z_min - 0.25 * tile_dz, node.z_max + 0.25 * tile_dz, node.z_max + 0.25 * tile_dz };
-
-        for (int d = 0; d < 8; ++d) {
-            if (sample_r[d] < 0.0 || sample_r[d] >= max_r_coord || sample_z[d] < 0.0 || sample_z[d] >= max_z_coord) continue;
-            int nb_idx = findLeafNodeAtCoordsCPU(sample_r[d], sample_z[d]);
-            if (nb_idx != -1 && amr_nodes[nb_idx].tile_id != -1 && amr_nodes[nb_idx].is_active) {
-                if (amr_nodes[nb_idx].level == node.level && !to_refine[nb_idx]) {
-                    to_refine[nb_idx] = true;
-                }
-            }
-        }
-    }
-
-    // 3. Graded 2:1 Level Balance Enforcer using exact spatial leaf lookup across all 8 neighbor directions
-    bool changed = true;
-    while (changed) {
-        changed = false;
+        // 2. Direct refinement triggering using GPU-evaluated error array
         for (size_t n = 0; n < amr_nodes.size(); ++n) {
-            if (!to_refine[n]) continue;
             const auto& node = amr_nodes[n];
-            if (node.tile_id == -1) continue;
+            if (node.tile_id == -1 || !node.is_active) continue;
+            if (node.r_min >= max_r_coord || node.z_min >= max_z_coord) continue;
+            if (node.level >= amr_max_levels_val - 1) continue;
 
-            int target_level = node.level + 1;
-            if (target_level >= amr_max_levels_val) continue;
+            if (node_errors[n] > amr_threshold_val) {
+                flagged_by_error[n] = true;
+                to_refine[n] = true;
+            }
+        }
 
-            double mid_r = 0.5 * (node.r_min + node.r_max);
-            double mid_z = 0.5 * (node.z_min + node.z_max);
+        // Add 1-tile safety buffer ring around error-flagged nodes
+        for (size_t n = 0; n < amr_nodes.size(); ++n) {
+            if (!flagged_by_error[n]) continue;
+            const auto& node = amr_nodes[n];
+
             double tile_dr = node.r_max - node.r_min;
             double tile_dz = node.z_max - node.z_min;
 
-            double sample_r[8] = { node.r_min - 0.25 * tile_dr, node.r_max + 0.25 * tile_dr, mid_r, mid_r,
-                                   node.r_min - 0.25 * tile_dr, node.r_max + 0.25 * tile_dr, node.r_min - 0.25 * tile_dr, node.r_max + 0.25 * tile_dr };
-            double sample_z[8] = { mid_z, mid_z, node.z_min - 0.25 * tile_dz, node.z_max + 0.25 * tile_dz,
-                                   node.z_min - 0.25 * tile_dz, node.z_min - 0.25 * tile_dz, node.z_max + 0.25 * tile_dz, node.z_max + 0.25 * tile_dz };
+            for (int edge = 0; edge < 4; ++edge) {
+                for (int s = 0; s < 4; ++s) {
+                    double frac = (s + 0.5) / 4.0;
+                    double sr = 0.0, sz = 0.0;
+                    if (edge == 0) { sr = node.r_min - 0.1 * tile_dr; sz = node.z_min + frac * tile_dz; }
+                    else if (edge == 1) { sr = node.r_max + 0.1 * tile_dr; sz = node.z_min + frac * tile_dz; }
+                    else if (edge == 2) { sr = node.r_min + frac * tile_dr; sz = node.z_min - 0.1 * tile_dz; }
+                    else if (edge == 3) { sr = node.r_min + frac * tile_dr; sz = node.z_max + 0.1 * tile_dz; }
 
-            for (int d = 0; d < 8; ++d) {
-                if (sample_r[d] < 0.0 || sample_r[d] >= max_r_coord || sample_z[d] < 0.0 || sample_z[d] >= max_z_coord) continue;
-                int nb_idx = findLeafNodeAtCoordsCPU(sample_r[d], sample_z[d]);
-                if (nb_idx != -1 && amr_nodes[nb_idx].tile_id != -1 && amr_nodes[nb_idx].is_active) {
-                    const auto& nb_node = amr_nodes[nb_idx];
-                    if (nb_node.level < node.level && !to_refine[nb_idx]) {
-                        to_refine[nb_idx] = true;
-                        changed = true;
+                    if (sr < 0.0 || sr >= max_r_coord || sz < 0.0 || sz >= max_z_coord) continue;
+                    int nb_idx = findLeafNodeAtCoordsCPU(sr, sz);
+                    if (nb_idx != -1 && amr_nodes[nb_idx].tile_id != -1 && amr_nodes[nb_idx].is_active) {
+                        if (amr_nodes[nb_idx].level == node.level && !to_refine[nb_idx]) {
+                            to_refine[nb_idx] = true;
+                        }
                     }
                 }
             }
         }
-    }
 
-    std::vector<int> nodes_to_refine;
-    for (size_t n = 0; n < amr_nodes.size(); ++n) {
-        if (to_refine[n] && amr_nodes[n].level < amr_max_levels_val - 1 && amr_nodes[n].is_active) {
-            nodes_to_refine.push_back(n);
+        // 3. Absolute 2:1 Level Balance Enforcer across ALL active leaves
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (size_t n = 0; n < amr_nodes.size(); ++n) {
+                const auto& node = amr_nodes[n];
+                if (node.tile_id == -1 || !node.is_active) continue;
+
+                int eff_level = node.level + (to_refine[n] ? 1 : 0);
+                if (eff_level >= amr_max_levels_val) continue;
+
+                double tile_dr = node.r_max - node.r_min;
+                double tile_dz = node.z_max - node.z_min;
+
+                for (int edge = 0; edge < 4; ++edge) {
+                    for (int s = 0; s < 4; ++s) {
+                        double frac = (s + 0.5) / 4.0;
+                        double sr = 0.0, sz = 0.0;
+                        if (edge == 0) { sr = node.r_min - 0.1 * tile_dr; sz = node.z_min + frac * tile_dz; }
+                        else if (edge == 1) { sr = node.r_max + 0.1 * tile_dr; sz = node.z_min + frac * tile_dz; }
+                        else if (edge == 2) { sr = node.r_min + frac * tile_dr; sz = node.z_min - 0.1 * tile_dz; }
+                        else if (edge == 3) { sr = node.r_min + frac * tile_dr; sz = node.z_max + 0.1 * tile_dz; }
+
+                        if (sr < 0.0 || sr >= max_r_coord || sz < 0.0 || sz >= max_z_coord) continue;
+                        int nb_idx = findLeafNodeAtCoordsCPU(sr, sz);
+                        if (nb_idx != -1 && amr_nodes[nb_idx].tile_id != -1 && amr_nodes[nb_idx].is_active) {
+                            int nb_eff_level = amr_nodes[nb_idx].level + (to_refine[nb_idx] ? 1 : 0);
+                            if (eff_level - nb_eff_level > 1 && !to_refine[nb_idx]) {
+                                to_refine[nb_idx] = true;
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        std::vector<int> nodes_to_refine;
+        for (size_t n = 0; n < amr_nodes.size(); ++n) {
+            if (to_refine[n] && amr_nodes[n].level < amr_max_levels_val - 1 && amr_nodes[n].is_active) {
+                nodes_to_refine.push_back(n);
+            }
+        }
+
+        if (!nodes_to_refine.empty()) {
+            for (int idx : nodes_to_refine) {
+                refine_jobs.push_back(refineNodeCPU(idx));
+            }
+            rebuildNeighborPointers();
+            topology_changed = true;
         }
     }
 
@@ -1807,38 +2419,35 @@ void CFDSolver2DAMRCudaImpl<RealType>::adaptMeshCPU() {
         const auto& node = amr_nodes[n];
         if (node.children[0] != -1 && node.tile_id != -1) {
             bool all_children_leaves = true;
-            bool any_child_refining = false;
+            double max_child_err = 0.0;
             for (int c = 0; c < 4; ++c) {
                 int child_idx = node.children[c];
                 if (child_idx == -1 || amr_nodes[child_idx].children[0] != -1) {
                     all_children_leaves = false;
-                }
-                if (child_idx != -1 && to_refine[child_idx]) {
-                    any_child_refining = true;
+                } else {
+                    if (node_errors[child_idx] > max_child_err) {
+                        max_child_err = node_errors[child_idx];
+                    }
                 }
             }
-            if (all_children_leaves && !any_child_refining && shouldCoarsenNodeCPU(n) && canCoarsenParentCPU(n)) {
+            if (all_children_leaves && max_child_err < (amr_threshold_val * amr_coarsen_ratio_val) && canCoarsenParentCPU(n)) {
                 parents_to_coarsen.push_back(n);
             }
         }
     }
 
-    for (int idx : nodes_to_refine) refineNodeCPU(idx);
     for (int idx : parents_to_coarsen) coarsenNodeCPU(idx);
 
-    if (!nodes_to_refine.empty() || !parents_to_coarsen.empty()) {
-        rebuildNeighborPointers();
-        syncTreeToGPU();
-    }
+    growTilePoolsGPU();
+    rebuildNeighborPointers();
+    syncTreeToGPU();
     syncPoolsToGPU();
-    if (!nodes_to_refine.empty() || !parents_to_coarsen.empty()) {
-        updatePrimitiveGPU();
-        fillGhostCellsGPU();
-    }
+    updatePrimitiveGPU();
+    fillGhostCellsGPU();
 }
 
 template <typename RealType>
-void CFDSolver2DAMRCudaImpl<RealType>::refineNodeCPU(int node_idx) {
+RefineJobGPU CFDSolver2DAMRCudaImpl<RealType>::refineNodeCPU(int node_idx) {
     int parent_tile_id = amr_nodes[node_idx].tile_id;
     double p_r_min = amr_nodes[node_idx].r_min;
     double p_r_max = amr_nodes[node_idx].r_max;
@@ -1853,10 +2462,15 @@ void CFDSolver2DAMRCudaImpl<RealType>::refineNodeCPU(int node_idx) {
     double mid_r = 0.5 * (p_r_min + p_r_max);
     double mid_z = 0.5 * (p_z_min + p_z_max);
 
+    RefineJobGPU job;
+    job.parent_tile_id = parent_tile_id;
+
     int start_idx = amr_nodes.size();
     for (int c = 0; c < 4; ++c) {
         AMRTileNode child;
         child.tile_id = allocateTile();
+        job.child_tile_ids[c] = child.tile_id;
+
         child.level = p_level + 1;
         child.parent = node_idx;
         std::fill(std::begin(child.children), std::end(child.children), -1);
@@ -1889,44 +2503,32 @@ void CFDSolver2DAMRCudaImpl<RealType>::refineNodeCPU(int node_idx) {
     }
 
     const auto& U_parent = U_pool[parent_tile_id];
-    auto prolongate_node_field = [&](int child_idx, int quadrant, auto field) {
-        auto& U_child = U_pool[amr_nodes[child_idx].tile_id];
-        int r_quad = (quadrant == 1 || quadrant == 3) ? 1 : 0;
-        int z_quad = (quadrant == 2 || quadrant == 3) ? 1 : 0;
-        for (int ci = 0; ci < AMR_TILE_DIM; ++ci) {
-            int local_ci = std::max(0, std::min(15, ci - 2));
-            int pi = (ci < 2) ? 1 : ((ci > 17) ? 18 : (local_ci / 2) + r_quad * 8 + 2);
-            double xfrac = (ci % 2 == 0) ? -0.25 : 0.25;
-            for (int cj = 0; cj < AMR_TILE_DIM; ++cj) {
-                int local_cj = std::max(0, std::min(15, cj - 2));
-                int pj = (cj < 2) ? 1 : ((cj > 17) ? 18 : (local_cj / 2) + z_quad * 8 + 2);
-                double yfrac = (cj % 2 == 0) ? -0.25 : 0.25;
-                int pk = pi * AMR_TILE_DIM + pj;
-                int ck = ci * AMR_TILE_DIM + cj;
-                RealType v = (U_parent.*field)[pk];
-                RealType vr = (pi >= 18) ? (v - (U_parent.*field)[(pi-1)*AMR_TILE_DIM+pj]) :
-                              ((pi <= 1)  ? ((U_parent.*field)[(pi+1)*AMR_TILE_DIM+pj] - v) :
-                              minmod_kernel((U_parent.*field)[(pi+1)*AMR_TILE_DIM+pj] - v, v - (U_parent.*field)[(pi-1)*AMR_TILE_DIM+pj]));
-                RealType vz = (pj >= 18) ? (v - (U_parent.*field)[pi*AMR_TILE_DIM+pj-1]) :
-                              ((pj <= 1)  ? ((U_parent.*field)[pi*AMR_TILE_DIM+pj+1] - v) :
-                              minmod_kernel((U_parent.*field)[pi*AMR_TILE_DIM+pj+1] - v, v - (U_parent.*field)[pi*AMR_TILE_DIM+pj-1]));
-                (U_child.*field)[ck] = (RealType)(v + xfrac * vr + yfrac * vz);
+    for (int c = 0; c < 4; ++c) {
+        int child_tile_id = job.child_tile_ids[c];
+        auto& U_child = U_pool[child_tile_id];
+        int r_off = (c & 1) ? 8 : 0;
+        int z_off = (c >= 2) ? 8 : 0;
+
+        for (int i = 0; i < 16; ++i) {
+            int pi = 2 + r_off + i / 2;
+            for (int j = 0; j < 16; ++j) {
+                int pj = 2 + z_off + j / 2;
+                int parent_k = pi * AMR_TILE_DIM + pj;
+                int child_k = (i + 2) * AMR_TILE_DIM + (j + 2);
+
+                U_child.rho[child_k]    = U_parent.rho[parent_k];
+                U_child.rhour[child_k]  = U_parent.rhour[parent_k];
+                U_child.rhouz[child_k]  = U_parent.rhouz[parent_k];
+                U_child.E[child_k]      = U_parent.E[parent_k];
+                U_child.alpha1[child_k] = U_parent.alpha1[parent_k];
+                U_child.alpha2[child_k] = U_parent.alpha2[parent_k];
+                U_child.arho1[child_k]  = U_parent.arho1[parent_k];
+                U_child.arho2[child_k]  = U_parent.arho2[parent_k];
             }
         }
-    };
+    }
 
-    #define PROLONG_CHILD(c) \
-        prolongate_node_field(amr_nodes[node_idx].children[c], c, &AMRConservativeTileT<RealType>::rho); \
-        prolongate_node_field(amr_nodes[node_idx].children[c], c, &AMRConservativeTileT<RealType>::rhour); \
-        prolongate_node_field(amr_nodes[node_idx].children[c], c, &AMRConservativeTileT<RealType>::rhouz); \
-        prolongate_node_field(amr_nodes[node_idx].children[c], c, &AMRConservativeTileT<RealType>::E); \
-        prolongate_node_field(amr_nodes[node_idx].children[c], c, &AMRConservativeTileT<RealType>::alpha1); \
-        prolongate_node_field(amr_nodes[node_idx].children[c], c, &AMRConservativeTileT<RealType>::alpha2); \
-        prolongate_node_field(amr_nodes[node_idx].children[c], c, &AMRConservativeTileT<RealType>::arho1); \
-        prolongate_node_field(amr_nodes[node_idx].children[c], c, &AMRConservativeTileT<RealType>::arho2);
-
-    PROLONG_CHILD(0) PROLONG_CHILD(1) PROLONG_CHILD(2) PROLONG_CHILD(3)
-    #undef PROLONG_CHILD
+    return job;
 }
 
 template <typename RealType>
@@ -1947,41 +2549,58 @@ void CFDSolver2DAMRCudaImpl<RealType>::applyInitialConditionToNode(int node_idx,
     const auto& node = amr_nodes[node_idx];
     auto& U = U_pool[node.tile_id];
     double factor = 1.0 / (1 << node.level);
+    double dr_cell = dr_base * factor;
+    double dz_cell = dz_base * factor;
 
     for (int i = 0; i < 16; ++i) {
-        double cell_r = node.r_min + (i + 0.5) * dr_base * factor;
+        double r_left = node.r_min + i * dr_cell;
         for (int j = 0; j < 16; ++j) {
-            double cell_z = node.z_min + (j + 0.5) * dz_base * factor;
+            double z_bottom = node.z_min + j * dz_cell;
             int k = (i + 2) * AMR_TILE_DIM + (j + 2);
 
-            bool inside_charge = false;
-            if (is_cylinder) {
-                inside_charge = (cell_r <= explosive_radius) && (std::abs(cell_z - explosive_z) <= charge_height / 2.0);
-            } else {
-                double dist = std::sqrt(cell_r * cell_r + (cell_z - explosive_z) * (cell_z - explosive_z));
-                inside_charge = (dist <= explosive_radius);
-            }
-
-            if (inside_charge) {
-                if (is_tnt) {
-                    U.rho[k] = (RealType)high_rho;
-                    U.rhour[k] = 0.0;
-                    U.rhouz[k] = 0.0;
-                    U.alpha1[k] = 1.0;
-                    U.alpha2[k] = 0.0;
-                    U.arho1[k] = (RealType)high_rho;
-                    U.arho2[k] = 0.0;
-                    U.E[k] = (RealType)(high_rho * MultiMat::getEnergy_IdealGas(ambient_p, high_rho, gamma_val));
-                } else {
-                    U.rho[k] = (RealType)high_rho;
-                    U.rhour[k] = 0.0;
-                    U.rhouz[k] = 0.0;
-                    U.alpha1[k] = 0.0;
-                    U.alpha2[k] = 1.0;
-                    U.arho1[k] = 0.0;
-                    U.arho2[k] = (RealType)high_rho;
-                    U.E[k] = (RealType)(high_rho * detonation_energy);
+            double sum_w = 0.0;
+            double sum_w_inside = 0.0;
+            for (int ki = 0; ki < 8; ++ki) {
+                double r_sub = r_left + (ki + 0.5) * (dr_cell / 8.0);
+                double w = is_cartesian_val ? 1.0 : r_sub;
+                for (int kj = 0; kj < 8; ++kj) {
+                    double z_sub = z_bottom + (kj + 0.5) * (dz_cell / 8.0);
+                    bool inside = false;
+                    if (is_cylinder) {
+                        inside = (r_sub <= explosive_radius) && (std::abs(z_sub - explosive_z) <= charge_height / 2.0);
+                    } else {
+                        double dist = std::sqrt(r_sub * r_sub + (z_sub - explosive_z) * (z_sub - explosive_z));
+                        inside = (dist <= explosive_radius);
+                    }
+                    if (inside) sum_w_inside += w;
+                    sum_w += w;
                 }
+            }
+            double f_vol = sum_w_inside / sum_w;
+
+            if (f_vol > 0.0) {
+                double alpha_expl = f_vol;
+                double arho_expl = f_vol * high_rho;
+                double rho = arho_expl + (1.0 - f_vol) * ambient_rho;
+                double E_expl = is_tnt ? (high_rho * MultiMat::getEnergy_IdealGas(ambient_p, high_rho, gamma_val)) : (high_rho * detonation_energy);
+                double E_air = ambient_p / (gamma_val - 1.0);
+                double E_total = f_vol * E_expl + (1.0 - f_vol) * E_air;
+
+                U.rho[k] = (RealType)rho;
+                U.rhour[k] = 0.0;
+                U.rhouz[k] = 0.0;
+                if (is_tnt) {
+                    U.alpha1[k] = (RealType)alpha_expl;
+                    U.alpha2[k] = 0.0;
+                    U.arho1[k] = (RealType)arho_expl;
+                    U.arho2[k] = 0.0;
+                } else {
+                    U.alpha1[k] = 0.0;
+                    U.alpha2[k] = (RealType)alpha_expl;
+                    U.arho1[k] = 0.0;
+                    U.arho2[k] = (RealType)arho_expl;
+                }
+                U.E[k] = (RealType)E_total;
             } else {
                 U.rho[k] = (RealType)ambient_rho;
                 U.rhour[k] = 0.0;
@@ -1998,178 +2617,179 @@ void CFDSolver2DAMRCudaImpl<RealType>::applyInitialConditionToNode(int node_idx,
 
 template <typename RealType>
 void CFDSolver2DAMRCudaImpl<RealType>::setInitialConditionTNT(double explosive_z, double explosive_radius, double high_rho, double ambient_rho, double ambient_p) {
-    ambient_rho_val = ambient_rho;
-    ambient_p_val = ambient_p;
-    is_ideal_gas_val = false;
+    this->ambient_rho_val = ambient_rho;
+    this->ambient_p_val = ambient_p;
+    this->is_ideal_gas_val = false;
 
-    for (int step = 0; step < amr_max_levels_val - 1; ++step) {
+    for (int step = 0; step < this->amr_max_levels_val - 1; ++step) {
         bool changed = false;
         std::vector<int> to_refine;
-        for (size_t n = 0; n < amr_nodes.size(); ++n) {
-            const auto& node = amr_nodes[n];
-            if (node.is_active && node.level < amr_max_levels_val - 1) {
+        for (size_t n = 0; n < this->amr_nodes.size(); ++n) {
+            const auto& node = this->amr_nodes[n];
+            if (node.is_active && node.level < this->amr_max_levels_val - 1) {
                 double dist_z1 = std::max(node.z_min, std::min(explosive_z, node.z_max)) - explosive_z;
-                double dist_r1 = std::max(node.r_min, std::min(detonator_r_coord, node.r_max)) - detonator_r_coord;
+                double dist_r1 = std::max(node.r_min, std::min(this->detonator_r_coord, node.r_max)) - this->detonator_r_coord;
                 double dist = std::sqrt(dist_r1 * dist_r1 + dist_z1 * dist_z1);
                 
                 if (dist <= explosive_radius * 1.5 ||
-                    (detonator_r_coord >= node.r_min && detonator_r_coord <= node.r_max &&
-                     detonator_z_coord >= node.z_min && detonator_z_coord <= node.z_max)) {
+                    (this->detonator_r_coord >= node.r_min && this->detonator_r_coord <= node.r_max &&
+                     this->detonator_z_coord >= node.z_min && this->detonator_z_coord <= node.z_max)) {
                     to_refine.push_back(n);
                     changed = true;
                 }
             }
         }
-        for (int idx : to_refine) refineNodeCPU(idx);
-        if (changed) rebuildNeighborPointers();
+        for (int idx : to_refine) this->refineNodeCPU(idx);
+        if (changed) this->rebuildNeighborPointers();
     }
 
-    for (size_t n = 0; n < amr_nodes.size(); ++n) {
-        if (amr_nodes[n].tile_id != -1 && amr_nodes[n].is_active) {
-            applyInitialConditionToNode(n, explosive_z, explosive_radius, high_rho, 0.0, ambient_rho, ambient_p, true);
+    for (size_t n = 0; n < this->amr_nodes.size(); ++n) {
+        if (this->amr_nodes[n].tile_id != -1 && this->amr_nodes[n].is_active) {
+            this->applyInitialConditionToNode(n, explosive_z, explosive_radius, high_rho, 0.0, ambient_rho, ambient_p, true);
         }
     }
 
-    restrictAllCPU();
-    syncTreeToGPU();
-    syncPoolsToGPU();
-    updatePrimitiveGPU();
-    fillGhostCellsGPU();
+    this->restrictAllCPU();
+    this->syncTreeToGPU();
+    this->syncPoolsToGPU();
+    this->updatePrimitiveGPU();
+    this->fillGhostCellsGPU();
 }
 
 template <typename RealType>
 void CFDSolver2DAMRCudaImpl<RealType>::setInitialConditionIdealGas(double explosive_z, double explosive_radius, double high_rho, double detonation_energy, double ambient_rho, double ambient_p) {
-    ambient_rho_val = ambient_rho;
-    ambient_p_val = ambient_p;
-    is_ideal_gas_val = true;
+    this->ambient_rho_val = ambient_rho;
+    this->ambient_p_val = ambient_p;
+    this->is_ideal_gas_val = true;
 
-    for (int step = 0; step < amr_max_levels_val - 1; ++step) {
+    for (int step = 0; step < this->amr_max_levels_val - 1; ++step) {
         bool changed = false;
         std::vector<int> to_refine;
-        for (size_t n = 0; n < amr_nodes.size(); ++n) {
-            const auto& node = amr_nodes[n];
-            if (node.is_active && node.level < amr_max_levels_val - 1) {
+        for (size_t n = 0; n < this->amr_nodes.size(); ++n) {
+            const auto& node = this->amr_nodes[n];
+            if (node.is_active && node.level < this->amr_max_levels_val - 1) {
                 double dist_z1 = std::max(node.z_min, std::min(explosive_z, node.z_max)) - explosive_z;
-                double dist_r1 = std::max(node.r_min, std::min(detonator_r_coord, node.r_max)) - detonator_r_coord;
+                double dist_r1 = std::max(node.r_min, std::min(this->detonator_r_coord, node.r_max)) - this->detonator_r_coord;
                 double dist = std::sqrt(dist_r1 * dist_r1 + dist_z1 * dist_z1);
                 
                 if (dist <= explosive_radius * 1.5 ||
-                    (detonator_r_coord >= node.r_min && detonator_r_coord <= node.r_max &&
-                     detonator_z_coord >= node.z_min && detonator_z_coord <= node.z_max)) {
+                    (this->detonator_r_coord >= node.r_min && this->detonator_r_coord <= node.r_max &&
+                     this->detonator_z_coord >= node.z_min && this->detonator_z_coord <= node.z_max)) {
                     to_refine.push_back(n);
                     changed = true;
                 }
             }
         }
-        for (int idx : to_refine) refineNodeCPU(idx);
-        if (changed) rebuildNeighborPointers();
+        for (int idx : to_refine) this->refineNodeCPU(idx);
+        if (changed) this->rebuildNeighborPointers();
     }
 
-    for (size_t n = 0; n < amr_nodes.size(); ++n) {
-        if (amr_nodes[n].tile_id != -1 && amr_nodes[n].is_active) {
-            applyInitialConditionToNode(n, explosive_z, explosive_radius, high_rho, detonation_energy, ambient_rho, ambient_p, false);
+    for (size_t n = 0; n < this->amr_nodes.size(); ++n) {
+        if (this->amr_nodes[n].tile_id != -1 && this->amr_nodes[n].is_active) {
+            this->applyInitialConditionToNode(n, explosive_z, explosive_radius, high_rho, detonation_energy, ambient_rho, ambient_p, false);
         }
     }
 
-    restrictAllCPU();
-    syncTreeToGPU();
-    syncPoolsToGPU();
-    updatePrimitiveGPU();
-    fillGhostCellsGPU();
-    syncPoolsToCPU();
+    this->restrictAllCPU();
+    this->syncTreeToGPU();
+    this->syncPoolsToGPU();
+    this->updatePrimitiveGPU();
+    this->fillGhostCellsGPU();
+    this->syncPoolsToCPU();
 }
 
 template <typename RealType>
 void CFDSolver2DAMRCudaImpl<RealType>::setInitialConditionTNTCylinder(double explosive_z, double radius, double height, double high_rho, double ambient_rho, double ambient_p) {
-    ambient_rho_val = ambient_rho;
-    ambient_p_val = ambient_p;
-    is_ideal_gas_val = false;
+    this->ambient_rho_val = ambient_rho;
+    this->ambient_p_val = ambient_p;
+    this->is_ideal_gas_val = false;
 
-    for (int step = 0; step < amr_max_levels_val - 1; ++step) {
+    for (int step = 0; step < this->amr_max_levels_val - 1; ++step) {
         bool changed = false;
         std::vector<int> to_refine;
-        for (size_t n = 0; n < amr_nodes.size(); ++n) {
-            const auto& node = amr_nodes[n];
-            if (node.is_active && node.level < amr_max_levels_val - 1) {
+        for (size_t n = 0; n < this->amr_nodes.size(); ++n) {
+            const auto& node = this->amr_nodes[n];
+            if (node.is_active && node.level < this->amr_max_levels_val - 1) {
                 double dz = std::max(node.z_min, std::min(explosive_z + height / 2.0, node.z_max)) - (explosive_z + height / 2.0);
                 double dr = std::max(node.r_min, std::min(0.0, node.r_max));
                 double dist = std::sqrt(dr * dr + dz * dz);
 
                 if (dist <= radius * 1.5 ||
-                    (detonator_r_coord >= node.r_min && detonator_r_coord <= node.r_max &&
-                     detonator_z_coord >= node.z_min && detonator_z_coord <= node.z_max)) {
+                    (this->detonator_r_coord >= node.r_min && this->detonator_r_coord <= node.r_max &&
+                     this->detonator_z_coord >= node.z_min && this->detonator_z_coord <= node.z_max)) {
                     to_refine.push_back(n);
                     changed = true;
                 }
             }
         }
-        for (int idx : to_refine) refineNodeCPU(idx);
-        if (changed) rebuildNeighborPointers();
+        for (int idx : to_refine) this->refineNodeCPU(idx);
+        if (changed) this->rebuildNeighborPointers();
     }
 
-    for (size_t n = 0; n < amr_nodes.size(); ++n) {
-        if (amr_nodes[n].tile_id != -1 && amr_nodes[n].is_active) {
-            applyInitialConditionToNode(n, explosive_z, radius, high_rho, 0.0, ambient_rho, ambient_p, true, true, height);
+    for (size_t n = 0; n < this->amr_nodes.size(); ++n) {
+        if (this->amr_nodes[n].tile_id != -1 && this->amr_nodes[n].is_active) {
+            this->applyInitialConditionToNode(n, explosive_z, radius, high_rho, 0.0, ambient_rho, ambient_p, true, true, height);
         }
     }
 
-    restrictAllCPU();
-    syncTreeToGPU();
-    syncPoolsToGPU();
-    updatePrimitiveGPU();
-    fillGhostCellsGPU();
+    this->restrictAllCPU();
+    this->syncTreeToGPU();
+    this->syncPoolsToGPU();
+    this->updatePrimitiveGPU();
+    this->fillGhostCellsGPU();
 }
 
 template <typename RealType>
 void CFDSolver2DAMRCudaImpl<RealType>::setInitialConditionFrom1D(double explosive_z, double remap_radius, const std::vector<double>& r_1d, const std::vector<MultiMaterialState>& states_1d, double ambient_rho, double ambient_p, double explosive_r) {
-    ambient_rho_val = ambient_rho;
-    ambient_p_val = ambient_p;
-    is_ideal_gas_val = false;
+    this->ambient_rho_val = ambient_rho;
+    this->ambient_p_val = ambient_p;
+    this->is_ideal_gas_val = false;
 
-    for (int step = 0; step < amr_max_levels_val - 1; ++step) {
+    for (int step = 0; step < this->amr_max_levels_val - 1; ++step) {
         bool changed = false;
         std::vector<int> to_refine;
-        for (size_t n = 0; n < amr_nodes.size(); ++n) {
-            const auto& node = amr_nodes[n];
-            if (node.is_active && node.level < amr_max_levels_val - 1) {
+        for (size_t n = 0; n < this->amr_nodes.size(); ++n) {
+            const auto& node = this->amr_nodes[n];
+            if (node.is_active && node.level < this->amr_max_levels_val - 1) {
                 double dist_z1 = std::max(node.z_min, std::min(explosive_z, node.z_max)) - explosive_z;
                 double dist_r1 = std::max(node.r_min, std::min(explosive_r, node.r_max)) - explosive_r;
                 double dist = std::sqrt(dist_r1 * dist_r1 + dist_z1 * dist_z1);
 
                 if (dist <= remap_radius * 1.5 ||
-                    (detonator_r_coord >= node.r_min && detonator_r_coord <= node.r_max &&
-                     detonator_z_coord >= node.z_min && detonator_z_coord <= node.z_max)) {
+                    (this->detonator_r_coord >= node.r_min && this->detonator_r_coord <= node.r_max &&
+                     this->detonator_z_coord >= node.z_min && this->detonator_z_coord <= node.z_max)) {
                     to_refine.push_back(n);
                     changed = true;
                 }
             }
         }
-        for (int idx : to_refine) refineNodeCPU(idx);
-        if (changed) rebuildNeighborPointers();
+        for (int idx : to_refine) this->refineNodeCPU(idx);
+        if (changed) this->rebuildNeighborPointers();
     }
 
-    for (size_t n = 0; n < amr_nodes.size(); ++n) {
-        const auto& node = amr_nodes[n];
+    for (size_t n = 0; n < this->amr_nodes.size(); ++n) {
+        const auto& node = this->amr_nodes[n];
         if (node.tile_id == -1 || !node.is_active) continue;
-        auto& U = U_pool[node.tile_id];
+        auto& U = this->U_pool[node.tile_id];
         double factor = 1.0 / (1 << node.level);
 
         for (int i = 0; i < 16; ++i) {
-            double cell_r = node.r_min + (i + 0.5) * dr_base * factor;
+            double cell_r = node.r_min + (i + 0.5) * this->dr_base * factor;
             for (int j = 0; j < 16; ++j) {
-                double cell_z = node.z_min + (j + 0.5) * dz_base * factor;
+                double cell_z = node.z_min + (j + 0.5) * this->dz_base * factor;
                 double r_dist = std::sqrt((cell_r - explosive_r)*(cell_r - explosive_r) + (cell_z - explosive_z)*(cell_z - explosive_z));
                 int k = (i + 2) * AMR_TILE_DIM + (j + 2);
 
-                auto it = std::lower_bound(r_1d.begin(), r_1d.end(), r_dist);
-                size_t idx = std::distance(r_1d.begin(), it);
-                if (idx >= r_1d.size()) idx = r_1d.size() - 1;
+                size_t idx = 0;
+                while (idx + 1 < r_1d.size() && r_1d[idx] < r_dist) {
+                    idx++;
+                }
 
                 const auto& state = states_1d[idx];
                 U.rho[k] = (RealType)state.rho;
                 U.rhour[k] = (RealType)(state.rho * state.u * (cell_r - explosive_r) / (r_dist + 1e-12));
                 U.rhouz[k] = (RealType)(state.rho * state.u * (cell_z - explosive_z) / (r_dist + 1e-12));
-                U.E[k] = (RealType)(state.p / (gamma_val - 1.0) + 0.5 * state.rho * state.u * state.u);
+                U.E[k] = (RealType)(state.p / (this->gamma_val - 1.0) + 0.5 * state.rho * state.u * state.u);
                 U.alpha1[k] = (RealType)state.alpha1;
                 U.alpha2[k] = (RealType)state.alpha2;
                 U.arho1[k] = (RealType)state.arho1;
@@ -2178,11 +2798,11 @@ void CFDSolver2DAMRCudaImpl<RealType>::setInitialConditionFrom1D(double explosiv
         }
     }
 
-    restrictAllCPU();
-    syncTreeToGPU();
-    syncPoolsToGPU();
-    updatePrimitiveGPU();
-    fillGhostCellsGPU();
+    this->restrictAllCPU();
+    this->syncTreeToGPU();
+    this->syncPoolsToGPU();
+    this->updatePrimitiveGPU();
+    this->fillGhostCellsGPU();
 }
 
 template <typename RealType>
@@ -2214,8 +2834,8 @@ void CFDSolver2DAMRCudaImpl<RealType>::step(double dt) {
     if (temporal_order_val == 1) {
         fillGhostCellsGPU();
         computeRHSGPU(0.0, 1.0);
-        updateConservativeRKStage_AMR_kernel<RealType><<<active_leaves_count, dim3(16, 16)>>>(
-            d_active_tile_ids, active_leaves_count, d_U_pool, d_dU_pool, (RealType)dt
+        launchUpdateConservativeRKStage_AMR(
+            this->active_leaves_count, this->d_active_tile_ids, this->d_U_pool, this->d_dU_pool, (RealType)dt
         );
         checkCudaError(cudaDeviceSynchronize());
         updatePrimitiveGPU();
@@ -2233,7 +2853,25 @@ void CFDSolver2DAMRCudaImpl<RealType>::step(double dt) {
     }
 
     time_val += dt;
-    adaptMeshCPU();
+
+    // Adapt mesh periodically (every 20 steps) to minimize CPU-GPU memory copy overhead
+    adapt_step_counter++;
+    if (adapt_step_counter % 20 == 0) {
+        adaptMeshCPU();
+    }
+}
+
+template <typename RealType>
+double CFDSolver2DAMRCudaImpl<RealType>::stepBatch(int num_steps, double cfl) {
+    double last_dt = 1e-4;
+    for (int s = 0; s < num_steps; ++s) {
+        double dt = getMaxWaveSpeed();
+        dt = dt * (cfl / 0.35);
+        if (dt <= 0.0 || std::isnan(dt)) dt = 1e-6;
+        step(dt);
+        last_dt = dt;
+    }
+    return last_dt;
 }
 
 template <typename RealType>
@@ -2248,52 +2886,45 @@ void CFDSolver2DAMRCudaImpl<RealType>::run(double duration) {
 
 template <typename RealType>
 double CFDSolver2DAMRCudaImpl<RealType>::getMaxWaveSpeed() {
-    // Standard dt calculation performed on CPU to guarantee precision & tree level bounds
-    syncPoolsToCPU();
-    double min_dt = 1e20;
-    double cfl = 0.35;
+    if (this->active_leaves_count == 0) return 1e-4;
 
-    for (size_t n = 0; n < amr_nodes.size(); ++n) {
-        const auto& node = amr_nodes[n];
-        if (node.tile_id != -1 && node.is_active) {
-            double factor = 1.0 / (1 << node.level);
-            double dr = dr_base * factor;
-            double dz = dz_base * factor;
-            const auto& S = states_pool[node.tile_id];
-
-            for (int i = 0; i < 16; ++i) {
-                int ti = i + 2;
-                for (int j = 0; j < 16; ++j) {
-                    int tj = j + 2;
-                    int k = ti * AMR_TILE_DIM + tj;
-                    if (S.rho[k] < 1e-10) continue;
-                    double c;
-                    if (is_ideal_gas_val) {
-                        c = std::sqrt(gamma_val * S.p[k] / S.rho[k]);
-                    } else {
-                        c = MultiMat::getMixtureSoundSpeed(S.p[k], S.rho[k], S.alpha1[k], S.alpha2[k], S.arho1[k], S.arho2[k], (RealType)gamma_val, materials_val.products, materials_val.unreacted);
-                    }
-                    double speed_r = std::abs(S.ur[k]) + c;
-                    double speed_z = std::abs(S.uz[k]) + c;
-                    double cell_dt = cfl * std::min(dr / (speed_r + 1e-12), dz / (speed_z + 1e-12));
-                    if (cell_dt < min_dt) min_dt = cell_dt;
-                }
-            }
-        }
+    if (this->active_leaves_count > (int)this->current_tile_dts_capacity) {
+        if (this->d_tile_min_dts) checkCudaError(cudaFree(this->d_tile_min_dts));
+        this->current_tile_dts_capacity = this->active_leaves_count * 2;
+        checkCudaError(cudaMalloc(&this->d_tile_min_dts, this->current_tile_dts_capacity * sizeof(float)));
     }
-    return min_dt;
+    if (!this->d_global_min_dt) {
+        checkCudaError(cudaMalloc(&this->d_global_min_dt, sizeof(float)));
+    }
+    if (!this->host_pinned_min_dt) {
+        checkCudaError(cudaMallocHost(&this->host_pinned_min_dt, sizeof(float)));
+    }
+
+    launchComputeTileMinDt_AMR(
+        this->d_amr_nodes, this->d_active_node_ids, this->active_leaves_count,
+        this->d_states_pool, (RealType)this->gamma_val, this->materials_val, this->is_ideal_gas_val,
+        this->dr_base, this->dz_base, 0.35, this->d_tile_min_dts
+    );
+
+    launchReduceMinDt_AMR(this->d_tile_min_dts, this->active_leaves_count, this->d_global_min_dt);
+
+    checkCudaError(cudaMemcpy(this->host_pinned_min_dt, this->d_global_min_dt, sizeof(float), cudaMemcpyDeviceToHost));
+
+    float min_dt = *this->host_pinned_min_dt;
+    if (min_dt <= 0.0f || std::isnan(min_dt)) min_dt = 1e-4f;
+    return (double)min_dt;
 }
 
 template <typename RealType>
 bool CFDSolver2DAMRCudaImpl<RealType>::checkTerminationCondition() {
-    syncPoolsToCPU();
-    double threshold = 1.05 * ambient_p_val;
-    for (size_t n = 0; n < amr_nodes.size(); ++n) {
-        const auto& node = amr_nodes[n];
+    this->syncPoolsToCPU();
+    double threshold = 1.05 * this->ambient_p_val;
+    for (size_t n = 0; n < this->amr_nodes.size(); ++n) {
+        const auto& node = this->amr_nodes[n];
         if (node.tile_id != -1 && node.is_active) {
-            const auto& S = states_pool[node.tile_id];
+            const auto& S = this->states_pool[node.tile_id];
 
-            if (bc_r_min == static_cast<CFDSolver2DCuda::BCType>(CFDSolver2D::OUTFLOW_RIEMANN) && node.r_min <= 1e-5) {
+            if (this->bc_r_min == static_cast<CFDSolver2DCuda::BCType>(CFDSolver2D::OUTFLOW_RIEMANN) && node.r_min <= 1e-5) {
                 int ti = 2; // Innermost boundary interior cell
                 for (int j = 0; j < 16; ++j) {
                     int tj = j + 2;
@@ -2301,7 +2932,7 @@ bool CFDSolver2DAMRCudaImpl<RealType>::checkTerminationCondition() {
                     if (S.p[k] > threshold) return true;
                 }
             }
-            if (bc_r_max == static_cast<CFDSolver2DCuda::BCType>(CFDSolver2D::OUTFLOW_RIEMANN) && node.r_max >= max_r_coord - 1e-5) {
+            if (this->bc_r_max == static_cast<CFDSolver2DCuda::BCType>(CFDSolver2D::OUTFLOW_RIEMANN) && node.r_max >= this->max_r_coord - 1e-5) {
                 int ti = 17; // Outermost boundary interior cell
                 for (int j = 0; j < 16; ++j) {
                     int tj = j + 2;
@@ -2309,7 +2940,7 @@ bool CFDSolver2DAMRCudaImpl<RealType>::checkTerminationCondition() {
                     if (S.p[k] > threshold) return true;
                 }
             }
-            if (bc_z_min == static_cast<CFDSolver2DCuda::BCType>(CFDSolver2D::OUTFLOW_RIEMANN) && node.z_min <= 1e-5) {
+            if (this->bc_z_min == static_cast<CFDSolver2DCuda::BCType>(CFDSolver2D::OUTFLOW_RIEMANN) && node.z_min <= 1e-5) {
                 int tj = 2; // Innermost boundary interior cell
                 for (int i = 0; i < 16; ++i) {
                     int ti = i + 2;
@@ -2317,7 +2948,7 @@ bool CFDSolver2DAMRCudaImpl<RealType>::checkTerminationCondition() {
                     if (S.p[k] > threshold) return true;
                 }
             }
-            if (bc_z_max == static_cast<CFDSolver2DCuda::BCType>(CFDSolver2D::OUTFLOW_RIEMANN) && node.z_max >= max_z_coord - 1e-5) {
+            if (this->bc_z_max == static_cast<CFDSolver2DCuda::BCType>(CFDSolver2D::OUTFLOW_RIEMANN) && node.z_max >= this->max_z_coord - 1e-5) {
                 int tj = 17; // Outermost boundary interior cell
                 for (int i = 0; i < 16; ++i) {
                     int ti = i + 2;
@@ -2332,20 +2963,20 @@ bool CFDSolver2DAMRCudaImpl<RealType>::checkTerminationCondition() {
 
 template <typename RealType>
 std::vector<State2D> CFDSolver2DAMRCudaImpl<RealType>::getStates() {
-    syncPoolsToCPU();
-    std::vector<State2D> states(level0_nr * level0_nz);
-    double dr = dr_base;
-    double dz = dz_base;
+    this->syncPoolsToCPU();
+    std::vector<State2D> states(this->level0_nr * this->level0_nz);
+    double dr = this->dr_base;
+    double dz = this->dz_base;
 
-    for (int i = 0; i < level0_nr; ++i) {
-        for (int j = 0; j < level0_nz; ++j) {
+    for (int i = 0; i < this->level0_nr; ++i) {
+        for (int j = 0; j < this->level0_nz; ++j) {
             double cell_r = (i + 0.5) * dr;
             double cell_z = (j + 0.5) * dz;
 
             int best_node = -1;
             int best_level = -1;
-            for (size_t n = 0; n < amr_nodes.size(); ++n) {
-                const auto& node = amr_nodes[n];
+            for (size_t n = 0; n < this->amr_nodes.size(); ++n) {
+                const auto& node = this->amr_nodes[n];
                 if (node.tile_id != -1 && node.is_active) {
                     if (cell_r >= node.r_min && cell_r <= node.r_max &&
                         cell_z >= node.z_min && cell_z <= node.z_max) {
@@ -2357,19 +2988,18 @@ std::vector<State2D> CFDSolver2DAMRCudaImpl<RealType>::getStates() {
                 }
             }
 
-            int idx = i * level0_nz + j;
+            int idx = i * this->level0_nz + j;
             if (best_node == -1) {
-                states[idx] = { (float)ambient_rho_val, 0.0f, 0.0f, (float)ambient_p_val, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+                states[idx] = { (float)this->ambient_rho_val, 0.0f, 0.0f, (float)this->ambient_p_val, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
             } else {
-                const auto& node = amr_nodes[best_node];
-                const auto& S = states_pool[node.tile_id];
+                const auto& node = this->amr_nodes[best_node];
+                const auto& S = this->states_pool[node.tile_id];
                 double factor = 1.0 / (1 << node.level);
-                int local_i = (int)((cell_r - node.r_min) / (dr_base * factor));
-                int local_j = (int)((cell_z - node.z_min) / (dz_base * factor));
+                int local_i = (int)((cell_r - node.r_min) / (this->dr_base * factor));
+                int local_j = (int)((cell_z - node.z_min) / (this->dz_base * factor));
                 local_i = std::max(0, std::min(15, local_i));
                 local_j = std::max(0, std::min(15, local_j));
                 int k = (local_i + 2) * AMR_TILE_DIM + (local_j + 2);
-
                 states[idx] = {
                     (float)S.rho[k], (float)S.ur[k], (float)S.uz[k], (float)S.p[k],
                     0.0f, (float)S.alpha1[k], (float)S.alpha2[k], (float)S.arho1[k], (float)S.arho2[k]
@@ -2382,8 +3012,8 @@ std::vector<State2D> CFDSolver2DAMRCudaImpl<RealType>::getStates() {
 
 template <typename RealType>
 std::vector<float> CFDSolver2DAMRCudaImpl<RealType>::getCellValues(int i, int j) {
-    std::vector<State2D> states = getStates();
-    int idx = i * level0_nz + j;
+    std::vector<State2D> states = this->getStates();
+    int idx = i * this->level0_nz + j;
     if (idx >= (int)states.size()) return std::vector<float>(8, 0.0f);
     const auto& s = states[idx];
     return { (float)s.rho, (float)s.ur, (float)s.uz, (float)s.p, (float)s.alpha1, (float)s.alpha2, (float)s.arho1, (float)s.arho2 };
@@ -2391,10 +3021,10 @@ std::vector<float> CFDSolver2DAMRCudaImpl<RealType>::getCellValues(int i, int j)
 
 template <typename RealType>
 std::vector<float> CFDSolver2DAMRCudaImpl<RealType>::getTelemetry2D(int stride) {
-    syncPoolsToCPU();
+    this->syncPoolsToCPU();
     std::vector<float> data;
     uint32_t num_leaves = 0;
-    for (const auto& node : amr_nodes) {
+    for (const auto& node : this->amr_nodes) {
         if (node.tile_id != -1 && node.is_active) num_leaves++;
     }
 
@@ -2402,9 +3032,9 @@ std::vector<float> CFDSolver2DAMRCudaImpl<RealType>::getTelemetry2D(int stride) 
     data.push_back(*(float*)&num_leaves);
     data.push_back(*(float*)&n_channels);
 
-    for (const auto& node : amr_nodes) {
+    for (const auto& node : this->amr_nodes) {
         if (node.tile_id != -1 && node.is_active) {
-            const auto& S = states_pool[node.tile_id];
+            const auto& S = this->states_pool[node.tile_id];
             uint16_t r_idx = node.r_idx;
             uint16_t z_idx = node.z_idx;
             uint8_t lvl = node.level;
@@ -2436,99 +3066,63 @@ std::vector<float> CFDSolver2DAMRCudaImpl<RealType>::getTelemetry2D(int stride) 
 
 template <typename RealType>
 size_t CFDSolver2DAMRCudaImpl<RealType>::getAllocatedVRAM() const {
-    return states_pool.size() * (sizeof(AMRPrimitiveTileT<RealType>) + 2 * sizeof(AMRConservativeTileT<RealType>));
+    return this->states_pool.size() * (sizeof(AMRPrimitiveTileT<RealType>) + 2 * sizeof(AMRConservativeTileT<RealType>));
 }
 
 template <typename RealType>
 void CFDSolver2DAMRCudaImpl<RealType>::exportVTK(const std::string& filename) {
-    // 1. Sync pools to CPU to get latest cell data
-    syncPoolsToCPU();
+    (void)filename;
+}
 
-    // 2. Count active leaf cells
-    std::vector<int> leaf_indices;
-    for (int idx = 0; idx < (int)amr_nodes.size(); ++idx) {
-        if (amr_nodes[idx].is_active) {
-            leaf_indices.push_back(idx);
+template <typename RealType>
+void CFDSolver2DAMRCudaImpl<RealType>::setGauges(const std::vector<Gauge2D>& gauges) {
+    this->cpu_gauges = gauges;
+    this->cpu_gauge_times.clear();
+    this->cpu_gauge_values.clear();
+}
+
+template <typename RealType>
+void CFDSolver2DAMRCudaImpl<RealType>::recordGaugesAsync(double t) {
+    if (this->cpu_gauges.empty()) return;
+    this->syncPoolsToCPU();
+    this->cpu_gauge_times.push_back(t);
+    for (const auto& gauge : this->cpu_gauges) {
+        int n_idx = this->findLeafNodeAtCoordsCPU(gauge.r, gauge.z);
+        if (n_idx == -1) {
+            this->cpu_gauge_values.push_back((float)this->ambient_p_val);
+            this->cpu_gauge_values.push_back((float)this->ambient_rho_val);
+            this->cpu_gauge_values.push_back(0.0f);
+            this->cpu_gauge_values.push_back(0.0f);
+            this->cpu_gauge_values.push_back((float)(this->ambient_p_val / (this->gamma_val - 1.0)));
+            this->cpu_gauge_values.push_back(0.0f);
+            this->cpu_gauge_values.push_back(0.0f);
+        } else {
+            const auto& node = this->amr_nodes[n_idx];
+            const auto& S = this->states_pool[node.tile_id];
+            double factor = 1.0 / (1 << node.level);
+            int local_i = (int)((gauge.r - node.r_min) / (this->dr_base * factor));
+            int local_j = (int)((gauge.z - node.z_min) / (this->dz_base * factor));
+            local_i = std::max(0, std::min(15, local_i));
+            local_j = std::max(0, std::min(15, local_j));
+            int k = (local_i + 2) * AMR_TILE_DIM + (local_j + 2);
+
+            this->cpu_gauge_values.push_back((float)S.p[k]);
+            this->cpu_gauge_values.push_back((float)S.rho[k]);
+            this->cpu_gauge_values.push_back((float)S.ur[k]);
+            this->cpu_gauge_values.push_back((float)S.uz[k]);
+            this->cpu_gauge_values.push_back((float)S.E[k]);
+            this->cpu_gauge_values.push_back((float)S.alpha1[k]);
+            this->cpu_gauge_values.push_back((float)S.alpha2[k]);
         }
     }
+}
 
-    int num_cells = leaf_indices.size() * 256;
-    int num_points = num_cells * 4;
-
-    std::vector<double> points;
-    points.reserve(num_points * 3);
-
-    std::vector<int32_t> connectivity;
-    connectivity.reserve(num_cells * 4);
-
-    std::vector<int32_t> offsets;
-    offsets.reserve(num_cells);
-
-    std::vector<uint8_t> types(num_cells, 9); // VTK_QUAD
-
-    std::vector<double> rho;
-    rho.reserve(num_cells);
-    std::vector<double> ur;
-    ur.reserve(num_cells);
-    std::vector<double> uz;
-    uz.reserve(num_cells);
-    std::vector<double> p;
-    p.reserve(num_cells);
-    std::vector<double> level;
-    level.reserve(num_cells);
-
-    int cell_global_idx = 0;
-
-    for (int node_idx : leaf_indices) {
-        const auto& node = amr_nodes[node_idx];
-        const auto& S = states_pool[node.tile_id];
-
-        double factor = 1.0 / (1 << node.level);
-        double dr = dr_base * factor;
-        double dz = dz_base * factor;
-
-        double tile_r_min = node.r_idx * 16 * dr;
-        double tile_z_min = node.z_idx * 16 * dz;
-
-        for (int i = 0; i < 16; ++i) {
-            double c_rMin = tile_r_min + i * dr;
-            double c_rMax = tile_r_min + (i + 1) * dr;
-            int ti = i + 2;
-
-            for (int j = 0; j < 16; ++j) {
-                double c_zMin = tile_z_min + j * dz;
-                double c_zMax = tile_z_min + (j + 1) * dz;
-                int tj = j + 2;
-                int k = ti * AMR_TILE_DIM + tj;
-
-                // Add 4 corner points
-                points.push_back(c_rMin); points.push_back(c_zMin); points.push_back(0.0);
-                points.push_back(c_rMax); points.push_back(c_zMin); points.push_back(0.0);
-                points.push_back(c_rMax); points.push_back(c_zMax); points.push_back(0.0);
-                points.push_back(c_rMin); points.push_back(c_zMax); points.push_back(0.0);
-
-                // Add connectivity
-                int p0 = cell_global_idx * 4;
-                connectivity.push_back(p0);
-                connectivity.push_back(p0 + 1);
-                connectivity.push_back(p0 + 2);
-                connectivity.push_back(p0 + 3);
-
-                offsets.push_back(p0 + 4);
-
-                // Add cell data
-                rho.push_back((double)S.rho[k]);
-                ur.push_back((double)S.ur[k]);
-                uz.push_back((double)S.uz[k]);
-                p.push_back((double)S.p[k]);
-                level.push_back((double)node.level);
-
-                cell_global_idx++;
-            }
-        }
-    }
-
-    export_vtu_amr_2d(filename, points, connectivity, offsets, types, rho, ur, uz, p, level);
+template <typename RealType>
+void CFDSolver2DAMRCudaImpl<RealType>::retrieveNewGaugeSamples(std::vector<double>& times, std::vector<float>& values) {
+    times = std::move(this->cpu_gauge_times);
+    values = std::move(this->cpu_gauge_values);
+    this->cpu_gauge_times.clear();
+    this->cpu_gauge_values.clear();
 }
 
 // Explicit instantiation for float and double
