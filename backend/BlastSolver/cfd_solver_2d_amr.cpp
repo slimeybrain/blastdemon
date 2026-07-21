@@ -317,8 +317,12 @@ void CFDSolver2DAMRImpl<RealType>::fillGhostCells() {
                     const auto& Nb = states_pool[nb_node.tile_id];
                     auto prolongate_cell = [&](int ic, int jc, double xfrac, double yfrac, auto field) {
                         double v = (Nb.*field)[ic * AMR_TILE_DIM + jc];
-                        double vr = minmod_kernel((Nb.*field)[(ic+1)*AMR_TILE_DIM+jc] - v, v - (Nb.*field)[(ic-1)*AMR_TILE_DIM+jc]);
-                        double vz = minmod_kernel((Nb.*field)[ic*AMR_TILE_DIM+jc+1] - v, v - (Nb.*field)[ic*AMR_TILE_DIM+jc-1]);
+                        double vr = (ic == 17) ? (v - (Nb.*field)[(ic-1)*AMR_TILE_DIM+jc]) :
+                                    ((ic == 2)  ? ((Nb.*field)[(ic+1)*AMR_TILE_DIM+jc] - v) :
+                                    minmod_kernel((Nb.*field)[(ic+1)*AMR_TILE_DIM+jc] - v, v - (Nb.*field)[(ic-1)*AMR_TILE_DIM+jc]));
+                        double vz = (jc == 17) ? (v - (Nb.*field)[ic*AMR_TILE_DIM+jc-1]) :
+                                    ((jc == 2)  ? ((Nb.*field)[ic*AMR_TILE_DIM+jc+1] - v) :
+                                    minmod_kernel((Nb.*field)[ic*AMR_TILE_DIM+jc+1] - v, v - (Nb.*field)[ic*AMR_TILE_DIM+jc-1]));
                         return (RealType)(v + xfrac * vr + yfrac * vz);
                     };
 
@@ -1020,6 +1024,7 @@ void CFDSolver2DAMRImpl<RealType>::adaptMesh() {
     if (!nodes_to_refine.empty() || !parents_to_coarsen.empty()) {
         rebuildNeighborPointers();
         updatePrimitiveFromConservative();
+        fillGhostCells();
     }
 }
 
@@ -1143,17 +1148,19 @@ void CFDSolver2DAMRImpl<RealType>::refineNode(int node_idx) {
     const auto& U_parent = U_pool[parent_tile_id];
     auto prolongate_node_field = [&](int child_idx, int quadrant, auto field) {
         auto& U_child = U_pool[amr_nodes[child_idx].tile_id];
+        int r_quad = (quadrant == 1 || quadrant == 3) ? 1 : 0;
+        int z_quad = (quadrant == 2 || quadrant == 3) ? 1 : 0;
         
-        for (int i = 0; i < 16; ++i) {
-            int pi = (quadrant == 1 || quadrant == 3) ? (i / 2) + 8 + 2 : (i / 2) + 2;
-            double xfrac = (quadrant == 1 || quadrant == 3) ? ((i % 2 == 0) ? -0.25 : 0.25) : ((i % 2 == 0) ? -0.25 : 0.25);
+        for (int ci = 0; ci < AMR_TILE_DIM; ++ci) {
+            int pi = (ci / 2) + r_quad * 8 + 1;
+            double xfrac = (ci % 2 == 0) ? -0.25 : 0.25;
             
-            for (int j = 0; j < 16; ++j) {
-                int pj = (quadrant == 2 || quadrant == 3) ? (j / 2) + 8 + 2 : (j / 2) + 2;
-                double yfrac = (quadrant == 2 || quadrant == 3) ? ((j % 2 == 0) ? -0.25 : 0.25) : ((j % 2 == 0) ? -0.25 : 0.25);
+            for (int cj = 0; cj < AMR_TILE_DIM; ++cj) {
+                int pj = (cj / 2) + z_quad * 8 + 1;
+                double yfrac = (cj % 2 == 0) ? -0.25 : 0.25;
                 
                 int pk = pi * AMR_TILE_DIM + pj;
-                int ck = (i + 2) * AMR_TILE_DIM + (j + 2);
+                int ck = ci * AMR_TILE_DIM + cj;
 
                 RealType v = (U_parent.*field)[pk];
                 RealType vr = minmod_kernel((U_parent.*field)[pk+AMR_TILE_DIM] - v, v - (U_parent.*field)[pk-AMR_TILE_DIM]);
