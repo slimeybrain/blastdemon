@@ -530,8 +530,8 @@ __global__ void computeTileRHS_AMR_kernel(
         #undef RECONSTRUCT
 
         #define CLAMP(face) \
-            face.alpha1 = max((RealType)0.0, min((RealType)1.0, face.alpha1)); \
-            face.alpha2 = max((RealType)0.0, min((RealType)1.0, face.alpha2)); \
+            face.alpha1 = math_max((RealType)0.0, math_min((RealType)1.0, face.alpha1)); \
+            face.alpha2 = math_max((RealType)0.0, math_min((RealType)1.0, face.alpha2)); \
             compute_E_kernel(face, gamma, mat, is_ideal_gas);
 
         CLAMP(s_faceL_L) CLAMP(s_faceL_R) CLAMP(s_faceR_L) CLAMP(s_faceR_R)
@@ -578,8 +578,8 @@ __global__ void computeTileRHS_AMR_kernel(
         #undef RECONSTRUCT_MM
 
         #define CLAMP(face) \
-            face.alpha1 = max((RealType)0.0, min((RealType)1.0, face.alpha1)); \
-            face.alpha2 = max((RealType)0.0, min((RealType)1.0, face.alpha2)); \
+            face.alpha1 = math_max((RealType)0.0, math_min((RealType)1.0, face.alpha1)); \
+            face.alpha2 = math_max((RealType)0.0, math_min((RealType)1.0, face.alpha2)); \
             compute_E_kernel(face, gamma, mat, is_ideal_gas);
 
         CLAMP(s_faceL_L) CLAMP(s_faceL_R) CLAMP(s_faceR_L) CLAMP(s_faceR_R)
@@ -989,7 +989,7 @@ CFDSolver2DAMRCudaImpl<RealType>::CFDSolver2DAMRCudaImpl(int nr, int nz, double 
     : level0_nr(nr), level0_nz(nz), max_r_coord(max_r), max_z_coord(max_z),
       time_val(0.0), gamma_val(gamma), is_ideal_gas_val(true), is_cartesian_val(false),
       amr_max_levels_val(max_levels), amr_threshold_val(threshold), amr_coarsen_ratio_val(coarsen_ratio),
-      flux_scheme_name("AUSM+"), spatial_order_val(2), temporal_order_val(2),
+      flux_scheme_name("AUSM+"), spatial_order_val(2), temporal_order_val(2), step_counter_val(0),
       bc_r_min(static_cast<CFDSolver2DCuda::BCType>(CFDSolver2D::REFLECTIVE)),
       bc_r_max(static_cast<CFDSolver2DCuda::BCType>(CFDSolver2D::OUTFLOW_RIEMANN)),
       bc_z_min(static_cast<CFDSolver2DCuda::BCType>(CFDSolver2D::REFLECTIVE)),

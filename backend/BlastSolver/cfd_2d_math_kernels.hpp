@@ -30,14 +30,31 @@ struct ConservativeState2DT {
     RealType arho2;
 };
 
+template <typename T>
+#ifdef __CUDACC__
+__host__ __device__
+#endif
+inline T math_abs(T a) { return (a < (T)0) ? -a : a; }
+
+template <typename T>
+#ifdef __CUDACC__
+__host__ __device__
+#endif
+inline T math_max(T a, T b) { return (a > b) ? a : b; }
+
+template <typename T>
+#ifdef __CUDACC__
+__host__ __device__
+#endif
+inline T math_min(T a, T b) { return (a < b) ? a : b; }
+
 template <typename RealType>
 #ifdef __CUDACC__
 __host__ __device__
 #endif
 inline RealType minmod_kernel(RealType a, RealType b) {
-    using std::abs;
     if (a * b <= (RealType)0.0) return (RealType)0.0;
-    return (abs(a) < abs(b)) ? a : b;
+    return (math_abs(a) < math_abs(b)) ? a : b;
 }
 
 template <typename RealType>
@@ -82,13 +99,11 @@ __host__ __device__
 inline void calcFluxRusanov_kernel(const CellState2DT<RealType>& sL, const CellState2DT<RealType>& sR, RealType gamma, const MultiMat::MaterialSet& mat, 
                                    RealType& f_rho, RealType& f_rhour, RealType& f_rhouz, RealType& f_E, 
                                    RealType& f_alpha1, RealType& f_alpha2, RealType& f_arho1, RealType& f_arho2, RealType& v_face, bool is_ideal_gas) {
-    using std::abs;
-    using std::max;
     RealType cL, cR;
-    RealType rhoL_safe = max(sL.rho, (RealType)1e-8);
-    RealType rhoR_safe = max(sR.rho, (RealType)1e-8);
-    RealType pL_safe = max(sL.p, (RealType)1e-8);
-    RealType pR_safe = max(sR.p, (RealType)1e-8);
+    RealType rhoL_safe = math_max(sL.rho, (RealType)1e-8);
+    RealType rhoR_safe = math_max(sR.rho, (RealType)1e-8);
+    RealType pL_safe = math_max(sL.p, (RealType)1e-8);
+    RealType pR_safe = math_max(sR.p, (RealType)1e-8);
 
     if (is_ideal_gas) {
         cL = std::sqrt(gamma * pL_safe / rhoL_safe);
@@ -97,7 +112,7 @@ inline void calcFluxRusanov_kernel(const CellState2DT<RealType>& sL, const CellS
         cL = MultiMat::getMixtureSoundSpeed(pL_safe, rhoL_safe, sL.alpha1, sL.alpha2, sL.arho1, sL.arho2, gamma, mat.products, mat.unreacted);
         cR = MultiMat::getMixtureSoundSpeed(pR_safe, rhoR_safe, sR.alpha1, sR.alpha2, sR.arho1, sR.arho2, gamma, mat.products, mat.unreacted);
     }
-    RealType s_max = max(abs(sL.ur) + cL, abs(sR.ur) + cR);
+    RealType s_max = math_max(math_abs(sL.ur) + cL, math_abs(sR.ur) + cR);
 
     RealType fL_rho = sL.rho * sL.ur;
     RealType fL_rhour = sL.rho * sL.ur * sL.ur + sL.p;
@@ -132,13 +147,11 @@ __host__ __device__
 inline void calcFluxRusanovZ_kernel(const CellState2DT<RealType>& sL, const CellState2DT<RealType>& sR, RealType gamma, const MultiMat::MaterialSet& mat, 
                                     RealType& f_rho, RealType& f_rhour, RealType& f_rhouz, RealType& f_E, 
                                     RealType& f_alpha1, RealType& f_alpha2, RealType& f_arho1, RealType& f_arho2, RealType& v_face, bool is_ideal_gas) {
-    using std::abs;
-    using std::max;
     RealType cL, cR;
-    RealType rhoL_safe = max(sL.rho, (RealType)1e-8);
-    RealType rhoR_safe = max(sR.rho, (RealType)1e-8);
-    RealType pL_safe = max(sL.p, (RealType)1e-8);
-    RealType pR_safe = max(sR.p, (RealType)1e-8);
+    RealType rhoL_safe = math_max(sL.rho, (RealType)1e-8);
+    RealType rhoR_safe = math_max(sR.rho, (RealType)1e-8);
+    RealType pL_safe = math_max(sL.p, (RealType)1e-8);
+    RealType pR_safe = math_max(sR.p, (RealType)1e-8);
 
     if (is_ideal_gas) {
         cL = std::sqrt(gamma * pL_safe / rhoL_safe);
@@ -147,7 +160,7 @@ inline void calcFluxRusanovZ_kernel(const CellState2DT<RealType>& sL, const Cell
         cL = MultiMat::getMixtureSoundSpeed(pL_safe, rhoL_safe, sL.alpha1, sL.alpha2, sL.arho1, sL.arho2, gamma, mat.products, mat.unreacted);
         cR = MultiMat::getMixtureSoundSpeed(pR_safe, rhoR_safe, sR.alpha1, sR.alpha2, sR.arho1, sR.arho2, gamma, mat.products, mat.unreacted);
     }
-    RealType s_max = max(abs(sL.uz) + cL, abs(sR.uz) + cR);
+    RealType s_max = math_max(math_abs(sL.uz) + cL, math_abs(sR.uz) + cR);
 
     RealType fL_rho = sL.rho * sL.uz;
     RealType fL_rhour = sL.rho * sL.ur * sL.uz;
@@ -186,9 +199,8 @@ inline CellState2DT<RealType> applyBC_AMR_kernel(CellState2DT<RealType> s, int b
     } else if (bc == 1) { // TRANSMISSIVE
         // zero gradient
     } else if (bc == 2) { // OUTFLOW_RIEMANN
-        using std::max;
-        RealType rho_safe = max(s.rho, (RealType)1e-8);
-        RealType p_safe = max(s.p, (RealType)1e-8);
+        RealType rho_safe = math_max(s.rho, (RealType)1e-8);
+        RealType p_safe = math_max(s.p, (RealType)1e-8);
         RealType c;
         if (is_ideal_gas) {
             c = std::sqrt(gamma * p_safe / rho_safe);
