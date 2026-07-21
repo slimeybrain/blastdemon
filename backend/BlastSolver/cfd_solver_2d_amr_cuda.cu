@@ -1207,8 +1207,12 @@ void CFDSolver2DAMRCudaImpl<RealType>::refineNodeCPU(int node_idx) {
                 int pk = pi * AMR_TILE_DIM + pj;
                 int ck = ci * AMR_TILE_DIM + cj;
                 RealType v = (U_parent.*field)[pk];
-                RealType vr = minmod_kernel((U_parent.*field)[pk+AMR_TILE_DIM] - v, v - (U_parent.*field)[pk-AMR_TILE_DIM]);
-                RealType vz = minmod_kernel((U_parent.*field)[pk+1] - v, v - (U_parent.*field)[pk-1]);
+                RealType vr = (pi >= 18) ? (v - (U_parent.*field)[(pi-1)*AMR_TILE_DIM+pj]) :
+                              ((pi <= 1)  ? ((U_parent.*field)[(pi+1)*AMR_TILE_DIM+pj] - v) :
+                              minmod_kernel((U_parent.*field)[(pi+1)*AMR_TILE_DIM+pj] - v, v - (U_parent.*field)[(pi-1)*AMR_TILE_DIM+pj]));
+                RealType vz = (pj >= 18) ? (v - (U_parent.*field)[pi*AMR_TILE_DIM+pj-1]) :
+                              ((pj <= 1)  ? ((U_parent.*field)[pi*AMR_TILE_DIM+pj+1] - v) :
+                              minmod_kernel((U_parent.*field)[pi*AMR_TILE_DIM+pj+1] - v, v - (U_parent.*field)[pi*AMR_TILE_DIM+pj-1]));
                 (U_child.*field)[ck] = (RealType)(v + xfrac * vr + yfrac * vz);
             }
         }
