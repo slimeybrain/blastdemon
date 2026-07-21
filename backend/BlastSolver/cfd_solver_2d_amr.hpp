@@ -53,6 +53,18 @@ struct AMRConservativeTileT {
 enum AMRDir { AMR_DIR_LEFT = 0, AMR_DIR_RIGHT = 1, AMR_DIR_BOTTOM = 2, AMR_DIR_TOP = 3 };
 
 template <typename RealType>
+struct AMRFaceFluxT {
+    RealType rho[TILE_SIZE];
+    RealType rhour[TILE_SIZE];
+    RealType rhouz[TILE_SIZE];
+    RealType E[TILE_SIZE];
+    RealType alpha1[TILE_SIZE];
+    RealType alpha2[TILE_SIZE];
+    RealType arho1[TILE_SIZE];
+    RealType arho2[TILE_SIZE];
+};
+
+template <typename RealType>
 class CFDSolver2DAMRImpl : public CFDSolver2D {
 private:
     int level0_nr;
@@ -101,19 +113,7 @@ private:
     std::vector<int> free_tile_ids;
 
     // Boundary flux buffers for flux correction at interfaces
-    // For each node: Left, Right, Bottom, Top boundary fluxes
-    // Stored as 16 entries per boundary per node
-    struct FaceFluxT {
-        RealType rho[TILE_SIZE];
-        RealType rhour[TILE_SIZE];
-        RealType rhouz[TILE_SIZE];
-        RealType E[TILE_SIZE];
-        RealType alpha1[TILE_SIZE];
-        RealType alpha2[TILE_SIZE];
-        RealType arho1[TILE_SIZE];
-        RealType arho2[TILE_SIZE];
-    };
-    std::vector<std::array<FaceFluxT, 4>> node_boundary_fluxes;
+    std::vector<std::array<AMRFaceFluxT<RealType>, 4>> node_boundary_fluxes;
 
     int allocateTile();
     void freeTile(int tile_id);
@@ -124,7 +124,7 @@ private:
     void fillGhostCells();
     void computeTileRHS(int node_idx, double A_coeff, double dt);
     void applyLSRK3Step(int stage, double dt);
-    void applyFluxCorrection(double dt);
+    void applyFluxCorrection(int stage, double dt);
     void updatePrimitiveFromConservative();
     void restrictAll();
     void restrictNode(int node_idx);

@@ -525,9 +525,13 @@ __global__ __launch_bounds__(256, 2) void computeTileRHS_kernel(
     RealType r_center = (RealType)(i + 0.5) * dr;
     RealType r_left = (RealType)i * dr;
     RealType r_right = (RealType)(i + 1) * dr;
-    
+
+    RealType p_face_R = (RealType)0.5 * (s_faceR_L.p + s_faceR_R.p);
+    RealType p_face_L = (RealType)0.5 * (s_faceL_L.p + s_faceL_R.p);
+    RealType p_face_avg = (RealType)0.5 * (p_face_R + p_face_L);
+
     RealType dU_rho = -((RealType)1.0 / (r_center * dr)) * (r_right * fr_R_rho - r_left * fr_L_rho) - ((RealType)1.0 / dz) * (fz_T_rho - fz_B_rho);
-    RealType dU_rhour = -((RealType)1.0 / (r_center * dr)) * (r_right * fr_R_rhour - r_left * fr_L_rhour) - ((RealType)1.0 / dz) * (fz_T_rhour - fz_B_rhour) + s_c.p / r_center;
+    RealType dU_rhour = -((RealType)1.0 / (r_center * dr)) * (r_right * fr_R_rhour - r_left * fr_L_rhour) - ((RealType)1.0 / dz) * (fz_T_rhour - fz_B_rhour) + p_face_avg / r_center;
     RealType dU_rhouz = -((RealType)1.0 / (r_center * dr)) * (r_right * fr_R_rhouz - r_left * fr_L_rhouz) - ((RealType)1.0 / dz) * (fz_T_rhouz - fz_B_rhouz);
     RealType dU_E = -((RealType)1.0 / (r_center * dr)) * (r_right * fr_R_E - r_left * fr_L_E) - ((RealType)1.0 / dz) * (fz_T_E - fz_B_E);
 

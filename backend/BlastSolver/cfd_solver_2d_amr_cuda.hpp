@@ -33,6 +33,7 @@ private:
     double time_val;
     double gamma_val;
     bool is_ideal_gas_val;
+    bool is_cartesian_val;
 
     int amr_max_levels_val;
     double amr_threshold_val;
@@ -65,6 +66,7 @@ private:
     AMRPrimitiveTileT<RealType>* d_states_pool;
     AMRConservativeTileT<RealType>* d_U_pool;
     AMRConservativeTileT<RealType>* d_dU_pool;
+    AMRFaceFluxT<RealType>* d_node_boundary_fluxes;
     size_t allocated_tiles_capacity;
 
     // Active leaf node IDs list on GPU
@@ -74,6 +76,9 @@ private:
     int* d_allocated_node_ids;
     int* d_allocated_tile_ids;
     int allocated_nodes_count;
+    size_t current_active_capacity;
+    size_t current_allocated_capacity;
+    size_t current_tree_capacity;
 
     // GPU tree nodes representation for ghost-cell updates
     GPUNode2D* d_amr_nodes;
@@ -131,6 +136,7 @@ public:
     void setMaterialParameters(const MultiMat::MaterialSet& materials) override;
     void setGamma(double g) override;
     void setIdealGas(bool val) override;
+    void setCoordinateSystemCartesian(bool cartesian) { is_cartesian_val = cartesian; }
 
     void step(double dt) override;
     void run(double duration) override;

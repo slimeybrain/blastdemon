@@ -177,16 +177,140 @@ __global__ void fillGhostCells_AMR_kernel(
                 T.arho2[ti * AMR_TILE_DIM + 18] = Nb.arho2[ti * AMR_TILE_DIM + 2];
                 T.arho2[ti * AMR_TILE_DIM + 19] = Nb.arho2[ti * AMR_TILE_DIM + 3];
             }
+        } else if (nb_node.level == node.level + 1) {
+            // Fine neighbor restriction averaging for CUDA
+            int r_sub = node.r_idx % 2;
+            int z_sub = node.z_idx % 2;
+
+            if (boundary_id == 0) { // Left
+                int tj = cell_idx + 2;
+                int fj1 = z_sub * 8 * 2 + cell_idx * 2 + 2;
+                int fj2 = fj1 + 1;
+                fj1 = max(2, min(17, fj1));
+                fj2 = max(2, min(17, fj2));
+                int k1 = 16 * AMR_TILE_DIM + fj1;
+                int k2 = 16 * AMR_TILE_DIM + fj2;
+                int k3 = 17 * AMR_TILE_DIM + fj1;
+                int k4 = 17 * AMR_TILE_DIM + fj2;
+                RealType avg_rho  = (RealType)(0.25 * ((double)Nb.rho[k1]   + (double)Nb.rho[k2]   + (double)Nb.rho[k3]   + (double)Nb.rho[k4]));
+                RealType avg_ur   = (RealType)(0.25 * ((double)Nb.ur[k1]    + (double)Nb.ur[k2]    + (double)Nb.ur[k3]    + (double)Nb.ur[k4]));
+                RealType avg_uz   = (RealType)(0.25 * ((double)Nb.uz[k1]    + (double)Nb.uz[k2]    + (double)Nb.uz[k3]    + (double)Nb.uz[k4]));
+                RealType avg_p    = (RealType)(0.25 * ((double)Nb.p[k1]     + (double)Nb.p[k2]     + (double)Nb.p[k3]     + (double)Nb.p[k4]));
+                RealType avg_E    = (RealType)(0.25 * ((double)Nb.E[k1]     + (double)Nb.E[k2]     + (double)Nb.E[k3]     + (double)Nb.E[k4]));
+                RealType avg_a1   = (RealType)(0.25 * ((double)Nb.alpha1[k1] + (double)Nb.alpha1[k2] + (double)Nb.alpha1[k3] + (double)Nb.alpha1[k4]));
+                RealType avg_a2   = (RealType)(0.25 * ((double)Nb.alpha2[k1] + (double)Nb.alpha2[k2] + (double)Nb.alpha2[k3] + (double)Nb.alpha2[k4]));
+                RealType avg_ar1  = (RealType)(0.25 * ((double)Nb.arho1[k1]  + (double)Nb.arho1[k2]  + (double)Nb.arho1[k3]  + (double)Nb.arho1[k4]));
+                RealType avg_ar2  = (RealType)(0.25 * ((double)Nb.arho2[k1]  + (double)Nb.arho2[k2]  + (double)Nb.arho2[k3]  + (double)Nb.arho2[k4]));
+                T.rho[0*AMR_TILE_DIM+tj]  = avg_rho;  T.rho[1*AMR_TILE_DIM+tj]  = avg_rho;
+                T.ur[0*AMR_TILE_DIM+tj]   = avg_ur;   T.ur[1*AMR_TILE_DIM+tj]   = avg_ur;
+                T.uz[0*AMR_TILE_DIM+tj]   = avg_uz;   T.uz[1*AMR_TILE_DIM+tj]   = avg_uz;
+                T.p[0*AMR_TILE_DIM+tj]    = avg_p;    T.p[1*AMR_TILE_DIM+tj]    = avg_p;
+                T.E[0*AMR_TILE_DIM+tj]    = avg_E;    T.E[1*AMR_TILE_DIM+tj]    = avg_E;
+                T.alpha1[0*AMR_TILE_DIM+tj] = avg_a1; T.alpha1[1*AMR_TILE_DIM+tj] = avg_a1;
+                T.alpha2[0*AMR_TILE_DIM+tj] = avg_a2; T.alpha2[1*AMR_TILE_DIM+tj] = avg_a2;
+                T.arho1[0*AMR_TILE_DIM+tj]  = avg_ar1; T.arho1[1*AMR_TILE_DIM+tj]  = avg_ar1;
+                T.arho2[0*AMR_TILE_DIM+tj]  = avg_ar2; T.arho2[1*AMR_TILE_DIM+tj]  = avg_ar2;
+            } else if (boundary_id == 1) { // Right
+                int tj = cell_idx + 2;
+                int fj1 = z_sub * 8 * 2 + cell_idx * 2 + 2;
+                int fj2 = fj1 + 1;
+                fj1 = max(2, min(17, fj1));
+                fj2 = max(2, min(17, fj2));
+                int k1 = 2 * AMR_TILE_DIM + fj1;
+                int k2 = 2 * AMR_TILE_DIM + fj2;
+                int k3 = 3 * AMR_TILE_DIM + fj1;
+                int k4 = 3 * AMR_TILE_DIM + fj2;
+                RealType avg_rho  = (RealType)(0.25 * ((double)Nb.rho[k1]   + (double)Nb.rho[k2]   + (double)Nb.rho[k3]   + (double)Nb.rho[k4]));
+                RealType avg_ur   = (RealType)(0.25 * ((double)Nb.ur[k1]    + (double)Nb.ur[k2]    + (double)Nb.ur[k3]    + (double)Nb.ur[k4]));
+                RealType avg_uz   = (RealType)(0.25 * ((double)Nb.uz[k1]    + (double)Nb.uz[k2]    + (double)Nb.uz[k3]    + (double)Nb.uz[k4]));
+                RealType avg_p    = (RealType)(0.25 * ((double)Nb.p[k1]     + (double)Nb.p[k2]     + (double)Nb.p[k3]     + (double)Nb.p[k4]));
+                RealType avg_E    = (RealType)(0.25 * ((double)Nb.E[k1]     + (double)Nb.E[k2]     + (double)Nb.E[k3]     + (double)Nb.E[k4]));
+                RealType avg_a1   = (RealType)(0.25 * ((double)Nb.alpha1[k1] + (double)Nb.alpha1[k2] + (double)Nb.alpha1[k3] + (double)Nb.alpha1[k4]));
+                RealType avg_a2   = (RealType)(0.25 * ((double)Nb.alpha2[k1] + (double)Nb.alpha2[k2] + (double)Nb.alpha2[k3] + (double)Nb.alpha2[k4]));
+                RealType avg_ar1  = (RealType)(0.25 * ((double)Nb.arho1[k1]  + (double)Nb.arho1[k2]  + (double)Nb.arho1[k3]  + (double)Nb.arho1[k4]));
+                RealType avg_ar2  = (RealType)(0.25 * ((double)Nb.arho2[k1]  + (double)Nb.arho2[k2]  + (double)Nb.arho2[k3]  + (double)Nb.arho2[k4]));
+                T.rho[18*AMR_TILE_DIM+tj]  = avg_rho;  T.rho[19*AMR_TILE_DIM+tj]  = avg_rho;
+                T.ur[18*AMR_TILE_DIM+tj]   = avg_ur;   T.ur[19*AMR_TILE_DIM+tj]   = avg_ur;
+                T.uz[18*AMR_TILE_DIM+tj]   = avg_uz;   T.uz[19*AMR_TILE_DIM+tj]   = avg_uz;
+                T.p[18*AMR_TILE_DIM+tj]    = avg_p;    T.p[19*AMR_TILE_DIM+tj]    = avg_p;
+                T.E[18*AMR_TILE_DIM+tj]    = avg_E;    T.E[19*AMR_TILE_DIM+tj]    = avg_E;
+                T.alpha1[18*AMR_TILE_DIM+tj] = avg_a1; T.alpha1[19*AMR_TILE_DIM+tj] = avg_a1;
+                T.alpha2[18*AMR_TILE_DIM+tj] = avg_a2; T.alpha2[19*AMR_TILE_DIM+tj] = avg_a2;
+                T.arho1[18*AMR_TILE_DIM+tj]  = avg_ar1; T.arho1[19*AMR_TILE_DIM+tj]  = avg_ar1;
+                T.arho2[18*AMR_TILE_DIM+tj]  = avg_ar2; T.arho2[19*AMR_TILE_DIM+tj]  = avg_ar2;
+            } else if (boundary_id == 2) { // Bottom
+                int ti = cell_idx + 2;
+                int fi1 = r_sub * 8 * 2 + cell_idx * 2 + 2;
+                int fi2 = fi1 + 1;
+                fi1 = max(2, min(17, fi1));
+                fi2 = max(2, min(17, fi2));
+                int k1 = fi1 * AMR_TILE_DIM + 16;
+                int k2 = fi1 * AMR_TILE_DIM + 17;
+                int k3 = fi2 * AMR_TILE_DIM + 16;
+                int k4 = fi2 * AMR_TILE_DIM + 17;
+                RealType avg_rho  = (RealType)(0.25 * ((double)Nb.rho[k1]   + (double)Nb.rho[k2]   + (double)Nb.rho[k3]   + (double)Nb.rho[k4]));
+                RealType avg_ur   = (RealType)(0.25 * ((double)Nb.ur[k1]    + (double)Nb.ur[k2]    + (double)Nb.ur[k3]    + (double)Nb.ur[k4]));
+                RealType avg_uz   = (RealType)(0.25 * ((double)Nb.uz[k1]    + (double)Nb.uz[k2]    + (double)Nb.uz[k3]    + (double)Nb.uz[k4]));
+                RealType avg_p    = (RealType)(0.25 * ((double)Nb.p[k1]     + (double)Nb.p[k2]     + (double)Nb.p[k3]     + (double)Nb.p[k4]));
+                RealType avg_E    = (RealType)(0.25 * ((double)Nb.E[k1]     + (double)Nb.E[k2]     + (double)Nb.E[k3]     + (double)Nb.E[k4]));
+                RealType avg_a1   = (RealType)(0.25 * ((double)Nb.alpha1[k1] + (double)Nb.alpha1[k2] + (double)Nb.alpha1[k3] + (double)Nb.alpha1[k4]));
+                RealType avg_a2   = (RealType)(0.25 * ((double)Nb.alpha2[k1] + (double)Nb.alpha2[k2] + (double)Nb.alpha2[k3] + (double)Nb.alpha2[k4]));
+                RealType avg_ar1  = (RealType)(0.25 * ((double)Nb.arho1[k1]  + (double)Nb.arho1[k2]  + (double)Nb.arho1[k3]  + (double)Nb.arho1[k4]));
+                RealType avg_ar2  = (RealType)(0.25 * ((double)Nb.arho2[k1]  + (double)Nb.arho2[k2]  + (double)Nb.arho2[k3]  + (double)Nb.arho2[k4]));
+                T.rho[ti*AMR_TILE_DIM+0]  = avg_rho;  T.rho[ti*AMR_TILE_DIM+1]  = avg_rho;
+                T.ur[ti*AMR_TILE_DIM+0]   = avg_ur;   T.ur[ti*AMR_TILE_DIM+1]   = avg_ur;
+                T.uz[ti*AMR_TILE_DIM+0]   = avg_uz;   T.uz[ti*AMR_TILE_DIM+1]   = avg_uz;
+                T.p[ti*AMR_TILE_DIM+0]    = avg_p;    T.p[ti*AMR_TILE_DIM+1]    = avg_p;
+                T.E[ti*AMR_TILE_DIM+0]    = avg_E;    T.E[ti*AMR_TILE_DIM+1]    = avg_E;
+                T.alpha1[ti*AMR_TILE_DIM+0] = avg_a1; T.alpha1[ti*AMR_TILE_DIM+1] = avg_a1;
+                T.alpha2[ti*AMR_TILE_DIM+0] = avg_a2; T.alpha2[ti*AMR_TILE_DIM+1] = avg_a2;
+                T.arho1[ti*AMR_TILE_DIM+0]  = avg_ar1; T.arho1[ti*AMR_TILE_DIM+1]  = avg_ar1;
+                T.arho2[ti*AMR_TILE_DIM+0]  = avg_ar2; T.arho2[ti*AMR_TILE_DIM+1]  = avg_ar2;
+            } else if (boundary_id == 3) { // Top
+                int ti = cell_idx + 2;
+                int fi1 = r_sub * 8 * 2 + cell_idx * 2 + 2;
+                int fi2 = fi1 + 1;
+                fi1 = max(2, min(17, fi1));
+                fi2 = max(2, min(17, fi2));
+                int k1 = fi1 * AMR_TILE_DIM + 2;
+                int k2 = fi1 * AMR_TILE_DIM + 3;
+                int k3 = fi2 * AMR_TILE_DIM + 2;
+                int k4 = fi2 * AMR_TILE_DIM + 3;
+                RealType avg_rho  = (RealType)(0.25 * ((double)Nb.rho[k1]   + (double)Nb.rho[k2]   + (double)Nb.rho[k3]   + (double)Nb.rho[k4]));
+                RealType avg_ur   = (RealType)(0.25 * ((double)Nb.ur[k1]    + (double)Nb.ur[k2]    + (double)Nb.ur[k3]    + (double)Nb.ur[k4]));
+                RealType avg_uz   = (RealType)(0.25 * ((double)Nb.uz[k1]    + (double)Nb.uz[k2]    + (double)Nb.uz[k3]    + (double)Nb.uz[k4]));
+                RealType avg_p    = (RealType)(0.25 * ((double)Nb.p[k1]     + (double)Nb.p[k2]     + (double)Nb.p[k3]     + (double)Nb.p[k4]));
+                RealType avg_E    = (RealType)(0.25 * ((double)Nb.E[k1]     + (double)Nb.E[k2]     + (double)Nb.E[k3]     + (double)Nb.E[k4]));
+                RealType avg_a1   = (RealType)(0.25 * ((double)Nb.alpha1[k1] + (double)Nb.alpha1[k2] + (double)Nb.alpha1[k3] + (double)Nb.alpha1[k4]));
+                RealType avg_a2   = (RealType)(0.25 * ((double)Nb.alpha2[k1] + (double)Nb.alpha2[k2] + (double)Nb.alpha2[k3] + (double)Nb.alpha2[k4]));
+                RealType avg_ar1  = (RealType)(0.25 * ((double)Nb.arho1[k1]  + (double)Nb.arho1[k2]  + (double)Nb.arho1[k3]  + (double)Nb.arho1[k4]));
+                RealType avg_ar2  = (RealType)(0.25 * ((double)Nb.arho2[k1]  + (double)Nb.arho2[k2]  + (double)Nb.arho2[k3]  + (double)Nb.arho2[k4]));
+                T.rho[ti*AMR_TILE_DIM+18]  = avg_rho;  T.rho[ti*AMR_TILE_DIM+19]  = avg_rho;
+                T.ur[ti*AMR_TILE_DIM+18]   = avg_ur;   T.ur[ti*AMR_TILE_DIM+19]   = avg_ur;
+                T.uz[ti*AMR_TILE_DIM+18]   = avg_uz;   T.uz[ti*AMR_TILE_DIM+19]   = avg_uz;
+                T.p[ti*AMR_TILE_DIM+18]    = avg_p;    T.p[ti*AMR_TILE_DIM+19]    = avg_p;
+                T.E[ti*AMR_TILE_DIM+18]    = avg_E;    T.E[ti*AMR_TILE_DIM+19]    = avg_E;
+                T.alpha1[ti*AMR_TILE_DIM+18] = avg_a1; T.alpha1[ti*AMR_TILE_DIM+19] = avg_a1;
+                T.alpha2[ti*AMR_TILE_DIM+18] = avg_a2; T.alpha2[ti*AMR_TILE_DIM+19] = avg_a2;
+                T.arho1[ti*AMR_TILE_DIM+18]  = avg_ar1; T.arho1[ti*AMR_TILE_DIM+19]  = avg_ar1;
+                T.arho2[ti*AMR_TILE_DIM+18]  = avg_ar2; T.arho2[ti*AMR_TILE_DIM+19]  = avg_ar2;
+            }
         } else if (nb_node.level == node.level - 1) {
             // Coarser neighbor prolongation
             auto prolongate_gpu = [&](int ic, int jc, double xfrac, double yfrac, auto field) {
                 double v = (Nb.*field)[ic * AMR_TILE_DIM + jc];
-                double vr = (ic == 17) ? (v - (Nb.*field)[(ic-1)*AMR_TILE_DIM+jc]) :
-                            ((ic == 2)  ? ((Nb.*field)[(ic+1)*AMR_TILE_DIM+jc] - v) :
-                            minmod_gpu((Nb.*field)[(ic+1)*AMR_TILE_DIM+jc] - v, v - (Nb.*field)[(ic-1)*AMR_TILE_DIM+jc]));
-                double vz = (jc == 17) ? (v - (Nb.*field)[ic*AMR_TILE_DIM+jc-1]) :
-                            ((jc == 2)  ? ((Nb.*field)[ic*AMR_TILE_DIM+jc+1] - v) :
-                            minmod_gpu((Nb.*field)[ic*AMR_TILE_DIM+jc+1] - v, v - (Nb.*field)[ic*AMR_TILE_DIM+jc-1]));
+                double diff_r_right = (ic >= 17) ? ((Nb.*field)[17 * AMR_TILE_DIM + jc] - (Nb.*field)[16 * AMR_TILE_DIM + jc])
+                                                 : ((Nb.*field)[(ic+1) * AMR_TILE_DIM + jc] - v);
+                double diff_r_left  = (ic <= 2)  ? ((Nb.*field)[3 * AMR_TILE_DIM + jc] - (Nb.*field)[2 * AMR_TILE_DIM + jc])
+                                                 : (v - (Nb.*field)[(ic-1) * AMR_TILE_DIM + jc]);
+                double vr = minmod_gpu(diff_r_right, diff_r_left);
+
+                double diff_z_top    = (jc >= 17) ? ((Nb.*field)[ic * AMR_TILE_DIM + 17] - (Nb.*field)[ic * AMR_TILE_DIM + 16])
+                                                  : ((Nb.*field)[ic * AMR_TILE_DIM + jc + 1] - v);
+                double diff_z_bottom = (jc <= 2)  ? ((Nb.*field)[ic * AMR_TILE_DIM + 3] - (Nb.*field)[ic * AMR_TILE_DIM + 2])
+                                                  : (v - (Nb.*field)[ic * AMR_TILE_DIM + jc - 1]);
+                double vz = minmod_gpu(diff_z_top, diff_z_bottom);
+
                 return (RealType)(v + xfrac * vr + yfrac * vz);
             };
 
@@ -300,19 +424,18 @@ __global__ void fillGhostCells_AMR_kernel(
             T.arho1[dst_k] = Nb.arho1[src_k];
             T.arho2[dst_k] = Nb.arho2[src_k];
         } else {
-            int fallback_i = (dst_i < 2) ? 0 : (dst_i >= 18 ? 19 : dst_i);
-            int fallback_j = (dst_j < 2) ? 2 : (dst_j >= 18 ? 17 : dst_j);
-            int src_k = fallback_i * AMR_TILE_DIM + fallback_j;
+            int adj_i = (dst_i < 2) ? 2 : (dst_i >= 18 ? 17 : dst_i);
+            int adj_j = (dst_j < 2) ? 2 : (dst_j >= 18 ? 17 : dst_j);
+            int face_r_i = (dst_i < 2) ? 0 : (dst_i >= 18 ? 19 : dst_i);
+            int face_z_j = (dst_j < 2) ? 0 : (dst_j >= 18 ? 19 : dst_j);
 
-            T.rho[dst_k] = T.rho[src_k];
-            T.ur[dst_k] = T.ur[src_k];
-            T.uz[dst_k] = T.uz[src_k];
-            T.p[dst_k] = T.p[src_k];
-            T.E[dst_k] = T.E[src_k];
-            T.alpha1[dst_k] = T.alpha1[src_k];
-            T.alpha2[dst_k] = T.alpha2[src_k];
-            T.arho1[dst_k] = T.arho1[src_k];
-            T.arho2[dst_k] = T.arho2[src_k];
+            int src_r_k = face_r_i * AMR_TILE_DIM + adj_j;
+            int src_z_k = adj_i * AMR_TILE_DIM + face_z_j;
+
+            #define AVG_GPU_CORNER(field) T.field[dst_k] = (RealType)0.5 * (T.field[src_r_k] + T.field[src_z_k]);
+            AVG_GPU_CORNER(rho) AVG_GPU_CORNER(ur) AVG_GPU_CORNER(uz) AVG_GPU_CORNER(p) AVG_GPU_CORNER(E)
+            AVG_GPU_CORNER(alpha1) AVG_GPU_CORNER(alpha2) AVG_GPU_CORNER(arho1) AVG_GPU_CORNER(arho2)
+            #undef AVG_GPU_CORNER
         }
     }
 }
@@ -324,6 +447,7 @@ __global__ void computeTileRHS_AMR_kernel(
     int active_leaves_count,
     AMRPrimitiveTileT<RealType>* states_pool,
     AMRConservativeTileT<RealType>* dU_pool,
+    AMRFaceFluxT<RealType>* node_boundary_fluxes,
     RealType A_coeff,
     RealType dt,
     RealType gamma,
@@ -430,9 +554,13 @@ __global__ void computeTileRHS_AMR_kernel(
     RealType r_center = (RealType)global_r;
     RealType r_left = (RealType)(global_r - 0.5 * dr_r);
     RealType r_right = (RealType)(global_r + 0.5 * dr_r);
-    
+
+    RealType p_face_R = (RealType)0.5 * (s_faceR_L.p + s_faceR_R.p);
+    RealType p_face_L = (RealType)0.5 * (s_faceL_L.p + s_faceL_R.p);
+    RealType p_face_avg = (RealType)0.5 * (p_face_R + p_face_L);
+
     RealType dU_rho = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_rho - r_left * fr_L_rho) - ((RealType)1.0 / dz_r) * (fz_T_rho - fz_B_rho);
-    RealType dU_rhour = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_rhour - r_left * fr_L_rhour) - ((RealType)1.0 / dz_r) * (fz_T_rhour - fz_B_rhour) + s_c.p / r_center;
+    RealType dU_rhour = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_rhour - r_left * fr_L_rhour) - ((RealType)1.0 / dz_r) * (fz_T_rhour - fz_B_rhour) + p_face_avg / r_center;
     RealType dU_rhouz = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_rhouz - r_left * fr_L_rhouz) - ((RealType)1.0 / dz_r) * (fz_T_rhouz - fz_B_rhouz);
     RealType dU_E = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_E - r_left * fr_L_E) - ((RealType)1.0 / dz_r) * (fz_T_E - fz_B_E);
 
@@ -443,7 +571,7 @@ __global__ void computeTileRHS_AMR_kernel(
     RealType dU_arho1 = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_ar1 - r_left * fr_L_ar1) - ((RealType)1.0 / dz_r) * (fz_T_ar1 - fz_B_ar1);
     RealType dU_arho2 = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_ar2 - r_left * fr_L_ar2) - ((RealType)1.0 / dz_r) * (fz_T_ar2 - fz_B_ar2);
 
-    int k_20 = ti * AMR_TILE_DIM + tj;
+        int k_20 = ti * AMR_TILE_DIM + tj;
     dU.rho[k_20] = A_coeff * dU.rho[k_20] + dt * dU_rho;
     dU.rhour[k_20] = A_coeff * dU.rhour[k_20] + dt * dU_rhour;
     dU.rhouz[k_20] = A_coeff * dU.rhouz[k_20] + dt * dU_rhouz;
@@ -452,6 +580,29 @@ __global__ void computeTileRHS_AMR_kernel(
     dU.alpha2[k_20] = A_coeff * dU.alpha2[k_20] + dt * dU_alpha2;
     dU.arho1[k_20] = A_coeff * dU.arho1[k_20] + dt * dU_arho1;
     dU.arho2[k_20] = A_coeff * dU.arho2[k_20] + dt * dU_arho2;
+
+    if (node_boundary_fluxes) {
+        if (i == 0) {
+            auto& f = node_boundary_fluxes[node_idx * 4 + 0];
+            f.rho[j] = fr_L_rho; f.rhour[j] = fr_L_rhour; f.rhouz[j] = fr_L_rhouz; f.E[j] = fr_L_E;
+            f.alpha1[j] = fr_L_a1; f.alpha2[j] = fr_L_a2; f.arho1[j] = fr_L_ar1; f.arho2[j] = fr_L_ar2;
+        }
+        if (i == 15) {
+            auto& f = node_boundary_fluxes[node_idx * 4 + 1];
+            f.rho[j] = fr_R_rho; f.rhour[j] = fr_R_rhour; f.rhouz[j] = fr_R_rhouz; f.E[j] = fr_R_E;
+            f.alpha1[j] = fr_R_a1; f.alpha2[j] = fr_R_a2; f.arho1[j] = fr_R_ar1; f.arho2[j] = fr_R_ar2;
+        }
+        if (j == 0) {
+            auto& f = node_boundary_fluxes[node_idx * 4 + 2];
+            f.rho[i] = fz_B_rho; f.rhour[i] = fz_B_rhour; f.rhouz[i] = fz_B_rhouz; f.E[i] = fz_B_E;
+            f.alpha1[i] = fz_B_a1; f.alpha2[i] = fz_B_a2; f.arho1[i] = fz_B_ar1; f.arho2[i] = fz_B_ar2;
+        }
+        if (j == 15) {
+            auto& f = node_boundary_fluxes[node_idx * 4 + 3];
+            f.rho[i] = fz_T_rho; f.rhour[i] = fz_T_rhour; f.rhouz[i] = fz_T_rhouz; f.E[i] = fz_T_E;
+            f.alpha1[i] = fz_T_a1; f.alpha2[i] = fz_T_a2; f.arho1[i] = fz_T_ar1; f.arho2[i] = fz_T_ar2;
+        }
+    }
 }
 
 template <typename RealType>
@@ -527,8 +678,32 @@ __global__ void updatePrimitiveFromConservative_AMR_kernel(
     RealType ur = 0.0;
     RealType uz = 0.0;
 
-    if (!bad) {
+    if (bad) {
+        u_rho = ambient_rho;
+        u_rhour = (RealType)0.0;
+        u_rhouz = (RealType)0.0;
+        u_E = is_ideal_gas ? (ambient_p / (gamma - (RealType)1.0)) : 
+              (ambient_rho * MultiMat::getEnergy_IdealGas(ambient_p, ambient_rho, gamma));
+        u_alpha1 = (RealType)0.0;
+        u_alpha2 = (RealType)1.0;
+        u_arho1 = (RealType)0.0;
+        u_arho2 = ambient_rho;
+
+        U.rho[k] = u_rho;
+        U.rhour[k] = u_rhour;
+        U.rhouz[k] = u_rhouz;
+        U.E[k] = u_E;
+        U.alpha1[k] = u_alpha1;
+        U.alpha2[k] = u_alpha2;
+        U.arho1[k] = u_arho1;
+        U.arho2[k] = u_arho2;
+
+        p = ambient_p;
+        ur = 0.0;
+        uz = 0.0;
+    } else {
         RealType rho_safe = max(u_rho, rho_floor);
+        U.rho[k] = rho_safe;
         ur = u_rhour / rho_safe;
         uz = u_rhouz / rho_safe;
         RealType ke = 0.5 * rho_safe * (ur * ur + uz * uz);
@@ -541,21 +716,32 @@ __global__ void updatePrimitiveFromConservative_AMR_kernel(
             alpha2 /= sum;
         }
 
-        RealType arho1 = max((RealType)0.0, min(u_rho, u_arho1));
-        RealType arho2 = max((RealType)0.0, min(u_rho, u_arho2));
-        if (arho1 + arho2 > u_rho) {
+        RealType arho1 = max((RealType)0.0, min(rho_safe, u_arho1));
+        RealType arho2 = max((RealType)0.0, min(rho_safe, u_arho2));
+        if (arho1 + arho2 > rho_safe) {
             RealType sum = arho1 + arho2;
-            arho1 = (arho1 / sum) * u_rho;
-            arho2 = (arho2 / sum) * u_rho;
+            arho1 = (arho1 / sum) * rho_safe;
+            arho2 = (arho2 / sum) * rho_safe;
         }
 
-        RealType e_internal = max(u_E - ke, p_floor / (gamma - (RealType)1.0));
+        RealType e_internal = u_E - ke;
+        RealType e_min = (RealType)1e-4 * abs(u_E);
+        if (e_internal < e_min) {
+            RealType p_prev = max((RealType)S.p[k], (RealType)ambient_p);
+            if (isnan(p_prev) || isinf(p_prev)) p_prev = (RealType)ambient_p;
+            e_internal = is_ideal_gas ? (p_prev / (gamma - (RealType)1.0)) : 
+                         (rho_safe * MultiMat::getEnergy_IdealGas(p_prev, rho_safe, gamma));
+            U.E[k] = ke + e_internal;
+        } else {
+            U.E[k] = u_E;
+        }
+
         if (is_ideal_gas) {
             p = e_internal * (gamma - (RealType)1.0);
         } else {
-            p = MultiMat::getMixturePressure(e_internal, u_rho, alpha1, alpha2, arho1, arho2, gamma, mat.products, mat.unreacted);
+            p = MultiMat::getMixturePressure(e_internal, rho_safe, alpha1, alpha2, arho1, arho2, gamma, mat.products, mat.unreacted);
         }
-        
+
         if (isnan(p) || isinf(p) || p < p_floor) {
             bad = true;
         } else {
@@ -600,7 +786,7 @@ __global__ void updatePrimitiveFromConservative_AMR_kernel(
 template <typename RealType>
 CFDSolver2DAMRCudaImpl<RealType>::CFDSolver2DAMRCudaImpl(int nr, int nz, double max_r, double max_z, double gamma, int max_levels, double threshold, double coarsen_ratio)
     : level0_nr(nr), level0_nz(nz), max_r_coord(max_r), max_z_coord(max_z),
-      time_val(0.0), gamma_val(gamma), is_ideal_gas_val(true),
+      time_val(0.0), gamma_val(gamma), is_ideal_gas_val(true), is_cartesian_val(false),
       amr_max_levels_val(max_levels), amr_threshold_val(threshold), amr_coarsen_ratio_val(coarsen_ratio),
       flux_scheme_name("AUSM+"), spatial_order_val(2), temporal_order_val(2),
       bc_r_min(static_cast<CFDSolver2DCuda::BCType>(CFDSolver2D::REFLECTIVE)),
@@ -610,12 +796,16 @@ CFDSolver2DAMRCudaImpl<RealType>::CFDSolver2DAMRCudaImpl(int nr, int nz, double 
       ambient_rho_val(1.225), ambient_p_val(101325.0), detonator_r_coord(0.0), detonator_z_coord(0.0),
       d_states_pool(nullptr), d_U_pool(nullptr), d_dU_pool(nullptr), allocated_tiles_capacity(0),
       d_active_node_ids(nullptr), d_active_tile_ids(nullptr), active_leaves_count(0),
-      d_allocated_node_ids(nullptr), d_allocated_tile_ids(nullptr), allocated_nodes_count(0), d_amr_nodes(nullptr) {
+      d_allocated_node_ids(nullptr), d_allocated_tile_ids(nullptr), allocated_nodes_count(0), d_amr_nodes(nullptr),
+      current_active_capacity(0), current_allocated_capacity(0), current_tree_capacity(0) {
 
     level0_num_tiles_r = (nr + TILE_SIZE - 1) / TILE_SIZE;
-    level0_num_tiles_z = (nz + TILE_SIZE - 1) / TILE_SIZE;
-    dr_base = max_r / nr;
-    dz_base = max_z / nz;
+    dr_base = max_r / (level0_num_tiles_r * TILE_SIZE);
+    
+    // Enforce square base cell aspect ratio (dz = dr)
+    dz_base = dr_base;
+    level0_num_tiles_z = std::max(1, (int)std::round(max_z / (dz_base * TILE_SIZE)));
+    max_z_coord = level0_num_tiles_z * TILE_SIZE * dz_base;
 
     // Allocate Level 0 grid on host
     for (int r = 0; r < level0_num_tiles_r; ++r) {
@@ -650,6 +840,7 @@ CFDSolver2DAMRCudaImpl<RealType>::~CFDSolver2DAMRCudaImpl() {
     if (d_allocated_node_ids) checkCudaError(cudaFree(d_allocated_node_ids));
     if (d_allocated_tile_ids) checkCudaError(cudaFree(d_allocated_tile_ids));
     if (d_amr_nodes) checkCudaError(cudaFree(d_amr_nodes));
+    if (d_node_boundary_fluxes) checkCudaError(cudaFree(d_node_boundary_fluxes));
 }
 
 template <typename RealType>
@@ -864,7 +1055,7 @@ void CFDSolver2DAMRCudaImpl<RealType>::syncTreeToGPU() {
     allocated_nodes_count = allocated_node_ids.size();
 
     // Reallocate active lists on GPU if needed
-    static size_t current_active_capacity = 0;
+    
     if (active_leaves_count > (int)current_active_capacity) {
         if (d_active_node_ids) checkCudaError(cudaFree(d_active_node_ids));
         if (d_active_tile_ids) checkCudaError(cudaFree(d_active_tile_ids));
@@ -874,7 +1065,7 @@ void CFDSolver2DAMRCudaImpl<RealType>::syncTreeToGPU() {
     }
 
     // Reallocate allocated lists on GPU if needed
-    static size_t current_allocated_capacity = 0;
+    
     if (allocated_nodes_count > (int)current_allocated_capacity) {
         if (d_allocated_node_ids) checkCudaError(cudaFree(d_allocated_node_ids));
         if (d_allocated_tile_ids) checkCudaError(cudaFree(d_allocated_tile_ids));
@@ -883,11 +1074,13 @@ void CFDSolver2DAMRCudaImpl<RealType>::syncTreeToGPU() {
         checkCudaError(cudaMalloc(&d_allocated_tile_ids, current_allocated_capacity * sizeof(int)));
     }
 
-    static size_t current_tree_capacity = 0;
+        
     if (amr_nodes.size() > current_tree_capacity) {
         if (d_amr_nodes) checkCudaError(cudaFree(d_amr_nodes));
+        if (d_node_boundary_fluxes) checkCudaError(cudaFree(d_node_boundary_fluxes));
         current_tree_capacity = amr_nodes.size() * 2;
         checkCudaError(cudaMalloc(&d_amr_nodes, current_tree_capacity * sizeof(GPUNode2D)));
+        checkCudaError(cudaMalloc(&d_node_boundary_fluxes, current_tree_capacity * 4 * sizeof(AMRFaceFluxT<RealType>)));
     }
 
     checkCudaError(cudaMemcpy(d_amr_nodes, gpu_nodes.data(), gpu_nodes.size() * sizeof(GPUNode2D), cudaMemcpyHostToDevice));
@@ -910,13 +1103,114 @@ void CFDSolver2DAMRCudaImpl<RealType>::fillGhostCellsGPU() {
 }
 
 template <typename RealType>
+__global__ void applyFluxCorrectionGPU_kernel(
+    GPUNode2D* nodes,
+    int* active_node_ids,
+    int active_leaves_count,
+    AMRConservativeTileT<RealType>* dU_pool,
+    AMRFaceFluxT<RealType>* node_boundary_fluxes,
+    double dt,
+    double dr_base,
+    double dz_base)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= active_leaves_count * 4 * 16) return;
+
+    int n_idx = tid / (4 * 16);
+    int d_and_c = tid % (4 * 16);
+    int d = d_and_c / 16;
+    int c = d_and_c % 16;
+
+    int node_idx = active_node_ids[n_idx];
+    const auto& node = nodes[node_idx];
+    int nb_idx = node.neighbors[d];
+    if (nb_idx == -1) return;
+
+    const auto& nb_node = nodes[nb_idx];
+    if (nb_node.children[0] != -1) {
+        RealType sign = (d == 1 || d == 3) ? (RealType)1.0 : (RealType)-1.0;
+
+        int child1 = -1, child2 = -1;
+        int fine_dir = -1;
+        if (d == 0) {
+            child1 = nb_node.children[1]; child2 = nb_node.children[3]; fine_dir = 1;
+        } else if (d == 1) {
+            child1 = nb_node.children[0]; child2 = nb_node.children[2]; fine_dir = 0;
+        } else if (d == 2) {
+            child1 = nb_node.children[2]; child2 = nb_node.children[3]; fine_dir = 3;
+        } else if (d == 3) {
+            child1 = nb_node.children[0]; child2 = nb_node.children[1]; fine_dir = 2;
+        }
+
+        if (child1 == -1 || child2 == -1) return;
+
+        int fc1 = (c * 2);
+        int fc2 = (c * 2) + 1;
+        int f_idx1 = fc1 % 16;
+        int f_idx2 = fc2 % 16;
+        int fine_node_idx = (fc1 < 16) ? child1 : child2;
+
+        const auto& f_flux = node_boundary_fluxes[fine_node_idx * 4 + fine_dir];
+
+        int ci = (d == 0) ? 2 : ((d == 1) ? 17 : c + 2);
+        int cj = (d == 2) ? 2 : ((d == 3) ? 17 : c + 2);
+        int ck = ci * 20 + cj;
+
+        const auto& c_flux = node_boundary_fluxes[node_idx * 4 + d];
+
+        double factor = 1.0 / (1 << node.level);
+        RealType dr_c = (RealType)(dr_base * factor);
+        RealType dz_c = (RealType)(dz_base * factor);
+
+        RealType r_c = (RealType)(node.r_min + (ci - 2 + 0.5) * dr_c);
+        RealType r_face = (RealType)(node.r_min + ((d == 0) ? 0.0 : ((d == 1) ? 16.0 : (ci - 2 + 0.5))) * dr_c);
+        RealType r_f1 = (RealType)(node.r_min + ((d == 0 || d == 1) ? ((d == 0) ? 0.0 : 16.0) * dr_c : (fc1 + 0.5) * 0.5 * dr_c));
+        RealType r_f2 = (RealType)(node.r_min + ((d == 0 || d == 1) ? ((d == 0) ? 0.0 : 16.0) * dr_c : (fc2 + 0.5) * 0.5 * dr_c));
+
+        #define CORRECT(field) \
+        { \
+            RealType fine_sum; \
+            if (d == 0 || d == 1) { \
+                fine_sum = (RealType)0.5 * (f_flux.field[f_idx1] + f_flux.field[f_idx2]); \
+                atomicAdd(&dU_pool[node.tile_id].field[ck], sign * (RealType)(dt / dr_c) * (r_face / r_c) * (c_flux.field[c] - fine_sum)); \
+            } else { \
+                fine_sum = (RealType)0.5 * (f_flux.field[f_idx1] * r_f1 + f_flux.field[f_idx2] * r_f2) / r_c; \
+                atomicAdd(&dU_pool[node.tile_id].field[ck], sign * (RealType)(dt / dz_c) * (c_flux.field[c] - fine_sum)); \
+            } \
+        }
+
+        CORRECT(rho) CORRECT(rhour) CORRECT(rhouz) CORRECT(E) CORRECT(alpha1) CORRECT(alpha2) CORRECT(arho1) CORRECT(arho2)
+        #undef CORRECT
+    }
+}
+
+
+
+template <typename RealType>
 void CFDSolver2DAMRCudaImpl<RealType>::computeRHSGPU(double A_coeff, double dt) {
     computeTileRHS_AMR_kernel<RealType><<<active_leaves_count, dim3(16, 16)>>>(
-        d_amr_nodes, d_active_node_ids, active_leaves_count, d_states_pool, d_dU_pool,
+        d_amr_nodes, d_active_node_ids, active_leaves_count, d_states_pool, d_dU_pool, d_node_boundary_fluxes,
         (RealType)A_coeff, (RealType)dt, (RealType)gamma_val, materials_val, is_ideal_gas_val,
         dr_base, dz_base, spatial_order_val
     );
     checkCudaError(cudaDeviceSynchronize());
+
+    // Apply flux correction directly after computing RHS fluxes
+    int total_flux_threads = active_leaves_count * 4 * 16;
+    int flux_blocks = (total_flux_threads + 255) / 256;
+    if (flux_blocks > 0) {
+        applyFluxCorrectionGPU_kernel<RealType><<<flux_blocks, 256>>>(
+            d_amr_nodes,
+            d_active_node_ids,
+            active_leaves_count,
+            d_dU_pool,
+            d_node_boundary_fluxes,
+            dt,
+            dr_base,
+            dz_base
+        );
+        cudaDeviceSynchronize();
+    }
 }
 
 template <typename RealType>
@@ -966,13 +1260,14 @@ void CFDSolver2DAMRCudaImpl<RealType>::restrictNodeCPU(int node_idx) {
     int child_tl = amr_nodes[node.children[2]].tile_id;
     int child_tr = amr_nodes[node.children[3]].tile_id;
 
-    for (int pi = 0; pi < AMR_TILE_DIM; ++pi) {
+    // Only restrict internal cells (2 to 17). Ghost cells will be updated by fillGhostCells.
+    for (int pi = 2; pi < 18; ++pi) {
         int child_tile_r = (pi >= 10) ? 1 : 0;
-        int local_pi = pi % 10;
-        int ci1 = 2 * local_pi;
-        int ci2 = 2 * local_pi + 1;
+        int local_pi = (pi < 10) ? (pi - 2) : (pi - 10);
+        int ci1 = 2 * local_pi + 2;
+        int ci2 = 2 * local_pi + 3;
 
-        for (int pj = 0; pj < AMR_TILE_DIM; ++pj) {
+        for (int pj = 2; pj < 18; ++pj) {
             int pk = pi * AMR_TILE_DIM + pj;
             int child_tile_z = (pj >= 10) ? 2 : 0;
             int quadrant = child_tile_r + child_tile_z;
@@ -983,14 +1278,27 @@ void CFDSolver2DAMRCudaImpl<RealType>::restrictNodeCPU(int node_idx) {
             else if (quadrant == 2) active_child_tile_id = child_tl;
             else active_child_tile_id = child_tr;
 
-            int local_pj = pj % 10;
-            int cj1 = 2 * local_pj;
-            int cj2 = 2 * local_pj + 1;
+            int local_pj = (pj < 10) ? (pj - 2) : (pj - 10);
+            int cj1 = 2 * local_pj + 2;
+            int cj2 = 2 * local_pj + 3;
 
             auto get_child_val = [&](int child_id, int local_i, int local_j, auto field) {
                 int k = local_i * AMR_TILE_DIM + local_j;
                 return (U_pool[child_id].*field)[k];
             };
+
+            double factor = 1.0 / (1 << node.level);
+            RealType dr_r = (RealType)(dr_base * factor);
+            RealType r_P = (RealType)(node.r_min + (pi - 2 + 0.5) * dr_r);
+            RealType w1, w2;
+            if (is_cartesian_val) {
+                w1 = (RealType)0.5;
+                w2 = (RealType)0.5;
+            } else {
+                RealType w_calc = (RealType)(dr_r / (8.0 * r_P));
+                w1 = std::max((RealType)0.05, std::min((RealType)0.95, (RealType)0.5 - w_calc));
+                w2 = std::max((RealType)0.05, std::min((RealType)0.95, (RealType)0.5 + w_calc));
+            }
 
             #define RESTRICT_FIELD(field) \
             { \
@@ -998,12 +1306,92 @@ void CFDSolver2DAMRCudaImpl<RealType>::restrictNodeCPU(int node_idx) {
                 RealType val_br = get_child_val(active_child_tile_id, ci2, cj1, &AMRConservativeTileT<RealType>::field); \
                 RealType val_tl = get_child_val(active_child_tile_id, ci1, cj2, &AMRConservativeTileT<RealType>::field); \
                 RealType val_tr = get_child_val(active_child_tile_id, ci2, cj2, &AMRConservativeTileT<RealType>::field); \
-                U_parent.field[pk] = (RealType)0.25 * (val_bl + val_br + val_tl + val_tr); \
+                U_parent.field[pk] = (RealType)(0.5 * (w1 * (val_bl + val_tl) + w2 * (val_br + val_tr))); \
             }
 
-            RESTRICT_FIELD(rho) RESTRICT_FIELD(rhour) RESTRICT_FIELD(rhouz) RESTRICT_FIELD(E)
+            RESTRICT_FIELD(rho) RESTRICT_FIELD(rhour) RESTRICT_FIELD(rhouz)
             RESTRICT_FIELD(alpha1) RESTRICT_FIELD(alpha2) RESTRICT_FIELD(arho1) RESTRICT_FIELD(arho2)
             #undef RESTRICT_FIELD
+
+            // Pressure-preserving internal energy restriction to prevent spurious pressure spikes on coarsening
+            auto get_fine_internal_e_gpu = [&](int ci, int cj) {
+                RealType rho_f = get_child_val(active_child_tile_id, ci, cj, &AMRConservativeTileT<RealType>::rho);
+                RealType rhour_f = get_child_val(active_child_tile_id, ci, cj, &AMRConservativeTileT<RealType>::rhour);
+                RealType rhouz_f = get_child_val(active_child_tile_id, ci, cj, &AMRConservativeTileT<RealType>::rhouz);
+                RealType E_f = get_child_val(active_child_tile_id, ci, cj, &AMRConservativeTileT<RealType>::E);
+                RealType rho_safe = std::max(rho_f, (RealType)1e-10);
+                RealType ke_f = (RealType)0.5 * (rhour_f * rhour_f + rhouz_f * rhouz_f) / rho_safe;
+                return E_f - ke_f;
+            };
+
+            RealType e_bl = get_fine_internal_e_gpu(ci1, cj1);
+            RealType e_br = get_fine_internal_e_gpu(ci2, cj1);
+            RealType e_tl = get_fine_internal_e_gpu(ci1, cj2);
+            RealType e_tr = get_fine_internal_e_gpu(ci2, cj2);
+
+            RealType e_internal_avg = (RealType)(0.5 * (w1 * (e_bl + e_tl) + w2 * (e_br + e_tr)));
+            RealType parent_rho_safe = std::max(U_parent.rho[pk], (RealType)1e-10);
+            RealType parent_ke = (RealType)0.5 * (U_parent.rhour[pk] * U_parent.rhour[pk] + U_parent.rhouz[pk] * U_parent.rhouz[pk]) / parent_rho_safe;
+
+            U_parent.E[pk] = e_internal_avg + parent_ke;
+        }
+    }
+
+    // Zero-order extrapolation on boundary to avoid garbage states in coarse neighbor
+    for (int j = 0; j < 16; ++j) {
+        // Left
+        for (int gc = 0; gc < 2; ++gc) {
+            int k_dest = gc * AMR_TILE_DIM + (j + 2);
+            int k_src = 2 * AMR_TILE_DIM + (j + 2);
+            U_parent.rho[k_dest] = U_parent.rho[k_src];
+            U_parent.rhour[k_dest] = U_parent.rhour[k_src];
+            U_parent.rhouz[k_dest] = U_parent.rhouz[k_src];
+            U_parent.E[k_dest] = U_parent.E[k_src];
+            U_parent.alpha1[k_dest] = U_parent.alpha1[k_src];
+            U_parent.alpha2[k_dest] = U_parent.alpha2[k_src];
+            U_parent.arho1[k_dest] = U_parent.arho1[k_src];
+            U_parent.arho2[k_dest] = U_parent.arho2[k_src];
+        }
+        // Right
+        for (int gc = 18; gc < 20; ++gc) {
+            int k_dest = gc * AMR_TILE_DIM + (j + 2);
+            int k_src = 17 * AMR_TILE_DIM + (j + 2);
+            U_parent.rho[k_dest] = U_parent.rho[k_src];
+            U_parent.rhour[k_dest] = U_parent.rhour[k_src];
+            U_parent.rhouz[k_dest] = U_parent.rhouz[k_src];
+            U_parent.E[k_dest] = U_parent.E[k_src];
+            U_parent.alpha1[k_dest] = U_parent.alpha1[k_src];
+            U_parent.alpha2[k_dest] = U_parent.alpha2[k_src];
+            U_parent.arho1[k_dest] = U_parent.arho1[k_src];
+            U_parent.arho2[k_dest] = U_parent.arho2[k_src];
+        }
+    }
+    for (int i = 0; i < 20; ++i) {
+        // Bottom
+        for (int gc = 0; gc < 2; ++gc) {
+            int k_dest = i * AMR_TILE_DIM + gc;
+            int k_src = i * AMR_TILE_DIM + 2;
+            U_parent.rho[k_dest] = U_parent.rho[k_src];
+            U_parent.rhour[k_dest] = U_parent.rhour[k_src];
+            U_parent.rhouz[k_dest] = U_parent.rhouz[k_src];
+            U_parent.E[k_dest] = U_parent.E[k_src];
+            U_parent.alpha1[k_dest] = U_parent.alpha1[k_src];
+            U_parent.alpha2[k_dest] = U_parent.alpha2[k_src];
+            U_parent.arho1[k_dest] = U_parent.arho1[k_src];
+            U_parent.arho2[k_dest] = U_parent.arho2[k_src];
+        }
+        // Top
+        for (int gc = 18; gc < 20; ++gc) {
+            int k_dest = i * AMR_TILE_DIM + gc;
+            int k_src = i * AMR_TILE_DIM + 17;
+            U_parent.rho[k_dest] = U_parent.rho[k_src];
+            U_parent.rhour[k_dest] = U_parent.rhour[k_src];
+            U_parent.rhouz[k_dest] = U_parent.rhouz[k_src];
+            U_parent.E[k_dest] = U_parent.E[k_src];
+            U_parent.alpha1[k_dest] = U_parent.alpha1[k_src];
+            U_parent.alpha2[k_dest] = U_parent.alpha2[k_src];
+            U_parent.arho1[k_dest] = U_parent.arho1[k_src];
+            U_parent.arho2[k_dest] = U_parent.arho2[k_src];
         }
     }
 }
@@ -1021,6 +1409,11 @@ void CFDSolver2DAMRCudaImpl<RealType>::adaptMeshCPU() {
         }
     }
 
+    // Sync restricted conservative variables to GPU, compute primitives, and sync back to CPU
+    syncPoolsToGPU();
+    updatePrimitiveGPU();
+    syncPoolsToCPU();
+
     std::vector<bool> to_refine(amr_nodes.size(), false);
 
     // 2. Identify nodes to refine directly, and flag their 8 cardinal/diagonal neighbors
@@ -1036,6 +1429,31 @@ void CFDSolver2DAMRCudaImpl<RealType>::adaptMeshCPU() {
                     int nb_idx = findNodeByCoords(node.r_idx + dr, node.z_idx + dz, node.level);
                     if (nb_idx != -1 && amr_nodes[nb_idx].tile_id != -1 && amr_nodes[nb_idx].is_active) {
                         to_refine[nb_idx] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (size_t n = 0; n < amr_nodes.size(); ++n) {
+            const auto& node = amr_nodes[n];
+            if (node.tile_id == -1) continue;
+            
+            bool is_refined = (node.children[0] != -1) || to_refine[n];
+            if (is_refined && node.level > 0) {
+                int parent_idx = node.parent;
+                const auto& parent = amr_nodes[parent_idx];
+                for (int dr = -1; dr <= 1; ++dr) {
+                    for (int dz = -1; dz <= 1; ++dz) {
+                        if (dr == 0 && dz == 0) continue;
+                        int nb_parent = findNodeByCoords(parent.r_idx + dr, parent.z_idx + dz, parent.level);
+                        if (nb_parent != -1 && amr_nodes[nb_parent].tile_id != -1 && amr_nodes[nb_parent].children[0] == -1 && !to_refine[nb_parent]) {
+                            to_refine[nb_parent] = true;
+                            changed = true;
+                        }
                     }
                 }
             }
@@ -1091,21 +1509,33 @@ bool CFDSolver2DAMRCudaImpl<RealType>::shouldRefineNodeCPU(int node_idx) {
     if (node.level >= amr_max_levels_val - 1) return false;
     const auto& S = states_pool[node.tile_id];
 
-    for (int i = 1; i < 15; ++i) {
+    for (int i = 0; i < 16; ++i) {
         int ti = i + 2;
-        for (int j = 1; j < 15; ++j) {
+        for (int j = 0; j < 16; ++j) {
             int tj = j + 2;
             int k = ti * AMR_TILE_DIM + tj;
-            double gr_rho = std::abs((double)(S.rho[k+AMR_TILE_DIM] - S.rho[k-AMR_TILE_DIM]));
-            double gz_rho = std::abs((double)(S.rho[k+1] - S.rho[k-1]));
-            double norm_rho = gr_rho + gz_rho;
 
-            double gr_p = std::abs((double)(S.p[k+AMR_TILE_DIM] - S.p[k-AMR_TILE_DIM]));
-            double gz_p = std::abs((double)(S.p[k+1] - S.p[k-1]));
-            double norm_p = gr_p + gz_p;
+            double diff_r_rho = (i == 0) ? std::abs((double)(S.rho[k+AMR_TILE_DIM] - S.rho[k])) :
+                                ((i == 15) ? std::abs((double)(S.rho[k] - S.rho[k-AMR_TILE_DIM])) :
+                                std::max(std::abs((double)(S.rho[k+AMR_TILE_DIM] - S.rho[k])), std::abs((double)(S.rho[k] - S.rho[k-AMR_TILE_DIM]))));
+            double diff_z_rho = (j == 0) ? std::abs((double)(S.rho[k+1] - S.rho[k])) :
+                                ((j == 15) ? std::abs((double)(S.rho[k] - S.rho[k-1])) :
+                                std::max(std::abs((double)(S.rho[k+1] - S.rho[k])), std::abs((double)(S.rho[k] - S.rho[k-1]))));
+            double norm_rho = diff_r_rho + diff_z_rho;
 
-            if (norm_rho / (ambient_rho_val + 1e-4) > amr_threshold_val ||
-                norm_p / (ambient_p_val + 1e-4) > amr_threshold_val) {
+            double diff_r_p = (i == 0) ? std::abs((double)(S.p[k+AMR_TILE_DIM] - S.p[k])) :
+                              ((i == 15) ? std::abs((double)(S.p[k] - S.p[k-AMR_TILE_DIM])) :
+                              std::max(std::abs((double)(S.p[k+AMR_TILE_DIM] - S.p[k])), std::abs((double)(S.p[k] - S.p[k-AMR_TILE_DIM]))));
+            double diff_z_p = (j == 0) ? std::abs((double)(S.p[k+1] - S.p[k])) :
+                              ((j == 15) ? std::abs((double)(S.p[k] - S.p[k-1])) :
+                              std::max(std::abs((double)(S.p[k+1] - S.p[k])), std::abs((double)(S.p[k] - S.p[k-1]))));
+            double norm_p = diff_r_p + diff_z_p;
+
+            double ref_rho = std::max(std::abs((double)S.rho[k]), 1e-4);
+            double ref_p   = std::max(std::abs((double)S.p[k]), 100.0);
+
+            if (norm_rho / ref_rho > amr_threshold_val ||
+                norm_p / ref_p > amr_threshold_val) {
                 return true;
             }
         }
@@ -1116,26 +1546,37 @@ bool CFDSolver2DAMRCudaImpl<RealType>::shouldRefineNodeCPU(int node_idx) {
 template <typename RealType>
 bool CFDSolver2DAMRCudaImpl<RealType>::shouldCoarsenNodeCPU(int parent_idx) {
     const auto& parent = amr_nodes[parent_idx];
-    for (int c = 0; c < 4; ++c) {
-        int child_idx = parent.children[c];
-        const auto& S = states_pool[amr_nodes[child_idx].tile_id];
-        for (int i = 1; i < 15; ++i) {
-            int ti = i + 2;
-            for (int j = 1; j < 15; ++j) {
-                int tj = j + 2;
-                int k = ti * AMR_TILE_DIM + tj;
-                double gr_rho = std::abs((double)(S.rho[k+AMR_TILE_DIM] - S.rho[k-AMR_TILE_DIM]));
-                double gz_rho = std::abs((double)(S.rho[k+1] - S.rho[k-1]));
-                double norm_rho = gr_rho + gz_rho;
+    if (parent.tile_id == -1) return false;
+    const auto& S = states_pool[parent.tile_id];
 
-                double gr_p = std::abs((double)(S.p[k+AMR_TILE_DIM] - S.p[k-AMR_TILE_DIM]));
-                double gz_p = std::abs((double)(S.p[k+1] - S.p[k-1]));
-                double norm_p = gr_p + gz_p;
+    for (int i = 0; i < 16; ++i) {
+        int ti = i + 2;
+        for (int j = 0; j < 16; ++j) {
+            int tj = j + 2;
+            int k = ti * AMR_TILE_DIM + tj;
 
-                if (norm_rho / (ambient_rho_val + 1e-4) > amr_threshold_val * amr_coarsen_ratio_val ||
-                    norm_p / (ambient_p_val + 1e-4) > amr_threshold_val * amr_coarsen_ratio_val) {
-                    return false;
-                }
+            double diff_r_rho = (i == 0) ? std::abs((double)(S.rho[k+AMR_TILE_DIM] - S.rho[k])) :
+                                ((i == 15) ? std::abs((double)(S.rho[k] - S.rho[k-AMR_TILE_DIM])) :
+                                std::max(std::abs((double)(S.rho[k+AMR_TILE_DIM] - S.rho[k])), std::abs((double)(S.rho[k] - S.rho[k-AMR_TILE_DIM]))));
+            double diff_z_rho = (j == 0) ? std::abs((double)(S.rho[k+1] - S.rho[k])) :
+                                ((j == 15) ? std::abs((double)(S.rho[k] - S.rho[k-1])) :
+                                std::max(std::abs((double)(S.rho[k+1] - S.rho[k])), std::abs((double)(S.rho[k] - S.rho[k-1]))));
+            double norm_rho = diff_r_rho + diff_z_rho;
+
+            double diff_r_p = (i == 0) ? std::abs((double)(S.p[k+AMR_TILE_DIM] - S.p[k])) :
+                              ((i == 15) ? std::abs((double)(S.p[k] - S.p[k-AMR_TILE_DIM])) :
+                              std::max(std::abs((double)(S.p[k+AMR_TILE_DIM] - S.p[k])), std::abs((double)(S.p[k] - S.p[k-AMR_TILE_DIM]))));
+            double diff_z_p = (j == 0) ? std::abs((double)(S.p[k+1] - S.p[k])) :
+                              ((j == 15) ? std::abs((double)(S.p[k] - S.p[k-1])) :
+                              std::max(std::abs((double)(S.p[k+1] - S.p[k])), std::abs((double)(S.p[k] - S.p[k-1]))));
+            double norm_p = diff_r_p + diff_z_p;
+
+            double ref_rho = std::max(std::abs((double)S.rho[k]), 1e-4);
+            double ref_p   = std::max(std::abs((double)S.p[k]), 100.0);
+
+            if (norm_rho / ref_rho > amr_threshold_val * amr_coarsen_ratio_val ||
+                norm_p / ref_p > amr_threshold_val * amr_coarsen_ratio_val) {
+                return false;
             }
         }
     }
@@ -1521,11 +1962,20 @@ void CFDSolver2DAMRCudaImpl<RealType>::step(double dt) {
         );
         checkCudaError(cudaDeviceSynchronize());
         updatePrimitiveGPU();
+        
+        syncPoolsToCPU();
+        restrictAllCPU();
+        syncPoolsToGPU();
+        updatePrimitiveGPU();
     } else {
         for (int stage = 0; stage < 3; ++stage) {
             applyLSRK3StepGPU(stage, dt);
             updatePrimitiveGPU();
+            
+            syncPoolsToCPU();
             restrictAllCPU();
+            syncPoolsToGPU();
+            updatePrimitiveGPU();
         }
     }
 

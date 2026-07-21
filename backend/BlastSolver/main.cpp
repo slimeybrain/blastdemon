@@ -719,6 +719,7 @@ void worker_thread_func() {
                     progress_msg["mode"] = "EXEC_ALL";
                 }
             } else {
+                initial_steps = std::max(initial_steps, step_count + global_target_steps.load());
                 if (initial_steps > 0) {
                     int completed = initial_steps - global_target_steps.load();
                     int percent = std::clamp((int)((completed * 100) / initial_steps), 0, 100);
@@ -1149,6 +1150,7 @@ void worker_3d_thread_func() {
                 progress_msg["percent"] = 50;
                 progress_msg["mode"] = "EXEC_ALL_3D";
             } else {
+                initial_steps = std::max(initial_steps, step_count + global_target_steps_3d.load());
                 if (initial_steps > 0) {
                     int completed = initial_steps - global_target_steps_3d.load();
                     int percent = std::clamp((int)((completed * 100) / initial_steps), 0, 100);
@@ -1284,6 +1286,7 @@ void worker_2d_thread_func() {
                 progress_msg["percent"] = 50; // Indeterminate
                 progress_msg["mode"] = "EXEC_ALL_2D";
             } else {
+                initial_steps = std::max(initial_steps, step_count + global_target_steps_2d.load());
                 if (initial_steps > 0) {
                     int completed = initial_steps - global_target_steps_2d.load();
                     int percent = std::clamp((int)((completed * 100) / initial_steps), 0, 100);
@@ -2200,15 +2203,19 @@ int main() {
 
                 } else if (command == "STEP") {
                     if (!global_solver) continue;
-                    global_target_steps = msg.at("steps").get<int>();
+                    int steps = msg.at("steps").get<int>();
                     global_cfl = msg.value("cfl", 0.4);
                     global_exec_until_end = false;
                     if (!sim_running) {
+                        global_target_steps = steps;
                         sim_running = true;
                         sim_paused = false;
                         sim_terminate = false;
                         std::thread(worker_thread_func).detach();
-                    } else { sim_paused = false; }
+                    } else {
+                        global_target_steps.fetch_add(steps);
+                        sim_paused = false;
+                    }
                 } else if (command == "EXEC_ALL" || command == "EXEC_END") {
                     if (!global_solver) continue;
                     global_cfl = msg.value("cfl", 0.4);
@@ -2560,15 +2567,19 @@ int main() {
                     emit_telemetry_2d(global_t2d, false);
                 } else if (command == "STEP_2D") {
                     if (!has_solver_2d()) continue;
-                    global_target_steps_2d = msg.at("steps").get<int>();
+                    int steps = msg.at("steps").get<int>();
                     global_cfl_2d = msg.value("cfl", 0.35);
                     global_exec_until_end_2d = false;
                     if (!sim2d_running) {
+                        global_target_steps_2d = steps;
                         sim2d_running = true;
                         sim2d_paused = false;
                         sim2d_terminate = false;
                         std::thread(worker_2d_thread_func).detach();
-                    } else { sim2d_paused = false; }
+                    } else {
+                        global_target_steps_2d.fetch_add(steps);
+                        sim2d_paused = false;
+                    }
                 } else if (command == "EXEC_ALL_2D") {
                     if (!has_solver_2d()) continue;
                     global_cfl_2d = msg.value("cfl", 0.35);
@@ -2658,15 +2669,19 @@ int main() {
                         continue;
                     }
                     if (!global_solver_3d) continue;
-                    global_target_steps_3d = msg.at("steps").get<int>();
+                    int steps = msg.at("steps").get<int>();
                     global_cfl_3d = msg.value("cfl", 0.4);
                     global_exec_until_end_3d = false;
                     if (!sim3d_running) {
+                        global_target_steps_3d = steps;
                         sim3d_running = true;
                         sim3d_paused = false;
                         sim3d_terminate = false;
                         std::thread(worker_3d_thread_func).detach();
-                    } else { sim3d_paused = false; }
+                    } else {
+                        global_target_steps_3d.fetch_add(steps);
+                        sim3d_paused = false;
+                    }
                 } else if (command == "EXEC_ALL_3D") {
                     if (sim3d_init_in_progress.load()) {
                         emit_kernel_log("WARNING", "Cannot run simulation: 3D initialization is in progress.", 0.0, "3d");
@@ -2791,6 +2806,11 @@ int main() {
     if (telemetry_thread.joinable()) {
         telemetry_thread.join();
     }
+
+    global_solver.reset();
+    global_solver_2d.reset();
+    global_solver_2d_cuda.reset();
+    global_solver_3d.reset();
 
     return 0;
 }

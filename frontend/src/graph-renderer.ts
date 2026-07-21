@@ -3056,7 +3056,7 @@ export class GraphRenderer {
                     max_z: max_z,
                     meshType: solverNode?.parameters?.mesh_type || 'regular',
                     amrMaxLevels: Math.max(1, Number(solverNode?.parameters?.amr_max_levels ?? 3)),
-                    baseNr: meshNode ? (Math.round(max_r / (Number(meshNode.parameters?.cell_size) || 0.05)) || 128) : 128,
+                    baseNr: meshNode ? (solverNode?.parameters?.mesh_type === 'amr' ? Math.ceil((Math.round(max_r / (Number(meshNode.parameters?.cell_size) || 0.05)) || 128) / 16) * 16 : (Math.round(max_r / (Number(meshNode.parameters?.cell_size) || 0.05)) || 128)) : 128,
                     baseNz: meshNode ? (Math.round(max_z / (Number(meshNode.parameters?.cell_size) || 0.05)) || 128) : 128
                 });
             }
@@ -3534,8 +3534,8 @@ export class GraphRenderer {
                     max_z: max_z,
                     meshType: solverNode?.parameters?.mesh_type || 'regular',
                     amrMaxLevels: Math.max(1, Number(solverNode?.parameters?.amr_max_levels ?? 3)),
-                    baseNr: meshNode ? (Math.round(max_r / (Number(meshNode.parameters?.cell_size) || 0.05)) || 128) : 128,
-                    baseNz: meshNode ? (Math.round(max_z / (Number(meshNode.parameters?.cell_size) || 0.05)) || 128) : 128
+                    baseNr: meshNode ? (solverNode?.parameters?.mesh_type === 'amr' ? Math.ceil((Math.round(max_r / (Number(meshNode.parameters?.cell_size) || 0.05)) || 128) / 16) * 16 : (Math.round(max_r / (Number(meshNode.parameters?.cell_size) || 0.05)) || 128)) : 128,
+                    baseNz: meshNode ? (solverNode?.parameters?.mesh_type === 'amr' ? Math.ceil((Math.round(max_z / (Number(meshNode.parameters?.cell_size) || 0.05)) || 128) / 16) * 16 : (Math.round(max_z / (Number(meshNode.parameters?.cell_size) || 0.05)) || 128)) : 128
                 });
 
                 requestAnimationFrame(() => {

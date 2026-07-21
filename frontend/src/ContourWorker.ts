@@ -318,6 +318,27 @@ function render(): void {
 
     context.clearRect(0, 0, width, height);
     context.imageSmoothingEnabled = false;
+    (context as any).imageSmoothingQuality = 'low';
+
+    // Determine domain dimensions for overlay mapping upfront
+    if (chargeInfo && chargeInfo.max_r) {
+        max_r = chargeInfo.max_r;
+    } else if (detonatorInfo && detonatorInfo.max_r) {
+        max_r = detonatorInfo.max_r;
+    }
+    if (chargeInfo && chargeInfo.max_z) {
+        max_z = chargeInfo.max_z;
+    } else if (detonatorInfo && detonatorInfo.max_z) {
+        max_z = detonatorInfo.max_z;
+    }
+
+    // Enforce square cell aspect ratio for AMR to match backend
+    if (meshType === 'amr') {
+        const level0TilesR = Math.max(1, Math.ceil((baseNr || 128) / 16));
+        const dr_base = (max_r || 1.0) / (level0TilesR * 16);
+        const level0TilesZ = Math.max(1, Math.round((max_z || 1.0) / (dr_base * 16)));
+        max_z = level0TilesZ * 16 * dr_base;
+    }
 
     let hasHeatmap = false;
     let nr = 0;
@@ -332,8 +353,11 @@ function render(): void {
 
             const maxLvl = Math.max(0, amrMaxLevels - 1);
             const scaleFactor = 1 << maxLvl;
-            outNr = (baseNr || 128) * scaleFactor;
-            outNz = (baseNz || 128) * scaleFactor;
+            const level0TilesR = Math.max(1, Math.ceil((baseNr || 128) / 16));
+            const dr_base = (max_r || 1.0) / (level0TilesR * 16);
+            const level0TilesZ = Math.max(1, Math.round((max_z || 1.0) / (dr_base * 16)));
+            outNr = (level0TilesR * 16) * scaleFactor;
+            outNz = (level0TilesZ * 16) * scaleFactor;
 
             if (!isFinite(outNr) || isNaN(outNr) || outNr <= 0) outNr = 128;
             if (!isFinite(outNz) || isNaN(outNz) || outNz <= 0) outNz = 128;
@@ -341,9 +365,13 @@ function render(): void {
             if (!tempCanvas || tempCanvas.width !== outNr || tempCanvas.height !== outNz) {
                 tempCanvas = new OffscreenCanvas(outNr, outNz);
                 tempCtx = tempCanvas.getContext('2d');
+                if (tempCtx) {
+                    tempCtx.imageSmoothingEnabled = false;
+                }
             }
 
             if (tempCtx) {
+                tempCtx.imageSmoothingEnabled = false;
                 tempCtx.fillStyle = '#000000';
                 tempCtx.fillRect(0, 0, outNr, outNz);
 
@@ -353,23 +381,26 @@ function render(): void {
                 for (const tile of tiles) {
                     const cellSizeInFinestPixels = 1 << (maxLvl - tile.level);
                     const tileWidthInFinestPixels = 16 * cellSizeInFinestPixels;
+                    // Use integer tile origin: no fractional pixel positions
                     const startX = tile.r_idx * tileWidthInFinestPixels;
                     const startY = tile.z_idx * tileWidthInFinestPixels;
 
                     for (let i = 0; i < 16; ++i) {
                         for (let j = 0; j < 16; ++j) {
+                            // Backend packs: outer loop i=r-direction, inner j=z-direction
                             const val = tile.data[i * 16 + j];
                             const col = getColor(val, displayMin, displayMax);
 
+                            // Cell pixel block: integer coords guaranteed
                             const cellStartX = startX + i * cellSizeInFinestPixels;
                             const cellStartY = startY + j * cellSizeInFinestPixels;
+                            const cellEndX = cellStartX + cellSizeInFinestPixels;
+                            const cellEndY = cellStartY + cellSizeInFinestPixels;
 
-                            for (let ii = 0; ii < cellSizeInFinestPixels; ++ii) {
-                                const px = cellStartX + ii;
+                            for (let px = cellStartX; px < cellEndX; ++px) {
                                 if (px < 0 || px >= outNr) continue;
 
-                                for (let jj = 0; jj < cellSizeInFinestPixels; ++jj) {
-                                    const py_raw = cellStartY + jj;
+                                for (let py_raw = cellStartY; py_raw < cellEndY; ++py_raw) {
                                     if (py_raw < 0 || py_raw >= outNz) continue;
 
                                     const py = outNz - 1 - py_raw;
@@ -440,23 +471,14 @@ function render(): void {
         }
     }
 
-    // Determine domain dimensions for overlay mapping
-    if (chargeInfo && chargeInfo.max_r) {
-        max_r = chargeInfo.max_r;
-    } else if (detonatorInfo && detonatorInfo.max_r) {
-        max_r = detonatorInfo.max_r;
-    }
-    if (chargeInfo && chargeInfo.max_z) {
-        max_z = chargeInfo.max_z;
-    } else if (detonatorInfo && detonatorInfo.max_z) {
-        max_z = detonatorInfo.max_z;
-    }
-
-    // Calculate aspect ratio
-    // If we have a heatmap, use its aspect ratio. Otherwise, use physical domain bounds.
-    const aspect = hasHeatmap
-        ? (isAxisymmetric ? (2 * outNr) / outNz : outNr / outNz)
-        : (isAxisymmetric ? (2 * max_r) / max_z : max_r / max_z);
+    // Calculate aspect ratio using physical domain to guarantee square cells.
+    // Since the backend enforces dr=dz (square cells), and the pixel canvas
+    // dimensions are level0TilesR*16*scale × level0TilesZ*16*scale, we always
+    // have outNr/outNz == max_r/max_z (for AMR). Use physical domain ratio
+    // directly to avoid floating-point accumulation errors from pixel counts.
+    const aspect = isAxisymmetric
+        ? (2 * max_r) / max_z
+        : max_r / max_z;
 
     let dw = width;
     let dh = height;
@@ -467,8 +489,11 @@ function render(): void {
         dw = width;
         dh = width / aspect;
     }
-    const dx = (width - dw) / 2;
-    const dy = (height - dh) / 2;
+    // Round to integer pixel boundaries — prevents sub-pixel seams in drawImage
+    dw = Math.round(dw);
+    dh = Math.round(dh);
+    const dx = Math.round((width - dw) / 2);
+    const dy = Math.round((height - dh) / 2);
 
     // Draw heatmap and overlays within a clipped and transformed context
     context.save();
@@ -482,21 +507,28 @@ function render(): void {
     context.translate(px + panX, py + panY);
     context.scale(zoom, zoom);
     context.translate(-px, -py);
+    // Re-assert after transform — some browsers reset this after transforms
+    context.imageSmoothingEnabled = false;
 
     // Draw heatmap
     if (hasHeatmap && tempCanvas) {
         if (isAxisymmetric) {
             // Draw left reflected half (r from -max_r to 0)
+            // Use Math.round for all dest coords to force integer pixel alignment
+            const halfDw = Math.round(dw / 2);
             context.save();
-            context.translate(dx + dw / 2, dy);
+            context.translate(dx + halfDw, dy);
             context.scale(-1, 1);
-            context.drawImage(tempCanvas, 0, 0, outNr, outNz, 0, 0, dw / 2, dh);
+            context.imageSmoothingEnabled = false;
+            context.drawImage(tempCanvas, 0, 0, outNr, outNz, 0, 0, halfDw, dh);
             context.restore();
 
             // Draw right normal half (r from 0 to max_r)
-            context.drawImage(tempCanvas, 0, 0, outNr, outNz, dx + dw / 2, dy, dw / 2, dh);
+            context.imageSmoothingEnabled = false;
+            context.drawImage(tempCanvas, 0, 0, outNr, outNz, dx + halfDw, dy, halfDw, dh);
         } else {
             // Draw standard full width
+            context.imageSmoothingEnabled = false;
             context.drawImage(tempCanvas, 0, 0, outNr, outNz, dx, dy, dw, dh);
         }
     } else {
@@ -525,16 +557,20 @@ function render(): void {
 
             for (const tile of amrTiles) {
                 const factor = 1.0 / (1 << tile.level);
-                const tileWidth = 16 * (max_r / baseNr) * factor;
-                const tileHeight = 16 * (max_z / baseNz) * factor;
+                const level0TilesR = Math.max(1, Math.ceil((baseNr || 128) / 16));
+                const dr_base = (max_r || 1.0) / (level0TilesR * 16);
+                const level0TilesZ = Math.max(1, Math.round((max_z || 1.0) / (dr_base * 16)));
+                const tileWidth = (max_r / level0TilesR) * factor;
+                const tileHeight = (max_z / level0TilesZ) * factor;
                 const rMin = tile.r_idx * tileWidth;
                 const zMin = tile.z_idx * tileHeight;
 
                 const cellW = tileWidth / 16;
                 const cellH = tileHeight / 16;
 
-                // Draw tile boundary and internal cell lines
-                for (let i = 0; i <= 16; ++i) {
+                // Draw internal cell lines and left/bottom tile edges once (i < 16, j < 16)
+                // This prevents tile boundaries from being double-stroked and appearing twice as bright.
+                for (let i = 0; i < 16; ++i) {
                     const r = rMin + i * cellW;
                     let cx1 = dx + dw / 2;
                     if (isAxisymmetric) {
@@ -555,19 +591,39 @@ function render(): void {
                     }
                 }
 
-                for (let j = 0; j <= 16; ++j) {
+                for (let j = 0; j < 16; ++j) {
                     const z = zMin + j * cellH;
                     const cy = dy + dh - (z / max_z) * dh;
-                    let cx1 = dx;
-                    let cx2 = dx + dw;
+                    
                     if (isAxisymmetric) {
-                        const rMax = rMin + tileWidth;
-                        cx1 = dx + dw / 2 - (rMax / max_r) * (dw / 2);
-                        cx2 = dx + dw / 2 + (rMax / max_r) * (dw / 2);
+                        // Right half
+                        const cx1_r = dx + dw / 2 + (rMin / max_r) * (dw / 2);
+                        const cx2_r = dx + dw / 2 + ((rMin + tileWidth) / max_r) * (dw / 2);
+                        context.moveTo(cx1_r, cy);
+                        context.lineTo(cx2_r, cy);
+                        
+                        // Left half (mirrored)
+                        const cx1_l = dx + dw / 2 - (rMin / max_r) * (dw / 2);
+                        const cx2_l = dx + dw / 2 - ((rMin + tileWidth) / max_r) * (dw / 2);
+                        context.moveTo(cx1_l, cy);
+                        context.lineTo(cx2_l, cy);
+                    } else {
+                        const cx1 = dx + (rMin / max_r) * dw;
+                        const cx2 = dx + ((rMin + tileWidth) / max_r) * dw;
+                        context.moveTo(cx1, cy);
+                        context.lineTo(cx2, cy);
                     }
-                    context.moveTo(cx1, cy);
-                    context.lineTo(cx2, cy);
                 }
+            }
+            // Draw right and top outer domain boundaries once
+            if (isAxisymmetric) {
+                const cx_far_r = dx + dw;
+                const cx_far_l = dx;
+                context.moveTo(cx_far_r, dy); context.lineTo(cx_far_r, dy + dh);
+                context.moveTo(cx_far_l, dy); context.lineTo(cx_far_l, dy + dh);
+            } else {
+                const cx_far = dx + dw;
+                context.moveTo(cx_far, dy); context.lineTo(cx_far, dy + dh);
             }
             context.stroke();
             context.restore();

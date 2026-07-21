@@ -85,12 +85,17 @@ inline void calcFluxRusanov_kernel(const CellState2DT<RealType>& sL, const CellS
     using std::abs;
     using std::max;
     RealType cL, cR;
+    RealType rhoL_safe = max(sL.rho, (RealType)1e-8);
+    RealType rhoR_safe = max(sR.rho, (RealType)1e-8);
+    RealType pL_safe = max(sL.p, (RealType)1e-8);
+    RealType pR_safe = max(sR.p, (RealType)1e-8);
+
     if (is_ideal_gas) {
-        cL = std::sqrt(gamma * sL.p / sL.rho);
-        cR = std::sqrt(gamma * sR.p / sR.rho);
+        cL = std::sqrt(gamma * pL_safe / rhoL_safe);
+        cR = std::sqrt(gamma * pR_safe / rhoR_safe);
     } else {
-        cL = MultiMat::getMixtureSoundSpeed(sL.p, sL.rho, sL.alpha1, sL.alpha2, sL.arho1, sL.arho2, gamma, mat.products, mat.unreacted);
-        cR = MultiMat::getMixtureSoundSpeed(sR.p, sR.rho, sR.alpha1, sR.alpha2, sR.arho1, sR.arho2, gamma, mat.products, mat.unreacted);
+        cL = MultiMat::getMixtureSoundSpeed(pL_safe, rhoL_safe, sL.alpha1, sL.alpha2, sL.arho1, sL.arho2, gamma, mat.products, mat.unreacted);
+        cR = MultiMat::getMixtureSoundSpeed(pR_safe, rhoR_safe, sR.alpha1, sR.alpha2, sR.arho1, sR.arho2, gamma, mat.products, mat.unreacted);
     }
     RealType s_max = max(abs(sL.ur) + cL, abs(sR.ur) + cR);
 
@@ -130,12 +135,17 @@ inline void calcFluxRusanovZ_kernel(const CellState2DT<RealType>& sL, const Cell
     using std::abs;
     using std::max;
     RealType cL, cR;
+    RealType rhoL_safe = max(sL.rho, (RealType)1e-8);
+    RealType rhoR_safe = max(sR.rho, (RealType)1e-8);
+    RealType pL_safe = max(sL.p, (RealType)1e-8);
+    RealType pR_safe = max(sR.p, (RealType)1e-8);
+
     if (is_ideal_gas) {
-        cL = std::sqrt(gamma * sL.p / sL.rho);
-        cR = std::sqrt(gamma * sR.p / sR.rho);
+        cL = std::sqrt(gamma * pL_safe / rhoL_safe);
+        cR = std::sqrt(gamma * pR_safe / rhoR_safe);
     } else {
-        cL = MultiMat::getMixtureSoundSpeed(sL.p, sL.rho, sL.alpha1, sL.alpha2, sL.arho1, sL.arho2, gamma, mat.products, mat.unreacted);
-        cR = MultiMat::getMixtureSoundSpeed(sR.p, sR.rho, sR.alpha1, sR.alpha2, sR.arho1, sR.arho2, gamma, mat.products, mat.unreacted);
+        cL = MultiMat::getMixtureSoundSpeed(pL_safe, rhoL_safe, sL.alpha1, sL.alpha2, sL.arho1, sL.arho2, gamma, mat.products, mat.unreacted);
+        cR = MultiMat::getMixtureSoundSpeed(pR_safe, rhoR_safe, sR.alpha1, sR.alpha2, sR.arho1, sR.arho2, gamma, mat.products, mat.unreacted);
     }
     RealType s_max = max(abs(sL.uz) + cL, abs(sR.uz) + cR);
 
@@ -176,11 +186,14 @@ inline CellState2DT<RealType> applyBC_AMR_kernel(CellState2DT<RealType> s, int b
     } else if (bc == 1) { // TRANSMISSIVE
         // zero gradient
     } else if (bc == 2) { // OUTFLOW_RIEMANN
+        using std::max;
+        RealType rho_safe = max(s.rho, (RealType)1e-8);
+        RealType p_safe = max(s.p, (RealType)1e-8);
         RealType c;
         if (is_ideal_gas) {
-            c = std::sqrt(gamma * s.p / s.rho);
+            c = std::sqrt(gamma * p_safe / rho_safe);
         } else {
-            c = MultiMat::getMixtureSoundSpeed(s.p, s.rho, s.alpha1, s.alpha2, s.arho1, s.arho2, gamma, mat.products, mat.unreacted);
+            c = MultiMat::getMixtureSoundSpeed(p_safe, rho_safe, s.alpha1, s.alpha2, s.arho1, s.arho2, gamma, mat.products, mat.unreacted);
         }
         if (normal_vel < (RealType)0.0) {
             s.rho = ambient_rho;

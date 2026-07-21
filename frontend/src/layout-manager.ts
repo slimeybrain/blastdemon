@@ -1807,8 +1807,7 @@ class ExecutionManagerComponent {
         const pauseBtn = card.querySelector('.execution-btn-pause') as HTMLButtonElement;
         const termBtn = card.querySelector('.execution-btn-term') as HTMLButtonElement;
         const stepButtons = Array.from(card.querySelectorAll('.execution-btn-step')) as HTMLButtonElement[];
-
-        const pipeline = this.findPipeline(model.id);
+        const stepRow = card.querySelector('.execution-step-row') as HTMLElement;
 
         if (!isConnected) {
             if (initBtn) initBtn.disabled = true;
@@ -1817,21 +1816,27 @@ class ExecutionManagerComponent {
             if (termBtn) termBtn.disabled = true;
             stepButtons.forEach(b => b.disabled = true);
         } else {
+            // Keep all buttons visible side-by-side in fixed positions
+            if (playBtn) playBtn.style.display = 'inline-flex';
+            if (pauseBtn) pauseBtn.style.display = 'inline-flex';
+            if (stepRow) stepRow.style.display = 'flex';
+
+            // Initialise button is ALWAYS active when connected
+            if (initBtn) initBtn.disabled = false;
+
             if (status === 'RUNNING') {
-                if (initBtn) initBtn.disabled = true;
-                if (playBtn) playBtn.disabled = !pipeline;
+                if (playBtn) playBtn.disabled = false;
                 if (pauseBtn) pauseBtn.disabled = false;
                 if (termBtn) termBtn.disabled = false;
-                stepButtons.forEach(b => b.disabled = true);
+                stepButtons.forEach(b => b.disabled = false);
             } else if (status === 'INITIALIZED' || status === 'PAUSED') {
-                if (initBtn) initBtn.disabled = false;
                 if (playBtn) playBtn.disabled = false;
                 if (pauseBtn) pauseBtn.disabled = true;
                 if (termBtn) termBtn.disabled = false;
                 stepButtons.forEach(b => b.disabled = false);
             } else {
-                if (initBtn) initBtn.disabled = false;
-                if (playBtn) playBtn.disabled = false;
+                // Not initialised (UNINITIALIZED or TERMINATED)
+                if (playBtn) playBtn.disabled = true;
                 if (pauseBtn) pauseBtn.disabled = true;
                 if (termBtn) termBtn.disabled = true;
                 stepButtons.forEach(b => b.disabled = true);
