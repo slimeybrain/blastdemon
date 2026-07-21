@@ -408,6 +408,70 @@ void CFDSolver2DAMRImpl<RealType>::fillGhostCells() {
                 }
             }
         }
+
+        // Fill the 4 corner ghost pads (2x2 cells at each corner)
+        auto copy_corner_cell = [&](int dst_i, int dst_j, int src_node_idx, int src_i, int src_j) {
+            int dst_k = dst_i * AMR_TILE_DIM + dst_j;
+            if (src_node_idx != -1 && amr_nodes[src_node_idx].tile_id != -1) {
+                const auto& Nb = states_pool[amr_nodes[src_node_idx].tile_id];
+                int src_k = src_i * AMR_TILE_DIM + src_j;
+                T.rho[dst_k] = Nb.rho[src_k];
+                T.ur[dst_k] = Nb.ur[src_k];
+                T.uz[dst_k] = Nb.uz[src_k];
+                T.p[dst_k] = Nb.p[src_k];
+                T.E[dst_k] = Nb.E[src_k];
+                T.alpha1[dst_k] = Nb.alpha1[src_k];
+                T.alpha2[dst_k] = Nb.alpha2[src_k];
+                T.arho1[dst_k] = Nb.arho1[src_k];
+                T.arho2[dst_k] = Nb.arho2[src_k];
+            } else {
+                // Fallback: copy from adjacent cardinal ghost cell
+                int fallback_i = (dst_i < 2) ? 0 : (dst_i >= 18 ? 19 : dst_i);
+                int fallback_j = (dst_j < 2) ? 2 : (dst_j >= 18 ? 17 : dst_j);
+                int src_k = fallback_i * AMR_TILE_DIM + fallback_j;
+                T.rho[dst_k] = T.rho[src_k];
+                T.ur[dst_k] = T.ur[src_k];
+                T.uz[dst_k] = T.uz[src_k];
+                T.p[dst_k] = T.p[src_k];
+                T.E[dst_k] = T.E[src_k];
+                T.alpha1[dst_k] = T.alpha1[src_k];
+                T.alpha2[dst_k] = T.alpha2[src_k];
+                T.arho1[dst_k] = T.arho1[src_k];
+                T.arho2[dst_k] = T.arho2[src_k];
+            }
+        };
+
+        // 1. Bottom-Left corner (i = 0..1, j = 0..1)
+        int nb_bl = findNodeByCoords(node.r_idx - 1, node.z_idx - 1, node.level);
+        for (int ci = 0; ci < 2; ++ci) {
+            for (int cj = 0; cj < 2; ++cj) {
+                copy_corner_cell(ci, cj, nb_bl, 16 + ci, 16 + cj);
+            }
+        }
+
+        // 2. Bottom-Right corner (i = 18..19, j = 0..1)
+        int nb_br = findNodeByCoords(node.r_idx + 1, node.z_idx - 1, node.level);
+        for (int ci = 0; ci < 2; ++ci) {
+            for (int cj = 0; cj < 2; ++cj) {
+                copy_corner_cell(18 + ci, cj, nb_br, 2 + ci, 16 + cj);
+            }
+        }
+
+        // 3. Top-Left corner (i = 0..1, j = 18..19)
+        int nb_tl = findNodeByCoords(node.r_idx - 1, node.z_idx + 1, node.level);
+        for (int ci = 0; ci < 2; ++ci) {
+            for (int cj = 0; cj < 2; ++cj) {
+                copy_corner_cell(ci, 18 + cj, nb_tl, 16 + ci, 2 + cj);
+            }
+        }
+
+        // 4. Top-Right corner (i = 18..19, j = 18..19)
+        int nb_tr = findNodeByCoords(node.r_idx + 1, node.z_idx + 1, node.level);
+        for (int ci = 0; ci < 2; ++ci) {
+            for (int cj = 0; cj < 2; ++cj) {
+                copy_corner_cell(18 + ci, 18 + cj, nb_tr, 2 + ci, 2 + cj);
+            }
+        }
     }
 }
 
@@ -846,28 +910,29 @@ void CFDSolver2DAMRImpl<RealType>::restrictNode(int node_idx) {
     int child_tl = amr_nodes[node.children[2]].tile_id;
     int child_tr = amr_nodes[node.children[3]].tile_id;
 
-    for (int i = 0; i < 16; ++i) {
-        int pi = i + 2;
-        int child_tile_id = (i >= 8) ? 1 : 0;
-        int ci1 = 2 * (i % 8);
-        int ci2 = 2 * (i % 8) + 1;
+    for (int pi = 0; pi < AMR_TILE_DIM; ++pi) {
+        int child_tile_r = (pi >= 10) ? 1 : 0;
+        int local_pi = pi % 10;
+        int ci1 = 2 * local_pi;
+        int ci2 = 2 * local_pi + 1;
 
-        for (int j = 0; j < 16; ++j) {
-            int pj = j + 2;
+        for (int pj = 0; pj < AMR_TILE_DIM; ++pj) {
             int pk = pi * AMR_TILE_DIM + pj;
+            int child_tile_z = (pj >= 10) ? 2 : 0;
+            int quadrant = child_tile_r + child_tile_z;
 
-            int quadrant = child_tile_id + ((j >= 8) ? 2 : 0);
             int active_child_tile_id = -1;
             if (quadrant == 0) active_child_tile_id = child_bl;
             else if (quadrant == 1) active_child_tile_id = child_br;
             else if (quadrant == 2) active_child_tile_id = child_tl;
             else active_child_tile_id = child_tr;
 
-            int cj1 = 2 * (j % 8);
-            int cj2 = 2 * (j % 8) + 1;
+            int local_pj = pj % 10;
+            int cj1 = 2 * local_pj;
+            int cj2 = 2 * local_pj + 1;
 
             auto get_child_val = [&](int child_id, int local_i, int local_j, auto field) {
-                int k = (local_i + 2) * AMR_TILE_DIM + (local_j + 2);
+                int k = local_i * AMR_TILE_DIM + local_j;
                 return (U_pool[child_id].*field)[k];
             };
 

@@ -27,9 +27,40 @@ __device__ inline RealType minmod_gpu(RealType a, RealType b) {
     return (abs_a < abs_b) ? a : b;
 }
 
+__device__ inline int findNodeByCoordsGPU(
+    const GPUNode2D* nodes, int total_nodes,
+    int level0_tiles_r, int level0_tiles_z,
+    int r_idx, int z_idx, int level) {
+
+    if (r_idx < 0 || r_idx >= (level0_tiles_r << level) ||
+        z_idx < 0 || z_idx >= (level0_tiles_z << level)) {
+        return -1;
+    }
+    int r0 = r_idx >> level;
+    int z0 = z_idx >> level;
+    int curr = r0 * level0_tiles_z + z0;
+    if (curr < 0 || curr >= total_nodes) return -1;
+
+    for (int l = 0; l < level; ++l) {
+        if (nodes[curr].children[0] == -1) {
+            return curr;
+        }
+        int shift = level - 1 - l;
+        int bit_r = (r_idx >> shift) & 1;
+        int bit_z = (z_idx >> shift) & 1;
+        int quadrant = bit_r + 2 * bit_z;
+        curr = nodes[curr].children[quadrant];
+        if (curr == -1) return -1;
+    }
+    return curr;
+}
+
 template <typename RealType>
 __global__ void fillGhostCells_AMR_kernel(
     GPUNode2D* nodes,
+    int total_nodes,
+    int level0_tiles_r,
+    int level0_tiles_z,
     int* active_node_ids,
     int active_leaves_count,
     AMRPrimitiveTileT<RealType>* states_pool,
@@ -226,6 +257,58 @@ __global__ void fillGhostCells_AMR_kernel(
             s1 = applyBC_AMR_kernel(s1, bc, -s1.uz, ambient_rho, ambient_p, gamma, mat, is_ideal_gas, false);
             T.rho[ti*AMR_TILE_DIM+18] = s1.rho; T.ur[ti*AMR_TILE_DIM+18] = s1.ur; T.uz[ti*AMR_TILE_DIM+18] = s1.uz; T.p[ti*AMR_TILE_DIM+18] = s1.p; T.E[ti*AMR_TILE_DIM+18] = s1.E; T.alpha1[ti*AMR_TILE_DIM+18] = s1.alpha1; T.alpha2[ti*AMR_TILE_DIM+18] = s1.alpha2; T.arho1[ti*AMR_TILE_DIM+18] = s1.arho1; T.arho2[ti*AMR_TILE_DIM+18] = s1.arho2;
             T.rho[ti*AMR_TILE_DIM+19] = s1.rho; T.ur[ti*AMR_TILE_DIM+19] = s1.ur; T.uz[ti*AMR_TILE_DIM+19] = s1.uz; T.p[ti*AMR_TILE_DIM+19] = s1.p; T.E[ti*AMR_TILE_DIM+19] = s1.E; T.alpha1[ti*AMR_TILE_DIM+19] = s1.alpha1; T.alpha2[ti*AMR_TILE_DIM+19] = s1.alpha2; T.arho1[ti*AMR_TILE_DIM+19] = s1.arho1; T.arho2[ti*AMR_TILE_DIM+19] = s1.arho2;
+        }
+    }
+
+    __syncthreads();
+
+    if (tid < 16) {
+        int corner_id = tid / 4;
+        int cell_offset = tid % 4;
+        int ci = cell_offset % 2;
+        int cj = cell_offset / 2;
+
+        int target_r_off = (corner_id == 1 || corner_id == 3) ? 1 : -1;
+        int target_z_off = (corner_id == 2 || corner_id == 3) ? 1 : -1;
+
+        int nb_diag = findNodeByCoordsGPU(nodes, total_nodes, level0_tiles_r, level0_tiles_z,
+                                          node.r_idx + target_r_off, node.z_idx + target_z_off, node.level);
+
+        int dst_i = (corner_id == 1 || corner_id == 3) ? (18 + ci) : ci;
+        int dst_j = (corner_id == 2 || corner_id == 3) ? (18 + cj) : cj;
+
+        int dst_k = dst_i * AMR_TILE_DIM + dst_j;
+
+        if (nb_diag != -1 && nodes[nb_diag].tile_id != -1) {
+            int src_pool = nodes[nb_diag].tile_id;
+            auto& Nb = states_pool[src_pool];
+            int src_i = (corner_id == 1 || corner_id == 3) ? (2 + ci) : (16 + ci);
+            int src_j = (corner_id == 2 || corner_id == 3) ? (2 + cj) : (16 + cj);
+            int src_k = src_i * AMR_TILE_DIM + src_j;
+
+            T.rho[dst_k] = Nb.rho[src_k];
+            T.ur[dst_k] = Nb.ur[src_k];
+            T.uz[dst_k] = Nb.uz[src_k];
+            T.p[dst_k] = Nb.p[src_k];
+            T.E[dst_k] = Nb.E[src_k];
+            T.alpha1[dst_k] = Nb.alpha1[src_k];
+            T.alpha2[dst_k] = Nb.alpha2[src_k];
+            T.arho1[dst_k] = Nb.arho1[src_k];
+            T.arho2[dst_k] = Nb.arho2[src_k];
+        } else {
+            int fallback_i = (dst_i < 2) ? 0 : (dst_i >= 18 ? 19 : dst_i);
+            int fallback_j = (dst_j < 2) ? 2 : (dst_j >= 18 ? 17 : dst_j);
+            int src_k = fallback_i * AMR_TILE_DIM + fallback_j;
+
+            T.rho[dst_k] = T.rho[src_k];
+            T.ur[dst_k] = T.ur[src_k];
+            T.uz[dst_k] = T.uz[src_k];
+            T.p[dst_k] = T.p[src_k];
+            T.E[dst_k] = T.E[src_k];
+            T.alpha1[dst_k] = T.alpha1[src_k];
+            T.alpha2[dst_k] = T.alpha2[src_k];
+            T.arho1[dst_k] = T.arho1[src_k];
+            T.arho2[dst_k] = T.arho2[src_k];
         }
     }
 }
@@ -813,7 +896,8 @@ void CFDSolver2DAMRCudaImpl<RealType>::syncTreeToGPU() {
 template <typename RealType>
 void CFDSolver2DAMRCudaImpl<RealType>::fillGhostCellsGPU() {
     fillGhostCells_AMR_kernel<RealType><<<allocated_nodes_count, 64>>>(
-        d_amr_nodes, d_allocated_node_ids, allocated_nodes_count, d_states_pool,
+        d_amr_nodes, (int)amr_nodes.size(), level0_num_tiles_r, level0_num_tiles_z,
+        d_allocated_node_ids, allocated_nodes_count, d_states_pool,
         bc_r_min, bc_r_max, bc_z_min, bc_z_max,
         (RealType)ambient_rho_val, (RealType)ambient_p_val, (RealType)gamma_val,
         materials_val, is_ideal_gas_val, dr_base, dz_base
@@ -878,28 +962,29 @@ void CFDSolver2DAMRCudaImpl<RealType>::restrictNodeCPU(int node_idx) {
     int child_tl = amr_nodes[node.children[2]].tile_id;
     int child_tr = amr_nodes[node.children[3]].tile_id;
 
-    for (int i = 0; i < 16; ++i) {
-        int pi = i + 2;
-        int child_tile_id = (i >= 8) ? 1 : 0;
-        int ci1 = 2 * (i % 8);
-        int ci2 = 2 * (i % 8) + 1;
+    for (int pi = 0; pi < AMR_TILE_DIM; ++pi) {
+        int child_tile_r = (pi >= 10) ? 1 : 0;
+        int local_pi = pi % 10;
+        int ci1 = 2 * local_pi;
+        int ci2 = 2 * local_pi + 1;
 
-        for (int j = 0; j < 16; ++j) {
-            int pj = j + 2;
+        for (int pj = 0; pj < AMR_TILE_DIM; ++pj) {
             int pk = pi * AMR_TILE_DIM + pj;
+            int child_tile_z = (pj >= 10) ? 2 : 0;
+            int quadrant = child_tile_r + child_tile_z;
 
-            int quadrant = child_tile_id + ((j >= 8) ? 2 : 0);
             int active_child_tile_id = -1;
             if (quadrant == 0) active_child_tile_id = child_bl;
             else if (quadrant == 1) active_child_tile_id = child_br;
             else if (quadrant == 2) active_child_tile_id = child_tl;
             else active_child_tile_id = child_tr;
 
-            int cj1 = 2 * (j % 8);
-            int cj2 = 2 * (j % 8) + 1;
+            int local_pj = pj % 10;
+            int cj1 = 2 * local_pj;
+            int cj2 = 2 * local_pj + 1;
 
             auto get_child_val = [&](int child_id, int local_i, int local_j, auto field) {
-                int k = (local_i + 2) * AMR_TILE_DIM + (local_j + 2);
+                int k = local_i * AMR_TILE_DIM + local_j;
                 return (U_pool[child_id].*field)[k];
             };
 
