@@ -88,6 +88,7 @@ private:
     void rebuildNeighborPointers();
     int findNeighborNode(int node_idx, int dir);
     int findNodeByCoords(int r_idx, int z_idx, int level);
+    int findLeafNodeAtCoordsCPU(double r, double z) const;
 
     void syncPoolsToGPU();
     void syncPoolsToCPU();
@@ -98,11 +99,14 @@ private:
     void applyLSRK3StepGPU(int stage, double dt);
     void updatePrimitiveGPU();
 
+    void restrictAllGPU();
     void restrictAllCPU();
     void restrictNodeCPU(int node_idx);
     void adaptMeshCPU();
+    double computeTileLoehnerErrorCPU(int tile_id) const;
     bool shouldRefineNodeCPU(int node_idx);
-    bool shouldCoarsenNodeCPU(int node_idx);
+    bool shouldCoarsenNodeCPU(int parent_idx);
+    bool canCoarsenParentCPU(int parent_idx) const;
     void refineNodeCPU(int node_idx);
     void coarsenNodeCPU(int parent_idx);
 
