@@ -779,60 +779,6 @@ __global__ void restrictNode_AMR_kernel(
     RealType parent_ke = (RealType)0.5 * (U_parent.rhour[pk] * U_parent.rhour[pk] + U_parent.rhouz[pk] * U_parent.rhouz[pk]) / parent_rho_safe;
 
     U_parent.E[pk] = e_internal_avg + parent_ke;
-
-    // Extrapolate to ghost cells for parent node
-    if (i == 0) {
-        for (int gc = 0; gc < 2; ++gc) {
-            int k_dest = gc * AMR_TILE_DIM + (j + 2);
-            int k_src = 2 * AMR_TILE_DIM + (j + 2);
-            U_parent.rho[k_dest] = U_parent.rho[k_src];
-            U_parent.rhour[k_dest] = U_parent.rhour[k_src];
-            U_parent.rhouz[k_dest] = U_parent.rhouz[k_src];
-            U_parent.E[k_dest] = U_parent.E[k_src];
-            U_parent.alpha1[k_dest] = U_parent.alpha1[k_src];
-            U_parent.alpha2[k_dest] = U_parent.alpha2[k_src];
-            U_parent.arho1[k_dest] = U_parent.arho1[k_src];
-            U_parent.arho2[k_dest] = U_parent.arho2[k_src];
-        }
-        for (int gc = 18; gc < 20; ++gc) {
-            int k_dest = gc * AMR_TILE_DIM + (j + 2);
-            int k_src = 17 * AMR_TILE_DIM + (j + 2);
-            U_parent.rho[k_dest] = U_parent.rho[k_src];
-            U_parent.rhour[k_dest] = U_parent.rhour[k_src];
-            U_parent.rhouz[k_dest] = U_parent.rhouz[k_src];
-            U_parent.E[k_dest] = U_parent.E[k_src];
-            U_parent.alpha1[k_dest] = U_parent.alpha1[k_src];
-            U_parent.alpha2[k_dest] = U_parent.alpha2[k_src];
-            U_parent.arho1[k_dest] = U_parent.arho1[k_src];
-            U_parent.arho2[k_dest] = U_parent.arho2[k_src];
-        }
-    }
-    if (j == 0) {
-        for (int gc = 0; gc < 2; ++gc) {
-            int k_dest = (i + 2) * AMR_TILE_DIM + gc;
-            int k_src = (i + 2) * AMR_TILE_DIM + 2;
-            U_parent.rho[k_dest] = U_parent.rho[k_src];
-            U_parent.rhour[k_dest] = U_parent.rhour[k_src];
-            U_parent.rhouz[k_dest] = U_parent.rhouz[k_src];
-            U_parent.E[k_dest] = U_parent.E[k_src];
-            U_parent.alpha1[k_dest] = U_parent.alpha1[k_src];
-            U_parent.alpha2[k_dest] = U_parent.alpha2[k_src];
-            U_parent.arho1[k_dest] = U_parent.arho1[k_src];
-            U_parent.arho2[k_dest] = U_parent.arho2[k_src];
-        }
-        for (int gc = 18; gc < 20; ++gc) {
-            int k_dest = (i + 2) * AMR_TILE_DIM + gc;
-            int k_src = (i + 2) * AMR_TILE_DIM + 17;
-            U_parent.rho[k_dest] = U_parent.rho[k_src];
-            U_parent.rhour[k_dest] = U_parent.rhour[k_src];
-            U_parent.rhouz[k_dest] = U_parent.rhouz[k_src];
-            U_parent.E[k_dest] = U_parent.E[k_src];
-            U_parent.alpha1[k_dest] = U_parent.alpha1[k_src];
-            U_parent.alpha2[k_dest] = U_parent.alpha2[k_src];
-            U_parent.arho1[k_dest] = U_parent.arho1[k_src];
-            U_parent.arho2[k_dest] = U_parent.arho2[k_src];
-        }
-    }
 }
 
 template <typename RealType>
@@ -989,7 +935,7 @@ CFDSolver2DAMRCudaImpl<RealType>::CFDSolver2DAMRCudaImpl(int nr, int nz, double 
     : level0_nr(nr), level0_nz(nz), max_r_coord(max_r), max_z_coord(max_z),
       time_val(0.0), gamma_val(gamma), is_ideal_gas_val(true), is_cartesian_val(false),
       amr_max_levels_val(max_levels), amr_threshold_val(threshold), amr_coarsen_ratio_val(coarsen_ratio),
-      flux_scheme_name("AUSM+"), spatial_order_val(2), temporal_order_val(2), step_counter_val(0),
+      flux_scheme_name("AUSM+"), spatial_order_val(2), temporal_order_val(2),
       bc_r_min(static_cast<CFDSolver2DCuda::BCType>(CFDSolver2D::REFLECTIVE)),
       bc_r_max(static_cast<CFDSolver2DCuda::BCType>(CFDSolver2D::OUTFLOW_RIEMANN)),
       bc_z_min(static_cast<CFDSolver2DCuda::BCType>(CFDSolver2D::REFLECTIVE)),
@@ -1282,6 +1228,7 @@ void CFDSolver2DAMRCudaImpl<RealType>::syncTreeToGPU() {
         current_tree_capacity = amr_nodes.size() * 2;
         checkCudaError(cudaMalloc(&d_amr_nodes, current_tree_capacity * sizeof(GPUNode2D)));
         checkCudaError(cudaMalloc(&d_node_boundary_fluxes, current_tree_capacity * 4 * sizeof(AMRFaceFluxT<RealType>)));
+        checkCudaError(cudaMemset(d_node_boundary_fluxes, 0, current_tree_capacity * 4 * sizeof(AMRFaceFluxT<RealType>)));
     }
 
     checkCudaError(cudaMemcpy(d_amr_nodes, gpu_nodes.data(), gpu_nodes.size() * sizeof(GPUNode2D), cudaMemcpyHostToDevice));
@@ -1351,6 +1298,7 @@ __global__ void applyFluxCorrectionGPU_kernel(
         int f_idx1 = fc1 % 16;
         int f_idx2 = fc2 % 16;
         int fine_node_idx = (fc1 < 16) ? child1 : child2;
+        if (nodes[fine_node_idx].children[0] != -1) return;
 
         const auto& f_flux = node_boundary_fluxes[fine_node_idx * 4 + fine_dir];
 
@@ -1688,20 +1636,7 @@ bool CFDSolver2DAMRCudaImpl<RealType>::shouldRefineNodeCPU(int node_idx) {
     if (node.tile_id == -1) return false;
 
     double error = computeTileLoehnerErrorCPU(node.tile_id);
-    
-    // Gradient-proportional level capping
-    if (error > 0.8) {
-        // Severe shock, allow up to max resolution
-        return true;
-    } else if (error > 0.4) {
-        // Moderate gradient, cap at level 3
-        return node.level < std::min((int)amr_max_levels_val - 1, 3);
-    } else if (error > amr_threshold_val) {
-        // Mild wave, cap at level 2
-        return node.level < std::min((int)amr_max_levels_val - 1, 2);
-    }
-
-    return false;
+    return (error > amr_threshold_val);
 }
 
 template <typename RealType>
@@ -2141,6 +2076,7 @@ void CFDSolver2DAMRCudaImpl<RealType>::setInitialConditionIdealGas(double explos
     syncPoolsToGPU();
     updatePrimitiveGPU();
     fillGhostCellsGPU();
+    syncPoolsToCPU();
 }
 
 template <typename RealType>

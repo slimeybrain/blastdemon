@@ -48,6 +48,19 @@ __host__ __device__
 #endif
 inline T math_min(T a, T b) { return (a < b) ? a : b; }
 
+template <typename T>
+#ifdef __CUDACC__
+__host__ __device__
+#endif
+inline T math_sqrt(T a) {
+#ifdef __CUDA_ARCH__
+    if (sizeof(T) == sizeof(float)) return sqrtf((float)a);
+    else return sqrt((double)a);
+#else
+    return std::sqrt(a);
+#endif
+}
+
 template <typename RealType>
 #ifdef __CUDACC__
 __host__ __device__
@@ -106,8 +119,8 @@ inline void calcFluxRusanov_kernel(const CellState2DT<RealType>& sL, const CellS
     RealType pR_safe = math_max(sR.p, (RealType)1e-8);
 
     if (is_ideal_gas) {
-        cL = std::sqrt(gamma * pL_safe / rhoL_safe);
-        cR = std::sqrt(gamma * pR_safe / rhoR_safe);
+        cL = math_sqrt(gamma * pL_safe / rhoL_safe);
+        cR = math_sqrt(gamma * pR_safe / rhoR_safe);
     } else {
         cL = MultiMat::getMixtureSoundSpeed(pL_safe, rhoL_safe, sL.alpha1, sL.alpha2, sL.arho1, sL.arho2, gamma, mat.products, mat.unreacted);
         cR = MultiMat::getMixtureSoundSpeed(pR_safe, rhoR_safe, sR.alpha1, sR.alpha2, sR.arho1, sR.arho2, gamma, mat.products, mat.unreacted);
@@ -154,8 +167,8 @@ inline void calcFluxRusanovZ_kernel(const CellState2DT<RealType>& sL, const Cell
     RealType pR_safe = math_max(sR.p, (RealType)1e-8);
 
     if (is_ideal_gas) {
-        cL = std::sqrt(gamma * pL_safe / rhoL_safe);
-        cR = std::sqrt(gamma * pR_safe / rhoR_safe);
+        cL = math_sqrt(gamma * pL_safe / rhoL_safe);
+        cR = math_sqrt(gamma * pR_safe / rhoR_safe);
     } else {
         cL = MultiMat::getMixtureSoundSpeed(pL_safe, rhoL_safe, sL.alpha1, sL.alpha2, sL.arho1, sL.arho2, gamma, mat.products, mat.unreacted);
         cR = MultiMat::getMixtureSoundSpeed(pR_safe, rhoR_safe, sR.alpha1, sR.alpha2, sR.arho1, sR.arho2, gamma, mat.products, mat.unreacted);

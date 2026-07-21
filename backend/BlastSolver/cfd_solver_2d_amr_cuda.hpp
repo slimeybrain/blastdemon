@@ -55,6 +55,8 @@ private:
     double detonator_r_coord;
     double detonator_z_coord;
 
+    friend int main();
+
     // CPU-side copy of the tree and pools
     std::vector<AMRTileNode> amr_nodes;
     std::vector<AMRPrimitiveTileT<RealType>> states_pool;

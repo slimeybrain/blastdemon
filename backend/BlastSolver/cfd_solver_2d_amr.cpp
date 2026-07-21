@@ -1216,51 +1216,202 @@ void CFDSolver2DAMRImpl<RealType>::restrictNode(int node_idx) {
 }
 
 template <typename RealType>
+double CFDSolver2DAMRImpl<RealType>::computeTileLoehnerError(int tile_id) const {
+    if (tile_id == -1 || tile_id >= (int)states_pool.size()) return 0.0;
+    const auto& S = states_pool[tile_id];
+
+    const double eps = 0.02;
+    double max_err = 0.0;
+
+    for (int i = 3; i < 17; ++i) {
+        for (int j = 3; j < 17; ++j) {
+            int k = i * AMR_TILE_DIM + j;
+
+            // Density Löhner Error
+            double rho_c  = (double)S.rho[k];
+            double rho_r1 = (double)S.rho[(i + 1) * AMR_TILE_DIM + j];
+            double rho_l1 = (double)S.rho[(i - 1) * AMR_TILE_DIM + j];
+            double rho_t1 = (double)S.rho[i * AMR_TILE_DIM + (j + 1)];
+            double rho_b1 = (double)S.rho[i * AMR_TILE_DIM + (j - 1)];
+
+            double d2_r_rho = std::abs(rho_r1 - 2.0 * rho_c + rho_l1);
+            double d1_r_rho = std::abs(rho_r1 - rho_c) + std::abs(rho_c - rho_l1) + eps * std::abs(rho_c);
+            double err_r_rho = d2_r_rho / (d1_r_rho + 1e-12);
+
+            double d2_z_rho = std::abs(rho_t1 - 2.0 * rho_c + rho_b1);
+            double d1_z_rho = std::abs(rho_t1 - rho_c) + std::abs(rho_c - rho_b1) + eps * std::abs(rho_c);
+            double err_z_rho = d2_z_rho / (d1_z_rho + 1e-12);
+
+            // Pressure Löhner Error
+            double p_c  = (double)S.p[k];
+            double p_r1 = (double)S.p[(i + 1) * AMR_TILE_DIM + j];
+            double p_l1 = (double)S.p[(i - 1) * AMR_TILE_DIM + j];
+            double p_t1 = (double)S.p[i * AMR_TILE_DIM + (j + 1)];
+            double p_b1 = (double)S.p[i * AMR_TILE_DIM + (j - 1)];
+
+            double d2_r_p = std::abs(p_r1 - 2.0 * p_c + p_l1);
+            double d1_r_p = std::abs(p_r1 - p_c) + std::abs(p_c - p_l1) + eps * std::abs(p_c);
+            double err_r_p = d2_r_p / (d1_r_p + 1e-12);
+
+            double d2_z_p = std::abs(p_t1 - 2.0 * p_c + p_b1);
+            double d1_z_p = std::abs(p_t1 - p_c) + std::abs(p_c - p_b1) + eps * std::abs(p_c);
+            double err_z_p = d2_z_p / (d1_z_p + 1e-12);
+
+            double cell_err = std::max({err_r_rho, err_z_rho, err_r_p, err_z_p});
+            if (cell_err > max_err) max_err = cell_err;
+        }
+    }
+    return max_err;
+}
+
+template <typename RealType>
+bool CFDSolver2DAMRImpl<RealType>::shouldRefineNode(int node_idx) {
+    const auto& node = amr_nodes[node_idx];
+    if (node.r_min >= max_r_coord || node.z_min >= max_z_coord) return false;
+    if (node.level >= amr_max_levels_val - 1) return false;
+    if (node.tile_id == -1) return false;
+
+    double error = computeTileLoehnerError(node.tile_id);
+    return (error > amr_threshold_val);
+}
+
+template <typename RealType>
+bool CFDSolver2DAMRImpl<RealType>::shouldCoarsenNode(int parent_idx) {
+    const auto& parent = amr_nodes[parent_idx];
+    if (parent.tile_id == -1 || parent.children[0] == -1) return false;
+
+    double max_child_err = 0.0;
+    for (int c = 0; c < 4; ++c) {
+        int child_idx = parent.children[c];
+        if (child_idx == -1) return false;
+        const auto& child = amr_nodes[child_idx];
+        if (child.children[0] != -1) return false; // Child must be a leaf
+        if (child.tile_id != -1) {
+            double err = computeTileLoehnerError(child.tile_id);
+            if (err > max_child_err) max_child_err = err;
+        }
+    }
+
+    double coarsen_threshold = amr_threshold_val * amr_coarsen_ratio_val;
+    return (max_child_err < coarsen_threshold);
+}
+
+template <typename RealType>
+int CFDSolver2DAMRImpl<RealType>::findLeafNodeAtCoords(double r, double z) const {
+    for (size_t n = 0; n < amr_nodes.size(); ++n) {
+        const auto& node = amr_nodes[n];
+        if (node.is_active && node.tile_id != -1 &&
+            r >= node.r_min && r < node.r_max &&
+            z >= node.z_min && z < node.z_max) {
+            return (int)n;
+        }
+    }
+    return -1;
+}
+
+template <typename RealType>
+bool CFDSolver2DAMRImpl<RealType>::canCoarsenParent(int parent_idx) const {
+    const auto& parent = amr_nodes[parent_idx];
+    if (parent.tile_id == -1 || parent.children[0] == -1) return false;
+
+    int parent_level = parent.level;
+
+    double mid_r = 0.5 * (parent.r_min + parent.r_max);
+    double mid_z = 0.5 * (parent.z_min + parent.z_max);
+    double tile_dr = parent.r_max - parent.r_min;
+    double tile_dz = parent.z_max - parent.z_min;
+
+    double sample_r[4] = { parent.r_min - 0.25 * tile_dr, parent.r_max + 0.25 * tile_dr, mid_r, mid_r };
+    double sample_z[4] = { mid_z, mid_z, parent.z_min - 0.25 * tile_dz, parent.z_max + 0.25 * tile_dz };
+
+    for (int d = 0; d < 4; ++d) {
+        if (sample_r[d] < 0.0 || sample_r[d] >= max_r_coord || sample_z[d] < 0.0 || sample_z[d] >= max_z_coord) continue;
+        int nb_idx = findLeafNodeAtCoords(sample_r[d], sample_z[d]);
+        if (nb_idx != -1 && amr_nodes[nb_idx].tile_id != -1 && amr_nodes[nb_idx].is_active) {
+            int nb_level = amr_nodes[nb_idx].level;
+            if (nb_level > parent_level + 1) return false;
+        }
+    }
+    return true;
+}
+
+template <typename RealType>
 void CFDSolver2DAMRImpl<RealType>::adaptMesh() {
-    // 1. Run restriction sweep first so parent nodes have up-to-date conservative variables before coarsening
+    // 1. Run restriction sweep first so parent nodes have up-to-date conservative variables
     restrictAll();
     updatePrimitiveFromConservative();
+    fillGhostCells();
 
     std::vector<bool> to_refine(amr_nodes.size(), false);
+    std::vector<bool> flagged_by_error(amr_nodes.size(), false);
 
-    // 2. Identify nodes to refine directly, and flag their 8 cardinal/diagonal neighbors
+    // 2. Direct refinement triggering
     for (size_t n = 0; n < amr_nodes.size(); ++n) {
         const auto& node = amr_nodes[n];
         if (node.tile_id == -1 || !node.is_active) continue;
 
         if (shouldRefineNode(n)) {
+            flagged_by_error[n] = true;
             to_refine[n] = true;
-            for (int dr = -1; dr <= 1; ++dr) {
-                for (int dz = -1; dz <= 1; ++dz) {
-                    if (dr == 0 && dz == 0) continue;
-                    int nb_idx = findNodeByCoords(node.r_idx + dr, node.z_idx + dz, node.level);
-                    if (nb_idx != -1 && amr_nodes[nb_idx].tile_id != -1 && amr_nodes[nb_idx].is_active) {
-                        to_refine[nb_idx] = true;
-                    }
+        }
+    }
+
+    // Add 1-tile safety buffer ring ONLY around SAME-LEVEL active neighbors of error-flagged nodes
+    for (size_t n = 0; n < amr_nodes.size(); ++n) {
+        if (!flagged_by_error[n]) continue;
+        const auto& node = amr_nodes[n];
+
+        double mid_r = 0.5 * (node.r_min + node.r_max);
+        double mid_z = 0.5 * (node.z_min + node.z_max);
+        double tile_dr = node.r_max - node.r_min;
+        double tile_dz = node.z_max - node.z_min;
+
+        double sample_r[8] = { node.r_min - 0.25 * tile_dr, node.r_max + 0.25 * tile_dr, mid_r, mid_r,
+                               node.r_min - 0.25 * tile_dr, node.r_max + 0.25 * tile_dr, node.r_min - 0.25 * tile_dr, node.r_max + 0.25 * tile_dr };
+        double sample_z[8] = { mid_z, mid_z, node.z_min - 0.25 * tile_dz, node.z_max + 0.25 * tile_dz,
+                               node.z_min - 0.25 * tile_dz, node.z_min - 0.25 * tile_dz, node.z_max + 0.25 * tile_dz, node.z_max + 0.25 * tile_dz };
+
+        for (int d = 0; d < 8; ++d) {
+            if (sample_r[d] < 0.0 || sample_r[d] >= max_r_coord || sample_z[d] < 0.0 || sample_z[d] >= max_z_coord) continue;
+            int nb_idx = findLeafNodeAtCoords(sample_r[d], sample_z[d]);
+            if (nb_idx != -1 && amr_nodes[nb_idx].tile_id != -1 && amr_nodes[nb_idx].is_active) {
+                if (amr_nodes[nb_idx].level == node.level && !to_refine[nb_idx]) {
+                    to_refine[nb_idx] = true;
                 }
             }
         }
     }
 
-        bool changed = true;
+    // 3. Graded 2:1 Level Balance Enforcer using exact spatial leaf lookup across all 8 neighbor directions
+    bool changed = true;
     while (changed) {
         changed = false;
         for (size_t n = 0; n < amr_nodes.size(); ++n) {
+            if (!to_refine[n]) continue;
             const auto& node = amr_nodes[n];
             if (node.tile_id == -1) continue;
-            
-            bool is_refined = (node.children[0] != -1) || to_refine[n];
-            if (is_refined && node.level > 0) {
-                int parent_idx = node.parent;
-                const auto& parent = amr_nodes[parent_idx];
-                for (int dr = -1; dr <= 1; ++dr) {
-                    for (int dz = -1; dz <= 1; ++dz) {
-                        if (dr == 0 && dz == 0) continue;
-                        int nb_parent = findNodeByCoords(parent.r_idx + dr, parent.z_idx + dz, parent.level);
-                        if (nb_parent != -1 && amr_nodes[nb_parent].tile_id != -1 && amr_nodes[nb_parent].children[0] == -1 && !to_refine[nb_parent]) {
-                            to_refine[nb_parent] = true;
-                            changed = true;
-                        }
+
+            int target_level = node.level + 1;
+            if (target_level >= amr_max_levels_val) continue;
+
+            double mid_r = 0.5 * (node.r_min + node.r_max);
+            double mid_z = 0.5 * (node.z_min + node.z_max);
+            double tile_dr = node.r_max - node.r_min;
+            double tile_dz = node.z_max - node.z_min;
+
+            double sample_r[8] = { node.r_min - 0.25 * tile_dr, node.r_max + 0.25 * tile_dr, mid_r, mid_r,
+                                   node.r_min - 0.25 * tile_dr, node.r_max + 0.25 * tile_dr, node.r_min - 0.25 * tile_dr, node.r_max + 0.25 * tile_dr };
+            double sample_z[8] = { mid_z, mid_z, node.z_min - 0.25 * tile_dz, node.z_max + 0.25 * tile_dz,
+                                   node.z_min - 0.25 * tile_dz, node.z_min - 0.25 * tile_dz, node.z_max + 0.25 * tile_dz, node.z_max + 0.25 * tile_dz };
+
+            for (int d = 0; d < 8; ++d) {
+                if (sample_r[d] < 0.0 || sample_r[d] >= max_r_coord || sample_z[d] < 0.0 || sample_z[d] >= max_z_coord) continue;
+                int nb_idx = findLeafNodeAtCoords(sample_r[d], sample_z[d]);
+                if (nb_idx != -1 && amr_nodes[nb_idx].tile_id != -1 && amr_nodes[nb_idx].is_active) {
+                    const auto& nb_node = amr_nodes[nb_idx];
+                    if (nb_node.level < node.level && !to_refine[nb_idx]) {
+                        to_refine[nb_idx] = true;
+                        changed = true;
                     }
                 }
             }
@@ -1269,12 +1420,12 @@ void CFDSolver2DAMRImpl<RealType>::adaptMesh() {
 
     std::vector<int> nodes_to_refine;
     for (size_t n = 0; n < amr_nodes.size(); ++n) {
-        if (to_refine[n] && amr_nodes[n].level < amr_max_levels_val - 1) {
+        if (to_refine[n] && amr_nodes[n].level < amr_max_levels_val - 1 && amr_nodes[n].is_active) {
             nodes_to_refine.push_back(n);
         }
     }
 
-    // 3. Identify parent nodes to coarsen (checking children leaf status, gradient checks, and refinement buffer checks)
+    // 4. Multi-pass Bottom-Up Coarsening Sweep
     std::vector<int> parents_to_coarsen;
     for (size_t n = 0; n < amr_nodes.size(); ++n) {
         const auto& node = amr_nodes[n];
@@ -1283,25 +1434,24 @@ void CFDSolver2DAMRImpl<RealType>::adaptMesh() {
             bool any_child_refining = false;
             for (int c = 0; c < 4; ++c) {
                 int child_idx = node.children[c];
-                if (amr_nodes[child_idx].children[0] != -1) {
+                if (child_idx == -1 || amr_nodes[child_idx].children[0] != -1) {
                     all_children_leaves = false;
                 }
-                if (to_refine[child_idx]) {
+                if (child_idx != -1 && to_refine[child_idx]) {
                     any_child_refining = true;
                 }
             }
-            if (all_children_leaves && !any_child_refining && shouldCoarsenNode(n)) {
+            if (all_children_leaves && !any_child_refining && shouldCoarsenNode(n) && canCoarsenParent(n)) {
                 parents_to_coarsen.push_back(n);
             }
         }
     }
 
-    // Refinement execution
+    // Execution of Refinement and Coarsening
     for (int idx : nodes_to_refine) {
         refineNode(idx);
     }
 
-    // Coarsening execution
     for (int idx : parents_to_coarsen) {
         coarsenNode(idx);
     }
@@ -1311,89 +1461,6 @@ void CFDSolver2DAMRImpl<RealType>::adaptMesh() {
         updatePrimitiveFromConservative();
         fillGhostCells();
     }
-}
-
-template <typename RealType>
-bool CFDSolver2DAMRImpl<RealType>::shouldRefineNode(int node_idx) {
-    const auto& node = amr_nodes[node_idx];
-    if (node.r_min >= max_r_coord || node.z_min >= max_z_coord) return false;
-    if (node.level >= amr_max_levels_val - 1) return false;
-
-    const auto& S = states_pool[node.tile_id];
-
-    // Normalized gradient check on density, pressure, and volume fraction (all 16x16 cells using internal differences)
-    for (int i = 0; i < 16; ++i) {
-        int ti = i + 2;
-        for (int j = 0; j < 16; ++j) {
-            int tj = j + 2;
-            int k = ti * AMR_TILE_DIM + tj;
-
-            double diff_r_rho = (i == 0) ? std::abs((double)(S.rho[k+AMR_TILE_DIM] - S.rho[k])) :
-                                ((i == 15) ? std::abs((double)(S.rho[k] - S.rho[k-AMR_TILE_DIM])) :
-                                std::max(std::abs((double)(S.rho[k+AMR_TILE_DIM] - S.rho[k])), std::abs((double)(S.rho[k] - S.rho[k-AMR_TILE_DIM]))));
-            double diff_z_rho = (j == 0) ? std::abs((double)(S.rho[k+1] - S.rho[k])) :
-                                ((j == 15) ? std::abs((double)(S.rho[k] - S.rho[k-1])) :
-                                std::max(std::abs((double)(S.rho[k+1] - S.rho[k])), std::abs((double)(S.rho[k] - S.rho[k-1]))));
-            double norm_rho = diff_r_rho + diff_z_rho;
-
-            double diff_r_p = (i == 0) ? std::abs((double)(S.p[k+AMR_TILE_DIM] - S.p[k])) :
-                              ((i == 15) ? std::abs((double)(S.p[k] - S.p[k-AMR_TILE_DIM])) :
-                              std::max(std::abs((double)(S.p[k+AMR_TILE_DIM] - S.p[k])), std::abs((double)(S.p[k] - S.p[k-AMR_TILE_DIM]))));
-            double diff_z_p = (j == 0) ? std::abs((double)(S.p[k+1] - S.p[k])) :
-                              ((j == 15) ? std::abs((double)(S.p[k] - S.p[k-1])) :
-                              std::max(std::abs((double)(S.p[k+1] - S.p[k])), std::abs((double)(S.p[k] - S.p[k-1]))));
-            double norm_p = diff_r_p + diff_z_p;
-
-            double ref_rho = std::max(std::abs((double)S.rho[k]), 1e-4);
-            double ref_p   = std::max(std::abs((double)S.p[k]), 100.0);
-
-            if (norm_rho / ref_rho > amr_threshold_val ||
-                norm_p / ref_p > amr_threshold_val) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-template <typename RealType>
-bool CFDSolver2DAMRImpl<RealType>::shouldCoarsenNode(int parent_idx) {
-    const auto& parent = amr_nodes[parent_idx];
-    if (parent.tile_id == -1) return false;
-    const auto& S = states_pool[parent.tile_id];
-
-    for (int i = 0; i < 16; ++i) {
-        int ti = i + 2;
-        for (int j = 0; j < 16; ++j) {
-            int tj = j + 2;
-            int k = ti * AMR_TILE_DIM + tj;
-
-            double diff_r_rho = (i == 0) ? std::abs((double)(S.rho[k+AMR_TILE_DIM] - S.rho[k])) :
-                                ((i == 15) ? std::abs((double)(S.rho[k] - S.rho[k-AMR_TILE_DIM])) :
-                                std::max(std::abs((double)(S.rho[k+AMR_TILE_DIM] - S.rho[k])), std::abs((double)(S.rho[k] - S.rho[k-AMR_TILE_DIM]))));
-            double diff_z_rho = (j == 0) ? std::abs((double)(S.rho[k+1] - S.rho[k])) :
-                                ((j == 15) ? std::abs((double)(S.rho[k] - S.rho[k-1])) :
-                                std::max(std::abs((double)(S.rho[k+1] - S.rho[k])), std::abs((double)(S.rho[k] - S.rho[k-1]))));
-            double norm_rho = diff_r_rho + diff_z_rho;
-
-            double diff_r_p = (i == 0) ? std::abs((double)(S.p[k+AMR_TILE_DIM] - S.p[k])) :
-                              ((i == 15) ? std::abs((double)(S.p[k] - S.p[k-AMR_TILE_DIM])) :
-                              std::max(std::abs((double)(S.p[k+AMR_TILE_DIM] - S.p[k])), std::abs((double)(S.p[k] - S.p[k-AMR_TILE_DIM]))));
-            double diff_z_p = (j == 0) ? std::abs((double)(S.p[k+1] - S.p[k])) :
-                              ((j == 15) ? std::abs((double)(S.p[k] - S.p[k-1])) :
-                              std::max(std::abs((double)(S.p[k+1] - S.p[k])), std::abs((double)(S.p[k] - S.p[k-1]))));
-            double norm_p = diff_r_p + diff_z_p;
-
-            double ref_rho = std::max(std::abs((double)S.rho[k]), 1e-4);
-            double ref_p   = std::max(std::abs((double)S.p[k]), 100.0);
-
-            if (norm_rho / ref_rho > amr_threshold_val * amr_coarsen_ratio_val ||
-                norm_p / ref_p > amr_threshold_val * amr_coarsen_ratio_val) {
-                return false;
-            }
-        }
-    }
-    return true;
 }
 
 template <typename RealType>

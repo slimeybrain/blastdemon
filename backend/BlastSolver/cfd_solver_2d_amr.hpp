@@ -66,6 +66,7 @@ struct AMRFaceFluxT {
 
 template <typename RealType>
 class CFDSolver2DAMRImpl : public CFDSolver2D {
+    friend int main();
 private:
     int level0_nr;
     int level0_nz;
@@ -120,6 +121,7 @@ private:
     void rebuildNeighborPointers();
     int findNeighborNode(int node_idx, int dir);
     int findNodeByCoords(int r_idx, int z_idx, int level);
+    int findLeafNodeAtCoords(double r, double z) const;
 
     void fillGhostCells();
     void computeTileRHS(int node_idx, double A_coeff, double dt);
@@ -129,8 +131,10 @@ private:
     void restrictAll();
     void restrictNode(int node_idx);
     void adaptMesh();
+    double computeTileLoehnerError(int tile_id) const;
     bool shouldRefineNode(int node_idx);
-    bool shouldCoarsenNode(int node_idx);
+    bool shouldCoarsenNode(int parent_idx);
+    bool canCoarsenParent(int parent_idx) const;
     void refineNode(int node_idx);
     void coarsenNode(int parent_idx);
 

@@ -2450,13 +2450,12 @@ int main() {
                     global_is_amr_2d = (mesh_type == "amr");
                     int amr_max_levels = get_json_int(msg, "amr_max_levels", 3);
                     double amr_threshold = get_json_double(msg, "amr_threshold", 0.05);
-                    double amr_coarsen_ratio = get_json_double(msg, "amr_coarsen_ratio", 0.2);
+                    double amr_coarsen_ratio = get_json_double(msg, "amr_coarsen_ratio", 0.4);
 
                     amr_max_levels = std::clamp(amr_max_levels, 1, 6);
                     if (amr_threshold <= 0.0 || std::isnan(amr_threshold)) amr_threshold = 0.05;
-                    if (amr_coarsen_ratio <= 0.0 || std::isnan(amr_coarsen_ratio) || amr_coarsen_ratio >= amr_threshold) {
-                        amr_coarsen_ratio = amr_threshold * 0.4;
-                    }
+                    if (amr_coarsen_ratio <= 0.0 || std::isnan(amr_coarsen_ratio)) amr_coarsen_ratio = 0.4;
+                    amr_coarsen_ratio = std::clamp(amr_coarsen_ratio, 0.1, 0.9);
 
                     std::string precision = msg.value("precision", "double");
                     if (device == "cuda") {
