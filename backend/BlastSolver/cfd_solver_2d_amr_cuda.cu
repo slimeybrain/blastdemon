@@ -697,6 +697,31 @@ int CFDSolver2DAMRCudaImpl<RealType>::findNeighborNode(int node_idx, int dir) {
 }
 
 template <typename RealType>
+int CFDSolver2DAMRCudaImpl<RealType>::findNodeByCoords(int r_idx, int z_idx, int level) {
+    if (r_idx < 0 || r_idx >= (level0_num_tiles_r << level) ||
+        z_idx < 0 || z_idx >= (level0_num_tiles_z << level)) {
+        return -1;
+    }
+    int r0 = r_idx >> level;
+    int z0 = z_idx >> level;
+    int curr = r0 * level0_num_tiles_z + z0;
+    if (curr < 0 || curr >= (int)amr_nodes.size()) return -1;
+
+    for (int l = 0; l < level; ++l) {
+        if (amr_nodes[curr].children[0] == -1) {
+            return curr;
+        }
+        int shift = level - 1 - l;
+        int bit_r = (r_idx >> shift) & 1;
+        int bit_z = (z_idx >> shift) & 1;
+        int quadrant = bit_r + 2 * bit_z;
+        curr = amr_nodes[curr].children[quadrant];
+        if (curr == -1) return -1;
+    }
+    return curr;
+}
+
+template <typename RealType>
 void CFDSolver2DAMRCudaImpl<RealType>::syncPoolsToGPU() {
     if (states_pool.size() > allocated_tiles_capacity) {
         if (d_states_pool) checkCudaError(cudaFree(d_states_pool));
@@ -897,23 +922,61 @@ void CFDSolver2DAMRCudaImpl<RealType>::restrictNodeCPU(int node_idx) {
 template <typename RealType>
 void CFDSolver2DAMRCudaImpl<RealType>::adaptMeshCPU() {
     syncPoolsToCPU();
-    std::vector<int> nodes_to_refine;
-    std::vector<int> parents_to_coarsen;
 
+    // 1. Run restriction sweep first so parent nodes have up-to-date conservative variables before coarsening
+    for (int lvl = amr_max_levels_val - 2; lvl >= 0; --lvl) {
+        for (size_t n = 0; n < amr_nodes.size(); ++n) {
+            if (amr_nodes[n].level == lvl && amr_nodes[n].children[0] != -1) {
+                restrictNodeCPU(n);
+            }
+        }
+    }
+
+    std::vector<bool> to_refine(amr_nodes.size(), false);
+
+    // 2. Identify nodes to refine directly, and flag their 8 cardinal/diagonal neighbors
     for (size_t n = 0; n < amr_nodes.size(); ++n) {
-        if (amr_nodes[n].tile_id != -1 && amr_nodes[n].is_active && shouldRefineNodeCPU(n)) {
+        const auto& node = amr_nodes[n];
+        if (node.tile_id == -1 || !node.is_active) continue;
+
+        if (shouldRefineNodeCPU(n)) {
+            to_refine[n] = true;
+            for (int dr = -1; dr <= 1; ++dr) {
+                for (int dz = -1; dz <= 1; ++dz) {
+                    if (dr == 0 && dz == 0) continue;
+                    int nb_idx = findNodeByCoords(node.r_idx + dr, node.z_idx + dz, node.level);
+                    if (nb_idx != -1 && amr_nodes[nb_idx].tile_id != -1 && amr_nodes[nb_idx].is_active) {
+                        to_refine[nb_idx] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    std::vector<int> nodes_to_refine;
+    for (size_t n = 0; n < amr_nodes.size(); ++n) {
+        if (to_refine[n] && amr_nodes[n].level < amr_max_levels_val - 1) {
             nodes_to_refine.push_back(n);
         }
     }
 
+    // 3. Identify parent nodes to coarsen (checking children leaf status, gradient checks, and refinement buffer checks)
+    std::vector<int> parents_to_coarsen;
     for (size_t n = 0; n < amr_nodes.size(); ++n) {
         const auto& node = amr_nodes[n];
         if (node.children[0] != -1 && node.tile_id != -1) {
             bool all_children_leaves = true;
+            bool any_child_refining = false;
             for (int c = 0; c < 4; ++c) {
-                if (amr_nodes[node.children[c]].children[0] != -1) all_children_leaves = false;
+                int child_idx = node.children[c];
+                if (amr_nodes[child_idx].children[0] != -1) {
+                    all_children_leaves = false;
+                }
+                if (to_refine[child_idx]) {
+                    any_child_refining = true;
+                }
             }
-            if (all_children_leaves && shouldCoarsenNodeCPU(n)) {
+            if (all_children_leaves && !any_child_refining && shouldCoarsenNodeCPU(n)) {
                 parents_to_coarsen.push_back(n);
             }
         }
@@ -927,6 +990,9 @@ void CFDSolver2DAMRCudaImpl<RealType>::adaptMeshCPU() {
         syncTreeToGPU();
     }
     syncPoolsToGPU();
+    if (!nodes_to_refine.empty() || !parents_to_coarsen.empty()) {
+        updatePrimitiveGPU();
+    }
 }
 
 template <typename RealType>
@@ -942,7 +1008,16 @@ bool CFDSolver2DAMRCudaImpl<RealType>::shouldRefineNodeCPU(int node_idx) {
             int k = ti * AMR_TILE_DIM + tj;
             double gr_rho = std::abs((double)(S.rho[k+AMR_TILE_DIM] - S.rho[k-AMR_TILE_DIM]));
             double gz_rho = std::abs((double)(S.rho[k+1] - S.rho[k-1]));
-            if ((gr_rho + gz_rho) / (ambient_rho_val + 1e-4) > amr_threshold_val) return true;
+            double norm_rho = gr_rho + gz_rho;
+
+            double gr_p = std::abs((double)(S.p[k+AMR_TILE_DIM] - S.p[k-AMR_TILE_DIM]));
+            double gz_p = std::abs((double)(S.p[k+1] - S.p[k-1]));
+            double norm_p = gr_p + gz_p;
+
+            if (norm_rho / (ambient_rho_val + 1e-4) > amr_threshold_val ||
+                norm_p / (ambient_p_val + 1e-4) > amr_threshold_val) {
+                return true;
+            }
         }
     }
     return false;
@@ -961,7 +1036,16 @@ bool CFDSolver2DAMRCudaImpl<RealType>::shouldCoarsenNodeCPU(int parent_idx) {
                 int k = ti * AMR_TILE_DIM + tj;
                 double gr_rho = std::abs((double)(S.rho[k+AMR_TILE_DIM] - S.rho[k-AMR_TILE_DIM]));
                 double gz_rho = std::abs((double)(S.rho[k+1] - S.rho[k-1]));
-                if ((gr_rho + gz_rho) / (ambient_rho_val + 1e-4) > amr_threshold_val * amr_coarsen_ratio_val) return false;
+                double norm_rho = gr_rho + gz_rho;
+
+                double gr_p = std::abs((double)(S.p[k+AMR_TILE_DIM] - S.p[k-AMR_TILE_DIM]));
+                double gz_p = std::abs((double)(S.p[k+1] - S.p[k-1]));
+                double norm_p = gr_p + gz_p;
+
+                if (norm_rho / (ambient_rho_val + 1e-4) > amr_threshold_val * amr_coarsen_ratio_val ||
+                    norm_p / (ambient_p_val + 1e-4) > amr_threshold_val * amr_coarsen_ratio_val) {
+                    return false;
+                }
             }
         }
     }

@@ -119,6 +119,7 @@ private:
     void freeTile(int tile_id);
     void rebuildNeighborPointers();
     int findNeighborNode(int node_idx, int dir);
+    int findNodeByCoords(int r_idx, int z_idx, int level);
 
     void fillGhostCells();
     void computeTileRHS(int node_idx, double A_coeff, double dt);
