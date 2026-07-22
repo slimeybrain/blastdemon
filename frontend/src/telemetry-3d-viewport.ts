@@ -43,10 +43,12 @@ export class Telemetry3DViewport {
     private controlsOverlay: HTMLElement | null = null;
     private floatOpenBtn: HTMLElement | null = null;
     private sliceListContainer: HTMLElement | null = null;
+    private staticListContainer: HTMLElement | null = null;
     private expandedSliceIndices = new Set<number>();
     private needsSlicesRebuild = true;
     private isOpen = true;
     private latestSliceRanges: { min: number, max: number }[] = [];
+    private latestEmpiricalRange: { min: number, max: number } | null = null;
     private _lastSliceKey: string = '';
 
     private viewTypeSuffix: string;
@@ -92,6 +94,22 @@ export class Telemetry3DViewport {
                         badge.style.background = 'rgba(255, 170, 0, 0.1)';
                     }
                 }
+                if (this.debugOverlay) {
+                    this.debugOverlay.style.color = '#00ff66';
+                    this.debugOverlay.innerHTML = `Renderer: ${renderer} Active`;
+                }
+            } else if (type === 'error') {
+                console.error("[ViewportWorker Error]", e.data.message);
+                const badge = document.getElementById(this.getElId('viewport-renderer-badge'));
+                if (badge) {
+                    badge.innerHTML = 'ERROR';
+                    badge.style.color = '#ff3333';
+                    badge.style.background = 'rgba(255, 51, 51, 0.2)';
+                }
+                if (this.debugOverlay) {
+                    this.debugOverlay.style.color = '#ff3333';
+                    this.debugOverlay.innerHTML = `WORKER ERROR: ${e.data.message}`;
+                }
             } else if (type === 'rangeUpdated') {
                 const vpNode = this.getViewportNode();
                 if (vpNode) {
@@ -126,13 +144,29 @@ export class Telemetry3DViewport {
             } else if (type === 'sliceRanges') {
                 this.latestSliceRanges = e.data.ranges;
                 this.syncControls(false);
+            } else if (type === 'obstaclesRangeUpdated') {
+                const vpNode = this.getViewportNode();
+                if (vpNode) {
+                    const { min, max } = e.data;
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, {
+                        obstacles_auto_scale: false,
+                        obstacles_min_val: min,
+                        obstacles_max_val: max
+                    });
+                    this.syncControls(true);
+                }
             } else if (type === 'currentRange') {
+                const { min, max } = e.data;
+                this.latestEmpiricalRange = { min, max };
                 const rangeLabel = document.getElementById(this.getElId('viewport-current-range'));
                 if (rangeLabel) {
                     rangeLabel.textContent = `Current: [${this.formatRangeValue(min)}, ${this.formatRangeValue(max)}]`;
                 }
             }
         };
+
+        this.initInteraction();
+        this.buildOverlay();
 
         const rect = this.container.getBoundingClientRect();
         // @ts-ignore
@@ -145,9 +179,6 @@ export class Telemetry3DViewport {
                 height: rect.height || 600
             }
         }, [offscreen]);
-
-        this.initInteraction();
-        this.buildOverlay();
 
         // Diagnostic Overlay for STL Loading
         this.debugOverlay = document.createElement('div');
@@ -315,18 +346,21 @@ export class Telemetry3DViewport {
         this.controlsOverlay.style.top = '10px';
         this.controlsOverlay.style.right = '10px';
         this.controlsOverlay.style.bottom = '10px';
-        this.controlsOverlay.style.width = '290px';
-        this.controlsOverlay.style.background = 'rgba(20, 20, 22, 0.85)';
-        this.controlsOverlay.style.backdropFilter = 'blur(12px)';
-        this.controlsOverlay.style.border = '1px solid rgba(255, 255, 255, 0.1)';
+        this.controlsOverlay.style.width = '460px';
+        this.controlsOverlay.style.maxWidth = 'calc(100% - 20px)';
+        this.controlsOverlay.style.background = 'rgba(16, 16, 19, 0.92)';
+        this.controlsOverlay.style.backdropFilter = 'blur(16px)';
+        this.controlsOverlay.style.border = '1px solid rgba(255, 255, 255, 0.12)';
         this.controlsOverlay.style.borderRadius = '8px';
         this.controlsOverlay.style.display = 'flex';
         this.controlsOverlay.style.flexDirection = 'column';
         this.controlsOverlay.style.color = '#e0e0e0';
         this.controlsOverlay.style.fontFamily = 'system-ui, -apple-system, sans-serif';
-        this.controlsOverlay.style.fontSize = '12px';
-        this.controlsOverlay.style.boxShadow = '0 12px 40px 0 rgba(0, 0, 0, 0.5)';
+        this.controlsOverlay.style.fontSize = '11px';
+        this.controlsOverlay.style.boxShadow = '0 12px 40px 0 rgba(0, 0, 0, 0.6)';
         this.controlsOverlay.style.zIndex = '11';
+        this.controlsOverlay.style.boxSizing = 'border-box';
+        this.controlsOverlay.style.overflow = 'hidden';
         this.container.appendChild(this.controlsOverlay);
 
         // Header
@@ -334,9 +368,11 @@ export class Telemetry3DViewport {
         header.style.display = 'flex';
         header.style.justifyContent = 'space-between';
         header.style.alignItems = 'center';
-        header.style.padding = '8px 12px';
+        header.style.padding = '6px 10px';
         header.style.borderBottom = '1px solid rgba(255, 255, 255, 0.08)';
-        header.style.background = 'linear-gradient(to right, rgba(255,255,255,0.02), transparent)';
+        header.style.background = 'linear-gradient(to right, rgba(255,255,255,0.03), transparent)';
+        header.style.boxSizing = 'border-box';
+        header.style.width = '100%';
         
         const titleWrap = document.createElement('div');
         titleWrap.style.display = 'flex';
@@ -344,7 +380,8 @@ export class Telemetry3DViewport {
 
         const title = document.createElement('span');
         title.innerHTML = '⚡ 3D Controls';
-        title.style.fontWeight = '600';
+        title.style.fontWeight = '700';
+        title.style.fontSize = '11px';
         title.style.letterSpacing = '0.5px';
         titleWrap.appendChild(title);
 
@@ -352,14 +389,14 @@ export class Telemetry3DViewport {
         badge.id = this.getElId('viewport-renderer-badge');
         badge.innerHTML = 'Detecting...';
         badge.style.fontSize = '8px';
-        badge.style.padding = '2px 5px';
+        badge.style.padding = '1px 4px';
         badge.style.borderRadius = '3px';
         badge.style.border = '1px solid rgba(255,255,255,0.15)';
         badge.style.fontWeight = 'bold';
         badge.style.marginLeft = '8px';
         badge.style.textTransform = 'uppercase';
-        badge.style.color = '#888';
-        badge.style.background = 'rgba(255,255,255,0.03)';
+        badge.style.color = '#00adff';
+        badge.style.background = 'rgba(0,173,255,0.1)';
         titleWrap.appendChild(badge);
 
         header.appendChild(titleWrap);
@@ -370,7 +407,7 @@ export class Telemetry3DViewport {
         closeBtn.style.border = 'none';
         closeBtn.style.color = '#aaa';
         closeBtn.style.cursor = 'pointer';
-        closeBtn.style.fontSize = '12px';
+        closeBtn.style.fontSize = '11px';
         closeBtn.onclick = () => {
             this.isOpen = false;
             if (this.controlsOverlay) this.controlsOverlay.style.display = 'none';
@@ -383,70 +420,17 @@ export class Telemetry3DViewport {
         const content = document.createElement('div');
         content.style.flex = '1';
         content.style.overflowY = 'auto';
-        content.style.padding = '12px';
+        content.style.overflowX = 'hidden';
+        content.style.padding = '6px';
         content.style.display = 'flex';
         content.style.flexDirection = 'column';
-        content.style.gap = '14px';
+        content.style.gap = '6px';
+        content.style.boxSizing = 'border-box';
+        content.style.width = '100%';
         this.controlsOverlay.appendChild(content);
 
-        // Section 1: Render Options
-        const renderSection = this.createSection(content, 'Render Settings');
-        this.buildRenderControls(renderSection);
-
-        // Section 1.5: Lighting & Shadows
-        const lightingSection = this.createSection(content, 'Lighting & Shadows');
-        this.buildLightingControls(lightingSection);
-
-        // Section 1.6: STL Geometry
-        const stlSection = this.createSection(content, 'STL Boundary Mesh');
-        this.buildSTLControls(stlSection);
-
-        // Section 1.65: Obstacle Surfaces
-        const obsSection = this.createSection(content, 'Obstacle Surfaces');
-        this.buildObstacleControls(obsSection);
- 
-        // Section 1.7: Virtual Gauges
-        const gaugesSection = this.createSection(content, 'Virtual Gauges');
-        this.buildGaugeControls(gaugesSection);
-
-        // Section 2: Slice Settings
-        const sliceSection = this.createSection(content, 'Active Slices');
-        this.sliceListContainer = document.createElement('div');
-        this.sliceListContainer.style.display = 'flex';
-        this.sliceListContainer.style.flexDirection = 'column';
-        this.sliceListContainer.style.gap = '8px';
-        sliceSection.appendChild(this.sliceListContainer);
-
-        const addSliceBtn = document.createElement('button');
-        addSliceBtn.innerHTML = '+ Add Slice';
-        this.applyButtonStyle(addSliceBtn);
-        addSliceBtn.style.marginTop = '8px';
-        addSliceBtn.onclick = () => this.addSlice();
-        sliceSection.appendChild(addSliceBtn);
-    }
-
-    private createSection(parent: HTMLElement, titleText: string): HTMLElement {
-        const wrap = document.createElement('div');
-        wrap.style.display = 'flex';
-        wrap.style.flexDirection = 'column';
-        wrap.style.gap = '6px';
-        parent.appendChild(wrap);
-
-        const label = document.createElement('div');
-        label.innerHTML = titleText;
-        label.style.fontWeight = 'bold';
-        label.style.color = '#00adff';
-        label.style.textTransform = 'uppercase';
-        label.style.fontSize = '10px';
-        label.style.letterSpacing = '1px';
-        wrap.appendChild(label);
-
-        const body = document.createElement('div');
-        body.style.display = 'flex';
-        body.style.flexDirection = 'column';
-        body.style.gap = '6px';
-        wrap.appendChild(body);
-        return body;
+        // Build Unified Controls Matrix Table
+        this.buildUnifiedControlsTable(content);
     }
 
     private formatRangeValue(val: number): string {
@@ -457,165 +441,1936 @@ export class Telemetry3DViewport {
     }
 
     private applyButtonStyle(btn: HTMLElement) {
-        btn.style.background = '#2c2c30';
+        btn.style.background = '#25252a';
         btn.style.color = '#ffffff';
-        btn.style.border = '1px solid rgba(255, 255, 255, 0.1)';
+        btn.style.border = '1px solid rgba(255, 255, 255, 0.12)';
         btn.style.borderRadius = '4px';
-        btn.style.padding = '4px 8px';
+        btn.style.padding = '3px 7px';
         btn.style.cursor = 'pointer';
-        btn.style.fontSize = '11px';
+        btn.style.fontSize = '10px';
         btn.style.fontWeight = '500';
         btn.style.transition = 'background 0.2s';
-        btn.onmouseover = () => btn.style.background = '#3c3c40';
-        btn.onmouseout = () => btn.style.background = '#2c2c30';
+        btn.onmouseover = () => btn.style.background = '#35353c';
+        btn.onmouseout = () => btn.style.background = '#25252a';
     }
 
-    private buildRenderControls(parent: HTMLElement) {
+    private createCard(
+        parent: HTMLElement,
+        titleText: string,
+        icon: string,
+        enabledKey?: string,
+        defaultEnabled: boolean = true,
+        onEnableChange?: (enabled: boolean) => void
+    ): { card: HTMLElement; body: HTMLElement; header: HTMLElement } {
+        const card = document.createElement('div');
+        card.style.background = 'rgba(255, 255, 255, 0.025)';
+        card.style.border = '1px solid rgba(255, 255, 255, 0.08)';
+        card.style.borderRadius = '5px';
+        card.style.padding = '5px 7px';
+        card.style.display = 'flex';
+        card.style.flexDirection = 'column';
+        card.style.gap = '4px';
+        card.style.width = '100%';
+        card.style.boxSizing = 'border-box';
+        card.style.transition = 'border-color 0.2s, background 0.2s';
+        parent.appendChild(card);
+
+        const header = document.createElement('div');
+        header.style.display = 'flex';
+        header.style.justifyContent = 'space-between';
+        header.style.alignItems = 'center';
+        header.style.width = '100%';
+        header.style.boxSizing = 'border-box';
+
+        const titleWrap = document.createElement('div');
+        titleWrap.style.display = 'flex';
+        titleWrap.style.alignItems = 'center';
+        titleWrap.style.gap = '5px';
+
+        let isEnabled = defaultEnabled;
+        if (enabledKey) {
+            const vpNode = this.getViewportNode();
+            if (vpNode) {
+                isEnabled = vpNode.parameters[enabledKey] !== false;
+            }
+            const enableCb = document.createElement('input');
+            enableCb.type = 'checkbox';
+            enableCb.checked = isEnabled;
+            enableCb.title = `Enable/Disable ${titleText}`;
+            enableCb.style.margin = '0';
+            enableCb.onchange = (e) => {
+                e.stopPropagation();
+                const vp = this.getViewportNode();
+                if (vp) {
+                    this.stateManager.updateNodeParametersInPlace(vp.id, { [enabledKey]: enableCb.checked });
+                    if (onEnableChange) onEnableChange(enableCb.checked);
+                    this.syncControls(true);
+                }
+            };
+            this.bindEditingEvents(enableCb);
+            titleWrap.appendChild(enableCb);
+        }
+
+        const iconSpan = document.createElement('span');
+        iconSpan.textContent = icon;
+        iconSpan.style.fontSize = '10px';
+        titleWrap.appendChild(iconSpan);
+
+        const titleLabel = document.createElement('span');
+        titleLabel.textContent = titleText;
+        titleLabel.style.fontWeight = 'bold';
+        titleLabel.style.fontSize = '9.5px';
+        titleLabel.style.color = '#00adff';
+        titleLabel.style.letterSpacing = '0.4px';
+        titleLabel.style.textTransform = 'uppercase';
+        titleWrap.appendChild(titleLabel);
+
+        header.appendChild(titleWrap);
+
+        let isExpanded = true;
+        const toggleBtn = document.createElement('span');
+        toggleBtn.textContent = '▲';
+        toggleBtn.style.cursor = 'pointer';
+        toggleBtn.style.fontSize = '8px';
+        toggleBtn.style.color = '#888';
+        header.appendChild(toggleBtn);
+
+        card.appendChild(header);
+
+        const body = document.createElement('div');
+        body.style.display = 'flex';
+        body.style.flexDirection = 'column';
+        body.style.gap = '4px';
+        body.style.width = '100%';
+        body.style.boxSizing = 'border-box';
+        body.style.marginTop = '2px';
+        card.appendChild(body);
+
+        toggleBtn.onclick = (e) => {
+            e.stopPropagation();
+            isExpanded = !isExpanded;
+            body.style.display = isExpanded ? 'flex' : 'none';
+            toggleBtn.textContent = isExpanded ? '▲' : '⚙️';
+        };
+
+        return { card, body, header };
+    }
+
+    private buildUnifiedControlsTable(parent: HTMLElement) {
         const vpNode = this.getViewportNode();
 
-        // Grid (bbox) toggle
-        const gridRow = document.createElement('label');
-        gridRow.style.display = 'flex';
-        gridRow.style.alignItems = 'center';
-        gridRow.style.gap = '6px';
-        gridRow.style.cursor = 'pointer';
-        
-        const gridCb = document.createElement('input');
-        gridCb.type = 'checkbox';
-        gridCb.id = this.getElId('viewport-grid-cb');
-        // FIX 1/5: Initialize from saved state so value is correct on load
-        gridCb.checked = vpNode ? (vpNode.parameters.show_grid !== false) : true;
-        gridCb.onchange = () => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { show_grid: gridCb.checked });
-                this.worker.postMessage({ type: 'setConfig', data: { showGrid: gridCb.checked } });
-            }
-        };
-        gridRow.appendChild(gridCb);
-        gridRow.appendChild(document.createTextNode('Show Bounding Box'));
-        parent.appendChild(gridRow);
+        // 1. Top Bar: Refresh Rate & Add Slice Button
+        const topBar = document.createElement('div');
+        topBar.style.display = 'flex';
+        topBar.style.justifyContent = 'space-between';
+        topBar.style.alignItems = 'center';
+        topBar.style.gap = '6px';
+        topBar.style.width = '100%';
+        topBar.style.marginBottom = '6px';
+        topBar.style.boxSizing = 'border-box';
 
-        // Cell edges toggle
-        const edgesRow = document.createElement('label');
-        edgesRow.style.display = 'flex';
-        edgesRow.style.alignItems = 'center';
-        edgesRow.style.gap = '6px';
-        edgesRow.style.cursor = 'pointer';
-        
-        const edgesCb = document.createElement('input');
-        edgesCb.type = 'checkbox';
-        edgesCb.id = this.getElId('viewport-edges-cb');
-        // FIX 1/5: Initialize from saved state
-        edgesCb.checked = vpNode ? (!!vpNode.parameters.cell_edges) : false;
-        edgesCb.onchange = () => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { cell_edges: edgesCb.checked });
-                this.worker.postMessage({ type: 'setConfig', data: { showCellEdges: edgesCb.checked } });
-            }
-        };
-        edgesRow.appendChild(edgesCb);
-        edgesRow.appendChild(document.createTextNode('Show Cell Edges'));
-        parent.appendChild(edgesRow);
-
-        // Refresh rate dropdown
         const rateRow = document.createElement('div');
         rateRow.style.display = 'flex';
-        rateRow.style.flexDirection = 'column';
+        rateRow.style.alignItems = 'center';
         rateRow.style.gap = '4px';
-        rateRow.style.marginTop = '6px';
-
-        const rateLbl = document.createElement('div');
-        rateLbl.style.fontSize = '9px';
-        rateLbl.style.color = '#aaa';
-        rateLbl.textContent = 'Refresh Rate';
-        rateRow.appendChild(rateLbl);
+        rateRow.style.fontSize = '10px';
+        rateRow.style.color = '#aaa';
+        rateRow.appendChild(document.createTextNode('Refresh Rate:'));
 
         const rateSel = document.createElement('select');
         rateSel.id = this.getElId('viewport-refresh-rate-sel');
         this.applySelectStyle(rateSel);
+        rateSel.style.width = '120px';
         rateSel.innerHTML = `
             <option value="0.0">Max Rate (0s)</option>
-            <option value="0.016">60 FPS (0.016s)</option>
-            <option value="0.033">30 FPS (0.033s)</option>
-            <option value="0.05">20 FPS (0.05s)</option>
-            <option value="0.1">10 FPS (0.1s)</option>
-            <option value="0.2">5 FPS (0.2s)</option>
-            <option value="0.5">2 FPS (0.5s)</option>
-            <option value="1.0">1 FPS (1.0s)</option>
-            <option value="2.0">0.5 FPS (2.0s)</option>
-            <option value="5.0">0.2 FPS (5.0s)</option>
-            <option value="10.0">0.1 FPS (10.0s)</option>
+            <option value="0.016">60 FPS</option>
+            <option value="0.033">30 FPS</option>
+            <option value="0.05">20 FPS</option>
+            <option value="0.1">10 FPS</option>
+            <option value="0.2">5 FPS</option>
+            <option value="0.5">2 FPS</option>
+            <option value="1.0">1 FPS</option>
+            <option value="2.0">0.5 FPS (Default)</option>
+            <option value="5.0">0.2 FPS</option>
         `;
-        rateSel.value = vpNode ? String(vpNode.parameters.refresh_rate ?? 2.0) : '2.0';
-        
+        this.selectOptionByNumericValue(rateSel, vpNode ? (vpNode.parameters.refresh_rate ?? 2.0) : 2.0);
         this.bindEditingEvents(rateSel, () => {
             const vp = this.getViewportNode();
             if (vp) {
                 const val = Number(rateSel.value);
                 this.stateManager.updateNodeParametersInPlace(vp.id, { refresh_rate: val });
-                
-                const net = (window as any).networkManager;
-                if (net && net.isConnected()) {
-                    let targetModelId = vp.id;
-                    const models = this.stateManager.getAppState().models;
-                    for (const [mid, m] of Object.entries(models)) {
-                        if (m.nodes.some(n => n.id === vp.id)) {
-                            targetModelId = mid;
-                            break;
-                        }
-                    }
-                    net.send({
-                        command: "VIEW3D_CONFIG",
-                        modelId: targetModelId,
-                        refresh_rate: val,
-                        slices: vp.parameters.slices || []
-                    });
-                }
+                this.sendView3DConfig();
             }
         });
         rateRow.appendChild(rateSel);
-        parent.appendChild(rateRow);
+        topBar.appendChild(rateRow);
 
-        // Recenter view button
-        const recenterRow = document.createElement('div');
-        recenterRow.style.display = 'flex';
-        recenterRow.style.justifyContent = 'center';
-        recenterRow.style.marginTop = '4px';
-        const recenterBtn = document.createElement('button');
-        recenterBtn.innerHTML = '🔄 Recenter View';
-        this.applyButtonStyle(recenterBtn);
-        recenterBtn.style.width = '100%';
-        recenterBtn.onclick = () => {
-            this.worker.postMessage({
-                type: 'setView',
-                data: { rotX: 0.5, rotY: 0.5, zoom: -2.5, panX: 0.0, panY: 0.0 }
-            });
-        };
-        recenterRow.appendChild(recenterBtn);
-        parent.appendChild(recenterRow);
+        const addSliceBtn = document.createElement('button');
+        addSliceBtn.innerHTML = '+ Add Slice';
+        this.applyButtonStyle(addSliceBtn);
+        addSliceBtn.onclick = () => this.addSlice();
+        topBar.appendChild(addSliceBtn);
+
+        parent.appendChild(topBar);
+
+        // 2. Real Data Table Card
+        const tableCard = document.createElement('div');
+        tableCard.style.background = 'rgba(255, 255, 255, 0.02)';
+        tableCard.style.border = '1px solid rgba(255, 255, 255, 0.08)';
+        tableCard.style.borderRadius = '6px';
+        tableCard.style.padding = '4px';
+        tableCard.style.width = '100%';
+        tableCard.style.boxSizing = 'border-box';
+        tableCard.style.overflow = 'hidden';
+        parent.appendChild(tableCard);
+
+        const table = document.createElement('table');
+        table.style.width = '100%';
+        table.style.tableLayout = 'fixed';
+        table.style.borderCollapse = 'collapse';
+        table.style.fontSize = '9.5px';
+        table.style.color = '#ccc';
+        tableCard.appendChild(table);
+
+        const thead = document.createElement('thead');
+        thead.innerHTML = `
+            <tr style="border-bottom: 1px solid rgba(255, 255, 255, 0.15); color: #00adff; font-weight: bold; font-size: 8.5px; text-transform: uppercase; letter-spacing: 0.5px;">
+                <th style="padding: 4px 2px; text-align: center; width: 20px;" title="Visibility">👁</th>
+                <th style="padding: 4px 4px; text-align: left; width: 70px;">LAYER</th>
+                <th style="padding: 4px 2px; text-align: center; width: 32px;" title="Solids / Volume Surface">SOL</th>
+                <th style="padding: 4px 2px; text-align: center; width: 38px;" title="Lines, Mesh Gridlines & Cell Edges">LINES</th>
+                <th style="padding: 4px 2px; text-align: center; width: 32px;" title="Results / Contour Display">RES</th>
+                <th style="padding: 4px 4px; text-align: left; width: 70px;">QTY</th>
+                <th style="padding: 4px 4px; text-align: left; width: 70px;">COLOR</th>
+                <th style="padding: 4px 2px; text-align: center; width: 44px;">SCL</th>
+                <th style="padding: 4px 4px; text-align: center; width: 45px;">OPACITY</th>
+                <th style="padding: 4px 2px; text-align: center; width: 18px;">🗑</th>
+            </tr>
+        `;
+        table.appendChild(thead);
+
+        const sliceTbody = document.createElement('tbody');
+        table.appendChild(sliceTbody);
+        this.sliceListContainer = sliceTbody;
+
+        const staticTbody = document.createElement('tbody');
+        table.appendChild(staticTbody);
+        this.staticListContainer = staticTbody;
+
+        // Render static component rows below slices
+        this.buildObstacleRow(staticTbody);
+        this.buildSTLRow(staticTbody);
+        this.buildGridRow(staticTbody);
+        this.buildGaugeRow(staticTbody);
+        this.buildLightingTableRow(staticTbody);
     }
 
-    private buildLightingControls(parent: HTMLElement) {
-        // FIX 1: Read initial values from state so sliders are persistent
+    private activePopover: HTMLElement | null = null;
+    private currentOutsideListener: ((e: MouseEvent) => void) | null = null;
+
+    private closePopover() {
+        if (this.currentOutsideListener) {
+            window.removeEventListener('mousedown', this.currentOutsideListener);
+            this.currentOutsideListener = null;
+        }
+        if (this.activePopover) {
+            this.activePopover.remove();
+            this.activePopover = null;
+        }
+    }
+
+    private showPopover(targetEl: HTMLElement, contentBuilder: (popover: HTMLElement) => void) {
+        this.closePopover();
+
+        const popover = document.createElement('div');
+        popover.className = 'viewport-controls-popover';
+        popover.style.position = 'fixed';
+        popover.style.zIndex = '99999';
+        popover.style.background = '#181c24';
+        popover.style.border = '1px solid #00adff';
+        popover.style.borderRadius = '5px';
+        popover.style.padding = '6px';
+        popover.style.boxShadow = '0 6px 20px rgba(0, 0, 0, 0.7)';
+        popover.style.fontSize = '9.5px';
+        popover.style.color = '#eee';
+        popover.style.minWidth = '130px';
+
+        contentBuilder(popover);
+
+        document.body.appendChild(popover);
+        this.activePopover = popover;
+
+        const rect = targetEl.getBoundingClientRect();
+        let top = rect.bottom + 4;
+        let left = rect.left;
+
+        popover.style.visibility = 'hidden';
+        const popRect = popover.getBoundingClientRect();
+        if (left + popRect.width > window.innerWidth - 10) {
+            left = window.innerWidth - popRect.width - 10;
+        }
+        if (top + popRect.height > window.innerHeight - 10) {
+            top = rect.top - popRect.height - 4;
+        }
+        popover.style.left = `${Math.max(10, left)}px`;
+        popover.style.top = `${Math.max(10, top)}px`;
+        popover.style.visibility = 'visible';
+
+        const onClickOutside = (e: MouseEvent) => {
+            const target = e.target as any;
+            if (popover && !popover.contains(target) && !targetEl.contains(target)) {
+                this.closePopover();
+            }
+        };
+        this.currentOutsideListener = onClickOutside;
+        setTimeout(() => {
+            if (this.activePopover === popover) {
+                window.addEventListener('mousedown', onClickOutside);
+            }
+        }, 10);
+    }
+
+    private showQuantityPopover(targetEl: HTMLElement, currentQty: string, onSelect: (qty: string) => void) {
+        const quantities = [
+            { id: 'pressure', label: '📊 Pressure' },
+            { id: 'density', label: '⚖️ Density' },
+            { id: 'velocity', label: '💨 Speed' },
+            { id: 'energy', label: '🔥 Energy' },
+            { id: 'species1', label: '💥 Reacted' },
+            { id: 'species2', label: '🧪 Unreacted' },
+            { id: 'species3', label: '🌬️ Air' },
+            { id: 'peak_overpressure', label: '📈 Pk Press' },
+            { id: 'peak_impulse', label: '⏱️ Pk Impulse' }
+        ];
+
+        this.showPopover(targetEl, (popover) => {
+            const title = document.createElement('div');
+            title.textContent = 'Select Quantity';
+            title.style.fontWeight = 'bold';
+            title.style.color = '#00adff';
+            title.style.marginBottom = '6px';
+            title.style.fontSize = '9px';
+            title.style.textTransform = 'uppercase';
+            popover.appendChild(title);
+
+            quantities.forEach(q => {
+                const item = document.createElement('div');
+                item.textContent = q.label;
+                item.style.padding = '3px 6px';
+                item.style.borderRadius = '3px';
+                item.style.cursor = 'pointer';
+                item.style.background = q.id === currentQty ? '#007acc' : 'transparent';
+                item.style.color = q.id === currentQty ? '#fff' : '#ccc';
+                item.onmouseenter = () => { if (q.id !== currentQty) item.style.background = 'rgba(255,255,255,0.1)'; };
+                item.onmouseleave = () => { if (q.id !== currentQty) item.style.background = 'transparent'; };
+                item.onclick = (e) => {
+                    e.stopPropagation();
+                    onSelect(q.id);
+                    this.closePopover();
+                };
+                popover.appendChild(item);
+            });
+        });
+    }
+
+    private showColormapPopover(targetEl: HTMLElement, currentCmap: string, onSelect: (cmap: string) => void) {
+        const colormaps = [
+            { id: 'plasma', name: 'Plasma', grad: 'linear-gradient(to right, #0d0887, #6a00a8, #b12a90, #e16462, #fca636, #f0f921)' },
+            { id: 'viridis', name: 'Viridis', grad: 'linear-gradient(to right, #440154, #3b528b, #21908d, #5dc963, #fde725)' },
+            { id: 'rainbow', name: 'Rainbow', grad: 'linear-gradient(to right, #0000ff, #00ffff, #00ff00, #ffff00, #ff0000)' },
+            { id: 'coolwarm', name: 'CoolWarm', grad: 'linear-gradient(to right, #3b4cc0, #88b0f3, #ddd, #f49a7b, #b40426)' },
+            { id: 'cividis', name: 'Cividis', grad: 'linear-gradient(to right, #002051, #395276, #678685, #9eb980, #fdea45)' },
+            { id: 'grayscale', name: 'Gray', grad: 'linear-gradient(to right, #000000, #ffffff)' }
+        ];
+
+        this.showPopover(targetEl, (popover) => {
+            const title = document.createElement('div');
+            title.textContent = 'Select Colormap';
+            title.style.fontWeight = 'bold';
+            title.style.color = '#00adff';
+            title.style.marginBottom = '6px';
+            title.style.fontSize = '9px';
+            title.style.textTransform = 'uppercase';
+            popover.appendChild(title);
+
+            colormaps.forEach(c => {
+                const item = document.createElement('div');
+                item.style.display = 'flex';
+                item.style.alignItems = 'center';
+                item.style.justifyContent = 'space-between';
+                item.style.gap = '8px';
+                item.style.padding = '3px 6px';
+                item.style.borderRadius = '3px';
+                item.style.cursor = 'pointer';
+                item.style.background = c.id === currentCmap ? '#007acc' : 'transparent';
+                item.style.color = c.id === currentCmap ? '#fff' : '#ccc';
+
+                const nameSpan = document.createElement('span');
+                nameSpan.textContent = c.name;
+                item.appendChild(nameSpan);
+
+                const swatch = document.createElement('div');
+                swatch.style.width = '35px';
+                swatch.style.height = '10px';
+                swatch.style.borderRadius = '2px';
+                swatch.style.background = c.grad;
+                swatch.style.border = '1px solid rgba(255,255,255,0.3)';
+                item.appendChild(swatch);
+
+                item.onmouseenter = () => { if (c.id !== currentCmap) item.style.background = 'rgba(255,255,255,0.1)'; };
+                item.onmouseleave = () => { if (c.id !== currentCmap) item.style.background = 'transparent'; };
+                item.onclick = (e) => {
+                    e.stopPropagation();
+                    onSelect(c.id);
+                    this.closePopover();
+                };
+                popover.appendChild(item);
+            });
+        });
+    }
+
+    private showOpacityPopover(targetEl: HTMLElement, currentVal: number, onChange: (opac: number) => void) {
+        this.showPopover(targetEl, (popover) => {
+            const title = document.createElement('div');
+            title.textContent = 'Opacity Preset';
+            title.style.fontWeight = 'bold';
+            title.style.color = '#00adff';
+            title.style.marginBottom = '6px';
+            title.style.fontSize = '9px';
+            title.style.textTransform = 'uppercase';
+            popover.appendChild(title);
+
+            const grid = document.createElement('div');
+            grid.style.display = 'grid';
+            grid.style.gridTemplateColumns = '1fr 1fr 1fr';
+            grid.style.gap = '4px';
+            grid.style.marginBottom = '6px';
+
+            const presets = [1.0, 0.75, 0.50, 0.25, 0.10, 0.0];
+            presets.forEach(p => {
+                const btn = document.createElement('button');
+                btn.textContent = `${Math.round(p * 100)}%`;
+                this.applyButtonStyle(btn);
+                btn.style.fontSize = '8.5px';
+                btn.style.padding = '2px 0';
+                if (Math.abs(p - currentVal) < 0.04) {
+                    btn.style.background = '#007acc';
+                    btn.style.borderColor = '#00adff';
+                }
+                btn.onclick = (e) => {
+                    e.stopPropagation();
+                    onChange(p);
+                    this.closePopover();
+                };
+                grid.appendChild(btn);
+            });
+            popover.appendChild(grid);
+
+            const customRow = document.createElement('div');
+            customRow.style.display = 'flex';
+            customRow.style.alignItems = 'center';
+            customRow.style.gap = '4px';
+            const numInp = document.createElement('input');
+            numInp.type = 'number';
+            numInp.min = '0';
+            numInp.max = '1';
+            numInp.step = '0.05';
+            numInp.value = String(currentVal);
+            this.applyInputStyle(numInp);
+            numInp.style.width = '60px';
+            numInp.onchange = () => {
+                const val = Math.max(0, Math.min(1, Number(numInp.value)));
+                onChange(val);
+                this.closePopover();
+            };
+            customRow.appendChild(document.createTextNode('Custom:'));
+            customRow.appendChild(numInp);
+            popover.appendChild(customRow);
+        });
+    }
+
+    private getEmpiricalRange(): { min: number, max: number } | null {
+        if (this.latestEmpiricalRange && isFinite(this.latestEmpiricalRange.min) && isFinite(this.latestEmpiricalRange.max)) {
+            return this.latestEmpiricalRange;
+        }
+        if (this.latestSliceRanges && this.latestSliceRanges.length > 0) {
+            let min = Infinity;
+            let max = -Infinity;
+            this.latestSliceRanges.forEach(r => {
+                if (r && isFinite(r.min) && isFinite(r.max)) {
+                    if (r.min < min) min = r.min;
+                    if (r.max > max) max = r.max;
+                }
+            });
+            if (min !== Infinity && max !== -Infinity) {
+                return { min, max };
+            }
+        }
+        return null;
+    }
+
+    private showRangePopover(targetEl: HTMLElement, qtyName: string, minVal: number, maxVal: number, autoScale: boolean, logScale: boolean, interpScale?: boolean, onApply?: (minV: number, maxV: number, autoV: boolean, logV: boolean, interpV: boolean) => void) {
+        this.showPopover(targetEl, (popover) => {
+            const title = document.createElement('div');
+            title.textContent = `Scale (${qtyName})`;
+            title.style.fontWeight = 'bold';
+            title.style.color = '#00adff';
+            title.style.marginBottom = '6px';
+            title.style.fontSize = '9px';
+            title.style.textTransform = 'uppercase';
+            popover.appendChild(title);
+
+            // Auto, Log & Smooth toggles
+            const togglesRow = document.createElement('div');
+            togglesRow.style.display = 'flex';
+            togglesRow.style.gap = '8px';
+            togglesRow.style.marginBottom = '8px';
+
+            const autoLbl = document.createElement('label');
+            autoLbl.style.display = 'flex';
+            autoLbl.style.alignItems = 'center';
+            autoLbl.style.gap = '3px';
+            autoLbl.style.cursor = 'pointer';
+            const autoCb = document.createElement('input');
+            autoCb.type = 'checkbox';
+            autoCb.checked = autoScale;
+            autoLbl.appendChild(autoCb);
+            autoLbl.appendChild(document.createTextNode('Auto'));
+            togglesRow.appendChild(autoLbl);
+
+            const logLbl = document.createElement('label');
+            logLbl.style.display = 'flex';
+            logLbl.style.alignItems = 'center';
+            logLbl.style.gap = '3px';
+            logLbl.style.cursor = 'pointer';
+            const logCb = document.createElement('input');
+            logCb.type = 'checkbox';
+            logCb.checked = logScale;
+            logLbl.appendChild(logCb);
+            logLbl.appendChild(document.createTextNode('Log'));
+            togglesRow.appendChild(logLbl);
+
+            const interpLbl = document.createElement('label');
+            interpLbl.style.display = 'flex';
+            interpLbl.style.alignItems = 'center';
+            interpLbl.style.gap = '3px';
+            interpLbl.style.cursor = 'pointer';
+            const interpCb = document.createElement('input');
+            interpCb.type = 'checkbox';
+            interpCb.checked = interpScale !== false;
+            interpLbl.appendChild(interpCb);
+            interpLbl.appendChild(document.createTextNode('Smooth'));
+            togglesRow.appendChild(interpLbl);
+
+            popover.appendChild(togglesRow);
+
+            // Min & Max inputs
+            const inputsGrid = document.createElement('div');
+            inputsGrid.style.display = 'grid';
+            inputsGrid.style.gridTemplateColumns = '40px 1fr';
+            inputsGrid.style.gap = '4px';
+            inputsGrid.style.alignItems = 'center';
+            inputsGrid.style.marginBottom = '8px';
+
+            const minLbl = document.createElement('span');
+            minLbl.textContent = 'Min:';
+            const minInp = document.createElement('input');
+            minInp.type = 'number';
+            minInp.value = String(minVal);
+            this.applyInputStyle(minInp);
+            minInp.disabled = autoScale;
+
+            const maxLbl = document.createElement('span');
+            maxLbl.textContent = 'Max:';
+            const maxInp = document.createElement('input');
+            maxInp.type = 'number';
+            maxInp.value = String(maxVal);
+            this.applyInputStyle(maxInp);
+            maxInp.disabled = autoScale;
+
+            const commitRange = () => {
+                const minV = Number(minInp.value);
+                const maxV = Number(maxInp.value);
+                if (!isNaN(minV) && !isNaN(maxV) && onApply) {
+                    onApply(minV, maxV, autoCb.checked, logCb.checked, interpCb.checked);
+                }
+            };
+
+            autoCb.onchange = () => {
+                minInp.disabled = autoCb.checked;
+                maxInp.disabled = autoCb.checked;
+                if (!autoCb.checked) {
+                    const emp = this.getEmpiricalRange();
+                    if (emp) {
+                        minInp.value = String(emp.min);
+                        maxInp.value = String(emp.max);
+                    }
+                }
+                commitRange();
+            };
+            logCb.onchange = () => {
+                commitRange();
+            };
+            interpCb.onchange = () => {
+                commitRange();
+            };
+
+            minInp.oninput = minInp.onchange = () => {
+                if (autoCb.checked) {
+                    autoCb.checked = false;
+                    minInp.disabled = false;
+                    maxInp.disabled = false;
+                }
+                commitRange();
+            };
+            maxInp.oninput = maxInp.onchange = () => {
+                if (autoCb.checked) {
+                    autoCb.checked = false;
+                    minInp.disabled = false;
+                    maxInp.disabled = false;
+                }
+                commitRange();
+            };
+
+            minInp.onkeydown = maxInp.onkeydown = (e: KeyboardEvent) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    commitRange();
+                    this.closePopover();
+                }
+            };
+
+            inputsGrid.appendChild(minLbl);
+            inputsGrid.appendChild(minInp);
+            inputsGrid.appendChild(maxLbl);
+            inputsGrid.appendChild(maxInp);
+            popover.appendChild(inputsGrid);
+
+            // Set to Current Button
+            const empRange = this.getEmpiricalRange();
+            const setBtn = document.createElement('button');
+            setBtn.textContent = empRange ? `🎯 Set to Current [${this.formatRangeValue(empRange.min)}, ${this.formatRangeValue(empRange.max)}]` : '🎯 Set to Current';
+            this.applyButtonStyle(setBtn);
+            setBtn.style.width = '100%';
+            setBtn.style.marginBottom = '6px';
+            setBtn.style.background = 'rgba(0, 173, 255, 0.15)';
+            setBtn.style.border = '1px solid #00adff';
+            setBtn.style.color = '#00adff';
+            setBtn.style.fontSize = '9px';
+            setBtn.style.padding = '4px 0';
+            setBtn.onclick = (e) => {
+                e.stopPropagation();
+                const curEmp = this.getEmpiricalRange();
+                if (curEmp) {
+                    autoCb.checked = false;
+                    minInp.disabled = false;
+                    maxInp.disabled = false;
+                    minInp.value = String(curEmp.min);
+                    maxInp.value = String(curEmp.max);
+                    commitRange();
+                }
+            };
+            popover.appendChild(setBtn);
+
+            const applyBtn = document.createElement('button');
+            applyBtn.textContent = 'Apply Scale';
+            this.applyButtonStyle(applyBtn);
+            applyBtn.style.width = '100%';
+            applyBtn.onclick = (e) => {
+                e.stopPropagation();
+                commitRange();
+                this.closePopover();
+            };
+            popover.appendChild(applyBtn);
+        });
+    }
+
+    private showAmbientPopover(targetEl: HTMLElement, currentVal: number, onChange: (val: number) => void) {
+        this.showPopover(targetEl, (popover) => {
+            const title = document.createElement('div');
+            title.textContent = 'Ambient Level';
+            title.style.fontWeight = 'bold';
+            title.style.color = '#00adff';
+            title.style.marginBottom = '6px';
+            title.style.fontSize = '9px';
+            title.style.textTransform = 'uppercase';
+            popover.appendChild(title);
+
+            const grid = document.createElement('div');
+            grid.style.display = 'grid';
+            grid.style.gridTemplateColumns = '1fr 1fr 1fr';
+            grid.style.gap = '4px';
+            grid.style.marginBottom = '6px';
+
+            const presets = [
+                { val: 0.10, label: '10%' },
+                { val: 0.30, label: '30%' },
+                { val: 0.50, label: '50%' },
+                { val: 0.70, label: '70%' },
+                { val: 0.85, label: '85%' },
+                { val: 1.00, label: '100%' }
+            ];
+            presets.forEach(p => {
+                const btn = document.createElement('button');
+                btn.textContent = p.label;
+                this.applyButtonStyle(btn);
+                btn.style.fontSize = '8.5px';
+                btn.style.padding = '2px 0';
+                if (Math.abs(p.val - currentVal) < 0.04) {
+                    btn.style.background = '#007acc';
+                    btn.style.borderColor = '#00adff';
+                }
+                btn.onclick = (e) => {
+                    e.stopPropagation();
+                    onChange(p.val);
+                    this.closePopover();
+                };
+                grid.appendChild(btn);
+            });
+            popover.appendChild(grid);
+
+            const customRow = document.createElement('div');
+            customRow.style.display = 'flex';
+            customRow.style.alignItems = 'center';
+            customRow.style.gap = '4px';
+            const numInp = document.createElement('input');
+            numInp.type = 'number';
+            numInp.min = '0';
+            numInp.max = '1';
+            numInp.step = '0.05';
+            numInp.value = String(currentVal);
+            this.applyInputStyle(numInp);
+            numInp.style.width = '60px';
+            numInp.oninput = () => {
+                const valStr = numInp.value.trim();
+                if (valStr !== '') {
+                    const val = Number(valStr);
+                    if (!isNaN(val)) {
+                        onChange(Math.max(0, Math.min(1, val)));
+                    }
+                }
+            };
+            numInp.onkeydown = (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    const val = Math.max(0, Math.min(1, Number(numInp.value)));
+                    onChange(val);
+                    this.closePopover();
+                }
+            };
+            customRow.appendChild(document.createTextNode('Custom:'));
+            customRow.appendChild(numInp);
+            popover.appendChild(customRow);
+        });
+    }
+
+    private showSpecularPopover(targetEl: HTMLElement, currentVal: number, onChange: (val: number) => void) {
+        this.showPopover(targetEl, (popover) => {
+            const title = document.createElement('div');
+            title.textContent = 'Specular Level';
+            title.style.fontWeight = 'bold';
+            title.style.color = '#00adff';
+            title.style.marginBottom = '6px';
+            title.style.fontSize = '9px';
+            title.style.textTransform = 'uppercase';
+            popover.appendChild(title);
+
+            const grid = document.createElement('div');
+            grid.style.display = 'grid';
+            grid.style.gridTemplateColumns = '1fr 1fr 1fr';
+            grid.style.gap = '4px';
+            grid.style.marginBottom = '6px';
+
+            const presets = [
+                { val: 0.00, label: '0%' },
+                { val: 0.20, label: '20%' },
+                { val: 0.40, label: '40%' },
+                { val: 0.60, label: '60%' },
+                { val: 0.80, label: '80%' },
+                { val: 1.00, label: '100%' }
+            ];
+            presets.forEach(p => {
+                const btn = document.createElement('button');
+                btn.textContent = p.label;
+                this.applyButtonStyle(btn);
+                btn.style.fontSize = '8.5px';
+                btn.style.padding = '2px 0';
+                if (Math.abs(p.val - currentVal) < 0.04) {
+                    btn.style.background = '#007acc';
+                    btn.style.borderColor = '#00adff';
+                }
+                btn.onclick = (e) => {
+                    e.stopPropagation();
+                    onChange(p.val);
+                    this.closePopover();
+                };
+                grid.appendChild(btn);
+            });
+            popover.appendChild(grid);
+
+            const customRow = document.createElement('div');
+            customRow.style.display = 'flex';
+            customRow.style.alignItems = 'center';
+            customRow.style.gap = '4px';
+            const numInp = document.createElement('input');
+            numInp.type = 'number';
+            numInp.min = '0';
+            numInp.max = '1';
+            numInp.step = '0.05';
+            numInp.value = String(currentVal);
+            this.applyInputStyle(numInp);
+            numInp.style.width = '60px';
+            numInp.oninput = () => {
+                const valStr = numInp.value.trim();
+                if (valStr !== '') {
+                    const val = Number(valStr);
+                    if (!isNaN(val)) {
+                        onChange(Math.max(0, Math.min(1, val)));
+                    }
+                }
+            };
+            numInp.onkeydown = (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    const val = Math.max(0, Math.min(1, Number(numInp.value)));
+                    onChange(val);
+                    this.closePopover();
+                }
+            };
+            customRow.appendChild(document.createTextNode('Custom:'));
+            customRow.appendChild(numInp);
+            popover.appendChild(customRow);
+        });
+    }
+
+    private showGaugeSizePopover(targetEl: HTMLElement, currentVal: number, onChange: (val: number) => void) {
+        this.showPopover(targetEl, (popover) => {
+            popover.style.width = '210px';
+
+            const title = document.createElement('div');
+            title.textContent = '🎯 Gauge Sphere Size';
+            title.style.fontWeight = 'bold';
+            title.style.color = '#00adff';
+            title.style.marginBottom = '4px';
+            title.style.fontSize = '9px';
+            title.style.textTransform = 'uppercase';
+            popover.appendChild(title);
+
+            const sub = document.createElement('div');
+            sub.textContent = 'Size in multiples of cell size (dx):';
+            sub.style.fontSize = '8.5px';
+            sub.style.color = '#aaa';
+            sub.style.marginBottom = '6px';
+            popover.appendChild(sub);
+
+            const grid = document.createElement('div');
+            grid.style.display = 'grid';
+            grid.style.gridTemplateColumns = '1fr 1fr 1fr';
+            grid.style.gap = '4px';
+            grid.style.marginBottom = '8px';
+
+            const presets = [
+                { val: 0.25, label: '0.25x' },
+                { val: 0.50, label: '0.50x' },
+                { val: 1.00, label: '1.00x' },
+                { val: 1.50, label: '1.50x' },
+                { val: 2.00, label: '2.00x' },
+                { val: 3.00, label: '3.00x' }
+            ];
+
+            presets.forEach(p => {
+                const btn = document.createElement('button');
+                btn.textContent = p.label;
+                this.applyButtonStyle(btn);
+                btn.style.fontSize = '8.5px';
+                btn.style.padding = '2px 0';
+                if (Math.abs(p.val - currentVal) < 0.05) {
+                    btn.style.background = '#007acc';
+                    btn.style.borderColor = '#00adff';
+                }
+                btn.onclick = (e) => {
+                    e.stopPropagation();
+                    onChange(p.val);
+                    this.closePopover();
+                };
+                grid.appendChild(btn);
+            });
+            popover.appendChild(grid);
+
+            // Slider & Readout
+            const sliderHeader = document.createElement('div');
+            sliderHeader.style.display = 'flex';
+            sliderHeader.style.justifyContent = 'space-between';
+            sliderHeader.style.fontSize = '8.5px';
+            sliderHeader.style.color = '#aaa';
+            sliderHeader.style.marginBottom = '3px';
+
+            const sliderLbl = document.createElement('span');
+            sliderLbl.textContent = 'Multiplier:';
+            const sliderValSpan = document.createElement('span');
+            sliderValSpan.style.color = '#00adff';
+            sliderValSpan.style.fontWeight = 'bold';
+            sliderValSpan.textContent = `${currentVal.toFixed(2)}x cell`;
+
+            sliderHeader.appendChild(sliderLbl);
+            sliderHeader.appendChild(sliderValSpan);
+            popover.appendChild(sliderHeader);
+
+            const slider = document.createElement('input');
+            slider.type = 'range';
+            slider.min = '0.1';
+            slider.max = '5.0';
+            slider.step = '0.05';
+            slider.value = String(currentVal);
+            slider.style.width = '100%';
+            slider.style.accentColor = '#00adff';
+            slider.style.cursor = 'pointer';
+            slider.style.marginBottom = '8px';
+
+            let numInp: HTMLInputElement | null = null;
+
+            const updateVal = (v: number) => {
+                sliderValSpan.textContent = `${v.toFixed(2)}x cell`;
+                if (numInp) numInp.value = v.toFixed(2);
+                onChange(v);
+            };
+
+            slider.oninput = () => {
+                updateVal(Number(slider.value));
+            };
+            popover.appendChild(slider);
+
+            // Exact numeric entry
+            const customRow = document.createElement('div');
+            customRow.style.display = 'flex';
+            customRow.style.alignItems = 'center';
+            customRow.style.gap = '6px';
+            customRow.style.fontSize = '8.5px';
+
+            const numLbl = document.createElement('span');
+            numLbl.textContent = 'Exact (cell dx):';
+
+            numInp = document.createElement('input');
+            numInp.type = 'number';
+            numInp.min = '0.05';
+            numInp.max = '10.0';
+            numInp.step = '0.05';
+            numInp.value = currentVal.toFixed(2);
+            this.applyInputStyle(numInp);
+            numInp.style.width = '65px';
+            numInp.style.fontSize = '9px';
+            numInp.oninput = () => {
+                const valStr = numInp!.value.trim();
+                if (valStr !== '') {
+                    const v = Number(valStr);
+                    if (!isNaN(v) && v > 0) {
+                        slider.value = String(v);
+                        sliderValSpan.textContent = `${v.toFixed(2)}x cell`;
+                        onChange(v);
+                    }
+                }
+            };
+            numInp.onkeydown = (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    let v = Number(numInp!.value);
+                    if (!isNaN(v) && v > 0) {
+                        onChange(v);
+                    }
+                    this.closePopover();
+                }
+            };
+
+            customRow.appendChild(numLbl);
+            customRow.appendChild(numInp);
+            popover.appendChild(customRow);
+        });
+    }
+
+    private showSlicePositionPopover(targetEl: HTMLElement, sliceIndex: number, slice: any, meshNode: any) {
+        this.showPopover(targetEl, (popover) => {
+            popover.style.width = '240px';
+
+            const title = document.createElement('div');
+            title.style.fontWeight = 'bold';
+            title.style.marginBottom = '6px';
+            title.style.color = '#00adff';
+            title.style.fontSize = '9px';
+            title.style.textTransform = 'uppercase';
+            title.innerHTML = `🔪 Slice #${sliceIndex + 1} Plane & Position`;
+            popover.appendChild(title);
+
+            // 1. Plane Buttons (XY, XZ, YZ)
+            const planeLabel = document.createElement('div');
+            planeLabel.style.fontSize = '8.5px';
+            planeLabel.style.color = '#aaa';
+            planeLabel.style.marginBottom = '3px';
+            planeLabel.textContent = 'Slice Plane Orientation:';
+            popover.appendChild(planeLabel);
+
+            const planeRow = document.createElement('div');
+            planeRow.style.display = 'flex';
+            planeRow.style.gap = '4px';
+            planeRow.style.marginBottom = '8px';
+
+            const planes = [
+                { id: 'xy', label: 'XY (Z-Norm)' },
+                { id: 'xz', label: 'XZ (Y-Norm)' },
+                { id: 'yz', label: 'YZ (X-Norm)' }
+            ];
+
+            const currentAxis = slice.axis || 'xy';
+
+            planes.forEach(p => {
+                const btn = document.createElement('button');
+                btn.textContent = p.label;
+                this.applyButtonStyle(btn);
+                btn.style.flex = '1';
+                btn.style.fontSize = '8.5px';
+                btn.style.padding = '3px 0';
+                if (p.id === currentAxis) {
+                    btn.style.background = '#007acc';
+                    btn.style.borderColor = '#00adff';
+                    btn.style.color = '#fff';
+                }
+                btn.onclick = (e) => {
+                    e.stopPropagation();
+                    this.updateSliceProperty(sliceIndex, { axis: p.id });
+                    this.closePopover();
+                };
+                planeRow.appendChild(btn);
+            });
+            popover.appendChild(planeRow);
+
+            // 2. Position Slider & Live Reading
+            const bounds = getSliceBounds(currentAxis, meshNode);
+            const curOffset = Number(slice.offset ?? (bounds.min + bounds.max) / 2.0);
+
+            const posHeader = document.createElement('div');
+            posHeader.style.display = 'flex';
+            posHeader.style.justifyContent = 'space-between';
+            posHeader.style.alignItems = 'center';
+            posHeader.style.fontSize = '8.5px';
+            posHeader.style.color = '#aaa';
+            posHeader.style.marginBottom = '4px';
+
+            const posLbl = document.createElement('span');
+            posLbl.textContent = 'Offset Position:';
+            const posValSpan = document.createElement('span');
+            posValSpan.style.color = '#00adff';
+            posValSpan.style.fontWeight = 'bold';
+            posValSpan.textContent = `${curOffset.toFixed(3)} m`;
+
+            posHeader.appendChild(posLbl);
+            posHeader.appendChild(posValSpan);
+            popover.appendChild(posHeader);
+
+            const slider = document.createElement('input');
+            slider.type = 'range';
+            slider.min = bounds.min.toString();
+            slider.max = bounds.max.toString();
+            slider.step = Math.max(0.0001, (bounds.max - bounds.min) / 200).toString();
+            slider.value = String(curOffset);
+            slider.style.width = '100%';
+            slider.style.accentColor = '#00adff';
+            slider.style.cursor = 'pointer';
+            slider.style.marginBottom = '8px';
+
+            let numInp: HTMLInputElement | null = null;
+
+            const updatePos = (v: number) => {
+                posValSpan.textContent = `${v.toFixed(3)} m`;
+                if (numInp) numInp.value = v.toFixed(3);
+                this.updateSliceProperty(sliceIndex, { offset: v });
+            };
+
+            slider.oninput = () => {
+                updatePos(Number(slider.value));
+            };
+            popover.appendChild(slider);
+
+            // 3. Quick Preset Percentages
+            const presetRow = document.createElement('div');
+            presetRow.style.display = 'flex';
+            presetRow.style.gap = '3px';
+            presetRow.style.marginBottom = '8px';
+
+            const presets = [
+                { frac: 0.00, label: '0%' },
+                { frac: 0.25, label: '25%' },
+                { frac: 0.50, label: '50%' },
+                { frac: 0.75, label: '75%' },
+                { frac: 1.00, label: '100%' }
+            ];
+
+            presets.forEach(pr => {
+                const pVal = bounds.min + pr.frac * (bounds.max - bounds.min);
+                const btn = document.createElement('button');
+                btn.textContent = pr.label;
+                this.applyButtonStyle(btn);
+                btn.style.flex = '1';
+                btn.style.fontSize = '8.5px';
+                btn.style.padding = '2px 0';
+                if (Math.abs(curOffset - pVal) < (bounds.max - bounds.min) * 0.02) {
+                    btn.style.background = '#007acc';
+                    btn.style.borderColor = '#00adff';
+                }
+                btn.onclick = (e) => {
+                    e.stopPropagation();
+                    slider.value = String(pVal);
+                    updatePos(pVal);
+                };
+                presetRow.appendChild(btn);
+            });
+            popover.appendChild(presetRow);
+
+            // 4. Exact Value Entry
+            const customRow = document.createElement('div');
+            customRow.style.display = 'flex';
+            customRow.style.alignItems = 'center';
+            customRow.style.gap = '6px';
+            customRow.style.fontSize = '8.5px';
+
+            const numLbl = document.createElement('span');
+            numLbl.textContent = 'Exact (m):';
+
+            numInp = document.createElement('input');
+            numInp.type = 'number';
+            numInp.min = bounds.min.toString();
+            numInp.max = bounds.max.toString();
+            numInp.step = '0.001';
+            numInp.value = curOffset.toFixed(3);
+            this.applyInputStyle(numInp);
+            numInp.style.width = '75px';
+            numInp.style.fontSize = '9px';
+            numInp.oninput = () => {
+                const valStr = numInp!.value.trim();
+                if (valStr !== '') {
+                    const v = Number(valStr);
+                    if (!isNaN(v)) {
+                        const clamped = Math.max(bounds.min, Math.min(bounds.max, v));
+                        slider.value = String(clamped);
+                        posValSpan.textContent = `${clamped.toFixed(3)} m`;
+                        this.updateSliceProperty(sliceIndex, { offset: clamped });
+                    }
+                }
+            };
+            numInp.onkeydown = (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    let v = Number(numInp!.value);
+                    if (!isNaN(v)) {
+                        v = Math.max(bounds.min, Math.min(bounds.max, v));
+                        this.updateSliceProperty(sliceIndex, { offset: v });
+                    }
+                    this.closePopover();
+                }
+            };
+
+            customRow.appendChild(numLbl);
+            customRow.appendChild(numInp);
+            popover.appendChild(customRow);
+        });
+    }
+
+    private setQuantityColormap(qty: string, cmap: string) {
         const vpNode = this.getViewportNode();
-        const initLighting = vpNode ? (vpNode.parameters.lightingEnabled !== false) : true;
+        if (!vpNode) return;
+        const qCmaps = vpNode.parameters.quantity_colormaps ? { ...vpNode.parameters.quantity_colormaps } : {};
+        qCmaps[qty] = cmap;
+
+        const slices = vpNode.parameters.slices ? [...vpNode.parameters.slices] : [];
+        slices.forEach(s => {
+            if ((s.quantities?.[0] || 'pressure') === qty) {
+                s.colormap = cmap;
+            }
+        });
+
+        const updates: any = { quantity_colormaps: qCmaps, slices };
+        if ((vpNode.parameters.stl_quantity || 'pressure') === qty) {
+            updates.stl_colormap = cmap;
+        }
+        if ((vpNode.parameters.obstacles_quantity || 'pressure') === qty) {
+            updates.obstacles_colormap = cmap;
+        }
+
+        this.stateManager.updateNodeParametersInPlace(vpNode.id, updates);
+        this.needsSlicesRebuild = true;
+        this.worker.postMessage({
+            type: 'setConfig',
+            data: {
+                quantityColormaps: qCmaps,
+                slices,
+                stlColormap: updates.stl_colormap,
+                obstaclesColormap: updates.obstacles_colormap
+            }
+        });
+        this.syncControls(true);
+    }
+
+    private setQuantityRange(qty: string, minV: number, maxV: number, autoV: boolean, logV: boolean, interpV?: boolean) {
+        const vpNode = this.getViewportNode();
+        if (!vpNode) return;
+
+        const qRanges = vpNode.parameters.quantity_ranges ? { ...vpNode.parameters.quantity_ranges } : {};
+        qRanges[qty] = [minV, maxV];
+
+        const slices = vpNode.parameters.slices ? [...vpNode.parameters.slices] : [];
+        slices.forEach(s => {
+            if ((s.quantities?.[0] || 'pressure') === qty) {
+                s.min_val = minV;
+                s.max_val = maxV;
+                s.auto_scale = autoV;
+                s.log_scale = logV;
+                if (interpV !== undefined) {
+                    s.interpolate = interpV;
+                }
+            }
+        });
+
+        const updates: any = { quantity_ranges: qRanges, slices };
+        if ((vpNode.parameters.stl_quantity || 'pressure') === qty) {
+            updates.stl_min_val = minV;
+            updates.stl_max_val = maxV;
+            updates.stl_auto_scale = autoV;
+            updates.stl_log_scale = logV;
+            if (interpV !== undefined) {
+                updates.stl_sampling_mode = interpV ? 'linear' : 'nearest';
+            }
+        }
+        if ((vpNode.parameters.obstacles_quantity || 'pressure') === qty) {
+            updates.obstacles_min_val = minV;
+            updates.obstacles_max_val = maxV;
+            updates.obstacles_auto_scale = autoV;
+            updates.obstacles_log_scale = logV;
+            if (interpV !== undefined) {
+                updates.obstacles_interpolate = interpV;
+            }
+        }
+
+        this.stateManager.updateNodeParametersInPlace(vpNode.id, updates);
+        this.needsSlicesRebuild = true;
+        this.syncControls(true);
+    }
+
+    private createToggleBtn(idStr: string, text: string, checked: boolean, onChange: (v: boolean) => void) {
+        const btn = document.createElement('div');
+        btn.id = this.getElId(idStr);
+        btn.innerText = text;
+        
+        let state = checked;
+        const updateStyle = () => {
+            btn.style.background = state ? '#007acc' : 'transparent';
+            btn.style.border = state ? '1px solid #007acc' : '1px solid rgba(255,255,255,0.2)';
+            btn.style.color = state ? '#fff' : '#ccc';
+        };
+        
+        updateStyle();
+        btn.style.borderRadius = '3px';
+        btn.style.padding = '2px 0px';
+        btn.style.fontSize = '8px';
+        btn.style.cursor = 'pointer';
+        btn.style.textAlign = 'center';
+        btn.style.userSelect = 'none';
+        btn.style.width = '100%';
+        btn.style.boxSizing = 'border-box';
+        
+        btn.onclick = (e: MouseEvent) => {
+            e.stopPropagation();
+            state = !state;
+            updateStyle();
+            onChange(state);
+        };
+        this.bindEditingEvents(btn);
+        return btn;
+    }
+
+    private buildObstacleRow(parent: HTMLElement) {
+        const vpNode = this.getViewportNode();
+        const initShow = vpNode ? (vpNode.parameters.show_obstacles === true) : false;
+        const initGrid = vpNode ? (vpNode.parameters.obstacles_gridlines !== false) : true;
+        const initSolid = vpNode ? (vpNode.parameters.obstacles_solid !== false) : true;
+        const initLight = vpNode ? (vpNode.parameters.obstacles_lighting !== false) : true;
+        const initOpacity = vpNode ? (vpNode.parameters.obstacles_opacity ?? 1.0) : 1.0;
+        const initQty = vpNode ? (vpNode.parameters.obstacles_quantity || 'pressure') : 'pressure';
+        const initCmap = vpNode ? (vpNode.parameters.quantity_colormaps?.[initQty] || vpNode.parameters.obstacles_colormap || 'plasma') : 'plasma';
+
+        const qRanges = vpNode?.parameters.quantity_ranges || {};
+        const qtyRange = qRanges[initQty] || [101325.0, 1013250.0];
+        const initAuto = vpNode ? (vpNode.parameters.obstacles_auto_scale !== false) : true;
+        const initLog = vpNode ? (vpNode.parameters.obstacles_log_scale === true) : false;
+
+        const tr = document.createElement('tr');
+        tr.style.borderBottom = '1px solid rgba(255,255,255,0.06)';
+
+        // Col 1: Vis Checkbox
+        const tdVis = document.createElement('td');
+        tdVis.style.padding = '3px 2px';
+        tdVis.style.textAlign = 'center';
+        const showCb = document.createElement('input');
+        showCb.type = 'checkbox';
+        showCb.id = this.getElId('viewport-obs-show-cb');
+        showCb.checked = initShow;
+        showCb.onchange = () => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { show_obstacles: showCb.checked });
+                this.worker.postMessage({ type: 'setConfig', data: { showObstacles: showCb.checked } });
+                this.sendView3DConfig();
+            }
+        };
+        this.bindEditingEvents(showCb);
+        tdVis.appendChild(showCb);
+        tr.appendChild(tdVis);
+
+        // Col 2: Layer Title
+        const tdLayer = document.createElement('td');
+        tdLayer.style.padding = '3px 4px';
+        tdLayer.innerHTML = '🧱 <b>Obstacles</b>';
+        tr.appendChild(tdLayer);
+
+        const appendToggleCol = (text: string, id: string, init: boolean, onChange: (v: boolean) => void) => {
+            const td = document.createElement('td');
+            td.style.padding = '3px 2px';
+            td.appendChild(this.createToggleBtn(id, text, init, onChange));
+            tr.appendChild(td);
+        };
+
+        // Col 3: SOL (Solid obstacles)
+        appendToggleCol('Sol', 'viewport-obs-solid-btn', initSolid, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { obstacles_solid: v });
+                this.worker.postMessage({ type: 'setConfig', data: { obstaclesSolid: v } });
+            }
+        });
+        // Col 4: LINES (Obstacle surface gridlines)
+        appendToggleCol('Msh', 'viewport-obs-grid-btn', initGrid, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { obstacles_gridlines: v });
+                this.worker.postMessage({ type: 'setConfig', data: { obstaclesGridlines: v } });
+            }
+        });
+        // Col 5: RES (Obstacle lighting)
+        appendToggleCol('Lgt', 'viewport-obs-light-btn', initLight, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { obstacles_lighting: v });
+                this.worker.postMessage({ type: 'setConfig', data: { obstaclesLighting: v } });
+            }
+        });
+
+        // Col 6: QTY (Quantity Popover Pill)
+        const tdQty = document.createElement('td');
+        tdQty.style.padding = '3px 4px';
+        const qtyPill = document.createElement('button');
+        const qtyLabels: Record<string, string> = {
+            pressure: 'Press', density: 'Density', velocity: 'Speed', energy: 'Energy',
+            species1: 'Reacted', species2: 'Unreacted', species3: 'Air',
+            peak_overpressure: 'Pk Press', peak_impulse: 'Pk Impulse'
+        };
+        qtyPill.textContent = `${qtyLabels[initQty] || initQty} ▾`;
+        this.applyButtonStyle(qtyPill);
+        qtyPill.style.fontSize = '8.5px';
+        qtyPill.style.width = '100%';
+        qtyPill.style.padding = '2px 0';
+        qtyPill.onclick = (e) => {
+            e.stopPropagation();
+            const currentQty = this.getViewportNode()?.parameters.obstacles_quantity || 'pressure';
+            this.showQuantityPopover(qtyPill, currentQty, (newQ) => {
+                const vp = this.getViewportNode();
+                if (vp) {
+                    const qCmaps = vp.parameters.quantity_colormaps || {};
+                    const newCmap = qCmaps[newQ] || 'plasma';
+                    this.stateManager.updateNodeParametersInPlace(vp.id, { obstacles_quantity: newQ, obstacles_colormap: newCmap });
+                    this.worker.postMessage({ type: 'setConfig', data: { obstaclesQuantity: newQ, obstaclesColormap: newCmap } });
+                    this.sendView3DConfig();
+                    this.syncControls(true);
+                }
+            });
+        };
+        tdQty.appendChild(qtyPill);
+        tr.appendChild(tdQty);
+
+        // Col 7: COLOR (Colormap Popover Button)
+        const tdCmap = document.createElement('td');
+        tdCmap.style.padding = '3px 4px';
+        const cmapPill = document.createElement('button');
+        cmapPill.textContent = `${initCmap.charAt(0).toUpperCase() + initCmap.slice(1)} ▾`;
+        this.applyButtonStyle(cmapPill);
+        cmapPill.style.fontSize = '8.5px';
+        cmapPill.style.width = '100%';
+        cmapPill.style.padding = '2px 0';
+        cmapPill.onclick = (e) => {
+            e.stopPropagation();
+            const vp = this.getViewportNode();
+            const activeQty = vp?.parameters.obstacles_quantity || 'pressure';
+            const curCmap = vp?.parameters.quantity_colormaps?.[activeQty] || vp?.parameters.obstacles_colormap || 'plasma';
+            this.showColormapPopover(cmapPill, curCmap, (newC) => {
+                this.setQuantityColormap(activeQty, newC);
+            });
+        };
+        tdCmap.appendChild(cmapPill);
+        tr.appendChild(tdCmap);
+
+        // Col 8: SCL (Auto, Log & Range Popover)
+        const tdScl = document.createElement('td');
+        tdScl.style.padding = '3px 2px';
+        const sclWrap = document.createElement('div');
+        sclWrap.style.display = 'flex';
+        sclWrap.style.gap = '2px';
+        sclWrap.appendChild(this.createToggleBtn('viewport-obs-auto-btn', 'A', initAuto, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                const activeQty = vp.parameters.obstacles_quantity || 'pressure';
+                const curRange = vp.parameters.quantity_ranges?.[activeQty] || [101325.0, 1013250.0];
+                this.setQuantityRange(activeQty, curRange[0], curRange[1], v, initLog);
+            }
+        }));
+        sclWrap.appendChild(this.createToggleBtn('viewport-obs-log-btn', 'L', initLog, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                const activeQty = vp.parameters.obstacles_quantity || 'pressure';
+                const curRange = vp.parameters.quantity_ranges?.[activeQty] || [101325.0, 1013250.0];
+                this.setQuantityRange(activeQty, curRange[0], curRange[1], initAuto, v);
+            }
+        }));
+
+        const cfgBtn = this.createToggleBtn('viewport-obs-cfg-btn', '⚙️', false, () => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                const activeQty = vp.parameters.obstacles_quantity || 'pressure';
+                const curRange = vp.parameters.quantity_ranges?.[activeQty] || [101325.0, 1013250.0];
+                const autoV = vp.parameters.obstacles_auto_scale !== false;
+                const logV = vp.parameters.obstacles_log_scale === true;
+                const interpV = vp.parameters.obstacles_interpolate !== false;
+                this.showRangePopover(cfgBtn, activeQty, curRange[0], curRange[1], autoV, logV, interpV, (minV, maxV, autoVal, logVal, interpVal) => {
+                    this.setQuantityRange(activeQty, minV, maxV, autoVal, logVal);
+                    if (interpVal !== undefined) {
+                        this.stateManager.updateNodeParametersInPlace(vp.id, { obstacles_interpolate: interpVal });
+                        this.worker.postMessage({ type: 'setConfig', data: { obstaclesInterpolate: interpVal } });
+                    }
+                });
+            }
+        });
+        sclWrap.appendChild(cfgBtn);
+        tdScl.appendChild(sclWrap);
+        tr.appendChild(tdScl);
+
+        // Col 9: OPACITY (Opacity Popover)
+        const tdOpac = document.createElement('td');
+        tdOpac.style.padding = '3px 4px';
+        const opacPill = document.createElement('button');
+        opacPill.textContent = `${Math.round(initOpacity * 100)}% ▾`;
+        this.applyButtonStyle(opacPill);
+        opacPill.style.fontSize = '8.5px';
+        opacPill.style.width = '100%';
+        opacPill.style.padding = '2px 0';
+        opacPill.onclick = (e) => {
+            e.stopPropagation();
+            const curVal = this.getViewportNode()?.parameters.obstacles_opacity ?? 1.0;
+            this.showOpacityPopover(opacPill, curVal, (newOpac) => {
+                const vp = this.getViewportNode();
+                if (vp) {
+                    this.stateManager.updateNodeParametersInPlace(vp.id, { obstacles_opacity: newOpac });
+                    this.worker.postMessage({ type: 'setConfig', data: { obstaclesOpacity: newOpac } });
+                    opacPill.textContent = `${Math.round(newOpac * 100)}% ▾`;
+                }
+            });
+        };
+        tdOpac.appendChild(opacPill);
+        tr.appendChild(tdOpac);
+
+        // Col 10: Empty Delete Cell
+        const tdDel = document.createElement('td');
+        tdDel.innerHTML = '<span style="color:#444;">—</span>';
+        tdDel.style.textAlign = 'center';
+        tr.appendChild(tdDel);
+
+        parent.appendChild(tr);
+    }
+
+    private buildSTLRow(parent: HTMLElement) {
+        const vpNode = this.getViewportNode();
+        const initShow = vpNode ? (vpNode.parameters.show_stl !== false) : true;
+        const initWf = vpNode ? (!!vpNode.parameters.stl_wireframe) : false;
+        const initSolids = vpNode ? (vpNode.parameters.stl_solids !== false) : true;
+        const initOpacity = vpNode ? (vpNode.parameters.stl_opacity ?? 0.5) : 0.5;
+        const initShowResults = vpNode ? (vpNode.parameters.stl_show_results !== false) : true;
+        const initQty = vpNode ? (vpNode.parameters.stl_quantity || 'pressure') : 'pressure';
+        const initCmap = vpNode ? (vpNode.parameters.quantity_colormaps?.[initQty] || vpNode.parameters.stl_colormap || 'plasma') : 'plasma';
+
+        const qRanges = vpNode?.parameters.quantity_ranges || {};
+        const qtyRange = qRanges[initQty] || [101325.0, 1013250.0];
+        const initAuto = vpNode ? (vpNode.parameters.stl_auto_scale !== false) : true;
+        const initLog = vpNode ? (vpNode.parameters.stl_log_scale === true) : false;
+
+        const tr = document.createElement('tr');
+        tr.style.borderBottom = '1px solid rgba(255,255,255,0.06)';
+
+        // Col 1: Vis Checkbox
+        const tdVis = document.createElement('td');
+        tdVis.style.padding = '3px 2px';
+        tdVis.style.textAlign = 'center';
+        const showCb = document.createElement('input');
+        showCb.type = 'checkbox';
+        showCb.id = this.getElId('viewport-stl-show-cb');
+        showCb.checked = initShow;
+        showCb.onchange = () => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { show_stl: showCb.checked });
+                this.worker.postMessage({ type: 'setConfig', data: { showSTL: showCb.checked } });
+                this.sendView3DConfig();
+            }
+        };
+        this.bindEditingEvents(showCb);
+        tdVis.appendChild(showCb);
+        tr.appendChild(tdVis);
+
+        // Col 2: Layer Title
+        const tdLayer = document.createElement('td');
+        tdLayer.style.padding = '3px 4px';
+        tdLayer.innerHTML = '📐 <b>STL Mesh</b>';
+        tr.appendChild(tdLayer);
+
+        const appendToggleCol = (text: string, id: string, init: boolean, onChange: (v: boolean) => void) => {
+            const td = document.createElement('td');
+            td.style.padding = '3px 2px';
+            td.appendChild(this.createToggleBtn(id, text, init, onChange));
+            tr.appendChild(td);
+        };
+
+        // Col 3: SOL (Solid geometry shading)
+        appendToggleCol('Sol', 'viewport-stl-solids-btn', initSolids, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { stl_solids: v });
+                this.worker.postMessage({ type: 'setConfig', data: { stlSolids: v } });
+            }
+        });
+        // Col 4: LINES (Wireframe lines)
+        appendToggleCol('Wir', 'viewport-stl-wf-btn', initWf, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { stl_wireframe: v });
+                this.worker.postMessage({ type: 'setConfig', data: { stlWireframe: v } });
+            }
+        });
+        // Col 5: RES (Surface contour results shading)
+        appendToggleCol('Res', 'viewport-stl-show-results-btn', initShowResults, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { stl_show_results: v });
+                this.worker.postMessage({ type: 'setConfig', data: { stlShowResults: v } });
+                this.sendView3DConfig();
+            }
+        });
+
+        // Col 6: QTY (Quantity Popover Pill)
+        const tdQty = document.createElement('td');
+        tdQty.style.padding = '3px 4px';
+        const qtyPill = document.createElement('button');
+        const qtyLabels: Record<string, string> = {
+            pressure: 'Press', density: 'Density', velocity: 'Speed', energy: 'Energy',
+            species1: 'Reacted', species2: 'Unreacted', species3: 'Air',
+            peak_overpressure: 'Pk Press', peak_impulse: 'Pk Impulse'
+        };
+        qtyPill.textContent = `${qtyLabels[initQty] || initQty} ▾`;
+        this.applyButtonStyle(qtyPill);
+        qtyPill.style.fontSize = '8.5px';
+        qtyPill.style.width = '100%';
+        qtyPill.style.padding = '2px 0';
+        qtyPill.onclick = (e) => {
+            e.stopPropagation();
+            const currentQty = this.getViewportNode()?.parameters.stl_quantity || 'pressure';
+            this.showQuantityPopover(qtyPill, currentQty, (newQ) => {
+                const vp = this.getViewportNode();
+                if (vp) {
+                    const qCmaps = vp.parameters.quantity_colormaps || {};
+                    const newCmap = qCmaps[newQ] || 'plasma';
+                    this.stateManager.updateNodeParametersInPlace(vp.id, { stl_quantity: newQ, stl_colormap: newCmap });
+                    this.worker.postMessage({ type: 'setConfig', data: { stlQuantity: newQ, stlColormap: newCmap } });
+                    this.sendView3DConfig();
+                    this.syncControls(true);
+                }
+            });
+        };
+        tdQty.appendChild(qtyPill);
+        tr.appendChild(tdQty);
+
+        // Col 7: COLOR (Colormap Popover Button)
+        const tdCmap = document.createElement('td');
+        tdCmap.style.padding = '3px 4px';
+        const cmapPill = document.createElement('button');
+        cmapPill.textContent = `${initCmap.charAt(0).toUpperCase() + initCmap.slice(1)} ▾`;
+        this.applyButtonStyle(cmapPill);
+        cmapPill.style.fontSize = '8.5px';
+        cmapPill.style.width = '100%';
+        cmapPill.style.padding = '2px 0';
+        cmapPill.onclick = (e) => {
+            e.stopPropagation();
+            const vp = this.getViewportNode();
+            const activeQty = vp?.parameters.stl_quantity || 'pressure';
+            const curCmap = vp?.parameters.quantity_colormaps?.[activeQty] || vp?.parameters.stl_colormap || 'plasma';
+            this.showColormapPopover(cmapPill, curCmap, (newC) => {
+                this.setQuantityColormap(activeQty, newC);
+            });
+        };
+        tdCmap.appendChild(cmapPill);
+        tr.appendChild(tdCmap);
+
+        // Col 8: SCL (Auto, Log & Range Popover)
+        const tdScl = document.createElement('td');
+        tdScl.style.padding = '3px 2px';
+        const sclWrap = document.createElement('div');
+        sclWrap.style.display = 'flex';
+        sclWrap.style.gap = '2px';
+        sclWrap.appendChild(this.createToggleBtn('viewport-stl-autoscale-btn', 'A', initAuto, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                const activeQty = vp.parameters.stl_quantity || 'pressure';
+                const curRange = vp.parameters.quantity_ranges?.[activeQty] || [101325.0, 1013250.0];
+                this.setQuantityRange(activeQty, curRange[0], curRange[1], v, initLog);
+            }
+        }));
+        sclWrap.appendChild(this.createToggleBtn('viewport-stl-logscale-btn', 'L', initLog, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                const activeQty = vp.parameters.stl_quantity || 'pressure';
+                const curRange = vp.parameters.quantity_ranges?.[activeQty] || [101325.0, 1013250.0];
+                this.setQuantityRange(activeQty, curRange[0], curRange[1], initAuto, v);
+            }
+        }));
+
+        const cfgBtn = this.createToggleBtn('viewport-stl-cfg-btn', '⚙️', false, () => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                const activeQty = vp.parameters.stl_quantity || 'pressure';
+                const curRange = vp.parameters.quantity_ranges?.[activeQty] || [101325.0, 1013250.0];
+                const autoV = vp.parameters.stl_auto_scale !== false;
+                const logV = vp.parameters.stl_log_scale === true;
+                const interpV = vp.parameters.stl_sampling_mode !== 'nearest';
+                this.showRangePopover(cfgBtn, activeQty, curRange[0], curRange[1], autoV, logV, interpV, (minV, maxV, autoVal, logVal, interpVal) => {
+                    this.setQuantityRange(activeQty, minV, maxV, autoVal, logVal);
+                    if (interpVal !== undefined) {
+                        const mode = interpVal ? 'linear' : 'nearest';
+                        this.stateManager.updateNodeParametersInPlace(vp.id, { stl_sampling_mode: mode });
+                        this.worker.postMessage({ type: 'setConfig', data: { stlSamplingMode: mode } });
+                    }
+                });
+            }
+        });
+        sclWrap.appendChild(cfgBtn);
+        tdScl.appendChild(sclWrap);
+        tr.appendChild(tdScl);
+
+        // Col 9: OPACITY (Opacity Popover)
+        const tdOpac = document.createElement('td');
+        tdOpac.style.padding = '3px 4px';
+        const opacPill = document.createElement('button');
+        opacPill.textContent = `${Math.round(initOpacity * 100)}% ▾`;
+        this.applyButtonStyle(opacPill);
+        opacPill.style.fontSize = '8.5px';
+        opacPill.style.width = '100%';
+        opacPill.style.padding = '2px 0';
+        opacPill.onclick = (e) => {
+            e.stopPropagation();
+            const curVal = this.getViewportNode()?.parameters.stl_opacity ?? 0.5;
+            this.showOpacityPopover(opacPill, curVal, (newOpac) => {
+                const vp = this.getViewportNode();
+                if (vp) {
+                    this.stateManager.updateNodeParametersInPlace(vp.id, { stl_opacity: newOpac });
+                    this.worker.postMessage({ type: 'setConfig', data: { stlOpacity: newOpac } });
+                    opacPill.textContent = `${Math.round(newOpac * 100)}% ▾`;
+                }
+            });
+        };
+        tdOpac.appendChild(opacPill);
+        tr.appendChild(tdOpac);
+
+        // Col 10: Empty Delete Cell
+        const tdDel = document.createElement('td');
+        tdDel.innerHTML = '<span style="color:#444;">—</span>';
+        tdDel.style.textAlign = 'center';
+        tr.appendChild(tdDel);
+
+        parent.appendChild(tr);
+    }
+
+    private buildGridRow(parent: HTMLElement) {
+        const vpNode = this.getViewportNode();
+        const initShow = vpNode ? (vpNode.parameters.show_grid !== false) : true;
+        const initEdges = vpNode ? (!!vpNode.parameters.cell_edges) : false;
+        const initBox = vpNode ? (vpNode.parameters.show_grid_box !== false) : true;
+        const initOpacity = vpNode ? (vpNode.parameters.grid_opacity ?? 1.0) : 1.0;
+
+        const tr = document.createElement('tr');
+        tr.style.borderBottom = '1px solid rgba(255,255,255,0.06)';
+
+        // Col 1: Vis Checkbox
+        const tdVis = document.createElement('td');
+        tdVis.style.padding = '3px 2px';
+        tdVis.style.textAlign = 'center';
+        const showCb = document.createElement('input');
+        showCb.type = 'checkbox';
+        showCb.id = this.getElId('viewport-grid-cb');
+        showCb.checked = initShow;
+        showCb.onchange = () => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { show_grid: showCb.checked });
+                this.worker.postMessage({ type: 'setConfig', data: { showGrid: showCb.checked } });
+            }
+        };
+        this.bindEditingEvents(showCb);
+        tdVis.appendChild(showCb);
+        tr.appendChild(tdVis);
+
+        // Col 2: Layer Title
+        const tdLayer = document.createElement('td');
+        tdLayer.style.padding = '3px 4px';
+        tdLayer.innerHTML = '📦 <b>Grid & Box</b>';
+        tr.appendChild(tdLayer);
+
+        // Col 3: SOL (Empty)
+        const tdSolE = document.createElement('td');
+        tdSolE.innerHTML = '<span style="color:#555;">—</span>';
+        tdSolE.style.textAlign = 'center';
+        tr.appendChild(tdSolE);
+
+        // Col 4: LINES (Edg & Box buttons both in LINES column)
+        const tdMsh = document.createElement('td');
+        tdMsh.style.padding = '3px 2px';
+        const mshWrap = document.createElement('div');
+        mshWrap.style.display = 'flex';
+        mshWrap.style.gap = '2px';
+        mshWrap.appendChild(this.createToggleBtn('viewport-edges-btn', 'Edg', initEdges, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { cell_edges: v });
+                this.worker.postMessage({ type: 'setConfig', data: { showCellEdges: v } });
+            }
+        }));
+        mshWrap.appendChild(this.createToggleBtn('viewport-box-btn', 'Box', initBox, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { show_grid_box: v });
+                this.worker.postMessage({ type: 'setConfig', data: { showGridBox: v } });
+            }
+        }));
+        tdMsh.appendChild(mshWrap);
+        tr.appendChild(tdMsh);
+
+        // Col 5, 6, 7, 8: Empty
+        for (let i = 0; i < 4; i++) {
+            const tdEmpty = document.createElement('td');
+            tdEmpty.innerHTML = '<span style="color:#555;">—</span>';
+            tdEmpty.style.textAlign = 'center';
+            tr.appendChild(tdEmpty);
+        }
+
+        // Col 9: OPACITY (Opacity Popover)
+        const tdOpac = document.createElement('td');
+        tdOpac.style.padding = '3px 4px';
+        const opacPill = document.createElement('button');
+        opacPill.textContent = `${Math.round(initOpacity * 100)}% ▾`;
+        this.applyButtonStyle(opacPill);
+        opacPill.style.fontSize = '8.5px';
+        opacPill.style.width = '100%';
+        opacPill.style.padding = '2px 0';
+        opacPill.onclick = (e) => {
+            e.stopPropagation();
+            const curVal = this.getViewportNode()?.parameters.grid_opacity ?? 1.0;
+            this.showOpacityPopover(opacPill, curVal, (newOpac) => {
+                const vp = this.getViewportNode();
+                if (vp) {
+                    this.stateManager.updateNodeParametersInPlace(vp.id, { grid_opacity: newOpac });
+                    this.worker.postMessage({ type: 'setConfig', data: { gridOpacity: newOpac } });
+                    opacPill.textContent = `${Math.round(newOpac * 100)}% ▾`;
+                }
+            });
+        };
+        tdOpac.appendChild(opacPill);
+        tr.appendChild(tdOpac);
+
+        // Col 10: Empty Delete Cell
+        const tdDel = document.createElement('td');
+        tdDel.innerHTML = '<span style="color:#444;">—</span>';
+        tdDel.style.textAlign = 'center';
+        tr.appendChild(tdDel);
+
+        parent.appendChild(tr);
+    }
+
+    private buildGaugeRow(parent: HTMLElement) {
+        const vpNode = this.getViewportNode();
+        const initShow = vpNode ? (vpNode.parameters.show_gauges !== false) : true;
+        const initQty = vpNode ? (vpNode.parameters.gauge_quantity || 'pressure') : 'pressure';
+        const initSolid = vpNode ? (vpNode.parameters.gauge_solid !== false) : true;
+        const initOpacity = vpNode ? (vpNode.parameters.gauge_opacity ?? 1.0) : 1.0;
+
+        const tr = document.createElement('tr');
+        tr.style.borderBottom = '1px solid rgba(255,255,255,0.06)';
+
+        // Col 1: Vis Checkbox
+        const tdVis = document.createElement('td');
+        tdVis.style.padding = '3px 2px';
+        tdVis.style.textAlign = 'center';
+        const showCb = document.createElement('input');
+        showCb.type = 'checkbox';
+        showCb.id = this.getElId('viewport-gauges-cb');
+        showCb.checked = initShow;
+        showCb.onchange = () => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { show_gauges: showCb.checked });
+                const gauges = this.getVirtualGauges();
+                this.worker.postMessage({ type: 'setConfig', data: { showGauges: showCb.checked, gauges } });
+            }
+        };
+        this.bindEditingEvents(showCb);
+        tdVis.appendChild(showCb);
+        tr.appendChild(tdVis);
+
+        // Col 2: Layer Title
+        const tdLayer = document.createElement('td');
+        tdLayer.style.padding = '3px 4px';
+        tdLayer.innerHTML = '🎯 <b>Gauges</b>';
+        tr.appendChild(tdLayer);
+
+        // Col 3: SOL (Solid Gauge Spheres)
+        const tdSph = document.createElement('td');
+        tdSph.style.padding = '3px 2px';
+        tdSph.appendChild(this.createToggleBtn('viewport-gauge-solid-btn', 'Sph', initSolid, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { gauge_solid: v });
+                this.worker.postMessage({ type: 'setConfig', data: { gaugeSolid: v } });
+            }
+        }));
+        tr.appendChild(tdSph);
+
+        // Col 4: LINES (Gauge Size Popover Pill)
+        const initSize = vpNode ? (vpNode.parameters.gauge_size ?? 1.0) : 1.0;
+        const tdSize = document.createElement('td');
+        tdSize.style.padding = '3px 4px';
+        const sizePill = document.createElement('button');
+        sizePill.textContent = `${initSize.toFixed(2)}x ▾`;
+        this.applyButtonStyle(sizePill);
+        sizePill.style.fontSize = '8.5px';
+        sizePill.style.width = '100%';
+        sizePill.style.padding = '2px 0';
+        sizePill.onclick = (e) => {
+            e.stopPropagation();
+            const curVal = this.getViewportNode()?.parameters.gauge_size ?? 1.0;
+            this.showGaugeSizePopover(sizePill, curVal, (newSize) => {
+                const vp = this.getViewportNode();
+                if (vp) {
+                    this.stateManager.updateNodeParametersInPlace(vp.id, { gauge_size: newSize });
+                    this.worker.postMessage({ type: 'setConfig', data: { gaugeSize: newSize } });
+                    sizePill.textContent = `${newSize.toFixed(2)}x ▾`;
+                }
+            });
+        };
+        tdSize.appendChild(sizePill);
+        tr.appendChild(tdSize);
+
+        // Col 5: RES (Empty)
+        const tdResEmpty = document.createElement('td');
+        tdResEmpty.innerHTML = '<span style="color:#555;">—</span>';
+        tdResEmpty.style.textAlign = 'center';
+        tr.appendChild(tdResEmpty);
+
+        // Col 6: QTY (Quantity Popover Pill)
+        const tdQty = document.createElement('td');
+        tdQty.style.padding = '3px 4px';
+        const qtyPill = document.createElement('button');
+        const qtyLabels: Record<string, string> = {
+            pressure: 'Press', density: 'Density', velocity: 'Speed', energy: 'Energy',
+            species1: 'Reacted', species2: 'Unreacted', species3: 'Air',
+            peak_overpressure: 'Pk Press', peak_impulse: 'Pk Impulse'
+        };
+        qtyPill.textContent = `${qtyLabels[initQty] || initQty} ▾`;
+        this.applyButtonStyle(qtyPill);
+        qtyPill.style.fontSize = '8.5px';
+        qtyPill.style.width = '100%';
+        qtyPill.style.padding = '2px 0';
+        qtyPill.onclick = (e) => {
+            e.stopPropagation();
+            const currentQty = this.getViewportNode()?.parameters.gauge_quantity || 'pressure';
+            this.showQuantityPopover(qtyPill, currentQty, (newQ) => {
+                const vp = this.getViewportNode();
+                if (vp) {
+                    this.stateManager.updateNodeParametersInPlace(vp.id, { gauge_quantity: newQ });
+                    this.worker.postMessage({ type: 'setConfig', data: { gaugeQuantity: newQ } });
+                    qtyPill.textContent = `${qtyLabels[newQ] || newQ} ▾`;
+                }
+            });
+        };
+        tdQty.appendChild(qtyPill);
+        tr.appendChild(tdQty);
+
+        // Col 7, 8: COLOR & SCL (Empty)
+        for (let i = 0; i < 2; i++) {
+            const tdEmpty = document.createElement('td');
+            tdEmpty.innerHTML = '<span style="color:#555;">—</span>';
+            tdEmpty.style.textAlign = 'center';
+            tr.appendChild(tdEmpty);
+        }
+
+        // Col 9: OPACITY (Opacity Popover)
+        const tdOpac = document.createElement('td');
+        tdOpac.style.padding = '3px 4px';
+        const opacPill = document.createElement('button');
+        opacPill.textContent = `${Math.round(initOpacity * 100)}% ▾`;
+        this.applyButtonStyle(opacPill);
+        opacPill.style.fontSize = '8.5px';
+        opacPill.style.width = '100%';
+        opacPill.style.padding = '2px 0';
+        opacPill.onclick = (e) => {
+            e.stopPropagation();
+            const curVal = this.getViewportNode()?.parameters.gauge_opacity ?? 1.0;
+            this.showOpacityPopover(opacPill, curVal, (newOpac) => {
+                const vp = this.getViewportNode();
+                if (vp) {
+                    this.stateManager.updateNodeParametersInPlace(vp.id, { gauge_opacity: newOpac });
+                    this.worker.postMessage({ type: 'setConfig', data: { gaugeOpacity: newOpac } });
+                    opacPill.textContent = `${Math.round(newOpac * 100)}% ▾`;
+                }
+            });
+        };
+        tdOpac.appendChild(opacPill);
+        tr.appendChild(tdOpac);
+
+        // Col 10: Empty Delete Cell
+        const tdDel = document.createElement('td');
+        tdDel.innerHTML = '<span style="color:#444;">—</span>';
+        tdDel.style.textAlign = 'center';
+        tr.appendChild(tdDel);
+
+        parent.appendChild(tr);
+    }
+
+    private buildLightingTableRow(parent: HTMLElement) {
+        const vpNode = this.getViewportNode();
+        const initLight = vpNode ? (vpNode.parameters.lightingEnabled !== false) : true;
         const initAO = vpNode ? (vpNode.parameters.aoEnabled !== false) : true;
         const initAmb = vpNode ? (vpNode.parameters.ambientLevel ?? 0.3) : 0.3;
         const initSpec = vpNode ? (vpNode.parameters.specularIntensity ?? 0.4) : 0.4;
 
-        // Lighting toggle
-        const lightRow = document.createElement('label');
-        lightRow.style.display = 'flex';
-        lightRow.style.alignItems = 'center';
-        lightRow.style.gap = '6px';
-        lightRow.style.cursor = 'pointer';
-        
+        const tr = document.createElement('tr');
+        tr.style.borderBottom = '1px solid rgba(255,255,255,0.06)';
+
+        // Col 1: Vis Checkbox (Enable Lighting)
+        const tdVis = document.createElement('td');
+        tdVis.style.padding = '3px 2px';
+        tdVis.style.textAlign = 'center';
         const lightCb = document.createElement('input');
         lightCb.type = 'checkbox';
         lightCb.id = this.getElId('viewport-lighting-cb');
-        lightCb.checked = initLighting;
+        lightCb.checked = initLight;
         lightCb.onchange = () => {
             const vp = this.getViewportNode();
             if (vp) {
@@ -623,121 +2378,144 @@ export class Telemetry3DViewport {
                 this.worker.postMessage({ type: 'setConfig', data: { lightingEnabled: lightCb.checked } });
             }
         };
-        lightRow.appendChild(lightCb);
-        lightRow.appendChild(document.createTextNode('Enable Lighting'));
-        parent.appendChild(lightRow);
+        this.bindEditingEvents(lightCb);
+        tdVis.appendChild(lightCb);
+        tr.appendChild(tdVis);
 
-        // AO toggle
-        const aoRow = document.createElement('label');
-        aoRow.style.display = 'flex';
-        aoRow.style.alignItems = 'center';
-        aoRow.style.gap = '6px';
-        aoRow.style.cursor = 'pointer';
-        
-        const aoCb = document.createElement('input');
-        aoCb.type = 'checkbox';
-        aoCb.id = this.getElId('viewport-ao-cb');
-        aoCb.checked = initAO;
-        aoCb.onchange = () => {
+        // Col 2: Layer Title
+        const tdLayer = document.createElement('td');
+        tdLayer.style.padding = '3px 4px';
+        tdLayer.innerHTML = '💡 <b>Lighting</b>';
+        tr.appendChild(tdLayer);
+
+        // Col 3, 4: SOL & LINES (Empty)
+        for (let i = 0; i < 2; i++) {
+            const tdEmpty = document.createElement('td');
+            tdEmpty.innerHTML = '<span style="color:#555;">—</span>';
+            tdEmpty.style.textAlign = 'center';
+            tr.appendChild(tdEmpty);
+        }
+
+        // Col 5: RES (AO toggle button)
+        const tdAo = document.createElement('td');
+        tdAo.style.padding = '3px 2px';
+        tdAo.appendChild(this.createToggleBtn('viewport-ao-btn', 'AO', initAO, (v) => {
             const vp = this.getViewportNode();
             if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { aoEnabled: aoCb.checked });
-                this.worker.postMessage({ type: 'setConfig', data: { aoEnabled: aoCb.checked } });
+                this.stateManager.updateNodeParametersInPlace(vp.id, { aoEnabled: v });
+                this.worker.postMessage({ type: 'setConfig', data: { aoEnabled: v } });
             }
-        };
-        aoRow.appendChild(aoCb);
-        aoRow.appendChild(document.createTextNode('Enable Ambient Occlusion'));
-        parent.appendChild(aoRow);
+        }));
+        tr.appendChild(tdAo);
 
-        // Ambient Level Slider
-        const ambWrap = document.createElement('div');
-        ambWrap.style.display = 'flex';
-        ambWrap.style.flexDirection = 'column';
-        ambWrap.style.gap = '2px';
-        
-        const ambLabel = document.createElement('span');
-        ambLabel.style.fontSize = '8px';
-        ambLabel.style.color = '#aaa';
-        // FIX 1: Set initial label from saved state
-        ambLabel.innerHTML = `Ambient Level: ${Number(initAmb).toFixed(2)}`;
-        
-        const ambSlider = document.createElement('input');
-        ambSlider.type = 'range';
-        ambSlider.id = this.getElId('viewport-ambient-slider');
-        ambSlider.min = '0';
-        ambSlider.max = '1';
-        ambSlider.step = '0.05';
-        ambSlider.style.width = '100%';
-        // FIX 1: Initialize slider position from saved state
-        ambSlider.value = String(initAmb);
-        ambSlider.oninput = () => {
-            ambLabel.innerHTML = `Ambient Level: ${Number(ambSlider.value).toFixed(2)}`;
-            const vp = this.getViewportNode();
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { ambientLevel: Number(ambSlider.value) });
-                this.worker.postMessage({ type: 'setConfig', data: { ambientLevel: Number(ambSlider.value) } });
-            }
+        // Col 6: QTY (Ambient Level Popover Pill)
+        const tdAmb = document.createElement('td');
+        tdAmb.style.padding = '3px 4px';
+        const ambPill = document.createElement('button');
+        ambPill.textContent = `Amb ${initAmb.toFixed(2)} ▾`;
+        this.applyButtonStyle(ambPill);
+        ambPill.style.fontSize = '8.5px';
+        ambPill.style.width = '100%';
+        ambPill.style.padding = '2px 0';
+        ambPill.onclick = (e) => {
+            e.stopPropagation();
+            const curVal = this.getViewportNode()?.parameters.ambientLevel ?? 0.3;
+            this.showAmbientPopover(ambPill, curVal, (newAmb) => {
+                const vp = this.getViewportNode();
+                if (vp) {
+                    this.stateManager.updateNodeParametersInPlace(vp.id, { ambientLevel: newAmb });
+                    this.worker.postMessage({ type: 'setConfig', data: { ambientLevel: newAmb } });
+                    ambPill.textContent = `Amb ${newAmb.toFixed(2)} ▾`;
+                }
+            });
         };
-        ambWrap.appendChild(ambLabel);
-        ambWrap.appendChild(ambSlider);
-        parent.appendChild(ambWrap);
+        tdAmb.appendChild(ambPill);
+        tr.appendChild(tdAmb);
 
-        // Specular Intensity Slider
-        const specWrap = document.createElement('div');
-        specWrap.style.display = 'flex';
-        specWrap.style.flexDirection = 'column';
-        specWrap.style.gap = '2px';
-        
-        const specLabel = document.createElement('span');
-        specLabel.style.fontSize = '8px';
-        specLabel.style.color = '#aaa';
-        // FIX 1: Set initial label from saved state
-        specLabel.innerHTML = `Specular Level: ${Number(initSpec).toFixed(2)}`;
-        
-        const specSlider = document.createElement('input');
-        specSlider.type = 'range';
-        specSlider.id = this.getElId('viewport-specular-slider');
-        specSlider.min = '0';
-        specSlider.max = '1';
-        specSlider.step = '0.05';
-        specSlider.style.width = '100%';
-        // FIX 1: Initialize slider position from saved state
-        specSlider.value = String(initSpec);
-        specSlider.oninput = () => {
-            specLabel.innerHTML = `Specular Level: ${Number(specSlider.value).toFixed(2)}`;
-            const vp = this.getViewportNode();
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { specularIntensity: Number(specSlider.value) });
-                this.worker.postMessage({ type: 'setConfig', data: { specularIntensity: Number(specSlider.value) } });
-            }
+        // Col 7: COLOR (Specular Level Popover Pill)
+        const tdSpec = document.createElement('td');
+        tdSpec.style.padding = '3px 4px';
+        const specPill = document.createElement('button');
+        specPill.textContent = `Spec ${initSpec.toFixed(2)} ▾`;
+        this.applyButtonStyle(specPill);
+        specPill.style.fontSize = '8.5px';
+        specPill.style.width = '100%';
+        specPill.style.padding = '2px 0';
+        specPill.onclick = (e) => {
+            e.stopPropagation();
+            const curVal = this.getViewportNode()?.parameters.specularIntensity ?? 0.4;
+            this.showSpecularPopover(specPill, curVal, (newSpec) => {
+                const vp = this.getViewportNode();
+                if (vp) {
+                    this.stateManager.updateNodeParametersInPlace(vp.id, { specularIntensity: newSpec });
+                    this.worker.postMessage({ type: 'setConfig', data: { specularIntensity: newSpec } });
+                    specPill.textContent = `Spec ${newSpec.toFixed(2)} ▾`;
+                }
+            });
         };
-        specWrap.appendChild(specLabel);
-        specWrap.appendChild(specSlider);
-        parent.appendChild(specWrap);
+        tdSpec.appendChild(specPill);
+        tr.appendChild(tdSpec);
+
+        // Col 8, 9, 10: Empty (SCL, OPAC, DELETE)
+        for (let i = 0; i < 3; i++) {
+            const tdEmpty = document.createElement('td');
+            tdEmpty.innerHTML = '<span style="color:#444;">—</span>';
+            tdEmpty.style.textAlign = 'center';
+            tr.appendChild(tdEmpty);
+        }
+
+        parent.appendChild(tr);
+    }
+
+    private selectOptionByNumericValue(sel: HTMLSelectElement | null, val: number | string): void {
+        if (!sel) return;
+        const target = Number(val);
+        let matched = false;
+        for (let i = 0; i < sel.options.length; i++) {
+            if (Math.abs(Number(sel.options[i].value) - target) < 0.001) {
+                sel.selectedIndex = i;
+                matched = true;
+                break;
+            }
+        }
+        if (!matched && sel.options.length > 0) {
+            for (let i = 0; i < sel.options.length; i++) {
+                if (Math.abs(Number(sel.options[i].value) - 2.0) < 0.001) {
+                    sel.selectedIndex = i;
+                    break;
+                }
+            }
+        }
     }
 
 
 
     private applySelectStyle(sel: HTMLSelectElement) {
-        sel.style.background = '#1e1e20';
+        sel.style.background = '#1b1b1e';
         sel.style.color = '#fff';
-        sel.style.border = '1px solid rgba(255, 255, 255, 0.1)';
-        sel.style.borderRadius = '4px';
-        sel.style.padding = '2px 4px';
-        sel.style.fontSize = '11px';
+        sel.style.border = '1px solid rgba(255, 255, 255, 0.12)';
+        sel.style.borderRadius = '3px';
+        sel.style.padding = '1px 3px';
+        sel.style.fontSize = '10px';
         sel.style.outline = 'none';
-        sel.style.width = '120px';
+        sel.style.width = '100%';
+        sel.style.boxSizing = 'border-box';
+        sel.style.minWidth = '0';
+        sel.style.height = '20px';
     }
 
     private applyInputStyle(inp: HTMLInputElement) {
-        inp.style.background = '#1e1e20';
+        inp.style.background = '#1b1b1e';
         inp.style.color = '#fff';
-        inp.style.border = '1px solid rgba(255, 255, 255, 0.1)';
-        inp.style.borderRadius = '4px';
-        inp.style.padding = '2px 4px';
-        inp.style.fontSize = '11px';
+        inp.style.border = '1px solid rgba(255, 255, 255, 0.12)';
+        inp.style.borderRadius = '3px';
+        inp.style.padding = '1px 3px';
+        inp.style.fontSize = '10px';
         inp.style.outline = 'none';
-        inp.style.width = '90%';
+        inp.style.width = '100%';
+        inp.style.boxSizing = 'border-box';
+        inp.style.minWidth = '0';
+        inp.style.height = '20px';
     }
 
     public setViewportNodeId(id: string | null): void {
@@ -772,6 +2550,55 @@ export class Telemetry3DViewport {
 
 
 
+    public sendView3DConfig(): void {
+        const vpNode = this.getViewportNode();
+        if (!vpNode) return;
+        const net = (window as any).networkManager;
+        if (!net || !net.isConnected()) return;
+
+        let targetModelId = vpNode.id;
+        const models = this.stateManager.getAppState().models;
+        for (const [mid, m] of Object.entries(models)) {
+            if (m.nodes.some(n => n.id === vpNode.id)) {
+                targetModelId = mid;
+                break;
+            }
+        }
+
+        const showObstacles = vpNode.parameters.show_obstacles === true;
+        const obstaclesQuantity = vpNode.parameters.obstacles_quantity || 'pressure';
+        const showSTL = vpNode.parameters.show_stl !== false;
+        const stlShowResults = vpNode.parameters.stl_show_results !== false;
+        const stlQuantity = vpNode.parameters.stl_quantity || 'pressure';
+
+        const userSlices = (vpNode.parameters.slices ? [...vpNode.parameters.slices] : []);
+        const fullSlices = [...userSlices];
+
+        if (showObstacles) {
+            fullSlices.push({
+                axis: 'obstacles',
+                offset: 0.0,
+                quantities: [obstaclesQuantity],
+                stride: 1
+            });
+        }
+        if (showSTL && stlShowResults) {
+            fullSlices.push({
+                axis: 'volume',
+                offset: 0.0,
+                quantities: [stlQuantity],
+                stride: 1
+            });
+        }
+
+        net.send({
+            command: "VIEW3D_CONFIG",
+            modelId: targetModelId,
+            refresh_rate: Number(vpNode.parameters.refresh_rate ?? 2.0),
+            slices: fullSlices
+        });
+    }
+
     private updateSlices(slices: any[]) {
         const vpNode = this.getViewportNode();
         if (!vpNode) return;
@@ -788,23 +2615,7 @@ export class Telemetry3DViewport {
             }
         });
 
-        const net = (window as any).networkManager;
-        if (net && net.isConnected()) {
-            let targetModelId = vpNode.id;
-            const models = this.stateManager.getAppState().models;
-            for (const [mid, m] of Object.entries(models)) {
-                if (m.nodes.some(n => n.id === vpNode.id)) {
-                    targetModelId = mid;
-                    break;
-                }
-            }
-            net.send({
-                command: "VIEW3D_CONFIG",
-                modelId: targetModelId,
-                refresh_rate: Number(vpNode.parameters.refresh_rate ?? 2.0),
-                slices: slices
-            });
-        }
+        this.sendView3DConfig();
     }
 
     private getMeshNode() {
@@ -887,7 +2698,8 @@ export class Telemetry3DViewport {
             log_scale: false,
             interpolate: true,
             min_val,
-            max_val
+            max_val,
+            enabled: true
         });
         this.needsSlicesRebuild = true;
         this.updateSlices(slices);
@@ -986,9 +2798,16 @@ export class Telemetry3DViewport {
         const edgesCb = document.getElementById(this.getElId('viewport-edges-cb')) as HTMLInputElement;
         if (edgesCb && document.activeElement !== edgesCb) edgesCb.checked = !!vpNode.parameters.cell_edges;
 
+        const rateVal = Number(vpNode.parameters.refresh_rate ?? 2.0);
+
         const rateSel = document.getElementById(this.getElId('viewport-refresh-rate-sel')) as HTMLSelectElement;
         if (rateSel && rateSel.dataset.editing !== 'true' && document.activeElement !== rateSel) {
-            rateSel.value = String(vpNode.parameters.refresh_rate ?? 2.0);
+            this.selectOptionByNumericValue(rateSel, rateVal);
+        }
+
+        const rateSelSlice = document.getElementById(this.getElId('viewport-refresh-rate-sel-slice')) as HTMLSelectElement;
+        if (rateSelSlice && rateSelSlice.dataset.editing !== 'true' && document.activeElement !== rateSelSlice) {
+            this.selectOptionByNumericValue(rateSelSlice, rateVal);
         }
 
         // FIX 1: Sync lighting/AO checkboxes and sliders from state
@@ -1015,20 +2834,39 @@ export class Telemetry3DViewport {
         }
 
         const stlShowCb = document.getElementById(this.getElId('viewport-stl-show-cb')) as HTMLInputElement;
-        if (stlShowCb) stlShowCb.checked = vpNode.parameters.show_stl !== false;
+        if (stlShowCb && document.activeElement !== stlShowCb) stlShowCb.checked = vpNode.parameters.show_stl !== false;
 
-        const stlWfCb = document.getElementById(this.getElId('viewport-stl-wf-cb')) as HTMLInputElement;
-        if (stlWfCb) stlWfCb.checked = !!vpNode.parameters.stl_wireframe;
+        const updateBtnStyle = (idStr: string, active: boolean) => {
+            const btn = document.getElementById(this.getElId(idStr));
+            if (btn) {
+                btn.style.background = active ? '#007acc' : 'transparent';
+                btn.style.border = active ? '1px solid #007acc' : '1px solid rgba(255,255,255,0.2)';
+                btn.style.color = active ? '#fff' : '#ccc';
+            }
+        };
 
-        const stlSolidsCb = document.getElementById(this.getElId('viewport-stl-solids-cb')) as HTMLInputElement;
-        if (stlSolidsCb) stlSolidsCb.checked = vpNode.parameters.stl_solids !== false;
+        updateBtnStyle('viewport-stl-solids-btn', vpNode.parameters.stl_solids !== false);
+        updateBtnStyle('viewport-stl-wf-btn', !!vpNode.parameters.stl_wireframe);
+        updateBtnStyle('viewport-stl-show-results-btn', vpNode.parameters.stl_show_results !== false);
+        updateBtnStyle('viewport-stl-autoscale-btn', vpNode.parameters.stl_auto_scale !== false);
+        updateBtnStyle('viewport-stl-logscale-btn', vpNode.parameters.stl_log_scale === true);
+
+        const stlQtySel = document.getElementById(this.getElId('viewport-stl-qty-sel')) as HTMLSelectElement;
+        if (stlQtySel && stlQtySel.dataset.editing !== 'true' && document.activeElement !== stlQtySel) {
+            stlQtySel.value = vpNode.parameters.stl_quantity || 'pressure';
+        }
 
         const stlOpacSlider = document.getElementById(this.getElId('viewport-stl-opacity-slider')) as HTMLInputElement;
-        const stlOpacLabel = stlOpacSlider?.parentElement?.querySelector('span') as HTMLElement;
-        if (stlOpacSlider && document.activeElement !== stlOpacSlider) {
+        const stlOpacInp = stlOpacSlider?.parentElement?.querySelector('input[type="number"]') as HTMLInputElement;
+        if (stlOpacSlider && document.activeElement !== stlOpacSlider && document.activeElement !== stlOpacInp) {
             const val = vpNode.parameters.stl_opacity ?? 0.5;
-            stlOpacSlider.value = val.toString();
-            if (stlOpacLabel) stlOpacLabel.innerHTML = `Opacity: ${Number(val).toFixed(2)}`;
+            stlOpacSlider.value = String(val);
+            if (stlOpacInp) stlOpacInp.value = String(val);
+        }
+
+        const stlCmSel = document.getElementById(this.getElId('viewport-stl-colormap-sel')) as HTMLSelectElement;
+        if (stlCmSel && stlCmSel.dataset.editing !== 'true' && document.activeElement !== stlCmSel) {
+            stlCmSel.value = vpNode.parameters.stl_colormap || 'plasma';
         }
 
         // Obstacles Sync
@@ -1042,9 +2880,49 @@ export class Telemetry3DViewport {
             obsGridCb.checked = vpNode.parameters.obstacles_gridlines !== false;
         }
 
+        const obsSolidCb = document.getElementById(this.getElId('viewport-obs-solid-cb')) as HTMLInputElement;
+        if (obsSolidCb && document.activeElement !== obsSolidCb) {
+            obsSolidCb.checked = vpNode.parameters.obstacles_solid !== false;
+        }
+
         const obsLightCb = document.getElementById(this.getElId('viewport-obs-light-cb')) as HTMLInputElement;
         if (obsLightCb && document.activeElement !== obsLightCb) {
             obsLightCb.checked = vpNode.parameters.obstacles_lighting !== false;
+        }
+
+        const obsAutoCb = document.getElementById(this.getElId('viewport-obs-auto-cb')) as HTMLInputElement;
+        if (obsAutoCb && document.activeElement !== obsAutoCb) {
+            obsAutoCb.checked = vpNode.parameters.obstacles_auto_scale !== false;
+        }
+
+        const obsLogCb = document.getElementById(this.getElId('viewport-obs-log-cb')) as HTMLInputElement;
+        if (obsLogCb && document.activeElement !== obsLogCb) {
+            obsLogCb.checked = vpNode.parameters.obstacles_log_scale === true;
+        }
+
+        const obsInterpCb = document.getElementById(this.getElId('viewport-obs-interp-cb')) as HTMLInputElement;
+        if (obsInterpCb && document.activeElement !== obsInterpCb) {
+            obsInterpCb.checked = vpNode.parameters.obstacles_interpolate !== false;
+        }
+
+        const obsMinInp = document.getElementById(this.getElId('viewport-obs-min-input')) as HTMLInputElement;
+        if (obsMinInp && obsMinInp.dataset.editing !== 'true' && document.activeElement !== obsMinInp) {
+            const val = vpNode.parameters.obstacles_min_val ?? 101325.0;
+            obsMinInp.value = String(val);
+            const isAuto = vpNode.parameters.obstacles_auto_scale !== false;
+            obsMinInp.disabled = isAuto;
+            obsMinInp.style.background = isAuto ? '#0c0c0d' : '#1a1a1c';
+            obsMinInp.style.color = isAuto ? '#666' : '#ccc';
+        }
+
+        const obsMaxInp = document.getElementById(this.getElId('viewport-obs-max-input')) as HTMLInputElement;
+        if (obsMaxInp && obsMaxInp.dataset.editing !== 'true' && document.activeElement !== obsMaxInp) {
+            const val = vpNode.parameters.obstacles_max_val ?? 1013250.0;
+            obsMaxInp.value = String(val);
+            const isAuto = vpNode.parameters.obstacles_auto_scale !== false;
+            obsMaxInp.disabled = isAuto;
+            obsMaxInp.style.background = isAuto ? '#0c0c0d' : '#1a1a1c';
+            obsMaxInp.style.color = isAuto ? '#666' : '#ccc';
         }
 
         const obsQtySel = document.getElementById(this.getElId('viewport-obs-qty-sel')) as HTMLSelectElement;
@@ -1052,35 +2930,101 @@ export class Telemetry3DViewport {
             obsQtySel.value = vpNode.parameters.obstacles_quantity || 'pressure';
         }
 
-        const obsOpacSlider = document.getElementById(this.getElId('viewport-obs-opacity-slider')) as HTMLInputElement;
-        const obsOpacLabel = obsOpacSlider?.parentElement?.querySelector('span') as HTMLElement;
-        if (obsOpacSlider && document.activeElement !== obsOpacSlider) {
-            const val = vpNode.parameters.obstacles_opacity ?? 1.0;
-            obsOpacSlider.value = String(val);
-            if (obsOpacLabel) obsOpacLabel.innerHTML = `Opacity: ${Number(val).toFixed(2)}`;
+        const obsCmSel = document.getElementById(this.getElId('viewport-obs-colormap-sel')) as HTMLSelectElement;
+        if (obsCmSel && obsCmSel.dataset.editing !== 'true' && document.activeElement !== obsCmSel) {
+            obsCmSel.value = vpNode.parameters.obstacles_colormap || 'plasma';
         }
 
+        const obsOpacSlider = document.getElementById(this.getElId('viewport-obs-opacity-slider')) as HTMLInputElement;
+        const obsOpacInp = obsOpacSlider?.parentElement?.querySelector('input[type="number"]') as HTMLInputElement;
+        if (obsOpacSlider && document.activeElement !== obsOpacSlider && document.activeElement !== obsOpacInp) {
+            const val = vpNode.parameters.obstacles_opacity ?? 1.0;
+            obsOpacSlider.value = String(val);
+            if (obsOpacInp) obsOpacInp.value = String(val);
+        }
+
+        // Bounding Box & Grid Sync
+        const gridOpacSlider = document.getElementById(this.getElId('viewport-grid-opacity-slider')) as HTMLInputElement;
+        const gridOpacInp = gridOpacSlider?.parentElement?.querySelector('input[type="number"]') as HTMLInputElement;
+        if (gridOpacSlider && document.activeElement !== gridOpacSlider && document.activeElement !== gridOpacInp) {
+            const val = vpNode.parameters.grid_opacity ?? 1.0;
+            gridOpacSlider.value = String(val);
+            if (gridOpacInp) gridOpacInp.value = String(val);
+        }
+
+        const boxCb = document.getElementById(this.getElId('viewport-box-cb')) as HTMLInputElement;
+        if (boxCb && document.activeElement !== boxCb) {
+            boxCb.checked = vpNode.parameters.show_grid_box !== false;
+        }
+
+        // Gauges Sync
         const showGauges = vpNode.parameters.show_gauges !== false;
-        const gaugeSize = vpNode.parameters.gauge_size ?? 0.03;
+        const gaugeSize = vpNode.parameters.gauge_size ?? 1.0;
+        const gaugeOpacity = vpNode.parameters.gauge_opacity ?? 1.0;
+        const gaugeQuantity = vpNode.parameters.gauge_quantity || 'pressure';
+        const gaugeSolid = vpNode.parameters.gauge_solid !== false;
         const gauges = this.getVirtualGauges();
 
         const showGaugesCb = document.getElementById(this.getElId('viewport-gauges-show-cb')) as HTMLInputElement;
         if (showGaugesCb) showGaugesCb.checked = showGauges;
 
         const gaugeSizeSlider = document.getElementById(this.getElId('viewport-gauge-size-slider')) as HTMLInputElement;
-        const gaugeSizeLabel = gaugeSizeSlider?.parentElement?.querySelector('span') as HTMLElement;
-        if (gaugeSizeSlider && document.activeElement !== gaugeSizeSlider) {
+        const gaugeSizeInp = gaugeSizeSlider?.parentElement?.querySelector('input[type="number"]') as HTMLInputElement;
+        if (gaugeSizeSlider && document.activeElement !== gaugeSizeSlider && document.activeElement !== gaugeSizeInp) {
             gaugeSizeSlider.value = String(gaugeSize);
-            if (gaugeSizeLabel) gaugeSizeLabel.innerHTML = `Marker Size: ${Number(gaugeSize).toFixed(3)}`;
+            if (gaugeSizeInp) gaugeSizeInp.value = String(gaugeSize);
+        }
+
+        const gaugeOpacSlider = document.getElementById(this.getElId('viewport-gauge-opacity-slider')) as HTMLInputElement;
+        const gaugeOpacInp = gaugeOpacSlider?.parentElement?.querySelector('input[type="number"]') as HTMLInputElement;
+        if (gaugeOpacSlider && document.activeElement !== gaugeOpacSlider && document.activeElement !== gaugeOpacInp) {
+            gaugeOpacSlider.value = String(gaugeOpacity);
+            if (gaugeOpacInp) gaugeOpacInp.value = String(gaugeOpacity);
+        }
+
+        const gaugeQtySel = document.getElementById(this.getElId('viewport-gauge-qty-sel')) as HTMLSelectElement;
+        if (gaugeQtySel && gaugeQtySel.dataset.editing !== 'true' && document.activeElement !== gaugeQtySel) {
+            gaugeQtySel.value = gaugeQuantity;
+        }
+
+        const gaugeSolidCb = document.getElementById(this.getElId('viewport-gauge-solid-cb')) as HTMLInputElement;
+        if (gaugeSolidCb && document.activeElement !== gaugeSolidCb) {
+            gaugeSolidCb.checked = gaugeSolid;
         }
 
         if (postToWorker) {
+            const qCmaps = vpNode.parameters.quantity_colormaps || {};
+            const stlQty = vpNode.parameters.stl_quantity || 'pressure';
+            const resStlCmap = qCmaps[stlQty] || vpNode.parameters.stl_colormap || 'plasma';
+
+            const obsQty = vpNode.parameters.obstacles_quantity || 'pressure';
+            const resObsCmap = qCmaps[obsQty] || vpNode.parameters.obstacles_colormap || 'plasma';
+
             this.worker.postMessage({
                 type: 'setConfig',
                 data: {
+                    quantityColormaps: qCmaps,
                     showGauges,
                     gaugeSize,
-                    gauges
+                    gaugeOpacity,
+                    gaugeQuantity,
+                    gaugeSolid,
+                    gauges,
+                    gridOpacity: vpNode.parameters.grid_opacity ?? 1.0,
+                    gridMeshlines: vpNode.parameters.cell_edges === true,
+                    showGridBox: vpNode.parameters.show_grid_box !== false,
+                    stlColormap: resStlCmap,
+                    obstaclesColormap: resObsCmap,
+                    obstaclesQuantity: obsQty,
+                    obstaclesSolid: vpNode.parameters.obstacles_solid !== false,
+                    obstaclesGridlines: vpNode.parameters.obstacles_gridlines !== false,
+                    obstaclesLighting: vpNode.parameters.obstacles_lighting !== false,
+                    obstaclesOpacity: vpNode.parameters.obstacles_opacity ?? 1.0,
+                    obstaclesAutoScale: vpNode.parameters.obstacles_auto_scale !== false,
+                    obstaclesLogScale: vpNode.parameters.obstacles_log_scale === true,
+                    obstaclesInterpolate: vpNode.parameters.obstacles_interpolate !== false,
+                    obstaclesMinVal: vpNode.parameters.obstacles_min_val ?? 101325.0,
+                    obstaclesMaxVal: vpNode.parameters.obstacles_max_val ?? 1013250.0
                 }
             });
         }
@@ -1120,390 +3064,236 @@ export class Telemetry3DViewport {
             }
         }
 
+        // Re-render static component rows below slices so popovers and buttons update instantly
+        if (this.staticListContainer && !this.activePopover) {
+            this.staticListContainer.innerHTML = '';
+            this.buildObstacleRow(this.staticListContainer);
+            this.buildSTLRow(this.staticListContainer);
+            this.buildGridRow(this.staticListContainer);
+            this.buildGaugeRow(this.staticListContainer);
+            this.buildLightingTableRow(this.staticListContainer);
+        }
+
         // 2. Sync Slices Row list
         const slices = vpNode.parameters.slices || [];
         if (this.sliceListContainer) {
             const currentRows = this.sliceListContainer.children.length;
-            // FIX 3: Force rebuild if slice structure changed externally (e.g. axis/qty changed from sidebar)
-            const currSliceKey = slices.map((s: any) => `${s.axis}:${s.quantities?.[0]}`).join(',');
+            // Force rebuild if any slice parameter, colormap, opacity, or range changed
+            const qCmaps = vpNode.parameters.quantity_colormaps || {};
+            const qRanges = vpNode.parameters.quantity_ranges || {};
+            const currSliceKey = slices.map((s: any) => {
+                const q = s.quantities?.[0] || 'pressure';
+                const cm = qCmaps[q] || s.colormap || 'plasma';
+                const op = s.opacity ?? 1.0;
+                const r = qRanges[q] || [s.min_val, s.max_val];
+                return `${s.axis}:${q}:${s.enabled !== false}:${cm}:${op}:${s.auto_scale !== false}:${s.log_scale === true}:${r?.[0]}:${r?.[1]}`;
+            }).join('|');
+
             if (currSliceKey !== this._lastSliceKey) {
                 this.needsSlicesRebuild = true;
             }
             this._lastSliceKey = currSliceKey;
-            if (this.needsSlicesRebuild || currentRows !== slices.length) {
+            if ((this.needsSlicesRebuild || currentRows !== slices.length) && !this.activePopover) {
                 this.sliceListContainer.innerHTML = '';
                 this.needsSlicesRebuild = false;
                 const focusedSliceIndex = vpNode.parameters.focusedSliceIndex ?? 0;
-
                 slices.forEach((slice: any, idx: number) => {
                     const qty = slice.quantities?.[0] || 'pressure';
-                    const colormapVal = slice.colormap || 'plasma';
                     const autoScaleVal = slice.auto_scale !== false;
                     const logScaleVal = slice.log_scale === true;
-                    const interpolateVal = slice.interpolate !== false;
-                    
-                    const ranges = vpNode.parameters.quantity_ranges || {};
-                    const range = ranges[qty] || [slice.min_val, slice.max_val];
-                    let minRangeVal = (range[0] !== undefined) ? range[0] : 101325.0;
-                    let maxRangeVal = (range[1] !== undefined) ? range[1] : 101325.0 * 10.0;
-                    if (autoScaleVal && this.latestSliceRanges && this.latestSliceRanges[idx]) {
-                        minRangeVal = this.latestSliceRanges[idx].min;
-                        maxRangeVal = this.latestSliceRanges[idx].max;
-                    }
-                    
-                    const isExpanded = this.expandedSliceIndices.has(idx);
 
-                    const row = document.createElement('div');
-                    row.className = `slice-card-${idx}`;
-                    row.style.background = idx === focusedSliceIndex ? 'rgba(0, 173, 255, 0.05)' : 'rgba(255,255,255,0.03)';
-                    row.style.border = idx === focusedSliceIndex ? '1px solid #00adff' : '1px solid rgba(255,255,255,0.06)';
-                    row.style.borderRadius = '4px';
-                    row.style.padding = '6px';
-                    row.style.display = 'flex';
-                    row.style.flexDirection = 'column';
-                    row.style.gap = '4px';
-                    row.style.cursor = 'pointer';
+                    const tr = document.createElement('tr');
+                    tr.style.borderBottom = '1px solid rgba(255,255,255,0.06)';
+                    tr.style.background = idx === focusedSliceIndex ? 'rgba(0, 173, 255, 0.12)' : 'transparent';
 
-                    row.onclick = (e) => {
-                        const target = e.target as HTMLElement;
-                        if (
-                            target.closest('input') || 
-                            target.closest('select') || 
-                            target.closest('option') || 
-                            target.closest('button') || 
-                            target.closest('label')
-                        ) {
-                            return;
-                        }
-                        this.stateManager.updateNodeParametersInPlace(vpNode.id, { focusedSliceIndex: idx });
-                    };
-
-                    const rowHeader = document.createElement('div');
-                    rowHeader.style.display = 'flex';
-                    rowHeader.style.justifyContent = 'space-between';
-                    rowHeader.style.alignItems = 'center';
-                    
-                    const titleSpan = document.createElement('span');
-                    titleSpan.textContent = `Slice #${idx + 1}`;
-                    titleSpan.style.color = '#ccc';
-                    titleSpan.style.fontWeight = 'bold';
-                    titleSpan.style.fontSize = '9px';
-                    rowHeader.appendChild(titleSpan);
-
-                    const toggleBtn = document.createElement('span');
-                    toggleBtn.textContent = isExpanded ? '▲' : '⚙️';
-                    toggleBtn.style.cursor = 'pointer';
-                    toggleBtn.style.fontSize = '9px';
-                    toggleBtn.onclick = (e) => {
+                    // Col 1: Vis Checkbox
+                    const tdVis = document.createElement('td');
+                    tdVis.style.padding = '3px 2px';
+                    tdVis.style.textAlign = 'center';
+                    const enableCb = document.createElement('input');
+                    enableCb.type = 'checkbox';
+                    enableCb.className = 'slice-enable-cb';
+                    enableCb.checked = slice.enabled !== false;
+                    enableCb.onchange = (e) => {
                         e.stopPropagation();
-                        if (this.expandedSliceIndices.has(idx)) this.expandedSliceIndices.delete(idx);
-                        else this.expandedSliceIndices.add(idx);
-                        this.needsSlicesRebuild = true;
-                        this.syncControls();
+                        this.updateSliceProperty(idx, { enabled: enableCb.checked });
                     };
+                    tdVis.appendChild(enableCb);
+                    tr.appendChild(tdVis);
 
-                    const deleteBtn = document.createElement('span');
-                    deleteBtn.textContent = '❌';
-                    deleteBtn.style.cursor = 'pointer';
-                    deleteBtn.style.fontSize = '8px';
-                    deleteBtn.style.marginLeft = '8px';
-                    deleteBtn.onclick = (e) => {
-                        e.stopPropagation();
-                        this.deleteSlice(idx);
-                    };
+                    // Col 2: Layer Title & Plane/Position Pill Button
+                    const tdLayer = document.createElement('td');
+                    tdLayer.style.padding = '3px 4px';
+                    tdLayer.style.cursor = 'pointer';
+                    tdLayer.onclick = () => this.stateManager.updateNodeParametersInPlace(vpNode.id, { focusedSliceIndex: idx });
+                    
+                    const titleRow = document.createElement('div');
+                    titleRow.style.display = 'flex';
+                    titleRow.style.alignItems = 'center';
+                    titleRow.style.justifyContent = 'space-between';
+                    titleRow.style.fontSize = '9px';
+                    titleRow.style.fontWeight = 'bold';
+                    titleRow.style.color = '#ccc';
+                    titleRow.innerHTML = `🔪 Slice #${idx + 1}`;
+                    tdLayer.appendChild(titleRow);
 
-                    const btnsWrap = document.createElement('div');
-                    btnsWrap.style.display = 'flex';
-                    btnsWrap.style.alignItems = 'center';
-                    btnsWrap.appendChild(toggleBtn);
-                    btnsWrap.appendChild(deleteBtn);
-
-                    rowHeader.appendChild(btnsWrap);
-                    row.appendChild(rowHeader);
-
-                    const grid = document.createElement('div');
-                    grid.style.display = 'grid';
-                    grid.style.gridTemplateColumns = '1fr 1.2fr 1fr';
-                    grid.style.gap = '4px';
-
-                    const axisSel = document.createElement('select');
-                    // FIX 2: Add class so fast-path syncControls can find and update it
-                    axisSel.className = 'slice-axis-sel';
-                    this.applySelectStyle(axisSel);
-                    axisSel.innerHTML = '<option value="yz">X-Normal</option><option value="xz">Y-Normal</option><option value="xy">Z-Normal</option>';
-                    axisSel.value = slice.axis;
-                    this.bindEditingEvents(axisSel, () => this.updateSliceProperty(idx, { axis: axisSel.value }));
-                    grid.appendChild(axisSel);
-
-                    const qSel = document.createElement('select');
-                    qSel.className = 'slice-qty-sel';
-                    this.applySelectStyle(qSel);
-                    qSel.innerHTML = '<option value="pressure">Pressure</option><option value="density">Density</option><option value="velocity">Velocity</option><option value="energy">Energy</option><option value="species1">Products</option><option value="species2">Unburnt</option><option value="species3">Air</option><option value="solid">Solid Cells</option><option value="overpressure">Peak Overpressure</option><option value="impulse">Peak Impulse</option>';
-                    qSel.value = qty;
-                    this.bindEditingEvents(qSel, () => this.updateSliceProperty(idx, { quantities: [qSel.value] }));
-                    grid.appendChild(qSel);
-
-                    const strideSel = document.createElement('select');
-                    strideSel.className = 'slice-stride-sel';
-                    this.applySelectStyle(strideSel);
-                    strideSel.style.width = '100%';
-                    strideSel.innerHTML = '<option value="1">1:1</option><option value="2">1:2</option><option value="4">1:4</option><option value="8">1:8</option><option value="16">1:16</option>';
-                    strideSel.value = String(slice.stride || 1);
-                    this.bindEditingEvents(strideSel, () => this.updateSliceProperty(idx, { stride: Number(strideSel.value) }));
-                    grid.appendChild(strideSel);
-                    row.appendChild(grid);
-
-                    // Offset slider
                     const bounds = getSliceBounds(slice.axis, meshNode);
-                    const stepVal = Math.max(0.001, (bounds.max - bounds.min) / 100);
+                    const curOffset = Number(slice.offset ?? (bounds.min + bounds.max) / 2.0);
+                    const axisShort = (slice.axis || 'xy').toUpperCase();
 
-                    const offWrap = document.createElement('div');
-                    offWrap.onclick = (e) => e.stopPropagation();
-                    offWrap.style.display = 'flex';
-                    offWrap.style.alignItems = 'center';
-                    offWrap.style.gap = '6px';
-                    offWrap.innerHTML = '<span style="font-size:8px;color:#aaa;min-width:30px">Offset</span>';
-
-                    const offSlider = document.createElement('input');
-                    offSlider.id = `viewport-${this.panelId}-slice-offset-${idx}`;
-                    offSlider.type = 'range';
-                    offSlider.className = 'slice-offset-slider';
-                    offSlider.min = bounds.min.toString();
-                    offSlider.max = bounds.max.toString();
-                    offSlider.step = stepVal.toString();
-                    offSlider.value = slice.offset.toString();
-                    offSlider.style.flex = '1';
-                    offSlider.style.height = '3px';
-                    offSlider.style.background = '#444';
-                    offSlider.style.outline = 'none';
-
-                    const offInp = document.createElement('input');
-                    offInp.type = 'number';
-                    offInp.className = 'slice-offset-val';
-                    this.applyInputStyle(offInp);
-                    offInp.style.width = '45px';
-                    offInp.style.padding = '0px 2px';
-                    offInp.style.textAlign = 'center';
-                    offInp.value = slice.offset.toString();
-
-                    this.bindEditingEvents(offSlider);
-                    offSlider.oninput = (e) => {
+                    const posPill = document.createElement('button');
+                    posPill.innerHTML = `📐 <b>${axisShort}</b> @ ${curOffset.toFixed(2)}m ▾`;
+                    this.applyButtonStyle(posPill);
+                    posPill.style.fontSize = '8.5px';
+                    posPill.style.width = '100%';
+                    posPill.style.marginTop = '2px';
+                    posPill.style.padding = '2px 4px';
+                    posPill.style.textAlign = 'center';
+                    posPill.onclick = (e) => {
                         e.stopPropagation();
-                        const val = Number(offSlider.value);
-                        offInp.value = String(val);
-                        
-                        const vp = this.getViewportNode();
-                        if (!vp) return;
-                        const currentSlices = vp.parameters.slices ? [...vp.parameters.slices] : [];
-                        if (currentSlices[idx]) {
-                            currentSlices[idx] = { ...currentSlices[idx], offset: val };
-                            this.updateSlices(currentSlices);
-                        }
+                        this.showSlicePositionPopover(posPill, idx, slice, meshNode);
                     };
+                    tdLayer.appendChild(posPill);
+                    tr.appendChild(tdLayer);
 
-                    this.bindEditingEvents(offInp, () => {
-                        const val = Math.max(bounds.min, Math.min(bounds.max, Number(offInp.value)));
-                        offSlider.value = val.toString();
-                        offInp.value = val.toString();
-                        this.updateSliceProperty(idx, { offset: val });
-                    });
+                    // Col 3: SOL (Empty for Slices)
+                    const tdSolE = document.createElement('td');
+                    tdSolE.innerHTML = '<span style="color:#555;">—</span>';
+                    tdSolE.style.textAlign = 'center';
+                    tr.appendChild(tdSolE);
 
-                    offWrap.appendChild(offSlider);
-                    offWrap.appendChild(offInp);
-                    row.appendChild(offWrap);
+                    // Col 4: LINES (Cell Edges Toggle Button)
+                    const tdLines = document.createElement('td');
+                    tdLines.style.padding = '3px 2px';
+                    const initCellEdges = vpNode.parameters.cell_edges === true;
+                    tdLines.appendChild(this.createToggleBtn(`slice-edges-btn-${idx}`, 'Edg', initCellEdges, (v) => {
+                        const vp = this.getViewportNode();
+                        if (vp) {
+                            this.stateManager.updateNodeParametersInPlace(vp.id, { cell_edges: v });
+                            this.worker.postMessage({ type: 'setConfig', data: { showCellEdges: v } });
+                        }
+                    }));
+                    tr.appendChild(tdLines);
 
-                    // Opacity Slider
-                    const opacWrap = document.createElement('div');
-                    opacWrap.onclick = (e) => e.stopPropagation();
-                    opacWrap.style.display = 'flex';
-                    opacWrap.style.alignItems = 'center';
-                    opacWrap.style.gap = '6px';
-                    opacWrap.style.marginTop = '4px';
-                    opacWrap.innerHTML = '<span style="font-size:8px;color:#aaa;min-width:30px">Opacity</span>';
+                    // Col 5: RES (Interpolate / Smooth Contours Toggle)
+                    const tdRes = document.createElement('td');
+                    tdRes.style.padding = '3px 2px';
+                    const initInterp = slice.interpolate !== false;
+                    tdRes.appendChild(this.createToggleBtn(`slice-interp-btn-${idx}`, 'Int', initInterp, (v) => {
+                        this.updateSliceProperty(idx, { interpolate: v });
+                    }));
+                    tr.appendChild(tdRes);
 
-                    const opacSlider = document.createElement('input');
-                    opacSlider.type = 'range';
-                    opacSlider.className = 'slice-opac-slider';
-                    opacSlider.min = '0';
-                    opacSlider.max = '1';
-                    opacSlider.step = '0.05';
-                    opacSlider.value = (slice.opacity !== undefined ? slice.opacity : 1.0).toString();
-                    opacSlider.style.flex = '1';
-                    opacSlider.style.height = '3px';
-                    opacSlider.style.background = '#444';
-                    opacSlider.style.outline = 'none';
-
-                    const opacInp = document.createElement('input');
-                    opacInp.type = 'number';
-                    opacInp.className = 'slice-opac-val';
-                    this.applyInputStyle(opacInp);
-                    opacInp.style.width = '45px';
-                    opacInp.style.padding = '0px 2px';
-                    opacInp.style.textAlign = 'center';
-                    opacInp.value = (slice.opacity !== undefined ? slice.opacity : 1.0).toString();
-
-                    this.bindEditingEvents(opacSlider);
-                    opacSlider.oninput = (e) => {
+                    // Col 6: QTY (Quantity Popover Pill)
+                    const tdQty = document.createElement('td');
+                    tdQty.style.padding = '3px 4px';
+                    const qtyPill = document.createElement('button');
+                    const qtyLabels: Record<string, string> = {
+                        pressure: 'Press', density: 'Density', velocity: 'Speed', energy: 'Energy',
+                        species1: 'Reacted', species2: 'Unreacted', species3: 'Air',
+                        peak_overpressure: 'Pk Press', peak_impulse: 'Pk Impulse'
+                    };
+                    qtyPill.textContent = `${qtyLabels[qty] || qty} ▾`;
+                    this.applyButtonStyle(qtyPill);
+                    qtyPill.style.fontSize = '8.5px';
+                    qtyPill.style.width = '100%';
+                    qtyPill.style.padding = '2px 0';
+                    qtyPill.onclick = (e) => {
                         e.stopPropagation();
-                        const val = Number(opacSlider.value);
-                        opacInp.value = String(val);
-                        
-                        const vp = this.getViewportNode();
-                        if (!vp) return;
-                        const currentSlices = vp.parameters.slices ? [...vp.parameters.slices] : [];
-                        if (currentSlices[idx]) {
-                            currentSlices[idx] = { ...currentSlices[idx], opacity: val };
-                            this.updateSlices(currentSlices);
-                        }
+                        this.showQuantityPopover(qtyPill, qty, (newQ) => {
+                            const qCmaps = vpNode.parameters.quantity_colormaps || {};
+                            const newCmap = qCmaps[newQ] || 'plasma';
+                            this.updateSliceProperty(idx, { quantities: [newQ], colormap: newCmap });
+                        });
                     };
+                    tdQty.appendChild(qtyPill);
+                    tr.appendChild(tdQty);
 
-                    this.bindEditingEvents(opacInp, () => {
-                        const val = Math.max(0.0, Math.min(1.0, Number(opacInp.value)));
-                        opacSlider.value = val.toString();
-                        opacInp.value = val.toString();
-                        this.updateSliceProperty(idx, { opacity: val });
+                    // Col 7: COLOR (Colormap Popover Button)
+                    const tdCmap = document.createElement('td');
+                    tdCmap.style.padding = '3px 4px';
+                    const curCmap = vpNode.parameters.quantity_colormaps?.[qty] || slice.colormap || 'plasma';
+                    const cmapPill = document.createElement('button');
+                    cmapPill.textContent = `${curCmap.charAt(0).toUpperCase() + curCmap.slice(1)} ▾`;
+                    this.applyButtonStyle(cmapPill);
+                    cmapPill.style.fontSize = '8.5px';
+                    cmapPill.style.width = '100%';
+                    cmapPill.style.padding = '2px 0';
+                    cmapPill.onclick = (e) => {
+                        e.stopPropagation();
+                        this.showColormapPopover(cmapPill, curCmap, (newC) => {
+                            this.setQuantityColormap(qty, newC);
+                        });
+                    };
+                    tdCmap.appendChild(cmapPill);
+                    tr.appendChild(tdCmap);
+
+                    // Col 8: SCL (Auto, Log & Range Popover)
+                    const tdScl = document.createElement('td');
+                    tdScl.style.padding = '3px 2px';
+                    const sclWrap = document.createElement('div');
+                    sclWrap.style.display = 'flex';
+                    sclWrap.style.gap = '2px';
+                    
+                    const interpScaleVal = slice.interpolate !== false;
+                    sclWrap.appendChild(this.createToggleBtn(`slice-auto-btn-${idx}`, 'A', autoScaleVal, (v) => {
+                        const curRange = vpNode.parameters.quantity_ranges?.[qty] || [slice.min_val ?? 101325.0, slice.max_val ?? 1013250.0];
+                        this.setQuantityRange(qty, curRange[0], curRange[1], v, logScaleVal, interpScaleVal);
+                    }));
+                    sclWrap.appendChild(this.createToggleBtn(`slice-log-btn-${idx}`, 'L', logScaleVal, (v) => {
+                        const curRange = vpNode.parameters.quantity_ranges?.[qty] || [slice.min_val ?? 101325.0, slice.max_val ?? 1013250.0];
+                        this.setQuantityRange(qty, curRange[0], curRange[1], autoScaleVal, v, interpScaleVal);
+                    }));
+
+                    const cfgBtn = this.createToggleBtn(`slice-cfg-btn-${idx}`, '⚙️', false, () => {
+                        const curRange = vpNode.parameters.quantity_ranges?.[qty] || [slice.min_val ?? 101325.0, slice.max_val ?? 1013250.0];
+                        this.showRangePopover(cfgBtn, qty, curRange[0], curRange[1], autoScaleVal, logScaleVal, interpScaleVal, (minV, maxV, autoVal, logVal, interpVal) => {
+                            this.setQuantityRange(qty, minV, maxV, autoVal, logVal);
+                            if (interpVal !== undefined) {
+                                this.updateSliceProperty(idx, { interpolate: interpVal });
+                            }
+                        });
                     });
+                    sclWrap.appendChild(cfgBtn);
 
-                    opacWrap.appendChild(opacSlider);
-                    opacWrap.appendChild(opacInp);
-                    row.appendChild(opacWrap);
+                    tdScl.appendChild(sclWrap);
+                    tr.appendChild(tdScl);
 
-                    // Extended Sub-panel
-                    if (isExpanded) {
-                        const subPanel = document.createElement('div');
-                        subPanel.style.borderTop = '1px solid rgba(255,255,255,0.06)';
-                        subPanel.style.paddingTop = '6px';
-                        subPanel.style.marginTop = '4px';
-                        subPanel.style.display = 'flex';
-                        subPanel.style.flexDirection = 'column';
-                        subPanel.style.gap = '4px';
-
-                        const createCheckbox = (labelStr: string, checkedVal: boolean, onCbChange: (v: boolean) => void) => {
-                            const lbl = document.createElement('label');
-                            lbl.style.display = 'flex';
-                            lbl.style.alignItems = 'center';
-                            lbl.style.gap = '4px';
-                            lbl.style.fontSize = '9px';
-                            lbl.style.color = '#ccc';
-                            lbl.style.cursor = 'pointer';
-                            const cb = document.createElement('input');
-                            cb.type = 'checkbox';
-                            cb.checked = checkedVal;
-                            cb.style.margin = '0';
-                            this.bindEditingEvents(cb, () => onCbChange(cb.checked));
-                            lbl.appendChild(cb);
-                            lbl.appendChild(document.createTextNode(labelStr));
-                            return lbl;
-                        };
-
-                        const cbGrid = document.createElement('div');
-                        cbGrid.style.display = 'grid';
-                        cbGrid.style.gridTemplateColumns = '1fr 1fr';
-                        cbGrid.style.gap = '4px';
-
-                        cbGrid.appendChild(createCheckbox('Auto Range', autoScaleVal, (val) => {
-                            this.updateSliceProperty(idx, { auto_scale: val });
-                        }));
-                        cbGrid.appendChild(createCheckbox('Log Scale', logScaleVal, (val) => {
-                            this.updateSliceProperty(idx, { log_scale: val });
-                        }));
-                        cbGrid.appendChild(createCheckbox('Interpolate', interpolateVal, (val) => {
-                            this.updateSliceProperty(idx, { interpolate: val });
-                        }));
-                        subPanel.appendChild(cbGrid);
-
-                        // Colormap Select Row
-                        const cmRow = document.createElement('div');
-                        cmRow.style.display = 'flex';
-                        cmRow.style.justifyContent = 'space-between';
-                        cmRow.style.alignItems = 'center';
-                        cmRow.innerHTML = '<span style="font-size:9px;color:#aaa">Colormap</span>';
-                        const cmSel = document.createElement('select');
-                        cmSel.className = 'slice-colormap-sel';
-                        this.applySelectStyle(cmSel);
-                        cmSel.innerHTML = '<option value="plasma">Plasma</option><option value="viridis">Viridis</option><option value="rainbow">Rainbow</option><option value="coolwarm">CoolWarm</option><option value="cividis">Cividis</option><option value="grayscale">Grayscale</option>';
-                        cmSel.value = colormapVal;
-                        this.bindEditingEvents(cmSel, () => this.updateSliceProperty(idx, { colormap: cmSel.value }));
-                        cmRow.appendChild(cmSel);
-                        subPanel.appendChild(cmRow);
-
-                        // Min / Max Inputs
-                        const rangeRow = document.createElement('div');
-                        rangeRow.style.display = 'flex';
-                        rangeRow.style.gap = '4px';
-                        rangeRow.style.alignItems = 'center';
-
-                        const minLabel = document.createElement('span');
-                        minLabel.textContent = 'Min:';
-                        minLabel.style.color = '#888';
-                        minLabel.style.fontSize = '8px';
-                        rangeRow.appendChild(minLabel);
-
-                        const minInput = document.createElement('input');
-                        minInput.type = 'number';
-                        minInput.className = 'action-btn slice-min-input';
-                        minInput.value = String(minRangeVal);
-                        minInput.disabled = autoScaleVal;
-                        minInput.style.width = '45px';
-                        minInput.style.background = autoScaleVal ? '#0c0c0d' : '#1a1a1c';
-                        minInput.style.color = autoScaleVal ? '#666' : '#ccc';
-                        minInput.style.border = '1px solid #333';
-                        minInput.style.borderRadius = '3px';
-                        minInput.style.fontSize = '8px';
-                        minInput.style.padding = '1px';
-                        this.bindEditingEvents(minInput, () => {
-                            this.updateSliceProperty(idx, { min_val: Number(minInput.value) });
+                    // Col 9: OPACITY (Opacity Popover)
+                    const tdOpac = document.createElement('td');
+                    tdOpac.style.padding = '3px 4px';
+                    const sliceOpac = slice.opacity ?? 1.0;
+                    const opacPill = document.createElement('button');
+                    opacPill.textContent = `${Math.round(sliceOpac * 100)}% ▾`;
+                    this.applyButtonStyle(opacPill);
+                    opacPill.style.fontSize = '8.5px';
+                    opacPill.style.width = '100%';
+                    opacPill.style.padding = '2px 0';
+                    opacPill.onclick = (e) => {
+                        e.stopPropagation();
+                        this.showOpacityPopover(opacPill, sliceOpac, (newOpac) => {
+                            this.updateSliceProperty(idx, { opacity: newOpac });
                         });
-                        rangeRow.appendChild(minInput);
+                    };
+                    tdOpac.appendChild(opacPill);
+                    tr.appendChild(tdOpac);
 
-                        const maxLabel = document.createElement('span');
-                        maxLabel.textContent = 'Max:';
-                        maxLabel.style.color = '#888';
-                        maxLabel.style.fontSize = '8px';
-                        rangeRow.appendChild(maxLabel);
+                    // Col 10: Delete Button Cell
+                    const tdDel = document.createElement('td');
+                    tdDel.style.padding = '3px 2px';
+                    tdDel.style.textAlign = 'center';
+                    const delBtn = document.createElement('span');
+                    delBtn.innerHTML = '✕';
+                    delBtn.style.color = '#ff4444';
+                    delBtn.style.cursor = 'pointer';
+                    delBtn.style.fontSize = '10px';
+                    delBtn.onclick = (e) => { e.stopPropagation(); this.deleteSlice(idx); };
+                    tdDel.appendChild(delBtn);
+                    tr.appendChild(tdDel);
 
-                        const maxInput = document.createElement('input');
-                        maxInput.type = 'number';
-                        maxInput.className = 'action-btn slice-max-input';
-                        maxInput.value = String(maxRangeVal);
-                        maxInput.disabled = autoScaleVal;
-                        maxInput.style.width = '48px';
-                        maxInput.style.background = autoScaleVal ? '#0c0c0d' : '#1a1a1c';
-                        maxInput.style.color = autoScaleVal ? '#666' : '#ccc';
-                        maxInput.style.border = '1px solid #333';
-                        maxInput.style.borderRadius = '3px';
-                        maxInput.style.fontSize = '8px';
-                        maxInput.style.padding = '1px';
-                        this.bindEditingEvents(maxInput, () => {
-                            this.updateSliceProperty(idx, { max_val: Number(maxInput.value) });
-                        });
-                        rangeRow.appendChild(maxInput);
-
-                        const scaleBtn = document.createElement('button');
-                        scaleBtn.className = 'action-btn';
-                        scaleBtn.innerHTML = '🎯';
-                        scaleBtn.title = 'Scale to Current Frame';
-                        scaleBtn.style.background = '#2c2c30';
-                        scaleBtn.style.color = '#ccc';
-                        scaleBtn.style.border = '1px solid #444';
-                        scaleBtn.style.borderRadius = '3px';
-                        scaleBtn.style.padding = '1px 3px';
-                        scaleBtn.style.cursor = 'pointer';
-                        scaleBtn.style.fontSize = '8px';
-                        scaleBtn.onclick = (e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            this.worker.postMessage({ type: 'scaleToCurrent', index: idx });
-                        };
-                        rangeRow.appendChild(scaleBtn);
-
-                        subPanel.appendChild(rangeRow);
-                        row.appendChild(subPanel);
-                    }
-
-                    this.sliceListContainer!.appendChild(row);
+                    this.sliceListContainer!.appendChild(tr);
                 });
-                
+
                 this.needsSlicesRebuild = false;
             } else {
                 // Just sync values of existing inputs in place
@@ -1516,6 +3306,12 @@ export class Telemetry3DViewport {
 
                     row.style.background = idx === focusedSliceIndex ? 'rgba(0, 173, 255, 0.05)' : 'rgba(255,255,255,0.03)';
                     row.style.border = idx === focusedSliceIndex ? '1px solid #00adff' : '1px solid rgba(255,255,255,0.06)';
+                    row.style.opacity = slice.enabled !== false ? '1.0' : '0.55';
+
+                    const enableCb = row.querySelector('.slice-enable-cb') as HTMLInputElement;
+                    if (enableCb && enableCb.dataset.editing !== 'true' && document.activeElement !== enableCb) {
+                        enableCb.checked = slice.enabled !== false;
+                    }
 
                     const bounds = getSliceBounds(slice.axis, meshNode);
 
@@ -1611,7 +3407,12 @@ export class Telemetry3DViewport {
 
             // Sync configuration to WebWorker
             if (postToWorker) {
-                const opacities = slices.map((s: any) => s.opacity !== undefined ? s.opacity : 1.0);
+                const qCmaps = vpNode.parameters.quantity_colormaps || {};
+                const resSlices = (slices || []).map((s: any) => {
+                    const q = s.quantities?.[0] || 'pressure';
+                    return { ...s, colormap: qCmaps[q] || s.colormap || 'plasma' };
+                });
+                const opacities = resSlices.map((s: any) => s.opacity !== undefined ? s.opacity : 1.0);
                 this.worker.postMessage({
                     type: 'setConfig',
                     data: {
@@ -1620,15 +3421,13 @@ export class Telemetry3DViewport {
                         ambientLevel: vpNode.parameters.ambientLevel ?? 0.3,
                         specularIntensity: vpNode.parameters.specularIntensity ?? 0.4,
                         sliceOpacities: opacities,
-                        slices: slices,
+                        slices: resSlices,
                         focusedSliceIndex: vpNode.parameters.focusedSliceIndex ?? 0,
                         quantityRanges: vpNode.parameters.quantity_ranges || {}
                     }
                 });
             }
         }
-
-
 
         // 4. Find connected domain mesh dimensions and configure worker
         let dimX = 1.0, dimY = 1.0, dimZ = 1.0, cellSize = 0.01;
@@ -1651,6 +3450,18 @@ export class Telemetry3DViewport {
 
         const { min: syncFocusedMin, max: syncFocusedMax } = getFocusedQuantityAndRange(vpNode);
 
+        const qCmaps = vpNode.parameters.quantity_colormaps || {};
+        const stlQty = vpNode.parameters.stl_quantity || 'pressure';
+        const resStlCmap = qCmaps[stlQty] || vpNode.parameters.stl_colormap || 'plasma';
+
+        const obsQty = vpNode.parameters.obstacles_quantity || 'pressure';
+        const resObsCmap = qCmaps[obsQty] || vpNode.parameters.obstacles_colormap || 'plasma';
+
+        const resSlices = (vpNode.parameters.slices || []).map((s: any) => {
+            const q = s.quantities?.[0] || 'pressure';
+            return { ...s, colormap: qCmaps[q] || s.colormap || 'plasma' };
+        });
+
         const configData: any = {
             colormap: vpNode.parameters.colormap || 'plasma',
             minY: syncFocusedMin,
@@ -1664,14 +3475,24 @@ export class Telemetry3DViewport {
             stlWireframe: !!vpNode.parameters.stl_wireframe,
             stlSolids: vpNode.parameters.stl_solids !== false,
             stlOpacity: vpNode.parameters.stl_opacity ?? 0.5,
-            slices: vpNode.parameters.slices || [],
+            stlColormap: resStlCmap,
+            stlShowResults: vpNode.parameters.stl_show_results !== false,
+            stlQuantity: stlQty,
+            stlSamplingMode: vpNode.parameters.stl_sampling_mode || 'nearest',
+            stlAutoScale: vpNode.parameters.stl_auto_scale !== false,
+            stlLogScale: vpNode.parameters.stl_log_scale === true,
+            stlMinVal: vpNode.parameters.stl_min_val ?? 101325.0,
+            stlMaxVal: vpNode.parameters.stl_max_val ?? 1013250.0,
+            slices: resSlices,
             focusedSliceIndex: vpNode.parameters.focusedSliceIndex ?? 0,
+            quantityColormaps: qCmaps,
             quantityRanges: vpNode.parameters.quantity_ranges || {},
-            showObstacles: vpNode.parameters.show_obstacles === true,
+            showObstacles: vpNode.parameters.show_obstacles !== false,
             obstaclesGridlines: vpNode.parameters.obstacles_gridlines !== false,
             obstaclesLighting: vpNode.parameters.obstacles_lighting !== false,
             obstaclesOpacity: vpNode.parameters.obstacles_opacity ?? 1.0,
-            obstaclesQuantity: vpNode.parameters.obstacles_quantity || 'pressure'
+            obstaclesQuantity: obsQty,
+            obstaclesColormap: resObsCmap
         };
 
         const cachedConfig = this.stateManager.getTelemetry(vpNode.id + "-config-3d");
@@ -1973,12 +3794,17 @@ export class Telemetry3DViewport {
         qtyRow.style.display = 'flex';
         qtyRow.style.justifyContent = 'space-between';
         qtyRow.style.alignItems = 'center';
+        qtyRow.style.gap = '6px';
+        qtyRow.style.width = '100%';
+        qtyRow.style.boxSizing = 'border-box';
         qtyRow.style.marginTop = '4px';
-        qtyRow.innerHTML = '<span style="font-size:11px;color:#aaa">Quantity</span>';
+        qtyRow.innerHTML = '<span style="font-size:11px;color:#aaa;flex-shrink:0;">Quantity</span>';
 
         const qtySel = document.createElement('select');
         qtySel.id = this.getElId('viewport-obs-qty-sel');
         this.applySelectStyle(qtySel);
+        qtySel.style.flex = '1';
+        qtySel.style.minWidth = '0';
         qtySel.innerHTML = '<option value="pressure">Pressure</option><option value="density">Density</option><option value="velocity">Speed</option><option value="energy">Energy</option><option value="species1">Reacted (Alpha1)</option><option value="species2">Unreacted (Alpha2)</option><option value="species3">Air</option><option value="peak_overpressure">Peak Overpressure</option><option value="peak_impulse">Peak Impulse</option>';
         qtySel.value = initQty;
         qtySel.onchange = () => {
@@ -2100,7 +3926,6 @@ export class Telemetry3DViewport {
             }
         }
 
-        // If viewportNodeId is actually a model ID, use that model directly
         if (!targetModel && this.viewportNodeId) {
             targetModel = allModels.find(m => m.id === this.viewportNodeId) || null;
         }
@@ -2114,38 +3939,34 @@ export class Telemetry3DViewport {
 
         if (!targetModel) return null;
 
-        // 1. Try viewport connection path
-        if (vpNode) {
-            const connToViewport = targetModel.connections.find((c: any) => c.toNode === vpNode.id);
-            if (connToViewport) {
-                const solverNode = targetModel.nodes.find((n: any) => n.id === connToViewport.fromNode);
-                if (solverNode && solverNode.type === 'CFDSolver3D') {
-                    const connToSolver = targetModel.connections.find((c: any) => c.toNode === solverNode.id && c.toPort === 'stl');
-                    if (connToSolver) {
-                        const geomNode = targetModel.nodes.find((n: any) => n.id === connToSolver.fromNode);
-                        if (geomNode && (geomNode.type === 'STLGeometry' || geomNode.type === 'PrimitiveGeometry3D')) {
-                            return geomNode;
-                        }
+        // 1. Recursively trace upstream from viewport node through intermediate nodes (VTKOutput, CFDSolver3D, etc.)
+        const findUpstreamGeom = (nodeId: string, visited = new Set<string>()): Node | null => {
+            if (visited.has(nodeId)) return null;
+            visited.add(nodeId);
+            const inConns = targetModel.connections.filter((c: any) => c.toNode === nodeId);
+            for (const conn of inConns) {
+                const parent = targetModel.nodes.find((n: any) => n.id === conn.fromNode);
+                if (parent) {
+                    if (parent.type === 'STLGeometry' || parent.type === 'PrimitiveGeometry3D') {
+                        return parent;
                     }
+                    const found = findUpstreamGeom(parent.id, visited);
+                    if (found) return found;
                 }
             }
+            return null;
+        };
+
+        if (vpNode) {
+            const found = findUpstreamGeom(vpNode.id);
+            if (found) return found;
         }
 
-        // 2. Fallback: Find geometry connected to any CFDSolver3D in the model
-        const solverNode = targetModel.nodes.find((n: any) => n.type === 'CFDSolver3D');
-        if (solverNode) {
-            const connToSolver = targetModel.connections.find((c: any) => c.toNode === solverNode.id && c.toPort === 'stl');
-            if (connToSolver) {
-                const geomNode = targetModel.nodes.find((n: any) => n.id === connToSolver.fromNode);
-                if (geomNode && (geomNode.type === 'STLGeometry' || geomNode.type === 'PrimitiveGeometry3D')) {
-                    return geomNode;
-                }
-            }
-        }
+        // 2. Fallback: Find geometry connected to any CFDSolver3D or anywhere in model
+        const geomNode = targetModel.nodes.find((n: any) => n.type === 'STLGeometry' || n.type === 'PrimitiveGeometry3D');
+        if (geomNode) return geomNode;
 
-        // 3. Last fallback: Find first geometry node in the model
-        const fallbackGeom = targetModel.nodes.find((n: any) => n.type === 'STLGeometry' || n.type === 'PrimitiveGeometry3D');
-        return fallbackGeom || null;
+        return null;
     }
 
     private getVirtualGauges(): any[] {
@@ -2168,19 +3989,11 @@ export class Telemetry3DViewport {
         }
         if (!targetModel) return [];
 
-        const connToViewport = targetModel.connections.find((c: any) => c.toNode === vpNode.id);
-        if (connToViewport) {
-            const solverNode = targetModel.nodes.find((n: any) => n.id === connToViewport.fromNode);
-            if (solverNode && solverNode.type === 'CFDSolver3D') {
-                const connToSolver = targetModel.connections.find((c: any) => c.toNode === solverNode.id && c.toPort === 'gauges');
-                if (connToSolver) {
-                    const gaugesNode = targetModel.nodes.find((n: any) => n.id === connToSolver.fromNode);
-                    if (gaugesNode && gaugesNode.type === 'VirtualGauges') {
-                        return gaugesNode.parameters.gauges || [];
-                    }
-                }
-            }
+        const vgNode = targetModel.nodes.find((n: any) => n.type === 'VirtualGauges');
+        if (vgNode && vgNode.parameters?.gauges && Array.isArray(vgNode.parameters.gauges)) {
+            return vgNode.parameters.gauges;
         }
+
         return [];
     }
 
@@ -2254,15 +4067,28 @@ export class Telemetry3DViewport {
         });
     }
 
-    public setSTLGeometry(vertices: Float32Array | null, modelId?: string): void {
-        // Only filter if we have a definite model binding AND the IDs don't match
+    public setSTLGeometry(vertices: Float32Array | null, modelId?: string, meshId: string = 'default'): void {
+        if (modelId) {
+            const myModelId = this.getCurrentModelId();
+            if (myModelId && myModelId !== modelId) return;
+        }
+        if (this.debugOverlay) {
+            this.debugOverlay.innerHTML = `Load STL: OK (${(vertices ? vertices.length / 3 : 0).toFixed(0)} verts, mesh: ${meshId})`;
+        }
+        this.worker.postMessage({
+            type: 'setSTLGeometry',
+            data: { vertices, meshId }
+        });
+    }
+
+    public setObstaclesGeometry(vertices: Float32Array | null, cells: Int32Array | null, modelId?: string, meshId: string = 'default'): void {
         if (modelId) {
             const myModelId = this.getCurrentModelId();
             if (myModelId && myModelId !== modelId) return;
         }
         this.worker.postMessage({
-            type: 'setSTLGeometry',
-            data: { vertices }
+            type: 'setObstaclesGeometry',
+            data: { vertices, cells, meshId }
         });
     }
 

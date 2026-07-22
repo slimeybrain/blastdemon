@@ -4,6 +4,8 @@
 
 extern void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<MultiMaterialState>& states_1d,
     CFDSolver3D& solver_3d, double x_expl, double y_expl, double z_expl, double R_remap);
+extern void remap_2d_to_3d(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d,
+    CFDSolver3D& solver_3d, double x_expl, double y_expl, double z_expl, double R_remap);
 #include <device_launch_parameters.h>
 #include <iostream>
 
@@ -1780,6 +1782,89 @@ __global__ void extract_slice_kernel(const PrimitiveTile3D<RealType, IsMultiMate
 }
 
 template <typename RealType, bool IsMultiMaterial>
+__global__ void extract_volume_kernel(const PrimitiveTile3D<RealType, IsMultiMaterial>* states, const GeometryTile3D* geom, float* data, int nx, int ny, int nz, int out_nx, int out_ny, int out_nz, double xmin, double ymin, double zmin, double dx, int qty_id, int stride) {
+    int gx = blockIdx.x * blockDim.x + threadIdx.x;
+    int gy = blockIdx.y * blockDim.y + threadIdx.y;
+    int gz = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if (gx >= out_nx || gy >= out_ny || gz >= out_nz) return;
+
+    int orig_x = gx * stride;
+    int orig_y = gy * stride;
+    int orig_z = gz * stride;
+
+    if (orig_x >= nx || orig_y >= ny || orig_z >= nz) return;
+
+    size_t out_idx = (size_t)gx + (size_t)gy * out_nx + (size_t)gz * out_nx * out_ny;
+
+    if (qty_id == 7) {
+        if (geom == nullptr) {
+            data[out_idx] = 0.0f;
+        } else {
+            int tx = orig_x / 8;
+            int ty = orig_y / 8;
+            int tz = orig_z / 8;
+            int ttx = (nx + 7) / 8;
+            int tty = (ny + 7) / 8;
+            int t_idx = tx + ty * ttx + tz * ttx * tty;
+            int cx = orig_x % 8;
+            int cy = orig_y % 8;
+            int cz = orig_z % 8;
+            int c_idx = cx + cy * 8 + cz * 64;
+            data[out_idx] = geom[t_idx].cells[c_idx].is_boundary ? 1.0f : 0.0f;
+        }
+    } else {
+        int target_x = orig_x;
+        int target_y = orig_y;
+        int target_z = orig_z;
+        if (geom != nullptr) {
+            int tx = orig_x / 8;
+            int ty = orig_y / 8;
+            int tz = orig_z / 8;
+            int ttx = (nx + 7) / 8;
+            int tty = (ny + 7) / 8;
+            int t_idx = tx + ty * ttx + tz * ttx * tty;
+            int cx = orig_x % 8;
+            int cy = orig_y % 8;
+            int cz = orig_z % 8;
+            int c_idx = cx + cy * 8 + cz * 64;
+            if (geom[t_idx].cells[c_idx].is_boundary) {
+                bool found = false;
+                for (int r = 1; r <= 2 && !found; ++r) {
+                    for (int dz = -r; dz <= r && !found; ++dz) {
+                        for (int dy = -r; dy <= r && !found; ++dy) {
+                            for (int dx_c = -r; dx_c <= r && !found; ++dx_c) {
+                                int nx_c = orig_x + dx_c;
+                                int ny_c = orig_y + dy;
+                                int nz_c = orig_z + dz;
+                                if (nx_c >= 0 && nx_c < nx && ny_c >= 0 && ny_c < ny && nz_c >= 0 && nz_c < nz) {
+                                    int n_tx = nx_c / 8;
+                                    int n_ty = ny_c / 8;
+                                    int n_tz = nz_c / 8;
+                                    int n_t_idx = n_tx + n_ty * ttx + n_tz * ttx * tty;
+                                    int n_cx = nx_c % 8;
+                                    int n_cy = ny_c % 8;
+                                    int n_cz = nz_c % 8;
+                                    int n_c_idx = n_cx + n_cy * 8 + n_cz * 64;
+                                    if (!geom[n_t_idx].cells[n_c_idx].is_boundary) {
+                                        target_x = nx_c;
+                                        target_y = ny_c;
+                                        target_z = nz_c;
+                                        found = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        GPUCellStateT<RealType> sC = sample_state_with_mirror_gpu<RealType, IsMultiMaterial>(states, geom, target_x, target_y, target_z, xmin, ymin, zmin, dx);
+        data[out_idx] = get_value_by_qty_struct<RealType, IsMultiMaterial>(sC, qty_id);
+    }
+}
+
+template <typename RealType, bool IsMultiMaterial>
 CFDSolver3DCuda<RealType, IsMultiMaterial>::CFDSolver3DCuda(int nx, int ny, int nz, double cellSize, double xmin, double ymin, double zmin)
     : CFDSolver3DImplBase(nx, ny, nz, cellSize, xmin, ymin, zmin) {
 
@@ -2514,6 +2599,35 @@ std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::extractSlice(cons
         return h_data;
     }
 
+    if (slice.axis == "volume") {
+        int stride = slice.stride > 0 ? slice.stride : 1;
+        int out_nx = (nx + stride - 1) / stride;
+        int out_ny = (ny + stride - 1) / stride;
+        int out_nz = (nz + stride - 1) / stride;
+        size_t total_voxels = (size_t)out_nx * out_ny * out_nz;
+        h_data.resize(total_voxels, 0.0f);
+        size_t required_size = total_voxels * sizeof(float);
+        if (d_slice_buf_capacity < required_size) {
+            if (d_slice_buf) cudaFree(d_slice_buf);
+            d_slice_buf_capacity = required_size;
+            CHECK_CUDA(cudaMalloc(&d_slice_buf, d_slice_buf_capacity));
+        }
+        dim3 threads(8, 8, 8);
+        dim3 blocks((out_nx + 7) / 8, (out_ny + 7) / 8, (out_nz + 7) / 8);
+        extract_volume_kernel<RealType, IsMultiMaterial><<<blocks, threads>>>(
+            (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+            (const GeometryTile3D*)d_geom,
+            (float*)d_slice_buf,
+            nx, ny, nz,
+            out_nx, out_ny, out_nz,
+            xmin, ymin, zmin, cellSize,
+            qty_id, stride
+        );
+        CHECK_CUDA(cudaDeviceSynchronize());
+        CHECK_CUDA(cudaMemcpy(h_data.data(), d_slice_buf, required_size, cudaMemcpyDeviceToHost));
+        return h_data;
+    }
+
     int axis = (slice.axis == "xy" ? 0 : (slice.axis == "xz" ? 1 : 2));
     int stride = slice.stride > 0 ? slice.stride : 1;
     int w = 0, h = 0;
@@ -2713,6 +2827,40 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::initializeFrom1D(const std::vec
 
     // 3. Remap onto the host sparse pointer vector
     remap_1d_to_3d(r_1d, states_1d, *this, x_expl, y_expl, z_expl, R_remap);
+
+    commitStates();
+
+    for (auto* ptr : h_tiles) {
+        delete ptr;
+    }
+    temp_h_tiles_ptr = nullptr;
+}
+
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DCuda<RealType, IsMultiMaterial>::initializeFrom2D(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d, double x_expl, double y_expl, double z_expl, double R_remap) {
+    ensure_paged_in();
+    if (states_2d.empty()) return;
+    int ntx = (nx + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    int nty = (ny + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    int ntz = (nz + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    int total_tiles = ntx * nty * ntz;
+
+    double amb_rho = states_2d.back().rho;
+    double amb_p = states_2d.back().p;
+    ambient_rho = amb_rho;
+    ambient_p = amb_p;
+
+    initialize_ambient_kernel<RealType, IsMultiMaterial><<<total_tiles, 512>>>(
+        (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states, (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
+        (RealType)amb_rho, (RealType)amb_p, (RealType)gamma, total_tiles
+    );
+    CHECK_CUDA(cudaDeviceSynchronize());
+    CHECK_CUDA(cudaMemset(d_active_tiles, 0, total_tiles * sizeof(uint8_t)));
+
+    std::vector<PrimitiveTile3D<RealType, IsMultiMaterial>*> h_tiles(total_tiles, nullptr);
+    temp_h_tiles_ptr = &h_tiles;
+
+    remap_2d_to_3d(nr, nz, dr, dz, states_2d, *this, x_expl, y_expl, z_expl, R_remap);
 
     commitStates();
 

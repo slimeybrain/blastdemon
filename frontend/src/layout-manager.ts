@@ -1255,6 +1255,9 @@ const NODE_ICONS: Record<string, string> = {
     'DomainMesh2D': '🌐',
     'DetonatorLocation': '🎯',
     'RemapNode': '🔄',
+    'Remap1DTo2DNode': '🔄',
+    'Remap1DTo3DNode': '🔄',
+    'Remap2DTo3DNode': '🔄',
     'HardwareConfig': '⚙️',
     'CFDSolver2D': '⚡',
     'TelemetryContour': '🗺️',
@@ -1272,6 +1275,7 @@ class OutlinerComponent {
     private listener: () => void;
     private selectionListener: () => void;
     private collapsedNodes: Set<string> = new Set();
+    private collapsedModels: Set<string> = new Set();
 
     constructor(parent: HTMLElement, stateManager: StateManager) {
         this.container = document.createElement('div');
@@ -1313,7 +1317,55 @@ class OutlinerComponent {
             return;
         }
 
+        // Outliner Toolbar: Collapse All and Expand All buttons
+        const toolbar = document.createElement('div');
+        toolbar.className = 'outliner-toolbar';
+        toolbar.style.display = 'flex';
+        toolbar.style.alignItems = 'center';
+        toolbar.style.gap = '6px';
+        toolbar.style.marginBottom = '8px';
+        toolbar.style.paddingBottom = '6px';
+        toolbar.style.borderBottom = '1px solid #2a2a2a';
+
+        const expandAllBtn = document.createElement('button');
+        expandAllBtn.className = 'header-button secondary';
+        expandAllBtn.style.fontSize = '10px';
+        expandAllBtn.style.padding = '2px 8px';
+        expandAllBtn.style.display = 'inline-flex';
+        expandAllBtn.style.alignItems = 'center';
+        expandAllBtn.style.gap = '4px';
+        expandAllBtn.title = 'Expand All Models and Nodes';
+        expandAllBtn.innerHTML = '<span>▼</span><span>Expand All</span>';
+        expandAllBtn.onclick = () => {
+            this.collapsedModels.clear();
+            this.collapsedNodes.clear();
+            this.render();
+        };
+
+        const collapseAllBtn = document.createElement('button');
+        collapseAllBtn.className = 'header-button secondary';
+        collapseAllBtn.style.fontSize = '10px';
+        collapseAllBtn.style.padding = '2px 8px';
+        collapseAllBtn.style.display = 'inline-flex';
+        collapseAllBtn.style.alignItems = 'center';
+        collapseAllBtn.style.gap = '4px';
+        collapseAllBtn.title = 'Collapse All Models and Nodes';
+        collapseAllBtn.innerHTML = '<span>▶</span><span>Collapse All</span>';
+        collapseAllBtn.onclick = () => {
+            models.forEach(m => {
+                this.collapsedModels.add(m.id);
+                m.nodes.forEach(n => this.collapsedNodes.add(n.id));
+            });
+            this.render();
+        };
+
+        toolbar.appendChild(expandAllBtn);
+        toolbar.appendChild(collapseAllBtn);
+        this.container.appendChild(toolbar);
+
         models.forEach(model => {
+            const isModelCollapsed = this.collapsedModels.has(model.id);
+
             const modelSection = document.createElement('div');
             modelSection.style.marginBottom = '12px';
 
@@ -1335,6 +1387,29 @@ class OutlinerComponent {
             left.style.display = 'flex';
             left.style.alignItems = 'center';
             left.style.gap = '6px';
+
+            // Individual Expand/Collapse Button for Model
+            const modelArrow = document.createElement('span');
+            modelArrow.className = 'outliner-node-arrow';
+            modelArrow.style.fontSize = '10px';
+            modelArrow.style.width = '14px';
+            modelArrow.style.height = '14px';
+            modelArrow.style.display = 'inline-flex';
+            modelArrow.style.alignItems = 'center';
+            modelArrow.style.justifyContent = 'center';
+            modelArrow.style.cursor = 'pointer';
+            modelArrow.title = isModelCollapsed ? 'Expand Model' : 'Collapse Model';
+            modelArrow.innerHTML = isModelCollapsed ? '▶' : '▼';
+            modelArrow.onclick = (e) => {
+                e.stopPropagation();
+                if (this.collapsedModels.has(model.id)) {
+                    this.collapsedModels.delete(model.id);
+                } else {
+                    this.collapsedModels.add(model.id);
+                }
+                this.render();
+            };
+            left.appendChild(modelArrow);
 
             const radio = document.createElement('span');
             radio.innerHTML = isActive ? '●' : '○';
@@ -1454,6 +1529,9 @@ class OutlinerComponent {
             list.style.listStyle = 'none';
             list.style.padding = '0';
             list.style.margin = '4px 0 0 0';
+            if (isModelCollapsed) {
+                list.style.display = 'none';
+            }
 
             const renderNodeTree = (nodeId: string, parentEl: HTMLElement, level: number, visited: Set<string>) => {
                 if (visited.has(nodeId)) return;
@@ -1583,6 +1661,9 @@ class ExecutionManagerComponent {
     
     private connectionBadge!: HTMLElement;
     private targetsListContainer!: HTMLElement;
+    private viewModeSelect!: HTMLSelectElement;
+    private viewMode: 'auto' | 'active' | 'all' = 'auto';
+    private collapsedModels: Set<string> = new Set();
     
 
     constructor(parent: HTMLElement, stateManager: StateManager) {
@@ -1633,7 +1714,7 @@ class ExecutionManagerComponent {
         headerRow.style.alignItems = 'center';
         headerRow.style.borderBottom = '1px solid #333';
         headerRow.style.paddingBottom = '8px';
-        headerRow.style.marginBottom = '12px';
+        headerRow.style.marginBottom = '10px';
         
         const titleSpan = document.createElement('span');
         titleSpan.style.fontWeight = 'bold';
@@ -1649,23 +1730,95 @@ class ExecutionManagerComponent {
 
         this.container.appendChild(headerRow);
 
+        // Targets Header & View Toolbar Row
+        const toolbarRow = document.createElement('div');
+        toolbarRow.className = 'execution-toolbar-row';
+        toolbarRow.style.display = 'flex';
+        toolbarRow.style.justifyContent = 'space-between';
+        toolbarRow.style.alignItems = 'center';
+        toolbarRow.style.marginBottom = '8px';
 
-
-        // Targets Header
         const targetsHeader = document.createElement('div');
         targetsHeader.style.fontWeight = 'bold';
         targetsHeader.style.fontSize = '11px';
         targetsHeader.style.color = '#888';
         targetsHeader.style.letterSpacing = '0.05em';
-        targetsHeader.style.marginBottom = '8px';
         targetsHeader.textContent = 'EXECUTION TARGETS';
-        this.container.appendChild(targetsHeader);
+        toolbarRow.appendChild(targetsHeader);
+
+        const actionsDiv = document.createElement('div');
+        actionsDiv.style.display = 'flex';
+        actionsDiv.style.alignItems = 'center';
+        actionsDiv.style.gap = '4px';
+
+        // View Mode Selector Dropdown
+        this.viewModeSelect = document.createElement('select');
+        this.viewModeSelect.className = 'execution-view-select';
+        this.viewModeSelect.style.fontSize = '10px';
+        this.viewModeSelect.style.background = '#222';
+        this.viewModeSelect.style.color = '#ccc';
+        this.viewModeSelect.style.border = '1px solid #444';
+        this.viewModeSelect.style.borderRadius = '3px';
+        this.viewModeSelect.style.padding = '2px 4px';
+        this.viewModeSelect.style.outline = 'none';
+
+        const optAuto = document.createElement('option');
+        optAuto.value = 'auto';
+        optAuto.textContent = 'Auto-Collapse Inactive';
+        this.viewModeSelect.appendChild(optAuto);
+
+        const optActive = document.createElement('option');
+        optActive.value = 'active';
+        optActive.textContent = 'Active Only';
+        this.viewModeSelect.appendChild(optActive);
+
+        const optAll = document.createElement('option');
+        optAll.value = 'all';
+        optAll.textContent = 'Show All';
+        this.viewModeSelect.appendChild(optAll);
+
+        this.viewModeSelect.value = this.viewMode;
+        this.viewModeSelect.onchange = () => {
+            this.viewMode = this.viewModeSelect.value as 'auto' | 'active' | 'all';
+            this.updateTargets();
+        };
+        actionsDiv.appendChild(this.viewModeSelect);
+
+        // Expand / Collapse All buttons
+        const expandAllBtn = document.createElement('button');
+        expandAllBtn.innerHTML = '▼';
+        expandAllBtn.title = 'Expand All Cards';
+        expandAllBtn.className = 'execution-icon-btn';
+        expandAllBtn.onclick = () => {
+            this.collapsedModels.clear();
+            if (this.viewMode === 'auto') {
+                this.viewMode = 'all';
+                this.viewModeSelect.value = 'all';
+            }
+            this.updateTargets();
+        };
+
+        const collapseAllBtn = document.createElement('button');
+        collapseAllBtn.innerHTML = '▶';
+        collapseAllBtn.title = 'Collapse All Cards';
+        collapseAllBtn.className = 'execution-icon-btn';
+        collapseAllBtn.onclick = () => {
+            const models = this.stateManager.getWorkspaceModels();
+            models.forEach(m => this.collapsedModels.add(m.id));
+            this.updateTargets();
+        };
+
+        actionsDiv.appendChild(expandAllBtn);
+        actionsDiv.appendChild(collapseAllBtn);
+        toolbarRow.appendChild(actionsDiv);
+
+        this.container.appendChild(toolbarRow);
 
         // Targets list container
         this.targetsListContainer = document.createElement('div');
         this.targetsListContainer.style.display = 'flex';
         this.targetsListContainer.style.flexDirection = 'column';
-        this.targetsListContainer.style.gap = '10px';
+        this.targetsListContainer.style.gap = '8px';
         this.container.appendChild(this.targetsListContainer);
     }
 
@@ -1710,10 +1863,85 @@ class ExecutionManagerComponent {
         const card = document.createElement('div');
         card.className = 'execution-target-card';
         card.dataset.modelId = model.id;
+        card.setAttribute('draggable', 'true');
 
-        // Header row
+        // Drag events for HTML5 drag-and-drop reordering
+        card.ondragstart = (e: DragEvent) => {
+            if (e.dataTransfer) {
+                e.dataTransfer.setData('text/plain', model.id);
+                e.dataTransfer.effectAllowed = 'move';
+            }
+            card.classList.add('is-dragging');
+        };
+
+        card.ondragend = () => {
+            card.classList.remove('is-dragging');
+            if (this.targetsListContainer) {
+                Array.from(this.targetsListContainer.children).forEach(el => el.classList.remove('drag-over'));
+            }
+        };
+
+        card.ondragover = (e: DragEvent) => {
+            e.preventDefault();
+            if (e.dataTransfer) {
+                e.dataTransfer.dropEffect = 'move';
+            }
+            card.classList.add('drag-over');
+        };
+
+        card.ondragleave = () => {
+            card.classList.remove('drag-over');
+        };
+
+        card.ondrop = (e: DragEvent) => {
+            e.preventDefault();
+            card.classList.remove('drag-over');
+            if (e.dataTransfer) {
+                const draggedModelId = e.dataTransfer.getData('text/plain');
+                if (draggedModelId && draggedModelId !== model.id) {
+                    const models = this.stateManager.getWorkspaceModels();
+                    const currentIds = models.map(m => m.id);
+                    const fromIndex = currentIds.indexOf(draggedModelId);
+                    const toIndex = currentIds.indexOf(model.id);
+                    if (fromIndex !== -1 && toIndex !== -1) {
+                        const newOrder = [...currentIds];
+                        const [moved] = newOrder.splice(fromIndex, 1);
+                        newOrder.splice(toIndex, 0, moved);
+                        this.stateManager.reorderModelsInWorkspace(newOrder);
+                    }
+                }
+            }
+        };
+
+        // Header row (Clicking activates model or toggles collapse)
         const headerRow = document.createElement('div');
         headerRow.className = 'execution-target-header';
+
+        const dragHandle = document.createElement('span');
+        dragHandle.className = 'execution-target-drag-handle';
+        dragHandle.innerHTML = '⋮⋮';
+        dragHandle.title = 'Drag to reorder position';
+        headerRow.appendChild(dragHandle);
+
+        const arrowSpan = document.createElement('span');
+        arrowSpan.className = 'execution-target-fold-arrow';
+        arrowSpan.textContent = '▼';
+        arrowSpan.onclick = (e) => {
+            e.stopPropagation();
+            if (this.collapsedModels.has(model.id)) {
+                this.collapsedModels.delete(model.id);
+            } else {
+                this.collapsedModels.add(model.id);
+            }
+            this.updateTargets();
+        };
+        headerRow.appendChild(arrowSpan);
+
+        const activeBadge = document.createElement('span');
+        activeBadge.className = 'execution-target-active-badge';
+        activeBadge.textContent = 'ACTIVE';
+        activeBadge.style.display = 'none';
+        headerRow.appendChild(activeBadge);
 
         const metaDiv = document.createElement('div');
         metaDiv.className = 'execution-target-meta';
@@ -1725,7 +1953,7 @@ class ExecutionManagerComponent {
         nameSpan.textContent = model.name;
         nameSpan.style.color = accentColor;
         nameSpan.style.cursor = 'pointer';
-        nameSpan.title = 'Double-click to rename';
+        nameSpan.title = 'Click to activate model, double-click to rename';
 
         const startRename = (e: Event) => {
             e.stopPropagation();
@@ -1772,7 +2000,7 @@ class ExecutionManagerComponent {
         renameBtn.title = 'Rename Model';
         renameBtn.style.cursor = 'pointer';
         renameBtn.style.fontSize = '11px';
-        renameBtn.style.marginLeft = '6px';
+        renameBtn.style.marginLeft = '4px';
         renameBtn.style.opacity = '0.6';
         renameBtn.onmouseenter = () => renameBtn.style.opacity = '1';
         renameBtn.onmouseleave = () => renameBtn.style.opacity = '0.6';
@@ -1782,10 +2010,74 @@ class ExecutionManagerComponent {
         metaDiv.appendChild(renameBtn);
         headerRow.appendChild(metaDiv);
 
+        // Compact progress text (visible when collapsed)
+        const compactProgressSpan = document.createElement('span');
+        compactProgressSpan.className = 'execution-target-compact-progress';
+        headerRow.appendChild(compactProgressSpan);
+
+        // Reorder button group (Top, Up, Down, Bottom)
+        const reorderGroup = document.createElement('div');
+        reorderGroup.className = 'execution-reorder-btn-group';
+
+        const createReorderBtn = (text: string, title: string, direction: 'top' | 'up' | 'down' | 'bottom') => {
+            const btn = document.createElement('button');
+            btn.className = `execution-reorder-btn execution-reorder-${direction}`;
+            btn.textContent = text;
+            btn.title = title;
+            btn.onclick = (e) => {
+                e.stopPropagation();
+                this.stateManager.moveModelInWorkspace(model.id, direction);
+            };
+            return btn;
+        };
+
+        reorderGroup.appendChild(createReorderBtn('⤊', 'Move to Top', 'top'));
+        reorderGroup.appendChild(createReorderBtn('▲', 'Move Up', 'up'));
+        reorderGroup.appendChild(createReorderBtn('▼', 'Move Down', 'down'));
+        reorderGroup.appendChild(createReorderBtn('⤋', 'Move to Bottom', 'bottom'));
+        headerRow.appendChild(reorderGroup);
+
+        // Quick mini action button on header (visible when collapsed)
+        const quickBtn = document.createElement('button');
+        quickBtn.className = 'execution-target-quick-btn';
+        quickBtn.title = 'Quick Run / Pause';
+        quickBtn.style.display = 'none';
+        quickBtn.onclick = (e) => {
+            e.stopPropagation();
+            const status = this.stateManager.getModelStatus(model.id);
+            if (status === 'RUNNING') {
+                document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'PAUSE' } }));
+            } else {
+                document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'EXEC_ALL' } }));
+            }
+        };
+        headerRow.appendChild(quickBtn);
+
         const badge = document.createElement('div');
         badge.className = `status-badge`;
         headerRow.appendChild(badge);
+
+        // Click header row to activate model
+        headerRow.onclick = (e) => {
+            const target = e.target as HTMLElement;
+            if (target.classList.contains('execution-target-fold-arrow') || 
+                target.classList.contains('execution-target-quick-btn') ||
+                target.classList.contains('execution-reorder-btn') ||
+                target.classList.contains('execution-target-drag-handle')) {
+                return;
+            }
+            this.stateManager.setActiveModel(model.id);
+            if (this.viewMode === 'auto') {
+                this.collapsedModels.delete(model.id);
+            }
+            this.updateTargets();
+        };
+
         card.appendChild(headerRow);
+
+        // Collapsible Card Body Wrapper
+        const cardBody = document.createElement('div');
+        cardBody.className = 'execution-target-body';
 
         // Progress bar and details
         const progressContainer = document.createElement('div');
@@ -1803,7 +2095,7 @@ class ExecutionManagerComponent {
 
         progressContainer.appendChild(progressBg);
         progressContainer.appendChild(progressText);
-        card.appendChild(progressContainer);
+        cardBody.appendChild(progressContainer);
 
         // State Actions Row
         const actionsRow = document.createElement('div');
@@ -1838,7 +2130,7 @@ class ExecutionManagerComponent {
         actionsRow.appendChild(playBtn);
         actionsRow.appendChild(pauseBtn);
         actionsRow.appendChild(termBtn);
-        card.appendChild(actionsRow);
+        cardBody.appendChild(actionsRow);
 
         // Stepping Row (Large square step keys)
         const stepRow = document.createElement('div');
@@ -1865,7 +2157,9 @@ class ExecutionManagerComponent {
         });
 
         stepRow.appendChild(stepGrid);
-        card.appendChild(stepRow);
+        cardBody.appendChild(stepRow);
+
+        card.appendChild(cardBody);
 
         return card;
     }
@@ -1875,12 +2169,113 @@ class ExecutionManagerComponent {
         const progress = this.stateManager.getModelProgress(model.id);
         const simTime = this.stateManager.getModelSimTime(model.id);
         const has2D = model.nodes.some((n: any) => n.type === 'CFDSolver2D');
+        const activeWs = this.stateManager.getActiveWorkspace();
+        const isActive = activeWs?.activeModelId === model.id;
+
+        // Models reorder boundary state check
+        const models = this.stateManager.getWorkspaceModels();
+        const modelIndex = models.findIndex(m => m.id === model.id);
+        const isFirst = modelIndex === 0;
+        const isLast = modelIndex === models.length - 1;
+
+        const btnTop = card.querySelector('.execution-reorder-top') as HTMLButtonElement;
+        const btnUp = card.querySelector('.execution-reorder-up') as HTMLButtonElement;
+        const btnDown = card.querySelector('.execution-reorder-down') as HTMLButtonElement;
+        const btnBottom = card.querySelector('.execution-reorder-bottom') as HTMLButtonElement;
+
+        if (btnTop) btnTop.disabled = isFirst;
+        if (btnUp) btnUp.disabled = isFirst;
+        if (btnDown) btnDown.disabled = isLast;
+        if (btnBottom) btnBottom.disabled = isLast;
+
+        // View Mode Filter
+        if (this.viewMode === 'active') {
+            card.style.display = isActive ? 'flex' : 'none';
+        } else {
+            card.style.display = 'flex';
+        }
+
+        // Active model highlighting
+        if (isActive) {
+            card.classList.add('is-active');
+        } else {
+            card.classList.remove('is-active');
+        }
+
+        // Active Badge
+        const activeBadge = card.querySelector('.execution-target-active-badge') as HTMLElement;
+        if (activeBadge) {
+            activeBadge.style.display = isActive ? 'inline-block' : 'none';
+        }
+
+        // Determine collapse state
+        let isCollapsed = false;
+        if (this.viewMode === 'auto') {
+            isCollapsed = !isActive || this.collapsedModels.has(model.id);
+        } else if (this.viewMode === 'all') {
+            isCollapsed = this.collapsedModels.has(model.id);
+        }
+
+        // Card fold arrow
+        const arrowSpan = card.querySelector('.execution-target-fold-arrow') as HTMLElement;
+        if (arrowSpan) {
+            arrowSpan.textContent = isCollapsed ? '▶' : '▼';
+        }
+
+        // Card body display
+        const cardBody = card.querySelector('.execution-target-body') as HTMLElement;
+        if (cardBody) {
+            cardBody.style.display = isCollapsed ? 'none' : 'flex';
+        }
 
         // Update badge
         const badge = card.querySelector('.status-badge') as HTMLElement;
         if (badge) {
             badge.className = `status-badge badge-${status.toLowerCase()}`;
             badge.textContent = status;
+        }
+
+        // Compact progress text for collapsed view
+        const compactProgress = card.querySelector('.execution-target-compact-progress') as HTMLElement;
+        if (compactProgress) {
+            if (isCollapsed) {
+                compactProgress.style.display = 'inline';
+                if (status === 'RUNNING') {
+                    compactProgress.textContent = `${progress}% | ${simTime.toExponential(2)}s`;
+                } else if (simTime > 0) {
+                    compactProgress.textContent = `${simTime.toExponential(2)}s`;
+                } else {
+                    compactProgress.textContent = '';
+                }
+            } else {
+                compactProgress.style.display = 'none';
+            }
+        }
+
+        // Quick mini action button on header (visible when collapsed & connected)
+        const quickBtn = card.querySelector('.execution-target-quick-btn') as HTMLButtonElement;
+        if (quickBtn) {
+            if (isCollapsed && isConnected) {
+                quickBtn.style.display = 'inline-block';
+                if (status === 'RUNNING') {
+                    quickBtn.textContent = '⏸';
+                    quickBtn.title = 'Pause Execution';
+                    quickBtn.style.color = '#fb923c';
+                    quickBtn.disabled = false;
+                } else if (status === 'INITIALIZED' || status === 'PAUSED') {
+                    quickBtn.textContent = '▶';
+                    quickBtn.title = 'Run Execution';
+                    quickBtn.style.color = '#4ade80';
+                    quickBtn.disabled = false;
+                } else {
+                    quickBtn.textContent = '▶';
+                    quickBtn.title = 'Initialize / Run Execution';
+                    quickBtn.style.color = '#00f0ff';
+                    quickBtn.disabled = false;
+                }
+            } else {
+                quickBtn.style.display = 'none';
+            }
         }
 
         // Update progress bar fill

@@ -594,9 +594,12 @@ document.addEventListener('click', (e: MouseEvent) => {
  * already spawned when INIT (1D) was sent under that same ID.
  */
 interface RemapPipeline {
-    model1dId: string;   // model containing CFDSolver (1D phase)
-    model2dId: string;   // model containing CFDSolver2D + RemapNode (2D phase)
-    processId: string;   // canonical broker key = model2dId
+    sourceModelId: string; // model containing source solver (1D or 2D phase)
+    targetModelId: string; // model containing target solver + remapper node
+    model1dId: string;     // alias for sourceModelId (backwards compatibility)
+    model2dId: string;     // alias for targetModelId (backwards compatibility)
+    sourceType: '1D' | '2D';
+    processId: string;     // canonical broker key = targetModelId
 }
 
 function findRemapPipeline(modelId: string): RemapPipeline | null {
@@ -618,22 +621,60 @@ function findRemapPipeline(modelId: string): RemapPipeline | null {
         const toModelId   = nodeToModel.get(conn.toNode);
         if (!fromModelId || !toModelId || fromModelId === toModelId) continue;
 
-        // Destination must be a RemapNode inside the 2D model.
         const toModel  = allModels.find(m => m.id === toModelId);
         const toNode   = toModel?.nodes.find(n => n.id === conn.toNode);
-        if (toNode?.type !== 'RemapNode') continue;
+        if (!toNode) continue;
 
-        // Source must live in a model that has a 1D CFDSolver.
-        const fromModel = allModels.find(m => m.id === fromModelId);
-        if (!fromModel?.nodes.some(n => n.type === 'CFDSolver')) continue;
+        if (toNode.type === 'RemapNode' || toNode.type === 'Remap1DTo2DNode' || toNode.type === 'Remap1DTo3DNode') {
+            const isRemapConnected = toModel?.connections.some(c => c.fromNode === toNode.id && (c.toPort === 'remap' || c.toPort === 'in'));
+            if (!isRemapConnected) continue;
 
-        // ONLY match if modelId is the 2D target model!
-        if (modelId === toModelId) {
-            return {
-                model1dId: fromModelId,
-                model2dId: toModelId,
-                processId: toModelId,
-            };
+            const fromModel = allModels.find(m => m.id === fromModelId);
+            if (!fromModel?.nodes.some(n => n.type === 'CFDSolver')) continue;
+
+            if (modelId === toModelId) {
+                // Check if target solver explicitly disabled remap via init_mode parameter
+                const targetSolver = toModel?.nodes.find(n => n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D');
+                const initMode = targetSolver?.parameters?.init_mode;
+                if (initMode && initMode !== 'From1D') {
+                    console.log(`[findRemapPipeline] Remap pipeline ignored for ${modelId} because target solver init_mode is '${initMode}'`);
+                    continue;
+                }
+
+                return {
+                    sourceModelId: fromModelId,
+                    targetModelId: toModelId,
+                    model1dId: fromModelId,
+                    model2dId: toModelId,
+                    sourceType: '1D',
+                    processId: toModelId,
+                };
+            }
+        } else if (toNode.type === 'Remap2DTo3DNode') {
+            const isRemapConnected = toModel?.connections.some(c => c.fromNode === toNode.id && (c.toPort === 'remap' || c.toPort === 'in'));
+            if (!isRemapConnected) continue;
+
+            const fromModel = allModels.find(m => m.id === fromModelId);
+            if (!fromModel?.nodes.some(n => n.type === 'CFDSolver2D')) continue;
+
+            if (modelId === toModelId) {
+                // Check if target solver explicitly disabled remap via init_mode parameter
+                const targetSolver = toModel?.nodes.find(n => n.type === 'CFDSolver3D');
+                const initMode = targetSolver?.parameters?.init_mode;
+                if (initMode && initMode !== 'From2D') {
+                    console.log(`[findRemapPipeline] Remap pipeline ignored for ${modelId} because target solver init_mode is '${initMode}'`);
+                    continue;
+                }
+
+                return {
+                    sourceModelId: fromModelId,
+                    targetModelId: toModelId,
+                    model1dId: fromModelId,
+                    model2dId: toModelId,
+                    sourceType: '2D',
+                    processId: toModelId,
+                };
+            }
         }
     }
     return null;
@@ -644,6 +685,8 @@ function sendContourConfig(targetId: string) {
     if (m) {
         const contourNode = m.nodes.find(n => n.type === 'TelemetryContour');
         if (contourNode) {
+            const isConnected = m.connections.some(c => c.toNode === contourNode.id || c.fromNode === contourNode.id);
+            if (!isConnected) return;
             const stride = Number(contourNode.parameters?.downsample_stride ?? 1);
             const rate = Number(contourNode.parameters?.refresh_rate ?? 0.0);
             networkManager.send({
@@ -661,8 +704,13 @@ function sendView3DConfig(targetId: string) {
     if (m) {
         const view3DNode = m.nodes.find(n => n.type === 'Telemetry3DViewport');
         if (view3DNode) {
+            const isConnected = m.connections.some(c => c.toNode === view3DNode.id || c.fromNode === view3DNode.id);
+            if (!isConnected) return;
             const showObstacles = view3DNode.parameters?.show_obstacles === true;
             const obstaclesQuantity = view3DNode.parameters?.obstacles_quantity || 'pressure';
+            const showStl = view3DNode.parameters?.show_stl === true;
+            const stlQuantity = view3DNode.parameters?.stl_quantity || 'pressure';
+            
             const slices = [...(view3DNode.parameters?.slices || [])];
             if (showObstacles) {
                 slices.push({
@@ -672,7 +720,16 @@ function sendView3DConfig(targetId: string) {
                     stride: 1
                 });
             }
-            const rate = Number(view3DNode.parameters?.refresh_rate ?? 0.0);
+            if (showStl) {
+                slices.push({
+                    axis: 'volume',
+                    offset: 0.0,
+                    quantities: [stlQuantity],
+                    stride: 1
+                });
+            }
+            
+            const rate = Number(view3DNode.parameters?.refresh_rate ?? 2.0);
             networkManager.send({
                 command: "VIEW3D_CONFIG",
                 modelId: targetId,
@@ -734,11 +791,24 @@ function tryRemapFrom1D(targetModelId: string, pipe: any): boolean {
 
         const serialized1D = solver1DNode?.parameters || {};
 
-        console.log(`[tryRemapFrom1D] Sending REMAP payload for target ${targetModelId} with ${n_cells} cells.`);
+        const remapConn = model?.connections.find(c => (c.toNode === solver2DNode?.id || c.toNode === solver3DNode?.id) && c.toPort === 'remap');
+        const remapNode = remapConn ? model?.nodes.find(n => n.id === remapConn.fromNode) : null;
+
+        const explosive_x = Number(remapNode?.parameters?.explosive_x ?? 0.5);
+        const explosive_y = Number(remapNode?.parameters?.explosive_y ?? 0.5);
+        const explosive_z = Number(remapNode?.parameters?.explosive_z ?? (remapNode?.parameters?.explosive_r ?? 0.1));
+        const explosive_r = Number(remapNode?.parameters?.explosive_r ?? 0.0);
+        const remap_radius = Number(remapNode?.parameters?.remap_radius ?? (n_cells * cell_size));
+
+        console.log(`[tryRemapFrom1D] Sending REMAP payload for target ${targetModelId} with ${n_cells} cells. Center: (${explosive_x}, ${explosive_y}, ${explosive_z}), radius: ${remap_radius}`);
         networkManager.send({
             command: "REMAP",
             modelId: targetModelId,
-            remap_radius: n_cells * cell_size,
+            explosive_x: explosive_x,
+            explosive_y: explosive_y,
+            explosive_z: explosive_z,
+            explosive_r: explosive_r,
+            remap_radius: remap_radius,
             r_1d: r_1d,
             rho_1d: rho_1d,
             ur_1d: ur_1d,
@@ -763,6 +833,77 @@ function tryRemapFrom1D(targetModelId: string, pipe: any): boolean {
     } catch (err) {
         if (activeSolverNode) {
             stateManager.pushTelemetry(activeSolverNode.id, `[ERROR] Failed to parse 1D telemetry: ${err}`, targetModelId);
+        }
+        return false;
+    }
+}
+
+function tryRemapFrom2D(targetModelId: string, pipe: any): boolean {
+    const model = stateManager.getAllModels().find(m => m.id === targetModelId);
+    const model2d = stateManager.getAllModels().find(m => m.id === (pipe.sourceModelId || pipe.model2dId));
+    const solver2DNode = model2d?.nodes.find(n => n.type === 'CFDSolver2D');
+    const telemetry = solver2DNode ? stateManager.getTelemetry(solver2DNode.id + "-binary") : null;
+    
+    const solver3DNode = model?.nodes.find(n => n.type === 'CFDSolver3D');
+
+    if (solver3DNode) {
+        stateManager.pushTelemetry(solver3DNode.id, `[DEBUG] tryRemapFrom2D starting. target=${targetModelId} 2dModel=${pipe.sourceModelId || pipe.model2dId} node=${solver2DNode?.id ?? 'null'} telemetry=${telemetry ? ('ArrayBuffer(' + telemetry.byteLength + ')') : 'null'}`, targetModelId);
+    }
+
+    if (!telemetry || !(telemetry instanceof ArrayBuffer)) {
+        if (solver3DNode) {
+            stateManager.pushTelemetry(solver3DNode.id, `[INFO] No 2D simulation telemetry found. Automatically initializing and running 2D model (${pipe.sourceModelId || pipe.model2dId})...`, targetModelId);
+        }
+        const sId = pipe.sourceModelId || pipe.model2dId;
+        if (sId) {
+            console.log(`[tryRemapFrom2D] Auto-running 2D model ${sId} to generate remap profile.`);
+            executeModelCommand(sId, "INIT", {}, false);
+            executeModelCommand(sId, "EXEC_ALL", {}, false);
+        }
+        return false;
+    }
+
+    try {
+        const meshConn2D = model2d?.connections.find(c => c.toNode === solver2DNode!.id && c.toPort === 'mesh');
+        const meshNode2D = meshConn2D ? model2d?.nodes.find(n => n.id === meshConn2D.fromNode) : null;
+        const cell_size = Number(meshNode2D?.parameters?.cell_size ?? 0.005);
+        const max_r = Number(meshNode2D?.parameters?.max_r ?? 1.0);
+        const max_z = Number(meshNode2D?.parameters?.max_z ?? 1.0);
+
+        const view = new DataView(telemetry);
+        const nr = view.getUint32(0, true);
+        const nz = view.getUint32(4, true);
+        const num_materials = view.getUint32(8, true);
+        const floats = new Float32Array(telemetry, 12);
+        
+        const remapConn = model?.connections.find(c => c.toNode === solver3DNode?.id && c.toPort === 'remap');
+        const remapNode = remapConn ? model?.nodes.find(n => n.id === remapConn.fromNode) : null;
+
+        const explosive_x = Number(remapNode?.parameters?.explosive_x ?? 0.5);
+        const explosive_y = Number(remapNode?.parameters?.explosive_y ?? 0.5);
+        const explosive_z = Number(remapNode?.parameters?.explosive_z ?? 0.5);
+        const remap_radius = Number(remapNode?.parameters?.remap_radius ?? 0.5);
+
+        console.log(`[tryRemapFrom2D] Sending REMAP_2D payload for target ${targetModelId} with ${nr}x${nz} cells. Center: (${explosive_x}, ${explosive_y}, ${explosive_z}), radius: ${remap_radius}`);
+        networkManager.send({
+            command: "REMAP_2D",
+            modelId: targetModelId,
+            nr: nr,
+            nz: nz,
+            cell_size: cell_size,
+            max_r: max_r,
+            max_z: max_z,
+            explosive_x: explosive_x,
+            explosive_y: explosive_y,
+            explosive_z: explosive_z,
+            remap_radius: remap_radius,
+            num_materials: num_materials,
+            telemetry_data: Array.from(floats)
+        });
+        return true;
+    } catch (err) {
+        if (solver3DNode) {
+            stateManager.pushTelemetry(solver3DNode.id, `[ERROR] Failed to parse 2D telemetry: ${err}`, targetModelId);
         }
         return false;
     }
@@ -807,38 +948,39 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
         stateManager.setModelProgress(modelId, 0);
         stateManager.setModelSimTime(modelId, 0.0);
 
-        if (pipeline) {
-            // Treat model as isolated: send INIT_2D first, then REMAP from 1D telemetry
+        if (has3D) {
             const state = stateManager.getSimulationState(modelId);
             if (state) {
-                const payload = serializeForSolver(state, "INIT_2D", modelId, model?.filename);
-                console.log(`Sending INIT_2D for 2D model ${modelId} in pipeline`);
+                const payload = serializeForSolver(state, "INIT_3D", modelId, model?.filename);
+                console.log(`[INIT_3D] Payload for ${modelId}:`, JSON.parse(payload));
                 networkManager.send(payload);
-                sendContourConfig(modelId);
-                
-                if (tryRemapFrom1D(modelId, pipeline)) {
-                    stateManager.setModelStatus(modelId, 'INITIALIZED');
+                sendView3DConfig(modelId);
+                if (pipeline) {
+                    const success = pipeline.sourceType === '2D' ? tryRemapFrom2D(modelId, pipeline) : tryRemapFrom1D(modelId, pipeline);
+                    if (success) {
+                        stateManager.setModelStatus(modelId, 'INITIALIZED');
+                    } else {
+                        stateManager.setModelStatus(modelId, 'UNINITIALIZED');
+                    }
                 } else {
-                    stateManager.setModelStatus(modelId, 'UNINITIALIZED');
+                    stateManager.setModelStatus(modelId, 'INITIALIZED');
                 }
             }
         }
-        else if (has3D) {
+        else if (has2D) {
             const state = stateManager.getSimulationState(modelId);
             if (state) {
+                const payload = serializeForSolver(state, "INIT_2D", modelId, model?.filename);
+                console.log(`Sending INIT_2D for 2D model ${modelId}`);
+                networkManager.send(payload);
+                sendContourConfig(modelId);
                 if (pipeline) {
-                    const payload = serializeForSolver(state, "INIT_3D", modelId, model?.filename);
-                    console.log(`[INIT_3D] Payload for ${modelId}:`, JSON.parse(payload));
-                    networkManager.send(payload);
-                    sendView3DConfig(modelId);
                     if (tryRemapFrom1D(modelId, pipeline)) {
                         stateManager.setModelStatus(modelId, 'INITIALIZED');
+                    } else {
+                        stateManager.setModelStatus(modelId, 'UNINITIALIZED');
                     }
                 } else {
-                    const payload = serializeForSolver(state, "INIT_3D", modelId, model?.filename);
-                    console.log(`[INIT_3D] Payload for ${modelId}:`, JSON.parse(payload));
-                    networkManager.send(payload);
-                    sendView3DConfig(modelId);
                     stateManager.setModelStatus(modelId, 'INITIALIZED');
                 }
             }
@@ -1015,6 +1157,74 @@ networkManager.onMessage(async (data) => {
         }
         const payloadBuffer = data.slice(offset);
         
+        if (payloadBuffer.byteLength >= 4) {
+            const pView = new DataView(payloadBuffer);
+            const magic = pView.getUint32(0, true);
+
+            // Binary STL Mesh Frame ("BSTL")
+            if (magic === 0x4253544c) {
+                let pOffset = 4;
+                const meshIdLen = pView.getUint32(pOffset, true); pOffset += 4;
+                const meshIdBytes = new Uint8Array(payloadBuffer, pOffset, meshIdLen); pOffset += meshIdLen;
+                const meshId = new TextDecoder().decode(meshIdBytes);
+                const numFloats = pView.getUint32(pOffset, true); pOffset += 4;
+                
+                const vertBuffer = payloadBuffer.slice(pOffset, pOffset + numFloats * 4);
+                const vertices = new Float32Array(vertBuffer);
+
+                layoutManager.components.forEach(comp => {
+                    if (comp.type === 'TELEMETRY_3D' && comp.instance) {
+                        comp.instance.setSTLGeometry(vertices, modelId, meshId);
+                    }
+                    if (comp.type === 'NODE_VIEWER' && comp.instance) {
+                        comp.instance.setSTLGeometry(vertices, modelId, meshId);
+                    }
+                    if (comp.type === 'NODE_GRAPH' && comp.instance) {
+                        const state = stateManager.getSimulationState(modelId);
+                        const vpNodes = state?.nodes.filter(n => n.type === 'Telemetry3DViewport') || [];
+                        vpNodes.forEach(vpNode => {
+                            comp.instance.setSTLGeometry(vpNode.id, vertices, meshId);
+                        });
+                    }
+                });
+                return;
+            }
+
+            // Binary Obstacle Surface Mesh Frame ("BOBS")
+            if (magic === 0x424f4253) {
+                let pOffset = 4;
+                const meshIdLen = pView.getUint32(pOffset, true); pOffset += 4;
+                const meshIdBytes = new Uint8Array(payloadBuffer, pOffset, meshIdLen); pOffset += meshIdLen;
+                const meshId = new TextDecoder().decode(meshIdBytes);
+                const numVerts = pView.getUint32(pOffset, true); pOffset += 4;
+                const numCells = pView.getUint32(pOffset, true); pOffset += 4;
+                
+                const vertBuffer = payloadBuffer.slice(pOffset, pOffset + numVerts * 4);
+                const vertices = new Float32Array(vertBuffer);
+                pOffset += numVerts * 4;
+
+                const cellBuffer = payloadBuffer.slice(pOffset, pOffset + numCells * 4);
+                const cells = new Int32Array(cellBuffer);
+
+                layoutManager.components.forEach(comp => {
+                    if (comp.type === 'TELEMETRY_3D' && comp.instance) {
+                        comp.instance.setObstaclesGeometry(vertices, cells, modelId, meshId);
+                    }
+                    if (comp.type === 'NODE_VIEWER' && comp.instance) {
+                        comp.instance.setObstaclesGeometry(vertices, cells, modelId, meshId);
+                    }
+                    if (comp.type === 'NODE_GRAPH' && comp.instance) {
+                        const state = stateManager.getSimulationState(modelId);
+                        const vpNodes = state?.nodes.filter(n => n.type === 'Telemetry3DViewport') || [];
+                        vpNodes.forEach(vpNode => {
+                            comp.instance.setObstaclesGeometry(vpNode.id, vertices, cells, meshId);
+                        });
+                    }
+                });
+                return;
+            }
+        }
+
         let type: 'CFDSolver2D' | 'CFDSolver' | 'CFDSolver3D' = 'CFDSolver';
         let model = stateManager.getAllModels().find(m => m.id === modelId);
         if (model) {
@@ -1248,14 +1458,17 @@ networkManager.onMessage(async (data) => {
                     const allModels = stateManager.getAllModels();
                     for (const m of allModels) {
                         const pipe = findRemapPipeline(m.id);
-                        if (pipe && pipe.model1dId === modelId) {
-                            console.log(`[Pipeline Auto-Init] 1D model ${modelId} completed. Initializing downstream model ${m.id}`);
-                            const state2d = stateManager.getSimulationState(m.id);
-                            if (state2d) {
-                                const payload = serializeForSolver(state2d, "INIT_2D", m.id, m.filename);
+                        if (pipe && (pipe.sourceModelId === modelId || pipe.model1dId === modelId)) {
+                            console.log(`[Pipeline Auto-Init] Model ${modelId} completed. Initializing downstream model ${m.id}`);
+                            const mState = stateManager.getSimulationState(m.id);
+                            if (mState) {
+                                const is3D = m.nodes.some(n => n.type === 'CFDSolver3D');
+                                const cmd = is3D ? "INIT_3D" : "INIT_2D";
+                                const payload = serializeForSolver(mState, cmd, m.id, m.filename);
                                 networkManager.send(payload);
-                                sendContourConfig(m.id);
-                                if (tryRemapFrom1D(m.id, pipe)) {
+                                if (is3D) sendView3DConfig(m.id); else sendContourConfig(m.id);
+                                const remapOk = pipe.sourceType === '2D' ? tryRemapFrom2D(m.id, pipe) : tryRemapFrom1D(m.id, pipe);
+                                if (remapOk) {
                                     stateManager.setModelStatus(m.id, 'INITIALIZED');
                                 }
                             }

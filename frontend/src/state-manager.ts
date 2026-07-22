@@ -350,6 +350,50 @@ export class StateManager {
         }
     }
 
+    moveModelInWorkspace(modelId: string, direction: 'top' | 'up' | 'down' | 'bottom'): void {
+        const ws = this.getActiveWorkspace();
+        if (!ws) return;
+
+        const idx = ws.modelIds.indexOf(modelId);
+        if (idx === -1) return;
+
+        const newModelIds = [...ws.modelIds];
+        if (direction === 'top') {
+            if (idx === 0) return;
+            const [item] = newModelIds.splice(idx, 1);
+            newModelIds.unshift(item);
+        } else if (direction === 'up') {
+            if (idx === 0) return;
+            const [item] = newModelIds.splice(idx, 1);
+            newModelIds.splice(idx - 1, 0, item);
+        } else if (direction === 'down') {
+            if (idx === newModelIds.length - 1) return;
+            const [item] = newModelIds.splice(idx, 1);
+            newModelIds.splice(idx + 1, 0, item);
+        } else if (direction === 'bottom') {
+            if (idx === newModelIds.length - 1) return;
+            const [item] = newModelIds.splice(idx, 1);
+            newModelIds.push(item);
+        }
+
+        ws.modelIds = newModelIds;
+        this.pushAppState(this.appState);
+    }
+
+    reorderModelsInWorkspace(reorderedIds: string[]): void {
+        const ws = this.getActiveWorkspace();
+        if (!ws) return;
+
+        const currentSet = new Set(ws.modelIds);
+        const filtered = reorderedIds.filter(id => currentSet.has(id));
+        ws.modelIds.forEach(id => {
+            if (!filtered.includes(id)) filtered.push(id);
+        });
+
+        ws.modelIds = filtered;
+        this.pushAppState(this.appState);
+    }
+
     copyModelToClipboard(modelId: string): void {
         const model = this.appState.models[modelId];
         if (model) {
@@ -375,6 +419,9 @@ export class StateManager {
             'DetonatorLocation': 'node-detonator',
             'DetonatorLocation3D': 'node-detonator',
             'RemapNode': 'node-remap',
+            'Remap1DTo2DNode': 'node-remap',
+            'Remap1DTo3DNode': 'node-remap',
+            'Remap2DTo3DNode': 'node-remap',
             'HardwareConfig': 'node-hardware',
             'CFDSolver2D': 'node-solver2d',
             'TelemetryContour': 'node-contour',
@@ -1488,10 +1535,34 @@ export class StateManager {
             'RemapNode': {
                 explosive_x: 0.0,
                 explosive_y: 0.0,
-                explosive_z: 0.0,
+                explosive_z: 0.1,
                 explosive_r: 0.0,
                 remap_radius: 0.5,
-                trigger_type: 'end'
+                trigger_type: 'end',
+                trigger_val: 0.0
+            },
+            'Remap1DTo2DNode': {
+                explosive_r: 0.0,
+                explosive_z: 0.1,
+                remap_radius: 0.5,
+                trigger_type: 'end',
+                trigger_val: 0.0
+            },
+            'Remap1DTo3DNode': {
+                explosive_x: 0.5,
+                explosive_y: 0.5,
+                explosive_z: 0.5,
+                remap_radius: 0.5,
+                trigger_type: 'end',
+                trigger_val: 0.0
+            },
+            'Remap2DTo3DNode': {
+                explosive_x: 0.5,
+                explosive_y: 0.5,
+                explosive_z: 0.5,
+                remap_radius: 0.5,
+                trigger_type: 'end',
+                trigger_val: 0.0
             },
             'HardwareConfig': {
                 device: 'cpu',
@@ -1564,16 +1635,43 @@ export class StateManager {
             },
             'Telemetry3DViewport': {
                 colormap: 'plasma',
+                quantity_colormaps: {
+                    pressure: 'plasma',
+                    density: 'viridis',
+                    velocity: 'rainbow',
+                    energy: 'inferno',
+                    species1: 'magma',
+                    species2: 'coolwarm',
+                    species3: 'plasma',
+                    solid: 'grayscale',
+                    overpressure: 'inferno',
+                    impulse: 'thermal'
+                },
+                quantity_ranges: {
+                    pressure: [101325.0, 1013250.0],
+                    density: [1.2, 100.0],
+                    velocity: [0.0, 1000.0],
+                    energy: [200000.0, 10000000.0],
+                    species1: [0.0, 1.0],
+                    species2: [0.0, 1.0],
+                    species3: [0.0, 1.0],
+                    solid: [0.0, 1.0],
+                    overpressure: [0.0, 101325.0 * 99.0],
+                    impulse: [0.0, 10000.0]
+                },
                 refresh_rate: 2.0,
-                slices: [{ axis: 'xy', offset: 0.5, quantities: ['pressure'], stride: 1, opacity: 1.0, colormap: 'plasma', auto_scale: true, log_scale: false, interpolate: true, min_val: 101325.0, max_val: 101325.0 * 10.0 }],
+                slices: [{ axis: 'xy', offset: 0.5, quantities: ['pressure'], stride: 1, opacity: 1.0, colormap: 'plasma', auto_scale: true, log_scale: false, interpolate: true, min_val: 101325.0, max_val: 101325.0 * 10.0, enabled: true }],
                 log_scale: false,
                 auto_scale: true,
                 min_val: 101325.0,
                 max_val: 101325.0 * 100.0,
                 show_grid: true,
+                grid_meshlines: true,
+                show_grid_box: true,
+                grid_opacity: 1.0,
                 cell_edges: false,
                 interpolate: false,
-                // Lighting — explicit defaults so overlay sliders initialise correctly (FIX 1)
+                // Lighting — explicit defaults so overlay sliders initialise correctly
                 lightingEnabled: true,
                 aoEnabled: true,
                 ambientLevel: 0.3,
@@ -1596,16 +1694,34 @@ export class StateManager {
                 qty_overpressure: true,
                 qty_impulse: true,
                 show_stl: true,
+                stl_colormap: 'plasma',
                 stl_wireframe: false,
                 stl_solids: true,
                 stl_opacity: 0.5,
+                stl_show_results: true,
+                stl_quantity: 'pressure',
+                stl_sampling_mode: 'nearest',
+                stl_auto_scale: true,
+                stl_log_scale: false,
+                stl_min_val: 101325.0,
+                stl_max_val: 1013250.0,
                 show_gauges: true,
-                gauge_size: 0.03,
+                gauge_size: 1.0,
+                gauge_opacity: 1.0,
+                gauge_quantity: 'pressure',
+                gauge_solid: true,
                 show_obstacles: false,
+                obstacles_colormap: 'plasma',
                 obstacles_gridlines: true,
+                obstacles_solid: true,
                 obstacles_lighting: true,
                 obstacles_opacity: 1.0,
-                obstacles_quantity: 'pressure'
+                obstacles_quantity: 'pressure',
+                obstacles_auto_scale: true,
+                obstacles_log_scale: false,
+                obstacles_interpolate: true,
+                obstacles_min_val: 101325.0,
+                obstacles_max_val: 101325.0 * 10.0
             }
         };
 
@@ -1760,7 +1876,10 @@ export class StateManager {
             ];
             case 'Charge1D':
             case 'Charge2D': return [{ id: 'material', label: 'Material' }];
-            case 'RemapNode': return [{ id: 'in', label: '1D Solver' }];
+            case 'RemapNode':
+            case 'Remap1DTo2DNode':
+            case 'Remap1DTo3DNode': return [{ id: 'in', label: '1D Solver' }];
+            case 'Remap2DTo3DNode': return [{ id: 'in', label: '2D Solver' }];
             case 'TelemetryContour': return [{ id: 'in', label: 'Data Stream' }];
             case 'VTKOutput': return [{ id: 'in', label: 'Solver' }];
             case 'VirtualGauges': return [{ id: 'in', label: 'Solver Output' }];
@@ -1790,7 +1909,10 @@ export class StateManager {
             case 'DomainMesh2D': return [{ id: 'mesh', label: 'Mesh Spec' }];
             case 'DetonatorLocation':
             case 'DetonatorLocation3D': return [{ id: 'detonator', label: 'Detonator Spec' }];
-            case 'RemapNode': return [{ id: 'remap', label: 'Remap Spec' }];
+            case 'RemapNode':
+            case 'Remap1DTo2DNode':
+            case 'Remap1DTo3DNode':
+            case 'Remap2DTo3DNode': return [{ id: 'remap', label: 'Remap Spec' }];
             case 'HardwareConfig': return [{ id: 'hardware', label: 'Hardware Spec' }];
             case 'CFDSolver2D': return [{ id: 'telemetry', label: 'Telemetry' }];
             case 'DomainMesh3D': return [{ id: 'mesh', label: 'Mesh Spec' }];

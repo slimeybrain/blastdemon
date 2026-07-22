@@ -332,10 +332,17 @@ export class NodeViewer {
         }
     }
 
-    public setSTLGeometry(vertices: Float32Array | null, modelId?: string): void {
+    public setSTLGeometry(vertices: Float32Array | null, modelId?: string, meshId: string = 'default'): void {
         if (modelId && this.getCurrentModelId() !== modelId) return;
         if (this.viewport3D) {
-            this.viewport3D.setSTLGeometry(vertices, modelId);
+            this.viewport3D.setSTLGeometry(vertices, modelId, meshId);
+        }
+    }
+
+    public setObstaclesGeometry(vertices: Float32Array | null, cells: Int32Array | null, modelId?: string, meshId: string = 'default'): void {
+        if (modelId && this.getCurrentModelId() !== modelId) return;
+        if (this.viewport3D) {
+            this.viewport3D.setObstaclesGeometry(vertices, cells, modelId, meshId);
         }
     }
 
@@ -2096,7 +2103,7 @@ export class NodeViewer {
             'ascii_precision', 'step_interval', 'time_interval', 'downsample_stride',
             'telemetry_channel',
             // 2D CFD keys
-            'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r',
+            'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
             'charge_r', 'charge_z', 'charge_radius', 'charge_height',
             'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
             'ideal_gamma', 'ideal_rho_0', 'ideal_e_0',
@@ -2104,7 +2111,7 @@ export class NodeViewer {
             'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
             'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
             'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
-            'min_y', 'max_y', 'min_val', 'max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'obstacles_opacity',
+            'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
             'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio'
         ];
 
@@ -2133,7 +2140,7 @@ export class NodeViewer {
             'device': ['cpu', 'cuda'],
             'trigger_type': ['end', 'time', 'step'],
             'composition': ['Aluminized ANFO', 'Ammonal', 'ANFO', 'Baratol', 'C-4', 'Composition A-3', 'Composition B', 'Composition C-3', 'Cyclotol', 'Heavy ANFO', 'HMX', 'LX-04', 'LX-07', 'LX-10', 'LX-14', 'LX-17', 'Mining Emulsion', 'Octol', 'PBX 9404', 'PBX 9501', 'PBX 9502', 'PE-10', 'PE-12', 'PE-4', 'PE-8', 'Pentolite', 'PETN', 'RDX', 'TATB', 'Tetryl', 'TNT', 'Water Gel', 'Custom'],
-            'init_mode': ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
+            'init_mode': node.type === 'CFDSolver3D' ? ['From1D', 'From2D', 'Multi-Material JWL', 'Ideal Gas'] : ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
             'flux_scheme': ['AUSM+', 'Rusanov'],
             'spatial_order': ['1', '2', '3'],
             'temporal_order': ['1', '2', '3'],

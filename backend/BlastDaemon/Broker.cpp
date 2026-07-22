@@ -456,17 +456,37 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
                 }
             }
 
-            resp["status"] = "success";
-            resp["vertices"] = coords;
-            std::cout << "[Broker] Successfully loaded STL file " << filePath << " with " << (coords.size() / 9) << " triangles." << std::endl;
+            uint32_t magic = 0x4253544c; // "BSTL"
+            std::string meshId = filePath.empty() ? "primitives" : filePath;
+            uint32_t meshIdLen = static_cast<uint32_t>(meshId.size());
+            uint32_t numFloats = static_cast<uint32_t>(coords.size());
+
+            std::vector<uint8_t> bin_msg;
+            bin_msg.insert(bin_msg.end(), modelId.begin(), modelId.end());
+            bin_msg.push_back('\0');
+
+            const uint8_t* m_ptr = reinterpret_cast<const uint8_t*>(&magic);
+            bin_msg.insert(bin_msg.end(), m_ptr, m_ptr + 4);
+
+            const uint8_t* len_ptr = reinterpret_cast<const uint8_t*>(&meshIdLen);
+            bin_msg.insert(bin_msg.end(), len_ptr, len_ptr + 4);
+            bin_msg.insert(bin_msg.end(), meshId.begin(), meshId.end());
+
+            const uint8_t* nf_ptr = reinterpret_cast<const uint8_t*>(&numFloats);
+            bin_msg.insert(bin_msg.end(), nf_ptr, nf_ptr + 4);
+
+            const uint8_t* data_ptr = reinterpret_cast<const uint8_t*>(coords.data());
+            bin_msg.insert(bin_msg.end(), data_ptr, data_ptr + coords.size() * sizeof(float));
+
+            if (client) {
+                send_websocket_binary(client, bin_msg.data(), bin_msg.size());
+            }
+            std::cout << "[Broker] Transmitted full binary STL mesh " << meshId << " (" << (coords.size() / 9) << " triangles) to client." << std::endl;
         } catch (const std::exception& e) {
             resp["status"] = "error";
             resp["error"] = e.what();
             std::cerr << "[Broker] [ERROR] Failed to load STL: " << e.what() << std::endl;
-        }
-
-        if (client) {
-            send_websocket_text(client, resp.dump());
+            if (client) send_websocket_text(client, resp.dump());
         }
         return;
      }
@@ -505,18 +525,38 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
                     subtractive_flags.push_back(flag_val);
                 }
             }
-            resp["status"] = "success";
-            resp["vertices"] = coords;
-            resp["subtractive_flags"] = subtractive_flags;
-            std::cout << "[Broker] Successfully generated primitive geometry with " << (coords.size() / 9) << " triangles." << std::endl;
+
+            uint32_t magic = 0x4253544c; // "BSTL"
+            std::string meshId = "primitives";
+            uint32_t meshIdLen = static_cast<uint32_t>(meshId.size());
+            uint32_t numFloats = static_cast<uint32_t>(coords.size());
+
+            std::vector<uint8_t> bin_msg;
+            bin_msg.insert(bin_msg.end(), modelId.begin(), modelId.end());
+            bin_msg.push_back('\0');
+
+            const uint8_t* m_ptr = reinterpret_cast<const uint8_t*>(&magic);
+            bin_msg.insert(bin_msg.end(), m_ptr, m_ptr + 4);
+
+            const uint8_t* len_ptr = reinterpret_cast<const uint8_t*>(&meshIdLen);
+            bin_msg.insert(bin_msg.end(), len_ptr, len_ptr + 4);
+            bin_msg.insert(bin_msg.end(), meshId.begin(), meshId.end());
+
+            const uint8_t* nf_ptr = reinterpret_cast<const uint8_t*>(&numFloats);
+            bin_msg.insert(bin_msg.end(), nf_ptr, nf_ptr + 4);
+
+            const uint8_t* data_ptr = reinterpret_cast<const uint8_t*>(coords.data());
+            bin_msg.insert(bin_msg.end(), data_ptr, data_ptr + coords.size() * sizeof(float));
+
+            if (client) {
+                send_websocket_binary(client, bin_msg.data(), bin_msg.size());
+            }
+            std::cout << "[Broker] Transmitted full binary primitive geometry (" << (coords.size() / 9) << " triangles) to client." << std::endl;
         } catch (const std::exception& e) {
             resp["status"] = "error";
             resp["error"] = e.what();
             std::cerr << "[Broker] [ERROR] Failed to generate primitive geometry: " << e.what() << std::endl;
-        }
-
-        if (client) {
-            send_websocket_text(client, resp.dump());
+            if (client) send_websocket_text(client, resp.dump());
         }
         return;
     }
@@ -644,12 +684,16 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
                         std::string marker = "";
                         const std::string m1 = "BIN_FRAME ";
                         const std::string m3 = "BIN_FRAME_3D_SLICES ";
+                        const std::string m_obs = "BIN_OBSTACLES ";
                         const std::string m2_a = "BIN2D_FRAME ";
                         const std::string m2_b = "BIN_FRAME_2D ";
                         const std::string m2_amr = "BIN2D_AMR_FRAME ";
                         if (accumulator.size() >= m3.size() &&
                             std::equal(m3.begin(), m3.end(), accumulator.begin())) {
                             marker = m3;
+                        } else if (accumulator.size() >= m_obs.size() &&
+                            std::equal(m_obs.begin(), m_obs.end(), accumulator.begin())) {
+                            marker = m_obs;
                         } else if (accumulator.size() >= m2_amr.size() &&
                             std::equal(m2_amr.begin(), m2_amr.end(), accumulator.begin())) {
                             marker = m2_amr;

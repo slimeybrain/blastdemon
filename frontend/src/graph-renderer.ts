@@ -756,7 +756,7 @@ export class GraphRenderer {
                 if (toPortId === 'detonator') return fromType === 'DetonatorLocation3D';
                 if (toPortId === 'stl') return fromType === 'STLGeometry' || fromType === 'PrimitiveGeometry3D';
                 if (toPortId === 'gauges') return fromType === 'VirtualGauges';
-                if (toPortId === 'remap') return fromType === 'RemapNode';
+                if (toPortId === 'remap') return fromType === 'RemapNode' || fromType === 'Remap1DTo3DNode' || fromType === 'Remap2DTo3DNode';
                 return false;
             case 'Charge3D':
                 if (toPortId === 'material') return fromType === 'Material';
@@ -775,7 +775,7 @@ export class GraphRenderer {
             case 'CFDSolver2D':
                 if (toPortId === 'mesh') return fromType === 'DomainMesh2D';
                 if (toPortId === 'detonator') return fromType === 'DetonatorLocation';
-                if (toPortId === 'remap') return fromType === 'RemapNode';
+                if (toPortId === 'remap') return fromType === 'RemapNode' || fromType === 'Remap1DTo2DNode';
                 if (toPortId === 'hardware') return fromType === 'HardwareConfig';
                 if (toPortId === 'air') return fromType === 'Material';
                 if (toPortId === 'explosive') return fromType === 'Charge2D' || fromType === 'Charge1D';
@@ -786,7 +786,12 @@ export class GraphRenderer {
                 if (toPortId === 'material') return fromType === 'Material';
                 return false;
             case 'RemapNode':
+            case 'Remap1DTo2DNode':
+            case 'Remap1DTo3DNode':
                 if (toPortId === 'in') return fromType === 'CFDSolver';
+                return false;
+            case 'Remap2DTo3DNode':
+                if (toPortId === 'in') return fromType === 'CFDSolver2D';
                 return false;
             case 'VirtualGauges':
                 if (toPortId === 'in') return fromType === 'CFDSolver' || fromType === 'CFDSolver2D' || fromType === 'CFDSolver3D';
@@ -1146,7 +1151,7 @@ export class GraphRenderer {
                 items: [
                     { label: 'Domain Mesh 2D', type: 'DomainMesh2D' },
                     { label: 'Detonator Location', type: 'DetonatorLocation' },
-                    { label: 'Remapper (1D -> 2D)', type: 'RemapNode' },
+                    { label: 'Remapper (1D -> 2D)', type: 'Remap1DTo2DNode' },
                     { label: '2D Charge', type: 'Charge2D' },
                     { label: 'CFD Solver 2D', type: 'CFDSolver2D' }
                 ]
@@ -1156,6 +1161,8 @@ export class GraphRenderer {
                 items: [
                     { label: 'Domain Mesh 3D', type: 'DomainMesh3D' },
                     { label: 'Detonator Location 3D', type: 'DetonatorLocation3D' },
+                    { label: 'Remapper (1D -> 3D)', type: 'Remap1DTo3DNode' },
+                    { label: 'Remapper (2D -> 3D)', type: 'Remap2DTo3DNode' },
                     { label: '3D Charge', type: 'Charge3D' },
                     { label: 'STL Geometry 3D', type: 'STLGeometry' },
                     { label: 'Primitive Geometry 3D', type: 'PrimitiveGeometry3D' },
@@ -1451,13 +1458,29 @@ export class GraphRenderer {
                 detonator_y: 0.5,
                 detonator_z: 0.5
             };
-            case 'RemapNode': return {
-                explosive_x: 0.0,
-                explosive_y: 0.0,
-                explosive_z: 0.0,
+            case 'RemapNode':
+            case 'Remap1DTo2DNode': return {
                 explosive_r: 0.0,
+                explosive_z: 0.1,
                 remap_radius: 0.5,
-                trigger_type: 'end'
+                trigger_type: 'end',
+                trigger_val: 0.0
+            };
+            case 'Remap1DTo3DNode': return {
+                explosive_x: 0.5,
+                explosive_y: 0.5,
+                explosive_z: 0.5,
+                remap_radius: 0.5,
+                trigger_type: 'end',
+                trigger_val: 0.0
+            };
+            case 'Remap2DTo3DNode': return {
+                explosive_x: 0.5,
+                explosive_y: 0.5,
+                explosive_z: 0.5,
+                remap_radius: 0.5,
+                trigger_type: 'end',
+                trigger_val: 0.0
             };
             case 'HardwareConfig': return {
                 device: 'cpu',
@@ -1533,14 +1556,41 @@ export class GraphRenderer {
             };
             case 'Telemetry3DViewport': return {
                 colormap: 'plasma',
+                quantity_colormaps: {
+                    pressure: 'plasma',
+                    density: 'viridis',
+                    velocity: 'rainbow',
+                    energy: 'inferno',
+                    species1: 'magma',
+                    species2: 'coolwarm',
+                    species3: 'plasma',
+                    solid: 'grayscale',
+                    overpressure: 'inferno',
+                    impulse: 'thermal'
+                },
+                quantity_ranges: {
+                    pressure: [101325.0, 1013250.0],
+                    density: [1.2, 100.0],
+                    velocity: [0.0, 1000.0],
+                    energy: [200000.0, 10000000.0],
+                    species1: [0.0, 1.0],
+                    species2: [0.0, 1.0],
+                    species3: [0.0, 1.0],
+                    solid: [0.0, 1.0],
+                    overpressure: [0.0, 101325.0 * 99.0],
+                    impulse: [0.0, 10000.0]
+                },
                 auto_scale: true,
                 log_scale: false,
                 show_grid: true,
+                grid_meshlines: true,
+                show_grid_box: true,
+                grid_opacity: 1.0,
                 interpolate: true,
                 min_val: 101325.0,
                 max_val: 101325.0 * 10.0,
                 slices: [
-                    { axis: 'xy', offset: 0.5, stride: 1, quantities: ['pressure'], opacity: 1.0, colormap: 'plasma', auto_scale: true, log_scale: false, interpolate: true, min_val: 101325.0, max_val: 101325.0 * 10.0 }
+                    { axis: 'xy', offset: 0.5, stride: 1, quantities: ['pressure'], opacity: 1.0, colormap: 'plasma', auto_scale: true, log_scale: false, interpolate: true, min_val: 101325.0, max_val: 101325.0 * 10.0, enabled: true }
                 ],
                 lightingEnabled: true,
                 aoEnabled: true,
@@ -1563,17 +1613,31 @@ export class GraphRenderer {
                 qty_overpressure: true,
                 qty_impulse: true,
                 show_stl: true,
+                stl_colormap: 'plasma',
                 stl_wireframe: false,
                 stl_solids: true,
                 stl_opacity: 0.5,
+                stl_show_results: true,
+                stl_quantity: 'pressure',
+                stl_sampling_mode: 'nearest',
                 refresh_rate: 2.0,
                 show_gauges: true,
-                gauge_size: 0.03,
+                gauge_size: 1.0,
+                gauge_opacity: 1.0,
+                gauge_quantity: 'pressure',
+                gauge_solid: true,
                 show_obstacles: false,
+                obstacles_colormap: 'plasma',
                 obstacles_gridlines: true,
+                obstacles_solid: true,
                 obstacles_lighting: true,
                 obstacles_opacity: 1.0,
-                obstacles_quantity: 'pressure'
+                obstacles_quantity: 'pressure',
+                obstacles_auto_scale: true,
+                obstacles_log_scale: false,
+                obstacles_interpolate: true,
+                obstacles_min_val: 101325.0,
+                obstacles_max_val: 101325.0 * 10.0
             };
 
             default: return {};
@@ -1685,7 +1749,10 @@ export class GraphRenderer {
             case 'DomainMesh2D':    return 'MESH2D';
             case 'DetonatorLocation':
             case 'DetonatorLocation3D': return 'DETONATOR';
-            case 'RemapNode':       return 'REMAP';
+            case 'RemapNode':
+            case 'Remap1DTo2DNode': return 'REMAP 1D->2D';
+            case 'Remap1DTo3DNode': return 'REMAP 1D->3D';
+            case 'Remap2DTo3DNode': return 'REMAP 2D->3D';
             case 'HardwareConfig':   return 'HARDWARE';
             case 'CFDSolver2D':     return 'SOLVER2D';
             case 'TelemetryContour': return 'CONTOUR';
@@ -1714,7 +1781,10 @@ export class GraphRenderer {
             case 'DomainMesh2D':      return 'Domain Mesh 2D';
             case 'DetonatorLocation': return 'Detonator Location';
             case 'DetonatorLocation3D': return 'Detonator Location 3D';
-            case 'RemapNode':         return 'Remapper (1D -> 2D)';
+            case 'RemapNode':
+            case 'Remap1DTo2DNode':   return 'Remapper (1D -> 2D)';
+            case 'Remap1DTo3DNode':   return 'Remapper (1D -> 3D)';
+            case 'Remap2DTo3DNode':   return 'Remapper (2D -> 3D)';
             case 'HardwareConfig':    return 'Hardware Configuration';
             case 'CFDSolver2D':       return 'CFD Solver 2D';
             case 'TelemetryContour':  return 'Telemetry - Contour (2D)';
@@ -2646,7 +2716,7 @@ export class GraphRenderer {
         if (nodeType === 'Charge1D' || nodeType === 'Charge2D' || portId === 'explosive') return 'explosive';
         if (portId === 'ideal_gas') return 'material';
         if (nodeType === 'DetonatorLocation' || nodeType === 'DetonatorLocation3D' || portId === 'detonator') return 'detonator';
-        if (nodeType === 'RemapNode' || portId === 'remap') return 'remap';
+        if (nodeType === 'RemapNode' || nodeType === 'Remap1DTo2DNode' || nodeType === 'Remap1DTo3DNode' || nodeType === 'Remap2DTo3DNode' || portId === 'remap') return 'remap';
         if (nodeType === 'HardwareConfig' || portId === 'hardware') return 'hardware';
         if (portId === 'telemetry' || (portId === 'in' && (nodeType === 'TelemetryText' || nodeType === 'TelemetryGraph' || nodeType === 'TelemetryContour' || nodeType === 'Telemetry3DViewport'))) return 'telemetry';
         return 'material';
@@ -3005,7 +3075,7 @@ export class GraphRenderer {
                         // 3. Try to get charge geometry from Remapper
                         const remapConn = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'remap');
                         if (remapConn) {
-                            const remapNode = state.nodes.find(n => n.id === remapConn.fromNode && n.type === 'RemapNode');
+                            const remapNode = state.nodes.find(n => n.id === remapConn.fromNode && (n.type === 'RemapNode' || n.type === 'Remap1DTo2DNode'));
                             if (remapNode) {
                                 const ws = this.stateManager.getActiveWorkspace();
                                 const wsConns = ws ? (ws.connections || []) : [];
@@ -3968,7 +4038,7 @@ export class GraphRenderer {
                 'trigger_type': ['end', 'time', 'step'],
                 // Explosive composition — JWL parameter sets (Ideal Gas uses its own node)
                 'composition': ['Aluminized ANFO', 'Ammonal', 'ANFO', 'Baratol', 'C-4', 'Composition A-3', 'Composition B', 'Composition C-3', 'Cyclotol', 'Heavy ANFO', 'HMX', 'LX-04', 'LX-07', 'LX-10', 'LX-14', 'LX-17', 'Mining Emulsion', 'Octol', 'PBX 9404', 'PBX 9501', 'PBX 9502', 'PE-10', 'PE-12', 'PE-4', 'PE-8', 'Pentolite', 'PETN', 'RDX', 'TATB', 'Tetryl', 'TNT', 'Water Gel', 'Custom'],
-                'init_mode': ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
+                'init_mode': node.type === 'CFDSolver3D' ? ['From1D', 'From2D', 'Multi-Material JWL', 'Ideal Gas'] : ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
                 'flux_scheme': ['AUSM+', 'Rusanov'],
                 'spatial_order': ['1', '2', '3'],
                 'temporal_order': ['1', '2', '3'],
@@ -4010,7 +4080,7 @@ export class GraphRenderer {
                             'ascii_precision', 'step_interval', 'time_interval', 'downsample_stride',
                             'telemetry_channel',
                             // 2D CFD keys
-                            'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r',
+                            'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
                             'charge_r', 'charge_z', 'charge_radius', 'charge_height',
                             'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
                             'ideal_gamma', 'ideal_rho_0', 'ideal_e_0',
@@ -4018,7 +4088,7 @@ export class GraphRenderer {
                             'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
                             'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
                             'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
-                            'min_y', 'max_y', 'min_val', 'max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'obstacles_opacity',
+                            'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
                             'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio'
                         ];
                         let castValue: any = newVal;
@@ -4543,7 +4613,12 @@ export class GraphRenderer {
             case 'DetonatorLocation3D':
                 return 'Detonator position node (3D). Specifies where the detonation point source is placed in the 3D Cartesian domain. detonator_x, detonator_y, and detonator_z set the coordinates (m). Required by the 3D CFD Solver.';
             case 'RemapNode':
+            case 'Remap1DTo2DNode':
                 return 'Remapper (1D → 2D). Reads the converged 1D spherical-symmetric solution and maps its conserved variables onto the 2D axisymmetric mesh, centered at the specified explosive_z / explosive_r origin. Triggers at "end" of the 1D run, or at a specific time or step count.';
+            case 'Remap1DTo3DNode':
+                return 'Remapper (1D → 3D). Reads the converged 1D spherical-symmetric solution and maps its conserved variables onto the 3D Cartesian mesh, centered at the specified explosive_x / explosive_y / explosive_z origin.';
+            case 'Remap2DTo3DNode':
+                return 'Remapper (2D → 3D). Reads the converged 2D axisymmetric or Cartesian solution and revolves/maps its conserved variables onto the 3D Cartesian mesh, centered at the specified explosive_x / explosive_y / explosive_z origin.';
             case 'HardwareConfig':
                 return 'Hardware configuration node. Selects the execution device (CPU with OpenMP, or GPU with CUDA) and the floating-point precision (double / single). Applied to both 1D and 2D solvers in the model.';
             case 'CFDSolver2D':
@@ -6425,14 +6500,22 @@ export class GraphRenderer {
                     break;
                 }
             }
-            net.send({ command: "VIEW3D_CONFIG", modelId: targetModelId, slices });
+            const currentRate = Number(node.parameters?.refresh_rate ?? 2.0);
+            net.send({ command: "VIEW3D_CONFIG", modelId: targetModelId, slices, refresh_rate: currentRate });
         }
     }
 
-    public setSTLGeometry(nodeId: string, vertices: Float32Array | null): void {
+    public setSTLGeometry(nodeId: string, vertices: Float32Array | null, meshId: string = 'default'): void {
         const vp = this.viewport3Ds.get(nodeId);
         if (vp) {
-            vp.setSTLGeometry(vertices);
+            vp.setSTLGeometry(vertices, undefined, meshId);
+        }
+    }
+
+    public setObstaclesGeometry(nodeId: string, vertices: Float32Array | null, cells: Int32Array | null, meshId: string = 'default'): void {
+        const vp = this.viewport3Ds.get(nodeId);
+        if (vp) {
+            vp.setObstaclesGeometry(vertices, cells, undefined, meshId);
         }
     }
 

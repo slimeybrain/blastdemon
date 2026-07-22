@@ -172,10 +172,10 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                 addMessage(solver2D.id, 'error', "CFD Solver 2D requires a Remap node connected to the 'remap' input when Init Mode is 'From1D'.");
             } else {
                 const remapNode = state.nodes.find(n => n.id === remapConn.fromNode);
-                if (!remapNode || remapNode.type !== 'RemapNode') {
+                if (!remapNode || (remapNode.type !== 'RemapNode' && remapNode.type !== 'Remap1DTo2DNode')) {
                     const connKey = `${remapConn.fromNode}:${remapConn.fromPort}->${remapConn.toNode}:${remapConn.toPort}`;
-                    flawedConnections.set(connKey, "Only RemapNode can be connected to the Remap input.");
-                    addMessage(solver2D.id, 'error', "Only RemapNode can be connected to the Remap input.");
+                    flawedConnections.set(connKey, "Only RemapNode or Remap1DTo2DNode can be connected to the Remap input of CFD Solver 2D.");
+                    addMessage(solver2D.id, 'error', "Only RemapNode or Remap1DTo2DNode can be connected to the Remap input of CFD Solver 2D.");
                 }
             }
 
@@ -394,13 +394,13 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             // Remap connection check
             const remapConn3D = state.connections.find(c => c.toNode === solver3D.id && c.toPort === 'remap');
             if (!remapConn3D) {
-                addMessage(solver3D.id, 'error', "No Remap node connected to CFD Solver 3D. A RemapNode is required for From1D mode.");
+                addMessage(solver3D.id, 'error', "No Remap node connected to CFD Solver 3D. A Remap1DTo3DNode (or RemapNode) is required for From1D mode.");
             } else {
                 const remapNode3D = state.nodes.find(n => n.id === remapConn3D.fromNode);
-                if (!remapNode3D || remapNode3D.type !== 'RemapNode') {
+                if (!remapNode3D || (remapNode3D.type !== 'RemapNode' && remapNode3D.type !== 'Remap1DTo3DNode')) {
                     const connKey = `${remapConn3D.fromNode}:${remapConn3D.fromPort}->${remapConn3D.toNode}:${remapConn3D.toPort}`;
-                    flawedConnections.set(connKey, "Only RemapNode can be connected to the Remap input of CFD Solver 3D.");
-                    addMessage(solver3D.id, 'error', "Only RemapNode can be connected to the Remap input of CFD Solver 3D.");
+                    flawedConnections.set(connKey, "Only Remap1DTo3DNode (or RemapNode) can be connected to the Remap input of CFD Solver 3D in From1D mode.");
+                    addMessage(solver3D.id, 'error', "Only Remap1DTo3DNode (or RemapNode) can be connected to the Remap input of CFD Solver 3D in From1D mode.");
                 }
             }
 
@@ -413,6 +413,33 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                     const connectedNode = state.nodes.find(n => n.id === conn.fromNode);
                     if (connectedNode) {
                         addMessage(connectedNode.id, 'warning', `This node is ignored because the connected CFD Solver 3D Init Mode is 'From1D'.`);
+                    }
+                }
+            });
+
+        } else if (initMode3D === 'From2D') {
+            // Remap 2D->3D connection check
+            const remapConn3D = state.connections.find(c => c.toNode === solver3D.id && c.toPort === 'remap');
+            if (!remapConn3D) {
+                addMessage(solver3D.id, 'error', "No Remap node connected to CFD Solver 3D. A Remap2DTo3DNode is required for From2D mode.");
+            } else {
+                const remapNode3D = state.nodes.find(n => n.id === remapConn3D.fromNode);
+                if (!remapNode3D || remapNode3D.type !== 'Remap2DTo3DNode') {
+                    const connKey = `${remapConn3D.fromNode}:${remapConn3D.fromPort}->${remapConn3D.toNode}:${remapConn3D.toPort}`;
+                    flawedConnections.set(connKey, "Only Remap2DTo3DNode can be connected to the Remap input of CFD Solver 3D in From2D mode.");
+                    addMessage(solver3D.id, 'error', "Only Remap2DTo3DNode can be connected to the Remap input of CFD Solver 3D in From2D mode.");
+                }
+            }
+
+            // Ignored inputs warning
+            const ignoredPorts = ['charge', 'detonator'];
+            ignoredPorts.forEach(port => {
+                const conn = state.connections.find(c => c.toNode === solver3D.id && c.toPort === port);
+                if (conn) {
+                    addMessage(solver3D.id, 'warning', `Input connected to '${port}' port is ignored when Init Mode is 'From2D'.`);
+                    const connectedNode = state.nodes.find(n => n.id === conn.fromNode);
+                    if (connectedNode) {
+                        addMessage(connectedNode.id, 'warning', `This node is ignored because the connected CFD Solver 3D Init Mode is 'From2D'.`);
                     }
                 }
             });
@@ -719,7 +746,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             }
         }
 
-        if (node.type === 'RemapNode') {
+        if (node.type === 'RemapNode' || node.type === 'Remap1DTo2DNode' || node.type === 'Remap1DTo3DNode') {
             const remap_radius = Number(node.parameters?.remap_radius ?? 0.5);
             if (isNaN(remap_radius) || remap_radius <= 0) {
                 addMessage(node.id, 'error', "Remap radius must be greater than 0.");
@@ -733,8 +760,28 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                 const fromNode = state.nodes.find(n => n.id === inConn.fromNode);
                 if (!fromNode || fromNode.type !== 'CFDSolver') {
                     const connKey = `${inConn.fromNode}:${inConn.fromPort}->${inConn.toNode}:${inConn.toPort}`;
-                    flawedConnections.set(connKey, "Remap input must be connected to a 1D CFD Solver.");
-                    addMessage(node.id, 'error', "Remap input must be connected to a 1D CFD Solver.");
+                    flawedConnections.set(connKey, "Only 1D CFD Solver can be connected to the input of this Remap node.");
+                    addMessage(node.id, 'error', "Only 1D CFD Solver can be connected to the input of this Remap node.");
+                }
+            }
+        }
+
+        if (node.type === 'Remap2DTo3DNode') {
+            const remap_radius = Number(node.parameters?.remap_radius ?? 0.5);
+            if (isNaN(remap_radius) || remap_radius <= 0) {
+                addMessage(node.id, 'error', "Remap radius must be greater than 0.");
+            }
+
+            // Connection checks
+            const inConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'in');
+            if (!inConn) {
+                addMessage(node.id, 'error', "Remap 2D->3D node is not connected to a 2D CFD Solver.");
+            } else {
+                const fromNode = state.nodes.find(n => n.id === inConn.fromNode);
+                if (!fromNode || fromNode.type !== 'CFDSolver2D') {
+                    const connKey = `${inConn.fromNode}:${inConn.fromPort}->${inConn.toNode}:${inConn.toPort}`;
+                    flawedConnections.set(connKey, "Only 2D CFD Solver (CFDSolver2D) can be connected to the input of Remap 2D->3D node.");
+                    addMessage(node.id, 'error', "Only 2D CFD Solver (CFDSolver2D) can be connected to the input of Remap 2D->3D node.");
                 }
             }
 

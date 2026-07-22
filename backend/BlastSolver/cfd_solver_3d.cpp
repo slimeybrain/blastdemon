@@ -1075,6 +1075,49 @@ std::vector<float> CFDSolver3DImpl<RealType, IsMultiMaterial>::extractSlice(cons
         return data;
     }
 
+    if (slice.axis == "volume") {
+        int out_nx = (nx + stride - 1) / stride;
+        int out_ny = (ny + stride - 1) / stride;
+        int out_nz = (nz + stride - 1) / stride;
+        data.resize((size_t)out_nx * out_ny * out_nz);
+        for (int gz = 0; gz < out_nz; ++gz) {
+            for (int gy = 0; gy < out_ny; ++gy) {
+                for (int gx = 0; gx < out_nx; ++gx) {
+                    int gxc = gx * stride;
+                    int gyc = gy * stride;
+                    int gzc = gz * stride;
+                    int target_x = gxc;
+                    int target_y = gyc;
+                    int target_z = gzc;
+                    if (is_solid(gxc, gyc, gzc)) {
+                        bool found = false;
+                        for (int r = 1; r <= 2 && !found; ++r) {
+                            for (int dz = -r; dz <= r && !found; ++dz) {
+                                for (int dy = -r; dy <= r && !found; ++dy) {
+                                    for (int dx = -r; dx <= r && !found; ++dx) {
+                                        int nx_c = gxc + dx;
+                                        int ny_c = gyc + dy;
+                                        int nz_c = gzc + dz;
+                                        if (nx_c >= 0 && nx_c < nx && ny_c >= 0 && ny_c < ny && nz_c >= 0 && nz_c < nz) {
+                                            if (!is_solid(nx_c, ny_c, nz_c)) {
+                                                target_x = nx_c;
+                                                target_y = ny_c;
+                                                target_z = nz_c;
+                                                found = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    data[(size_t)gx + (size_t)gy * out_nx + (size_t)gz * out_nx * out_ny] = getVal(sampleState(target_x, target_y, target_z), target_x, target_y, target_z);
+                }
+            }
+        }
+        return data;
+    }
+
     if (slice.axis == "xy") {
         int gz = std::clamp((int)((slice.offset - zmin) / cellSize), 0, nz - 1);
         int out_nx = (nx + stride - 1) / stride;
@@ -1116,6 +1159,8 @@ std::vector<float> CFDSolver3DImpl<RealType, IsMultiMaterial>::extractSlice(cons
 }
 
 extern void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<MultiMaterialState>& states_1d,
+                    CFDSolver3D& solver_3d, double x_expl, double y_expl, double z_expl, double R_remap);
+extern void remap_2d_to_3d(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d,
                     CFDSolver3D& solver_3d, double x_expl, double y_expl, double z_expl, double R_remap);
 
 template <typename RealType, bool IsMultiMaterial>
@@ -1165,6 +1210,48 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::initializeFrom1D(const std::vec
     active_tiles.assign(states_pool.size(), 0);
 
     remap_1d_to_3d(r_1d, states_1d, *this, x_expl, y_expl, z_expl, R_remap);
+}
+
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DImpl<RealType, IsMultiMaterial>::initializeFrom2D(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d, double x_expl, double y_expl, double z_expl, double R_remap) {
+    if (states_2d.empty()) return;
+    double amb_rho = states_2d.back().rho;
+    double amb_p = states_2d.back().p;
+    ambient_rho = amb_rho;
+    ambient_p = amb_p;
+
+    #pragma omp parallel for
+    for (int t = 0; t < (int)states_pool.size(); ++t) {
+        auto& tile = states_pool[t];
+        auto& u_tile = U_pool[t];
+        for (int i = 0; i < TILE_CELLS_3D; ++i) {
+            tile.rho[i] = (RealType)amb_rho;
+            tile.ux[i] = 0.0; tile.uy[i] = 0.0; tile.uz[i] = 0.0;
+            tile.p[i] = (RealType)amb_p;
+            CellState3D<IsMultiMaterial> temp_s;
+            if constexpr (IsMultiMaterial) {
+                temp_s.alpha1 = 0.0; temp_s.alpha2 = 0.0;
+                temp_s.arho1 = 0.0; temp_s.arho2 = 0.0;
+                tile.alpha1[i] = 0.0; tile.alpha2[i] = 0.0;
+                tile.arho1[i] = 0.0; tile.arho2[i] = 0.0;
+            }
+            tile.floor_status[i] = 0;
+            tile.peak_overpressure[i] = 0.0;
+            tile.running_impulse[i] = 0.0;
+            tile.peak_impulse[i] = 0.0;
+
+            u_tile.rho[i] = (RealType)amb_rho;
+            u_tile.rhoux[i] = 0.0; u_tile.rhouy[i] = 0.0; u_tile.rhouz[i] = 0.0;
+            u_tile.E[i] = (RealType)getEnergy3D<IsMultiMaterial>(amb_p, amb_rho, temp_s, gamma, currentMaterials.products, currentMaterials.unreacted);
+            if constexpr (IsMultiMaterial) {
+                u_tile.alpha1[i] = 0.0; u_tile.alpha2[i] = 0.0;
+                u_tile.arho1[i] = 0.0; u_tile.arho2[i] = 0.0;
+            }
+        }
+    }
+    active_tiles.assign(states_pool.size(), 0);
+
+    remap_2d_to_3d(nr, nz, dr, dz, states_2d, *this, x_expl, y_expl, z_expl, R_remap);
 }
 
 template <typename RealType, bool IsMultiMaterial>

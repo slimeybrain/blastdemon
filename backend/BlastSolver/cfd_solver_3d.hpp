@@ -35,6 +35,7 @@ struct Slice3D {
     double offset;
     std::vector<std::string> quantities;
     int stride = 1;
+    bool enabled = true;
 };
 
 struct ObstacleFace {
@@ -118,6 +119,7 @@ public:
     virtual void retrieveNewGaugeSamples(std::vector<double>& times, std::vector<float>& values) {}
 
     virtual void initializeFrom1D(const std::vector<double>& r_1d, const std::vector<MultiMaterialState>& states_1d, double x_expl, double y_expl, double z_expl, double R_remap) = 0;
+    virtual void initializeFrom2D(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d, double x_expl, double y_expl, double z_expl, double R_remap) = 0;
 
     virtual void setCellStateMulti(int i, int j, int k, const CellState3D<true>& s) = 0;
     virtual void setCellStateIdeal(int i, int j, int k, const CellState3D<false>& s) = 0;
@@ -256,6 +258,7 @@ public:
     void retrieveNewGaugeSamples(std::vector<double>& times, std::vector<float>& values) override;
 
     void initializeFrom1D(const std::vector<double>& r_1d, const std::vector<MultiMaterialState>& states_1d, double x_expl, double y_expl, double z_expl, double R_remap) override;
+    void initializeFrom2D(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d, double x_expl, double y_expl, double z_expl, double R_remap) override;
 
     void setCellStateMulti(int i, int j, int k, const CellState3D<true>& s) override;
     void setCellStateIdeal(int i, int j, int k, const CellState3D<false>& s) override;

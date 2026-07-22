@@ -885,44 +885,190 @@ void generateObstacleMesh(int nx, int ny, int nz, double cellSize, double xmin, 
 void sendObstacleMeshToFrontend(const std::string& modelId) {
     if (global_obstacle_faces.empty()) return;
 
-    // If the mesh is too large, do not send the full vertices/cells lists to the frontend
-    // to prevent memory exhaustion (OOM), WebSocket pipeline blocking, and browser crashes.
-    if (global_obstacle_faces.size() > 100000) {
-        std::cout << "[INFO] Obstacle mesh is too large (" << global_obstacle_faces.size()
-                  << " faces). Skipping transmission to frontend to preserve memory and performance." << std::endl;
-        nlohmann::json msg;
-        msg["type"] = "obstacles_mesh";
-        msg["modelId"] = modelId;
-        msg["vertices"] = nlohmann::json::array();
-        msg["cells"] = nlohmann::json::array();
-        std::cout << msg.dump() << std::endl;
-        return;
-    }
+    size_t total_faces = global_obstacle_faces.size();
 
-    std::stringstream ss;
-    ss << std::fixed << std::setprecision(5);
-    ss << "{\"type\":\"obstacles_mesh\",\"modelId\":\"" << modelId << "\",\"vertices\":[";
-
-    for (size_t f = 0; f < global_obstacle_faces.size(); ++f) {
+    std::vector<float> vertices;
+    vertices.reserve(total_faces * 12);
+    for (size_t f = 0; f < total_faces; ++f) {
         const auto& face = global_obstacle_faces[f];
-        if (f > 0) ss << ",";
-        ss << face.px[0] << "," << face.py[0] << "," << face.pz[0] << ","
-           << face.px[1] << "," << face.py[1] << "," << face.pz[1] << ","
-           << face.px[2] << "," << face.py[2] << "," << face.pz[2] << ","
-           << face.px[3] << "," << face.py[3] << "," << face.pz[3];
+        vertices.push_back((float)face.px[0]); vertices.push_back((float)face.py[0]); vertices.push_back((float)face.pz[0]);
+        vertices.push_back((float)face.px[1]); vertices.push_back((float)face.py[1]); vertices.push_back((float)face.pz[1]);
+        vertices.push_back((float)face.px[2]); vertices.push_back((float)face.py[2]); vertices.push_back((float)face.pz[2]);
+        vertices.push_back((float)face.px[3]); vertices.push_back((float)face.py[3]); vertices.push_back((float)face.pz[3]);
     }
 
-    ss << "],\"cells\":[";
-
-    for (size_t f = 0; f < global_obstacle_faces.size(); ++f) {
+    std::vector<int32_t> cells;
+    cells.reserve(total_faces * 3);
+    for (size_t f = 0; f < total_faces; ++f) {
         const auto& face = global_obstacle_faces[f];
-        if (f > 0) ss << ",";
-        ss << face.gx_fluid << "," << face.gy_fluid << "," << face.gz_fluid;
+        cells.push_back((int32_t)face.gx_fluid);
+        cells.push_back((int32_t)face.gy_fluid);
+        cells.push_back((int32_t)face.gz_fluid);
     }
 
-    ss << "]}";
+    std::string meshId = "default_obstacles";
+    uint32_t magic = 0x424f4253; // "BOBS"
+    uint32_t meshIdLen = static_cast<uint32_t>(meshId.size());
+    uint32_t numVerts = static_cast<uint32_t>(vertices.size());
+    uint32_t numCells = static_cast<uint32_t>(cells.size());
 
-    std::cout << ss.str() << std::endl;
+    size_t payload_bytes = 4 + 4 + meshIdLen + 4 + 4 + (vertices.size() * sizeof(float)) + (cells.size() * sizeof(int32_t));
+
+    std::cout << "BIN_OBSTACLES " << payload_bytes << "\n";
+    std::cout.write(reinterpret_cast<const char*>(&magic), 4);
+    std::cout.write(reinterpret_cast<const char*>(&meshIdLen), 4);
+    std::cout.write(meshId.data(), meshIdLen);
+    std::cout.write(reinterpret_cast<const char*>(&numVerts), 4);
+    std::cout.write(reinterpret_cast<const char*>(&numCells), 4);
+    std::cout.write(reinterpret_cast<const char*>(vertices.data()), vertices.size() * sizeof(float));
+    std::cout.write(reinterpret_cast<const char*>(cells.data()), cells.size() * sizeof(int32_t));
+    std::cout.flush();
+
+    std::cout << "[INFO] Emitted binary obstacle surface mesh with " << total_faces << " faces." << std::endl;
+}
+
+struct PendingRemap {
+    bool has_pending = false;
+    std::string type = ""; // "1D" or "2D"
+    nlohmann::json msg;
+};
+static std::mutex g_pending_remap_mutex;
+static PendingRemap g_pending_remap;
+
+void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFDSolver3D* solver_3d, CFDSolver2D* solver_2d, CFDSolver2DCuda* solver_2d_cuda) {
+    if (type == "1D") {
+        double explosive_z = msg.value("explosive_z", 0.0);
+        double remap_radius = msg.value("remap_radius", 0.5);
+        double explosive_r = msg.value("explosive_r", 0.0);
+        double ambient_rho = msg.value("ambient_rho", 1.225648589);
+        double ambient_p = msg.value("ambient_p", 101325.0);
+        double gamma = msg.value("gamma", 1.4);
+        
+        std::string composition = msg.value("composition", "TNT");
+        std::string explosive_type = msg.value("explosive_type", "");
+        bool is_ideal_gas = (explosive_type == "MaterialIdealGas" || msg.value("init_mode", "") == "Ideal Gas");
+
+        MultiMat::MaterialSet matSet = parseMaterialSet(msg);
+
+        std::vector<double> r_1d = msg.at("r_1d").get<std::vector<double>>();
+        std::vector<MultiMaterialState> states_1d;
+        if (msg.contains("states_1d")) {
+            for (const auto& item : msg.at("states_1d")) {
+                MultiMaterialState s;
+                s.rho = item.at("rho").get<double>();
+                s.u = item.at("u").get<double>();
+                s.p = item.at("p").get<double>();
+                s.E = item.at("E").get<double>();
+                s.alpha1 = item.at("alpha1").get<double>();
+                s.alpha2 = item.at("alpha2").get<double>();
+                s.arho1 = item.at("arho1").get<double>();
+                s.arho2 = item.at("arho2").get<double>();
+                s.floor_status = item.value("floor_status", 0);
+                states_1d.push_back(s);
+            }
+        } else if (msg.contains("rho_1d") && msg.contains("ur_1d") && msg.contains("p_1d")) {
+            std::vector<double> rho_1d = msg.at("rho_1d").get<std::vector<double>>();
+            std::vector<double> ur_1d = msg.at("ur_1d").get<std::vector<double>>();
+            std::vector<double> p_1d = msg.at("p_1d").get<std::vector<double>>();
+            for (size_t i = 0; i < r_1d.size(); ++i) {
+                MultiMaterialState s{};
+                s.rho = rho_1d[i];
+                s.u = ur_1d[i];
+                s.p = p_1d[i];
+                s.alpha1 = 0.0;
+                s.alpha2 = 1.0;
+                s.arho1 = 0.0;
+                s.arho2 = s.rho;
+                s.E = s.p / (gamma - 1.0) + 0.5 * s.rho * s.u * s.u;
+                states_1d.push_back(s);
+            }
+        }
+
+        if (solver_3d) {
+            double explosive_x = msg.value("explosive_x", 0.5);
+            double explosive_y = msg.value("explosive_y", 0.5);
+            solver_3d->initializeFrom1D(r_1d, states_1d, explosive_x, explosive_y, explosive_z, remap_radius);
+            global_t3d = 0.0;
+            global_wallclock_3d = 0.0;
+            emit_kernel_log("REMAP", "1D->3D remap applied successfully.", 0.0, "3d");
+            emit_telemetry_3d(global_t3d, false);
+        } else if (solver_2d) {
+            solver_2d->setGamma(gamma);
+            solver_2d->setIdealGas(is_ideal_gas);
+            solver_2d->setMaterialParameters(matSet);
+            solver_2d->setInitialConditionFrom1D(explosive_z, remap_radius, r_1d, states_1d, ambient_rho, ambient_p, explosive_r);
+            solver_2d->setTime(0.0);
+            global_t2d = 0.0;
+            global_wallclock_2d = 0.0;
+            solver2d_initialized = true;
+            emit_kernel_log("REMAP", "1D->2D remap applied successfully.", 0.0, "2d");
+            emit_telemetry_2d(global_t2d, false);
+        } else if (solver_2d_cuda) {
+            solver_2d_cuda->setGamma(gamma);
+            solver_2d_cuda->setIdealGas(is_ideal_gas);
+            solver_2d_cuda->setMaterialParameters(matSet);
+            solver_2d_cuda->setInitialConditionFrom1D(explosive_z, remap_radius, r_1d, states_1d, ambient_rho, ambient_p, explosive_r);
+            solver_2d_cuda->setTime(0.0);
+            global_t2d = 0.0;
+            global_wallclock_2d = 0.0;
+            solver2d_initialized = true;
+            emit_kernel_log("REMAP", "1D->2D remap applied successfully.", 0.0, "2d");
+            emit_telemetry_2d(global_t2d, false);
+        }
+    } else if (type == "2D") {
+        int nr = msg.value("nr", 100);
+        int nz = msg.value("nz", 100);
+        double cell_size = msg.value("cell_size", 0.005);
+        double dr = cell_size;
+        double dz = cell_size;
+        double explosive_x = msg.value("explosive_x", 0.5);
+        double explosive_y = msg.value("explosive_y", 0.5);
+        double explosive_z = msg.value("explosive_z", 0.5);
+        double remap_radius = msg.value("remap_radius", 0.5);
+
+        std::vector<State2D> states_2d;
+        if (msg.contains("states_2d")) {
+            for (const auto& item : msg.at("states_2d")) {
+                State2D s{};
+                s.rho = item.value("rho", 1.225);
+                s.ur = item.value("ur", 0.0);
+                s.uz = item.value("uz", 0.0);
+                s.p = item.value("p", 101325.0);
+                s.E = item.value("E", 253312.5);
+                s.alpha1 = item.value("alpha1", 0.0);
+                s.alpha2 = item.value("alpha2", 0.0);
+                s.arho1 = item.value("arho1", 0.0);
+                s.arho2 = item.value("arho2", 0.0);
+                states_2d.push_back(s);
+            }
+        } else if (msg.contains("telemetry_data")) {
+            std::vector<double> data = msg.at("telemetry_data").get<std::vector<double>>();
+            size_t n_cells = (size_t)nr * (size_t)nz;
+            if (n_cells > 0 && data.size() >= n_cells) {
+                size_t n_channels = data.size() / n_cells;
+                for (size_t i = 0; i < n_cells; ++i) {
+                    State2D s{};
+                    s.rho = (n_channels > 0) ? data[i * n_channels + 0] : 1.225;
+                    s.ur  = (n_channels > 1) ? data[i * n_channels + 1] : 0.0;
+                    s.uz  = (n_channels > 2) ? data[i * n_channels + 2] : 0.0;
+                    s.p   = (n_channels > 3) ? data[i * n_channels + 3] : 101325.0;
+                    s.alpha1 = (n_channels > 4) ? data[i * n_channels + 4] : 0.0;
+                    s.alpha2 = (n_channels > 5) ? data[i * n_channels + 5] : 0.0;
+                    s.arho1 = (n_channels > 6) ? data[i * n_channels + 6] : 0.0;
+                    s.arho2 = (n_channels > 7) ? data[i * n_channels + 7] : s.rho;
+                    states_2d.push_back(s);
+                }
+            }
+        }
+
+        if (solver_3d && !states_2d.empty()) {
+            solver_3d->initializeFrom2D(nr, nz, dr, dz, states_2d, explosive_x, explosive_y, explosive_z, remap_radius);
+            global_t3d = 0.0;
+            global_wallclock_3d = 0.0;
+            emit_kernel_log("REMAP_2D", "2D->3D remap applied successfully.", 0.0, "3d");
+            emit_telemetry_3d(global_t3d, false);
+        }
+    }
 }
 
 void init_3d_thread_func(nlohmann::json msg) {
@@ -1068,6 +1214,20 @@ void init_3d_thread_func(nlohmann::json msg) {
         generateObstacleMesh(nx, ny, nz, cellSize, xmin, ymin, zmin);
         std::cout << "[DEBUG] Obstacle mesh generated with " << global_obstacle_faces.size() << " faces. Uploading..." << std::endl;
         local_solver_3d->uploadObstacleFaces(global_obstacle_faces);
+
+        // Check if a REMAP command arrived while voxelization was running
+        {
+            std::lock_guard<std::mutex> lock(g_pending_remap_mutex);
+            if (g_pending_remap.has_pending) {
+                if (init_mode == "From1D" || init_mode == "From2D") {
+                    std::cout << "[INFO] Applying queued pending " << g_pending_remap.type << " remap onto 3D solver..." << std::endl;
+                    apply_remap_payload(g_pending_remap.msg, g_pending_remap.type, local_solver_3d.get(), nullptr, nullptr);
+                } else {
+                    std::cout << "[INFO] Ignoring queued pending remap because solver init_mode is '" << init_mode << "'." << std::endl;
+                }
+                g_pending_remap.has_pending = false;
+            }
+        }
 
         std::cout << "[DEBUG] Obstacle faces uploaded. Committing solver..." << std::endl;
         // Commit to global solver
@@ -1833,7 +1993,7 @@ void async_telemetry_thread_func() {
 
             for (size_t i = 0; i < n_slices; ++i) {
                 const auto& s = payload->slices[i];
-                uint32_t axis_id = (s.axis == "xy" ? 0 : (s.axis == "xz" ? 1 : (s.axis == "yz" ? 2 : 3)));
+                uint32_t axis_id = (s.axis == "xy" ? 0 : (s.axis == "xz" ? 1 : (s.axis == "yz" ? 2 : (s.axis == "obstacles" ? 3 : 4))));
                 float offset = (float)s.offset;
                 uint32_t w = s.w;
                 uint32_t h = s.h;
@@ -1978,7 +2138,7 @@ void emit_telemetry_3d(double elapsed, bool is_terminated) {
         sp.stride = s.stride;
         sp.data = global_solver_3d->extractSlice(s);
 
-        uint32_t axis_id = (s.axis == "xy" ? 0 : (s.axis == "xz" ? 1 : (s.axis == "yz" ? 2 : 3)));
+        uint32_t axis_id = (s.axis == "xy" ? 0 : (s.axis == "xz" ? 1 : (s.axis == "yz" ? 2 : (s.axis == "obstacles" ? 3 : 4))));
         int stride = s.stride > 0 ? s.stride : 1;
         if (axis_id == 0) {
             sp.w = (global_solver_3d->getNx() + stride - 1) / stride;
@@ -1989,9 +2149,13 @@ void emit_telemetry_3d(double elapsed, bool is_terminated) {
         } else if (axis_id == 2) {
             sp.w = (global_solver_3d->getNy() + stride - 1) / stride;
             sp.h = (global_solver_3d->getNz() + stride - 1) / stride;
-        } else {
+        } else if (axis_id == 3) {
             sp.w = sp.data.size();
             sp.h = 1;
+        } else if (axis_id == 4) {
+            sp.w = (global_solver_3d->getNx() + stride - 1) / stride;
+            sp.h = (global_solver_3d->getNy() + stride - 1) / stride;
+            sp.offset = (double)((global_solver_3d->getNz() + stride - 1) / stride);
         }
         payload->slices.push_back(std::move(sp));
     }
@@ -2646,59 +2810,29 @@ int main() {
                     step_progress_2d = 0;
                     solver2d_initialized = false;
                 } else if (command == "REMAP") {
-                    double explosive_z = msg.value("explosive_z", 0.0);
-                    double remap_radius = msg.value("remap_radius", 0.5);
-                    double explosive_r = msg.value("explosive_r", 0.0);
-                    double ambient_rho = msg.value("ambient_rho", 1.225648589);
-                    double ambient_p = msg.value("ambient_p", 101325.0);
-                    double gamma = msg.value("gamma", 1.4);
-                    
-                    std::string composition = msg.value("composition", "TNT");
-                    std::string explosive_type = msg.value("explosive_type", "");
-                    bool is_ideal_gas = (explosive_type == "MaterialIdealGas" || msg.value("init_mode", "") == "Ideal Gas");
-
-                    MultiMat::MaterialSet matSet = parseMaterialSet(msg);
-
-                    std::vector<double> r_1d = msg.at("r_1d").get<std::vector<double>>();
-                    std::vector<MultiMaterialState> states_1d;
-                    for (const auto& item : msg.at("states_1d")) {
-                        MultiMaterialState s;
-                        s.rho = item.at("rho").get<double>();
-                        s.u = item.at("u").get<double>();
-                        s.p = item.at("p").get<double>();
-                        s.E = item.at("E").get<double>();
-                        s.alpha1 = item.at("alpha1").get<double>();
-                        s.alpha2 = item.at("alpha2").get<double>();
-                        s.arho1 = item.at("arho1").get<double>();
-                        s.arho2 = item.at("arho2").get<double>();
-                        s.floor_status = item.value("floor_status", 0);
-                        states_1d.push_back(s);
-                    }
-
-                    if (global_solver_3d) {
-                        double explosive_x = msg.value("explosive_x", 0.0);
-                        double explosive_y = msg.value("explosive_y", 0.0);
-                        global_solver_3d->initializeFrom1D(r_1d, states_1d, explosive_x, explosive_y, explosive_z, remap_radius);
-                        global_t3d = 0.0;
-                        global_wallclock_3d = 0.0;
+                    if (sim3d_init_in_progress.load()) {
+                        std::lock_guard<std::mutex> lock(g_pending_remap_mutex);
+                        g_pending_remap.has_pending = true;
+                        g_pending_remap.type = "1D";
+                        g_pending_remap.msg = msg;
+                        emit_kernel_log("REMAP", "Received 1D remap payload during 3D initialization. Queued for completion.", 0.0, "3d");
+                    } else if (global_solver_3d) {
+                        apply_remap_payload(msg, "1D", global_solver_3d.get(), nullptr, nullptr);
                     } else if (global_solver_2d) {
-                        global_solver_2d->setGamma(gamma);
-                        global_solver_2d->setIdealGas(is_ideal_gas);
-                        global_solver_2d->setMaterialParameters(matSet);
-                        global_solver_2d->setInitialConditionFrom1D(explosive_z, remap_radius, r_1d, states_1d, ambient_rho, ambient_p, explosive_r);
-                        global_solver_2d->setTime(0.0);
+                        apply_remap_payload(msg, "1D", nullptr, global_solver_2d.get(), nullptr);
                     } else if (global_solver_2d_cuda) {
-                        global_solver_2d_cuda->setGamma(gamma);
-                        global_solver_2d_cuda->setIdealGas(is_ideal_gas);
-                        global_solver_2d_cuda->setMaterialParameters(matSet);
-                        global_solver_2d_cuda->setInitialConditionFrom1D(explosive_z, remap_radius, r_1d, states_1d, ambient_rho, ambient_p, explosive_r);
-                        global_solver_2d_cuda->setTime(0.0);
+                        apply_remap_payload(msg, "1D", nullptr, nullptr, global_solver_2d_cuda.get());
                     }
-                    global_t2d = 0.0;
-                    global_wallclock_2d = 0.0;
-                    solver2d_initialized = true;
-                    emit_kernel_log("REMAP", "1D->2D remap applied successfully.", 0.0, "2d");
-                    emit_telemetry_2d(global_t2d, false);
+                } else if (command == "REMAP_2D") {
+                    if (sim3d_init_in_progress.load()) {
+                        std::lock_guard<std::mutex> lock(g_pending_remap_mutex);
+                        g_pending_remap.has_pending = true;
+                        g_pending_remap.type = "2D";
+                        g_pending_remap.msg = msg;
+                        emit_kernel_log("REMAP_2D", "Received 2D remap payload during 3D initialization. Queued for completion.", 0.0, "3d");
+                    } else if (global_solver_3d) {
+                        apply_remap_payload(msg, "2D", global_solver_3d.get(), nullptr, nullptr);
+                    }
                 } else if (command == "STEP_3D") {
                     if (sim3d_init_in_progress.load()) {
                         emit_kernel_log("WARNING", "Cannot step simulation: 3D initialization is in progress.", 0.0, "3d");
@@ -2764,6 +2898,7 @@ int main() {
                             s.axis = s_msg.value("axis", "xy");
                             s.offset = s_msg.value("offset", 0.5);
                             s.stride = s_msg.value("stride", 1);
+                            s.enabled = s_msg.value("enabled", true);
                             if (s.stride < 1) s.stride = 1;
                             if (s_msg.contains("quantities")) {
                                     for (const auto& q : s_msg["quantities"]) {
@@ -2778,6 +2913,7 @@ int main() {
                         s.axis = "xy";
                         s.offset = 0.5;
                         s.stride = 1;
+                        s.enabled = true;
                         s.quantities.push_back("pressure");
                         global_slices_3d.push_back(s);
                     }
@@ -2796,6 +2932,7 @@ int main() {
                             s.axis = s_msg.value("axis", "xy");
                             s.offset = s_msg.value("offset", 0.5);
                             s.stride = s_msg.value("stride", 1);
+                            s.enabled = s_msg.value("enabled", true);
                             if (s.stride < 1) s.stride = 1;
                             if (s_msg.contains("quantities")) {
                                 for (const auto& q : s_msg["quantities"]) {
@@ -2803,6 +2940,21 @@ int main() {
                                 }
                             }
                             global_slices_3d.push_back(s);
+                        }
+                    } else if (command == "VIEW3D_CONFIG") {
+                        bool show_stl = msg.value("show_stl", true);
+                        bool stl_show_results = msg.value("stl_show_results", true);
+                        std::string stl_qty = msg.value("stl_quantity", "pressure");
+
+                        if (show_stl && stl_show_results) {
+                            Slice3D vol_slice;
+                            vol_slice.axis = "volume";
+                            vol_slice.offset = 0.5;
+                            vol_slice.stride = msg.value("stride", 1);
+                            if (vol_slice.stride < 1) vol_slice.stride = 1;
+                            vol_slice.enabled = true;
+                            vol_slice.quantities.push_back(stl_qty);
+                            global_slices_3d.push_back(vol_slice);
                         }
                     }
                     if (command == "CONTOUR_CONFIG") {

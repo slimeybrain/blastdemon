@@ -167,14 +167,6 @@ void main() {
     else color = colormap_plasma(t);
     
     vec4 finalColor = vec4(color, uAlpha);
-    if (uShowCellEdges) {
-        vec2 grid = fract(vTexCoord * vSliceSize);
-        vec2 width = fwidth(vTexCoord * vSliceSize);
-        vec2 edge = smoothstep(width, vec2(0.0), grid) + smoothstep(vec2(1.0) - width, vec2(1.0), grid);
-        float isEdge = max(edge.x, edge.y);
-        finalColor = mix(finalColor, vec4(0.1, 0.1, 0.1, 0.8), isEdge * 0.5);
-    }
-    
     if (uEnableLighting) {
         vec3 viewPos3 = vViewPos.xyz;
         vec3 normal = normalize(cross(dFdx(viewPos3), dFdy(viewPos3)));
@@ -189,6 +181,14 @@ void main() {
         
         vec3 lit = finalColor.rgb * (uAmbientLevel + 0.7 * diff) + vec3(1.0) * (uSpecularLevel * spec);
         finalColor = vec4(lit * ao, finalColor.a);
+    }
+
+    if (uShowCellEdges) {
+        vec2 grid = fract(vTexCoord * vSliceSize);
+        vec2 width = fwidth(vTexCoord * vSliceSize) * 0.5;
+        vec2 edge = (vec2(1.0) - smoothstep(vec2(0.0), width, grid)) + smoothstep(vec2(1.0) - width, vec2(1.0), grid);
+        float isEdge = clamp(edge.x + edge.y, 0.0, 1.0);
+        finalColor = vec4(mix(finalColor.rgb, vec3(0.0, 0.0, 0.0), isEdge), finalColor.a);
     }
     outColor = finalColor;
 }
@@ -215,6 +215,7 @@ void main() {
 `;
 
 const FS_SOURCE_1 = `
+#extension GL_OES_standard_derivatives : enable
 precision highp float;
 varying vec2 vTexCoord;
 varying vec2 vSliceSize;
@@ -227,6 +228,7 @@ uniform float uMin;
 uniform float uMax;
 uniform bool uUseLogScale;
 uniform int uIsWireframe;
+uniform bool uShowCellEdges;
 uniform bool uInterpolate;
 uniform bool uEnableLighting;
 uniform bool uEnableAO;
@@ -379,6 +381,19 @@ void main() {
         
         vec3 lit = finalColor.rgb * (uAmbientLevel + 0.7 * diff) + vec3(1.0) * (uSpecularLevel * spec);
         finalColor = vec4(lit * ao, finalColor.a);
+    }
+
+    if (uShowCellEdges) {
+        vec2 grid = fract(vTexCoord * vSliceSize);
+        #ifdef GL_OES_standard_derivatives
+        vec2 width = fwidth(vTexCoord * vSliceSize) * 0.5;
+        vec2 edge = (vec2(1.0) - smoothstep(vec2(0.0), width, grid)) + smoothstep(vec2(1.0) - width, vec2(1.0), grid);
+        float isEdge = clamp(edge.x + edge.y, 0.0, 1.0);
+        #else
+        vec2 edge = step(grid, vec2(0.01)) + step(vec2(0.99), grid);
+        float isEdge = clamp(edge.x + edge.y, 0.0, 1.0);
+        #endif
+        finalColor = vec4(mix(finalColor.rgb, vec3(0.0, 0.0, 0.0), isEdge), finalColor.a);
     }
     gl_FragColor = finalColor;
 }
