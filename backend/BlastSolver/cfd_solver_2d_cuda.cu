@@ -265,7 +265,8 @@ __global__ __launch_bounds__(256, 2) void computeTileRHS_kernel(
     const int32_t* tile_map, const PrimitiveTileT<RealType>* states_pool, ConservativeTileT<RealType>* dU_pool,
     int spatialOrder, bool is_ideal_gas,
     int bcRmin, int bcRmax, int bcZmin, int bcZmax,
-    RealType ambient_rho, RealType ambient_p) {
+    RealType ambient_rho, RealType ambient_p, bool is_cartesian,
+    const uint8_t* d_solid_mask, const double* d_solid_velocities) {
     
     int tr = blockIdx.x;
     int tz = blockIdx.y;
@@ -530,17 +531,43 @@ __global__ __launch_bounds__(256, 2) void computeTileRHS_kernel(
     RealType p_face_L = (RealType)0.5 * (s_faceL_L.p + s_faceL_R.p);
     RealType p_face_avg = (RealType)0.5 * (p_face_R + p_face_L);
 
-    RealType dU_rho = -((RealType)1.0 / (r_center * dr)) * (r_right * fr_R_rho - r_left * fr_L_rho) - ((RealType)1.0 / dz) * (fz_T_rho - fz_B_rho);
-    RealType dU_rhour = -((RealType)1.0 / (r_center * dr)) * (r_right * fr_R_rhour - r_left * fr_L_rhour) - ((RealType)1.0 / dz) * (fz_T_rhour - fz_B_rhour) + p_face_avg / r_center;
-    RealType dU_rhouz = -((RealType)1.0 / (r_center * dr)) * (r_right * fr_R_rhouz - r_left * fr_L_rhouz) - ((RealType)1.0 / dz) * (fz_T_rhouz - fz_B_rhouz);
-    RealType dU_E = -((RealType)1.0 / (r_center * dr)) * (r_right * fr_R_E - r_left * fr_L_E) - ((RealType)1.0 / dz) * (fz_T_E - fz_B_E);
+    RealType dU_rho, dU_rhour, dU_rhouz, dU_E, div_u, dU_alpha1, dU_alpha2, dU_arho1, dU_arho2;
+    if (is_cartesian) {
+        dU_rho = -((RealType)1.0 / dr) * (fr_R_rho - fr_L_rho) - ((RealType)1.0 / dz) * (fz_T_rho - fz_B_rho);
+        dU_rhour = -((RealType)1.0 / dr) * (fr_R_rhour - fr_L_rhour) - ((RealType)1.0 / dz) * (fz_T_rhour - fz_B_rhour);
+        dU_rhouz = -((RealType)1.0 / dr) * (fr_R_rhouz - fr_L_rhouz) - ((RealType)1.0 / dz) * (fz_T_rhouz - fz_B_rhouz);
+        dU_E = -((RealType)1.0 / dr) * (fr_R_E - fr_L_E) - ((RealType)1.0 / dz) * (fz_T_E - fz_B_E);
 
-    RealType div_u = ((RealType)1.0 / (r_center * dr)) * (r_right * v_face_rR - r_left * v_face_rL) + ((RealType)1.0 / dz) * (v_face_zT - v_face_zB);
-    
-    RealType dU_alpha1 = -((RealType)1.0 / (r_center * dr)) * (r_right * fr_R_a1 - r_left * fr_L_a1) - ((RealType)1.0 / dz) * (fz_T_a1 - fz_B_a1) + s_c.alpha1 * div_u;
-    RealType dU_alpha2 = -((RealType)1.0 / (r_center * dr)) * (r_right * fr_R_a2 - r_left * fr_L_a2) - ((RealType)1.0 / dz) * (fz_T_a2 - fz_B_a2) + s_c.alpha2 * div_u;
-    RealType dU_arho1 = -((RealType)1.0 / (r_center * dr)) * (r_right * fr_R_ar1 - r_left * fr_L_ar1) - ((RealType)1.0 / dz) * (fz_T_ar1 - fz_B_ar1);
-    RealType dU_arho2 = -((RealType)1.0 / (r_center * dr)) * (r_right * fr_R_ar2 - r_left * fr_L_ar2) - ((RealType)1.0 / dz) * (fz_T_ar2 - fz_B_ar2);
+        div_u = ((RealType)1.0 / dr) * (v_face_rR - v_face_rL) + ((RealType)1.0 / dz) * (v_face_zT - v_face_zB);
+
+        dU_alpha1 = -((RealType)1.0 / dr) * (fr_R_a1 - fr_L_a1) - ((RealType)1.0 / dz) * (fz_T_a1 - fz_B_a1) + s_c.alpha1 * div_u;
+        dU_alpha2 = -((RealType)1.0 / dr) * (fr_R_a2 - fr_L_a2) - ((RealType)1.0 / dz) * (fz_T_a2 - fz_B_a2) + s_c.alpha2 * div_u;
+        dU_arho1 = -((RealType)1.0 / dr) * (fr_R_ar1 - fr_L_ar1) - ((RealType)1.0 / dz) * (fz_T_ar1 - fz_B_ar1);
+        dU_arho2 = -((RealType)1.0 / dr) * (fr_R_ar2 - fr_L_ar2) - ((RealType)1.0 / dz) * (fz_T_ar2 - fz_B_ar2);
+    } else {
+        dU_rho = -((RealType)1.0 / (r_center * dr)) * (r_right * fr_R_rho - r_left * fr_L_rho) - ((RealType)1.0 / dz) * (fz_T_rho - fz_B_rho);
+        dU_rhour = -((RealType)1.0 / (r_center * dr)) * (r_right * fr_R_rhour - r_left * fr_L_rhour) - ((RealType)1.0 / dz) * (fz_T_rhour - fz_B_rhour) + p_face_avg / r_center;
+        dU_rhouz = -((RealType)1.0 / (r_center * dr)) * (r_right * fr_R_rhouz - r_left * fr_L_rhouz) - ((RealType)1.0 / dz) * (fz_T_rhouz - fz_B_rhouz);
+        dU_E = -((RealType)1.0 / (r_center * dr)) * (r_right * fr_R_E - r_left * fr_L_E) - ((RealType)1.0 / dz) * (fz_T_E - fz_B_E);
+
+        div_u = ((RealType)1.0 / (r_center * dr)) * (r_right * v_face_rR - r_left * v_face_rL) + ((RealType)1.0 / dz) * (v_face_zT - v_face_zB);
+
+        dU_alpha1 = -((RealType)1.0 / (r_center * dr)) * (r_right * fr_R_a1 - r_left * fr_L_a1) - ((RealType)1.0 / dz) * (fz_T_a1 - fz_B_a1) + s_c.alpha1 * div_u;
+        dU_alpha2 = -((RealType)1.0 / (r_center * dr)) * (r_right * fr_R_a2 - r_left * fr_L_a2) - ((RealType)1.0 / dz) * (fz_T_a2 - fz_B_a2) + s_c.alpha2 * div_u;
+        dU_arho1 = -((RealType)1.0 / (r_center * dr)) * (r_right * fr_R_ar1 - r_left * fr_L_ar1) - ((RealType)1.0 / dz) * (fz_T_ar1 - fz_B_ar1);
+        dU_arho2 = -((RealType)1.0 / (r_center * dr)) * (r_right * fr_R_ar2 - r_left * fr_L_ar2) - ((RealType)1.0 / dz) * (fz_T_ar2 - fz_B_ar2);
+    }
+
+    if (d_solid_mask != nullptr && d_solid_mask[i * nz_cells + j] != 0) {
+        dU_rho = 0;
+        dU_rhour = 0;
+        dU_rhouz = 0;
+        dU_E = 0;
+        dU_alpha1 = 0;
+        dU_alpha2 = 0;
+        dU_arho1 = 0;
+        dU_arho2 = 0;
+    }
 
     dU_pool[pool_idx].rho[k] = A_coeff * dU_pool[pool_idx].rho[k] + dt * dU_rho;
     dU_pool[pool_idx].rhour[k] = A_coeff * dU_pool[pool_idx].rhour[k] + dt * dU_rhour;
@@ -1056,10 +1083,10 @@ void CFDSolver2DCudaImpl<RealType>::syncPoolToDevice() {
 template <typename RealType>
 void CFDSolver2DCudaImpl<RealType>::setInitialConditionTNT(double explosive_z, double explosive_radius, 
                                             double high_rho, 
-                                            double ambient_rho, double ambient_p) {
+                                            double ambient_rho, double ambient_p, double explosive_r) {
     this->ambient_rho = ambient_rho;
     this->ambient_p = ambient_p;
-    this->det_x = 0.0;
+    this->det_x = explosive_r;
     this->det_y = 0.0;
     this->det_z = explosive_z;
     this->is_ideal_gas = false;
@@ -1077,7 +1104,7 @@ void CFDSolver2DCudaImpl<RealType>::setInitialConditionTNT(double explosive_z, d
                 double w = r_sub;
                 for (int kj = 0; kj < 8; ++kj) {
                     double z_sub = j * dz + (kj + 0.5) * (dz / 8.0);
-                    double dist = std::sqrt(r_sub * r_sub + (z_sub - explosive_z) * (z_sub - explosive_z));
+                    double dist = std::sqrt((r_sub - explosive_r) * (r_sub - explosive_r) + (z_sub - explosive_z) * (z_sub - explosive_z));
                     if (dist <= explosive_radius) {
                         sum_w_inside += w;
                     }
@@ -1346,10 +1373,10 @@ void CFDSolver2DCudaImpl<RealType>::setInitialConditionFrom1D(double explosive_z
 }
 
 template <typename RealType>
-void CFDSolver2DCudaImpl<RealType>::setInitialConditionTNTCylinder(double explosive_z, double radius, double height, double high_rho, double ambient_rho, double ambient_p) {
+void CFDSolver2DCudaImpl<RealType>::setInitialConditionTNTCylinder(double explosive_z, double radius, double height, double high_rho, double ambient_rho, double ambient_p, double explosive_r) {
     this->ambient_rho = ambient_rho;
     this->ambient_p = ambient_p;
-    this->det_x = 0.0;
+    this->det_x = explosive_r;
     this->det_y = 0.0;
     this->det_z = explosive_z + height / 2.0;
     this->is_ideal_gas = false;
@@ -1367,7 +1394,7 @@ void CFDSolver2DCudaImpl<RealType>::setInitialConditionTNTCylinder(double explos
                 double w = r_sub;
                 for (int kj = 0; kj < 8; ++kj) {
                     double z_sub = j * dz + (kj + 0.5) * (dz / 8.0);
-                    bool inside = (r_sub <= radius) && (std::abs(z_sub - explosive_z) <= height / 2.0);
+                    bool inside = (std::abs(r_sub - explosive_r) <= radius) && (std::abs(z_sub - explosive_z) <= height / 2.0);
                     if (inside) {
                         sum_w_inside += w;
                     }
@@ -1411,10 +1438,10 @@ void CFDSolver2DCudaImpl<RealType>::setInitialConditionTNTCylinder(double explos
 }
 
 template <typename RealType>
-void CFDSolver2DCudaImpl<RealType>::setInitialConditionIdealGas(double explosive_z, double explosive_radius, double high_rho, double detonation_energy, double ambient_rho, double ambient_p) {
+void CFDSolver2DCudaImpl<RealType>::setInitialConditionIdealGas(double explosive_z, double explosive_radius, double high_rho, double detonation_energy, double ambient_rho, double ambient_p, double explosive_r) {
     this->ambient_rho = ambient_rho;
     this->ambient_p = ambient_p;
-    this->det_x = 0.0;
+    this->det_x = explosive_r;
     this->det_y = 0.0;
     this->det_z = explosive_z;
     this->is_ideal_gas = true;
@@ -1434,7 +1461,7 @@ void CFDSolver2DCudaImpl<RealType>::setInitialConditionIdealGas(double explosive
                 double w = r_sub;
                 for (int kj = 0; kj < 8; ++kj) {
                     double z_sub = j * dz + (kj + 0.5) * (dz / 8.0);
-                    double dist = std::sqrt(r_sub * r_sub + (z_sub - explosive_z) * (z_sub - explosive_z));
+                    double dist = std::sqrt((r_sub - explosive_r) * (r_sub - explosive_r) + (z_sub - explosive_z) * (z_sub - explosive_z));
                     if (dist <= explosive_radius) {
                         sum_w_inside += w;
                     }
@@ -1565,7 +1592,8 @@ void CFDSolver2DCudaImpl<RealType>::step(double dt) {
         computeTileRHS_kernel<<<blocks, threads>>>(
             num_tiles_r, num_tiles_z, nr_cells, nz_cells, dr_r, dz_r, gamma_r, (RealType)1.0, (RealType)0.0, d_materials, d_tile_map, d_states_pool, d_dU_pool, spatialOrder, is_ideal_gas,
             static_cast<int>(bcRmin), static_cast<int>(bcRmax), static_cast<int>(bcZmin), static_cast<int>(bcZmax),
-            ambient_rho_r, ambient_p_r
+            ambient_rho_r, ambient_p_r, this->is_cartesian,
+            d_solid_mask, d_solid_velocities
         );
         CUDA_CHECK(cudaGetLastError());
         
@@ -1580,7 +1608,8 @@ void CFDSolver2DCudaImpl<RealType>::step(double dt) {
             computeTileRHS_kernel<<<blocks, threads>>>(
                 num_tiles_r, num_tiles_z, nr_cells, nz_cells, dr_r, dz_r, gamma_r, dt_r, (RealType)A[stage], d_materials, d_tile_map, d_states_pool, d_dU_pool, spatialOrder, is_ideal_gas,
                 static_cast<int>(bcRmin), static_cast<int>(bcRmax), static_cast<int>(bcZmin), static_cast<int>(bcZmax),
-                ambient_rho_r, ambient_p_r
+                ambient_rho_r, ambient_p_r, this->is_cartesian,
+                d_solid_mask, d_solid_velocities
             );
             CUDA_CHECK(cudaGetLastError());
             
@@ -2009,6 +2038,34 @@ void CFDSolver2DCudaImpl<RealType>::exportVTK(const std::string& filename) {
         alpha2[idx] = states[idx].alpha2;
     }
     export_vtu_2d(filename, nr, nz, dr, dz, rho, ur, uz, p, E, alpha1, alpha2);
+}
+
+template <typename RealType>
+void CFDSolver2DCudaImpl<RealType>::setSolidMask(const uint8_t* mask) {
+    if (!mask) return;
+    int total = nr_cells * nz_cells;
+    if ((size_t)total > solid_capacity) {
+        if (d_solid_mask) CUDA_CHECK(cudaFree(d_solid_mask));
+        if (d_solid_velocities) CUDA_CHECK(cudaFree(d_solid_velocities));
+        solid_capacity = total * 2;
+        CUDA_CHECK(cudaMalloc(&d_solid_mask, solid_capacity * sizeof(uint8_t)));
+        CUDA_CHECK(cudaMalloc(&d_solid_velocities, solid_capacity * 2 * sizeof(double)));
+    }
+    CUDA_CHECK(cudaMemcpy(d_solid_mask, mask, total * sizeof(uint8_t), cudaMemcpyHostToDevice));
+}
+
+template <typename RealType>
+void CFDSolver2DCudaImpl<RealType>::setSolidVelocities(const double* v) {
+    if (!v) return;
+    int total = nr_cells * nz_cells;
+    if ((size_t)total > solid_capacity) {
+        if (d_solid_mask) CUDA_CHECK(cudaFree(d_solid_mask));
+        if (d_solid_velocities) CUDA_CHECK(cudaFree(d_solid_velocities));
+        solid_capacity = total * 2;
+        CUDA_CHECK(cudaMalloc(&d_solid_mask, solid_capacity * sizeof(uint8_t)));
+        CUDA_CHECK(cudaMalloc(&d_solid_velocities, solid_capacity * 2 * sizeof(double)));
+    }
+    CUDA_CHECK(cudaMemcpy(d_solid_velocities, v, total * 2 * sizeof(double), cudaMemcpyHostToDevice));
 }
 
 // Explicit template instantiations

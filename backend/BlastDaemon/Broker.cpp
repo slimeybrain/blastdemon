@@ -587,7 +587,7 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
         return;
     }
 
-    if (command == "INIT" || command == "INIT_2D" || command == "INIT_3D" || command == "INIT_MPM" || command == "INIT_2D_MPM") {
+    if (command == "INIT" || command == "INIT_2D" || command == "INIT_3D" || command == "INIT_MPM" || command == "INIT_2D_MPM" || command == "INIT_FSI_2D" || command == "INIT_FSI") {
         std::cout << "[DEBUG] RAW BROKER RECEIVE INIT FOR modelId " << modelId << ": " << json_str << std::endl;
     }
 
@@ -601,7 +601,7 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
         return;
     }
 
-    if (command == "INIT" || command == "START" || command == "INIT_2D" || command == "INIT_3D" || command == "INIT_MPM" || command == "INIT_2D_MPM") {
+    if (command == "INIT" || command == "START" || command == "INIT_2D" || command == "INIT_3D" || command == "INIT_MPM" || command == "INIT_2D_MPM" || command == "INIT_FSI_2D" || command == "INIT_FSI") {
         std::cout << "--- " << command << " COMMAND RECEIVED for modelId " << modelId << " ---" << std::endl;
 
         // ── Per-model process isolation ─────────────────────────────────────────
@@ -771,9 +771,10 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
         }
     } else if (command == "STEP" || command == "TERMINATE" || command == "EXEC_ALL" || command == "EXEC_END" || command == "PAUSE" || command == "RESUME" ||
                command == "SET_DEVICE" || command == "REMAP" || command == "STEP_2D" || command == "EXEC_ALL_2D" || command == "PAUSE_2D" || command == "RESUME_2D" || command == "TERMINATE_2D" || command == "WRITE_VTK" || command == "CONTOUR_CONFIG" ||
-               command == "STEP_3D" || command == "EXEC_ALL_3D" || command == "PAUSE_3D" || command == "TERMINATE_3D" || command == "VIEW3D_CONFIG" || command == "STEP_MPM" || command == "EXEC_ALL_MPM" || command == "PAUSE_MPM" || command == "RESUME_MPM" || command == "TERMINATE_MPM") {
-        if (command == "PAUSE" || command == "PAUSE_2D" || command == "PAUSE_3D" || command == "PAUSE_MPM") std::cout << "[DEBUG] PAUSE COMMAND RECEIVED for modelId " << modelId << "\n";
-        if (command == "TERMINATE" || command == "TERMINATE_2D" || command == "TERMINATE_3D" || command == "TERMINATE_MPM") std::cout << "[DEBUG] TERMINATE COMMAND RECEIVED for modelId " << modelId << "\n";
+               command == "STEP_3D" || command == "EXEC_ALL_3D" || command == "PAUSE_3D" || command == "TERMINATE_3D" || command == "VIEW3D_CONFIG" || command == "STEP_MPM" || command == "EXEC_ALL_MPM" || command == "PAUSE_MPM" || command == "RESUME_MPM" || command == "TERMINATE_MPM" ||
+               command == "STEP_FSI_2D" || command == "STEP_FSI" || command == "EXEC_ALL_FSI_2D" || command == "EXEC_ALL_FSI" || command == "PAUSE_FSI_2D" || command == "PAUSE_FSI" || command == "TERMINATE_FSI_2D" || command == "TERMINATE_FSI") {
+        if (command == "PAUSE" || command == "PAUSE_2D" || command == "PAUSE_3D" || command == "PAUSE_MPM" || command == "PAUSE_FSI_2D" || command == "PAUSE_FSI") std::cout << "[DEBUG] PAUSE COMMAND RECEIVED for modelId " << modelId << "\n";
+        if (command == "TERMINATE" || command == "TERMINATE_2D" || command == "TERMINATE_3D" || command == "TERMINATE_MPM" || command == "TERMINATE_FSI_2D" || command == "TERMINATE_FSI") std::cout << "[DEBUG] TERMINATE COMMAND RECEIVED for modelId " << modelId << "\n";
         
         if (active_processes.count(modelId) && active_processes[modelId]) {
             auto& proc = active_processes[modelId];
@@ -789,7 +790,7 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
             }
 
             if (routed) {
-                if (command == "TERMINATE" || command == "TERMINATE_2D" || command == "TERMINATE_3D" || command == "TERMINATE_MPM") {
+                if (command == "TERMINATE" || command == "TERMINATE_2D" || command == "TERMINATE_3D" || command == "TERMINATE_MPM" || command == "TERMINATE_FSI_2D" || command == "TERMINATE_FSI") {
                     // Erase ALL entries pointing to the same process (shared 1D/2D process).
                     auto target_proc = active_processes[modelId];
                     std::vector<std::string> to_erase;

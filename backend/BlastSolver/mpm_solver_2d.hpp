@@ -22,17 +22,21 @@ struct MPMParticle2D {
     float V0;           // Initial volume
     float V;            // Current volume
 
-    // Material Properties (Steel J2 Elastoplasticity)
-    float density;           // kg/m^3 (e.g. 7850)
-    float youngs_modulus;    // Pa (e.g. 210e9)
-    float poissons_ratio;    // (e.g. 0.3)
-    float yield_stress;      // Pa (e.g. 400e6)
-    float hardening_modulus; // Pa (e.g. 1e9)
+    // Material Properties (Steel J2 Elastoplasticity & Fracture/Failure)
+    float density;               // kg/m^3 (e.g. 7850)
+    float youngs_modulus;        // Pa (e.g. 210e9)
+    float poissons_ratio;        // (e.g. 0.3)
+    float yield_stress;          // Pa (e.g. 400e6)
+    float hardening_modulus;     // Pa (e.g. 1e9)
+    float failure_strain;        // Critical equivalent plastic strain (e.g. 0.25)
+    float tensile_failure_stress;// Critical tensile stress cutoff Pa (e.g. 600e6)
 
-    // Deformation & Stress State
+    // Deformation, Stress & Damage State
     float F[2][2];      // Deformation gradient
     float sigma[2][2];  // Cauchy stress tensor
     float ep_bar;       // Equivalent plastic strain
+    float damage;       // Scalar damage D in [0, 1]
+    bool has_failed;    // Total failure status flag
     int object_id;
 };
 
@@ -48,6 +52,7 @@ struct MPMGridNode2D {
     float plastic_strain;
     float density;
     float pressure;
+    float damage;
 };
 
 enum class MPMTransferScheme {
@@ -73,18 +78,24 @@ public:
 
     // Object Adders (Primitives)
     void addRectangleObject(int obj_id, float pos_x, float pos_y, float size_x, float size_y,
-                            float vel_x, float vel_y, float density, float E, float nu,
-                            float yield_stress, float hardening, int ppc = 4);
+                            float vel_x, float vel_y, float angular_vel, float density, float E, float nu,
+                            float yield_stress, float hardening, float failure_strain = 0.25f,
+                            float tensile_failure_stress = 600.0e6f, int ppc = 4);
 
     void addCircleObject(int obj_id, float pos_x, float pos_y, float radius,
-                         float vel_x, float vel_y, float density, float E, float nu,
-                         float yield_stress, float hardening, int ppc = 4);
+                         float vel_x, float vel_y, float angular_vel, float density, float E, float nu,
+                         float yield_stress, float hardening, float failure_strain = 0.25f,
+                         float tensile_failure_stress = 600.0e6f, int ppc = 4);
 
     // Simulation Step: Run 1 step at dt = cfl * dt_critical
     void step(float cfl = 0.3f);
+    void stepWithDt(float dt, bool run_p2g = true);
+    float computeStepSize(float cfl = 0.3f) const;
 
     // Getters & Telemetry
     const std::vector<MPMParticle2D>& getParticles() const { return m_particles; }
+    std::vector<MPMGridNode2D>& getGrid() { return m_grid; }
+    const std::vector<MPMGridNode2D>& getGrid() const { return m_grid; }
     int getNx() const { return m_nx; }
     int getNy() const { return m_ny; }
     float getDx() const { return m_dx; }

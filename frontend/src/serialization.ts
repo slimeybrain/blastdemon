@@ -36,6 +36,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         // MPM keys
         'pos_x', 'pos_y', 'vel_x', 'vel_y', 'size_x', 'size_y', 'radius', 'angular_vel',
         'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
+        'failure_strain', 'tensile_failure_stress',
         'ppc', 'time_step', 'penalty_stiffness', 'contour_opacity', 'contour_min', 'contour_max'
     ];
 
@@ -495,6 +496,119 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         }
         flattenedParams['max_r'] = maxR;
         flattenedParams['max_z'] = maxZ;
+    } else if (command === "INIT_FSI_2D" || command === "INIT_FSI") {
+        // 1. Serialize 2D CFD Solver part
+        const solverNode2D = state.nodes.find(n => n.type === 'CFDSolver2D');
+        if (solverNode2D) {
+            Object.entries(solverNode2D.parameters).forEach(([key, value]) => {
+                flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+            });
+            const meshConn2D = state.connections.find(c => c.toNode === solverNode2D.id && c.toPort === 'mesh');
+            if (meshConn2D) {
+                const meshNode2D = state.nodes.find(n => n.id === meshConn2D.fromNode);
+                if (meshNode2D) {
+                    Object.entries(meshNode2D.parameters).forEach(([key, value]) => {
+                        flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                    });
+                }
+            }
+            const airConn2D = state.connections.find(c => c.toNode === solverNode2D.id && c.toPort === 'air');
+            if (airConn2D) {
+                const airNode = state.nodes.find(n => n.id === airConn2D.fromNode);
+                if (airNode && airNode.type === 'Material' && airNode.parameters?.material_type === 'Air') {
+                    ['atm_pressure', 'atm_temperature', 'gamma'].forEach(key => {
+                        if (airNode.parameters[key] !== undefined) {
+                            flattenedParams[key] = numericKeys.includes(key) ? Number(airNode.parameters[key]) : airNode.parameters[key];
+                        }
+                    });
+                }
+            }
+            let expConn2D = state.connections.find(c => c.toNode === solverNode2D.id && c.toPort === 'charge') || state.connections.find(c => c.toNode === solverNode2D.id && c.toPort === 'explosive');
+            if (expConn2D) {
+                const chargeNode = state.nodes.find(n => n.id === expConn2D.fromNode);
+                if (chargeNode && (chargeNode.type === 'Charge2D' || chargeNode.type === 'Charge1D')) {
+                    Object.entries(chargeNode.parameters).forEach(([key, value]) => {
+                        flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                    });
+                    const matConn = state.connections.find(c => c.toNode === chargeNode.id && c.toPort === 'material');
+                    if (matConn) {
+                        const matNode = state.nodes.find(n => n.id === matConn.fromNode);
+                        if (matNode && matNode.type === 'Material') {
+                            const matType = matNode.parameters?.material_type ?? 'JWL Charge';
+                            if (matType === 'JWL Charge') {
+                                flattenedParams['explosive_type'] = 'MaterialExplosive';
+                                ['composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'].forEach(key => {
+                                    if (matNode.parameters[key] !== undefined) {
+                                        flattenedParams[key] = numericKeys.includes(key) ? Number(matNode.parameters[key]) : matNode.parameters[key];
+                                    }
+                                });
+                            } else if (matType === 'Ideal Gas Charge') {
+                                flattenedParams['explosive_type'] = 'MaterialIdealGas';
+                                flattenedParams['gamma'] = Number(matNode.parameters?.ideal_gamma ?? 1.4);
+                                flattenedParams['rho'] = Number(matNode.parameters?.ideal_rho_0 ?? 1630.0);
+                                flattenedParams['detonation_energy'] = Number(matNode.parameters?.ideal_e_0 ?? 4290000);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Serialize MPM Domain part
+        const mpmDomain = state.nodes.find(n => n.type === 'MPMDomain2D');
+        if (mpmDomain) {
+            Object.entries(mpmDomain.parameters).forEach(([key, value]) => {
+                flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+            });
+            const domainPpc = Number(mpmDomain.parameters?.ppc ?? 4);
+            flattenedParams['ppc'] = domainPpc;
+
+            const objConns = state.connections.filter(c => c.toNode === mpmDomain.id && c.toPort === 'objects');
+            const mpmObjects: any[] = [];
+            for (const conn of objConns) {
+                const objNode = state.nodes.find(n => n.id === conn.fromNode);
+                if (objNode && objNode.type === 'MPMObject2D') {
+                    const objParams: any = {};
+                    Object.entries(objNode.parameters).forEach(([k, v]) => {
+                        objParams[k] = numericKeys.includes(k) ? Number(v) : v;
+                    });
+                    const matConn = state.connections.find(c => c.toNode === objNode.id && c.toPort === 'material');
+                    if (matConn) {
+                        const matNode = state.nodes.find(n => n.id === matConn.fromNode);
+                        if (matNode) {
+                            Object.entries(matNode.parameters).forEach(([k, v]) => {
+                                objParams[k] = numericKeys.includes(k) ? Number(v) : v;
+                            });
+                        }
+                    }
+                    if (objParams['ppc'] === undefined) {
+                        objParams['ppc'] = domainPpc;
+                    }
+                    mpmObjects.push(objParams);
+                }
+            }
+            flattenedParams['mpm_objects'] = mpmObjects;
+        }
+
+        // 3. Serialize FSICoupler2D parameters
+        const couplerNode = state.nodes.find(n => n.type === 'FSICoupler2D');
+        if (couplerNode) {
+            Object.entries(couplerNode.parameters).forEach(([key, value]) => {
+                flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+            });
+        }
+
+        const cellSize = flattenedParams['cell_size'] || 0.005;
+        const maxR = flattenedParams['max_r'] || 1.0;
+        const maxZ = flattenedParams['max_z'] || 1.0;
+        flattenedParams['nr'] = Math.round(maxR / cellSize);
+        flattenedParams['nz'] = Math.round(maxZ / cellSize);
+        flattenedParams['max_r'] = maxR;
+        flattenedParams['max_z'] = maxZ;
+        if (!flattenedParams['gamma']) flattenedParams['gamma'] = 1.4;
+        const p = flattenedParams['atm_pressure'] || 101325.0;
+        const t = flattenedParams['atm_temperature'] || 288.0;
+        flattenedParams['ambient_rho'] = p / (287.058 * t);
     } else if (command === "INIT_MPM" || command === "INIT_2D_MPM") {
         const mpmDomain = state.nodes.find(n => n.type === 'MPMDomain2D');
         if (mpmDomain) {
@@ -519,18 +633,29 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 }
             }
 
+            const domainPpc = Number(mpmDomain.parameters?.ppc ?? 4);
+            flattenedParams['ppc'] = domainPpc;
+
             const objConns = state.connections.filter(c => c.toNode === mpmDomain.id && c.toPort === 'objects');
             const mpmObjects: any[] = [];
             for (const conn of objConns) {
                 const objNode = state.nodes.find(n => n.id === conn.fromNode);
                 if (objNode && objNode.type === 'MPMObject2D') {
-                    const objParams: any = { ...objNode.parameters };
+                    const objParams: any = {};
+                    Object.entries(objNode.parameters).forEach(([k, v]) => {
+                        objParams[k] = numericKeys.includes(k) ? Number(v) : v;
+                    });
                     const matConn = state.connections.find(c => c.toNode === objNode.id && c.toPort === 'material');
                     if (matConn) {
                         const matNode = state.nodes.find(n => n.id === matConn.fromNode);
                         if (matNode) {
-                            Object.assign(objParams, matNode.parameters);
+                            Object.entries(matNode.parameters).forEach(([k, v]) => {
+                                objParams[k] = numericKeys.includes(k) ? Number(v) : v;
+                            });
                         }
+                    }
+                    if (objParams['ppc'] === undefined) {
+                        objParams['ppc'] = domainPpc;
                     }
                     mpmObjects.push(objParams);
                 }

@@ -1632,6 +1632,237 @@ void worker_mpm_2d_thread_func() {
     global_exec_until_end_mpm = false;
 }
 
+std::atomic<bool> sim_fsi_running{false};
+std::atomic<bool> sim_fsi_paused{false};
+std::atomic<bool> sim_fsi_terminate{false};
+std::atomic<bool> global_exec_until_end_fsi{false};
+std::atomic<int> global_target_steps_fsi{0};
+std::atomic<float> global_cfl_fsi{0.35f};
+
+void worker_fsi_2d_thread_func() {
+    int step_count = 0;
+    int initial_steps = 0;
+    auto last_telemetry_time = std::chrono::steady_clock::now();
+
+    while (!sim_fsi_terminate.load()) {
+        if (sim_fsi_paused.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+
+        bool done = false;
+        if (!global_exec_until_end_fsi.load()) {
+            if (global_target_steps_fsi.load() <= 0) done = true;
+        }
+
+        if (done) break;
+
+        if (global_solver_mpm_2d || has_solver_2d()) {
+            float cfl = global_cfl_fsi.load();
+
+            // Synchronized 2-Way FSI Coupling exchange
+            if (global_solver_mpm_2d && has_solver_2d()) {
+                // 1. P2G scatter to populate MPM background grid
+                global_solver_mpm_2d->particleToGrid();
+
+                // 2. Fetch fluid states from 2D CFD solver
+                std::vector<State2D> cfd_states;
+                int nr = 0, nz = 0;
+                double dr = 0.0, dz = 0.0;
+                if (global_solver_2d_cuda) {
+                    cfd_states = global_solver_2d_cuda->getStates();
+                    nr = global_solver_2d_cuda->getNr();
+                    nz = global_solver_2d_cuda->getNz();
+                    dr = global_solver_2d_cuda->getDr();
+                    dz = global_solver_2d_cuda->getDz();
+                } else if (global_solver_2d) {
+                    cfd_states = global_solver_2d->getStates();
+                    nr = global_solver_2d->getNr();
+                    nz = global_solver_2d->getNz();
+                    dr = global_solver_2d->getDr();
+                    dz = global_solver_2d->getDz();
+                }
+
+                if (!cfd_states.empty() && nr > 0 && nz > 0) {
+                    auto& mpm_grid = global_solver_mpm_2d->getGrid();
+                    int mpm_nx = global_solver_mpm_2d->getNx();
+                    int mpm_ny = global_solver_mpm_2d->getNy();
+
+                    std::vector<uint8_t> solid_mask(nr * nz, 0);
+                    std::vector<double> solid_vel(2 * nr * nz, 0.0);
+
+                    // Pass 1: Build solid_mask & solid_vel from MPM grid nodes with temporal hysteresis
+                    static std::vector<uint8_t> prev_solid_mask;
+                    if (prev_solid_mask.size() != static_cast<size_t>(nr * nz)) {
+                        prev_solid_mask.assign(nr * nz, 0);
+                    }
+
+                    for (int i = 0; i < nr; ++i) {
+                        for (int j = 0; j < nz; ++j) {
+                            if (i < mpm_nx && j < mpm_ny) {
+                                int mpm_idx = i * mpm_ny + j;
+                                const auto& m_node = mpm_grid[mpm_idx];
+                                int cfd_idx = i * nz + j;
+
+                                // Hysteresis threshold: turn solid at mass > 1.0e-5, stay solid until mass < 2.0e-6
+                                bool was_solid = (prev_solid_mask[cfd_idx] != 0);
+                                float threshold = was_solid ? 2.0e-6f : 1.0e-5f;
+
+                                if (m_node.m > threshold) {
+                                    solid_mask[cfd_idx] = 1;
+                                    solid_vel[2 * cfd_idx + 0] = m_node.v[0];
+                                    solid_vel[2 * cfd_idx + 1] = m_node.v[1];
+                                }
+                            }
+                        }
+                    }
+                    prev_solid_mask = solid_mask;
+
+                    // Pass 2: Calculate surface fluid pressure forces on MPM boundary grid nodes
+                    for (int i = 0; i < nr; ++i) {
+                        for (int j = 0; j < nz; ++j) {
+                            if (i < mpm_nx && j < mpm_ny) {
+                                int mpm_idx = i * mpm_ny + j;
+                                auto& m_node = mpm_grid[mpm_idx];
+                                int cfd_idx = i * nz + j;
+
+                                if (m_node.m > 1.0e-8f) {
+                                    // Check if node is on the surface (adjacent to fluid)
+                                    bool is_surface = false;
+                                    double p_left = cfd_states[cfd_idx].p;
+                                    double p_right = cfd_states[cfd_idx].p;
+                                    double p_bottom = cfd_states[cfd_idx].p;
+                                    double p_top = cfd_states[cfd_idx].p;
+
+                                    if (i > 0 && solid_mask[(i - 1) * nz + j] == 0) {
+                                        p_left = cfd_states[(i - 1) * nz + j].p;
+                                        is_surface = true;
+                                    }
+                                    if (i < nr - 1 && solid_mask[(i + 1) * nz + j] == 0) {
+                                        p_right = cfd_states[(i + 1) * nz + j].p;
+                                        is_surface = true;
+                                    }
+                                    if (j > 0 && solid_mask[i * nz + (j - 1)] == 0) {
+                                        p_bottom = cfd_states[i * nz + (j - 1)].p;
+                                        is_surface = true;
+                                    }
+                                    if (j < nz - 1 && solid_mask[i * nz + (j + 1)] == 0) {
+                                        p_top = cfd_states[i * nz + (j + 1)].p;
+                                        is_surface = true;
+                                    }
+
+                                    if (is_surface) {
+                                        m_node.f_ext[0] = static_cast<float>((p_left - p_right) * dz);
+                                        m_node.f_ext[1] = static_cast<float>((p_bottom - p_top) * dr);
+                                    } else {
+                                        m_node.f_ext[0] = 0.0f;
+                                        m_node.f_ext[1] = 0.0f;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (global_solver_2d_cuda) {
+                        global_solver_2d_cuda->setSolidMask(solid_mask.data());
+                        global_solver_2d_cuda->setSolidVelocities(solid_vel.data());
+                    } else if (global_solver_2d) {
+                        global_solver_2d->setSolidMask(solid_mask.data());
+                        global_solver_2d->setSolidVelocities(solid_vel.data());
+                    }
+                }
+            }
+
+            // Calculate coupled CFL stability timestep
+            float dt_mpm = global_solver_mpm_2d ? global_solver_mpm_2d->computeStepSize(cfl) : 1.0f;
+            double dt_cfd = 1.0;
+            if (global_solver_2d_cuda) {
+                double c_max = global_solver_2d_cuda->getMaxWaveSpeed();
+                double min_h = std::min(global_solver_2d_cuda->getDr(), global_solver_2d_cuda->getDz());
+                dt_cfd = cfl * min_h / (c_max > 1e-6 ? c_max : 340.0);
+            } else if (global_solver_2d) {
+                dt_cfd = global_solver_2d->computeStepSize(cfl);
+            }
+
+            double dt_common = std::min(static_cast<double>(dt_mpm), dt_cfd);
+            dt_common = std::clamp(dt_common, 1.0e-8, 1.0e-4);
+            global_dt_2d = dt_common;
+
+            if (global_solver_mpm_2d) {
+                global_solver_mpm_2d->stepWithDt(static_cast<float>(dt_common), false);
+            }
+            if (global_solver_2d_cuda) {
+                global_solver_2d_cuda->step(dt_common);
+                global_t2d = global_solver_2d_cuda->getTime();
+            } else if (global_solver_2d) {
+                global_solver_2d->step(dt_common);
+                global_t2d += dt_common;
+            }
+
+            step_count++;
+
+            if (!global_exec_until_end_fsi.load()) {
+                global_target_steps_fsi--;
+            }
+
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_telemetry_time).count();
+
+            if (elapsed_ms >= 33 || done) {
+                double sim_time = global_solver_mpm_2d ? global_solver_mpm_2d->getSimTime() : global_t2d;
+
+                if (global_solver_mpm_2d) emit_telemetry_mpm_2d(sim_time, false);
+                if (has_solver_2d()) emit_telemetry_2d(global_t2d, false);
+                last_telemetry_time = now;
+
+                nlohmann::json progress_msg;
+                progress_msg["type"] = "progress";
+                progress_msg["sim_time"] = sim_time;
+                progress_msg["dt"] = dt_common;
+                progress_msg["scope"] = "2d";
+
+                if (global_exec_until_end_fsi.load()) {
+                    progress_msg["percent"] = 50;
+                    progress_msg["mode"] = "EXEC_ALL_FSI_2D";
+                } else {
+                    initial_steps = std::max(initial_steps, step_count + global_target_steps_fsi.load());
+                    if (initial_steps > 0) {
+                        int completed = initial_steps - global_target_steps_fsi.load();
+                        int percent = std::clamp((int)((completed * 100) / initial_steps), 0, 99);
+                        progress_msg["percent"] = percent;
+                        progress_msg["completed"] = completed;
+                        progress_msg["total"] = initial_steps;
+                        progress_msg["mode"] = "STEP_FSI_2D";
+                    }
+                }
+                std::lock_guard<std::mutex> lock(cout_mutex);
+                std::cout << progress_msg.dump() << std::endl;
+            }
+        }
+    }
+
+    double final_sim_time = global_solver_mpm_2d ? global_solver_mpm_2d->getSimTime() : global_t2d;
+    if (global_solver_mpm_2d) emit_telemetry_mpm_2d(final_sim_time, true);
+    if (has_solver_2d()) emit_telemetry_2d(global_t2d, true);
+
+    nlohmann::json progress_msg;
+    progress_msg["type"] = "progress";
+    progress_msg["sim_time"] = final_sim_time;
+    progress_msg["scope"] = "2d";
+    progress_msg["percent"] = 100;
+    progress_msg["mode"] = global_exec_until_end_fsi.load() ? "EXEC_ALL_FSI_2D" : "STEP_FSI_2D";
+    {
+        std::lock_guard<std::mutex> lock(cout_mutex);
+        std::cout << progress_msg.dump() << std::endl;
+    }
+
+    sim_fsi_running = false;
+    sim_fsi_paused = false;
+    sim_fsi_terminate = false;
+    global_target_steps_fsi = 0;
+    global_exec_until_end_fsi = false;
+}
+
 // NVML Dynamic Loading Declarations
 typedef int nvmlReturn_t;
 #define NVML_SUCCESS 0
@@ -2916,6 +3147,7 @@ int main() {
                             double high_rho = msg.value("high_rho", msg.value("rho", 1630.0));
                             double ambient_rho = msg.value("ambient_rho", 1.225648589);
                             double ambient_p = msg.value("atm_pressure", msg.value("ambient_p", 101325.0));
+                            double explosive_r = msg.value("charge_r", msg.value("explosive_r", 0.0));
                             double explosive_z = msg.value("charge_z", msg.value("explosive_z", 0.0));
                             double explosive_radius = msg.value("charge_radius", msg.value("explosive_radius", 0.1));
                             
@@ -2923,15 +3155,15 @@ int main() {
                             if (charge_shape == "Cylinder" || charge_shape == "cylinder") {
                                 double charge_radius = msg.value("charge_radius", 0.1);
                                 double charge_height = msg.value("charge_height", 0.2);
-                                double detonator_r = msg.value("detonator_r", 0.0);
+                                double detonator_r = msg.value("detonator_r", explosive_r);
                                 double detonator_z = msg.value("detonator_z", explosive_z + charge_height / 2.0);
                                 global_solver_2d->setDetonatorLocation(detonator_r, detonator_z);
-                                global_solver_2d->setInitialConditionTNTCylinder(explosive_z, charge_radius, charge_height, high_rho, ambient_rho, ambient_p);
+                                global_solver_2d->setInitialConditionTNTCylinder(explosive_z, charge_radius, charge_height, high_rho, ambient_rho, ambient_p, explosive_r);
                             } else {
-                                double detonator_r = msg.value("detonator_r", 0.0);
+                                double detonator_r = msg.value("detonator_r", explosive_r);
                                 double detonator_z = msg.value("detonator_z", explosive_z);
                                 global_solver_2d->setDetonatorLocation(detonator_r, detonator_z);
-                                global_solver_2d->setInitialConditionTNT(explosive_z, explosive_radius, high_rho, ambient_rho, ambient_p);
+                                global_solver_2d->setInitialConditionTNT(explosive_z, explosive_radius, high_rho, ambient_rho, ambient_p, explosive_r);
                             }
                         }
                     }
@@ -3014,6 +3246,8 @@ int main() {
                         global_solver_mpm_2d->setVelocityScheme(Blast::MPMVelocityScheme::APIC);
                     }
 
+                    int domain_ppc = get_json_int(msg, "ppc", 4);
+
                     if (msg.contains("mpm_objects") && msg["mpm_objects"].is_array()) {
                         int obj_idx = 0;
                         for (const auto& obj : msg["mpm_objects"]) {
@@ -3023,31 +3257,35 @@ int main() {
                             float pos_y = static_cast<float>(get_json_double(obj, "pos_y", 0.5));
                             float vel_x = static_cast<float>(get_json_double(obj, "vel_x", 0.0));
                             float vel_y = static_cast<float>(get_json_double(obj, "vel_y", 0.0));
+                            float angular_vel = static_cast<float>(get_json_double(obj, "angular_vel", 0.0));
                             float density = static_cast<float>(get_json_double(obj, "density", 7850.0));
                             float E = static_cast<float>(get_json_double(obj, "youngs_modulus", 210.0e9));
                             float nu = static_cast<float>(get_json_double(obj, "poissons_ratio", 0.3));
                             float yield_stress = static_cast<float>(get_json_double(obj, "yield_stress", 400.0e6));
                             float hardening = static_cast<float>(get_json_double(obj, "hardening_modulus", 1.0e9));
-                            int ppc = get_json_int(obj, "ppc", 4);
+                            float failure_strain = static_cast<float>(get_json_double(obj, "failure_strain", 0.25));
+                            float tensile_failure_stress = static_cast<float>(get_json_double(obj, "tensile_failure_stress", 600.0e6));
+                            int ppc = get_json_int(obj, "ppc", domain_ppc);
 
                             if (shape == "Circle") {
                                 float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
-                                global_solver_mpm_2d->addCircleObject(obj_idx, pos_x, pos_y, radius, vel_x, vel_y, density, E, nu, yield_stress, hardening, ppc);
+                                global_solver_mpm_2d->addCircleObject(obj_idx, pos_x, pos_y, radius, vel_x, vel_y, angular_vel, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
                             } else {
                                 float size_x = static_cast<float>(get_json_double(obj, "size_x", 0.2));
                                 float size_y = static_cast<float>(get_json_double(obj, "size_y", 0.2));
-                                global_solver_mpm_2d->addRectangleObject(obj_idx, pos_x, pos_y, size_x, size_y, vel_x, vel_y, density, E, nu, yield_stress, hardening, ppc);
+                                global_solver_mpm_2d->addRectangleObject(obj_idx, pos_x, pos_y, size_x, size_y, vel_x, vel_y, angular_vel, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
                             }
                         }
                     } else {
                         // Default steel impact primitives test case
-                        global_solver_mpm_2d->addCircleObject(1, 0.3f, 0.5f, 0.1f, 150.0f, 0.0f, 7850.0f, 210.0e9f, 0.3f, 400.0e6f, 1.0e9f, 4);
-                        global_solver_mpm_2d->addRectangleObject(2, 0.7f, 0.5f, 0.2f, 0.4f, 0.0f, 0.0f, 7850.0f, 210.0e9f, 0.3f, 400.0e6f, 1.0e9f, 4);
+                        global_solver_mpm_2d->addCircleObject(1, 0.3f, 0.5f, 0.1f, 150.0f, 0.0f, 0.0f, 7850.0f, 210.0e9f, 0.3f, 400.0e6f, 1.0e9f, 0.25f, 600.0e6f, domain_ppc);
+                        global_solver_mpm_2d->addRectangleObject(2, 0.7f, 0.5f, 0.2f, 0.4f, 0.0f, 0.0f, 0.0f, 7850.0f, 210.0e9f, 0.3f, 400.0e6f, 1.0e9f, 0.25f, 600.0e6f, domain_ppc);
                     }
 
                     global_solver_mpm_2d->particleToGrid();
                     emit_telemetry_mpm_2d(0.0, false);
-                    emit_kernel_log("SYSTEM", "2D MPM Solver Initialized with GIMP+APIC", 0.0, "mpm_2d");
+                    std::string init_log = "2D MPM Solver Initialized (" + std::to_string(global_solver_mpm_2d->getParticles().size()) + " particles, PPC=" + std::to_string(domain_ppc) + ")";
+                    emit_kernel_log("SYSTEM", init_log, 0.0, "mpm_2d");
                 } else if (command == "STEP_MPM" || command == "STEP_2D_MPM") {
                     if (!global_solver_mpm_2d) continue;
                     int steps = get_json_int(msg, "steps", 1);
@@ -3086,6 +3324,168 @@ int main() {
                         std::this_thread::sleep_for(std::chrono::milliseconds(5));
                     }
                     global_solver_mpm_2d.reset();
+                } else if (command == "INIT_FSI_2D" || command == "INIT_FSI") {
+                    sim2d_terminate = true;
+                    while (sim2d_running.load() || sim_fsi_running.load()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    }
+                    global_solver_2d.reset();
+                    global_solver_2d_cuda.reset();
+                    global_solver_mpm_2d.reset();
+                    sim2d_terminate = false;
+                    sim2d_paused = false;
+                    sim_fsi_terminate = false;
+                    sim_fsi_paused = false;
+                    step_progress_2d = 0;
+                    global_wallclock_2d = 0.0;
+
+                    int nr = get_json_int(msg, "nr", get_json_int(msg, "nx", 128));
+                    int nz = get_json_int(msg, "nz", get_json_int(msg, "ny", 128));
+                    double max_r = get_json_double(msg, "max_r", get_json_double(msg, "max_x", 1.0));
+                    double max_z = get_json_double(msg, "max_z", get_json_double(msg, "max_y", 1.0));
+                    double gamma = get_json_double(msg, "gamma", 1.4);
+                    std::string flux_scheme = msg.value("flux_scheme", "AUSM+");
+                    int spatial_order = get_json_int(msg, "spatial_order", 2);
+                    int temporal_order = get_json_int(msg, "temporal_order", 2);
+                    std::string coord_sys = msg.value("coordinate_system", "Axisymmetric");
+
+                    std::string bc_r_min_str = msg.value("bc_r_min", "Reflecting");
+                    std::string bc_r_max_str = msg.value("bc_r_max", "Terminate");
+                    std::string bc_z_min_str = msg.value("bc_z_min", "Reflecting");
+                    std::string bc_z_max_str = msg.value("bc_z_max", "Terminate");
+
+                    auto map_bc_2d = [](const std::string& str) -> CFDSolver2D::BCType {
+                        if (str == "Transmitting" || str == "transmitting" || str == "TRANSMISSIVE" || str == "transmissive") {
+                            return CFDSolver2D::TRANSMISSIVE;
+                        } else if (str == "Riemann" || str == "riemann" || str == "Terminate" || str == "terminate" || str == "OUTFLOW_RIEMANN" || str == "outflow_riemann") {
+                            return CFDSolver2D::OUTFLOW_RIEMANN;
+                        } else {
+                            return CFDSolver2D::REFLECTIVE;
+                        }
+                    };
+
+                    CFDSolver2D::BCType r_min_bc = map_bc_2d(bc_r_min_str);
+                    CFDSolver2D::BCType r_max_bc = map_bc_2d(bc_r_max_str);
+                    CFDSolver2D::BCType z_min_bc = map_bc_2d(bc_z_min_str);
+                    CFDSolver2D::BCType z_max_bc = map_bc_2d(bc_z_max_str);
+
+                    MultiMat::MaterialSet matSet = parseMaterialSet(msg);
+
+                    global_solver_2d = std::make_unique<CFDSolver2DImpl<double>>(nr, nz, max_r, max_z, gamma);
+                    global_solver_2d->setFluxScheme(flux_scheme);
+                    global_solver_2d->setSpatialOrder(spatial_order);
+                    global_solver_2d->setTemporalOrder(temporal_order);
+                    global_solver_2d->setBCTypes(r_min_bc, r_max_bc, z_min_bc, z_max_bc);
+                    global_solver_2d->setMaterialParameters(matSet);
+                    global_solver_2d->setCoordinateSystemCartesian(coord_sys == "Cartesian");
+
+                    double explosive_r = msg.value("charge_r", msg.value("explosive_r", 0.0));
+                    double explosive_z = msg.value("charge_z", msg.value("explosive_z", 0.1));
+                    double high_rho = msg.value("high_rho", msg.value("rho", 1630.0));
+                    double ambient_rho = msg.value("ambient_rho", 1.225);
+                    double ambient_p = msg.value("atm_pressure", msg.value("ambient_p", 101325.0));
+                    double explosive_radius = msg.value("charge_radius", msg.value("explosive_radius", 0.1));
+
+                    double detonator_r = msg.value("detonator_r", explosive_r);
+                    double detonator_z = msg.value("detonator_z", explosive_z);
+                    global_solver_2d->setDetonatorLocation(detonator_r, detonator_z);
+                    global_solver_2d->setInitialConditionTNT(explosive_z, explosive_radius, high_rho, ambient_rho, ambient_p, explosive_r);
+                    solver2d_initialized = true;
+
+                    global_solver_mpm_2d = std::make_unique<Blast::MPMSolver2D>();
+                    float dx = static_cast<float>(max_r / nr);
+                    float dy = static_cast<float>(max_z / nz);
+                    global_solver_mpm_2d->initializeGrid(nr, nz, dx, dy);
+
+                    std::string transfer_scheme = msg.value("transfer_scheme", "GIMP");
+                    std::string velocity_scheme = msg.value("velocity_scheme", "APIC");
+                    if (transfer_scheme == "Standard") {
+                        global_solver_mpm_2d->setTransferScheme(Blast::MPMTransferScheme::Standard);
+                    } else {
+                        global_solver_mpm_2d->setTransferScheme(Blast::MPMTransferScheme::GIMP);
+                    }
+                    if (velocity_scheme == "PIC") {
+                        global_solver_mpm_2d->setVelocityScheme(Blast::MPMVelocityScheme::PIC);
+                    } else if (velocity_scheme == "FLIP") {
+                        global_solver_mpm_2d->setVelocityScheme(Blast::MPMVelocityScheme::FLIP);
+                    } else {
+                        global_solver_mpm_2d->setVelocityScheme(Blast::MPMVelocityScheme::APIC);
+                    }
+
+                    int domain_ppc = get_json_int(msg, "ppc", 4);
+                    if (msg.contains("mpm_objects") && msg["mpm_objects"].is_array()) {
+                        int obj_idx = 0;
+                        for (const auto& obj : msg["mpm_objects"]) {
+                            obj_idx++;
+                            std::string shape = obj.value("shape_type", "Rectangle");
+                            float pos_x = static_cast<float>(get_json_double(obj, "pos_x", 0.5));
+                            float pos_y = static_cast<float>(get_json_double(obj, "pos_y", 0.5));
+                            float vel_x = static_cast<float>(get_json_double(obj, "vel_x", 0.0));
+                            float vel_y = static_cast<float>(get_json_double(obj, "vel_y", 0.0));
+                            float angular_vel = static_cast<float>(get_json_double(obj, "angular_vel", 0.0));
+                            float density = static_cast<float>(get_json_double(obj, "density", 7850.0));
+                            float E = static_cast<float>(get_json_double(obj, "youngs_modulus", 210.0e9));
+                            float nu = static_cast<float>(get_json_double(obj, "poissons_ratio", 0.3));
+                            float yield_stress = static_cast<float>(get_json_double(obj, "yield_stress", 400.0e6));
+                            float hardening = static_cast<float>(get_json_double(obj, "hardening_modulus", 1.0e9));
+                            float failure_strain = static_cast<float>(get_json_double(obj, "failure_strain", 0.25));
+                            float tensile_failure_stress = static_cast<float>(get_json_double(obj, "tensile_failure_stress", 600.0e6));
+                            int ppc = get_json_int(obj, "ppc", domain_ppc);
+
+                            if (shape == "Circle") {
+                                float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
+                                global_solver_mpm_2d->addCircleObject(obj_idx, pos_x, pos_y, radius, vel_x, vel_y, angular_vel, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                            } else {
+                                float size_x = static_cast<float>(get_json_double(obj, "size_x", 0.2));
+                                float size_y = static_cast<float>(get_json_double(obj, "size_y", 0.2));
+                                global_solver_mpm_2d->addRectangleObject(obj_idx, pos_x, pos_y, size_x, size_y, vel_x, vel_y, angular_vel, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                            }
+                        }
+                    } else {
+                        global_solver_mpm_2d->addRectangleObject(1, 0.7f, 0.5f, 0.2f, 0.4f, 0.0f, 0.0f, 0.0f, 7850.0f, 210.0e9f, 0.3f, 400.0e6f, 1.0e9f, 0.25f, 600.0e6f, domain_ppc);
+                    }
+
+                    global_solver_mpm_2d->particleToGrid();
+                    init_gauges(msg);
+                    emit_kernel_log("SYSTEM", "2D Coupled FSI Solver (CFD + MPM) Initialized", 0.0, "2d");
+                    emit_telemetry_2d(0.0, false);
+                    emit_telemetry_mpm_2d(0.0, false);
+                } else if (command == "STEP_FSI_2D" || command == "STEP_FSI") {
+                    int steps = get_json_int(msg, "steps", 1);
+                    global_cfl_fsi = static_cast<float>(get_json_double(msg, "cfl", 0.35));
+                    global_exec_until_end_fsi = false;
+                    if (!sim_fsi_running) {
+                        global_target_steps_fsi = steps;
+                        sim_fsi_running = true;
+                        sim_fsi_paused = false;
+                        sim_fsi_terminate = false;
+                        std::thread(worker_fsi_2d_thread_func).detach();
+                    } else {
+                        global_target_steps_fsi.fetch_add(steps);
+                        sim_fsi_paused = false;
+                    }
+                } else if (command == "EXEC_ALL_FSI_2D" || command == "EXEC_ALL_FSI") {
+                    global_cfl_fsi = static_cast<float>(get_json_double(msg, "cfl", 0.35));
+                    global_exec_until_end_fsi = true;
+                    if (!sim_fsi_running) {
+                        sim_fsi_running = true;
+                        sim_fsi_paused = false;
+                        sim_fsi_terminate = false;
+                        std::thread(worker_fsi_2d_thread_func).detach();
+                    } else {
+                        sim_fsi_paused = false;
+                    }
+                } else if (command == "PAUSE_FSI_2D" || command == "PAUSE_FSI") {
+                    sim_fsi_paused = true;
+                    global_target_steps_fsi = 0;
+                } else if (command == "TERMINATE_FSI_2D" || command == "TERMINATE_FSI") {
+                    sim_fsi_terminate = true;
+                    while (sim_fsi_running.load()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    }
+                    global_solver_2d.reset();
+                    global_solver_mpm_2d.reset();
+                    solver2d_initialized = false;
                 } else if (command == "REMAP") {
                     if (sim3d_init_in_progress.load()) {
                         std::lock_guard<std::mutex> lock(g_pending_remap_mutex);

@@ -148,15 +148,15 @@ public:
 
     virtual void setInitialConditionTNT(double explosive_z, double explosive_radius, 
                                         double high_rho,
-                                        double ambient_rho, double ambient_p) override;
+                                        double ambient_rho, double ambient_p, double explosive_r = 0.0) override;
 
     virtual void setInitialConditionIdealGas(double explosive_z, double explosive_radius,
                                              double high_rho, double detonation_energy,
-                                             double ambient_rho, double ambient_p) override;
+                                             double ambient_rho, double ambient_p, double explosive_r = 0.0) override;
 
     virtual void setInitialConditionTNTCylinder(double explosive_z, double radius, double height,
                                                 double high_rho,
-                                                double ambient_rho, double ambient_p) override;
+                                                double ambient_rho, double ambient_p, double explosive_r = 0.0) override;
 
     virtual void setInitialConditionFrom1D(double explosive_z, double remap_radius,
                                            const std::vector<double>& r_1d,

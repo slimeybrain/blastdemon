@@ -798,8 +798,7 @@ export class GraphRenderer {
                 return false;
             case 'TelemetryText':
             case 'TelemetryGraph':
-                if (toPortId === 'in') return fromType === 'CFDSolver' || fromType === 'CFDSolver2D' || fromType === 'CFDSolver3D' || fromType === 'MPMDomain2D';
-                return false;
+                return fromType === 'CFDSolver' || fromType === 'CFDSolver2D' || fromType === 'CFDSolver3D' || fromType === 'MPMDomain2D' || fromType === 'FSICoupler2D';
             case 'MPMDomain2D':
                 if (toPortId === 'mesh') return fromType === 'DomainMesh2D';
                 if (toPortId === 'objects') return fromType === 'MPMObject2D';
@@ -808,12 +807,11 @@ export class GraphRenderer {
                 if (toPortId === 'material') return fromType === 'MPMMaterialSteel';
                 return false;
             case 'FSICoupler2D':
-                if (toPortId === 'cfd_solver') return fromType === 'CFDSolver2D';
-                if (toPortId === 'mpm_domain') return fromType === 'MPMDomain2D';
+                if (toPortId === 'cfd_solver' || toPortId === 'cfd') return fromType === 'CFDSolver2D';
+                if (toPortId === 'mpm_domain' || toPortId === 'mpm') return fromType === 'MPMDomain2D';
                 return false;
             case 'TelemetryContour':
-                if (toPortId === 'in') return fromType === 'CFDSolver2D' || fromType === 'MPMDomain2D';
-                return false;
+                return fromType === 'CFDSolver2D' || fromType === 'MPMDomain2D' || fromType === 'FSICoupler2D';
             case 'VTKOutput':
                 if (toPortId === 'in') return fromType === 'CFDSolver' || fromType === 'CFDSolver2D' || fromType === 'CFDSolver3D';
                 return false;
@@ -842,7 +840,9 @@ export class GraphRenderer {
                 const state = this.stateManager.getCurrentState();
                 if (state) {
                     const targetNode = state.nodes.find(n => n.id === this.hoveredPort!.nodeId);
-                    const isMultiInput = targetNode?.type === 'MPMDomain2D' && this.hoveredPort!.portId === 'objects';
+                    const isMultiInput = (targetNode?.type === 'MPMDomain2D' && this.hoveredPort!.portId === 'objects')
+                        || targetNode?.type === 'TelemetryText'
+                        || targetNode?.type === 'TelemetryContour';
 
                     if (!isMultiInput) {
                         const existingIdx = state.connections.findIndex(conn =>
@@ -1332,7 +1332,6 @@ export class GraphRenderer {
         const state = this.stateManager.getCurrentState();
         if (!state) return;
 
-        const isSolver = (t: string) => ['CFDSolver', 'CFDSolver2D', 'CFDSolver3D', 'MPMDomain2D'].includes(t);
         const isMesh = (t: string) => ['DomainMesh', 'DomainMesh2D', 'DomainMesh3D'].includes(t);
 
         const ws = this.stateManager.getActiveWorkspace();
@@ -1340,8 +1339,16 @@ export class GraphRenderer {
         const activeModelState = activeModelId ? this.stateManager.getSimulationState(activeModelId) : null;
         const targetNodes = activeModelState ? activeModelState.nodes : state.nodes;
 
-        if (isSolver(type) && targetNodes.some(n => isSolver(n.type))) {
+        const existingCFDSolver = targetNodes.find(n => ['CFDSolver', 'CFDSolver2D', 'CFDSolver3D'].includes(n.type));
+        const existingMPMDomain = targetNodes.find(n => n.type === 'MPMDomain2D');
+
+        if (['CFDSolver', 'CFDSolver2D', 'CFDSolver3D'].includes(type) && existingCFDSolver) {
             alert(`You can only have one CFD Solver per model canvas. Please create a 'New Model' from the top menu for a separate simulation.`);
+            return;
+        }
+
+        if (type === 'MPMDomain2D' && existingMPMDomain) {
+            alert(`You can only have one MPM Domain per model canvas. Please create a 'New Model' from the top menu for a separate simulation.`);
             return;
         }
 
@@ -1384,8 +1391,8 @@ export class GraphRenderer {
                 dimension: '1D',
                 domain_radius: 1.0,
                 cell_size: 0.001,
-                left_bc: 'Reflecting',
-                right_bc: 'Terminate',
+                left_bc: 'Transmitting',
+                right_bc: 'Transmitting',
                 y_min_bc: 'Reflecting',
                 y_max_bc: 'Reflecting',
                 z_min_bc: 'Reflecting',
@@ -1408,14 +1415,17 @@ export class GraphRenderer {
                 jwl_R2: 0.90,
                 jwl_omega: 0.35,
                 // Ideal Gas Charge params
+                ideal_gamma: 1.4,
                 ideal_rho_0: 1630,
                 ideal_e_0: 4290000
             };
             case 'Charge1D': return {
+                charge_mass: 0.853479,
                 charge_radius: 0.05
             };
             case 'Charge2D': return {
                 charge_shape: 'Sphere',
+                charge_mass: 0.853479,
                 charge_radius: 0.05,
                 charge_height: 0.1,
                 charge_r: 0.0,
@@ -1561,8 +1571,10 @@ export class GraphRenderer {
             };
             case 'Charge3D': return {
                 charge_shape: 'Sphere',
+                charge_mass: 6.8277,
                 charge_x: 0.5, charge_y: 0.5, charge_z: 0.5,
                 charge_radius: 0.1,
+                charge_height: 0.2,
                 charge_lx: 0.2, charge_ly: 0.2, charge_lz: 0.2
             };
             case 'CFDSolver3D': return {
@@ -1687,7 +1699,9 @@ export class GraphRenderer {
                 youngs_modulus: 210.0e9,
                 poissons_ratio: 0.3,
                 yield_stress: 400.0e6,
-                hardening_modulus: 1.0e9
+                hardening_modulus: 1.0e9,
+                failure_strain: 0.25,
+                tensile_failure_stress: 600.0e6
             };
             case 'FSICoupler2D': return {
                 coupling_mode: 'TwoWay_Full',
@@ -2396,21 +2410,17 @@ export class GraphRenderer {
                                 portsBottomEl.appendChild(p);
                             });
                         } else if (node.type === 'TelemetryText') {
-                            // TelemetryText (HORIZ, normal/expanded): use a representative
-                            // anchor that sits at the node's left-centre, identical to what
-                            // compact mode uses. Because the representative port is NOT part
-                            // of the flex-content flow, it cannot be pushed out of place when
-                            // the log body fills with text.
-                            if (node.inputs.length > 0) {
+                            node.inputs.forEach((inputPort, idx) => {
                                 const p = document.createElement('div');
                                 p.className = 'port input representative';
-                                const colorClass = this.getPortColorClass(node.type, node.inputs[0].id);
-                                p.innerHTML = `<div class="port-bullet ${colorClass}" id="${this.panelId}-port-in-${node.id}-representative"></div>`;
+                                p.style.top = `${30 + idx * 24}px`;
+                                const colorClass = this.getPortColorClass(node.type, inputPort.id);
+                                p.innerHTML = `<div class="port-bullet ${colorClass}" id="${this.panelId}-port-in-${node.id}-${inputPort.id}" title="${inputPort.label}"></div>`;
                                 p.addEventListener('mousedown', (e) => {
-                                    this.handleInputPortMouseDown(e, node.id, node.inputs[0].id);
+                                    this.handleInputPortMouseDown(e, node.id, inputPort.id);
                                 });
                                 portsEl.appendChild(p);
-                            }
+                            });
                             if (node.outputs.length > 0) {
                                 const p = document.createElement('div');
                                 p.className = 'port output representative';
@@ -2785,14 +2795,13 @@ export class GraphRenderer {
         if (nodeType === 'DetonatorLocation' || nodeType === 'DetonatorLocation3D' || portId === 'detonator') return 'detonator';
         if (nodeType === 'RemapNode' || nodeType === 'Remap1DTo2DNode' || nodeType === 'Remap1DTo3DNode' || nodeType === 'Remap2DTo3DNode' || portId === 'remap') return 'remap';
         if (nodeType === 'HardwareConfig' || portId === 'hardware') return 'hardware';
-        if (portId === 'telemetry' || (portId === 'in' && (nodeType === 'TelemetryText' || nodeType === 'TelemetryGraph' || nodeType === 'TelemetryContour' || nodeType === 'Telemetry3DViewport'))) return 'telemetry';
+        if (portId === 'telemetry' || portId === 'mpm_in' || portId === 'in_2' || (portId === 'in' && (nodeType === 'TelemetryText' || nodeType === 'TelemetryGraph' || nodeType === 'TelemetryContour' || nodeType === 'Telemetry3DViewport'))) return 'telemetry';
         return 'material';
     }
 
     private getPortPosition(node: Node, portId: string, isInput: boolean): { x: number, y: number } | null {
         // compact, full-panel, and TelemetryText (all HORIZ modes) use representative bullets
-        const useRepresentative = node.displayMode === 'compact' || node.displayMode === 'full-panel'
-            || (node.type === 'TelemetryText' && (node.orientation || 'HORIZ') === 'HORIZ');
+        const useRepresentative = node.displayMode === 'compact' || node.displayMode === 'full-panel';
         const bulletId = useRepresentative
             ? (isInput ? `${this.panelId}-port-in-${node.id}-representative` : `${this.panelId}-port-out-${node.id}-representative`)
             : (isInput ? `${this.panelId}-port-in-${node.id}-${portId}` : `${this.panelId}-port-out-${node.id}-${portId}`);
@@ -3056,27 +3065,33 @@ export class GraphRenderer {
             }
         } else if (node.type === 'TelemetryContour') {
             const state = this.stateManager.getCurrentState();
-            const conn = state?.connections.find(c => c.toNode === node.id && c.toPort === 'in');
-            const connectedSolver = conn ? state?.nodes.find(n => n.id === conn.fromNode) : null;
-            const isMPM = connectedSolver?.type === 'MPMDomain2D';
+            const conns = state?.connections.filter(c => c.toNode === node.id) || [];
+            const connectedSolvers = conns.map(c => state?.nodes.find(n => n.id === c.fromNode)).filter(Boolean);
+            const hasMPM = connectedSolvers.some(n => n?.type === 'MPMDomain2D' || n?.type === 'FSICoupler2D');
+            const hasCFD = connectedSolvers.some(n => n?.type === 'CFDSolver2D' || n?.type === 'FSICoupler2D') || connectedSolvers.length === 0;
 
-            const CHANNELS: { label: string }[] = isMPM ? [
-                { label: 'Pressure' },
-                { label: 'Density' },
-                { label: 'Velocity' },
-                { label: 'Y-Velocity' },
-                { label: 'Von Mises Stress' },
-                { label: 'Plastic Strain' },
-                { label: 'Object ID' }
-            ] : [
-                { label: 'Pressure' },
-                { label: 'Density' },
-                { label: 'Radial Vel' },
-                { label: 'Axial Vel' },
-                { label: 'Spec Energy' },
-                { label: 'Burn Frac' },
-                { label: 'Unburnt Frac' }
-            ];
+            const CHANNELS: { label: string }[] = [];
+            if (hasCFD) {
+                CHANNELS.push(
+                    { label: 'Pressure' },
+                    { label: 'Density' },
+                    { label: 'Radial Vel' },
+                    { label: 'Axial Vel' },
+                    { label: 'Spec Energy' },
+                    { label: 'Burn Frac' },
+                    { label: 'Unburnt Frac' }
+                );
+            }
+            if (hasMPM) {
+                CHANNELS.push(
+                    { label: 'Von Mises Stress' },
+                    { label: 'Plastic Strain' },
+                    { label: 'Object ID' }
+                );
+            }
+            if (CHANNELS.length === 0) {
+                CHANNELS.push({ label: 'Pressure' }, { label: 'Density' }, { label: 'Velocity' });
+            }
             const currentChannel = Number(node.parameters?.telemetry_channel ?? 0);
             const currentStride = Number(node.parameters?.downsample_stride ?? 1);
             const currentRate = Number(node.parameters?.refresh_rate ?? 0.0);
@@ -3112,9 +3127,19 @@ export class GraphRenderer {
             let solverNode: any = null;
             let meshNode: any = null;
             if (state) {
-                const conn = state.connections.find(c => c.toNode === node.id && c.toPort === 'in');
-                solverNode = conn ? state.nodes.find(n => n.id === conn.fromNode) : null;
-                if (solverNode && (solverNode.type === 'CFDSolver2D' || solverNode.type === 'MPMDomain2D')) {
+                const conns = state.connections.filter(c => c.toNode === node.id);
+                for (const c of conns) {
+                    const candidate = state.nodes.find(n => n.id === c.fromNode);
+                    if (candidate && (candidate.type === 'CFDSolver2D' || candidate.type === 'MPMDomain2D')) {
+                        solverNode = candidate;
+                        break;
+                    }
+                }
+                if (!solverNode) {
+                    solverNode = state.nodes.find(n => n.type === 'CFDSolver2D' || n.type === 'MPMDomain2D') || null;
+                }
+
+                if (solverNode) {
                     const ownerModel = this.stateManager.getAllModels().find(m => m.nodes.some(n => n.id === solverNode.id));
                     const modelNodes = ownerModel ? ownerModel.nodes : state.nodes;
 
@@ -3535,6 +3560,31 @@ export class GraphRenderer {
                 gridToggleGroup.appendChild(gridCheckbox);
                 scaleBar.appendChild(gridToggleGroup);
 
+                // Smooth Checkbox [NEW]
+                if (node.parameters && node.parameters.interpolate === undefined) {
+                    node.parameters.interpolate = true;
+                }
+                const showSmooth = node.parameters?.interpolate !== false;
+                const smoothToggleGroup = document.createElement('label');
+                smoothToggleGroup.className = 'telemetry-log-checkbox-container';
+                smoothToggleGroup.textContent = 'Smooth:';
+
+                const smoothCheckbox = document.createElement('input');
+                smoothCheckbox.type = 'checkbox';
+                smoothCheckbox.className = 'telemetry-smooth-checkbox';
+                smoothCheckbox.checked = showSmooth;
+                smoothCheckbox.addEventListener('change', () => {
+                    this.stateManager.updateNodeParametersInPlace(node.id, {
+                        interpolate: smoothCheckbox.checked
+                    });
+                    const w = this.nodeWorkers.get(node.id);
+                    if (w) {
+                        w.postMessage({ type: 'setConfig', interpolate: smoothCheckbox.checked });
+                    }
+                });
+                smoothToggleGroup.appendChild(smoothCheckbox);
+                scaleBar.appendChild(smoothToggleGroup);
+
                 // Min Text Entry
                 const minLabel = document.createElement('span');
                 minLabel.className = 'telemetry-channel-label';
@@ -3597,7 +3647,7 @@ export class GraphRenderer {
                 [
                     logCheckbox, logGroup, lockCheckbox, lockGroup,
                     chargeCheckbox, chargeToggleGroup, detCheckbox, detToggleGroup,
-                    gridCheckbox, gridToggleGroup,
+                    gridCheckbox, gridToggleGroup, smoothCheckbox, smoothToggleGroup,
                     minInput, maxInput, setBtn
                 ].forEach(el => {
                     ['mousedown', 'mouseup', 'click'].forEach(evtType => {
@@ -3718,6 +3768,7 @@ export class GraphRenderer {
                     chargeInfo: (node.parameters?.show_charge !== false) ? chargeInfo : null,
                     detonatorInfo: (node.parameters?.show_detonator !== false) ? detonatorInfo : null,
                     showGridlines: node.parameters?.show_gridlines === true,
+                    interpolate: node.parameters?.interpolate !== false,
                     max_r: max_r,
                     max_z: max_z,
                     meshType: solverNode?.parameters?.mesh_type || 'regular',

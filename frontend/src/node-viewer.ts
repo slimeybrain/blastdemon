@@ -2116,6 +2116,7 @@ export class NodeViewer {
             // MPM keys
             'pos_x', 'pos_y', 'vel_x', 'vel_y', 'size_x', 'size_y', 'radius', 'angular_vel',
             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
+            'failure_strain', 'tensile_failure_stress',
             'ppc', 'time_step', 'penalty_stiffness', 'contour_opacity', 'contour_min', 'contour_max'
         ];
 

@@ -949,10 +949,16 @@ export class StateManager {
                 const wcStr = data.wallclock !== undefined ? `, Wallclock: ${Number(data.wallclock).toFixed(4)}s` : '';
                 return `[${timestamp}] [PROGRESS] ${percent}% complete${wcStr}`;
             }
-            if (data.type === 'TELEMETRY' || data.type === 'TELEMETRY_2D' || data.type === 'TELEMETRY_3D') {
+            if (data.type === 'TELEMETRY_MPM_2D') {
                 const wcStr = data.wallclock !== undefined ? `, Wallclock: ${Number(data.wallclock).toFixed(4)}s` : '';
                 const dtStr = data.dt !== undefined ? `, dt: ${Number(data.dt).toExponential(6)}s` : '';
-                return `[${timestamp}] [SOLVER] Time: ${data.time?.toExponential(6) || '0'}${dtStr}${wcStr}, Terminated: ${data.is_terminated || false}`;
+                return `[${timestamp}] [MPM] Time: ${data.time?.toExponential(6) || '0'}${dtStr}${wcStr}, Terminated: ${data.is_terminated || false}`;
+            }
+            if (data.type === 'TELEMETRY' || data.type === 'TELEMETRY_2D' || data.type === 'TELEMETRY_3D') {
+                const tag = data.type === 'TELEMETRY_2D' ? 'CFD' : 'SOLVER';
+                const wcStr = data.wallclock !== undefined ? `, Wallclock: ${Number(data.wallclock).toFixed(4)}s` : '';
+                const dtStr = data.dt !== undefined ? `, dt: ${Number(data.dt).toExponential(6)}s` : '';
+                return `[${timestamp}] [${tag}] Time: ${data.time?.toExponential(6) || '0'}${dtStr}${wcStr}, Terminated: ${data.is_terminated || false}`;
             }
             if (data.type === 'resource_pulse') {
                 return `[${timestamp}] [RESOURCES] CPU: ${data.metrics?.cpu?.toFixed(1)}%, RAM: ${data.metrics?.ram?.toFixed(1)}%`;
@@ -978,12 +984,12 @@ export class StateManager {
             nodeId = nodeIdOrData;
             data = optionalData;
         } else if (typeof nodeIdOrData === 'string') {
-            const solverNode = nodes.find(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D');
+            const solverNode = nodes.find(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D' || n.type === 'MPMDomain2D' || n.type === 'FSICoupler2D');
             if (!solverNode) return;
             nodeId = solverNode.id;
             data = nodeIdOrData;
         } else {
-            const solverNode = nodes.find(n => n.id === 'node-solver') || nodes.find(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D');
+            const solverNode = nodes.find(n => n.id === 'node-solver') || nodes.find(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D' || n.type === 'MPMDomain2D' || n.type === 'FSICoupler2D');
             if (!solverNode) return;
             nodeId = solverNode.id;
             data = nodeIdOrData;
@@ -993,7 +999,7 @@ export class StateManager {
 
         const targetNode = nodes.find(n => n.id === nodeId);
         let telemetryToStore = data;
-        if ((targetNode?.type === 'TelemetryText' || targetNode?.type === 'CFDSolver' || targetNode?.type === 'CFDSolver2D' || targetNode?.type === 'CFDSolver3D' || targetNode?.type === 'MPMDomain2D') && !(data instanceof ArrayBuffer)) {
+        if ((targetNode?.type === 'TelemetryText' || targetNode?.type === 'CFDSolver' || targetNode?.type === 'CFDSolver2D' || targetNode?.type === 'CFDSolver3D' || targetNode?.type === 'MPMDomain2D' || targetNode?.type === 'FSICoupler2D') && !(data instanceof ArrayBuffer)) {
             if (data && typeof data === 'object' && (data.type === 'progress' || data.type === 'progress_2d' || data.type === 'resource_pulse')) {
                  // Skip
             } else {
@@ -1008,7 +1014,17 @@ export class StateManager {
         this.telemetryStore.set(nodeId, telemetryToStore);
         this.notifyTelemetryUpdate(nodeId, telemetryToStore);
 
-        const telemetryConnections = connections.filter(e => e.fromNode === nodeId);
+        const solverNodeTypes = ['CFDSolver', 'CFDSolver2D', 'CFDSolver3D', 'MPMDomain2D', 'FSICoupler2D'];
+        const isSolverOrCoupler = targetNode && solverNodeTypes.includes(targetNode.type);
+
+        const telemetryConnections = connections.filter(e => {
+            if (e.fromNode === nodeId) return true;
+            if (isSolverOrCoupler) {
+                const fromN = nodes.find(n => n.id === e.fromNode);
+                return fromN && solverNodeTypes.includes(fromN.type);
+            }
+            return false;
+        });
         const updatedNodeIds = new Set<string>();
 
         telemetryConnections.forEach(connection => {
@@ -1016,7 +1032,7 @@ export class StateManager {
             if (connectedNode) {
                 updatedNodeIds.add(connectedNode.id);
                 if (connectedNode.type === 'TelemetryGraph') {
-                    if (data instanceof ArrayBuffer || (data && (data.type === 'TELEMETRY' || data.type === 'TELEMETRY_2D' || data.type === 'TELEMETRY_3D'))) {
+                    if (data instanceof ArrayBuffer || (data && (data.type === 'TELEMETRY' || data.type === 'TELEMETRY_2D' || data.type === 'TELEMETRY_3D' || data.type === 'TELEMETRY_MPM_2D'))) {
                          this.telemetryStore.set(connectedNode.id, data);
                          this.notifyTelemetryUpdate(connectedNode.id, data);
                     }
@@ -1026,7 +1042,7 @@ export class StateManager {
                          this.notifyTelemetryUpdate(connectedNode.id, data.gauges_history);
                     }
                 } else if (connectedNode.type === 'TelemetryContour' || connectedNode.type === 'Telemetry3DViewport') {
-                    if (data instanceof ArrayBuffer || (data && data.type === 'TELEMETRY_3D')) {
+                    if (data instanceof ArrayBuffer || (data && (data.type === 'TELEMETRY_3D' || data.type === 'TELEMETRY_2D' || data.type === 'TELEMETRY_MPM_2D'))) {
                          this.telemetryStore.set(connectedNode.id, data);
                          if (data && data.type === 'TELEMETRY_3D') {
                              this.telemetryStore.set(connectedNode.id + "-config-3d", data);
@@ -1035,7 +1051,7 @@ export class StateManager {
                     }
                 } else if (connectedNode.type === 'TelemetryText') {
                     if (data instanceof ArrayBuffer) return;
-                    if (data && typeof data === 'object' && (data.type === 'progress' || data.type === 'progress_2d' || data.type === 'progress_3d' || data.type === 'resource_pulse')) {
+                    if (data && typeof data === 'object' && data.type === 'resource_pulse') {
                         return;
                     }
 
@@ -1592,7 +1608,8 @@ export class StateManager {
                 min_y: 0,
                 max_y: 1,
                 downsample_stride: 1,
-                refresh_rate: 0.0
+                refresh_rate: 0.0,
+                interpolate: true
             },
             'VTKOutput': {
                 vtk_dir: './vtk_output',
@@ -1751,7 +1768,9 @@ export class StateManager {
                 youngs_modulus: 210.0e9,
                 poissons_ratio: 0.3,
                 yield_stress: 400.0e6,
-                hardening_modulus: 1.0e9
+                hardening_modulus: 1.0e9,
+                failure_strain: 0.25,
+                tensile_failure_stress: 600.0e6
             },
             'FSICoupler2D': {
                 coupling_mode: 'TwoWay_Full',
@@ -1903,7 +1922,10 @@ export class StateManager {
         switch (type) {
             case 'ThePainter': return [{ id: 'mesh', label: 'Mesh' }, { id: 'air', label: 'Air' }, { id: 'explosive', label: 'Charge' }];
             case 'CFDSolver': return [{ id: 'in', label: 'Initial State' }];
-            case 'TelemetryText':
+            case 'TelemetryText': return [
+                { id: 'in', label: 'Stream 1' },
+                { id: 'in_2', label: 'Stream 2' }
+            ];
             case 'TelemetryGraph': return [{ id: 'in', label: 'Data Stream' }];
             case 'CFDSolver2D': return [
                 { id: 'mesh', label: 'Mesh' },
@@ -1919,7 +1941,10 @@ export class StateManager {
             case 'Remap1DTo2DNode':
             case 'Remap1DTo3DNode': return [{ id: 'in', label: '1D Solver' }];
             case 'Remap2DTo3DNode': return [{ id: 'in', label: '2D Solver' }];
-            case 'TelemetryContour': return [{ id: 'in', label: 'Data Stream' }];
+            case 'TelemetryContour': return [
+                { id: 'in', label: 'CFD Stream' },
+                { id: 'mpm_in', label: 'MPM Stream' }
+            ];
             case 'VTKOutput': return [{ id: 'in', label: 'Solver' }];
             case 'VirtualGauges': return [{ id: 'in', label: 'Solver Output' }];
             case 'CFDSolver3D': return [

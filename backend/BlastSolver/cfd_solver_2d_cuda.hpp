@@ -23,13 +23,13 @@ public:
                                            double explosive_r = 0.0) = 0;
     virtual void setInitialConditionTNTCylinder(double explosive_z, double radius, double height,
                                                 double high_rho,
-                                                double ambient_rho, double ambient_p) = 0;
+                                                double ambient_rho, double ambient_p, double explosive_r = 0.0) = 0;
     virtual void setInitialConditionTNT(double explosive_z, double explosive_radius,
                                         double high_rho,
-                                        double ambient_rho, double ambient_p) = 0;
+                                        double ambient_rho, double ambient_p, double explosive_r = 0.0) = 0;
     virtual void setInitialConditionIdealGas(double explosive_z, double explosive_radius,
                                              double high_rho, double detonation_energy,
-                                             double ambient_rho, double ambient_p) = 0;
+                                             double ambient_rho, double ambient_p, double explosive_r = 0.0) = 0;
     
     virtual void setFluxScheme(const std::string& scheme_name) = 0;
     virtual void setSpatialOrder(int order) = 0;
@@ -37,6 +37,7 @@ public:
     virtual void setMaterialParameters(const MultiMat::MaterialSet& materials) = 0;
     virtual void setGamma(double g) = 0;
     virtual void setIdealGas(bool val) = 0;
+    virtual void setCoordinateSystemCartesian(bool cartesian) = 0;
 
     virtual void step(double dt) = 0;
     virtual double stepBatch(int num_steps, double cfl) { (void)num_steps; (void)cfl; return getTime(); }
@@ -63,6 +64,9 @@ public:
     virtual void setGauges(const std::vector<Gauge2D>& gauges) {}
     virtual void recordGaugesAsync(double t) {}
     virtual void retrieveNewGaugeSamples(std::vector<double>& times, std::vector<float>& values) {}
+
+    virtual void setSolidVelocities(const double* v) {}
+    virtual void setSolidMask(const uint8_t* mask) {}
 
     virtual double getMaxWaveSpeed() = 0;
     virtual bool checkTerminationCondition() = 0;
@@ -92,13 +96,13 @@ public:
                                    double explosive_r = 0.0) override;
     void setInitialConditionTNTCylinder(double explosive_z, double radius, double height,
                                         double high_rho,
-                                        double ambient_rho, double ambient_p) override;
+                                        double ambient_rho, double ambient_p, double explosive_r = 0.0) override;
     void setInitialConditionTNT(double explosive_z, double explosive_radius,
                                 double high_rho,
-                                double ambient_rho, double ambient_p) override;
+                                double ambient_rho, double ambient_p, double explosive_r = 0.0) override;
     void setInitialConditionIdealGas(double explosive_z, double explosive_radius,
                                      double high_rho, double detonation_energy,
-                                     double ambient_rho, double ambient_p) override;
+                                     double ambient_rho, double ambient_p, double explosive_r = 0.0) override;
     
     void setFluxScheme(const std::string& scheme_name) override;
     void setSpatialOrder(int order) override { spatialOrder = order; }
@@ -169,7 +173,16 @@ private:
     double det_y = 0.0;
     double det_z = 0.0;
 
+    void setCoordinateSystemCartesian(bool cartesian) override { is_cartesian = cartesian; }
+    void setSolidVelocities(const double* v) override;
+    void setSolidMask(const uint8_t* mask) override;
+
     bool is_ideal_gas = false;
+    bool is_cartesian = false;
+
+    uint8_t* d_solid_mask = nullptr;
+    double* d_solid_velocities = nullptr;
+    size_t solid_capacity = 0;
 
     // GPU-side gauge variables
     int num_gauges = 0;

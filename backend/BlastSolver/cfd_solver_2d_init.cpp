@@ -90,10 +90,10 @@ void CFDSolver2DImpl<RealType>::setFluxScheme(const std::string& scheme_name) {
 template <typename RealType>
 void CFDSolver2DImpl<RealType>::setInitialConditionTNT(double explosive_z, double explosive_radius, 
                                         double high_rho, 
-                                        double ambient_rho, double ambient_p) {
+                                        double ambient_rho, double ambient_p, double explosive_r) {
     this->ambient_rho = ambient_rho;
     this->ambient_p = ambient_p;
-    this->det_x = 0.0;
+    this->det_x = explosive_r;
     this->det_y = 0.0;
     this->det_z = explosive_z;
 
@@ -107,7 +107,7 @@ void CFDSolver2DImpl<RealType>::setInitialConditionTNT(double explosive_z, doubl
                 double w = is_cartesian ? 1.0 : r_sub;
                 for (int kj = 0; kj < 8; ++kj) {
                     double z_sub = j * dz + (kj + 0.5) * (dz / 8.0);
-                    double dist = std::sqrt(r_sub * r_sub + (z_sub - explosive_z) * (z_sub - explosive_z));
+                    double dist = std::sqrt((r_sub - explosive_r) * (r_sub - explosive_r) + (z_sub - explosive_z) * (z_sub - explosive_z));
                     if (dist <= explosive_radius) {
                         sum_w_inside += w;
                     }
@@ -157,10 +157,10 @@ void CFDSolver2DImpl<RealType>::setInitialConditionTNT(double explosive_z, doubl
 template <typename RealType>
 void CFDSolver2DImpl<RealType>::setInitialConditionIdealGas(double explosive_z, double explosive_radius,
                                              double high_rho, double detonation_energy,
-                                             double ambient_rho, double ambient_p) {
+                                             double ambient_rho, double ambient_p, double explosive_r) {
     this->ambient_rho = ambient_rho;
     this->ambient_p = ambient_p;
-    this->det_x = 0.0;
+    this->det_x = explosive_r;
     this->det_y = 0.0;
     this->det_z = explosive_z;
     this->is_ideal_gas = true;
@@ -176,7 +176,7 @@ void CFDSolver2DImpl<RealType>::setInitialConditionIdealGas(double explosive_z, 
                 double w = is_cartesian ? 1.0 : r_sub;
                 for (int kj = 0; kj < 8; ++kj) {
                     double z_sub = j * dz + (kj + 0.5) * (dz / 8.0);
-                    double dist = std::sqrt(r_sub * r_sub + (z_sub - explosive_z) * (z_sub - explosive_z));
+                    double dist = std::sqrt((r_sub - explosive_r) * (r_sub - explosive_r) + (z_sub - explosive_z) * (z_sub - explosive_z));
                     if (dist <= explosive_radius) {
                         sum_w_inside += w;
                     }
@@ -220,10 +220,10 @@ void CFDSolver2DImpl<RealType>::setInitialConditionIdealGas(double explosive_z, 
 template <typename RealType>
 void CFDSolver2DImpl<RealType>::setInitialConditionTNTCylinder(double explosive_z, double radius, double height,
                                                 double high_rho,
-                                                double ambient_rho, double ambient_p) {
+                                                double ambient_rho, double ambient_p, double explosive_r) {
     this->ambient_rho = ambient_rho;
     this->ambient_p = ambient_p;
-    this->det_x = 0.0;
+    this->det_x = explosive_r;
     this->det_y = 0.0;
     this->det_z = explosive_z + height / 2.0; // Top of the cylinder
 
@@ -236,7 +236,7 @@ void CFDSolver2DImpl<RealType>::setInitialConditionTNTCylinder(double explosive_
                 double w = is_cartesian ? 1.0 : r_sub;
                 for (int kj = 0; kj < 8; ++kj) {
                     double z_sub = j * dz + (kj + 0.5) * (dz / 8.0);
-                    bool inside = (r_sub <= radius) && (std::abs(z_sub - explosive_z) <= height / 2.0);
+                    bool inside = (std::abs(r_sub - explosive_r) <= radius) && (std::abs(z_sub - explosive_z) <= height / 2.0);
                     if (inside) {
                         sum_w_inside += w;
                     }

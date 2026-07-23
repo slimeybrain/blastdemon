@@ -44,8 +44,8 @@ float MPMSolver2D::evalGIMP_dS(float x_p, float x_i, float h, float l_p) const {
 }
 
 void MPMSolver2D::addRectangleObject(int obj_id, float pos_x, float pos_y, float size_x, float size_y,
-                                     float vel_x, float vel_y, float density, float E, float nu,
-                                     float yield_stress, float hardening, int ppc) {
+                                     float vel_x, float vel_y, float angular_vel, float density, float E, float nu,
+                                     float yield_stress, float hardening, float failure_strain, float tensile_failure_stress, int ppc) {
     int particles_per_dim = static_cast<int>(std::round(std::sqrt(static_cast<float>(ppc))));
     if (particles_per_dim < 1) particles_per_dim = 2;
 
@@ -65,11 +65,15 @@ void MPMSolver2D::addRectangleObject(int obj_id, float pos_x, float pos_y, float
             MPMParticle2D p{};
             p.x[0] = x;
             p.x[1] = y;
-            p.v[0] = vel_x;
-            p.v[1] = vel_y;
 
-            p.B[0][0] = 0.0f; p.B[0][1] = 0.0f;
-            p.B[1][0] = 0.0f; p.B[1][1] = 0.0f;
+            float rx = x - pos_x;
+            float ry = y - pos_y;
+
+            p.v[0] = vel_x - angular_vel * ry;
+            p.v[1] = vel_y + angular_vel * rx;
+
+            p.B[0][0] = 0.0f;           p.B[0][1] = -angular_vel;
+            p.B[1][0] =  angular_vel;   p.B[1][1] = 0.0f;
 
             p.lp[0] = 0.5f * p_dx;
             p.lp[1] = 0.5f * p_dy;
@@ -83,6 +87,10 @@ void MPMSolver2D::addRectangleObject(int obj_id, float pos_x, float pos_y, float
             p.poissons_ratio = nu;
             p.yield_stress = yield_stress;
             p.hardening_modulus = hardening;
+            p.failure_strain = failure_strain;
+            p.tensile_failure_stress = tensile_failure_stress;
+            p.damage = 0.0f;
+            p.has_failed = false;
 
             p.F[0][0] = 1.0f; p.F[0][1] = 0.0f;
             p.F[1][0] = 0.0f; p.F[1][1] = 1.0f;
@@ -99,8 +107,8 @@ void MPMSolver2D::addRectangleObject(int obj_id, float pos_x, float pos_y, float
 }
 
 void MPMSolver2D::addCircleObject(int obj_id, float pos_x, float pos_y, float radius,
-                                  float vel_x, float vel_y, float density, float E, float nu,
-                                  float yield_stress, float hardening, int ppc) {
+                                  float vel_x, float vel_y, float angular_vel, float density, float E, float nu,
+                                  float yield_stress, float hardening, float failure_strain, float tensile_failure_stress, int ppc) {
     int particles_per_dim = static_cast<int>(std::round(std::sqrt(static_cast<float>(ppc))));
     if (particles_per_dim < 1) particles_per_dim = 2;
 
@@ -118,17 +126,18 @@ void MPMSolver2D::addCircleObject(int obj_id, float pos_x, float pos_y, float ra
 
     for (float x = min_x + 0.5f * p_dx; x < max_x; x += p_dx) {
         for (float y = min_y + 0.5f * p_dy; y < max_y; y += p_dy) {
-            float dx = x - pos_x;
-            float dy = y - pos_y;
-            if (dx * dx + dy * dy <= r2) {
+            float rx = x - pos_x;
+            float ry = y - pos_y;
+            if (rx * rx + ry * ry <= r2) {
                 MPMParticle2D p{};
                 p.x[0] = x;
                 p.x[1] = y;
-                p.v[0] = vel_x;
-                p.v[1] = vel_y;
 
-                p.B[0][0] = 0.0f; p.B[0][1] = 0.0f;
-                p.B[1][0] = 0.0f; p.B[1][1] = 0.0f;
+                p.v[0] = vel_x - angular_vel * ry;
+                p.v[1] = vel_y + angular_vel * rx;
+
+                p.B[0][0] = 0.0f;           p.B[0][1] = -angular_vel;
+                p.B[1][0] =  angular_vel;   p.B[1][1] = 0.0f;
 
                 p.lp[0] = 0.5f * p_dx;
                 p.lp[1] = 0.5f * p_dy;
@@ -142,6 +151,10 @@ void MPMSolver2D::addCircleObject(int obj_id, float pos_x, float pos_y, float ra
                 p.poissons_ratio = nu;
                 p.yield_stress = yield_stress;
                 p.hardening_modulus = hardening;
+                p.failure_strain = failure_strain;
+                p.tensile_failure_stress = tensile_failure_stress;
+                p.damage = 0.0f;
+                p.has_failed = false;
 
                 p.F[0][0] = 1.0f; p.F[0][1] = 0.0f;
                 p.F[1][0] = 0.0f; p.F[1][1] = 1.0f;
@@ -170,6 +183,7 @@ void MPMSolver2D::particleToGrid() {
         node.plastic_strain = 0.0f;
         node.density = 0.0f;
         node.pressure = 0.0f;
+        node.damage = 0.0f;
     }
 
     // P2G Scatter
@@ -245,6 +259,7 @@ void MPMSolver2D::particleToGrid() {
                 node.plastic_strain += p.m * weight * p.ep_bar;
                 node.density += p.m * weight * p.density;
                 node.pressure += p.m * weight * press;
+                node.damage += p.m * weight * p.damage;
             }
         }
     }
@@ -256,6 +271,7 @@ void MPMSolver2D::particleToGrid() {
             node.plastic_strain /= node.m;
             node.density /= node.m;
             node.pressure /= node.m;
+            node.damage /= node.m;
         }
     }
 }
@@ -266,9 +282,9 @@ void MPMSolver2D::updateGridKinematics(float dt) {
     if (!m_particles.empty()) {
         avg_p_mass = m_particles[0].m;
     }
-    // Nodes with mass below 0.1% of a single particle mass are low-mass boundary nodes.
-    // Accelerating them by f_int / m_node causes 1e7 m/s spurious velocity spikes.
-    float mass_cutoff = 1.0e-3f * avg_p_mass;
+    // Low-mass boundary nodes require effective mass regularization (25% of particle mass)
+    // to prevent spurious acceleration spikes from FSI/internal pressure forces.
+    float m_eff_floor = 0.25f * avg_p_mass;
 
     for (int j = 0; j < m_ny; ++j) {
         for (int i = 0; i < m_nx; ++i) {
@@ -279,15 +295,18 @@ void MPMSolver2D::updateGridKinematics(float dt) {
                 node.v[0] = node.p[0] / node.m;
                 node.v[1] = node.p[1] / node.m;
 
-                if (node.m > mass_cutoff) {
-                    // Total Force = External (FSI) - Internal
-                    float f_tot_x = node.f_ext[0] - node.f_int[0];
-                    float f_tot_y = node.f_ext[1] - node.f_int[1];
+                // Total Force = External (FSI) - Internal
+                float f_tot_x = node.f_ext[0] - node.f_int[0];
+                float f_tot_y = node.f_ext[1] - node.f_int[1];
 
-                    // Update Grid Velocity with mass-safe acceleration
-                    node.v[0] += dt * (f_tot_x / node.m);
-                    node.v[1] += dt * (f_tot_y / node.m);
-                }
+                // Smooth mass regularization prevents 1e7 m/s^2 acceleration blowups on fringe nodes
+                float m_eff = std::max(node.m, m_eff_floor);
+                node.v[0] += dt * (f_tot_x / m_eff);
+                node.v[1] += dt * (f_tot_y / m_eff);
+
+                // Clamp node velocity to realistic bounds
+                node.v[0] = std::clamp(node.v[0], -5000.0f, 5000.0f);
+                node.v[1] = std::clamp(node.v[1], -5000.0f, 5000.0f);
 
                 // Apply Domain Boundary Conditions (Sticky/Reflecting Ground Walls)
                 if (i == 0 || i == m_nx - 1) {
@@ -456,6 +475,18 @@ void MPMSolver2D::updateStressState(float dt) {
         float deps_yy = L[1][1] * dt;
         float deps_xy = 0.5f * (L[0][1] + L[1][0]) * dt;
 
+        // Vorticity W = 0.5 * (L - L^T)
+        float W_xy = 0.5f * (L[0][1] - L[1][0]);
+
+        // Jaumann objective stress rate rotation: dSigma_rot = (W * Sigma - Sigma * W) * dt
+        float rot_xx =  2.0f * W_xy * p.sigma[0][1] * dt;
+        float rot_yy = -2.0f * W_xy * p.sigma[0][1] * dt;
+        float rot_xy =  W_xy * (p.sigma[1][1] - p.sigma[0][0]) * dt;
+
+        float sig_xx_base = p.sigma[0][0] + rot_xx;
+        float sig_yy_base = p.sigma[1][1] + rot_yy;
+        float sig_xy_base = p.sigma[0][1] + rot_xy;
+
         // Lame Elastic Parameters
         float E = p.youngs_modulus;
         float nu = p.poissons_ratio;
@@ -464,9 +495,9 @@ void MPMSolver2D::updateStressState(float dt) {
 
         // Trial Elastic Stress Update
         float tr_deps = deps_xx + deps_yy;
-        float sig_xx_trial = p.sigma[0][0] + lambda * tr_deps + 2.0f * mu * deps_xx;
-        float sig_yy_trial = p.sigma[1][1] + lambda * tr_deps + 2.0f * mu * deps_yy;
-        float sig_xy_trial = p.sigma[0][1] + 2.0f * mu * deps_xy;
+        float sig_xx_trial = sig_xx_base + lambda * tr_deps + 2.0f * mu * deps_xx;
+        float sig_yy_trial = sig_yy_base + lambda * tr_deps + 2.0f * mu * deps_yy;
+        float sig_xy_trial = sig_xy_base + 2.0f * mu * deps_xy;
 
         // Hydrostatic Pressure & Deviatoric Stress
         float press = -0.5f * (sig_xx_trial + sig_yy_trial);
@@ -497,45 +528,80 @@ void MPMSolver2D::updateStressState(float dt) {
             p.sigma[1][0] = sig_xy_trial;
         }
 
+        // Evaluate Material Damage & Failure Criteria
+        float d_plastic = 0.0f;
+        if (p.failure_strain > 0.0f) {
+            d_plastic = std::clamp(p.ep_bar / p.failure_strain, 0.0f, 1.0f);
+        }
+
+        float curr_press = -0.5f * (p.sigma[0][0] + p.sigma[1][1]);
+        float tensile_stress = -curr_press; // Hydrostatic tension (negative pressure)
+        float d_tensile = 0.0f;
+        if (tensile_stress > 0.0f && p.tensile_failure_stress > 0.0f) {
+            d_tensile = std::clamp(tensile_stress / p.tensile_failure_stress, 0.0f, 1.0f);
+        }
+
+        float total_damage = std::max(p.damage, std::max(d_plastic, d_tensile));
+        p.damage = total_damage;
+        if (p.damage >= 1.0f) {
+            p.has_failed = true;
+            p.damage = 1.0f;
+        }
+
+        // Stress Tensor Softening & Degradation
+        float soft_factor = 1.0f - p.damage;
+        if (soft_factor < 0.0f) soft_factor = 0.0f;
+
+        p.sigma[0][0] *= soft_factor;
+        p.sigma[1][1] *= soft_factor;
+        p.sigma[0][1] *= soft_factor;
+        p.sigma[1][0] *= soft_factor;
+
         // Update Volume incrementally using det(F) = 1 + tr(deps)
         p.V = std::clamp(p.V * (1.0f + tr_deps), 0.1f * p.V0, 10.0f * p.V0);
     }
 }
 
-void MPMSolver2D::step(float cfl) {
-    if (m_particles.empty()) return;
-
-    // Calculate maximum acoustic wave speed c_s = sqrt(E / rho) + |v_max|
+float MPMSolver2D::computeStepSize(float cfl) const {
+    if (m_particles.empty()) return 1.0e-6f;
     float max_speed = 100.0f;
     float max_v = 0.0f;
     for (const auto& p : m_particles) {
+        if (std::isnan(p.v[0]) || std::isnan(p.v[1]) || std::isinf(p.v[0]) || std::isinf(p.v[1])) continue;
         float E = p.youngs_modulus;
         float rho = std::max(10.0f, p.density);
         float c_s = std::sqrt(E / rho);
+        if (std::isnan(c_s) || std::isinf(c_s)) continue;
         float v_mag = std::sqrt(p.v[0] * p.v[0] + p.v[1] * p.v[1]);
+        if (v_mag > 5000.0f) v_mag = 5000.0f;
         if (v_mag > max_v) max_v = v_mag;
         float total_speed = c_s + v_mag;
         if (total_speed > max_speed) max_speed = total_speed;
     }
-
     float min_h = std::min(m_dx, m_dy);
     float dt_crit = min_h / max_speed;
-    if (dt_crit < 1.0e-8f) dt_crit = 1.0e-8f;
+    return std::max(1.0e-8f, cfl * dt_crit);
+}
 
-    // Dynamically calculate exact step size dt = cfl * dt_critical
-    float dt = std::max(1.0e-8f, cfl * dt_crit);
-
+void MPMSolver2D::stepWithDt(float dt, bool run_p2g) {
+    if (m_particles.empty()) return;
     m_last_dt = dt;
-    m_last_cfl = cfl;
-    m_last_v_max = max_v;
     m_sim_time += static_cast<double>(dt);
     m_step_count++;
 
-    // Execute EXACTLY 1 physical step at dt
-    particleToGrid();
+    if (run_p2g) {
+        particleToGrid();
+    }
     updateGridKinematics(dt);
     gridToParticle(dt);
     updateStressState(dt);
+}
+
+void MPMSolver2D::step(float cfl) {
+    if (m_particles.empty()) return;
+    float dt = computeStepSize(cfl);
+    m_last_cfl = cfl;
+    stepWithDt(dt);
 }
 
 std::vector<float> MPMSolver2D::getGridScalarField(const std::string& quantity) const {
@@ -549,6 +615,8 @@ std::vector<float> MPMSolver2D::getGridScalarField(const std::string& quantity) 
             field[i] = m_grid[i].density;
         } else if (quantity == "pressure") {
             field[i] = m_grid[i].pressure;
+        } else if (quantity == "damage") {
+            field[i] = m_grid[i].damage;
         } else if (quantity == "velocity") {
             float vx = m_grid[i].v[0];
             float vy = m_grid[i].v[1];

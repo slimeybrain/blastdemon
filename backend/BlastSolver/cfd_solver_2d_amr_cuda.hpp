@@ -157,15 +157,15 @@ public:
 
     void setInitialConditionTNTCylinder(double explosive_z, double radius, double height,
                                         double high_rho,
-                                        double ambient_rho, double ambient_p) override;
+                                        double ambient_rho, double ambient_p, double explosive_r = 0.0) override;
 
     void setInitialConditionTNT(double explosive_z, double explosive_radius,
                                 double high_rho,
-                                double ambient_rho, double ambient_p) override;
+                                double ambient_rho, double ambient_p, double explosive_r = 0.0) override;
 
     void setInitialConditionIdealGas(double explosive_z, double explosive_radius,
                                      double high_rho, double detonation_energy,
-                                     double ambient_rho, double ambient_p) override;
+                                     double ambient_rho, double ambient_p, double explosive_r = 0.0) override;
     
     void setFluxScheme(const std::string& scheme_name) override;
     void setSpatialOrder(int order) override;

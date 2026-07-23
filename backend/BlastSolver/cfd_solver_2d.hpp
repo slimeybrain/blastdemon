@@ -24,15 +24,15 @@ public:
 
     virtual void setInitialConditionTNT(double explosive_z, double explosive_radius, 
                                         double high_rho,
-                                        double ambient_rho, double ambient_p) = 0;
+                                        double ambient_rho, double ambient_p, double explosive_r = 0.0) = 0;
 
     virtual void setInitialConditionIdealGas(double explosive_z, double explosive_radius,
                                              double high_rho, double detonation_energy,
-                                             double ambient_rho, double ambient_p) = 0;
+                                             double ambient_rho, double ambient_p, double explosive_r = 0.0) = 0;
 
     virtual void setInitialConditionTNTCylinder(double explosive_z, double radius, double height,
                                                 double high_rho,
-                                                double ambient_rho, double ambient_p) = 0;
+                                                double ambient_rho, double ambient_p, double explosive_r = 0.0) = 0;
 
     virtual void setInitialConditionFrom1D(double explosive_z, double remap_radius,
                                            const std::vector<double>& r_1d,
@@ -98,15 +98,15 @@ public:
 
     void setInitialConditionTNT(double explosive_z, double explosive_radius, 
                                 double high_rho,
-                                double ambient_rho, double ambient_p) override;
+                                double ambient_rho, double ambient_p, double explosive_r = 0.0) override;
 
     void setInitialConditionIdealGas(double explosive_z, double explosive_radius,
                                      double high_rho, double detonation_energy,
-                                     double ambient_rho, double ambient_p) override;
+                                     double ambient_rho, double ambient_p, double explosive_r = 0.0) override;
 
     void setInitialConditionTNTCylinder(double explosive_z, double radius, double height,
                                         double high_rho,
-                                        double ambient_rho, double ambient_p) override;
+                                        double ambient_rho, double ambient_p, double explosive_r = 0.0) override;
 
     void setInitialConditionFrom1D(double explosive_z, double remap_radius,
                                    const std::vector<double>& r_1d,
@@ -189,6 +189,8 @@ private:
     BCType bcZmin = REFLECTIVE;
     BCType bcZmax = OUTFLOW_RIEMANN;
     bool is_cartesian = false;
+    std::vector<uint8_t> solid_mask;
+    std::vector<double> solid_velocities;
     double ambient_rho;
     double ambient_p;
     MultiMat::MaterialSet currentMaterials = MultiMat::TNT;
@@ -222,9 +224,6 @@ private:
     
     void updatePrimitiveFromConservative();
     
-    std::vector<double> solid_vel;
-    std::vector<uint8_t> solid_mask;
-
     std::vector<Gauge2D> cpu_gauges;
     std::vector<double> cpu_gauge_times;
     std::vector<float> cpu_gauge_values;

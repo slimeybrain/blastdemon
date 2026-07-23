@@ -8,6 +8,8 @@ let height = 0;
 let dpr = 1;
 
 let lastBuffer: ArrayBuffer | null = null;
+let lastCfdBuffer: ArrayBuffer | null = null;
+let lastMpmBuffer: ArrayBuffer | null = null;
 let selectedChannel = 0; // 0=p, 1=rho, 2=ur, 3=uz, 4=e_int, 5=alpha1, 6=alpha2
 let displayMin = 0;
 let displayMax = 1;
@@ -19,6 +21,7 @@ let isAxisymmetric = true;
 let chargeInfo: any = null;
 let detonatorInfo: any = null;
 let showGridlines = false;
+let interpolate = true;
 let max_r = 1.0;
 let max_z = 1.0;
 let meshType = 'regular';
@@ -319,7 +322,7 @@ function updateAutoScale(data: Float32Array): void {
     let max = -Infinity;
     for (let i = 0; i < data.length; ++i) {
         const v = data[i];
-        if (isFinite(v)) {
+        if (isFinite(v) && v !== 0) {
             if (v < min) min = v;
             if (v > max) max = v;
         }
@@ -339,8 +342,8 @@ function render(): void {
     lastRenderTime = Date.now();
 
     context.clearRect(0, 0, width, height);
-    context.imageSmoothingEnabled = false;
-    (context as any).imageSmoothingQuality = 'low';
+    context.imageSmoothingEnabled = interpolate;
+    (context as any).imageSmoothingQuality = interpolate ? 'high' : 'low';
 
     // Determine domain dimensions for overlay mapping upfront
     if (chargeInfo && chargeInfo.max_r) {
@@ -388,14 +391,12 @@ function render(): void {
                 tempCanvas = new OffscreenCanvas(outNr, outNz);
                 tempCtx = tempCanvas.getContext('2d');
                 if (tempCtx) {
-                    tempCtx.imageSmoothingEnabled = false;
+                    tempCtx.imageSmoothingEnabled = interpolate;
                 }
             }
 
             if (tempCtx) {
-                tempCtx.imageSmoothingEnabled = false;
-                tempCtx.fillStyle = '#000000';
-                tempCtx.fillRect(0, 0, outNr, outNz);
+                tempCtx.imageSmoothingEnabled = interpolate;
 
                 const imgData = tempCtx.createImageData(outNr, outNz);
                 const pixels = imgData.data;
@@ -444,10 +445,12 @@ function render(): void {
             }
         }
     } else {
-        if (lastBuffer) {
-            currentParticles = extractParticles2D(lastBuffer);
+        const cfdBufToUse = lastCfdBuffer || lastBuffer;
+        const mpmBufToUse = lastMpmBuffer || lastBuffer;
+        if (mpmBufToUse) {
+            currentParticles = extractParticles2D(mpmBufToUse);
         }
-        const frameInfo = lastBuffer ? extractChannel2D(lastBuffer, selectedChannel) : null;
+        const frameInfo = cfdBufToUse ? extractChannel2D(cfdBufToUse, selectedChannel) : null;
         if (frameInfo) {
             const { data, nr: cellNr, nz: cellNz } = frameInfo;
             nr = cellNr;
@@ -467,16 +470,70 @@ function render(): void {
             }
 
             if (tempCtx) {
-                // Build the image data for the raw outNr x outNz grid
+                // Build a filled copy of grid data with extrapolated values for solid cells
+                const validData = new Float32Array(data);
+                for (let pass = 0; pass < 3; ++pass) {
+                    for (let r_idx = 0; r_idx < nr; ++r_idx) {
+                        for (let z_idx = 0; z_idx < nz; ++z_idx) {
+                            const idx = r_idx * nz + z_idx;
+                            if (validData[idx] === 0 || !isFinite(validData[idx])) {
+                                let sum = 0;
+                                let cnt = 0;
+                                for (let dr = -1; dr <= 1; ++dr) {
+                                    for (let dz_cell = -1; dz_cell <= 1; ++dz_cell) {
+                                        if (dr === 0 && dz_cell === 0) continue;
+                                        const ni = r_idx + dr;
+                                        const nj = z_idx + dz_cell;
+                                        if (ni >= 0 && ni < nr && nj >= 0 && nj < nz) {
+                                            const nval = validData[ni * nz + nj];
+                                            if (nval !== 0 && isFinite(nval)) {
+                                                sum += nval;
+                                                cnt++;
+                                            }
+                                        }
+                                    }
+                                }
+                                if (cnt > 0) {
+                                    validData[idx] = sum / cnt;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Build the image data for the outNr x outNz grid
                 const imgData = tempCtx.createImageData(outNr, outNz);
                 const pixels = imgData.data;
 
                 for (let i = 0; i < outNr; ++i) {
                     for (let j = 0; j < outNz; ++j) {
-                        const rawI = Math.min(nr - 1, i * stride);
-                        const rawJ = Math.min(nz - 1, j * stride);
-                        const solverIdx = rawI * nz + rawJ;
-                        const val = data[solverIdx];
+                        let val: number;
+                        if (interpolate && nr > 1 && nz > 1) {
+                            const r_norm = outNr > 1 ? (i / (outNr - 1)) : 0;
+                            const z_norm = outNz > 1 ? (j / (outNz - 1)) : 0;
+
+                            const r_idx = r_norm * (nr - 1);
+                            const z_idx = z_norm * (nz - 1);
+
+                            const i0 = Math.floor(r_idx);
+                            const j0 = Math.floor(z_idx);
+                            const i1 = Math.min(nr - 1, i0 + 1);
+                            const j1 = Math.min(nz - 1, j0 + 1);
+
+                            const u = r_idx - i0;
+                            const v = z_idx - j0;
+
+                            const v00 = validData[i0 * nz + j0];
+                            const v10 = validData[i1 * nz + j0];
+                            const v01 = validData[i0 * nz + j1];
+                            const v11 = validData[i1 * nz + j1];
+
+                            val = (1.0 - u) * (1.0 - v) * v00 + u * (1.0 - v) * v10 + (1.0 - u) * v * v01 + u * v * v11;
+                        } else {
+                            const rawI = Math.min(nr - 1, i * stride);
+                            const rawJ = Math.min(nz - 1, j * stride);
+                            val = validData[rawI * nz + rawJ];
+                        }
 
                         const col = getColor(val, displayMin, displayMax);
                         
@@ -487,7 +544,7 @@ function render(): void {
                         pixels[pixelIdx + 0] = col.r;
                         pixels[pixelIdx + 1] = col.g;
                         pixels[pixelIdx + 2] = col.b;
-                        pixels[pixelIdx + 3] = 255; // Alpha
+                        pixels[pixelIdx + 3] = 255; // Full opacity: no black canvas border
                     }
                 }
                 tempCtx.putImageData(imgData, 0, 0);
@@ -497,10 +554,6 @@ function render(): void {
     }
 
     // Calculate aspect ratio using physical domain to guarantee square cells.
-    // Since the backend enforces dr=dz (square cells), and the pixel canvas
-    // dimensions are level0TilesR*16*scale × level0TilesZ*16*scale, we always
-    // have outNr/outNz == max_r/max_z (for AMR). Use physical domain ratio
-    // directly to avoid floating-point accumulation errors from pixel counts.
     const aspect = isAxisymmetric
         ? (2 * max_r) / max_z
         : max_r / max_z;
@@ -532,28 +585,31 @@ function render(): void {
     context.translate(px + panX, py + panY);
     context.scale(zoom, zoom);
     context.translate(-px, -py);
-    // Re-assert after transform — some browsers reset this after transforms
-    context.imageSmoothingEnabled = false;
+    // Enable/disable smooth image sampling based on interpolate setting
+    context.imageSmoothingEnabled = interpolate;
+    if (interpolate) (context as any).imageSmoothingQuality = 'high';
 
     // Draw heatmap
     if (hasHeatmap && tempCanvas) {
         if (isAxisymmetric) {
             // Draw left reflected half (r from -max_r to 0)
-            // Use Math.round for all dest coords to force integer pixel alignment
             const halfDw = Math.round(dw / 2);
             context.save();
             context.translate(dx + halfDw, dy);
             context.scale(-1, 1);
-            context.imageSmoothingEnabled = false;
+            context.imageSmoothingEnabled = interpolate;
+            if (interpolate) (context as any).imageSmoothingQuality = 'high';
             context.drawImage(tempCanvas, 0, 0, outNr, outNz, 0, 0, halfDw, dh);
             context.restore();
 
             // Draw right normal half (r from 0 to max_r)
-            context.imageSmoothingEnabled = false;
+            context.imageSmoothingEnabled = interpolate;
+            if (interpolate) (context as any).imageSmoothingQuality = 'high';
             context.drawImage(tempCanvas, 0, 0, outNr, outNz, dx + halfDw, dy, halfDw, dh);
         } else {
             // Draw standard full width
-            context.imageSmoothingEnabled = false;
+            context.imageSmoothingEnabled = interpolate;
+            if (interpolate) (context as any).imageSmoothingQuality = 'high';
             context.drawImage(tempCanvas, 0, 0, outNr, outNz, dx, dy, dw, dh);
         }
     } else {
@@ -773,12 +829,13 @@ function render(): void {
     if (currentParticles && currentParticles.length > 0) {
         context.save();
         context.fillStyle = '#00ffff';
-        context.strokeStyle = '#000000';
-        context.lineWidth = 0.5 / zoom;
+        context.strokeStyle = 'rgba(0, 80, 120, 0.6)';
+        context.lineWidth = 0.3 / zoom;
 
-        const pRadius = Math.max(1.0, 2.0 / zoom);
+        const pRadius = Math.max(0.6, 1.1 / zoom);
         const numParticles = currentParticles.length / 2;
 
+        context.beginPath();
         for (let k = 0; k < numParticles; ++k) {
             const xp = currentParticles[k * 2];
             const yp = currentParticles[k * 2 + 1];
@@ -788,25 +845,21 @@ function render(): void {
                 const pyR = dy + (1.0 - yp / max_z) * dh;
                 const pxL = dx + dw / 2 - (xp / max_r) * (dw / 2);
 
-                context.beginPath();
+                context.moveTo(pxR + pRadius, pyR);
                 context.arc(pxR, pyR, pRadius, 0, 2 * Math.PI);
-                context.fill();
-                context.stroke();
 
-                context.beginPath();
+                context.moveTo(pxL + pRadius, pyR);
                 context.arc(pxL, pyR, pRadius, 0, 2 * Math.PI);
-                context.fill();
-                context.stroke();
             } else {
                 const px = dx + (xp / max_r) * dw;
                 const py = dy + (1.0 - yp / max_z) * dh;
 
-                context.beginPath();
+                context.moveTo(px + pRadius, py);
                 context.arc(px, py, pRadius, 0, 2 * Math.PI);
-                context.fill();
-                context.stroke();
             }
         }
+        context.fill();
+        context.stroke();
         context.restore();
     }
 
@@ -834,6 +887,24 @@ self.onmessage = (event) => {
 
     if (data instanceof ArrayBuffer) {
         lastBuffer = data;
+
+        let isMpm = false;
+        if (data.byteLength >= 12) {
+            const view = new DataView(data);
+            const nr = view.getUint32(0, true);
+            const nz = view.getUint32(4, true);
+            const n_channels = view.getUint32(8, true);
+            const gridBytes = nr * nz * n_channels * 4;
+            if (data.byteLength > 12 + gridBytes) {
+                isMpm = true;
+            }
+        }
+
+        if (isMpm) {
+            lastMpmBuffer = data;
+        } else {
+            lastCfdBuffer = data;
+        }
 
         // Robustness: throttle & catch-up logic
         const now = Date.now();
@@ -916,6 +987,7 @@ self.onmessage = (event) => {
         if (data.chargeInfo !== undefined) chargeInfo = data.chargeInfo;
         if (data.detonatorInfo !== undefined) detonatorInfo = data.detonatorInfo;
         if (typeof data.showGridlines === 'boolean') showGridlines = data.showGridlines;
+        if (typeof data.interpolate === 'boolean') interpolate = data.interpolate;
         if (!autoScale) {
             if (typeof data.min === 'number') displayMin = data.min;
             if (typeof data.max === 'number') displayMax = data.max;

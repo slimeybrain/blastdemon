@@ -463,7 +463,8 @@ __global__ void computeTileRHS_AMR_kernel(
     bool is_ideal_gas,
     double dr_base,
     double dz_base,
-    int spatial_order) {
+    int spatial_order,
+    bool is_cartesian) {
 
     int tile_idx = blockIdx.x;
     if (tile_idx >= active_leaves_count) return;
@@ -638,17 +639,32 @@ __global__ void computeTileRHS_AMR_kernel(
     RealType p_face_L = (RealType)0.5 * (s_faceL_L.p + s_faceL_R.p);
     RealType p_face_avg = (RealType)0.5 * (p_face_R + p_face_L);
 
-    RealType dU_rho = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_rho - r_left * fr_L_rho) - ((RealType)1.0 / dz_r) * (fz_T_rho - fz_B_rho);
-    RealType dU_rhour = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_rhour - r_left * fr_L_rhour) - ((RealType)1.0 / dz_r) * (fz_T_rhour - fz_B_rhour) + p_face_avg / r_center;
-    RealType dU_rhouz = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_rhouz - r_left * fr_L_rhouz) - ((RealType)1.0 / dz_r) * (fz_T_rhouz - fz_B_rhouz);
-    RealType dU_E = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_E - r_left * fr_L_E) - ((RealType)1.0 / dz_r) * (fz_T_E - fz_B_E);
+    RealType dU_rho, dU_rhour, dU_rhouz, dU_E, div_u, dU_alpha1, dU_alpha2, dU_arho1, dU_arho2;
+    if (is_cartesian) {
+        dU_rho = -((RealType)1.0 / dr_r) * (fr_R_rho - fr_L_rho) - ((RealType)1.0 / dz_r) * (fz_T_rho - fz_B_rho);
+        dU_rhour = -((RealType)1.0 / dr_r) * (fr_R_rhour - fr_L_rhour) - ((RealType)1.0 / dz_r) * (fz_T_rhour - fz_B_rhour);
+        dU_rhouz = -((RealType)1.0 / dr_r) * (fr_R_rhouz - fr_L_rhouz) - ((RealType)1.0 / dz_r) * (fz_T_rhouz - fz_B_rhouz);
+        dU_E = -((RealType)1.0 / dr_r) * (fr_R_E - fr_L_E) - ((RealType)1.0 / dz_r) * (fz_T_E - fz_B_E);
 
-    RealType div_u = ((RealType)1.0 / (r_center * dr_r)) * (r_right * v_face_rR - r_left * v_face_rL) + ((RealType)1.0 / dz_r) * (v_face_zT - v_face_zB);
-    
-    RealType dU_alpha1 = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_a1 - r_left * fr_L_a1) - ((RealType)1.0 / dz_r) * (fz_T_a1 - fz_B_a1) + s_c.alpha1 * div_u;
-    RealType dU_alpha2 = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_a2 - r_left * fr_L_a2) - ((RealType)1.0 / dz_r) * (fz_T_a2 - fz_B_a2) + s_c.alpha2 * div_u;
-    RealType dU_arho1 = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_ar1 - r_left * fr_L_ar1) - ((RealType)1.0 / dz_r) * (fz_T_ar1 - fz_B_ar1);
-    RealType dU_arho2 = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_ar2 - r_left * fr_L_ar2) - ((RealType)1.0 / dz_r) * (fz_T_ar2 - fz_B_ar2);
+        div_u = ((RealType)1.0 / dr_r) * (v_face_rR - v_face_rL) + ((RealType)1.0 / dz_r) * (v_face_zT - v_face_zB);
+
+        dU_alpha1 = -((RealType)1.0 / dr_r) * (fr_R_a1 - fr_L_a1) - ((RealType)1.0 / dz_r) * (fz_T_a1 - fz_B_a1) + s_c.alpha1 * div_u;
+        dU_alpha2 = -((RealType)1.0 / dr_r) * (fr_R_a2 - fr_L_a2) - ((RealType)1.0 / dz_r) * (fz_T_a2 - fz_B_a2) + s_c.alpha2 * div_u;
+        dU_arho1 = -((RealType)1.0 / dr_r) * (fr_R_ar1 - fr_L_ar1) - ((RealType)1.0 / dz_r) * (fz_T_ar1 - fz_B_ar1);
+        dU_arho2 = -((RealType)1.0 / dr_r) * (fr_R_ar2 - fr_L_ar2) - ((RealType)1.0 / dz_r) * (fz_T_ar2 - fz_B_ar2);
+    } else {
+        dU_rho = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_rho - r_left * fr_L_rho) - ((RealType)1.0 / dz_r) * (fz_T_rho - fz_B_rho);
+        dU_rhour = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_rhour - r_left * fr_L_rhour) - ((RealType)1.0 / dz_r) * (fz_T_rhour - fz_B_rhour) + p_face_avg / r_center;
+        dU_rhouz = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_rhouz - r_left * fr_L_rhouz) - ((RealType)1.0 / dz_r) * (fz_T_rhouz - fz_B_rhouz);
+        dU_E = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_E - r_left * fr_L_E) - ((RealType)1.0 / dz_r) * (fz_T_E - fz_B_E);
+
+        div_u = ((RealType)1.0 / (r_center * dr_r)) * (r_right * v_face_rR - r_left * v_face_rL) + ((RealType)1.0 / dz_r) * (v_face_zT - v_face_zB);
+
+        dU_alpha1 = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_a1 - r_left * fr_L_a1) - ((RealType)1.0 / dz_r) * (fz_T_a1 - fz_B_a1) + s_c.alpha1 * div_u;
+        dU_alpha2 = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_a2 - r_left * fr_L_a2) - ((RealType)1.0 / dz_r) * (fz_T_a2 - fz_B_a2) + s_c.alpha2 * div_u;
+        dU_arho1 = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_ar1 - r_left * fr_L_ar1) - ((RealType)1.0 / dz_r) * (fz_T_ar1 - fz_B_ar1);
+        dU_arho2 = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_ar2 - r_left * fr_L_ar2) - ((RealType)1.0 / dz_r) * (fz_T_ar2 - fz_B_ar2);
+    }
 
         int k_20 = ti * AMR_TILE_DIM + tj;
     dU.rho[k_20] = A_coeff * dU.rho[k_20] + dt * dU_rho;
@@ -1142,17 +1158,17 @@ inline void launchComputeTileRHS_AMR(
     GPUNode2D* nodes, int* active_node_ids, int active_leaves_count,
     AMRPrimitiveTileT<float>* states_pool, AMRConservativeTileT<float>* dU_pool,
     AMRFaceFluxT<float>* node_boundary_fluxes, float A_coeff, float dt, float gamma, MultiMat::MaterialSet mat,
-    bool is_ideal_gas, double dr_base, double dz_base, int order) {
+    bool is_ideal_gas, double dr_base, double dz_base, int order, bool is_cartesian) {
     computeTileRHS_AMR_kernel<float><<<active_leaves_count, dim3(16, 16)>>>(
-        nodes, active_node_ids, active_leaves_count, states_pool, dU_pool, node_boundary_fluxes, A_coeff, dt, gamma, mat, is_ideal_gas, dr_base, dz_base, order);
+        nodes, active_node_ids, active_leaves_count, states_pool, dU_pool, node_boundary_fluxes, A_coeff, dt, gamma, mat, is_ideal_gas, dr_base, dz_base, order, is_cartesian);
 }
 inline void launchComputeTileRHS_AMR(
     GPUNode2D* nodes, int* active_node_ids, int active_leaves_count,
     AMRPrimitiveTileT<double>* states_pool, AMRConservativeTileT<double>* dU_pool,
     AMRFaceFluxT<double>* node_boundary_fluxes, double A_coeff, double dt, double gamma, MultiMat::MaterialSet mat,
-    bool is_ideal_gas, double dr_base, double dz_base, int order) {
+    bool is_ideal_gas, double dr_base, double dz_base, int order, bool is_cartesian) {
     computeTileRHS_AMR_kernel<double><<<active_leaves_count, dim3(16, 16)>>>(
-        nodes, active_node_ids, active_leaves_count, states_pool, dU_pool, node_boundary_fluxes, A_coeff, dt, gamma, mat, is_ideal_gas, dr_base, dz_base, order);
+        nodes, active_node_ids, active_leaves_count, states_pool, dU_pool, node_boundary_fluxes, A_coeff, dt, gamma, mat, is_ideal_gas, dr_base, dz_base, order, is_cartesian);
 }
 
 inline void launchUpdateConservativeRKStage_AMR(
@@ -1750,7 +1766,7 @@ void CFDSolver2DAMRCudaImpl<RealType>::computeRHSGPU(double A_coeff, double dt) 
     launchComputeTileRHS_AMR(
         this->d_amr_nodes, this->d_active_node_ids, this->active_leaves_count, this->d_states_pool, this->d_dU_pool, this->d_node_boundary_fluxes,
         (RealType)A_coeff, (RealType)dt, (RealType)this->gamma_val, this->materials_val, this->is_ideal_gas_val,
-        this->dr_base, this->dz_base, this->spatial_order_val
+        this->dr_base, this->dz_base, this->spatial_order_val, this->is_cartesian_val
     );
 }
 
@@ -2616,7 +2632,7 @@ void CFDSolver2DAMRCudaImpl<RealType>::applyInitialConditionToNode(int node_idx,
 }
 
 template <typename RealType>
-void CFDSolver2DAMRCudaImpl<RealType>::setInitialConditionTNT(double explosive_z, double explosive_radius, double high_rho, double ambient_rho, double ambient_p) {
+void CFDSolver2DAMRCudaImpl<RealType>::setInitialConditionTNT(double explosive_z, double explosive_radius, double high_rho, double ambient_rho, double ambient_p, double explosive_r) {
     this->ambient_rho_val = ambient_rho;
     this->ambient_p_val = ambient_p;
     this->is_ideal_gas_val = false;
@@ -2628,7 +2644,7 @@ void CFDSolver2DAMRCudaImpl<RealType>::setInitialConditionTNT(double explosive_z
             const auto& node = this->amr_nodes[n];
             if (node.is_active && node.level < this->amr_max_levels_val - 1) {
                 double dist_z1 = std::max(node.z_min, std::min(explosive_z, node.z_max)) - explosive_z;
-                double dist_r1 = std::max(node.r_min, std::min(this->detonator_r_coord, node.r_max)) - this->detonator_r_coord;
+                double dist_r1 = std::max(node.r_min, std::min(explosive_r, node.r_max)) - explosive_r;
                 double dist = std::sqrt(dist_r1 * dist_r1 + dist_z1 * dist_z1);
                 
                 if (dist <= explosive_radius * 1.5 ||
@@ -2657,7 +2673,7 @@ void CFDSolver2DAMRCudaImpl<RealType>::setInitialConditionTNT(double explosive_z
 }
 
 template <typename RealType>
-void CFDSolver2DAMRCudaImpl<RealType>::setInitialConditionIdealGas(double explosive_z, double explosive_radius, double high_rho, double detonation_energy, double ambient_rho, double ambient_p) {
+void CFDSolver2DAMRCudaImpl<RealType>::setInitialConditionIdealGas(double explosive_z, double explosive_radius, double high_rho, double detonation_energy, double ambient_rho, double ambient_p, double explosive_r) {
     this->ambient_rho_val = ambient_rho;
     this->ambient_p_val = ambient_p;
     this->is_ideal_gas_val = true;
@@ -2669,7 +2685,7 @@ void CFDSolver2DAMRCudaImpl<RealType>::setInitialConditionIdealGas(double explos
             const auto& node = this->amr_nodes[n];
             if (node.is_active && node.level < this->amr_max_levels_val - 1) {
                 double dist_z1 = std::max(node.z_min, std::min(explosive_z, node.z_max)) - explosive_z;
-                double dist_r1 = std::max(node.r_min, std::min(this->detonator_r_coord, node.r_max)) - this->detonator_r_coord;
+                double dist_r1 = std::max(node.r_min, std::min(explosive_r, node.r_max)) - explosive_r;
                 double dist = std::sqrt(dist_r1 * dist_r1 + dist_z1 * dist_z1);
                 
                 if (dist <= explosive_radius * 1.5 ||
@@ -2699,7 +2715,7 @@ void CFDSolver2DAMRCudaImpl<RealType>::setInitialConditionIdealGas(double explos
 }
 
 template <typename RealType>
-void CFDSolver2DAMRCudaImpl<RealType>::setInitialConditionTNTCylinder(double explosive_z, double radius, double height, double high_rho, double ambient_rho, double ambient_p) {
+void CFDSolver2DAMRCudaImpl<RealType>::setInitialConditionTNTCylinder(double explosive_z, double radius, double height, double high_rho, double ambient_rho, double ambient_p, double explosive_r) {
     this->ambient_rho_val = ambient_rho;
     this->ambient_p_val = ambient_p;
     this->is_ideal_gas_val = false;
@@ -2711,7 +2727,7 @@ void CFDSolver2DAMRCudaImpl<RealType>::setInitialConditionTNTCylinder(double exp
             const auto& node = this->amr_nodes[n];
             if (node.is_active && node.level < this->amr_max_levels_val - 1) {
                 double dz = std::max(node.z_min, std::min(explosive_z + height / 2.0, node.z_max)) - (explosive_z + height / 2.0);
-                double dr = std::max(node.r_min, std::min(0.0, node.r_max));
+                double dr = std::max(node.r_min, std::min(explosive_r, node.r_max)) - explosive_r;
                 double dist = std::sqrt(dr * dr + dz * dz);
 
                 if (dist <= radius * 1.5 ||

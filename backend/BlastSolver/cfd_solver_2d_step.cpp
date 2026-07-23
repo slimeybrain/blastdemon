@@ -154,6 +154,35 @@ void CFDSolver2DImpl<RealType>::updatePrimitiveFromConservative() {
             states_pool[pool_idx].floor_status[k] = floor_status;
         }
     }
+
+    if (!solid_mask.empty() && !solid_velocities.empty()) {
+        #pragma omp parallel for collapse(2)
+        for (int i = 0; i < nr_cells; ++i) {
+            for (int j = 0; j < nz_cells; ++j) {
+                int flat = i * nz_cells + j;
+                if (solid_mask[flat]) {
+                    int tr = i / TILE_SIZE;
+                    int tz = j / TILE_SIZE;
+                    int pool_idx = tile_map[tr * num_tiles_z + tz];
+                    if (pool_idx != -1) {
+                        int local_i = i % TILE_SIZE;
+                        int local_j = j % TILE_SIZE;
+                        int k = local_i * TILE_SIZE + local_j;
+                        RealType sv_u = (RealType)solid_velocities[2 * flat + 0];
+                        RealType sv_v = (RealType)solid_velocities[2 * flat + 1];
+
+                        states_pool[pool_idx].ur[k] = sv_u;
+                        states_pool[pool_idx].uz[k] = sv_v;
+                        U_pool[pool_idx].rhour[k] = states_pool[pool_idx].rho[k] * sv_u;
+                        U_pool[pool_idx].rhouz[k] = states_pool[pool_idx].rho[k] * sv_v;
+                        RealType ke = (RealType)0.5 * states_pool[pool_idx].rho[k] * (sv_u * sv_u + sv_v * sv_v);
+                        U_pool[pool_idx].E[k] = states_pool[pool_idx].p[k] / ((RealType)gamma - (RealType)1.0) + ke;
+                        states_pool[pool_idx].E[k] = U_pool[pool_idx].E[k];
+                    }
+                }
+            }
+        }
+    }
 }
 
 // --------------------------------------------------------------------------------------
@@ -559,6 +588,68 @@ void CFDSolver2DImpl<RealType>::computeTileRHS(int pool_idx, int tr, int tz, dou
                 compute_E_cpu(s_faceT_R, gamma_r, currentMaterials, is_ideal_gas);
             }
 
+            // Immersed solid wall boundary handling for flux reconstruction
+            if (!solid_mask.empty()) {
+                bool is_c = solid_mask[i * nz_cells + j] != 0;
+                bool is_L = (i > 0) && (solid_mask[(i - 1) * nz_cells + j] != 0);
+                bool is_R = (i < nr_cells - 1) && (solid_mask[(i + 1) * nz_cells + j] != 0);
+                bool is_B = (j > 0) && (solid_mask[i * nz_cells + (j - 1)] != 0);
+                bool is_T = (j < nz_cells - 1) && (solid_mask[i * nz_cells + (j + 1)] != 0);
+
+                // Left face (i-1/2)
+                if (is_L && !is_c) { // Solid on left, fluid on right
+                    double sv_u = solid_velocities.empty() ? 0.0 : solid_velocities[2 * ((i - 1) * nz_cells + j) + 0];
+                    s_faceL_L = s_faceL_R;
+                    s_faceL_L.ur = (RealType)(2.0 * sv_u - s_faceL_R.ur);
+                } else if (!is_L && is_c) { // Fluid on left, solid on right
+                    double sv_u = solid_velocities.empty() ? 0.0 : solid_velocities[2 * (i * nz_cells + j) + 0];
+                    s_faceL_R = s_faceL_L;
+                    s_faceL_R.ur = (RealType)(2.0 * sv_u - s_faceL_L.ur);
+                }
+
+                // Right face (i+1/2)
+                if (is_c && !is_R) { // Solid on left, fluid on right
+                    double sv_u = solid_velocities.empty() ? 0.0 : solid_velocities[2 * (i * nz_cells + j) + 0];
+                    s_faceR_L = s_faceR_R;
+                    s_faceR_L.ur = (RealType)(2.0 * sv_u - s_faceR_R.ur);
+                } else if (!is_c && is_R) { // Fluid on left, solid on right
+                    double sv_u = solid_velocities.empty() ? 0.0 : solid_velocities[2 * ((i + 1) * nz_cells + j) + 0];
+                    s_faceR_R = s_faceR_L;
+                    s_faceR_R.ur = (RealType)(2.0 * sv_u - s_faceR_L.ur);
+                }
+
+                // Bottom face (j-1/2)
+                if (is_B && !is_c) { // Solid below, fluid above
+                    double sv_v = solid_velocities.empty() ? 0.0 : solid_velocities[2 * (i * nz_cells + (j - 1)) + 1];
+                    s_faceB_L = s_faceB_R;
+                    s_faceB_L.uz = (RealType)(2.0 * sv_v - s_faceB_R.uz);
+                } else if (!is_B && is_c) { // Fluid below, solid above
+                    double sv_v = solid_velocities.empty() ? 0.0 : solid_velocities[2 * (i * nz_cells + j) + 1];
+                    s_faceB_R = s_faceB_L;
+                    s_faceB_R.uz = (RealType)(2.0 * sv_v - s_faceB_L.uz);
+                }
+
+                // Top face (j+1/2)
+                if (is_c && !is_T) { // Solid below, fluid above
+                    double sv_v = solid_velocities.empty() ? 0.0 : solid_velocities[2 * (i * nz_cells + j) + 1];
+                    s_faceT_L = s_faceT_R;
+                    s_faceT_L.uz = (RealType)(2.0 * sv_v - s_faceT_R.uz);
+                } else if (!is_c && is_T) { // Fluid below, solid above
+                    double sv_v = solid_velocities.empty() ? 0.0 : solid_velocities[2 * (i * nz_cells + (j + 1)) + 1];
+                    s_faceT_R = s_faceT_L;
+                    s_faceT_R.uz = (RealType)(2.0 * sv_v - s_faceT_L.uz);
+                }
+
+                compute_E_cpu(s_faceL_L, gamma_r, currentMaterials, is_ideal_gas);
+                compute_E_cpu(s_faceL_R, gamma_r, currentMaterials, is_ideal_gas);
+                compute_E_cpu(s_faceR_L, gamma_r, currentMaterials, is_ideal_gas);
+                compute_E_cpu(s_faceR_R, gamma_r, currentMaterials, is_ideal_gas);
+                compute_E_cpu(s_faceB_L, gamma_r, currentMaterials, is_ideal_gas);
+                compute_E_cpu(s_faceB_R, gamma_r, currentMaterials, is_ideal_gas);
+                compute_E_cpu(s_faceT_L, gamma_r, currentMaterials, is_ideal_gas);
+                compute_E_cpu(s_faceT_R, gamma_r, currentMaterials, is_ideal_gas);
+            }
+
             RealType fr_L_rho, fr_L_rhour, fr_L_rhouz, fr_L_E, fr_L_a1, fr_L_a2, fr_L_ar1, fr_L_ar2, v_face_rL;
             RealType fr_R_rho, fr_R_rhour, fr_R_rhouz, fr_R_E, fr_R_a1, fr_R_a2, fr_R_ar1, fr_R_ar2, v_face_rR;
 
@@ -571,6 +662,20 @@ void CFDSolver2DImpl<RealType>::computeTileRHS(int pool_idx, int tr, int tz, dou
             calcFluxRusanovZ(s_faceB_L, s_faceB_R, gamma_r, currentMaterials, fz_B_rho, fz_B_rhour, fz_B_rhouz, fz_B_E, fz_B_a1, fz_B_a2, fz_B_ar1, fz_B_ar2, v_face_zB, is_ideal_gas);
             calcFluxRusanovZ(s_faceT_L, s_faceT_R, gamma_r, currentMaterials, fz_T_rho, fz_T_rhour, fz_T_rhouz, fz_T_E, fz_T_a1, fz_T_a2, fz_T_ar1, fz_T_ar2, v_face_zT, is_ideal_gas);
 
+            // Zero fluxes across internal solid faces
+            if (!solid_mask.empty()) {
+                bool is_c = solid_mask[i * nz_cells + j] != 0;
+                bool is_L = (i > 0) && (solid_mask[(i - 1) * nz_cells + j] != 0);
+                bool is_R = (i < nr_cells - 1) && (solid_mask[(i + 1) * nz_cells + j] != 0);
+                bool is_B = (j > 0) && (solid_mask[i * nz_cells + (j - 1)] != 0);
+                bool is_T = (j < nz_cells - 1) && (solid_mask[i * nz_cells + (j + 1)] != 0);
+
+                if (is_L && is_c) { fr_L_rho = 0; fr_L_rhour = 0; fr_L_rhouz = 0; fr_L_E = 0; }
+                if (is_c && is_R) { fr_R_rho = 0; fr_R_rhour = 0; fr_R_rhouz = 0; fr_R_E = 0; }
+                if (is_B && is_c) { fz_B_rho = 0; fz_B_rhour = 0; fz_B_rhouz = 0; fz_B_E = 0; }
+                if (is_c && is_T) { fz_T_rho = 0; fz_T_rhour = 0; fz_T_rhouz = 0; fz_T_E = 0; }
+            }
+
             RealType r_center = (RealType)(i + 0.5) * dr_r;
             RealType r_left = (RealType)i * dr_r;
             RealType r_right = (RealType)(i + 1) * dr_r;
@@ -579,17 +684,43 @@ void CFDSolver2DImpl<RealType>::computeTileRHS(int pool_idx, int tr, int tz, dou
             RealType p_face_L = (RealType)0.5 * (s_faceL_L.p + s_faceL_R.p);
             RealType p_face_avg = (RealType)0.5 * (p_face_R + p_face_L);
 
-            RealType dU_rho = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_rho - r_left * fr_L_rho) - ((RealType)1.0 / dz_r) * (fz_T_rho - fz_B_rho);
-            RealType dU_rhour = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_rhour - r_left * fr_L_rhour) - ((RealType)1.0 / dz_r) * (fz_T_rhour - fz_B_rhour) + p_face_avg / r_center;
-            RealType dU_rhouz = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_rhouz - r_left * fr_L_rhouz) - ((RealType)1.0 / dz_r) * (fz_T_rhouz - fz_B_rhouz);
-            RealType dU_E = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_E - r_left * fr_L_E) - ((RealType)1.0 / dz_r) * (fz_T_E - fz_B_E);
+            RealType dU_rho, dU_rhour, dU_rhouz, dU_E, div_u, dU_alpha1, dU_alpha2, dU_arho1, dU_arho2;
+            if (is_cartesian) {
+                dU_rho = -((RealType)1.0 / dr_r) * (fr_R_rho - fr_L_rho) - ((RealType)1.0 / dz_r) * (fz_T_rho - fz_B_rho);
+                dU_rhour = -((RealType)1.0 / dr_r) * (fr_R_rhour - fr_L_rhour) - ((RealType)1.0 / dz_r) * (fz_T_rhour - fz_B_rhour);
+                dU_rhouz = -((RealType)1.0 / dr_r) * (fr_R_rhouz - fr_L_rhouz) - ((RealType)1.0 / dz_r) * (fz_T_rhouz - fz_B_rhouz);
+                dU_E = -((RealType)1.0 / dr_r) * (fr_R_E - fr_L_E) - ((RealType)1.0 / dz_r) * (fz_T_E - fz_B_E);
 
-            RealType div_u = ((RealType)1.0 / (r_center * dr_r)) * (r_right * v_face_rR - r_left * v_face_rL) + ((RealType)1.0 / dz_r) * (v_face_zT - v_face_zB);
-            
-            RealType dU_alpha1 = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_a1 - r_left * fr_L_a1) - ((RealType)1.0 / dz_r) * (fz_T_a1 - fz_B_a1) + s_c.alpha1 * div_u;
-            RealType dU_alpha2 = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_a2 - r_left * fr_L_a2) - ((RealType)1.0 / dz_r) * (fz_T_a2 - fz_B_a2) + s_c.alpha2 * div_u;
-            RealType dU_arho1 = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_ar1 - r_left * fr_L_ar1) - ((RealType)1.0 / dz_r) * (fz_T_ar1 - fz_B_ar1);
-            RealType dU_arho2 = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_ar2 - r_left * fr_L_ar2) - ((RealType)1.0 / dz_r) * (fz_T_ar2 - fz_B_ar2);
+                div_u = ((RealType)1.0 / dr_r) * (v_face_rR - v_face_rL) + ((RealType)1.0 / dz_r) * (v_face_zT - v_face_zB);
+
+                dU_alpha1 = -((RealType)1.0 / dr_r) * (fr_R_a1 - fr_L_a1) - ((RealType)1.0 / dz_r) * (fz_T_a1 - fz_B_a1) + s_c.alpha1 * div_u;
+                dU_alpha2 = -((RealType)1.0 / dr_r) * (fr_R_a2 - fr_L_a2) - ((RealType)1.0 / dz_r) * (fz_T_a2 - fz_B_a2) + s_c.alpha2 * div_u;
+                dU_arho1 = -((RealType)1.0 / dr_r) * (fr_R_ar1 - fr_L_ar1) - ((RealType)1.0 / dz_r) * (fz_T_ar1 - fz_B_ar1);
+                dU_arho2 = -((RealType)1.0 / dr_r) * (fr_R_ar2 - fr_L_ar2) - ((RealType)1.0 / dz_r) * (fz_T_ar2 - fz_B_ar2);
+            } else {
+                dU_rho = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_rho - r_left * fr_L_rho) - ((RealType)1.0 / dz_r) * (fz_T_rho - fz_B_rho);
+                dU_rhour = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_rhour - r_left * fr_L_rhour) - ((RealType)1.0 / dz_r) * (fz_T_rhour - fz_B_rhour) + p_face_avg / r_center;
+                dU_rhouz = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_rhouz - r_left * fr_L_rhouz) - ((RealType)1.0 / dz_r) * (fz_T_rhouz - fz_B_rhouz);
+                dU_E = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_E - r_left * fr_L_E) - ((RealType)1.0 / dz_r) * (fz_T_E - fz_B_E);
+
+                div_u = ((RealType)1.0 / (r_center * dr_r)) * (r_right * v_face_rR - r_left * v_face_rL) + ((RealType)1.0 / dz_r) * (v_face_zT - v_face_zB);
+
+                dU_alpha1 = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_a1 - r_left * fr_L_a1) - ((RealType)1.0 / dz_r) * (fz_T_a1 - fz_B_a1) + s_c.alpha1 * div_u;
+                dU_alpha2 = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_a2 - r_left * fr_L_a2) - ((RealType)1.0 / dz_r) * (fz_T_a2 - fz_B_a2) + s_c.alpha2 * div_u;
+                dU_arho1 = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_ar1 - r_left * fr_L_ar1) - ((RealType)1.0 / dz_r) * (fz_T_ar1 - fz_B_ar1);
+                dU_arho2 = -((RealType)1.0 / (r_center * dr_r)) * (r_right * fr_R_ar2 - r_left * fr_L_ar2) - ((RealType)1.0 / dz_r) * (fz_T_ar2 - fz_B_ar2);
+            }
+
+            if (!solid_mask.empty() && solid_mask[i * nz_cells + j] != 0) {
+                dU_rho = 0;
+                dU_rhour = 0;
+                dU_rhouz = 0;
+                dU_E = 0;
+                dU_alpha1 = 0;
+                dU_alpha2 = 0;
+                dU_arho1 = 0;
+                dU_arho2 = 0;
+            }
 
             dU_pool[pool_idx].rho[k] = A_coeff_r * dU_pool[pool_idx].rho[k] + dt_r * dU_rho;
             dU_pool[pool_idx].rhour[k] = A_coeff_r * dU_pool[pool_idx].rhour[k] + dt_r * dU_rhour;
@@ -772,11 +903,26 @@ double CFDSolver2DImpl<RealType>::computeStepSize(double cfl) const {
         for (int k = 0; k < TILE_SIZE * TILE_SIZE; ++k) {
             using std::abs;
             using std::max;
-            RealType c = MultiMat::getMixtureSoundSpeed(states_pool[pool_idx].p[k], states_pool[pool_idx].rho[k], states_pool[pool_idx].alpha1[k], states_pool[pool_idx].alpha2[k], states_pool[pool_idx].arho1[k], states_pool[pool_idx].arho2[k], (RealType)gamma, currentMaterials.products, currentMaterials.unreacted);
-            RealType s = max(abs(states_pool[pool_idx].ur[k]), abs(states_pool[pool_idx].uz[k])) + c;
+            RealType rho = states_pool[pool_idx].rho[k];
+            RealType p = states_pool[pool_idx].p[k];
+            RealType ur = states_pool[pool_idx].ur[k];
+            RealType uz = states_pool[pool_idx].uz[k];
+
+            if (std::isnan(rho) || std::isnan(p) || std::isnan(ur) || std::isnan(uz) ||
+                std::isinf(rho) || std::isinf(p) || std::isinf(ur) || std::isinf(uz) ||
+                rho <= (RealType)1e-8 || p <= (RealType)1e-8) {
+                continue;
+            }
+
+            RealType c = MultiMat::getMixtureSoundSpeed(p, rho, states_pool[pool_idx].alpha1[k], states_pool[pool_idx].alpha2[k], states_pool[pool_idx].arho1[k], states_pool[pool_idx].arho2[k], (RealType)gamma, currentMaterials.products, currentMaterials.unreacted);
+            if (std::isnan(c) || std::isinf(c)) continue;
+
+            RealType s = max(abs(ur), abs(uz)) + c;
+            if (s > (RealType)20000.0) s = (RealType)20000.0;
             max_speed = max(max_speed, s);
         }
     }
+    if (max_speed < (RealType)1e-6) max_speed = (RealType)340.0;
     return cfl * std::min(dr, dz) / (double)max_speed;
 }
 
@@ -852,12 +998,20 @@ bool CFDSolver2DImpl<RealType>::checkTerminationCondition() const {
 
 template <typename RealType>
 void CFDSolver2DImpl<RealType>::setSolidVelocities(const double* v) {
-    // dummy
+    if (!v) {
+        solid_velocities.clear();
+        return;
+    }
+    solid_velocities.assign(v, v + 2 * nr_cells * nz_cells);
 }
 
 template <typename RealType>
 void CFDSolver2DImpl<RealType>::setSolidMask(const uint8_t* mask) {
-    // dummy
+    if (!mask) {
+        solid_mask.clear();
+        return;
+    }
+    solid_mask.assign(mask, mask + nr_cells * nz_cells);
 }
 
 template <typename RealType>

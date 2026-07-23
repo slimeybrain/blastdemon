@@ -956,19 +956,42 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             }
         }
 
-        if (node.type === 'TelemetryText' || node.type === 'TelemetryGraph' || node.type === 'TelemetryContour' || node.type === 'VTKOutput' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport') {
+        if (node.type === 'TelemetryContour') {
+            const connList = state.connections.filter(c => c.toNode === node.id);
+            if (connList.length === 0) {
+                addMessage(node.id, 'warning', "Not connected to any 2D CFD Solver, MPM Domain, or FSI Coupler. No data will be received.");
+            } else {
+                connList.forEach(conn => {
+                    const fromNode = state.nodes.find(n => n.id === conn.fromNode);
+                    if (!fromNode || (fromNode.type !== 'CFDSolver2D' && fromNode.type !== 'MPMDomain2D' && fromNode.type !== 'FSICoupler2D')) {
+                        const connKey = `${conn.fromNode}:${conn.fromPort}->${conn.toNode}:${conn.toPort}`;
+                        flawedConnections.set(connKey, "TelemetryContour requires a 2D CFD Solver, 2D MPM Domain, or FSI Coupler 2D source.");
+                        addMessage(node.id, 'error', "TelemetryContour requires a 2D CFD Solver, 2D MPM Domain, or FSI Coupler 2D source.");
+                    }
+                });
+            }
+        } else if (node.type === 'TelemetryText') {
+            const connList = state.connections.filter(c => c.toNode === node.id);
+            if (connList.length === 0) {
+                addMessage(node.id, 'warning', "Not connected to any solver. No data will be received.");
+            } else {
+                connList.forEach(conn => {
+                    const fromNode = state.nodes.find(n => n.id === conn.fromNode);
+                    const solverTypes = ['CFDSolver', 'CFDSolver2D', 'CFDSolver3D', 'MPMDomain2D', 'FSICoupler2D'];
+                    if (!fromNode || !solverTypes.includes(fromNode.type)) {
+                        const connKey = `${conn.fromNode}:${conn.fromPort}->${conn.toNode}:${conn.toPort}`;
+                        flawedConnections.set(connKey, "TelemetryText must be connected to a solver or coupler source.");
+                        addMessage(node.id, 'error', "TelemetryText must be connected to a solver or coupler source.");
+                    }
+                });
+            }
+        } else if (node.type === 'TelemetryGraph' || node.type === 'VTKOutput' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport') {
             const conn = state.connections.find(c => c.toNode === node.id && c.toPort === 'in');
             if (!conn) {
                 addMessage(node.id, 'warning', `Not connected to any CFD Solver. No data will be received.`);
             } else {
                 const fromNode = state.nodes.find(n => n.id === conn.fromNode);
-                if (node.type === 'TelemetryContour') {
-                    if (!fromNode || (fromNode.type !== 'CFDSolver2D' && fromNode.type !== 'MPMDomain2D')) {
-                        const connKey = `${conn.fromNode}:${conn.fromPort}->${conn.toNode}:${conn.toPort}`;
-                        flawedConnections.set(connKey, "TelemetryContour requires a 2D CFD Solver or 2D MPM Domain source.");
-                        addMessage(node.id, 'error', "TelemetryContour requires a 2D CFD Solver or 2D MPM Domain source.");
-                    }
-                } else if (node.type === 'Telemetry3DViewport') {
+                if (node.type === 'Telemetry3DViewport') {
                     if (!fromNode || fromNode.type !== 'CFDSolver3D') {
                         const connKey = `${conn.fromNode}:${conn.fromPort}->${conn.toNode}:${conn.toPort}`;
                         flawedConnections.set(connKey, `${node.type} requires a 3D CFD Solver source.`);
