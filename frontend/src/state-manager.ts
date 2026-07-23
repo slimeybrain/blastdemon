@@ -432,7 +432,11 @@ export class StateManager {
             'CFDSolver3D': 'node-solver3d',
             'Telemetry3DViewport': 'node-viewport3d',
             'STLGeometry': 'node-stl',
-            'PrimitiveGeometry3D': 'node-stl'
+            'PrimitiveGeometry3D': 'node-stl',
+            'MPMDomain2D': 'node-mpm-domain',
+            'MPMObject2D': 'node-mpm-obj',
+            'MPMMaterialSteel': 'node-mpm-steel',
+            'FSICoupler2D': 'node-fsi-coupler'
         };
         const prefix = prefixMap[type] || `node-${type.toLowerCase()}`;
 
@@ -989,7 +993,7 @@ export class StateManager {
 
         const targetNode = nodes.find(n => n.id === nodeId);
         let telemetryToStore = data;
-        if (targetNode?.type === 'TelemetryText' && !(data instanceof ArrayBuffer)) {
+        if ((targetNode?.type === 'TelemetryText' || targetNode?.type === 'CFDSolver' || targetNode?.type === 'CFDSolver2D' || targetNode?.type === 'CFDSolver3D' || targetNode?.type === 'MPMDomain2D') && !(data instanceof ArrayBuffer)) {
             if (data && typeof data === 'object' && (data.type === 'progress' || data.type === 'progress_2d' || data.type === 'resource_pulse')) {
                  // Skip
             } else {
@@ -1030,6 +1034,7 @@ export class StateManager {
                          this.notifyTelemetryUpdate(connectedNode.id, data);
                     }
                 } else if (connectedNode.type === 'TelemetryText') {
+                    if (data instanceof ArrayBuffer) return;
                     if (data && typeof data === 'object' && (data.type === 'progress' || data.type === 'progress_2d' || data.type === 'progress_3d' || data.type === 'resource_pulse')) {
                         return;
                     }
@@ -1722,6 +1727,40 @@ export class StateManager {
                 obstacles_interpolate: true,
                 obstacles_min_val: 101325.0,
                 obstacles_max_val: 101325.0 * 10.0
+            },
+            'MPMDomain2D': {
+                transfer_scheme: 'GIMP',
+                velocity_scheme: 'APIC',
+                ppc: 4,
+                cfl: 0.3,
+                time_step: 1.0e-5
+            },
+            'MPMObject2D': {
+                shape_type: 'Rectangle',
+                pos_x: 0.5,
+                pos_y: 0.5,
+                size_x: 0.2,
+                size_y: 0.2,
+                radius: 0.1,
+                vel_x: 0.0,
+                vel_y: 0.0,
+                angular_vel: 0.0
+            },
+            'MPMMaterialSteel': {
+                density: 7850.0,
+                youngs_modulus: 210.0e9,
+                poissons_ratio: 0.3,
+                yield_stress: 400.0e6,
+                hardening_modulus: 1.0e9
+            },
+            'FSICoupler2D': {
+                coupling_mode: 'TwoWay_Full',
+                penalty_stiffness: 1.0e9,
+                contour_quantity: 'von_mises',
+                color_map: 'viridis',
+                contour_opacity: 1.0,
+                contour_min: 0.0,
+                contour_max: 500.0e6
             }
         };
 
@@ -1894,6 +1933,9 @@ export class StateManager {
             ];
             case 'Charge3D': return [{ id: 'material', label: 'Material' }];
             case 'Telemetry3DViewport': return [{ id: 'in', label: 'Data Stream' }];
+            case 'MPMDomain2D': return [{ id: 'mesh', label: 'Grid' }, { id: 'objects', label: 'MPM Objects' }];
+            case 'MPMObject2D': return [{ id: 'material', label: 'Material' }];
+            case 'FSICoupler2D': return [{ id: 'cfd', label: 'CFD Solver' }, { id: 'mpm', label: 'MPM Solver' }];
             default: return [];
         }
     }
@@ -1919,6 +1961,10 @@ export class StateManager {
             case 'Charge3D': return [{ id: 'out', label: 'Charge Spec' }];
             case 'CFDSolver3D': return [{ id: 'telemetry', label: 'Telemetry' }];
             case 'VirtualGauges': return [{ id: 'out', label: 'Gauges Spec' }];
+            case 'MPMDomain2D': return [{ id: 'telemetry', label: 'Telemetry' }, { id: 'mpm_out', label: 'MPM State' }];
+            case 'MPMObject2D': return [{ id: 'out', label: 'Object Spec' }];
+            case 'MPMMaterialSteel': return [{ id: 'out', label: 'Material Spec' }];
+            case 'FSICoupler2D': return [{ id: 'telemetry', label: 'Telemetry' }];
             case 'STLGeometry':
             case 'PrimitiveGeometry3D': return [{ id: 'stl', label: 'STL Geometry' }];
             default: return [];

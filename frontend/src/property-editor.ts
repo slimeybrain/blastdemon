@@ -2293,6 +2293,14 @@ export class PropertyEditor {
                 return 'STL Geometry boundary. Specifies the STL file path for Immersed Boundary Method solid obstacles in 3D.';
             case 'PrimitiveGeometry3D':
                 return 'Primitive Geometry boundary. Specifies analytic cuboids, cylinders, or wedges for Immersed Boundary Method solid obstacles in 3D.';
+            case 'MPMDomain2D':
+                return '2D Material Point Method (MPM) domain solver settings. Configures GIMP interpolation, APIC momentum transfer, and CFL time stepping.';
+            case 'MPMObject2D':
+                return '2D MPM Primitive Object. Defines shape geometry, initial position, translation/rotation velocities, and material binding.';
+            case 'MPMMaterialSteel':
+                return 'MPM Steel Material properties. Defines density, elastoplasticity (Young\'s modulus, Poisson\'s ratio), Von Mises yield stress, and strain hardening.';
+            case 'FSICoupler2D':
+                return 'Two-Way Fluid-Structure Interaction (FSI) Coupler. Dynamically couples Eulerian CFD gas dynamics with Lagrangian MPM solid/fluid particles.';
             default:
                 return 'Simulation graph node.';
         }

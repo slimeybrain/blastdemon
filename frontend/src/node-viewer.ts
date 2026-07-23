@@ -2112,7 +2112,11 @@ export class NodeViewer {
             'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
             'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
             'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
-            'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio'
+            'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio',
+            // MPM keys
+            'pos_x', 'pos_y', 'vel_x', 'vel_y', 'size_x', 'size_y', 'radius', 'angular_vel',
+            'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
+            'ppc', 'time_step', 'penalty_stiffness', 'contour_opacity', 'contour_min', 'contour_max'
         ];
 
         const chargeShapeOptions = node.type === 'Charge3D' ? ['Sphere', 'Cylinder', 'Block'] : ['Sphere', 'Cylinder'];
@@ -2146,7 +2150,13 @@ export class NodeViewer {
             'temporal_order': ['1', '2', '3'],
             'plot_stride': ['1', '2', '5', '10', '20', '50', '100'],
             'charge_shape': chargeShapeOptions,
-            'material_type': ['Air', 'JWL Charge', 'Ideal Gas Charge']
+            'material_type': ['Air', 'JWL Charge', 'Ideal Gas Charge'],
+            'transfer_scheme': ['GIMP', 'Standard'],
+            'velocity_scheme': ['APIC', 'PIC', 'FLIP'],
+            'shape_type': ['Rectangle', 'Circle'],
+            'coupling_mode': ['TwoWay_Full', 'OneWay_CFD_to_MPM', 'Disabled'],
+            'contour_quantity': ['von_mises', 'plastic_strain', 'density', 'velocity', 'pressure'],
+            'color_map': ['viridis', 'plasma', 'jet', 'coolwarm']
         };
 
         if (typeof value === 'boolean') {

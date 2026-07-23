@@ -32,7 +32,11 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
         'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
         'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
-        'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio'
+        'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio',
+        // MPM keys
+        'pos_x', 'pos_y', 'vel_x', 'vel_y', 'size_x', 'size_y', 'radius', 'angular_vel',
+        'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
+        'ppc', 'time_step', 'penalty_stiffness', 'contour_opacity', 'contour_min', 'contour_max'
     ];
 
     const flattenedParams: Record<string, any> = {};
@@ -491,6 +495,48 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         }
         flattenedParams['max_r'] = maxR;
         flattenedParams['max_z'] = maxZ;
+    } else if (command === "INIT_MPM" || command === "INIT_2D_MPM") {
+        const mpmDomain = state.nodes.find(n => n.type === 'MPMDomain2D');
+        if (mpmDomain) {
+            Object.entries(mpmDomain.parameters).forEach(([key, value]) => {
+                flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+            });
+
+            const meshConn = state.connections.find(c => c.toNode === mpmDomain.id && c.toPort === 'mesh');
+            if (meshConn) {
+                const meshNode = state.nodes.find(n => n.id === meshConn.fromNode);
+                if (meshNode) {
+                    Object.entries(meshNode.parameters).forEach(([key, value]) => {
+                        flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                    });
+                    const cellSize = Number(meshNode.parameters?.cell_size ?? 0.005);
+                    const maxR = Number(meshNode.parameters?.max_r ?? 1.0);
+                    const maxZ = Number(meshNode.parameters?.max_z ?? 1.0);
+                    flattenedParams['nr'] = Math.round(maxR / cellSize);
+                    flattenedParams['nz'] = Math.round(maxZ / cellSize);
+                    flattenedParams['max_r'] = maxR;
+                    flattenedParams['max_z'] = maxZ;
+                }
+            }
+
+            const objConns = state.connections.filter(c => c.toNode === mpmDomain.id && c.toPort === 'objects');
+            const mpmObjects: any[] = [];
+            for (const conn of objConns) {
+                const objNode = state.nodes.find(n => n.id === conn.fromNode);
+                if (objNode && objNode.type === 'MPMObject2D') {
+                    const objParams: any = { ...objNode.parameters };
+                    const matConn = state.connections.find(c => c.toNode === objNode.id && c.toPort === 'material');
+                    if (matConn) {
+                        const matNode = state.nodes.find(n => n.id === matConn.fromNode);
+                        if (matNode) {
+                            Object.assign(objParams, matNode.parameters);
+                        }
+                    }
+                    mpmObjects.push(objParams);
+                }
+            }
+            flattenedParams['mpm_objects'] = mpmObjects;
+        }
     } else if (command === "INIT_3D") {
         const cellSize = flattenedParams['cell_size'] || 0.01;
         const xmin = flattenedParams['xmin'] !== undefined ? flattenedParams['xmin'] : (flattenedParams['x_min'] !== undefined ? flattenedParams['x_min'] : 0.0);

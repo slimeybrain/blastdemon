@@ -34,6 +34,9 @@
 #include "HDF5Writer.hpp"
 #include "XDMFWriter.hpp"
 #include "VTKWriter.hpp"
+#include "mpm_solver_2d.hpp"
+
+std::unique_ptr<Blast::MPMSolver2D> global_solver_mpm_2d = nullptr;
 
 std::string get_absolute_path(const std::string& path, const std::string& base_dir) {
     if (path.empty()) return base_dir;
@@ -1516,6 +1519,119 @@ void worker_2d_thread_func() {
     global_exec_until_end_2d = false;
 }
 
+std::atomic<bool> sim_mpm_running{false};
+std::atomic<bool> sim_mpm_paused{false};
+std::atomic<bool> sim_mpm_terminate{false};
+std::atomic<bool> global_exec_until_end_mpm{false};
+std::atomic<int> global_target_steps_mpm{0};
+std::atomic<float> global_cfl_mpm{0.3f};
+std::atomic<double> global_refresh_rate_mpm{0.0};
+
+void emit_telemetry_mpm_2d(double elapsed = 0.0, bool is_terminated = false);
+
+void worker_mpm_2d_thread_func() {
+    int step_count = 0;
+    int initial_steps = 0;
+    auto last_telemetry_time = std::chrono::steady_clock::now();
+
+    while (!sim_mpm_terminate.load()) {
+        if (sim_mpm_paused.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+
+        bool done = false;
+        if (!global_exec_until_end_mpm.load()) {
+            if (global_target_steps_mpm.load() <= 0) done = true;
+        }
+
+        if (done) break;
+
+        if (global_solver_mpm_2d) {
+            float cfl = global_cfl_mpm.load();
+            global_solver_mpm_2d->step(cfl);
+            step_count++;
+
+            if (!global_exec_until_end_mpm.load()) {
+                global_target_steps_mpm--;
+            }
+
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_telemetry_time).count();
+            int target_interval_ms = (int)(global_refresh_rate_mpm.load() * 1000.0);
+            if (target_interval_ms <= 0) target_interval_ms = 33;
+
+            if (elapsed_ms >= target_interval_ms || done) {
+                double sim_time = global_solver_mpm_2d->getSimTime();
+                int current_step = global_solver_mpm_2d->getStepCount();
+
+                emit_telemetry_mpm_2d(sim_time, false);
+                last_telemetry_time = now;
+
+                char log_buf[256];
+                snprintf(log_buf, sizeof(log_buf),
+                         "Step %d | Time = %.4e s | dt = %.2e s | CFL = %.2f | v_max = %.1f m/s",
+                         current_step,
+                         sim_time,
+                         global_solver_mpm_2d->getLastDt(),
+                         global_solver_mpm_2d->getLastCFL(),
+                         global_solver_mpm_2d->getMaxVelocity());
+                emit_kernel_log("SYSTEM", log_buf, sim_time, "mpm_2d");
+
+                nlohmann::json progress_msg;
+                progress_msg["type"] = "progress";
+                progress_msg["sim_time"] = sim_time;
+                progress_msg["scope"] = "mpm_2d";
+                progress_msg["dt"] = global_solver_mpm_2d->getLastDt();
+
+                if (global_exec_until_end_mpm.load()) {
+                    progress_msg["percent"] = 50; // Indeterminate while running continuously
+                    progress_msg["mode"] = "EXEC_ALL_MPM";
+                } else {
+                    initial_steps = std::max(initial_steps, step_count + global_target_steps_mpm.load());
+                    if (initial_steps > 0) {
+                        int completed = initial_steps - global_target_steps_mpm.load();
+                        int percent = std::clamp((int)((completed * 100) / initial_steps), 0, 99);
+                        progress_msg["percent"] = percent;
+                        progress_msg["completed"] = completed;
+                        progress_msg["total"] = initial_steps;
+                        progress_msg["mode"] = "STEP_MPM";
+                    }
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(cout_mutex);
+                    std::cout << progress_msg.dump() << std::endl;
+                }
+            }
+
+            // removed sleep
+        } else {
+            break;
+        }
+    }
+
+    double final_sim_time = global_solver_mpm_2d ? global_solver_mpm_2d->getSimTime() : 0.0;
+    emit_telemetry_mpm_2d(final_sim_time, false);
+
+    nlohmann::json progress_msg;
+    progress_msg["type"] = "progress";
+    progress_msg["sim_time"] = final_sim_time;
+    progress_msg["scope"] = "mpm_2d";
+    progress_msg["percent"] = 100;
+    progress_msg["mode"] = global_exec_until_end_mpm.load() ? "EXEC_ALL_MPM" : "STEP_MPM";
+    {
+        std::lock_guard<std::mutex> lock(cout_mutex);
+        std::cout << progress_msg.dump() << std::endl;
+    }
+
+    sim_mpm_running = false;
+    sim_mpm_paused = false;
+    sim_mpm_terminate = false;
+    global_target_steps_mpm = 0;
+    global_exec_until_end_mpm = false;
+}
+
 // NVML Dynamic Loading Declarations
 typedef int nvmlReturn_t;
 #define NVML_SUCCESS 0
@@ -2088,6 +2204,66 @@ void emit_telemetry_2d(double elapsed, bool is_terminated) {
     }
 
     global_async_telemetry.push(std::move(payload));
+}
+
+void emit_telemetry_mpm_2d(double elapsed, bool is_terminated) {
+    if (!global_solver_mpm_2d) return;
+
+    int nr = global_solver_mpm_2d->getNx();
+    int nz = global_solver_mpm_2d->getNy();
+    if (nr <= 0 || nz <= 0) return;
+
+    int n_ch = 7;
+    size_t dest_stride = static_cast<size_t>(nr) * static_cast<size_t>(nz);
+    std::vector<float> grid_data(n_ch * dest_stride, 0.0f);
+
+    std::vector<float> press = global_solver_mpm_2d->getGridScalarField("pressure");
+    std::vector<float> rho = global_solver_mpm_2d->getGridScalarField("density");
+    std::vector<float> vm = global_solver_mpm_2d->getGridScalarField("von_mises");
+    std::vector<float> ep = global_solver_mpm_2d->getGridScalarField("plastic_strain");
+    std::vector<float> vel = global_solver_mpm_2d->getGridScalarField("velocity");
+
+    for (int i = 0; i < nr; ++i) {
+        for (int j = 0; j < nz; ++j) {
+            int idx = i * nz + j;
+            grid_data[0 * dest_stride + idx] = (idx < (int)press.size()) ? press[idx] : 0.0f;
+            grid_data[1 * dest_stride + idx] = (idx < (int)rho.size()) ? rho[idx] : 0.0f;
+            grid_data[2 * dest_stride + idx] = (idx < (int)vel.size()) ? vel[idx] : 0.0f;
+            grid_data[3 * dest_stride + idx] = 0.0f;
+            grid_data[4 * dest_stride + idx] = (idx < (int)vm.size()) ? vm[idx] : 0.0f;
+            grid_data[5 * dest_stride + idx] = (idx < (int)ep.size()) ? ep[idx] : 0.0f;
+            grid_data[6 * dest_stride + idx] = 0.0f;
+        }
+    }
+
+    const auto& particles = global_solver_mpm_2d->getParticles();
+    uint32_t n_particles_u = static_cast<uint32_t>(particles.size());
+    std::vector<float> particle_data(n_particles_u * 2);
+    for (size_t k = 0; k < particles.size(); ++k) {
+        particle_data[k * 2 + 0] = particles[k].x[0];
+        particle_data[k * 2 + 1] = particles[k].x[1];
+    }
+
+    const uint32_t out_nr_u = static_cast<uint32_t>(nr);
+    const uint32_t out_nz_u = static_cast<uint32_t>(nz);
+    const uint32_t n_channels_u = static_cast<uint32_t>(n_ch);
+    size_t header_bytes  = sizeof(uint32_t) * 3;
+    size_t payload_bytes = grid_data.size() * sizeof(float);
+    size_t particle_hdr_bytes = sizeof(uint32_t);
+    size_t particle_payload_bytes = particle_data.size() * sizeof(float);
+    size_t total_bytes   = header_bytes + payload_bytes + particle_hdr_bytes + particle_payload_bytes;
+
+    std::lock_guard<std::mutex> lock(cout_mutex);
+    std::cout << "BIN_FRAME_2D " << total_bytes << "\n";
+    std::cout.write(reinterpret_cast<const char*>(&out_nr_u),     sizeof(uint32_t));
+    std::cout.write(reinterpret_cast<const char*>(&out_nz_u),     sizeof(uint32_t));
+    std::cout.write(reinterpret_cast<const char*>(&n_channels_u), sizeof(uint32_t));
+    std::cout.write(reinterpret_cast<const char*>(grid_data.data()), payload_bytes);
+    std::cout.write(reinterpret_cast<const char*>(&n_particles_u), sizeof(uint32_t));
+    if (n_particles_u > 0) {
+        std::cout.write(reinterpret_cast<const char*>(particle_data.data()), particle_payload_bytes);
+    }
+    std::cout.flush();
 }
 
 void emit_telemetry_3d(double elapsed, bool is_terminated) {
@@ -2809,6 +2985,107 @@ int main() {
                     global_wallclock_2d = 0.0;
                     step_progress_2d = 0;
                     solver2d_initialized = false;
+                } else if (command == "INIT_MPM" || command == "INIT_2D_MPM") {
+                    global_solver_mpm_2d = std::make_unique<Blast::MPMSolver2D>();
+
+                    int nx = get_json_int(msg, "nr", get_json_int(msg, "nx", 64));
+                    int ny = get_json_int(msg, "nz", get_json_int(msg, "ny", 64));
+                    double max_x = get_json_double(msg, "max_r", get_json_double(msg, "max_x", 1.0));
+                    double max_y = get_json_double(msg, "max_z", get_json_double(msg, "max_y", 1.0));
+                    float dx = static_cast<float>(max_x / nx);
+                    float dy = static_cast<float>(max_y / ny);
+
+                    global_solver_mpm_2d->initializeGrid(nx, ny, dx, dy);
+
+                    std::string transfer_scheme = msg.value("transfer_scheme", "GIMP");
+                    std::string velocity_scheme = msg.value("velocity_scheme", "APIC");
+
+                    if (transfer_scheme == "Standard") {
+                        global_solver_mpm_2d->setTransferScheme(Blast::MPMTransferScheme::Standard);
+                    } else {
+                        global_solver_mpm_2d->setTransferScheme(Blast::MPMTransferScheme::GIMP);
+                    }
+
+                    if (velocity_scheme == "PIC") {
+                        global_solver_mpm_2d->setVelocityScheme(Blast::MPMVelocityScheme::PIC);
+                    } else if (velocity_scheme == "FLIP") {
+                        global_solver_mpm_2d->setVelocityScheme(Blast::MPMVelocityScheme::FLIP);
+                    } else {
+                        global_solver_mpm_2d->setVelocityScheme(Blast::MPMVelocityScheme::APIC);
+                    }
+
+                    if (msg.contains("mpm_objects") && msg["mpm_objects"].is_array()) {
+                        int obj_idx = 0;
+                        for (const auto& obj : msg["mpm_objects"]) {
+                            obj_idx++;
+                            std::string shape = obj.value("shape_type", "Rectangle");
+                            float pos_x = static_cast<float>(get_json_double(obj, "pos_x", 0.5));
+                            float pos_y = static_cast<float>(get_json_double(obj, "pos_y", 0.5));
+                            float vel_x = static_cast<float>(get_json_double(obj, "vel_x", 0.0));
+                            float vel_y = static_cast<float>(get_json_double(obj, "vel_y", 0.0));
+                            float density = static_cast<float>(get_json_double(obj, "density", 7850.0));
+                            float E = static_cast<float>(get_json_double(obj, "youngs_modulus", 210.0e9));
+                            float nu = static_cast<float>(get_json_double(obj, "poissons_ratio", 0.3));
+                            float yield_stress = static_cast<float>(get_json_double(obj, "yield_stress", 400.0e6));
+                            float hardening = static_cast<float>(get_json_double(obj, "hardening_modulus", 1.0e9));
+                            int ppc = get_json_int(obj, "ppc", 4);
+
+                            if (shape == "Circle") {
+                                float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
+                                global_solver_mpm_2d->addCircleObject(obj_idx, pos_x, pos_y, radius, vel_x, vel_y, density, E, nu, yield_stress, hardening, ppc);
+                            } else {
+                                float size_x = static_cast<float>(get_json_double(obj, "size_x", 0.2));
+                                float size_y = static_cast<float>(get_json_double(obj, "size_y", 0.2));
+                                global_solver_mpm_2d->addRectangleObject(obj_idx, pos_x, pos_y, size_x, size_y, vel_x, vel_y, density, E, nu, yield_stress, hardening, ppc);
+                            }
+                        }
+                    } else {
+                        // Default steel impact primitives test case
+                        global_solver_mpm_2d->addCircleObject(1, 0.3f, 0.5f, 0.1f, 150.0f, 0.0f, 7850.0f, 210.0e9f, 0.3f, 400.0e6f, 1.0e9f, 4);
+                        global_solver_mpm_2d->addRectangleObject(2, 0.7f, 0.5f, 0.2f, 0.4f, 0.0f, 0.0f, 7850.0f, 210.0e9f, 0.3f, 400.0e6f, 1.0e9f, 4);
+                    }
+
+                    global_solver_mpm_2d->particleToGrid();
+                    emit_telemetry_mpm_2d(0.0, false);
+                    emit_kernel_log("SYSTEM", "2D MPM Solver Initialized with GIMP+APIC", 0.0, "mpm_2d");
+                } else if (command == "STEP_MPM" || command == "STEP_2D_MPM") {
+                    if (!global_solver_mpm_2d) continue;
+                    int steps = get_json_int(msg, "steps", 1);
+                    global_cfl_mpm = static_cast<float>(get_json_double(msg, "cfl", 0.3));
+                    global_exec_until_end_mpm = false;
+                    if (!sim_mpm_running) {
+                        global_target_steps_mpm = steps;
+                        sim_mpm_running = true;
+                        sim_mpm_paused = false;
+                        sim_mpm_terminate = false;
+                        std::thread(worker_mpm_2d_thread_func).detach();
+                    } else {
+                        global_target_steps_mpm.fetch_add(steps);
+                        sim_mpm_paused = false;
+                    }
+                } else if (command == "EXEC_ALL_MPM") {
+                    if (!global_solver_mpm_2d) continue;
+                    global_cfl_mpm = static_cast<float>(get_json_double(msg, "cfl", 0.3));
+                    global_exec_until_end_mpm = true;
+                    if (!sim_mpm_running) {
+                        sim_mpm_running = true;
+                        sim_mpm_paused = false;
+                        sim_mpm_terminate = false;
+                        std::thread(worker_mpm_2d_thread_func).detach();
+                    } else {
+                        sim_mpm_paused = false;
+                    }
+                } else if (command == "PAUSE_MPM") {
+                    sim_mpm_paused = true;
+                    global_target_steps_mpm = 0;
+                } else if (command == "RESUME_MPM") {
+                    sim_mpm_paused = false;
+                } else if (command == "TERMINATE_MPM") {
+                    sim_mpm_terminate = true;
+                    while (sim_mpm_running.load()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    }
+                    global_solver_mpm_2d.reset();
                 } else if (command == "REMAP") {
                     if (sim3d_init_in_progress.load()) {
                         std::lock_guard<std::mutex> lock(g_pending_remap_mutex);
@@ -2925,6 +3202,7 @@ int main() {
                     global_telemetry_stride = msg.value("stride", 1);
                     double rate = msg.value("refresh_rate", 0.0);
                     global_telemetry_interval_ms = (rate > 0.0) ? static_cast<int>(rate * 1000.0) : 33;
+                    global_refresh_rate_mpm = rate;
                     if (msg.contains("slices")) {
                         global_slices_3d.clear();
                         for (const auto& s_msg : msg["slices"]) {

@@ -46,6 +46,8 @@ add_executable(BlastSolver
     backend/BlastSolver/cfd_solver_2d_step.cpp
     backend/BlastSolver/cfd_solver_2d_fluxes.cpp
     backend/BlastSolver/cfd_solver_2d_amr.cpp
+    # 2D MPM solver
+    backend/BlastSolver/mpm_solver_2d.cpp
     # 2D CUDA solver
     backend/BlastSolver/cfd_solver_2d_cuda.cu
     backend/BlastSolver/cfd_solver_2d_amr_cuda.cu

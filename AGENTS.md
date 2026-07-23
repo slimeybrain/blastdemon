@@ -39,5 +39,13 @@
 - **Default Parameter Alignment:** Default node parameters MUST be identical between `state-manager.ts` (`defaults` map) and `graph-renderer.ts` (`getDefaultParameters` method) to prevent property inspector and UI anomalies.
 - **Dropdown and Widget Uniformity:** When a node parameter has discrete options (like an enum or fixed choice list), ensure it is styled and rendered as a dropdown selector or other appropriate widget *both* in the sidebar property editor (`frontend/src/property-editor.ts`) and on the node canvas representation (`frontend/src/graph-renderer.ts`). Never leave it as a plain text input when options are pre-defined.
 
+## 7. Chat Response & Formatting Rule (ABSOLUTE RULE)
+- **No Unrendered Markup / Raw Formatting:** All chat responses must be rendered directly as clean, readable text. Do NOT emit raw, escaped, or unrendered markdown markup (such as double-escaped LaTeX brackets, raw syntax delimiters, or unparsed markdown blocks that force manual translation).
+
+## 8. Automatic Broker Management Directive (ABSOLUTE RULE)
+- **Do NOT automatically start or restart the Broker:** Under no circumstances should the agent launch, start, or restart the `./Broker` daemon automatically in the background. The Broker process is managed manually by the user in their own terminal.
+
+
+
 
 

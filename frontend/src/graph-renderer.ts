@@ -798,10 +798,21 @@ export class GraphRenderer {
                 return false;
             case 'TelemetryText':
             case 'TelemetryGraph':
-                if (toPortId === 'in') return fromType === 'CFDSolver' || fromType === 'CFDSolver2D' || fromType === 'CFDSolver3D';
+                if (toPortId === 'in') return fromType === 'CFDSolver' || fromType === 'CFDSolver2D' || fromType === 'CFDSolver3D' || fromType === 'MPMDomain2D';
+                return false;
+            case 'MPMDomain2D':
+                if (toPortId === 'mesh') return fromType === 'DomainMesh2D';
+                if (toPortId === 'objects') return fromType === 'MPMObject2D';
+                return false;
+            case 'MPMObject2D':
+                if (toPortId === 'material') return fromType === 'MPMMaterialSteel';
+                return false;
+            case 'FSICoupler2D':
+                if (toPortId === 'cfd_solver') return fromType === 'CFDSolver2D';
+                if (toPortId === 'mpm_domain') return fromType === 'MPMDomain2D';
                 return false;
             case 'TelemetryContour':
-                if (toPortId === 'in') return fromType === 'CFDSolver2D';
+                if (toPortId === 'in') return fromType === 'CFDSolver2D' || fromType === 'MPMDomain2D';
                 return false;
             case 'VTKOutput':
                 if (toPortId === 'in') return fromType === 'CFDSolver' || fromType === 'CFDSolver2D' || fromType === 'CFDSolver3D';
@@ -830,12 +841,17 @@ export class GraphRenderer {
             if (this.hoveredPort && this.hoveredPort.isInput) {
                 const state = this.stateManager.getCurrentState();
                 if (state) {
-                    const existingIdx = state.connections.findIndex(conn =>
-                        conn.toNode === this.hoveredPort!.nodeId &&
-                        conn.toPort === this.hoveredPort!.portId
-                    );
-                    if (existingIdx !== -1) {
-                        state.connections.splice(existingIdx, 1);
+                    const targetNode = state.nodes.find(n => n.id === this.hoveredPort!.nodeId);
+                    const isMultiInput = targetNode?.type === 'MPMDomain2D' && this.hoveredPort!.portId === 'objects';
+
+                    if (!isMultiInput) {
+                        const existingIdx = state.connections.findIndex(conn =>
+                            conn.toNode === this.hoveredPort!.nodeId &&
+                            conn.toPort === this.hoveredPort!.portId
+                        );
+                        if (existingIdx !== -1) {
+                            state.connections.splice(existingIdx, 1);
+                        }
                     }
 
                     const exists = state.connections.some(conn =>
@@ -1170,6 +1186,15 @@ export class GraphRenderer {
                 ]
             },
             {
+                name: 'MPM Simulation (2D)',
+                items: [
+                    { label: 'MPM Domain 2D', type: 'MPMDomain2D' },
+                    { label: 'MPM Object 2D (Primitive)', type: 'MPMObject2D' },
+                    { label: 'MPM Steel Material', type: 'MPMMaterialSteel' },
+                    { label: 'FSI Coupler 2D', type: 'FSICoupler2D' }
+                ]
+            },
+            {
                 name: 'Telemetry & Output',
                 items: [
                     { label: 'Telemetry - Text', type: 'TelemetryText' },
@@ -1307,7 +1332,7 @@ export class GraphRenderer {
         const state = this.stateManager.getCurrentState();
         if (!state) return;
 
-        const isSolver = (t: string) => ['CFDSolver', 'CFDSolver2D', 'CFDSolver3D'].includes(t);
+        const isSolver = (t: string) => ['CFDSolver', 'CFDSolver2D', 'CFDSolver3D', 'MPMDomain2D'].includes(t);
         const isMesh = (t: string) => ['DomainMesh', 'DomainMesh2D', 'DomainMesh3D'].includes(t);
 
         const ws = this.stateManager.getActiveWorkspace();
@@ -1639,6 +1664,40 @@ export class GraphRenderer {
                 obstacles_min_val: 101325.0,
                 obstacles_max_val: 101325.0 * 10.0
             };
+            case 'MPMDomain2D': return {
+                transfer_scheme: 'GIMP',
+                velocity_scheme: 'APIC',
+                ppc: 4,
+                cfl: 0.3,
+                time_step: 1.0e-5
+            };
+            case 'MPMObject2D': return {
+                shape_type: 'Rectangle',
+                pos_x: 0.5,
+                pos_y: 0.5,
+                size_x: 0.2,
+                size_y: 0.2,
+                radius: 0.1,
+                vel_x: 0.0,
+                vel_y: 0.0,
+                angular_vel: 0.0
+            };
+            case 'MPMMaterialSteel': return {
+                density: 7850.0,
+                youngs_modulus: 210.0e9,
+                poissons_ratio: 0.3,
+                yield_stress: 400.0e6,
+                hardening_modulus: 1.0e9
+            };
+            case 'FSICoupler2D': return {
+                coupling_mode: 'TwoWay_Full',
+                penalty_stiffness: 1.0e9,
+                contour_quantity: 'von_mises',
+                color_map: 'viridis',
+                contour_opacity: 1.0,
+                contour_min: 0.0,
+                contour_max: 500.0e6
+            };
 
             default: return {};
         }
@@ -1763,6 +1822,10 @@ export class GraphRenderer {
             case 'Telemetry3DViewport': return 'VIEW3D';
             case 'STLGeometry':
             case 'PrimitiveGeometry3D': return 'STL';
+            case 'MPMDomain2D':      return 'MPM2D';
+            case 'MPMObject2D':      return 'MPM OBJ';
+            case 'MPMMaterialSteel': return 'MPM STEEL';
+            case 'FSICoupler2D':     return 'FSI 2D';
             default: return (type as string).toUpperCase();
         }
     }
@@ -1795,6 +1858,10 @@ export class GraphRenderer {
             case 'Telemetry3DViewport': return 'Telemetry - 3D Viewport';
             case 'STLGeometry':       return 'STL Geometry 3D';
             case 'PrimitiveGeometry3D': return 'Primitive Geometry 3D';
+            case 'MPMDomain2D':      return 'MPM Domain 2D';
+            case 'MPMObject2D':      return 'MPM Object 2D';
+            case 'MPMMaterialSteel': return 'MPM Material (Steel)';
+            case 'FSICoupler2D':     return 'FSI Coupler 2D';
             default: return type;
         }
     }
@@ -2988,7 +3055,20 @@ export class GraphRenderer {
                 this.viewport3Ds.set(node.id, vp);
             }
         } else if (node.type === 'TelemetryContour') {
-            const CHANNELS: { label: string }[] = [
+            const state = this.stateManager.getCurrentState();
+            const conn = state?.connections.find(c => c.toNode === node.id && c.toPort === 'in');
+            const connectedSolver = conn ? state?.nodes.find(n => n.id === conn.fromNode) : null;
+            const isMPM = connectedSolver?.type === 'MPMDomain2D';
+
+            const CHANNELS: { label: string }[] = isMPM ? [
+                { label: 'Pressure' },
+                { label: 'Density' },
+                { label: 'Velocity' },
+                { label: 'Y-Velocity' },
+                { label: 'Von Mises Stress' },
+                { label: 'Plastic Strain' },
+                { label: 'Object ID' }
+            ] : [
                 { label: 'Pressure' },
                 { label: 'Density' },
                 { label: 'Radial Vel' },
@@ -3024,7 +3104,6 @@ export class GraphRenderer {
                 { value: '10.0', label: '0.1 FPS (10.0s)' }
             ];
 
-            const state = this.stateManager.getCurrentState();
             let isAxisymmetric = true;
             let chargeInfo = null;
             let detonatorInfo = null;
@@ -3035,7 +3114,7 @@ export class GraphRenderer {
             if (state) {
                 const conn = state.connections.find(c => c.toNode === node.id && c.toPort === 'in');
                 solverNode = conn ? state.nodes.find(n => n.id === conn.fromNode) : null;
-                if (solverNode && solverNode.type === 'CFDSolver2D') {
+                if (solverNode && (solverNode.type === 'CFDSolver2D' || solverNode.type === 'MPMDomain2D')) {
                     const ownerModel = this.stateManager.getAllModels().find(m => m.nodes.some(n => n.id === solverNode.id));
                     const modelNodes = ownerModel ? ownerModel.nodes : state.nodes;
 
@@ -4050,7 +4129,13 @@ export class GraphRenderer {
                 log_scale: ['true', 'false'],
                 show_grid: ['true', 'false'],
                 'voxelization_method': ['watertight_floodfill', 'watertight_raycast', 'thin_shell', 'winding_number'],
-                'obstacles_quantity': ['pressure', 'density', 'velocity', 'energy', 'species1', 'species2', 'species3', 'peak_overpressure', 'peak_impulse']
+                'obstacles_quantity': ['pressure', 'density', 'velocity', 'energy', 'species1', 'species2', 'species3', 'peak_overpressure', 'peak_impulse'],
+                'transfer_scheme': ['GIMP', 'Standard'],
+                'velocity_scheme': ['APIC', 'PIC', 'FLIP'],
+                'shape_type': ['Rectangle', 'Circle'],
+                'coupling_mode': ['TwoWay_Full', 'OneWay_CFD_to_MPM', 'Disabled'],
+                'contour_quantity': ['von_mises', 'plastic_strain', 'density', 'velocity', 'pressure'],
+                'color_map': ['viridis', 'plasma', 'jet', 'coolwarm']
             };
 
             let inputEl: HTMLElement;
@@ -4089,7 +4174,11 @@ export class GraphRenderer {
                             'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
                             'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
                             'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
-                            'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio'
+                            'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio',
+                            // MPM keys
+                            'pos_x', 'pos_y', 'vel_x', 'vel_y', 'size_x', 'size_y', 'radius', 'angular_vel',
+                            'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
+                            'ppc', 'time_step', 'penalty_stiffness', 'contour_opacity', 'contour_min', 'contour_max'
                         ];
                         let castValue: any = newVal;
                         if (numericKeys.includes(key)) {

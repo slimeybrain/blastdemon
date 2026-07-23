@@ -935,13 +935,14 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
     }
 
     const has2D    = model?.nodes.some(n => n.type === 'CFDSolver2D') || false;
+    const hasMPM2D = model?.nodes.some(n => n.type === 'MPMDomain2D') || false;
     const pipeline = findRemapPipeline(modelId);
     const has3D      = model?.nodes.some(n => n.type === 'CFDSolver3D') || false;
 
     // Helper to get solver node for logging
     const getSolverNode = (mid: string) => {
         const m = stateManager.getAllModels().find(m => m.id === mid);
-        return m?.nodes.find(n => n.type === 'CFDSolver2D' || n.type === 'CFDSolver');
+        return m?.nodes.find(n => n.type === 'CFDSolver2D' || n.type === 'CFDSolver' || n.type === 'MPMDomain2D');
     };
     // ── INIT ─────────────────────────────────────────────────────────────────
     if (command === "INIT") {
@@ -967,6 +968,16 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
                 }
             }
         }
+        else if (hasMPM2D) {
+            const state = stateManager.getSimulationState(modelId);
+            if (state) {
+                const payload = serializeForSolver(state, "INIT_MPM", modelId, model?.filename);
+                console.log(`Sending INIT_MPM for MPM 2D model ${modelId}`);
+                networkManager.send(payload);
+                sendContourConfig(modelId);
+                stateManager.setModelStatus(modelId, 'INITIALIZED');
+            }
+        }
         else if (has2D) {
             const state = stateManager.getSimulationState(modelId);
             if (state) {
@@ -983,17 +994,6 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
                 } else {
                     stateManager.setModelStatus(modelId, 'INITIALIZED');
                 }
-            }
-        }
-        else if (has2D) {
-            // Standalone 2D model (Ideal Gas / JWL direct init — no remap partner).
-            const state = stateManager.getSimulationState(modelId);
-            if (state) {
-                const payload = serializeForSolver(state, "INIT_2D", modelId, model?.filename);
-                console.log(`Sending INIT_2D for standalone 2D model ${modelId}`);
-                networkManager.send(payload);
-                sendContourConfig(modelId);
-                stateManager.setModelStatus(modelId, 'INITIALIZED');
             }
         } else {
             // Pure 1D model.
@@ -1021,6 +1021,11 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
         if (has3D) {
             sendView3DConfig(modelId);
             networkManager.send({ command: "STEP_3D", modelId: modelId, steps, cfl });
+        } else if (hasMPM2D) {
+            sendContourConfig(modelId);
+            const mpmNode = model?.nodes.find(n => n.type === 'MPMDomain2D');
+            const mpmCfl = Number(mpmNode?.parameters?.cfl ?? 0.3);
+            networkManager.send({ command: "STEP_MPM", modelId: modelId, steps, cfl: mpmCfl });
         } else if (pipeline || has2D) {
             sendContourConfig(modelId);
             networkManager.send({ command: "STEP_2D", modelId: modelId, steps, cfl });
@@ -1045,6 +1050,18 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
                     networkManager.send(payload);
                     sendView3DConfig(modelId);
                     networkManager.send({ command: "EXEC_ALL_3D", modelId: modelId, cfl });
+                    stateManager.setModelStatus(modelId, 'RUNNING');
+                }
+            } else if (hasMPM2D) {
+                const state = stateManager.getSimulationState(modelId);
+                if (state) {
+                    const payload = serializeForSolver(state, "INIT_MPM", modelId, model?.filename);
+                    console.log(`[Auto-Run] Sending INIT_MPM for MPM model ${modelId}`);
+                    networkManager.send(payload);
+                    sendContourConfig(modelId);
+                    const mpmNode = state.nodes.find(n => n.type === 'MPMDomain2D');
+                    const mpmCfl = Number(mpmNode?.parameters?.cfl ?? 0.3);
+                    networkManager.send({ command: "EXEC_ALL_MPM", modelId: modelId, cfl: mpmCfl });
                     stateManager.setModelStatus(modelId, 'RUNNING');
                 }
             } else if (pipeline) {
@@ -1088,6 +1105,11 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
             if (has3D) {
                 sendView3DConfig(modelId);
                 networkManager.send({ command: "EXEC_ALL_3D", modelId: modelId, cfl });
+            } else if (hasMPM2D) {
+                sendContourConfig(modelId);
+                const mpmNode = model?.nodes.find(n => n.type === 'MPMDomain2D');
+                const mpmCfl = Number(mpmNode?.parameters?.cfl ?? 0.3);
+                networkManager.send({ command: "EXEC_ALL_MPM", modelId: modelId, cfl: mpmCfl });
             } else if (pipeline || has2D) {
                 sendContourConfig(modelId);
                 networkManager.send({ command: "EXEC_ALL_2D", modelId: modelId, cfl });
@@ -1102,6 +1124,8 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
         const has3D = model?.nodes.some(n => n.type === 'CFDSolver3D') || false;
         if (has3D) {
             networkManager.send({ command: "PAUSE_3D", modelId: modelId });
+        } else if (hasMPM2D) {
+            networkManager.send({ command: "PAUSE_MPM", modelId: modelId });
         } else if (pipeline || has2D) {
             networkManager.send({ command: "PAUSE_2D", modelId: modelId });
         } else {
@@ -1225,14 +1249,18 @@ networkManager.onMessage(async (data) => {
             }
         }
 
-        let type: 'CFDSolver2D' | 'CFDSolver' | 'CFDSolver3D' = 'CFDSolver';
+        let type: 'CFDSolver2D' | 'CFDSolver' | 'CFDSolver3D' | 'MPMDomain2D' = 'CFDSolver';
         let model = stateManager.getAllModels().find(m => m.id === modelId);
         if (model) {
             if (model.nodes.some(n => n.type === 'CFDSolver3D')) type = 'CFDSolver3D';
+            else if (model.nodes.some(n => n.type === 'MPMDomain2D')) type = 'MPMDomain2D';
             else if (model.nodes.some(n => n.type === 'CFDSolver2D')) type = 'CFDSolver2D';
         }
         
         let solverNode = model?.nodes.find(n => n.type === type);
+        if (!solverNode && model) {
+            solverNode = model.nodes.find(n => n.type === 'MPMDomain2D' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D' || n.type === 'CFDSolver');
+        }
         
         if (solverNode) {
             stateManager.pushTelemetry(solverNode.id, payloadBuffer, modelId);
@@ -1416,19 +1444,21 @@ networkManager.onMessage(async (data) => {
         }
 
         // Determine correct target solver type
-        let targetType: 'CFDSolver2D' | 'CFDSolver' | 'CFDSolver3D' = 'CFDSolver';
+        let targetType: 'CFDSolver2D' | 'CFDSolver' | 'CFDSolver3D' | 'MPMDomain2D' = 'CFDSolver';
         if (dataJson.type === 'progress_3d' || dataJson.type === 'TELEMETRY_3D' || dataJson.scope === '3d') {
             targetType = 'CFDSolver3D';
         } else if (dataJson.type === 'progress_2d' || dataJson.type === 'TELEMETRY_2D' || dataJson.scope === '2d') {
             targetType = 'CFDSolver2D';
+        } else if (dataJson.scope === 'mpm_2d') {
+            targetType = 'MPMDomain2D';
         } else if (dataJson.type === 'progress' || dataJson.type === 'TELEMETRY') {
             targetType = 'CFDSolver';
         } else if (dataJson.type === 'log') {
             const msg = dataJson.message || "";
-            const is3DLog = msg.includes("3D") || msg.includes("3d");
-            const is2DLog = msg.includes("2D") || msg.includes("REMAP") || msg.includes("vtk") || msg.includes("2d");
-            if (is3DLog) targetType = 'CFDSolver3D';
-            else if (is2DLog) targetType = 'CFDSolver2D';
+            const scope = dataJson.scope || "";
+            if (scope === 'mpm_2d' || msg.includes("MPM") || msg.includes("mpm")) targetType = 'MPMDomain2D';
+            else if (scope === '3d' || msg.includes("3D") || msg.includes("3d")) targetType = 'CFDSolver3D';
+            else if (scope === '2d' || msg.includes("2D") || msg.includes("REMAP") || msg.includes("vtk") || msg.includes("2d")) targetType = 'CFDSolver2D';
             else targetType = 'CFDSolver';
         }
 

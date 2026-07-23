@@ -56,6 +56,28 @@ function requestRender(): void {
     });
 }
 
+let currentParticles: Float32Array | null = null;
+
+function extractParticles2D(buffer: ArrayBuffer): Float32Array | null {
+    const HEADER_SIZE = 12;
+    if (buffer.byteLength < HEADER_SIZE) return null;
+    const header = new DataView(buffer);
+    const nr = header.getUint32(0, true);
+    const nz = header.getUint32(4, true);
+    const n_channels = header.getUint32(8, true);
+    const gridBytes = nr * nz * n_channels * 4;
+
+    if (buffer.byteLength < HEADER_SIZE + gridBytes + 4) return null;
+
+    const particlesHeaderView = new DataView(buffer, HEADER_SIZE + gridBytes, 4);
+    const numParticles = particlesHeaderView.getUint32(0, true);
+
+    if (numParticles === 0) return null;
+    if (buffer.byteLength < HEADER_SIZE + gridBytes + 4 + numParticles * 8) return null;
+
+    return new Float32Array(buffer, HEADER_SIZE + gridBytes + 4, numParticles * 2);
+}
+
 function extractChannel2D(buffer: ArrayBuffer, channel: number): { data: Float32Array; nr: number; nz: number } | null {
     const HEADER_SIZE = 12; // nr, nz, n_channels (all uint32)
     if (buffer.byteLength < HEADER_SIZE) return null;
@@ -422,6 +444,9 @@ function render(): void {
             }
         }
     } else {
+        if (lastBuffer) {
+            currentParticles = extractParticles2D(lastBuffer);
+        }
         const frameInfo = lastBuffer ? extractChannel2D(lastBuffer, selectedChannel) : null;
         if (frameInfo) {
             const { data, nr: cellNr, nz: cellNz } = frameInfo;
@@ -740,6 +765,47 @@ function render(): void {
         drawDet(false);
         if (isAxisymmetric) {
             drawDet(true);
+        }
+        context.restore();
+    }
+
+    // Draw MPM particles overlay if present
+    if (currentParticles && currentParticles.length > 0) {
+        context.save();
+        context.fillStyle = '#00ffff';
+        context.strokeStyle = '#000000';
+        context.lineWidth = 0.5 / zoom;
+
+        const pRadius = Math.max(1.0, 2.0 / zoom);
+        const numParticles = currentParticles.length / 2;
+
+        for (let k = 0; k < numParticles; ++k) {
+            const xp = currentParticles[k * 2];
+            const yp = currentParticles[k * 2 + 1];
+
+            if (isAxisymmetric) {
+                const pxR = dx + dw / 2 + (xp / max_r) * (dw / 2);
+                const pyR = dy + (1.0 - yp / max_z) * dh;
+                const pxL = dx + dw / 2 - (xp / max_r) * (dw / 2);
+
+                context.beginPath();
+                context.arc(pxR, pyR, pRadius, 0, 2 * Math.PI);
+                context.fill();
+                context.stroke();
+
+                context.beginPath();
+                context.arc(pxL, pyR, pRadius, 0, 2 * Math.PI);
+                context.fill();
+                context.stroke();
+            } else {
+                const px = dx + (xp / max_r) * dw;
+                const py = dy + (1.0 - yp / max_z) * dh;
+
+                context.beginPath();
+                context.arc(px, py, pRadius, 0, 2 * Math.PI);
+                context.fill();
+                context.stroke();
+            }
         }
         context.restore();
     }

@@ -1262,7 +1262,11 @@ const NODE_ICONS: Record<string, string> = {
     'CFDSolver2D': '⚡',
     'TelemetryContour': '🗺️',
     'VTKOutput': '💾',
-    'VirtualGauges': '⏱️'
+    'VirtualGauges': '⏱️',
+    'MPMDomain2D': '🧱',
+    'MPMObject2D': '🟥',
+    'MPMMaterialSteel': '⚙️',
+    'FSICoupler2D': '🔗'
 };
 
 function getNodeIcon(type: string): string {
@@ -2343,7 +2347,7 @@ class ExecutionManagerComponent {
                 stepButtons.forEach(b => b.disabled = false);
             } else {
                 // Not initialised (UNINITIALIZED or TERMINATED)
-                if (playBtn) playBtn.disabled = true;
+                if (playBtn) playBtn.disabled = false; // Enabled for Auto-Run
                 if (pauseBtn) pauseBtn.disabled = true;
                 if (termBtn) termBtn.disabled = true;
                 stepButtons.forEach(b => b.disabled = true);
