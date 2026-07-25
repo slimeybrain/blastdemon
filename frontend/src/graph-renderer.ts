@@ -1,5 +1,5 @@
 import { SimulationState, Node, Connection, Port, NodeType } from './types.js';
-import { StateManager } from './state-manager.js';
+import { StateManager, calculateRefinementMeshInfo } from './state-manager.js';
 import { Telemetry3DViewport } from './telemetry-3d-viewport.js';
 import { validateSimulationState } from './validation.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
@@ -750,13 +750,16 @@ export class GraphRenderer {
 
         switch (toType) {
             case 'CFDSolver3D':
-                if (toPortId === 'mesh') return fromType === 'DomainMesh3D';
+                if (toPortId === 'mesh') return fromType === 'DomainMesh3D' || fromType === 'RefinementMesh3D';
                 if (toPortId === 'air') return fromType === 'Material';
                 if (toPortId === 'charge') return fromType === 'Charge3D';
                 if (toPortId === 'detonator') return fromType === 'DetonatorLocation3D';
                 if (toPortId === 'stl') return fromType === 'STLGeometry' || fromType === 'PrimitiveGeometry3D';
                 if (toPortId === 'gauges') return fromType === 'VirtualGauges';
                 if (toPortId === 'remap') return fromType === 'RemapNode' || fromType === 'Remap1DTo3DNode' || fromType === 'Remap2DTo3DNode';
+                return false;
+            case 'RefinementMesh3D':
+                if (toPortId === 'parent_mesh') return fromType === 'DomainMesh3D' || fromType === 'RefinementMesh3D';
                 return false;
             case 'Charge3D':
                 if (toPortId === 'material') return fromType === 'Material';
@@ -1176,6 +1179,7 @@ export class GraphRenderer {
                 name: '3D Simulation',
                 items: [
                     { label: 'Domain Mesh 3D', type: 'DomainMesh3D' },
+                    { label: 'Refinement Mesh 3D (Submesh)', type: 'RefinementMesh3D' },
                     { label: 'Detonator Location 3D', type: 'DetonatorLocation3D' },
                     { label: 'Remapper (1D -> 3D)', type: 'Remap1DTo3DNode' },
                     { label: 'Remapper (2D -> 3D)', type: 'Remap2DTo3DNode' },
@@ -1462,7 +1466,7 @@ export class GraphRenderer {
                 flux_scheme: 'AUSM+',
                 spatial_order: 2,
                 temporal_order: 2,
-                precision: 'double'
+                precision: 'single'
             };
             case 'TelemetryGraph': return {
                 telemetry_channel: 0,
@@ -1519,7 +1523,7 @@ export class GraphRenderer {
             };
             case 'HardwareConfig': return {
                 device: 'cpu',
-                precision: 'double'
+                precision: 'single'
             };
             case 'CFDSolver2D': return {
                 init_mode: 'From1D',
@@ -1568,6 +1572,15 @@ export class GraphRenderer {
                 bc_x_min: 'Reflecting', bc_x_max: 'Transmitting',
                 bc_y_min: 'Reflecting', bc_y_max: 'Transmitting',
                 bc_z_min: 'Reflecting', bc_z_max: 'Transmitting'
+            };
+            case 'RefinementMesh3D': return {
+                submesh_x: 0.25,
+                submesh_y: 0.25,
+                submesh_z: 0.25,
+                submesh_size_x: 0.5,
+                submesh_size_y: 0.5,
+                submesh_size_z: 0.5,
+                refinement_level: 1
             };
             case 'Charge3D': return {
                 charge_shape: 'Sphere',
@@ -4010,6 +4023,12 @@ export class GraphRenderer {
                         const ny = Math.round(dim_y / cellSize);
                         const nz = Math.round(dim_z / cellSize);
                         gridInfo.textContent = `Calculated Grid: ${nx} x ${ny} x ${nz} cells (Total: ${(nx * ny * nz).toLocaleString()})`;
+                    } else if (node.type === 'RefinementMesh3D') {
+                        const state = this.stateManager.getCurrentState();
+                        if (state) {
+                            const stats = calculateRefinementMeshInfo(node, state);
+                            gridInfo.innerHTML = `<div>Refined Region: ${stats.subNx} x ${stats.subNy} x ${stats.subNz} (${stats.subTotalCells.toLocaleString()} cells)</div><div>Total Grid (w/ Parent): ${stats.newTotalCells.toLocaleString()} cells</div>`;
+                        }
                     }
                 }
                 return;
@@ -4034,7 +4053,7 @@ export class GraphRenderer {
         }
 
         const paramKeys = Object.keys(node.parameters);
-        if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D') {
+        if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D' || node.type === 'RefinementMesh3D') {
             paramKeys.sort((a, b) => {
                 if (a === 'cell_size') return -1;
                 if (b === 'cell_size') return 1;
@@ -4049,13 +4068,15 @@ export class GraphRenderer {
         }
         
         let gridInfoDiv: HTMLDivElement | null = null;
-        if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D') {
+        if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D' || node.type === 'RefinementMesh3D') {
+            const state = this.stateManager.getCurrentState();
             const cellSize = Number(node.parameters['cell_size'] ?? 0.001);
             const info = document.createElement('div');
             info.className = 'grid-info-display';
             info.style.fontSize = 'var(--font-xs)';
             info.style.color = '#569cd6';
             info.style.marginTop = '6px';
+            info.style.lineHeight = '1.3';
             if (node.type === 'DomainMesh') {
                 const radius = Number(node.parameters['domain_radius'] ?? 1.0);
                 const n_cells = Math.round(radius / cellSize);
@@ -4066,7 +4087,7 @@ export class GraphRenderer {
                 const nr = Math.round(max_r / cellSize);
                 const nz = Math.round(max_z / cellSize);
                 info.textContent = `Calculated Grid: ${nr} x ${nz} cells (Total: ${(nr * nz).toLocaleString()})`;
-            } else {
+            } else if (node.type === 'DomainMesh3D') {
                 const xmin = Number(node.parameters['xmin'] ?? node.parameters['origin_x'] ?? 0.0);
                 const xmax = Number(node.parameters['xmax'] ?? (xmin + (node.parameters['dim_x'] ?? 1.0)));
                 const ymin = Number(node.parameters['ymin'] ?? node.parameters['origin_y'] ?? 0.0);
@@ -4081,6 +4102,9 @@ export class GraphRenderer {
                 const ny = Math.round(dim_y / cellSize);
                 const nz = Math.round(dim_z / cellSize);
                 info.textContent = `Calculated Grid: ${nx} x ${ny} x ${nz} cells (Total: ${(nx * ny * nz).toLocaleString()})`;
+            } else if (node.type === 'RefinementMesh3D' && state) {
+                const stats = calculateRefinementMeshInfo(node, state);
+                info.innerHTML = `<div>Refined Region: ${stats.subNx} x ${stats.subNy} x ${stats.subNz} (${stats.subTotalCells.toLocaleString()} cells)</div><div>Total Grid (w/ Parent): ${stats.newTotalCells.toLocaleString()} cells</div>`;
             }
             gridInfoDiv = info;
         }
@@ -4096,6 +4120,7 @@ export class GraphRenderer {
             const value = node.parameters[key];
             if (key === 'gauges' || key === 'slices' || key === 'primitives') continue;
             if (key === 'nr' || key === 'nz' || key === 'n_cells') continue;
+            if (node.type === 'CFDSolver3D' && (key === 'mesh_type' || key === 'amr_max_levels' || key === 'amr_threshold' || key === 'amr_coarsen_ratio' || key === 'amr_tile_size')) continue;
             if (node.type === 'VTKOutput' && !is3D && (key === 'export_slices' || key === 'export_volumes')) continue;
             if (node.type === 'VirtualGauges' && key === 'telemetry_channel') continue;
             // DetonatorLocation and DetonatorLocation3D are separate nodes now, showing correct properties
@@ -4216,7 +4241,7 @@ export class GraphRenderer {
                             'ascii_precision', 'step_interval', 'time_interval', 'downsample_stride',
                             'telemetry_channel',
                             // 2D CFD keys
-                            'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
+                            'nr', 'nz', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
                             'charge_r', 'charge_z', 'charge_radius', 'charge_height',
                             'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
                             'ideal_gamma', 'ideal_rho_0', 'ideal_e_0',
@@ -4225,10 +4250,14 @@ export class GraphRenderer {
                             'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
                             'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
                             'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
-                            'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio',
+                            'refinement_opacity', 'charge_opacity',
+                            'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio', 'amr_tile_size',
+                            'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'refinement_level',
+                            'submesh_x', 'submesh_y', 'submesh_z', 'submesh_size_x', 'submesh_size_y', 'submesh_size_z',
                             // MPM keys
-                            'pos_x', 'pos_y', 'vel_x', 'vel_y', 'size_x', 'size_y', 'radius', 'angular_vel',
+                            'pos_x', 'pos_y', 'vel_x', 'vel_y', 'radius', 'angular_vel',
                             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
+                            'failure_strain', 'tensile_failure_stress',
                             'ppc', 'time_step', 'penalty_stiffness', 'contour_opacity', 'contour_min', 'contour_max'
                         ];
                         let castValue: any = newVal;

@@ -54,6 +54,7 @@ uniform int uColormap;
 uniform float uMin;
 uniform float uMax;
 uniform bool uUseLogScale;
+uniform bool uIsAMR;
 uniform int uIsWireframe;
 uniform bool uShowCellEdges;
 uniform bool uInterpolate;
@@ -71,6 +72,11 @@ uniform float uDx;
 uniform float uStlMin;
 uniform float uStlMax;
 uniform bool uStlLogScale;
+
+uniform int uAxis;
+uniform int uIsSubmesh;
+uniform int uNumSubmeshMasks;
+uniform vec4 uSubmeshMasks[8];
 
 out vec4 outColor;
 
@@ -163,11 +169,28 @@ float getT(float raw, float minVal, float maxVal, bool useLogScale) {
 }
 
 void main() {
+    if (uIsSubmesh == 0 && uNumSubmeshMasks > 0) {
+        vec2 coord2D;
+        if (uAxis == 0) {
+            coord2D = vLocalPos.xy;
+        } else if (uAxis == 1) {
+            coord2D = vLocalPos.xz;
+        } else {
+            coord2D = vLocalPos.yz;
+        }
+        for (int i = 0; i < uNumSubmeshMasks; i++) {
+            vec4 maskBox = uSubmeshMasks[i];
+            if (coord2D.x >= maskBox.x && coord2D.x <= maskBox.y &&
+                coord2D.y >= maskBox.z && coord2D.y <= maskBox.w) {
+                discard;
+            }
+        }
+    }
     if (uIsWireframe > 0) {
         // Obstacle Surfaces (9 = Solid with lighting, 10 = Gridlines, 11 = Solid unlit)
         if (uIsWireframe >= 9 && uIsWireframe <= 11) {
             if (uIsWireframe == 10) {
-                outColor = vec4(0.0, 0.0, 0.0, uAlpha);
+                outColor = vec4(0.8, 0.8, 0.8, uAlpha * 0.5);
                 return;
             }
             float val = vSliceSize.y;
@@ -194,6 +217,50 @@ void main() {
                 }
                 vec3 lit = baseColor.rgb * (uAmbientLevel + 0.7 * diff) + vec3(1.0) * (uSpecularLevel * spec);
                 outColor = vec4(lit * ao, baseColor.a);
+            } else {
+                outColor = baseColor;
+            }
+            return;
+        }
+
+        if (uIsWireframe == 12) {
+            vec4 baseColor = vec4(0.0, 0.9, 1.0, uAlpha);
+            if (uEnableLighting) {
+                vec3 viewPos3 = vViewPos.xyz;
+                vec3 dX = dFdx(viewPos3); vec3 dY = dFdy(viewPos3);
+                float lX = length(dX); if (lX > 1e-12) dX /= lX;
+                float lY = length(dY); if (lY > 1e-12) dY /= lY;
+                vec3 rawN = cross(dX, dY);
+                float lenN = length(rawN);
+                vec3 normal = (lenN > 1e-4) ? (rawN / lenN) : vec3(0.0, 0.0, 1.0);
+                if (normal.z < 0.0) normal = -normal;
+                vec3 lightDir = vec3(0.0, 0.0, 1.0);
+                float diff = max(dot(normal, lightDir), 0.0);
+                vec3 lit = baseColor.rgb * (uAmbientLevel + 0.7 * diff);
+                outColor = vec4(lit, baseColor.a);
+            } else {
+                outColor = baseColor;
+            }
+            return;
+        }
+
+        if (uIsWireframe == 13) {
+            vec4 baseColor = vec4(1.0, 0.24, 0.0, uAlpha);
+            if (uEnableLighting) {
+                vec3 viewPos3 = vViewPos.xyz;
+                vec3 dX = dFdx(viewPos3); vec3 dY = dFdy(viewPos3);
+                float lX = length(dX); if (lX > 1e-12) dX /= lX;
+                float lY = length(dY); if (lY > 1e-12) dY /= lY;
+                vec3 rawN = cross(dX, dY);
+                float lenN = length(rawN);
+                vec3 normal = (lenN > 1e-4) ? (rawN / lenN) : vec3(0.0, 0.0, 1.0);
+                if (normal.z < 0.0) normal = -normal;
+                vec3 lightDir = vec3(0.0, 0.0, 1.0);
+                float diff = max(dot(normal, lightDir), 0.0);
+                vec3 reflectDir = reflect(-lightDir, normal);
+                float spec = pow(max(dot(reflectDir, vec3(0.0, 0.0, 1.0)), 0.0), 16.0);
+                vec3 lit = baseColor.rgb * (uAmbientLevel + 0.7 * diff) + vec3(1.0) * (uSpecularLevel * spec);
+                outColor = vec4(lit, baseColor.a);
             } else {
                 outColor = baseColor;
             }
@@ -402,41 +469,15 @@ void main() {
     }
     vec3 color;
     if (!uInterpolate) {
-        vec2 texel = vTexCoord * vSliceSize - 0.5;
-        vec2 iTexel = floor(texel);
-        vec2 f = fract(texel);
-        vec2 df = fwidth(texel);
-        vec2 w = clamp((f - vec2(0.5)) / max(df, vec2(1e-5)) + vec2(0.5), 0.0, 1.0);
-
-        vec2 uv00 = (iTexel + vec2(0.5, 0.5)) / vSliceSize;
-        vec2 uv10 = (iTexel + vec2(1.5, 0.5)) / vSliceSize;
-        vec2 uv01 = (iTexel + vec2(0.5, 1.5)) / vSliceSize;
-        vec2 uv11 = (iTexel + vec2(1.5, 1.5)) / vSliceSize;
-
-        float r00 = texture(uTexture, uv00).r;
-        float r10 = texture(uTexture, uv10).r;
-        float r01 = texture(uTexture, uv01).r;
-        float r11 = texture(uTexture, uv11).r;
-
-        float t00 = getT(r00, uMin, uMax, uUseLogScale);
-        float t10 = getT(r10, uMin, uMax, uUseLogScale);
-        float t01 = getT(r01, uMin, uMax, uUseLogScale);
-        float t11 = getT(r11, uMin, uMax, uUseLogScale);
-
-        vec3 c00 = getColormapColor(t00, uColormap);
-        vec3 c10 = getColormapColor(t10, uColormap);
-        vec3 c01 = getColormapColor(t01, uColormap);
-        vec3 c11 = getColormapColor(t11, uColormap);
-
-        vec3 c0 = mix(c00, c10, w.x);
-        vec3 c1 = mix(c01, c11, w.x);
-        color = mix(c0, c1, w.y);
+        vec2 cellUv = (floor(vTexCoord * vSliceSize) + vec2(0.5)) / vSliceSize;
+        float raw = texture(uTexture, cellUv).r;
+        float t = getT(raw, uMin, uMax, uUseLogScale);
+        color = getColormapColor(t, uColormap);
     } else {
         float raw = texture(uTexture, vTexCoord).r;
         float t = getT(raw, uMin, uMax, uUseLogScale);
         color = getColormapColor(t, uColormap);
     }
-    
     vec4 finalColor = vec4(color, uAlpha);
     if (uEnableLighting) {
         vec3 viewPos3 = vViewPos.xyz;
@@ -461,8 +502,9 @@ void main() {
     }
     
     if (uShowCellEdges) {
-        vec2 grid = fract(vTexCoord * vSliceSize);
-        vec2 width = fwidth(vTexCoord * vSliceSize) * 0.5;
+        vec2 edgeSize = vSliceSize;
+        vec2 grid = fract(vTexCoord * edgeSize);
+        vec2 width = fwidth(vTexCoord * edgeSize) * 0.5;
         vec2 edge = (vec2(1.0) - smoothstep(vec2(0.0), width, grid)) + smoothstep(vec2(1.0) - width, vec2(1.0), grid);
         float isEdge = clamp(edge.x + edge.y, 0.0, 1.0);
         finalColor = vec4(mix(finalColor.rgb, vec3(0.0, 0.0, 0.0), isEdge), finalColor.a);
@@ -525,6 +567,11 @@ uniform vec3 uDomainExtent;
 uniform float uDx;
 uniform float uStlMin;
 uniform float uStlMax;
+
+uniform int uAxis;
+uniform int uIsSubmesh;
+uniform int uNumSubmeshMasks;
+uniform vec4 uSubmeshMasks[8];
 
 vec3 colormap_plasma(float t) {
     return vec3(t * 1.5, t * t, 1.0 - t);
@@ -615,10 +662,27 @@ float getT(float raw, float minVal, float maxVal, bool useLogScale) {
 }
 
 void main() {
+    if (uIsSubmesh == 0 && uNumSubmeshMasks > 0) {
+        vec2 coord2D;
+        if (uAxis == 0) {
+            coord2D = vLocalPos.xy;
+        } else if (uAxis == 1) {
+            coord2D = vLocalPos.xz;
+        } else {
+            coord2D = vLocalPos.yz;
+        }
+        for (int i = 0; i < uNumSubmeshMasks; i++) {
+            vec4 maskBox = uSubmeshMasks[i];
+            if (coord2D.x >= maskBox.x && coord2D.x <= maskBox.y &&
+                coord2D.y >= maskBox.z && coord2D.y <= maskBox.w) {
+                discard;
+            }
+        }
+    }
     if (uIsWireframe > 0) {
         if (uIsWireframe >= 9 && uIsWireframe <= 11) {
             if (uIsWireframe == 10) {
-                gl_FragColor = vec4(0.0, 0.0, 0.0, uAlpha);
+                outColor = vec4(0.0, 0.95, 1.0, 0.95);
                 return;
             }
             float val = vSliceSize.y;
@@ -647,15 +711,25 @@ void main() {
                     ao = pow(max(normal.z, 0.0), 0.5);
                 }
                 vec3 lit = baseColor.rgb * (uAmbientLevel + 0.7 * diff) + vec3(1.0) * (uSpecularLevel * spec);
-                gl_FragColor = vec4(lit * ao, baseColor.a);
+                outColor = vec4(lit * ao, baseColor.a);
             } else {
-                gl_FragColor = baseColor;
+                outColor = baseColor;
             }
             return;
         }
 
+        if (uIsWireframe == 12) {
+            outColor = vec4(0.0, 0.9, 1.0, uAlpha);
+            return;
+        }
+
+        if (uIsWireframe == 13) {
+            outColor = vec4(1.0, 0.24, 0.0, uAlpha);
+            return;
+        }
+
         if (uIsWireframe == 1) {
-            gl_FragColor = vec4(0.3, 0.3, 0.4, 0.8);
+            outColor = vec4(0.3, 0.3, 0.4, 0.8);
             return;
         }
         
@@ -687,9 +761,9 @@ void main() {
                     ao = pow(max(normal.z, 0.0), 0.5);
                 }
                 vec3 lit = baseColor.rgb * (uAmbientLevel + 0.7 * diff) + vec3(1.0) * (uSpecularLevel * spec);
-                gl_FragColor = vec4(lit * ao, baseColor.a);
+                outColor = vec4(lit * ao, baseColor.a);
             } else {
-                gl_FragColor = baseColor;
+                outColor = baseColor;
             }
             return;
         }
@@ -729,9 +803,9 @@ void main() {
                         ao = pow(max(abs(normal.z), 0.2), 0.5);
                     }
                     vec3 lit = baseColor.rgb * (uAmbientLevel + 0.7 * diff) + vec3(1.0) * (uSpecularLevel * spec);
-                    gl_FragColor = vec4(lit * ao, baseColor.a);
+                    outColor = vec4(lit * ao, baseColor.a);
                 } else {
-                    gl_FragColor = baseColor;
+                    outColor = baseColor;
                 }
                 return;
             }
@@ -754,7 +828,7 @@ void main() {
             
             if (uIsWireframe == 6) {
                 if (lineCoverage < 0.01) discard;
-                gl_FragColor = vec4(wireColor.rgb, wireColor.a * lineCoverage);
+                outColor = vec4(wireColor.rgb, wireColor.a * lineCoverage);
                 return;
             }
             
@@ -787,7 +861,7 @@ void main() {
                 }
                 vec4 darkWireColor = vec4(0.0, 0.0, 0.0, litColor.a);
                 if (vSliceSize.y > 0.5) darkWireColor = vec4(0.8, 0.1, 0.1, litColor.a);
-                gl_FragColor = mix(litColor, darkWireColor, lineCoverage * 0.85);
+                outColor = mix(litColor, darkWireColor, lineCoverage * 0.85);
                 return;
             }
         }
@@ -795,46 +869,17 @@ void main() {
     }
     vec3 color;
     if (!uInterpolate) {
-        vec2 texel = vTexCoord * vSliceSize - 0.5;
-        vec2 iTexel = floor(texel);
-        vec2 f = fract(texel);
-        #ifdef GL_OES_standard_derivatives
-        vec2 df = fwidth(texel);
-        vec2 w = clamp((f - vec2(0.5)) / max(df, vec2(1e-5)) + vec2(0.5), 0.0, 1.0);
-        #else
-        vec2 w = step(0.5, f);
-        #endif
-
-        vec2 uv00 = (iTexel + vec2(0.5, 0.5)) / vSliceSize;
-        vec2 uv10 = (iTexel + vec2(1.5, 0.5)) / vSliceSize;
-        vec2 uv01 = (iTexel + vec2(0.5, 1.5)) / vSliceSize;
-        vec2 uv11 = (iTexel + vec2(1.5, 1.5)) / vSliceSize;
-
-        float r00 = texture2D(uTexture, uv00).r;
-        float r10 = texture2D(uTexture, uv10).r;
-        float r01 = texture2D(uTexture, uv01).r;
-        float r11 = texture2D(uTexture, uv11).r;
-
-        float t00 = getT(r00, uMin, uMax, uUseLogScale);
-        float t10 = getT(r10, uMin, uMax, uUseLogScale);
-        float t01 = getT(r01, uMin, uMax, uUseLogScale);
-        float t11 = getT(r11, uMin, uMax, uUseLogScale);
-
-        vec3 c00 = getColormapColor(t00, uColormap);
-        vec3 c10 = getColormapColor(t10, uColormap);
-        vec3 c01 = getColormapColor(t01, uColormap);
-        vec3 c11 = getColormapColor(t11, uColormap);
-
-        vec3 c0 = mix(c00, c10, w.x);
-        vec3 c1 = mix(c01, c11, w.x);
-        color = mix(c0, c1, w.y);
+        vec2 cellUv = (floor(vTexCoord * vSliceSize) + vec2(0.5)) / vSliceSize;
+        float raw = texture(uTexture, cellUv).r;
+        float t = getT(raw, uMin, uMax, uUseLogScale);
+        color = getColormapColor(t, uColormap);
     } else {
-        float raw = texture2D(uTexture, vTexCoord).r;
+        float raw = texture(uTexture, vTexCoord).r;
         float t = getT(raw, uMin, uMax, uUseLogScale);
         color = getColormapColor(t, uColormap);
     }
-    
     vec4 finalColor = vec4(color, uAlpha);
+    
     if (uEnableLighting) {
         vec3 viewPos3 = vViewPos.xyz;
         vec3 normal = vec3(0.0, 0.0, 1.0);
@@ -847,12 +892,6 @@ void main() {
         if (lenN > 1e-4) normal = rawN / lenN;
         if (normal.z < 0.0) normal = -normal;
         #endif
-        vec3 lightDir = normalize(vec3(0.5, 0.8, 1.0));
-        float diff = max(dot(normal, lightDir), 0.0) * 0.7 + max(dot(-normal, lightDir), 0.0) * 0.3;
-        
-        vec3 reflectDir = reflect(-lightDir, normal);
-        vec3 viewDir = normalize(-viewPos3);
-        float spec = pow(max(dot(reflectDir, viewDir), 0.0), 32.0);
         vec3 lightDir = normalize(vec3(0.5, 0.8, 1.0));
         float diff = max(dot(normal, lightDir), 0.0) * 0.7 + max(dot(-normal, lightDir), 0.0) * 0.3;
         
@@ -878,7 +917,7 @@ void main() {
         #endif
         finalColor = vec4(mix(finalColor.rgb, vec3(0.0, 0.0, 0.0), isEdge), finalColor.a);
     }
-    gl_FragColor = finalColor;
+    outColor = finalColor;
 }
 `;
 
@@ -1084,7 +1123,7 @@ fn fs_main(vertexIn: VertexOutput, @builtin(front_facing) isFront: bool) -> @loc
         if (uniforms.isWireframe >= 8.5 && uniforms.isWireframe <= 11.5) {
             if (uniforms.isWireframe > 9.5 && uniforms.isWireframe < 10.5) {
                 // 10.0: Wireframe gridlines
-                return vec4<f32>(0.0, 0.0, 0.0, uniforms.alpha);
+                return vec4<f32>(0.8, 0.8, 0.8, uniforms.alpha * 0.5);
             }
             let val = sliceSize.y;
             let t = getT(val, uniforms.minVal, uniforms.maxVal, uniforms.useLogScale);
@@ -1274,39 +1313,14 @@ fn fs_main(vertexIn: VertexOutput, @builtin(front_facing) isFront: bool) -> @loc
     }
     var color: vec3<f32>;
     if (uniforms.interpolate < 0.5) {
-        let texel = texCoord * sliceSize - vec2<f32>(0.5, 0.5);
-        let iTexel = floor(texel);
-        let fTexel = fract(texel);
-        let df = fwidth(texel);
-        let w = clamp((fTexel - vec2<f32>(0.5, 0.5)) / max(df, vec2<f32>(1e-5, 1e-5)) + vec2<f32>(0.5, 0.5), vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
-
-        let uv00 = (iTexel + vec2<f32>(0.5, 0.5)) / sliceSize;
-        let uv10 = (iTexel + vec2<f32>(1.5, 0.5)) / sliceSize;
-        let uv01 = (iTexel + vec2<f32>(0.5, 1.5)) / sliceSize;
-        let uv11 = (iTexel + vec2<f32>(1.5, 1.5)) / sliceSize;
-
-        let r00 = textureSample(uTexture, uSampler, uv00).r;
-        let r10 = textureSample(uTexture, uSampler, uv10).r;
-        let r01 = textureSample(uTexture, uSampler, uv01).r;
-        let r11 = textureSample(uTexture, uSampler, uv11).r;
-
-        let t00 = getT(r00, uniforms.minVal, uniforms.maxVal, uniforms.useLogScale);
-        let t10 = getT(r10, uniforms.minVal, uniforms.maxVal, uniforms.useLogScale);
-        let t01 = getT(r01, uniforms.minVal, uniforms.maxVal, uniforms.useLogScale);
-        let t11 = getT(r11, uniforms.minVal, uniforms.maxVal, uniforms.useLogScale);
-
-        let c00 = getColormapColor(t00, uniforms.colormap);
-        let c10 = getColormapColor(t10, uniforms.colormap);
-        let c01 = getColormapColor(t01, uniforms.colormap);
-        let c11 = getColormapColor(t11, uniforms.colormap);
-
-        let c0 = mix(c00, c10, w.x);
-        let c1 = mix(c01, c11, w.x);
-        color = mix(c0, c1, w.y);
+        let cellUv = (floor(texCoord * sliceSize) + vec2<f32>(0.5, 0.5)) / sliceSize;
+        let raw = textureSample(uTexture, uSampler, cellUv).r;
+        let t = getT(raw, uniforms.minVal, uniforms.maxVal, uniforms.useLogScale > 0.5);
+        color = getColormapColor(t, i32(uniforms.colormap));
     } else {
         let raw = textureSample(uTexture, uSampler, texCoord).r;
-        let t = getT(raw, uniforms.minVal, uniforms.maxVal, uniforms.useLogScale);
-        color = getColormapColor(t, uniforms.colormap);
+        let t = getT(raw, uniforms.minVal, uniforms.maxVal, uniforms.useLogScale > 0.5);
+        color = getColormapColor(t, i32(uniforms.colormap));
     }
 
     var finalColor = vec4<f32>(color, uniforms.alpha);
@@ -1381,6 +1395,16 @@ let cachedHeight = 0;
 let gl: WebGL2RenderingContext | null = null;
 let program: WebGLProgram | null = null;
 let bboxBuffer: WebGLBuffer | null = null;
+let amrTilesBuffer: WebGLBuffer | null = null;
+let amrTilesCount = 0;
+let gpuAMRTilesBuffer: any = null;
+
+let sliceGridlinesBuffer: WebGLBuffer | null = null;
+let sliceGridlinesCount = 0;
+let gpuSliceGridlinesBuffer: any = null;
+
+let amrLeafTilesCache: any[] = [];
+let slicesConfigCache: any[] = [];
 
 let ctx2D: OffscreenCanvasRenderingContext2D | null = null;
 
@@ -1433,6 +1457,7 @@ let stlAutoScale = true;
 let stlLogScale = false;
 let stlMinVal = 101325.0;
 let stlMaxVal = 1013250.0;
+let meshType = 'regular';
 
 let latestVolume3DData: Float32Array | null = null;
 let stlVolMin = 0.0;
@@ -1496,6 +1521,14 @@ interface CachedSlice {
     offset: number;
     w: number;
     h: number;
+    xmin: number;
+    xmax: number;
+    ymin: number;
+    ymax: number;
+    zmin: number;
+    zmax: number;
+    level: number;
+    is_submesh: boolean;
     data: Float32Array;
     minY?: number;
     maxY?: number;
@@ -1509,10 +1542,31 @@ let cachedSlices: CachedSlice[] = [];
 let xmin = 0.0;
 let ymin = 0.0;
 let zmin = 0.0;
+let xmax = 1.0;
+let ymax = 1.0;
+let zmax = 1.0;
 let dx = 0.01;
+let dy = 0.01;
+let dz = 0.01;
 let nx = 64;
 let ny = 64;
 let nz = 64;
+
+function getDimX(): number {
+    if (xmax !== undefined && xmax > xmin) return xmax - xmin;
+    if (nx && dx && nx * dx > 0) return nx * dx;
+    return 1.0;
+}
+function getDimY(): number {
+    if (ymax !== undefined && ymax > ymin) return ymax - ymin;
+    if (ny && (dy || dx) && ny * (dy || dx) > 0) return ny * (dy || dx);
+    return 1.0;
+}
+function getDimZ(): number {
+    if (zmax !== undefined && zmax > zmin) return zmax - zmin;
+    if (nz && (dz || dx) && nz * (dz || dx) > 0) return nz * (dz || dx);
+    return 1.0;
+}
 
 // Axes Indicator Buffers
 let gpuAxesBuffer: any = null;
@@ -1686,9 +1740,9 @@ function updateSTLGeometry() {
         return;
     }
 
-    const sizeX = nx * dx || 1.0;
-    const sizeY = ny * dx || 1.0;
-    const sizeZ = nz * dx || 1.0;
+    const sizeX = getDimX();
+    const sizeY = getDimY();
+    const sizeZ = getDimZ();
 
     const count = rawSTLVertices.length / 3;
     const data = new Float32Array(count * 7);
@@ -2074,6 +2128,14 @@ interface SliceDataWebGPU {
     offset: number;
     w: number;
     h: number;
+    xmin: number;
+    xmax: number;
+    ymin: number;
+    ymax: number;
+    zmin: number;
+    zmax: number;
+    level: number;
+    is_submesh: boolean;
     gpuTexture: any;
     gpuTextureView: any;
     vertexBuffer: any;
@@ -2092,6 +2154,14 @@ interface SliceDataWebGL {
     offset: number;
     w: number;
     h: number;
+    xmin: number;
+    xmax: number;
+    ymin: number;
+    ymax: number;
+    zmin: number;
+    zmax: number;
+    level: number;
+    is_submesh: boolean;
     texture: WebGLTexture;
     buffer: WebGLBuffer;
     opacity: number;
@@ -2472,9 +2542,9 @@ function updateGaugesGeometry() {
     const cellMeters = (dx && dx > 0) ? dx : 0.01;
     const radiusMeters = mult * cellMeters * 0.5;
 
-    const dimX = (nx && dx) ? (nx * dx) : 1.0;
-    const dimY = (ny && dx) ? (ny * dx) : 1.0;
-    const dimZ = (nz && dx) ? (nz * dx) : 1.0;
+    const dimX = getDimX();
+    const dimY = getDimY();
+    const dimZ = getDimZ();
 
     const rx = radiusMeters / dimX;
     const ry = radiusMeters / dimY;
@@ -2485,9 +2555,9 @@ function updateGaugesGeometry() {
         const gx = Number(g.x ?? 0.0);
         const gy = Number(g.y ?? 0.0);
         const gz = Number(g.z ?? 0.0);
-        const px = (gx - xmin) / dimX - 0.5;
-        const py = (gy - ymin) / dimY - 0.5;
-        const pz = (gz - zmin) / dimZ - 0.5;
+        const px = normX(gx);
+        const py = normY(gy);
+        const pz = normZ(gz);
 
         const sphereVerts = getSphereVertices(px, py, pz, rx, ry, rz);
         verts.push(...sphereVerts);
@@ -2517,6 +2587,280 @@ function updateGaugesGeometry() {
             new Float32Array(gpuGaugesBuffer.getMappedRange()).set(verts);
             gpuGaugesBuffer.unmap();
         }
+    }
+}
+let chargeData: any = null;
+let showCharge: boolean = true;
+let chargeSolid: boolean = true;
+let chargeWireframe: boolean = true;
+let chargeLighting: boolean = true;
+let chargeOpacity: number = 0.65;
+let chargeColor: string = '#ff3d00';
+let chargeBuffer: WebGLBuffer | null = null;
+let chargeCount: number = 0;
+let chargeWireBuffer: WebGLBuffer | null = null;
+let chargeWireCount: number = 0;
+
+function getBoxVertices(x0: number, x1: number, y0: number, y1: number, z0: number, z1: number): number[] {
+    const verts: number[] = [];
+    const addTri = (p1: number[], p2: number[], p3: number[]) => {
+        verts.push(...p1, 0, 0, 0, 0);
+        verts.push(...p2, 0, 0, 0, 0);
+        verts.push(...p3, 0, 0, 0, 0);
+    };
+
+    const c = [
+        [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],
+        [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]
+    ];
+
+    addTri(c[0], c[2], c[1]); addTri(c[0], c[3], c[2]);
+    addTri(c[4], c[5], c[6]); addTri(c[4], c[6], c[7]);
+    addTri(c[0], c[1], c[5]); addTri(c[0], c[5], c[4]);
+    addTri(c[3], c[6], c[2]); addTri(c[3], c[7], c[6]);
+    addTri(c[0], c[4], c[7]); addTri(c[0], c[7], c[3]);
+    addTri(c[1], c[2], c[6]); addTri(c[1], c[6], c[5]);
+
+    return verts;
+}
+
+function getBoxWireframeVertices(x0: number, x1: number, y0: number, y1: number, z0: number, z1: number): number[] {
+    const verts: number[] = [];
+    const addLine = (p1: number[], p2: number[]) => {
+        verts.push(...p1, 0, 0);
+        verts.push(...p2, 0, 0);
+    };
+
+    const c = [
+        [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],
+        [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]
+    ];
+
+    addLine(c[0], c[1]); addLine(c[1], c[2]); addLine(c[2], c[3]); addLine(c[3], c[0]);
+    addLine(c[4], c[5]); addLine(c[5], c[6]); addLine(c[6], c[7]); addLine(c[7], c[4]);
+    addLine(c[0], c[4]); addLine(c[1], c[5]); addLine(c[2], c[6]); addLine(c[3], c[7]);
+
+    return verts;
+}
+function updateChargeGeometry() {
+    if (!chargeData) {
+        chargeCount = 0;
+        chargeWireCount = 0;
+        return;
+    }
+
+    const dimX = getDimX();
+    const dimY = getDimY();
+    const dimZ = getDimZ();
+
+    const cx = Number(chargeData.x ?? (xmin + dimX * 0.5));
+    const cy = Number(chargeData.y ?? (ymin + dimY * 0.5));
+    const cz = Number(chargeData.z ?? (zmin + dimZ * 0.5));
+
+    const px = normX(cx);
+    const py = normY(cy);
+    const pz = normZ(cz);
+
+    const shape = chargeData.shape || 'Sphere';
+    let solidVerts: number[] = [];
+    let wireVerts: number[] = [];
+
+    if (shape === 'Block') {
+        const lx = Number(chargeData.lx ?? 0.2);
+        const ly = Number(chargeData.ly ?? 0.2);
+        const lz = Number(chargeData.lz ?? 0.2);
+
+        const x0 = px - (lx * 0.5) / dimX;
+        const x1 = px + (lx * 0.5) / dimX;
+        const y0 = py - (ly * 0.5) / dimY;
+        const y1 = py + (ly * 0.5) / dimY;
+        const z0 = pz - (lz * 0.5) / dimZ;
+        const z1 = pz + (lz * 0.5) / dimZ;
+
+        solidVerts = getBoxVertices(x0, x1, y0, y1, z0, z1);
+        wireVerts = getBoxWireframeVertices(x0, x1, y0, y1, z0, z1);
+    } else {
+        const r = Number(chargeData.radius ?? 0.1);
+        const rx = r / dimX;
+        const ry = r / dimY;
+        const rz = r / dimZ;
+
+        solidVerts = getSphereVertices(px, py, pz, rx, ry, rz);
+        const x0 = px - rx; const x1 = px + rx;
+        const y0 = py - ry; const y1 = py + ry;
+        const z0 = pz - rz; const z1 = pz + rz;
+        wireVerts = getBoxWireframeVertices(x0, x1, y0, y1, z0, z1);
+    }
+
+    if (gl) {
+        if (!chargeBuffer) chargeBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, chargeBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(solidVerts), gl.STATIC_DRAW);
+        chargeCount = solidVerts.length / 7;
+
+        if (!chargeWireBuffer) chargeWireBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, chargeWireBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(wireVerts), gl.STATIC_DRAW);
+        chargeWireCount = wireVerts.length / 5;
+    }
+}
+
+function normX(x: number): number {
+    const dimX = getDimX();
+    return (x - xmin) / dimX - 0.5;
+}
+function normY(y: number): number {
+    const dimY = getDimY();
+    return (y - ymin) / dimY - 0.5;
+}
+function normZ(z: number): number {
+    const dimZ = getDimZ();
+    return (z - zmin) / dimZ - 0.5;
+}
+
+function updateAMRTilesGeometry(tiles: any[]) {
+    if (!tiles || tiles.length === 0) {
+        amrTilesCount = 0;
+        return;
+    }
+    const floatArray = new Float32Array(tiles.length * 12 * 2 * 5);
+    let offset = 0;
+    for (const t of tiles) {
+        const xMin = Number(t.xmin ?? t.x_min ?? 0.0);
+        const xMax = Number(t.xmax ?? t.x_max ?? 1.0);
+        const yMin = Number(t.ymin ?? t.y_min ?? 0.0);
+        const yMax = Number(t.ymax ?? t.y_max ?? 1.0);
+        const zMin = Number(t.zmin ?? t.z_min ?? 0.0);
+        const zMax = Number(t.zmax ?? t.z_max ?? 1.0);
+
+        const x0 = normX(xMin), x1 = normX(xMax);
+        const y0 = normY(yMin), y1 = normY(yMax);
+        const z0 = normZ(zMin), z1 = normZ(zMax);
+
+        const edges = [
+            x0,y0,z0, x1,y0,z0,  x1,y0,z0, x1,y1,z0,  x1,y1,z0, x0,y1,z0,  x0,y1,z0, x0,y0,z0,
+            x0,y0,z1, x1,y0,z1,  x1,y0,z1, x1,y1,z1,  x1,y1,z1, x0,y1,z1,  x0,y1,z1, x0,y0,z1,
+            x0,y0,z0, x0,y0,z1,  x1,y0,z0, x1,y0,z1,  x1,y1,z0, x1,y1,z1,  x0,y1,z0, x0,y1,z1
+        ];
+
+        for (let i = 0; i < edges.length; i += 3) {
+            floatArray[offset++] = edges[i];
+            floatArray[offset++] = edges[i+1];
+            floatArray[offset++] = edges[i+2];
+            floatArray[offset++] = 0.0;
+            floatArray[offset++] = 0.0;
+        }
+    }
+    amrTilesCount = tiles.length * 24;
+
+    if (gl) {
+        if (!amrTilesBuffer) amrTilesBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, amrTilesBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, floatArray, gl.DYNAMIC_DRAW);
+    }
+    if (gpuDevice) {
+        if (gpuAMRTilesBuffer) gpuAMRTilesBuffer.destroy();
+        gpuAMRTilesBuffer = gpuDevice.createBuffer({
+            size: floatArray.byteLength,
+            usage: 0x20 | 0x08, // GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
+            mappedAtCreation: true
+        });
+        new Float32Array(gpuAMRTilesBuffer.getMappedRange()).set(floatArray);
+        gpuAMRTilesBuffer.unmap();
+    }
+}
+
+function updateSliceAMRGridlinesGeometry() {
+    if (!amrLeafTilesCache || amrLeafTilesCache.length === 0 || !slicesConfigCache || slicesConfigCache.length === 0) {
+        sliceGridlinesCount = 0;
+        return;
+    }
+
+    const lineVertices: number[] = [];
+    const N = 32; // 32x32 fine submesh cells per tile slice
+
+    for (const slice of slicesConfigCache) {
+        if (slice.enabled === false) continue;
+
+        const axis = slice.axis || 'xy';
+        const rawOffset = slice.offset ?? 0.0;
+
+        for (const tile of amrLeafTilesCache) {
+            const tileXMin = Number(tile.xmin ?? tile.x_min ?? 0.0);
+            const tileXMax = Number(tile.xmax ?? tile.x_max ?? 1.0);
+            const tileYMin = Number(tile.ymin ?? tile.y_min ?? 0.0);
+            const tileYMax = Number(tile.ymax ?? tile.y_max ?? 1.0);
+            const tileZMin = Number(tile.zmin ?? tile.z_min ?? 0.0);
+            const tileZMax = Number(tile.zmax ?? tile.z_max ?? 1.0);
+
+            if (axis === 'xy') {
+                if (rawOffset < tileZMin - 1e-4 || rawOffset > tileZMax + 1e-4) continue;
+                const x0 = normX(tileXMin), x1 = normX(tileXMax);
+                const y0 = normY(tileYMin), y1 = normY(tileYMax);
+                const z = normZ(rawOffset);
+
+                for (let i = 0; i <= N; ++i) {
+                    const x = x0 + (i / N) * (x1 - x0);
+                    lineVertices.push(x, y0, z, 0, 0, x, y1, z, 0, 0);
+                }
+                for (let j = 0; j <= N; ++j) {
+                    const y = y0 + (j / N) * (y1 - y0);
+                    lineVertices.push(x0, y, z, 0, 0, x1, y, z, 0, 0);
+                }
+            } else if (axis === 'xz') {
+                if (rawOffset < tileYMin - 1e-4 || rawOffset > tileYMax + 1e-4) continue;
+                const x0 = normX(tileXMin), x1 = normX(tileXMax);
+                const z0 = normZ(tileZMin), z1 = normZ(tileZMax);
+                const y = normY(rawOffset);
+
+                for (let i = 0; i <= N; ++i) {
+                    const x = x0 + (i / N) * (x1 - x0);
+                    lineVertices.push(x, y, z0, 0, 0, x, y, z1, 0, 0);
+                }
+                for (let k = 0; k <= N; ++k) {
+                    const z = z0 + (k / N) * (z1 - z0);
+                    lineVertices.push(x0, y, z, 0, 0, x1, y, z, 0, 0);
+                }
+            } else if (axis === 'yz') {
+                if (rawOffset < tileXMin - 1e-4 || rawOffset > tileXMax + 1e-4) continue;
+                const y0 = normY(tileYMin), y1 = normY(tileYMax);
+                const z0 = normZ(tileZMin), z1 = normZ(tileZMax);
+                const x = normX(rawOffset);
+
+                for (let j = 0; j <= N; ++j) {
+                    const y = y0 + (j / N) * (y1 - y0);
+                    lineVertices.push(x, y, z0, 0, 0, x, y, z1, 0, 0);
+                }
+                for (let k = 0; k <= N; ++k) {
+                    const z = z0 + (k / N) * (z1 - z0);
+                    lineVertices.push(x, y0, z, 0, 0, x, y1, z, 0, 0);
+                }
+            }
+        }
+    }
+
+    if (lineVertices.length === 0) {
+        sliceGridlinesCount = 0;
+        return;
+    }
+
+    const floatArray = new Float32Array(lineVertices);
+    sliceGridlinesCount = floatArray.length / 5;
+
+    if (gl) {
+        if (!sliceGridlinesBuffer) sliceGridlinesBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, sliceGridlinesBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, floatArray, gl.DYNAMIC_DRAW);
+    }
+    if (gpuDevice) {
+        if (gpuSliceGridlinesBuffer) gpuSliceGridlinesBuffer.destroy();
+        gpuSliceGridlinesBuffer = gpuDevice.createBuffer({
+            size: floatArray.byteLength,
+            usage: 0x20 | 0x08,
+            mappedAtCreation: true
+        });
+        new Float32Array(gpuSliceGridlinesBuffer.getMappedRange()).set(floatArray);
+        gpuSliceGridlinesBuffer.unmap();
     }
 }
 
@@ -2616,20 +2960,20 @@ function cross(a: number[], b: number[]) { return [a[1]*b[2]-a[2]*b[1], a[2]*b[0
 function normalize(a: number[]) { let len = Math.hypot(a[0], a[1], a[2]); if (len>0) { return [a[0]/len, a[1]/len, a[2]/len]; } return [0,0,0]; }
 
 function getSliceCenterDistance(axis: number, offset: number, eye: number[]): number {
-    const dimX = (nx && dx) ? (nx * dx) : 1.0;
-    const dimY = (ny && dx) ? (ny * dx) : 1.0;
-    const dimZ = (nz && dx) ? (nz * dx) : 1.0;
+    const dimX = getDimX();
+    const dimY = getDimY();
+    const dimZ = getDimZ();
 
     let sx = 0;
     let sy = 0;
     let sz = 0;
 
     if (axis === 0) { // XY
-        sz = (offset - zmin) / dimZ - 0.5;
+        sz = normZ(offset);
     } else if (axis === 1) { // XZ
-        sy = (offset - ymin) / dimY - 0.5;
+        sy = normY(offset);
     } else { // YZ
-        sx = (offset - xmin) / dimX - 0.5;
+        sx = normX(offset);
     }
 
     const dxVal = eye[0] - sx;
@@ -2646,9 +2990,9 @@ function updateMatrices(width: number, height: number) {
     const zFar = 1000.0;
 
     // Model matrix (Scaling)
-    const sizeX = nx * dx || 1.0;
-    const sizeY = ny * dx || 1.0;
-    const sizeZ = nz * dx || 1.0;
+    const sizeX = getDimX();
+    const sizeY = getDimY();
+    const sizeZ = getDimZ();
     const maxSize = Math.max(sizeX, sizeY, sizeZ);
     const sX = sizeX / maxSize;
     const sY = sizeY / maxSize;
@@ -2727,39 +3071,64 @@ function updateMatrices(width: number, height: number) {
     }
 }
 
-function getSliceGeometry(axis: number, offset: number, w: number, h: number) {
+function getSliceGeometry(
+    axis: number,
+    offset: number,
+    w: number,
+    h: number,
+    x0?: number,
+    x1?: number,
+    y0?: number,
+    y1?: number,
+    z0?: number,
+    z1?: number,
+    level: number = 0
+) {
+    const xMinVal = x0 !== undefined ? x0 : xmin;
+    const xMaxVal = x1 !== undefined ? x1 : (xmin + getDimX());
+    const yMinVal = y0 !== undefined ? y0 : ymin;
+    const yMaxVal = y1 !== undefined ? y1 : (ymin + getDimY());
+    const zMinVal = z0 !== undefined ? z0 : zmin;
+    const zMaxVal = z1 !== undefined ? z1 : (zmin + getDimZ());
+
+    const nx0 = normX(xMinVal);
+    const nx1 = normX(xMaxVal);
+    const ny0 = normY(yMinVal);
+    const ny1 = normY(yMaxVal);
+    const nz0 = normZ(zMinVal);
+    const nz1 = normZ(zMaxVal);
+
+    const zEpsilon = 1e-5 * level;
+
     if (axis === 0) { // XY
-        const dimZ = (nz && dx) ? (nz * dx) : 1.0;
-        const z = (offset - zmin) / dimZ - 0.5;
+        const z = normZ(offset) + zEpsilon;
         return new Float32Array([
-            -0.5, -0.5, z,  0, 0,  w, h,
-             0.5, -0.5, z,  1, 0,  w, h,
-             0.5,  0.5, z,  1, 1,  w, h,
-            -0.5, -0.5, z,  0, 0,  w, h,
-             0.5,  0.5, z,  1, 1,  w, h,
-            -0.5,  0.5, z,  0, 1,  w, h
+            nx0, ny0, z,  0, 0,  w, h,
+            nx1, ny0, z,  1, 0,  w, h,
+            nx1, ny1, z,  1, 1,  w, h,
+            nx0, ny0, z,  0, 0,  w, h,
+            nx1, ny1, z,  1, 1,  w, h,
+            nx0, ny1, z,  0, 1,  w, h
         ]);
     } else if (axis === 1) { // XZ
-        const dimY = (ny && dx) ? (ny * dx) : 1.0;
-        const y = (offset - ymin) / dimY - 0.5;
+        const y = normY(offset) + zEpsilon;
         return new Float32Array([
-            -0.5, y, -0.5,  0, 0,  w, h,
-             0.5, y, -0.5,  1, 0,  w, h,
-             0.5, y,  0.5,  1, 1,  w, h,
-            -0.5, y, -0.5,  0, 0,  w, h,
-             0.5, y,  0.5,  1, 1,  w, h,
-            -0.5, y,  0.5,  0, 1,  w, h
+            nx0, y, nz0,  0, 0,  w, h,
+            nx1, y, nz0,  1, 0,  w, h,
+            nx1, y, nz1,  1, 1,  w, h,
+            nx0, y, nz0,  0, 0,  w, h,
+            nx1, y, nz1,  1, 1,  w, h,
+            nx0, y, nz1,  0, 1,  w, h
         ]);
     } else { // YZ
-        const dimX = (nx && dx) ? (nx * dx) : 1.0;
-        const x = (offset - xmin) / dimX - 0.5;
+        const x = normX(offset) + zEpsilon;
         return new Float32Array([
-            x, -0.5, -0.5,  0, 0,  w, h,
-            x,  0.5, -0.5,  1, 0,  w, h,
-            x,  0.5,  0.5,  1, 1,  w, h,
-            x, -0.5, -0.5,  0, 0,  w, h,
-            x,  0.5,  0.5,  1, 1,  w, h,
-            x, -0.5,  0.5,  0, 1,  w, h
+            x, ny0, nz0,  0, 0,  w, h,
+            x, ny1, nz0,  1, 0,  w, h,
+            x, ny1, nz1,  1, 1,  w, h,
+            x, ny0, nz0,  0, 0,  w, h,
+            x, ny1, nz1,  1, 1,  w, h,
+            x, ny0, nz1,  0, 1,  w, h
         ]);
     }
 }
@@ -2799,14 +3168,26 @@ function handleFrame(buffer: ArrayBuffer) {
         const zOff = view.getFloat32(cacheOffset + 4, true);
         const w = view.getUint32(cacheOffset + 8, true);
         const h = view.getUint32(cacheOffset + 12, true);
-        const dataStart = cacheOffset + 16;
+        const xminVal = view.getFloat32(cacheOffset + 16, true);
+        const xmaxVal = view.getFloat32(cacheOffset + 20, true);
+        const yminVal = view.getFloat32(cacheOffset + 24, true);
+        const ymaxVal = view.getFloat32(cacheOffset + 28, true);
+        const zminVal = view.getFloat32(cacheOffset + 32, true);
+        const zmaxVal = view.getFloat32(cacheOffset + 36, true);
+        const level = view.getUint32(cacheOffset + 40, true);
+        const isSubmesh = view.getUint32(cacheOffset + 44, true) !== 0;
+
+        const dataStart = cacheOffset + 48;
         let numElements = w * h;
         let volNz = nz || 64;
         if (axis === 4) {
             volNz = (Math.round(zOff) > 0) ? Math.round(zOff) : (nz || 64);
             numElements = w * h * volNz;
         }
-        const floatData = new Float32Array(buffer, dataStart, numElements);
+        const availableBytes = Math.max(0, buffer.byteLength - dataStart);
+        const availableElements = Math.floor(availableBytes / 4);
+        const actualElements = Math.min(numElements, availableElements);
+        const floatData = new Float32Array(buffer, dataStart, actualElements);
 
         const useAxis = axis;
         const useOffset = zOff;
@@ -2837,6 +3218,14 @@ function handleFrame(buffer: ArrayBuffer) {
                 offset: useOffset,
                 w,
                 h,
+                xmin: xminVal,
+                xmax: xmaxVal,
+                ymin: yminVal,
+                ymax: ymaxVal,
+                zmin: zminVal,
+                zmax: zmaxVal,
+                level,
+                is_submesh: isSubmesh,
                 data: new Float32Array(floatData)
             });
         }
@@ -2851,26 +3240,35 @@ function handleFrame(buffer: ArrayBuffer) {
         const qty = config.quantities?.[0] || 'pressure';
         const sliceAutoScale = config.auto_scale !== false;
         const colormapVal = quantityColormaps[qty] || config.colormap || 'plasma';
-        const logVal = config.log_scale === true;
         const interpVal = config.interpolate !== false;
         
         let sliceMin = Infinity;
         let sliceMax = -Infinity;
+        let slicePosMin = Infinity;
         for (let j = 0; j < slice.data.length; j++) {
             const v = slice.data[j];
             if (isFinite(v)) {
                 if (v < sliceMin) sliceMin = v;
                 if (v > sliceMax) sliceMax = v;
+                if (v > 0 && v < slicePosMin) slicePosMin = v;
             }
         }
+        const logVal = config.log_scale === true || (sliceMax > 0 && sliceMin > 0 && (sliceMax / sliceMin > 50.0));
 
         let sliceMinY = minY;
         let sliceMaxY = maxY;
 
         if (sliceAutoScale) {
             if (sliceMin < sliceMax) {
-                sliceMinY = sliceMin;
-                sliceMaxY = sliceMax;
+                if (logVal && sliceMax > 0) {
+                    const dynamicFloor = sliceMax / 1000000.0;
+                    const effMin = (isFinite(slicePosMin) && slicePosMin > dynamicFloor) ? slicePosMin : dynamicFloor;
+                    sliceMinY = effMin;
+                    sliceMaxY = sliceMax;
+                } else {
+                    sliceMinY = sliceMin;
+                    sliceMaxY = sliceMax;
+                }
             } else {
                 const range = config.min_val !== undefined && config.max_val !== undefined ? [config.min_val, config.max_val] : (quantityRanges[qty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0]);
                 sliceMinY = range[0];
@@ -2946,7 +3344,7 @@ function handleFrame(buffer: ArrayBuffer) {
             const opacity = sliceOpacities[i] !== undefined ? sliceOpacities[i] : 1.0;
 
             let slice: SliceDataWebGPU;
-            const geo = getSliceGeometry(axis, zOff, w, h);
+            const geo = getSliceGeometry(axis, zOff, w, h, sliceObj.xmin, sliceObj.xmax, sliceObj.ymin, sliceObj.ymax, sliceObj.zmin, sliceObj.zmax, sliceObj.level);
 
             if (activeSlicesWebGPU[i]) {
                 slice = activeSlicesWebGPU[i];
@@ -2992,6 +3390,14 @@ function handleFrame(buffer: ArrayBuffer) {
                 );
                 gpuDevice.queue.writeBuffer(slice.vertexBuffer, 0, geo);
                 slice.axis = axis; slice.offset = zOff; slice.opacity = opacity;
+                slice.xmin = sliceObj.xmin;
+                slice.xmax = sliceObj.xmax;
+                slice.ymin = sliceObj.ymin;
+                slice.ymax = sliceObj.ymax;
+                slice.zmin = sliceObj.zmin;
+                slice.zmax = sliceObj.zmax;
+                slice.level = sliceObj.level;
+                slice.is_submesh = sliceObj.is_submesh;
                 slice.minY = sliceObj.minY; slice.maxY = sliceObj.maxY;
                 slice.colormap = sliceObj.colormap; slice.useLogScale = sliceObj.useLogScale; slice.interpolate = sliceObj.interpolate;
             } else {
@@ -3033,7 +3439,31 @@ function handleFrame(buffer: ArrayBuffer) {
                     ]
                 });
 
-                slice = { axis, offset: zOff, w, h, gpuTexture: tex, gpuTextureView: texView, vertexBuffer: vb, bindGroup, opacity, index: i, minY: sliceObj.minY, maxY: sliceObj.maxY, colormap: sliceObj.colormap, useLogScale: sliceObj.useLogScale, interpolate: sliceObj.interpolate };
+                slice = {
+                    axis,
+                    offset: zOff,
+                    w,
+                    h,
+                    xmin: sliceObj.xmin,
+                    xmax: sliceObj.xmax,
+                    ymin: sliceObj.ymin,
+                    ymax: sliceObj.ymax,
+                    zmin: sliceObj.zmin,
+                    zmax: sliceObj.zmax,
+                    level: sliceObj.level,
+                    is_submesh: sliceObj.is_submesh,
+                    gpuTexture: tex,
+                    gpuTextureView: texView,
+                    vertexBuffer: vb,
+                    bindGroup,
+                    opacity,
+                    index: i,
+                    minY: sliceObj.minY,
+                    maxY: sliceObj.maxY,
+                    colormap: sliceObj.colormap,
+                    useLogScale: sliceObj.useLogScale,
+                    interpolate: sliceObj.interpolate
+                };
                 activeSlicesWebGPU[i] = slice;
             }
         });
@@ -3070,19 +3500,27 @@ function handleFrame(buffer: ArrayBuffer) {
             activeGl.bindTexture(activeGl.TEXTURE_2D, slice.texture);
             activeGl.texImage2D(activeGl.TEXTURE_2D, 0, internalFormat, w, h, 0, format, activeGl.FLOAT, floatData);
 
-            const filter = hasFloatLinear ? activeGl.LINEAR : activeGl.NEAREST;
+            const filter = (sliceObj.interpolate === false) ? activeGl.NEAREST : (hasFloatLinear ? activeGl.LINEAR : activeGl.NEAREST);
             activeGl.texParameteri(activeGl.TEXTURE_2D, activeGl.TEXTURE_MIN_FILTER, filter);
             activeGl.texParameteri(activeGl.TEXTURE_2D, activeGl.TEXTURE_MAG_FILTER, filter);
             activeGl.texParameteri(activeGl.TEXTURE_2D, activeGl.TEXTURE_WRAP_S, activeGl.CLAMP_TO_EDGE);
             activeGl.texParameteri(activeGl.TEXTURE_2D, activeGl.TEXTURE_WRAP_T, activeGl.CLAMP_TO_EDGE);
 
             activeGl.bindBuffer(activeGl.ARRAY_BUFFER, slice.buffer);
-            activeGl.bufferData(activeGl.ARRAY_BUFFER, getSliceGeometry(axis, zOff, w, h), activeGl.STATIC_DRAW);
+            activeGl.bufferData(activeGl.ARRAY_BUFFER, getSliceGeometry(axis, zOff, w, h, sliceObj.xmin, sliceObj.xmax, sliceObj.ymin, sliceObj.ymax, sliceObj.zmin, sliceObj.zmax, sliceObj.level), activeGl.STATIC_DRAW);
 
             slice.axis = axis;
             slice.offset = zOff;
             slice.w = w;
             slice.h = h;
+            slice.xmin = sliceObj.xmin;
+            slice.xmax = sliceObj.xmax;
+            slice.ymin = sliceObj.ymin;
+            slice.ymax = sliceObj.ymax;
+            slice.zmin = sliceObj.zmin;
+            slice.zmax = sliceObj.zmax;
+            slice.level = sliceObj.level;
+            slice.is_submesh = sliceObj.is_submesh;
             slice.opacity = opacity;
             slice.minY = sliceObj.minY;
             slice.maxY = sliceObj.maxY;
@@ -3101,9 +3539,31 @@ function handleFrame(buffer: ArrayBuffer) {
 
             const buf = activeGl.createBuffer()!;
             activeGl.bindBuffer(activeGl.ARRAY_BUFFER, buf);
-            activeGl.bufferData(activeGl.ARRAY_BUFFER, getSliceGeometry(axis, zOff, w, h), activeGl.STATIC_DRAW);
+            activeGl.bufferData(activeGl.ARRAY_BUFFER, getSliceGeometry(axis, zOff, w, h, sliceObj.xmin, sliceObj.xmax, sliceObj.ymin, sliceObj.ymax, sliceObj.zmin, sliceObj.zmax, sliceObj.level), activeGl.STATIC_DRAW);
 
-            slice = { axis, offset: zOff, w, h, texture: tex, buffer: buf, opacity, index: i, minY: sliceObj.minY, maxY: sliceObj.maxY, colormap: sliceObj.colormap, useLogScale: sliceObj.useLogScale, interpolate: sliceObj.interpolate };
+            slice = {
+                axis,
+                offset: zOff,
+                w,
+                h,
+                xmin: sliceObj.xmin,
+                xmax: sliceObj.xmax,
+                ymin: sliceObj.ymin,
+                ymax: sliceObj.ymax,
+                zmin: sliceObj.zmin,
+                zmax: sliceObj.zmax,
+                level: sliceObj.level,
+                is_submesh: sliceObj.is_submesh,
+                texture: tex,
+                buffer: buf,
+                opacity,
+                index: i,
+                minY: sliceObj.minY,
+                maxY: sliceObj.maxY,
+                colormap: sliceObj.colormap,
+                useLogScale: sliceObj.useLogScale,
+                interpolate: sliceObj.interpolate
+            };
             activeSlicesWebGL[i] = slice;
         }
     });
@@ -3124,14 +3584,523 @@ function multiplyMatrices(a: Float32Array, b: Float32Array): Float32Array {
     return out;
 }
 
-function projectPoint(v: number[], mvp: Float32Array, width: number, height: number) {
+function invertMatrix4(m: Float32Array): Float32Array | null {
+    const inv = new Float32Array(16);
+    inv[0]  =  m[5]*m[10]*m[15] - m[5]*m[11]*m[14] - m[9]*m[6]*m[15] + m[9]*m[7]*m[14] + m[13]*m[6]*m[11] - m[13]*m[7]*m[10];
+    inv[4]  = -m[4]*m[10]*m[15] + m[4]*m[11]*m[14] + m[8]*m[6]*m[15] - m[8]*m[7]*m[14] - m[12]*m[6]*m[11] + m[12]*m[7]*m[10];
+    inv[8]  =  m[4]*m[9] *m[15] - m[4]*m[11]*m[13] - m[8]*m[5]*m[15] + m[8]*m[7]*m[13] + m[12]*m[5]*m[11] - m[12]*m[7]*m[9];
+    inv[12] = -m[4]*m[9] *m[14] + m[4]*m[10]*m[13] + m[8]*m[5]*m[14] - m[8]*m[6]*m[13] - m[12]*m[5]*m[10] + m[12]*m[6]*m[9];
+
+    inv[1]  = -m[1]*m[10]*m[15] + m[1]*m[11]*m[14] + m[9]*m[2]*m[15] - m[9]*m[3]*m[14] - m[13]*m[2]*m[11] + m[13]*m[3]*m[10];
+    inv[5]  =  m[0]*m[10]*m[15] - m[0]*m[11]*m[14] - m[8]*m[2]*m[15] + m[8]*m[3]*m[14] + m[12]*m[2]*m[11] - m[12]*m[3]*m[10];
+    inv[9]  = -m[0]*m[9] *m[15] + m[0]*m[11]*m[13] + m[8]*m[1]*m[15] - m[8]*m[3]*m[13] - m[12]*m[1]*m[11] + m[12]*m[3]*m[9];
+    inv[13] =  m[0]*m[9] *m[14] - m[0]*m[10]*m[13] - m[8]*m[1]*m[14] + m[8]*m[2]*m[13] + m[12]*m[1]*m[10] - m[12]*m[2]*m[9];
+
+    inv[2]  =  m[1]*m[6] *m[15] - m[1]*m[7] *m[14] - m[5]*m[2]*m[15] + m[5]*m[3]*m[14] + m[13]*m[2]*m[7]  - m[13]*m[3]*m[6];
+    inv[6]  = -m[0]*m[6] *m[15] + m[0]*m[7] *m[14] + m[4]*m[2]*m[15] - m[4]*m[3]*m[14] - m[12]*m[2]*m[7]  + m[12]*m[3]*m[6];
+    inv[10] =  m[0]*m[5] *m[15] - m[0]*m[7] *m[13] - m[4]*m[1]*m[15] + m[4]*m[3]*m[13] + m[12]*m[1]*m[7]  - m[12]*m[3]*m[5];
+    inv[14] = -m[0]*m[5] *m[14] + m[0]*m[6] *m[13] + m[4]*m[1]*m[14] - m[4]*m[2]*m[13] - m[12]*m[1]*m[6]  + m[12]*m[2]*m[5];
+
+    inv[3]  = -m[1]*m[6] *m[11] + m[1]*m[7] *m[10] + m[5]*m[2]*m[11] - m[5]*m[3]*m[10] - m[9] *m[2]*m[7]  + m[9] *m[3]*m[6];
+    inv[7]  =  m[0]*m[6] *m[11] - m[0]*m[7] *m[10] - m[4]*m[2]*m[11] + m[4]*m[3]*m[10] + m[8] *m[2]*m[7]  - m[8] *m[3]*m[6];
+    inv[11] = -m[0]*m[5] *m[11] + m[0]*m[7] *m[9]  + m[4]*m[1]*m[11] - m[4]*m[3]*m[9]  - m[8] *m[1]*m[7]  + m[8] *m[3]*m[5];
+    inv[15] =  m[0]*m[5] *m[10] - m[0]*m[6] *m[9]  - m[4]*m[1]*m[10] + m[4]*m[2]*m[9]  + m[8] *m[1]*m[6]  - m[8] *m[2]*m[5];
+
+    let det = m[0]*inv[0] + m[1]*inv[4] + m[2]*inv[8] + m[3]*inv[12];
+    if (det === 0) return null;
+    det = 1.0 / det;
+
+    const out = new Float32Array(16);
+    for (let i = 0; i < 16; i++) {
+        out[i] = inv[i] * det;
+    }
+    return out;
+}
+
+function getRayFromScreen(mouseX: number, mouseY: number, width: number, height: number): { origin: number[], dir: number[] } | null {
+    if (width <= 0 || height <= 0) return null;
+    const ndcX = (mouseX / width) * 2.0 - 1.0;
+    const ndcY = 1.0 - (mouseY / height) * 2.0;
+
+    const pv = multiplyMatrices(projectionMatrix, viewMatrix);
+    const invPV = invertMatrix4(pv);
+    if (!invPV) return null;
+
+    function unproject(x: number, y: number, z: number): number[] {
+        const w = invPV![3]*x + invPV![7]*y + invPV![11]*z + invPV![15] || 1.0;
+        return [
+            (invPV![0]*x + invPV![4]*y + invPV![8]*z + invPV![12]) / w,
+            (invPV![1]*x + invPV![5]*y + invPV![9]*z + invPV![13]) / w,
+            (invPV![2]*x + invPV![6]*y + invPV![10]*z + invPV![14]) / w
+        ];
+    }
+
+    const nearPt = unproject(ndcX, ndcY, -1.0);
+    const farPt = unproject(ndcX, ndcY, 1.0);
+
+    const dir = normalize([farPt[0] - nearPt[0], farPt[1] - nearPt[1], farPt[2] - nearPt[2]]);
+    return { origin: nearPt, dir };
+}
+
+function rayTriangleIntersect(
+    O: number[], D: number[],
+    V0: number[], V1: number[], V2: number[]
+): number | null {
+    const EPSILON = 1e-7;
+    const e1 = [V1[0] - V0[0], V1[1] - V0[1], V1[2] - V0[2]];
+    const e2 = [V2[0] - V0[0], V2[1] - V0[1], V2[2] - V0[2]];
+
+    const h = cross(D, e2);
+    const a = e1[0]*h[0] + e1[1]*h[1] + e1[2]*h[2];
+
+    if (a > -EPSILON && a < EPSILON) return null;
+
+    const f = 1.0 / a;
+    const s = [O[0] - V0[0], O[1] - V0[1], O[2] - V0[2]];
+    const u = f * (s[0]*h[0] + s[1]*h[1] + s[2]*h[2]);
+
+    if (u < 0.0 || u > 1.0) return null;
+
+    const q = cross(s, e1);
+    const v = f * (D[0]*q[0] + D[1]*q[1] + D[2]*q[2]);
+
+    if (v < 0.0 || u + v > 1.0) return null;
+
+    const t = f * (e2[0]*q[0] + e2[1]*q[1] + e2[2]*q[2]);
+    if (t > EPSILON) return t;
+    return null;
+}
+
+function raySphereIntersect(
+    O: number[], D: number[],
+    center: number[], radius: number
+): number | null {
+    const oc = [O[0] - center[0], O[1] - center[1], O[2] - center[2]];
+    const b = oc[0]*D[0] + oc[1]*D[1] + oc[2]*D[2];
+    const c = (oc[0]*oc[0] + oc[1]*oc[1] + oc[2]*oc[2]) - radius * radius;
+    const discriminant = b * b - c;
+    if (discriminant < 0) return null;
+    const sqrtDisc = Math.sqrt(discriminant);
+    let t = -b - sqrtDisc;
+    if (t > 1e-5) return t;
+    t = -b + sqrtDisc;
+    if (t > 1e-5) return t;
+    return null;
+}
+
+function rayBoxIntersect(
+    O: number[], D: number[],
+    boxMin: number[], boxMax: number[]
+): number | null {
+    let tmin = -Infinity;
+    let tmax = Infinity;
+
+    for (let i = 0; i < 3; i++) {
+        if (Math.abs(D[i]) < 1e-8) {
+            if (O[i] < boxMin[i] || O[i] > boxMax[i]) return null;
+        } else {
+            const invD = 1.0 / D[i];
+            let t1 = (boxMin[i] - O[i]) * invD;
+            let t2 = (boxMax[i] - O[i]) * invD;
+            if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+            tmin = Math.max(tmin, t1);
+            tmax = Math.min(tmax, t2);
+            if (tmin > tmax) return null;
+        }
+    }
+    if (tmax < 1e-5) return null;
+    return tmin > 1e-5 ? tmin : tmax;
+}
+
+function distToSegment2D(
+    px: number, py: number,
+    x0: number, y0: number,
+    x1: number, y1: number
+): { dist: number, t: number } {
+    const dx = x1 - x0;
+    const dy = y1 - y0;
+    const lenSq = dx * dx + dy * dy;
+    if (lenSq === 0) {
+        return { dist: Math.hypot(px - x0, py - y0), t: 0 };
+    }
+    let t = ((px - x0) * dx + (py - y0) * dy) / lenSq;
+    t = Math.max(0, Math.min(1, t));
+    const projX = x0 + t * dx;
+    const projY = y0 + t * dy;
+    return { dist: Math.hypot(px - projX, py - projY), t };
+}
+
+function testWireframeEdge(
+    v0: number[], v1: number[],
+    mvp: Float32Array,
+    mouseX: number, mouseY: number,
+    width: number, height: number,
+    cameraEye: number[],
+    maxPixelDist: number = 8.0
+): { hitPoint: number[], camDist: number } | null {
+    const p0 = projectPoint(v0, mvp, width, height);
+    const p1 = projectPoint(v1, mvp, width, height);
+
+    if (p0.w <= 0.01 && p1.w <= 0.01) return null;
+
+    const res = distToSegment2D(mouseX, mouseY, p0.x, p0.y, p1.x, p1.y);
+    if (res.dist <= maxPixelDist) {
+        const hitPoint = [
+            (1.0 - res.t) * v0[0] + res.t * v1[0],
+            (1.0 - res.t) * v0[1] + res.t * v1[1],
+            (1.0 - res.t) * v0[2] + res.t * v1[2]
+        ];
+        const camDist = Math.hypot(hitPoint[0] - cameraEye[0], hitPoint[1] - cameraEye[1], hitPoint[2] - cameraEye[2]);
+        return { hitPoint, camDist };
+    }
+    return null;
+}
+
+function handleSetRotationCenterFromClick(mouseX: number, mouseY: number, width: number, height: number) {
+    const ray = getRayFromScreen(mouseX, mouseY, width, height);
+    if (!ray) return;
+
+    const O = ray.origin;
+    const D = ray.dir;
+
+    const sizeX = getDimX();
+    const sizeY = getDimY();
+    const sizeZ = getDimZ();
+    const maxSize = Math.max(sizeX, sizeY, sizeZ);
+    const sX = sizeX / maxSize;
+    const sY = sizeY / maxSize;
+    const sZ = sizeZ / maxSize;
+
+    function physToWorld(x: number, y: number, z: number): number[] {
+        return [
+            normX(x) * sX,
+            normY(y) * sY,
+            normZ(z) * sZ
+        ];
+    }
+
+    const eye = [cameraEyeX, cameraEyeY, cameraEyeZ];
+    const mvp = multiplyMatrices(projectionMatrix, multiplyMatrices(viewMatrix, modelMatrix));
+
+    let bestHit: number[] | null = null;
+    let minTSolid = Infinity;
+
+    // --- PHASE 1: TEST SOLID SURFACES DIRECTLY UNDER CLICK ---
+
+    // 1. STL Solid Mesh
+    const isSTLSolid = showSTL && stlSolids && (stlOpacity > 0.01 || !stlWireframe);
+    if (isSTLSolid && rawSTLVertices && rawSTLVertices.length >= 9) {
+        let stlMinX = Infinity, stlMinY = Infinity, stlMinZ = Infinity;
+        let stlMaxX = -Infinity, stlMaxY = -Infinity, stlMaxZ = -Infinity;
+        for (let i = 0; i < rawSTLVertices.length; i += 3) {
+            const vx = rawSTLVertices[i], vy = rawSTLVertices[i+1], vz = rawSTLVertices[i+2];
+            if (vx < stlMinX) stlMinX = vx; if (vx > stlMaxX) stlMaxX = vx;
+            if (vy < stlMinY) stlMinY = vy; if (vy > stlMaxY) stlMaxY = vy;
+            if (vz < stlMinZ) stlMinZ = vz; if (vz > stlMaxZ) stlMaxZ = vz;
+        }
+        const wStlMin = physToWorld(stlMinX, stlMinY, stlMinZ);
+        const wStlMax = physToWorld(stlMaxX, stlMaxY, stlMaxZ);
+
+        if (rayBoxIntersect(O, D, wStlMin, wStlMax) !== null) {
+            const numTris = Math.floor(rawSTLVertices.length / 9);
+            for (let i = 0; i < numTris; i++) {
+                const idx = i * 9;
+                const v0 = physToWorld(rawSTLVertices[idx], rawSTLVertices[idx+1], rawSTLVertices[idx+2]);
+                const v1 = physToWorld(rawSTLVertices[idx+3], rawSTLVertices[idx+4], rawSTLVertices[idx+5]);
+                const v2 = physToWorld(rawSTLVertices[idx+6], rawSTLVertices[idx+7], rawSTLVertices[idx+8]);
+
+                const t = rayTriangleIntersect(O, D, v0, v1, v2);
+                if (t !== null && t > 1e-4 && t < minTSolid) {
+                    minTSolid = t;
+                    bestHit = [O[0] + t * D[0], O[1] + t * D[1], O[2] + t * D[2]];
+                }
+            }
+        }
+    }
+
+    // 2. Obstacles Solid Mesh
+    const isObsSolid = showObstacles && obstaclesSolid && obstaclesOpacity > 0.01;
+    if (isObsSolid && rawObstacleVertices && rawObstacleVertices.length >= 12) {
+        let obsMinX = Infinity, obsMinY = Infinity, obsMinZ = Infinity;
+        let obsMaxX = -Infinity, obsMaxY = -Infinity, obsMaxZ = -Infinity;
+        for (let i = 0; i < rawObstacleVertices.length; i += 3) {
+            const vx = rawObstacleVertices[i], vy = rawObstacleVertices[i+1], vz = rawObstacleVertices[i+2];
+            if (vx < obsMinX) obsMinX = vx; if (vx > obsMaxX) obsMaxX = vx;
+            if (vy < obsMinY) obsMinY = vy; if (vy > obsMaxY) obsMaxY = vy;
+            if (vz < obsMinZ) obsMinZ = vz; if (vz > obsMaxZ) obsMaxZ = vz;
+        }
+        const wObsMin = physToWorld(obsMinX, obsMinY, obsMinZ);
+        const wObsMax = physToWorld(obsMaxX, obsMaxY, obsMaxZ);
+
+        if (rayBoxIntersect(O, D, wObsMin, wObsMax) !== null) {
+            const numFaces = Math.floor(rawObstacleVertices.length / 12);
+            for (let f = 0; f < numFaces; f++) {
+                const base = f * 12;
+                const v0 = physToWorld(rawObstacleVertices[base], rawObstacleVertices[base+1], rawObstacleVertices[base+2]);
+                const v1 = physToWorld(rawObstacleVertices[base+3], rawObstacleVertices[base+4], rawObstacleVertices[base+5]);
+                const v2 = physToWorld(rawObstacleVertices[base+6], rawObstacleVertices[base+7], rawObstacleVertices[base+8]);
+                const v3 = physToWorld(rawObstacleVertices[base+9], rawObstacleVertices[base+10], rawObstacleVertices[base+11]);
+
+                let t1 = rayTriangleIntersect(O, D, v0, v1, v2);
+                if (t1 !== null && t1 > 1e-4 && t1 < minTSolid) {
+                    minTSolid = t1;
+                    bestHit = [O[0] + t1 * D[0], O[1] + t1 * D[1], O[2] + t1 * D[2]];
+                }
+                let t2 = rayTriangleIntersect(O, D, v0, v2, v3);
+                if (t2 !== null && t2 > 1e-4 && t2 < minTSolid) {
+                    minTSolid = t2;
+                    bestHit = [O[0] + t2 * D[0], O[1] + t2 * D[1], O[2] + t2 * D[2]];
+                }
+            }
+        }
+    }
+
+    // 3. Slices (Solid)
+    if (cachedSlices && cachedSlices.length > 0) {
+        cachedSlices.forEach((slice, idx) => {
+            const cfg = slicesConfig[idx];
+            if (cfg && cfg.enabled === false) return;
+            const opacity = sliceOpacities[idx] !== undefined ? sliceOpacities[idx] : 1.0;
+            if (opacity <= 0.01) return;
+
+            const axis = slice.axis;
+            const offset = slice.offset;
+
+            let v0: number[], v1: number[], v2: number[], v3: number[];
+            if (axis === 0) {
+                const wz = normZ(offset) * sZ;
+                v0 = [-0.5 * sX, -0.5 * sY, wz];
+                v1 = [ 0.5 * sX, -0.5 * sY, wz];
+                v2 = [ 0.5 * sX,  0.5 * sY, wz];
+                v3 = [-0.5 * sX,  0.5 * sY, wz];
+            } else if (axis === 1) {
+                const wy = normY(offset) * sY;
+                v0 = [-0.5 * sX, wy, -0.5 * sZ];
+                v1 = [ 0.5 * sX, wy, -0.5 * sZ];
+                v2 = [ 0.5 * sX, wy,  0.5 * sZ];
+                v3 = [-0.5 * sX, wy,  0.5 * sZ];
+            } else {
+                const wx = normX(offset) * sX;
+                v0 = [wx, -0.5 * sY, -0.5 * sZ];
+                v1 = [wx,  0.5 * sY, -0.5 * sZ];
+                v2 = [wx,  0.5 * sY,  0.5 * sZ];
+                v3 = [wx, -0.5 * sY,  0.5 * sZ];
+            }
+
+            let t1 = rayTriangleIntersect(O, D, v0, v1, v2);
+            if (t1 !== null && t1 > 1e-4 && t1 < minTSolid) {
+                minTSolid = t1;
+                bestHit = [O[0] + t1 * D[0], O[1] + t1 * D[1], O[2] + t1 * D[2]];
+            }
+            let t2 = rayTriangleIntersect(O, D, v0, v2, v3);
+            if (t2 !== null && t2 > 1e-4 && t2 < minTSolid) {
+                minTSolid = t2;
+                bestHit = [O[0] + t2 * D[0], O[1] + t2 * D[1], O[2] + t2 * D[2]];
+            }
+        });
+    }
+
+    // 4. Virtual Gauges (Solid)
+    if (showGauges && gaugeSolid && gaugeOpacity > 0.01 && gaugesList && gaugesList.length > 0) {
+        const mult = (gaugeSize > 0) ? gaugeSize : 1.0;
+        const cellMeters = (dx && dx > 0) ? dx : 0.01;
+        const radiusMeters = mult * cellMeters * 0.5;
+        const rWorld = radiusMeters / maxSize;
+
+        for (const g of gaugesList) {
+            const gx = Number(g.x ?? 0.0);
+            const gy = Number(g.y ?? 0.0);
+            const gz = Number(g.z ?? 0.0);
+            const center = physToWorld(gx, gy, gz);
+
+            const t = raySphereIntersect(O, D, center, Math.max(rWorld, 0.005));
+            if (t !== null && t > 1e-4 && t < minTSolid) {
+                minTSolid = t;
+                bestHit = [O[0] + t * D[0], O[1] + t * D[1], O[2] + t * D[2]];
+            }
+        }
+    }
+
+    // 5. Charge Geometry (Solid)
+    if (showCharge && chargeSolid && chargeOpacity > 0.01 && chargeData) {
+        const cx = Number(chargeData.x ?? (xmin + sizeX * 0.5));
+        const cy = Number(chargeData.y ?? (ymin + sizeY * 0.5));
+        const cz = Number(chargeData.z ?? (zmin + sizeZ * 0.5));
+        const center = physToWorld(cx, cy, cz);
+
+        const shape = chargeData.shape || 'Sphere';
+        if (shape === 'Block') {
+            const lx = Number(chargeData.lx ?? 0.2);
+            const ly = Number(chargeData.ly ?? 0.2);
+            const lz = Number(chargeData.lz ?? 0.2);
+
+            const boxMin = [
+                center[0] - (lx * 0.5) / maxSize,
+                center[1] - (ly * 0.5) / maxSize,
+                center[2] - (lz * 0.5) / maxSize
+            ];
+            const boxMax = [
+                center[0] + (lx * 0.5) / maxSize,
+                center[1] + (ly * 0.5) / maxSize,
+                center[2] + (lz * 0.5) / maxSize
+            ];
+
+            const t = rayBoxIntersect(O, D, boxMin, boxMax);
+            if (t !== null && t > 1e-4 && t < minTSolid) {
+                minTSolid = t;
+                bestHit = [O[0] + t * D[0], O[1] + t * D[1], O[2] + t * D[2]];
+            }
+        } else {
+            const r = Number(chargeData.radius ?? 0.1);
+            const rWorld = r / maxSize;
+            const t = raySphereIntersect(O, D, center, Math.max(rWorld, 0.005));
+            if (t !== null && t > 1e-4 && t < minTSolid) {
+                minTSolid = t;
+                bestHit = [O[0] + t * D[0], O[1] + t * D[1], O[2] + t * D[2]];
+            }
+        }
+    }
+
+    // 6. Domain Bounding Box (Solid if gridOpacity > 0.01 and showGridBox)
+    if (showGridBox && gridOpacity > 0.01) {
+        const domainMin = [-0.5 * sX, -0.5 * sY, -0.5 * sZ];
+        const domainMax = [ 0.5 * sX,  0.5 * sY,  0.5 * sZ];
+        const t = rayBoxIntersect(O, D, domainMin, domainMax);
+        if (t !== null && t > 1e-4 && t < minTSolid) {
+            minTSolid = t;
+            bestHit = [O[0] + t * D[0], O[1] + t * D[1], O[2] + t * D[2]];
+        }
+    }
+
+    // --- PHASE 2: WIREFRAME EDGE HIT TEST (ONLY IF NO SOLID HIT DIRECTLY UNDER CLICK) ---
+    if (!bestHit) {
+        let minEdgeCamDist = Infinity;
+
+        // STL Wireframe Edges
+        if (showSTL && stlWireframe && rawSTLVertices && rawSTLVertices.length >= 9) {
+            const numTris = Math.floor(rawSTLVertices.length / 9);
+            for (let i = 0; i < numTris; i++) {
+                const idx = i * 9;
+                const v0 = physToWorld(rawSTLVertices[idx], rawSTLVertices[idx+1], rawSTLVertices[idx+2]);
+                const v1 = physToWorld(rawSTLVertices[idx+3], rawSTLVertices[idx+4], rawSTLVertices[idx+5]);
+                const v2 = physToWorld(rawSTLVertices[idx+6], rawSTLVertices[idx+7], rawSTLVertices[idx+8]);
+
+                const e1 = testWireframeEdge(v0, v1, mvp, mouseX, mouseY, width, height, eye);
+                if (e1 && e1.camDist < minEdgeCamDist) { minEdgeCamDist = e1.camDist; bestHit = e1.hitPoint; }
+
+                const e2 = testWireframeEdge(v1, v2, mvp, mouseX, mouseY, width, height, eye);
+                if (e2 && e2.camDist < minEdgeCamDist) { minEdgeCamDist = e2.camDist; bestHit = e2.hitPoint; }
+
+                const e3 = testWireframeEdge(v2, v0, mvp, mouseX, mouseY, width, height, eye);
+                if (e3 && e3.camDist < minEdgeCamDist) { minEdgeCamDist = e3.camDist; bestHit = e3.hitPoint; }
+            }
+        }
+
+        // Obstacles Wireframe Edges
+        if (showObstacles && obstaclesGridlines && rawObstacleVertices && rawObstacleVertices.length >= 12) {
+            const numFaces = Math.floor(rawObstacleVertices.length / 12);
+            for (let f = 0; f < numFaces; f++) {
+                const base = f * 12;
+                const v0 = physToWorld(rawObstacleVertices[base], rawObstacleVertices[base+1], rawObstacleVertices[base+2]);
+                const v1 = physToWorld(rawObstacleVertices[base+3], rawObstacleVertices[base+4], rawObstacleVertices[base+5]);
+                const v2 = physToWorld(rawObstacleVertices[base+6], rawObstacleVertices[base+7], rawObstacleVertices[base+8]);
+                const v3 = physToWorld(rawObstacleVertices[base+9], rawObstacleVertices[base+10], rawObstacleVertices[base+11]);
+
+                const edges = [[v0, v1], [v1, v2], [v2, v3], [v3, v0]];
+                for (const edge of edges) {
+                    const eRes = testWireframeEdge(edge[0], edge[1], mvp, mouseX, mouseY, width, height, eye);
+                    if (eRes && eRes.camDist < minEdgeCamDist) { minEdgeCamDist = eRes.camDist; bestHit = eRes.hitPoint; }
+                }
+            }
+        }
+
+        // Charge Wireframe Edges
+        if (showCharge && chargeWireframe && chargeData) {
+            const cx = Number(chargeData.x ?? (xmin + sizeX * 0.5));
+            const cy = Number(chargeData.y ?? (ymin + sizeY * 0.5));
+            const cz = Number(chargeData.z ?? (zmin + sizeZ * 0.5));
+            const center = physToWorld(cx, cy, cz);
+            const lx = Number(chargeData.lx ?? 0.2);
+            const ly = Number(chargeData.ly ?? 0.2);
+            const lz = Number(chargeData.lz ?? 0.2);
+
+            const x0 = center[0] - (lx * 0.5) / maxSize;
+            const x1 = center[0] + (lx * 0.5) / maxSize;
+            const y0 = center[1] - (ly * 0.5) / maxSize;
+            const y1 = center[1] + (ly * 0.5) / maxSize;
+            const z0 = center[2] - (lz * 0.5) / maxSize;
+            const z1 = center[2] + (lz * 0.5) / maxSize;
+
+            const boxCorners = [
+                [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],
+                [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]
+            ];
+            const boxEdges = [
+                [0,1], [1,2], [2,3], [3,0],
+                [4,5], [5,6], [6,7], [7,4],
+                [0,4], [1,5], [2,6], [3,7]
+            ];
+            for (const [eA, eB] of boxEdges) {
+                const eRes = testWireframeEdge(boxCorners[eA], boxCorners[eB], mvp, mouseX, mouseY, width, height, eye);
+                if (eRes && eRes.camDist < minEdgeCamDist) { minEdgeCamDist = eRes.camDist; bestHit = eRes.hitPoint; }
+            }
+        }
+
+        // Domain Box Gridlines
+        if (showGrid || showGridBox) {
+            const x0 = -0.5 * sX, x1 = 0.5 * sX;
+            const y0 = -0.5 * sY, y1 = 0.5 * sY;
+            const z0 = -0.5 * sZ, z1 = 0.5 * sZ;
+
+            const corners = [
+                [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],
+                [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]
+            ];
+            const edges = [
+                [0,1], [1,2], [2,3], [3,0],
+                [4,5], [5,6], [6,7], [7,4],
+                [0,4], [1,5], [2,6], [3,7]
+            ];
+            for (const [eA, eB] of edges) {
+                const eRes = testWireframeEdge(corners[eA], corners[eB], mvp, mouseX, mouseY, width, height, eye);
+                if (eRes && eRes.camDist < minEdgeCamDist) { minEdgeCamDist = eRes.camDist; bestHit = eRes.hitPoint; }
+            }
+        }
+    }
+
+    // --- PHASE 3: UPDATE ROTATION CENTER IF HIT FOUND ---
+    if (bestHit) {
+        targetX = bestHit[0];
+        targetY = bestHit[1];
+        targetZ = bestHit[2];
+
+        const u = [
+            Math.cos(pitch) * Math.sin(yaw),
+            Math.cos(pitch) * Math.cos(yaw),
+            Math.sin(pitch)
+        ];
+
+        const dxVal = cameraEyeX - targetX;
+        const dyVal = cameraEyeY - targetY;
+        const dzVal = cameraEyeZ - targetZ;
+
+        const projDist = dxVal * u[0] + dyVal * u[1] + dzVal * u[2];
+        distance = Math.max(0.01, projDist);
+
+        updateMatrices(width, height);
+        render();
+    }
+}
+
+function projectPoint(v: number[], mvp: Float32Array, width: number, height: number): { x: number, y: number, w: number } {
     const x = v[0], y = v[1], z = v[2];
     const w = mvp[3] * x + mvp[7] * y + mvp[11] * z + mvp[15] || 1;
     const px = (mvp[0] * x + mvp[4] * y + mvp[8] * z + mvp[12]) / w;
     const py = (mvp[1] * x + mvp[5] * y + mvp[9] * z + mvp[13]) / w;
     return {
         x: (px * 0.5 + 0.5) * width,
-        y: (1.0 - (py * 0.5 + 0.5)) * height
+        y: (1.0 - (py * 0.5 + 0.5)) * height,
+        w
     };
 }
 
@@ -3222,9 +4191,9 @@ function render2D() {
     }
 
     if (showGauges && gaugesList && gaugesList.length > 0) {
-        const dimX = (nx && dx) ? (nx * dx) : 1.0;
-        const dimY = (ny && dx) ? (ny * dx) : 1.0;
-        const dimZ = (nz && dx) ? (nz * dx) : 1.0;
+        const dimX = getDimX();
+        const dimY = getDimY();
+        const dimZ = getDimZ();
         ctx2D.fillStyle = "#ffaa00";
         ctx2D.strokeStyle = "#ffaa00";
         ctx2D.lineWidth = 2;
@@ -3232,9 +4201,9 @@ function render2D() {
             const gx = Number(g.x ?? 0.5);
             const gy = Number(g.y ?? 0.5);
             const gz = Number(g.z ?? 0.5);
-            const px = (gx - xmin) / dimX - 0.5;
-            const py = (gy - ymin) / dimY - 0.5;
-            const pz = (gz - zmin) / dimZ - 0.5;
+            const px = normX(gx);
+            const py = normY(gy);
+            const pz = normZ(gz);
             const pt = projectPoint([px, py, pz], mvp, width, height);
 
             ctx2D.beginPath();
@@ -3288,9 +4257,9 @@ function render() {
         uniformData[61] = getColormapIndex(stlColormap);
         uniformData[62] = dx || 0.01;
         uniformData[63] = finalStlMin;
-        const sizeX = nx * dx || 1.0;
-        const sizeY = ny * dx || 1.0;
-        const sizeZ = nz * dx || 1.0;
+        const sizeX = getDimX();
+        const sizeY = getDimY();
+        const sizeZ = getDimZ();
         uniformData[64] = xmin;
         uniformData[65] = ymin;
         uniformData[66] = zmin;
@@ -3371,17 +4340,28 @@ function render() {
                 ]
             });
 
+            passEncoder.setPipeline(gpuLinePipeline);
             passEncoder.setBindGroup(0, bboxBindGroup);
             passEncoder.setVertexBuffer(0, gpuBBoxBuffer);
-            passEncoder.draw(24);
+            passEncoder.draw(24, 1, 0, 0);
+            
+            if (gpuAMRTilesBuffer && amrTilesCount > 0) {
+                passEncoder.setVertexBuffer(0, gpuAMRTilesBuffer);
+                passEncoder.draw(amrTilesCount, 1, 0, 0);
+            }
+            if (gpuSliceGridlinesBuffer && sliceGridlinesCount > 0) {
+                passEncoder.setVertexBuffer(0, gpuSliceGridlinesBuffer);
+                passEncoder.draw(sliceGridlinesCount, 1, 0, 0);
+            }
         }
 
-        // Draw Axes Indicator
+        // Draw Axes Indicator (disabled to draw tick labels on bounding box instead)
+        /*
         if (gpuAxesBuffer && gpuPipeline && gpuAxesUniformBuffers.length === 3) {
             passEncoder.setPipeline(gpuPipeline);
-            const sizeX = nx * dx || 1.0;
-            const sizeY = ny * dx || 1.0;
-            const sizeZ = nz * dx || 1.0;
+            const sizeX = getDimX();
+            const sizeY = getDimY();
+            const sizeZ = getDimZ();
             const maxSize = Math.max(sizeX, sizeY, sizeZ);
             const sX = sizeX / maxSize;
             const sY = sizeY / maxSize;
@@ -3414,15 +4394,16 @@ function render() {
                 passEncoder.draw(180, 1, a * 180, 0);
             }
         }
+        */
 
         // Draw STL Geometry
         if (showSTL && gpuSTLBuffer && transformedSTLVertices && gpuSTLUniformSolid && gpuSTLUniformWireframe) {
             const count = transformedSTLVertices.length / 7;
             const dummyTexView = Object.values(activeSlicesWebGPU)[0]?.gpuTextureView || gpuDummyTextureView;
 
-            const sizeX = nx * dx || 1.0;
-            const sizeY = ny * dx || 1.0;
-            const sizeZ = nz * dx || 1.0;
+            const sizeX = getDimX();
+            const sizeY = getDimY();
+            const sizeZ = getDimZ();
             const sx = 1.0 / sizeX;
             const sy = 1.0 / sizeY;
             const sz = 1.0 / sizeZ;
@@ -3552,9 +4533,9 @@ function render() {
                 });
             }
 
-            const sizeX = nx * dx || 1.0;
-            const sizeY = ny * dx || 1.0;
-            const sizeZ = nz * dx || 1.0;
+            const sizeX = getDimX();
+            const sizeY = getDimY();
+            const sizeZ = getDimZ();
             const sx = 1.0 / sizeX;
             const sy = 1.0 / sizeY;
             const sz = 1.0 / sizeZ;
@@ -3688,6 +4669,7 @@ function render() {
                     sliceUniformData[50] = slice.minY ?? minY;
                     sliceUniformData[51] = slice.maxY ?? maxY;
                     sliceUniformData[52] = slice.useLogScale ? 1.0 : 0.0;
+                    sliceUniformData[54] = (meshType === 'amr') ? 0.0 : (showCellEdges ? 1.0 : 0.0);
                     sliceUniformData[55] = slice.interpolate ? 1.0 : 0.0;
                     gpuDevice.queue.writeBuffer(gpuSliceUniformBuffers[slice.index], 0, sliceUniformData.buffer);
 
@@ -3736,10 +4718,12 @@ function render() {
                     passEncoder.draw(6);
                 });
             }
+
         }
 
         passEncoder.end();
         gpuDevice.queue.submit([commandEncoder.finish()]);
+        sendFrameMatrixMessage();
         return;
     }
 
@@ -3773,6 +4757,7 @@ function render() {
     const uMin = gl.getUniformLocation(program, "uMin");
     const uMax = gl.getUniformLocation(program, "uMax");
     const uUseLog = gl.getUniformLocation(program, "uUseLogScale");
+    const uIsAMRLoc = gl.getUniformLocation(program, "uIsAMR");
     const uIsWF = gl.getUniformLocation(program, "uIsWireframe");
 
     gl.uniformMatrix4fv(uProj, false, projectionMatrix);
@@ -3780,6 +4765,7 @@ function render() {
     gl.uniform1f(uMin, minY);
     gl.uniform1f(uMax, maxY);
     gl.uniform1i(uUseLog, useLogScale ? 1 : 0);
+    if (uIsAMRLoc !== null) gl.uniform1i(uIsAMRLoc, meshType === 'amr' ? 1 : 0);
     gl.uniformMatrix4fv(uView, false, viewMatrix);
     gl.uniformMatrix4fv(uModel, false, modelMatrix);
     gl.uniform1f(uAlpha, 1.0); // Will be overwritten per slice
@@ -3807,11 +4793,22 @@ function render() {
         gl.drawArrays(gl.LINES, 0, 24);
     }
 
-    // Draw Axes Indicator
+    if (amrTilesBuffer && amrTilesCount > 0) {
+        gl.uniform1i(uIsWF, 10);
+        gl.bindBuffer(gl.ARRAY_BUFFER, amrTilesBuffer);
+        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 20, 0);
+        gl.enableVertexAttribArray(0);
+        gl.disableVertexAttribArray(1);
+        gl.disableVertexAttribArray(2);
+        gl.drawArrays(gl.LINES, 0, amrTilesCount);
+    }
+
+    // Draw Axes Indicator (disabled to draw tick labels on bounding box instead)
+    /*
     if (axesBuffer) {
-        const sizeX = nx * dx || 1.0;
-        const sizeY = ny * dx || 1.0;
-        const sizeZ = nz * dx || 1.0;
+        const sizeX = getDimX();
+        const sizeY = getDimY();
+        const sizeZ = getDimZ();
         const maxSize = Math.max(sizeX, sizeY, sizeZ);
         const sX = sizeX / maxSize;
         const sY = sizeY / maxSize;
@@ -3839,14 +4836,15 @@ function render() {
         }
         gl.uniformMatrix4fv(uModel, false, modelMatrix);
     }
+    */
 
     // Draw STL Geometry fallback in WebGL
     if (showSTL && stlBuffer && transformedSTLVertices) {
         const count = transformedSTLVertices.length / 7;
 
-        const sizeX = nx * dx || 1.0;
-        const sizeY = ny * dx || 1.0;
-        const sizeZ = nz * dx || 1.0;
+        const sizeX = getDimX();
+        const sizeY = getDimY();
+        const sizeZ = getDimZ();
         const sx = 1.0 / sizeX;
         const sy = 1.0 / sizeY;
         const sz = 1.0 / sizeZ;
@@ -3951,9 +4949,9 @@ function render() {
 
     // Draw Obstacle Surfaces in WebGL fallback
     if (showObstacles && obstacleBuffer && obstacleTriIndexCount > 0) {
-        const sizeX = nx * dx || 1.0;
-        const sizeY = ny * dx || 1.0;
-        const sizeZ = nz * dx || 1.0;
+        const sizeX = getDimX();
+        const sizeY = getDimY();
+        const sizeZ = getDimZ();
         const sx = 1.0 / sizeX;
         const sy = 1.0 / sizeY;
         const sz = 1.0 / sizeZ;
@@ -4008,7 +5006,7 @@ function render() {
             if (uColormapLoc) gl.uniform1i(uColormapLoc, getColormapIndex(obstaclesColormap));
             if (uMinLoc) gl.uniform1f(uMinLoc, obsMin);
             if (uMaxLoc) gl.uniform1f(uMaxLoc, obsMax);
-            if (uLogLoc) gl.uniform1f(uLogLoc, obstaclesLogScale ? 1.0 : 0.0);
+            if (uLogLoc) gl.uniform1i(uLogLoc, obstaclesLogScale ? 1.0 : 0.0);
             gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, obstacleTriIndexBuffer);
             gl.drawElements(gl.TRIANGLES, obstacleTriIndexCount, gl.UNSIGNED_INT, 0);
         }
@@ -4028,29 +5026,96 @@ function render() {
     gl.uniform1i(uIsWF, 0);
     const uShowEdges = gl.getUniformLocation(program, "uShowCellEdges");
     if (uShowEdges !== null) {
-        gl.uniform1i(uShowEdges, shouldShowCellEdges() ? 1 : 0);
+        gl.uniform1i(uShowEdges, (meshType === 'amr') ? 0 : (shouldShowCellEdges() ? 1 : 0));
     }
     const uInterp = gl.getUniformLocation(program, "uInterpolate");
     if (uInterp !== null) {
         gl.uniform1i(uInterp, interpolate ? 1 : 0);
     }
 
+    const getSliceProperties = (slice: SliceDataWebGL) => {
+        let colormapVal = slice.colormap;
+        let useLogScaleVal = slice.useLogScale;
+        let interpolateVal = slice.interpolate;
+        let minYVal = slice.minY;
+        let maxYVal = slice.maxY;
+        let opacityVal = slice.opacity;
+
+        if (slice.is_submesh) {
+            const parent = Object.values(activeSlicesWebGL).find(p => !p.is_submesh && p.axis === slice.axis && Math.abs(p.offset - slice.offset) < 1e-4);
+            if (parent) {
+                colormapVal = parent.colormap;
+                useLogScaleVal = parent.useLogScale;
+                interpolateVal = parent.interpolate;
+                minYVal = parent.minY;
+                maxYVal = parent.maxY;
+                opacityVal = parent.opacity;
+            }
+        }
+        return {
+            colormap: colormapVal,
+            useLogScale: useLogScaleVal,
+            interpolate: interpolateVal,
+            minY: minYVal,
+            maxY: maxYVal,
+            opacity: opacityVal
+        };
+    };
+
+    const getSubmeshMasks = (slice: SliceDataWebGL) => {
+        const masks: number[] = [];
+        let numMasks = 0;
+        slicesArrayWebGL.forEach(other => {
+            if (other.is_submesh && other.axis === slice.axis && Math.abs(other.offset - slice.offset) < 1e-4 && other.level > (slice.level || 0)) {
+                let min1 = 0, max1 = 0, min2 = 0, max2 = 0;
+                if (slice.axis === 0) { // XY
+                    min1 = normX(other.xmin); max1 = normX(other.xmax);
+                    min2 = normY(other.ymin); max2 = normY(other.ymax);
+                } else if (slice.axis === 1) { // XZ
+                    min1 = normX(other.xmin); max1 = normX(other.xmax);
+                    min2 = normZ(other.zmin); max2 = normZ(other.zmax);
+                } else { // YZ
+                    min1 = normY(other.ymin); max1 = normY(other.ymax);
+                    min2 = normZ(other.zmin); max2 = normZ(other.zmax);
+                }
+                masks.push(min1, max1, min2, max2);
+                numMasks++;
+            }
+        });
+        return { masks: masks.slice(0, 32), numMasks: Math.min(numMasks, 8) };
+    };
+
     const slicesArrayWebGL = Object.values(activeSlicesWebGL).filter(s => {
-        const cfg = slicesConfig[s.index];
+        let cfg = slicesConfig[s.index];
+        if (s.is_submesh) {
+            const parent = Object.values(activeSlicesWebGL).find(p => !p.is_submesh && p.axis === s.axis && Math.abs(p.offset - s.offset) < 1e-4);
+            if (parent) {
+                cfg = slicesConfig[parent.index];
+            }
+        }
         return !cfg || cfg.enabled !== false;
     });
+
     if (slicesArrayWebGL.length > 0) {
         const opaqueSlices = slicesArrayWebGL.filter(s => {
-            const opac = s.opacity;
-            return opac >= 0.999;
+            const props = getSliceProperties(s);
+            return props.opacity >= 0.999;
         });
         const transparentSlices = slicesArrayWebGL.filter(s => {
-            const opac = s.opacity;
-            return opac < 0.999;
+            const props = getSliceProperties(s);
+            return props.opacity < 0.999;
         });
+
+        const uAxisLoc = gl!.getUniformLocation(program, "uAxis");
+        const uIsSubmeshLoc = gl!.getUniformLocation(program, "uIsSubmesh");
+        const uNumMasksLoc = gl!.getUniformLocation(program, "uNumSubmeshMasks");
+        const uMasksLoc = gl!.getUniformLocation(program, "uSubmeshMasks");
 
         // Pass 1: Opaque Slices (depth write enabled)
         opaqueSlices.forEach(slice => {
+            const props = getSliceProperties(slice);
+
+            gl!.uniform1i(uIsWF, 0);
             gl!.activeTexture(gl!.TEXTURE0);
             gl!.bindTexture(gl!.TEXTURE_2D, slice.texture);
             gl!.bindBuffer(gl!.ARRAY_BUFFER, slice.buffer);
@@ -4063,14 +5128,24 @@ function render() {
             gl!.vertexAttribPointer(2, 2, gl!.FLOAT, false, 28, 20);
             gl!.enableVertexAttribArray(2);
 
-            gl!.uniform1f(uMin, slice.minY ?? minY);
-            gl!.uniform1f(uMax, slice.maxY ?? maxY);
-            gl!.uniform1i(uColormap, getColormapIndex(slice.colormap));
-            gl!.uniform1i(uUseLog, slice.useLogScale ? 1 : 0);
+            gl!.uniform1f(uMin, props.minY ?? minY);
+            gl!.uniform1f(uMax, props.maxY ?? maxY);
+            gl!.uniform1i(uColormap, getColormapIndex(props.colormap));
+            gl!.uniform1i(uUseLog, props.useLogScale ? 1 : 0);
             if (uInterp !== null) {
-                gl!.uniform1i(uInterp, slice.interpolate ? 1 : 0);
+                gl!.uniform1i(uInterp, props.interpolate ? 1 : 0);
             }
             gl!.uniform1f(uAlpha, 1.0);
+
+            // Set submesh mask uniforms
+            if (uAxisLoc !== null) gl!.uniform1i(uAxisLoc, slice.axis);
+            if (uIsSubmeshLoc !== null) gl!.uniform1i(uIsSubmeshLoc, slice.is_submesh ? 1 : 0);
+            const { masks, numMasks } = getSubmeshMasks(slice);
+            if (uNumMasksLoc !== null) gl!.uniform1i(uNumMasksLoc, numMasks);
+            if (uMasksLoc !== null && numMasks > 0) {
+                gl!.uniform4fv(uMasksLoc, new Float32Array(masks));
+            }
+
             gl!.drawArrays(gl!.TRIANGLES, 0, 6);
         });
 
@@ -4086,6 +5161,9 @@ function render() {
             });
 
             transparentSlices.forEach(slice => {
+                const props = getSliceProperties(slice);
+
+                gl!.uniform1i(uIsWF, 0);
                 gl!.activeTexture(gl!.TEXTURE0);
                 gl!.bindTexture(gl!.TEXTURE_2D, slice.texture);
                 gl!.bindBuffer(gl!.ARRAY_BUFFER, slice.buffer);
@@ -4098,20 +5176,97 @@ function render() {
                 gl!.vertexAttribPointer(2, 2, gl!.FLOAT, false, 28, 20);
                 gl!.enableVertexAttribArray(2);
 
-                gl!.uniform1f(uMin, slice.minY ?? minY);
-                gl!.uniform1f(uMax, slice.maxY ?? maxY);
-                gl!.uniform1i(uColormap, getColormapIndex(slice.colormap));
-                gl!.uniform1i(uUseLog, slice.useLogScale ? 1 : 0);
+                gl!.uniform1f(uMin, props.minY ?? minY);
+                gl!.uniform1f(uMax, props.maxY ?? maxY);
+                gl!.uniform1i(uColormap, getColormapIndex(props.colormap));
+                gl!.uniform1i(uUseLog, props.useLogScale ? 1 : 0);
                 if (uInterp !== null) {
-                    gl!.uniform1i(uInterp, slice.interpolate ? 1 : 0);
+                    gl!.uniform1i(uInterp, props.interpolate ? 1 : 0);
                 }
-                gl!.uniform1f(uAlpha, slice.opacity);
+                gl!.uniform1f(uAlpha, props.opacity);
+
+                // Set submesh mask uniforms
+                if (uAxisLoc !== null) gl!.uniform1i(uAxisLoc, slice.axis);
+                if (uIsSubmeshLoc !== null) gl!.uniform1i(uIsSubmeshLoc, slice.is_submesh ? 1 : 0);
+                const { masks, numMasks } = getSubmeshMasks(slice);
+                if (uNumMasksLoc !== null) gl!.uniform1i(uNumMasksLoc, numMasks);
+                if (uMasksLoc !== null && numMasks > 0) {
+                    gl!.uniform4fv(uMasksLoc, new Float32Array(masks));
+                }
+
                 gl!.drawArrays(gl!.TRIANGLES, 0, 6);
             });
 
             gl.depthMask(true);
         }
+
+        if (sliceGridlinesBuffer && sliceGridlinesCount > 0) {
+            gl.depthMask(false);
+            gl.uniform1i(uIsWF, 10);
+            gl.uniform1f(uAlpha, 1.0);
+            gl.bindBuffer(gl.ARRAY_BUFFER, sliceGridlinesBuffer);
+            gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 20, 0);
+            gl.enableVertexAttribArray(0);
+            gl.disableVertexAttribArray(1);
+            gl.drawArrays(gl.LINES, 0, sliceGridlinesCount);
+            gl.depthMask(true);
+        }
+
+        // Draw Charge Geometry
+        if (showCharge) {
+            if (chargeSolid && chargeBuffer && chargeCount > 0) {
+                gl.uniform1i(uIsWF, 13);
+                gl.uniform1f(uAlpha, chargeOpacity);
+                gl.bindBuffer(gl.ARRAY_BUFFER, chargeBuffer);
+                gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
+                gl.enableVertexAttribArray(0);
+                gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 28, 12);
+                gl.enableVertexAttribArray(1);
+                gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 28, 20);
+                gl.enableVertexAttribArray(2);
+                gl.drawArrays(gl.TRIANGLES, 0, chargeCount);
+            }
+            if (chargeWireframe && chargeWireBuffer && chargeWireCount > 0) {
+                gl.uniform1i(uIsWF, 13);
+                gl.uniform1f(uAlpha, 1.0);
+                gl.bindBuffer(gl.ARRAY_BUFFER, chargeWireBuffer);
+                gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 20, 0);
+                gl.enableVertexAttribArray(0);
+                gl.disableVertexAttribArray(1);
+                gl.disableVertexAttribArray(2);
+                gl.drawArrays(gl.LINES, 0, chargeWireCount);
+            }
+        }
     }
+    sendFrameMatrixMessage();
+}
+
+function sendFrameMatrixMessage() {
+    const sizeX = getDimX();
+    const sizeY = getDimY();
+    const sizeZ = getDimZ();
+    const maxSize = Math.max(sizeX, sizeY, sizeZ);
+    const sX = sizeX / maxSize;
+    const sY = sizeY / maxSize;
+    const sZ = sizeZ / maxSize;
+    const mvp = multiplyMatrices(projectionMatrix, multiplyMatrices(viewMatrix, modelMatrix));
+    self.postMessage({
+        type: 'renderFrame',
+        data: {
+            mvp: Array.from(mvp),
+            xmin,
+            xmax,
+            ymin,
+            ymax,
+            zmin,
+            zmax,
+            sX,
+            sY,
+            sZ,
+            showGridBox,
+            showGrid
+        }
+    });
 }
 
 function canvasWidth(): number {
@@ -4230,6 +5385,10 @@ self.onmessage = async (e) => {
             const h = canvasHeight();
             updateMatrices(w, h);
             render();
+        } else if (type === "setRotationCenterFromClick") {
+            const w = canvasWidth();
+            const h = canvasHeight();
+            handleSetRotationCenterFromClick(data.mouseX, data.mouseY, w, h);
         } else if (type === "setView") {
             if (data.pitch !== undefined) pitch = data.pitch;
             if (data.yaw !== undefined) yaw = data.yaw;
@@ -4257,9 +5416,14 @@ self.onmessage = async (e) => {
             if (data.showCellEdges !== undefined) showCellEdges = data.showCellEdges;
             if (data.interpolate !== undefined) interpolate = data.interpolate;
             if (data.xmin !== undefined) xmin = data.xmin;
+            if (data.xmax !== undefined) xmax = data.xmax;
             if (data.ymin !== undefined) ymin = data.ymin;
+            if (data.ymax !== undefined) ymax = data.ymax;
             if (data.zmin !== undefined) zmin = data.zmin;
+            if (data.zmax !== undefined) zmax = data.zmax;
             if (data.dx !== undefined) dx = data.dx;
+            if (data.dy !== undefined) dy = data.dy;
+            if (data.dz !== undefined) dz = data.dz;
             if (data.nx !== undefined) nx = data.nx;
             if (data.ny !== undefined) ny = data.ny;
             if (data.nz !== undefined) nz = data.nz;
@@ -4297,9 +5461,33 @@ self.onmessage = async (e) => {
             if (data.obstaclesMinVal !== undefined) obstaclesMinVal = data.obstaclesMinVal;
             if (data.obstaclesMaxVal !== undefined) obstaclesMaxVal = data.obstaclesMaxVal;
 
+            if (data.meshType !== undefined) meshType = data.meshType;
             if (data.gridOpacity !== undefined) gridOpacity = data.gridOpacity;
             if (data.gridMeshlines !== undefined) gridMeshlines = data.gridMeshlines;
             if (data.showGridBox !== undefined) showGridBox = data.showGridBox;
+            if (data.slices !== undefined) {
+                slicesConfig = data.slices;
+                slicesConfigCache = data.slices;
+                updateSliceAMRGridlinesGeometry();
+            }
+            if (data.amr_leaf_tiles !== undefined) {
+                amrLeafTilesCache = data.amr_leaf_tiles;
+                updateAMRTilesGeometry(data.amr_leaf_tiles);
+            }
+            if (data.submeshes !== undefined) {
+                const submeshTiles = data.submeshes.map((s: any) => ({
+                    xmin: s.x,
+                    xmax: s.x + s.size_x,
+                    ymin: s.y,
+                    ymax: s.y + s.size_y,
+                    zmin: s.z,
+                    zmax: s.z + s.size_z,
+                    level: s.level
+                }));
+                amrLeafTilesCache = submeshTiles;
+                updateAMRTilesGeometry(submeshTiles);
+                updateSliceAMRGridlinesGeometry();
+            }
 
             if (data.stlColormap !== undefined) stlColormap = data.stlColormap;
             if (data.stlShowResults !== undefined) stlShowResults = data.stlShowResults;
@@ -4319,9 +5507,22 @@ self.onmessage = async (e) => {
                 gaugesList = data.gauges;
                 gaugesChanged = true;
             }
-            if (data.xmin !== undefined || data.ymin !== undefined || data.zmin !== undefined || data.dx !== undefined || data.nx !== undefined || data.ny !== undefined || data.nz !== undefined) {
+            if (data.showCharge !== undefined) showCharge = data.showCharge;
+            if (data.chargeSolid !== undefined) chargeSolid = data.chargeSolid;
+            if (data.chargeWireframe !== undefined) chargeWireframe = data.chargeWireframe;
+            if (data.chargeLighting !== undefined) chargeLighting = data.chargeLighting;
+            if (data.chargeOpacity !== undefined) chargeOpacity = data.chargeOpacity;
+            if (data.chargeColor !== undefined) chargeColor = data.chargeColor;
+            if (data.charge !== undefined) {
+                chargeData = data.charge;
+                updateChargeGeometry();
+            }
+
+            if (data.xmin !== undefined || data.xmax !== undefined || data.ymin !== undefined || data.ymax !== undefined || data.zmin !== undefined || data.zmax !== undefined || data.dx !== undefined || data.nx !== undefined || data.ny !== undefined || data.nz !== undefined) {
                 gaugesChanged = true;
+                updateMatrices(canvasWidth(), canvasHeight());
                 updateSTLGeometry();
+                updateChargeGeometry();
             }
             if (gaugesChanged) {
                 updateGaugesGeometry();
@@ -4346,6 +5547,14 @@ self.onmessage = async (e) => {
                             offset: config.offset,
                             w,
                             h,
+                            xmin: xmin,
+                            xmax: xmin + getDimX(),
+                            ymin: ymin,
+                            ymax: ymin + getDimY(),
+                            zmin: zmin,
+                            zmax: zmin + getDimZ(),
+                            level: 0,
+                            is_submesh: false,
                             data: dummyData,
                             minY: config.min_val ?? 101325.0,
                             maxY: config.max_val ?? 1013250.0,
@@ -4396,7 +5605,7 @@ self.onmessage = async (e) => {
                         const h = sliceObj.h;
                         const floatData = sliceObj.data;
                         const opacity = sliceOpacities[i] !== undefined ? sliceOpacities[i] : 1.0;
-                        const geo = getSliceGeometry(axis, zOff, w, h);
+                        const geo = getSliceGeometry(axis, zOff, w, h, sliceObj.xmin, sliceObj.xmax, sliceObj.ymin, sliceObj.ymax, sliceObj.zmin, sliceObj.zmax, sliceObj.level);
 
                         if (activeSlicesWebGPU[i]) {
                             const slice = activeSlicesWebGPU[i];
@@ -4443,6 +5652,14 @@ self.onmessage = async (e) => {
                             gpuDevice.queue.writeBuffer(slice.vertexBuffer, 0, geo);
                             slice.axis = axis;
                             slice.offset = zOff;
+                            slice.xmin = sliceObj.xmin !== undefined ? sliceObj.xmin : xmin;
+                            slice.xmax = sliceObj.xmax !== undefined ? sliceObj.xmax : (xmin + getDimX());
+                            slice.ymin = sliceObj.ymin !== undefined ? sliceObj.ymin : ymin;
+                            slice.ymax = sliceObj.ymax !== undefined ? sliceObj.ymax : (ymin + getDimY());
+                            slice.zmin = sliceObj.zmin !== undefined ? sliceObj.zmin : zmin;
+                            slice.zmax = sliceObj.zmax !== undefined ? sliceObj.zmax : (zmin + getDimZ());
+                            slice.level = sliceObj.level !== undefined ? sliceObj.level : 0;
+                            slice.is_submesh = sliceObj.is_submesh === true;
                             slice.opacity = opacity;
                             slice.minY = sliceObj.minY;
                             slice.maxY = sliceObj.maxY;
@@ -4493,6 +5710,14 @@ self.onmessage = async (e) => {
                                 offset: zOff,
                                 w,
                                 h,
+                                xmin: sliceObj.xmin !== undefined ? sliceObj.xmin : xmin,
+                                xmax: sliceObj.xmax !== undefined ? sliceObj.xmax : (xmin + getDimX()),
+                                ymin: sliceObj.ymin !== undefined ? sliceObj.ymin : ymin,
+                                ymax: sliceObj.ymax !== undefined ? sliceObj.ymax : (ymin + getDimY()),
+                                zmin: sliceObj.zmin !== undefined ? sliceObj.zmin : zmin,
+                                zmax: sliceObj.zmax !== undefined ? sliceObj.zmax : (zmin + getDimZ()),
+                                level: sliceObj.level !== undefined ? sliceObj.level : 0,
+                                is_submesh: sliceObj.is_submesh === true,
                                 gpuTexture: tex,
                                 gpuTextureView: texView,
                                 vertexBuffer: vb,
@@ -4531,12 +5756,20 @@ self.onmessage = async (e) => {
                             activeGl.texParameteri(activeGl.TEXTURE_2D, activeGl.TEXTURE_MAG_FILTER, filter);
 
                             activeGl.bindBuffer(activeGl.ARRAY_BUFFER, slice.buffer);
-                            activeGl.bufferData(activeGl.ARRAY_BUFFER, getSliceGeometry(axisNum, zOff, w, h), activeGl.STATIC_DRAW);
+                            activeGl.bufferData(activeGl.ARRAY_BUFFER, getSliceGeometry(axisNum, zOff, w, h, sliceObj.xmin, sliceObj.xmax, sliceObj.ymin, sliceObj.ymax, sliceObj.zmin, sliceObj.zmax, sliceObj.level), activeGl.STATIC_DRAW);
 
                             slice.axis = axisNum;
                             slice.offset = zOff;
                             slice.w = w;
                             slice.h = h;
+                            slice.xmin = sliceObj.xmin !== undefined ? sliceObj.xmin : xmin;
+                            slice.xmax = sliceObj.xmax !== undefined ? sliceObj.xmax : (xmin + getDimX());
+                            slice.ymin = sliceObj.ymin !== undefined ? sliceObj.ymin : ymin;
+                            slice.ymax = sliceObj.ymax !== undefined ? sliceObj.ymax : (ymin + getDimY());
+                            slice.zmin = sliceObj.zmin !== undefined ? sliceObj.zmin : zmin;
+                            slice.zmax = sliceObj.zmax !== undefined ? sliceObj.zmax : (zmin + getDimZ());
+                            slice.level = sliceObj.level !== undefined ? sliceObj.level : 0;
+                            slice.is_submesh = sliceObj.is_submesh === true;
                             slice.opacity = opacity;
                             slice.minY = sliceObj.minY;
                             slice.maxY = sliceObj.maxY;
@@ -4555,13 +5788,21 @@ self.onmessage = async (e) => {
 
                             const buf = activeGl.createBuffer()!;
                             activeGl.bindBuffer(activeGl.ARRAY_BUFFER, buf);
-                            activeGl.bufferData(activeGl.ARRAY_BUFFER, getSliceGeometry(axisNum, zOff, w, h), activeGl.STATIC_DRAW);
+                            activeGl.bufferData(activeGl.ARRAY_BUFFER, getSliceGeometry(axisNum, zOff, w, h, sliceObj.xmin, sliceObj.xmax, sliceObj.ymin, sliceObj.ymax, sliceObj.zmin, sliceObj.zmax, sliceObj.level), activeGl.STATIC_DRAW);
 
                             activeSlicesWebGL[i] = {
                                 axis: axisNum,
                                 offset: zOff,
                                 w,
                                 h,
+                                xmin: sliceObj.xmin !== undefined ? sliceObj.xmin : xmin,
+                                xmax: sliceObj.xmax !== undefined ? sliceObj.xmax : (xmin + getDimX()),
+                                ymin: sliceObj.ymin !== undefined ? sliceObj.ymin : ymin,
+                                ymax: sliceObj.ymax !== undefined ? sliceObj.ymax : (ymin + getDimY()),
+                                zmin: sliceObj.zmin !== undefined ? sliceObj.zmin : zmin,
+                                zmax: sliceObj.zmax !== undefined ? sliceObj.zmax : (zmin + getDimZ()),
+                                level: sliceObj.level !== undefined ? sliceObj.level : 0,
+                                is_submesh: sliceObj.is_submesh === true,
                                 texture: tex,
                                 buffer: buf,
                                 opacity,
@@ -4602,21 +5843,31 @@ self.onmessage = async (e) => {
 
                     let sliceMin = Infinity;
                     let sliceMax = -Infinity;
+                    let slicePosMin = Infinity;
                     for (let j = 0; j < slice.data.length; j++) {
                         const v = slice.data[j];
                         if (isFinite(v)) {
                             if (v < sliceMin) sliceMin = v;
                             if (v > sliceMax) sliceMax = v;
+                            if (v > 0 && v < slicePosMin) slicePosMin = v;
                         }
                     }
 
+                    const logVal = config.log_scale === true || (sliceMax > 0 && sliceMin > 0 && (sliceMax / sliceMin > 50.0));
                     let sliceMinY = minY;
                     let sliceMaxY = maxY;
 
                     if (sliceAutoScale) {
                         if (sliceMin < sliceMax) {
-                            sliceMinY = sliceMin;
-                            sliceMaxY = sliceMax;
+                            if (logVal && sliceMax > 0) {
+                                const dynamicFloor = sliceMax / 1000000.0;
+                                const effMin = (isFinite(slicePosMin) && slicePosMin > dynamicFloor) ? slicePosMin : dynamicFloor;
+                                sliceMinY = effMin;
+                                sliceMaxY = sliceMax;
+                            } else {
+                                sliceMinY = sliceMin;
+                                sliceMaxY = sliceMax;
+                            }
                         } else {
                             const range = config.min_val !== undefined && config.max_val !== undefined ? [config.min_val, config.max_val] : (quantityRanges[qty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0]);
                             sliceMinY = range[0];

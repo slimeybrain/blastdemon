@@ -10,7 +10,6 @@
 #include "cfd_states.hpp"
 #include "cfd_tile.hpp"
 #include "PrimitiveGeometry.hpp"
-
 enum class BCType3D {
     REFLECTIVE = 0,
     TRANSMISSIVE = 1,
@@ -25,6 +24,8 @@ struct Charge3DParams {
     double lx, ly, lz;
 };
 
+#include "grid_manager_3d.hpp"
+
 struct Gauge3D {
     std::string name;
     double x, y, z;
@@ -38,9 +39,31 @@ struct Slice3D {
     bool enabled = true;
 };
 
+struct SlicePayload3D {
+    std::string axis;
+    double offset;
+    int stride;
+    std::vector<float> data;
+    int w = 0;
+    int h = 0;
+    double xmin = 0.0, xmax = 0.0;
+    double ymin = 0.0, ymax = 0.0;
+    double zmin = 0.0, zmax = 0.0;
+    int level = 0;
+    bool is_submesh = false;
+};
+
+
 struct ObstacleFace {
     int gx_fluid, gy_fluid, gz_fluid;
     float px[4], py[4], pz[4];
+};
+
+struct SubMeshParams3D {
+    std::string id;
+    int level = 1;
+    double xmin = 0.0, ymin = 0.0, zmin = 0.0;
+    double size_x = 0.5, size_y = 0.5, size_z = 0.5;
 };
 
 struct GPUObstacleFace {
@@ -109,9 +132,36 @@ public:
     virtual double getYMin() const = 0;
     virtual double getZMin() const = 0;
     virtual double getCellSize() const = 0;
+    virtual double getDy() const { return getCellSize(); }
+    virtual double getDz() const { return getCellSize(); }
 
     virtual std::vector<float> sampleGauge(const Gauge3D& gauge) const = 0;
     virtual std::vector<float> extractSlice(const Slice3D& slice) const = 0;
+    virtual std::vector<SlicePayload3D> extractAllSlices(const Slice3D& slice) const = 0;
+    virtual void getSliceDimensions(const Slice3D& slice, int& w, int& h, int& depth) const {
+        int stride = slice.stride > 0 ? slice.stride : 1;
+        depth = 1;
+        if (slice.axis == "xy" || slice.axis == "obstacles") {
+            w = (getNx() + stride - 1) / stride;
+            h = (getNy() + stride - 1) / stride;
+        } else if (slice.axis == "xz") {
+            w = (getNx() + stride - 1) / stride;
+            h = (getNz() + stride - 1) / stride;
+        } else if (slice.axis == "yz") {
+            w = (getNy() + stride - 1) / stride;
+            h = (getNz() + stride - 1) / stride;
+        } else if (slice.axis == "volume") {
+            w = (getNx() + stride - 1) / stride;
+            h = (getNy() + stride - 1) / stride;
+            depth = (getNz() + stride - 1) / stride;
+        } else {
+            w = 0; h = 0; depth = 0;
+        }
+    }
+    virtual void getSliceDimensions(const Slice3D& slice, int& w, int& h) const {
+        int d = 1;
+        getSliceDimensions(slice, w, h, d);
+    }
     virtual std::vector<float> getCellValues(int i, int j, int k) const = 0;
 
     virtual void setGauges(const std::vector<Gauge3D>& gauges) {}
@@ -139,6 +189,7 @@ public:
                                        const std::atomic<bool>* terminate_flag = nullptr,
                                        std::function<void(double)> progress_callback = nullptr) = 0;
     virtual void uploadObstacleFaces(const std::vector<ObstacleFace>& faces) {}
+    virtual void addSubMesh(const SubMeshParams3D& submesh) {}
     virtual std::pair<double, double> getConservationTotals() const = 0;
 };
 
@@ -154,6 +205,7 @@ protected:
     double ambient_rho = 1.225;
     double ambient_p = 101325.0;
     bool is_ideal_gas_val = false;
+    std::vector<SubMeshParams3D> submesh_regions;
 
     BCType3D bcXmin = BCType3D::REFLECTIVE;
     BCType3D bcXmax = BCType3D::TRANSMISSIVE;
@@ -201,6 +253,8 @@ public:
     double getYMin() const { return ymin; }
     double getZMin() const { return zmin; }
     double getCellSize() const override { return cellSize; }
+    double getDy() const override { return cellSize; }
+    double getDz() const override { return cellSize; }
     bool is_terminated() const override { return terminated; }
     double getGamma() const override { return gamma; }
     void setGamma(double g) { gamma = g; }
@@ -214,6 +268,12 @@ public:
                                const std::atomic<bool>* terminate_flag = nullptr,
                                std::function<void(double)> progress_callback = nullptr) override {}
     std::pair<double, double> getConservationTotals() const override { return {0.0, 0.0}; }
+    void addSubMesh(const SubMeshParams3D& submesh) override {
+        submesh_regions.push_back(submesh);
+    }
+    const std::vector<SubMeshParams3D>& getSubMeshRegions() const {
+        return submesh_regions;
+    }
 };
 
 template <typename RealType, bool IsMultiMaterial>
@@ -224,11 +284,14 @@ class CFDSolver3DImpl : public CFDSolver3DImplBase {
     std::vector<uint8_t> active_tiles;
     std::vector<GeometryTile3D> geom_pool;
     std::vector<ObstacleFace> obstacle_faces;
+    std::unique_ptr<GridManager3D<RealType, IsMultiMaterial>> grid_manager;
 
     int n_tiles_x, n_tiles_y, n_tiles_z;
 
 public:
     CFDSolver3DImpl(int nx, int ny, int nz, double cellSize, double xmin = 0, double ymin = 0, double zmin = 0);
+
+    void addSubMesh(const SubMeshParams3D& submesh) override;
 
     void setInitialCondition(const Charge3DParams& charge, const MultiMat::MaterialSet& materials, double ambient_rho, double ambient_p) override;
     void setFluxScheme(const std::string& scheme_name) override;
@@ -251,6 +314,9 @@ public:
 
     std::vector<float> sampleGauge(const Gauge3D& gauge) const override;
     std::vector<float> extractSlice(const Slice3D& slice) const override;
+    std::vector<SlicePayload3D> extractAllSlices(const Slice3D& slice) const override;
+    void getSliceDimensions(const Slice3D& slice, int& w, int& h, int& depth) const override;
+    using CFDSolver3D::getSliceDimensions;
     std::vector<float> getCellValues(int i, int j, int k) const override;
 
     void setGauges(const std::vector<Gauge3D>& gauges) override;

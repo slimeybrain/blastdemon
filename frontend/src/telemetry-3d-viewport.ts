@@ -38,6 +38,9 @@ export class Telemetry3DViewport {
     private currentGeometryHash: string | null = null;
     private debugOverlay: HTMLElement | null = null;
     private hasTelemetryGrid = false;
+    private overlayCanvas: HTMLCanvasElement | null = null;
+    private overlayCtx: CanvasRenderingContext2D | null = null;
+    private latestFrameData: any = null;
 
     // Overlay Elements
     private controlsOverlay: HTMLElement | null = null;
@@ -51,8 +54,18 @@ export class Telemetry3DViewport {
     private latestEmpiricalRange: { min: number, max: number } | null = null;
     private _lastSliceKey: string = '';
 
+    // Colorbar Overlay Elements
+    private colorbarOverlay: HTMLElement | null = null;
+    private colorbarGradientEl: HTMLElement | null = null;
+    private colorbarTitleEl: HTMLElement | null = null;
+    private colorbarTicksContainer: HTMLElement | null = null;
+    private colorbarAutoBadge: HTMLElement | null = null;
+    private colorbarLogBadge: HTMLElement | null = null;
+    private colorbarCmapBadge: HTMLElement | null = null;
+
     private viewTypeSuffix: string;
     private viewportNodeId: string | null = null;
+    private virtualNodes: Record<string, any> = {};
 
     private getElId(base: string): string {
         return `${base}-${this.panelId}${this.viewTypeSuffix}`;
@@ -65,6 +78,21 @@ export class Telemetry3DViewport {
         this.viewTypeSuffix = viewTypeSuffix;
         this.viewportNodeId = viewportNodeId || null;
 
+        // Monkey patch stateManager.updateNodeParametersInPlace to support virtual viewport updates
+        const origUpdate = this.stateManager.updateNodeParametersInPlace;
+        this.stateManager.updateNodeParametersInPlace = (nodeId: string, parameters: Record<string, any>) => {
+            if (nodeId.startsWith('virtual-viewport-')) {
+                const modelId = nodeId.substring('virtual-viewport-'.length);
+                if (this.virtualNodes[modelId]) {
+                    Object.assign(this.virtualNodes[modelId].parameters, parameters);
+                    this.syncControls(true);
+                }
+                origUpdate.call(this.stateManager, nodeId, parameters);
+            } else {
+                origUpdate.call(this.stateManager, nodeId, parameters);
+            }
+        };
+
         // Container relative positioning
         this.container.style.position = 'relative';
         this.container.style.overflow = 'hidden';
@@ -75,11 +103,25 @@ export class Telemetry3DViewport {
         this.canvas.style.display = 'block';
         this.container.appendChild(this.canvas);
 
-        this.worker = new Worker(new URL('./ViewportWorker.ts', import.meta.url), { type: 'module' });
+        this.overlayCanvas = document.createElement('canvas');
+        this.overlayCanvas.style.position = 'absolute';
+        this.overlayCanvas.style.top = '0';
+        this.overlayCanvas.style.left = '0';
+        this.overlayCanvas.style.width = '100%';
+        this.overlayCanvas.style.height = '100%';
+        this.overlayCanvas.style.pointerEvents = 'none';
+        this.overlayCanvas.style.zIndex = '5';
+        this.container.appendChild(this.overlayCanvas);
+        this.overlayCtx = this.overlayCanvas.getContext('2d');
+
+        this.worker = new Worker(new URL('./ViewportWorker.ts?t=' + Date.now(), import.meta.url), { type: 'module' });
 
         this.worker.onmessage = (e) => {
             const { type, renderer, min, max } = e.data;
-            if (type === 'rendererInfo') {
+            if (type === 'renderFrame') {
+                this.latestFrameData = e.data.data;
+                this.drawTicks();
+            } else if (type === 'rendererInfo') {
                 const badge = document.getElementById(this.getElId('viewport-renderer-badge'));
                 if (badge) {
                     badge.innerHTML = renderer;
@@ -169,14 +211,15 @@ export class Telemetry3DViewport {
         this.buildOverlay();
 
         const rect = this.container.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
         // @ts-ignore
         const offscreen = this.canvas.transferControlToOffscreen();
         this.worker.postMessage({
             type: 'init',
             data: {
                 canvas: offscreen,
-                width: rect.width || 800,
-                height: rect.height || 600
+                width: (rect.width || 800) * dpr,
+                height: (rect.height || 600) * dpr
             }
         }, [offscreen]);
 
@@ -197,6 +240,25 @@ export class Telemetry3DViewport {
         this.debugOverlay.innerHTML = 'STL Status: Initializing...';
         this.container.appendChild(this.debugOverlay);
 
+        const triggerResize = () => {
+            const r = this.container.getBoundingClientRect();
+            const dpr = window.devicePixelRatio || 1;
+            if (r.width > 0 && r.height > 0) {
+                this.worker.postMessage({
+                    type: 'resize',
+                    data: {
+                        width: r.width * dpr,
+                        height: r.height * dpr
+                    }
+                });
+                if (this.overlayCanvas) {
+                    this.overlayCanvas.width = r.width * dpr;
+                    this.overlayCanvas.height = r.height * dpr;
+                    this.drawTicks();
+                }
+            }
+        };
+
         new ResizeObserver(entries => {
             for (let entry of entries) {
                 const dpr = window.devicePixelRatio || 1;
@@ -207,8 +269,17 @@ export class Telemetry3DViewport {
                         height: entry.contentRect.height * dpr
                     }
                 });
+                if (this.overlayCanvas) {
+                    this.overlayCanvas.width = entry.contentRect.width * dpr;
+                    this.overlayCanvas.height = entry.contentRect.height * dpr;
+                    this.drawTicks();
+                }
             }
         }).observe(this.container);
+
+        requestAnimationFrame(triggerResize);
+        setTimeout(triggerResize, 100);
+        setTimeout(triggerResize, 500);
 
         const net = (window as any).networkManager;
         if (net) {
@@ -285,6 +356,17 @@ export class Telemetry3DViewport {
         this.canvas.addEventListener('mousedown', (e) => {
             e.stopPropagation();
             e.preventDefault();
+            if (e.button === 0 && e.ctrlKey) {
+                const rect = this.canvas.getBoundingClientRect();
+                const dpr = window.devicePixelRatio || 1;
+                const mouseX = (e.clientX - rect.left) * dpr;
+                const mouseY = (e.clientY - rect.top) * dpr;
+                this.worker.postMessage({
+                    type: 'setRotationCenterFromClick',
+                    data: { mouseX, mouseY }
+                });
+                return;
+            }
             isDragging = true;
             lastX = e.clientX;
             lastY = e.clientY;
@@ -660,9 +742,11 @@ export class Telemetry3DViewport {
         // Render static component rows below slices
         this.buildObstacleRow(staticTbody);
         this.buildSTLRow(staticTbody);
+        this.buildChargeRow(staticTbody);
         this.buildGridRow(staticTbody);
         this.buildGaugeRow(staticTbody);
         this.buildLightingTableRow(staticTbody);
+        this.buildColorbarTableRow(staticTbody);
     }
 
     private activePopover: HTMLElement | null = null;
@@ -1768,7 +1852,7 @@ export class Telemetry3DViewport {
         const qtyLabels: Record<string, string> = {
             pressure: 'Press', density: 'Density', velocity: 'Speed', energy: 'Energy',
             species1: 'Reacted', species2: 'Unreacted', species3: 'Air',
-            peak_overpressure: 'Pk Press', peak_impulse: 'Pk Impulse'
+            peak_overpressure: 'Pk Press', peak_impulse: 'Pk Impulse', amr_level: 'AMR Level'
         };
         qtyPill.textContent = `${qtyLabels[initQty] || initQty} ▾`;
         this.applyButtonStyle(qtyPill);
@@ -1975,7 +2059,7 @@ export class Telemetry3DViewport {
         const qtyLabels: Record<string, string> = {
             pressure: 'Press', density: 'Density', velocity: 'Speed', energy: 'Energy',
             species1: 'Reacted', species2: 'Unreacted', species3: 'Air',
-            peak_overpressure: 'Pk Press', peak_impulse: 'Pk Impulse'
+            peak_overpressure: 'Pk Press', peak_impulse: 'Pk Impulse', amr_level: 'AMR Level'
         };
         qtyPill.textContent = `${qtyLabels[initQty] || initQty} ▾`;
         this.applyButtonStyle(qtyPill);
@@ -2091,6 +2175,118 @@ export class Telemetry3DViewport {
         tr.appendChild(tdOpac);
 
         // Col 10: Empty Delete Cell
+        const tdDel = document.createElement('td');
+        tdDel.innerHTML = '<span style="color:#444;">—</span>';
+        tdDel.style.textAlign = 'center';
+        tr.appendChild(tdDel);
+
+        parent.appendChild(tr);
+    }
+
+
+
+    private buildChargeRow(parent: HTMLElement) {
+        const vpNode = this.getViewportNode();
+        const initShow = vpNode ? (vpNode.parameters.show_charge !== false) : true;
+        const initSolid = vpNode ? (vpNode.parameters.charge_solid !== false) : true;
+        const initWf = vpNode ? (vpNode.parameters.charge_wireframe !== false) : true;
+        const initLight = vpNode ? (vpNode.parameters.charge_lighting !== false) : true;
+        const initOpacity = vpNode ? (vpNode.parameters.charge_opacity ?? 0.65) : 0.65;
+
+        const tr = document.createElement('tr');
+        tr.style.borderBottom = '1px solid rgba(255,255,255,0.06)';
+
+        const tdVis = document.createElement('td');
+        tdVis.style.padding = '3px 2px';
+        tdVis.style.textAlign = 'center';
+        const showCb = document.createElement('input');
+        showCb.type = 'checkbox';
+        showCb.id = this.getElId('viewport-charge-show-cb');
+        showCb.checked = initShow;
+        showCb.onchange = () => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { show_charge: showCb.checked });
+                this.worker.postMessage({ type: 'setConfig', data: { showCharge: showCb.checked } });
+                this.sendView3DConfig();
+            }
+        };
+        this.bindEditingEvents(showCb);
+        tdVis.appendChild(showCb);
+        tr.appendChild(tdVis);
+
+        const tdLayer = document.createElement('td');
+        tdLayer.style.padding = '3px 4px';
+        tdLayer.innerHTML = '💥 <b>Charge</b>';
+        tr.appendChild(tdLayer);
+
+        const appendToggleCol = (text: string, id: string, init: boolean, onChange: (v: boolean) => void) => {
+            const td = document.createElement('td');
+            td.style.padding = '3px 2px';
+            td.appendChild(this.createToggleBtn(id, text, init, onChange));
+            tr.appendChild(td);
+        };
+
+        appendToggleCol('Sol', 'viewport-charge-solid-btn', initSolid, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { charge_solid: v });
+                this.worker.postMessage({ type: 'setConfig', data: { chargeSolid: v } });
+            }
+        });
+        appendToggleCol('Msh', 'viewport-charge-wf-btn', initWf, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { charge_wireframe: v });
+                this.worker.postMessage({ type: 'setConfig', data: { chargeWireframe: v } });
+            }
+        });
+        appendToggleCol('Lgt', 'viewport-charge-light-btn', initLight, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { charge_lighting: v });
+                this.worker.postMessage({ type: 'setConfig', data: { chargeLighting: v } });
+            }
+        });
+
+        const tdQty = document.createElement('td');
+        tdQty.innerHTML = '<span style="color:#444;">—</span>';
+        tdQty.style.textAlign = 'center';
+        tr.appendChild(tdQty);
+
+        const tdCmap = document.createElement('td');
+        tdCmap.innerHTML = '<span style="color:#444;">—</span>';
+        tdCmap.style.textAlign = 'center';
+        tr.appendChild(tdCmap);
+
+        const tdScl = document.createElement('td');
+        tdScl.innerHTML = '<span style="color:#444;">—</span>';
+        tdScl.style.textAlign = 'center';
+        tr.appendChild(tdScl);
+
+        const tdOpac = document.createElement('td');
+        tdOpac.style.padding = '3px 4px';
+        const opacPill = document.createElement('button');
+        opacPill.textContent = `${Math.round(initOpacity * 100)}% ▾`;
+        this.applyButtonStyle(opacPill);
+        opacPill.style.fontSize = '8.5px';
+        opacPill.style.width = '100%';
+        opacPill.style.padding = '2px 0';
+        opacPill.onclick = (e) => {
+            e.stopPropagation();
+            const curVal = this.getViewportNode()?.parameters.charge_opacity ?? 0.65;
+            this.showOpacityPopover(opacPill, curVal, (newOpac) => {
+                const vp = this.getViewportNode();
+                if (vp) {
+                    this.stateManager.updateNodeParametersInPlace(vp.id, { charge_opacity: newOpac });
+                    this.worker.postMessage({ type: 'setConfig', data: { chargeOpacity: newOpac } });
+                    opacPill.textContent = `${Math.round(newOpac * 100)}% ▾`;
+                }
+            });
+        };
+        tdOpac.appendChild(opacPill);
+        tr.appendChild(tdOpac);
+
         const tdDel = document.createElement('td');
         tdDel.innerHTML = '<span style="color:#444;">—</span>';
         tdDel.style.textAlign = 'center';
@@ -2290,7 +2486,7 @@ export class Telemetry3DViewport {
         const qtyLabels: Record<string, string> = {
             pressure: 'Press', density: 'Density', velocity: 'Speed', energy: 'Energy',
             species1: 'Reacted', species2: 'Unreacted', species3: 'Air',
-            peak_overpressure: 'Pk Press', peak_impulse: 'Pk Impulse'
+            peak_overpressure: 'Pk Press', peak_impulse: 'Pk Impulse', amr_level: 'AMR Level'
         };
         qtyPill.textContent = `${qtyLabels[initQty] || initQty} ▾`;
         this.applyButtonStyle(qtyPill);
@@ -2467,6 +2663,601 @@ export class Telemetry3DViewport {
         parent.appendChild(tr);
     }
 
+    private getColormapCssGradient(cmapId: string, direction: 'to top' | 'to right' = 'to top'): string {
+        const cmapGradients: Record<string, string> = {
+            plasma: '#0d0887, #6a00a8, #b12a90, #e16462, #fca636, #f0f921',
+            viridis: '#440154, #3b528b, #21908d, #5dc963, #fde725',
+            rainbow: '#0000ff, #00ffff, #00ff00, #ffff00, #ff0000',
+            coolwarm: '#3b4cc0, #88b0f3, #ddd, #f49a7b, #b40426',
+            cividis: '#002051, #395276, #678685, #9eb980, #fdea45',
+            grayscale: '#000000, #ffffff'
+        };
+        const stops = cmapGradients[cmapId] || cmapGradients.plasma;
+        return `linear-gradient(${direction}, ${stops})`;
+    }
+
+    private setFocusedQuantity(qty: string) {
+        const vpNode = this.getViewportNode();
+        if (!vpNode) return;
+        const slices = vpNode.parameters.slices ? [...vpNode.parameters.slices] : [];
+        const focusedIdx = vpNode.parameters.focusedSliceIndex ?? 0;
+        if (slices[focusedIdx]) {
+            slices[focusedIdx] = {
+                ...slices[focusedIdx],
+                quantities: [qty]
+            };
+            this.stateManager.updateNodeParametersInPlace(vpNode.id, { slices });
+            this.updateSlices(slices);
+        } else {
+            this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_quantity: qty, obstacles_quantity: qty });
+        }
+        this.syncControls(true);
+    }
+
+    private buildColorbarOverlay() {
+        if (this.colorbarOverlay) return;
+
+        const overlay = document.createElement('div');
+        overlay.id = this.getElId('viewport-colorbar-overlay');
+        overlay.className = 'viewport-colorbar-container';
+        overlay.style.position = 'absolute';
+        overlay.style.zIndex = '1000';
+        overlay.style.background = 'rgba(16, 16, 19, 0.85)';
+        overlay.style.backdropFilter = 'blur(12px)';
+        overlay.style.border = '1px solid rgba(255, 255, 255, 0.15)';
+        overlay.style.borderRadius = '8px';
+        overlay.style.padding = '8px 10px';
+        overlay.style.display = 'flex';
+        overlay.style.flexDirection = 'column';
+        overlay.style.gap = '6px';
+        overlay.style.color = '#e0e0e0';
+        overlay.style.fontFamily = 'system-ui, -apple-system, sans-serif';
+        overlay.style.fontSize = '10px';
+        overlay.style.boxShadow = '0 8px 24px rgba(0, 0, 0, 0.6)';
+        overlay.style.userSelect = 'none';
+        overlay.style.boxSizing = 'border-box';
+        overlay.style.pointerEvents = 'auto';
+
+        // 1. Header (Title + Badges)
+        const header = document.createElement('div');
+        header.style.display = 'flex';
+        header.style.alignItems = 'center';
+        header.style.justifyContent = 'space-between';
+        header.style.gap = '6px';
+
+        // Quantity Title Button
+        const titleSpan = document.createElement('span');
+        titleSpan.style.fontWeight = 'bold';
+        titleSpan.style.color = '#00adff';
+        titleSpan.style.cursor = 'pointer';
+        titleSpan.style.fontSize = '10px';
+        titleSpan.style.letterSpacing = '0.5px';
+        titleSpan.style.textTransform = 'uppercase';
+        titleSpan.title = 'Click to change quantity';
+        titleSpan.onclick = (e) => {
+            e.stopPropagation();
+            const vpNode = this.getViewportNode();
+            const { quantity: curQty } = getFocusedQuantityAndRange(vpNode || {});
+            this.showQuantityPopover(titleSpan, curQty, (newQ) => {
+                this.setFocusedQuantity(newQ);
+            });
+        };
+        this.colorbarTitleEl = titleSpan;
+        header.appendChild(titleSpan);
+
+        // Badges container
+        const badgesWrap = document.createElement('div');
+        badgesWrap.style.display = 'flex';
+        badgesWrap.style.alignItems = 'center';
+        badgesWrap.style.gap = '4px';
+
+        // Auto / Manual Badge
+        const autoBadge = document.createElement('span');
+        autoBadge.style.fontSize = '8px';
+        autoBadge.style.fontWeight = 'bold';
+        autoBadge.style.padding = '1px 4px';
+        autoBadge.style.borderRadius = '3px';
+        autoBadge.style.cursor = 'pointer';
+        autoBadge.title = 'Click to toggle Auto / Manual scale';
+        autoBadge.onclick = (e) => {
+            e.stopPropagation();
+            const vpNode = this.getViewportNode();
+            if (vpNode) {
+                const curAuto = vpNode.parameters.auto_scale !== false;
+                this.stateManager.updateNodeParametersInPlace(vpNode.id, { auto_scale: !curAuto });
+                this.syncControls(true);
+            }
+        };
+        this.colorbarAutoBadge = autoBadge;
+        badgesWrap.appendChild(autoBadge);
+
+        // Lin / Log Badge
+        const logBadge = document.createElement('span');
+        logBadge.style.fontSize = '8px';
+        logBadge.style.fontWeight = 'bold';
+        logBadge.style.padding = '1px 4px';
+        logBadge.style.borderRadius = '3px';
+        logBadge.style.cursor = 'pointer';
+        logBadge.title = 'Click to toggle Linear / Logarithmic scale';
+        logBadge.onclick = (e) => {
+            e.stopPropagation();
+            const vpNode = this.getViewportNode();
+            if (vpNode) {
+                const curLog = vpNode.parameters.log_scale === true;
+                this.stateManager.updateNodeParametersInPlace(vpNode.id, { log_scale: !curLog });
+                this.syncControls(true);
+            }
+        };
+        this.colorbarLogBadge = logBadge;
+        badgesWrap.appendChild(logBadge);
+
+        // Colormap Badge
+        const cmapBadge = document.createElement('span');
+        cmapBadge.style.fontSize = '8px';
+        cmapBadge.style.fontWeight = 'bold';
+        cmapBadge.style.padding = '1px 4px';
+        cmapBadge.style.borderRadius = '3px';
+        cmapBadge.style.cursor = 'pointer';
+        cmapBadge.style.background = 'rgba(255, 255, 255, 0.1)';
+        cmapBadge.style.border = '1px solid rgba(255, 255, 255, 0.2)';
+        cmapBadge.style.color = '#fff';
+        cmapBadge.title = 'Click to change colormap';
+        cmapBadge.onclick = (e) => {
+            e.stopPropagation();
+            const vpNode = this.getViewportNode();
+            const { quantity: curQty } = getFocusedQuantityAndRange(vpNode || {});
+            const qCmaps = vpNode?.parameters.quantity_colormaps || {};
+            const curCmap = qCmaps[curQty] || vpNode?.parameters.stl_colormap || 'plasma';
+            this.showColormapPopover(cmapBadge, curCmap, (newCmap) => {
+                this.setQuantityColormap(curQty, newCmap);
+            });
+        };
+        this.colorbarCmapBadge = cmapBadge;
+        badgesWrap.appendChild(cmapBadge);
+
+        header.appendChild(badgesWrap);
+        overlay.appendChild(header);
+
+        // 2. Main Body (Gradient Bar + Ticks)
+        const bodyRow = document.createElement('div');
+        bodyRow.style.display = 'flex';
+        bodyRow.style.alignItems = 'stretch';
+        bodyRow.style.gap = '8px';
+
+        // Gradient Bar
+        const gradBar = document.createElement('div');
+        gradBar.style.width = '16px';
+        gradBar.style.height = '180px';
+        gradBar.style.borderRadius = '4px';
+        gradBar.style.border = '1px solid rgba(255, 255, 255, 0.25)';
+        gradBar.style.boxShadow = 'inset 0 0 4px rgba(0,0,0,0.5)';
+        gradBar.style.cursor = 'pointer';
+        gradBar.title = 'Click to select colormap';
+        gradBar.onclick = (e) => {
+            e.stopPropagation();
+            const vpNode = this.getViewportNode();
+            const { quantity: curQty } = getFocusedQuantityAndRange(vpNode || {});
+            const qCmaps = vpNode?.parameters.quantity_colormaps || {};
+            const curCmap = qCmaps[curQty] || vpNode?.parameters.stl_colormap || 'plasma';
+            this.showColormapPopover(gradBar, curCmap, (newCmap) => {
+                this.setQuantityColormap(curQty, newCmap);
+            });
+        };
+        this.colorbarGradientEl = gradBar;
+        bodyRow.appendChild(gradBar);
+
+        // Ticks Container
+        const ticksCol = document.createElement('div');
+        ticksCol.style.display = 'flex';
+        ticksCol.style.flexDirection = 'column';
+        ticksCol.style.justifyContent = 'space-between';
+        ticksCol.style.height = '180px';
+        ticksCol.style.fontSize = '9px';
+        ticksCol.style.fontFamily = 'monospace';
+        ticksCol.style.color = '#ccc';
+        ticksCol.style.minWidth = '80px';
+        this.colorbarTicksContainer = ticksCol;
+
+        bodyRow.appendChild(ticksCol);
+        overlay.appendChild(bodyRow);
+
+        this.colorbarOverlay = overlay;
+        this.container.appendChild(overlay);
+        const vpNode = this.getViewportNode();
+        this.syncColorbarOverlay(vpNode || { parameters: {} });
+    }
+
+    private syncColorbarOverlay(vpNode: any) {
+        if (!this.colorbarOverlay) {
+            this.buildColorbarOverlay();
+        }
+        if (!this.colorbarOverlay) return;
+        if (!vpNode) vpNode = { parameters: {} };
+        const params = vpNode.parameters || {};
+
+        const showCb = params.show_color_bar !== false;
+        if (!showCb) {
+            this.colorbarOverlay.style.display = 'none';
+            return;
+        }
+
+        this.colorbarOverlay.style.display = 'flex';
+
+        // Position
+        const pos = params.color_bar_position || 'left-center';
+        if (pos === 'left-top') {
+            this.colorbarOverlay.style.top = '40px';
+            this.colorbarOverlay.style.left = '12px';
+            this.colorbarOverlay.style.bottom = 'auto';
+            this.colorbarOverlay.style.right = 'auto';
+            this.colorbarOverlay.style.transform = 'none';
+        } else if (pos === 'left-bottom') {
+            this.colorbarOverlay.style.bottom = '20px';
+            this.colorbarOverlay.style.left = '12px';
+            this.colorbarOverlay.style.top = 'auto';
+            this.colorbarOverlay.style.right = 'auto';
+            this.colorbarOverlay.style.transform = 'none';
+        } else if (pos === 'right-bottom') {
+            this.colorbarOverlay.style.bottom = '20px';
+            this.colorbarOverlay.style.right = this.isOpen ? '480px' : '12px';
+            this.colorbarOverlay.style.top = 'auto';
+            this.colorbarOverlay.style.left = 'auto';
+            this.colorbarOverlay.style.transform = 'none';
+        } else {
+            // left-center (default): fixed top offset (80px) to prevent translateY clipping when container bounds update
+            this.colorbarOverlay.style.top = '80px';
+            this.colorbarOverlay.style.left = '12px';
+            this.colorbarOverlay.style.bottom = 'auto';
+            this.colorbarOverlay.style.right = 'auto';
+            this.colorbarOverlay.style.transform = 'none';
+        }
+
+        const { quantity: focusedQty } = getFocusedQuantityAndRange(vpNode);
+        const qCmaps = params.quantity_colormaps || {};
+        const activeCmap = qCmaps[focusedQty] || params.stl_colormap || params.obstacles_colormap || 'plasma';
+
+        // Update Title & Units
+        const unitMap: Record<string, string> = {
+            pressure: 'Pa',
+            density: 'kg/m³',
+            velocity: 'm/s',
+            energy: 'J/kg',
+            species1: 'frac',
+            species2: 'frac',
+            species3: 'frac',
+            peak_overpressure: 'Pa',
+            peak_impulse: 'Pa·s'
+        };
+        const unitStr = unitMap[focusedQty] ? ` (${unitMap[focusedQty]})` : '';
+        if (this.colorbarTitleEl) {
+            this.colorbarTitleEl.textContent = `${focusedQty.toUpperCase()}${unitStr}`;
+        }
+
+        // Update Gradient
+        if (this.colorbarGradientEl) {
+            this.colorbarGradientEl.style.background = this.getColormapCssGradient(activeCmap, 'to top');
+        }
+
+        // Update Badges
+        const isAuto = params.auto_scale !== false;
+        if (this.colorbarAutoBadge) {
+            this.colorbarAutoBadge.textContent = isAuto ? 'AUTO' : 'MANUAL';
+            this.colorbarAutoBadge.style.background = isAuto ? 'rgba(0, 173, 255, 0.2)' : 'rgba(255, 170, 0, 0.2)';
+            this.colorbarAutoBadge.style.color = isAuto ? '#00adff' : '#ffaa00';
+            this.colorbarAutoBadge.style.border = isAuto ? '1px solid rgba(0, 173, 255, 0.4)' : '1px solid rgba(255, 170, 0, 0.4)';
+        }
+
+        const isLog = params.log_scale === true;
+        if (this.colorbarLogBadge) {
+            this.colorbarLogBadge.textContent = isLog ? 'LOG' : 'LIN';
+            this.colorbarLogBadge.style.background = isLog ? 'rgba(170, 0, 255, 0.2)' : 'rgba(255, 255, 255, 0.1)';
+            this.colorbarLogBadge.style.color = isLog ? '#d080ff' : '#aaa';
+            this.colorbarLogBadge.style.border = isLog ? '1px solid rgba(170, 0, 255, 0.4)' : '1px solid rgba(255, 255, 255, 0.2)';
+        }
+
+        if (this.colorbarCmapBadge) {
+            this.colorbarCmapBadge.textContent = activeCmap.toUpperCase();
+        }
+
+        // Determine Min/Max range
+        let minVal = 0.0;
+        let maxVal = 1.0;
+        if (isAuto && this.latestEmpiricalRange) {
+            minVal = this.latestEmpiricalRange.min;
+            maxVal = this.latestEmpiricalRange.max;
+        } else if (params.min_val !== undefined && params.max_val !== undefined) {
+            minVal = Number(params.min_val);
+            maxVal = Number(params.max_val);
+        } else {
+            const ranges = params.quantity_ranges || {};
+            const r = ranges[focusedQty] || DEFAULT_QUANTITY_RANGES[focusedQty] || [0.0, 1.0];
+            minVal = r[0];
+            maxVal = r[1];
+        }
+
+        // Calculate 5 ticks (100%, 75%, 50%, 25%, 0%)
+        const ticksContainer = this.colorbarTicksContainer;
+        if (!ticksContainer) return;
+
+        ticksContainer.innerHTML = '';
+
+        const numTicks = 5;
+        for (let i = 0; i < numTicks; i++) {
+            const t = (numTicks - 1 - i) / (numTicks - 1); // 1.0 down to 0.0
+            let val = minVal + t * (maxVal - minVal);
+            if (isLog && minVal > 0 && maxVal > minVal) {
+                val = minVal * Math.pow(maxVal / minVal, t);
+            }
+
+            const tickRow = document.createElement('div');
+            tickRow.style.display = 'flex';
+            tickRow.style.alignItems = 'center';
+            tickRow.style.gap = '4px';
+
+            const tickLine = document.createElement('div');
+            tickLine.style.width = '5px';
+            tickLine.style.height = '1px';
+            tickLine.style.background = 'rgba(255,255,255,0.4)';
+            tickRow.appendChild(tickLine);
+
+            if (i === 0 || i === numTicks - 1) {
+                // Top (Max) or Bottom (Min): Editable numerical input!
+                const isMax = (i === 0);
+                const input = document.createElement('input');
+                input.type = 'number';
+                input.step = 'any';
+                input.value = String(val);
+                input.style.width = '68px';
+                input.style.background = 'rgba(0,0,0,0.5)';
+                input.style.border = '1px solid rgba(255,255,255,0.2)';
+                input.style.borderRadius = '3px';
+                input.style.color = '#00adff';
+                input.style.fontFamily = 'monospace';
+                input.style.fontSize = '9px';
+                input.style.padding = '1px 3px';
+                input.style.boxSizing = 'border-box';
+                input.title = isMax ? 'Edit Maximum Value' : 'Edit Minimum Value';
+
+                this.bindEditingEvents(input, () => {
+                    const newV = Number(input.value);
+                    if (!isNaN(newV)) {
+                        const updates: any = { auto_scale: false };
+                        if (isMax) updates.max_val = newV;
+                        else updates.min_val = newV;
+                        this.stateManager.updateNodeParametersInPlace(vpNode.id, updates);
+                        this.syncControls(true);
+                    }
+                });
+                tickRow.appendChild(input);
+            } else {
+                // Intermediate tick label
+                const label = document.createElement('span');
+                label.textContent = this.formatRangeValue(val);
+                label.style.color = '#aaa';
+                tickRow.appendChild(label);
+            }
+
+            ticksContainer.appendChild(tickRow);
+        }
+    }
+
+    private buildColorbarTableRow(parent: HTMLElement) {
+        const vpNode = this.getViewportNode();
+        const initShow = vpNode ? (vpNode.parameters.show_color_bar !== false) : true;
+        const initPos = vpNode ? (vpNode.parameters.color_bar_position || 'left-center') : 'left-center';
+        const initAuto = vpNode ? (vpNode.parameters.auto_scale !== false) : true;
+        const initLog = vpNode ? (vpNode.parameters.log_scale === true) : false;
+        const { quantity: initQty } = getFocusedQuantityAndRange(vpNode || {});
+        const initCmap = vpNode ? (vpNode.parameters.quantity_colormaps?.[initQty] || vpNode.parameters.stl_colormap || 'plasma') : 'plasma';
+
+        const tr = document.createElement('tr');
+        tr.style.borderBottom = '1px solid rgba(255,255,255,0.06)';
+
+        // Col 1: Vis Checkbox (Enable Color Bar)
+        const tdVis = document.createElement('td');
+        tdVis.style.padding = '3px 2px';
+        tdVis.style.textAlign = 'center';
+        const showCb = document.createElement('input');
+        showCb.type = 'checkbox';
+        showCb.id = this.getElId('viewport-colorbar-cb');
+        showCb.checked = initShow;
+        showCb.onchange = () => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { show_color_bar: showCb.checked });
+                this.syncControls(true);
+            }
+        };
+        this.bindEditingEvents(showCb);
+        tdVis.appendChild(showCb);
+        tr.appendChild(tdVis);
+
+        // Col 2: Layer Title
+        const tdLayer = document.createElement('td');
+        tdLayer.style.padding = '3px 4px';
+        tdLayer.innerHTML = '🎨 <b>Color Bar</b>';
+        tr.appendChild(tdLayer);
+
+        // Col 3: SOL (Position Popover Pill)
+        const tdPos = document.createElement('td');
+        tdPos.style.padding = '3px 2px';
+        tdPos.style.textAlign = 'center';
+        const posPill = document.createElement('div');
+        posPill.style.fontSize = '8px';
+        posPill.style.padding = '2px 4px';
+        posPill.style.borderRadius = '3px';
+        posPill.style.cursor = 'pointer';
+        posPill.style.background = 'rgba(255,255,255,0.08)';
+        posPill.style.border = '1px solid rgba(255,255,255,0.15)';
+        posPill.style.color = '#00adff';
+        posPill.style.fontWeight = 'bold';
+        posPill.textContent = initPos.replace('-', ' ').toUpperCase();
+        posPill.onclick = (e) => {
+            e.stopPropagation();
+            this.showPopover(posPill, (popover) => {
+                const positions = [
+                    { id: 'left-center', label: 'Left Center' },
+                    { id: 'left-top', label: 'Left Top' },
+                    { id: 'left-bottom', label: 'Left Bottom' },
+                    { id: 'right-bottom', label: 'Right Bottom' }
+                ];
+                positions.forEach(p => {
+                    const item = document.createElement('div');
+                    item.textContent = p.label;
+                    item.style.padding = '3px 6px';
+                    item.style.borderRadius = '3px';
+                    item.style.cursor = 'pointer';
+                    item.onclick = (ev) => {
+                        ev.stopPropagation();
+                        const vp = this.getViewportNode();
+                        if (vp) {
+                            this.stateManager.updateNodeParametersInPlace(vp.id, { color_bar_position: p.id });
+                            this.syncControls(true);
+                            this.closePopover();
+                        }
+                    };
+                    popover.appendChild(item);
+                });
+            });
+        };
+        tdPos.appendChild(posPill);
+        tr.appendChild(tdPos);
+
+        // Col 4: LINES (Auto-Scale Pill)
+        const tdAuto = document.createElement('td');
+        tdAuto.style.padding = '3px 2px';
+        tdAuto.style.textAlign = 'center';
+        tdAuto.appendChild(this.createToggleBtn('viewport-colorbar-autoscale-btn', 'AUTO', initAuto, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { auto_scale: v });
+                this.syncControls(true);
+            }
+        }));
+        tr.appendChild(tdAuto);
+
+        // Col 5: RES (Log Scale Pill)
+        const tdLog = document.createElement('td');
+        tdLog.style.padding = '3px 2px';
+        tdLog.style.textAlign = 'center';
+        tdLog.appendChild(this.createToggleBtn('viewport-colorbar-logscale-btn', 'LOG', initLog, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { log_scale: v });
+                this.syncControls(true);
+            }
+        }));
+        tr.appendChild(tdLog);
+
+        // Col 6: QTY (Quantity Selector Pill)
+        const tdQty = document.createElement('td');
+        tdQty.style.padding = '3px 4px';
+        const qtyPill = document.createElement('div');
+        qtyPill.style.fontSize = '9px';
+        qtyPill.style.padding = '2px 4px';
+        qtyPill.style.borderRadius = '3px';
+        qtyPill.style.cursor = 'pointer';
+        qtyPill.style.background = 'rgba(0, 173, 255, 0.12)';
+        qtyPill.style.border = '1px solid rgba(0, 173, 255, 0.3)';
+        qtyPill.style.color = '#00adff';
+        qtyPill.style.fontWeight = '500';
+        qtyPill.textContent = initQty;
+        qtyPill.onclick = (e) => {
+            e.stopPropagation();
+            this.showQuantityPopover(qtyPill, initQty, (newQ) => {
+                this.setFocusedQuantity(newQ);
+            });
+        };
+        tdQty.appendChild(qtyPill);
+        tr.appendChild(tdQty);
+
+        // Col 7: COLOR (Colormap Selector Pill)
+        const tdCmap = document.createElement('td');
+        tdCmap.style.padding = '3px 4px';
+        const cmapPill = document.createElement('div');
+        cmapPill.style.fontSize = '9px';
+        cmapPill.style.padding = '2px 4px';
+        cmapPill.style.borderRadius = '3px';
+        cmapPill.style.cursor = 'pointer';
+        cmapPill.style.background = 'rgba(255, 255, 255, 0.08)';
+        cmapPill.style.border = '1px solid rgba(255, 255, 255, 0.15)';
+        cmapPill.style.color = '#e0e0e0';
+        cmapPill.textContent = initCmap;
+        cmapPill.onclick = (e) => {
+            e.stopPropagation();
+            this.showColormapPopover(cmapPill, initCmap, (newC) => {
+                this.setQuantityColormap(initQty, newC);
+            });
+        };
+        tdCmap.appendChild(cmapPill);
+        tr.appendChild(tdCmap);
+
+        // Col 8: SCL (Range limits popover button)
+        const tdScl = document.createElement('td');
+        tdScl.style.padding = '3px 2px';
+        tdScl.style.textAlign = 'center';
+        const rangeBtn = document.createElement('button');
+        rangeBtn.innerHTML = '⚙️ Range';
+        this.applyButtonStyle(rangeBtn);
+        rangeBtn.style.fontSize = '8px';
+        rangeBtn.onclick = (e) => {
+            e.stopPropagation();
+            this.showPopover(rangeBtn, (popover) => {
+                const vp = this.getViewportNode();
+                const minV = vp?.parameters.min_val ?? 0.0;
+                const maxV = vp?.parameters.max_val ?? 1.0;
+
+                popover.innerHTML = `
+                    <div style="font-weight:bold; color:#00adff; margin-bottom:6px;">Manual Range Limits</div>
+                    <div style="display:flex; flex-direction:column; gap:4px;">
+                        <label style="display:flex; justify-content:space-between; align-items:center; gap:6px;">
+                            <span>Min:</span>
+                            <input type="number" step="any" id="popover-min-inp" value="${minV}" style="width:70px; background:#111; color:#fff; border:1px solid #444; border-radius:3px; padding:2px;">
+                        </label>
+                        <label style="display:flex; justify-content:space-between; align-items:center; gap:6px;">
+                            <span>Max:</span>
+                            <input type="number" step="any" id="popover-max-inp" value="${maxV}" style="width:70px; background:#111; color:#fff; border:1px solid #444; border-radius:3px; padding:2px;">
+                        </label>
+                        <button id="popover-apply-range" style="margin-top:4px; background:#007acc; color:#fff; border:none; border-radius:3px; padding:3px; cursor:pointer;">Apply Range</button>
+                    </div>
+                `;
+                const applyBtn = popover.querySelector('#popover-apply-range') as HTMLButtonElement;
+                if (applyBtn) {
+                    applyBtn.onclick = () => {
+                        const minInp = popover.querySelector('#popover-min-inp') as HTMLInputElement;
+                        const maxInp = popover.querySelector('#popover-max-inp') as HTMLInputElement;
+                        if (minInp && maxInp && vp) {
+                            const minN = Number(minInp.value);
+                            const maxN = Number(maxInp.value);
+                            this.stateManager.updateNodeParametersInPlace(vp.id, {
+                                auto_scale: false,
+                                min_val: minN,
+                                max_val: maxN
+                            });
+                            this.syncControls(true);
+                            this.closePopover();
+                        }
+                    };
+                }
+            });
+        };
+        tdScl.appendChild(rangeBtn);
+        tr.appendChild(tdScl);
+
+        // Col 9, 10: OPACITY and TRASH
+        const tdOpac = document.createElement('td');
+        tdOpac.innerHTML = '<span style="color:#555;">—</span>';
+        tdOpac.style.textAlign = 'center';
+        tr.appendChild(tdOpac);
+
+        const tdTrash = document.createElement('td');
+        tdTrash.innerHTML = '<span style="color:#555;">—</span>';
+        tdTrash.style.textAlign = 'center';
+        tr.appendChild(tdTrash);
+
+        parent.appendChild(tr);
+    }
+
     private selectOptionByNumericValue(sel: HTMLSelectElement | null, val: number | string): void {
         if (!sel) return;
         const target = Number(val);
@@ -2531,20 +3322,36 @@ export class Telemetry3DViewport {
             }
         }
 
-        const ws = this.stateManager.getActiveWorkspace();
-        if (!ws) return null;
-        if (ws.activeModelId) {
-            const state = this.stateManager.getSimulationState(ws.activeModelId);
+        const currentModelId = this.getCurrentModelId();
+        if (currentModelId) {
+            const state = this.stateManager.getSimulationState(currentModelId);
             const node = state?.nodes.find(n => n.type === 'Telemetry3DViewport');
             if (node) return node;
+
+            if (!this.virtualNodes[currentModelId]) {
+                const defaultSlices = [
+                    { axis: 'xy', offset: 0.5, quantities: ['pressure'], stride: 1, enabled: true }
+                ];
+
+                this.virtualNodes[currentModelId] = {
+                    id: 'virtual-viewport-' + currentModelId,
+                    type: 'Telemetry3DViewport',
+                    parameters: {
+                        slices: defaultSlices,
+                        show_grid: true,
+                        show_grid_box: true,
+                        cell_edges: false,
+                        show_stl: true,
+                        stl_opacity: 0.5,
+                        show_obstacles: true,
+                        obstacles_opacity: 1.0,
+                        refresh_rate: 2.0
+                    }
+                };
+            }
+            return this.virtualNodes[currentModelId];
         }
 
-        // Fallback: search all models in the workspace
-        const allModels = this.stateManager.getWorkspaceModels();
-        for (const m of allModels) {
-            const node = m.nodes.find(n => n.type === 'Telemetry3DViewport');
-            if (node) return node;
-        }
         return null;
     }
 
@@ -2556,14 +3363,7 @@ export class Telemetry3DViewport {
         const net = (window as any).networkManager;
         if (!net || !net.isConnected()) return;
 
-        let targetModelId = vpNode.id;
-        const models = this.stateManager.getAppState().models;
-        for (const [mid, m] of Object.entries(models)) {
-            if (m.nodes.some(n => n.id === vpNode.id)) {
-                targetModelId = mid;
-                break;
-            }
-        }
+        let targetModelId = this.getCurrentModelId() || vpNode.id;
 
         const showObstacles = vpNode.parameters.show_obstacles === true;
         const obstaclesQuantity = vpNode.parameters.obstacles_quantity || 'pressure';
@@ -2624,10 +3424,16 @@ export class Telemetry3DViewport {
 
         const allModels = this.stateManager.getAllModels();
         let targetModel: any = null;
-        for (const m of Object.values(allModels)) {
-            if (m.nodes.some(n => n.id === vpNode.id)) {
-                targetModel = m;
-                break;
+        const currentModelId = this.getCurrentModelId();
+        if (currentModelId) {
+            targetModel = allModels.find(m => m.id === currentModelId) || null;
+        }
+        if (!targetModel) {
+            for (const m of Object.values(allModels)) {
+                if (m.nodes.some(n => n.id === vpNode.id)) {
+                    targetModel = m;
+                    break;
+                }
             }
         }
         if (!targetModel) return null;
@@ -2638,11 +3444,21 @@ export class Telemetry3DViewport {
             if (solverNode) {
                 const connToSolver = targetModel.connections.find((c: any) => c.toNode === solverNode.id && c.toPort === 'mesh');
                 if (connToSolver) {
-                    return targetModel.nodes.find((n: any) => n.id === connToSolver.fromNode) || null;
+                    let currNode = targetModel.nodes.find((n: any) => n.id === connToSolver.fromNode);
+                    let depth = 0;
+                    while (currNode && currNode.type === 'RefinementMesh3D' && depth < 20) {
+                        const parentConn = targetModel.connections.find((c: any) => c.toNode === currNode.id && c.toPort === 'parent_mesh');
+                        if (!parentConn) break;
+                        currNode = targetModel.nodes.find((n: any) => n.id === parentConn.fromNode);
+                        depth++;
+                    }
+                    if (currNode && currNode.type === 'DomainMesh3D') {
+                        return currNode;
+                    }
                 }
             }
         }
-        return null;
+        return targetModel.nodes.find((n: any) => n.type === 'DomainMesh3D') || null;
     }
 
     private getSolverNode(): Node | null {
@@ -2651,10 +3467,16 @@ export class Telemetry3DViewport {
 
         const allModels = this.stateManager.getAllModels();
         let targetModel: any = null;
-        for (const m of Object.values(allModels)) {
-            if (m.nodes.some(n => n.id === vpNode.id)) {
-                targetModel = m;
-                break;
+        const currentModelId = this.getCurrentModelId();
+        if (currentModelId) {
+            targetModel = allModels.find(m => m.id === currentModelId) || null;
+        }
+        if (!targetModel) {
+            for (const m of Object.values(allModels)) {
+                if (m.nodes.some(n => n.id === vpNode.id)) {
+                    targetModel = m;
+                    break;
+                }
             }
         }
         if (!targetModel) return null;
@@ -2663,7 +3485,7 @@ export class Telemetry3DViewport {
         if (connToViewport) {
             return targetModel.nodes.find((n: any) => n.id === connToViewport.fromNode) || null;
         }
-        return null;
+        return targetModel.nodes.find((n: any) => n.type === 'CFDSolver3D') || null;
     }
 
     private addSlice() {
@@ -2784,6 +3606,7 @@ export class Telemetry3DViewport {
 
     private syncControls(postToWorker: boolean = true) {
         const vpNode = this.getViewportNode();
+        this.syncColorbarOverlay(vpNode || { parameters: {} });
         if (!vpNode) return;
 
         const solverNode = this.getSolverNode();
@@ -2835,6 +3658,9 @@ export class Telemetry3DViewport {
 
         const stlShowCb = document.getElementById(this.getElId('viewport-stl-show-cb')) as HTMLInputElement;
         if (stlShowCb && document.activeElement !== stlShowCb) stlShowCb.checked = vpNode.parameters.show_stl !== false;
+
+        const cbShowCb = document.getElementById(this.getElId('viewport-colorbar-cb')) as HTMLInputElement;
+        if (cbShowCb && document.activeElement !== cbShowCb) cbShowCb.checked = vpNode.parameters.show_color_bar !== false;
 
         const updateBtnStyle = (idStr: string, active: boolean) => {
             const btn = document.getElementById(this.getElId(idStr));
@@ -3000,6 +3826,53 @@ export class Telemetry3DViewport {
             const obsQty = vpNode.parameters.obstacles_quantity || 'pressure';
             const resObsCmap = qCmaps[obsQty] || vpNode.parameters.obstacles_colormap || 'plasma';
 
+            const state = this.stateManager.getCurrentState();
+            const solverNode3D = state?.nodes.find(n => n.type === 'CFDSolver3D');
+            const domainMesh3D = state?.nodes.find(n => n.type === 'DomainMesh3D');
+            const xmin = Number(domainMesh3D?.parameters.xmin ?? 0.0);
+            const xmax = Number(domainMesh3D?.parameters.xmax ?? 1.0);
+            const ymin = Number(domainMesh3D?.parameters.ymin ?? 0.0);
+            const ymax = Number(domainMesh3D?.parameters.ymax ?? 1.0);
+            const zmin = Number(domainMesh3D?.parameters.zmin ?? 0.0);
+            const zmax = Number(domainMesh3D?.parameters.zmax ?? 1.0);
+
+            const chargeConn = solverNode3D ? state?.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'charge') : null;
+            const chargeNode = chargeConn ? state?.nodes.find(n => n.id === chargeConn.fromNode) : state?.nodes.find(n => n.type === 'Charge3D' || n.type === 'Charge2D' || n.type === 'Charge1D');
+
+            let chargeParams: any = null;
+            if (chargeNode) {
+                const shape = chargeNode.parameters.charge_shape || 'Sphere';
+                const cx = Number(chargeNode.parameters.charge_x ?? ((xmin + xmax) * 0.5));
+                const cy = Number(chargeNode.parameters.charge_y ?? ((ymin + ymax) * 0.5));
+                const cz = Number(chargeNode.parameters.charge_z ?? ((zmin + zmax) * 0.5));
+                const radius = Number(chargeNode.parameters.charge_radius ?? 0.1);
+                const height = Number(chargeNode.parameters.charge_height ?? 0.2);
+                const lx = Number(chargeNode.parameters.charge_lx ?? 0.2);
+                const ly = Number(chargeNode.parameters.charge_ly ?? 0.2);
+                const lz = Number(chargeNode.parameters.charge_lz ?? 0.2);
+
+                chargeParams = {
+                    id: chargeNode.id,
+                    type: chargeNode.type,
+                    shape: shape,
+                    x: cx, y: cy, z: cz,
+                    radius: radius, height: height,
+                    lx: lx, ly: ly, lz: lz
+                };
+            }
+
+            const submeshNodes = state?.nodes.filter(n => n.type === 'RefinementMesh3D') || [];
+            const submeshes = submeshNodes.map((sNode: any) => ({
+                id: sNode.id,
+                level: Number(sNode.parameters.refinement_level ?? 1),
+                x: Number(sNode.parameters.submesh_x ?? 0.25),
+                y: Number(sNode.parameters.submesh_y ?? 0.25),
+                z: Number(sNode.parameters.submesh_z ?? 0.25),
+                size_x: Number(sNode.parameters.submesh_size_x ?? 0.5),
+                size_y: Number(sNode.parameters.submesh_size_y ?? 0.5),
+                size_z: Number(sNode.parameters.submesh_size_z ?? 0.5)
+            }));
+
             this.worker.postMessage({
                 type: 'setConfig',
                 data: {
@@ -3024,7 +3897,14 @@ export class Telemetry3DViewport {
                     obstaclesLogScale: vpNode.parameters.obstacles_log_scale === true,
                     obstaclesInterpolate: vpNode.parameters.obstacles_interpolate !== false,
                     obstaclesMinVal: vpNode.parameters.obstacles_min_val ?? 101325.0,
-                    obstaclesMaxVal: vpNode.parameters.obstacles_max_val ?? 1013250.0
+                    obstaclesMaxVal: vpNode.parameters.obstacles_max_val ?? 1013250.0,
+                    showCharge: vpNode.parameters.show_charge !== false,
+                    chargeSolid: vpNode.parameters.charge_solid !== false,
+                    chargeWireframe: vpNode.parameters.charge_wireframe !== false,
+                    chargeLighting: vpNode.parameters.charge_lighting !== false,
+                    chargeOpacity: vpNode.parameters.charge_opacity ?? 0.65,
+                    charge: chargeParams,
+                    submeshes: submeshes
                 }
             });
         }
@@ -3072,6 +3952,7 @@ export class Telemetry3DViewport {
             this.buildGridRow(this.staticListContainer);
             this.buildGaugeRow(this.staticListContainer);
             this.buildLightingTableRow(this.staticListContainer);
+            this.buildColorbarTableRow(this.staticListContainer);
         }
 
         // 2. Sync Slices Row list
@@ -3191,7 +4072,7 @@ export class Telemetry3DViewport {
                     const qtyLabels: Record<string, string> = {
                         pressure: 'Press', density: 'Density', velocity: 'Speed', energy: 'Energy',
                         species1: 'Reacted', species2: 'Unreacted', species3: 'Air',
-                        peak_overpressure: 'Pk Press', peak_impulse: 'Pk Impulse'
+                        peak_overpressure: 'Pk Press', peak_impulse: 'Pk Impulse', amr_level: 'AMR Level'
                     };
                     qtyPill.textContent = `${qtyLabels[qty] || qty} ▾`;
                     this.applyButtonStyle(qtyPill);
@@ -3432,13 +4313,14 @@ export class Telemetry3DViewport {
         // 4. Find connected domain mesh dimensions and configure worker
         let dimX = 1.0, dimY = 1.0, dimZ = 1.0, cellSize = 0.01;
         let xmin = 0.0, ymin = 0.0, zmin = 0.0;
+        let xmax = 1.0, ymax = 1.0, zmax = 1.0;
         if (meshNode && meshNode.type === 'DomainMesh3D') {
             xmin = Number(meshNode.parameters?.xmin ?? meshNode.parameters?.x_min ?? 0.0);
-            const xmax = Number(meshNode.parameters?.xmax ?? meshNode.parameters?.x_max ?? 1.0);
+            xmax = Number(meshNode.parameters?.xmax ?? meshNode.parameters?.x_max ?? 1.0);
             ymin = Number(meshNode.parameters?.ymin ?? meshNode.parameters?.y_min ?? 0.0);
-            const ymax = Number(meshNode.parameters?.ymax ?? meshNode.parameters?.y_max ?? 1.0);
+            ymax = Number(meshNode.parameters?.ymax ?? meshNode.parameters?.y_max ?? 1.0);
             zmin = Number(meshNode.parameters?.zmin ?? meshNode.parameters?.z_min ?? 0.0);
-            const zmax = Number(meshNode.parameters?.zmax ?? meshNode.parameters?.z_max ?? 1.0);
+            zmax = Number(meshNode.parameters?.zmax ?? meshNode.parameters?.z_max ?? 1.0);
             dimX = xmax - xmin;
             dimY = ymax - ymin;
             dimZ = zmax - zmin;
@@ -3463,6 +4345,7 @@ export class Telemetry3DViewport {
         });
 
         const configData: any = {
+            meshType: solverNode?.parameters?.mesh_type || 'regular',
             colormap: vpNode.parameters.colormap || 'plasma',
             minY: syncFocusedMin,
             maxY: syncFocusedMax,
@@ -3495,21 +4378,26 @@ export class Telemetry3DViewport {
             obstaclesColormap: resObsCmap
         };
 
+        configData.xmin = xmin;
+        configData.xmax = xmax;
+        configData.ymin = ymin;
+        configData.ymax = ymax;
+        configData.zmin = zmin;
+        configData.zmax = zmax;
+
         const cachedConfig = this.stateManager.getTelemetry(vpNode.id + "-config-3d");
         if (cachedConfig) {
             this.hasTelemetryGrid = true;
-            configData.xmin = cachedConfig.xmin;
-            configData.ymin = cachedConfig.ymin;
-            configData.zmin = cachedConfig.zmin;
-            configData.dx = cachedConfig.dx;
-            configData.nx = cachedConfig.nx;
-            configData.ny = cachedConfig.ny;
-            configData.nz = cachedConfig.nz;
-        } else if (!this.hasTelemetryGrid) {
-            configData.xmin = xmin;
-            configData.ymin = ymin;
-            configData.zmin = zmin;
+            configData.dx = cachedConfig.dx ?? cellSize;
+            configData.dy = cachedConfig.dy ?? (dimY / (ny || 1));
+            configData.dz = cachedConfig.dz ?? (dimZ / (nz || 1));
+            configData.nx = cachedConfig.nx ?? nx;
+            configData.ny = cachedConfig.ny ?? ny;
+            configData.nz = cachedConfig.nz ?? nz;
+        } else {
             configData.dx = cellSize;
+            configData.dy = dimY / (ny || 1);
+            configData.dz = dimZ / (nz || 1);
             configData.nx = nx;
             configData.ny = ny;
             configData.nz = nz;
@@ -3575,6 +4463,9 @@ export class Telemetry3DViewport {
         if (this.canvas.parentNode !== this.container) {
             this.container.appendChild(this.canvas);
         }
+        if (this.overlayCanvas && this.overlayCanvas.parentNode !== this.container) {
+            this.container.appendChild(this.overlayCanvas);
+        }
         if (this.controlsOverlay && this.controlsOverlay.parentNode !== this.container) {
             this.container.appendChild(this.controlsOverlay);
         }
@@ -3584,6 +4475,12 @@ export class Telemetry3DViewport {
         if (this.debugOverlay && this.debugOverlay.parentNode !== this.container) {
             this.container.appendChild(this.debugOverlay);
         }
+        if (this.colorbarOverlay && this.colorbarOverlay.parentNode !== this.container) {
+            this.container.appendChild(this.colorbarOverlay);
+        }
+
+        const vpNode = this.getViewportNode();
+        this.syncColorbarOverlay(vpNode || { parameters: {} });
 
         // Force geometry reload
         this.currentGeometryHash = '';
@@ -3885,13 +4782,18 @@ export class Telemetry3DViewport {
         const vpNode = this.getViewportNode();
         if (!vpNode) return null;
 
-        // Find which model globally contains this viewport node
         const allModels = this.stateManager.getAllModels();
         let targetModel: any = null;
-        for (const m of Object.values(allModels)) {
-            if (m.nodes.some(n => n.id === vpNode.id)) {
-                targetModel = m;
-                break;
+        const currentModelId = this.getCurrentModelId();
+        if (currentModelId) {
+            targetModel = allModels.find(m => m.id === currentModelId) || null;
+        }
+        if (!targetModel) {
+            for (const m of Object.values(allModels)) {
+                if (m.nodes.some(n => n.id === vpNode.id)) {
+                    targetModel = m;
+                    break;
+                }
             }
         }
         if (!targetModel) return null;
@@ -3909,6 +4811,10 @@ export class Telemetry3DViewport {
                 }
             }
         }
+        const fallbackStlNode = targetModel.nodes.find((n: any) => n.type === 'STLGeometry');
+        if (fallbackStlNode) {
+            return fallbackStlNode.parameters.stl_file || null;
+        }
         return null;
     }
 
@@ -3917,7 +4823,11 @@ export class Telemetry3DViewport {
         const allModels = this.stateManager.getAllModels();
         let targetModel: any = null;
 
-        if (vpNode) {
+        const currentModelId = this.getCurrentModelId();
+        if (currentModelId) {
+            targetModel = allModels.find(m => m.id === currentModelId) || null;
+        }
+        if (!targetModel && vpNode) {
             for (const m of Object.values(allModels)) {
                 if (m.nodes.some(n => n.id === vpNode.id)) {
                     targetModel = m;
@@ -3925,21 +4835,17 @@ export class Telemetry3DViewport {
                 }
             }
         }
-
         if (!targetModel && this.viewportNodeId) {
             targetModel = allModels.find(m => m.id === this.viewportNodeId) || null;
         }
-
         if (!targetModel) {
             const ws = this.stateManager.getActiveWorkspace();
             if (ws && ws.activeModelId) {
-                targetModel = allModels.find(m => m.id === ws.activeModelId);
+                targetModel = allModels.find(m => m.id === ws.activeModelId) || null;
             }
         }
-
         if (!targetModel) return null;
 
-        // 1. Recursively trace upstream from viewport node through intermediate nodes (VTKOutput, CFDSolver3D, etc.)
         const findUpstreamGeom = (nodeId: string, visited = new Set<string>()): Node | null => {
             if (visited.has(nodeId)) return null;
             visited.add(nodeId);
@@ -3962,7 +4868,6 @@ export class Telemetry3DViewport {
             if (found) return found;
         }
 
-        // 2. Fallback: Find geometry connected to any CFDSolver3D or anywhere in model
         const geomNode = targetModel.nodes.find((n: any) => n.type === 'STLGeometry' || n.type === 'PrimitiveGeometry3D');
         if (geomNode) return geomNode;
 
@@ -3975,16 +4880,22 @@ export class Telemetry3DViewport {
 
         const allModels = this.stateManager.getAllModels();
         let targetModel: any = null;
-        for (const m of Object.values(allModels)) {
-            if (m.nodes.some(n => n.id === vpNode.id)) {
-                targetModel = m;
-                break;
+        const currentModelId = this.getCurrentModelId();
+        if (currentModelId) {
+            targetModel = allModels.find(m => m.id === currentModelId) || null;
+        }
+        if (!targetModel && vpNode) {
+            for (const m of Object.values(allModels)) {
+                if (m.nodes.some(n => n.id === vpNode.id)) {
+                    targetModel = m;
+                    break;
+                }
             }
         }
         if (!targetModel) {
             const ws = this.stateManager.getActiveWorkspace();
             if (ws && ws.activeModelId) {
-                targetModel = allModels.find(m => m.id === ws.activeModelId);
+                targetModel = allModels.find(m => m.id === ws.activeModelId) || null;
             }
         }
         if (!targetModel) return [];
@@ -4092,6 +5003,250 @@ export class Telemetry3DViewport {
         });
     }
 
+    private getTickInterval(minVal: number, maxVal: number, targetTicks: number = 5): { major: number, minor: number } {
+        const range = maxVal - minVal;
+        if (range <= 0) return { major: 1, minor: 0.1 };
+        
+        const rawStep = range / targetTicks;
+        const magnitude = Math.pow(10, Math.floor(Math.log10(rawStep)));
+        const normalized = rawStep / magnitude;
+        
+        let step = magnitude;
+        if (normalized >= 5) {
+            step = 5 * magnitude;
+        } else if (normalized >= 2) {
+            step = 2 * magnitude;
+        }
+        
+        return {
+            major: step,
+            minor: step / 5
+        };
+    }
+
+    private formatTickValue(val: number, step: number): string {
+        if (Math.abs(val) > 0.0001 && Math.abs(val) < 0.001) {
+            return val.toExponential(1);
+        }
+        if (Math.abs(val) < 1e-4 || Math.abs(val) >= 1e5) {
+            return val.toExponential(2);
+        }
+        const decimals = Math.max(0, -Math.floor(Math.log10(step)));
+        return val.toFixed(decimals);
+    }
+
+    private drawTicks() {
+        if (!this.overlayCanvas || !this.overlayCtx || !this.latestFrameData) return;
+        const ctx = this.overlayCtx;
+        const data = this.latestFrameData;
+        const width = this.overlayCanvas.width;
+        const height = this.overlayCanvas.height;
+
+        ctx.clearRect(0, 0, width, height);
+
+        if (!data.showGrid && !data.showGridBox) return;
+
+        const mvp = new Float32Array(data.mvp);
+        const { xmin, xmax, ymin, ymax, zmin, zmax, sX, sY, sZ } = data;
+
+        const sizeX = xmax - xmin;
+        const sizeY = ymax - ymin;
+        const sizeZ = zmax - zmin;
+
+        if (sizeX <= 0 || sizeY <= 0 || sizeZ <= 0) return;
+
+        const project = (x: number, y: number, z: number) => {
+            const bx = (x - xmin) / sizeX - 0.5;
+            const by = (y - ymin) / sizeY - 0.5;
+            const bz = (z - zmin) / sizeZ - 0.5;
+            const mx = bx;
+            const my = by;
+            const mz = bz;
+
+            const w = mvp[3] * mx + mvp[7] * my + mvp[11] * mz + mvp[15] || 1;
+            const screenX = (mvp[0] * mx + mvp[4] * my + mvp[8] * mz + mvp[12]) / w;
+            const screenY = (mvp[1] * mx + mvp[5] * my + mvp[9] * mz + mvp[13]) / w;
+
+            return {
+                x: (screenX * 0.5 + 0.5) * width,
+                y: (1.0 - (screenY * 0.5 + 0.5)) * height,
+                w
+            };
+        };
+
+        const centerProj = project((xmin + xmax) / 2, (ymin + ymax) / 2, (zmin + zmax) / 2);
+        if (centerProj.w < 0.1) return;
+
+        const dpr = window.devicePixelRatio || 1;
+        const depthScale = Math.max(0.5, Math.min(1.4, 2.0 / centerProj.w));
+        const scale = depthScale * dpr;
+
+        const fontSize = Math.round(10 * scale);
+        ctx.font = `bold ${fontSize}px system-ui, -apple-system, sans-serif`;
+
+        const axes = [
+            {
+                name: 'X',
+                color: '#ff5555',
+                min: xmin,
+                max: xmax,
+                offsetDir: [0, -1, 0],
+                pointAt: (val: number) => [val, ymin, zmin],
+                labelSuffix: 'm'
+            },
+            {
+                name: 'Y',
+                color: '#55ff55',
+                min: ymin,
+                max: ymax,
+                offsetDir: [1, 0, 0],
+                pointAt: (val: number) => [xmax, val, zmin],
+                labelSuffix: 'm'
+            },
+            {
+                name: 'Z',
+                color: '#55aaff',
+                min: zmin,
+                max: zmax,
+                offsetDir: [-1, 0, 0],
+                pointAt: (val: number) => [xmin, ymin, val],
+                labelSuffix: 'm'
+            }
+        ];
+
+        const dx_physical = (xmax - xmin) * 0.05;
+        const dy_physical = (ymax - ymin) * 0.05;
+        const dz_physical = (zmax - zmin) * 0.05;
+
+        for (const axis of axes) {
+            const { major, minor } = this.getTickInterval(axis.min, axis.max);
+            
+            let tickVal = Math.ceil(axis.min / major) * major;
+            const limit = axis.max + major * 1e-5;
+
+            while (tickVal <= limit) {
+                const val = tickVal;
+                const clampedVal = Math.max(axis.min, Math.min(axis.max, val));
+                const [ax, ay, az] = axis.pointAt(clampedVal);
+                
+                const pBase = project(ax, ay, az);
+                if (pBase.w < 0.1) {
+                    tickVal += major;
+                    continue;
+                }
+
+                const ox = ax + axis.offsetDir[0] * dx_physical;
+                const oy = ay + axis.offsetDir[1] * dy_physical;
+                const oz = az + axis.offsetDir[2] * dz_physical;
+                const pOff = project(ox, oy, oz);
+
+                if (pOff.w < 0.1) {
+                    tickVal += major;
+                    continue;
+                }
+
+                let dx = pOff.x - pBase.x;
+                let dy = pOff.y - pBase.y;
+                let len = Math.sqrt(dx * dx + dy * dy);
+                let ux = 0;
+                let uy = 1;
+                if (len > 0.001) {
+                    ux = dx / len;
+                    uy = dy / len;
+                }
+
+                const L_major = 8 * scale;
+                const L_label = 16 * scale;
+
+                const pTickEnd = {
+                    x: pBase.x + ux * L_major,
+                    y: pBase.y + uy * L_major
+                };
+
+                const pLabelPos = {
+                    x: pBase.x + ux * L_label,
+                    y: pBase.y + uy * L_label
+                };
+
+                ctx.beginPath();
+                ctx.moveTo(pBase.x, pBase.y);
+                ctx.lineTo(pTickEnd.x, pTickEnd.y);
+                ctx.strokeStyle = axis.color;
+                ctx.lineWidth = 1.5 * dpr;
+                ctx.stroke();
+
+                ctx.fillStyle = '#ffffff';
+                
+                if (ux > 0.3) ctx.textAlign = 'left';
+                else if (ux < -0.3) ctx.textAlign = 'right';
+                else ctx.textAlign = 'center';
+
+                if (uy > 0.3) ctx.textBaseline = 'top';
+                else if (uy < -0.3) ctx.textBaseline = 'bottom';
+                else ctx.textBaseline = 'middle';
+
+                const displayVal = this.formatTickValue(clampedVal, major);
+                ctx.fillText(`${displayVal}${axis.labelSuffix}`, pLabelPos.x, pLabelPos.y);
+
+                tickVal += major;
+            }
+
+            if (minor > 0) {
+                let minorVal = Math.ceil(axis.min / minor) * minor;
+                const minorLimit = axis.max + minor * 1e-5;
+                while (minorVal <= minorLimit) {
+                    const nearestMajor = Math.round(minorVal / major) * major;
+                    if (Math.abs(minorVal - nearestMajor) < minor * 0.1) {
+                        minorVal += minor;
+                        continue;
+                    }
+
+                    const clampedVal = Math.max(axis.min, Math.min(axis.max, minorVal));
+                    const [ax, ay, az] = axis.pointAt(clampedVal);
+                    const pBase = project(ax, ay, az);
+                    if (pBase.w < 0.1) {
+                        minorVal += minor;
+                        continue;
+                    }
+
+                    const ox = ax + axis.offsetDir[0] * dx_physical;
+                    const oy = ay + axis.offsetDir[1] * dy_physical;
+                    const oz = az + axis.offsetDir[2] * dz_physical;
+                    const pOff = project(ox, oy, oz);
+                    if (pOff.w < 0.1) {
+                        minorVal += minor;
+                        continue;
+                    }
+
+                    let dx = pOff.x - pBase.x;
+                    let dy = pOff.y - pBase.y;
+                    let len = Math.sqrt(dx * dx + dy * dy);
+                    let ux = 0;
+                    let uy = 1;
+                    if (len > 0.001) {
+                        ux = dx / len;
+                        uy = dy / len;
+                    }
+
+                    const L_minor = 4 * scale;
+                    const pTickEnd = {
+                        x: pBase.x + ux * L_minor,
+                        y: pBase.y + uy * L_minor
+                    };
+
+                    ctx.beginPath();
+                    ctx.moveTo(pBase.x, pBase.y);
+                    ctx.lineTo(pTickEnd.x, pTickEnd.y);
+                    ctx.strokeStyle = axis.color;
+                    ctx.lineWidth = 1.0 * dpr;
+                    ctx.stroke();
+
+                    minorVal += minor;
+                }
+            }
+        }
+    }
+
     public destroy() {
         this.stateManager.offStateChange(this.stateListener);
         const net = (window as any).networkManager;
@@ -4101,8 +5256,10 @@ export class Telemetry3DViewport {
         }
         this.worker.terminate();
         this.canvas.remove();
+        if (this.overlayCanvas) this.overlayCanvas.remove();
         if (this.controlsOverlay) this.controlsOverlay.remove();
         if (this.floatOpenBtn) this.floatOpenBtn.remove();
+        if (this.colorbarOverlay) this.colorbarOverlay.remove();
     }
 }
 

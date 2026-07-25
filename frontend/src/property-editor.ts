@@ -1,4 +1,4 @@
-import { StateManager } from './state-manager.js';
+import { StateManager, calculateRefinementMeshInfo } from './state-manager.js';
 import { Node } from './types.js';
 import { validateSimulationState } from './validation.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
@@ -122,6 +122,9 @@ export class PropertyEditor {
                     const ny = Math.round(dim_y / cellSize);
                     const nz = Math.round(dim_z / cellSize);
                     gridInfo.textContent = `Calculated Grid: ${nx} x ${ny} x ${nz} cells (Total: ${(nx * ny * nz).toLocaleString()})`;
+                } else if (node.type === 'RefinementMesh3D' && state) {
+                    const stats = calculateRefinementMeshInfo(node, state);
+                    gridInfo.innerHTML = `<div>Refined Region: ${stats.subNx} x ${stats.subNy} x ${stats.subNz} (${stats.subTotalCells.toLocaleString()} cells)</div><div>Total Grid (w/ Parent): ${stats.newTotalCells.toLocaleString()} cells</div>`;
                 }
             }
 
@@ -328,6 +331,7 @@ export class PropertyEditor {
         for (const key of paramKeys) {
             const value = node.parameters[key];
             if (key === 'nr' || key === 'nz' || key === 'n_cells') continue;
+            if (node.type === 'CFDSolver3D' && (key === 'mesh_type' || key === 'amr_max_levels' || key === 'amr_threshold' || key === 'amr_coarsen_ratio' || key === 'amr_tile_size')) continue;
 
             if (node.type === 'DomainMesh') {
                 const dim = node.parameters['dimension'] || '1D';
@@ -402,6 +406,91 @@ export class PropertyEditor {
         }
         if (gridInfoDiv) {
             form.appendChild(gridInfoDiv);
+        }
+
+        if (node.type === 'RefinementMesh3D') {
+            const stats = state ? calculateRefinementMeshInfo(node, state) : { subNx: 1, subNy: 1, subNz: 1, subTotalCells: 0, newTotalCells: 0 };
+            const cellInfo = document.createElement('div');
+            cellInfo.id = 'grid-info-display';
+            cellInfo.style.fontSize = 'var(--font-xs)';
+            cellInfo.style.color = '#569cd6';
+            cellInfo.style.marginTop = '6px';
+            cellInfo.style.lineHeight = '1.3';
+            const sx = Number(node.parameters['submesh_size_x'] ?? 0.5);
+            const sy = Number(node.parameters['submesh_size_y'] ?? 0.5);
+            const sz = Number(node.parameters['submesh_size_z'] ?? 0.5);
+            const lvl = Number(node.parameters['refinement_level'] ?? 1);
+            cellInfo.innerHTML = `<div>SubMesh Level ${lvl} (${sx}m x ${sy}m x ${sz}m)</div><div>Refined Region: ${stats.subNx} x ${stats.subNy} x ${stats.subNz} (${stats.subTotalCells.toLocaleString()} cells)</div><div>Total Grid (w/ Parent): ${stats.newTotalCells.toLocaleString()} cells</div>`;
+            form.appendChild(cellInfo);
+
+            const autoFitDiv = document.createElement('div');
+            autoFitDiv.style.marginTop = '12px';
+            autoFitDiv.style.padding = '8px';
+            autoFitDiv.style.background = '#252526';
+            autoFitDiv.style.border = '1px solid #3c3c3c';
+            autoFitDiv.style.borderRadius = '4px';
+
+            const autoFitTitle = document.createElement('div');
+            autoFitTitle.style.fontSize = 'var(--font-xs)';
+            autoFitTitle.style.fontWeight = 'bold';
+            autoFitTitle.style.color = '#569cd6';
+            autoFitTitle.style.marginBottom = '6px';
+            autoFitTitle.textContent = 'QUICK AUTO-FIT ACTIONS';
+            autoFitDiv.appendChild(autoFitTitle);
+
+            const btnContainer = document.createElement('div');
+            btnContainer.style.display = 'flex';
+            btnContainer.style.flexDirection = 'column';
+            btnContainer.style.gap = '6px';
+
+            const createActionBtn = (text: string, onClick: () => void) => {
+                const btn = document.createElement('button');
+                btn.textContent = text;
+                btn.style.padding = '5px 8px';
+                btn.style.fontSize = 'var(--font-xs)';
+                btn.style.background = '#0e639c';
+                btn.style.color = '#fff';
+                btn.style.border = 'none';
+                btn.style.borderRadius = '3px';
+                btn.style.cursor = 'pointer';
+                btn.onclick = onClick;
+                return btn;
+            };
+
+            btnContainer.appendChild(createActionBtn('🎯 Auto-Fit to Explosive Charge', () => {
+                const state = this.stateManager.getCurrentState();
+                const chargeNode = state?.nodes.find(n => n.type === 'Charge3D');
+                if (chargeNode) {
+                    const cx = Number(chargeNode.parameters.charge_x ?? 0.5);
+                    const cy = Number(chargeNode.parameters.charge_y ?? 0.5);
+                    const cz = Number(chargeNode.parameters.charge_z ?? 0.5);
+                    const r = Number(chargeNode.parameters.charge_radius ?? 0.1);
+                    const padding = 0.05;
+                    const size = Math.ceil(((r + padding) * 2) * 100) / 100;
+                    this.stateManager.updateNodeParameters(node.id, {
+                        submesh_x: Math.max(0, cx - size * 0.5),
+                        submesh_y: Math.max(0, cy - size * 0.5),
+                        submesh_z: Math.max(0, cz - size * 0.5),
+                        submesh_size_x: size,
+                        submesh_size_y: size,
+                        submesh_size_z: size
+                    });
+                }
+            }));
+
+            btnContainer.appendChild(createActionBtn('🔲 Center 50% in Parent Domain', () => {
+                this.stateManager.updateNodeParameters(node.id, {
+                    submesh_x: 0.25,
+                    submesh_y: 0.25,
+                    submesh_z: 0.25,
+                    submesh_size_x: 0.5,
+                    submesh_size_y: 0.5,
+                    submesh_size_z: 0.5
+                });
+            }));
+
+            autoFitDiv.appendChild(btnContainer);
+            form.appendChild(autoFitDiv);
         }
         this.container.appendChild(form);
 
@@ -1043,7 +1132,7 @@ export class PropertyEditor {
             'ascii_precision', 'step_interval', 'time_interval', 'downsample_stride',
             'telemetry_channel',
             // 2D CFD keys
-            'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
+            'nr', 'nz', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
             'charge_r', 'charge_z', 'charge_radius', 'charge_height',
             'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
             'ideal_gamma', 'ideal_rho_0', 'ideal_e_0',
@@ -1052,16 +1141,21 @@ export class PropertyEditor {
             'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
             'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
             'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
-            'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio',
+            'refinement_opacity', 'charge_opacity',
+            'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio', 'amr_tile_size',
+            'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'refinement_level',
+            'submesh_x', 'submesh_y', 'submesh_z', 'submesh_size_x', 'submesh_size_y', 'submesh_size_z',
             // MPM keys
-            'pos_x', 'pos_y', 'vel_x', 'vel_y', 'size_x', 'size_y', 'radius', 'angular_vel',
+            'pos_x', 'pos_y', 'vel_x', 'vel_y', 'radius', 'angular_vel',
             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
             'failure_strain', 'tensile_failure_stress',
             'ppc', 'time_step', 'penalty_stiffness', 'contour_opacity', 'contour_min', 'contour_max'
         ];
 
         const dropdowns: Record<string, string[]> = {
+            'shape': ['box', 'sphere', 'cylinder'],
             'mesh_type': ['regular', 'amr'],
+            'amr_tile_size': ['8', '16'],
             'dimension': ['1D', '2D', '3D'],
             'x_min_bc': ['Reflecting', 'Transmitting', 'Terminate'],
             'x_max_bc': ['Reflecting', 'Transmitting', 'Terminate'],

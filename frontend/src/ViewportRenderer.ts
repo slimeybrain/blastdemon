@@ -820,8 +820,13 @@ function handleFrame(buffer: ArrayBuffer) {
         const zOff = view.getFloat32(offset + 4, true);
         const w = view.getUint32(offset + 8, true);
         const h = view.getUint32(offset + 12, true);
+        let numElements = w * h;
+        if (axis === 4) {
+            const volNz = (Math.round(zOff) > 0) ? Math.round(zOff) : (nz || 64);
+            numElements = w * h * volNz;
+        }
         const dataStart = offset + 16;
-        const floatData = new Float32Array(buffer, dataStart, w * h);
+        const floatData = new Float32Array(buffer, dataStart, numElements);
 
         const config = slicesConfig[i] || {};
         const useAxis = axis;
@@ -835,11 +840,13 @@ function handleFrame(buffer: ArrayBuffer) {
 
         let sliceMin = Infinity;
         let sliceMax = -Infinity;
+        let slicePosMin = Infinity;
         for (let j = 0; j < floatData.length; j++) {
             const v = floatData[j];
             if (isFinite(v)) {
                 if (v < sliceMin) sliceMin = v;
                 if (v > sliceMax) sliceMax = v;
+                if (v > 0 && v < slicePosMin) slicePosMin = v;
             }
         }
 
@@ -848,8 +855,15 @@ function handleFrame(buffer: ArrayBuffer) {
 
         if (sliceAutoScale) {
             if (sliceMin < sliceMax) {
-                sliceMinY = sliceMin;
-                sliceMaxY = sliceMax;
+                if (logVal && sliceMax > 0) {
+                    const dynamicFloor = sliceMax / 1000000.0;
+                    const effMin = (isFinite(slicePosMin) && slicePosMin > dynamicFloor) ? slicePosMin : dynamicFloor;
+                    sliceMinY = effMin;
+                    sliceMaxY = sliceMax;
+                } else {
+                    sliceMinY = sliceMin;
+                    sliceMaxY = sliceMax;
+                }
             } else {
                 const range = config.min_val !== undefined && config.max_val !== undefined ? [config.min_val, config.max_val] : (DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0]);
                 sliceMinY = range[0];
@@ -874,7 +888,7 @@ function handleFrame(buffer: ArrayBuffer) {
             interpolate: interpVal
         });
 
-        offset = dataStart + (w * h * 4);
+        offset = dataStart + (numElements * 4);
     }
 
     if (is2DFallback) {
@@ -1101,7 +1115,8 @@ function render() {
         gl.drawArrays(gl.LINES, 0, 24);
     }
 
-    // Draw Axes Indicator
+    // Draw Axes Indicator (disabled to draw tick labels on bounding box instead)
+    /*
     if (axesBuffer) {
         gl.bindBuffer(gl.ARRAY_BUFFER, axesBuffer);
         // Stride is 28 (7 floats * 4 bytes)
@@ -1117,6 +1132,7 @@ function render() {
             gl.drawArrays(gl.TRIANGLES, a * 180, 180);
         }
     }
+    */
 
     gl.uniform1i(uIsWF, 0);
     const uShowEdges = gl.getUniformLocation(program, "uShowCellEdges");

@@ -2,17 +2,75 @@
 #define     CFD_SOLVER_3D_CUDA_HPP
 
 #include "cfd_solver_3d.hpp"
+#include "grid_manager_3d.hpp"
 #include <unordered_map>
 
 struct GPUGauge3D {
     int t_idx;
     int c_idx;
+    int submesh_idx; // -1 if not in submesh, otherwise submesh index in gpu_submeshes
+    int sm_idx;      // flat linear index inside the submesh
+};
+
+template <typename RealType>
+struct GPUSubMeshDevicePointer3D {
+    RealType* rho;
+    RealType* ux;
+    RealType* uy;
+    RealType* uz;
+    RealType* p;
+    RealType* E;
+    RealType* alpha1;
+    RealType* alpha2;
+};
+
+template <typename RealType>
+struct GPUSubMeshBuffer3D {
+    std::string id;
+    int level = 0;
+    int nx = 0, ny = 0, nz = 0;
+    RealType xmin = 0, xmax = 0;
+    RealType ymin = 0, ymax = 0;
+    RealType zmin = 0, zmax = 0;
+    RealType cellSize = 0;
+
+    RealType* d_rho = nullptr;
+    RealType* d_ux = nullptr;
+    RealType* d_uy = nullptr;
+    RealType* d_uz = nullptr;
+    RealType* d_p = nullptr;
+    RealType* d_E = nullptr;
+
+    RealType* d_new_rho = nullptr;
+    RealType* d_new_ux = nullptr;
+    RealType* d_new_uy = nullptr;
+    RealType* d_new_uz = nullptr;
+    RealType* d_new_p = nullptr;
+    RealType* d_new_E = nullptr;
+
+    RealType* d_alpha1 = nullptr;
+    RealType* d_alpha2 = nullptr;
+    RealType* d_arho1 = nullptr;
+    RealType* d_arho2 = nullptr;
+
+    RealType* d_new_alpha1 = nullptr;
+    RealType* d_new_alpha2 = nullptr;
+    RealType* d_new_arho1 = nullptr;
+    RealType* d_new_arho2 = nullptr;
+
+    RealType* d_peak_overpressure = nullptr;
+    RealType* d_peak_impulse = nullptr;
+
+    uint8_t* d_is_boundary = nullptr;
+
+    bool is_allocated = false;
 };
 
 template <typename RealType, bool IsMultiMaterial>
 class CFDSolver3DCuda : public CFDSolver3DImplBase {
     // GPU pointers and internal state
     mutable void* d_states = nullptr;
+    mutable void* d_states_old = nullptr;
     mutable void* d_U = nullptr;
     mutable void* d_dU = nullptr;
     mutable void* d_geom = nullptr;
@@ -28,10 +86,19 @@ class CFDSolver3DCuda : public CFDSolver3DImplBase {
     mutable void* d_tile_energy = nullptr;
     mutable void* d_tile_is_near_boundary = nullptr;
 
+    // GPU-side submesh device buffers
+    mutable std::vector<GPUSubMeshBuffer3D<RealType>> gpu_submeshes;
+    void allocateGPUSubMeshes() const;
+    void freeGPUSubMeshes() const;
+    void syncSubMeshesToGPU() const;
+    void syncSubMeshesToHost() const;
+    void bind_constants() const;
+
     // GPU-side gauge variables
     int num_gauges = 0;
     mutable void* d_gauge_coords = nullptr;
     mutable void* d_gauge_results = nullptr;
+    mutable void* d_submesh_buffers_gauge = nullptr;
     void* gauge_stream = nullptr;
     void* step_done = nullptr;
     int num_obstacle_faces = 0;
@@ -70,7 +137,11 @@ class CFDSolver3DCuda : public CFDSolver3DImplBase {
     mutable std::vector<GPUGauge3D> paged_gauge_coords;
     mutable bool has_paged_gauges = false;
 
+    std::unique_ptr<GridManager3D<RealType, IsMultiMaterial>> grid_manager;
+
 public:
+    void addSubMesh(const SubMeshParams3D& submesh) override;
+    std::vector<PrimitiveTile3D<RealType, IsMultiMaterial>> temp_h_tiles;
     std::vector<PrimitiveTile3D<RealType, IsMultiMaterial>*>* temp_h_tiles_ptr = nullptr;
 
 private:
@@ -111,6 +182,9 @@ public:
 
     std::vector<float> sampleGauge(const Gauge3D& gauge) const override;
     std::vector<float> extractSlice(const Slice3D& slice) const override;
+    std::vector<SlicePayload3D> extractAllSlices(const Slice3D& slice) const override;
+    void getSliceDimensions(const Slice3D& slice, int& w, int& h, int& depth) const override;
+    using CFDSolver3D::getSliceDimensions;
     std::vector<float> getCellValues(int i, int j, int k) const override;
 
     void setGauges(const std::vector<Gauge3D>& gauges) override;

@@ -93,6 +93,23 @@ else()
     message(WARNING "HDF5 not found. Building BlastSolver without HDF5 support (NO_HDF5 defined).")
 endif()
 
+# test_subgrid_vs_uniform binary
+add_executable(test_subgrid_vs_uniform
+    backend/BlastSolver/test_subgrid_vs_uniform.cu
+    backend/BlastSolver/ImmersedBoundary.cpp
+    backend/BlastSolver/cfd_solver_3d.cpp
+    backend/BlastSolver/cfd_solver_3d_cuda.cu
+    backend/BlastSolver/remapper_3d.cpp
+)
+target_include_directories(test_subgrid_vs_uniform PRIVATE backend/BlastSolver/include)
+set_target_properties(test_subgrid_vs_uniform PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+target_compile_options(test_subgrid_vs_uniform PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3>)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(test_subgrid_vs_uniform PRIVATE OpenMP::OpenMP_CXX)
+    target_compile_options(test_subgrid_vs_uniform PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler -fopenmp>)
+endif()
+target_link_libraries(test_subgrid_vs_uniform PRIVATE ${CMAKE_DL_LIBS} ZLIB::ZLIB)
+
 # test_cuda_solver binary
 add_executable(test_cuda_solver
     backend/BlastSolver/test_cuda_solver.cu
@@ -163,6 +180,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/backend/BlastSolver/test_amr_2d_compare.c
         target_compile_definitions(test_amr_2d_compare PRIVATE NO_HDF5)
     endif()
 endif()
+
 
 
 

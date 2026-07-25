@@ -1121,6 +1121,24 @@ void init_3d_thread_func(nlohmann::json msg) {
             }
         }
 
+        if (msg.contains("submeshes") && msg["submeshes"].is_array()) {
+            for (const auto& sm_json : msg["submeshes"]) {
+                SubMeshParams3D sm_p;
+                sm_p.id = sm_json.value("id", "submesh");
+                sm_p.level = get_json_int(sm_json, "level", 1);
+                sm_p.xmin = get_json_double(sm_json, "x", get_json_double(sm_json, "xmin", 0.25));
+                sm_p.ymin = get_json_double(sm_json, "y", get_json_double(sm_json, "ymin", 0.25));
+                sm_p.zmin = get_json_double(sm_json, "z", get_json_double(sm_json, "zmin", 0.25));
+                sm_p.size_x = get_json_double(sm_json, "size_x", 0.5);
+                sm_p.size_y = get_json_double(sm_json, "size_y", 0.5);
+                sm_p.size_z = get_json_double(sm_json, "size_z", 0.5);
+                local_solver_3d->addSubMesh(sm_p);
+                std::cout << "[INFO] Added submesh refinement region: " << sm_p.id << " level " << sm_p.level 
+                          << " at (" << sm_p.xmin << "," << sm_p.ymin << "," << sm_p.zmin << ") size ("
+                          << sm_p.size_x << "x" << sm_p.size_y << "x" << sm_p.size_z << ")" << std::endl;
+            }
+        }
+
         std::string flux_scheme = msg.value("flux_scheme", "AUSM+");
         int spatial_order = msg.value("spatial_order", 2);
         int temporal_order = msg.value("temporal_order", 2);
@@ -2158,6 +2176,11 @@ struct TelemetryPayload {
         std::vector<float> data;
         int w = 0;
         int h = 0;
+        float xmin = 0.0f, xmax = 0.0f;
+        float ymin = 0.0f, ymax = 0.0f;
+        float zmin = 0.0f, zmax = 0.0f;
+        int level = 0;
+        bool is_submesh = false;
     };
     std::vector<SlicePayload> slices;
     double xmin = 0.0, ymin = 0.0, zmin = 0.0, dx = 0.0;
@@ -2330,7 +2353,7 @@ void async_telemetry_thread_func() {
             }
 
             size_t header_bytes = 12; // magic (4) + time (4) + n_slices (4)
-            size_t slice_header_bytes = n_slices * 16; // (axis, offset, w, h) per slice
+            size_t slice_header_bytes = n_slices * 48; // (axis_id(4), offset(4), w(4), h(4), xmin(4), xmax(4), ymin(4), ymax(4), zmin(4), zmax(4), level(4), is_submesh(4))
             size_t total_bytes = header_bytes + slice_header_bytes + total_payload_bytes;
 
             std::cout << "BIN_FRAME_3D_SLICES " << total_bytes << "\n";
@@ -2344,11 +2367,27 @@ void async_telemetry_thread_func() {
                 float offset = (float)s.offset;
                 uint32_t w = s.w;
                 uint32_t h = s.h;
+                float xmin = s.xmin;
+                float xmax = s.xmax;
+                float ymin = s.ymin;
+                float ymax = s.ymax;
+                float zmin = s.zmin;
+                float zmax = s.zmax;
+                uint32_t level = s.level;
+                uint32_t is_submesh = s.is_submesh ? 1 : 0;
 
                 std::cout.write(reinterpret_cast<const char*>(&axis_id), 4);
                 std::cout.write(reinterpret_cast<const char*>(&offset), 4);
                 std::cout.write(reinterpret_cast<const char*>(&w), 4);
                 std::cout.write(reinterpret_cast<const char*>(&h), 4);
+                std::cout.write(reinterpret_cast<const char*>(&xmin), 4);
+                std::cout.write(reinterpret_cast<const char*>(&xmax), 4);
+                std::cout.write(reinterpret_cast<const char*>(&ymin), 4);
+                std::cout.write(reinterpret_cast<const char*>(&ymax), 4);
+                std::cout.write(reinterpret_cast<const char*>(&zmin), 4);
+                std::cout.write(reinterpret_cast<const char*>(&zmax), 4);
+                std::cout.write(reinterpret_cast<const char*>(&level), 4);
+                std::cout.write(reinterpret_cast<const char*>(&is_submesh), 4);
                 std::cout.write(reinterpret_cast<const char*>(s.data.data()), s.data.size() * sizeof(float));
             }
             std::cout.flush();
@@ -2535,36 +2574,66 @@ void emit_telemetry_3d(double elapsed, bool is_terminated) {
         }
     }
 
-    uint32_t n_slices = global_slices_3d.size();
-    payload->slices.reserve(n_slices);
-
     for (const auto& s : global_slices_3d) {
-        TelemetryPayload::SlicePayload sp;
-        sp.axis = s.axis;
-        sp.offset = s.offset;
-        sp.stride = s.stride;
-        sp.data = global_solver_3d->extractSlice(s);
-
         uint32_t axis_id = (s.axis == "xy" ? 0 : (s.axis == "xz" ? 1 : (s.axis == "yz" ? 2 : (s.axis == "obstacles" ? 3 : 4))));
-        int stride = s.stride > 0 ? s.stride : 1;
-        if (axis_id == 0) {
-            sp.w = (global_solver_3d->getNx() + stride - 1) / stride;
-            sp.h = (global_solver_3d->getNy() + stride - 1) / stride;
-        } else if (axis_id == 1) {
-            sp.w = (global_solver_3d->getNx() + stride - 1) / stride;
-            sp.h = (global_solver_3d->getNz() + stride - 1) / stride;
-        } else if (axis_id == 2) {
-            sp.w = (global_solver_3d->getNy() + stride - 1) / stride;
-            sp.h = (global_solver_3d->getNz() + stride - 1) / stride;
-        } else if (axis_id == 3) {
+        if (axis_id == 3) {
+            TelemetryPayload::SlicePayload sp;
+            sp.axis = s.axis;
+            sp.offset = s.offset;
+            sp.stride = s.stride;
+            sp.data = global_solver_3d->extractSlice(s);
             sp.w = sp.data.size();
             sp.h = 1;
+            sp.xmin = (float)global_solver_3d->getXMin();
+            sp.xmax = (float)(global_solver_3d->getXMin() + global_solver_3d->getNx() * global_solver_3d->getCellSize());
+            sp.ymin = (float)global_solver_3d->getYMin();
+            sp.ymax = (float)(global_solver_3d->getYMin() + global_solver_3d->getNy() * global_solver_3d->getCellSize());
+            sp.zmin = (float)global_solver_3d->getZMin();
+            sp.zmax = (float)(global_solver_3d->getZMin() + global_solver_3d->getNz() * global_solver_3d->getCellSize());
+            sp.level = 0;
+            sp.is_submesh = false;
+            payload->slices.push_back(std::move(sp));
         } else if (axis_id == 4) {
-            sp.w = (global_solver_3d->getNx() + stride - 1) / stride;
-            sp.h = (global_solver_3d->getNy() + stride - 1) / stride;
-            sp.offset = (double)((global_solver_3d->getNz() + stride - 1) / stride);
+            TelemetryPayload::SlicePayload sp;
+            sp.axis = s.axis;
+            sp.offset = s.offset;
+            sp.stride = s.stride;
+            sp.data = global_solver_3d->extractSlice(s);
+            int w = 0, h = 0, depth = 1;
+            global_solver_3d->getSliceDimensions(s, w, h, depth);
+            sp.w = w;
+            sp.h = h;
+            sp.offset = (double)depth;
+            sp.xmin = (float)global_solver_3d->getXMin();
+            sp.xmax = (float)(global_solver_3d->getXMin() + global_solver_3d->getNx() * global_solver_3d->getCellSize());
+            sp.ymin = (float)global_solver_3d->getYMin();
+            sp.ymax = (float)(global_solver_3d->getYMin() + global_solver_3d->getNy() * global_solver_3d->getCellSize());
+            sp.zmin = (float)global_solver_3d->getZMin();
+            sp.zmax = (float)(global_solver_3d->getZMin() + global_solver_3d->getNz() * global_solver_3d->getCellSize());
+            sp.level = 0;
+            sp.is_submesh = false;
+            payload->slices.push_back(std::move(sp));
+        } else {
+            std::vector<SlicePayload3D> all_slices = global_solver_3d->extractAllSlices(s);
+            for (auto& ps : all_slices) {
+                TelemetryPayload::SlicePayload sp;
+                sp.axis = ps.axis;
+                sp.offset = ps.offset;
+                sp.stride = ps.stride;
+                sp.data = std::move(ps.data);
+                sp.w = ps.w;
+                sp.h = ps.h;
+                sp.xmin = (float)ps.xmin;
+                sp.xmax = (float)ps.xmax;
+                sp.ymin = (float)ps.ymin;
+                sp.ymax = (float)ps.ymax;
+                sp.zmin = (float)ps.zmin;
+                sp.zmax = (float)ps.zmax;
+                sp.level = ps.level;
+                sp.is_submesh = ps.is_submesh;
+                payload->slices.push_back(std::move(sp));
+            }
         }
-        payload->slices.push_back(std::move(sp));
     }
 
     global_async_telemetry.push(std::move(payload));

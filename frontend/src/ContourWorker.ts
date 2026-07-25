@@ -147,19 +147,28 @@ function updateAutoScaleAMR(tiles: AMRLeafTile[]): void {
     if (!autoScale) return;
     let min = Infinity;
     let max = -Infinity;
+    let posMin = Infinity;
     for (const tile of tiles) {
         for (let i = 0; i < tile.data.length; ++i) {
             const v = tile.data[i];
-            if (isFinite(v)) {
+            if (isFinite(v) && v !== 0) {
                 if (v < min) min = v;
                 if (v > max) max = v;
+                if (v > 0 && v < posMin) posMin = v;
             }
         }
     }
     if (min !== Infinity && max !== -Infinity) {
-        displayMin = min;
-        displayMax = max;
-        range = max - min || 1;
+        if (useLogScale && max > 0) {
+            const dynamicFloor = max / 1000000.0;
+            const effMin = (isFinite(posMin) && posMin > dynamicFloor) ? posMin : dynamicFloor;
+            displayMin = effMin;
+            displayMax = max;
+        } else {
+            displayMin = min;
+            displayMax = max;
+        }
+        range = displayMax - displayMin || 1;
         self.postMessage({ type: 'bounds', minY: displayMin, maxY: displayMax });
     }
 }
@@ -290,7 +299,7 @@ function getColor(val: number, min: number, max: number): { r: number; g: number
     let t = 0;
     if (useLogScale) {
         const safeMax = Math.max(1e-20, max);
-        const dynamicFloor = safeMax * 1e-6; // dynamic range limit
+        const dynamicFloor = safeMax * 1e-6; // 6 orders of magnitude dynamic range limit for explosive CFD
         const safeMin = Math.max(dynamicFloor, min);
         
         const logMin = Math.log10(safeMin);
@@ -320,17 +329,26 @@ function updateAutoScale(data: Float32Array): void {
     if (!autoScale) return;
     let min = Infinity;
     let max = -Infinity;
+    let posMin = Infinity;
     for (let i = 0; i < data.length; ++i) {
         const v = data[i];
         if (isFinite(v) && v !== 0) {
             if (v < min) min = v;
             if (v > max) max = v;
+            if (v > 0 && v < posMin) posMin = v;
         }
     }
     if (min !== Infinity && max !== -Infinity) {
-        displayMin = min;
-        displayMax = max;
-        range = max - min || 1;
+        if (useLogScale && max > 0) {
+            const dynamicFloor = max / 1000000.0;
+            const effMin = (isFinite(posMin) && posMin > dynamicFloor) ? posMin : dynamicFloor;
+            displayMin = effMin;
+            displayMax = max;
+        } else {
+            displayMin = min;
+            displayMax = max;
+        }
+        range = displayMax - displayMin || 1;
         self.postMessage({ type: 'bounds', minY: displayMin, maxY: displayMax });
     }
 }

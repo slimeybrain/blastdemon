@@ -89,6 +89,16 @@ void voxelize_primitives(
     std::function<void(double)> progress_callback = nullptr
 );
 
+void voxelize_flat_boundary(
+    const std::vector<Triangle>& triangles,
+    const std::string& voxelization_method,
+    std::vector<uint8_t>& is_boundary,
+    int nx, int ny, int nz,
+    double cellSize,
+    double xmin, double ymin, double zmin
+);
+
+
 
 HD_FUNC inline GeometryPayload pack_geometry_payload(bool is_boundary, float nx, float ny, float nz) {
     if (!is_boundary) return {0, 0, 0, false};
@@ -144,6 +154,105 @@ HD_FUNC inline bool ray_triangle_intersect(
     if (v < 0.0f || u + v > 1.0f) return false;
     
     t = f * (edge2.x * q.x + edge2.y * q.y + edge2.z * q.z);
+    return true;
+}
+
+HD_FUNC inline bool tri_box_overlap(const Point3D& boxcenter, float boxhalfsize, const Triangle& tri) {
+    float v0x = tri.v0.x - boxcenter.x;
+    float v0y = tri.v0.y - boxcenter.y;
+    float v0z = tri.v0.z - boxcenter.z;
+    float v1x = tri.v1.x - boxcenter.x;
+    float v1y = tri.v1.y - boxcenter.y;
+    float v1z = tri.v1.z - boxcenter.z;
+    float v2x = tri.v2.x - boxcenter.x;
+    float v2y = tri.v2.y - boxcenter.y;
+    float v2z = tri.v2.z - boxcenter.z;
+
+    float e0x = v1x - v0x, e0y = v1y - v0y, e0z = v1z - v0z;
+    float e1x = v2x - v1x, e1y = v2y - v1y, e1z = v2z - v1z;
+    float e2x = v0x - v2x, e2y = v0y - v2y, e2z = v0z - v2z;
+
+    float min_val, max_val;
+
+#define TEST_CROSS_AXIS(p0, p1, p2, rad_val) \
+    min_val = std::min({p0, p1, p2}); \
+    max_val = std::max({p0, p1, p2}); \
+    if (min_val > rad_val || max_val < -rad_val) return false;
+
+    {
+        float p0 = -v0y * e0z + v0z * e0y;
+        float p2 = -v2y * e0z + v2z * e0y;
+        float rad = boxhalfsize * (std::abs(e0z) + std::abs(e0y));
+        TEST_CROSS_AXIS(p0, p0, p2, rad);
+    }
+    {
+        float p0 = -v0y * e1z + v0z * e1y;
+        float p2 = -v2y * e1z + v2z * e1y;
+        float rad = boxhalfsize * (std::abs(e1z) + std::abs(e1y));
+        TEST_CROSS_AXIS(p0, p2, p2, rad);
+    }
+    {
+        float p0 = -v0y * e2z + v0z * e2y;
+        float p1 = -v1y * e2z + v1z * e2y;
+        float rad = boxhalfsize * (std::abs(e2z) + std::abs(e2y));
+        TEST_CROSS_AXIS(p0, p1, p0, rad);
+    }
+    {
+        float p0 = v0x * e0z - v0z * e0x;
+        float p2 = v2x * e0z - v2z * e0x;
+        float rad = boxhalfsize * (std::abs(e0z) + std::abs(e0x));
+        TEST_CROSS_AXIS(p0, p0, p2, rad);
+    }
+    {
+        float p0 = v0x * e1z - v0z * e1x;
+        float p2 = v2x * e1z - v2z * e1x;
+        float rad = boxhalfsize * (std::abs(e1z) + std::abs(e1x));
+        TEST_CROSS_AXIS(p0, p2, p2, rad);
+    }
+    {
+        float p0 = v0x * e2z - v0z * e2x;
+        float p1 = v1x * e2z - v1z * e2x;
+        float rad = boxhalfsize * (std::abs(e2z) + std::abs(e2x));
+        TEST_CROSS_AXIS(p0, p1, p0, rad);
+    }
+    {
+        float p0 = -v0x * e0y + v0y * e0x;
+        float p2 = -v2x * e0y + v2y * e0x;
+        float rad = boxhalfsize * (std::abs(e0y) + std::abs(e0x));
+        TEST_CROSS_AXIS(p0, p0, p2, rad);
+    }
+    {
+        float p0 = -v0x * e1y + v0y * e1x;
+        float p2 = -v2x * e1y + v2y * e1x;
+        float rad = boxhalfsize * (std::abs(e1y) + std::abs(e1x));
+        TEST_CROSS_AXIS(p0, p2, p2, rad);
+    }
+    {
+        float p0 = -v0x * e2y + v0y * e2x;
+        float p1 = -v1x * e2y + v1y * e2x;
+        float rad = boxhalfsize * (std::abs(e2y) + std::abs(e2x));
+        TEST_CROSS_AXIS(p0, p1, p0, rad);
+    }
+
+    if (std::min({v0x, v1x, v2x}) > boxhalfsize || std::max({v0x, v1x, v2x}) < -boxhalfsize) return false;
+    if (std::min({v0y, v1y, v2y}) > boxhalfsize || std::max({v0y, v1y, v2y}) < -boxhalfsize) return false;
+    if (std::min({v0z, v1z, v2z}) > boxhalfsize || std::max({v0z, v1z, v2z}) < -boxhalfsize) return false;
+
+    float nx = e0y * e1z - e0z * e1y;
+    float ny = e0z * e1x - e0x * e1z;
+    float nz = e0x * e1y - e0y * e1x;
+    float d = -(nx * v0x + ny * v0y + nz * v0z);
+
+    float vmin_x = (nx > 0.0f) ? -boxhalfsize : boxhalfsize;
+    float vmax_x = (nx > 0.0f) ? boxhalfsize : -boxhalfsize;
+    float vmin_y = (ny > 0.0f) ? -boxhalfsize : boxhalfsize;
+    float vmax_y = (ny > 0.0f) ? boxhalfsize : -boxhalfsize;
+    float vmin_z = (nz > 0.0f) ? -boxhalfsize : boxhalfsize;
+    float vmax_z = (nz > 0.0f) ? boxhalfsize : -boxhalfsize;
+
+    if (nx * vmin_x + ny * vmin_y + nz * vmin_z + d > 0.0f) return false;
+    if (nx * vmax_x + ny * vmax_y + nz * vmax_z + d < 0.0f) return false;
+
     return true;
 }
 

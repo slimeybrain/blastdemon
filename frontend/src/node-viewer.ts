@@ -2112,7 +2112,10 @@ export class NodeViewer {
             'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
             'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
             'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
+            'refinement_opacity', 'charge_opacity',
             'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio',
+            'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'refinement_level',
+            'submesh_x', 'submesh_y', 'submesh_z', 'submesh_size_x', 'submesh_size_y', 'submesh_size_z',
             // MPM keys
             'pos_x', 'pos_y', 'vel_x', 'vel_y', 'size_x', 'size_y', 'radius', 'angular_vel',
             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
@@ -2123,6 +2126,7 @@ export class NodeViewer {
         const chargeShapeOptions = node.type === 'Charge3D' ? ['Sphere', 'Cylinder', 'Block'] : ['Sphere', 'Cylinder'];
 
         const dropdowns: Record<string, string[]> = {
+            'shape': ['box', 'sphere', 'cylinder'],
             'mesh_type': ['regular', 'amr'],
             'dimension': ['1D', '2D', '3D'],
             'x_min_bc': ['Reflecting', 'Transmitting', 'Terminate'],

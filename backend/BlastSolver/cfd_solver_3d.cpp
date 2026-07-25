@@ -30,6 +30,27 @@ CFDSolver3DImpl<RealType, IsMultiMaterial>::CFDSolver3DImpl(int nx, int ny, int 
 }
 
 template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DImpl<RealType, IsMultiMaterial>::addSubMesh(const SubMeshParams3D& submesh) {
+    CFDSolver3DImplBase::addSubMesh(submesh);
+    if (!grid_manager) {
+        auto root = std::make_shared<SubMesh3D<RealType, IsMultiMaterial>>("root", 0, (RealType)xmin, (RealType)ymin, (RealType)zmin, (RealType)lx, (RealType)ly, (RealType)lz, (RealType)cellSize);
+        grid_manager = std::make_unique<GridManager3D<RealType, IsMultiMaterial>>(root);
+    }
+    double submeshCellSize = cellSize / (double)(1 << submesh.level);
+    double margin = 2.0 * submeshCellSize;
+    auto sm = std::make_shared<SubMesh3D<RealType, IsMultiMaterial>>(
+        submesh.id, submesh.level,
+        (RealType)(submesh.xmin - margin), (RealType)(submesh.ymin - margin), (RealType)(submesh.zmin - margin),
+        (RealType)(submesh.size_x + 2.0 * margin), (RealType)(submesh.size_y + 2.0 * margin), (RealType)(submesh.size_z + 2.0 * margin),
+        (RealType)submeshCellSize
+    );
+    grid_manager->addSubMesh(sm);
+    if (!geom_pool.empty()) {
+        grid_manager->updateSubMeshGeometry(geom_pool, nx, ny, nz, (RealType)cellSize, (RealType)xmin, (RealType)ymin, (RealType)zmin, n_tiles_x, n_tiles_y);
+    }
+}
+
+template <typename RealType, bool IsMultiMaterial>
 void CFDSolver3DImpl<RealType, IsMultiMaterial>::setDetonatorLocation(double x, double y, double z) {
     detX = x; detY = y; detZ = z;
 }
@@ -102,31 +123,71 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setInitialCondition(const Charg
 
                             int c_idx = i + j * TILE_SIZE_3D + k * TILE_SIZE_3D * TILE_SIZE_3D;
                             
+                            int submesh_level = 0;
+                            for (const auto& sm : submesh_regions) {
+                                double sm_xmax = sm.xmin + sm.size_x;
+                                double sm_ymax = sm.ymin + sm.size_y;
+                                double sm_zmax = sm.zmin + sm.size_z;
+                                if (x_c >= sm.xmin && x_c <= sm_xmax &&
+                                    y_c >= sm.ymin && y_c <= sm_ymax &&
+                                    z_c >= sm.zmin && z_c <= sm_zmax) {
+                                    submesh_level = std::max(submesh_level, sm.level);
+                                }
+                            }
+
                             int points_inside = 0;
-                            for (double ox : {-0.25, 0.25}) {
-                                for (double oy : {-0.25, 0.25}) {
-                                    for (double oz : {-0.25, 0.25}) {
-                                        double px = x_c + ox * cellSize;
-                                        double py = y_c + oy * cellSize;
-                                        double pz = z_c + oz * cellSize;
-                                        double dx = px - charge.x;
-                                        double dy = py - charge.y;
-                                        double dz = pz - charge.z;
-                                        double dist_sq = dx*dx + dy*dy + dz*dz;
-                                        bool inside = false;
-                                        if (charge.shape_type == 0) { // Sphere
-                                            if (dist_sq <= charge.radius * charge.radius) inside = true;
-                                        } else if (charge.shape_type == 1) { // Block
-                                            if (std::abs(dx) <= charge.lx*0.5 && std::abs(dy) <= charge.ly*0.5 && std::abs(dz) <= charge.lz*0.5) inside = true;
-                                        } else if (charge.shape_type == 2) { // Cylinder
-                                            double dr_sq = dx*dx + dy*dy;
-                                            if (dr_sq <= charge.radius*charge.radius && std::abs(dz) <= charge.height*0.5) inside = true;
+                            int total_points = 8;
+                            if (submesh_level > 0) {
+                                total_points = 64;
+                                for (double ox : {-0.375, -0.125, 0.125, 0.375}) {
+                                    for (double oy : {-0.375, -0.125, 0.125, 0.375}) {
+                                        for (double oz : {-0.375, -0.125, 0.125, 0.375}) {
+                                            double px = x_c + ox * cellSize;
+                                            double py = y_c + oy * cellSize;
+                                            double pz = z_c + oz * cellSize;
+                                            double dx = px - charge.x;
+                                            double dy = py - charge.y;
+                                            double dz = pz - charge.z;
+                                            double dist_sq = dx*dx + dy*dy + dz*dz;
+                                            bool inside = false;
+                                            if (charge.shape_type == 0) { // Sphere
+                                                if (dist_sq <= charge.radius * charge.radius) inside = true;
+                                            } else if (charge.shape_type == 1) { // Block
+                                                if (std::abs(dx) <= charge.lx*0.5 && std::abs(dy) <= charge.ly*0.5 && std::abs(dz) <= charge.lz*0.5) inside = true;
+                                            } else if (charge.shape_type == 2) { // Cylinder
+                                                double dr_sq = dx*dx + dy*dy;
+                                                if (dr_sq <= charge.radius*charge.radius && std::abs(dz) <= charge.height*0.5) inside = true;
+                                            }
+                                            if (inside) points_inside++;
                                         }
-                                        if (inside) points_inside++;
+                                    }
+                                }
+                            } else {
+                                for (double ox : {-0.25, 0.25}) {
+                                    for (double oy : {-0.25, 0.25}) {
+                                        for (double oz : {-0.25, 0.25}) {
+                                            double px = x_c + ox * cellSize;
+                                            double py = y_c + oy * cellSize;
+                                            double pz = z_c + oz * cellSize;
+                                            double dx = px - charge.x;
+                                            double dy = py - charge.y;
+                                            double dz = pz - charge.z;
+                                            double dist_sq = dx*dx + dy*dy + dz*dz;
+                                            bool inside = false;
+                                            if (charge.shape_type == 0) { // Sphere
+                                                if (dist_sq <= charge.radius * charge.radius) inside = true;
+                                            } else if (charge.shape_type == 1) { // Block
+                                                if (std::abs(dx) <= charge.lx*0.5 && std::abs(dy) <= charge.ly*0.5 && std::abs(dz) <= charge.lz*0.5) inside = true;
+                                            } else if (charge.shape_type == 2) { // Cylinder
+                                                double dr_sq = dx*dx + dy*dy;
+                                                if (dr_sq <= charge.radius*charge.radius && std::abs(dz) <= charge.height*0.5) inside = true;
+                                            }
+                                            if (inside) points_inside++;
+                                        }
                                     }
                                 }
                             }
-                            double f_vol = points_inside / 8.0;
+                            double f_vol = (double)points_inside / (double)total_points;
 
                             if (f_vol > 0.0) {
                                 tile_has_charge = true;
@@ -166,6 +227,11 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setInitialCondition(const Charg
         }
     }
     updateActiveRegions();
+    if (grid_manager && grid_manager->getSubMeshCount() > 0) {
+        for (auto& sm : grid_manager->getSubMeshes()) {
+            grid_manager->prolongateAll(*sm, *grid_manager->getRootMesh());
+        }
+    }
 }
 
 template <typename RealType, bool IsMultiMaterial>
@@ -470,6 +536,29 @@ typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealT
     }
 
     return res;
+}
+
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DImpl<RealType, IsMultiMaterial>::getSliceDimensions(const Slice3D& slice, int& w, int& h, int& depth) const {
+    int stride = slice.stride > 0 ? slice.stride : 1;
+    depth = 1;
+    int scale = 1;
+    if (slice.axis == "xy" || slice.axis == "obstacles") {
+        w = ((nx + stride - 1) / stride) * scale;
+        h = ((ny + stride - 1) / stride) * scale;
+    } else if (slice.axis == "xz") {
+        w = ((nx + stride - 1) / stride) * scale;
+        h = ((nz + stride - 1) / stride) * scale;
+    } else if (slice.axis == "yz") {
+        w = ((ny + stride - 1) / stride) * scale;
+        h = ((nz + stride - 1) / stride) * scale;
+    } else if (slice.axis == "volume") {
+        w = (nx + stride - 1) / stride;
+        h = (ny + stride - 1) / stride;
+        depth = (nz + stride - 1) / stride;
+    } else {
+        w = 0; h = 0; depth = 0;
+    }
 }
 
 template <typename RealType, bool IsMultiMaterial>
@@ -970,6 +1059,17 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
         }
     }
 
+    if (grid_manager && grid_manager->getSubMeshCount() > 0) {
+        grid_manager->syncRootFromTiles(states_pool, nx, ny, nz, n_tiles_x, n_tiles_y, (RealType)gamma);
+        grid_manager->stepSubMeshes((RealType)dt, (RealType)gamma, currentMaterials);
+        for (auto& sm : grid_manager->getSubMeshes()) {
+            grid_manager->prolongateGhosts(*sm, *grid_manager->getRootMesh());
+            grid_manager->restrictToParent(*grid_manager->getRootMesh(), *sm);
+        }
+        grid_manager->syncRootToTiles(states_pool, nx, ny, nz, n_tiles_x, n_tiles_y);
+        copy_primitive_to_U();
+    }
+
     currentTime += dt;
     updateActiveRegions();
 }
@@ -985,17 +1085,25 @@ double CFDSolver3DImpl<RealType, IsMultiMaterial>::computeStepSize(double cfl) c
         if (!active_tiles[t]) continue;
         const auto& tile = states_pool[t];
         for (int i = 0; i < TILE_CELLS_3D; ++i) {
+            using std::abs;
             using std::sqrt;
             using std::max;
-            RealType u_mag = sqrt(tile.ux[i]*tile.ux[i] + tile.uy[i]*tile.uy[i] + tile.uz[i]*tile.uz[i]);
             RealType c;
             if constexpr (IsMultiMaterial) {
                 c = MultiMat::getMixtureSoundSpeed(tile.p[i], tile.rho[i], tile.alpha1[i], tile.alpha2[i], tile.arho1[i], tile.arho2[i], (RealType)gamma, currentMaterials.products, currentMaterials.unreacted);
+                RealType a1 = tile.alpha1[i];
+                RealType a2 = tile.alpha2[i];
+                RealType ar1 = tile.arho1[i];
+                RealType ar2 = tile.arho2[i];
+                if (a1 > (RealType)1e-4 || a2 > (RealType)1e-4 || (ar1 + ar2) > (RealType)1e-4) {
+                    c = max(c, (RealType)currentMaterials.det_vel);
+                }
             } else {
                 c = sqrt((RealType)gamma * tile.p[i] / max((RealType)1e-6, tile.rho[i]));
             }
-            if (u_mag + c > max_s) {
-                max_s = u_mag + c;
+            RealType s = abs(tile.ux[i]) + abs(tile.uy[i]) + abs(tile.uz[i]) + (RealType)3.0 * c;
+            if (s > max_s) {
+                max_s = s;
             }
         }
     }
@@ -1075,6 +1183,25 @@ std::vector<float> CFDSolver3DImpl<RealType, IsMultiMaterial>::extractSlice(cons
         return data;
     }
 
+    auto sampleSubmeshOrBase = [&](int gxc, int gyc, int gzc) -> float {
+        RealType px = (RealType)xmin + ((RealType)gxc + (RealType)0.5) * (RealType)cellSize;
+        RealType py = (RealType)ymin + ((RealType)gyc + (RealType)0.5) * (RealType)cellSize;
+        RealType pz = (RealType)zmin + ((RealType)gzc + (RealType)0.5) * (RealType)cellSize;
+
+        if (grid_manager && grid_manager->getSubMeshCount() > 0) {
+            for (const auto& sm : grid_manager->getSubMeshes()) {
+                if (sm->containsInteriorPoint(px, py, pz)) {
+                    int si = std::clamp((int)std::floor((px - sm->xmin) / sm->cellSize), 0, sm->nx - 1);
+                    int sj = std::clamp((int)std::floor((py - sm->ymin) / sm->cellSize), 0, sm->ny - 1);
+                    int sk = std::clamp((int)std::floor((pz - sm->zmin) / sm->cellSize), 0, sm->nz - 1);
+                    size_t s_idx = sm->getIndex(si, sj, sk);
+                    return (float)sm->getValue(qty, s_idx);
+                }
+            }
+        }
+        return getVal(sampleState(gxc, gyc, gzc), gxc, gyc, gzc);
+    };
+
     if (slice.axis == "volume") {
         int out_nx = (nx + stride - 1) / stride;
         int out_ny = (ny + stride - 1) / stride;
@@ -1111,51 +1238,136 @@ std::vector<float> CFDSolver3DImpl<RealType, IsMultiMaterial>::extractSlice(cons
                             }
                         }
                     }
-                    data[(size_t)gx + (size_t)gy * out_nx + (size_t)gz * out_nx * out_ny] = getVal(sampleState(target_x, target_y, target_z), target_x, target_y, target_z);
+                    data[(size_t)gx + (size_t)gy * out_nx + (size_t)gz * out_nx * out_ny] = sampleSubmeshOrBase(target_x, target_y, target_z);
                 }
             }
         }
         return data;
     }
 
-    if (slice.axis == "xy") {
-        int gz = std::clamp((int)((slice.offset - zmin) / cellSize), 0, nz - 1);
-        int out_nx = (nx + stride - 1) / stride;
-        int out_ny = (ny + stride - 1) / stride;
-        data.resize(out_nx * out_ny);
-        for (int gy = 0; gy < out_ny; ++gy) {
-            for (int gx = 0; gx < out_nx; ++gx) {
-                int gxc = gx * stride;
-                int gyc = gy * stride;
-                data[gx + gy * out_nx] = getVal(sampleState(gxc, gyc, gz), gxc, gyc, gz);
-            }
-        }
-    } else if (slice.axis == "xz") {
-        int gy = std::clamp((int)((slice.offset - ymin) / cellSize), 0, ny - 1);
-        int out_nx = (nx + stride - 1) / stride;
-        int out_nz = (nz + stride - 1) / stride;
-        data.resize(out_nx * out_nz);
-        for (int gz = 0; gz < out_nz; ++gz) {
-            for (int gx = 0; gx < out_nx; ++gx) {
-                int gxc = gx * stride;
-                int gzc = gz * stride;
-                data[gx + gz * out_nx] = getVal(sampleState(gxc, gy, gzc), gxc, gy, gzc);
-            }
-        }
-    } else if (slice.axis == "yz") {
-        int gx = std::clamp((int)((slice.offset - xmin) / cellSize), 0, nx - 1);
-        int out_ny = (ny + stride - 1) / stride;
-        int out_nz = (nz + stride - 1) / stride;
-        data.resize(out_ny * out_nz);
-        for (int gz = 0; gz < out_nz; ++gz) {
-            for (int gy = 0; gy < out_ny; ++gy) {
-                int gyc = gy * stride;
-                int gzc = gz * stride;
-                data[gy + gz * out_ny] = getVal(sampleState(gx, gyc, gzc), gx, gyc, gzc);
+    int scale = 1;
+    int axis = (slice.axis == "xy" ? 0 : (slice.axis == "xz" ? 1 : 2));
+    int base_w = 0, base_h = 0;
+    if (axis == 0) { base_w = (nx + stride - 1) / stride; base_h = (ny + stride - 1) / stride; }
+    else if (axis == 1) { base_w = (nx + stride - 1) / stride; base_h = (nz + stride - 1) / stride; }
+    else { base_w = (ny + stride - 1) / stride; base_h = (nz + stride - 1) / stride; }
+
+    int w = base_w * scale;
+    int h = base_h * scale;
+
+    data.resize(w * h, 0.0f);
+
+    for (int j = 0; j < h; ++j) {
+        for (int i = 0; i < w; ++i) {
+            int gxc = (i / scale) * stride;
+            int gyc = (j / scale) * stride;
+            int gzc = (j / scale) * stride;
+
+            if (axis == 0) {
+                int gz = std::clamp((int)((slice.offset - zmin) / cellSize), 0, nz - 1);
+                data[i + j * w] = getVal(sampleState(gxc, gyc, gz), gxc, gyc, gz);
+            } else if (axis == 1) {
+                int gy = std::clamp((int)((slice.offset - ymin) / cellSize), 0, ny - 1);
+                data[i + j * w] = getVal(sampleState(gxc, gy, gzc), gxc, gy, gzc);
+            } else {
+                int gx = std::clamp((int)((slice.offset - xmin) / cellSize), 0, nx - 1);
+                data[i + j * w] = getVal(sampleState(gx, gxc, gzc), gx, gxc, gzc);
             }
         }
     }
     return data;
+}
+
+template <typename RealType, bool IsMultiMaterial>
+std::vector<SlicePayload3D> CFDSolver3DImpl<RealType, IsMultiMaterial>::extractAllSlices(const Slice3D& slice) const {
+    std::vector<SlicePayload3D> results;
+
+    // 1. Parent slice
+    SlicePayload3D parent_sp;
+    parent_sp.axis = slice.axis;
+    parent_sp.offset = slice.offset;
+    parent_sp.stride = slice.stride;
+    parent_sp.is_submesh = false;
+    parent_sp.level = 0;
+    parent_sp.xmin = xmin; parent_sp.xmax = xmin + nx * cellSize;
+    parent_sp.ymin = ymin; parent_sp.ymax = ymin + ny * cellSize;
+    parent_sp.zmin = zmin; parent_sp.zmax = zmin + nz * cellSize;
+
+    int base_w = 0, base_h = 0, depth = 1;
+    getSliceDimensions(slice, base_w, base_h, depth);
+    parent_sp.w = base_w;
+    parent_sp.h = base_h;
+    parent_sp.data = extractSlice(slice);
+
+    results.push_back(std::move(parent_sp));
+
+    // 2. Submesh slices
+    if (grid_manager && grid_manager->getSubMeshCount() > 0) {
+        int axis = (slice.axis == "xy" ? 0 : (slice.axis == "xz" ? 1 : 2));
+        std::string qty = (slice.quantities.empty()) ? "pressure" : slice.quantities[0];
+        
+        for (const auto& sm : grid_manager->getSubMeshes()) {
+            int n_ghost = 2;
+            if (sm->nx > 2 * n_ghost && sm->ny > 2 * n_ghost && sm->nz > 2 * n_ghost) {
+                bool intersects = false;
+                double margin = n_ghost * sm->cellSize;
+                if (axis == 0) { // XY
+                    intersects = (slice.offset >= sm->zmin + margin && slice.offset <= sm->zmax - margin);
+                } else if (axis == 1) { // XZ
+                    intersects = (slice.offset >= sm->ymin + margin && slice.offset <= sm->ymax - margin);
+                } else { // YZ
+                    intersects = (slice.offset >= sm->xmin + margin && slice.offset <= sm->xmax - margin);
+                }
+
+                if (intersects) {
+                    SlicePayload3D sub_sp;
+                    sub_sp.axis = slice.axis;
+                    sub_sp.offset = slice.offset;
+                    sub_sp.stride = slice.stride;
+                    sub_sp.is_submesh = true;
+                    sub_sp.level = sm->level;
+                    sub_sp.xmin = sm->xmin + margin; sub_sp.xmax = sm->xmax - margin;
+                    sub_sp.ymin = sm->ymin + margin; sub_sp.ymax = sm->ymax - margin;
+                    sub_sp.zmin = sm->zmin + margin; sub_sp.zmax = sm->zmax - margin;
+
+                    int sk = 0;
+                    if (axis == 0) {
+                        sk = std::clamp((int)std::floor((slice.offset - sm->zmin) / sm->cellSize), 0, sm->nz - 1);
+                        sub_sp.w = sm->nx - 2 * n_ghost;
+                        sub_sp.h = sm->ny - 2 * n_ghost;
+                    } else if (axis == 1) {
+                        sk = std::clamp((int)std::floor((slice.offset - sm->ymin) / sm->cellSize), 0, sm->ny - 1);
+                        sub_sp.w = sm->nx - 2 * n_ghost;
+                        sub_sp.h = sm->nz - 2 * n_ghost;
+                    } else {
+                        sk = std::clamp((int)std::floor((slice.offset - sm->xmin) / sm->cellSize), 0, sm->nx - 1);
+                        sub_sp.w = sm->ny - 2 * n_ghost;
+                        sub_sp.h = sm->nz - 2 * n_ghost;
+                    }
+
+                    sub_sp.data.resize(sub_sp.w * sub_sp.h, 0.0f);
+                    for (int j = 0; j < sub_sp.h; ++j) {
+                        for (int i = 0; i < sub_sp.w; ++i) {
+                            int si = i + n_ghost;
+                            int sj = j + n_ghost;
+                            size_t s_idx = 0;
+                            if (axis == 0) {
+                                s_idx = sm->getIndex(si, sj, sk);
+                            } else if (axis == 1) {
+                                s_idx = sm->getIndex(si, sk, sj);
+                            } else {
+                                s_idx = sm->getIndex(sk, si, sj);
+                            }
+                            sub_sp.data[i + j * sub_sp.w] = (float)sm->getValue(qty, s_idx);
+                        }
+                    }
+                    results.push_back(std::move(sub_sp));
+                }
+            }
+        }
+    }
+
+    return results;
 }
 
 extern void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<MultiMaterialState>& states_1d,
@@ -1370,6 +1582,11 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setGeometry(const std::string& 
         terminate_flag,
         progress_callback
     );
+    if (grid_manager && grid_manager->getSubMeshCount() > 0) {
+        grid_manager->updateSubMeshGeometry(geom_pool, nx, ny, nz, (RealType)cellSize, (RealType)xmin, (RealType)ymin, (RealType)zmin, n_tiles_x, n_tiles_y);
+        std::vector<Triangle> triangles = read_stl(stl_filepath);
+        grid_manager->voxelizeSubMeshGeometry(triangles, voxelization_method);
+    }
 }
 
 template <typename RealType, bool IsMultiMaterial>
@@ -1388,6 +1605,10 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setGeometryTriangles(const std:
         terminate_flag,
         progress_callback
     );
+    if (grid_manager && grid_manager->getSubMeshCount() > 0) {
+        grid_manager->updateSubMeshGeometry(geom_pool, nx, ny, nz, (RealType)cellSize, (RealType)xmin, (RealType)ymin, (RealType)zmin, n_tiles_x, n_tiles_y);
+        grid_manager->voxelizeSubMeshGeometry(triangles, voxelization_method);
+    }
 }
 
 template <typename RealType, bool IsMultiMaterial>
@@ -1406,6 +1627,11 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setGeometryPrimitives(const nlo
         terminate_flag,
         progress_callback
     );
+    if (grid_manager && grid_manager->getSubMeshCount() > 0) {
+        grid_manager->updateSubMeshGeometry(geom_pool, nx, ny, nz, (RealType)cellSize, (RealType)xmin, (RealType)ymin, (RealType)zmin, n_tiles_x, n_tiles_y);
+        std::vector<Triangle> triangles = generate_primitives_triangles(primitives);
+        grid_manager->voxelizeSubMeshGeometry(triangles, voxelization_method);
+    }
 }
 
 template <typename RealType, bool IsMultiMaterial>

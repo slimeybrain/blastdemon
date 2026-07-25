@@ -32,9 +32,12 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
         'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
         'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
-        'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio',
+        'refinement_opacity', 'charge_opacity',
+        'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio', 'amr_tile_size',
+        'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'refinement_level',
+        'submesh_x', 'submesh_y', 'submesh_z', 'submesh_size_x', 'submesh_size_y', 'submesh_size_z',
         // MPM keys
-        'pos_x', 'pos_y', 'vel_x', 'vel_y', 'size_x', 'size_y', 'radius', 'angular_vel',
+        'pos_x', 'pos_y', 'vel_x', 'vel_y', 'radius', 'angular_vel',
         'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
         'failure_strain', 'tensile_failure_stress',
         'ppc', 'time_step', 'penalty_stiffness', 'contour_opacity', 'contour_min', 'contour_max'
@@ -152,15 +155,48 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             flattenedParams['geometry_hash'] = '';
         }
 
-        // Trace Mesh 3D
-        const meshConn3D = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'mesh');
-        if (meshConn3D) {
-            const meshNode3D = state.nodes.find(n => n.id === meshConn3D.fromNode);
-            if (meshNode3D) {
-                Object.entries(meshNode3D.parameters).forEach(([key, value]) => {
+        // Trace Mesh 3D (supporting RefinementMesh3D chains leading to DomainMesh3D)
+        const submeshList: any[] = [];
+        state.connections.filter(c => c.toNode === solverNode3D.id && c.toPort === 'mesh').forEach(conn => {
+            let currNode = state.nodes.find(n => n.id === conn.fromNode);
+            let depth = 0;
+            while (currNode && currNode.type === 'RefinementMesh3D' && depth < 20) {
+                submeshList.push({
+                    id: currNode.id,
+                    level: Number(currNode.parameters.refinement_level ?? 1),
+                    x: Number(currNode.parameters.submesh_x ?? 0.25),
+                    y: Number(currNode.parameters.submesh_y ?? 0.25),
+                    z: Number(currNode.parameters.submesh_z ?? 0.25),
+                    size_x: Number(currNode.parameters.submesh_size_x ?? 0.5),
+                    size_y: Number(currNode.parameters.submesh_size_y ?? 0.5),
+                    size_z: Number(currNode.parameters.submesh_size_z ?? 0.5)
+                });
+                const parentConn = state.connections.find(c => c.toNode === currNode!.id && c.toPort === 'parent_mesh');
+                if (!parentConn) break;
+                currNode = state.nodes.find(n => n.id === parentConn.fromNode);
+                depth++;
+            }
+            if (currNode && currNode.type === 'DomainMesh3D') {
+                Object.entries(currNode.parameters).forEach(([key, value]) => {
                     flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
                 });
             }
+        });
+
+        // Fallback: if xmin/xmax is still undefined, check for any DomainMesh3D in the graph
+        if (flattenedParams['xmin'] === undefined && flattenedParams['xmax'] === undefined) {
+            const rootDomainMesh = state.nodes.find(n => n.type === 'DomainMesh3D');
+            if (rootDomainMesh) {
+                Object.entries(rootDomainMesh.parameters).forEach(([key, value]) => {
+                    if (flattenedParams[key] === undefined) {
+                        flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                    }
+                });
+            }
+        }
+
+        if (submeshList.length > 0) {
+            flattenedParams['submeshes'] = submeshList;
         }
 
         // Trace Air for CFD Solver 3D
@@ -680,6 +716,19 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         flattenedParams['xmin'] = xmin;
         flattenedParams['ymin'] = ymin;
         flattenedParams['zmin'] = zmin;
+
+        const centerX = xmin + dimX * 0.5;
+        const centerY = ymin + dimY * 0.5;
+        const centerZ = zmin + dimZ * 0.5;
+        if (flattenedParams['charge_x'] === undefined) flattenedParams['charge_x'] = centerX;
+        if (flattenedParams['charge_y'] === undefined) flattenedParams['charge_y'] = centerY;
+        if (flattenedParams['charge_z'] === undefined) flattenedParams['charge_z'] = centerZ;
+
+        const mass3D = flattenedParams['charge_mass'] !== undefined ? Number(flattenedParams['charge_mass']) : 0.0;
+        const rho3D = flattenedParams['rho'] || 1630.0;
+        if (mass3D > 0 && (!flattenedParams['charge_radius'] || flattenedParams['charge_radius'] === 0.0)) {
+            flattenedParams['charge_radius'] = Math.pow((3.0 * mass3D) / (4.0 * Math.PI * rho3D), 1.0 / 3.0);
+        }
 
         if (!flattenedParams['gamma']) flattenedParams['gamma'] = 1.4;
         const p = flattenedParams['atm_pressure'] || 101325.0;

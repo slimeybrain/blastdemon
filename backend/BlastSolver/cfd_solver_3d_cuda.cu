@@ -1353,20 +1353,21 @@ __global__ void __launch_bounds__(512) set_initial_condition_kernel(PrimitiveTil
 
     if (gx >= nx || gy >= ny || gz >= nz) return;
 
-    RealType x_c = xmin + (gx + (RealType)0.5) * cellSize;
-    RealType y_c = ymin + (gy + (RealType)0.5) * cellSize;
-    RealType z_c = zmin + (gz + (RealType)0.5) * cellSize;
+    RealType x0_cell = xmin + (RealType)gx * cellSize;
+    RealType y0_cell = ymin + (RealType)gy * cellSize;
+    RealType z0_cell = zmin + (RealType)gz * cellSize;
+    RealType h_micro = cellSize / (RealType)4.0;
 
     int points_inside = 0;
-    for (double ox : {-0.25, 0.25}) {
-        for (double oy : {-0.25, 0.25}) {
-            for (double oz : {-0.25, 0.25}) {
-                double px = (double)x_c + ox * (double)cellSize;
-                double py = (double)y_c + oy * (double)cellSize;
-                double pz = (double)z_c + oz * (double)cellSize;
+    for (int sk = 0; sk < 4; ++sk) {
+        double pz = (double)z0_cell + (sk + 0.5) * (double)h_micro;
+        double dz_p = pz - charge.z;
+        for (int sj = 0; sj < 4; ++sj) {
+            double py = (double)y0_cell + (sj + 0.5) * (double)h_micro;
+            double dy_p = py - charge.y;
+            for (int si = 0; si < 4; ++si) {
+                double px = (double)x0_cell + (si + 0.5) * (double)h_micro;
                 double dx_p = px - charge.x;
-                double dy_p = py - charge.y;
-                double dz_p = pz - charge.z;
                 double dist_sq_p = dx_p*dx_p + dy_p*dy_p + dz_p*dz_p;
                 bool inside = false;
                 if (charge.shape_type == 0) { // Sphere
@@ -1381,7 +1382,7 @@ __global__ void __launch_bounds__(512) set_initial_condition_kernel(PrimitiveTil
             }
         }
     }
-    RealType f_vol = (RealType)(points_inside / 8.0);
+    RealType f_vol = (RealType)(points_inside / 64.0);
 
     RealType rho = amb_rho;
     RealType p = amb_p;
@@ -1412,8 +1413,8 @@ __global__ void __launch_bounds__(512) set_initial_condition_kernel(PrimitiveTil
             RealType p_high = (gamma - (RealType)1.0) * high_rho * det_energy;
             p = f_vol * p_high + ((RealType)1.0 - f_vol) * amb_p;
         }
-        active_tiles[t_idx] = 1;
     }
+    active_tiles[t_idx] = 1;
 
     states[t_idx].rho[c_idx] = rho;
     states[t_idx].ux[c_idx] = 0;
@@ -1927,6 +1928,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::updateBoundaryConditions() {
 
 template <typename RealType, bool IsMultiMaterial>
 CFDSolver3DCuda<RealType, IsMultiMaterial>::~CFDSolver3DCuda() {
+    freeGPUSubMeshes();
     if (d_states) cudaFree(d_states);
     if (d_U) cudaFree(d_U);
     if (d_dU) cudaFree(d_dU);
@@ -1943,10 +1945,12 @@ CFDSolver3DCuda<RealType, IsMultiMaterial>::~CFDSolver3DCuda() {
 
     if (d_gauge_coords) cudaFree(d_gauge_coords);
     if (d_gauge_results) cudaFree(d_gauge_results);
+    if (d_submesh_buffers_gauge) cudaFree(d_submesh_buffers_gauge);
     if (host_pinned_gauge_data) cudaFreeHost(host_pinned_gauge_data);
     if (gauge_stream) cudaStreamDestroy((cudaStream_t)gauge_stream);
     if (step_done) cudaEventDestroy((cudaEvent_t)step_done);
     if (d_obstacle_faces) cudaFree(d_obstacle_faces);
+    if (d_states_old) { cudaFree(d_states_old); d_states_old = nullptr; }
 }
 
 template <typename RealType, bool IsMultiMaterial>
@@ -2109,6 +2113,42 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::ensure_paged_in() const {
     const_cast<CFDSolver3DCuda*>(this)->rebuildActiveIndex();
 
     is_paged_out = false;
+    bind_constants();
+}
+
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DCuda<RealType, IsMultiMaterial>::bind_constants() const {
+    int ntx = (nx + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    int nty = (ny + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    int ntz = (nz + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    CHECK_CUDA(cudaMemcpyToSymbol(d_nx, &nx, sizeof(int)));
+    CHECK_CUDA(cudaMemcpyToSymbol(d_ny, &ny, sizeof(int)));
+    CHECK_CUDA(cudaMemcpyToSymbol(d_nz, &nz, sizeof(int)));
+    CHECK_CUDA(cudaMemcpyToSymbol(d_ntx, &ntx, sizeof(int)));
+    CHECK_CUDA(cudaMemcpyToSymbol(d_nty, &nty, sizeof(int)));
+    CHECK_CUDA(cudaMemcpyToSymbol(d_ntz, &ntz, sizeof(int)));
+    CHECK_CUDA(cudaMemcpyToSymbol(d_cellSize, &cellSize, sizeof(double)));
+    CHECK_CUDA(cudaMemcpyToSymbol(d_xmin, &xmin, sizeof(double)));
+    CHECK_CUDA(cudaMemcpyToSymbol(d_ymin, &ymin, sizeof(double)));
+    CHECK_CUDA(cudaMemcpyToSymbol(d_zmin, &zmin, sizeof(double)));
+    CHECK_CUDA(cudaMemcpyToSymbol(d_gamma, &gamma, sizeof(double)));
+    bool useAUSM = (currentFluxScheme == "AUSM+");
+    CHECK_CUDA(cudaMemcpyToSymbol(d_useAUSM, &useAUSM, sizeof(bool)));
+    int b1 = (int)bcXmin, b2 = (int)bcXmax, b3 = (int)bcYmin, b4 = (int)bcYmax, b5 = (int)bcZmin, b6 = (int)bcZmax;
+    CHECK_CUDA(cudaMemcpyToSymbol(d_bcXmin, &b1, sizeof(int)));
+    CHECK_CUDA(cudaMemcpyToSymbol(d_bcXmax, &b2, sizeof(int)));
+    CHECK_CUDA(cudaMemcpyToSymbol(d_bcYmin, &b3, sizeof(int)));
+    CHECK_CUDA(cudaMemcpyToSymbol(d_bcYmax, &b4, sizeof(int)));
+    CHECK_CUDA(cudaMemcpyToSymbol(d_bcZmin, &b5, sizeof(int)));
+    CHECK_CUDA(cudaMemcpyToSymbol(d_bcZmax, &b6, sizeof(int)));
+    CHECK_CUDA(cudaMemcpyToSymbol(d_spatialOrder, &spatialOrder, sizeof(int)));
+    CHECK_CUDA(cudaMemcpyToSymbol(d_temporalOrder, &temporalOrder, sizeof(int)));
+    if constexpr (IsMultiMaterial) {
+        CHECK_CUDA(cudaMemcpyToSymbol(d_products, &currentMaterials.products, sizeof(MultiMat::JWLParams)));
+        CHECK_CUDA(cudaMemcpyToSymbol(d_unreacted, &currentMaterials.unreacted, sizeof(MultiMat::JWLParams)));
+        CHECK_CUDA(cudaMemcpyToSymbol(d_det_vel, &currentMaterials.det_vel, sizeof(double)));
+    }
+    CHECK_CUDA(cudaDeviceSynchronize());
 }
 
 template <typename RealType, bool IsMultiMaterial>
@@ -2130,7 +2170,18 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setDetonatorLocation(double x, 
 }
 
 template <typename RealType, bool IsMultiMaterial>
+__global__ void update_conservative_from_primitive_kernel_3d(
+    const PrimitiveTile3D<RealType, IsMultiMaterial>* states,
+    ConservativeTile3D<RealType, IsMultiMaterial>* U,
+    int total_tiles,
+    RealType gamma,
+    MultiMat::JWLParams products,
+    MultiMat::JWLParams unreacted
+);
+
+template <typename RealType, bool IsMultiMaterial>
 void CFDSolver3DCuda<RealType, IsMultiMaterial>::setInitialCondition(const Charge3DParams& charge, const MultiMat::MaterialSet& materials, double amb_rho, double amb_p) {
+    bind_constants();
     currentMaterials = materials;
     CHECK_CUDA(cudaMemcpyToSymbol(d_ambient_rho, &amb_rho, sizeof(double)));
     CHECK_CUDA(cudaMemcpyToSymbol(d_ambient_p, &amb_p, sizeof(double)));
@@ -2168,6 +2219,32 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setInitialCondition(const Charg
     );
     CHECK_CUDA(cudaDeviceSynchronize());
     updateActiveRegions();
+    if (grid_manager && grid_manager->getSubMeshCount() > 0) {
+        temp_h_tiles.resize(total_tiles);
+        CHECK_CUDA(cudaMemcpy(temp_h_tiles.data(), d_states, total_tiles * sizeof(PrimitiveTile3D<RealType, IsMultiMaterial>), cudaMemcpyDeviceToHost));
+        grid_manager->syncRootFromTiles(temp_h_tiles, nx, ny, nz, ntx, nty, (RealType)gamma);
+        
+        RealType p_exp = (RealType)materials.unreacted.rho0 * (RealType)materials.detonation_energy * ((RealType)gamma - (RealType)1.0);
+        if constexpr (!IsMultiMaterial) {
+            p_exp = (RealType)materials.unreacted.rho0 * (RealType)materials.detonation_energy * ((RealType)gamma - (RealType)1.0);
+        }
+        grid_manager->initializeExplosiveSuperSampled(charge, (RealType)materials.unreacted.rho0, p_exp, (RealType)gamma);
+        grid_manager->syncRootToTiles(temp_h_tiles, nx, ny, nz, ntx, nty);
+        CHECK_CUDA(cudaMemcpy(d_states, temp_h_tiles.data(), total_tiles * sizeof(PrimitiveTile3D<RealType, IsMultiMaterial>), cudaMemcpyHostToDevice));
+
+        // Synchronize GPU d_U (conservative states) from updated d_states
+        dim3 c_threads(8, 8, 8);
+        update_conservative_from_primitive_kernel_3d<RealType, IsMultiMaterial><<<total_tiles, c_threads>>>(
+            (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+            (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
+            total_tiles, (RealType)gamma, currentMaterials.products, currentMaterials.unreacted
+        );
+        CHECK_CUDA(cudaDeviceSynchronize());
+        syncSubMeshesToGPU();
+
+        allocateGPUSubMeshes();
+        syncSubMeshesToGPU();
+    }
 }
 
 template <typename RealType, bool IsMultiMaterial>
@@ -2237,6 +2314,52 @@ __global__ void __launch_bounds__(512) williamson_stage_B_kernel_3d(Conservative
 }
 
 template <typename RealType, bool IsMultiMaterial>
+__global__ void __launch_bounds__(512) update_conservative_from_primitive_kernel_3d(
+    const PrimitiveTile3D<RealType, IsMultiMaterial>* states,
+    ConservativeTile3D<RealType, IsMultiMaterial>* U,
+    int total_tiles,
+    RealType gamma,
+    MultiMat::JWLParams products,
+    MultiMat::JWLParams unreacted
+) {
+    int t_idx = blockIdx.x;
+    if (t_idx >= total_tiles) return;
+
+    int lx = threadIdx.x;
+    int ly = threadIdx.y;
+    int lz = threadIdx.z;
+    int c_idx = lx + ly * TILE_SIZE_3D + lz * TILE_SIZE_3D * TILE_SIZE_3D;
+
+    RealType rho = states[t_idx].rho[c_idx];
+    RealType ux = states[t_idx].ux[c_idx];
+    RealType uy = states[t_idx].uy[c_idx];
+    RealType uz = states[t_idx].uz[c_idx];
+    RealType p = states[t_idx].p[c_idx];
+
+    U[t_idx].rho[c_idx] = rho;
+    U[t_idx].rhoux[c_idx] = rho * ux;
+    U[t_idx].rhouy[c_idx] = rho * uy;
+    U[t_idx].rhouz[c_idx] = rho * uz;
+
+    RealType ke = (RealType)0.5 * rho * (ux*ux + uy*uy + uz*uz);
+    RealType total_E;
+    if constexpr (IsMultiMaterial) {
+        RealType a1 = states[t_idx].alpha1[c_idx];
+        RealType a2 = states[t_idx].alpha2[c_idx];
+        RealType ar1 = states[t_idx].arho1[c_idx];
+        RealType ar2 = states[t_idx].arho2[c_idx];
+        U[t_idx].alpha1[c_idx] = a1;
+        U[t_idx].alpha2[c_idx] = a2;
+        U[t_idx].arho1[c_idx] = ar1;
+        U[t_idx].arho2[c_idx] = ar2;
+        total_E = (RealType)MultiMat::getMixtureEnergy((double)p, (double)rho, (double)a1, (double)a2, (double)ar1, (double)ar2, (double)gamma, products, unreacted) + ke;
+    } else {
+        total_E = p / max((RealType)1e-6, gamma - (RealType)1.0) + ke;
+    }
+    U[t_idx].E[c_idx] = total_E;
+}
+
+template <typename RealType, bool IsMultiMaterial>
 __global__ void __launch_bounds__(512) update_peak_quantities_kernel_3d(
     PrimitiveTile3D<RealType, IsMultiMaterial>* states,
     const int* active_tile_indices,
@@ -2271,8 +2394,736 @@ __global__ void __launch_bounds__(512) update_peak_quantities_kernel_3d(
 }
 
 template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DCuda<RealType, IsMultiMaterial>::allocateGPUSubMeshes() const {
+    if (!grid_manager || grid_manager->getSubMeshCount() == 0) return;
+
+    // Allocate parent-grid snapshot buffer for temporal prolongation interpolation.
+    // This must exist before any step() call that uses submeshes.
+    if (!d_states_old) {
+        int ntx = (nx + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+        int nty = (ny + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+        int ntz = (nz + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+        int total_tiles = ntx * nty * ntz;
+        CHECK_CUDA(cudaMalloc(&d_states_old, total_tiles * sizeof(PrimitiveTile3D<RealType, IsMultiMaterial>)));
+        // Initialise to current d_states so first-step prolongation is stable
+        CHECK_CUDA(cudaMemcpy(d_states_old, d_states, total_tiles * sizeof(PrimitiveTile3D<RealType, IsMultiMaterial>), cudaMemcpyDeviceToDevice));
+    }
+
+    const auto& host_submeshes = grid_manager->getSubMeshes();
+    gpu_submeshes.resize(host_submeshes.size());
+
+    for (size_t idx = 0; idx < host_submeshes.size(); ++idx) {
+        const auto& sm = host_submeshes[idx];
+        auto& gpu_sm = gpu_submeshes[idx];
+
+        if (gpu_sm.is_allocated) continue;
+
+        gpu_sm.id = sm->id;
+        gpu_sm.level = sm->level;
+        gpu_sm.nx = sm->nx;
+        gpu_sm.ny = sm->ny;
+        gpu_sm.nz = sm->nz;
+        gpu_sm.xmin = sm->xmin;
+        gpu_sm.xmax = sm->xmax;
+        gpu_sm.ymin = sm->ymin;
+        gpu_sm.ymax = sm->ymax;
+        gpu_sm.zmin = sm->zmin;
+        gpu_sm.zmax = sm->zmax;
+        gpu_sm.cellSize = sm->cellSize;
+
+        size_t total_cells = (size_t)sm->nx * sm->ny * sm->nz;
+        size_t bytes = total_cells * sizeof(RealType);
+
+        CHECK_CUDA(cudaMalloc(&gpu_sm.d_rho, bytes));
+        CHECK_CUDA(cudaMalloc(&gpu_sm.d_ux, bytes));
+        CHECK_CUDA(cudaMalloc(&gpu_sm.d_uy, bytes));
+        CHECK_CUDA(cudaMalloc(&gpu_sm.d_uz, bytes));
+        CHECK_CUDA(cudaMalloc(&gpu_sm.d_p, bytes));
+        CHECK_CUDA(cudaMalloc(&gpu_sm.d_E, bytes));
+
+        CHECK_CUDA(cudaMalloc(&gpu_sm.d_new_rho, bytes));
+        CHECK_CUDA(cudaMalloc(&gpu_sm.d_new_ux, bytes));
+        CHECK_CUDA(cudaMalloc(&gpu_sm.d_new_uy, bytes));
+        CHECK_CUDA(cudaMalloc(&gpu_sm.d_new_uz, bytes));
+        CHECK_CUDA(cudaMalloc(&gpu_sm.d_new_p, bytes));
+        CHECK_CUDA(cudaMalloc(&gpu_sm.d_new_E, bytes));
+
+        CHECK_CUDA(cudaMalloc(&gpu_sm.d_peak_overpressure, bytes));
+        CHECK_CUDA(cudaMalloc(&gpu_sm.d_peak_impulse, bytes));
+        CHECK_CUDA(cudaMalloc(&gpu_sm.d_is_boundary, total_cells * sizeof(uint8_t)));
+        CHECK_CUDA(cudaMemset(gpu_sm.d_is_boundary, 0, total_cells * sizeof(uint8_t)));
+
+        if constexpr (IsMultiMaterial) {
+            CHECK_CUDA(cudaMalloc(&gpu_sm.d_alpha1, bytes));
+            CHECK_CUDA(cudaMalloc(&gpu_sm.d_alpha2, bytes));
+            CHECK_CUDA(cudaMalloc(&gpu_sm.d_arho1, bytes));
+            CHECK_CUDA(cudaMalloc(&gpu_sm.d_arho2, bytes));
+
+            CHECK_CUDA(cudaMalloc(&gpu_sm.d_new_alpha1, bytes));
+            CHECK_CUDA(cudaMalloc(&gpu_sm.d_new_alpha2, bytes));
+            CHECK_CUDA(cudaMalloc(&gpu_sm.d_new_arho1, bytes));
+            CHECK_CUDA(cudaMalloc(&gpu_sm.d_new_arho2, bytes));
+        }
+
+        gpu_sm.is_allocated = true;
+    }
+}
+
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DCuda<RealType, IsMultiMaterial>::freeGPUSubMeshes() const {
+    for (auto& gpu_sm : gpu_submeshes) {
+        if (!gpu_sm.is_allocated) continue;
+        if (gpu_sm.d_rho) cudaFree(gpu_sm.d_rho);
+        if (gpu_sm.d_ux) cudaFree(gpu_sm.d_ux);
+        if (gpu_sm.d_uy) cudaFree(gpu_sm.d_uy);
+        if (gpu_sm.d_uz) cudaFree(gpu_sm.d_uz);
+        if (gpu_sm.d_p) cudaFree(gpu_sm.d_p);
+        if (gpu_sm.d_E) cudaFree(gpu_sm.d_E);
+
+        if (gpu_sm.d_new_rho) cudaFree(gpu_sm.d_new_rho);
+        if (gpu_sm.d_new_ux) cudaFree(gpu_sm.d_new_ux);
+        if (gpu_sm.d_new_uy) cudaFree(gpu_sm.d_new_uy);
+        if (gpu_sm.d_new_uz) cudaFree(gpu_sm.d_new_uz);
+        if (gpu_sm.d_new_p) cudaFree(gpu_sm.d_new_p);
+        if (gpu_sm.d_new_E) cudaFree(gpu_sm.d_new_E);
+
+        if (gpu_sm.d_peak_overpressure) cudaFree(gpu_sm.d_peak_overpressure);
+        if (gpu_sm.d_peak_impulse) cudaFree(gpu_sm.d_peak_impulse);
+        if (gpu_sm.d_is_boundary) cudaFree(gpu_sm.d_is_boundary);
+
+        if constexpr (IsMultiMaterial) {
+            if (gpu_sm.d_alpha1) cudaFree(gpu_sm.d_alpha1);
+            if (gpu_sm.d_alpha2) cudaFree(gpu_sm.d_alpha2);
+            if (gpu_sm.d_arho1) cudaFree(gpu_sm.d_arho1);
+            if (gpu_sm.d_arho2) cudaFree(gpu_sm.d_arho2);
+
+            if (gpu_sm.d_new_alpha1) cudaFree(gpu_sm.d_new_alpha1);
+            if (gpu_sm.d_new_alpha2) cudaFree(gpu_sm.d_new_alpha2);
+            if (gpu_sm.d_new_arho1) cudaFree(gpu_sm.d_new_arho1);
+            if (gpu_sm.d_new_arho2) cudaFree(gpu_sm.d_new_arho2);
+        }
+        gpu_sm.is_allocated = false;
+    }
+    gpu_submeshes.clear();
+}
+
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DCuda<RealType, IsMultiMaterial>::syncSubMeshesToGPU() const {
+    if (!grid_manager || grid_manager->getSubMeshCount() == 0) return;
+    allocateGPUSubMeshes();
+
+    const auto& host_submeshes = grid_manager->getSubMeshes();
+    for (size_t idx = 0; idx < host_submeshes.size(); ++idx) {
+        const auto& sm = host_submeshes[idx];
+        auto& gpu_sm = gpu_submeshes[idx];
+        size_t total_cells = (size_t)sm->nx * sm->ny * sm->nz;
+        size_t bytes = total_cells * sizeof(RealType);
+
+        CHECK_CUDA(cudaMemcpy(gpu_sm.d_rho, sm->rho.data(), bytes, cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(gpu_sm.d_ux, sm->ux.data(), bytes, cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(gpu_sm.d_uy, sm->uy.data(), bytes, cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(gpu_sm.d_uz, sm->uz.data(), bytes, cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(gpu_sm.d_p, sm->p.data(), bytes, cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(gpu_sm.d_E, sm->E.data(), bytes, cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(gpu_sm.d_peak_overpressure, sm->peak_overpressure.data(), bytes, cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(gpu_sm.d_peak_impulse, sm->peak_impulse.data(), bytes, cudaMemcpyHostToDevice));
+
+        if (!sm->is_boundary.empty() && gpu_sm.d_is_boundary) {
+            CHECK_CUDA(cudaMemcpy(gpu_sm.d_is_boundary, sm->is_boundary.data(), total_cells * sizeof(uint8_t), cudaMemcpyHostToDevice));
+        } else if (gpu_sm.d_is_boundary) {
+            CHECK_CUDA(cudaMemset(gpu_sm.d_is_boundary, 0, total_cells * sizeof(uint8_t)));
+        }
+
+        if constexpr (IsMultiMaterial) {
+            if (!sm->alpha1.empty() && gpu_sm.d_alpha1) {
+                CHECK_CUDA(cudaMemcpy(gpu_sm.d_alpha1, sm->alpha1.data(), bytes, cudaMemcpyHostToDevice));
+                CHECK_CUDA(cudaMemcpy(gpu_sm.d_alpha2, sm->alpha2.data(), bytes, cudaMemcpyHostToDevice));
+                CHECK_CUDA(cudaMemcpy(gpu_sm.d_arho1, sm->arho1.data(), bytes, cudaMemcpyHostToDevice));
+                CHECK_CUDA(cudaMemcpy(gpu_sm.d_arho2, sm->arho2.data(), bytes, cudaMemcpyHostToDevice));
+            }
+        }
+    }
+}
+
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DCuda<RealType, IsMultiMaterial>::syncSubMeshesToHost() const {
+    if (!grid_manager || grid_manager->getSubMeshCount() == 0 || gpu_submeshes.empty()) return;
+
+    const auto& host_submeshes = grid_manager->getSubMeshes();
+    for (size_t idx = 0; idx < host_submeshes.size(); ++idx) {
+        auto& sm = host_submeshes[idx];
+        const auto& gpu_sm = gpu_submeshes[idx];
+        if (!gpu_sm.is_allocated) continue;
+
+        size_t total_cells = (size_t)sm->nx * sm->ny * sm->nz;
+        size_t bytes = total_cells * sizeof(RealType);
+
+        CHECK_CUDA(cudaMemcpy(sm->rho.data(), gpu_sm.d_rho, bytes, cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpy(sm->ux.data(), gpu_sm.d_ux, bytes, cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpy(sm->uy.data(), gpu_sm.d_uy, bytes, cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpy(sm->uz.data(), gpu_sm.d_uz, bytes, cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpy(sm->p.data(), gpu_sm.d_p, bytes, cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpy(sm->E.data(), gpu_sm.d_E, bytes, cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpy(sm->peak_overpressure.data(), gpu_sm.d_peak_overpressure, bytes, cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpy(sm->peak_impulse.data(), gpu_sm.d_peak_impulse, bytes, cudaMemcpyDeviceToHost));
+
+        if constexpr (IsMultiMaterial) {
+            if (!sm->alpha1.empty() && gpu_sm.d_alpha1) {
+                CHECK_CUDA(cudaMemcpy(sm->alpha1.data(), gpu_sm.d_alpha1, bytes, cudaMemcpyDeviceToHost));
+                CHECK_CUDA(cudaMemcpy(sm->alpha2.data(), gpu_sm.d_alpha2, bytes, cudaMemcpyDeviceToHost));
+                CHECK_CUDA(cudaMemcpy(sm->arho1.data(), gpu_sm.d_arho1, bytes, cudaMemcpyDeviceToHost));
+                CHECK_CUDA(cudaMemcpy(sm->arho2.data(), gpu_sm.d_arho2, bytes, cudaMemcpyDeviceToHost));
+            }
+        }
+    }
+}
+
+template <typename RealType, bool IsMultiMaterial>
+__global__ void prolongate_ghosts_kernel_3d(
+    const PrimitiveTile3D<RealType, IsMultiMaterial>* d_states_old,
+    const PrimitiveTile3D<RealType, IsMultiMaterial>* d_states_new,
+    RealType tau,
+    int ntx, int nty, int ntz, RealType gamma,
+    int nx_c, int ny_c, int nz_c,
+    RealType xmin_c, RealType ymin_c, RealType zmin_c, RealType h_c,
+    RealType xmin_p, RealType ymin_p, RealType zmin_p, RealType h_p,
+    int nx_p, int ny_p, int nz_p,
+    RealType* d_rho, RealType* d_ux, RealType* d_uy, RealType* d_uz, RealType* d_p, RealType* d_E,
+    RealType* d_alpha1, RealType* d_alpha2, RealType* d_arho1, RealType* d_arho2,
+    const GeometryTile3D* d_geom,
+    int bcXmin, int bcXmax, int bcYmin, int bcYmax, int bcZmin, int bcZmax,
+    int n_ghost
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+    int k = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if (i >= nx_c || j >= ny_c || k >= nz_c) return;
+
+    bool is_ghost = (i < n_ghost || i >= nx_c - n_ghost || j < n_ghost || j >= ny_c - n_ghost || k < n_ghost || k >= nz_c - n_ghost);
+    if (!is_ghost) return;
+
+    RealType x_child = xmin_c + (i + static_cast<RealType>(0.5)) * h_c;
+    RealType y_child = ymin_c + (j + static_cast<RealType>(0.5)) * h_c;
+    RealType z_child = zmin_c + (k + static_cast<RealType>(0.5)) * h_c;
+
+    RealType eps_h = static_cast<RealType>(1e-4) * h_p;
+
+    bool touch_x_min = (i < n_ghost && xmin_c <= xmin_p + eps_h);
+    bool touch_x_max = (i >= nx_c - n_ghost && xmin_c + nx_c * h_c >= xmin_p + nx_p * h_p - eps_h);
+    bool touch_y_min = (j < n_ghost && ymin_c <= ymin_p + eps_h);
+    bool touch_y_max = (j >= ny_c - n_ghost && ymin_c + ny_c * h_c >= ymin_p + ny_p * h_p - eps_h);
+    bool touch_z_min = (k < n_ghost && zmin_c <= zmin_p + eps_h);
+    bool touch_z_max = (k >= nz_c - n_ghost && zmin_c + nz_c * h_c >= zmin_p + nz_p * h_p - eps_h);
+
+    size_t child_idx = i + j * nx_c + k * nx_c * ny_c;
+
+    RealType parent_i_f = (x_child - xmin_p) / h_p - static_cast<RealType>(0.5);
+    RealType parent_j_f = (y_child - ymin_p) / h_p - static_cast<RealType>(0.5);
+    RealType parent_k_f = (z_child - zmin_p) / h_p - static_cast<RealType>(0.5);
+
+    int i0 = min(max((int)floor(parent_i_f), 0), nx_p - 1);
+    int j0 = min(max((int)floor(parent_j_f), 0), ny_p - 1);
+    int k0 = min(max((int)floor(parent_k_f), 0), nz_p - 1);
+    int i1 = min(i0 + 1, nx_p - 1);
+    int j1 = min(j0 + 1, ny_p - 1);
+    int k1 = min(k0 + 1, nz_p - 1);
+
+    RealType wx = min(max(parent_i_f - i0, static_cast<RealType>(0.0)), static_cast<RealType>(1.0));
+    RealType wy = min(max(parent_j_f - j0, static_cast<RealType>(0.0)), static_cast<RealType>(1.0));
+    RealType wz = min(max(parent_k_f - k0, static_cast<RealType>(0.0)), static_cast<RealType>(1.0));
+
+    RealType w000 = (1 - wx) * (1 - wy) * (1 - wz);
+    RealType w100 = wx * (1 - wy) * (1 - wz);
+    RealType w010 = (1 - wx) * wy * (1 - wz);
+    RealType w110 = wx * wy * (1 - wz);
+    RealType w001 = (1 - wx) * (1 - wy) * wz;
+    RealType w101 = wx * (1 - wy) * wz;
+    RealType w011 = (1 - wx) * wy * wz;
+    RealType w111 = wx * wy * wz;
+
+    auto get_parent_val = [&](const PrimitiveTile3D<RealType, IsMultiMaterial>* p_states, int pi, int pj, int pk, int field_id) -> RealType {
+        int tx = pi / 8;
+        int ty = pj / 8;
+        int tz = pk / 8;
+        int t_idx = tx + ty * ntx + tz * ntx * nty;
+        int c_idx = (pi % 8) + (pj % 8) * 8 + (pk % 8) * 64;
+        const auto& tile = p_states[t_idx];
+        if (field_id == 0) return tile.rho[c_idx];
+        if (field_id == 1) return tile.ux[c_idx];
+        if (field_id == 2) return tile.uy[c_idx];
+        if (field_id == 3) return tile.uz[c_idx];
+        if (field_id == 4) return tile.p[c_idx];
+        if constexpr (IsMultiMaterial) {
+            if (field_id == 6) return tile.alpha1[c_idx];
+            if (field_id == 7) return tile.alpha2[c_idx];
+            if (field_id == 8) return tile.arho1[c_idx];
+            if (field_id == 9) return tile.arho2[c_idx];
+        }
+        return static_cast<RealType>(0.0);
+    };
+
+    auto trilinear_interp = [&](const PrimitiveTile3D<RealType, IsMultiMaterial>* p_states, int field_id) -> RealType {
+        return w000 * get_parent_val(p_states, i0, j0, k0, field_id) +
+               w100 * get_parent_val(p_states, i1, j0, k0, field_id) +
+               w010 * get_parent_val(p_states, i0, j1, k0, field_id) +
+               w110 * get_parent_val(p_states, i1, j1, k0, field_id) +
+               w001 * get_parent_val(p_states, i0, j0, k1, field_id) +
+               w101 * get_parent_val(p_states, i1, j0, k1, field_id) +
+               w011 * get_parent_val(p_states, i0, j1, k1, field_id) +
+               w111 * get_parent_val(p_states, i1, j1, k1, field_id);
+    };
+
+    auto interp_temporal = [&](int field_id) -> RealType {
+        if (!d_states_old) return trilinear_interp(d_states_new, field_id);
+        RealType val_old = trilinear_interp(d_states_old, field_id);
+        RealType val_new = trilinear_interp(d_states_new, field_id);
+        return (static_cast<RealType>(1.0) - tau) * val_old + tau * val_new;
+    };
+
+    RealType r_interp = max(static_cast<RealType>(1e-8), interp_temporal(0));
+    RealType u_interp = interp_temporal(1);
+    RealType v_interp = interp_temporal(2);
+    RealType w_interp = interp_temporal(3);
+    RealType p_interp = max(static_cast<RealType>(1e-8), interp_temporal(4));
+
+    if (touch_x_min && bcXmin == 0) u_interp = -u_interp;
+    if (touch_x_max && bcXmax == 0) u_interp = -u_interp;
+    if (touch_y_min && bcYmin == 0) v_interp = -v_interp;
+    if (touch_y_max && bcYmax == 0) v_interp = -v_interp;
+    if (touch_z_min && bcZmin == 0) w_interp = -w_interp;
+    if (touch_z_max && bcZmax == 0) w_interp = -w_interp;
+
+    d_rho[child_idx] = r_interp;
+    d_ux[child_idx] = u_interp;
+    d_uy[child_idx] = v_interp;
+    d_uz[child_idx] = w_interp;
+    d_p[child_idx] = p_interp;
+
+    RealType gm1 = max(static_cast<RealType>(1e-4), gamma - static_cast<RealType>(1.0));
+    RealType ke = static_cast<RealType>(0.5) * r_interp * (u_interp*u_interp + v_interp*v_interp + w_interp*w_interp);
+
+    if constexpr (IsMultiMaterial) {
+        RealType a1 = (d_alpha1) ? max(static_cast<RealType>(0.0), min(static_cast<RealType>(1.0), interp_temporal(6))) : static_cast<RealType>(0.0);
+        RealType a2 = (d_alpha2) ? max(static_cast<RealType>(0.0), min(static_cast<RealType>(1.0), interp_temporal(7))) : static_cast<RealType>(0.0);
+        RealType ar1 = (d_arho1) ? max(static_cast<RealType>(0.0), interp_temporal(8)) : static_cast<RealType>(0.0);
+        RealType ar2 = (d_arho2) ? max(static_cast<RealType>(0.0), interp_temporal(9)) : static_cast<RealType>(0.0);
+
+        if (d_alpha1) d_alpha1[child_idx] = a1;
+        if (d_alpha2) d_alpha2[child_idx] = a2;
+        if (d_arho1) d_arho1[child_idx] = ar1;
+        if (d_arho2) d_arho2[child_idx] = ar2;
+
+        d_E[child_idx] = (RealType)MultiMat::getMixtureEnergy((double)p_interp, (double)r_interp, (double)a1, (double)a2, (double)ar1, (double)ar2, (double)gamma, d_products, d_unreacted) + ke;
+    } else {
+        d_E[child_idx] = p_interp / gm1 + ke;
+    }
+}
+
+template <typename RealType, bool IsMultiMaterial>
+__global__ void submesh_step_kernel_3d(
+    int nx, int ny, int nz, RealType h, RealType dt_sub, RealType gamma,
+    const RealType* d_rho, const RealType* d_ux, const RealType* d_uy, const RealType* d_uz, const RealType* d_p, const RealType* d_E,
+    const RealType* d_alpha1, const RealType* d_alpha2, const RealType* d_arho1, const RealType* d_arho2,
+    RealType* d_new_rho, RealType* d_new_ux, RealType* d_new_uy, RealType* d_new_uz, RealType* d_new_p, RealType* d_new_E,
+    RealType* d_new_alpha1, RealType* d_new_alpha2, RealType* d_new_arho1, RealType* d_new_arho2,
+    RealType* d_peak_overpressure, RealType* d_peak_impulse,
+    const uint8_t* d_is_boundary,
+    const GeometryTile3D* d_geom, RealType xmin_c, RealType ymin_c, RealType zmin_c,
+    RealType xmin_p, RealType ymin_p, RealType zmin_p, RealType h_p,
+    int n_ghost, int spatial_order
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+    int k = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if (i >= nx || j >= ny || k >= nz) return;
+
+    size_t c_idx = i + j * nx + k * nx * ny;
+
+    if (i < n_ghost || i >= nx - n_ghost || j < n_ghost || j >= ny - n_ghost || k < n_ghost || k >= nz - n_ghost) {
+        d_new_rho[c_idx] = d_rho[c_idx];
+        d_new_ux[c_idx]  = d_ux[c_idx];
+        d_new_uy[c_idx]  = d_uy[c_idx];
+        d_new_uz[c_idx]  = d_uz[c_idx];
+        d_new_p[c_idx]   = d_p[c_idx];
+        d_new_E[c_idx]   = d_E[c_idx];
+        if constexpr (IsMultiMaterial) {
+            if (d_new_alpha1) d_new_alpha1[c_idx] = d_alpha1[c_idx];
+            if (d_new_alpha2) d_new_alpha2[c_idx] = d_alpha2[c_idx];
+            if (d_new_arho1)  d_new_arho1[c_idx]  = d_arho1[c_idx];
+            if (d_new_arho2)  d_new_arho2[c_idx]  = d_arho2[c_idx];
+        }
+        return;
+    }
+    RealType dt_h = dt_sub / h;
+    RealType gm1 = max(static_cast<RealType>(1e-4), gamma - static_cast<RealType>(1.0));
+
+    auto get_state_at = [&](int ci, int cj, int ck) -> GPUCellStateT<RealType> {
+        ci = min(max(ci, 0), nx - 1);
+        cj = min(max(cj, 0), ny - 1);
+        ck = min(max(ck, 0), nz - 1);
+        size_t idx = ci + cj * nx + ck * nx * ny;
+
+        GPUCellStateT<RealType> s;
+        s.rho = max(static_cast<RealType>(1e-8), d_rho[idx]);
+        s.ux = d_ux[idx];
+        s.uy = d_uy[idx];
+        s.uz = d_uz[idx];
+        s.p = max(static_cast<RealType>(1e-8), d_p[idx]);
+        s.E = d_E[idx];
+        if constexpr (IsMultiMaterial) {
+            s.alpha1 = (d_alpha1) ? d_alpha1[idx] : (RealType)0.0;
+            s.alpha2 = (d_alpha2) ? d_alpha2[idx] : (RealType)0.0;
+            s.arho1 = (d_arho1) ? d_arho1[idx] : (RealType)0.0;
+            s.arho2 = (d_arho2) ? d_arho2[idx] : (RealType)0.0;
+        } else {
+            s.alpha1 = 0; s.alpha2 = 0; s.arho1 = 0; s.arho2 = 0;
+        }
+
+        if (d_is_boundary && d_is_boundary[idx]) {
+            s.rho = max(static_cast<RealType>(1e-8), d_rho[c_idx]);
+            s.p = max(static_cast<RealType>(1e-8), d_p[c_idx]);
+            s.E = d_E[c_idx];
+            s.ux = (ci != i) ? -d_ux[c_idx] : d_ux[c_idx];
+            s.uy = (cj != j) ? -d_uy[c_idx] : d_uy[c_idx];
+            s.uz = (ck != k) ? -d_uz[c_idx] : d_uz[c_idx];
+        }
+        return s;
+    };
+
+    auto reconstruct_interface = [&](int di, int dj, int dk, GPUCellStateT<RealType>& sL, GPUCellStateT<RealType>& sR) {
+        GPUCellStateT<RealType> sM2 = get_state_at(i - 2*di, j - 2*dj, k - 2*dk);
+        GPUCellStateT<RealType> sM1 = get_state_at(i - di, j - dj, k - dk);
+        GPUCellStateT<RealType> sP0 = get_state_at(i, j, k);
+        GPUCellStateT<RealType> sP1 = get_state_at(i + di, j + dj, k + dk);
+
+        if (spatial_order == 1) {
+            sL = sM1;
+            sR = sP0;
+        } else {
+            auto reconstruct_var = [&](RealType vM2, RealType vM1, RealType vP0, RealType vP1, RealType& vL, RealType& vR) {
+                RealType dL = vM1 - vM2;
+                RealType dC = vP0 - vM1;
+                RealType dR = vP1 - vP0;
+                vL = vM1 + static_cast<RealType>(0.5) * minmod_gpu(dL, dC);
+                vR = vP0 - static_cast<RealType>(0.5) * minmod_gpu(dC, dR);
+            };
+
+            reconstruct_var(sM2.rho, sM1.rho, sP0.rho, sP1.rho, sL.rho, sR.rho);
+            sL.rho = max(static_cast<RealType>(1e-8), sL.rho);
+            sR.rho = max(static_cast<RealType>(1e-8), sR.rho);
+
+            reconstruct_var(sM2.ux, sM1.ux, sP0.ux, sP1.ux, sL.ux, sR.ux);
+            reconstruct_var(sM2.uy, sM1.uy, sP0.uy, sP1.uy, sL.uy, sR.uy);
+            reconstruct_var(sM2.uz, sM1.uz, sP0.uz, sP1.uz, sL.uz, sR.uz);
+
+            reconstruct_var(sM2.p, sM1.p, sP0.p, sP1.p, sL.p, sR.p);
+            sL.p = max(static_cast<RealType>(1e-8), sL.p);
+            sR.p = max(static_cast<RealType>(1e-8), sR.p);
+
+            RealType keL = static_cast<RealType>(0.5) * sL.rho * (sL.ux*sL.ux + sL.uy*sL.uy + sL.uz*sL.uz);
+            RealType keR = static_cast<RealType>(0.5) * sR.rho * (sR.ux*sR.ux + sR.uy*sR.uy + sR.uz*sR.uz);
+            sL.E = sL.p / gm1 + keL;
+            sR.E = sR.p / gm1 + keR;
+
+            if constexpr (IsMultiMaterial) {
+                reconstruct_var(sM2.alpha1, sM1.alpha1, sP0.alpha1, sP1.alpha1, sL.alpha1, sR.alpha1);
+                reconstruct_var(sM2.alpha2, sM1.alpha2, sP0.alpha2, sP1.alpha2, sL.alpha2, sR.alpha2);
+                reconstruct_var(sM2.arho1, sM1.arho1, sP0.arho1, sP1.arho1, sL.arho1, sR.arho1);
+                reconstruct_var(sM2.arho2, sM1.arho2, sP0.arho2, sP1.arho2, sL.arho2, sR.arho2);
+
+                sL.alpha1 = min(max(sL.alpha1, static_cast<RealType>(0.0)), static_cast<RealType>(1.0));
+                sL.alpha2 = min(max(sL.alpha2, static_cast<RealType>(0.0)), static_cast<RealType>(1.0));
+                sR.alpha1 = min(max(sR.alpha1, static_cast<RealType>(0.0)), static_cast<RealType>(1.0));
+                sR.alpha2 = min(max(sR.alpha2, static_cast<RealType>(0.0)), static_cast<RealType>(1.0));
+
+                sL.E = (RealType)MultiMat::getMixtureEnergy((double)sL.p, (double)sL.rho, (double)sL.alpha1, (double)sL.alpha2, (double)sL.arho1, (double)sL.arho2, (double)gamma, d_products, d_unreacted) + keL;
+                sR.E = (RealType)MultiMat::getMixtureEnergy((double)sR.p, (double)sR.rho, (double)sR.alpha1, (double)sR.alpha2, (double)sR.arho1, (double)sR.arho2, (double)gamma, d_products, d_unreacted) + keR;
+            }
+        }
+    };
+
+    GPUCellStateT<RealType> sLx_L, sLx_R, sRx_L, sRx_R;
+    GPUCellStateT<RealType> sLy_L, sLy_R, sRy_L, sRy_R;
+    GPUCellStateT<RealType> sLz_L, sLz_R, sRz_L, sRz_R;
+
+    reconstruct_interface(1, 0, 0, sLx_L, sLx_R);
+    {
+        int orig_i = i;
+        i = orig_i + 1;
+        reconstruct_interface(1, 0, 0, sRx_L, sRx_R);
+        i = orig_i;
+    }
+
+    reconstruct_interface(0, 1, 0, sLy_L, sLy_R);
+    {
+        int orig_j = j;
+        j = orig_j + 1;
+        reconstruct_interface(0, 1, 0, sRy_L, sRy_R);
+        j = orig_j;
+    }
+
+    reconstruct_interface(0, 0, 1, sLz_L, sLz_R);
+    {
+        int orig_k = k;
+        k = orig_k + 1;
+        reconstruct_interface(0, 0, 1, sRz_L, sRz_R);
+        k = orig_k;
+    }
+
+    RealType fX_L[10], fX_R[10];
+    RealType fY_L[10], fY_R[10];
+    RealType fZ_L[10], fZ_R[10];
+
+    if (d_useAUSM) {
+        getAUSMPlusFluxGPU<RealType, IsMultiMaterial>(sLx_L, sLx_R, fX_L, 0, gamma);
+        getAUSMPlusFluxGPU<RealType, IsMultiMaterial>(sRx_L, sRx_R, fX_R, 0, gamma);
+
+        getAUSMPlusFluxGPU<RealType, IsMultiMaterial>(sLy_L, sLy_R, fY_L, 1, gamma);
+        getAUSMPlusFluxGPU<RealType, IsMultiMaterial>(sRy_L, sRy_R, fY_R, 1, gamma);
+
+        getAUSMPlusFluxGPU<RealType, IsMultiMaterial>(sLz_L, sLz_R, fZ_L, 2, gamma);
+        getAUSMPlusFluxGPU<RealType, IsMultiMaterial>(sRz_L, sRz_R, fZ_R, 2, gamma);
+    } else {
+        getAUSMPlusFluxGPU<RealType, IsMultiMaterial>(sLx_L, sLx_R, fX_L, 0, gamma);
+        getAUSMPlusFluxGPU<RealType, IsMultiMaterial>(sRx_L, sRx_R, fX_R, 0, gamma);
+
+        getAUSMPlusFluxGPU<RealType, IsMultiMaterial>(sLy_L, sLy_R, fY_L, 1, gamma);
+        getAUSMPlusFluxGPU<RealType, IsMultiMaterial>(sRy_L, sRy_R, fY_R, 1, gamma);
+
+        getAUSMPlusFluxGPU<RealType, IsMultiMaterial>(sLz_L, sLz_R, fZ_L, 2, gamma);
+        getAUSMPlusFluxGPU<RealType, IsMultiMaterial>(sRz_L, sRz_R, fZ_R, 2, gamma);
+    }
+
+    GPUCellStateT<RealType> sC = get_state_at(i, j, k);
+
+    RealType rho_n   = sC.rho - dt_h * (fX_R[0] - fX_L[0] + fY_R[0] - fY_L[0] + fZ_R[0] - fZ_L[0]);
+    RealType rhoux_n = sC.rho*sC.ux - dt_h * (fX_R[1] - fX_L[1] + fY_R[1] - fY_L[1] + fZ_R[1] - fZ_L[1]);
+    RealType rhouy_n = sC.rho*sC.uy - dt_h * (fX_R[2] - fX_L[2] + fY_R[2] - fY_L[2] + fZ_R[2] - fZ_L[2]);
+    RealType rhouz_n = sC.rho*sC.uz - dt_h * (fX_R[3] - fX_L[3] + fY_R[3] - fY_L[3] + fZ_R[3] - fZ_L[3]);
+    RealType E_n     = sC.E - dt_h * (fX_R[4] - fX_L[4] + fY_R[4] - fY_L[4] + fZ_R[4] - fZ_L[4]);
+
+    if (d_is_boundary && d_is_boundary[c_idx]) {
+        d_new_rho[c_idx] = static_cast<RealType>(1.225);
+        d_new_ux[c_idx] = static_cast<RealType>(0.0);
+        d_new_uy[c_idx] = static_cast<RealType>(0.0);
+        d_new_uz[c_idx] = static_cast<RealType>(0.0);
+        d_new_p[c_idx] = static_cast<RealType>(101325.0);
+        d_new_E[c_idx] = static_cast<RealType>(101325.0) / gm1;
+        if constexpr (IsMultiMaterial) {
+            if (d_new_alpha1) {
+                d_new_alpha1[c_idx] = static_cast<RealType>(0.0);
+                d_new_alpha2[c_idx] = static_cast<RealType>(1.0);
+                d_new_arho1[c_idx] = static_cast<RealType>(0.0);
+                d_new_arho2[c_idx] = static_cast<RealType>(1.225);
+            }
+        }
+    } else {
+        RealType rho_clamped = max(static_cast<RealType>(1e-8), rho_n);
+        d_new_rho[c_idx] = rho_clamped;
+        d_new_ux[c_idx] = rhoux_n / rho_clamped;
+        d_new_uy[c_idx] = rhouy_n / rho_clamped;
+        d_new_uz[c_idx] = rhouz_n / rho_clamped;
+
+        RealType ke_n = static_cast<RealType>(0.5) * rho_clamped * (d_new_ux[c_idx]*d_new_ux[c_idx] + d_new_uy[c_idx]*d_new_uy[c_idx] + d_new_uz[c_idx]*d_new_uz[c_idx]);
+        RealType e_int = E_n - ke_n;
+
+        const RealType MAX_SPECIFIC_EINT = static_cast<RealType>(1e10);
+        if (e_int / rho_clamped > MAX_SPECIFIC_EINT) {
+            e_int = rho_clamped * MAX_SPECIFIC_EINT;
+            E_n = e_int + ke_n;
+        } else if (e_int < static_cast<RealType>(0.0)) {
+            e_int = static_cast<RealType>(0.0);
+            E_n = ke_n;
+        }
+
+        if constexpr (IsMultiMaterial) {
+            if (d_alpha1 && d_new_alpha1) {
+                RealType div_u = (fX_R[9] - fX_L[9]) + (fY_R[9] - fY_L[9]) + (fZ_R[9] - fZ_L[9]);
+                RealType a1_n = sC.alpha1 - dt_h * (fX_R[5] - fX_L[5] + fY_R[5] - fY_L[5] + fZ_R[5] - fZ_L[5]) + dt_h * sC.alpha1 * div_u;
+                RealType a2_n = sC.alpha2 - dt_h * (fX_R[6] - fX_L[6] + fY_R[6] - fY_L[6] + fZ_R[6] - fZ_L[6]) + dt_h * sC.alpha2 * div_u;
+                d_new_alpha1[c_idx] = min(max(a1_n, static_cast<RealType>(0.0)), static_cast<RealType>(1.0));
+                d_new_alpha2[c_idx] = min(max(a2_n, static_cast<RealType>(0.0)), static_cast<RealType>(1.0));
+
+                RealType sum_a = d_new_alpha1[c_idx] + d_new_alpha2[c_idx];
+                if (sum_a > static_cast<RealType>(1.0)) {
+                    d_new_alpha1[c_idx] /= sum_a;
+                    d_new_alpha2[c_idx] /= sum_a;
+                }
+
+                d_new_arho1[c_idx] = d_new_alpha1[c_idx] * rho_clamped;
+                d_new_arho2[c_idx] = d_new_alpha2[c_idx] * rho_clamped;
+
+                RealType p_n = (RealType)MultiMat::getMixturePressure((double)e_int, (double)rho_clamped, (double)d_new_alpha1[c_idx], (double)d_new_alpha2[c_idx], (double)d_new_arho1[c_idx], (double)d_new_arho2[c_idx], (double)gamma, d_products, d_unreacted);
+                if (isnan(p_n) || isinf(p_n) || p_n < static_cast<RealType>(1e-8)) {
+                    p_n = static_cast<RealType>(101325.0);
+                    d_new_rho[c_idx] = static_cast<RealType>(1.225);
+                    d_new_ux[c_idx] = static_cast<RealType>(0.0);
+                    d_new_uy[c_idx] = static_cast<RealType>(0.0);
+                    d_new_uz[c_idx] = static_cast<RealType>(0.0);
+                    ke_n = static_cast<RealType>(0.0);
+                    d_new_alpha1[c_idx] = static_cast<RealType>(0.0);
+                    d_new_alpha2[c_idx] = static_cast<RealType>(1.0);
+                    d_new_arho1[c_idx] = static_cast<RealType>(0.0);
+                    d_new_arho2[c_idx] = static_cast<RealType>(1.225);
+                    e_int = p_n / gm1;
+                }
+                d_new_p[c_idx] = p_n;
+                d_new_E[c_idx] = (RealType)MultiMat::getMixtureEnergy((double)p_n, (double)d_new_rho[c_idx], (double)d_new_alpha1[c_idx], (double)d_new_alpha2[c_idx], (double)d_new_arho1[c_idx], (double)d_new_arho2[c_idx], (double)gamma, d_products, d_unreacted) + ke_n;
+            }
+        } else {
+            RealType p_n = e_int * gm1;
+            if (isnan(p_n) || isinf(p_n) || p_n < static_cast<RealType>(1e-8)) {
+                p_n = static_cast<RealType>(101325.0);
+                d_new_rho[c_idx] = static_cast<RealType>(1.225);
+                d_new_ux[c_idx] = static_cast<RealType>(0.0);
+                d_new_uy[c_idx] = static_cast<RealType>(0.0);
+                d_new_uz[c_idx] = static_cast<RealType>(0.0);
+                ke_n = static_cast<RealType>(0.0);
+                e_int = p_n / gm1;
+            }
+            d_new_p[c_idx] = p_n;
+            d_new_E[c_idx] = e_int + ke_n;
+        }
+    }
+
+    if (d_peak_overpressure) {
+        RealType op = d_new_p[c_idx] - static_cast<RealType>(101325.0);
+        if (op < (RealType)0.0) op = (RealType)0.0;
+        if (op > d_peak_overpressure[c_idx]) {
+            d_peak_overpressure[c_idx] = op;
+        }
+        if (d_peak_impulse) {
+            d_peak_impulse[c_idx] += op * dt_sub;
+        }
+    }
+}
+
+template <typename RealType, bool IsMultiMaterial>
+__global__ void restrict_to_parent_kernel_3d(
+    PrimitiveTile3D<RealType, IsMultiMaterial>* d_states,
+    int ntx, int nty, int ntz,
+    int nx_c, int ny_c, int nz_c,
+    RealType xmin_c, RealType ymin_c, RealType zmin_c, RealType h_c,
+    RealType xmin_p, RealType ymin_p, RealType zmin_p, RealType h_p,
+    int nx_p, int ny_p, int nz_p,
+    const RealType* d_rho, const RealType* d_ux, const RealType* d_uy, const RealType* d_uz, const RealType* d_p, const RealType* d_E,
+    const RealType* d_alpha1, const RealType* d_alpha2, const RealType* d_arho1, const RealType* d_arho2,
+    const RealType* d_peak_overpressure, const RealType* d_peak_impulse,
+    const uint8_t* d_is_boundary,
+    const GeometryTile3D* d_geom,
+    int n_ghost
+) {
+    int k_idx = blockIdx.z * blockDim.z + threadIdx.z;
+    int j_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    int i_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int ck = k_idx * 2;
+    int cj = j_idx * 2;
+    int ci = i_idx * 2;
+
+    if (ck >= nz_c || cj >= ny_c || ci >= nx_c) return;
+
+    if (ci < n_ghost || ci + 1 >= nx_c - n_ghost ||
+        cj < n_ghost || cj + 1 >= ny_c - n_ghost ||
+        ck < n_ghost || ck + 1 >= nz_c - n_ghost) {
+        return;
+    }
+
+    RealType z_child = zmin_c + (ck + static_cast<RealType>(0.5)) * h_c;
+    RealType y_child = ymin_c + (cj + static_cast<RealType>(0.5)) * h_c;
+    RealType x_child = xmin_c + (ci + static_cast<RealType>(0.5)) * h_c;
+
+    int pk = min(max((int)floor((z_child - zmin_p) / h_p), 0), nz_p - 1);
+    int pj = min(max((int)floor((y_child - ymin_p) / h_p), 0), ny_p - 1);
+    int pi = min(max((int)floor((x_child - xmin_p) / h_p), 0), nx_p - 1);
+
+    if (d_geom) {
+        float dummy1, dummy2, dummy3;
+        if (get_solid_normal_gpu(d_geom, pi, pj, pk, dummy1, dummy2, dummy3)) return;
+    }
+
+    RealType sum_rho = 0, sum_rhoux = 0, sum_rhouy = 0, sum_rhouz = 0, sum_p = 0, sum_E = 0;
+    RealType sum_alpha1 = 0, sum_alpha2 = 0, sum_arho1 = 0, sum_arho2 = 0;
+    RealType max_peak_op = static_cast<RealType>(0.0);
+    RealType max_peak_imp = static_cast<RealType>(0.0);
+    int valid_cells = 0;
+
+    for (int dk = 0; dk < 2 && (ck + dk) < nz_c; ++dk) {
+        for (int dj = 0; dj < 2 && (cj + dj) < ny_c; ++dj) {
+            for (int di = 0; di < 2 && (ci + di) < nx_c; ++di) {
+                size_t c_idx = (ci + di) + (cj + dj) * nx_c + (ck + dk) * nx_c * ny_c;
+                if (d_is_boundary && d_is_boundary[c_idx]) continue;
+
+                RealType r = d_rho[c_idx];
+                sum_rho += r;
+                sum_rhoux += r * d_ux[c_idx];
+                sum_rhouy += r * d_uy[c_idx];
+                sum_rhouz += r * d_uz[c_idx];
+                sum_p += d_p[c_idx];
+                sum_E += d_E[c_idx];
+                valid_cells++;
+
+                if (d_peak_overpressure) {
+                    RealType op = d_peak_overpressure[c_idx];
+                    if (op > max_peak_op) max_peak_op = op;
+                }
+                if (d_peak_impulse) {
+                    RealType imp = d_peak_impulse[c_idx];
+                    if (imp > max_peak_imp) max_peak_imp = imp;
+                }
+
+                if constexpr (IsMultiMaterial) {
+                    if (d_alpha1) {
+                        sum_alpha1 += d_alpha1[c_idx];
+                        sum_alpha2 += d_alpha2[c_idx];
+                        sum_arho1 += d_arho1[c_idx];
+                        sum_arho2 += d_arho2[c_idx];
+                    }
+                }
+            }
+        }
+    }
+
+    if (valid_cells > 0) {
+        int tx_p = pi / 8;
+        int ty_p = pj / 8;
+        int tz_p = pk / 8;
+        int t_idx_p = tx_p + ty_p * ntx + tz_p * ntx * nty;
+        int cell_idx_p = (pi % 8) + (pj % 8) * 8 + (pk % 8) * 64;
+
+        RealType inv_vc = static_cast<RealType>(1.0) / static_cast<RealType>(valid_cells);
+        RealType avg_rho = max(static_cast<RealType>(1e-8), sum_rho * inv_vc);
+
+        d_states[t_idx_p].rho[cell_idx_p] = avg_rho;
+        d_states[t_idx_p].ux[cell_idx_p] = (sum_rhoux * inv_vc) / avg_rho;
+        d_states[t_idx_p].uy[cell_idx_p] = (sum_rhouy * inv_vc) / avg_rho;
+        d_states[t_idx_p].uz[cell_idx_p] = (sum_rhouz * inv_vc) / avg_rho;
+        d_states[t_idx_p].p[cell_idx_p] = max(static_cast<RealType>(1e-8), sum_p * inv_vc);
+
+        if (d_peak_overpressure && max_peak_op > d_states[t_idx_p].peak_overpressure[cell_idx_p]) {
+            d_states[t_idx_p].peak_overpressure[cell_idx_p] = max_peak_op;
+        }
+        if (d_peak_impulse && max_peak_imp > d_states[t_idx_p].peak_impulse[cell_idx_p]) {
+            d_states[t_idx_p].peak_impulse[cell_idx_p] = max_peak_imp;
+        }
+
+        if constexpr (IsMultiMaterial) {
+            if (d_alpha1) {
+                d_states[t_idx_p].alpha1[cell_idx_p] = sum_alpha1 * inv_vc;
+                d_states[t_idx_p].alpha2[cell_idx_p] = sum_alpha2 * inv_vc;
+                d_states[t_idx_p].arho1[cell_idx_p] = sum_arho1 * inv_vc;
+                d_states[t_idx_p].arho2[cell_idx_p] = sum_arho2 * inv_vc;
+            }
+        }
+    }
+}
+
+template <typename RealType, bool IsMultiMaterial>
 void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
     ensure_paged_in();
+    bind_constants();
     if (h_num_active_tiles == 0) {
         currentTime += dt;
         return;
@@ -2283,6 +3134,10 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
     int nty = (ny + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
     int ntz = (nz + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
     int total_tiles = ntx * nty * ntz;
+
+    if (grid_manager && grid_manager->getSubMeshCount() > 0 && d_states_old) {
+        CHECK_CUDA(cudaMemcpy(d_states_old, d_states, total_tiles * sizeof(PrimitiveTile3D<RealType, IsMultiMaterial>), cudaMemcpyDeviceToDevice));
+    }
 
     int n_active = h_num_active_tiles;
     dim3 threads(TILE_SIZE_3D, TILE_SIZE_3D, TILE_SIZE_3D);
@@ -2307,14 +3162,18 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
     } else { // Williamson Low-Storage RK3
         const RealType A[3] = { (RealType)0.0, (RealType)(-5.0/9.0), (RealType)(-153.0/128.0) };
         const RealType B[3] = { (RealType)(1.0/3.0), (RealType)(15.0/16.0), (RealType)(8.0/15.0) };
- 
-        for (int stage = 0; stage < 3; ++stage) {
-            williamson_stage_A_kernel_3d<RealType, IsMultiMaterial><<<n_active, threads>>>((ConservativeTile3D<RealType, IsMultiMaterial>*)d_dU, (const int*)d_active_tile_indices, A[stage]);
+
+        CHECK_CUDA(cudaMemset(d_dU, 0, total_tiles * sizeof(ConservativeTile3D<RealType, IsMultiMaterial>)));
+
+        for (int st = 0; st < 3; ++st) {
+            williamson_stage_A_kernel_3d<RealType, IsMultiMaterial><<<n_active, threads>>>((ConservativeTile3D<RealType, IsMultiMaterial>*)d_dU, (const int*)d_active_tile_indices, A[st]);
+
             compute_flux_x_kernel_3d<RealType, IsMultiMaterial><<<n_active, threads>>>((const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states, (ConservativeTile3D<RealType, IsMultiMaterial>*)d_dU, (const int*)d_active_tile_indices, (const uint8_t*)d_tile_is_near_boundary, (const GeometryTile3D*)d_geom, dt_r);
             compute_flux_y_kernel_3d<RealType, IsMultiMaterial><<<n_active, threads>>>((const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states, (ConservativeTile3D<RealType, IsMultiMaterial>*)d_dU, (const int*)d_active_tile_indices, (const uint8_t*)d_tile_is_near_boundary, (const GeometryTile3D*)d_geom, dt_r);
             compute_flux_z_kernel_3d<RealType, IsMultiMaterial><<<n_active, threads>>>((const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states, (ConservativeTile3D<RealType, IsMultiMaterial>*)d_dU, (const int*)d_active_tile_indices, (const uint8_t*)d_tile_is_near_boundary, (const GeometryTile3D*)d_geom, dt_r);
-            williamson_stage_B_kernel_3d<RealType, IsMultiMaterial><<<n_active, threads>>>((ConservativeTile3D<RealType, IsMultiMaterial>*)d_U, (const ConservativeTile3D<RealType, IsMultiMaterial>*)d_dU, (const int*)d_active_tile_indices, B[stage]);
- 
+
+            williamson_stage_B_kernel_3d<RealType, IsMultiMaterial><<<n_active, threads>>>((ConservativeTile3D<RealType, IsMultiMaterial>*)d_U, (const ConservativeTile3D<RealType, IsMultiMaterial>*)d_dU, (const int*)d_active_tile_indices, B[st]);
+
             update_primitive_kernel_3d<RealType, IsMultiMaterial><<<n_active, threads>>>((PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states, (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U, (const int*)d_active_tile_indices, (const GeometryTile3D*)d_geom);
         }
     }
@@ -2327,10 +3186,111 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
     update_peak_quantities_kernel_3d<RealType, IsMultiMaterial><<<n_active, threads>>>((PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states, (const int*)d_active_tile_indices, (RealType)ambient_p, dt_r);
     
     CHECK_CUDA(cudaDeviceSynchronize());
+
+    if (grid_manager && grid_manager->getSubMeshCount() > 0) {
+        if (gpu_submeshes.empty()) {
+            allocateGPUSubMeshes();
+            syncSubMeshesToGPU();
+        }
+
+        int b1 = (int)bcXmin, b2 = (int)bcXmax, b3 = (int)bcYmin, b4 = (int)bcYmax, b5 = (int)bcZmin, b6 = (int)bcZmax;
+        int n_ghost = (spatialOrder == 2) ? 2 : 1;
+
+        for (size_t sm_idx = 0; sm_idx < gpu_submeshes.size(); ++sm_idx) {
+            auto& gpu_sm = gpu_submeshes[sm_idx];
+
+            // 2. Perform 2-step sub-cycling flux integration on GPU with fresh boundary prolongation
+            RealType dt_sub = (RealType)dt * static_cast<RealType>(0.5);
+            dim3 p_threads(8, 8, 4);
+            dim3 p_blocks((gpu_sm.nx + 7) / 8, (gpu_sm.ny + 7) / 8, (gpu_sm.nz + 3) / 4);
+
+            dim3 s_threads(8, 8, 4);
+            dim3 s_blocks((gpu_sm.nx + 7) / 8, (gpu_sm.ny + 7) / 8, (gpu_sm.nz + 3) / 4);
+
+            for (int substep = 0; substep < 2; ++substep) {
+                RealType tau = (RealType)(substep == 0 ? 0.25 : 0.75);
+                prolongate_ghosts_kernel_3d<RealType, IsMultiMaterial><<<p_blocks, p_threads>>>(
+                    (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states_old,
+                    (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+                    tau,
+                    ntx, nty, ntz, (RealType)gamma,
+                    gpu_sm.nx, gpu_sm.ny, gpu_sm.nz,
+                    gpu_sm.xmin, gpu_sm.ymin, gpu_sm.zmin, gpu_sm.cellSize,
+                    (RealType)xmin, (RealType)ymin, (RealType)zmin, (RealType)cellSize,
+                    nx, ny, nz,
+                    gpu_sm.d_rho, gpu_sm.d_ux, gpu_sm.d_uy, gpu_sm.d_uz, gpu_sm.d_p, gpu_sm.d_E,
+                    gpu_sm.d_alpha1, gpu_sm.d_alpha2, gpu_sm.d_arho1, gpu_sm.d_arho2,
+                    (const GeometryTile3D*)d_geom, b1, b2, b3, b4, b5, b6,
+                    n_ghost
+                );
+                CHECK_CUDA(cudaGetLastError());
+
+                submesh_step_kernel_3d<RealType, IsMultiMaterial><<<s_blocks, s_threads>>>(
+                    gpu_sm.nx, gpu_sm.ny, gpu_sm.nz, gpu_sm.cellSize, dt_sub, (RealType)gamma,
+                    gpu_sm.d_rho, gpu_sm.d_ux, gpu_sm.d_uy, gpu_sm.d_uz, gpu_sm.d_p, gpu_sm.d_E,
+                    gpu_sm.d_alpha1, gpu_sm.d_alpha2, gpu_sm.d_arho1, gpu_sm.d_arho2,
+                    gpu_sm.d_new_rho, gpu_sm.d_new_ux, gpu_sm.d_new_uy, gpu_sm.d_new_uz, gpu_sm.d_new_p, gpu_sm.d_new_E,
+                    gpu_sm.d_new_alpha1, gpu_sm.d_new_alpha2, gpu_sm.d_new_arho1, gpu_sm.d_new_arho2,
+                    gpu_sm.d_peak_overpressure, gpu_sm.d_peak_impulse,
+                    gpu_sm.d_is_boundary,
+                    (const GeometryTile3D*)d_geom, gpu_sm.xmin, gpu_sm.ymin, gpu_sm.zmin,
+                    (RealType)xmin, (RealType)ymin, (RealType)zmin, (RealType)cellSize,
+                    n_ghost, spatialOrder
+                );
+                CHECK_CUDA(cudaGetLastError());
+
+                std::swap(gpu_sm.d_rho, gpu_sm.d_new_rho);
+                std::swap(gpu_sm.d_ux, gpu_sm.d_new_ux);
+                std::swap(gpu_sm.d_uy, gpu_sm.d_new_uy);
+                std::swap(gpu_sm.d_uz, gpu_sm.d_new_uz);
+                std::swap(gpu_sm.d_p, gpu_sm.d_new_p);
+                std::swap(gpu_sm.d_E, gpu_sm.d_new_E);
+                if constexpr (IsMultiMaterial) {
+                    std::swap(gpu_sm.d_alpha1, gpu_sm.d_new_alpha1);
+                    std::swap(gpu_sm.d_alpha2, gpu_sm.d_new_alpha2);
+                    std::swap(gpu_sm.d_arho1, gpu_sm.d_new_arho1);
+                    std::swap(gpu_sm.d_arho2, gpu_sm.d_new_arho2);
+                }
+            }
+
+            // 3. Restrict submesh cell values back into root mesh on GPU
+            int n_rx = gpu_sm.nx / 2;
+            int n_ry = gpu_sm.ny / 2;
+            int n_rz = gpu_sm.nz / 2;
+            dim3 r_threads(8, 8, 4);
+            dim3 r_blocks((n_rx + 7) / 8, (n_ry + 7) / 8, (n_rz + 3) / 4);
+
+            restrict_to_parent_kernel_3d<RealType, IsMultiMaterial><<<r_blocks, r_threads>>>(
+                (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+                ntx, nty, ntz,
+                gpu_sm.nx, gpu_sm.ny, gpu_sm.nz,
+                gpu_sm.xmin, gpu_sm.ymin, gpu_sm.zmin, gpu_sm.cellSize,
+                (RealType)xmin, (RealType)ymin, (RealType)zmin, (RealType)cellSize,
+                nx, ny, nz,
+                gpu_sm.d_rho, gpu_sm.d_ux, gpu_sm.d_uy, gpu_sm.d_uz, gpu_sm.d_p, gpu_sm.d_E,
+                gpu_sm.d_alpha1, gpu_sm.d_alpha2, gpu_sm.d_arho1, gpu_sm.d_arho2,
+                gpu_sm.d_peak_overpressure, gpu_sm.d_peak_impulse,
+                gpu_sm.d_is_boundary,
+                (const GeometryTile3D*)d_geom,
+                n_ghost
+            );
+            CHECK_CUDA(cudaGetLastError());
+        }
+
+        // Synchronize GPU d_U (conservative states) from updated d_states (primitive states)
+        dim3 c_threads(8, 8, 8);
+        update_conservative_from_primitive_kernel_3d<RealType, IsMultiMaterial><<<total_tiles, c_threads>>>(
+            (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+            (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
+            total_tiles, (RealType)gamma, currentMaterials.products, currentMaterials.unreacted
+        );
+        CHECK_CUDA(cudaGetLastError());
+        CHECK_CUDA(cudaDeviceSynchronize());
+    }
+
     currentTime += dt;
     updateActiveRegions();
 }
-
 
 template <typename RealType, bool IsMultiMaterial>
 void CFDSolver3DCuda<RealType, IsMultiMaterial>::setFluxScheme(const std::string& name) {
@@ -2366,14 +3326,20 @@ __global__ void __launch_bounds__(512) compute_max_speed_kernel_3d(const Primiti
         RealType uz = states[t_idx].uz[c_idx];
         RealType p = states[t_idx].p[c_idx];
 
-        RealType u_mag = sqrt(ux*ux + uy*uy + uz*uz);
         RealType c;
         if constexpr (IsMultiMaterial) {
             c = (RealType)MultiMat::getMixtureSoundSpeed((double)p, (double)rho, (double)states[t_idx].alpha1[c_idx], (double)states[t_idx].alpha2[c_idx], (double)states[t_idx].arho1[c_idx], (double)states[t_idx].arho2[c_idx], (double)gamma, d_products, d_unreacted);
+            RealType a1 = states[t_idx].alpha1[c_idx];
+            RealType a2 = states[t_idx].alpha2[c_idx];
+            RealType ar1 = states[t_idx].arho1[c_idx];
+            RealType ar2 = states[t_idx].arho2[c_idx];
+            if (a1 > (RealType)1e-4 || a2 > (RealType)1e-4 || (ar1 + ar2) > (RealType)1e-4) {
+                c = fmax(c, (RealType)d_det_vel);
+            }
         } else {
             c = sqrt(gamma * p / max((RealType)1e-6, rho));
         }
-        max_s = u_mag + c;
+        max_s = abs(ux) + abs(uy) + abs(uz) + (RealType)3.0 * c;
     }
 
     sdata[tid] = max_s;
@@ -2410,6 +3376,7 @@ __global__ void reduce_max_kernel(const RealType* data, int n, RealType* result)
 template <typename RealType, bool IsMultiMaterial>
 double CFDSolver3DCuda<RealType, IsMultiMaterial>::computeStepSize(double cfl) const {
     ensure_paged_in();
+    bind_constants();
     if (h_num_active_tiles == 0) return 1e-6;
 
     int n_active = h_num_active_tiles;
@@ -2423,12 +3390,71 @@ double CFDSolver3DCuda<RealType, IsMultiMaterial>::computeStepSize(double cfl) c
     CHECK_CUDA(cudaMemcpy(&h_max_s, d_max_s_buf, sizeof(RealType), cudaMemcpyDeviceToHost));
 
     double max_s = fmax(1e-6, (double)h_max_s);
+    if (std::isnan(max_s) || std::isinf(max_s) || max_s <= 0.0) {
+        max_s = 1e-6;
+    }
+
+    if (grid_manager && grid_manager->getSubMeshCount() > 0 && !gpu_submeshes.empty()) {
+        syncSubMeshesToHost();
+        for (const auto& sm : grid_manager->getSubMeshes()) {
+            double sm_max_s = 1e-6;
+            for (size_t c = 0; c < sm->rho.size(); ++c) {
+                double r = fmax(1e-8, (double)sm->rho[c]);
+                double u = (double)sm->ux[c];
+                double v = (double)sm->uy[c];
+                double w = (double)sm->uz[c];
+                double pr = fmax(1e-8, (double)sm->p[c]);
+                double cs = std::sqrt((double)gamma * pr / r);
+                double speed = std::abs(u) + std::abs(v) + std::abs(w) + 3.0 * cs;
+                if (!std::isnan(speed) && !std::isinf(speed) && speed > sm_max_s) {
+                    sm_max_s = speed;
+                }
+            }
+            int level_shift = (sm->level >= 1) ? (sm->level - 1) : 0;
+            double eff_speed = sm_max_s * (double)(1 << level_shift);
+            if (!std::isnan(eff_speed) && !std::isinf(eff_speed) && eff_speed > max_s) {
+                max_s = eff_speed;
+            }
+        }
+    }
+
+    max_s = std::clamp(max_s, 1e-6, 1e9);
     return cfl * cellSize / max_s;
 }
 
 template <typename RealType, bool IsMultiMaterial>
 std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::sampleGauge(const Gauge3D& gauge) const {
     ensure_paged_in();
+    bind_constants();
+
+    if (grid_manager && grid_manager->getSubMeshCount() > 0) {
+        syncSubMeshesToHost();
+        RealType px = (RealType)gauge.x;
+        RealType py = (RealType)gauge.y;
+        RealType pz = (RealType)gauge.z;
+        for (const auto& sm : grid_manager->getSubMeshes()) {
+            if (sm->containsInteriorPoint(px, py, pz)) {
+                int si = std::clamp((int)std::floor((px - sm->xmin) / sm->cellSize), 0, sm->nx - 1);
+                int sj = std::clamp((int)std::floor((py - sm->ymin) / sm->cellSize), 0, sm->ny - 1);
+                int sk = std::clamp((int)std::floor((pz - sm->zmin) / sm->cellSize), 0, sm->nz - 1);
+                size_t s_idx = sm->getIndex(si, sj, sk);
+
+                std::vector<float> vals(7, 0.0f);
+                vals[0] = (float)sm->getValue("pressure", s_idx);
+                vals[1] = (float)sm->getValue("density", s_idx);
+                vals[2] = (float)sm->getValue("velocity", s_idx);
+                vals[3] = (float)sm->getValue("energy", s_idx);
+                if constexpr (IsMultiMaterial) {
+                    vals[4] = (float)sm->getValue("species1", s_idx);
+                    vals[5] = (float)sm->getValue("species2", s_idx);
+                    vals[6] = (float)sm->getValue("species3", s_idx);
+                } else {
+                    vals[6] = 1.0f;
+                }
+                return vals;
+            }
+        }
+    }
     int gx = std::clamp((int)((gauge.x - xmin) / cellSize), 0, nx - 1);
     int gy = std::clamp((int)((gauge.y - ymin) / cellSize), 0, ny - 1);
     int gz = std::clamp((int)((gauge.z - zmin) / cellSize), 0, nz - 1);
@@ -2510,6 +3536,7 @@ std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::sampleGauge(const
 template <typename RealType, bool IsMultiMaterial>
 std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::getCellValues(int gx, int gy, int gz) const {
     ensure_paged_in();
+    bind_constants();
     gx = std::clamp(gx, 0, nx - 1);
     gy = std::clamp(gy, 0, ny - 1);
     gz = std::clamp(gz, 0, nz - 1);
@@ -2557,6 +3584,7 @@ std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::getCellValues(int
 template <typename RealType, bool IsMultiMaterial>
 std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::extractSlice(const Slice3D& slice) const {
     ensure_paged_in();
+    bind_constants();
     std::vector<float> h_data;
     bool is_obstacles = (slice.axis == "obstacles");
 
@@ -2625,21 +3653,54 @@ std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::extractSlice(cons
         );
         CHECK_CUDA(cudaDeviceSynchronize());
         CHECK_CUDA(cudaMemcpy(h_data.data(), d_slice_buf, required_size, cudaMemcpyDeviceToHost));
+
+        if (grid_manager && grid_manager->getSubMeshCount() > 0) {
+            syncSubMeshesToHost();
+            for (int gz = 0; gz < out_nz; ++gz) {
+                for (int gy = 0; gy < out_ny; ++gy) {
+                    for (int gx = 0; gx < out_nx; ++gx) {
+                        RealType px = (RealType)xmin + ((RealType)(gx * stride) + (RealType)0.5) * (RealType)cellSize;
+                        RealType py = (RealType)ymin + ((RealType)(gy * stride) + (RealType)0.5) * (RealType)cellSize;
+                        RealType pz = (RealType)zmin + ((RealType)(gz * stride) + (RealType)0.5) * (RealType)cellSize;
+                        float base_val = h_data[(size_t)gx + (size_t)gy * out_nx + (size_t)gz * out_nx * out_ny];
+                        for (const auto& sm : grid_manager->getSubMeshes()) {
+                            if (sm->containsInteriorPoint(px, py, pz)) {
+                                int si = std::clamp((int)std::floor((px - sm->xmin) / sm->cellSize), 0, sm->nx - 1);
+                                int sj = std::clamp((int)std::floor((py - sm->ymin) / sm->cellSize), 0, sm->ny - 1);
+                                int sk = std::clamp((int)std::floor((pz - sm->zmin) / sm->cellSize), 0, sm->nz - 1);
+                                size_t s_idx = sm->getIndex(si, sj, sk);
+                                h_data[(size_t)gx + (size_t)gy * out_nx + (size_t)gz * out_nx * out_ny] = (float)sm->getValue(qty, s_idx);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         return h_data;
     }
 
     int axis = (slice.axis == "xy" ? 0 : (slice.axis == "xz" ? 1 : 2));
     int stride = slice.stride > 0 ? slice.stride : 1;
-    int w = 0, h = 0;
-    if (axis == 0) { w = (nx + stride - 1) / stride; h = (ny + stride - 1) / stride; }
-    else if (axis == 1) { w = (nx + stride - 1) / stride; h = (nz + stride - 1) / stride; }
-    else { w = (ny + stride - 1) / stride; h = (nz + stride - 1) / stride; }
+    int scale = 1;
+    std::cout << "[DEBUG] extractSlice axis=" << slice.axis << " stride=" << stride << " scale=" << scale << " nx=" << nx << " ny=" << ny << " nz=" << nz << std::endl;
+    int base_w = 0, base_h = 0;
+    if (axis == 0) { base_w = (nx + stride - 1) / stride; base_h = (ny + stride - 1) / stride; }
+    else if (axis == 1) { base_w = (nx + stride - 1) / stride; base_h = (nz + stride - 1) / stride; }
+    else { base_w = (ny + stride - 1) / stride; base_h = (nz + stride - 1) / stride; }
+
+    int w = base_w * scale;
+    int h = base_h * scale;
+    std::cout << "[DEBUG] extractSlice w=" << w << " h=" << h << " base_w=" << base_w << " base_h=" << base_h << std::endl;
 
     h_data.resize(w * h, 0.0f);
-    dim3 blocks((w+15)/16, (h+15)/16);
+
+    // Extract coarse slice
+    std::vector<float> coarse_slice(base_w * base_h, 0.0f);
+    dim3 blocks((base_w+15)/16, (base_h+15)/16);
     dim3 threads(16, 16);
 
-    size_t required_size = (size_t)w * (size_t)h * sizeof(float);
+    size_t required_size = (size_t)base_w * (size_t)base_h * sizeof(float);
     if (d_slice_buf_capacity < required_size) {
         if (d_slice_buf) cudaFree(d_slice_buf);
         d_slice_buf_capacity = required_size;
@@ -2648,9 +3709,131 @@ std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::extractSlice(cons
 
     extract_slice_kernel<RealType, IsMultiMaterial><<<blocks, threads>>>((const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states, (const GeometryTile3D*)d_geom, (float*)d_slice_buf, nx, ny, nz, axis, slice.offset, xmin, ymin, zmin, cellSize, qty_id, stride);
     CHECK_CUDA(cudaDeviceSynchronize());
-    CHECK_CUDA(cudaMemcpy(h_data.data(), d_slice_buf, required_size, cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(coarse_slice.data(), d_slice_buf, required_size, cudaMemcpyDeviceToHost));
+
+    for (int j = 0; j < h; ++j) {
+        for (int i = 0; i < w; ++i) {
+            h_data[i + j * w] = coarse_slice[i + j * base_w];
+        }
+    }
 
     return h_data;
+}
+
+template <typename RealType, bool IsMultiMaterial>
+std::vector<SlicePayload3D> CFDSolver3DCuda<RealType, IsMultiMaterial>::extractAllSlices(const Slice3D& slice) const {
+    std::vector<SlicePayload3D> results;
+
+    // 1. Parent slice
+    SlicePayload3D parent_sp;
+    parent_sp.axis = slice.axis;
+    parent_sp.offset = slice.offset;
+    parent_sp.stride = slice.stride;
+    parent_sp.is_submesh = false;
+    parent_sp.level = 0;
+    parent_sp.xmin = xmin; parent_sp.xmax = xmin + nx * cellSize;
+    parent_sp.ymin = ymin; parent_sp.ymax = ymin + ny * cellSize;
+    parent_sp.zmin = zmin; parent_sp.zmax = zmin + nz * cellSize;
+
+    int base_w = 0, base_h = 0, depth = 1;
+    getSliceDimensions(slice, base_w, base_h, depth);
+    parent_sp.w = base_w;
+    parent_sp.h = base_h;
+    parent_sp.data = extractSlice(slice);
+
+    results.push_back(std::move(parent_sp));
+
+    // 2. Submesh slices
+    if (grid_manager && grid_manager->getSubMeshCount() > 0) {
+        int axis = (slice.axis == "xy" ? 0 : (slice.axis == "xz" ? 1 : 2));
+        std::string qty = (slice.quantities.empty()) ? "pressure" : slice.quantities[0];
+        syncSubMeshesToHost();
+        
+        for (const auto& sm : grid_manager->getSubMeshes()) {
+            int n_ghost = 2;
+            if (sm->nx > 2 * n_ghost && sm->ny > 2 * n_ghost && sm->nz > 2 * n_ghost) {
+                bool intersects = false;
+                double margin = n_ghost * sm->cellSize;
+                if (axis == 0) { // XY
+                    intersects = (slice.offset >= sm->zmin + margin && slice.offset <= sm->zmax - margin);
+                } else if (axis == 1) { // XZ
+                    intersects = (slice.offset >= sm->ymin + margin && slice.offset <= sm->ymax - margin);
+                } else { // YZ
+                    intersects = (slice.offset >= sm->xmin + margin && slice.offset <= sm->xmax - margin);
+                }
+
+                if (intersects) {
+                    SlicePayload3D sub_sp;
+                    sub_sp.axis = slice.axis;
+                    sub_sp.offset = slice.offset;
+                    sub_sp.stride = slice.stride;
+                    sub_sp.is_submesh = true;
+                    sub_sp.level = sm->level;
+                    sub_sp.xmin = sm->xmin + margin; sub_sp.xmax = sm->xmax - margin;
+                    sub_sp.ymin = sm->ymin + margin; sub_sp.ymax = sm->ymax - margin;
+                    sub_sp.zmin = sm->zmin + margin; sub_sp.zmax = sm->zmax - margin;
+
+                    int sk = 0;
+                    if (axis == 0) {
+                        sk = std::clamp((int)std::floor((slice.offset - sm->zmin) / sm->cellSize), 0, sm->nz - 1);
+                        sub_sp.w = sm->nx - 2 * n_ghost;
+                        sub_sp.h = sm->ny - 2 * n_ghost;
+                    } else if (axis == 1) {
+                        sk = std::clamp((int)std::floor((slice.offset - sm->ymin) / sm->cellSize), 0, sm->ny - 1);
+                        sub_sp.w = sm->nx - 2 * n_ghost;
+                        sub_sp.h = sm->nz - 2 * n_ghost;
+                    } else {
+                        sk = std::clamp((int)std::floor((slice.offset - sm->xmin) / sm->cellSize), 0, sm->nx - 1);
+                        sub_sp.w = sm->ny - 2 * n_ghost;
+                        sub_sp.h = sm->nz - 2 * n_ghost;
+                    }
+
+                    sub_sp.data.resize(sub_sp.w * sub_sp.h, 0.0f);
+                    for (int j = 0; j < sub_sp.h; ++j) {
+                        for (int i = 0; i < sub_sp.w; ++i) {
+                            int si = i + n_ghost;
+                            int sj = j + n_ghost;
+                            size_t s_idx = 0;
+                            if (axis == 0) {
+                                s_idx = sm->getIndex(si, sj, sk);
+                            } else if (axis == 1) {
+                                s_idx = sm->getIndex(si, sk, sj);
+                            } else {
+                                s_idx = sm->getIndex(sk, si, sj);
+                            }
+                            sub_sp.data[i + j * sub_sp.w] = (float)sm->getValue(qty, s_idx);
+                        }
+                    }
+                    results.push_back(std::move(sub_sp));
+                }
+            }
+        }
+    }
+
+    return results;
+}
+
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DCuda<RealType, IsMultiMaterial>::getSliceDimensions(const Slice3D& slice, int& w, int& h, int& depth) const {
+    int stride = slice.stride > 0 ? slice.stride : 1;
+    depth = 1;
+    int scale = 1;
+    if (slice.axis == "xy" || slice.axis == "obstacles") {
+        w = ((nx + stride - 1) / stride) * scale;
+        h = ((ny + stride - 1) / stride) * scale;
+    } else if (slice.axis == "xz") {
+        w = ((nx + stride - 1) / stride) * scale;
+        h = ((nz + stride - 1) / stride) * scale;
+    } else if (slice.axis == "yz") {
+        w = ((ny + stride - 1) / stride) * scale;
+        h = ((nz + stride - 1) / stride) * scale;
+    } else if (slice.axis == "volume") {
+        w = (nx + stride - 1) / stride;
+        h = (ny + stride - 1) / stride;
+        depth = (nz + stride - 1) / stride;
+    } else {
+        w = 0; h = 0; depth = 0;
+    }
 }
 
 template <typename RealType, bool IsMultiMaterial>
@@ -2661,12 +3844,6 @@ __global__ void __launch_bounds__(512) check_active_tiles_kernel(
     int nx, int ny, int nz) {
 
     int t_idx = blockIdx.x;
-    if (!active_tiles[t_idx]) {
-        if (threadIdx.x == 0) {
-            temp_active[t_idx] = 0;
-        }
-        return;
-    }
 
     int tx = blockIdx.x % d_ntx;
     int ty = (blockIdx.x / d_ntx) % d_nty;
@@ -3005,11 +4182,10 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::commitStates() {
 
     if (temp_h_tiles_ptr) {
         const auto& h_tiles = *temp_h_tiles_ptr;
-        std::vector<uint8_t> h_active_tiles(total_tiles, 0);
+        std::vector<uint8_t> h_active_tiles(total_tiles, 1);
         for (int t = 0; t < total_tiles; ++t) {
             if (h_tiles[t]) {
                 CHECK_CUDA(cudaMemcpy((PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states + t, h_tiles[t], sizeof(PrimitiveTile3D<RealType, IsMultiMaterial>), cudaMemcpyHostToDevice));
-                h_active_tiles[t] = 1;
             }
         }
         CHECK_CUDA(cudaMemcpy(d_active_tiles, h_active_tiles.data(), total_tiles * sizeof(uint8_t), cudaMemcpyHostToDevice));
@@ -3031,6 +4207,32 @@ template <typename RealType, bool IsMultiMaterial>
 void CFDSolver3DCuda<RealType, IsMultiMaterial>::setTemporalOrder(int order) { temporalOrder = order; }
 
 template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DCuda<RealType, IsMultiMaterial>::addSubMesh(const SubMeshParams3D& submesh) {
+    CFDSolver3DImplBase::addSubMesh(submesh);
+    if (!grid_manager) {
+        auto root = std::make_shared<SubMesh3D<RealType, IsMultiMaterial>>("root", 0, (RealType)xmin, (RealType)ymin, (RealType)zmin, (RealType)lx, (RealType)ly, (RealType)lz, (RealType)cellSize);
+        grid_manager = std::make_unique<GridManager3D<RealType, IsMultiMaterial>>(root);
+    }
+    double submeshCellSize = cellSize / (double)(1 << submesh.level);
+    double margin = 2.0 * submeshCellSize;
+    auto sm = std::make_shared<SubMesh3D<RealType, IsMultiMaterial>>(
+        submesh.id, submesh.level,
+        (RealType)(submesh.xmin - margin), (RealType)(submesh.ymin - margin), (RealType)(submesh.zmin - margin),
+        (RealType)(submesh.size_x + 2.0 * margin), (RealType)(submesh.size_y + 2.0 * margin), (RealType)(submesh.size_z + 2.0 * margin),
+        (RealType)submeshCellSize
+    );
+    grid_manager->addSubMesh(sm);
+
+    int ntx = (nx + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    int nty = (ny + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    if (!global_geometry_tiles.empty()) {
+        grid_manager->updateSubMeshGeometry(global_geometry_tiles, nx, ny, nz, (RealType)cellSize, (RealType)xmin, (RealType)ymin, (RealType)zmin, ntx, nty);
+    }
+    allocateGPUSubMeshes();
+    syncSubMeshesToGPU();
+}
+
+template <typename RealType, bool IsMultiMaterial>
 void CFDSolver3DCuda<RealType, IsMultiMaterial>::setBoundaryConditions(BCType3D xmin, BCType3D xmax, BCType3D ymin, BCType3D ymax, BCType3D zmin, BCType3D zmax) {
     CFDSolver3DImplBase::setBoundaryConditions(xmin, xmax, ymin, ymax, zmin, zmax);
     updateBoundaryConditions();
@@ -3038,6 +4240,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setBoundaryConditions(BCType3D 
 template <typename RealType, bool IsMultiMaterial>
 __global__ void batch_sample_gauges_kernel_3d(
     const PrimitiveTile3D<RealType, IsMultiMaterial>* states,
+    const GPUSubMeshDevicePointer3D<RealType>* submesh_ptrs,
     const GPUGauge3D* gauges,
     float* out_data,
     int num_gauges
@@ -3045,35 +4248,67 @@ __global__ void batch_sample_gauges_kernel_3d(
     int g = blockIdx.x * blockDim.x + threadIdx.x;
     if (g >= num_gauges) return;
 
-    int t_idx = gauges[g].t_idx;
-    int c_idx = gauges[g].c_idx;
+    int sm_idx = gauges[g].submesh_idx;
+    if (sm_idx >= 0 && submesh_ptrs) {
+        const auto& sm = submesh_ptrs[sm_idx];
+        int idx = gauges[g].sm_idx;
 
-    const PrimitiveTile3D<RealType, IsMultiMaterial>& tile = states[t_idx];
+        out_data[g * 7 + 0] = (float)sm.p[idx];
+        out_data[g * 7 + 1] = (float)sm.rho[idx];
+        RealType ux = sm.ux[idx];
+        RealType uy = sm.uy[idx];
+        RealType uz = sm.uz[idx];
+        out_data[g * 7 + 2] = (float)sqrt((double)(ux * ux + uy * uy + uz * uz));
 
-    out_data[g * 7 + 0] = (float)tile.p[c_idx];
-    out_data[g * 7 + 1] = (float)tile.rho[c_idx];
-    RealType ux = tile.ux[c_idx];
-    RealType uy = tile.uy[c_idx];
-    RealType uz = tile.uz[c_idx];
-    out_data[g * 7 + 2] = (float)sqrt((double)(ux * ux + uy * uy + uz * uz));
+        RealType ke = (RealType)0.5 * sm.rho[idx] * (ux*ux + uy*uy + uz*uz);
+        RealType total_E;
+        if constexpr (IsMultiMaterial) {
+            total_E = (RealType)MultiMat::getMixtureEnergy((double)sm.p[idx], (double)sm.rho[idx], (double)sm.alpha1[idx], (double)sm.alpha2[idx], (double)(sm.alpha1[idx]*sm.rho[idx]), (double)(sm.alpha2[idx]*sm.rho[idx]), d_gamma, d_products, d_unreacted) + ke;
+        } else {
+            total_E = sm.p[idx] / (d_gamma - (RealType)1.0) + ke;
+        }
+        out_data[g * 7 + 3] = (float)(total_E / fmax((RealType)1e-6, sm.rho[idx]));
 
-    RealType ke = (RealType)0.5 * tile.rho[c_idx] * (ux*ux + uy*uy + uz*uz);
-    RealType total_E;
-    if constexpr (IsMultiMaterial) {
-        total_E = (RealType)MultiMat::getMixtureEnergy((double)tile.p[c_idx], (double)tile.rho[c_idx], (double)tile.alpha1[c_idx], (double)tile.alpha2[c_idx], (double)tile.arho1[c_idx], (double)tile.arho2[c_idx], d_gamma, d_products, d_unreacted) + ke;
+        if constexpr (IsMultiMaterial) {
+            out_data[g * 7 + 4] = (float)sm.alpha1[idx];
+            out_data[g * 7 + 5] = (float)sm.alpha2[idx];
+            out_data[g * 7 + 6] = (float)(1.0 - sm.alpha1[idx] - sm.alpha2[idx]);
+        } else {
+            out_data[g * 7 + 4] = 0.0f;
+            out_data[g * 7 + 5] = 0.0f;
+            out_data[g * 7 + 6] = 1.0f;
+        }
     } else {
-        total_E = tile.p[c_idx] / (d_gamma - (RealType)1.0) + ke;
-    }
-    out_data[g * 7 + 3] = (float)(total_E / fmax((RealType)1e-6, tile.rho[c_idx]));
+        int t_idx = gauges[g].t_idx;
+        int c_idx = gauges[g].c_idx;
 
-    if constexpr (IsMultiMaterial) {
-        out_data[g * 7 + 4] = (float)tile.alpha1[c_idx];
-        out_data[g * 7 + 5] = (float)tile.alpha2[c_idx];
-        out_data[g * 7 + 6] = (float)(1.0 - tile.alpha1[c_idx] - tile.alpha2[c_idx]);
-    } else {
-        out_data[g * 7 + 4] = 0.0f;
-        out_data[g * 7 + 5] = 0.0f;
-        out_data[g * 7 + 6] = 1.0f;
+        const PrimitiveTile3D<RealType, IsMultiMaterial>& tile = states[t_idx];
+
+        out_data[g * 7 + 0] = (float)tile.p[c_idx];
+        out_data[g * 7 + 1] = (float)tile.rho[c_idx];
+        RealType ux = tile.ux[c_idx];
+        RealType uy = tile.uy[c_idx];
+        RealType uz = tile.uz[c_idx];
+        out_data[g * 7 + 2] = (float)sqrt((double)(ux * ux + uy * uy + uz * uz));
+
+        RealType ke = (RealType)0.5 * tile.rho[c_idx] * (ux*ux + uy*uy + uz*uz);
+        RealType total_E;
+        if constexpr (IsMultiMaterial) {
+            total_E = (RealType)MultiMat::getMixtureEnergy((double)tile.p[c_idx], (double)tile.rho[c_idx], (double)tile.alpha1[c_idx], (double)tile.alpha2[c_idx], (double)tile.arho1[c_idx], (double)tile.arho2[c_idx], d_gamma, d_products, d_unreacted) + ke;
+        } else {
+            total_E = tile.p[c_idx] / (d_gamma - (RealType)1.0) + ke;
+        }
+        out_data[g * 7 + 3] = (float)(total_E / fmax((RealType)1e-6, tile.rho[c_idx]));
+
+        if constexpr (IsMultiMaterial) {
+            out_data[g * 7 + 4] = (float)tile.alpha1[c_idx];
+            out_data[g * 7 + 5] = (float)tile.alpha2[c_idx];
+            out_data[g * 7 + 6] = (float)(1.0 - tile.alpha1[c_idx] - tile.alpha2[c_idx]);
+        } else {
+            out_data[g * 7 + 4] = 0.0f;
+            out_data[g * 7 + 5] = 0.0f;
+            out_data[g * 7 + 6] = 1.0f;
+        }
     }
 }
 
@@ -3082,6 +4317,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setGauges(const std::vector<Gau
     ensure_paged_in();
     if (d_gauge_coords) { cudaFree(d_gauge_coords); d_gauge_coords = nullptr; }
     if (d_gauge_results) { cudaFree(d_gauge_results); d_gauge_results = nullptr; }
+    if (d_submesh_buffers_gauge) { cudaFree(d_submesh_buffers_gauge); d_submesh_buffers_gauge = nullptr; }
     if (host_pinned_gauge_data) { cudaFreeHost(host_pinned_gauge_data); host_pinned_gauge_data = nullptr; }
 
     num_gauges = gauges.size();
@@ -3096,8 +4332,6 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setGauges(const std::vector<Gau
     int ntx = (nx + 7) / 8;
     int nty = (ny + 7) / 8;
 
-    // Helper: look up is_boundary for a cell (i,j,k) using the global host geometry cache.
-    // Returns false if no geometry is loaded or coords are out of range.
     const bool has_geom = !global_geometry_tiles.empty()
                           && (int)global_geometry_tiles.size() == ntx * ((ny + 7) / 8) * ((nz + 7) / 8);
 
@@ -3111,8 +4345,6 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setGauges(const std::vector<Gau
         return global_geometry_tiles[t].cells[c].is_boundary;
     };
 
-    // Returns true if the fluid cell (i,j,k) has at least one solid face-neighbour,
-    // i.e., it is directly in contact with the obstacle surface.
     auto cell_is_boundary_contact = [&](int i, int j, int k) -> bool {
         const int face_dirs[6][3] = {
             {1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}
@@ -3124,85 +4356,170 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setGauges(const std::vector<Gau
     };
 
     for (size_t g = 0; g < gauges.size(); ++g) {
+        int submesh_idx = -1;
+        int sm_idx = -1;
+
+        if (grid_manager && grid_manager->getSubMeshCount() > 0) {
+            RealType px = (RealType)gauges[g].x;
+            RealType py = (RealType)gauges[g].y;
+            RealType pz = (RealType)gauges[g].z;
+            const auto& host_submeshes = grid_manager->getSubMeshes();
+            for (size_t sm_i = 0; sm_i < host_submeshes.size(); ++sm_i) {
+                const auto& sm = host_submeshes[sm_i];
+                if (sm->containsInteriorPoint(px, py, pz)) {
+                    submesh_idx = (int)sm_i;
+                    int si = std::clamp((int)std::floor((px - sm->xmin) / sm->cellSize), 0, sm->nx - 1);
+                    int sj = std::clamp((int)std::floor((py - sm->ymin) / sm->cellSize), 0, sm->ny - 1);
+                    int sk = std::clamp((int)std::floor((pz - sm->zmin) / sm->cellSize), 0, sm->nz - 1);
+
+                    if (has_geom) {
+                        auto cell_is_solid_sub = [&](int i, int j, int k) -> bool {
+                            if (i < 0 || i >= sm->nx || j < 0 || j >= sm->ny || k < 0 || k >= sm->nz) return false;
+                            size_t idx = sm->getIndex(i, j, k);
+                            return sm->is_boundary[idx] != 0;
+                        };
+                        auto cell_is_boundary_contact_sub = [&](int i, int j, int k) -> bool {
+                            const int face_dirs[6][3] = {
+                                {1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}
+                            };
+                            for (auto& d : face_dirs) {
+                                if (cell_is_solid_sub(i + d[0], j + d[1], k + d[2])) return true;
+                            }
+                            return false;
+                        };
+
+                        const int SNAP_RADIUS = 2;
+                        bool gauge_is_solid = cell_is_solid_sub(si, sj, sk);
+                        bool near_solid = gauge_is_solid;
+                        if (!near_solid) {
+                            for (int dz = -SNAP_RADIUS; dz <= SNAP_RADIUS && !near_solid; ++dz)
+                            for (int dy = -SNAP_RADIUS; dy <= SNAP_RADIUS && !near_solid; ++dy)
+                            for (int dx = -SNAP_RADIUS; dx <= SNAP_RADIUS && !near_solid; ++dx) {
+                                float dist = std::sqrt((float)(dx*dx + dy*dy + dz*dz));
+                                if (dist <= 1.999f && cell_is_solid_sub(si+dx, sj+dy, sk+dz))
+                                    near_solid = true;
+                            }
+                        }
+
+                        if (near_solid) {
+                            int best_x = -1, best_y = -1, best_z = -1;
+                            float best_dist_contact = 1e9f;
+                            float best_dist_fluid = 1e9f;
+                            int bf_x = -1, bf_y = -1, bf_z = -1;
+
+                            const int SEARCH_RADIUS = SNAP_RADIUS + 1;
+                            for (int dz = -SEARCH_RADIUS; dz <= SEARCH_RADIUS; ++dz)
+                            for (int dy = -SEARCH_RADIUS; dy <= SEARCH_RADIUS; ++dy)
+                            for (int dx = -SEARCH_RADIUS; dx <= SEARCH_RADIUS; ++dx) {
+                                int cx = si + dx, cy = sj + dy, cz = sk + dz;
+                                if (cx < 0 || cx >= sm->nx || cy < 0 || cy >= sm->ny || cz < 0 || cz >= sm->nz) continue;
+                                if (cell_is_solid_sub(cx, cy, cz)) continue;
+
+                                float dist = std::sqrt((float)(dx*dx + dy*dy + dz*dz));
+                                if (cell_is_boundary_contact_sub(cx, cy, cz)) {
+                                    if (dist < best_dist_contact) {
+                                        best_dist_contact = dist;
+                                        best_x = cx; best_y = cy; best_z = cz;
+                                    }
+                                }
+                                if (dist < best_dist_fluid) {
+                                    best_dist_fluid = dist;
+                                    bf_x = cx; bf_y = cy; bf_z = cz;
+                                }
+                            }
+
+                            int snap_x, snap_y, snap_z;
+                            if (best_x >= 0) {
+                                snap_x = best_x; snap_y = best_y; snap_z = best_z;
+                            } else if (bf_x >= 0) {
+                                snap_x = bf_x; snap_y = bf_y; snap_z = bf_z;
+                            } else {
+                                snap_x = si; snap_y = sj; snap_z = sk;
+                            }
+
+                            if (snap_x != si || snap_y != sj || snap_z != sk) {
+                                std::cout << "[SUBMESH GAUGE SNAP] Gauge '" << gauges[g].name
+                                          << "' adjusted from submesh cell (" << si << "," << sj << "," << sk << ")"
+                                          << " to submesh boundary-contact cell (" << snap_x << "," << snap_y << "," << snap_z << ")"
+                                          << " (dist=" << best_dist_contact << " cells)\n";
+                                si = snap_x; sj = snap_y; sk = snap_z;
+                            }
+                        }
+                    }
+
+                    sm_idx = (int)sm->getIndex(si, sj, sk);
+                    break;
+                }
+            }
+        }
+
         int gx = std::clamp((int)((gauges[g].x - xmin) / cellSize), 0, nx - 1);
         int gy = std::clamp((int)((gauges[g].y - ymin) / cellSize), 0, ny - 1);
         int gz = std::clamp((int)((gauges[g].z - zmin) / cellSize), 0, nz - 1);
 
-        // --- Automatic gauge snapping (internal only; user coordinates are unchanged) ---
-        // If geometry is loaded, check whether the gauge is inside a solid or within
-        // 1.999 cells of one.  If so, snap the internal extraction cell to the nearest
-        // fluid cell that is in direct contact with the obstacle, so that pressure
-        // readings on building facades etc. are physically correct.
-        if (has_geom) {
-            const int SNAP_RADIUS = 2;   // covers the 1.999-cell threshold
-            bool gauge_is_solid = cell_is_solid(gx, gy, gz);
+        if (submesh_idx == -1) {
+            if (has_geom) {
+                const int SNAP_RADIUS = 2;
+                bool gauge_is_solid = cell_is_solid(gx, gy, gz);
 
-            // Check whether the gauge is within SNAP_RADIUS cells of any solid.
-            bool near_solid = gauge_is_solid;
-            if (!near_solid) {
-                for (int dz = -SNAP_RADIUS; dz <= SNAP_RADIUS && !near_solid; ++dz)
-                for (int dy = -SNAP_RADIUS; dy <= SNAP_RADIUS && !near_solid; ++dy)
-                for (int dx = -SNAP_RADIUS; dx <= SNAP_RADIUS && !near_solid; ++dx) {
-                    float dist = std::sqrt((float)(dx*dx + dy*dy + dz*dz));
-                    if (dist <= 1.999f && cell_is_solid(gx+dx, gy+dy, gz+dz))
-                        near_solid = true;
+                bool near_solid = gauge_is_solid;
+                if (!near_solid) {
+                    for (int dz = -SNAP_RADIUS; dz <= SNAP_RADIUS && !near_solid; ++dz)
+                    for (int dy = -SNAP_RADIUS; dy <= SNAP_RADIUS && !near_solid; ++dy)
+                    for (int dx = -SNAP_RADIUS; dx <= SNAP_RADIUS && !near_solid; ++dx) {
+                        float dist = std::sqrt((float)(dx*dx + dy*dy + dz*dz));
+                        if (dist <= 1.999f && cell_is_solid(gx+dx, gy+dy, gz+dz))
+                            near_solid = true;
+                    }
                 }
-            }
 
-            if (near_solid) {
-                // Search within SNAP_RADIUS+1 cells for the nearest boundary-contact
-                // fluid cell, then fall back to any fluid cell if none is found.
-                int best_x = -1, best_y = -1, best_z = -1;
-                float best_dist_contact = 1e9f;
-                float best_dist_fluid   = 1e9f;
-                int   bf_x = -1, bf_y = -1, bf_z = -1;  // nearest plain fluid fallback
+                if (near_solid) {
+                    int best_x = -1, best_y = -1, best_z = -1;
+                    float best_dist_contact = 1e9f;
+                    float best_dist_fluid   = 1e9f;
+                    int   bf_x = -1, bf_y = -1, bf_z = -1;
 
-                const int SEARCH_RADIUS = SNAP_RADIUS + 1;
-                for (int dz = -SEARCH_RADIUS; dz <= SEARCH_RADIUS; ++dz)
-                for (int dy = -SEARCH_RADIUS; dy <= SEARCH_RADIUS; ++dy)
-                for (int dx = -SEARCH_RADIUS; dx <= SEARCH_RADIUS; ++dx) {
-                    int cx = gx + dx, cy = gy + dy, cz = gz + dz;
-                    if (cx < 0 || cx >= nx || cy < 0 || cy >= ny || cz < 0 || cz >= nz) continue;
-                    if (cell_is_solid(cx, cy, cz)) continue;
+                    const int SEARCH_RADIUS = SNAP_RADIUS + 1;
+                    for (int dz = -SEARCH_RADIUS; dz <= SEARCH_RADIUS; ++dz)
+                    for (int dy = -SEARCH_RADIUS; dy <= SEARCH_RADIUS; ++dy)
+                    for (int dx = -SEARCH_RADIUS; dx <= SEARCH_RADIUS; ++dx) {
+                        int cx = gx + dx, cy = gy + dy, cz = gz + dz;
+                        if (cx < 0 || cx >= nx || cy < 0 || cy >= ny || cz < 0 || cz >= nz) continue;
+                        if (cell_is_solid(cx, cy, cz)) continue;
 
-                    float dist = std::sqrt((float)(dx*dx + dy*dy + dz*dz));
+                        float dist = std::sqrt((float)(dx*dx + dy*dy + dz*dz));
 
-                    // Track nearest boundary-contact cell.
-                    if (cell_is_boundary_contact(cx, cy, cz)) {
-                        if (dist < best_dist_contact) {
-                            best_dist_contact = dist;
-                            best_x = cx; best_y = cy; best_z = cz;
+                        if (cell_is_boundary_contact(cx, cy, cz)) {
+                            if (dist < best_dist_contact) {
+                                best_dist_contact = dist;
+                                best_x = cx; best_y = cy; best_z = cz;
+                            }
+                        }
+                        if (dist < best_dist_fluid) {
+                            best_dist_fluid = dist;
+                            bf_x = cx; bf_y = cy; bf_z = cz;
                         }
                     }
-                    // Also track nearest any-fluid as a fallback.
-                    if (dist < best_dist_fluid) {
-                        best_dist_fluid = dist;
-                        bf_x = cx; bf_y = cy; bf_z = cz;
+
+                    int snap_x, snap_y, snap_z;
+                    if (best_x >= 0) {
+                        snap_x = best_x; snap_y = best_y; snap_z = best_z;
+                    } else if (bf_x >= 0) {
+                        snap_x = bf_x; snap_y = bf_y; snap_z = bf_z;
+                    } else {
+                        snap_x = gx; snap_y = gy; snap_z = gz;
                     }
-                }
 
-                int snap_x, snap_y, snap_z;
-                if (best_x >= 0) {
-                    // Found a boundary-contact fluid cell — use it.
-                    snap_x = best_x; snap_y = best_y; snap_z = best_z;
-                } else if (bf_x >= 0) {
-                    // No boundary-contact cell found; fall back to nearest fluid cell.
-                    snap_x = bf_x; snap_y = bf_y; snap_z = bf_z;
-                } else {
-                    // No fluid cell in range at all — keep original (degenerate grid).
-                    snap_x = gx; snap_y = gy; snap_z = gz;
-                }
-
-                if (snap_x != gx || snap_y != gy || snap_z != gz) {
-                    std::cout << "[GAUGE SNAP] Gauge '" << gauges[g].name
-                              << "' adjusted from cell (" << gx << "," << gy << "," << gz << ")"
-                              << " to boundary-contact cell (" << snap_x << "," << snap_y << "," << snap_z << ")"
-                              << " (dist=" << best_dist_contact << " cells)\n";
-                    gx = snap_x; gy = snap_y; gz = snap_z;
+                    if (snap_x != gx || snap_y != gy || snap_z != gz) {
+                        std::cout << "[GAUGE SNAP] Gauge '" << gauges[g].name
+                                  << "' adjusted from cell (" << gx << "," << gy << "," << gz << ")"
+                                  << " to boundary-contact cell (" << snap_x << "," << snap_y << "," << snap_z << ")"
+                                  << " (dist=" << best_dist_contact << " cells)\n";
+                        gx = snap_x; gy = snap_y; gz = snap_z;
+                    }
                 }
             }
         }
-        // -------------------------------------------------------------------------
 
         int tx = gx / TILE_SIZE_3D, ty = gy / TILE_SIZE_3D, tz = gz / TILE_SIZE_3D;
         int t_idx = tx + ty * ntx + tz * ntx * nty;
@@ -3211,6 +4528,8 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setGauges(const std::vector<Gau
 
         local_gauge_coords[g].t_idx = t_idx;
         local_gauge_coords[g].c_idx = c_idx;
+        local_gauge_coords[g].submesh_idx = submesh_idx;
+        local_gauge_coords[g].sm_idx = sm_idx;
     }
 
     CHECK_CUDA(cudaMalloc(&d_gauge_coords, num_gauges * sizeof(GPUGauge3D)));
@@ -3243,10 +4562,32 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::recordGaugesAsync(double t) {
     CHECK_CUDA(cudaEventRecord((cudaEvent_t)step_done, 0));
     CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)gauge_stream, (cudaEvent_t)step_done, 0));
 
+    // Synchronise submesh device pointers to the GPU array for sampling
+    if (grid_manager && grid_manager->getSubMeshCount() > 0 && !gpu_submeshes.empty()) {
+        size_t n_sub = gpu_submeshes.size();
+        std::vector<GPUSubMeshDevicePointer3D<RealType>> temp_ptrs(n_sub);
+        for (size_t i = 0; i < n_sub; ++i) {
+            temp_ptrs[i].rho = gpu_submeshes[i].d_rho;
+            temp_ptrs[i].ux = gpu_submeshes[i].d_ux;
+            temp_ptrs[i].uy = gpu_submeshes[i].d_uy;
+            temp_ptrs[i].uz = gpu_submeshes[i].d_uz;
+            temp_ptrs[i].p = gpu_submeshes[i].d_p;
+            temp_ptrs[i].E = gpu_submeshes[i].d_E;
+            temp_ptrs[i].alpha1 = gpu_submeshes[i].d_alpha1;
+            temp_ptrs[i].alpha2 = gpu_submeshes[i].d_alpha2;
+        }
+
+        if (!d_submesh_buffers_gauge) {
+            CHECK_CUDA(cudaMalloc(&d_submesh_buffers_gauge, n_sub * sizeof(GPUSubMeshDevicePointer3D<RealType>)));
+        }
+        CHECK_CUDA(cudaMemcpy(d_submesh_buffers_gauge, temp_ptrs.data(), n_sub * sizeof(GPUSubMeshDevicePointer3D<RealType>), cudaMemcpyHostToDevice));
+    }
+
     int threads_per_block = 256;
     int blocks_gauge = (num_gauges + threads_per_block - 1) / threads_per_block;
     batch_sample_gauges_kernel_3d<RealType, IsMultiMaterial><<<blocks_gauge, threads_per_block, 0, (cudaStream_t)gauge_stream>>>(
         (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+        (const GPUSubMeshDevicePointer3D<RealType>*)d_submesh_buffers_gauge,
         (const GPUGauge3D*)d_gauge_coords,
         (float*)d_gauge_results,
         num_gauges
@@ -3310,6 +4651,12 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setGeometry(const std::string& 
     );
 
     loadGeometryToGPU(host_geom, terminate_flag);
+
+    if (grid_manager && grid_manager->getSubMeshCount() > 0) {
+        std::vector<Triangle> triangles = read_stl(stl_filepath);
+        grid_manager->voxelizeSubMeshGeometry(triangles, voxelization_method);
+        syncSubMeshesToGPU();
+    }
 }
 
 template <typename RealType, bool IsMultiMaterial>
@@ -3338,6 +4685,11 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setGeometryTriangles(const std:
     );
 
     loadGeometryToGPU(host_geom, terminate_flag);
+
+    if (grid_manager && grid_manager->getSubMeshCount() > 0) {
+        grid_manager->voxelizeSubMeshGeometry(triangles, voxelization_method);
+        syncSubMeshesToGPU();
+    }
 }
 
 template <typename RealType, bool IsMultiMaterial>
@@ -3366,6 +4718,12 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setGeometryPrimitives(const nlo
     );
 
     loadGeometryToGPU(host_geom, terminate_flag);
+
+    if (grid_manager && grid_manager->getSubMeshCount() > 0) {
+        std::vector<Triangle> triangles = generate_primitives_triangles(primitives);
+        grid_manager->voxelizeSubMeshGeometry(triangles, voxelization_method);
+        syncSubMeshesToGPU();
+    }
 }
 
 template <typename RealType, bool IsMultiMaterial>
@@ -3446,6 +4804,11 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::loadGeometryToGPU(const std::ve
         }
     }
     std::cout << "[DIAGNOSTIC] Device geometry has " << gpu_boundary_count << " boundary cells." << std::endl;
+
+    if (grid_manager && grid_manager->getSubMeshCount() > 0) {
+        grid_manager->updateSubMeshGeometry(host_geom, nx, ny, nz, (RealType)cellSize, (RealType)xmin, (RealType)ymin, (RealType)zmin, ntx, nty);
+        syncSubMeshesToGPU();
+    }
 }
 
 template <typename RealType, bool IsMultiMaterial>

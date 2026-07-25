@@ -436,7 +436,8 @@ export class StateManager {
             'MPMDomain2D': 'node-mpm-domain',
             'MPMObject2D': 'node-mpm-obj',
             'MPMMaterialSteel': 'node-mpm-steel',
-            'FSICoupler2D': 'node-fsi-coupler'
+            'FSICoupler2D': 'node-fsi-coupler',
+            'RefinementMesh3D': 'node-refinement3d'
         };
         const prefix = prefixMap[type] || `node-${type.toLowerCase()}`;
 
@@ -1513,7 +1514,7 @@ export class StateManager {
                 flux_scheme: 'AUSM+',
                 spatial_order: 2,
                 temporal_order: 2,
-                precision: 'double'
+                precision: 'single'
             },
             'TelemetryGraph': {
                 telemetry_channel: 0,
@@ -1587,7 +1588,7 @@ export class StateManager {
             },
             'HardwareConfig': {
                 device: 'cpu',
-                precision: 'double'
+                precision: 'single'
             },
             'CFDSolver2D': {
                 init_mode: 'From1D',
@@ -1638,6 +1639,15 @@ export class StateManager {
                 bc_y_min: 'Reflecting', bc_y_max: 'Transmitting',
                 bc_z_min: 'Reflecting', bc_z_max: 'Transmitting'
             },
+            'RefinementMesh3D': {
+                submesh_x: 0.25,
+                submesh_y: 0.25,
+                submesh_z: 0.25,
+                submesh_size_x: 0.5,
+                submesh_size_y: 0.5,
+                submesh_size_z: 0.5,
+                refinement_level: 1
+            },
             'Charge3D': {
                 charge_shape: 'Sphere',
                 charge_mass: 6.8277,
@@ -1687,6 +1697,8 @@ export class StateManager {
                 auto_scale: true,
                 min_val: 101325.0,
                 max_val: 101325.0 * 100.0,
+                show_color_bar: true,
+                color_bar_position: 'left-center',
                 show_grid: true,
                 grid_meshlines: true,
                 show_grid_box: true,
@@ -1808,6 +1820,11 @@ export class StateManager {
             if (node.type === 'CFDSolver3D') {
                 delete node.parameters['stl_file'];
                 delete node.parameters['geometry_hash'];
+                delete node.parameters['mesh_type'];
+                delete node.parameters['amr_max_levels'];
+                delete node.parameters['amr_threshold'];
+                delete node.parameters['amr_coarsen_ratio'];
+                delete node.parameters['amr_tile_size'];
             }
             if (node.type === 'DomainMesh') {
                 if (node.parameters['x_min_bc'] !== undefined) {
@@ -1956,6 +1973,7 @@ export class StateManager {
                 { id: 'gauges', label: 'Gauges' },
                 { id: 'remap', label: 'Remap' }
             ];
+            case 'RefinementMesh3D': return [{ id: 'parent_mesh', label: 'Parent Mesh' }];
             case 'Charge3D': return [{ id: 'material', label: 'Material' }];
             case 'Telemetry3DViewport': return [{ id: 'in', label: 'Data Stream' }];
             case 'MPMDomain2D': return [{ id: 'mesh', label: 'Grid' }, { id: 'objects', label: 'MPM Objects' }];
@@ -1983,6 +2001,7 @@ export class StateManager {
             case 'HardwareConfig': return [{ id: 'hardware', label: 'Hardware Spec' }];
             case 'CFDSolver2D': return [{ id: 'telemetry', label: 'Telemetry' }];
             case 'DomainMesh3D': return [{ id: 'mesh', label: 'Mesh Spec' }];
+            case 'RefinementMesh3D': return [{ id: 'mesh', label: 'Mesh Spec' }];
             case 'Charge3D': return [{ id: 'out', label: 'Charge Spec' }];
             case 'CFDSolver3D': return [{ id: 'telemetry', label: 'Telemetry' }];
             case 'VirtualGauges': return [{ id: 'out', label: 'Gauges Spec' }];
@@ -2226,3 +2245,63 @@ function syncExplosiveParameters(node: Node, parameters: Record<string, any>, st
         }
     }
 }
+
+export function calculateRefinementMeshInfo(node: Node, state: SimulationState) {
+    const sx = Number(node.parameters['submesh_size_x'] ?? 0.5);
+    const sy = Number(node.parameters['submesh_size_y'] ?? 0.5);
+    const sz = Number(node.parameters['submesh_size_z'] ?? 0.5);
+    const lvl = Number(node.parameters['refinement_level'] ?? 1);
+
+    let rootMeshNode: Node | null = null;
+    let currNode: Node | undefined = node;
+    let depth = 0;
+    while (currNode && depth < 20) {
+        const parentConn = state.connections.find(c => c.toNode === currNode!.id && c.toPort === 'parent_mesh');
+        if (!parentConn) break;
+        currNode = state.nodes.find(n => n.id === parentConn.fromNode);
+        if (currNode && currNode.type === 'DomainMesh3D') {
+            rootMeshNode = currNode;
+            break;
+        }
+    }
+
+    if (!rootMeshNode) {
+        rootMeshNode = state.nodes.find(n => n.type === 'DomainMesh3D') || null;
+    }
+
+    const parentCellSize = Number(rootMeshNode?.parameters['cell_size'] ?? 0.01);
+    
+    let parentNx = 100, parentNy = 100, parentNz = 100;
+    if (rootMeshNode) {
+        const xmin = Number(rootMeshNode.parameters['xmin'] ?? rootMeshNode.parameters['origin_x'] ?? 0.0);
+        const xmax = Number(rootMeshNode.parameters['xmax'] ?? (xmin + (rootMeshNode.parameters['dim_x'] ?? 1.0)));
+        const ymin = Number(rootMeshNode.parameters['ymin'] ?? rootMeshNode.parameters['origin_y'] ?? 0.0);
+        const ymax = Number(rootMeshNode.parameters['ymax'] ?? (ymin + (rootMeshNode.parameters['dim_y'] ?? 1.0)));
+        const zmin = Number(rootMeshNode.parameters['zmin'] ?? rootMeshNode.parameters['origin_z'] ?? 0.0);
+        const zmax = Number(rootMeshNode.parameters['zmax'] ?? (zmin + (rootMeshNode.parameters['dim_z'] ?? 1.0)));
+        const dim_x = xmax - xmin;
+        const dim_y = ymax - ymin;
+        const dim_z = zmax - zmin;
+        parentNx = Math.max(1, Math.round(dim_x / parentCellSize));
+        parentNy = Math.max(1, Math.round(dim_y / parentCellSize));
+        parentNz = Math.max(1, Math.round(dim_z / parentCellSize));
+    }
+    const parentTotalCells = parentNx * parentNy * parentNz;
+
+    const refinedCellSize = parentCellSize / Math.pow(2, lvl);
+    const subNx = Math.max(1, Math.round(sx / refinedCellSize));
+    const subNy = Math.max(1, Math.round(sy / refinedCellSize));
+    const subNz = Math.max(1, Math.round(sz / refinedCellSize));
+    const subTotalCells = subNx * subNy * subNz;
+
+    const newTotalCells = parentTotalCells + subTotalCells;
+
+    return {
+        subNx, subNy, subNz,
+        subTotalCells,
+        parentTotalCells,
+        newTotalCells,
+        hasParent: !!rootMeshNode
+    };
+}
+

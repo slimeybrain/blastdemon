@@ -103,115 +103,7 @@ std::vector<Triangle> read_stl(const std::string& filepath) {
 #include <unordered_map>
 #include <algorithm>
 
-inline bool tri_box_overlap(const Point3D& boxcenter, float boxhalfsize, const Triangle& tri) {
-    float v0x = tri.v0.x - boxcenter.x;
-    float v0y = tri.v0.y - boxcenter.y;
-    float v0z = tri.v0.z - boxcenter.z;
-    float v1x = tri.v1.x - boxcenter.x;
-    float v1y = tri.v1.y - boxcenter.y;
-    float v1z = tri.v1.z - boxcenter.z;
-    float v2x = tri.v2.x - boxcenter.x;
-    float v2y = tri.v2.y - boxcenter.y;
-    float v2z = tri.v2.z - boxcenter.z;
 
-    float e0x = v1x - v0x, e0y = v1y - v0y, e0z = v1z - v0z;
-    float e1x = v2x - v1x, e1y = v2y - v1y, e1z = v2z - v1z;
-    float e2x = v0x - v2x, e2y = v0y - v2y, e2z = v0z - v2z;
-
-    float min_val, max_val;
-
-#define TEST_CROSS_AXIS(p0, p1, p2, rad_val) \
-    min_val = std::min({p0, p1, p2}); \
-    max_val = std::max({p0, p1, p2}); \
-    if (min_val > rad_val || max_val < -rad_val) return false;
-
-    // Axis a00: (0, -e0z, e0y)
-    {
-        float p0 = -v0y * e0z + v0z * e0y;
-        float p2 = -v2y * e0z + v2z * e0y;
-        float rad = boxhalfsize * (std::abs(e0z) + std::abs(e0y));
-        TEST_CROSS_AXIS(p0, p0, p2, rad);
-    }
-    // Axis a01: (0, -e1z, e1y)
-    {
-        float p0 = -v0y * e1z + v0z * e1y;
-        float p2 = -v2y * e1z + v2z * e1y;
-        float rad = boxhalfsize * (std::abs(e1z) + std::abs(e1y));
-        TEST_CROSS_AXIS(p0, p2, p2, rad);
-    }
-    // Axis a02: (0, -e2z, e2y)
-    {
-        float p0 = -v0y * e2z + v0z * e2y;
-        float p1 = -v1y * e2z + v1z * e2y;
-        float rad = boxhalfsize * (std::abs(e2z) + std::abs(e2y));
-        TEST_CROSS_AXIS(p0, p1, p0, rad);
-    }
-
-    // Axis a10: (e0z, 0, -e0x)
-    {
-        float p0 = v0x * e0z - v0z * e0x;
-        float p2 = v2x * e0z - v2z * e0x;
-        float rad = boxhalfsize * (std::abs(e0z) + std::abs(e0x));
-        TEST_CROSS_AXIS(p0, p0, p2, rad);
-    }
-    // Axis a11: (e1z, 0, -e1x)
-    {
-        float p0 = v0x * e1z - v0z * e1x;
-        float p2 = v2x * e1z - v2z * e1x;
-        float rad = boxhalfsize * (std::abs(e1z) + std::abs(e1x));
-        TEST_CROSS_AXIS(p0, p2, p2, rad);
-    }
-    // Axis a12: (e2z, 0, -e2x)
-    {
-        float p0 = v0x * e2z - v0z * e2x;
-        float p1 = v1x * e2z - v1z * e2x;
-        float rad = boxhalfsize * (std::abs(e2z) + std::abs(e2x));
-        TEST_CROSS_AXIS(p0, p1, p0, rad);
-    }
-
-    // Axis a20: (-e0y, e0x, 0)
-    {
-        float p0 = -v0x * e0y + v0y * e0x;
-        float p2 = -v2x * e0y + v2y * e0x;
-        float rad = boxhalfsize * (std::abs(e0y) + std::abs(e0x));
-        TEST_CROSS_AXIS(p0, p0, p2, rad);
-    }
-    // Axis a21: (-e1y, e1x, 0)
-    {
-        float p0 = -v0x * e1y + v0y * e1x;
-        float p2 = -v2x * e1y + v2y * e1x;
-        float rad = boxhalfsize * (std::abs(e1y) + std::abs(e1x));
-        TEST_CROSS_AXIS(p0, p2, p2, rad);
-    }
-    // Axis a22: (-e2y, e2x, 0)
-    {
-        float p0 = -v0x * e2y + v0y * e2x;
-        float p1 = -v1x * e2y + v1y * e2x;
-        float rad = boxhalfsize * (std::abs(e2y) + std::abs(e2x));
-        TEST_CROSS_AXIS(p0, p1, p0, rad);
-    }
-
-    if (std::min({v0x, v1x, v2x}) > boxhalfsize || std::max({v0x, v1x, v2x}) < -boxhalfsize) return false;
-    if (std::min({v0y, v1y, v2y}) > boxhalfsize || std::max({v0y, v1y, v2y}) < -boxhalfsize) return false;
-    if (std::min({v0z, v1z, v2z}) > boxhalfsize || std::max({v0z, v1z, v2z}) < -boxhalfsize) return false;
-
-    float nx = e0y * e1z - e0z * e1y;
-    float ny = e0z * e1x - e0x * e1z;
-    float nz = e0x * e1y - e0y * e1x;
-    float d = -(nx * v0x + ny * v0y + nz * v0z);
-    
-    float vmin_x = (nx > 0.0f) ? -boxhalfsize : boxhalfsize;
-    float vmax_x = (nx > 0.0f) ? boxhalfsize : -boxhalfsize;
-    float vmin_y = (ny > 0.0f) ? -boxhalfsize : boxhalfsize;
-    float vmax_y = (ny > 0.0f) ? boxhalfsize : -boxhalfsize;
-    float vmin_z = (nz > 0.0f) ? -boxhalfsize : boxhalfsize;
-    float vmax_z = (nz > 0.0f) ? boxhalfsize : -boxhalfsize;
-
-    if (nx * vmin_x + ny * vmin_y + nz * vmin_z + d > 0.0f) return false;
-    if (nx * vmax_x + ny * vmax_y + nz * vmax_z + d < 0.0f) return false;
-
-    return true;
-}
 
 inline float signed_solid_angle(const Point3D& p, const Point3D& v0, const Point3D& v1, const Point3D& v2) {
     float ax = v0.x - p.x, ay = v0.y - p.y, az = v0.z - p.z;
@@ -965,6 +857,279 @@ void voxelize_primitives(
     if (progress_callback) progress_callback(1.0);
     std::cout << "[INFO] Voxelization of primitives complete. Geometry cached with hash: " << geometry_hash << std::endl;
 }
+
+void voxelize_flat_boundary(
+    const std::vector<Triangle>& triangles,
+    const std::string& voxelization_method,
+    std::vector<uint8_t>& is_boundary,
+    int nx, int ny, int nz,
+    double cellSize,
+    double xmin, double ymin, double zmin
+) {
+    is_boundary.assign(nx * ny * nz, 0);
+    if (triangles.empty()) return;
+
+    float box_half = 0.5f * (float)cellSize;
+
+    // Boundary flag vector
+    std::vector<uint8_t> has_boundary(nx * ny * nz, 0);
+
+    #pragma omp parallel for
+    for (int i = 0; i < (int)triangles.size(); ++i) {
+        const auto& tri = triangles[i];
+        
+        float min_x = std::min({tri.v0.x, tri.v1.x, tri.v2.x});
+        float max_x = std::max({tri.v0.x, tri.v1.x, tri.v2.x});
+        float min_y = std::min({tri.v0.y, tri.v1.y, tri.v2.y});
+        float max_y = std::max({tri.v0.y, tri.v1.y, tri.v2.y});
+        float min_z = std::min({tri.v0.z, tri.v1.z, tri.v2.z});
+        float max_z = std::max({tri.v0.z, tri.v1.z, tri.v2.z});
+
+        int gx_min = std::clamp(static_cast<int>((min_x - cellSize - xmin) / cellSize), 0, nx - 1);
+        int gx_max = std::clamp(static_cast<int>((max_x + cellSize - xmin) / cellSize), 0, nx - 1);
+        int gy_min = std::clamp(static_cast<int>((min_y - cellSize - ymin) / cellSize), 0, ny - 1);
+        int gy_max = std::clamp(static_cast<int>((max_y + cellSize - ymin) / cellSize), 0, ny - 1);
+        int gz_min = std::clamp(static_cast<int>((min_z - cellSize - zmin) / cellSize), 0, nz - 1);
+        int gz_max = std::clamp(static_cast<int>((max_z + cellSize - zmin) / cellSize), 0, nz - 1);
+
+        for (int gz = gz_min; gz <= gz_max; ++gz) {
+            float z_c = (float)(zmin + (gz + 0.5) * cellSize);
+            for (int gy = gy_min; gy <= gy_max; ++gy) {
+                float y_c = (float)(ymin + (gy + 0.5) * cellSize);
+                for (int gx = gx_min; gx <= gx_max; ++gx) {
+                    float x_c = (float)(xmin + (gx + 0.5) * cellSize);
+                    Point3D P = {x_c, y_c, z_c};
+                    if (tri_box_overlap(P, box_half, tri)) {
+                        int idx = gx + gy * nx + gz * nx * ny;
+                        #pragma omp critical
+                        {
+                            has_boundary[idx] = 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    std::vector<uint8_t> is_inside(nx * ny * nz, 0);
+
+    if (voxelization_method == "watertight_floodfill") {
+        std::vector<uint8_t> visited(nx * ny * nz, 0);
+        std::vector<int> queue;
+        queue.reserve(nx * ny * 6);
+
+        // Seed domain boundary cells
+        for (int gz = 0; gz < nz; ++gz) {
+            for (int gy = 0; gy < ny; ++gy) {
+                for (int gx : {0, nx - 1}) {
+                    int idx = gx + gy * nx + gz * nx * ny;
+                    if (!has_boundary[idx]) {
+                        visited[idx] = 1;
+                        queue.push_back(idx);
+                    }
+                }
+            }
+        }
+        for (int gz = 0; gz < nz; ++gz) {
+            for (int gx = 0; gx < nx; ++gx) {
+                for (int gy : {0, ny - 1}) {
+                    int idx = gx + gy * nx + gz * nx * ny;
+                    if (!visited[idx]) {
+                        if (!has_boundary[idx]) {
+                            visited[idx] = 1;
+                            queue.push_back(idx);
+                        }
+                    }
+                }
+            }
+        }
+        for (int gy = 0; gy < ny; ++gy) {
+            for (int gx = 0; gx < nx; ++gx) {
+                for (int gz : {0, nz - 1}) {
+                    int idx = gx + gy * nx + gz * nx * ny;
+                    if (!visited[idx]) {
+                        if (!has_boundary[idx]) {
+                            visited[idx] = 1;
+                            queue.push_back(idx);
+                        }
+                    }
+                }
+            }
+        }
+
+        // BFS traversal
+        size_t head = 0;
+        while (head < queue.size()) {
+            int curr = queue[head++];
+            int gz = curr / (nx * ny);
+            int rem = curr % (nx * ny);
+            int gy = rem / nx;
+            int gx = rem % nx;
+
+            const int dx[] = {1, -1, 0, 0, 0, 0};
+            const int dy[] = {0, 0, 1, -1, 0, 0};
+            const int dz[] = {0, 0, 0, 0, 1, -1};
+
+            for (int d = 0; d < 6; ++d) {
+                int nx_val = gx + dx[d];
+                int ny_val = gy + dy[d];
+                int nz_val = gz + dz[d];
+
+                if (nx_val >= 0 && nx_val < nx && ny_val >= 0 && ny_val < ny && nz_val >= 0 && nz_val < nz) {
+                    int n_idx = nx_val + ny_val * nx + nz_val * nx * ny;
+                    if (!visited[n_idx]) {
+                        if (!has_boundary[n_idx]) {
+                            visited[n_idx] = 1;
+                            queue.push_back(n_idx);
+                        }
+                    }
+                }
+            }
+        }
+
+        #pragma omp parallel for collapse(3)
+        for (int gz = 0; gz < nz; ++gz) {
+            for (int gy = 0; gy < ny; ++gy) {
+                for (int gx = 0; gx < nx; ++gx) {
+                    int idx = gx + gy * nx + gz * nx * ny;
+                    if (!visited[idx]) {
+                        if (!has_boundary[idx]) {
+                            is_inside[idx] = 1;
+                        }
+                    }
+                }
+            }
+        }
+    } else if (voxelization_method == "watertight_raycast") {
+        std::vector<std::vector<int>> grid_triangles(ny * nz);
+        for (int i = 0; i < (int)triangles.size(); ++i) {
+            const auto& tri = triangles[i];
+            float min_y = std::min({tri.v0.y, tri.v1.y, tri.v2.y});
+            float max_y = std::max({tri.v0.y, tri.v1.y, tri.v2.y});
+            float min_z = std::min({tri.v0.z, tri.v1.z, tri.v2.z});
+            float max_z = std::max({tri.v0.z, tri.v1.z, tri.v2.z});
+
+            int gy_min = std::clamp(static_cast<int>(std::floor((min_y - ymin) / cellSize)), 0, ny - 1);
+            int gy_max = std::clamp(static_cast<int>(std::floor((max_y - ymin) / cellSize)), 0, ny - 1);
+            int gz_min = std::clamp(static_cast<int>(std::floor((min_z - zmin) / cellSize)), 0, nz - 1);
+            int gz_max = std::clamp(static_cast<int>(std::floor((max_z - zmin) / cellSize)), 0, nz - 1);
+
+            for (int gz = gz_min; gz <= gz_max; ++gz) {
+                for (int gy = gy_min; gy <= gy_max; ++gy) {
+                    grid_triangles[gy + gz * ny].push_back(i);
+                }
+            }
+        }
+
+        #pragma omp parallel for collapse(2)
+        for (int gz = 0; gz < nz; ++gz) {
+            for (int gy = 0; gy < ny; ++gy) {
+                float y_ray = (float)(ymin + (gy + 0.5f + 1.234e-4f) * cellSize);
+                float z_ray = (float)(zmin + (gz + 0.5f + 5.678e-4f) * cellSize);
+
+                const auto& candidate_indices = grid_triangles[gy + gz * ny];
+                if (!candidate_indices.empty()) {
+                    std::vector<float> intersects;
+                    Point3D O = { (float)xmin - (float)cellSize, y_ray, z_ray };
+                    Point3D D = { 1.0f, 0.0f, 0.0f };
+                    for (int idx : candidate_indices) {
+                        const auto& tri = triangles[idx];
+                        float t;
+                        if (ray_triangle_intersect(O, D, tri.v0, tri.v1, tri.v2, t)) {
+                            intersects.push_back(O.x + t);
+                        }
+                    }
+
+                    if (!intersects.empty()) {
+                        std::sort(intersects.begin(), intersects.end());
+
+                        for (int gx = 0; gx < nx; ++gx) {
+                            float x_c = (float)(xmin + (gx + 0.5f) * cellSize);
+                            int count = 0;
+                            for (float xi : intersects) {
+                                  if (xi < x_c) count++;
+                                  else break;
+                            }
+                            if (count % 2 == 1) {
+                                is_inside[gx + gy * nx + gz * nx * ny] = 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else if (voxelization_method == "winding_number") {
+        #pragma omp parallel for collapse(3)
+        for (int gz = 0; gz < nz; ++gz) {
+            for (int gy = 0; gy < ny; ++gy) {
+                for (int gx = 0; gx < nx; ++gx) {
+                    int idx = gx + gy * nx + gz * nx * ny;
+                    if (!has_boundary[idx]) {
+                        float x_c = (float)(xmin + (gx + 0.5) * cellSize);
+                        float y_c = (float)(ymin + (gy + 0.5) * cellSize);
+                        float z_c = (float)(zmin + (gz + 0.5) * cellSize);
+                        Point3D P = {x_c, y_c, z_c};
+
+                        float sum = 0.0f;
+                        for (int i = 0; i < (int)triangles.size(); ++i) {
+                            sum += signed_solid_angle(P, triangles[i].v0, triangles[i].v1, triangles[i].v2);
+                        }
+                        float w = sum / (4.0f * (float)M_PI);
+                        if (std::abs(w) > 0.5f) {
+                            is_inside[idx] = 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #pragma omp parallel for collapse(3)
+    for (int gz = 0; gz < nz; ++gz) {
+        for (int gy = 0; gy < ny; ++gy) {
+            for (int gx = 0; gx < nx; ++gx) {
+                int idx = gx + gy * nx + gz * nx * ny;
+                if (has_boundary[idx] || is_inside[idx]) {
+                    is_boundary[idx] = 1;
+                }
+            }
+        }
+    }
+
+    // Clean up isolated fluid cells
+    for (int iter = 0; iter < 3; ++iter) {
+        int removed_this_iter = 0;
+        std::vector<uint8_t> new_is_boundary = is_boundary;
+        #pragma omp parallel for collapse(3) reduction(+:removed_this_iter)
+        for (int gz = 0; gz < nz; ++gz) {
+            for (int gy = 0; gy < ny; ++gy) {
+                for (int gx = 0; gx < nx; ++gx) {
+                    int idx = gx + gy * nx + gz * nx * ny;
+                    if (!is_boundary[idx]) {
+                        int solid_neighbors = 0;
+                        auto is_solid = [&](int x, int y, int z) {
+                            if (x < 0 || x >= nx || y < 0 || y >= ny || z < 0 || z >= nz) return false;
+                            return is_boundary[x + y * nx + z * nx * ny] != 0;
+                        };
+                        if (is_solid(gx+1, gy, gz)) solid_neighbors++;
+                        if (is_solid(gx-1, gy, gz)) solid_neighbors++;
+                        if (is_solid(gx, gy+1, gz)) solid_neighbors++;
+                        if (is_solid(gx, gy-1, gz)) solid_neighbors++;
+                        if (is_solid(gx, gy, gz+1)) solid_neighbors++;
+                        if (is_solid(gx, gy, gz-1)) solid_neighbors++;
+                        if (solid_neighbors >= 5) {
+                            new_is_boundary[idx] = 1;
+                            removed_this_iter++;
+                        }
+                    }
+                }
+            }
+        }
+        is_boundary = new_is_boundary;
+        if (removed_this_iter == 0) break;
+    }
+}
+
 
 
 

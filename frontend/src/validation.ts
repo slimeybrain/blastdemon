@@ -365,13 +365,13 @@ export function validateSimulationState(state: SimulationState): ValidationResul
         // Mesh 3D connection check
         const meshConn3D = state.connections.find(c => c.toNode === solver3D.id && c.toPort === 'mesh');
         if (!meshConn3D) {
-            addMessage(solver3D.id, 'error', "No Mesh node connected to CFD Solver 3D. A DomainMesh3D node is required.");
+            addMessage(solver3D.id, 'error', "No Mesh node connected to CFD Solver 3D. A DomainMesh3D or RefinementMesh3D node is required.");
         } else {
             const fromNode = state.nodes.find(n => n.id === meshConn3D.fromNode);
-            if (!fromNode || fromNode.type !== 'DomainMesh3D') {
+            if (!fromNode || (fromNode.type !== 'DomainMesh3D' && fromNode.type !== 'RefinementMesh3D')) {
                 const connKey = `${meshConn3D.fromNode}:${meshConn3D.fromPort}->${meshConn3D.toNode}:${meshConn3D.toPort}`;
-                flawedConnections.set(connKey, "Only DomainMesh3D node can be connected to the Mesh input of CFD Solver 3D.");
-                addMessage(solver3D.id, 'error', "Only DomainMesh3D node can be connected to the Mesh input of CFD Solver 3D.");
+                flawedConnections.set(connKey, "Only DomainMesh3D or RefinementMesh3D node can be connected to the Mesh input of CFD Solver 3D.");
+                addMessage(solver3D.id, 'error', "Only DomainMesh3D or RefinementMesh3D node can be connected to the Mesh input of CFD Solver 3D.");
             }
         }
 
@@ -1036,13 +1036,40 @@ export function validateSimulationState(state: SimulationState): ValidationResul
         if (isNaN(dimY) || dimY <= 0) {
             addMessage(mesh3D.id, 'error', "Mesh dimension Y (ymax - ymin) must be greater than 0.");
         }
-        if (isNaN(dimZ) || dimZ <= 0) {
-            addMessage(mesh3D.id, 'error', "Mesh dimension Z (zmax - zmin) must be greater than 0.");
-        }
         if (cellSize >= dimX || cellSize >= dimY || cellSize >= dimZ) {
             addMessage(mesh3D.id, 'error', "Mesh Cell Size must be smaller than domain dimensions.");
         }
     });
+
+    // RefinementMesh3D validation
+    state.nodes.filter(n => n.type === 'RefinementMesh3D').forEach(refMesh3D => {
+        const parentConn = state.connections.find(c => c.toNode === refMesh3D.id && c.toPort === 'parent_mesh');
+        if (!parentConn) {
+            addMessage(refMesh3D.id, 'error', "No Parent Mesh connected to RefinementMesh3D. A DomainMesh3D or parent RefinementMesh3D node is required.");
+        } else {
+            const fromNode = state.nodes.find(n => n.id === parentConn.fromNode);
+            if (!fromNode || (fromNode.type !== 'DomainMesh3D' && fromNode.type !== 'RefinementMesh3D')) {
+                const connKey = `${parentConn.fromNode}:${parentConn.fromPort}->${parentConn.toNode}:${parentConn.toPort}`;
+                flawedConnections.set(connKey, "Only DomainMesh3D or RefinementMesh3D node can be connected to the Parent Mesh input of RefinementMesh3D.");
+                addMessage(refMesh3D.id, 'error', "Only DomainMesh3D or RefinementMesh3D node can be connected to the Parent Mesh input of RefinementMesh3D.");
+            }
+        }
+
+        const sizeX = Number(refMesh3D.parameters?.submesh_size_x ?? 0.5);
+        const sizeY = Number(refMesh3D.parameters?.submesh_size_y ?? 0.5);
+        const sizeZ = Number(refMesh3D.parameters?.submesh_size_z ?? 0.5);
+        if (isNaN(sizeX) || sizeX <= 0) {
+            addMessage(refMesh3D.id, 'error', "Submesh Size X must be greater than 0.");
+        }
+        if (isNaN(sizeY) || sizeY <= 0) {
+            addMessage(refMesh3D.id, 'error', "Submesh Size Y must be greater than 0.");
+        }
+        if (isNaN(sizeZ) || sizeZ <= 0) {
+            addMessage(refMesh3D.id, 'error', "Submesh Size Z must be greater than 0.");
+        }
+    });
+
+
 
     // Generic validation check for missing/not-provided parameters
     state.nodes.forEach(node => {
