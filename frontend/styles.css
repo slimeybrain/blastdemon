@@ -933,9 +933,9 @@ canvas {
 /* Resource Manager Styles */
 .resource-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-    gap: 15px;
-    padding: 15px;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 10px;
+    padding: 10px;
     background: #111;
     height: 100%;
     overflow-y: auto;
@@ -944,7 +944,7 @@ canvas {
 .resource-card {
     background: #1e1e1e;
     border: 1px solid #333;
-    padding: 12px;
+    padding: 10px;
     border-radius: 4px;
     display: flex;
     flex-direction: column;

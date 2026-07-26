@@ -1,4 +1,4 @@
-import { StateManager, calculateRefinementMeshInfo } from './state-manager.js';
+import { StateManager, calculateRefinementMeshInfo, getMeshDisplayHTML } from './state-manager.js';
 import { Node } from './types.js';
 import { validateSimulationState } from './validation.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
@@ -97,36 +97,9 @@ export class PropertyEditor {
 
             const gridInfo = this.container.querySelector('#grid-info-display') as HTMLDivElement;
             if (gridInfo) {
-                const cellSize = Number(node.parameters['cell_size'] ?? 0.001);
-                if (node.type === 'DomainMesh') {
-                    const radius = Number(node.parameters['domain_radius'] ?? 1.0);
-                    const n_cells = Math.round(radius / cellSize);
-                    gridInfo.textContent = `Calculated Grid: ${n_cells.toLocaleString()} cells`;
-                } else if (node.type === 'DomainMesh2D') {
-                    const max_r = Number(node.parameters['max_r'] ?? 1.0);
-                    const max_z = Number(node.parameters['max_z'] ?? 1.0);
-                    const nr = Math.round(max_r / cellSize);
-                    const nz = Math.round(max_z / cellSize);
-                    gridInfo.textContent = `Calculated Grid: ${nr} x ${nz} cells (Total: ${(nr * nz).toLocaleString()})`;
-                } else if (node.type === 'DomainMesh3D') {
-                    const xmin = Number(node.parameters['xmin'] ?? 0.0);
-                    const xmax = Number(node.parameters['xmax'] ?? 1.0);
-                    const ymin = Number(node.parameters['ymin'] ?? 0.0);
-                    const ymax = Number(node.parameters['ymax'] ?? 1.0);
-                    const zmin = Number(node.parameters['zmin'] ?? 0.0);
-                    const zmax = Number(node.parameters['zmax'] ?? 1.0);
-                    const dim_x = xmax - xmin;
-                    const dim_y = ymax - ymin;
-                    const dim_z = zmax - zmin;
-                    const nx = Math.round(dim_x / cellSize);
-                    const ny = Math.round(dim_y / cellSize);
-                    const nz = Math.round(dim_z / cellSize);
-                    gridInfo.textContent = `Calculated Grid: ${nx} x ${ny} x ${nz} cells (Total: ${(nx * ny * nz).toLocaleString()})`;
-                } else if (node.type === 'RefinementMesh3D' && state) {
-                    const stats = calculateRefinementMeshInfo(node, state);
-                    gridInfo.innerHTML = `<div>Refined Region: ${stats.subNx} x ${stats.subNy} x ${stats.subNz} (${stats.subTotalCells.toLocaleString()} cells)</div><div>Total Grid (w/ Parent): ${stats.newTotalCells.toLocaleString()} cells</div>`;
-                }
+                gridInfo.innerHTML = getMeshDisplayHTML(node, state ?? undefined);
             }
+
 
             // Refresh validation warnings banner even in fast-update path
             const warnings: string[] = [];
@@ -293,37 +266,13 @@ export class PropertyEditor {
         
         let gridInfoDiv: HTMLDivElement | null = null;
         if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D') {
-            const cellSize = Number(node.parameters['cell_size'] ?? 0.001);
             const info = document.createElement('div');
             info.id = 'grid-info-display';
             info.style.fontSize = 'var(--font-sm)';
             info.style.color = '#569cd6';
             info.style.marginTop = '10px';
-            if (node.type === 'DomainMesh') {
-                const radius = Number(node.parameters['domain_radius'] ?? 1.0);
-                const n_cells = Math.round(radius / cellSize);
-                info.textContent = `Calculated Grid: ${n_cells.toLocaleString()} cells`;
-            } else if (node.type === 'DomainMesh2D') {
-                const max_r = Number(node.parameters['max_r'] ?? 1.0);
-                const max_z = Number(node.parameters['max_z'] ?? 1.0);
-                const nr = Math.round(max_r / cellSize);
-                const nz = Math.round(max_z / cellSize);
-                info.textContent = `Calculated Grid: ${nr} x ${nz} cells (Total: ${(nr * nz).toLocaleString()})`;
-            } else {
-                const xmin = Number(node.parameters['xmin'] ?? 0.0);
-                const xmax = Number(node.parameters['xmax'] ?? 1.0);
-                const ymin = Number(node.parameters['ymin'] ?? 0.0);
-                const ymax = Number(node.parameters['ymax'] ?? 1.0);
-                const zmin = Number(node.parameters['zmin'] ?? 0.0);
-                const zmax = Number(node.parameters['zmax'] ?? 1.0);
-                const dim_x = xmax - xmin;
-                const dim_y = ymax - ymin;
-                const dim_z = zmax - zmin;
-                const nx = Math.round(dim_x / cellSize);
-                const ny = Math.round(dim_y / cellSize);
-                const nz = Math.round(dim_z / cellSize);
-                info.textContent = `Calculated Grid: ${nx} x ${ny} x ${nz} cells (Total: ${(nx * ny * nz).toLocaleString()})`;
-            }
+            info.style.lineHeight = '1.3';
+            info.innerHTML = getMeshDisplayHTML(node, state ?? undefined);
             gridInfoDiv = info;
         }
 
@@ -409,7 +358,6 @@ export class PropertyEditor {
         }
 
         if (node.type === 'RefinementMesh3D') {
-            const stats = state ? calculateRefinementMeshInfo(node, state) : { subNx: 1, subNy: 1, subNz: 1, subTotalCells: 0, newTotalCells: 0 };
             const cellInfo = document.createElement('div');
             cellInfo.id = 'grid-info-display';
             cellInfo.style.fontSize = 'var(--font-xs)';
@@ -420,7 +368,7 @@ export class PropertyEditor {
             const sy = Number(node.parameters['submesh_size_y'] ?? 0.5);
             const sz = Number(node.parameters['submesh_size_z'] ?? 0.5);
             const lvl = Number(node.parameters['refinement_level'] ?? 1);
-            cellInfo.innerHTML = `<div>SubMesh Level ${lvl} (${sx}m x ${sy}m x ${sz}m)</div><div>Refined Region: ${stats.subNx} x ${stats.subNy} x ${stats.subNz} (${stats.subTotalCells.toLocaleString()} cells)</div><div>Total Grid (w/ Parent): ${stats.newTotalCells.toLocaleString()} cells</div>`;
+            cellInfo.innerHTML = `<div>SubMesh Level ${lvl} (${sx}m x ${sy}m x ${sz}m)</div>` + getMeshDisplayHTML(node, state ?? undefined);
             form.appendChild(cellInfo);
 
             const autoFitDiv = document.createElement('div');

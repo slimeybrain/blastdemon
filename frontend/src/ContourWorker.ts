@@ -728,7 +728,7 @@ function render(): void {
             context.restore();
         } else if (nr > 0 && nz > 0) {
             const cellWidthOnScreen = (isAxisymmetric ? (dw / 2) : dw) / nr * zoom;
-            if (cellWidthOnScreen >= 3) {
+            if (cellWidthOnScreen >= 6) {
                 context.save();
                 context.strokeStyle = 'rgba(255, 255, 255, 0.15)';
                 context.lineWidth = 0.5 / zoom;

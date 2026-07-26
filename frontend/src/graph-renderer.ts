@@ -1,5 +1,5 @@
 import { SimulationState, Node, Connection, Port, NodeType } from './types.js';
-import { StateManager, calculateRefinementMeshInfo } from './state-manager.js';
+import { StateManager, calculateRefinementMeshInfo, getMeshDisplayHTML } from './state-manager.js';
 import { Telemetry3DViewport } from './telemetry-3d-viewport.js';
 import { validateSimulationState } from './validation.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
@@ -2896,7 +2896,9 @@ export class GraphRenderer {
                 { label: '100x', value: 100 }
             ];
 
-            const meshNode = this.stateManager.getCurrentState()?.nodes.find(n => n.type === 'DomainMesh');
+            const ownerModel = this.stateManager.getAllModels().find(m => m.nodes.some(n => n.id === node.id));
+            const modelNodes = ownerModel ? ownerModel.nodes : (this.stateManager.getCurrentState()?.nodes || []);
+            const meshNode = modelNodes.find(n => n.type === 'DomainMesh');
             const is1D = (meshNode?.parameters?.dimension ?? '1D') === '1D';
             const domainRadius = Number(meshNode?.parameters?.domain_radius ?? 1.0);
             const xAxisMode = is1D ? (node.parameters?.x_axis_mode ?? 'radius') : 'cell_id';
@@ -3998,39 +4000,8 @@ export class GraphRenderer {
                 }
                 const gridInfo = form.querySelector('.grid-info-display') as HTMLDivElement;
                 if (gridInfo) {
-                    const cellSize = Number(node.parameters['cell_size'] ?? 0.001);
-                    if (node.type === 'DomainMesh') {
-                        const radius = Number(node.parameters['domain_radius'] ?? 1.0);
-                        const n_cells = Math.round(radius / cellSize);
-                        gridInfo.textContent = `Calculated Grid: ${n_cells.toLocaleString()} cells`;
-                    } else if (node.type === 'DomainMesh2D') {
-                        const max_r = Number(node.parameters['max_r'] ?? 1.0);
-                        const max_z = Number(node.parameters['max_z'] ?? 1.0);
-                        const nr = Math.round(max_r / cellSize);
-                        const nz = Math.round(max_z / cellSize);
-                        gridInfo.textContent = `Calculated Grid: ${nr} x ${nz} cells (Total: ${(nr * nz).toLocaleString()})`;
-                    } else if (node.type === 'DomainMesh3D') {
-                        const xmin = Number(node.parameters['xmin'] ?? node.parameters['origin_x'] ?? 0.0);
-                        const xmax = Number(node.parameters['xmax'] ?? (xmin + (node.parameters['dim_x'] ?? 1.0)));
-                        const ymin = Number(node.parameters['ymin'] ?? node.parameters['origin_y'] ?? 0.0);
-                        const ymax = Number(node.parameters['ymax'] ?? (ymin + (node.parameters['dim_y'] ?? 1.0)));
-                        const zmin = Number(node.parameters['zmin'] ?? node.parameters['origin_z'] ?? 0.0);
-                        const zmax = Number(node.parameters['zmax'] ?? (zmin + (node.parameters['dim_z'] ?? 1.0)));
-                        
-                        const dim_x = xmax - xmin;
-                        const dim_y = ymax - ymin;
-                        const dim_z = zmax - zmin;
-                        const nx = Math.round(dim_x / cellSize);
-                        const ny = Math.round(dim_y / cellSize);
-                        const nz = Math.round(dim_z / cellSize);
-                        gridInfo.textContent = `Calculated Grid: ${nx} x ${ny} x ${nz} cells (Total: ${(nx * ny * nz).toLocaleString()})`;
-                    } else if (node.type === 'RefinementMesh3D') {
-                        const state = this.stateManager.getCurrentState();
-                        if (state) {
-                            const stats = calculateRefinementMeshInfo(node, state);
-                            gridInfo.innerHTML = `<div>Refined Region: ${stats.subNx} x ${stats.subNy} x ${stats.subNz} (${stats.subTotalCells.toLocaleString()} cells)</div><div>Total Grid (w/ Parent): ${stats.newTotalCells.toLocaleString()} cells</div>`;
-                        }
-                    }
+                    const state = this.stateManager.getCurrentState();
+                    gridInfo.innerHTML = getMeshDisplayHTML(node, state ?? undefined);
                 }
                 return;
             }
@@ -4071,42 +4042,13 @@ export class GraphRenderer {
         let gridInfoDiv: HTMLDivElement | null = null;
         if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D' || node.type === 'RefinementMesh3D') {
             const state = this.stateManager.getCurrentState();
-            const cellSize = Number(node.parameters['cell_size'] ?? 0.001);
             const info = document.createElement('div');
             info.className = 'grid-info-display';
             info.style.fontSize = 'var(--font-xs)';
             info.style.color = '#569cd6';
             info.style.marginTop = '6px';
             info.style.lineHeight = '1.3';
-            if (node.type === 'DomainMesh') {
-                const radius = Number(node.parameters['domain_radius'] ?? 1.0);
-                const n_cells = Math.round(radius / cellSize);
-                info.textContent = `Calculated Grid: ${n_cells.toLocaleString()} cells`;
-            } else if (node.type === 'DomainMesh2D') {
-                const max_r = Number(node.parameters['max_r'] ?? 1.0);
-                const max_z = Number(node.parameters['max_z'] ?? 1.0);
-                const nr = Math.round(max_r / cellSize);
-                const nz = Math.round(max_z / cellSize);
-                info.textContent = `Calculated Grid: ${nr} x ${nz} cells (Total: ${(nr * nz).toLocaleString()})`;
-            } else if (node.type === 'DomainMesh3D') {
-                const xmin = Number(node.parameters['xmin'] ?? node.parameters['origin_x'] ?? 0.0);
-                const xmax = Number(node.parameters['xmax'] ?? (xmin + (node.parameters['dim_x'] ?? 1.0)));
-                const ymin = Number(node.parameters['ymin'] ?? node.parameters['origin_y'] ?? 0.0);
-                const ymax = Number(node.parameters['ymax'] ?? (ymin + (node.parameters['dim_y'] ?? 1.0)));
-                const zmin = Number(node.parameters['zmin'] ?? node.parameters['origin_z'] ?? 0.0);
-                const zmax = Number(node.parameters['zmax'] ?? (zmin + (node.parameters['dim_z'] ?? 1.0)));
-                
-                const dim_x = xmax - xmin;
-                const dim_y = ymax - ymin;
-                const dim_z = zmax - zmin;
-                const nx = Math.round(dim_x / cellSize);
-                const ny = Math.round(dim_y / cellSize);
-                const nz = Math.round(dim_z / cellSize);
-                info.textContent = `Calculated Grid: ${nx} x ${ny} x ${nz} cells (Total: ${(nx * ny * nz).toLocaleString()})`;
-            } else if (node.type === 'RefinementMesh3D' && state) {
-                const stats = calculateRefinementMeshInfo(node, state);
-                info.innerHTML = `<div>Refined Region: ${stats.subNx} x ${stats.subNy} x ${stats.subNz} (${stats.subTotalCells.toLocaleString()} cells)</div><div>Total Grid (w/ Parent): ${stats.newTotalCells.toLocaleString()} cells</div>`;
-            }
+            info.innerHTML = getMeshDisplayHTML(node, state ?? undefined);
             gridInfoDiv = info;
         }
 

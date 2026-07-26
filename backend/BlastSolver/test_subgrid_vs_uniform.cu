@@ -18,8 +18,8 @@ int main() {
     double fine_h = 0.01;
     CFDSolver3DCuda<float, false> solver_fine(fine_nx, fine_ny, fine_nz, fine_h, 0.0, 0.0, 0.0);
     solver_fine.setFluxScheme("AUSM+");
-    solver_fine.setSpatialOrder(2);
-    solver_fine.setTemporalOrder(2);
+    solver_fine.setSpatialOrder(3);
+    solver_fine.setTemporalOrder(3);
     solver_fine.setBoundaryConditions(BCType3D::REFLECTIVE, BCType3D::TRANSMISSIVE, BCType3D::REFLECTIVE, BCType3D::TRANSMISSIVE, BCType3D::REFLECTIVE, BCType3D::TRANSMISSIVE);
 
     // -------------------------------------------------------------------
@@ -30,8 +30,8 @@ int main() {
     double coarse_h = 0.02;
     CFDSolver3DCuda<float, false> solver_subgrid(coarse_nx, coarse_ny, coarse_nz, coarse_h, 0.0, 0.0, 0.0);
     solver_subgrid.setFluxScheme("AUSM+");
-    solver_subgrid.setSpatialOrder(2);
-    solver_subgrid.setTemporalOrder(2);
+    solver_subgrid.setSpatialOrder(3);
+    solver_subgrid.setTemporalOrder(3);
     solver_subgrid.setBoundaryConditions(BCType3D::REFLECTIVE, BCType3D::TRANSMISSIVE, BCType3D::REFLECTIVE, BCType3D::TRANSMISSIVE, BCType3D::REFLECTIVE, BCType3D::TRANSMISSIVE);
 
     SubMeshParams3D sm_p;

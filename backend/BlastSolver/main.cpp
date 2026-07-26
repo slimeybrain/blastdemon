@@ -1009,6 +1009,9 @@ void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFD
         }
 
         if (solver_3d) {
+            solver_3d->setGamma(gamma);
+            solver_3d->setIdealGas(is_ideal_gas);
+            solver_3d->setMaterialParameters(matSet);
             double explosive_x = msg.value("explosive_x", 0.5);
             double explosive_y = msg.value("explosive_y", 0.5);
             solver_3d->initializeFrom1D(r_1d, states_1d, explosive_x, explosive_y, explosive_z, remap_radius);
@@ -1072,20 +1075,29 @@ void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFD
                 size_t n_channels = data.size() / n_cells;
                 for (size_t i = 0; i < n_cells; ++i) {
                     State2D s{};
-                    s.rho = (n_channels > 0) ? data[i * n_channels + 0] : 1.225;
-                    s.ur  = (n_channels > 1) ? data[i * n_channels + 1] : 0.0;
-                    s.uz  = (n_channels > 2) ? data[i * n_channels + 2] : 0.0;
-                    s.p   = (n_channels > 3) ? data[i * n_channels + 3] : 101325.0;
-                    s.alpha1 = (n_channels > 4) ? data[i * n_channels + 4] : 0.0;
-                    s.alpha2 = (n_channels > 5) ? data[i * n_channels + 5] : 0.0;
-                    s.arho1 = (n_channels > 6) ? data[i * n_channels + 6] : 0.0;
-                    s.arho2 = (n_channels > 7) ? data[i * n_channels + 7] : s.rho;
+                    s.p      = (n_channels > 0) ? data[0 * n_cells + i] : 101325.0;
+                    s.rho    = (n_channels > 1) ? data[1 * n_cells + i] : 1.225;
+                    s.ur     = (n_channels > 2) ? data[2 * n_cells + i] : 0.0;
+                    s.uz     = (n_channels > 3) ? data[3 * n_cells + i] : 0.0;
+                    s.E      = (n_channels > 4) ? data[4 * n_cells + i] : 253312.5;
+                    s.alpha1 = (n_channels > 5) ? data[5 * n_cells + i] : 0.0;
+                    s.alpha2 = (n_channels > 6) ? data[6 * n_cells + i] : 0.0;
+                    s.arho1  = s.alpha1 * s.rho;
+                    s.arho2  = s.alpha2 * s.rho;
                     states_2d.push_back(s);
                 }
             }
         }
 
+        double gamma_val = msg.value("gamma", 1.4);
+        std::string explosive_type = msg.value("explosive_type", "");
+        bool is_ideal_gas_val = (explosive_type == "MaterialIdealGas" || msg.value("init_mode", "") == "Ideal Gas");
+        MultiMat::MaterialSet matSet_val = parseMaterialSet(msg);
+
         if (solver_3d && !states_2d.empty()) {
+            solver_3d->setGamma(gamma_val);
+            solver_3d->setIdealGas(is_ideal_gas_val);
+            solver_3d->setMaterialParameters(matSet_val);
             solver_3d->initializeFrom2D(nr, nz, dr, dz, states_2d, explosive_x, explosive_y, explosive_z, remap_radius);
             global_t3d = 0.0;
             global_wallclock_3d = 0.0;

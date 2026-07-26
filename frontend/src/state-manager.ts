@@ -401,6 +401,21 @@ export class StateManager {
         }
     }
 
+    private getUniqueNodeIdFromBase(baseId: string, tempExistingIds: Set<string>): string {
+        const prefix = baseId.replace(/-\d+$/, '');
+        let newId = baseId;
+        if (tempExistingIds.has(newId)) {
+            let index = 1;
+            newId = `${prefix}-${index}`;
+            while (tempExistingIds.has(newId)) {
+                index++;
+                newId = `${prefix}-${index}`;
+            }
+        }
+        tempExistingIds.add(newId);
+        return newId;
+    }
+
     getClipboardModel(): Model | null {
         return this.clipboardModel;
     }
@@ -475,7 +490,7 @@ export class StateManager {
 
         const idMapping: Record<string, string> = {};
         const duplicatedNodes: Node[] = this.clipboardModel.nodes.map(node => {
-            const newNodeId = this.getUniqueNodeId(node.type, tempExistingIds);
+            const newNodeId = this.getUniqueNodeIdFromBase(node.id, tempExistingIds);
             idMapping[node.id] = newNodeId;
             return {
                 ...JSON.parse(JSON.stringify(node)),
@@ -566,6 +581,9 @@ export class StateManager {
     pushAppState(newAppState: AppState, autoSave: boolean = true): void {
         const stateCopy = JSON.parse(JSON.stringify(newAppState)) as AppState;
         
+        // Heal duplicate node IDs to prevent models merging
+        this.healDuplicateNodeIds(stateCopy);
+
         // Ensure menu bar exists on all layouts
         stateCopy.workspaces.forEach(ws => {
             ws.layout = ensureMenuBar(ws.layout);
@@ -1362,13 +1380,13 @@ export class StateManager {
         return this.getUniqueNodeId(type, existingIds);
     }
 
-    private nodeExistsInAnyModel(nodeId: string): boolean {
-        return Object.values(this.appState.models).some(m => m.nodes.some(n => n.id === nodeId));
+    private nodeExistsInAnyModel(nodeId: string, targetAppState: AppState = this.appState): boolean {
+        return Object.values(targetAppState.models).some(m => m.nodes.some(n => n.id === nodeId));
     }
 
-    public healDuplicateNodeIds(): void {
+    public healDuplicateNodeIds(targetAppState: AppState = this.appState): void {
         const seenIds = new Set<string>();
-        Object.values(this.appState.models).forEach(model => {
+        Object.values(targetAppState.models).forEach(model => {
             const modelIdMap = new Map<string, string>(); // oldId -> newId for this specific model
 
             model.nodes.forEach(node => {
@@ -1376,7 +1394,7 @@ export class StateManager {
                     const prefix = node.id.replace(/-\d+$/, '');
                     let index = 1;
                     let newId = `${prefix}-${index}`;
-                    while (seenIds.has(newId) || this.nodeExistsInAnyModel(newId)) {
+                    while (seenIds.has(newId) || this.nodeExistsInAnyModel(newId, targetAppState)) {
                         index++;
                         newId = `${prefix}-${index}`;
                     }
@@ -1404,7 +1422,7 @@ export class StateManager {
                 });
 
                 // Update cross-model workspace connections referencing these renamed nodes
-                this.appState.workspaces.forEach(ws => {
+                targetAppState.workspaces.forEach(ws => {
                     ws.connections.forEach(conn => {
                         if (modelIdMap.has(conn.fromNode)) {
                             conn.fromNode = modelIdMap.get(conn.fromNode)!;
@@ -2281,10 +2299,35 @@ function syncExplosiveParameters(node: Node, parameters: Record<string, any>, st
     }
 }
 
+function getConnectedRefinementNodes(rootNodeId: string, state: SimulationState): Node[] {
+    const connected: Node[] = [];
+    const visited = new Set<string>();
+
+    const traverse = (parentId: string) => {
+        if (visited.has(parentId)) return;
+        visited.add(parentId);
+
+        const conns = state.connections.filter(c => c.fromNode === parentId);
+        for (const conn of conns) {
+            const childNode = state.nodes.find(n => n.id === conn.toNode);
+            if (childNode && childNode.type === 'RefinementMesh3D' && !visited.has(childNode.id)) {
+                connected.push(childNode);
+                traverse(childNode.id);
+            }
+        }
+    };
+
+    traverse(rootNodeId);
+    return connected;
+}
+
 export function calculateRefinementMeshInfo(node: Node, state: SimulationState) {
-    const sx = Number(node.parameters['submesh_size_x'] ?? 0.5);
-    const sy = Number(node.parameters['submesh_size_y'] ?? 0.5);
-    const sz = Number(node.parameters['submesh_size_z'] ?? 0.5);
+    const rawSx = Number(node.parameters['submesh_size_x'] ?? 0.5);
+    const rawSy = Number(node.parameters['submesh_size_y'] ?? 0.5);
+    const rawSz = Number(node.parameters['submesh_size_z'] ?? 0.5);
+    const rawX = Number(node.parameters['submesh_x'] ?? 0.25);
+    const rawY = Number(node.parameters['submesh_y'] ?? 0.25);
+    const rawZ = Number(node.parameters['submesh_z'] ?? 0.25);
     const lvl = Number(node.parameters['refinement_level'] ?? 1);
 
     let rootMeshNode: Node | null = null;
@@ -2307,21 +2350,34 @@ export function calculateRefinementMeshInfo(node: Node, state: SimulationState) 
     const parentCellSize = Number(rootMeshNode?.parameters['cell_size'] ?? 0.01);
     
     let parentNx = 100, parentNy = 100, parentNz = 100;
+    let rootXMin = 0.0, rootYMin = 0.0, rootZMin = 0.0;
     if (rootMeshNode) {
-        const xmin = Number(rootMeshNode.parameters['xmin'] ?? rootMeshNode.parameters['origin_x'] ?? 0.0);
-        const xmax = Number(rootMeshNode.parameters['xmax'] ?? (xmin + (rootMeshNode.parameters['dim_x'] ?? 1.0)));
-        const ymin = Number(rootMeshNode.parameters['ymin'] ?? rootMeshNode.parameters['origin_y'] ?? 0.0);
-        const ymax = Number(rootMeshNode.parameters['ymax'] ?? (ymin + (rootMeshNode.parameters['dim_y'] ?? 1.0)));
-        const zmin = Number(rootMeshNode.parameters['zmin'] ?? rootMeshNode.parameters['origin_z'] ?? 0.0);
-        const zmax = Number(rootMeshNode.parameters['zmax'] ?? (zmin + (rootMeshNode.parameters['dim_z'] ?? 1.0)));
-        const dim_x = xmax - xmin;
-        const dim_y = ymax - ymin;
-        const dim_z = zmax - zmin;
+        rootXMin = Number(rootMeshNode.parameters['xmin'] ?? rootMeshNode.parameters['origin_x'] ?? 0.0);
+        const xmax = Number(rootMeshNode.parameters['xmax'] ?? (rootXMin + (rootMeshNode.parameters['dim_x'] ?? 1.0)));
+        rootYMin = Number(rootMeshNode.parameters['ymin'] ?? rootMeshNode.parameters['origin_y'] ?? 0.0);
+        const ymax = Number(rootMeshNode.parameters['ymax'] ?? (rootYMin + (rootMeshNode.parameters['dim_y'] ?? 1.0)));
+        rootZMin = Number(rootMeshNode.parameters['zmin'] ?? rootMeshNode.parameters['origin_z'] ?? 0.0);
+        const zmax = Number(rootMeshNode.parameters['zmax'] ?? (rootZMin + (rootMeshNode.parameters['dim_z'] ?? 1.0)));
+        const dim_x = xmax - rootXMin;
+        const dim_y = ymax - rootYMin;
+        const dim_z = zmax - rootZMin;
         parentNx = Math.max(1, Math.round(dim_x / parentCellSize));
         parentNy = Math.max(1, Math.round(dim_y / parentCellSize));
         parentNz = Math.max(1, Math.round(dim_z / parentCellSize));
     }
     const parentTotalCells = parentNx * parentNy * parentNz;
+
+    const ix0 = Math.round((rawX - rootXMin) / parentCellSize);
+    const ix1 = Math.round((rawX + rawSx - rootXMin) / parentCellSize);
+    const sx = Math.max(parentCellSize, (Math.max(ix0 + 1, ix1) - ix0) * parentCellSize);
+
+    const jy0 = Math.round((rawY - rootYMin) / parentCellSize);
+    const jy1 = Math.round((rawY + rawSy - rootYMin) / parentCellSize);
+    const sy = Math.max(parentCellSize, (Math.max(jy0 + 1, jy1) - jy0) * parentCellSize);
+
+    const kz0 = Math.round((rawZ - rootZMin) / parentCellSize);
+    const kz1 = Math.round((rawZ + rawSz - rootZMin) / parentCellSize);
+    const sz = Math.max(parentCellSize, (Math.max(kz0 + 1, kz1) - kz0) * parentCellSize);
 
     const refinedCellSize = parentCellSize / Math.pow(2, lvl);
     const subNx = Math.max(1, Math.round(sx / refinedCellSize));
@@ -2329,14 +2385,107 @@ export function calculateRefinementMeshInfo(node: Node, state: SimulationState) 
     const subNz = Math.max(1, Math.round(sz / refinedCellSize));
     const subTotalCells = subNx * subNy * subNz;
 
-    const newTotalCells = parentTotalCells + subTotalCells;
+    // Sum all subgrids attached in this simulation model / domain tree
+    let allSubgridCells = 0;
+    if (rootMeshNode) {
+        const refNodes = getConnectedRefinementNodes(rootMeshNode.id, state);
+        for (const refNode of refNodes) {
+            const rsx_raw = Number(refNode.parameters['submesh_size_x'] ?? 0.5);
+            const rsy_raw = Number(refNode.parameters['submesh_size_y'] ?? 0.5);
+            const rsz_raw = Number(refNode.parameters['submesh_size_z'] ?? 0.5);
+            const rx_raw = Number(refNode.parameters['submesh_x'] ?? 0.25);
+            const ry_raw = Number(refNode.parameters['submesh_y'] ?? 0.25);
+            const rz_raw = Number(refNode.parameters['submesh_z'] ?? 0.25);
+            const rlvl = Number(refNode.parameters['refinement_level'] ?? 1);
+
+            const rix0 = Math.round((rx_raw - rootXMin) / parentCellSize);
+            const rix1 = Math.round((rx_raw + rsx_raw - rootXMin) / parentCellSize);
+            const rsx = Math.max(parentCellSize, (Math.max(rix0 + 1, rix1) - rix0) * parentCellSize);
+
+            const rjy0 = Math.round((ry_raw - rootYMin) / parentCellSize);
+            const rjy1 = Math.round((ry_raw + rsy_raw - rootYMin) / parentCellSize);
+            const rsy = Math.max(parentCellSize, (Math.max(rjy0 + 1, rjy1) - rjy0) * parentCellSize);
+
+            const rkz0 = Math.round((rz_raw - rootZMin) / parentCellSize);
+            const rkz1 = Math.round((rz_raw + rsz_raw - rootZMin) / parentCellSize);
+            const rsz = Math.max(parentCellSize, (Math.max(rkz0 + 1, rkz1) - rkz0) * parentCellSize);
+
+            const rCellSize = parentCellSize / Math.pow(2, rlvl);
+            const rNx = Math.max(1, Math.round(rsx / rCellSize));
+            const rNy = Math.max(1, Math.round(rsy / rCellSize));
+            const rNz = Math.max(1, Math.round(rsz / rCellSize));
+            allSubgridCells += (rNx * rNy * rNz);
+        }
+    } else {
+        allSubgridCells = subTotalCells;
+    }
+
+    const newTotalCells = parentTotalCells + allSubgridCells;
 
     return {
         subNx, subNy, subNz,
         subTotalCells,
         parentTotalCells,
+        allSubgridCells,
         newTotalCells,
         hasParent: !!rootMeshNode
     };
 }
+
+export function getMeshDisplayHTML(node: Node, state?: SimulationState): string {
+    const cellSize = Number(node.parameters['cell_size'] ?? 0.001);
+    if (node.type === 'DomainMesh') {
+        const radius = Number(node.parameters['domain_radius'] ?? 1.0);
+        const n_cells = Math.round(radius / cellSize);
+        return `<div>Calculated Grid: ${n_cells.toLocaleString()} cells</div>`;
+    } else if (node.type === 'DomainMesh2D') {
+        const max_r = Number(node.parameters['max_r'] ?? 1.0);
+        const max_z = Number(node.parameters['max_z'] ?? 1.0);
+        const nr = Math.round(max_r / cellSize);
+        const nz = Math.round(max_z / cellSize);
+        return `<div>Calculated Grid: ${nr} x ${nz} cells (Total: ${(nr * nz).toLocaleString()})</div>`;
+    } else if (node.type === 'DomainMesh3D') {
+        const xmin = Number(node.parameters['xmin'] ?? node.parameters['origin_x'] ?? 0.0);
+        const xmax = Number(node.parameters['xmax'] ?? (xmin + (node.parameters['dim_x'] ?? 1.0)));
+        const ymin = Number(node.parameters['ymin'] ?? node.parameters['origin_y'] ?? 0.0);
+        const ymax = Number(node.parameters['ymax'] ?? (ymin + (node.parameters['dim_y'] ?? 1.0)));
+        const zmin = Number(node.parameters['zmin'] ?? node.parameters['origin_z'] ?? 0.0);
+        const zmax = Number(node.parameters['zmax'] ?? (zmin + (node.parameters['dim_z'] ?? 1.0)));
+
+        const dim_x = xmax - xmin;
+        const dim_y = ymax - ymin;
+        const dim_z = zmax - zmin;
+        const nx = Math.round(dim_x / cellSize);
+        const ny = Math.round(dim_y / cellSize);
+        const nz = Math.round(dim_z / cellSize);
+        const currentCells = nx * ny * nz;
+
+        let totalSubgridCells = 0;
+        if (state) {
+            const refNodes = getConnectedRefinementNodes(node.id, state);
+            for (const refNode of refNodes) {
+                const stats = calculateRefinementMeshInfo(refNode, state);
+                totalSubgridCells += stats.subTotalCells;
+            }
+        }
+
+        if (totalSubgridCells > 0) {
+            return `<div>Calculated Grid: ${nx} x ${ny} x ${nz} (${currentCells.toLocaleString()} cells)</div><div>Total Grid (w/ Subgrids): ${(currentCells + totalSubgridCells).toLocaleString()} cells</div>`;
+        } else {
+            return `<div>Calculated Grid: ${nx} x ${ny} x ${nz} cells (Total: ${currentCells.toLocaleString()})</div>`;
+        }
+    } else if (node.type === 'RefinementMesh3D') {
+        if (state) {
+            const stats = calculateRefinementMeshInfo(node, state);
+            return `<div>Refined Region: ${stats.subNx} x ${stats.subNy} x ${stats.subNz} (${stats.subTotalCells.toLocaleString()} cells)</div><div>Total Grid (w/ Parent): ${stats.newTotalCells.toLocaleString()} cells</div>`;
+        } else {
+            const sx = Number(node.parameters['submesh_size_x'] ?? 0.5);
+            const sy = Number(node.parameters['submesh_size_y'] ?? 0.5);
+            const sz = Number(node.parameters['submesh_size_z'] ?? 0.5);
+            return `<div>SubMesh (${sx}m x ${sy}m x ${sz}m)</div>`;
+        }
+    }
+    return '';
+}
+
 

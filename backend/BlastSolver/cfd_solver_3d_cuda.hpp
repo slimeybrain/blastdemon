@@ -27,6 +27,8 @@ struct GPUSubMeshDevicePointer3D {
 template <typename RealType>
 struct GPUSubMeshBuffer3D {
     std::string id;
+    std::string parent_id = "root";
+    int parent_idx = -1;
     int level = 0;
     int nx = 0, ny = 0, nz = 0;
     RealType xmin = 0, xmax = 0;
@@ -57,6 +59,18 @@ struct GPUSubMeshBuffer3D {
     RealType* d_new_alpha2 = nullptr;
     RealType* d_new_arho1 = nullptr;
     RealType* d_new_arho2 = nullptr;
+
+    RealType* d_rho_old = nullptr;
+    RealType* d_ux_old = nullptr;
+    RealType* d_uy_old = nullptr;
+    RealType* d_uz_old = nullptr;
+    RealType* d_p_old = nullptr;
+    RealType* d_E_old = nullptr;
+
+    RealType* d_alpha1_old = nullptr;
+    RealType* d_alpha2_old = nullptr;
+    RealType* d_arho1_old = nullptr;
+    RealType* d_arho2_old = nullptr;
 
     RealType* d_peak_overpressure = nullptr;
     RealType* d_peak_impulse = nullptr;

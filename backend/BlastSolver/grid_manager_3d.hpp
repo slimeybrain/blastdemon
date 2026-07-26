@@ -26,6 +26,22 @@ private:
     // Flat sorted-by-level view, rebuilt when a submesh is added
     std::vector<SMeshPtr> submeshes_sorted;
 
+    BCType3D bcXmin = BCType3D::REFLECTIVE;
+    BCType3D bcXmax = BCType3D::TRANSMISSIVE;
+    BCType3D bcYmin = BCType3D::REFLECTIVE;
+    BCType3D bcYmax = BCType3D::TRANSMISSIVE;
+    BCType3D bcZmin = BCType3D::REFLECTIVE;
+    BCType3D bcZmax = BCType3D::TRANSMISSIVE;
+
+public:
+    void setBoundaryConditions(BCType3D xmin, BCType3D xmax, BCType3D ymin, BCType3D ymax, BCType3D zmin, BCType3D zmax) {
+        bcXmin = xmin; bcXmax = xmax;
+        bcYmin = ymin; bcYmax = ymax;
+        bcZmin = zmin; bcZmax = zmax;
+    }
+
+private:
+
     // Rebuild the flat sorted view
     void rebuildSortedView() {
         submeshes_sorted.clear();
@@ -110,22 +126,84 @@ public:
     // Spatial Trilinear & Temporal Linear Prolongation (Fill 2-cell Fine Ghost Boundary Layer from Parent)
     void prolongateGhosts(SubMesh3D<RealType, IsMultiMaterial>& child, const SubMesh3D<RealType, IsMultiMaterial>& parent, RealType temporal_factor = 1.0) {
         RealType h_parent = parent.cellSize;
+        RealType eps_h = static_cast<RealType>(1e-4) * h_parent;
+        int n_ghost = 2;
 
         for (int k = 0; k < child.nz; ++k) {
             RealType z_child = child.zmin + (k + static_cast<RealType>(0.5)) * child.cellSize;
+            bool out_z_min = (z_child < parent.zmin - eps_h);
+            bool out_z_max = (z_child > parent.zmax + eps_h);
+
             for (int j = 0; j < child.ny; ++j) {
                 RealType y_child = child.ymin + (j + static_cast<RealType>(0.5)) * child.cellSize;
+                bool out_y_min = (y_child < parent.ymin - eps_h);
+                bool out_y_max = (y_child > parent.ymax + eps_h);
+
                 for (int i = 0; i < child.nx; ++i) {
                     // Check if cell is in 2-cell ghost boundary layer
-                    bool is_ghost = (i < 2 || i >= child.nx - 2 || j < 2 || j >= child.ny - 2 || k < 2 || k >= child.nz - 2);
+                    bool is_ghost = (i < n_ghost || i >= child.nx - n_ghost || j < n_ghost || j >= child.ny - n_ghost || k < n_ghost || k >= child.nz - n_ghost);
                     if (!is_ghost) continue;
 
                     RealType x_child = child.xmin + (i + static_cast<RealType>(0.5)) * child.cellSize;
+                    bool out_x_min = (x_child < parent.xmin - eps_h);
+                    bool out_x_max = (x_child > parent.xmax + eps_h);
 
-                    // If ghost cell touches parent domain exterior physical boundary, skip spatial interpolation
-                    if (x_child < parent.xmin || x_child > parent.xmax ||
-                        y_child < parent.ymin || y_child > parent.ymax ||
-                        z_child < parent.zmin || z_child > parent.zmax) {
+                    bool is_outside_domain = (out_x_min || out_x_max || out_y_min || out_y_max || out_z_min || out_z_max);
+                    size_t c_idx = child.getIndex(i, j, k);
+
+                    // If ghost cell extends past domain physical boundary, enforce domain physical boundary conditions
+                    if (is_outside_domain) {
+                        int i_src = i;
+                        int j_src = j;
+                        int k_src = k;
+
+                        bool flip_ux = false;
+                        bool flip_uy = false;
+                        bool flip_uz = false;
+
+                        if (out_x_min) {
+                            i_src = 2 * n_ghost - 1 - i;
+                            if (bcXmin == BCType3D::REFLECTIVE) flip_ux = true;
+                        } else if (out_x_max) {
+                            i_src = 2 * (child.nx - n_ghost) - 1 - i;
+                            if (bcXmax == BCType3D::REFLECTIVE) flip_ux = true;
+                        }
+
+                        if (out_y_min) {
+                            j_src = 2 * n_ghost - 1 - j;
+                            if (bcYmin == BCType3D::REFLECTIVE) flip_uy = true;
+                        } else if (out_y_max) {
+                            j_src = 2 * (child.ny - n_ghost) - 1 - j;
+                            if (bcYmax == BCType3D::REFLECTIVE) flip_uy = true;
+                        }
+
+                        if (out_z_min) {
+                            k_src = 2 * n_ghost - 1 - k;
+                            if (bcZmin == BCType3D::REFLECTIVE) flip_uz = true;
+                        } else if (out_z_max) {
+                            k_src = 2 * (child.nz - n_ghost) - 1 - k;
+                            if (bcZmax == BCType3D::REFLECTIVE) flip_uz = true;
+                        }
+
+                        i_src = std::clamp(i_src, 0, child.nx - 1);
+                        j_src = std::clamp(j_src, 0, child.ny - 1);
+                        k_src = std::clamp(k_src, 0, child.nz - 1);
+
+                        size_t src_idx = child.getIndex(i_src, j_src, k_src);
+
+                        child.rho[c_idx] = child.rho[src_idx];
+                        child.ux[c_idx]  = flip_ux ? -child.ux[src_idx] : child.ux[src_idx];
+                        child.uy[c_idx]  = flip_uy ? -child.uy[src_idx] : child.uy[src_idx];
+                        child.uz[c_idx]  = flip_uz ? -child.uz[src_idx] : child.uz[src_idx];
+                        child.p[c_idx]   = child.p[src_idx];
+                        child.E[c_idx]   = child.E[src_idx];
+
+                        if constexpr (IsMultiMaterial) {
+                            child.alpha1[c_idx] = child.alpha1[src_idx];
+                            child.alpha2[c_idx] = child.alpha2[src_idx];
+                            child.arho1[c_idx]  = child.arho1[src_idx];
+                            child.arho2[c_idx]  = child.arho2[src_idx];
+                        }
                         continue;
                     }
 
@@ -166,7 +244,6 @@ public:
                                w111 * p_buf[parent.getIndex(i1, j1, k1)];
                     };
 
-                    size_t c_idx = child.getIndex(i, j, k);
                     child.rho[c_idx] = interpolate(parent.rho);
                     child.ux[c_idx] = interpolate(parent.ux);
                     child.uy[c_idx] = interpolate(parent.uy);
@@ -526,7 +603,8 @@ public:
     // -----------------------------------------------------------------------
     void stepSingleSubMesh(SMesh& submesh, SMeshPtr parent, RealType dt_sub, RealType gamma,
                            const MultiMat::MaterialSet& materials,
-                           const std::vector<GeometryTile3D>& geom_pool) {
+                           const std::vector<GeometryTile3D>& geom_pool,
+                           int spatial_order = 2) {
         // Prolongate 2-cell ghost boundary layer from direct parent
         prolongateGhosts(submesh, *parent);
 
@@ -798,30 +876,32 @@ public:
     // Called once per global substep.
     // -----------------------------------------------------------------------
     void stepSubTreeRecursive(const std::string& parent_mesh_id, SMeshPtr parent_ptr,
-                              RealType dt_sub, RealType gamma,
+                              RealType dt_level, RealType gamma,
                               const MultiMat::MaterialSet& materials,
-                              const std::vector<GeometryTile3D>& geom_pool) {
+                              const std::vector<GeometryTile3D>& geom_pool,
+                              int spatial_order = 2) {
         auto children = getChildren(parent_mesh_id);
-        for (auto& child : children) {
-            stepSingleSubMesh(*child, parent_ptr, dt_sub, gamma, materials, geom_pool);
-            // Recurse: step this child's own children, reading from child as parent
-            stepSubTreeRecursive(child->id, child, dt_sub, gamma, materials, geom_pool);
-            // Restrict fine solution back to direct parent
-            restrictToParent(*parent_ptr, *child);
+        if (children.empty()) return;
+
+        RealType dt_sub = dt_level * static_cast<RealType>(0.5);
+
+        for (int substep = 0; substep < 2; ++substep) {
+            for (auto& child : children) {
+                stepSingleSubMesh(*child, parent_ptr, dt_sub, gamma, materials, geom_pool, spatial_order);
+                // Recurse: step this child's own children with dt_sub
+                stepSubTreeRecursive(child->id, child, dt_sub, gamma, materials, geom_pool, spatial_order);
+                // Restrict fine solution back to direct parent
+                restrictToParent(*parent_ptr, *child);
+            }
         }
     }
 
     // -----------------------------------------------------------------------
-    // Public entry point: 2-substep subcycled stepping of the full subgrid tree
+    // Public entry point: Recursive subcycled stepping of the full subgrid tree
     // -----------------------------------------------------------------------
-    void stepSubMeshes(RealType dt, RealType gamma, const MultiMat::MaterialSet& materials, const std::vector<GeometryTile3D>& geom_pool) {
+    void stepSubMeshes(RealType dt, RealType gamma, const MultiMat::MaterialSet& materials, const std::vector<GeometryTile3D>& geom_pool, int spatial_order = 2) {
         if (submesh_map.empty()) return;
-        RealType dt_sub = dt * static_cast<RealType>(0.5); // Sub-cycling half timestep for CFL stability
-
-        for (int substep = 0; substep < 2; ++substep) {
-            // Walk the tree from root. "root" is the sentinel parent_id for level-1 submeshes.
-            stepSubTreeRecursive("root", root_mesh, dt_sub, gamma, materials, geom_pool);
-        }
+        stepSubTreeRecursive("root", root_mesh, dt, gamma, materials, geom_pool, spatial_order);
     }
 
     void voxelizeSubMeshGeometry(const std::vector<Triangle>& triangles, const std::string& voxelization_method) {

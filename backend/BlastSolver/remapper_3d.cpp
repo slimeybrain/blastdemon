@@ -8,7 +8,7 @@
 /**
  * remap_1d_to_3d
  * Projects 1D spherical simulation results onto a 3D Cartesian grid.
- * Uses 27-point subgrid averaging (3x3x3) per cell for robust volume-weighted remapping.
+ * Uses 27-point subgrid CONSERVATIVE volume integration per cell.
  */
 void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<MultiMaterialState>& states_1d,
                     CFDSolver3D& solver_3d, double x_expl, double y_expl, double z_expl, double R_remap) {
@@ -17,6 +17,11 @@ void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<MultiMate
     int ny = solver_3d.getNy();
     int nz = solver_3d.getNz();
     double dx = solver_3d.getCellSize();
+    double gamma = solver_3d.getGamma();
+    bool is_ideal = solver_3d.isIdealGas();
+    const auto& mat = solver_3d.getMaterialParameters();
+
+    double r_max_1d = r_1d.back();
 
     auto interp_1d = [&](double r) -> MultiMaterialState {
         if (r <= r_1d.front()) return states_1d.front();
@@ -57,59 +62,129 @@ void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<MultiMate
                 double dz_expl = z_c - z_expl;
                 double dist = std::sqrt(dx_expl*dx_expl + dy_expl*dy_expl + dz_expl*dz_expl);
 
-                if (dist > R_remap + dx * 2.0) continue;
+                // Cutoff only if dist is far outside max domain profile radius
+                double cut_r = (R_remap > 0.0) ? std::min(R_remap, r_max_1d) : r_max_1d;
+                if (dist > cut_r + dx * 2.0) {
+                    const auto& amb = states_1d.back();
+                    if (is_ideal) {
+                        CellState3D<false> s_gas;
+                        s_gas.rho = amb.rho;
+                        s_gas.ux = s_gas.uy = s_gas.uz = 0.0;
+                        s_gas.p = amb.p;
+                        s_gas.E = amb.p / (gamma - 1.0);
+                        solver_3d.setCellStateIdeal(i, j, k, s_gas);
+                    } else {
+                        CellState3D<true> s3d;
+                        s3d.rho = amb.rho;
+                        s3d.ux = s3d.uy = s3d.uz = 0.0;
+                        s3d.p = amb.p;
+                        s3d.alpha1 = 0.0; s3d.alpha2 = 1.0;
+                        s3d.arho1 = 0.0; s3d.arho2 = amb.rho;
+                        s3d.E = MultiMat::getMixtureEnergy(amb.p, amb.rho, 0.0, 1.0, 0.0, amb.rho, gamma, mat.products, mat.unreacted);
+                        solver_3d.setCellStateMulti(i, j, k, s3d);
+                    }
+                    continue;
+                }
 
-                // 27-point subgrid averaging
-                MultiMaterialState avg;
-                avg.rho = avg.u = avg.p = avg.alpha1 = avg.alpha2 = avg.arho1 = avg.arho2 = 0;
+                // 27-point conservative volume integration
+                double sum_rho = 0.0;
+                double sum_rhoux = 0.0;
+                double sum_rhouy = 0.0;
+                double sum_rhouz = 0.0;
+                double sum_E = 0.0;
+                double sum_alpha1 = 0.0;
+                double sum_alpha2 = 0.0;
+                double sum_arho1 = 0.0;
+                double sum_arho2 = 0.0;
 
-                const double sub[3] = {-0.333, 0.0, 0.333};
+                const double sub[3] = {-0.333333333, 0.0, 0.333333333};
                 for (int sk = 0; sk < 3; ++sk) {
                     for (int sj = 0; sj < 3; sj++) {
                         for (int si = 0; si < 3; si++) {
                             double sx = x_c + sub[si] * dx;
                             double sy = y_c + sub[sj] * dx;
                             double sz = z_c + sub[sk] * dx;
-                            double r = std::sqrt((sx-x_expl)*(sx-x_expl) + (sy-y_expl)*(sy-y_expl) + (sz-z_expl)*(sz-z_expl));
-                            auto s = interp_1d(r);
-                            avg.rho += s.rho; avg.u += s.u; avg.p += s.p;
-                            avg.alpha1 += s.alpha1; avg.alpha2 += s.alpha2;
-                            avg.arho1 += s.arho1; avg.arho2 += s.arho2;
+                            double rx = sx - x_expl;
+                            double ry = sy - y_expl;
+                            double rz = sz - z_expl;
+                            double sr = std::sqrt(rx*rx + ry*ry + rz*rz);
+
+                            auto s = interp_1d(sr);
+
+                            double sux = 0.0, suy = 0.0, suz = 0.0;
+                            if (sr > 1e-9) {
+                                sux = s.u * (rx / sr);
+                                suy = s.u * (ry / sr);
+                                suz = s.u * (rz / sr);
+                            }
+
+                            double ske = 0.5 * s.rho * (sux*sux + suy*suy + suz*suz);
+                            double sE = 0.0;
+                            if (is_ideal) {
+                                sE = s.p / (gamma - 1.0) + ske;
+                            } else {
+                                double a1 = s.alpha1, a2 = s.alpha2;
+                                if (a1 + a2 < 1e-6) { a1 = 0.0; a2 = 1.0; }
+                                double ar1 = s.arho1, ar2 = (a2 > 1e-6) ? s.arho2 : s.rho;
+                                sE = MultiMat::getMixtureEnergy(s.p, s.rho, a1, a2, ar1, ar2, gamma, mat.products, mat.unreacted) + ske;
+                                sum_alpha1 += a1;
+                                sum_alpha2 += a2;
+                                sum_arho1 += ar1;
+                                sum_arho2 += ar2;
+                            }
+
+                            sum_rho += s.rho;
+                            sum_rhoux += s.rho * sux;
+                            sum_rhouy += s.rho * suy;
+                            sum_rhouz += s.rho * suz;
+                            sum_E += sE;
                         }
                     }
                 }
 
                 double inv27 = 1.0 / 27.0;
-                CellState3D<true> s3d;
-                s3d.rho = avg.rho * inv27;
-                double u_mag = avg.u * inv27;
-                if (dist > 1e-9) {
-                    s3d.ux = u_mag * (dx_expl / dist);
-                    s3d.uy = u_mag * (dy_expl / dist);
-                    s3d.uz = u_mag * (dz_expl / dist);
-                } else {
-                    s3d.ux = s3d.uy = s3d.uz = 0;
-                }
-                s3d.p = avg.p * inv27;
-                s3d.alpha1 = avg.alpha1 * inv27;
-                s3d.alpha2 = avg.alpha2 * inv27;
-                s3d.arho1 = avg.arho1 * inv27;
-                s3d.arho2 = avg.arho2 * inv27;
+                double rho_avg = sum_rho * inv27;
+                double rhoux_avg = sum_rhoux * inv27;
+                double rhouy_avg = sum_rhouy * inv27;
+                double rhouz_avg = sum_rhouz * inv27;
+                double E_avg = sum_E * inv27;
 
-                double ke = 0.5 * s3d.rho * (s3d.ux*s3d.ux + s3d.uy*s3d.uy + s3d.uz*s3d.uz);
-                if (solver_3d.isIdealGas()) {
-                    s3d.E = s3d.p / (solver_3d.getGamma() - 1.0) + ke;
+                double ux_avg = rhoux_avg / std::max(1e-9, rho_avg);
+                double uy_avg = rhouy_avg / std::max(1e-9, rho_avg);
+                double uz_avg = rhouz_avg / std::max(1e-9, rho_avg);
+                double ke_avg = 0.5 * rho_avg * (ux_avg*ux_avg + uy_avg*uy_avg + uz_avg*uz_avg);
+
+                if (is_ideal) {
+                    double p_avg = std::max(1e-6, (gamma - 1.0) * (E_avg - ke_avg));
                     CellState3D<false> s_gas;
-                    s_gas.rho = s3d.rho;
-                    s_gas.ux = s3d.ux;
-                    s_gas.uy = s3d.uy;
-                    s_gas.uz = s3d.uz;
-                    s_gas.p = s3d.p;
-                    s_gas.E = s3d.E;
+                    s_gas.rho = rho_avg;
+                    s_gas.ux = ux_avg;
+                    s_gas.uy = uy_avg;
+                    s_gas.uz = uz_avg;
+                    s_gas.p = p_avg;
+                    s_gas.E = E_avg;
                     solver_3d.setCellStateIdeal(i, j, k, s_gas);
                 } else {
-                    const auto& mat = solver_3d.getMaterialParameters();
-                    s3d.E = MultiMat::getMixtureEnergy(s3d.p, s3d.rho, s3d.alpha1, s3d.alpha2, s3d.arho1, s3d.arho2, solver_3d.getGamma(), mat.products, mat.unreacted) + ke;
+                    double a1_avg = sum_alpha1 * inv27;
+                    double a2_avg = sum_alpha2 * inv27;
+                    if (a1_avg + a2_avg < 1e-6) { a1_avg = 0.0; a2_avg = 1.0; }
+                    double ar1_avg = sum_arho1 * inv27;
+                    double ar2_avg = sum_arho2 * inv27;
+
+                    double e_internal = std::max(1e-6, E_avg - ke_avg);
+                    double p_avg = MultiMat::getMixturePressure(e_internal, rho_avg, a1_avg, a2_avg, ar1_avg, ar2_avg, gamma, mat.products, mat.unreacted);
+
+                    CellState3D<true> s3d;
+                    s3d.rho = rho_avg;
+                    s3d.ux = ux_avg;
+                    s3d.uy = uy_avg;
+                    s3d.uz = uz_avg;
+                    s3d.p = p_avg;
+                    s3d.E = E_avg;
+                    s3d.alpha1 = a1_avg;
+                    s3d.alpha2 = a2_avg;
+                    s3d.arho1 = ar1_avg;
+                    s3d.arho2 = ar2_avg;
                     solver_3d.setCellStateMulti(i, j, k, s3d);
                 }
             }
@@ -121,8 +196,7 @@ void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<MultiMate
 /**
  * remap_2d_to_3d
  * Projects 2D axisymmetric (r, z) simulation results onto a 3D Cartesian grid.
- * Revolves the 2D radial profile around the specified origin (x_expl, y_expl, z_expl).
- * Uses 27-point subgrid averaging per cell for robust volume-weighted remapping.
+ * Uses 27-point subgrid CONSERVATIVE volume integration per cell.
  */
 void remap_2d_to_3d(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d,
                     CFDSolver3D& solver_3d, double x_expl, double y_expl, double z_expl, double R_remap) {
@@ -131,16 +205,19 @@ void remap_2d_to_3d(int nr, int nz, double dr, double dz, const std::vector<Stat
     int ny = solver_3d.getNy();
     int nz_3d = solver_3d.getNz();
     double dx = solver_3d.getCellSize();
+    double gamma = solver_3d.getGamma();
+    bool is_ideal = solver_3d.isIdealGas();
+    const auto& mat = solver_3d.getMaterialParameters();
+
+    double max_r_2d = nr * dr;
+    double max_z_2d = nz * dz;
 
     auto interp_2d = [&](double r, double z) -> State2D {
         if (r < 0.0) r = 0.0;
         if (z < 0.0) z = 0.0;
 
-        double max_r = nr * dr;
-        double max_z = nz * dz;
-
-        if (r >= max_r - 1e-9) r = max_r - 1e-9;
-        if (z >= max_z - 1e-9) z = max_z - 1e-9;
+        if (r >= max_r_2d - 1e-9) r = max_r_2d - 1e-9;
+        if (z >= max_z_2d - 1e-9) z = max_z_2d - 1e-9;
 
         double r_idx_f = (r / dr) - 0.5;
         double z_idx_f = (z / dz) - 0.5;
@@ -191,62 +268,129 @@ void remap_2d_to_3d(int nr, int nz, double dr, double dz, const std::vector<Stat
                 double r_dist = std::sqrt(dx_expl * dx_expl + dy_expl * dy_expl);
                 double dist_total = std::sqrt(r_dist * r_dist + dz_expl * dz_expl);
 
-                if (R_remap > 0.0 && dist_total > R_remap + dx * 2.0) continue;
+                double cut_r = (R_remap > 0.0) ? std::min(R_remap, max_r_2d) : max_r_2d;
+                if (dist_total > cut_r + dx * 2.0) {
+                    const auto& amb = states_2d.back();
+                    if (is_ideal) {
+                        CellState3D<false> s_gas;
+                        s_gas.rho = amb.rho;
+                        s_gas.ux = s_gas.uy = s_gas.uz = 0.0;
+                        s_gas.p = amb.p;
+                        s_gas.E = amb.p / (gamma - 1.0);
+                        solver_3d.setCellStateIdeal(i, j, k, s_gas);
+                    } else {
+                        CellState3D<true> s3d;
+                        s3d.rho = amb.rho;
+                        s3d.ux = s3d.uy = s3d.uz = 0.0;
+                        s3d.p = amb.p;
+                        s3d.alpha1 = 0.0; s3d.alpha2 = 1.0;
+                        s3d.arho1 = 0.0; s3d.arho2 = amb.rho;
+                        s3d.E = MultiMat::getMixtureEnergy(amb.p, amb.rho, 0.0, 1.0, 0.0, amb.rho, gamma, mat.products, mat.unreacted);
+                        solver_3d.setCellStateMulti(i, j, k, s3d);
+                    }
+                    continue;
+                }
 
-                // 27-point subgrid averaging
-                State2D avg;
-                avg.rho = avg.ur = avg.uz = avg.p = avg.alpha1 = avg.alpha2 = avg.arho1 = avg.arho2 = 0;
+                // 27-point conservative volume integration
+                double sum_rho = 0.0;
+                double sum_rhoux = 0.0;
+                double sum_rhouy = 0.0;
+                double sum_rhouz = 0.0;
+                double sum_E = 0.0;
+                double sum_alpha1 = 0.0;
+                double sum_alpha2 = 0.0;
+                double sum_arho1 = 0.0;
+                double sum_arho2 = 0.0;
 
-                const double sub[3] = {-0.333, 0.0, 0.333};
+                const double sub[3] = {-0.333333333, 0.0, 0.333333333};
                 for (int sk = 0; sk < 3; ++sk) {
                     for (int sj = 0; sj < 3; sj++) {
                         for (int si = 0; si < 3; si++) {
                             double sx = x_c + sub[si] * dx;
                             double sy = y_c + sub[sj] * dx;
                             double sz = z_c + sub[sk] * dx;
-                            double sr = std::sqrt((sx - x_expl)*(sx - x_expl) + (sy - y_expl)*(sy - y_expl));
-                            double s_z = std::abs(sz - z_expl);
+                            double rx = sx - x_expl;
+                            double ry = sy - y_expl;
+                            double rz = sz - z_expl;
+                            double sr = std::sqrt(rx * rx + ry * ry);
+                            double s_z = std::abs(rz);
+
                             auto s = interp_2d(sr, s_z);
-                            avg.rho += s.rho; avg.ur += s.ur; avg.uz += s.uz; avg.p += s.p;
-                            avg.alpha1 += s.alpha1; avg.alpha2 += s.alpha2;
-                            avg.arho1 += s.arho1; avg.arho2 += s.arho2;
+
+                            double sux = 0.0, suy = 0.0;
+                            if (sr > 1e-9) {
+                                sux = s.ur * (rx / sr);
+                                suy = s.ur * (ry / sr);
+                            }
+                            double suz = (rz >= 0.0) ? s.uz : -s.uz;
+
+                            double ske = 0.5 * s.rho * (sux*sux + suy*suy + suz*suz);
+                            double sE = 0.0;
+                            if (is_ideal) {
+                                sE = s.p / (gamma - 1.0) + ske;
+                            } else {
+                                double a1 = s.alpha1, a2 = s.alpha2;
+                                if (a1 + a2 < 1e-6) { a1 = 0.0; a2 = 1.0; }
+                                double ar1 = s.arho1, ar2 = (a2 > 1e-6) ? s.arho2 : s.rho;
+                                sE = MultiMat::getMixtureEnergy(s.p, s.rho, a1, a2, ar1, ar2, gamma, mat.products, mat.unreacted) + ske;
+                                sum_alpha1 += a1;
+                                sum_alpha2 += a2;
+                                sum_arho1 += ar1;
+                                sum_arho2 += ar2;
+                            }
+
+                            sum_rho += s.rho;
+                            sum_rhoux += s.rho * sux;
+                            sum_rhouy += s.rho * suy;
+                            sum_rhouz += s.rho * suz;
+                            sum_E += sE;
                         }
                     }
                 }
 
                 double inv27 = 1.0 / 27.0;
-                CellState3D<true> s3d;
-                s3d.rho = avg.rho * inv27;
-                double ur_avg = avg.ur * inv27;
-                double uz_avg = avg.uz * inv27;
+                double rho_avg = sum_rho * inv27;
+                double rhoux_avg = sum_rhoux * inv27;
+                double rhouy_avg = sum_rhouy * inv27;
+                double rhouz_avg = sum_rhouz * inv27;
+                double E_avg = sum_E * inv27;
 
-                if (r_dist > 1e-9) {
-                    s3d.ux = ur_avg * (dx_expl / r_dist);
-                    s3d.uy = ur_avg * (dy_expl / r_dist);
-                } else {
-                    s3d.ux = s3d.uy = 0;
-                }
-                s3d.uz = uz_avg;
-                s3d.p = avg.p * inv27;
-                s3d.alpha1 = avg.alpha1 * inv27;
-                s3d.alpha2 = avg.alpha2 * inv27;
-                s3d.arho1 = avg.arho1 * inv27;
-                s3d.arho2 = avg.arho2 * inv27;
+                double ux_avg = rhoux_avg / std::max(1e-9, rho_avg);
+                double uy_avg = rhouy_avg / std::max(1e-9, rho_avg);
+                double uz_avg = rhouz_avg / std::max(1e-9, rho_avg);
+                double ke_avg = 0.5 * rho_avg * (ux_avg*ux_avg + uy_avg*uy_avg + uz_avg*uz_avg);
 
-                double ke = 0.5 * s3d.rho * (s3d.ux*s3d.ux + s3d.uy*s3d.uy + s3d.uz*s3d.uz);
-                if (solver_3d.isIdealGas()) {
-                    s3d.E = s3d.p / (solver_3d.getGamma() - 1.0) + ke;
+                if (is_ideal) {
+                    double p_avg = std::max(1e-6, (gamma - 1.0) * (E_avg - ke_avg));
                     CellState3D<false> s_gas;
-                    s_gas.rho = s3d.rho;
-                    s_gas.ux = s3d.ux;
-                    s_gas.uy = s3d.uy;
-                    s_gas.uz = s3d.uz;
-                    s_gas.p = s3d.p;
-                    s_gas.E = s3d.E;
+                    s_gas.rho = rho_avg;
+                    s_gas.ux = ux_avg;
+                    s_gas.uy = uy_avg;
+                    s_gas.uz = uz_avg;
+                    s_gas.p = p_avg;
+                    s_gas.E = E_avg;
                     solver_3d.setCellStateIdeal(i, j, k, s_gas);
                 } else {
-                    const auto& mat = solver_3d.getMaterialParameters();
-                    s3d.E = MultiMat::getMixtureEnergy(s3d.p, s3d.rho, s3d.alpha1, s3d.alpha2, s3d.arho1, s3d.arho2, solver_3d.getGamma(), mat.products, mat.unreacted) + ke;
+                    double a1_avg = sum_alpha1 * inv27;
+                    double a2_avg = sum_alpha2 * inv27;
+                    if (a1_avg + a2_avg < 1e-6) { a1_avg = 0.0; a2_avg = 1.0; }
+                    double ar1_avg = sum_arho1 * inv27;
+                    double ar2_avg = sum_arho2 * inv27;
+
+                    double e_internal = std::max(1e-6, E_avg - ke_avg);
+                    double p_avg = MultiMat::getMixturePressure(e_internal, rho_avg, a1_avg, a2_avg, ar1_avg, ar2_avg, gamma, mat.products, mat.unreacted);
+
+                    CellState3D<true> s3d;
+                    s3d.rho = rho_avg;
+                    s3d.ux = ux_avg;
+                    s3d.uy = uy_avg;
+                    s3d.uz = uz_avg;
+                    s3d.p = p_avg;
+                    s3d.E = E_avg;
+                    s3d.alpha1 = a1_avg;
+                    s3d.alpha2 = a2_avg;
+                    s3d.arho1 = ar1_avg;
+                    s3d.arho2 = ar2_avg;
                     solver_3d.setCellStateMulti(i, j, k, s3d);
                 }
             }
@@ -254,3 +398,384 @@ void remap_2d_to_3d(int nr, int nz, double dr, double dz, const std::vector<Stat
     }
     solver_3d.commitStates();
 }
+
+template <typename RealType, bool IsMultiMaterial>
+void remap_1d_to_submesh(const std::vector<double>& r_1d, const std::vector<MultiMaterialState>& states_1d,
+                         SubMesh3D<RealType, IsMultiMaterial>& sm, double x_expl, double y_expl, double z_expl, double R_remap,
+                         double gamma, const MultiMat::MaterialSet& materials, bool is_ideal_gas) {
+
+    int nx = sm.nx;
+    int ny = sm.ny;
+    int nz = sm.nz;
+    RealType dx = sm.cellSize;
+
+    double r_max_1d = r_1d.back();
+
+    auto interp_1d = [&](double r) -> MultiMaterialState {
+        if (r <= r_1d.front()) return states_1d.front();
+        if (r >= r_1d.back()) return states_1d.back();
+
+        auto it = std::lower_bound(r_1d.begin(), r_1d.end(), r);
+        size_t idx = std::distance(r_1d.begin(), it);
+        if (idx == 0) return states_1d[0];
+
+        double r0 = r_1d[idx-1];
+        double r1 = r_1d[idx];
+        double t = (r - r0) / (r1 - r0);
+
+        const auto& s0 = states_1d[idx-1];
+        const auto& s1 = states_1d[idx];
+
+        MultiMaterialState res;
+        res.rho = s0.rho + t * (s1.rho - s0.rho);
+        res.u = s0.u + t * (s1.u - s0.u);
+        res.p = s0.p + t * (s1.p - s0.p);
+        res.alpha1 = s0.alpha1 + t * (s1.alpha1 - s0.alpha1);
+        res.alpha2 = s0.alpha2 + t * (s1.alpha2 - s0.alpha2);
+        res.arho1 = s0.arho1 + t * (s1.arho1 - s0.arho1);
+        res.arho2 = s0.arho2 + t * (s1.arho2 - s0.arho2);
+        return res;
+    };
+
+    #pragma omp parallel for collapse(3)
+    for (int k = 0; k < nz; ++k) {
+        for (int j = 0; j < ny; ++j) {
+            for (int i = 0; i < nx; ++i) {
+                double x_c = (double)sm.xmin + (i + 0.5) * (double)dx;
+                double y_c = (double)sm.ymin + (j + 0.5) * (double)dx;
+                double z_c = (double)sm.zmin + (k + 0.5) * (double)dx;
+
+                double dx_expl = x_c - x_expl;
+                double dy_expl = y_c - y_expl;
+                double dz_expl = z_c - z_expl;
+                double dist = std::sqrt(dx_expl*dx_expl + dy_expl*dy_expl + dz_expl*dz_expl);
+
+                size_t c_idx = sm.getIndex(i, j, k);
+
+                double cut_r = (R_remap > 0.0) ? std::min(R_remap, r_max_1d) : r_max_1d;
+                if (dist > cut_r + (double)dx * 2.0) {
+                    const auto& amb = states_1d.back();
+                    sm.rho[c_idx] = (RealType)amb.rho;
+                    sm.ux[c_idx] = sm.uy[c_idx] = sm.uz[c_idx] = (RealType)0.0;
+                    sm.p[c_idx] = (RealType)amb.p;
+                    if constexpr (IsMultiMaterial) {
+                        if (!sm.alpha1.empty()) {
+                            sm.alpha1[c_idx] = 0.0;
+                            sm.alpha2[c_idx] = 1.0;
+                            sm.arho1[c_idx] = 0.0;
+                            sm.arho2[c_idx] = (RealType)amb.rho;
+                        }
+                        sm.E[c_idx] = (RealType)MultiMat::getMixtureEnergy(amb.p, amb.rho, 0.0, 1.0, 0.0, amb.rho, gamma, materials.products, materials.unreacted);
+                    } else {
+                        sm.E[c_idx] = (RealType)(amb.p / (gamma - 1.0));
+                    }
+                    continue;
+                }
+
+                double sum_rho = 0.0;
+                double sum_rhoux = 0.0;
+                double sum_rhouy = 0.0;
+                double sum_rhouz = 0.0;
+                double sum_E = 0.0;
+                double sum_alpha1 = 0.0;
+                double sum_alpha2 = 0.0;
+                double sum_arho1 = 0.0;
+                double sum_arho2 = 0.0;
+
+                const double sub[3] = {-0.333333333, 0.0, 0.333333333};
+                for (int sk = 0; sk < 3; ++sk) {
+                    for (int sj = 0; sj < 3; sj++) {
+                        for (int si = 0; si < 3; si++) {
+                            double sx = x_c + sub[si] * (double)dx;
+                            double sy = y_c + sub[sj] * (double)dx;
+                            double sz = z_c + sub[sk] * (double)dx;
+                            double rx = sx - x_expl;
+                            double ry = sy - y_expl;
+                            double rz = sz - z_expl;
+                            double sr = std::sqrt(rx*rx + ry*ry + rz*rz);
+
+                            auto s = interp_1d(sr);
+
+                            double sux = 0.0, suy = 0.0, suz = 0.0;
+                            if (sr > 1e-9) {
+                                sux = s.u * (rx / sr);
+                                suy = s.u * (ry / sr);
+                                suz = s.u * (rz / sr);
+                            }
+
+                            double ske = 0.5 * s.rho * (sux*sux + suy*suy + suz*suz);
+                            double sE = 0.0;
+                            if (is_ideal_gas) {
+                                sE = s.p / (gamma - 1.0) + ske;
+                            } else {
+                                double a1 = s.alpha1, a2 = s.alpha2;
+                                if (a1 + a2 < 1e-6) { a1 = 0.0; a2 = 1.0; }
+                                double ar1 = s.arho1, ar2 = (a2 > 1e-6) ? s.arho2 : s.rho;
+                                sE = MultiMat::getMixtureEnergy(s.p, s.rho, a1, a2, ar1, ar2, gamma, materials.products, materials.unreacted) + ske;
+                                sum_alpha1 += a1;
+                                sum_alpha2 += a2;
+                                sum_arho1 += ar1;
+                                sum_arho2 += ar2;
+                            }
+
+                            sum_rho += s.rho;
+                            sum_rhoux += s.rho * sux;
+                            sum_rhouy += s.rho * suy;
+                            sum_rhouz += s.rho * suz;
+                            sum_E += sE;
+                        }
+                    }
+                }
+
+                double inv27 = 1.0 / 27.0;
+                double rho_avg = sum_rho * inv27;
+                double rhoux_avg = sum_rhoux * inv27;
+                double rhouy_avg = sum_rhouy * inv27;
+                double rhouz_avg = sum_rhouz * inv27;
+                double E_avg = sum_E * inv27;
+
+                double ux_avg = rhoux_avg / std::max(1e-9, rho_avg);
+                double uy_avg = rhouy_avg / std::max(1e-9, rho_avg);
+                double uz_avg = rhouz_avg / std::max(1e-9, rho_avg);
+                double ke_avg = 0.5 * rho_avg * (ux_avg*ux_avg + uy_avg*uy_avg + uz_avg*uz_avg);
+
+                sm.rho[c_idx] = (RealType)rho_avg;
+                sm.ux[c_idx] = (RealType)ux_avg;
+                sm.uy[c_idx] = (RealType)uy_avg;
+                sm.uz[c_idx] = (RealType)uz_avg;
+
+                if (is_ideal_gas) {
+                    double p_avg = std::max(1e-6, (gamma - 1.0) * (E_avg - ke_avg));
+                    sm.p[c_idx] = (RealType)p_avg;
+                    sm.E[c_idx] = (RealType)E_avg;
+                } else {
+                    double a1_avg = sum_alpha1 * inv27;
+                    double a2_avg = sum_alpha2 * inv27;
+                    if (a1_avg + a2_avg < 1e-6) { a1_avg = 0.0; a2_avg = 1.0; }
+                    double ar1_avg = sum_arho1 * inv27;
+                    double ar2_avg = sum_arho2 * inv27;
+
+                    double e_internal = std::max(1e-6, E_avg - ke_avg);
+                    double p_avg = MultiMat::getMixturePressure(e_internal, rho_avg, a1_avg, a2_avg, ar1_avg, ar2_avg, gamma, materials.products, materials.unreacted);
+
+                    sm.p[c_idx] = (RealType)p_avg;
+                    sm.E[c_idx] = (RealType)E_avg;
+                    if constexpr (IsMultiMaterial) {
+                        if (!sm.alpha1.empty()) {
+                            sm.alpha1[c_idx] = (RealType)a1_avg;
+                            sm.alpha2[c_idx] = (RealType)a2_avg;
+                            sm.arho1[c_idx]  = (RealType)ar1_avg;
+                            sm.arho2[c_idx]  = (RealType)ar2_avg;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    sm.is_initialized = true;
+}
+
+template <typename RealType, bool IsMultiMaterial>
+void remap_2d_to_submesh(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d,
+                         SubMesh3D<RealType, IsMultiMaterial>& sm, double x_expl, double y_expl, double z_expl, double R_remap,
+                         double gamma, const MultiMat::MaterialSet& materials, bool is_ideal_gas) {
+
+    int nx = sm.nx;
+    int ny = sm.ny;
+    int nz_3d = sm.nz;
+    RealType dx = sm.cellSize;
+
+    double max_r_2d = nr * dr;
+    double max_z_2d = nz * dz;
+
+    auto interp_2d = [&](double r, double z) -> State2D {
+        if (r < 0.0) r = 0.0;
+        if (z < 0.0) z = 0.0;
+
+        if (r >= max_r_2d - 1e-9) r = max_r_2d - 1e-9;
+        if (z >= max_z_2d - 1e-9) z = max_z_2d - 1e-9;
+
+        double r_idx_f = (r / dr) - 0.5;
+        double z_idx_f = (z / dz) - 0.5;
+
+        if (r_idx_f < 0.0) r_idx_f = 0.0;
+        if (z_idx_f < 0.0) z_idx_f = 0.0;
+
+        int i0 = static_cast<int>(r_idx_f);
+        int j0 = static_cast<int>(z_idx_f);
+        int i1 = std::min(i0 + 1, nr - 1);
+        int j1 = std::min(j0 + 1, nz - 1);
+
+        double tr = r_idx_f - i0;
+        double tz = z_idx_f - j0;
+
+        const auto& s00 = states_2d[i0 + j0 * nr];
+        const auto& s10 = states_2d[i1 + j0 * nr];
+        const auto& s01 = states_2d[i0 + j1 * nr];
+        const auto& s11 = states_2d[i1 + j1 * nr];
+
+        State2D res;
+        auto blend = [&](double a, double b, double c, double d) {
+            return (1.0 - tr) * (1.0 - tz) * a + tr * (1.0 - tz) * b + (1.0 - tr) * tz * c + tr * tz * d;
+        };
+
+        res.rho = blend(s00.rho, s10.rho, s01.rho, s11.rho);
+        res.ur = blend(s00.ur, s10.ur, s01.ur, s11.ur);
+        res.uz = blend(s00.uz, s10.uz, s01.uz, s11.uz);
+        res.p = blend(s00.p, s10.p, s01.p, s11.p);
+        res.alpha1 = blend(s00.alpha1, s10.alpha1, s01.alpha1, s11.alpha1);
+        res.alpha2 = blend(s00.alpha2, s10.alpha2, s01.alpha2, s11.alpha2);
+        res.arho1 = blend(s00.arho1, s10.arho1, s01.arho1, s11.arho1);
+        res.arho2 = blend(s00.arho2, s10.arho2, s01.arho2, s11.arho2);
+        return res;
+    };
+
+    #pragma omp parallel for collapse(3)
+    for (int k = 0; k < nz_3d; ++k) {
+        for (int j = 0; j < ny; ++j) {
+            for (int i = 0; i < nx; ++i) {
+                double x_c = (double)sm.xmin + (i + 0.5) * (double)dx;
+                double y_c = (double)sm.ymin + (j + 0.5) * (double)dx;
+                double z_c = (double)sm.zmin + (k + 0.5) * (double)dx;
+
+                double dx_expl = x_c - x_expl;
+                double dy_expl = y_c - y_expl;
+                double dz_expl = z_c - z_expl;
+                double r_dist = std::sqrt(dx_expl * dx_expl + dy_expl * dy_expl);
+                double dist_total = std::sqrt(r_dist * r_dist + dz_expl * dz_expl);
+
+                size_t c_idx = sm.getIndex(i, j, k);
+
+                double cut_r = (R_remap > 0.0) ? std::min(R_remap, max_r_2d) : max_r_2d;
+                if (dist_total > cut_r + (double)dx * 2.0) {
+                    const auto& amb = states_2d.back();
+                    sm.rho[c_idx] = (RealType)amb.rho;
+                    sm.ux[c_idx] = sm.uy[c_idx] = sm.uz[c_idx] = (RealType)0.0;
+                    sm.p[c_idx] = (RealType)amb.p;
+                    if constexpr (IsMultiMaterial) {
+                        if (!sm.alpha1.empty()) {
+                            sm.alpha1[c_idx] = 0.0;
+                            sm.alpha2[c_idx] = 1.0;
+                            sm.arho1[c_idx] = 0.0;
+                            sm.arho2[c_idx] = (RealType)amb.rho;
+                        }
+                        sm.E[c_idx] = (RealType)MultiMat::getMixtureEnergy(amb.p, amb.rho, 0.0, 1.0, 0.0, amb.rho, gamma, materials.products, materials.unreacted);
+                    } else {
+                        sm.E[c_idx] = (RealType)(amb.p / (gamma - 1.0));
+                    }
+                    continue;
+                }
+
+                double sum_rho = 0.0;
+                double sum_rhoux = 0.0;
+                double sum_rhouy = 0.0;
+                double sum_rhouz = 0.0;
+                double sum_E = 0.0;
+                double sum_alpha1 = 0.0;
+                double sum_alpha2 = 0.0;
+                double sum_arho1 = 0.0;
+                double sum_arho2 = 0.0;
+
+                const double sub[3] = {-0.333333333, 0.0, 0.333333333};
+                for (int sk = 0; sk < 3; ++sk) {
+                    for (int sj = 0; sj < 3; sj++) {
+                        for (int si = 0; si < 3; si++) {
+                            double sx = x_c + sub[si] * (double)dx;
+                            double sy = y_c + sub[sj] * (double)dx;
+                            double sz = z_c + sub[sk] * (double)dx;
+                            double rx = sx - x_expl;
+                            double ry = sy - y_expl;
+                            double rz = sz - z_expl;
+                            double sr = std::sqrt(rx * rx + ry * ry);
+                            double s_z = std::abs(rz);
+
+                            auto s = interp_2d(sr, s_z);
+
+                            double sux = 0.0, suy = 0.0;
+                            if (sr > 1e-9) {
+                                sux = s.ur * (rx / sr);
+                                suy = s.ur * (ry / sr);
+                            }
+                            double suz = (rz >= 0.0) ? s.uz : -s.uz;
+
+                            double ske = 0.5 * s.rho * (sux*sux + suy*suy + suz*suz);
+                            double sE = 0.0;
+                            if (is_ideal_gas) {
+                                sE = s.p / (gamma - 1.0) + ske;
+                            } else {
+                                double a1 = s.alpha1, a2 = s.alpha2;
+                                if (a1 + a2 < 1e-6) { a1 = 0.0; a2 = 1.0; }
+                                double ar1 = s.arho1, ar2 = (a2 > 1e-6) ? s.arho2 : s.rho;
+                                sE = MultiMat::getMixtureEnergy(s.p, s.rho, a1, a2, ar1, ar2, gamma, materials.products, materials.unreacted) + ske;
+                                sum_alpha1 += a1;
+                                sum_alpha2 += a2;
+                                sum_arho1 += ar1;
+                                sum_arho2 += ar2;
+                            }
+
+                            sum_rho += s.rho;
+                            sum_rhoux += s.rho * sux;
+                            sum_rhouy += s.rho * suy;
+                            sum_rhouz += s.rho * suz;
+                            sum_E += sE;
+                        }
+                    }
+                }
+
+                double inv27 = 1.0 / 27.0;
+                double rho_avg = sum_rho * inv27;
+                double rhoux_avg = sum_rhoux * inv27;
+                double rhouy_avg = sum_rhouy * inv27;
+                double rhouz_avg = sum_rhouz * inv27;
+                double E_avg = sum_E * inv27;
+
+                double ux_avg = rhoux_avg / std::max(1e-9, rho_avg);
+                double uy_avg = rhouy_avg / std::max(1e-9, rho_avg);
+                double uz_avg = rhouz_avg / std::max(1e-9, rho_avg);
+                double ke_avg = 0.5 * rho_avg * (ux_avg*ux_avg + uy_avg*uy_avg + uz_avg*uz_avg);
+
+                sm.rho[c_idx] = (RealType)rho_avg;
+                sm.ux[c_idx] = (RealType)ux_avg;
+                sm.uy[c_idx] = (RealType)uy_avg;
+                sm.uz[c_idx] = (RealType)uz_avg;
+
+                if (is_ideal_gas) {
+                    double p_avg = std::max(1e-6, (gamma - 1.0) * (E_avg - ke_avg));
+                    sm.p[c_idx] = (RealType)p_avg;
+                    sm.E[c_idx] = (RealType)E_avg;
+                } else {
+                    double a1_avg = sum_alpha1 * inv27;
+                    double a2_avg = sum_alpha2 * inv27;
+                    if (a1_avg + a2_avg < 1e-6) { a1_avg = 0.0; a2_avg = 1.0; }
+                    double ar1_avg = sum_arho1 * inv27;
+                    double ar2_avg = sum_arho2 * inv27;
+
+                    double e_internal = std::max(1e-6, E_avg - ke_avg);
+                    double p_avg = MultiMat::getMixturePressure(e_internal, rho_avg, a1_avg, a2_avg, ar1_avg, ar2_avg, gamma, materials.products, materials.unreacted);
+
+                    sm.p[c_idx] = (RealType)p_avg;
+                    sm.E[c_idx] = (RealType)E_avg;
+                    if constexpr (IsMultiMaterial) {
+                        if (!sm.alpha1.empty()) {
+                            sm.alpha1[c_idx] = (RealType)a1_avg;
+                            sm.alpha2[c_idx] = (RealType)a2_avg;
+                            sm.arho1[c_idx]  = (RealType)ar1_avg;
+                            sm.arho2[c_idx]  = (RealType)ar2_avg;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    sm.is_initialized = true;
+}
+
+template void remap_1d_to_submesh<float, false>(const std::vector<double>&, const std::vector<MultiMaterialState>&, SubMesh3D<float, false>&, double, double, double, double, double, const MultiMat::MaterialSet&, bool);
+template void remap_1d_to_submesh<float, true>(const std::vector<double>&, const std::vector<MultiMaterialState>&, SubMesh3D<float, true>&, double, double, double, double, double, const MultiMat::MaterialSet&, bool);
+template void remap_1d_to_submesh<double, false>(const std::vector<double>&, const std::vector<MultiMaterialState>&, SubMesh3D<double, false>&, double, double, double, double, double, const MultiMat::MaterialSet&, bool);
+template void remap_1d_to_submesh<double, true>(const std::vector<double>&, const std::vector<MultiMaterialState>&, SubMesh3D<double, true>&, double, double, double, double, double, const MultiMat::MaterialSet&, bool);
+
+template void remap_2d_to_submesh<float, false>(int, int, double, double, const std::vector<State2D>&, SubMesh3D<float, false>&, double, double, double, double, double, const MultiMat::MaterialSet&, bool);
+template void remap_2d_to_submesh<float, true>(int, int, double, double, const std::vector<State2D>&, SubMesh3D<float, true>&, double, double, double, double, double, const MultiMat::MaterialSet&, bool);
+template void remap_2d_to_submesh<double, false>(int, int, double, double, const std::vector<State2D>&, SubMesh3D<double, false>&, double, double, double, double, double, const MultiMat::MaterialSet&, bool);
+template void remap_2d_to_submesh<double, true>(int, int, double, double, const std::vector<State2D>&, SubMesh3D<double, true>&, double, double, double, double, double, const MultiMat::MaterialSet&, bool);

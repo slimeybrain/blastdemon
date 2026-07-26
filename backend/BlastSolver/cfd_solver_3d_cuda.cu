@@ -185,7 +185,17 @@ __global__ void __launch_bounds__(512) initialize_ambient_kernel(PrimitiveTile3D
     
     RealType E;
     if constexpr (IsMultiMaterial) {
-        E = (RealType)MultiMat::getMixtureEnergy((double)amb_p, (double)amb_rho, 0.0, 0.0, 0.0, 0.0, (double)gamma, d_products, d_unreacted);
+        states[t_idx].alpha1[c_idx] = 0.0;
+        states[t_idx].alpha2[c_idx] = 1.0;
+        states[t_idx].arho1[c_idx] = 0.0;
+        states[t_idx].arho2[c_idx] = amb_rho;
+
+        U[t_idx].alpha1[c_idx] = 0.0;
+        U[t_idx].alpha2[c_idx] = 1.0;
+        U[t_idx].arho1[c_idx] = 0.0;
+        U[t_idx].arho2[c_idx] = amb_rho;
+
+        E = MultiMat::getMixtureEnergy<RealType>((RealType)amb_p, (RealType)amb_rho, (RealType)0.0, (RealType)1.0, (RealType)0.0, (RealType)amb_rho, (RealType)gamma, d_products, d_unreacted);
     } else {
         E = amb_p / (gamma - (RealType)1.0);
     }
@@ -200,18 +210,6 @@ __global__ void __launch_bounds__(512) initialize_ambient_kernel(PrimitiveTile3D
     U[t_idx].rhouy[c_idx] = 0;
     U[t_idx].rhouz[c_idx] = 0;
     U[t_idx].E[c_idx] = E;
-
-    if constexpr (IsMultiMaterial) {
-        states[t_idx].alpha1[c_idx] = 0.0;
-        states[t_idx].alpha2[c_idx] = 0.0;
-        states[t_idx].arho1[c_idx] = 0.0;
-        states[t_idx].arho2[c_idx] = 0.0;
-
-        U[t_idx].alpha1[c_idx] = 0.0;
-        U[t_idx].alpha2[c_idx] = 0.0;
-        U[t_idx].arho1[c_idx] = 0.0;
-        U[t_idx].arho2[c_idx] = 0.0;
-    }
 }
 
 template <typename RealType, bool IsMultiMaterial>
@@ -229,7 +227,7 @@ __global__ void __launch_bounds__(512) commit_states_kernel(PrimitiveTile3D<Real
     RealType ke = (RealType)0.5 * s.rho[c_idx] * (s.ux[c_idx]*s.ux[c_idx] + s.uy[c_idx]*s.uy[c_idx] + s.uz[c_idx]*s.uz[c_idx]);
     RealType total_E;
     if constexpr (IsMultiMaterial) {
-        total_E = (RealType)MultiMat::getMixtureEnergy((double)s.p[c_idx], (double)s.rho[c_idx], (double)s.alpha1[c_idx], (double)s.alpha2[c_idx], (double)s.arho1[c_idx], (double)s.arho2[c_idx], d_gamma, d_products, d_unreacted) + ke;
+        total_E = MultiMat::getMixtureEnergy<RealType>(s.p[c_idx], s.rho[c_idx], s.alpha1[c_idx], s.alpha2[c_idx], s.arho1[c_idx], s.arho2[c_idx], (RealType)d_gamma, d_products, d_unreacted) + ke;
     } else {
         total_E = s.p[c_idx] / (d_gamma - (RealType)1.0) + ke;
     }
@@ -372,15 +370,15 @@ __device__ void getRusanovFluxGPU(const GPUCellStateT<RealType>& sL, const GPUCe
         fR[7] = sR.arho1 * unR;  fR[8] = sR.arho2 * unR;
     }
 
-    double cL, cR;
+    RealType cL, cR;
     if constexpr (IsMultiMaterial) {
-        cL = MultiMat::getMixtureSoundSpeed((double)sL.p, (double)sL.rho, (double)sL.alpha1, (double)sL.alpha2, (double)sL.arho1, (double)sL.arho2, (double)gamma, d_products, d_unreacted);
-        cR = MultiMat::getMixtureSoundSpeed((double)sR.p, (double)sR.rho, (double)sR.alpha1, (double)sR.alpha2, (double)sR.arho1, (double)sR.arho2, (double)gamma, d_products, d_unreacted);
+        cL = MultiMat::getMixtureSoundSpeed<RealType>(sL.p, sL.rho, sL.alpha1, sL.alpha2, sL.arho1, sL.arho2, (RealType)gamma, d_products, d_unreacted);
+        cR = MultiMat::getMixtureSoundSpeed<RealType>(sR.p, sR.rho, sR.alpha1, sR.alpha2, sR.arho1, sR.arho2, (RealType)gamma, d_products, d_unreacted);
     } else {
-        cL = sqrt((double)gamma * (double)sL.p / max((double)1e-6, (double)sL.rho));
-        cR = sqrt((double)gamma * (double)sR.p / max((double)1e-6, (double)sR.rho));
+        cL = sqrt(gamma * sL.p / fmax((RealType)1e-6, sL.rho));
+        cR = sqrt(gamma * sR.p / fmax((RealType)1e-6, sR.rho));
     }
-    double s_max = fmax(fabs((double)unL) + cL, fabs((double)unR) + cR);
+    RealType s_max = fmax(abs(unL) + cL, abs(unR) + cR);
 
     RealType UL[9] = {sL.rho, sL.rho*sL.ux, sL.rho*sL.uy, sL.rho*sL.uz, sL.E};
     RealType UR[9] = {sR.rho, sR.rho*sR.ux, sR.rho*sR.uy, sR.rho*sR.uz, sR.E};
@@ -400,11 +398,11 @@ template <typename RealType, bool IsMultiMaterial>
 __device__ void getAUSMPlusFluxGPU(const GPUCellStateT<RealType>& sL, const GPUCellStateT<RealType>& sR, RealType* flux, int dir, RealType gamma) {
     RealType aL, aR;
     if constexpr (IsMultiMaterial) {
-        aL = (RealType)MultiMat::getMixtureSoundSpeed((double)sL.p, (double)sL.rho, (double)sL.alpha1, (double)sL.alpha2, (double)sL.arho1, (double)sL.arho2, (double)gamma, d_products, d_unreacted);
-        aR = (RealType)MultiMat::getMixtureSoundSpeed((double)sR.p, (double)sR.rho, (double)sR.alpha1, (double)sR.alpha2, (double)sR.arho1, (double)sR.arho2, (double)gamma, d_products, d_unreacted);
+        aL = MultiMat::getMixtureSoundSpeed<RealType>(sL.p, sL.rho, sL.alpha1, sL.alpha2, sL.arho1, sL.arho2, (RealType)gamma, d_products, d_unreacted);
+        aR = MultiMat::getMixtureSoundSpeed<RealType>(sR.p, sR.rho, sR.alpha1, sR.alpha2, sR.arho1, sR.arho2, (RealType)gamma, d_products, d_unreacted);
     } else {
-        aL = sqrt(gamma * sL.p / max((RealType)1e-6, sL.rho));
-        aR = sqrt(gamma * sR.p / max((RealType)1e-6, sR.rho));
+        aL = sqrt(gamma * sL.p / fmax((RealType)1e-6, sL.rho));
+        aR = sqrt(gamma * sR.p / fmax((RealType)1e-6, sR.rho));
     }
     RealType a_half = (RealType)0.5 * (aL + aR);
 
@@ -495,29 +493,29 @@ __device__ RealType minmod_gpu(RealType a, RealType b) {
 
 template <typename RealType>
 __device__ RealType weno3_gpu(RealType vM1, RealType v0, RealType vP1) {
-    double d0 = (double)v0 - (double)vM1;
-    double d1 = (double)vP1 - (double)v0;
+    RealType d0 = v0 - vM1;
+    RealType d1 = vP1 - v0;
     
-    double beta0 = d0 * d0;
-    double beta1 = d1 * d1;
+    RealType beta0 = d0 * d0;
+    RealType beta1 = d1 * d1;
     
-    double eps = 1e-6;
-    double alpha0 = (1.0 / 3.0) / ((eps + beta0) * (eps + beta0));
-    double alpha1 = (2.0 / 3.0) / ((eps + beta1) * (eps + beta1));
+    RealType eps = (RealType)1e-6;
+    RealType alpha0 = ((RealType)1.0 / (RealType)3.0) / ((eps + beta0) * (eps + beta0));
+    RealType alpha1 = ((RealType)2.0 / (RealType)3.0) / ((eps + beta1) * (eps + beta1));
     
-    double sum_alpha = alpha0 + alpha1;
-    double w0, w1;
-    if (sum_alpha < 1e-300) {
-        w0 = 1.0 / 3.0;
-        w1 = 2.0 / 3.0;
+    RealType sum_alpha = alpha0 + alpha1;
+    RealType w0, w1;
+    if (sum_alpha < (RealType)1e-30) {
+        w0 = (RealType)1.0 / (RealType)3.0;
+        w1 = (RealType)2.0 / (RealType)3.0;
     } else {
         w0 = alpha0 / sum_alpha;
         w1 = alpha1 / sum_alpha;
     }
     
-    double p0 = (double)v0 + 0.5 * d0;
-    double p1 = (double)v0 + 0.5 * d1;
-    return (RealType)(w0 * p0 + w1 * p1);
+    RealType p0 = v0 + (RealType)0.5 * d0;
+    RealType p1 = v0 + (RealType)0.5 * d1;
+    return w0 * p0 + w1 * p1;
 }
 
 // Why this works:
@@ -819,8 +817,8 @@ __device__ __forceinline__ void reconstruct_gpu(
     RealType keR = (RealType)0.5 * sR.rho * (sR.ux*sR.ux + sR.uy*sR.uy + sR.uz*sR.uz);
 
     if constexpr (IsMultiMaterial) {
-        sL.E = (RealType)MultiMat::getMixtureEnergy((double)sL.p, (double)sL.rho, (double)sL.alpha1, (double)sL.alpha2, (double)sL.arho1, (double)sL.arho2, d_gamma, d_products, d_unreacted) + keL;
-        sR.E = (RealType)MultiMat::getMixtureEnergy((double)sR.p, (double)sR.rho, (double)sR.alpha1, (double)sR.alpha2, (double)sR.arho1, (double)sR.arho2, d_gamma, d_products, d_unreacted) + keR;
+        sL.E = MultiMat::getMixtureEnergy<RealType>(sL.p, sL.rho, sL.alpha1, sL.alpha2, sL.arho1, sL.arho2, (RealType)d_gamma, d_products, d_unreacted) + keL;
+        sR.E = MultiMat::getMixtureEnergy<RealType>(sR.p, sR.rho, sR.alpha1, sR.alpha2, sR.arho1, sR.arho2, (RealType)d_gamma, d_products, d_unreacted) + keR;
     } else {
         sL.E = sL.p / ((RealType)d_gamma - (RealType)1.0) + keL;
         sR.E = sR.p / ((RealType)d_gamma - (RealType)1.0) + keR;
@@ -1121,7 +1119,7 @@ __global__ void __launch_bounds__(512) update_primitive_kernel_3d(
     RealType p = (RealType)d_ambient_p;
     RealType E;
     if constexpr (IsMultiMaterial) {
-        E = (RealType)MultiMat::getMixtureEnergy((double)d_ambient_p, (double)d_ambient_rho, 0.0, 0.0, 0.0, 0.0, d_gamma, d_products, d_unreacted);
+        E = MultiMat::getMixtureEnergy<RealType>((RealType)d_ambient_p, (RealType)d_ambient_rho, (RealType)0.0, (RealType)0.0, (RealType)0.0, (RealType)0.0, (RealType)d_gamma, d_products, d_unreacted);
     } else {
         E = (RealType)d_ambient_p / ((RealType)d_gamma - (RealType)1.0);
     }
@@ -1180,11 +1178,11 @@ __global__ void __launch_bounds__(512) update_primitive_kernel_3d(
                 arho2 = (arho2 / sum) * rho;
             }
 
-            double p_val = MultiMat::getMixturePressure((double)e_int, (double)rho, (double)alpha1, (double)alpha2, (double)arho1, (double)arho2, d_gamma, d_products, d_unreacted);
+            RealType p_val = MultiMat::getMixturePressure<RealType>(e_int, rho, alpha1, alpha2, arho1, arho2, (RealType)d_gamma, d_products, d_unreacted);
             if (isnan(p_val) || isinf(p_val) || p_val < (RealType)1e-8) {
                 bad = true;
             } else {
-                p = (RealType)p_val;
+                p = p_val;
                 E = u_E;
                 U[t_idx].alpha1[c_idx] = alpha1;
                 U[t_idx].alpha2[c_idx] = alpha2;
@@ -1209,7 +1207,7 @@ __global__ void __launch_bounds__(512) update_primitive_kernel_3d(
         uz = 0.0;
         p = (RealType)d_ambient_p;
         if constexpr (IsMultiMaterial) {
-            E = (RealType)MultiMat::getMixtureEnergy((double)d_ambient_p, (double)d_ambient_rho, 0.0, 0.0, 0.0, 0.0, d_gamma, d_products, d_unreacted);
+            E = MultiMat::getMixtureEnergy<RealType>((RealType)d_ambient_p, (RealType)d_ambient_rho, (RealType)0.0, (RealType)0.0, (RealType)0.0, (RealType)0.0, (RealType)d_gamma, d_products, d_unreacted);
         } else {
             E = (RealType)d_ambient_p / ((RealType)d_gamma - (RealType)1.0);
         }
@@ -1244,7 +1242,7 @@ __global__ void __launch_bounds__(512) update_primitive_kernel_3d(
         uz = 0.0;
         p = (RealType)d_ambient_p;
         if constexpr (IsMultiMaterial) {
-            E = (RealType)MultiMat::getMixtureEnergy((double)d_ambient_p, (double)d_ambient_rho, 0.0, 0.0, 0.0, 0.0, d_gamma, d_products, d_unreacted);
+            E = MultiMat::getMixtureEnergy<RealType>((RealType)d_ambient_p, (RealType)d_ambient_rho, (RealType)0.0, (RealType)0.0, (RealType)0.0, (RealType)0.0, (RealType)d_gamma, d_products, d_unreacted);
         } else {
             E = (RealType)d_ambient_p / ((RealType)d_gamma - (RealType)1.0);
         }
@@ -1311,27 +1309,27 @@ __global__ void __launch_bounds__(512) applyProgrammedBurn_kernel_3d(
     RealType y_c = d_ymin + (gy + (RealType)0.5) * d_cellSize;
     RealType z_c = d_zmin + (gz + (RealType)0.5) * d_cellSize;
 
-    double tmp_alpha1 = (double)U[t_idx].alpha1[c_idx];
-    double tmp_alpha2 = (double)U[t_idx].alpha2[c_idx];
-    double tmp_arho1 = (double)U[t_idx].arho1[c_idx];
-    double tmp_arho2 = (double)U[t_idx].arho2[c_idx];
+    RealType tmp_alpha1 = U[t_idx].alpha1[c_idx];
+    RealType tmp_alpha2 = U[t_idx].alpha2[c_idx];
+    RealType tmp_arho1 = U[t_idx].arho1[c_idx];
+    RealType tmp_arho2 = U[t_idx].arho2[c_idx];
 
-    double dF = MultiMat::computeProgrammedBurn(
-        (double)currentTime, (double)dt, (double)x_c, (double)y_c, (double)z_c,
-        d_det_vel, 0.0, d_detX, d_detY, d_detZ,
-        (double)d_cellSize, d_products.rho0,
+    RealType dF = MultiMat::computeProgrammedBurn<RealType>(
+        (RealType)currentTime, dt, x_c, y_c, z_c,
+        (RealType)d_det_vel, (RealType)0.0, (RealType)d_detX, (RealType)d_detY, (RealType)d_detZ,
+        (RealType)d_cellSize, (RealType)d_products.rho0,
         tmp_alpha1, tmp_alpha2, tmp_arho1, tmp_arho2
     );
 
-    if (dF > 0.0) {
+    if (dF > (RealType)0.0) {
         if (d_detonation_energy > 0.0) {
-            double rho_expl = tmp_arho1 + tmp_arho2;
-            U[t_idx].E[c_idx] += (RealType)(dF * rho_expl * d_detonation_energy);
+            RealType rho_expl = tmp_arho1 + tmp_arho2;
+            U[t_idx].E[c_idx] += dF * rho_expl * (RealType)d_detonation_energy;
         }
-        U[t_idx].alpha1[c_idx] = (RealType)tmp_alpha1;
-        U[t_idx].alpha2[c_idx] = (RealType)tmp_alpha2;
-        U[t_idx].arho1[c_idx] = (RealType)tmp_arho1;
-        U[t_idx].arho2[c_idx] = (RealType)tmp_arho2;
+        U[t_idx].alpha1[c_idx] = tmp_alpha1;
+        U[t_idx].alpha2[c_idx] = tmp_alpha2;
+        U[t_idx].arho1[c_idx] = tmp_arho1;
+        U[t_idx].arho2[c_idx] = tmp_arho2;
     }
 }
 
@@ -1430,7 +1428,7 @@ __global__ void __launch_bounds__(512) set_initial_condition_kernel(PrimitiveTil
     
     RealType init_E;
     if constexpr (IsMultiMaterial) {
-        init_E = (RealType)MultiMat::getMixtureEnergy((double)p, (double)rho, (double)alpha1, (double)alpha2, (double)arho1, (double)arho2, (double)gamma, d_products, d_unreacted);
+        init_E = MultiMat::getMixtureEnergy<RealType>(p, rho, alpha1, alpha2, arho1, arho2, (RealType)gamma, d_products, d_unreacted);
     } else {
         init_E = p / (gamma - (RealType)1.0);
     }
@@ -1467,7 +1465,7 @@ __device__ float get_value_by_qty(const PrimitiveTile3D<RealType, IsMultiMateria
         RealType ke = (RealType)0.5 * tile.rho[c_idx] * (tile.ux[c_idx]*tile.ux[c_idx] + tile.uy[c_idx]*tile.uy[c_idx] + tile.uz[c_idx]*tile.uz[c_idx]);
         RealType total_E;
         if constexpr (IsMultiMaterial) {
-            total_E = (RealType)MultiMat::getMixtureEnergy((double)tile.p[c_idx], (double)tile.rho[c_idx], (double)tile.alpha1[c_idx], (double)tile.alpha2[c_idx], (double)tile.arho1[c_idx], (double)tile.arho2[c_idx], d_gamma, d_products, d_unreacted) + ke;
+            total_E = MultiMat::getMixtureEnergy<RealType>(tile.p[c_idx], tile.rho[c_idx], tile.alpha1[c_idx], tile.alpha2[c_idx], tile.arho1[c_idx], tile.arho2[c_idx], (RealType)d_gamma, d_products, d_unreacted) + ke;
         } else {
             total_E = tile.p[c_idx] / (d_gamma - (RealType)1.0) + ke;
         }
@@ -1503,7 +1501,7 @@ __device__ float get_value_by_qty_struct(const GPUCellStateT<RealType>& tile, in
         RealType ke = (RealType)0.5 * tile.rho * (tile.ux*tile.ux + tile.uy*tile.uy + tile.uz*tile.uz);
         RealType total_E;
         if constexpr (IsMultiMaterial) {
-            total_E = (RealType)MultiMat::getMixtureEnergy((double)tile.p, (double)tile.rho, (double)tile.alpha1, (double)tile.alpha2, (double)tile.arho1, (double)tile.arho2, d_gamma, d_products, d_unreacted) + ke;
+            total_E = MultiMat::getMixtureEnergy<RealType>(tile.p, tile.rho, tile.alpha1, tile.alpha2, tile.arho1, tile.arho2, (RealType)d_gamma, d_products, d_unreacted) + ke;
         } else {
             total_E = tile.p / (d_gamma - (RealType)1.0) + ke;
         }
@@ -1663,7 +1661,7 @@ __device__ GPUCellStateT<RealType> sample_state_with_mirror_gpu(
 
                 double ke = 0.5 * sC.rho * (sC.ux*sC.ux + sC.uy*sC.uy + sC.uz*sC.uz);
                 if constexpr (IsMultiMaterial) {
-                    sC.E = MultiMat::getMixtureEnergy((double)sC.p, (double)sC.rho, (double)sC.alpha1, (double)sC.alpha2, (double)sC.arho1, (double)sC.arho2, d_gamma, d_products, d_unreacted) + ke;
+                    sC.E = MultiMat::getMixtureEnergy<RealType>(sC.p, sC.rho, sC.alpha1, sC.alpha2, sC.arho1, sC.arho2, (RealType)d_gamma, d_products, d_unreacted) + ke;
                 } else {
                     sC.E = sC.p / (d_gamma - 1.0) + ke;
                 }
@@ -1696,7 +1694,7 @@ __device__ GPUCellStateT<RealType> sample_state_with_mirror_gpu(
                     sC.uz = sn.uz - 2.0 * u_dot_n * nz_u;
                     double ke = 0.5 * sC.rho * (sC.ux*sC.ux + sC.uy*sC.uy + sC.uz*sC.uz);
                     if constexpr (IsMultiMaterial) {
-                        sC.E = MultiMat::getMixtureEnergy((double)sC.p, (double)sC.rho, (double)sC.alpha1, (double)sC.alpha2, (double)sC.arho1, (double)sC.arho2, d_gamma, d_products, d_unreacted) + ke;
+                        sC.E = MultiMat::getMixtureEnergy<RealType>(sC.p, sC.rho, sC.alpha1, sC.alpha2, sC.arho1, sC.arho2, (RealType)d_gamma, d_products, d_unreacted) + ke;
                     } else {
                         sC.E = sC.p / (d_gamma - 1.0) + ke;
                     }
@@ -2135,6 +2133,8 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::bind_constants() const {
     CHECK_CUDA(cudaMemcpyToSymbol(d_ymin, &ymin, sizeof(double)));
     CHECK_CUDA(cudaMemcpyToSymbol(d_zmin, &zmin, sizeof(double)));
     CHECK_CUDA(cudaMemcpyToSymbol(d_gamma, &gamma, sizeof(double)));
+    CHECK_CUDA(cudaMemcpyToSymbol(d_ambient_rho, &ambient_rho, sizeof(double)));
+    CHECK_CUDA(cudaMemcpyToSymbol(d_ambient_p, &ambient_p, sizeof(double)));
     bool useAUSM = (currentFluxScheme == "AUSM+");
     CHECK_CUDA(cudaMemcpyToSymbol(d_useAUSM, &useAUSM, sizeof(bool)));
     int b1 = (int)bcXmin, b2 = (int)bcXmax, b3 = (int)bcYmin, b4 = (int)bcYmax, b5 = (int)bcZmin, b6 = (int)bcZmax;
@@ -2355,7 +2355,7 @@ __global__ void __launch_bounds__(512) update_conservative_from_primitive_kernel
         U[t_idx].alpha2[c_idx] = a2;
         U[t_idx].arho1[c_idx] = ar1;
         U[t_idx].arho2[c_idx] = ar2;
-        total_E = (RealType)MultiMat::getMixtureEnergy((double)p, (double)rho, (double)a1, (double)a2, (double)ar1, (double)ar2, (double)gamma, products, unreacted) + ke;
+        total_E = MultiMat::getMixtureEnergy<RealType>(p, rho, a1, a2, ar1, ar2, (RealType)gamma, products, unreacted) + ke;
     } else {
         total_E = p / max((RealType)1e-6, gamma - (RealType)1.0) + ke;
     }
@@ -2422,7 +2422,17 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::allocateGPUSubMeshes() const {
         if (gpu_sm.is_allocated) continue;
 
         gpu_sm.id = sm->id;
+        gpu_sm.parent_id = sm->parent_id;
         gpu_sm.level = sm->level;
+        gpu_sm.parent_idx = -1;
+        if (gpu_sm.parent_id != "root" && !gpu_sm.parent_id.empty()) {
+            for (size_t p = 0; p < host_submeshes.size(); ++p) {
+                if (host_submeshes[p]->id == gpu_sm.parent_id) {
+                    gpu_sm.parent_idx = (int)p;
+                    break;
+                }
+            }
+        }
         gpu_sm.nx = sm->nx;
         gpu_sm.ny = sm->ny;
         gpu_sm.nz = sm->nz;
@@ -2444,6 +2454,13 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::allocateGPUSubMeshes() const {
         CHECK_CUDA(cudaMalloc(&gpu_sm.d_p, bytes));
         CHECK_CUDA(cudaMalloc(&gpu_sm.d_E, bytes));
 
+        CHECK_CUDA(cudaMalloc(&gpu_sm.d_rho_old, bytes));
+        CHECK_CUDA(cudaMalloc(&gpu_sm.d_ux_old, bytes));
+        CHECK_CUDA(cudaMalloc(&gpu_sm.d_uy_old, bytes));
+        CHECK_CUDA(cudaMalloc(&gpu_sm.d_uz_old, bytes));
+        CHECK_CUDA(cudaMalloc(&gpu_sm.d_p_old, bytes));
+        CHECK_CUDA(cudaMalloc(&gpu_sm.d_E_old, bytes));
+
         CHECK_CUDA(cudaMalloc(&gpu_sm.d_new_rho, bytes));
         CHECK_CUDA(cudaMalloc(&gpu_sm.d_new_ux, bytes));
         CHECK_CUDA(cudaMalloc(&gpu_sm.d_new_uy, bytes));
@@ -2461,6 +2478,11 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::allocateGPUSubMeshes() const {
             CHECK_CUDA(cudaMalloc(&gpu_sm.d_alpha2, bytes));
             CHECK_CUDA(cudaMalloc(&gpu_sm.d_arho1, bytes));
             CHECK_CUDA(cudaMalloc(&gpu_sm.d_arho2, bytes));
+
+            CHECK_CUDA(cudaMalloc(&gpu_sm.d_alpha1_old, bytes));
+            CHECK_CUDA(cudaMalloc(&gpu_sm.d_alpha2_old, bytes));
+            CHECK_CUDA(cudaMalloc(&gpu_sm.d_arho1_old, bytes));
+            CHECK_CUDA(cudaMalloc(&gpu_sm.d_arho2_old, bytes));
 
             CHECK_CUDA(cudaMalloc(&gpu_sm.d_new_alpha1, bytes));
             CHECK_CUDA(cudaMalloc(&gpu_sm.d_new_alpha2, bytes));
@@ -2483,6 +2505,13 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::freeGPUSubMeshes() const {
         if (gpu_sm.d_p) cudaFree(gpu_sm.d_p);
         if (gpu_sm.d_E) cudaFree(gpu_sm.d_E);
 
+        if (gpu_sm.d_rho_old) cudaFree(gpu_sm.d_rho_old);
+        if (gpu_sm.d_ux_old) cudaFree(gpu_sm.d_ux_old);
+        if (gpu_sm.d_uy_old) cudaFree(gpu_sm.d_uy_old);
+        if (gpu_sm.d_uz_old) cudaFree(gpu_sm.d_uz_old);
+        if (gpu_sm.d_p_old) cudaFree(gpu_sm.d_p_old);
+        if (gpu_sm.d_E_old) cudaFree(gpu_sm.d_E_old);
+
         if (gpu_sm.d_new_rho) cudaFree(gpu_sm.d_new_rho);
         if (gpu_sm.d_new_ux) cudaFree(gpu_sm.d_new_ux);
         if (gpu_sm.d_new_uy) cudaFree(gpu_sm.d_new_uy);
@@ -2499,6 +2528,11 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::freeGPUSubMeshes() const {
             if (gpu_sm.d_alpha2) cudaFree(gpu_sm.d_alpha2);
             if (gpu_sm.d_arho1) cudaFree(gpu_sm.d_arho1);
             if (gpu_sm.d_arho2) cudaFree(gpu_sm.d_arho2);
+
+            if (gpu_sm.d_alpha1_old) cudaFree(gpu_sm.d_alpha1_old);
+            if (gpu_sm.d_alpha2_old) cudaFree(gpu_sm.d_alpha2_old);
+            if (gpu_sm.d_arho1_old) cudaFree(gpu_sm.d_arho1_old);
+            if (gpu_sm.d_arho2_old) cudaFree(gpu_sm.d_arho2_old);
 
             if (gpu_sm.d_new_alpha1) cudaFree(gpu_sm.d_new_alpha1);
             if (gpu_sm.d_new_alpha2) cudaFree(gpu_sm.d_new_alpha2);
@@ -2528,6 +2562,14 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::syncSubMeshesToGPU() const {
         CHECK_CUDA(cudaMemcpy(gpu_sm.d_uz, sm->uz.data(), bytes, cudaMemcpyHostToDevice));
         CHECK_CUDA(cudaMemcpy(gpu_sm.d_p, sm->p.data(), bytes, cudaMemcpyHostToDevice));
         CHECK_CUDA(cudaMemcpy(gpu_sm.d_E, sm->E.data(), bytes, cudaMemcpyHostToDevice));
+
+        CHECK_CUDA(cudaMemcpy(gpu_sm.d_rho_old, sm->rho.data(), bytes, cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(gpu_sm.d_ux_old, sm->ux.data(), bytes, cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(gpu_sm.d_uy_old, sm->uy.data(), bytes, cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(gpu_sm.d_uz_old, sm->uz.data(), bytes, cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(gpu_sm.d_p_old, sm->p.data(), bytes, cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(gpu_sm.d_E_old, sm->E.data(), bytes, cudaMemcpyHostToDevice));
+
         CHECK_CUDA(cudaMemcpy(gpu_sm.d_peak_overpressure, sm->peak_overpressure.data(), bytes, cudaMemcpyHostToDevice));
         CHECK_CUDA(cudaMemcpy(gpu_sm.d_peak_impulse, sm->peak_impulse.data(), bytes, cudaMemcpyHostToDevice));
 
@@ -2543,6 +2585,11 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::syncSubMeshesToGPU() const {
                 CHECK_CUDA(cudaMemcpy(gpu_sm.d_alpha2, sm->alpha2.data(), bytes, cudaMemcpyHostToDevice));
                 CHECK_CUDA(cudaMemcpy(gpu_sm.d_arho1, sm->arho1.data(), bytes, cudaMemcpyHostToDevice));
                 CHECK_CUDA(cudaMemcpy(gpu_sm.d_arho2, sm->arho2.data(), bytes, cudaMemcpyHostToDevice));
+
+                CHECK_CUDA(cudaMemcpy(gpu_sm.d_alpha1_old, sm->alpha1.data(), bytes, cudaMemcpyHostToDevice));
+                CHECK_CUDA(cudaMemcpy(gpu_sm.d_alpha2_old, sm->alpha2.data(), bytes, cudaMemcpyHostToDevice));
+                CHECK_CUDA(cudaMemcpy(gpu_sm.d_arho1_old, sm->arho1.data(), bytes, cudaMemcpyHostToDevice));
+                CHECK_CUDA(cudaMemcpy(gpu_sm.d_arho2_old, sm->arho2.data(), bytes, cudaMemcpyHostToDevice));
             }
         }
     }
@@ -2612,14 +2659,91 @@ __global__ void prolongate_ghosts_kernel_3d(
 
     RealType eps_h = static_cast<RealType>(1e-4) * h_p;
 
-    bool touch_x_min = (i < n_ghost && xmin_c <= xmin_p + eps_h);
-    bool touch_x_max = (i >= nx_c - n_ghost && xmin_c + nx_c * h_c >= xmin_p + nx_p * h_p - eps_h);
-    bool touch_y_min = (j < n_ghost && ymin_c <= ymin_p + eps_h);
-    bool touch_y_max = (j >= ny_c - n_ghost && ymin_c + ny_c * h_c >= ymin_p + ny_p * h_p - eps_h);
-    bool touch_z_min = (k < n_ghost && zmin_c <= zmin_p + eps_h);
-    bool touch_z_max = (k >= nz_c - n_ghost && zmin_c + nz_c * h_c >= zmin_p + nz_p * h_p - eps_h);
+    RealType xmax_p = xmin_p + nx_p * h_p;
+    RealType ymax_p = ymin_p + ny_p * h_p;
+    RealType zmax_p = zmin_p + nz_p * h_p;
 
+    bool out_x_min = (x_child < xmin_p - eps_h);
+    bool out_x_max = (x_child > xmax_p + eps_h);
+    bool out_y_min = (y_child < ymin_p - eps_h);
+    bool out_y_max = (y_child > ymax_p + eps_h);
+    bool out_z_min = (z_child < zmin_p - eps_h);
+    bool out_z_max = (z_child > zmax_p + eps_h);
+
+    bool is_outside_domain = (out_x_min || out_x_max || out_y_min || out_y_max || out_z_min || out_z_max);
     size_t child_idx = i + j * nx_c + k * nx_c * ny_c;
+
+    if (is_outside_domain) {
+        int i_src = i;
+        int j_src = j;
+        int k_src = k;
+
+        bool flip_ux = false;
+        bool flip_uy = false;
+        bool flip_uz = false;
+
+        if (out_x_min) {
+            i_src = 2 * n_ghost - 1 - i;
+            if (bcXmin == 0) flip_ux = true;
+        } else if (out_x_max) {
+            i_src = 2 * (nx_c - n_ghost) - 1 - i;
+            if (bcXmax == 0) flip_ux = true;
+        }
+
+        if (out_y_min) {
+            j_src = 2 * n_ghost - 1 - j;
+            if (bcYmin == 0) flip_uy = true;
+        } else if (out_y_max) {
+            j_src = 2 * (ny_c - n_ghost) - 1 - j;
+            if (bcYmax == 0) flip_uy = true;
+        }
+
+        if (out_z_min) {
+            k_src = 2 * n_ghost - 1 - k;
+            if (bcZmin == 0) flip_uz = true;
+        } else if (out_z_max) {
+            k_src = 2 * (nz_c - n_ghost) - 1 - k;
+            if (bcZmax == 0) flip_uz = true;
+        }
+
+        i_src = min(max(i_src, 0), nx_c - 1);
+        j_src = min(max(j_src, 0), ny_c - 1);
+        k_src = min(max(k_src, 0), nz_c - 1);
+
+        size_t src_idx = i_src + j_src * nx_c + k_src * nx_c * ny_c;
+
+        RealType r_val = d_rho[src_idx];
+        RealType u_val = flip_ux ? -d_ux[src_idx] : d_ux[src_idx];
+        RealType v_val = flip_uy ? -d_uy[src_idx] : d_uy[src_idx];
+        RealType w_val = flip_uz ? -d_uz[src_idx] : d_uz[src_idx];
+        RealType p_val = d_p[src_idx];
+
+        d_rho[child_idx] = r_val;
+        d_ux[child_idx]  = u_val;
+        d_uy[child_idx]  = v_val;
+        d_uz[child_idx]  = w_val;
+        d_p[child_idx]   = p_val;
+
+        RealType gm1 = max(static_cast<RealType>(1e-4), gamma - static_cast<RealType>(1.0));
+        RealType ke = static_cast<RealType>(0.5) * r_val * (u_val*u_val + v_val*v_val + w_val*w_val);
+
+        if constexpr (IsMultiMaterial) {
+            RealType a1 = d_alpha1 ? d_alpha1[src_idx] : static_cast<RealType>(0.0);
+            RealType a2 = d_alpha2 ? d_alpha2[src_idx] : static_cast<RealType>(0.0);
+            RealType ar1 = d_arho1 ? d_arho1[src_idx] : static_cast<RealType>(0.0);
+            RealType ar2 = d_arho2 ? d_arho2[src_idx] : static_cast<RealType>(0.0);
+
+            if (d_alpha1) d_alpha1[child_idx] = a1;
+            if (d_alpha2) d_alpha2[child_idx] = a2;
+            if (d_arho1)  d_arho1[child_idx]  = ar1;
+            if (d_arho2)  d_arho2[child_idx]  = ar2;
+
+            d_E[child_idx] = MultiMat::getMixtureEnergy<RealType>(p_val, r_val, a1, a2, ar1, ar2, (RealType)gamma, d_products, d_unreacted) + ke;
+        } else {
+            d_E[child_idx] = p_val / gm1 + ke;
+        }
+        return;
+    }
 
     RealType parent_i_f = (x_child - xmin_p) / h_p - static_cast<RealType>(0.5);
     RealType parent_j_f = (y_child - ymin_p) / h_p - static_cast<RealType>(0.5);
@@ -2690,13 +2814,6 @@ __global__ void prolongate_ghosts_kernel_3d(
     RealType w_interp = interp_temporal(3);
     RealType p_interp = max(static_cast<RealType>(1e-8), interp_temporal(4));
 
-    if (touch_x_min && bcXmin == 0) u_interp = -u_interp;
-    if (touch_x_max && bcXmax == 0) u_interp = -u_interp;
-    if (touch_y_min && bcYmin == 0) v_interp = -v_interp;
-    if (touch_y_max && bcYmax == 0) v_interp = -v_interp;
-    if (touch_z_min && bcZmin == 0) w_interp = -w_interp;
-    if (touch_z_max && bcZmax == 0) w_interp = -w_interp;
-
     d_rho[child_idx] = r_interp;
     d_ux[child_idx] = u_interp;
     d_uy[child_idx] = v_interp;
@@ -2717,9 +2834,210 @@ __global__ void prolongate_ghosts_kernel_3d(
         if (d_arho1) d_arho1[child_idx] = ar1;
         if (d_arho2) d_arho2[child_idx] = ar2;
 
-        d_E[child_idx] = (RealType)MultiMat::getMixtureEnergy((double)p_interp, (double)r_interp, (double)a1, (double)a2, (double)ar1, (double)ar2, (double)gamma, d_products, d_unreacted) + ke;
+        d_E[child_idx] = MultiMat::getMixtureEnergy<RealType>(p_interp, r_interp, a1, a2, ar1, ar2, (RealType)gamma, d_products, d_unreacted) + ke;
     } else {
         d_E[child_idx] = p_interp / gm1 + ke;
+    }
+}
+
+template <typename RealType, bool IsMultiMaterial>
+__global__ void prolongate_ghosts_submesh_kernel_3d(
+    const RealType* p_rho_old, const RealType* p_ux_old, const RealType* p_uy_old, const RealType* p_uz_old, const RealType* p_p_old, const RealType* p_E_old,
+    const RealType* p_alpha1_old, const RealType* p_alpha2_old, const RealType* p_arho1_old, const RealType* p_arho2_old,
+    const RealType* p_rho_new, const RealType* p_ux_new, const RealType* p_uy_new, const RealType* p_uz_new, const RealType* p_p_new, const RealType* p_E_new,
+    const RealType* p_alpha1_new, const RealType* p_alpha2_new, const RealType* p_arho1_new, const RealType* p_arho2_new,
+    RealType tau,
+    int nx_p, int ny_p, int nz_p,
+    RealType xmin_p, RealType ymin_p, RealType zmin_p, RealType h_p,
+    RealType gamma,
+    int nx_c, int ny_c, int nz_c,
+    RealType xmin_c, RealType ymin_c, RealType zmin_c, RealType h_c,
+    RealType xmin_domain, RealType ymin_domain, RealType zmin_domain, RealType h_domain,
+    int nx_domain, int ny_domain, int nz_domain,
+    RealType* d_rho, RealType* d_ux, RealType* d_uy, RealType* d_uz, RealType* d_p, RealType* d_E,
+    RealType* d_alpha1, RealType* d_alpha2, RealType* d_arho1, RealType* d_arho2,
+    const GeometryTile3D* d_geom,
+    int bcXmin, int bcXmax, int bcYmin, int bcYmax, int bcZmin, int bcZmax,
+    int n_ghost
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+    int k = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if (i >= nx_c || j >= ny_c || k >= nz_c) return;
+
+    bool is_ghost = (i < n_ghost || i >= nx_c - n_ghost || j < n_ghost || j >= ny_c - n_ghost || k < n_ghost || k >= nz_c - n_ghost);
+    if (!is_ghost) return;
+
+    RealType x_child = xmin_c + (i + static_cast<RealType>(0.5)) * h_c;
+    RealType y_child = ymin_c + (j + static_cast<RealType>(0.5)) * h_c;
+    RealType z_child = zmin_c + (k + static_cast<RealType>(0.5)) * h_c;
+
+    RealType eps_h = static_cast<RealType>(1e-4) * h_domain;
+
+    RealType xmax_dom = xmin_domain + nx_domain * h_domain;
+    RealType ymax_dom = ymin_domain + ny_domain * h_domain;
+    RealType zmax_dom = zmin_domain + nz_domain * h_domain;
+
+    bool out_x_min = (x_child < xmin_domain - eps_h);
+    bool out_x_max = (x_child > xmax_dom + eps_h);
+    bool out_y_min = (y_child < ymin_domain - eps_h);
+    bool out_y_max = (y_child > ymax_dom + eps_h);
+    bool out_z_min = (z_child < zmin_domain - eps_h);
+    bool out_z_max = (z_child > zmax_dom + eps_h);
+
+    bool is_outside_domain = (out_x_min || out_x_max || out_y_min || out_y_max || out_z_min || out_z_max);
+    size_t child_idx = i + j * nx_c + k * nx_c * ny_c;
+
+    if (is_outside_domain) {
+        int i_src = i;
+        int j_src = j;
+        int k_src = k;
+
+        bool flip_ux = false;
+        bool flip_uy = false;
+        bool flip_uz = false;
+
+        if (out_x_min) {
+            i_src = 2 * n_ghost - 1 - i;
+            if (bcXmin == 0) flip_ux = true;
+        } else if (out_x_max) {
+            i_src = 2 * (nx_c - n_ghost) - 1 - i;
+            if (bcXmax == 0) flip_ux = true;
+        }
+
+        if (out_y_min) {
+            j_src = 2 * n_ghost - 1 - j;
+            if (bcYmin == 0) flip_uy = true;
+        } else if (out_y_max) {
+            j_src = 2 * (ny_c - n_ghost) - 1 - j;
+            if (bcYmax == 0) flip_uy = true;
+        }
+
+        if (out_z_min) {
+            k_src = 2 * n_ghost - 1 - k;
+            if (bcZmin == 0) flip_uz = true;
+        } else if (out_z_max) {
+            k_src = 2 * (nz_c - n_ghost) - 1 - k;
+            if (bcZmax == 0) flip_uz = true;
+        }
+
+        i_src = min(max(i_src, 0), nx_c - 1);
+        j_src = min(max(j_src, 0), ny_c - 1);
+        k_src = min(max(k_src, 0), nz_c - 1);
+
+        size_t src_idx = i_src + j_src * nx_c + k_src * nx_c * ny_c;
+
+        RealType r_val = d_rho[src_idx];
+        RealType u_val = flip_ux ? -d_ux[src_idx] : d_ux[src_idx];
+        RealType v_val = flip_uy ? -d_uy[src_idx] : d_uy[src_idx];
+        RealType w_val = flip_uz ? -d_uz[src_idx] : d_uz[src_idx];
+        RealType p_val = d_p[src_idx];
+
+        d_rho[child_idx] = r_val;
+        d_ux[child_idx]  = u_val;
+        d_uy[child_idx]  = v_val;
+        d_uz[child_idx]  = w_val;
+        d_p[child_idx]   = p_val;
+
+        RealType gm1 = max(static_cast<RealType>(1e-4), gamma - static_cast<RealType>(1.0));
+        RealType ke = static_cast<RealType>(0.5) * r_val * (u_val*u_val + v_val*v_val + w_val*w_val);
+
+        if constexpr (IsMultiMaterial) {
+            RealType a1 = d_alpha1 ? d_alpha1[src_idx] : static_cast<RealType>(0.0);
+            RealType a2 = d_alpha2 ? d_alpha2[src_idx] : static_cast<RealType>(0.0);
+            RealType ar1 = d_arho1 ? d_arho1[src_idx] : static_cast<RealType>(0.0);
+            RealType ar2 = d_arho2 ? d_arho2[src_idx] : static_cast<RealType>(0.0);
+
+            if (d_alpha1) d_alpha1[child_idx] = a1;
+            if (d_alpha2) d_alpha2[child_idx] = a2;
+            if (d_arho1)  d_arho1[child_idx]  = ar1;
+            if (d_arho2)  d_arho2[child_idx]  = ar2;
+
+            d_E[child_idx] = MultiMat::getMixtureEnergy<RealType>(p_val, r_val, a1, a2, ar1, ar2, (RealType)gamma, d_products, d_unreacted) + ke;
+        } else {
+            d_E[child_idx] = p_val / gm1 + ke;
+        }
+        return;
+    }
+
+    RealType parent_i_f = (x_child - xmin_p) / h_p - static_cast<RealType>(0.5);
+    RealType parent_j_f = (y_child - ymin_p) / h_p - static_cast<RealType>(0.5);
+    RealType parent_k_f = (z_child - zmin_p) / h_p - static_cast<RealType>(0.5);
+
+    int i0 = min(max((int)floor(parent_i_f), 0), nx_p - 1);
+    int j0 = min(max((int)floor(parent_j_f), 0), ny_p - 1);
+    int k0 = min(max((int)floor(parent_k_f), 0), nz_p - 1);
+    int i1 = min(i0 + 1, nx_p - 1);
+    int j1 = min(j0 + 1, ny_p - 1);
+    int k1 = min(k0 + 1, nz_p - 1);
+
+    RealType wx = min(max(parent_i_f - i0, static_cast<RealType>(0.0)), static_cast<RealType>(1.0));
+    RealType wy = min(max(parent_j_f - j0, static_cast<RealType>(0.0)), static_cast<RealType>(1.0));
+    RealType wz = min(max(parent_k_f - k0, static_cast<RealType>(0.0)), static_cast<RealType>(1.0));
+
+    RealType w000 = (1 - wx) * (1 - wy) * (1 - wz);
+    RealType w100 = wx * (1 - wy) * (1 - wz);
+    RealType w010 = (1 - wx) * wy * (1 - wz);
+    RealType w110 = wx * wy * (1 - wz);
+    RealType w001 = (1 - wx) * (1 - wy) * wz;
+    RealType w101 = wx * (1 - wy) * wz;
+    RealType w011 = (1 - wx) * wy * wz;
+    RealType w111 = wx * wy * wz;
+
+    auto interpolate_p = [&](const RealType* p_buf) -> RealType {
+        if (!p_buf) return static_cast<RealType>(0.0);
+        size_t idx000 = i0 + j0 * nx_p + k0 * nx_p * ny_p;
+        size_t idx100 = i1 + j0 * nx_p + k0 * nx_p * ny_p;
+        size_t idx010 = i0 + j1 * nx_p + k0 * nx_p * ny_p;
+        size_t idx110 = i1 + j1 * nx_p + k0 * nx_p * ny_p;
+        size_t idx001 = i0 + j0 * nx_p + k1 * nx_p * ny_p;
+        size_t idx101 = i1 + j0 * nx_p + k1 * nx_p * ny_p;
+        size_t idx011 = i0 + j1 * nx_p + k1 * nx_p * ny_p;
+        size_t idx111 = i1 + j1 * nx_p + k1 * nx_p * ny_p;
+
+        return w000 * p_buf[idx000] + w100 * p_buf[idx100] +
+               w010 * p_buf[idx010] + w110 * p_buf[idx110] +
+               w001 * p_buf[idx001] + w101 * p_buf[idx101] +
+               w011 * p_buf[idx011] + w111 * p_buf[idx111];
+    };
+
+    auto interp_temporal = [&](const RealType* old_buf, const RealType* new_buf) -> RealType {
+        if (!old_buf) return interpolate_p(new_buf);
+        RealType val_old = interpolate_p(old_buf);
+        RealType val_new = interpolate_p(new_buf);
+        return (static_cast<RealType>(1.0) - tau) * val_old + tau * val_new;
+    };
+
+    RealType r_val = max(static_cast<RealType>(1e-8), interp_temporal(p_rho_old, p_rho_new));
+    RealType u_val = interp_temporal(p_ux_old, p_ux_new);
+    RealType v_val = interp_temporal(p_uy_old, p_uy_new);
+    RealType w_val = interp_temporal(p_uz_old, p_uz_new);
+    RealType p_val = max(static_cast<RealType>(1e-8), interp_temporal(p_p_old, p_p_new));
+
+    d_rho[child_idx] = r_val;
+    d_ux[child_idx]  = u_val;
+    d_uy[child_idx]  = v_val;
+    d_uz[child_idx]  = w_val;
+    d_p[child_idx]   = p_val;
+
+    RealType gm1 = max(static_cast<RealType>(1e-4), gamma - static_cast<RealType>(1.0));
+    RealType ke = static_cast<RealType>(0.5) * r_val * (u_val*u_val + v_val*v_val + w_val*w_val);
+
+    if constexpr (IsMultiMaterial) {
+        RealType a1  = min(max(interp_temporal(p_alpha1_old, p_alpha1_new), static_cast<RealType>(0.0)), static_cast<RealType>(1.0));
+        RealType a2  = min(max(interp_temporal(p_alpha2_old, p_alpha2_new), static_cast<RealType>(0.0)), static_cast<RealType>(1.0));
+        RealType ar1 = min(max(interp_temporal(p_arho1_old, p_arho1_new),   static_cast<RealType>(0.0)), r_val);
+        RealType ar2 = min(max(interp_temporal(p_arho2_old, p_arho2_new),   static_cast<RealType>(0.0)), r_val);
+
+        if (d_alpha1) d_alpha1[child_idx] = a1;
+        if (d_alpha2) d_alpha2[child_idx] = a2;
+        if (d_arho1)  d_arho1[child_idx]  = ar1;
+        if (d_arho2)  d_arho2[child_idx]  = ar2;
+
+        d_E[child_idx] = MultiMat::getMixtureEnergy<RealType>(p_val, r_val, a1, a2, ar1, ar2, (RealType)gamma, d_products, d_unreacted) + ke;
+    } else {
+        d_E[child_idx] = p_val / gm1 + ke;
     }
 }
 
@@ -2839,6 +3157,43 @@ __global__ void submesh_step_kernel_3d(
         if (spatial_order == 1) {
             sL = sM1;
             sR = sP0;
+        } else if (spatial_order == 3) {
+            auto reconstruct_var = [&](RealType vM2, RealType vM1, RealType vP0, RealType vP1, RealType& vL, RealType& vR) {
+                vL = weno3_gpu(vM2, vM1, vP0);
+                vR = weno3_gpu(vP1, vP0, vM1);
+            };
+
+            reconstruct_var(sM2.rho, sM1.rho, sP0.rho, sP1.rho, sL.rho, sR.rho);
+            sL.rho = max(static_cast<RealType>(1e-8), sL.rho);
+            sR.rho = max(static_cast<RealType>(1e-8), sR.rho);
+
+            reconstruct_var(sM2.ux, sM1.ux, sP0.ux, sP1.ux, sL.ux, sR.ux);
+            reconstruct_var(sM2.uy, sM1.uy, sP0.uy, sP1.uy, sL.uy, sR.uy);
+            reconstruct_var(sM2.uz, sM1.uz, sP0.uz, sP1.uz, sL.uz, sR.uz);
+
+            reconstruct_var(sM2.p, sM1.p, sP0.p, sP1.p, sL.p, sR.p);
+            sL.p = max(static_cast<RealType>(1e-8), sL.p);
+            sR.p = max(static_cast<RealType>(1e-8), sR.p);
+
+            RealType keL = static_cast<RealType>(0.5) * sL.rho * (sL.ux*sL.ux + sL.uy*sL.uy + sL.uz*sL.uz);
+            RealType keR = static_cast<RealType>(0.5) * sR.rho * (sR.ux*sR.ux + sR.uy*sR.uy + sR.uz*sR.uz);
+            sL.E = sL.p / gm1 + keL;
+            sR.E = sR.p / gm1 + keR;
+
+            if constexpr (IsMultiMaterial) {
+                reconstruct_var(sM2.alpha1, sM1.alpha1, sP0.alpha1, sP1.alpha1, sL.alpha1, sR.alpha1);
+                reconstruct_var(sM2.alpha2, sM1.alpha2, sP0.alpha2, sP1.alpha2, sL.alpha2, sR.alpha2);
+                reconstruct_var(sM2.arho1, sM1.arho1, sP0.arho1, sP1.arho1, sL.arho1, sR.arho1);
+                reconstruct_var(sM2.arho2, sM1.arho2, sP0.arho2, sP1.arho2, sL.arho2, sR.arho2);
+
+                sL.alpha1 = min(max(sL.alpha1, static_cast<RealType>(0.0)), static_cast<RealType>(1.0));
+                sL.alpha2 = min(max(sL.alpha2, static_cast<RealType>(0.0)), static_cast<RealType>(1.0));
+                sR.alpha1 = min(max(sR.alpha1, static_cast<RealType>(0.0)), static_cast<RealType>(1.0));
+                sR.alpha2 = min(max(sR.alpha2, static_cast<RealType>(0.0)), static_cast<RealType>(1.0));
+
+                sL.E = MultiMat::getMixtureEnergy<RealType>(sL.p, sL.rho, sL.alpha1, sL.alpha2, sL.arho1, sL.arho2, (RealType)gamma, d_products, d_unreacted) + keL;
+                sR.E = MultiMat::getMixtureEnergy<RealType>(sR.p, sR.rho, sR.alpha1, sR.alpha2, sR.arho1, sR.arho2, (RealType)gamma, d_products, d_unreacted) + keR;
+            }
         } else {
             auto reconstruct_var = [&](RealType vM2, RealType vM1, RealType vP0, RealType vP1, RealType& vL, RealType& vR) {
                 RealType dL = vM1 - vM2;
@@ -2876,8 +3231,8 @@ __global__ void submesh_step_kernel_3d(
                 sR.alpha1 = min(max(sR.alpha1, static_cast<RealType>(0.0)), static_cast<RealType>(1.0));
                 sR.alpha2 = min(max(sR.alpha2, static_cast<RealType>(0.0)), static_cast<RealType>(1.0));
 
-                sL.E = (RealType)MultiMat::getMixtureEnergy((double)sL.p, (double)sL.rho, (double)sL.alpha1, (double)sL.alpha2, (double)sL.arho1, (double)sL.arho2, (double)gamma, d_products, d_unreacted) + keL;
-                sR.E = (RealType)MultiMat::getMixtureEnergy((double)sR.p, (double)sR.rho, (double)sR.alpha1, (double)sR.alpha2, (double)sR.arho1, (double)sR.arho2, (double)gamma, d_products, d_unreacted) + keR;
+                sL.E = MultiMat::getMixtureEnergy<RealType>(sL.p, sL.rho, sL.alpha1, sL.alpha2, sL.arho1, sL.arho2, (RealType)gamma, d_products, d_unreacted) + keL;
+                sR.E = MultiMat::getMixtureEnergy<RealType>(sR.p, sR.rho, sR.alpha1, sR.alpha2, sR.arho1, sR.arho2, (RealType)gamma, d_products, d_unreacted) + keR;
             }
         }
     };
@@ -2924,14 +3279,14 @@ __global__ void submesh_step_kernel_3d(
         getAUSMPlusFluxGPU<RealType, IsMultiMaterial>(sLz_L, sLz_R, fZ_L, 2, gamma);
         getAUSMPlusFluxGPU<RealType, IsMultiMaterial>(sRz_L, sRz_R, fZ_R, 2, gamma);
     } else {
-        getAUSMPlusFluxGPU<RealType, IsMultiMaterial>(sLx_L, sLx_R, fX_L, 0, gamma);
-        getAUSMPlusFluxGPU<RealType, IsMultiMaterial>(sRx_L, sRx_R, fX_R, 0, gamma);
+        getRusanovFluxGPU<RealType, IsMultiMaterial>(sLx_L, sLx_R, fX_L, 0, gamma);
+        getRusanovFluxGPU<RealType, IsMultiMaterial>(sRx_L, sRx_R, fX_R, 0, gamma);
 
-        getAUSMPlusFluxGPU<RealType, IsMultiMaterial>(sLy_L, sLy_R, fY_L, 1, gamma);
-        getAUSMPlusFluxGPU<RealType, IsMultiMaterial>(sRy_L, sRy_R, fY_R, 1, gamma);
+        getRusanovFluxGPU<RealType, IsMultiMaterial>(sLy_L, sLy_R, fY_L, 1, gamma);
+        getRusanovFluxGPU<RealType, IsMultiMaterial>(sRy_L, sRy_R, fY_R, 1, gamma);
 
-        getAUSMPlusFluxGPU<RealType, IsMultiMaterial>(sLz_L, sLz_R, fZ_L, 2, gamma);
-        getAUSMPlusFluxGPU<RealType, IsMultiMaterial>(sRz_L, sRz_R, fZ_R, 2, gamma);
+        getRusanovFluxGPU<RealType, IsMultiMaterial>(sLz_L, sLz_R, fZ_L, 2, gamma);
+        getRusanovFluxGPU<RealType, IsMultiMaterial>(sRz_L, sRz_R, fZ_R, 2, gamma);
     }
 
     GPUCellStateT<RealType> sC = get_state_at(i, j, k);
@@ -2993,7 +3348,7 @@ __global__ void submesh_step_kernel_3d(
                 d_new_arho1[c_idx] = d_new_alpha1[c_idx] * rho_clamped;
                 d_new_arho2[c_idx] = d_new_alpha2[c_idx] * rho_clamped;
 
-                RealType p_n = (RealType)MultiMat::getMixturePressure((double)e_int, (double)rho_clamped, (double)d_new_alpha1[c_idx], (double)d_new_alpha2[c_idx], (double)d_new_arho1[c_idx], (double)d_new_arho2[c_idx], (double)gamma, d_products, d_unreacted);
+                RealType p_n = MultiMat::getMixturePressure<RealType>(e_int, rho_clamped, d_new_alpha1[c_idx], d_new_alpha2[c_idx], d_new_arho1[c_idx], d_new_arho2[c_idx], (RealType)gamma, d_products, d_unreacted);
                 if (isnan(p_n) || isinf(p_n) || p_n < static_cast<RealType>(1e-8)) {
                     p_n = static_cast<RealType>(101325.0);
                     d_new_rho[c_idx] = static_cast<RealType>(1.225);
@@ -3008,7 +3363,7 @@ __global__ void submesh_step_kernel_3d(
                     e_int = p_n / gm1;
                 }
                 d_new_p[c_idx] = p_n;
-                d_new_E[c_idx] = (RealType)MultiMat::getMixtureEnergy((double)p_n, (double)d_new_rho[c_idx], (double)d_new_alpha1[c_idx], (double)d_new_alpha2[c_idx], (double)d_new_arho1[c_idx], (double)d_new_arho2[c_idx], (double)gamma, d_products, d_unreacted) + ke_n;
+                d_new_E[c_idx] = MultiMat::getMixtureEnergy<RealType>(p_n, d_new_rho[c_idx], d_new_alpha1[c_idx], d_new_alpha2[c_idx], d_new_arho1[c_idx], d_new_arho2[c_idx], (RealType)gamma, d_products, d_unreacted) + ke_n;
             }
         } else {
             RealType p_n = e_int * gm1;
@@ -3041,6 +3396,7 @@ __global__ void submesh_step_kernel_3d(
 template <typename RealType, bool IsMultiMaterial>
 __global__ void restrict_to_parent_kernel_3d(
     PrimitiveTile3D<RealType, IsMultiMaterial>* d_states,
+    ConservativeTile3D<RealType, IsMultiMaterial>* d_U,
     int ntx, int nty, int ntz,
     int nx_c, int ny_c, int nz_c,
     RealType xmin_c, RealType ymin_c, RealType zmin_c, RealType h_c,
@@ -3133,12 +3489,25 @@ __global__ void restrict_to_parent_kernel_3d(
 
         RealType inv_vc = static_cast<RealType>(1.0) / static_cast<RealType>(valid_cells);
         RealType avg_rho = max(static_cast<RealType>(1e-8), sum_rho * inv_vc);
+        RealType avg_rhoux = sum_rhoux * inv_vc;
+        RealType avg_rhouy = sum_rhouy * inv_vc;
+        RealType avg_rhouz = sum_rhouz * inv_vc;
+        RealType avg_p = max(static_cast<RealType>(1e-8), sum_p * inv_vc);
+        RealType avg_E = sum_E * inv_vc;
 
         d_states[t_idx_p].rho[cell_idx_p] = avg_rho;
-        d_states[t_idx_p].ux[cell_idx_p] = (sum_rhoux * inv_vc) / avg_rho;
-        d_states[t_idx_p].uy[cell_idx_p] = (sum_rhouy * inv_vc) / avg_rho;
-        d_states[t_idx_p].uz[cell_idx_p] = (sum_rhouz * inv_vc) / avg_rho;
-        d_states[t_idx_p].p[cell_idx_p] = max(static_cast<RealType>(1e-8), sum_p * inv_vc);
+        d_states[t_idx_p].ux[cell_idx_p] = avg_rhoux / avg_rho;
+        d_states[t_idx_p].uy[cell_idx_p] = avg_rhouy / avg_rho;
+        d_states[t_idx_p].uz[cell_idx_p] = avg_rhouz / avg_rho;
+        d_states[t_idx_p].p[cell_idx_p] = avg_p;
+
+        if (d_U) {
+            d_U[t_idx_p].rho[cell_idx_p] = avg_rho;
+            d_U[t_idx_p].rhoux[cell_idx_p] = avg_rhoux;
+            d_U[t_idx_p].rhouy[cell_idx_p] = avg_rhouy;
+            d_U[t_idx_p].rhouz[cell_idx_p] = avg_rhouz;
+            d_U[t_idx_p].E[cell_idx_p] = avg_E;
+        }
 
         if (d_peak_overpressure && max_peak_op > d_states[t_idx_p].peak_overpressure[cell_idx_p]) {
             d_states[t_idx_p].peak_overpressure[cell_idx_p] = max_peak_op;
@@ -3149,10 +3518,137 @@ __global__ void restrict_to_parent_kernel_3d(
 
         if constexpr (IsMultiMaterial) {
             if (d_alpha1) {
-                d_states[t_idx_p].alpha1[cell_idx_p] = sum_alpha1 * inv_vc;
-                d_states[t_idx_p].alpha2[cell_idx_p] = sum_alpha2 * inv_vc;
-                d_states[t_idx_p].arho1[cell_idx_p] = sum_arho1 * inv_vc;
-                d_states[t_idx_p].arho2[cell_idx_p] = sum_arho2 * inv_vc;
+                RealType a1 = sum_alpha1 * inv_vc;
+                RealType a2 = sum_alpha2 * inv_vc;
+                RealType ar1 = sum_arho1 * inv_vc;
+                RealType ar2 = sum_arho2 * inv_vc;
+
+                d_states[t_idx_p].alpha1[cell_idx_p] = a1;
+                d_states[t_idx_p].alpha2[cell_idx_p] = a2;
+                d_states[t_idx_p].arho1[cell_idx_p] = ar1;
+                d_states[t_idx_p].arho2[cell_idx_p] = ar2;
+
+                if (d_U) {
+                    d_U[t_idx_p].alpha1[cell_idx_p] = a1;
+                    d_U[t_idx_p].alpha2[cell_idx_p] = a2;
+                    d_U[t_idx_p].arho1[cell_idx_p] = ar1;
+                    d_U[t_idx_p].arho2[cell_idx_p] = ar2;
+                }
+            }
+        }
+    }
+}
+
+template <typename RealType, bool IsMultiMaterial>
+__global__ void restrict_to_parent_submesh_kernel_3d(
+    RealType* p_rho, RealType* p_ux, RealType* p_uy, RealType* p_uz, RealType* p_p, RealType* p_E,
+    RealType* p_alpha1, RealType* p_alpha2, RealType* p_arho1, RealType* p_arho2,
+    RealType* p_peak_overpressure, RealType* p_peak_impulse,
+    int nx_p, int ny_p, int nz_p,
+    RealType xmin_p, RealType ymin_p, RealType zmin_p, RealType h_p,
+    int nx_c, int ny_c, int nz_c,
+    RealType xmin_c, RealType ymin_c, RealType zmin_c, RealType h_c,
+    const RealType* d_rho, const RealType* d_ux, const RealType* d_uy, const RealType* d_uz, const RealType* d_p, const RealType* d_E,
+    const RealType* d_alpha1, const RealType* d_alpha2, const RealType* d_arho1, const RealType* d_arho2,
+    const RealType* d_peak_overpressure, const RealType* d_peak_impulse,
+    const uint8_t* d_is_boundary,
+    const GeometryTile3D* d_geom,
+    int n_ghost
+) {
+    int k_idx = blockIdx.z * blockDim.z + threadIdx.z;
+    int j_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    int i_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int ck = k_idx * 2;
+    int cj = j_idx * 2;
+    int ci = i_idx * 2;
+
+    if (ck >= nz_c || cj >= ny_c || ci >= nx_c) return;
+
+    if (ci < n_ghost || ci + 1 >= nx_c - n_ghost ||
+        cj < n_ghost || cj + 1 >= ny_c - n_ghost ||
+        ck < n_ghost || ck + 1 >= nz_c - n_ghost) {
+        return;
+    }
+
+    RealType z_child = zmin_c + (ck + static_cast<RealType>(0.5)) * h_c;
+    RealType y_child = ymin_c + (cj + static_cast<RealType>(0.5)) * h_c;
+    RealType x_child = xmin_c + (ci + static_cast<RealType>(0.5)) * h_c;
+
+    int pk = min(max((int)floor((z_child - zmin_p) / h_p), 0), nz_p - 1);
+    int pj = min(max((int)floor((y_child - ymin_p) / h_p), 0), ny_p - 1);
+    int pi = min(max((int)floor((x_child - xmin_p) / h_p), 0), nx_p - 1);
+
+    RealType sum_rho = 0, sum_rhoux = 0, sum_rhouy = 0, sum_rhouz = 0, sum_p = 0, sum_E = 0;
+    RealType sum_alpha1 = 0, sum_alpha2 = 0, sum_arho1 = 0, sum_arho2 = 0;
+    RealType max_peak_op = static_cast<RealType>(0.0);
+    RealType max_peak_imp = static_cast<RealType>(0.0);
+    int valid_cells = 0;
+
+    for (int dk = 0; dk < 2 && (ck + dk) < nz_c; ++dk) {
+        for (int dj = 0; dj < 2 && (cj + dj) < ny_c; ++dj) {
+            for (int di = 0; di < 2 && (ci + di) < nx_c; ++di) {
+                size_t c_idx = (ci + di) + (cj + dj) * nx_c + (ck + dk) * nx_c * ny_c;
+                if (d_is_boundary && d_is_boundary[c_idx]) continue;
+
+                RealType r = d_rho[c_idx];
+                sum_rho += r;
+                sum_rhoux += r * d_ux[c_idx];
+                sum_rhouy += r * d_uy[c_idx];
+                sum_rhouz += r * d_uz[c_idx];
+                sum_p += d_p[c_idx];
+                sum_E += d_E[c_idx];
+                valid_cells++;
+
+                if (d_peak_overpressure) {
+                    RealType op = d_peak_overpressure[c_idx];
+                    if (op > max_peak_op) max_peak_op = op;
+                }
+                if (d_peak_impulse) {
+                    RealType imp = d_peak_impulse[c_idx];
+                    if (imp > max_peak_imp) max_peak_imp = imp;
+                }
+
+                if constexpr (IsMultiMaterial) {
+                    if (d_alpha1) {
+                        sum_alpha1 += d_alpha1[c_idx];
+                        sum_alpha2 += d_alpha2[c_idx];
+                        sum_arho1 += d_arho1[c_idx];
+                        sum_arho2 += d_arho2[c_idx];
+                    }
+                }
+            }
+        }
+    }
+
+    if (valid_cells > 0) {
+        size_t p_idx = pi + pj * nx_p + pk * nx_p * ny_p;
+
+        RealType inv_vc = static_cast<RealType>(1.0) / static_cast<RealType>(valid_cells);
+        RealType avg_rho = max(static_cast<RealType>(1e-8), sum_rho * inv_vc);
+
+        p_rho[p_idx] = avg_rho;
+        p_ux[p_idx]  = (sum_rhoux * inv_vc) / avg_rho;
+        p_uy[p_idx]  = (sum_rhouy * inv_vc) / avg_rho;
+        p_uz[p_idx]  = (sum_rhouz * inv_vc) / avg_rho;
+        p_p[p_idx]   = max(static_cast<RealType>(1e-8), sum_p * inv_vc);
+        if (p_E) {
+            p_E[p_idx] = sum_E * inv_vc;
+        }
+
+        if (p_peak_overpressure && max_peak_op > p_peak_overpressure[p_idx]) {
+            p_peak_overpressure[p_idx] = max_peak_op;
+        }
+        if (p_peak_impulse && max_peak_imp > p_peak_impulse[p_idx]) {
+            p_peak_impulse[p_idx] = max_peak_imp;
+        }
+
+        if constexpr (IsMultiMaterial) {
+            if (p_alpha1) {
+                p_alpha1[p_idx] = sum_alpha1 * inv_vc;
+                p_alpha2[p_idx] = sum_alpha2 * inv_vc;
+                p_arho1[p_idx]  = sum_arho1 * inv_vc;
+                p_arho2[p_idx]  = sum_arho2 * inv_vc;
             }
         }
     }
@@ -3232,66 +3728,154 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
         }
 
         int b1 = (int)bcXmin, b2 = (int)bcXmax, b3 = (int)bcYmin, b4 = (int)bcYmax, b5 = (int)bcZmin, b6 = (int)bcZmax;
-        int n_ghost = (spatialOrder == 2) ? 2 : 1;
+        int n_ghost = (spatialOrder >= 2) ? 2 : 1;
+
+        int max_level = 0;
+        for (const auto& sm : gpu_submeshes) {
+            if (sm.level > max_level) max_level = sm.level;
+        }
+
+        std::function<void(int, double, double, double)> stepLevelRecursive =
+            [&](int level, double dt_level, double tau_start, double tau_step) {
+
+            if (level > max_level) return;
+
+            RealType dt_sub = (RealType)(dt_level * 0.5);
+
+            for (int substep = 0; substep < 2; ++substep) {
+                double tau = tau_start + (substep + 0.5) * tau_step * 0.5;
+
+                for (size_t sm_idx = 0; sm_idx < gpu_submeshes.size(); ++sm_idx) {
+                    auto& gpu_sm = gpu_submeshes[sm_idx];
+                    if (gpu_sm.level != level) continue;
+
+                    size_t cells_sm = (size_t)gpu_sm.nx * gpu_sm.ny * gpu_sm.nz;
+                    size_t bytes_sm = cells_sm * sizeof(RealType);
+                    CHECK_CUDA(cudaMemcpy(gpu_sm.d_rho_old, gpu_sm.d_rho, bytes_sm, cudaMemcpyDeviceToDevice));
+                    CHECK_CUDA(cudaMemcpy(gpu_sm.d_ux_old, gpu_sm.d_ux, bytes_sm, cudaMemcpyDeviceToDevice));
+                    CHECK_CUDA(cudaMemcpy(gpu_sm.d_uy_old, gpu_sm.d_uy, bytes_sm, cudaMemcpyDeviceToDevice));
+                    CHECK_CUDA(cudaMemcpy(gpu_sm.d_uz_old, gpu_sm.d_uz, bytes_sm, cudaMemcpyDeviceToDevice));
+                    CHECK_CUDA(cudaMemcpy(gpu_sm.d_p_old, gpu_sm.d_p, bytes_sm, cudaMemcpyDeviceToDevice));
+                    CHECK_CUDA(cudaMemcpy(gpu_sm.d_E_old, gpu_sm.d_E, bytes_sm, cudaMemcpyDeviceToDevice));
+                    if constexpr (IsMultiMaterial) {
+                        CHECK_CUDA(cudaMemcpy(gpu_sm.d_alpha1_old, gpu_sm.d_alpha1, bytes_sm, cudaMemcpyDeviceToDevice));
+                        CHECK_CUDA(cudaMemcpy(gpu_sm.d_alpha2_old, gpu_sm.d_alpha2, bytes_sm, cudaMemcpyDeviceToDevice));
+                        CHECK_CUDA(cudaMemcpy(gpu_sm.d_arho1_old, gpu_sm.d_arho1, bytes_sm, cudaMemcpyDeviceToDevice));
+                        CHECK_CUDA(cudaMemcpy(gpu_sm.d_arho2_old, gpu_sm.d_arho2, bytes_sm, cudaMemcpyDeviceToDevice));
+                    }
+
+                    dim3 p_threads(8, 8, 4);
+                    dim3 p_blocks((gpu_sm.nx + 7) / 8, (gpu_sm.ny + 7) / 8, (gpu_sm.nz + 3) / 4);
+
+                    dim3 s_threads(8, 8, 4);
+                    dim3 s_blocks((gpu_sm.nx + 7) / 8, (gpu_sm.ny + 7) / 8, (gpu_sm.nz + 3) / 4);
+
+                    if (gpu_sm.parent_idx < 0) {
+                        prolongate_ghosts_kernel_3d<RealType, IsMultiMaterial><<<p_blocks, p_threads>>>(
+                            (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states_old,
+                            (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+                            (RealType)tau,
+                            ntx, nty, ntz, (RealType)gamma,
+                            gpu_sm.nx, gpu_sm.ny, gpu_sm.nz,
+                            gpu_sm.xmin, gpu_sm.ymin, gpu_sm.zmin, gpu_sm.cellSize,
+                            (RealType)xmin, (RealType)ymin, (RealType)zmin, (RealType)cellSize,
+                            nx, ny, nz,
+                            gpu_sm.d_rho, gpu_sm.d_ux, gpu_sm.d_uy, gpu_sm.d_uz, gpu_sm.d_p, gpu_sm.d_E,
+                            gpu_sm.d_alpha1, gpu_sm.d_alpha2, gpu_sm.d_arho1, gpu_sm.d_arho2,
+                            (const GeometryTile3D*)d_geom, b1, b2, b3, b4, b5, b6,
+                            n_ghost
+                        );
+                    } else {
+                        const auto& parent_sm = gpu_submeshes[gpu_sm.parent_idx];
+                        RealType theta = (RealType)((substep + 0.5) * 0.5);
+                        prolongate_ghosts_submesh_kernel_3d<RealType, IsMultiMaterial><<<p_blocks, p_threads>>>(
+                            parent_sm.d_rho_old, parent_sm.d_ux_old, parent_sm.d_uy_old, parent_sm.d_uz_old, parent_sm.d_p_old, parent_sm.d_E_old,
+                            parent_sm.d_alpha1_old, parent_sm.d_alpha2_old, parent_sm.d_arho1_old, parent_sm.d_arho2_old,
+                            parent_sm.d_rho, parent_sm.d_ux, parent_sm.d_uy, parent_sm.d_uz, parent_sm.d_p, parent_sm.d_E,
+                            parent_sm.d_alpha1, parent_sm.d_alpha2, parent_sm.d_arho1, parent_sm.d_arho2,
+                            theta,
+                            parent_sm.nx, parent_sm.ny, parent_sm.nz,
+                            parent_sm.xmin, parent_sm.ymin, parent_sm.zmin, parent_sm.cellSize,
+                            (RealType)gamma,
+                            gpu_sm.nx, gpu_sm.ny, gpu_sm.nz,
+                            gpu_sm.xmin, gpu_sm.ymin, gpu_sm.zmin, gpu_sm.cellSize,
+                            (RealType)xmin, (RealType)ymin, (RealType)zmin, (RealType)cellSize,
+                            nx, ny, nz,
+                            gpu_sm.d_rho, gpu_sm.d_ux, gpu_sm.d_uy, gpu_sm.d_uz, gpu_sm.d_p, gpu_sm.d_E,
+                            gpu_sm.d_alpha1, gpu_sm.d_alpha2, gpu_sm.d_arho1, gpu_sm.d_arho2,
+                            (const GeometryTile3D*)d_geom, b1, b2, b3, b4, b5, b6,
+                            n_ghost
+                        );
+                    }
+                    CHECK_CUDA(cudaGetLastError());
+
+                    submesh_step_kernel_3d<RealType, IsMultiMaterial><<<s_blocks, s_threads>>>(
+                        gpu_sm.nx, gpu_sm.ny, gpu_sm.nz, gpu_sm.cellSize, dt_sub, (RealType)gamma,
+                        gpu_sm.d_rho, gpu_sm.d_ux, gpu_sm.d_uy, gpu_sm.d_uz, gpu_sm.d_p, gpu_sm.d_E,
+                        gpu_sm.d_alpha1, gpu_sm.d_alpha2, gpu_sm.d_arho1, gpu_sm.d_arho2,
+                        gpu_sm.d_new_rho, gpu_sm.d_new_ux, gpu_sm.d_new_uy, gpu_sm.d_new_uz, gpu_sm.d_new_p, gpu_sm.d_new_E,
+                        gpu_sm.d_new_alpha1, gpu_sm.d_new_alpha2, gpu_sm.d_new_arho1, gpu_sm.d_new_arho2,
+                        gpu_sm.d_peak_overpressure, gpu_sm.d_peak_impulse,
+                        gpu_sm.d_is_boundary,
+                        (const GeometryTile3D*)d_geom, gpu_sm.xmin, gpu_sm.ymin, gpu_sm.zmin,
+                        (RealType)xmin, (RealType)ymin, (RealType)zmin, (RealType)cellSize,
+                        n_ghost, spatialOrder
+                    );
+                    CHECK_CUDA(cudaGetLastError());
+
+                    std::swap(gpu_sm.d_rho, gpu_sm.d_new_rho);
+                    std::swap(gpu_sm.d_ux, gpu_sm.d_new_ux);
+                    std::swap(gpu_sm.d_uy, gpu_sm.d_new_uy);
+                    std::swap(gpu_sm.d_uz, gpu_sm.d_new_uz);
+                    std::swap(gpu_sm.d_p, gpu_sm.d_new_p);
+                    std::swap(gpu_sm.d_E, gpu_sm.d_new_E);
+                    if constexpr (IsMultiMaterial) {
+                        std::swap(gpu_sm.d_alpha1, gpu_sm.d_new_alpha1);
+                        std::swap(gpu_sm.d_alpha2, gpu_sm.d_new_alpha2);
+                        std::swap(gpu_sm.d_arho1, gpu_sm.d_new_arho1);
+                        std::swap(gpu_sm.d_arho2, gpu_sm.d_new_arho2);
+                    }
+                }
+
+                stepLevelRecursive(level + 1, dt_sub, tau_start + substep * tau_step * 0.5, tau_step * 0.5);
+
+                for (size_t sm_idx = 0; sm_idx < gpu_submeshes.size(); ++sm_idx) {
+                    const auto& child_sm = gpu_submeshes[sm_idx];
+                    if (child_sm.level != level + 1 || child_sm.parent_idx < 0) continue;
+                    auto& parent_sm = gpu_submeshes[child_sm.parent_idx];
+
+                    int n_rx = child_sm.nx / 2;
+                    int n_ry = child_sm.ny / 2;
+                    int n_rz = child_sm.nz / 2;
+                    dim3 r_threads(8, 8, 4);
+                    dim3 r_blocks((n_rx + 7) / 8, (n_ry + 7) / 8, (n_rz + 3) / 4);
+
+                    restrict_to_parent_submesh_kernel_3d<RealType, IsMultiMaterial><<<r_blocks, r_threads>>>(
+                        parent_sm.d_rho, parent_sm.d_ux, parent_sm.d_uy, parent_sm.d_uz, parent_sm.d_p, parent_sm.d_E,
+                        parent_sm.d_alpha1, parent_sm.d_alpha2, parent_sm.d_arho1, parent_sm.d_arho2,
+                        parent_sm.d_peak_overpressure, parent_sm.d_peak_impulse,
+                        parent_sm.nx, parent_sm.ny, parent_sm.nz,
+                        parent_sm.xmin, parent_sm.ymin, parent_sm.zmin, parent_sm.cellSize,
+                        child_sm.nx, child_sm.ny, child_sm.nz,
+                        child_sm.xmin, child_sm.ymin, child_sm.zmin, child_sm.cellSize,
+                        child_sm.d_rho, child_sm.d_ux, child_sm.d_uy, child_sm.d_uz, child_sm.d_p, child_sm.d_E,
+                        child_sm.d_alpha1, child_sm.d_alpha2, child_sm.d_arho1, child_sm.d_arho2,
+                        child_sm.d_peak_overpressure, child_sm.d_peak_impulse,
+                        child_sm.d_is_boundary,
+                        (const GeometryTile3D*)d_geom,
+                        n_ghost
+                    );
+                    CHECK_CUDA(cudaGetLastError());
+                }
+            }
+        };
+
+        stepLevelRecursive(1, dt, 0.0, 1.0);
 
         for (size_t sm_idx = 0; sm_idx < gpu_submeshes.size(); ++sm_idx) {
             auto& gpu_sm = gpu_submeshes[sm_idx];
+            if (gpu_sm.level != 1) continue;
 
-            // 2. Perform 2-step sub-cycling flux integration on GPU with fresh boundary prolongation
-            RealType dt_sub = (RealType)dt * static_cast<RealType>(0.5);
-            dim3 p_threads(8, 8, 4);
-            dim3 p_blocks((gpu_sm.nx + 7) / 8, (gpu_sm.ny + 7) / 8, (gpu_sm.nz + 3) / 4);
-
-            dim3 s_threads(8, 8, 4);
-            dim3 s_blocks((gpu_sm.nx + 7) / 8, (gpu_sm.ny + 7) / 8, (gpu_sm.nz + 3) / 4);
-
-            for (int substep = 0; substep < 2; ++substep) {
-                RealType tau = (RealType)(substep == 0 ? 0.25 : 0.75);
-                prolongate_ghosts_kernel_3d<RealType, IsMultiMaterial><<<p_blocks, p_threads>>>(
-                    (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states_old,
-                    (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
-                    tau,
-                    ntx, nty, ntz, (RealType)gamma,
-                    gpu_sm.nx, gpu_sm.ny, gpu_sm.nz,
-                    gpu_sm.xmin, gpu_sm.ymin, gpu_sm.zmin, gpu_sm.cellSize,
-                    (RealType)xmin, (RealType)ymin, (RealType)zmin, (RealType)cellSize,
-                    nx, ny, nz,
-                    gpu_sm.d_rho, gpu_sm.d_ux, gpu_sm.d_uy, gpu_sm.d_uz, gpu_sm.d_p, gpu_sm.d_E,
-                    gpu_sm.d_alpha1, gpu_sm.d_alpha2, gpu_sm.d_arho1, gpu_sm.d_arho2,
-                    (const GeometryTile3D*)d_geom, b1, b2, b3, b4, b5, b6,
-                    n_ghost
-                );
-                CHECK_CUDA(cudaGetLastError());
-
-                submesh_step_kernel_3d<RealType, IsMultiMaterial><<<s_blocks, s_threads>>>(
-                    gpu_sm.nx, gpu_sm.ny, gpu_sm.nz, gpu_sm.cellSize, dt_sub, (RealType)gamma,
-                    gpu_sm.d_rho, gpu_sm.d_ux, gpu_sm.d_uy, gpu_sm.d_uz, gpu_sm.d_p, gpu_sm.d_E,
-                    gpu_sm.d_alpha1, gpu_sm.d_alpha2, gpu_sm.d_arho1, gpu_sm.d_arho2,
-                    gpu_sm.d_new_rho, gpu_sm.d_new_ux, gpu_sm.d_new_uy, gpu_sm.d_new_uz, gpu_sm.d_new_p, gpu_sm.d_new_E,
-                    gpu_sm.d_new_alpha1, gpu_sm.d_new_alpha2, gpu_sm.d_new_arho1, gpu_sm.d_new_arho2,
-                    gpu_sm.d_peak_overpressure, gpu_sm.d_peak_impulse,
-                    gpu_sm.d_is_boundary,
-                    (const GeometryTile3D*)d_geom, gpu_sm.xmin, gpu_sm.ymin, gpu_sm.zmin,
-                    (RealType)xmin, (RealType)ymin, (RealType)zmin, (RealType)cellSize,
-                    n_ghost, spatialOrder
-                );
-                CHECK_CUDA(cudaGetLastError());
-
-                std::swap(gpu_sm.d_rho, gpu_sm.d_new_rho);
-                std::swap(gpu_sm.d_ux, gpu_sm.d_new_ux);
-                std::swap(gpu_sm.d_uy, gpu_sm.d_new_uy);
-                std::swap(gpu_sm.d_uz, gpu_sm.d_new_uz);
-                std::swap(gpu_sm.d_p, gpu_sm.d_new_p);
-                std::swap(gpu_sm.d_E, gpu_sm.d_new_E);
-                if constexpr (IsMultiMaterial) {
-                    std::swap(gpu_sm.d_alpha1, gpu_sm.d_new_alpha1);
-                    std::swap(gpu_sm.d_alpha2, gpu_sm.d_new_alpha2);
-                    std::swap(gpu_sm.d_arho1, gpu_sm.d_new_arho1);
-                    std::swap(gpu_sm.d_arho2, gpu_sm.d_new_arho2);
-                }
-            }
-
-            // 3. Restrict submesh cell values back into root mesh on GPU
             int n_rx = gpu_sm.nx / 2;
             int n_ry = gpu_sm.ny / 2;
             int n_rz = gpu_sm.nz / 2;
@@ -3300,6 +3884,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
 
             restrict_to_parent_kernel_3d<RealType, IsMultiMaterial><<<r_blocks, r_threads>>>(
                 (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+                (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
                 ntx, nty, ntz,
                 gpu_sm.nx, gpu_sm.ny, gpu_sm.nz,
                 gpu_sm.xmin, gpu_sm.ymin, gpu_sm.zmin, gpu_sm.cellSize,
@@ -3315,7 +3900,6 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
             CHECK_CUDA(cudaGetLastError());
         }
 
-        // Synchronize GPU d_U (conservative states) from updated d_states (primitive states)
         dim3 c_threads(8, 8, 8);
         update_conservative_from_primitive_kernel_3d<RealType, IsMultiMaterial><<<total_tiles, c_threads>>>(
             (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
@@ -3366,7 +3950,7 @@ __global__ void __launch_bounds__(512) compute_max_speed_kernel_3d(const Primiti
 
         RealType c;
         if constexpr (IsMultiMaterial) {
-            c = (RealType)MultiMat::getMixtureSoundSpeed((double)p, (double)rho, (double)states[t_idx].alpha1[c_idx], (double)states[t_idx].alpha2[c_idx], (double)states[t_idx].arho1[c_idx], (double)states[t_idx].arho2[c_idx], (double)gamma, d_products, d_unreacted);
+            c = MultiMat::getMixtureSoundSpeed<RealType>(p, rho, states[t_idx].alpha1[c_idx], states[t_idx].alpha2[c_idx], states[t_idx].arho1[c_idx], states[t_idx].arho2[c_idx], (RealType)gamma, d_products, d_unreacted);
             RealType a1 = states[t_idx].alpha1[c_idx];
             RealType a2 = states[t_idx].alpha2[c_idx];
             RealType ar1 = states[t_idx].arho1[c_idx];
@@ -3411,6 +3995,60 @@ __global__ void reduce_max_kernel(const RealType* data, int n, RealType* result)
     if (tid == 0) result[0] = sdata[0];
 }
 
+template <typename RealType>
+__global__ void compute_submesh_max_speed_kernel_3d(
+    int nx, int ny, int nz, RealType gamma, RealType level_scale,
+    const RealType* d_rho, const RealType* d_ux, const RealType* d_uy, const RealType* d_uz, const RealType* d_p,
+    RealType* d_max_s_buf
+) {
+    __shared__ RealType sdata[256];
+    int tid = threadIdx.x;
+    int total_cells = nx * ny * nz;
+
+    RealType max_s = (RealType)1e-6;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < total_cells; i += blockDim.x * gridDim.x) {
+        RealType r = fmax((RealType)1e-8, d_rho[i]);
+        RealType u = d_ux[i];
+        RealType v = d_uy[i];
+        RealType w = d_uz[i];
+        RealType pr = fmax((RealType)1e-8, d_p[i]);
+        RealType cs = sqrt(gamma * pr / r);
+        RealType speed = (abs(u) + abs(v) + abs(w) + (RealType)3.0 * cs) * level_scale;
+        if (!isnan(speed) && !isinf(speed)) {
+            max_s = fmax(max_s, speed);
+        }
+    }
+    sdata[tid] = max_s;
+    __syncthreads();
+
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] = fmax(sdata[tid], sdata[tid + s]);
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        if constexpr (sizeof(RealType) == sizeof(float)) {
+            int* val_as_int = (int*)&d_max_s_buf[0];
+            int old = *val_as_int, assumed;
+            do {
+                assumed = old;
+                float old_val = __int_as_float(assumed);
+                if (old_val >= (float)sdata[0]) break;
+                old = atomicCAS(val_as_int, assumed, __float_as_int((float)sdata[0]));
+            } while (assumed != old);
+        } else {
+            unsigned long long int* val_as_ull = (unsigned long long int*)&d_max_s_buf[0];
+            unsigned long long int old = *val_as_ull, assumed;
+            do {
+                assumed = old;
+                double old_val = __longlong_as_double(assumed);
+                if (old_val >= (double)sdata[0]) break;
+                old = atomicCAS(val_as_ull, assumed, __double_as_longlong((double)sdata[0]));
+            } while (assumed != old);
+        }
+    }
+}
+
 template <typename RealType, bool IsMultiMaterial>
 double CFDSolver3DCuda<RealType, IsMultiMaterial>::computeStepSize(double cfl) const {
     ensure_paged_in();
@@ -3424,36 +4062,28 @@ double CFDSolver3DCuda<RealType, IsMultiMaterial>::computeStepSize(double cfl) c
     // GPU-side second-pass reduction to a single scalar
     reduce_max_kernel<RealType><<<1, 256>>>((const RealType*)d_max_s_buf, n_active, (RealType*)d_max_s_buf);
 
+    if (grid_manager && grid_manager->getSubMeshCount() > 0 && !gpu_submeshes.empty()) {
+        for (const auto& gpu_sm : gpu_submeshes) {
+            if (!gpu_sm.is_allocated) continue;
+            int total_cells = gpu_sm.nx * gpu_sm.ny * gpu_sm.nz;
+            int blocks = (total_cells + 255) / 256;
+            if (blocks > 64) blocks = 64;
+            int level_shift = (gpu_sm.level >= 1) ? (gpu_sm.level - 1) : 0;
+            RealType level_scale = (RealType)(1 << level_shift);
+            compute_submesh_max_speed_kernel_3d<RealType><<<blocks, 256>>>(
+                gpu_sm.nx, gpu_sm.ny, gpu_sm.nz, (RealType)gamma, level_scale,
+                gpu_sm.d_rho, gpu_sm.d_ux, gpu_sm.d_uy, gpu_sm.d_uz, gpu_sm.d_p,
+                (RealType*)d_max_s_buf
+            );
+        }
+    }
+
     RealType h_max_s;
     CHECK_CUDA(cudaMemcpy(&h_max_s, d_max_s_buf, sizeof(RealType), cudaMemcpyDeviceToHost));
 
     double max_s = fmax(1e-6, (double)h_max_s);
     if (std::isnan(max_s) || std::isinf(max_s) || max_s <= 0.0) {
         max_s = 1e-6;
-    }
-
-    if (grid_manager && grid_manager->getSubMeshCount() > 0 && !gpu_submeshes.empty()) {
-        syncSubMeshesToHost();
-        for (const auto& sm : grid_manager->getSubMeshes()) {
-            double sm_max_s = 1e-6;
-            for (size_t c = 0; c < sm->rho.size(); ++c) {
-                double r = fmax(1e-8, (double)sm->rho[c]);
-                double u = (double)sm->ux[c];
-                double v = (double)sm->uy[c];
-                double w = (double)sm->uz[c];
-                double pr = fmax(1e-8, (double)sm->p[c]);
-                double cs = std::sqrt((double)gamma * pr / r);
-                double speed = std::abs(u) + std::abs(v) + std::abs(w) + 3.0 * cs;
-                if (!std::isnan(speed) && !std::isinf(speed) && speed > sm_max_s) {
-                    sm_max_s = speed;
-                }
-            }
-            int level_shift = (sm->level >= 1) ? (sm->level - 1) : 0;
-            double eff_speed = sm_max_s * (double)(1 << level_shift);
-            if (!std::isnan(eff_speed) && !std::isinf(eff_speed) && eff_speed > max_s) {
-                max_s = eff_speed;
-            }
-        }
     }
 
     max_s = std::clamp(max_s, 1e-6, 1e9);
@@ -3562,7 +4192,7 @@ std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::sampleGauge(const
     RealType ke = (RealType)0.5 * h_tile.rho[c_idx] * (h_tile.ux[c_idx]*h_tile.ux[c_idx] + h_tile.uy[c_idx]*h_tile.uy[c_idx] + h_tile.uz[c_idx]*h_tile.uz[c_idx]);
     RealType total_E;
     if constexpr (IsMultiMaterial) {
-        total_E = (RealType)MultiMat::getMixtureEnergy((double)h_tile.p[c_idx], (double)h_tile.rho[c_idx], (double)h_tile.alpha1[c_idx], (double)h_tile.alpha2[c_idx], (double)h_tile.arho1[c_idx], (double)h_tile.arho2[c_idx], gamma, d_products, d_unreacted) + ke;
+        total_E = MultiMat::getMixtureEnergy<RealType>(h_tile.p[c_idx], h_tile.rho[c_idx], h_tile.alpha1[c_idx], h_tile.alpha2[c_idx], h_tile.arho1[c_idx], h_tile.arho2[c_idx], (RealType)gamma, d_products, d_unreacted) + ke;
     } else {
         total_E = h_tile.p[c_idx] / (gamma - (RealType)1.0) + ke;
     }
@@ -3603,7 +4233,7 @@ std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::getCellValues(int
     RealType ke = (RealType)0.5 * cached_tile.rho[c_idx] * (cached_tile.ux[c_idx]*cached_tile.ux[c_idx] + cached_tile.uy[c_idx]*cached_tile.uy[c_idx] + cached_tile.uz[c_idx]*cached_tile.uz[c_idx]);
     RealType total_E;
     if constexpr (IsMultiMaterial) {
-        total_E = (RealType)MultiMat::getMixtureEnergy((double)cached_tile.p[c_idx], (double)cached_tile.rho[c_idx], (double)cached_tile.alpha1[c_idx], (double)cached_tile.alpha2[c_idx], (double)cached_tile.arho1[c_idx], (double)cached_tile.arho2[c_idx], gamma, d_products, d_unreacted) + ke;
+        total_E = MultiMat::getMixtureEnergy<RealType>(cached_tile.p[c_idx], cached_tile.rho[c_idx], cached_tile.alpha1[c_idx], cached_tile.alpha2[c_idx], cached_tile.arho1[c_idx], cached_tile.arho2[c_idx], (RealType)gamma, d_products, d_unreacted) + ke;
     } else {
         total_E = cached_tile.p[c_idx] / (gamma - (RealType)1.0) + ke;
     }
@@ -4219,6 +4849,8 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::initializeFrom1D(const std::vec
     ambient_rho = amb_rho;
     ambient_p = amb_p;
 
+    bind_constants();
+
     // 1. Initialize d_states and d_U to ambient on the device
     initialize_ambient_kernel<RealType, IsMultiMaterial><<<total_tiles, 512>>>(
         (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states, (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
@@ -4240,6 +4872,30 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::initializeFrom1D(const std::vec
         delete ptr;
     }
     temp_h_tiles_ptr = nullptr;
+
+    if (grid_manager && grid_manager->getSubMeshCount() > 0) {
+        temp_h_tiles.resize(total_tiles);
+        CHECK_CUDA(cudaMemcpy(temp_h_tiles.data(), d_states, total_tiles * sizeof(PrimitiveTile3D<RealType, IsMultiMaterial>), cudaMemcpyDeviceToHost));
+        grid_manager->syncRootFromTiles(temp_h_tiles, nx, ny, nz, ntx, nty, (RealType)gamma);
+
+        for (auto& sm : grid_manager->getSubMeshes()) {
+            remap_1d_to_submesh(r_1d, states_1d, *sm, x_expl, y_expl, z_expl, R_remap, (double)gamma, currentMaterials, is_ideal_gas_val);
+        }
+
+        grid_manager->syncRootToTiles(temp_h_tiles, nx, ny, nz, ntx, nty);
+        CHECK_CUDA(cudaMemcpy(d_states, temp_h_tiles.data(), total_tiles * sizeof(PrimitiveTile3D<RealType, IsMultiMaterial>), cudaMemcpyHostToDevice));
+
+        dim3 c_threads(8, 8, 8);
+        update_conservative_from_primitive_kernel_3d<RealType, IsMultiMaterial><<<total_tiles, c_threads>>>(
+            (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+            (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
+            total_tiles, (RealType)gamma, currentMaterials.products, currentMaterials.unreacted
+        );
+        CHECK_CUDA(cudaDeviceSynchronize());
+
+        allocateGPUSubMeshes();
+        syncSubMeshesToGPU();
+    }
 }
 
 template <typename RealType, bool IsMultiMaterial>
@@ -4255,6 +4911,8 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::initializeFrom2D(int nr, int nz
     double amb_p = states_2d.back().p;
     ambient_rho = amb_rho;
     ambient_p = amb_p;
+
+    bind_constants();
 
     initialize_ambient_kernel<RealType, IsMultiMaterial><<<total_tiles, 512>>>(
         (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states, (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
@@ -4274,7 +4932,32 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::initializeFrom2D(int nr, int nz
         delete ptr;
     }
     temp_h_tiles_ptr = nullptr;
+
+    if (grid_manager && grid_manager->getSubMeshCount() > 0) {
+        temp_h_tiles.resize(total_tiles);
+        CHECK_CUDA(cudaMemcpy(temp_h_tiles.data(), d_states, total_tiles * sizeof(PrimitiveTile3D<RealType, IsMultiMaterial>), cudaMemcpyDeviceToHost));
+        grid_manager->syncRootFromTiles(temp_h_tiles, nx, ny, nz, ntx, nty, (RealType)gamma);
+
+        for (auto& sm : grid_manager->getSubMeshes()) {
+            remap_2d_to_submesh(nr, nz, dr, dz, states_2d, *sm, x_expl, y_expl, z_expl, R_remap, (double)gamma, currentMaterials, is_ideal_gas_val);
+        }
+
+        grid_manager->syncRootToTiles(temp_h_tiles, nx, ny, nz, ntx, nty);
+        CHECK_CUDA(cudaMemcpy(d_states, temp_h_tiles.data(), total_tiles * sizeof(PrimitiveTile3D<RealType, IsMultiMaterial>), cudaMemcpyHostToDevice));
+
+        dim3 c_threads(8, 8, 8);
+        update_conservative_from_primitive_kernel_3d<RealType, IsMultiMaterial><<<total_tiles, c_threads>>>(
+            (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+            (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
+            total_tiles, (RealType)gamma, currentMaterials.products, currentMaterials.unreacted
+        );
+        CHECK_CUDA(cudaDeviceSynchronize());
+
+        allocateGPUSubMeshes();
+        syncSubMeshesToGPU();
+    }
 }
+
 
 template <typename RealType, bool IsMultiMaterial>
 void CFDSolver3DCuda<RealType, IsMultiMaterial>::setCellStateMulti(int i, int j, int k, const CellState3D<true>& s) {
@@ -4300,9 +4983,9 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setCellStateMulti(int i, int j,
                         tile->p[c] = (RealType)ambient_p;
                         if constexpr (IsMultiMaterial) {
                             tile->alpha1[c] = 0.0;
-                            tile->alpha2[c] = 0.0;
+                            tile->alpha2[c] = 1.0;
                             tile->arho1[c] = 0.0;
-                            tile->arho2[c] = 0.0;
+                            tile->arho2[c] = (RealType)ambient_rho;
                         }
                         tile->floor_status[c] = 0;
                         tile->peak_overpressure[c] = 0.0;
@@ -4370,9 +5053,9 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setCellStateIdeal(int i, int j,
                         tile->p[c] = (RealType)ambient_p;
                         if constexpr (IsMultiMaterial) {
                             tile->alpha1[c] = 0.0;
-                            tile->alpha2[c] = 0.0;
+                            tile->alpha2[c] = 1.0;
                             tile->arho1[c] = 0.0;
-                            tile->arho2[c] = 0.0;
+                            tile->arho2[c] = (RealType)ambient_rho;
                         }
                         tile->floor_status[c] = 0;
                         tile->peak_overpressure[c] = 0.0;
@@ -4441,13 +5124,50 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::addSubMesh(const SubMeshParams3
     if (!grid_manager) {
         auto root = std::make_shared<SubMesh3D<RealType, IsMultiMaterial>>("root", 0, (RealType)xmin, (RealType)ymin, (RealType)zmin, (RealType)lx, (RealType)ly, (RealType)lz, (RealType)cellSize);
         grid_manager = std::make_unique<GridManager3D<RealType, IsMultiMaterial>>(root);
+        grid_manager->setBoundaryConditions(bcXmin, bcXmax, bcYmin, bcYmax, bcZmin, bcZmax);
     }
-    double submeshCellSize = cellSize / (double)(1 << submesh.level);
+
+    double p_xmin = xmin, p_ymin = ymin, p_zmin = zmin;
+    double p_cellSize = cellSize;
+    int parent_level = 0;
+
+    if (submesh.parent_id != "root" && grid_manager) {
+        auto p_sm = grid_manager->resolveParentPublic(submesh.parent_id);
+        if (p_sm && p_sm != grid_manager->getRootMesh()) {
+            double p_margin = 2.0 * p_sm->cellSize;
+            p_xmin = p_sm->xmin + p_margin;
+            p_ymin = p_sm->ymin + p_margin;
+            p_zmin = p_sm->zmin + p_margin;
+            p_cellSize = p_sm->cellSize;
+            parent_level = p_sm->level;
+        }
+    }
+
+    int ix0 = (int)std::round((submesh.xmin - p_xmin) / p_cellSize);
+    int ix1 = (int)std::round((submesh.xmin + submesh.size_x - p_xmin) / p_cellSize);
+    double snapped_xmin = p_xmin + ix0 * p_cellSize;
+    double snapped_xmax = p_xmin + std::max(ix0 + 1, ix1) * p_cellSize;
+    double snapped_size_x = snapped_xmax - snapped_xmin;
+
+    int jy0 = (int)std::round((submesh.ymin - p_ymin) / p_cellSize);
+    int jy1 = (int)std::round((submesh.ymin + submesh.size_y - p_ymin) / p_cellSize);
+    double snapped_ymin = p_ymin + jy0 * p_cellSize;
+    double snapped_ymax = p_ymin + std::max(jy0 + 1, jy1) * p_cellSize;
+    double snapped_size_y = snapped_ymax - snapped_ymin;
+
+    int kz0 = (int)std::round((submesh.zmin - p_zmin) / p_cellSize);
+    int kz1 = (int)std::round((submesh.zmin + submesh.size_z - p_zmin) / p_cellSize);
+    double snapped_zmin = p_zmin + kz0 * p_cellSize;
+    double snapped_zmax = p_zmin + std::max(kz0 + 1, kz1) * p_cellSize;
+    double snapped_size_z = snapped_zmax - snapped_zmin;
+
+    int level_diff = std::max(1, submesh.level - parent_level);
+    double submeshCellSize = p_cellSize / (double)(1 << level_diff);
     double margin = 2.0 * submeshCellSize;
     auto sm = std::make_shared<SubMesh3D<RealType, IsMultiMaterial>>(
         submesh.id, submesh.level,
-        (RealType)(submesh.xmin - margin), (RealType)(submesh.ymin - margin), (RealType)(submesh.zmin - margin),
-        (RealType)(submesh.size_x + 2.0 * margin), (RealType)(submesh.size_y + 2.0 * margin), (RealType)(submesh.size_z + 2.0 * margin),
+        (RealType)(snapped_xmin - margin), (RealType)(snapped_ymin - margin), (RealType)(snapped_zmin - margin),
+        (RealType)(snapped_size_x + 2.0 * margin), (RealType)(snapped_size_y + 2.0 * margin), (RealType)(snapped_size_z + 2.0 * margin),
         (RealType)submeshCellSize,
         submesh.parent_id
     );
@@ -4465,6 +5185,9 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::addSubMesh(const SubMeshParams3
 template <typename RealType, bool IsMultiMaterial>
 void CFDSolver3DCuda<RealType, IsMultiMaterial>::setBoundaryConditions(BCType3D xmin, BCType3D xmax, BCType3D ymin, BCType3D ymax, BCType3D zmin, BCType3D zmax) {
     CFDSolver3DImplBase::setBoundaryConditions(xmin, xmax, ymin, ymax, zmin, zmax);
+    if (grid_manager) {
+        grid_manager->setBoundaryConditions(xmin, xmax, ymin, ymax, zmin, zmax);
+    }
     updateBoundaryConditions();
 }
 template <typename RealType, bool IsMultiMaterial>
@@ -4493,7 +5216,7 @@ __global__ void batch_sample_gauges_kernel_3d(
         RealType ke = (RealType)0.5 * sm.rho[idx] * (ux*ux + uy*uy + uz*uz);
         RealType total_E;
         if constexpr (IsMultiMaterial) {
-            total_E = (RealType)MultiMat::getMixtureEnergy((double)sm.p[idx], (double)sm.rho[idx], (double)sm.alpha1[idx], (double)sm.alpha2[idx], (double)(sm.alpha1[idx]*sm.rho[idx]), (double)(sm.alpha2[idx]*sm.rho[idx]), d_gamma, d_products, d_unreacted) + ke;
+            total_E = MultiMat::getMixtureEnergy<RealType>(sm.p[idx], sm.rho[idx], sm.alpha1[idx], sm.alpha2[idx], sm.alpha1[idx]*sm.rho[idx], sm.alpha2[idx]*sm.rho[idx], (RealType)d_gamma, d_products, d_unreacted) + ke;
         } else {
             total_E = sm.p[idx] / (d_gamma - (RealType)1.0) + ke;
         }
@@ -4524,7 +5247,7 @@ __global__ void batch_sample_gauges_kernel_3d(
         RealType ke = (RealType)0.5 * tile.rho[c_idx] * (ux*ux + uy*uy + uz*uz);
         RealType total_E;
         if constexpr (IsMultiMaterial) {
-            total_E = (RealType)MultiMat::getMixtureEnergy((double)tile.p[c_idx], (double)tile.rho[c_idx], (double)tile.alpha1[c_idx], (double)tile.alpha2[c_idx], (double)tile.arho1[c_idx], (double)tile.arho2[c_idx], d_gamma, d_products, d_unreacted) + ke;
+            total_E = MultiMat::getMixtureEnergy<RealType>(tile.p[c_idx], tile.rho[c_idx], tile.alpha1[c_idx], tile.alpha2[c_idx], tile.arho1[c_idx], tile.arho2[c_idx], (RealType)d_gamma, d_products, d_unreacted) + ke;
         } else {
             total_E = tile.p[c_idx] / (d_gamma - (RealType)1.0) + ke;
         }

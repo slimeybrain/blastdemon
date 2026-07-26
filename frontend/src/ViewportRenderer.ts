@@ -581,7 +581,7 @@ function shouldShowCellEdges(): boolean {
     const fov = 45 * Math.PI / 180;
     const modelPixelsVal = h / (2.0 * distanceVal * Math.tan(fov / 2.0));
     const cellPixels = modelPixelsVal / maxN;
-    return cellPixels >= 3.0;
+    return cellPixels >= 6.0;
 }
 
 interface SliceData {

@@ -2121,7 +2121,7 @@ function shouldShowCellEdges(): boolean {
         modelPixels = h / (2.0 * distance * Math.tan(fovRad / 2.0));
     }
     const cellPixels = modelPixels / maxN;
-    return cellPixels >= 3.0;
+    return cellPixels >= 6.0;
 }
 
 interface SliceDataWebGPU {
@@ -2917,7 +2917,10 @@ function updateSliceAMRGridlinesGeometry() {
     }
 
     const lineVertices: number[] = [];
-    const N = 32; // 32x32 fine submesh cells per tile slice
+
+    const rootDx = (dx > 0) ? dx : 0.075;
+    const rootDy = (dy > 0) ? dy : 0.075;
+    const rootDz = (dz > 0) ? dz : 0.075;
 
     for (const slice of slicesConfigCache) {
         if (slice.enabled === false) continue;
@@ -2926,12 +2929,37 @@ function updateSliceAMRGridlinesGeometry() {
         const rawOffset = slice.offset ?? 0.0;
 
         for (const tile of amrLeafTilesCache) {
-            const tileXMin = Number(tile.xmin ?? tile.x_min ?? 0.0);
-            const tileXMax = Number(tile.xmax ?? tile.x_max ?? 1.0);
-            const tileYMin = Number(tile.ymin ?? tile.y_min ?? 0.0);
-            const tileYMax = Number(tile.ymax ?? tile.y_max ?? 1.0);
-            const tileZMin = Number(tile.zmin ?? tile.z_min ?? 0.0);
-            const tileZMax = Number(tile.zmax ?? tile.z_max ?? 1.0);
+            const rawTileXMin = Number(tile.xmin ?? tile.x_min ?? 0.0);
+            const rawTileXMax = Number(tile.xmax ?? tile.x_max ?? 1.0);
+            const rawTileYMin = Number(tile.ymin ?? tile.y_min ?? 0.0);
+            const rawTileYMax = Number(tile.ymax ?? tile.y_max ?? 1.0);
+            const rawTileZMin = Number(tile.zmin ?? tile.z_min ?? 0.0);
+            const rawTileZMax = Number(tile.zmax ?? tile.z_max ?? 1.0);
+            const level = Math.max(1, Number(tile.level ?? 1));
+
+            // Snap submesh bounds to root domain grid cell faces so they line up perfectly
+            const ix0 = Math.round((rawTileXMin - xmin) / rootDx);
+            const ix1 = Math.round((rawTileXMax - xmin) / rootDx);
+            const tileXMin = xmin + ix0 * rootDx;
+            const tileXMax = xmin + Math.max(ix0 + 1, ix1) * rootDx;
+
+            const jy0 = Math.round((rawTileYMin - ymin) / rootDy);
+            const jy1 = Math.round((rawTileYMax - ymin) / rootDy);
+            const tileYMin = ymin + jy0 * rootDy;
+            const tileYMax = ymin + Math.max(jy0 + 1, jy1) * rootDy;
+
+            const kz0 = Math.round((rawTileZMin - zmin) / rootDz);
+            const kz1 = Math.round((rawTileZMax - zmin) / rootDz);
+            const tileZMin = zmin + kz0 * rootDz;
+            const tileZMax = zmin + Math.max(kz0 + 1, kz1) * rootDz;
+
+            const subDx = rootDx / (1 << level);
+            const subDy = rootDy / (1 << level);
+            const subDz = rootDz / (1 << level);
+
+            const nxSub = Math.max(1, Math.round((tileXMax - tileXMin) / subDx));
+            const nySub = Math.max(1, Math.round((tileYMax - tileYMin) / subDy));
+            const nzSub = Math.max(1, Math.round((tileZMax - tileZMin) / subDz));
 
             if (axis === 'xy') {
                 if (rawOffset < tileZMin - 1e-4 || rawOffset > tileZMax + 1e-4) continue;
@@ -2939,12 +2967,12 @@ function updateSliceAMRGridlinesGeometry() {
                 const y0 = normY(tileYMin), y1 = normY(tileYMax);
                 const z = normZ(rawOffset);
 
-                for (let i = 0; i <= N; ++i) {
-                    const x = x0 + (i / N) * (x1 - x0);
+                for (let i = 0; i <= nxSub; ++i) {
+                    const x = x0 + (i / nxSub) * (x1 - x0);
                     lineVertices.push(x, y0, z, 0, 0, x, y1, z, 0, 0);
                 }
-                for (let j = 0; j <= N; ++j) {
-                    const y = y0 + (j / N) * (y1 - y0);
+                for (let j = 0; j <= nySub; ++j) {
+                    const y = y0 + (j / nySub) * (y1 - y0);
                     lineVertices.push(x0, y, z, 0, 0, x1, y, z, 0, 0);
                 }
             } else if (axis === 'xz') {
@@ -2953,12 +2981,12 @@ function updateSliceAMRGridlinesGeometry() {
                 const z0 = normZ(tileZMin), z1 = normZ(tileZMax);
                 const y = normY(rawOffset);
 
-                for (let i = 0; i <= N; ++i) {
-                    const x = x0 + (i / N) * (x1 - x0);
+                for (let i = 0; i <= nxSub; ++i) {
+                    const x = x0 + (i / nxSub) * (x1 - x0);
                     lineVertices.push(x, y, z0, 0, 0, x, y, z1, 0, 0);
                 }
-                for (let k = 0; k <= N; ++k) {
-                    const z = z0 + (k / N) * (z1 - z0);
+                for (let k = 0; k <= nzSub; ++k) {
+                    const z = z0 + (k / nzSub) * (z1 - z0);
                     lineVertices.push(x0, y, z, 0, 0, x1, y, z, 0, 0);
                 }
             } else if (axis === 'yz') {
@@ -2967,12 +2995,12 @@ function updateSliceAMRGridlinesGeometry() {
                 const z0 = normZ(tileZMin), z1 = normZ(tileZMax);
                 const x = normX(rawOffset);
 
-                for (let j = 0; j <= N; ++j) {
-                    const y = y0 + (j / N) * (y1 - y0);
+                for (let j = 0; j <= nySub; ++j) {
+                    const y = y0 + (j / nySub) * (y1 - y0);
                     lineVertices.push(x, y, z0, 0, 0, x, y, z1, 0, 0);
                 }
-                for (let k = 0; k <= N; ++k) {
-                    const z = z0 + (k / N) * (z1 - z0);
+                for (let k = 0; k <= nzSub; ++k) {
+                    const z = z0 + (k / nzSub) * (z1 - z0);
                     lineVertices.push(x, y0, z, 0, 0, x, y1, z, 0, 0);
                 }
             }

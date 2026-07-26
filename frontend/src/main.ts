@@ -771,7 +771,11 @@ function tryRemapFrom1D(targetModelId: string, pipe: any): boolean {
     }
 
     try {
-        const cell_size = Number(solver1DNode!.parameters?.cell_size ?? 0.001);
+        const meshConn1D = model1d?.connections.find(c => c.toNode === solver1DNode!.id && c.toPort === 'mesh');
+        const meshNode1D = meshConn1D ? model1d?.nodes.find(n => n.id === meshConn1D.fromNode) : model1d?.nodes.find(n => n.type === 'DomainMesh');
+        const cell_size = Number(meshNode1D?.parameters?.cell_size ?? 0.001);
+        const gamma = Number(solver1DNode?.parameters?.gamma ?? 1.4);
+
         const view = new DataView(telemetry);
         const n_cells = view.getUint32(0, true);
         const n_channels = view.getUint32(4, true);
@@ -781,12 +785,43 @@ function tryRemapFrom1D(targetModelId: string, pipe: any): boolean {
         const rho_1d: number[] = [];
         const ur_1d: number[] = [];
         const p_1d: number[] = [];
+        const states_1d: any[] = [];
+
+        // Planar channel layout in C++ getTelemetryChannels():
+        // Ch 0: Pressure | Ch 1: Density | Ch 2: Velocity | Ch 3: Internal Energy | Ch 4: Alpha1 | Ch 5: Alpha2 | Ch 6: Air
+        const p_offset      = 0 * n_cells;
+        const rho_offset    = 1 * n_cells;
+        const u_offset      = 2 * n_cells;
+        const alpha1_offset = 4 * n_cells;
+        const alpha2_offset = 5 * n_cells;
 
         for (let i = 0; i < n_cells; ++i) {
-            r_1d.push((i + 0.5) * cell_size);
-            rho_1d.push(floats[i * n_channels + 0]);
-            ur_1d.push(floats[i * n_channels + 1]);
-            p_1d.push(floats[i * n_channels + 2]);
+            const r = (i + 0.5) * cell_size;
+            const p = floats[p_offset + i];
+            const rho = floats[rho_offset + i];
+            const u = floats[u_offset + i];
+            const a1 = (n_channels > 4) ? floats[alpha1_offset + i] : 0.0;
+            const a2 = (n_channels > 5) ? floats[alpha2_offset + i] : 1.0;
+
+            r_1d.push(r);
+            p_1d.push(p);
+            rho_1d.push(rho);
+            ur_1d.push(u);
+
+            const ar1 = a1 * rho;
+            const ar2 = a2 * rho;
+            const E = (gamma > 1.0) ? (p / (gamma - 1.0) + 0.5 * rho * u * u) : p;
+
+            states_1d.push({
+                rho: rho,
+                u: u,
+                p: p,
+                E: E,
+                alpha1: a1,
+                alpha2: a2,
+                arho1: ar1,
+                arho2: ar2
+            });
         }
 
         const serialized1D = solver1DNode?.parameters || {};
@@ -810,6 +845,7 @@ function tryRemapFrom1D(targetModelId: string, pipe: any): boolean {
             explosive_r: explosive_r,
             remap_radius: remap_radius,
             r_1d: r_1d,
+            states_1d: states_1d,
             rho_1d: rho_1d,
             ur_1d: ur_1d,
             p_1d: p_1d,

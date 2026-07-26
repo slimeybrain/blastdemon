@@ -179,6 +179,9 @@ public:
     virtual void commitStates() = 0;
 
     virtual bool isIdealGas() const = 0;
+    virtual void setGamma(double g) {}
+    virtual void setIdealGas(bool val) {}
+    virtual void setMaterialParameters(const MultiMat::MaterialSet& materials) {}
     virtual const MultiMat::MaterialSet& getMaterialParameters() const = 0;
     virtual double getAmbientP() const = 0;
     virtual size_t getAllocatedVRAM() const { return 0; }
@@ -261,7 +264,9 @@ public:
     double getDz() const override { return cellSize; }
     bool is_terminated() const override { return terminated; }
     double getGamma() const override { return gamma; }
-    void setGamma(double g) { gamma = g; }
+    void setGamma(double g) override { gamma = g; }
+    void setIdealGas(bool val) override { is_ideal_gas_val = val; }
+    void setMaterialParameters(const MultiMat::MaterialSet& materials) override { currentMaterials = materials; }
     void setGeometry(const std::string& stl_filepath, const std::string& geometry_hash, const std::string& voxelization_method,
                      const std::atomic<bool>* terminate_flag = nullptr,
                      std::function<void(double)> progress_callback = nullptr) override {}
@@ -286,6 +291,8 @@ class CFDSolver3DImpl : public CFDSolver3DImplBase {
     std::vector<ConservativeTile3D<RealType, IsMultiMaterial>> U_pool;
     std::vector<ConservativeTile3D<RealType, IsMultiMaterial>> dU_pool;
     std::vector<uint8_t> active_tiles;
+    std::vector<int> active_tile_indices;
+    std::vector<uint8_t> tile_is_fully_interior;
     std::vector<GeometryTile3D> geom_pool;
     std::vector<ObstacleFace> obstacle_faces;
     std::unique_ptr<GridManager3D<RealType, IsMultiMaterial>> grid_manager;
@@ -296,6 +303,7 @@ public:
     CFDSolver3DImpl(int nx, int ny, int nz, double cellSize, double xmin = 0, double ymin = 0, double zmin = 0);
 
     void addSubMesh(const SubMeshParams3D& submesh) override;
+    void setBoundaryConditions(BCType3D xmin, BCType3D xmax, BCType3D ymin, BCType3D ymax, BCType3D zmin, BCType3D zmax) override;
 
     void setInitialCondition(const Charge3DParams& charge, const MultiMat::MaterialSet& materials, double ambient_rho, double ambient_p) override;
     void setFluxScheme(const std::string& scheme_name) override;
@@ -886,4 +894,15 @@ public:
     }
 };
 
+template <typename RealType, bool IsMultiMaterial>
+void remap_1d_to_submesh(const std::vector<double>& r_1d, const std::vector<MultiMaterialState>& states_1d,
+                         SubMesh3D<RealType, IsMultiMaterial>& sm, double x_expl, double y_expl, double z_expl, double R_remap,
+                         double gamma, const MultiMat::MaterialSet& materials, bool is_ideal_gas);
+
+template <typename RealType, bool IsMultiMaterial>
+void remap_2d_to_submesh(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d,
+                         SubMesh3D<RealType, IsMultiMaterial>& sm, double x_expl, double y_expl, double z_expl, double R_remap,
+                         double gamma, const MultiMat::MaterialSet& materials, bool is_ideal_gas);
+
 #endif
+
