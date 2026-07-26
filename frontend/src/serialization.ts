@@ -155,33 +155,56 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             flattenedParams['geometry_hash'] = '';
         }
 
-        // Trace Mesh 3D (supporting RefinementMesh3D chains leading to DomainMesh3D)
+        // --- Recursive subgrid tree collection ---
+        // Walks all RefinementMesh3D nodes reachable from the DomainMesh3D via outgoing `mesh` connections.
+        // Each entry carries parent_id ("root" = direct child of domain, or another subgrid id).
         const submeshList: any[] = [];
-        state.connections.filter(c => c.toNode === solverNode3D.id && c.toPort === 'mesh').forEach(conn => {
-            let currNode = state.nodes.find(n => n.id === conn.fromNode);
-            let depth = 0;
-            while (currNode && currNode.type === 'RefinementMesh3D' && depth < 20) {
+
+        const collectSubgridTree = (parentNodeId: string, parentSubmeshId: string) => {
+            // Find all RefinementMesh3D nodes whose parent_mesh port connects FROM parentNodeId
+            const childConns = state.connections.filter(
+                c => c.fromNode === parentNodeId && c.fromPort === 'mesh'
+            );
+            for (const conn of childConns) {
+                const childNode = state.nodes.find(n => n.id === conn.toNode);
+                if (!childNode || childNode.type !== 'RefinementMesh3D') continue;
                 submeshList.push({
-                    id: currNode.id,
-                    level: Number(currNode.parameters.refinement_level ?? 1),
-                    x: Number(currNode.parameters.submesh_x ?? 0.25),
-                    y: Number(currNode.parameters.submesh_y ?? 0.25),
-                    z: Number(currNode.parameters.submesh_z ?? 0.25),
-                    size_x: Number(currNode.parameters.submesh_size_x ?? 0.5),
-                    size_y: Number(currNode.parameters.submesh_size_y ?? 0.5),
-                    size_z: Number(currNode.parameters.submesh_size_z ?? 0.5)
+                    id: childNode.id,
+                    parent_id: parentSubmeshId,
+                    level: Number(childNode.parameters.refinement_level ?? 1),
+                    x: Number(childNode.parameters.submesh_x ?? 0.25),
+                    y: Number(childNode.parameters.submesh_y ?? 0.25),
+                    z: Number(childNode.parameters.submesh_z ?? 0.25),
+                    size_x: Number(childNode.parameters.submesh_size_x ?? 0.5),
+                    size_y: Number(childNode.parameters.submesh_size_y ?? 0.5),
+                    size_z: Number(childNode.parameters.submesh_size_z ?? 0.5)
                 });
-                const parentConn = state.connections.find(c => c.toNode === currNode!.id && c.toPort === 'parent_mesh');
+                // Recurse: this subgrid's children use its id as parent_id
+                collectSubgridTree(childNode.id, childNode.id);
+            }
+        };
+
+        // Find the DomainMesh3D connected to CFDSolver3D.mesh
+        // (new design: only DomainMesh3D plugs directly into solver.mesh)
+        const meshConn3D = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'mesh');
+        if (meshConn3D) {
+            let rootDomainNode = state.nodes.find(n => n.id === meshConn3D.fromNode);
+            // Auto-heal: if an old scene has RefinementMesh3D→solver, trace back to DomainMesh3D
+            let depth = 0;
+            while (rootDomainNode && rootDomainNode.type === 'RefinementMesh3D' && depth < 20) {
+                const parentConn = state.connections.find(c => c.toNode === rootDomainNode!.id && c.toPort === 'parent_mesh');
                 if (!parentConn) break;
-                currNode = state.nodes.find(n => n.id === parentConn.fromNode);
+                rootDomainNode = state.nodes.find(n => n.id === parentConn.fromNode);
                 depth++;
             }
-            if (currNode && currNode.type === 'DomainMesh3D') {
-                Object.entries(currNode.parameters).forEach(([key, value]) => {
+            if (rootDomainNode && rootDomainNode.type === 'DomainMesh3D') {
+                Object.entries(rootDomainNode.parameters).forEach(([key, value]) => {
                     flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
                 });
+                // Walk all RefinementMesh3D children of the DomainMesh3D (and their children, recursively)
+                collectSubgridTree(rootDomainNode.id, 'root');
             }
-        });
+        }
 
         // Fallback: if xmin/xmax is still undefined, check for any DomainMesh3D in the graph
         if (flattenedParams['xmin'] === undefined && flattenedParams['xmax'] === undefined) {
@@ -192,6 +215,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                         flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
                     }
                 });
+                collectSubgridTree(rootDomainMesh.id, 'root');
             }
         }
 

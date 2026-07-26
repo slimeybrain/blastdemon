@@ -21,8 +21,9 @@ template <typename RealType, bool IsMultiMaterial>
 class SubMesh3D {
 public:
     std::string id;
+    // ID of direct parent: "root" means the domain root mesh, otherwise another submesh ID
+    std::string parent_id;
     int level;
-    int parent_level;
     
     // Physical bounds
     RealType xmin, xmax;
@@ -55,8 +56,8 @@ public:
     // Initialization flag
     bool is_initialized = false;
 
-    SubMesh3D(const std::string& submesh_id, int level, RealType xmin, RealType ymin, RealType zmin, RealType size_x, RealType size_y, RealType size_z, RealType cellSize)
-        : id(submesh_id), level(level), parent_level(level - 1), xmin(xmin), ymin(ymin), zmin(zmin), cellSize(cellSize), is_initialized(false) {
+    SubMesh3D(const std::string& submesh_id, int level, RealType xmin, RealType ymin, RealType zmin, RealType size_x, RealType size_y, RealType size_z, RealType cellSize, const std::string& parent_id = "root")
+        : id(submesh_id), parent_id(parent_id), level(level), xmin(xmin), ymin(ymin), zmin(zmin), cellSize(cellSize), is_initialized(false) {
         xmax = xmin + size_x;
         ymax = ymin + size_y;
         zmax = zmin + size_z;

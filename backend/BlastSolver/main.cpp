@@ -654,7 +654,7 @@ void emit_kernel_log(const std::string& level, const std::string& msg, double t,
     log["message"] = msg;
     log["time"] = t;
     log["scope"] = scope;
-    std::cout << log.dump() << std::endl;
+    std::cout << log.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) << std::endl;
 }
 
 bool has_solver_2d() {
@@ -787,7 +787,7 @@ void worker_thread_func() {
 
 extern std::vector<GeometryTile3D> global_geometry_tiles;
 
-void generateObstacleMesh(int nx, int ny, int nz, double cellSize, double xmin, double ymin, double zmin) {
+void generateObstacleMesh(int nx, int ny, int nz, double cellSize, double xmin, double ymin, double zmin, const nlohmann::json& submeshes_cfg = nlohmann::json()) {
     global_obstacle_faces.clear();
     if (global_geometry_tiles.empty()) return;
 
@@ -812,6 +812,27 @@ void generateObstacleMesh(int nx, int ny, int nz, double cellSize, double xmin, 
         }
     }
 
+    auto is_inside_submesh = [&](int x_idx, int y_idx, int z_idx) -> bool {
+        if (!submeshes_cfg.is_array() || submeshes_cfg.empty()) return false;
+        double cx = xmin + (x_idx + 0.5) * cellSize;
+        double cy = ymin + (y_idx + 0.5) * cellSize;
+        double cz = zmin + (z_idx + 0.5) * cellSize;
+        for (const auto& sm : submeshes_cfg) {
+            double sm_xmin = sm.value("x", sm.value("xmin", 0.25));
+            double sm_ymin = sm.value("y", sm.value("ymin", 0.25));
+            double sm_zmin = sm.value("z", sm.value("zmin", 0.25));
+            double sm_xmax = sm_xmin + sm.value("size_x", 0.5);
+            double sm_ymax = sm_ymin + sm.value("size_y", 0.5);
+            double sm_zmax = sm_zmin + sm.value("size_z", 0.5);
+            if (cx >= sm_xmin && cx <= sm_xmax &&
+                cy >= sm_ymin && cy <= sm_ymax &&
+                cz >= sm_zmin && cz <= sm_zmax) {
+                return true;
+            }
+        }
+        return false;
+    };
+
     // 2. Sequential face generation
     for (int gz = 0; gz < nz; ++gz) {
         for (int gy = 0; gy < ny; ++gy) {
@@ -827,7 +848,7 @@ void generateObstacleMesh(int nx, int ny, int nz, double cellSize, double xmin, 
                 double z1 = zmin + (gz + 1) * cellSize;
 
                 // left (-x)
-                if (gx > 0 && solid_mask[idx - 1]) {
+                if (gx > 0 && solid_mask[idx - 1] && !is_inside_submesh(gx, gy, gz) && !is_inside_submesh(gx - 1, gy, gz)) {
                     ObstacleFace face;
                     face.gx_fluid = gx; face.gy_fluid = gy; face.gz_fluid = gz;
                     face.px[0] = x0; face.px[1] = x0; face.px[2] = x0; face.px[3] = x0;
@@ -836,7 +857,7 @@ void generateObstacleMesh(int nx, int ny, int nz, double cellSize, double xmin, 
                     global_obstacle_faces.push_back(face);
                 }
                 // right (+x)
-                if (gx < nx - 1 && solid_mask[idx + 1]) {
+                if (gx < nx - 1 && solid_mask[idx + 1] && !is_inside_submesh(gx, gy, gz) && !is_inside_submesh(gx + 1, gy, gz)) {
                     ObstacleFace face;
                     face.gx_fluid = gx; face.gy_fluid = gy; face.gz_fluid = gz;
                     face.px[0] = x1; face.px[1] = x1; face.px[2] = x1; face.px[3] = x1;
@@ -845,7 +866,7 @@ void generateObstacleMesh(int nx, int ny, int nz, double cellSize, double xmin, 
                     global_obstacle_faces.push_back(face);
                 }
                 // bottom (-y)
-                if (gy > 0 && solid_mask[idx - nx]) {
+                if (gy > 0 && solid_mask[idx - nx] && !is_inside_submesh(gx, gy, gz) && !is_inside_submesh(gx, gy - 1, gz)) {
                     ObstacleFace face;
                     face.gx_fluid = gx; face.gy_fluid = gy; face.gz_fluid = gz;
                     face.px[0] = x0; face.px[1] = x1; face.px[2] = x1; face.px[3] = x0;
@@ -854,7 +875,7 @@ void generateObstacleMesh(int nx, int ny, int nz, double cellSize, double xmin, 
                     global_obstacle_faces.push_back(face);
                 }
                 // top (+y)
-                if (gy < ny - 1 && solid_mask[idx + nx]) {
+                if (gy < ny - 1 && solid_mask[idx + nx] && !is_inside_submesh(gx, gy, gz) && !is_inside_submesh(gx, gy + 1, gz)) {
                     ObstacleFace face;
                     face.gx_fluid = gx; face.gy_fluid = gy; face.gz_fluid = gz;
                     face.px[0] = x0; face.px[1] = x0; face.px[2] = x1; face.px[3] = x1;
@@ -863,7 +884,7 @@ void generateObstacleMesh(int nx, int ny, int nz, double cellSize, double xmin, 
                     global_obstacle_faces.push_back(face);
                 }
                 // back (-z)
-                if (gz > 0 && solid_mask[idx - nx * ny]) {
+                if (gz > 0 && solid_mask[idx - nx * ny] && !is_inside_submesh(gx, gy, gz) && !is_inside_submesh(gx, gy, gz - 1)) {
                     ObstacleFace face;
                     face.gx_fluid = gx; face.gy_fluid = gy; face.gz_fluid = gz;
                     face.px[0] = x0; face.px[1] = x0; face.px[2] = x1; face.px[3] = x1;
@@ -872,7 +893,7 @@ void generateObstacleMesh(int nx, int ny, int nz, double cellSize, double xmin, 
                     global_obstacle_faces.push_back(face);
                 }
                 // front (+z)
-                if (gz < nz - 1 && solid_mask[idx + nx * ny]) {
+                if (gz < nz - 1 && solid_mask[idx + nx * ny] && !is_inside_submesh(gx, gy, gz) && !is_inside_submesh(gx, gy, gz + 1)) {
                     ObstacleFace face;
                     face.gx_fluid = gx; face.gy_fluid = gy; face.gz_fluid = gz;
                     face.px[0] = x0; face.px[1] = x1; face.px[2] = x1; face.px[3] = x0;
@@ -1132,8 +1153,11 @@ void init_3d_thread_func(nlohmann::json msg) {
                 sm_p.size_x = get_json_double(sm_json, "size_x", 0.5);
                 sm_p.size_y = get_json_double(sm_json, "size_y", 0.5);
                 sm_p.size_z = get_json_double(sm_json, "size_z", 0.5);
+                // Tree parent: "root" means the domain root mesh; otherwise another submesh id
+                sm_p.parent_id = sm_json.value("parent_id", "root");
                 local_solver_3d->addSubMesh(sm_p);
-                std::cout << "[INFO] Added submesh refinement region: " << sm_p.id << " level " << sm_p.level 
+                std::cout << "[INFO] Added submesh refinement region: " << sm_p.id << " level " << sm_p.level
+                          << " parent=" << sm_p.parent_id
                           << " at (" << sm_p.xmin << "," << sm_p.ymin << "," << sm_p.zmin << ") size ("
                           << sm_p.size_x << "x" << sm_p.size_y << "x" << sm_p.size_z << ")" << std::endl;
             }
@@ -1232,7 +1256,8 @@ void init_3d_thread_func(nlohmann::json msg) {
 
         std::cout << "[DEBUG] Voxelization finished. Generating obstacle mesh..." << std::endl;
         // Generate obstacle faces mesh and pass them to solver
-        generateObstacleMesh(nx, ny, nz, cellSize, xmin, ymin, zmin);
+        generateObstacleMesh(nx, ny, nz, cellSize, xmin, ymin, zmin, msg.value("submeshes", nlohmann::json::array()));
+        local_solver_3d->appendSubMeshObstacleFaces(global_obstacle_faces);
         std::cout << "[DEBUG] Obstacle mesh generated with " << global_obstacle_faces.size() << " faces. Uploading..." << std::endl;
         local_solver_3d->uploadObstacleFaces(global_obstacle_faces);
 

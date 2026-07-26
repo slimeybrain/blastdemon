@@ -750,7 +750,8 @@ export class GraphRenderer {
 
         switch (toType) {
             case 'CFDSolver3D':
-                if (toPortId === 'mesh') return fromType === 'DomainMesh3D' || fromType === 'RefinementMesh3D';
+                // mesh port only accepts the root DomainMesh3D; subgrids hang off the domain via parent_mesh
+                if (toPortId === 'mesh') return fromType === 'DomainMesh3D';
                 if (toPortId === 'air') return fromType === 'Material';
                 if (toPortId === 'charge') return fromType === 'Charge3D';
                 if (toPortId === 'detonator') return fromType === 'DetonatorLocation3D';

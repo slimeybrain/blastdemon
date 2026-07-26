@@ -57,6 +57,7 @@ struct SlicePayload3D {
 struct ObstacleFace {
     int gx_fluid, gy_fluid, gz_fluid;
     float px[4], py[4], pz[4];
+    int submesh_index = -1; // -1 = base grid, >=0 = submesh index with local coords in gx/gy/gz_fluid
 };
 
 struct SubMeshParams3D {
@@ -64,6 +65,8 @@ struct SubMeshParams3D {
     int level = 1;
     double xmin = 0.0, ymin = 0.0, zmin = 0.0;
     double size_x = 0.5, size_y = 0.5, size_z = 0.5;
+    // "root" = direct child of the domain mesh; otherwise the id of the parent SubMesh3D
+    std::string parent_id = "root";
 };
 
 struct GPUObstacleFace {
@@ -189,6 +192,7 @@ public:
                                        const std::atomic<bool>* terminate_flag = nullptr,
                                        std::function<void(double)> progress_callback = nullptr) = 0;
     virtual void uploadObstacleFaces(const std::vector<ObstacleFace>& faces) {}
+    virtual void appendSubMeshObstacleFaces(std::vector<ObstacleFace>& faces) {}
     virtual void addSubMesh(const SubMeshParams3D& submesh) {}
     virtual std::pair<double, double> getConservationTotals() const = 0;
 };
@@ -310,6 +314,7 @@ public:
                                const std::atomic<bool>* terminate_flag = nullptr,
                                std::function<void(double)> progress_callback = nullptr) override;
     void uploadObstacleFaces(const std::vector<ObstacleFace>& faces) override;
+    void appendSubMeshObstacleFaces(std::vector<ObstacleFace>& faces) override;
     std::pair<double, double> getConservationTotals() const override;
 
     std::vector<float> sampleGauge(const Gauge3D& gauge) const override;
@@ -363,9 +368,12 @@ public:
         int dir
     ) const {
         bool is_target_solid = false;
-        if (target_x >= 0 && target_x < nx && target_y >= 0 && target_y < ny && target_z >= 0 && target_z < nz) {
-            int t_idx = (target_x >> 3) + (target_y >> 3) * n_tiles_x + (target_z >> 3) * n_tiles_x * n_tiles_y;
-            int c_idx = (target_x & 7) + (target_y & 7) * 8 + (target_z & 7) * 64;
+        if (!geom_pool.empty()) {
+            int clamped_x = std::clamp(target_x, 0, nx - 1);
+            int clamped_y = std::clamp(target_y, 0, ny - 1);
+            int clamped_z = std::clamp(target_z, 0, nz - 1);
+            int t_idx = (clamped_x >> 3) + (clamped_y >> 3) * n_tiles_x + (clamped_z >> 3) * n_tiles_x * n_tiles_y;
+            int c_idx = (clamped_x & 7) + (clamped_y & 7) * 8 + (clamped_z & 7) * 64;
             is_target_solid = geom_pool[t_idx].cells[c_idx].is_boundary;
         }
         if (!is_target_solid) {

@@ -6,6 +6,7 @@
 #include <iostream>
 #include <cmath>
 #include <algorithm>
+#include <unordered_map>
 #include "submesh_3d.hpp"
 #include "cfd_solver_3d.hpp"
 #include "ImmersedBoundary.hpp"
@@ -13,28 +14,73 @@
 template <typename RealType, bool IsMultiMaterial>
 class GridManager3D {
 private:
-    std::shared_ptr<SubMesh3D<RealType, IsMultiMaterial>> root_mesh;
-    std::vector<std::shared_ptr<SubMesh3D<RealType, IsMultiMaterial>>> submeshes;
+    using SMesh = SubMesh3D<RealType, IsMultiMaterial>;
+    using SMeshPtr = std::shared_ptr<SMesh>;
 
-public:
-    GridManager3D(std::shared_ptr<SubMesh3D<RealType, IsMultiMaterial>> root)
-        : root_mesh(root) {}
+    SMeshPtr root_mesh;
 
-    void addSubMesh(std::shared_ptr<SubMesh3D<RealType, IsMultiMaterial>> submesh) {
-        submeshes.push_back(submesh);
-        // Sort submeshes by refinement level ascending
-        std::sort(submeshes.begin(), submeshes.end(), [](const auto& a, const auto& b) {
+    // Map from submesh id -> submesh  (insertion-ordered via a parallel vec for iteration)
+    std::unordered_map<std::string, SMeshPtr> submesh_map;
+    // Map from submesh id -> direct parent id ("root" = root_mesh)
+    std::unordered_map<std::string, std::string> parent_map;
+    // Flat sorted-by-level view, rebuilt when a submesh is added
+    std::vector<SMeshPtr> submeshes_sorted;
+
+    // Rebuild the flat sorted view
+    void rebuildSortedView() {
+        submeshes_sorted.clear();
+        for (auto& [id, sm] : submesh_map) {
+            submeshes_sorted.push_back(sm);
+        }
+        std::sort(submeshes_sorted.begin(), submeshes_sorted.end(), [](const SMeshPtr& a, const SMeshPtr& b) {
             return a->level < b->level;
         });
     }
 
-    size_t getSubMeshCount() const { return submeshes.size(); }
-    const std::vector<std::shared_ptr<SubMesh3D<RealType, IsMultiMaterial>>>& getSubMeshes() const { return submeshes; }
-    std::shared_ptr<SubMesh3D<RealType, IsMultiMaterial>> getRootMesh() { return root_mesh; }
+    // Return all direct children of the given parent id
+    std::vector<SMeshPtr> getChildren(const std::string& pid) const {
+        std::vector<SMeshPtr> out;
+        for (auto& [id, parent_id] : parent_map) {
+            if (parent_id == pid) {
+                auto it = submesh_map.find(id);
+                if (it != submesh_map.end()) out.push_back(it->second);
+            }
+        }
+        // Sort children by level so shallower ones step first
+        std::sort(out.begin(), out.end(), [](const SMeshPtr& a, const SMeshPtr& b) {
+            return a->level < b->level;
+        });
+        return out;
+    }
+
+    // Resolve a parent id to its SMesh pointer (root or a known submesh)
+    SMeshPtr resolveParent(const std::string& pid) const {
+        if (pid == "root" || pid.empty()) return root_mesh;
+        auto it = submesh_map.find(pid);
+        if (it != submesh_map.end()) return it->second;
+        return root_mesh; // fallback
+    }
+
+public:
+    GridManager3D(SMeshPtr root)
+        : root_mesh(root) {}
+
+    void addSubMesh(SMeshPtr submesh) {
+        submesh_map[submesh->id] = submesh;
+        parent_map[submesh->id] = submesh->parent_id.empty() ? "root" : submesh->parent_id;
+        rebuildSortedView();
+    }
+
+    size_t getSubMeshCount() const { return submesh_map.size(); }
+    // Legacy flat sorted view for telemetry and VTK consumers
+    const std::vector<SMeshPtr>& getSubMeshes() const { return submeshes_sorted; }
+    SMeshPtr getRootMesh() { return root_mesh; }
+    // Public access to parent resolution (e.g. for initial prolongation in cfd_solver_3d.cpp)
+    SMeshPtr resolveParentPublic(const std::string& pid) const { return resolveParent(pid); }
 
     void updateSubMeshGeometry(const std::vector<GeometryTile3D>& geom_pool, int parent_nx, int parent_ny, int parent_nz, RealType parent_h, RealType parent_xmin, RealType parent_ymin, RealType parent_zmin, int ntx, int nty) {
         if (geom_pool.empty()) return;
-        for (auto& sm : submeshes) {
+        for (auto& sm : submeshes_sorted) {
             #pragma omp parallel for collapse(3)
             for (int k = 0; k < sm->nz; ++k) {
                 for (int j = 0; j < sm->ny; ++j) {
@@ -70,8 +116,8 @@ public:
             for (int j = 0; j < child.ny; ++j) {
                 RealType y_child = child.ymin + (j + static_cast<RealType>(0.5)) * child.cellSize;
                 for (int i = 0; i < child.nx; ++i) {
-                    // Check if cell is in 1-cell ghost boundary layer
-                    bool is_ghost = (i < 1 || i >= child.nx - 1 || j < 1 || j >= child.ny - 1 || k < 1 || k >= child.nz - 1);
+                    // Check if cell is in 2-cell ghost boundary layer
+                    bool is_ghost = (i < 2 || i >= child.nx - 2 || j < 2 || j >= child.ny - 2 || k < 2 || k >= child.nz - 2);
                     if (!is_ghost) continue;
 
                     RealType x_child = child.xmin + (i + static_cast<RealType>(0.5)) * child.cellSize;
@@ -240,8 +286,19 @@ public:
                                 RealType ys = y0 + (sj + static_cast<RealType>(0.5)) * h_micro;
                                 for (int si = 0; si < 4; ++si) {
                                     RealType xs = x0 + (si + static_cast<RealType>(0.5)) * h_micro;
-                                    RealType r2 = (xs - cx)*(xs - cx) + (ys - cy)*(ys - cy) + (zs - cz)*(zs - cz);
-                                    if (r2 <= radius * radius) {
+                                    bool inside = false;
+                                    if (charge.shape_type == 0) { // Sphere
+                                        RealType r2 = (xs - cx)*(xs - cx) + (ys - cy)*(ys - cy) + (zs - cz)*(zs - cz);
+                                        if (r2 <= radius * radius) inside = true;
+                                    } else if (charge.shape_type == 1) { // Block
+                                        if (std::abs(xs - cx) <= static_cast<RealType>(charge.lx * 0.5) &&
+                                            std::abs(ys - cy) <= static_cast<RealType>(charge.ly * 0.5) &&
+                                            std::abs(zs - cz) <= static_cast<RealType>(charge.lz * 0.5)) inside = true;
+                                    } else if (charge.shape_type == 2) { // Cylinder
+                                        RealType dr2 = (xs - cx)*(xs - cx) + (ys - cy)*(ys - cy);
+                                        if (dr2 <= radius * radius && std::abs(zs - cz) <= static_cast<RealType>(charge.height * 0.5)) inside = true;
+                                    }
+                                    if (inside) {
                                         inside_count++;
                                     }
                                 }
@@ -289,7 +346,7 @@ public:
         };
 
         initMesh(*root_mesh);
-        for (auto& submesh : submeshes) {
+        for (auto& submesh : submeshes_sorted) {
             initMesh(*submesh);
         }
 
@@ -400,9 +457,13 @@ public:
                 }
             }
         }
-        for (auto& sm : submeshes) {
+        // Initialize any newly-added submeshes by prolongating from their direct parent.
+        // submeshes_sorted is sorted level-ascending, so a child's parent is always already
+        // initialized by the time we reach the child.
+        for (auto& sm : submeshes_sorted) {
             if (!sm->is_initialized) {
-                prolongateAll(*sm, *root_mesh);
+                SMeshPtr parent_ptr = resolveParent(sm->parent_id);
+                prolongateAll(*sm, *parent_ptr);
             }
         }
     }
@@ -435,251 +496,336 @@ public:
             }
         }
     }
+    bool getSolidNormal(const std::vector<GeometryTile3D>& geom_pool, RealType x, RealType y, RealType z, float& nx_b, float& ny_b, float& nz_b) {
+        if (geom_pool.empty()) return false;
+        int pi = std::clamp(static_cast<int>(std::floor((x - root_mesh->xmin) / root_mesh->cellSize)), 0, root_mesh->nx - 1);
+        int pj = std::clamp(static_cast<int>(std::floor((y - root_mesh->ymin) / root_mesh->cellSize)), 0, root_mesh->ny - 1);
+        int pk = std::clamp(static_cast<int>(std::floor((z - root_mesh->zmin) / root_mesh->cellSize)), 0, root_mesh->nz - 1);
 
-    // 3D Compressible Euler Fluid Solver for SubMeshes with 2-Step Sub-Cycling
-    void stepSubMeshes(RealType dt, RealType gamma, const MultiMat::MaterialSet& materials) {
+        int ntx = (root_mesh->nx + 7) / 8;
+        int nty = (root_mesh->ny + 7) / 8;
+        int tx = pi / 8;
+        int ty = pj / 8;
+        int tz = pk / 8;
+        int t_idx = tx + ty * ntx + tz * ntx * nty;
+        int c_idx = (pi % 8) + (pj % 8) * 8 + (pk % 8) * 64;
+
+        bool is_b = geom_pool[t_idx].cells[c_idx].is_boundary;
+        if (is_b) {
+            nx_b = static_cast<float>(geom_pool[t_idx].cells[c_idx].nx) / 127.0f;
+            ny_b = static_cast<float>(geom_pool[t_idx].cells[c_idx].ny) / 127.0f;
+            nz_b = static_cast<float>(geom_pool[t_idx].cells[c_idx].nz) / 127.0f;
+        } else {
+            nx_b = 0.0f; ny_b = 0.0f; nz_b = 0.0f;
+        }
+        return is_b;
+    }
+
+    // -----------------------------------------------------------------------
+    // Single-submesh solver step (shared by recursive tree walker)
+    // -----------------------------------------------------------------------
+    void stepSingleSubMesh(SMesh& submesh, SMeshPtr parent, RealType dt_sub, RealType gamma,
+                           const MultiMat::MaterialSet& materials,
+                           const std::vector<GeometryTile3D>& geom_pool) {
+        // Prolongate 2-cell ghost boundary layer from direct parent
+        prolongateGhosts(submesh, *parent);
+
+        RealType h = submesh.cellSize;
+        RealType dt_h = dt_sub / h;
+
+        std::vector<RealType> new_rho = submesh.rho;
+        std::vector<RealType> new_ux  = submesh.ux;
+        std::vector<RealType> new_uy  = submesh.uy;
+        std::vector<RealType> new_uz  = submesh.uz;
+        std::vector<RealType> new_p   = submesh.p;
+        std::vector<RealType> new_E   = submesh.E;
+
+        std::vector<RealType> new_alpha1, new_alpha2, new_arho1, new_arho2;
+        if constexpr (IsMultiMaterial) {
+            new_alpha1 = submesh.alpha1;
+            new_alpha2 = submesh.alpha2;
+            new_arho1  = submesh.arho1;
+            new_arho2  = submesh.arho2;
+        }
+
+        RealType gm1 = std::max(static_cast<RealType>(1e-4), gamma - static_cast<RealType>(1.0));
+
+        for (int k = 2; k < submesh.nz - 2; ++k) {
+            for (int j = 2; j < submesh.ny - 2; ++j) {
+                for (int i = 2; i < submesh.nx - 2; ++i) {
+                    size_t c_idx = submesh.getIndex(i, j, k);
+
+                    size_t L_x = submesh.getIndex(i - 1, j, k);
+                    size_t R_x = submesh.getIndex(i + 1, j, k);
+                    size_t L_y = submesh.getIndex(i, j - 1, k);
+                    size_t R_y = submesh.getIndex(i, j + 1, k);
+                    size_t L_z = submesh.getIndex(i, j, k - 1);
+                    size_t R_z = submesh.getIndex(i, j, k + 1);
+
+                    auto get_state_info = [&](size_t idx, RealType& r, RealType& u, RealType& v, RealType& w, RealType& pr, RealType& energy, RealType& c) {
+                        bool is_solid = !submesh.is_boundary.empty() && submesh.is_boundary[idx];
+                        if (is_solid) {
+                            r  = std::max(static_cast<RealType>(1e-8), submesh.rho[c_idx]);
+                            pr = std::max(static_cast<RealType>(1e-8), submesh.p[c_idx]);
+                            int di = 0, dj = 0, dk = 0;
+                            if (idx == L_x) di = -1;
+                            else if (idx == R_x) di = 1;
+                            else if (idx == L_y) dj = -1;
+                            else if (idx == R_y) dj = 1;
+                            else if (idx == L_z) dk = -1;
+                            else if (idx == R_z) dk = 1;
+
+                            RealType xc = submesh.xmin + (i + di + static_cast<RealType>(0.5)) * submesh.cellSize;
+                            RealType yc = submesh.ymin + (j + dj + static_cast<RealType>(0.5)) * submesh.cellSize;
+                            RealType zc = submesh.zmin + (k + dk + static_cast<RealType>(0.5)) * submesh.cellSize;
+
+                            float nx_b = 0.0f, ny_b = 0.0f, nz_b = 0.0f;
+                            getSolidNormal(geom_pool, xc, yc, zc, nx_b, ny_b, nz_b);
+
+                            RealType nx_r = nx_b, ny_r = ny_b, nz_r = nz_b;
+                            RealType nlen = std::sqrt(nx_r*nx_r + ny_r*ny_r + nz_r*nz_r);
+                            if (nlen > static_cast<RealType>(1e-3)) {
+                                nx_r /= nlen; ny_r /= nlen; nz_r /= nlen;
+                            } else {
+                                nx_r = -di; ny_r = -dj; nz_r = -dk;
+                            }
+
+                            RealType u_fluid = submesh.ux[c_idx];
+                            RealType v_fluid = submesh.uy[c_idx];
+                            RealType w_fluid = submesh.uz[c_idx];
+                            RealType u_dot_n = u_fluid * nx_r + v_fluid * ny_r + w_fluid * nz_r;
+
+                            u = u_fluid - static_cast<RealType>(2.0) * u_dot_n * nx_r;
+                            v = v_fluid - static_cast<RealType>(2.0) * u_dot_n * ny_r;
+                            w = w_fluid - static_cast<RealType>(2.0) * u_dot_n * nz_r;
+                        } else {
+                            r  = std::max(static_cast<RealType>(1e-8), submesh.rho[idx]);
+                            u  = submesh.ux[idx];
+                            v  = submesh.uy[idx];
+                            w  = submesh.uz[idx];
+                            pr = std::max(static_cast<RealType>(1e-8), submesh.p[idx]);
+                        }
+                        energy = pr / gm1 + static_cast<RealType>(0.5) * r * (u*u + v*v + w*w);
+                        c = std::sqrt(gamma * pr / r);
+                    };
+
+                    RealType rC, uC, vC, wC, pC, EC, cC;
+                    get_state_info(c_idx, rC, uC, vC, wC, pC, EC, cC);
+
+                    RealType rLx, uLx, vLx, wLx, pLx, ELx, cLx;
+                    get_state_info(L_x, rLx, uLx, vLx, wLx, pLx, ELx, cLx);
+
+                    RealType rRx, uRx, vRx, wRx, pRx, ERx, cRx;
+                    get_state_info(R_x, rRx, uRx, vRx, wRx, pRx, ERx, cRx);
+
+                    RealType rLy, uLy, vLy, wLy, pLy, ELy, cLy;
+                    get_state_info(L_y, rLy, uLy, vLy, wLy, pLy, ELy, cLy);
+
+                    RealType rRy, uRy, vRy, wRy, pRy, ERy, cRy;
+                    get_state_info(R_y, rRy, uRy, vRy, wRy, pRy, ERy, cRy);
+
+                    RealType rLz, uLz, vLz, wLz, pLz, ELz, cLz;
+                    get_state_info(L_z, rLz, uLz, vLz, wLz, pLz, ELz, cLz);
+
+                    RealType rRz, uRz, vRz, wRz, pRz, ERz, cRz;
+                    get_state_info(R_z, rRz, uRz, vRz, wRz, pRz, ERz, cRz);
+
+                    RealType Sx_L = std::max(std::abs(uLx) + cLx, std::abs(uC) + cC);
+                    RealType Sx_R = std::max(std::abs(uC) + cC, std::abs(uRx) + cRx);
+
+                    RealType Sy_L = std::max(std::abs(vLy) + cLy, std::abs(vC) + cC);
+                    RealType Sy_R = std::max(std::abs(vC) + cC, std::abs(vRy) + cRy);
+
+                    RealType Sz_L = std::max(std::abs(wLz) + cLz, std::abs(wC) + cC);
+                    RealType Sz_R = std::max(std::abs(wC) + cC, std::abs(wRz) + cRz);
+
+                    // Rusanov interface fluxes in X
+                    RealType Fx_L_rho   = 0.5 * (rLx*uLx + rC*uC)   - 0.5 * Sx_L * (rC - rLx);
+                    RealType Fx_R_rho   = 0.5 * (rC*uC + rRx*uRx)   - 0.5 * Sx_R * (rRx - rC);
+
+                    RealType Fx_L_rhoux = 0.5 * (rLx*uLx*uLx + pLx + rC*uC*uC + pC)   - 0.5 * Sx_L * (rC*uC - rLx*uLx);
+                    RealType Fx_R_rhoux = 0.5 * (rC*uC*uC + pC + rRx*uRx*uRx + pRx)   - 0.5 * Sx_R * (rRx*uRx - rC*uC);
+
+                    RealType Fx_L_rhouy = 0.5 * (rLx*uLx*vLx + rC*uC*vC) - 0.5 * Sx_L * (rC*vC - rLx*vLx);
+                    RealType Fx_R_rhouy = 0.5 * (rC*uC*vC + rRx*uRx*vRx) - 0.5 * Sx_R * (rRx*vRx - rC*vC);
+
+                    RealType Fx_L_rhouz = 0.5 * (rLx*uLx*wLx + rC*uC*wC) - 0.5 * Sx_L * (rC*wC - rLx*wLx);
+                    RealType Fx_R_rhouz = 0.5 * (rC*uC*wC + rRx*uRx*wRx) - 0.5 * Sx_R * (rRx*wRx - rC*wC);
+
+                    RealType Fx_L_E = 0.5 * ((ELx + pLx)*uLx + (EC + pC)*uC) - 0.5 * Sx_L * (EC - ELx);
+                    RealType Fx_R_E = 0.5 * ((EC + pC)*uC + (ERx + pRx)*uRx) - 0.5 * Sx_R * (ERx - EC);
+
+                    // Rusanov interface fluxes in Y
+                    RealType Fy_L_rho   = 0.5 * (rLy*vLy + rC*vC)   - 0.5 * Sy_L * (rC - rLy);
+                    RealType Fy_R_rho   = 0.5 * (rC*vC + rRy*vRy)   - 0.5 * Sy_R * (rRy - rC);
+
+                    RealType Fy_L_rhoux = 0.5 * (rLy*vLy*uLy + rC*vC*uC) - 0.5 * Sy_L * (rC*uC - rLy*uLy);
+                    RealType Fy_R_rhoux = 0.5 * (rC*vC*uC + rRy*vRy*uRy) - 0.5 * Sy_R * (rRy*uRy - rC*uC);
+
+                    RealType Fy_L_rhouy = 0.5 * (rLy*vLy*vLy + pLy + rC*vC*vC + pC)   - 0.5 * Sy_L * (rC*vC - rLy*vLy);
+                    RealType Fy_R_rhouy = 0.5 * (rC*vC*vC + pC + rRy*vRy*vRy + pRy)   - 0.5 * Sy_R * (rRy*vRy - rC*vC);
+
+                    RealType Fy_L_rhouz = 0.5 * (rLy*vLy*wLy + rC*vC*wC) - 0.5 * Sy_L * (rC*wC - rLy*wLy);
+                    RealType Fy_R_rhouz = 0.5 * (rC*vC*wC + rRy*vRy*wRy) - 0.5 * Sy_R * (rRy*wRy - rC*wC);
+
+                    RealType Fy_L_E = 0.5 * ((ELy + pLy)*vLy + (EC + pC)*vC) - 0.5 * Sy_L * (EC - ELy);
+                    RealType Fy_R_E = 0.5 * ((EC + pC)*vC + (ERy + pRy)*vRy) - 0.5 * Sy_R * (ERy - EC);
+
+                    // Rusanov interface fluxes in Z
+                    RealType Fz_L_rho   = 0.5 * (rLz*wLz + rC*wC)   - 0.5 * Sz_L * (rC - rLz);
+                    RealType Fz_R_rho   = 0.5 * (rC*wC + rRz*wRz)   - 0.5 * Sz_R * (rRz - rC);
+
+                    RealType Fz_L_rhoux = 0.5 * (rLz*wLz*uLz + rC*wC*uC) - 0.5 * Sz_L * (rC*uC - rLz*uLz);
+                    RealType Fz_R_rhoux = 0.5 * (rC*wC*uC + rRz*wRz*uRz) - 0.5 * Sz_R * (rRz*uRz - rC*uC);
+
+                    RealType Fz_L_rhouy = 0.5 * (rLz*wLz*vLz + rC*wC*vC) - 0.5 * Sz_L * (rC*vC - rLz*vLz);
+                    RealType Fz_R_rhouy = 0.5 * (rC*wC*vC + rRz*wRz*vRz) - 0.5 * Sz_R * (rRz*vRz - rC*vC);
+
+                    RealType Fz_L_rhouz = 0.5 * (rLz*wLz*wLz + pLz + rC*wC*wC + pC)   - 0.5 * Sz_L * (rC*wC - rLz*wLz);
+                    RealType Fz_R_rhouz = 0.5 * (rC*wC*wC + pC + rRz*wRz*wRz + pRz)   - 0.5 * Sz_R * (rRz*wRz - rC*wC);
+
+                    RealType Fz_L_E = 0.5 * ((ELz + pLz)*wLz + (EC + pC)*wC) - 0.5 * Sz_L * (EC - ELz);
+                    RealType Fz_R_E = 0.5 * ((EC + pC)*wC + (ERz + pRz)*wRz) - 0.5 * Sz_R * (ERz - EC);
+
+                    // Conservative finite volume updates
+                    RealType rho_n   = rC     - dt_h * (Fx_R_rho   - Fx_L_rho   + Fy_R_rho   - Fy_L_rho   + Fz_R_rho   - Fz_L_rho);
+                    RealType rhoux_n = rC*uC  - dt_h * (Fx_R_rhoux - Fx_L_rhoux + Fy_R_rhoux - Fy_L_rhoux + Fz_R_rhoux - Fz_L_rhoux);
+                    RealType rhouy_n = rC*vC  - dt_h * (Fx_R_rhouy - Fx_L_rhouy + Fy_R_rhouy - Fy_L_rhouy + Fz_R_rhouy - Fz_L_rhouy);
+                    RealType rhouz_n = rC*wC  - dt_h * (Fx_R_rhouz - Fx_L_rhouz + Fy_R_rhouz - Fy_L_rhouz + Fz_R_rhouz - Fz_L_rhouz);
+                    RealType E_n     = EC     - dt_h * (Fx_R_E     - Fx_L_E     + Fy_R_E     - Fy_L_E     + Fz_R_E     - Fz_L_E);
+
+                    if (!submesh.is_boundary.empty() && submesh.is_boundary[c_idx]) {
+                        new_rho[c_idx] = static_cast<RealType>(1.225);
+                        new_ux[c_idx]  = static_cast<RealType>(0.0);
+                        new_uy[c_idx]  = static_cast<RealType>(0.0);
+                        new_uz[c_idx]  = static_cast<RealType>(0.0);
+                        new_p[c_idx]   = static_cast<RealType>(101325.0);
+                        new_E[c_idx]   = static_cast<RealType>(101325.0) / gm1;
+                        if constexpr (IsMultiMaterial) {
+                            new_alpha1[c_idx] = static_cast<RealType>(0.0);
+                            new_alpha2[c_idx] = static_cast<RealType>(1.0);
+                            new_arho1[c_idx]  = static_cast<RealType>(0.0);
+                            new_arho2[c_idx]  = static_cast<RealType>(1.225);
+                        }
+                    } else {
+                        RealType rho_clamped = std::max(static_cast<RealType>(1e-8), rho_n);
+                        new_rho[c_idx] = rho_clamped;
+                        new_ux[c_idx]  = rhoux_n / rho_clamped;
+                        new_uy[c_idx]  = rhouy_n / rho_clamped;
+                        new_uz[c_idx]  = rhouz_n / rho_clamped;
+
+                        RealType ke_n  = static_cast<RealType>(0.5) * rho_clamped * (new_ux[c_idx]*new_ux[c_idx] + new_uy[c_idx]*new_uy[c_idx] + new_uz[c_idx]*new_uz[c_idx]);
+                        RealType e_int = E_n - ke_n;
+                        if (e_int < static_cast<RealType>(0.0)) e_int = static_cast<RealType>(0.0);
+
+                        if constexpr (IsMultiMaterial) {
+                            RealType Fx_L_a1 = 0.5 * (submesh.alpha1[L_x]*uLx + submesh.alpha1[c_idx]*uC) - 0.5 * Sx_L * (submesh.alpha1[c_idx] - submesh.alpha1[L_x]);
+                            RealType Fx_R_a1 = 0.5 * (submesh.alpha1[c_idx]*uC + submesh.alpha1[R_x]*uRx) - 0.5 * Sx_R * (submesh.alpha1[R_x] - submesh.alpha1[c_idx]);
+
+                            RealType Fy_L_a1 = 0.5 * (submesh.alpha1[L_y]*vLy + submesh.alpha1[c_idx]*vC) - 0.5 * Sy_L * (submesh.alpha1[c_idx] - submesh.alpha1[L_y]);
+                            RealType Fy_R_a1 = 0.5 * (submesh.alpha1[c_idx]*vC + submesh.alpha1[R_y]*vRy) - 0.5 * Sy_R * (submesh.alpha1[R_y] - submesh.alpha1[c_idx]);
+
+                            RealType Fz_L_a1 = 0.5 * (submesh.alpha1[L_z]*wLz + submesh.alpha1[c_idx]*wC) - 0.5 * Sz_L * (submesh.alpha1[c_idx] - submesh.alpha1[L_z]);
+                            RealType Fz_R_a1 = 0.5 * (submesh.alpha1[c_idx]*wC + submesh.alpha1[R_z]*wRz) - 0.5 * Sz_R * (submesh.alpha1[R_z] - submesh.alpha1[c_idx]);
+
+                            new_alpha1[c_idx] = std::clamp(submesh.alpha1[c_idx] - dt_h * (Fx_R_a1 - Fx_L_a1 + Fy_R_a1 - Fy_L_a1 + Fz_R_a1 - Fz_L_a1), static_cast<RealType>(0.0), static_cast<RealType>(1.0));
+                            new_alpha2[c_idx] = static_cast<RealType>(1.0) - new_alpha1[c_idx];
+                            new_arho1[c_idx]  = new_alpha1[c_idx] * new_rho[c_idx];
+                            new_arho2[c_idx]  = new_alpha2[c_idx] * new_rho[c_idx];
+
+                            RealType p_n = (RealType)MultiMat::getMixturePressure((double)e_int, (double)rho_clamped, (double)new_alpha1[c_idx], (double)new_alpha2[c_idx], (double)new_arho1[c_idx], (double)new_arho2[c_idx], (double)gamma, materials.products, materials.unreacted);
+                            if (std::isnan(p_n) || std::isinf(p_n) || p_n < static_cast<RealType>(1e-8)) {
+                                p_n = static_cast<RealType>(101325.0);
+                                new_rho[c_idx]    = static_cast<RealType>(1.225);
+                                new_ux[c_idx]     = static_cast<RealType>(0.0);
+                                new_uy[c_idx]     = static_cast<RealType>(0.0);
+                                new_uz[c_idx]     = static_cast<RealType>(0.0);
+                                ke_n              = static_cast<RealType>(0.0);
+                                new_alpha1[c_idx] = static_cast<RealType>(0.0);
+                                new_alpha2[c_idx] = static_cast<RealType>(1.0);
+                                new_arho1[c_idx]  = static_cast<RealType>(0.0);
+                                new_arho2[c_idx]  = static_cast<RealType>(1.225);
+                                e_int = p_n / gm1;
+                            }
+                            new_p[c_idx] = p_n;
+                            new_E[c_idx] = (RealType)MultiMat::getMixtureEnergy((double)p_n, (double)new_rho[c_idx], (double)new_alpha1[c_idx], (double)new_alpha2[c_idx], (double)new_arho1[c_idx], (double)new_arho2[c_idx], (double)gamma, materials.products, materials.unreacted) + ke_n;
+                        } else {
+                            RealType p_n = e_int * gm1;
+                            if (std::isnan(p_n) || std::isinf(p_n) || p_n < static_cast<RealType>(1e-8)) {
+                                p_n = static_cast<RealType>(101325.0);
+                                new_rho[c_idx] = static_cast<RealType>(1.225);
+                                new_ux[c_idx]  = static_cast<RealType>(0.0);
+                                new_uy[c_idx]  = static_cast<RealType>(0.0);
+                                new_uz[c_idx]  = static_cast<RealType>(0.0);
+                                ke_n           = static_cast<RealType>(0.0);
+                                e_int          = p_n / gm1;
+                            }
+                            new_p[c_idx] = p_n;
+                            new_E[c_idx] = e_int + ke_n;
+                        }
+                    }
+
+                    RealType op = new_p[c_idx] - static_cast<RealType>(101325.0);
+                    if (op < static_cast<RealType>(0.0)) op = static_cast<RealType>(0.0);
+                    if (op > submesh.peak_overpressure[c_idx]) {
+                        submesh.peak_overpressure[c_idx] = op;
+                    }
+                    submesh.peak_impulse[c_idx] += op * dt_sub;
+                }
+            }
+        }
+
+        submesh.rho = std::move(new_rho);
+        submesh.ux  = std::move(new_ux);
+        submesh.uy  = std::move(new_uy);
+        submesh.uz  = std::move(new_uz);
+        submesh.p   = std::move(new_p);
+        submesh.E   = std::move(new_E);
+        if constexpr (IsMultiMaterial) {
+            submesh.alpha1 = std::move(new_alpha1);
+            submesh.alpha2 = std::move(new_alpha2);
+            submesh.arho1  = std::move(new_arho1);
+            submesh.arho2  = std::move(new_arho2);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Recursive tree-walk step:
+    //   For each child of `parent_mesh_id`:
+    //     1. prolongate ghost layer from direct parent
+    //     2. step this child's subtree (recurse)
+    //     3. restrict child interior back to direct parent
+    // Called once per global substep.
+    // -----------------------------------------------------------------------
+    void stepSubTreeRecursive(const std::string& parent_mesh_id, SMeshPtr parent_ptr,
+                              RealType dt_sub, RealType gamma,
+                              const MultiMat::MaterialSet& materials,
+                              const std::vector<GeometryTile3D>& geom_pool) {
+        auto children = getChildren(parent_mesh_id);
+        for (auto& child : children) {
+            stepSingleSubMesh(*child, parent_ptr, dt_sub, gamma, materials, geom_pool);
+            // Recurse: step this child's own children, reading from child as parent
+            stepSubTreeRecursive(child->id, child, dt_sub, gamma, materials, geom_pool);
+            // Restrict fine solution back to direct parent
+            restrictToParent(*parent_ptr, *child);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Public entry point: 2-substep subcycled stepping of the full subgrid tree
+    // -----------------------------------------------------------------------
+    void stepSubMeshes(RealType dt, RealType gamma, const MultiMat::MaterialSet& materials, const std::vector<GeometryTile3D>& geom_pool) {
+        if (submesh_map.empty()) return;
         RealType dt_sub = dt * static_cast<RealType>(0.5); // Sub-cycling half timestep for CFL stability
 
         for (int substep = 0; substep < 2; ++substep) {
-            for (auto& submesh : submeshes) {
-                // Prolongate 2-cell ghost boundary layer from parent mesh
-                prolongateGhosts(*submesh, *root_mesh);
-
-                RealType h = submesh->cellSize;
-                RealType dt_h = dt_sub / h;
-
-                std::vector<RealType> new_rho = submesh->rho;
-                std::vector<RealType> new_ux = submesh->ux;
-                std::vector<RealType> new_uy = submesh->uy;
-                std::vector<RealType> new_uz = submesh->uz;
-                std::vector<RealType> new_p = submesh->p;
-                std::vector<RealType> new_E = submesh->E;
-
-                std::vector<RealType> new_alpha1, new_alpha2, new_arho1, new_arho2;
-                if constexpr (IsMultiMaterial) {
-                    new_alpha1 = submesh->alpha1;
-                    new_alpha2 = submesh->alpha2;
-                    new_arho1 = submesh->arho1;
-                    new_arho2 = submesh->arho2;
-                }
-
-                RealType gm1 = std::max(static_cast<RealType>(1e-4), gamma - static_cast<RealType>(1.0));
-
-                for (int k = 1; k < submesh->nz - 1; ++k) {
-                    for (int j = 1; j < submesh->ny - 1; ++j) {
-                        for (int i = 1; i < submesh->nx - 1; ++i) {
-                            size_t c_idx = submesh->getIndex(i, j, k);
-
-                            size_t L_x = submesh->getIndex(i - 1, j, k);
-                            size_t R_x = submesh->getIndex(i + 1, j, k);
-                            size_t L_y = submesh->getIndex(i, j - 1, k);
-                            size_t R_y = submesh->getIndex(i, j + 1, k);
-                            size_t L_z = submesh->getIndex(i, j, k - 1);
-                            size_t R_z = submesh->getIndex(i, j, k + 1);
-
-                            auto get_state_info = [&](size_t idx, RealType& r, RealType& u, RealType& v, RealType& w, RealType& pr, RealType& energy, RealType& c) {
-                                bool is_solid = !submesh->is_boundary.empty() && submesh->is_boundary[idx];
-                                if (is_solid) {
-                                    r = std::max(static_cast<RealType>(1e-8), submesh->rho[c_idx]);
-                                    pr = std::max(static_cast<RealType>(1e-8), submesh->p[c_idx]);
-                                    u = (idx == L_x || idx == R_x) ? -submesh->ux[c_idx] : submesh->ux[c_idx];
-                                    v = (idx == L_y || idx == R_y) ? -submesh->uy[c_idx] : submesh->uy[c_idx];
-                                    w = (idx == L_z || idx == R_z) ? -submesh->uz[c_idx] : submesh->uz[c_idx];
-                                } else {
-                                    r = std::max(static_cast<RealType>(1e-8), submesh->rho[idx]);
-                                    u = submesh->ux[idx];
-                                    v = submesh->uy[idx];
-                                    w = submesh->uz[idx];
-                                    pr = std::max(static_cast<RealType>(1e-8), submesh->p[idx]);
-                                }
-                                energy = pr / gm1 + static_cast<RealType>(0.5) * r * (u*u + v*v + w*w);
-                                c = std::sqrt(gamma * pr / r);
-                            };
-
-                            RealType rC, uC, vC, wC, pC, EC, cC;
-                            get_state_info(c_idx, rC, uC, vC, wC, pC, EC, cC);
-
-                            RealType rLx, uLx, vLx, wLx, pLx, ELx, cLx;
-                            get_state_info(L_x, rLx, uLx, vLx, wLx, pLx, ELx, cLx);
-
-                            RealType rRx, uRx, vRx, wRx, pRx, ERx, cRx;
-                            get_state_info(R_x, rRx, uRx, vRx, wRx, pRx, ERx, cRx);
-
-                            RealType rLy, uLy, vLy, wLy, pLy, ELy, cLy;
-                            get_state_info(L_y, rLy, uLy, vLy, wLy, pLy, ELy, cLy);
-
-                            RealType rRy, uRy, vRy, wRy, pRy, ERy, cRy;
-                            get_state_info(R_y, rRy, uRy, vRy, wRy, pRy, ERy, cRy);
-
-                            RealType rLz, uLz, vLz, wLz, pLz, ELz, cLz;
-                            get_state_info(L_z, rLz, uLz, vLz, wLz, pLz, ELz, cLz);
-
-                            RealType rRz, uRz, vRz, wRz, pRz, ERz, cRz;
-                            get_state_info(R_z, rRz, uRz, vRz, wRz, pRz, ERz, cRz);
-
-                            RealType Sx_L = std::max(std::abs(uLx) + cLx, std::abs(uC) + cC);
-                            RealType Sx_R = std::max(std::abs(uC) + cC, std::abs(uRx) + cRx);
-
-                            RealType Sy_L = std::max(std::abs(vLy) + cLy, std::abs(vC) + cC);
-                            RealType Sy_R = std::max(std::abs(vC) + cC, std::abs(vRy) + cRy);
-
-                            RealType Sz_L = std::max(std::abs(wLz) + cLz, std::abs(wC) + cC);
-                            RealType Sz_R = std::max(std::abs(wC) + cC, std::abs(wRz) + cRz);
-
-                            // Rusanov interface fluxes in X
-                            RealType Fx_L_rho = 0.5 * (rLx*uLx + rC*uC) - 0.5 * Sx_L * (rC - rLx);
-                            RealType Fx_R_rho = 0.5 * (rC*uC + rRx*uRx) - 0.5 * Sx_R * (rRx - rC);
-
-                            RealType Fx_L_rhoux = 0.5 * (rLx*uLx*uLx + pLx + rC*uC*uC + pC) - 0.5 * Sx_L * (rC*uC - rLx*uLx);
-                            RealType Fx_R_rhoux = 0.5 * (rC*uC*uC + pC + rRx*uRx*uRx + pRx) - 0.5 * Sx_R * (rRx*uRx - rC*uC);
-
-                            RealType Fx_L_rhouy = 0.5 * (rLx*uLx*vLx + rC*uC*vC) - 0.5 * Sx_L * (rC*vC - rLx*vLx);
-                            RealType Fx_R_rhouy = 0.5 * (rC*uC*vC + rRx*uRx*vRx) - 0.5 * Sx_R * (rRx*vRx - rC*vC);
-
-                            RealType Fx_L_rhouz = 0.5 * (rLx*uLx*wLx + rC*uC*wC) - 0.5 * Sx_L * (rC*wC - rLx*wLx);
-                            RealType Fx_R_rhouz = 0.5 * (rC*uC*wC + rRx*uRx*wRx) - 0.5 * Sx_R * (rRx*wRx - rC*wC);
-
-                            RealType Fx_L_E = 0.5 * ((ELx + pLx)*uLx + (EC + pC)*uC) - 0.5 * Sx_L * (EC - ELx);
-                            RealType Fx_R_E = 0.5 * ((EC + pC)*uC + (ERx + pRx)*uRx) - 0.5 * Sx_R * (ERx - EC);
-
-                            // Rusanov interface fluxes in Y
-                            RealType Fy_L_rho = 0.5 * (rLy*vLy + rC*vC) - 0.5 * Sy_L * (rC - rLy);
-                            RealType Fy_R_rho = 0.5 * (rC*vC + rRy*vRy) - 0.5 * Sy_R * (rRy - rC);
-
-                            RealType Fy_L_rhoux = 0.5 * (rLy*vLy*uLy + rC*vC*uC) - 0.5 * Sy_L * (rC*uC - rLy*uLy);
-                            RealType Fy_R_rhoux = 0.5 * (rC*vC*uC + rRy*vRy*uRy) - 0.5 * Sy_R * (rRy*uRy - rC*uC);
-
-                            RealType Fy_L_rhouy = 0.5 * (rLy*vLy*vLy + pLy + rC*vC*vC + pC) - 0.5 * Sy_L * (rC*vC - rLy*vLy);
-                            RealType Fy_R_rhouy = 0.5 * (rC*vC*vC + pC + rRy*vRy*vRy + pRy) - 0.5 * Sy_R * (rRy*vRy - rC*vC);
-
-                            RealType Fy_L_rhouz = 0.5 * (rLy*vLy*wLy + rC*vC*wC) - 0.5 * Sy_L * (rC*wC - rLy*wLy);
-                            RealType Fy_R_rhouz = 0.5 * (rC*vC*wC + rRy*vRy*wRy) - 0.5 * Sy_R * (rRy*wRy - rC*wC);
-
-                            RealType Fy_L_E = 0.5 * ((ELy + pLy)*vLy + (EC + pC)*vC) - 0.5 * Sy_L * (EC - ELy);
-                            RealType Fy_R_E = 0.5 * ((EC + pC)*vC + (ERy + pRy)*vRy) - 0.5 * Sy_R * (ERy - EC);
-
-                            // Rusanov interface fluxes in Z
-                            RealType Fz_L_rho = 0.5 * (rLz*wLz + rC*wC) - 0.5 * Sz_L * (rC - rLz);
-                            RealType Fz_R_rho = 0.5 * (rC*wC + rRz*wRz) - 0.5 * Sz_R * (rRz - rC);
-
-                            RealType Fz_L_rhoux = 0.5 * (rLz*wLz*uLz + rC*wC*uC) - 0.5 * Sz_L * (rC*uC - rLz*uLz);
-                            RealType Fz_R_rhoux = 0.5 * (rC*wC*uC + rRz*wRz*uRz) - 0.5 * Sz_R * (rRz*uRz - rC*uC);
-
-                            RealType Fz_L_rhouy = 0.5 * (rLz*wLz*vLz + rC*wC*vC) - 0.5 * Sz_L * (rC*vC - rLz*vLz);
-                            RealType Fz_R_rhouy = 0.5 * (rC*wC*vC + rRz*wRz*vRz) - 0.5 * Sz_R * (rRz*vRz - rC*vC);
-
-                            RealType Fz_L_rhouz = 0.5 * (rLz*wLz*wLz + pLz + rC*wC*wC + pC) - 0.5 * Sz_L * (rC*wC - rLz*wLz);
-                            RealType Fz_R_rhouz = 0.5 * (rC*wC*wC + pC + rRz*wRz*wRz + pRz) - 0.5 * Sz_R * (rRz*wRz - rC*wC);
-
-                            RealType Fz_L_E = 0.5 * ((ELz + pLz)*wLz + (EC + pC)*wC) - 0.5 * Sz_L * (EC - ELz);
-                            RealType Fz_R_E = 0.5 * ((EC + pC)*wC + (ERz + pRz)*wRz) - 0.5 * Sz_R * (ERz - EC);
-
-                            // Conservative finite volume updates
-                            RealType rho_n = rC - dt_h * (Fx_R_rho - Fx_L_rho + Fy_R_rho - Fy_L_rho + Fz_R_rho - Fz_L_rho);
-                            RealType rhoux_n = rC*uC - dt_h * (Fx_R_rhoux - Fx_L_rhoux + Fy_R_rhoux - Fy_L_rhoux + Fz_R_rhoux - Fz_L_rhoux);
-                            RealType rhouy_n = rC*vC - dt_h * (Fx_R_rhouy - Fx_L_rhouy + Fy_R_rhouy - Fy_L_rhouy + Fz_R_rhouy - Fz_L_rhouy);
-                            RealType rhouz_n = rC*wC - dt_h * (Fx_R_rhouz - Fx_L_rhouz + Fy_R_rhouz - Fy_L_rhouz + Fz_R_rhouz - Fz_L_rhouz);
-                            RealType E_n = EC - dt_h * (Fx_R_E - Fx_L_E + Fy_R_E - Fy_L_E + Fz_R_E - Fz_L_E);
-
-                            if (!submesh->is_boundary.empty() && submesh->is_boundary[c_idx]) {
-                                new_rho[c_idx] = static_cast<RealType>(1.225);
-                                new_ux[c_idx] = static_cast<RealType>(0.0);
-                                new_uy[c_idx] = static_cast<RealType>(0.0);
-                                new_uz[c_idx] = static_cast<RealType>(0.0);
-                                new_p[c_idx] = static_cast<RealType>(101325.0);
-                                new_E[c_idx] = static_cast<RealType>(101325.0) / gm1;
-                                if constexpr (IsMultiMaterial) {
-                                    new_alpha1[c_idx] = static_cast<RealType>(0.0);
-                                    new_alpha2[c_idx] = static_cast<RealType>(1.0);
-                                    new_arho1[c_idx] = static_cast<RealType>(0.0);
-                                    new_arho2[c_idx] = static_cast<RealType>(1.225);
-                                }
-                            } else {
-                                RealType rho_clamped = std::max(static_cast<RealType>(1e-8), rho_n);
-                                new_rho[c_idx] = rho_clamped;
-                                new_ux[c_idx] = rhoux_n / rho_clamped;
-                                new_uy[c_idx] = rhouy_n / rho_clamped;
-                                new_uz[c_idx] = rhouz_n / rho_clamped;
-
-                                RealType ke_n = static_cast<RealType>(0.5) * rho_clamped * (new_ux[c_idx]*new_ux[c_idx] + new_uy[c_idx]*new_uy[c_idx] + new_uz[c_idx]*new_uz[c_idx]);
-                                RealType e_int = E_n - ke_n;
-                                if (e_int < static_cast<RealType>(0.0)) e_int = static_cast<RealType>(0.0);
-
-                                if constexpr (IsMultiMaterial) {
-                                    RealType Fx_L_a1 = 0.5 * (submesh->alpha1[L_x]*uLx + submesh->alpha1[c_idx]*uC) - 0.5 * Sx_L * (submesh->alpha1[c_idx] - submesh->alpha1[L_x]);
-                                    RealType Fx_R_a1 = 0.5 * (submesh->alpha1[c_idx]*uC + submesh->alpha1[R_x]*uRx) - 0.5 * Sx_R * (submesh->alpha1[R_x] - submesh->alpha1[c_idx]);
-
-                                    RealType Fy_L_a1 = 0.5 * (submesh->alpha1[L_y]*vLy + submesh->alpha1[c_idx]*vC) - 0.5 * Sy_L * (submesh->alpha1[c_idx] - submesh->alpha1[L_y]);
-                                    RealType Fy_R_a1 = 0.5 * (submesh->alpha1[c_idx]*vC + submesh->alpha1[R_y]*vRy) - 0.5 * Sy_R * (submesh->alpha1[R_y] - submesh->alpha1[c_idx]);
-
-                                    RealType Fz_L_a1 = 0.5 * (submesh->alpha1[L_z]*wLz + submesh->alpha1[c_idx]*wC) - 0.5 * Sz_L * (submesh->alpha1[c_idx] - submesh->alpha1[L_z]);
-                                    RealType Fz_R_a1 = 0.5 * (submesh->alpha1[c_idx]*wC + submesh->alpha1[R_z]*wRz) - 0.5 * Sz_R * (submesh->alpha1[R_z] - submesh->alpha1[c_idx]);
-
-                                    new_alpha1[c_idx] = std::clamp(submesh->alpha1[c_idx] - dt_h * (Fx_R_a1 - Fx_L_a1 + Fy_R_a1 - Fy_L_a1 + Fz_R_a1 - Fz_L_a1), static_cast<RealType>(0.0), static_cast<RealType>(1.0));
-                                    new_alpha2[c_idx] = static_cast<RealType>(1.0) - new_alpha1[c_idx];
-                                    new_arho1[c_idx] = new_alpha1[c_idx] * new_rho[c_idx];
-                                    new_arho2[c_idx] = new_alpha2[c_idx] * new_rho[c_idx];
-
-                                    RealType p_n = (RealType)MultiMat::getMixturePressure((double)e_int, (double)rho_clamped, (double)new_alpha1[c_idx], (double)new_alpha2[c_idx], (double)new_arho1[c_idx], (double)new_arho2[c_idx], (double)gamma, materials.products, materials.unreacted);
-                                    if (std::isnan(p_n) || std::isinf(p_n) || p_n < static_cast<RealType>(1e-8)) {
-                                        p_n = static_cast<RealType>(101325.0);
-                                        new_rho[c_idx] = static_cast<RealType>(1.225);
-                                        new_ux[c_idx] = static_cast<RealType>(0.0);
-                                        new_uy[c_idx] = static_cast<RealType>(0.0);
-                                        new_uz[c_idx] = static_cast<RealType>(0.0);
-                                        ke_n = static_cast<RealType>(0.0);
-                                        new_alpha1[c_idx] = static_cast<RealType>(0.0);
-                                        new_alpha2[c_idx] = static_cast<RealType>(1.0);
-                                        new_arho1[c_idx] = static_cast<RealType>(0.0);
-                                        new_arho2[c_idx] = static_cast<RealType>(1.225);
-                                        e_int = p_n / gm1;
-                                    }
-                                    new_p[c_idx] = p_n;
-                                    new_E[c_idx] = (RealType)MultiMat::getMixtureEnergy((double)p_n, (double)new_rho[c_idx], (double)new_alpha1[c_idx], (double)new_alpha2[c_idx], (double)new_arho1[c_idx], (double)new_arho2[c_idx], (double)gamma, materials.products, materials.unreacted) + ke_n;
-                                } else {
-                                    RealType p_n = e_int * gm1;
-                                    if (std::isnan(p_n) || std::isinf(p_n) || p_n < static_cast<RealType>(1e-8)) {
-                                        p_n = static_cast<RealType>(101325.0);
-                                        new_rho[c_idx] = static_cast<RealType>(1.225);
-                                        new_ux[c_idx] = static_cast<RealType>(0.0);
-                                        new_uy[c_idx] = static_cast<RealType>(0.0);
-                                        new_uz[c_idx] = static_cast<RealType>(0.0);
-                                        ke_n = static_cast<RealType>(0.0);
-                                        e_int = p_n / gm1;
-                                    }
-                                    new_p[c_idx] = p_n;
-                                    new_E[c_idx] = e_int + ke_n;
-                                }
-                            }
-
-                            RealType op = new_p[c_idx] - static_cast<RealType>(101325.0);
-                            if (op < static_cast<RealType>(0.0)) op = static_cast<RealType>(0.0);
-                            if (op > submesh->peak_overpressure[c_idx]) {
-                                submesh->peak_overpressure[c_idx] = op;
-                            }
-                            submesh->peak_impulse[c_idx] += op * dt_sub;
-                        }
-                    }
-                }
-
-                submesh->rho = std::move(new_rho);
-                submesh->ux = std::move(new_ux);
-                submesh->uy = std::move(new_uy);
-                submesh->uz = std::move(new_uz);
-                submesh->p = std::move(new_p);
-                submesh->E = std::move(new_E);
-                if constexpr (IsMultiMaterial) {
-                    submesh->alpha1 = std::move(new_alpha1);
-                    submesh->alpha2 = std::move(new_alpha2);
-                    submesh->arho1 = std::move(new_arho1);
-                    submesh->arho2 = std::move(new_arho2);
-                }
-            }
+            // Walk the tree from root. "root" is the sentinel parent_id for level-1 submeshes.
+            stepSubTreeRecursive("root", root_mesh, dt_sub, gamma, materials, geom_pool);
         }
     }
 
     void voxelizeSubMeshGeometry(const std::vector<Triangle>& triangles, const std::string& voxelization_method) {
-        for (auto& sm : submeshes) {
+        for (auto& sm : submeshes_sorted) {
             voxelize_flat_boundary(
                 triangles,
                 voxelization_method,

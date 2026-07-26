@@ -184,10 +184,11 @@ void main() {
     }
 
     if (uShowCellEdges) {
-        vec2 grid = fract(vTexCoord * vSliceSize);
-        vec2 width = fwidth(vTexCoord * vSliceSize) * 0.5;
-        vec2 edge = (vec2(1.0) - smoothstep(vec2(0.0), width, grid)) + smoothstep(vec2(1.0) - width, vec2(1.0), grid);
-        float isEdge = clamp(edge.x + edge.y, 0.0, 1.0);
+        vec2 grid = abs(fract(vTexCoord * vSliceSize - 0.5) - 0.5);
+        vec2 threshold = max(fwidth(vTexCoord * vSliceSize), vec2(0.003));
+        vec2 distToEdge = grid / threshold;
+        float minDist = min(distToEdge.x, distToEdge.y);
+        float isEdge = 1.0 - smoothstep(0.4, 1.4, minDist);
         finalColor = vec4(mix(finalColor.rgb, vec3(0.0, 0.0, 0.0), isEdge), finalColor.a);
     }
     outColor = finalColor;
@@ -384,12 +385,14 @@ void main() {
     }
 
     if (uShowCellEdges) {
-        vec2 grid = fract(vTexCoord * vSliceSize);
         #ifdef GL_OES_standard_derivatives
-        vec2 width = fwidth(vTexCoord * vSliceSize) * 0.5;
-        vec2 edge = (vec2(1.0) - smoothstep(vec2(0.0), width, grid)) + smoothstep(vec2(1.0) - width, vec2(1.0), grid);
-        float isEdge = clamp(edge.x + edge.y, 0.0, 1.0);
+        vec2 grid = abs(fract(vTexCoord * vSliceSize - 0.5) - 0.5);
+        vec2 threshold = max(fwidth(vTexCoord * vSliceSize), vec2(0.003));
+        vec2 distToEdge = grid / threshold;
+        float minDist = min(distToEdge.x, distToEdge.y);
+        float isEdge = 1.0 - smoothstep(0.4, 1.4, minDist);
         #else
+        vec2 grid = fract(vTexCoord * vSliceSize);
         vec2 edge = step(grid, vec2(0.01)) + step(vec2(0.99), grid);
         float isEdge = clamp(edge.x + edge.y, 0.0, 1.0);
         #endif
@@ -723,7 +726,7 @@ function updateMatrices(width: number, height: number) {
     const h = height > 0 ? height : 1;
     const aspect = w / h;
     const fov = 45 * Math.PI / 180;
-    const zNear = 0.1;
+    const zNear = Math.max(1e-5, Math.min(0.05, Math.abs(zoom) * 0.1));
     const zFar = 100.0;
 
     // Perspective matrix
@@ -1250,7 +1253,7 @@ function render() {
             updateMatrices(w, h);
             render();
         } else if (type === "input") {
-            if (data.dy) zoom = Math.max(-10, Math.min(-0.5, zoom + data.dy * 0.01));
+            if (data.dy) zoom = Math.max(-10, Math.min(-0.0001, zoom + data.dy * 0.01));
             if (data.drx) rotX += data.drx * 0.01;
             if (data.dry) rotY += data.dry * 0.01;
             if (data.dpx !== undefined) {

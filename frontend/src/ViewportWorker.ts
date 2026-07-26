@@ -76,7 +76,7 @@ uniform bool uStlLogScale;
 uniform int uAxis;
 uniform int uIsSubmesh;
 uniform int uNumSubmeshMasks;
-uniform vec4 uSubmeshMasks[8];
+uniform vec4 uSubmeshMasks[32];
 
 out vec4 outColor;
 
@@ -169,7 +169,7 @@ float getT(float raw, float minVal, float maxVal, bool useLogScale) {
 }
 
 void main() {
-    if (uIsSubmesh == 0 && uNumSubmeshMasks > 0) {
+    if (uNumSubmeshMasks > 0) {
         vec2 coord2D;
         if (uAxis == 0) {
             coord2D = vLocalPos.xy;
@@ -503,10 +503,11 @@ void main() {
     
     if (uShowCellEdges) {
         vec2 edgeSize = vSliceSize;
-        vec2 grid = fract(vTexCoord * edgeSize);
-        vec2 width = fwidth(vTexCoord * edgeSize) * 0.5;
-        vec2 edge = (vec2(1.0) - smoothstep(vec2(0.0), width, grid)) + smoothstep(vec2(1.0) - width, vec2(1.0), grid);
-        float isEdge = clamp(edge.x + edge.y, 0.0, 1.0);
+        vec2 grid = abs(fract(vTexCoord * edgeSize - 0.5) - 0.5);
+        vec2 threshold = max(fwidth(vTexCoord * edgeSize), vec2(0.003));
+        vec2 distToEdge = grid / threshold;
+        float minDist = min(distToEdge.x, distToEdge.y);
+        float isEdge = 1.0 - smoothstep(0.4, 1.4, minDist);
         finalColor = vec4(mix(finalColor.rgb, vec3(0.0, 0.0, 0.0), isEdge), finalColor.a);
     }
     outColor = finalColor;
@@ -571,7 +572,7 @@ uniform float uStlMax;
 uniform int uAxis;
 uniform int uIsSubmesh;
 uniform int uNumSubmeshMasks;
-uniform vec4 uSubmeshMasks[8];
+uniform vec4 uSubmeshMasks[32];
 
 vec3 colormap_plasma(float t) {
     return vec3(t * 1.5, t * t, 1.0 - t);
@@ -662,7 +663,7 @@ float getT(float raw, float minVal, float maxVal, bool useLogScale) {
 }
 
 void main() {
-    if (uIsSubmesh == 0 && uNumSubmeshMasks > 0) {
+    if (uNumSubmeshMasks > 0) {
         vec2 coord2D;
         if (uAxis == 0) {
             coord2D = vLocalPos.xy;
@@ -906,12 +907,14 @@ void main() {
     }
 
     if (uShowCellEdges) {
-        vec2 grid = fract(vTexCoord * vSliceSize);
         #ifdef GL_OES_standard_derivatives
-        vec2 width = fwidth(vTexCoord * vSliceSize) * 0.5;
-        vec2 edge = (vec2(1.0) - smoothstep(vec2(0.0), width, grid)) + smoothstep(vec2(1.0) - width, vec2(1.0), grid);
-        float isEdge = clamp(edge.x + edge.y, 0.0, 1.0);
+        vec2 grid = abs(fract(vTexCoord * vSliceSize - 0.5) - 0.5);
+        vec2 threshold = max(fwidth(vTexCoord * vSliceSize), vec2(0.003));
+        vec2 distToEdge = grid / threshold;
+        float minDist = min(distToEdge.x, distToEdge.y);
+        float isEdge = 1.0 - smoothstep(0.4, 1.4, minDist);
         #else
+        vec2 grid = fract(vTexCoord * vSliceSize);
         vec2 edge = step(grid, vec2(0.01)) + step(vec2(0.99), grid);
         float isEdge = clamp(edge.x + edge.y, 0.0, 1.0);
         #endif
@@ -1349,13 +1352,11 @@ fn fs_main(vertexIn: VertexOutput, @builtin(front_facing) isFront: bool) -> @loc
     }
 
     if (uniforms.showCellEdges > 0.5) {
-        let gridX = fract(texCoord.x * sliceSize.x);
-        let gridY = fract(texCoord.y * sliceSize.y);
-        let widthX = fwidth(texCoord.x * sliceSize.x) * 0.5;
-        let widthY = fwidth(texCoord.y * sliceSize.y) * 0.5;
-        let edgeX = (1.0 - smoothstep(0.0, widthX, gridX)) + smoothstep(1.0 - widthX, 1.0, gridX);
-        let edgeY = (1.0 - smoothstep(0.0, widthY, gridY)) + smoothstep(1.0 - widthY, 1.0, gridY);
-        let isEdge = clamp(edgeX + edgeY, 0.0, 1.0);
+        let grid = abs(fract(texCoord * sliceSize - vec2<f32>(0.5, 0.5)) - vec2<f32>(0.5, 0.5));
+        let threshold = max(fwidth(texCoord * sliceSize), vec2<f32>(0.003, 0.003));
+        let distToEdge = grid / threshold;
+        let minDist = min(distToEdge.x, distToEdge.y);
+        let isEdge = 1.0 - smoothstep(0.4, 1.4, minDist);
         finalColor = vec4<f32>(mix(finalColor.rgb, vec3<f32>(0.0, 0.0, 0.0), isEdge), finalColor.a);
     }
 
@@ -2537,6 +2538,138 @@ function getSphereVertices(cx: number, cy: number, cz: number, rx: number, ry: n
     return verts;
 }
 
+function getSphereWireframeVertices(cx: number, cy: number, cz: number, rx: number, ry: number, rz: number): number[] {
+    const verts: number[] = [];
+    const addLine = (p1: number[], p2: number[]) => {
+        verts.push(...p1, 0, 0);
+        verts.push(...p2, 0, 0);
+    };
+
+    const segments = 32;
+
+    // XY Ring (at z = cz)
+    for (let i = 0; i < segments; i++) {
+        const theta1 = (i * 2 * Math.PI) / segments;
+        const theta2 = ((i + 1) * 2 * Math.PI) / segments;
+        addLine(
+            [cx + rx * Math.cos(theta1), cy + ry * Math.sin(theta1), cz],
+            [cx + rx * Math.cos(theta2), cy + ry * Math.sin(theta2), cz]
+        );
+    }
+
+    // XZ Ring (at y = cy)
+    for (let i = 0; i < segments; i++) {
+        const theta1 = (i * 2 * Math.PI) / segments;
+        const theta2 = ((i + 1) * 2 * Math.PI) / segments;
+        addLine(
+            [cx + rx * Math.cos(theta1), cy, cz + rz * Math.sin(theta1)],
+            [cx + rx * Math.cos(theta2), cy, cz + rz * Math.sin(theta2)]
+        );
+    }
+
+    // YZ Ring (at x = cx)
+    for (let i = 0; i < segments; i++) {
+        const theta1 = (i * 2 * Math.PI) / segments;
+        const theta2 = ((i + 1) * 2 * Math.PI) / segments;
+        addLine(
+            [cx, cy + ry * Math.cos(theta1), cz + rz * Math.sin(theta1)],
+            [cx, cy + ry * Math.cos(theta2), cz + rz * Math.sin(theta2)]
+        );
+    }
+
+    return verts;
+}
+
+function getCylinderVertices(cx: number, cy: number, cz: number, rx: number, ry: number, rz: number): number[] {
+    const verts: number[] = [];
+    const segments = 24;
+
+    const addTri = (p1: number[], p2: number[], p3: number[]) => {
+        verts.push(...p1, 0, 0, 0, 0);
+        verts.push(...p2, 0, 0, 0, 0);
+        verts.push(...p3, 0, 0, 0, 0);
+    };
+
+    const topCircle: number[][] = [];
+    const bottomCircle: number[][] = [];
+
+    for (let i = 0; i <= segments; i++) {
+        const theta = (i * 2 * Math.PI) / segments;
+        const cosT = Math.cos(theta);
+        const sinT = Math.sin(theta);
+        topCircle.push([cx + rx * cosT, cy + ry * sinT, cz + rz]);
+        bottomCircle.push([cx + rx * cosT, cy + ry * sinT, cz - rz]);
+    }
+
+    // Sides
+    for (let i = 0; i < segments; i++) {
+        const p1 = bottomCircle[i];
+        const p2 = bottomCircle[i + 1];
+        const p3 = topCircle[i];
+        const p4 = topCircle[i + 1];
+
+        addTri(p1, p3, p2);
+        addTri(p2, p3, p4);
+    }
+
+    // Top Cap
+    const topCenter = [cx, cy, cz + rz];
+    for (let i = 0; i < segments; i++) {
+        addTri(topCenter, topCircle[i], topCircle[i + 1]);
+    }
+
+    // Bottom Cap
+    const bottomCenter = [cx, cy, cz - rz];
+    for (let i = 0; i < segments; i++) {
+        addTri(bottomCenter, bottomCircle[i + 1], bottomCircle[i]);
+    }
+
+    return verts;
+}
+
+function getCylinderWireframeVertices(cx: number, cy: number, cz: number, rx: number, ry: number, rz: number): number[] {
+    const verts: number[] = [];
+    const segments = 32;
+
+    const addLine = (p1: number[], p2: number[]) => {
+        verts.push(...p1, 0, 0);
+        verts.push(...p2, 0, 0);
+    };
+
+    // Top Ring (at z = cz + rz)
+    for (let i = 0; i < segments; i++) {
+        const theta1 = (i * 2 * Math.PI) / segments;
+        const theta2 = ((i + 1) * 2 * Math.PI) / segments;
+        addLine(
+            [cx + rx * Math.cos(theta1), cy + ry * Math.sin(theta1), cz + rz],
+            [cx + rx * Math.cos(theta2), cy + ry * Math.sin(theta2), cz + rz]
+        );
+    }
+
+    // Bottom Ring (at z = cz - rz)
+    for (let i = 0; i < segments; i++) {
+        const theta1 = (i * 2 * Math.PI) / segments;
+        const theta2 = ((i + 1) * 2 * Math.PI) / segments;
+        addLine(
+            [cx + rx * Math.cos(theta1), cy + ry * Math.sin(theta1), cz - rz],
+            [cx + rx * Math.cos(theta2), cy + ry * Math.sin(theta2), cz - rz]
+        );
+    }
+
+    // 4 Vertical Pillars connecting them
+    const angles = [0, Math.PI / 2, Math.PI, 3 * Math.PI / 2];
+    for (const angle of angles) {
+        const cosA = Math.cos(angle);
+        const sinA = Math.sin(angle);
+        addLine(
+            [cx + rx * cosA, cy + ry * sinA, cz - rz],
+            [cx + rx * cosA, cy + ry * sinA, cz + rz]
+        );
+    }
+
+    return verts;
+}
+
 function updateGaugesGeometry() {
     const mult = (gaugeSize > 0) ? gaugeSize : 1.0;
     const cellMeters = (dx && dx > 0) ? dx : 0.01;
@@ -2652,6 +2785,7 @@ function updateChargeGeometry() {
     const dimX = getDimX();
     const dimY = getDimY();
     const dimZ = getDimZ();
+    const maxSize = Math.max(dimX, dimY, dimZ);
 
     const cx = Number(chargeData.x ?? (xmin + dimX * 0.5));
     const cy = Number(chargeData.y ?? (ymin + dimY * 0.5));
@@ -2665,32 +2799,38 @@ function updateChargeGeometry() {
     let solidVerts: number[] = [];
     let wireVerts: number[] = [];
 
-    if (shape === 'Block') {
-        const lx = Number(chargeData.lx ?? 0.2);
-        const ly = Number(chargeData.ly ?? 0.2);
-        const lz = Number(chargeData.lz ?? 0.2);
-
-        const x0 = px - (lx * 0.5) / dimX;
-        const x1 = px + (lx * 0.5) / dimX;
-        const y0 = py - (ly * 0.5) / dimY;
-        const y1 = py + (ly * 0.5) / dimY;
-        const z0 = pz - (lz * 0.5) / dimZ;
-        const z1 = pz + (lz * 0.5) / dimZ;
-
-        solidVerts = getBoxVertices(x0, x1, y0, y1, z0, z1);
-        wireVerts = getBoxWireframeVertices(x0, x1, y0, y1, z0, z1);
-    } else {
-        const r = Number(chargeData.radius ?? 0.1);
-        const rx = r / dimX;
-        const ry = r / dimY;
-        const rz = r / dimZ;
-
-        solidVerts = getSphereVertices(px, py, pz, rx, ry, rz);
-        const x0 = px - rx; const x1 = px + rx;
-        const y0 = py - ry; const y1 = py + ry;
-        const z0 = pz - rz; const z1 = pz + rz;
-        wireVerts = getBoxWireframeVertices(x0, x1, y0, y1, z0, z1);
-    }
+if (shape === 'Block') {
+    // Preserve original aspect ratios using per‑axis domain sizes
+    const lx = Number(chargeData.lx ?? 0.2);
+    const ly = Number(chargeData.ly ?? 0.2);
+    const lz = Number(chargeData.lz ?? 0.2);
+    const x0 = px - (lx * 0.5) / dimX;
+    const x1 = px + (lx * 0.5) / dimX;
+    const y0 = py - (ly * 0.5) / dimY;
+    const y1 = py + (ly * 0.5) / dimY;
+    const z0 = pz - (lz * 0.5) / dimZ;
+    const z1 = pz + (lz * 0.5) / dimZ;
+    solidVerts = getBoxVertices(x0, x1, y0, y1, z0, z1);
+    wireVerts = getBoxWireframeVertices(x0, x1, y0, y1, z0, z1);
+} else if (shape === 'Cylinder') {
+    const r = Number(chargeData.radius ?? 0.1);
+    const h = Number(chargeData.height ?? 0.2);
+    // Use per‑axis scaling for radius and height
+    const rx = r / dimX;
+    const ry = r / dimY;
+    const rz = (h * 0.5) / dimZ;
+    solidVerts = getCylinderVertices(px, py, pz, rx, ry, rz);
+    wireVerts = getCylinderWireframeVertices(px, py, pz, rx, ry, rz);
+} else {
+    // Sphere: scale radius per-axis so it renders as a true sphere in world space
+    // regardless of non-cubic domain aspect ratios
+    const r = Number(chargeData.radius ?? 0.1);
+    const rx = r / dimX;
+    const ry = r / dimY;
+    const rz = r / dimZ;
+    solidVerts = getSphereVertices(px, py, pz, rx, ry, rz);
+    wireVerts = getSphereWireframeVertices(px, py, pz, rx, ry, rz);
+}
 
     if (gl) {
         if (!chargeBuffer) chargeBuffer = gl.createBuffer();
@@ -2986,7 +3126,7 @@ function updateMatrices(width: number, height: number) {
     const w = width > 0 ? width : 1;
     const h = height > 0 ? height : 1;
     const aspect = w / h;
-    const zNear = 0.1;
+    const zNear = Math.max(1e-5, Math.min(0.05, distance * 0.1));
     const zFar = 1000.0;
 
     // Model matrix (Scaling)
@@ -3688,6 +3828,59 @@ function raySphereIntersect(
     return null;
 }
 
+function rayCylinderIntersect(O: number[], D: number[], center: number[], R: number, H: number): number | null {
+    const cx = center[0], cy = center[1], cz = center[2];
+    const dx = O[0] - cx, dy = O[1] - cy;
+    
+    // Infinite cylinder intersection in XY plane:
+    const A = D[0] * D[0] + D[1] * D[1];
+    const B = 2 * (D[0] * dx + D[1] * dy);
+    const C = dx * dx + dy * dy - R * R;
+    
+    let tMin = Infinity;
+    
+    if (A > 1e-8) {
+        const disc = B * B - 4 * A * C;
+        if (disc >= 0) {
+            const sqrtDisc = Math.sqrt(disc);
+            const t1 = (-B - sqrtDisc) / (2 * A);
+            const t2 = (-B + sqrtDisc) / (2 * A);
+            
+            for (const t of [t1, t2]) {
+                if (t > 1e-4) {
+                    const z = O[2] + t * D[2];
+                    if (Math.abs(z - cz) <= H) {
+                        if (t < tMin) tMin = t;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Caps intersection (z = cz - H and z = cz + H)
+    if (Math.abs(D[2]) > 1e-8) {
+        const tBottom = (cz - H - O[2]) / D[2];
+        if (tBottom > 1e-4 && tBottom < tMin) {
+            const x = O[0] + tBottom * D[0];
+            const y = O[1] + tBottom * D[1];
+            if ((x - cx) * (x - cx) + (y - cy) * (y - cy) <= R * R) {
+                tMin = tBottom;
+            }
+        }
+        
+        const tTop = (cz + H - O[2]) / D[2];
+        if (tTop > 1e-4 && tTop < tMin) {
+            const x = O[0] + tTop * D[0];
+            const y = O[1] + tTop * D[1];
+            if ((x - cx) * (x - cx) + (y - cy) * (y - cy) <= R * R) {
+                tMin = tTop;
+            }
+        }
+    }
+    
+    return tMin === Infinity ? null : tMin;
+}
+
 function rayBoxIntersect(
     O: number[], D: number[],
     boxMin: number[], boxMax: number[]
@@ -3950,6 +4143,16 @@ function handleSetRotationCenterFromClick(mouseX: number, mouseY: number, width:
                 minTSolid = t;
                 bestHit = [O[0] + t * D[0], O[1] + t * D[1], O[2] + t * D[2]];
             }
+        } else if (shape === 'Cylinder') {
+            const r = Number(chargeData.radius ?? 0.1);
+            const h = Number(chargeData.height ?? 0.2);
+            const rWorld = r / maxSize;
+            const hWorld = (h * 0.5) / maxSize;
+            const t = rayCylinderIntersect(O, D, center, rWorld, hWorld);
+            if (t !== null && t > 1e-4 && t < minTSolid) {
+                minTSolid = t;
+                bestHit = [O[0] + t * D[0], O[1] + t * D[1], O[2] + t * D[2]];
+            }
         } else {
             const r = Number(chargeData.radius ?? 0.1);
             const rWorld = r / maxSize;
@@ -4020,29 +4223,106 @@ function handleSetRotationCenterFromClick(mouseX: number, mouseY: number, width:
             const cy = Number(chargeData.y ?? (ymin + sizeY * 0.5));
             const cz = Number(chargeData.z ?? (zmin + sizeZ * 0.5));
             const center = physToWorld(cx, cy, cz);
-            const lx = Number(chargeData.lx ?? 0.2);
-            const ly = Number(chargeData.ly ?? 0.2);
-            const lz = Number(chargeData.lz ?? 0.2);
+            const shape = chargeData.shape || 'Sphere';
 
-            const x0 = center[0] - (lx * 0.5) / maxSize;
-            const x1 = center[0] + (lx * 0.5) / maxSize;
-            const y0 = center[1] - (ly * 0.5) / maxSize;
-            const y1 = center[1] + (ly * 0.5) / maxSize;
-            const z0 = center[2] - (lz * 0.5) / maxSize;
-            const z1 = center[2] + (lz * 0.5) / maxSize;
+            if (shape === 'Block') {
+                const lx = Number(chargeData.lx ?? 0.2);
+                const ly = Number(chargeData.ly ?? 0.2);
+                const lz = Number(chargeData.lz ?? 0.2);
 
-            const boxCorners = [
-                [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],
-                [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]
-            ];
-            const boxEdges = [
-                [0,1], [1,2], [2,3], [3,0],
-                [4,5], [5,6], [6,7], [7,4],
-                [0,4], [1,5], [2,6], [3,7]
-            ];
-            for (const [eA, eB] of boxEdges) {
-                const eRes = testWireframeEdge(boxCorners[eA], boxCorners[eB], mvp, mouseX, mouseY, width, height, eye);
-                if (eRes && eRes.camDist < minEdgeCamDist) { minEdgeCamDist = eRes.camDist; bestHit = eRes.hitPoint; }
+                const x0 = center[0] - (lx * 0.5) / maxSize;
+                const x1 = center[0] + (lx * 0.5) / maxSize;
+                const y0 = center[1] - (ly * 0.5) / maxSize;
+                const y1 = center[1] + (ly * 0.5) / maxSize;
+                const z0 = center[2] - (lz * 0.5) / maxSize;
+                const z1 = center[2] + (lz * 0.5) / maxSize;
+
+                const boxCorners = [
+                    [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],
+                    [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]
+                ];
+                const boxEdges = [
+                    [0,1], [1,2], [2,3], [3,0],
+                    [4,5], [5,6], [6,7], [7,4],
+                    [0,4], [1,5], [2,6], [3,7]
+                ];
+                for (const [eA, eB] of boxEdges) {
+                    const eRes = testWireframeEdge(boxCorners[eA], boxCorners[eB], mvp, mouseX, mouseY, width, height, eye);
+                    if (eRes && eRes.camDist < minEdgeCamDist) { minEdgeCamDist = eRes.camDist; bestHit = eRes.hitPoint; }
+                }
+            } else if (shape === 'Cylinder') {
+                const r = Number(chargeData.radius ?? 0.1);
+                const h = Number(chargeData.height ?? 0.2);
+                const rx = r / maxSize;
+                const ry = r / maxSize;
+                const rz = (h * 0.5) / maxSize;
+
+                const segments = 32;
+                const topRing: number[][] = [];
+                const bottomRing: number[][] = [];
+                for (let i = 0; i < segments; i++) {
+                    const theta = (i * 2 * Math.PI) / segments;
+                    topRing.push([center[0] + rx * Math.cos(theta), center[1] + ry * Math.sin(theta), center[2] + rz]);
+                    bottomRing.push([center[0] + rx * Math.cos(theta), center[1] + ry * Math.sin(theta), center[2] - rz]);
+                }
+
+                for (let i = 0; i < segments; i++) {
+                    const p1t = topRing[i];
+                    const p2t = topRing[(i + 1) % segments];
+                    const eResT = testWireframeEdge(p1t, p2t, mvp, mouseX, mouseY, width, height, eye);
+                    if (eResT && eResT.camDist < minEdgeCamDist) { minEdgeCamDist = eResT.camDist; bestHit = eResT.hitPoint; }
+
+                    const p1b = bottomRing[i];
+                    const p2b = bottomRing[(i + 1) % segments];
+                    const eResB = testWireframeEdge(p1b, p2b, mvp, mouseX, mouseY, width, height, eye);
+                    if (eResB && eResB.camDist < minEdgeCamDist) { minEdgeCamDist = eResB.camDist; bestHit = eResB.hitPoint; }
+                }
+
+                const angles = [0, Math.PI / 2, Math.PI, 3 * Math.PI / 2];
+                for (const angle of angles) {
+                    const cosA = Math.cos(angle);
+                    const sinA = Math.sin(angle);
+                    const pBottom = [center[0] + rx * cosA, center[1] + ry * sinA, center[2] - rz];
+                    const pTop = [center[0] + rx * cosA, center[1] + ry * sinA, center[2] + rz];
+                    const eResP = testWireframeEdge(pBottom, pTop, mvp, mouseX, mouseY, width, height, eye);
+                    if (eResP && eResP.camDist < minEdgeCamDist) { minEdgeCamDist = eResP.camDist; bestHit = eResP.hitPoint; }
+                }
+            } else {
+                const r = Number(chargeData.radius ?? 0.1);
+                const rx = r / maxSize;
+                const ry = r / maxSize;
+                const rz = r / maxSize;
+                const segments = 32;
+
+                // XY Ring
+                let prevXY = [center[0] + rx, center[1], center[2]];
+                for (let i = 1; i <= segments; i++) {
+                    const theta = (i * 2 * Math.PI) / segments;
+                    const currXY = [center[0] + rx * Math.cos(theta), center[1] + ry * Math.sin(theta), center[2]];
+                    const eRes = testWireframeEdge(prevXY, currXY, mvp, mouseX, mouseY, width, height, eye);
+                    if (eRes && eRes.camDist < minEdgeCamDist) { minEdgeCamDist = eRes.camDist; bestHit = eRes.hitPoint; }
+                    prevXY = currXY;
+                }
+
+                // XZ Ring
+                let prevXZ = [center[0] + rx, center[1], center[2]];
+                for (let i = 1; i <= segments; i++) {
+                    const theta = (i * 2 * Math.PI) / segments;
+                    const currXZ = [center[0] + rx * Math.cos(theta), center[1], center[2] + rz * Math.sin(theta)];
+                    const eRes = testWireframeEdge(prevXZ, currXZ, mvp, mouseX, mouseY, width, height, eye);
+                    if (eRes && eRes.camDist < minEdgeCamDist) { minEdgeCamDist = eRes.camDist; bestHit = eRes.hitPoint; }
+                    prevXZ = currXZ;
+                }
+
+                // YZ Ring
+                let prevYZ = [center[0], center[1] + ry, center[2]];
+                for (let i = 1; i <= segments; i++) {
+                    const theta = (i * 2 * Math.PI) / segments;
+                    const currYZ = [center[0], center[1] + ry * Math.cos(theta), center[2] + rz * Math.sin(theta)];
+                    const eRes = testWireframeEdge(prevYZ, currYZ, mvp, mouseX, mouseY, width, height, eye);
+                    if (eRes && eRes.camDist < minEdgeCamDist) { minEdgeCamDist = eRes.camDist; bestHit = eRes.hitPoint; }
+                    prevYZ = currYZ;
+                }
             }
         }
 
@@ -4085,7 +4365,7 @@ function handleSetRotationCenterFromClick(mouseX: number, mouseY: number, width:
         const dzVal = cameraEyeZ - targetZ;
 
         const projDist = dxVal * u[0] + dyVal * u[1] + dzVal * u[2];
-        distance = Math.max(0.01, projDist);
+        distance = Math.max(0.0001, projDist);
 
         updateMatrices(width, height);
         render();
@@ -5082,7 +5362,7 @@ function render() {
                 numMasks++;
             }
         });
-        return { masks: masks.slice(0, 32), numMasks: Math.min(numMasks, 8) };
+        return { masks: masks.slice(0, 128), numMasks: Math.min(numMasks, 32) };
     };
 
     const slicesArrayWebGL = Object.values(activeSlicesWebGL).filter(s => {
@@ -5351,7 +5631,7 @@ self.onmessage = async (e) => {
         } else if (type === "input") {
             if (data.dy !== undefined) {
                 // Scroll zooms distance
-                distance = Math.max(0.1, distance + data.dy * 0.01 * distance * 0.1);
+                distance = Math.max(0.0001, distance + data.dy * 0.01 * distance * 0.1);
             }
             if (data.drx !== undefined) {
                 pitch += data.drx * 0.01;
@@ -5532,17 +5812,20 @@ self.onmessage = async (e) => {
                 
                 // Ensure cachedSlices length matches slicesConfig length if we have at least one valid slice
                 if (cachedSlices.length > 0) {
-                    while (cachedSlices.length < slicesConfig.length) {
-                        const i = cachedSlices.length;
+                    const parentSlices = cachedSlices.filter(s => !s.is_submesh);
+                    const submeshSlices = cachedSlices.filter(s => s.is_submesh);
+
+                    while (parentSlices.length < slicesConfig.length) {
+                        const i = parentSlices.length;
                         const config = slicesConfig[i];
-                        const refSlice = cachedSlices[0];
+                        const refSlice = parentSlices[0] || submeshSlices[0];
                         const w = refSlice ? refSlice.w : 64;
                         const h = refSlice ? refSlice.h : 64;
                         const dummyData = new Float32Array(w * h);
                         if (refSlice && refSlice.data.length > 0) {
                             dummyData.fill(refSlice.data[0]);
                         }
-                        cachedSlices.push({
+                        parentSlices.push({
                             axis: config.axis === 'xy' ? 0 : config.axis === 'xz' ? 1 : 2,
                             offset: config.offset,
                             w,
@@ -5563,22 +5846,28 @@ self.onmessage = async (e) => {
                             interpolate: config.interpolate !== false
                         });
                     }
-                    if (cachedSlices.length > slicesConfig.length) {
+
+                    if (parentSlices.length > slicesConfig.length) {
                         // Destroy resources for slices that are being deleted
-                        for (let i = slicesConfig.length; i < cachedSlices.length; i++) {
-                            if (isWebGPU && activeSlicesWebGPU[i]) {
-                                activeSlicesWebGPU[i].gpuTexture.destroy();
-                                activeSlicesWebGPU[i].vertexBuffer.destroy();
-                                delete activeSlicesWebGPU[i];
-                            }
-                            if (gl && activeSlicesWebGL[i]) {
-                                gl.deleteTexture(activeSlicesWebGL[i].texture);
-                                gl.deleteBuffer(activeSlicesWebGL[i].buffer);
-                                delete activeSlicesWebGL[i];
+                        for (let i = slicesConfig.length; i < parentSlices.length; i++) {
+                            const origIdx = cachedSlices.indexOf(parentSlices[i]);
+                            if (origIdx !== -1) {
+                                if (isWebGPU && activeSlicesWebGPU[origIdx]) {
+                                    activeSlicesWebGPU[origIdx].gpuTexture.destroy();
+                                    activeSlicesWebGPU[origIdx].vertexBuffer.destroy();
+                                    delete activeSlicesWebGPU[origIdx];
+                                }
+                                if (gl && activeSlicesWebGL[origIdx]) {
+                                    gl.deleteTexture(activeSlicesWebGL[origIdx].texture);
+                                    gl.deleteBuffer(activeSlicesWebGL[origIdx].buffer);
+                                    delete activeSlicesWebGL[origIdx];
+                                }
                             }
                         }
-                        cachedSlices = cachedSlices.slice(0, slicesConfig.length);
+                        parentSlices.splice(slicesConfig.length);
                     }
+
+                    cachedSlices = [...parentSlices, ...submeshSlices];
                 }
                 
                 // Now, update cachedSlices configurations in-place

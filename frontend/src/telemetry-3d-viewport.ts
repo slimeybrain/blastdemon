@@ -62,6 +62,7 @@ export class Telemetry3DViewport {
     private colorbarAutoBadge: HTMLElement | null = null;
     private colorbarLogBadge: HTMLElement | null = null;
     private colorbarCmapBadge: HTMLElement | null = null;
+    private usePerspective: boolean = true;
 
     private viewTypeSuffix: string;
     private viewportNodeId: string | null = null;
@@ -227,16 +228,20 @@ export class Telemetry3DViewport {
         this.debugOverlay = document.createElement('div');
         this.debugOverlay.id = `viewport-debug-stl-${this.panelId}`;
         this.debugOverlay.style.position = 'absolute';
-        this.debugOverlay.style.top = '10px';
-        this.debugOverlay.style.left = '10px';
+        this.debugOverlay.style.bottom = '10px';
+        this.debugOverlay.style.left = '50%';
+        this.debugOverlay.style.transform = 'translateX(-50%)';
         this.debugOverlay.style.color = '#ffaa00';
-        this.debugOverlay.style.background = 'rgba(0, 0, 0, 0.7)';
+        this.debugOverlay.style.background = 'rgba(16, 16, 19, 0.82)';
+        this.debugOverlay.style.backdropFilter = 'blur(12px)';
+        this.debugOverlay.style.border = '1px solid rgba(255, 255, 255, 0.12)';
         this.debugOverlay.style.padding = '4px 8px';
         this.debugOverlay.style.borderRadius = '4px';
         this.debugOverlay.style.fontSize = '10px';
         this.debugOverlay.style.fontFamily = 'monospace';
         this.debugOverlay.style.pointerEvents = 'none';
         this.debugOverlay.style.zIndex = '100';
+        this.debugOverlay.style.whiteSpace = 'nowrap';
         this.debugOverlay.innerHTML = 'STL Status: Initializing...';
         this.container.appendChild(this.debugOverlay);
 
@@ -513,6 +518,12 @@ export class Telemetry3DViewport {
 
         // Build Unified Controls Matrix Table
         this.buildUnifiedControlsTable(content);
+
+        // Build Camera & View Card
+        this.buildCameraViewCard(content);
+
+        // Build Floating HUD View Toolbar
+        this.buildFloatingViewHUD();
     }
 
     private formatRangeValue(val: number): string {
@@ -3826,9 +3837,36 @@ export class Telemetry3DViewport {
             const obsQty = vpNode.parameters.obstacles_quantity || 'pressure';
             const resObsCmap = qCmaps[obsQty] || vpNode.parameters.obstacles_colormap || 'plasma';
 
-            const state = this.stateManager.getCurrentState();
-            const solverNode3D = state?.nodes.find(n => n.type === 'CFDSolver3D');
-            const domainMesh3D = state?.nodes.find(n => n.type === 'DomainMesh3D');
+            // Use model-scoped solver/domain nodes to avoid bleeding from other models
+            const solverNode3D = this.getSolverNode();
+            const domainMesh3DNode = this.getMeshNode();
+            // Resolve the root DomainMesh3D by walking up any RefinementMesh3D chain
+            let domainMesh3D: any = domainMesh3DNode;
+            if (domainMesh3D && domainMesh3D.type !== 'DomainMesh3D') domainMesh3D = null;
+            if (!domainMesh3D && domainMesh3DNode) {
+                // domainMesh3DNode may be a RefinementMesh3D — walk up to the root
+                const allModels = this.stateManager.getAllModels();
+                let targetModel: any = null;
+                const currentModelId = this.getCurrentModelId();
+                if (currentModelId) targetModel = allModels.find((m: any) => m.id === currentModelId) || null;
+                if (!targetModel) {
+                    const vpNode2 = this.getViewportNode();
+                    for (const m of Object.values(allModels) as any[]) {
+                        if (m.nodes.some((n: any) => n.id === vpNode2?.id)) { targetModel = m; break; }
+                    }
+                }
+                if (targetModel) {
+                    let curr: any = domainMesh3DNode;
+                    let depth = 0;
+                    while (curr && curr.type === 'RefinementMesh3D' && depth < 20) {
+                        const pc = targetModel.connections.find((c: any) => c.toNode === curr.id && c.toPort === 'parent_mesh');
+                        if (!pc) break;
+                        curr = targetModel.nodes.find((n: any) => n.id === pc.fromNode);
+                        depth++;
+                    }
+                    if (curr && curr.type === 'DomainMesh3D') domainMesh3D = curr;
+                }
+            }
             const xmin = Number(domainMesh3D?.parameters.xmin ?? 0.0);
             const xmax = Number(domainMesh3D?.parameters.xmax ?? 1.0);
             const ymin = Number(domainMesh3D?.parameters.ymin ?? 0.0);
@@ -3836,8 +3874,12 @@ export class Telemetry3DViewport {
             const zmin = Number(domainMesh3D?.parameters.zmin ?? 0.0);
             const zmax = Number(domainMesh3D?.parameters.zmax ?? 1.0);
 
-            const chargeConn = solverNode3D ? state?.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'charge') : null;
-            const chargeNode = chargeConn ? state?.nodes.find(n => n.id === chargeConn.fromNode) : state?.nodes.find(n => n.type === 'Charge3D' || n.type === 'Charge2D' || n.type === 'Charge1D');
+            // Resolve the charge node via connections from the model-scoped solver
+            const modelState = this.stateManager.getCurrentState();
+            const chargeConn = solverNode3D ? modelState?.connections.find((c: any) => c.toNode === solverNode3D.id && c.toPort === 'charge') : null;
+            const chargeNode = chargeConn
+                ? modelState?.nodes.find((n: any) => n.id === chargeConn.fromNode)
+                : modelState?.nodes.find((n: any) => n.type === 'Charge3D' || n.type === 'Charge2D' || n.type === 'Charge1D');
 
             let chargeParams: any = null;
             if (chargeNode) {
@@ -3861,17 +3903,46 @@ export class Telemetry3DViewport {
                 };
             }
 
-            const submeshNodes = state?.nodes.filter(n => n.type === 'RefinementMesh3D') || [];
-            const submeshes = submeshNodes.map((sNode: any) => ({
-                id: sNode.id,
-                level: Number(sNode.parameters.refinement_level ?? 1),
-                x: Number(sNode.parameters.submesh_x ?? 0.25),
-                y: Number(sNode.parameters.submesh_y ?? 0.25),
-                z: Number(sNode.parameters.submesh_z ?? 0.25),
-                size_x: Number(sNode.parameters.submesh_size_x ?? 0.5),
-                size_y: Number(sNode.parameters.submesh_size_y ?? 0.5),
-                size_z: Number(sNode.parameters.submesh_size_z ?? 0.5)
-            }));
+            // Collect only RefinementMesh3D nodes belonging to this model's solver chain.
+            // We trace from the solver's mesh-port connection and walk the RefinementMesh3D
+            // chain upward, collecting every node in that chain.
+            const submeshes: any[] = [];
+            {
+                const allModels2 = this.stateManager.getAllModels();
+                let targetModel2: any = null;
+                const currentModelId2 = this.getCurrentModelId();
+                if (currentModelId2) targetModel2 = allModels2.find((m: any) => m.id === currentModelId2) || null;
+                if (!targetModel2) {
+                    const vpNode3 = this.getViewportNode();
+                    for (const m of Object.values(allModels2) as any[]) {
+                        if (m.nodes.some((n: any) => n.id === vpNode3?.id)) { targetModel2 = m; break; }
+                    }
+                }
+                if (targetModel2 && solverNode3D) {
+                    // Find the node connected to the solver's mesh port
+                    const meshConn = targetModel2.connections.find((c: any) => c.toNode === solverNode3D.id && c.toPort === 'mesh');
+                    if (meshConn) {
+                        let curr: any = targetModel2.nodes.find((n: any) => n.id === meshConn.fromNode);
+                        let depth = 0;
+                        while (curr && curr.type === 'RefinementMesh3D' && depth < 20) {
+                            submeshes.push({
+                                id: curr.id,
+                                level: Number(curr.parameters.refinement_level ?? 1),
+                                x: Number(curr.parameters.submesh_x ?? 0.25),
+                                y: Number(curr.parameters.submesh_y ?? 0.25),
+                                z: Number(curr.parameters.submesh_z ?? 0.25),
+                                size_x: Number(curr.parameters.submesh_size_x ?? 0.5),
+                                size_y: Number(curr.parameters.submesh_size_y ?? 0.5),
+                                size_z: Number(curr.parameters.submesh_size_z ?? 0.5)
+                            });
+                            const parentConn = targetModel2.connections.find((c: any) => c.toNode === curr.id && c.toPort === 'parent_mesh');
+                            if (!parentConn) break;
+                            curr = targetModel2.nodes.find((n: any) => n.id === parentConn.fromNode);
+                            depth++;
+                        }
+                    }
+                }
+            }
 
             this.worker.postMessage({
                 type: 'setConfig',
@@ -5260,6 +5331,275 @@ export class Telemetry3DViewport {
         if (this.controlsOverlay) this.controlsOverlay.remove();
         if (this.floatOpenBtn) this.floatOpenBtn.remove();
         if (this.colorbarOverlay) this.colorbarOverlay.remove();
+    }
+
+    private syncProjectionButtons() {
+        const hudBtn = document.getElementById(this.getElId('viewport-hud-proj-btn'));
+        if (hudBtn) {
+            hudBtn.innerHTML = this.usePerspective ? '👁️ Persp' : '📐 Ortho';
+        }
+        const cardBtn = document.getElementById(this.getElId('viewport-card-proj-btn'));
+        if (cardBtn) {
+            cardBtn.innerHTML = this.usePerspective ? '👁️ Perspective' : '📐 Orthographic';
+        }
+    }
+
+    private buildFloatingViewHUD() {
+        const viewHUD = document.createElement('div');
+        viewHUD.style.position = 'absolute';
+        viewHUD.style.top = '10px';
+        viewHUD.style.left = '10px';
+        viewHUD.style.display = 'flex';
+        viewHUD.style.gap = '4px';
+        viewHUD.style.background = 'rgba(16, 16, 19, 0.82)';
+        viewHUD.style.backdropFilter = 'blur(12px)';
+        viewHUD.style.border = '1px solid rgba(255, 255, 255, 0.12)';
+        viewHUD.style.borderRadius = '6px';
+        viewHUD.style.padding = '3px';
+        viewHUD.style.zIndex = '10';
+        viewHUD.style.boxShadow = '0 4px 12px rgba(0, 0, 0, 0.5)';
+        
+        // Reset View Button
+        const resetBtn = document.createElement('button');
+        resetBtn.innerHTML = '🏠 Reset';
+        this.applyButtonStyle(resetBtn);
+        resetBtn.style.padding = '3px 6px';
+        resetBtn.title = 'Reset view to default angle and distance';
+        resetBtn.onclick = () => {
+            this.worker.postMessage({
+                type: 'setView',
+                data: {
+                    pitch: 0.42,
+                    yaw: 1.107,
+                    distance: 2.45,
+                    targetX: 0.0,
+                    targetY: 0.0,
+                    targetZ: 0.0
+                }
+            });
+        };
+        viewHUD.appendChild(resetBtn);
+
+        // Perspective/Orthographic Toggle Button
+        const projBtn = document.createElement('button');
+        projBtn.id = this.getElId('viewport-hud-proj-btn');
+        projBtn.innerHTML = this.usePerspective ? '👁️ Persp' : '📐 Ortho';
+        this.applyButtonStyle(projBtn);
+        projBtn.style.padding = '3px 6px';
+        projBtn.title = 'Toggle Perspective / Orthographic projection';
+        projBtn.onclick = () => {
+            this.usePerspective = !this.usePerspective;
+            this.syncProjectionButtons();
+            this.worker.postMessage({
+                type: 'setConfig',
+                data: { usePerspective: this.usePerspective }
+            });
+        };
+        viewHUD.appendChild(projBtn);
+
+        // Standard Views Buttons with a separator
+        const separator = document.createElement('div');
+        separator.style.width = '1px';
+        separator.style.height = '14px';
+        separator.style.background = 'rgba(255, 255, 255, 0.15)';
+        separator.style.alignSelf = 'center';
+        separator.style.margin = '0 3px';
+        viewHUD.appendChild(separator);
+
+        const views = [
+            { name: 'Top', val: 'top', title: 'Align camera to Top (Z+)' },
+            { name: 'Bottom', val: 'bottom', title: 'Align camera to Bottom (Z-)' },
+            { name: 'Front', val: 'front', title: 'Align camera to Front (Y-)' },
+            { name: 'Back', val: 'back', title: 'Align camera to Back (Y+)' },
+            { name: 'Left', val: 'left', title: 'Align camera to Left (X-)' },
+            { name: 'Right', val: 'right', title: 'Align camera to Right (X+)' }
+        ];
+
+        views.forEach(v => {
+            const btn = document.createElement('button');
+            btn.innerHTML = v.name;
+            this.applyButtonStyle(btn);
+            btn.style.padding = '3px 6px';
+            btn.title = v.title;
+            btn.onclick = () => {
+                // Standard CAD alignment behavior: switch to orthographic
+                this.usePerspective = false;
+                this.syncProjectionButtons();
+                this.worker.postMessage({
+                    type: 'setConfig',
+                    data: { usePerspective: false }
+                });
+
+                let pitch = 0.0;
+                let yaw = 0.0;
+                if (v.val === 'top') {
+                    pitch = Math.PI / 2 - 0.01;
+                    yaw = 0.0;
+                } else if (v.val === 'bottom') {
+                    pitch = -Math.PI / 2 + 0.01;
+                    yaw = 0.0;
+                } else if (v.val === 'front') {
+                    pitch = 0.0;
+                    yaw = Math.PI;
+                } else if (v.val === 'back') {
+                    pitch = 0.0;
+                    yaw = 0.0;
+                } else if (v.val === 'left') {
+                    pitch = 0.0;
+                    yaw = -Math.PI / 2;
+                } else if (v.val === 'right') {
+                    pitch = 0.0;
+                    yaw = Math.PI / 2;
+                }
+
+                this.worker.postMessage({
+                    type: 'setView',
+                    data: {
+                        pitch,
+                        yaw,
+                        targetX: 0.0,
+                        targetY: 0.0,
+                        targetZ: 0.0
+                    }
+                });
+            };
+            this.bindEditingEvents(btn);
+            viewHUD.appendChild(btn);
+        });
+
+        this.container.appendChild(viewHUD);
+    }
+
+    private buildCameraViewCard(parent: HTMLElement) {
+        const { card, body } = this.createCard(parent, 'Camera & View', '🎥', undefined, true);
+        
+        // 1. Projection Mode Selector Row
+        const projRow = document.createElement('div');
+        projRow.style.display = 'flex';
+        projRow.style.justifyContent = 'space-between';
+        projRow.style.alignItems = 'center';
+        projRow.style.marginTop = '4px';
+        projRow.innerHTML = '<span style="font-size:11px;color:#aaa">Projection</span>';
+
+        const projBtn = document.createElement('button');
+        projBtn.id = this.getElId('viewport-card-proj-btn');
+        projBtn.innerHTML = this.usePerspective ? '👁️ Perspective' : '📐 Orthographic';
+        this.applyButtonStyle(projBtn);
+        projBtn.style.width = '140px';
+        projBtn.onclick = () => {
+            this.usePerspective = !this.usePerspective;
+            this.syncProjectionButtons();
+            this.worker.postMessage({
+                type: 'setConfig',
+                data: { usePerspective: this.usePerspective }
+            });
+        };
+        projRow.appendChild(projBtn);
+        body.appendChild(projRow);
+
+        // 2. Standard Views Align Row
+        const alignRow = document.createElement('div');
+        alignRow.style.display = 'flex';
+        alignRow.style.flexDirection = 'column';
+        alignRow.style.gap = '4px';
+        alignRow.style.marginTop = '6px';
+        
+        const alignLabel = document.createElement('span');
+        alignLabel.style.fontSize = '10px';
+        alignLabel.style.color = '#aaa';
+        alignLabel.textContent = 'Align Camera Face:';
+        alignRow.appendChild(alignLabel);
+
+        const btnGrid = document.createElement('div');
+        btnGrid.style.display = 'grid';
+        btnGrid.style.gridTemplateColumns = 'repeat(3, 1fr)';
+        btnGrid.style.gap = '4px';
+
+        const views = [
+            { name: 'Top', val: 'top' },
+            { name: 'Bottom', val: 'bottom' },
+            { name: 'Front', val: 'front' },
+            { name: 'Back', val: 'back' },
+            { name: 'Left', val: 'left' },
+            { name: 'Right', val: 'right' }
+        ];
+
+        views.forEach(v => {
+            const btn = document.createElement('button');
+            btn.textContent = v.name;
+            this.applyButtonStyle(btn);
+            btn.onclick = () => {
+                this.usePerspective = false;
+                this.syncProjectionButtons();
+                this.worker.postMessage({
+                    type: 'setConfig',
+                    data: { usePerspective: false }
+                });
+
+                let pitch = 0.0;
+                let yaw = 0.0;
+                if (v.val === 'top') {
+                    pitch = Math.PI / 2 - 0.01;
+                    yaw = 0.0;
+                } else if (v.val === 'bottom') {
+                    pitch = -Math.PI / 2 + 0.01;
+                    yaw = 0.0;
+                } else if (v.val === 'front') {
+                    pitch = 0.0;
+                    yaw = Math.PI;
+                } else if (v.val === 'back') {
+                    pitch = 0.0;
+                    yaw = 0.0;
+                } else if (v.val === 'left') {
+                    pitch = 0.0;
+                    yaw = -Math.PI / 2;
+                } else if (v.val === 'right') {
+                    pitch = 0.0;
+                    yaw = Math.PI / 2;
+                }
+
+                this.worker.postMessage({
+                    type: 'setView',
+                    data: {
+                        pitch,
+                        yaw,
+                        targetX: 0.0,
+                        targetY: 0.0,
+                        targetZ: 0.0
+                    }
+                });
+            };
+            btnGrid.appendChild(btn);
+        });
+        alignRow.appendChild(btnGrid);
+        body.appendChild(alignRow);
+
+        // 3. Reset View Row
+        const resetRow = document.createElement('div');
+        resetRow.style.marginTop = '6px';
+        resetRow.style.display = 'flex';
+        resetRow.style.width = '100%';
+
+        const resetBtn = document.createElement('button');
+        resetBtn.innerHTML = '🏠 Reset Camera to Default';
+        this.applyButtonStyle(resetBtn);
+        resetBtn.style.width = '100%';
+        resetBtn.style.padding = '5px 0';
+        resetBtn.onclick = () => {
+            this.worker.postMessage({
+                type: 'setView',
+                data: {
+                    pitch: 0.42,
+                    yaw: 1.107,
+                    distance: 2.45,
+                    targetX: 0.0,
+                    targetY: 0.0,
+                    targetZ: 0.0
+                }
+            });
+        };
+        resetRow.appendChild(resetBtn);
+        body.appendChild(resetRow);
     }
 }
 

@@ -1442,6 +1442,41 @@ export class StateManager {
             node.outputs = this.getDefaultOutputs(node.type);
         });
 
+        // Auto-heal: re-route CFDSolver3D.mesh connections that point to a RefinementMesh3D
+        // (old scene format). Trace back to the DomainMesh3D and re-wire directly.
+        const model = stateObj || Object.values(this.appState.models).find(m => m.nodes === nodes);
+        if (model) {
+            const solverNodes = model.nodes.filter(n => n.type === 'CFDSolver3D');
+            for (const solver of solverNodes) {
+                const meshConnIdx = model.connections.findIndex(
+                    c => c.toNode === solver.id && c.toPort === 'mesh'
+                );
+                if (meshConnIdx === -1) continue;
+                const meshConn = model.connections[meshConnIdx];
+                const srcNode = model.nodes.find(n => n.id === meshConn.fromNode);
+                if (!srcNode || srcNode.type !== 'RefinementMesh3D') continue;
+
+                // Trace the parent_mesh chain to find the DomainMesh3D root
+                let curr: Node | undefined = srcNode;
+                let depth = 0;
+                while (curr && curr.type === 'RefinementMesh3D' && depth < 20) {
+                    const parentConn = model.connections.find(c => c.toNode === curr!.id && c.toPort === 'parent_mesh');
+                    if (!parentConn) break;
+                    curr = model.nodes.find(n => n.id === parentConn.fromNode);
+                    depth++;
+                }
+                if (curr && curr.type === 'DomainMesh3D') {
+                    console.warn(`[HEAL] Re-routing CFDSolver3D.mesh from RefinementMesh3D "${meshConn.fromNode}" to DomainMesh3D "${curr.id}"`);
+                    model.connections[meshConnIdx] = {
+                        fromNode: curr.id,
+                        fromPort: 'mesh',
+                        toNode: solver.id,
+                        toPort: 'mesh'
+                    };
+                }
+            }
+        }
+
         const defaults: Record<string, Record<string, any>> = {
             'DomainMesh': {
                 dimension: '1D',

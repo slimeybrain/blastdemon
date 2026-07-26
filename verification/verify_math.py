@@ -91,8 +91,9 @@ def run_3d_simulation(device="cpu", generate_mode=False):
             magic, time_val, n_slices = struct.unpack("<IfI", binary_payload[:12])
             offset = 12
             for _ in range(n_slices):
-                axis_id, slice_offset, w, h = struct.unpack("<IfII", binary_payload[offset:offset+16])
-                offset += 16
+                # Slice header is 48 bytes: axis_id(4), offset(4), w(4), h(4), xmin(4), xmax(4), ymin(4), ymax(4), zmin(4), zmax(4), level(4), is_submesh(4)
+                axis_id, slice_offset, w, h, _, _, _, _, _, _, _, _ = struct.unpack("<IfIIffffffII", binary_payload[offset:offset+48])
+                offset += 48
                 data_size = w * h
                 slice_vals = struct.unpack(f"<{data_size}f", binary_payload[offset:offset+data_size*4])
                 offset += data_size * 4

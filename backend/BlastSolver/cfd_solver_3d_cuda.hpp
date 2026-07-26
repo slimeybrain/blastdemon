@@ -138,6 +138,7 @@ class CFDSolver3DCuda : public CFDSolver3DImplBase {
     mutable bool has_paged_gauges = false;
 
     std::unique_ptr<GridManager3D<RealType, IsMultiMaterial>> grid_manager;
+    std::vector<ObstacleFace> obstacle_faces;
 
 public:
     void addSubMesh(const SubMeshParams3D& submesh) override;
@@ -178,6 +179,7 @@ public:
                                const std::atomic<bool>* terminate_flag = nullptr,
                                std::function<void(double)> progress_callback = nullptr) override;
     void uploadObstacleFaces(const std::vector<ObstacleFace>& faces) override;
+    void appendSubMeshObstacleFaces(std::vector<ObstacleFace>& faces) override;
     std::pair<double, double> getConservationTotals() const override;
 
     std::vector<float> sampleGauge(const Gauge3D& gauge) const override;

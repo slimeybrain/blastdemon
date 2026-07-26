@@ -368,7 +368,7 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
         }
 
         if (client) {
-            send_websocket_text(client, resp.dump());
+            send_websocket_text(client, resp.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
         }
         return;
     }
@@ -486,7 +486,7 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
             resp["status"] = "error";
             resp["error"] = e.what();
             std::cerr << "[Broker] [ERROR] Failed to load STL: " << e.what() << std::endl;
-            if (client) send_websocket_text(client, resp.dump());
+            if (client) send_websocket_text(client, resp.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
         }
         return;
      }
@@ -556,7 +556,7 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
             resp["status"] = "error";
             resp["error"] = e.what();
             std::cerr << "[Broker] [ERROR] Failed to generate primitive geometry: " << e.what() << std::endl;
-            if (client) send_websocket_text(client, resp.dump());
+            if (client) send_websocket_text(client, resp.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
         }
         return;
     }
@@ -582,7 +582,7 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
         }
 
         if (client) {
-            send_websocket_text(client, resp.dump());
+            send_websocket_text(client, resp.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
         }
         return;
     }
@@ -682,30 +682,33 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
                     while (!accumulator.empty()) {
                         // Check for BIN_FRAME or BIN2D_FRAME marker
                         std::string marker = "";
-                        const std::string m1 = "BIN_FRAME ";
-                        const std::string m3 = "BIN_FRAME_3D_SLICES ";
-                        const std::string m_obs = "BIN_OBSTACLES ";
-                        const std::string m2_a = "BIN2D_FRAME ";
-                        const std::string m2_b = "BIN_FRAME_2D ";
-                        const std::string m2_amr = "BIN2D_AMR_FRAME ";
-                        if (accumulator.size() >= m3.size() &&
-                            std::equal(m3.begin(), m3.end(), accumulator.begin())) {
-                            marker = m3;
-                        } else if (accumulator.size() >= m_obs.size() &&
-                            std::equal(m_obs.begin(), m_obs.end(), accumulator.begin())) {
-                            marker = m_obs;
-                        } else if (accumulator.size() >= m2_amr.size() &&
-                            std::equal(m2_amr.begin(), m2_amr.end(), accumulator.begin())) {
-                            marker = m2_amr;
-                        } else if (accumulator.size() >= m2_a.size() &&
-                            std::equal(m2_a.begin(), m2_a.end(), accumulator.begin())) {
-                            marker = m2_a;
-                        } else if (accumulator.size() >= m2_b.size() &&
-                            std::equal(m2_b.begin(), m2_b.end(), accumulator.begin())) {
-                            marker = m2_b;
-                        } else if (accumulator.size() >= m1.size() &&
-                            std::equal(m1.begin(), m1.end(), accumulator.begin())) {
-                            marker = m1;
+                        bool maybe_marker = false;
+                        
+                        const std::vector<std::string> binary_markers = {
+                            "BIN_FRAME_3D_SLICES ",
+                            "BIN_FRAME_2D ",
+                            "BIN_FRAME ",
+                            "BIN_OBSTACLES ",
+                            "BIN2D_AMR_FRAME ",
+                            "BIN2D_FRAME "
+                        };
+
+                        for (const auto& m : binary_markers) {
+                            if (accumulator.size() >= m.size()) {
+                                if (std::equal(m.begin(), m.end(), accumulator.begin())) {
+                                    marker = m;
+                                    break;
+                                }
+                            } else {
+                                if (std::equal(accumulator.begin(), accumulator.end(), m.begin())) {
+                                    maybe_marker = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (maybe_marker) {
+                            break; // Wait for more data to complete the potential marker
                         }
 
                         if (!marker.empty()) {
@@ -750,13 +753,13 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
                                     try {
                                         nlohmann::json log_json = nlohmann::json::parse(line);
                                         log_json["modelId"] = modelId;
-                                        send_websocket_text(client, log_json.dump());
+                                        send_websocket_text(client, log_json.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
                                     } catch (...) {
                                         nlohmann::json log_envelope;
                                         log_envelope["type"] = "log";
                                         log_envelope["modelId"] = modelId;
                                         log_envelope["message"] = line;
-                                        send_websocket_text(client, log_envelope.dump());
+                                        send_websocket_text(client, log_envelope.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
                                     }
                                 }
                             }
