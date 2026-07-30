@@ -726,7 +726,16 @@ export class NodeViewer {
         grid.style.gap = '10px';
         grid.style.alignItems = 'center';
 
-        const paramKeys = Object.keys(node.parameters);
+        let paramKeys = Object.keys(node.parameters);
+        if (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D') {
+            paramKeys = paramKeys.filter(k => k !== 'spatial_order' && k !== 'temporal_order');
+            const idx = Object.keys(node.parameters).indexOf('spatial_order');
+            if (idx !== -1) {
+                paramKeys.splice(idx, 0, 'space_time_scheme');
+            } else {
+                paramKeys.push('space_time_scheme');
+            }
+        }
         if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D') {
             paramKeys.sort((a, b) => {
                 if (a === 'cell_size') return -1;
@@ -742,7 +751,18 @@ export class NodeViewer {
         }
 
         for (const key of paramKeys) {
-            const value = node.parameters[key];
+            let value = node.parameters[key];
+            if (key === 'space_time_scheme') {
+                const so = node.parameters['spatial_order'] ?? 2;
+                const to = node.parameters['temporal_order'] ?? 2;
+                if (so === 1 && to === 1) value = 'Euler (1st-Order Space/Time)';
+                else if (so === 2 && to === 2) value = 'RK2 (2nd-Order Space/Time)';
+                else if (so === 3 && to === 3) value = 'RK3 (3rd-Order Space/Time)';
+                else if (so === 2 && to === 4) value = 'MUSCL-Hancock (2nd-Order Space/Time)';
+                else if (so === 2 && to === 5) value = 'ADER-2 (2nd-Order Space/Time)';
+                else if (so === 3 && to === 6) value = 'ADER-3 (3rd-Order Space/Time)';
+                else value = 'RK2 (2nd-Order Space/Time)';
+            }
             if (node.type === 'DomainMesh') {
                 const dim = node.parameters['dimension'] || '1D';
                 if ((key === 'y_min_bc' || key === 'y_max_bc') && dim === '1D') continue;
@@ -2234,7 +2254,15 @@ export class NodeViewer {
             'shape_type': ['Rectangle', 'Circle'],
             'coupling_mode': ['TwoWay_Full', 'OneWay_CFD_to_MPM', 'Disabled'],
             'contour_quantity': ['von_mises', 'plastic_strain', 'density', 'velocity', 'pressure'],
-            'color_map': ['viridis', 'plasma', 'jet', 'coolwarm']
+            'color_map': ['viridis', 'plasma', 'jet', 'coolwarm'],
+            'space_time_scheme': [
+                'Euler (1st-Order Space/Time)',
+                'RK2 (2nd-Order Space/Time)',
+                'RK3 (3rd-Order Space/Time)',
+                'MUSCL-Hancock (2nd-Order Space/Time)',
+                'ADER-2 (2nd-Order Space/Time)',
+                'ADER-3 (3rd-Order Space/Time)'
+            ]
         };
 
         if (typeof value === 'boolean') {
@@ -2279,8 +2307,25 @@ export class NodeViewer {
 
             select.addEventListener('change', () => {
                 let val: any = select.value;
-                if (numericKeys.includes(key)) val = Number(val);
-                this.updateParameter(node, key, val);
+                if (key === 'space_time_scheme') {
+                    let s_order = 2;
+                    let t_order = 2;
+                    if (val === 'Euler (1st-Order Space/Time)') { s_order = 1; t_order = 1; }
+                    else if (val === 'RK2 (2nd-Order Space/Time)') { s_order = 2; t_order = 2; }
+                    else if (val === 'RK3 (3rd-Order Space/Time)') { s_order = 3; t_order = 3; }
+                    else if (val === 'MUSCL-Hancock (2nd-Order Space/Time)') { s_order = 2; t_order = 4; }
+                    else if (val === 'ADER-2 (2nd-Order Space/Time)') { s_order = 2; t_order = 5; }
+                    else if (val === 'ADER-3 (3rd-Order Space/Time)') { s_order = 3; t_order = 6; }
+                    
+                    this.stateManager.updateNodeParameters(node.id, {
+                        spatial_order: s_order,
+                        temporal_order: t_order
+                    });
+                    this.render();
+                } else {
+                    if (numericKeys.includes(key)) val = Number(val);
+                    this.updateParameter(node, key, val);
+                }
             });
             return select;
         }

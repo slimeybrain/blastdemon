@@ -1,41 +1,28 @@
 #include <iostream>
 #include <chrono>
 #include <vector>
+#include <string>
 #include "cfd_solver_3d_cuda.hpp"
 
-int main() {
-    int nx = 305;
-    int ny = 160;
-    int nz = 102;
-    double cellSize = 0.05;
-    double xmin = -7.625;
-    double ymin = -4.0;
+// Templated benchmark execution function
+template <typename RealType, bool IsMultiMaterial>
+void run_benchmark(int nx, int ny, int nz, double cellSize, const std::string& fluxScheme, int spatial, int temporal, int num_steps, const std::string& precision_str, const std::string& physics_str, const std::string& scheme_name) {
+    double xmin = -cellSize * nx / 2.0;
+    double ymin = -cellSize * ny / 2.0;
     double zmin = 0.0;
 
-    std::cout << "=== Detailed CUDA Profiling for Exact Scene (4.97M Cells) ===" << std::endl;
-    std::cout << "Grid: " << nx << " x " << ny << " x " << nz << " (" << (nx * ny * nz / 1e6) << " M cells)" << std::endl;
+    CFDSolver3DCuda<RealType, IsMultiMaterial> solver(nx, ny, nz, cellSize, xmin, ymin, zmin);
+    solver.setFluxScheme(fluxScheme);
+    solver.setSpatialOrder(spatial);
+    solver.setTemporalOrder(temporal);
 
-    CFDSolver3DCuda<float, false> solver(nx, ny, nz, cellSize, xmin, ymin, zmin);
-    solver.setFluxScheme("AUSM+");
-    solver.setSpatialOrder(2);
-    solver.setTemporalOrder(2);
-
-    // Warmup
-    double dt = 1e-5;
-    
-    // Create a dummy voxelization to make all tiles active so the benchmark actually runs the kernels
-    nlohmann::json dummy_primitives = nlohmann::json::array();
-    dummy_primitives.push_back({
-        {"type", "Block"},
-        {"x", -3.8}, {"y", 0}, {"z", 0},
-        {"size_x", 7.625}, {"size_y", 8.0}, {"size_z", 10.2} // Covers half the domain in X
-    });
-    solver.setGeometryPrimitives(dummy_primitives, "dummy", "primitive");
-
+    // Make all cells active using a block charge covering the entire grid
     Charge3DParams charge;
-    charge.shape_type = 0; // Sphere
+    charge.shape_type = 1; // Block
     charge.x = 0.0; charge.y = 0.0; charge.z = 0.0;
-    charge.radius = 5.0;
+    charge.radius = 1e6;
+    charge.height = 1e6;
+    charge.lx = 1e6; charge.ly = 1e6; charge.lz = 1e6;
 
     MultiMat::MaterialSet mats;
     mats.products.A = 3.73e11;
@@ -49,30 +36,18 @@ int main() {
     double amb_rho = 1.18;
     double amb_p = 101325.0;
     solver.setInitialCondition(charge, mats, amb_rho, amb_p);
-
+    
+    // Warmup step
+    double dt = 1e-5;
     solver.step(dt);
     cudaDeviceSynchronize();
 
-    std::cout << "Active tiles after geometry: " << solver.getNumActiveTiles() << std::endl;
-
-    // Measure step breakdown over 10 RK2 steps
-    const int num_steps = 10;
+    int active_tiles = solver.getNumActiveTiles();
 
     cudaEvent_t start_evt, end_evt;
     cudaEventCreate(&start_evt);
     cudaEventCreate(&end_evt);
 
-    // Profile computeStepSize
-    cudaEventRecord(start_evt);
-    for (int i = 0; i < num_steps; ++i) {
-        solver.computeStepSize(0.6);
-    }
-    cudaEventRecord(end_evt);
-    cudaEventSynchronize(end_evt);
-    float dt_time_ms = 0;
-    cudaEventElapsedTime(&dt_time_ms, start_evt, end_evt);
-
-    // Profile full step() execution
     cudaEventRecord(start_evt);
     for (int i = 0; i < num_steps; ++i) {
         solver.step(dt);
@@ -81,12 +56,120 @@ int main() {
     cudaEventSynchronize(end_evt);
     float step_time_ms = 0;
     cudaEventElapsedTime(&step_time_ms, start_evt, end_evt);
+    float avg_step_ms = step_time_ms / num_steps;
 
-    std::cout << "\n--- Profiling Results (Average over " << num_steps << " RK2 steps) ---" << std::endl;
-    std::cout << "1. computeStepSize() (Wave Speed Reduction + D2H Memcpy): " << (dt_time_ms / num_steps) << " ms/step" << std::endl;
-    std::cout << "2. step() Execution (RK2 Fluxes + Primitives Update):       " << (step_time_ms / num_steps) << " ms/step" << std::endl;
-    std::cout << "Total step time (computeStepSize + step):                   " << ((dt_time_ms + step_time_ms) / num_steps) << " ms/step" << std::endl;
-    std::cout << "Achievable Stepping Throughput:                              " << (1000.0 / ((dt_time_ms + step_time_ms) / num_steps)) << " steps/second" << std::endl;
+    std::cout << "| " << precision_str << " | " 
+              << physics_str << " | " 
+              << fluxScheme << " | " 
+              << scheme_name << " | "
+              << active_tiles << " | " 
+              << avg_step_ms << " ms | " 
+              << (1000.0 / avg_step_ms) << " |" << std::endl;
+
+    cudaEventDestroy(start_evt);
+    cudaEventDestroy(end_evt);
+}
+
+int main(int argc, char* argv[]) {
+    int nx = 320;
+    int ny = 256;
+    int nz = 128;
+    double cellSize = 0.05;
+    int num_steps = 10;
+
+    if (argc > 1 && std::string(argv[1]) == "--single") {
+        if (argc < 8) {
+            std::cerr << "Usage: " << argv[0] << " --single <precision: float|double> <multimat: 0|1> <flux: AUSM+|Rusanov> <spatial: 1|2|3> <temporal: 1|2|3|4|5|6> <steps>" << std::endl;
+            return 1;
+        }
+        std::string precision = argv[2];
+        int multimat = std::stoi(argv[3]);
+        std::string flux = argv[4];
+        int spatial = std::stoi(argv[5]);
+        int temporal = std::stoi(argv[6]);
+        int steps = std::stoi(argv[7]);
+
+        std::string scheme_name = "RK" + std::to_string(temporal);
+        if (temporal == 4) scheme_name = "MUSCL-Hancock";
+        else if (temporal == 5) scheme_name = "ADER-2";
+        else if (temporal == 6) scheme_name = "ADER-3";
+
+        std::string physics_str = multimat ? "Multi-Material" : "Ideal Gas";
+
+        std::cout << "=== Running Single Profile Configuration ===" << std::endl;
+        std::cout << "Grid: " << nx << " x " << ny << " x " << nz << " (" << (nx * ny * nz / 1e6) << "M cells)" << std::endl;
+        std::cout << "Precision: " << precision << ", Physics: " << physics_str << ", Flux: " << flux << ", Scheme: " << scheme_name << std::endl;
+        
+        std::cout << "| Precision | Physics | Flux Scheme | Numerical Scheme | Active Tiles | Avg Step Time | Steps/Sec |" << std::endl;
+        std::cout << "|-----------|---------|-------------|------------------|--------------|---------------|-----------|" << std::endl;
+
+        if (precision == "float") {
+            if (multimat) {
+                run_benchmark<float, true>(nx, ny, nz, cellSize, flux, spatial, temporal, steps, "float", "Multi-Material", scheme_name);
+            } else {
+                run_benchmark<float, false>(nx, ny, nz, cellSize, flux, spatial, temporal, steps, "float", "Ideal Gas", scheme_name);
+            }
+        } else {
+            if (multimat) {
+                run_benchmark<double, true>(nx, ny, nz, cellSize, flux, spatial, temporal, steps, "double", "Multi-Material", scheme_name);
+            } else {
+                run_benchmark<double, false>(nx, ny, nz, cellSize, flux, spatial, temporal, steps, "double", "Ideal Gas", scheme_name);
+            }
+        }
+        return 0;
+    }
+
+    std::cout << "=== Detailed CUDA Profiling for 10M Cell Model (All Tiles Active) ===" << std::endl;
+    std::cout << "Grid: " << nx << " x " << ny << " x " << nz << " (" << (nx * ny * nz / 1e6) << " M cells)" << std::endl;
+    std::cout << "Total Tiles: " << (nx/8 * ny/8 * nz/8) << " tiles" << std::endl;
+    std::cout << std::endl;
+
+    std::cout << "| Precision | Physics Model | Flux Scheme | Numerical Scheme | Active Tiles | Avg Step Time | Steps/Sec |" << std::endl;
+    std::cout << "|-----------|---------------|-------------|------------------|--------------|---------------|-----------|" << std::endl;
+
+    struct Scheme {
+        std::string name;
+        int spatial;
+        int temporal;
+    };
+    std::vector<Scheme> schemes = {
+        {"RK1", 1, 1},
+        {"RK2 (2nd-Order)", 2, 2},
+        {"RK3 (3rd-Order)", 3, 3},
+        {"MUSCL-Hancock", 2, 4},
+        {"ADER-2 (2nd-Order)", 2, 5},
+        {"ADER-3 (3rd-Order)", 3, 6}
+    };
+
+    std::vector<std::string> flux_schemes = {"AUSM+", "Rusanov"};
+
+    // Float, Ideal Gas
+    for (const auto& flux : flux_schemes) {
+        for (const auto& s : schemes) {
+            run_benchmark<float, false>(nx, ny, nz, cellSize, flux, s.spatial, s.temporal, num_steps, "float", "Ideal Gas", s.name);
+        }
+    }
+
+    // Float, Multi-Material
+    for (const auto& flux : flux_schemes) {
+        for (const auto& s : schemes) {
+            run_benchmark<float, true>(nx, ny, nz, cellSize, flux, s.spatial, s.temporal, num_steps, "float", "Multi-Material", s.name);
+        }
+    }
+
+    // Double, Ideal Gas
+    for (const auto& flux : flux_schemes) {
+        for (const auto& s : schemes) {
+            run_benchmark<double, false>(nx, ny, nz, cellSize, flux, s.spatial, s.temporal, num_steps, "double", "Ideal Gas", s.name);
+        }
+    }
+
+    // Double, Multi-Material
+    for (const auto& flux : flux_schemes) {
+        for (const auto& s : schemes) {
+            run_benchmark<double, true>(nx, ny, nz, cellSize, flux, s.spatial, s.temporal, num_steps, "double", "Multi-Material", s.name);
+        }
+    }
 
     return 0;
 }

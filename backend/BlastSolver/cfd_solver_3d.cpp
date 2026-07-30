@@ -19,6 +19,9 @@ CFDSolver3DImpl<RealType, IsMultiMaterial>::CFDSolver3DImpl(int nx, int ny, int 
     states_pool.resize(total_tiles);
     U_pool.resize(total_tiles);
     dU_pool.resize(total_tiles);
+    states_pred.resize(total_tiles);
+    dW_dt_pool.resize(total_tiles);
+    states_int.resize(total_tiles);
     active_tiles.assign(total_tiles, 0);
     geom_pool.resize(total_tiles);
     #pragma omp parallel for
@@ -1033,6 +1036,107 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::updatePrimitiveFromConservative
 }
 
 template <typename RealType, bool IsMultiMaterial>
+struct PhysicalFlux3D {
+    RealType rho, rhoux, rhouy, rhouz, E;
+    RealType alpha1, alpha2, arho1, arho2;
+    RealType v_face;
+};
+
+template <typename RealType, bool IsMultiMaterial>
+PhysicalFlux3D<RealType, IsMultiMaterial> getPhysicalFlux(
+    const typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealType, IsMultiMaterial>& s, int dir, RealType gamma_val, 
+    const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted) {
+    PhysicalFlux3D<RealType, IsMultiMaterial> f;
+    RealType ke = (RealType)0.5 * s.rho * (s.ux*s.ux + s.uy*s.uy + s.uz*s.uz);
+    RealType total_E;
+    if constexpr (IsMultiMaterial) {
+        total_E = (RealType)MultiMat::getMixtureEnergy((double)s.p, (double)s.rho, (double)s.alpha1, (double)s.alpha2, (double)s.arho1, (double)s.arho2, (double)gamma_val, products, unreacted) + ke;
+    } else {
+        total_E = s.p / (gamma_val - (RealType)1.0) + ke;
+    }
+
+    if (dir == 0) { // X
+        f.rho = s.rho * s.ux;
+        f.rhoux = s.rho * s.ux * s.ux + s.p;
+        f.rhouy = s.rho * s.ux * s.uy;
+        f.rhouz = s.rho * s.ux * s.uz;
+        f.E = s.ux * (total_E + s.p);
+        f.v_face = s.ux;
+        if constexpr (IsMultiMaterial) {
+            f.alpha1 = s.alpha1 * s.ux;
+            f.alpha2 = s.alpha2 * s.ux;
+            f.arho1 = s.arho1 * s.ux;
+            f.arho2 = s.arho2 * s.ux;
+        } else {
+            f.alpha1 = 0; f.alpha2 = 0; f.arho1 = 0; f.arho2 = 0;
+        }
+    } else if (dir == 1) { // Y
+        f.rho = s.rho * s.uy;
+        f.rhoux = s.rho * s.uy * s.ux;
+        f.rhouy = s.rho * s.uy * s.uy + s.p;
+        f.rhouz = s.rho * s.uy * s.uz;
+        f.E = s.uy * (total_E + s.p);
+        f.v_face = s.uy;
+        if constexpr (IsMultiMaterial) {
+            f.alpha1 = s.alpha1 * s.uy;
+            f.alpha2 = s.alpha2 * s.uy;
+            f.arho1 = s.arho1 * s.uy;
+            f.arho2 = s.arho2 * s.uy;
+        } else {
+            f.alpha1 = 0; f.alpha2 = 0; f.arho1 = 0; f.arho2 = 0;
+        }
+    } else { // Z
+        f.rho = s.rho * s.uz;
+        f.rhoux = s.rho * s.uz * s.ux;
+        f.rhouy = s.rho * s.uz * s.uy;
+        f.rhouz = s.rho * s.uz * s.uz + s.p;
+        f.E = s.uz * (total_E + s.p);
+        f.v_face = s.uz;
+        if constexpr (IsMultiMaterial) {
+            f.alpha1 = s.alpha1 * s.uz;
+            f.alpha2 = s.alpha2 * s.uz;
+            f.arho1 = s.arho1 * s.uz;
+            f.arho2 = s.arho2 * s.uz;
+        } else {
+            f.alpha1 = 0; f.alpha2 = 0; f.arho1 = 0; f.arho2 = 0;
+        }
+    }
+    return f;
+}
+
+template <typename RealType, bool IsMultiMaterial>
+void computeTimeDerivative(
+    const typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealType, IsMultiMaterial>& sC,
+    const typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealType, IsMultiMaterial>& d_x,
+    const typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealType, IsMultiMaterial>& d_y,
+    const typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealType, IsMultiMaterial>& d_z,
+    RealType gamma_r,
+    typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealType, IsMultiMaterial>& dW_dt) {
+    
+    dW_dt.rho = -(sC.ux * d_x.rho + sC.rho * d_x.ux +
+                  sC.uy * d_y.rho + sC.rho * d_y.uy +
+                  sC.uz * d_z.rho + sC.rho * d_z.uz);
+                  
+    dW_dt.ux = -(sC.ux * d_x.ux + sC.uy * d_y.ux + sC.uz * d_z.ux + (RealType)1.0 / sC.rho * d_x.p);
+    dW_dt.uy = -(sC.ux * d_x.uy + sC.uy * d_y.uy + sC.uz * d_z.uy + (RealType)1.0 / sC.rho * d_y.p);
+    dW_dt.uz = -(sC.ux * d_x.uz + sC.uy * d_y.uz + sC.uz * d_z.uz + (RealType)1.0 / sC.rho * d_z.p);
+    
+    dW_dt.p = -(sC.ux * d_x.p + sC.uy * d_y.p + sC.uz * d_z.p + gamma_r * sC.p * (d_x.ux + d_y.uy + d_z.uz));
+    
+    if constexpr (IsMultiMaterial) {
+        dW_dt.alpha1 = -(sC.ux * d_x.alpha1 + sC.uy * d_y.alpha1 + sC.uz * d_z.alpha1) + sC.alpha1 * (d_x.ux + d_y.uy + d_z.uz);
+        dW_dt.alpha2 = -(sC.ux * d_x.alpha2 + sC.uy * d_y.alpha2 + sC.uz * d_z.alpha2) + sC.alpha2 * (d_x.ux + d_y.uy + d_z.uz);
+        
+        dW_dt.arho1 = -(sC.ux * d_x.arho1 + sC.arho1 * d_x.ux +
+                        sC.uy * d_y.arho1 + sC.arho1 * d_y.uy +
+                        sC.uz * d_z.arho1 + sC.arho1 * d_z.uz);
+        dW_dt.arho2 = dW_dt.rho - dW_dt.arho1;
+    } else {
+        dW_dt.alpha1 = 0; dW_dt.alpha2 = 0; dW_dt.arho1 = 0; dW_dt.arho2 = 0;
+    }
+}
+
+template <typename RealType, bool IsMultiMaterial>
 void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
     auto copy_primitive_to_U = [&]() {
         int n_active = (int)active_tile_indices.size();
@@ -1104,7 +1208,7 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
         
         computeFluxes(dt, U_pool);
         average_U(dU_pool, 0.5, 0.5);
-    } else { // Williamson Low-Storage RK3
+    } else if (temporalOrder == 3) { // Williamson Low-Storage RK3
         const RealType A[3] = { (RealType)0.0, (RealType)(-5.0/9.0), (RealType)(-153.0/128.0) };
         const RealType B[3] = { (RealType)(1.0/3.0), (RealType)(15.0/16.0), (RealType)(8.0/15.0) };
 
@@ -1156,6 +1260,457 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
             updatePrimitiveFromConservative();
             applyBC();
         }
+    } else if (temporalOrder == 4) { // MUSCL-Hancock (2nd order)
+        int total_tiles = n_tiles_x * n_tiles_y * n_tiles_z;
+        #pragma omp parallel for schedule(static)
+        for (int t = 0; t < total_tiles; ++t) {
+            states_pred[t] = states_pool[t];
+        }
+        RealType gamma_r = (RealType)gamma;
+        RealType invDx = (RealType)(1.0 / cellSize);
+        int n_active = (int)active_tile_indices.size();
+
+        #pragma omp parallel for schedule(guided)
+        for (int a = 0; a < n_active; ++a) {
+            int t = active_tile_indices[a];
+            int tx = t % n_tiles_x;
+            int ty = (t / n_tiles_x) % n_tiles_y;
+            int tz = t / (n_tiles_x * n_tiles_y);
+            
+            auto& s_pred_tile = states_pred[t];
+            bool is_interior_tile = tile_is_fully_interior[t];
+            
+            auto sample_func = [&](int tx_val, int ty_val, int tz_val, int qx_val, int qy_val, int qz_val, int dir_val) {
+                if (is_interior_tile) {
+                    return sampleStateInternal(tx_val, ty_val, tz_val);
+                } else {
+                    return sampleStateInternalIDW(tx_val, ty_val, tz_val, qx_val, qy_val, qz_val, dir_val);
+                }
+            };
+            
+            auto cons_to_prim = [&](RealType u_rho, RealType u_rhoux, RealType u_rhouy, RealType u_rhouz, RealType u_E,
+                                    RealType& u_alpha1, RealType& u_alpha2, RealType& u_arho1, RealType& u_arho2,
+                                    CellState3DT<RealType, IsMultiMaterial>& out_s) {
+                bool bad = std::isnan(u_rho) || std::isinf(u_rho) || u_rho < (RealType)1e-8 ||
+                           std::isnan(u_rhoux) || std::isinf(u_rhoux) ||
+                           std::isnan(u_rhouy) || std::isinf(u_rhouy) ||
+                           std::isnan(u_rhouz) || std::isinf(u_rhouz) ||
+                           std::isnan(u_E) || std::isinf(u_E);
+
+                if constexpr (IsMultiMaterial) {
+                    bad = bad || std::isnan(u_alpha1) || std::isinf(u_alpha1) ||
+                                std::isnan(u_alpha2) || std::isinf(u_alpha2) ||
+                                std::isnan(u_arho1) || std::isinf(u_arho1) ||
+                                std::isnan(u_arho2) || std::isinf(u_arho2);
+                }
+
+                if (!bad) {
+                    out_s.rho = std::max(u_rho, (RealType)1e-8);
+                    out_s.ux = u_rhoux / out_s.rho;
+                    out_s.uy = u_rhouy / out_s.rho;
+                    out_s.uz = u_rhouz / out_s.rho;
+                    RealType ke = (RealType)0.5 * out_s.rho * (out_s.ux*out_s.ux + out_s.uy*out_s.uy + out_s.uz*out_s.uz);
+                    RealType e_int = u_E - ke;
+
+                    if constexpr (IsMultiMaterial) {
+                        out_s.alpha1 = std::clamp(u_alpha1, (RealType)0.0, (RealType)1.0);
+                        out_s.alpha2 = std::clamp(u_alpha2, (RealType)0.0, (RealType)1.0);
+                        if (out_s.alpha1 + out_s.alpha2 > (RealType)1.0) {
+                            RealType sum = out_s.alpha1 + out_s.alpha2;
+                            out_s.alpha1 /= sum;
+                            out_s.alpha2 /= sum;
+                        }
+                        out_s.arho1 = std::clamp(u_arho1, (RealType)0.0, out_s.rho);
+                        out_s.arho2 = std::clamp(u_arho2, (RealType)0.0, out_s.rho);
+                        if (out_s.arho1 + out_s.arho2 > out_s.rho) {
+                            RealType sum = out_s.arho1 + out_s.arho2;
+                            out_s.arho1 = (out_s.arho1 / sum) * out_s.rho;
+                            out_s.arho2 = (out_s.arho2 / sum) * out_s.rho;
+                        }
+                        RealType p_val = MultiMat::getMixturePressure(e_int, out_s.rho, out_s.alpha1, out_s.alpha2, out_s.arho1, out_s.arho2, gamma_r, currentMaterials.products, currentMaterials.unreacted);
+                        if (std::isnan(p_val) || std::isinf(p_val) || p_val < (RealType)1e-8) {
+                            bad = true;
+                        } else {
+                            out_s.p = p_val;
+                            u_alpha1 = out_s.alpha1;
+                            u_alpha2 = out_s.alpha2;
+                            u_arho1 = out_s.arho1;
+                            u_arho2 = out_s.arho2;
+                        }
+                    } else {
+                        RealType p_val = e_int * (gamma_r - (RealType)1.0);
+                        if (std::isnan(p_val) || std::isinf(p_val) || p_val < (RealType)1e-8) {
+                            bad = true;
+                        } else {
+                            out_s.p = p_val;
+                        }
+                    }
+                }
+
+                if (bad) {
+                    out_s.rho = (RealType)ambient_rho;
+                    out_s.ux = 0.0;
+                    out_s.uy = 0.0;
+                    out_s.uz = 0.0;
+                    out_s.p = (RealType)ambient_p;
+                    if constexpr (IsMultiMaterial) {
+                        out_s.alpha1 = 0.0; out_s.alpha2 = 0.0;
+                        out_s.arho1 = 0.0; out_s.arho2 = 0.0;
+                    }
+                }
+            };
+
+            for (int k = 0; k < TILE_SIZE_3D; ++k) {
+                int gz = tz * TILE_SIZE_3D + k;
+                for (int j = 0; j < TILE_SIZE_3D; ++j) {
+                    int gy = ty * TILE_SIZE_3D + j;
+                    for (int i = 0; i < TILE_SIZE_3D; ++i) {
+                        int gx = tx * TILE_SIZE_3D + i;
+                        int idx = i + j * TILE_SIZE_3D + k * TILE_SIZE_3D * TILE_SIZE_3D;
+                        
+                        bool is_boundary = false;
+                        if (!geom_pool.empty() && !is_interior_tile) {
+                            int c = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
+                            is_boundary = geom_pool[t].cells[c].is_boundary;
+                        }
+                        if (is_boundary) continue;
+                        
+                        auto sC = sampleStateInternal(gx, gy, gz);
+                        
+                        auto sX_L = sample_func(gx - 1, gy, gz, gx, gy, gz, 0);
+                        auto sX_R = sample_func(gx + 1, gy, gz, gx, gy, gz, 0);
+                        auto sY_B = sample_func(gx, gy - 1, gz, gx, gy, gz, 1);
+                        auto sY_T = sample_func(gx, gy + 1, gz, gx, gy, gz, 1);
+                        auto sZ_D = sample_func(gx, gy, gz - 1, gx, gy, gz, 2);
+                        auto sZ_U = sample_func(gx, gy, gz + 1, gx, gy, gz, 2);
+                        
+                        auto W_xL = reconstruct<RealType, IsMultiMaterial>(sX_L, sC, sX_R, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted);
+                        auto W_xR = reconstruct<RealType, IsMultiMaterial>(sX_L, sC, sX_R, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted);
+                        auto W_yB = reconstruct<RealType, IsMultiMaterial>(sY_B, sC, sY_T, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted);
+                        auto W_yT = reconstruct<RealType, IsMultiMaterial>(sY_B, sC, sY_T, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted);
+                        auto W_zD = reconstruct<RealType, IsMultiMaterial>(sZ_D, sC, sZ_U, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted);
+                        auto W_zU = reconstruct<RealType, IsMultiMaterial>(sZ_D, sC, sZ_U, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted);
+                        
+                        auto F_L = getPhysicalFlux<RealType, IsMultiMaterial>(W_xL, 0, gamma_r, currentMaterials.products, currentMaterials.unreacted);
+                        auto F_R = getPhysicalFlux<RealType, IsMultiMaterial>(W_xR, 0, gamma_r, currentMaterials.products, currentMaterials.unreacted);
+                        auto G_B = getPhysicalFlux<RealType, IsMultiMaterial>(W_yB, 1, gamma_r, currentMaterials.products, currentMaterials.unreacted);
+                        auto G_T = getPhysicalFlux<RealType, IsMultiMaterial>(W_yT, 1, gamma_r, currentMaterials.products, currentMaterials.unreacted);
+                        auto H_D = getPhysicalFlux<RealType, IsMultiMaterial>(W_zD, 2, gamma_r, currentMaterials.products, currentMaterials.unreacted);
+                        auto H_U = getPhysicalFlux<RealType, IsMultiMaterial>(W_zU, 2, gamma_r, currentMaterials.products, currentMaterials.unreacted);
+                        
+                        RealType dt_dx = (RealType)(0.5 * dt * invDx);
+                        
+                        RealType u_rho = sC.rho;
+                        RealType u_rhoux = sC.rho * sC.ux;
+                        RealType u_rhouy = sC.rho * sC.uy;
+                        RealType u_rhouz = sC.rho * sC.uz;
+                        RealType ke = (RealType)0.5 * sC.rho * (sC.ux*sC.ux + sC.uy*sC.uy + sC.uz*sC.uz);
+                        RealType u_E;
+                        if constexpr (IsMultiMaterial) {
+                            u_E = MultiMat::getMixtureEnergy(sC.p, sC.rho, sC.alpha1, sC.alpha2, sC.arho1, sC.arho2, gamma_r, currentMaterials.products, currentMaterials.unreacted) + ke;
+                        } else {
+                            u_E = sC.p / (gamma_r - (RealType)1.0) + ke;
+                        }
+                        
+                        u_rho -= dt_dx * (F_R.rho - F_L.rho + G_T.rho - G_B.rho + H_U.rho - H_D.rho);
+                        u_rhoux -= dt_dx * (F_R.rhoux - F_L.rhoux + G_T.rhoux - G_B.rhoux + H_U.rhoux - H_D.rhoux);
+                        u_rhouy -= dt_dx * (F_R.rhouy - F_L.rhouy + G_T.rhouy - G_B.rhouy + H_U.rhouy - H_D.rhouy);
+                        u_rhouz -= dt_dx * (F_R.rhouz - F_L.rhouz + G_T.rhouz - G_B.rhouz + H_U.rhouz - H_D.rhouz);
+                        u_E -= dt_dx * (F_R.E - F_L.E + G_T.E - G_B.E + H_U.E - H_D.E);
+                        
+                        RealType u_alpha1 = 0, u_alpha2 = 0, u_arho1 = 0, u_arho2 = 0;
+                        if constexpr (IsMultiMaterial) {
+                            u_alpha1 = sC.alpha1; u_alpha2 = sC.alpha2; u_arho1 = sC.arho1; u_arho2 = sC.arho2;
+                            u_alpha1 -= dt_dx * (F_R.alpha1 - F_L.alpha1 + G_T.alpha1 - G_B.alpha1 + H_U.alpha1 - H_D.alpha1);
+                            u_alpha2 -= dt_dx * (F_R.alpha2 - F_L.alpha2 + G_T.alpha2 - G_B.alpha2 + H_U.alpha2 - H_D.alpha2);
+                            
+                            RealType div_u = (W_xR.ux - W_xL.ux) + (W_yT.uy - W_yB.uy) + (W_zU.uz - W_zD.uz);
+                            u_alpha1 += dt_dx * sC.alpha1 * div_u;
+                            u_alpha2 += dt_dx * sC.alpha2 * div_u;
+                            
+                            u_arho1 -= dt_dx * (F_R.arho1 - F_L.arho1 + G_T.arho1 - G_B.arho1 + H_U.arho1 - H_D.arho1);
+                            u_arho2 = u_rho - u_arho1;
+                        }
+                        
+                        CellState3DT<RealType, IsMultiMaterial> pred_s;
+                        cons_to_prim(u_rho, u_rhoux, u_rhouy, u_rhouz, u_E, u_alpha1, u_alpha2, u_arho1, u_arho2, pred_s);
+                        
+                        s_pred_tile.rho[idx] = pred_s.rho;
+                        s_pred_tile.ux[idx] = pred_s.ux;
+                        s_pred_tile.uy[idx] = pred_s.uy;
+                        s_pred_tile.uz[idx] = pred_s.uz;
+                        s_pred_tile.p[idx] = pred_s.p;
+                        if constexpr (IsMultiMaterial) {
+                            s_pred_tile.alpha1[idx] = pred_s.alpha1;
+                            s_pred_tile.alpha2[idx] = pred_s.alpha2;
+                            s_pred_tile.arho1[idx] = pred_s.arho1;
+                            s_pred_tile.arho2[idx] = pred_s.arho2;
+                        }
+                    }
+                }
+            }
+        }
+        
+        std::swap(states_pool, states_pred);
+        computeFluxes(dt, U_pool);
+        std::swap(states_pool, states_pred);
+
+    } else if (temporalOrder == 5 || temporalOrder == 6) { // ADER-2 (5) and ADER-3 (6)
+        int total_tiles = n_tiles_x * n_tiles_y * n_tiles_z;
+        #pragma omp parallel for schedule(static)
+        for (int t = 0; t < total_tiles; ++t) {
+            states_pred[t] = states_pool[t];
+        }
+        RealType gamma_r = (RealType)gamma;
+        RealType invDx = (RealType)(1.0 / cellSize);
+        int n_active = (int)active_tile_indices.size();
+
+        #pragma omp parallel for schedule(guided)
+        for (int a = 0; a < n_active; ++a) {
+            int t = active_tile_indices[a];
+            int tx = t % n_tiles_x;
+            int ty = (t / n_tiles_x) % n_tiles_y;
+            int tz = t / (n_tiles_x * n_tiles_y);
+            
+            auto& s_pred_tile = states_pred[t];
+            auto& dW_dt_tile = dW_dt_pool[t];
+            bool is_interior_tile = tile_is_fully_interior[t];
+            
+            auto sample_func = [&](int tx_val, int ty_val, int tz_val, int qx_val, int qy_val, int qz_val, int dir_val) {
+                if (is_interior_tile) {
+                    return sampleStateInternal(tx_val, ty_val, tz_val);
+                } else {
+                    return sampleStateInternalIDW(tx_val, ty_val, tz_val, qx_val, qy_val, qz_val, dir_val);
+                }
+            };
+            
+            auto slope = [&](RealType L, RealType C, RealType R) {
+                return minmod(C - L, R - C) * invDx;
+            };
+
+            for (int k = 0; k < TILE_SIZE_3D; ++k) {
+                int gz = tz * TILE_SIZE_3D + k;
+                for (int j = 0; j < TILE_SIZE_3D; ++j) {
+                    int gy = ty * TILE_SIZE_3D + j;
+                    for (int i = 0; i < TILE_SIZE_3D; ++i) {
+                        int gx = tx * TILE_SIZE_3D + i;
+                        int idx = i + j * TILE_SIZE_3D + k * TILE_SIZE_3D * TILE_SIZE_3D;
+                        
+                        bool is_boundary = false;
+                        if (!geom_pool.empty() && !is_interior_tile) {
+                            int c = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
+                            is_boundary = geom_pool[t].cells[c].is_boundary;
+                        }
+                        if (is_boundary) continue;
+                        
+                        auto sC = sampleStateInternal(gx, gy, gz);
+                        
+                        auto sX_L = sample_func(gx - 1, gy, gz, gx, gy, gz, 0);
+                        auto sX_R = sample_func(gx + 1, gy, gz, gx, gy, gz, 0);
+                        auto sY_B = sample_func(gx, gy - 1, gz, gx, gy, gz, 1);
+                        auto sY_T = sample_func(gx, gy + 1, gz, gx, gy, gz, 1);
+                        auto sZ_D = sample_func(gx, gy, gz - 1, gx, gy, gz, 2);
+                        auto sZ_U = sample_func(gx, gy, gz + 1, gx, gy, gz, 2);
+                        
+                        CellState3DT<RealType, IsMultiMaterial> d_x, d_y, d_z;
+                        d_x.rho = slope(sX_L.rho, sC.rho, sX_R.rho);
+                        d_x.ux = slope(sX_L.ux, sC.ux, sX_R.ux);
+                        d_x.uy = slope(sX_L.uy, sC.uy, sX_R.uy);
+                        d_x.uz = slope(sX_L.uz, sC.uz, sX_R.uz);
+                        d_x.p = slope(sX_L.p, sC.p, sX_R.p);
+                        if constexpr (IsMultiMaterial) {
+                            d_x.alpha1 = slope(sX_L.alpha1, sC.alpha1, sX_R.alpha1);
+                            d_x.alpha2 = slope(sX_L.alpha2, sC.alpha2, sX_R.alpha2);
+                            d_x.arho1 = slope(sX_L.arho1, sC.arho1, sX_R.arho1);
+                        } else {
+                            d_x.alpha1 = 0; d_x.alpha2 = 0; d_x.arho1 = 0; d_x.arho2 = 0;
+                        }
+
+                        d_y.rho = slope(sY_B.rho, sC.rho, sY_T.rho);
+                        d_y.ux = slope(sY_B.ux, sC.ux, sY_T.ux);
+                        d_y.uy = slope(sY_B.uy, sC.uy, sY_T.uy);
+                        d_y.uz = slope(sY_B.uz, sC.uz, sY_T.uz);
+                        d_y.p = slope(sY_B.p, sC.p, sY_T.p);
+                        if constexpr (IsMultiMaterial) {
+                            d_y.alpha1 = slope(sY_B.alpha1, sC.alpha1, sY_T.alpha1);
+                            d_y.alpha2 = slope(sY_B.alpha2, sC.alpha2, sY_T.alpha2);
+                            d_y.arho1 = slope(sY_B.arho1, sC.arho1, sY_T.arho1);
+                        } else {
+                            d_y.alpha1 = 0; d_y.alpha2 = 0; d_y.arho1 = 0; d_y.arho2 = 0;
+                        }
+
+                        d_z.rho = slope(sZ_D.rho, sC.rho, sZ_U.rho);
+                        d_z.ux = slope(sZ_D.ux, sC.ux, sZ_U.ux);
+                        d_z.uy = slope(sZ_D.uy, sC.uy, sZ_U.uy);
+                        d_z.uz = slope(sZ_D.uz, sC.uz, sZ_U.uz);
+                        d_z.p = slope(sZ_D.p, sC.p, sZ_U.p);
+                        if constexpr (IsMultiMaterial) {
+                            d_z.alpha1 = slope(sZ_D.alpha1, sC.alpha1, sZ_U.alpha1);
+                            d_z.alpha2 = slope(sZ_D.alpha2, sC.alpha2, sZ_U.alpha2);
+                            d_z.arho1 = slope(sZ_D.arho1, sC.arho1, sZ_U.arho1);
+                        } else {
+                            d_z.alpha1 = 0; d_z.alpha2 = 0; d_z.arho1 = 0; d_z.arho2 = 0;
+                        }
+                        
+                        CellState3DT<RealType, IsMultiMaterial> dW_dt;
+                        computeTimeDerivative<RealType, IsMultiMaterial>(sC, d_x, d_y, d_z, gamma_r, dW_dt);
+                        
+                        // Store the first time derivative
+                        dW_dt_tile.rho[idx] = dW_dt.rho;
+                        dW_dt_tile.ux[idx] = dW_dt.ux;
+                        dW_dt_tile.uy[idx] = dW_dt.uy;
+                        dW_dt_tile.uz[idx] = dW_dt.uz;
+                        dW_dt_tile.p[idx] = dW_dt.p;
+                        if constexpr (IsMultiMaterial) {
+                            dW_dt_tile.alpha1[idx] = dW_dt.alpha1;
+                            dW_dt_tile.alpha2[idx] = dW_dt.alpha2;
+                            dW_dt_tile.arho1[idx] = dW_dt.arho1;
+                            dW_dt_tile.arho2[idx] = dW_dt.arho2;
+                        }
+                        
+                        // Predict midpoint state W^{n+1/2}
+                        s_pred_tile.rho[idx] = sC.rho + (RealType)0.5 * (RealType)dt * dW_dt.rho;
+                        s_pred_tile.ux[idx] = sC.ux + (RealType)0.5 * (RealType)dt * dW_dt.ux;
+                        s_pred_tile.uy[idx] = sC.uy + (RealType)0.5 * (RealType)dt * dW_dt.uy;
+                        s_pred_tile.uz[idx] = sC.uz + (RealType)0.5 * (RealType)dt * dW_dt.uz;
+                        s_pred_tile.p[idx] = sC.p + (RealType)0.5 * (RealType)dt * dW_dt.p;
+                        if constexpr (IsMultiMaterial) {
+                            s_pred_tile.alpha1[idx] = sC.alpha1 + (RealType)0.5 * (RealType)dt * dW_dt.alpha1;
+                            s_pred_tile.alpha2[idx] = sC.alpha2 + (RealType)0.5 * (RealType)dt * dW_dt.alpha2;
+                            s_pred_tile.arho1[idx] = sC.arho1 + (RealType)0.5 * (RealType)dt * dW_dt.arho1;
+                            s_pred_tile.arho2[idx] = sC.arho2 + (RealType)0.5 * (RealType)dt * dW_dt.arho2;
+                        }
+                    }
+                }
+            }
+        }
+        
+        if (temporalOrder == 6) { // ADER-3
+            // Temporarily swap states_pool and states_pred so that we sample from W^{n+1/2}
+            std::swap(states_pool, states_pred);
+            
+            // Copy midpoint structure to states_int in parallel
+            #pragma omp parallel for schedule(static)
+            for (int t = 0; t < total_tiles; ++t) {
+                states_int[t] = states_pred[t];
+            }
+            
+            #pragma omp parallel for schedule(guided)
+            for (int a = 0; a < n_active; ++a) {
+                int t = active_tile_indices[a];
+                int tx = t % n_tiles_x;
+                int ty = (t / n_tiles_x) % n_tiles_y;
+                int tz = t / (n_tiles_x * n_tiles_y);
+                
+                auto& s_int_tile = states_int[t];
+                bool is_interior_tile = tile_is_fully_interior[t];
+                
+                auto sample_func = [&](int tx_val, int ty_val, int tz_val, int qx_val, int qy_val, int qz_val, int dir_val) {
+                    if (is_interior_tile) {
+                        return sampleStateInternal(tx_val, ty_val, tz_val);
+                    } else {
+                        return sampleStateInternalIDW(tx_val, ty_val, tz_val, qx_val, qy_val, qz_val, dir_val);
+                    }
+                };
+                
+                auto slope = [&](RealType L, RealType C, RealType R) {
+                    return minmod(C - L, R - C) * invDx;
+                };
+
+                for (int k = 0; k < TILE_SIZE_3D; ++k) {
+                    int gz = tz * TILE_SIZE_3D + k;
+                    for (int j = 0; j < TILE_SIZE_3D; ++j) {
+                        int gy = ty * TILE_SIZE_3D + j;
+                        for (int i = 0; i < TILE_SIZE_3D; ++i) {
+                            int gx = tx * TILE_SIZE_3D + i;
+                            int idx = i + j * TILE_SIZE_3D + k * TILE_SIZE_3D * TILE_SIZE_3D;
+                            
+                            bool is_boundary = false;
+                            if (!geom_pool.empty() && !is_interior_tile) {
+                                int c = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
+                                is_boundary = geom_pool[t].cells[c].is_boundary;
+                            }
+                            if (is_boundary) continue;
+                            
+                            auto sC = sampleStateInternal(gx, gy, gz); // midpoint state
+                            
+                            auto sX_L = sample_func(gx - 1, gy, gz, gx, gy, gz, 0);
+                            auto sX_R = sample_func(gx + 1, gy, gz, gx, gy, gz, 0);
+                            auto sY_B = sample_func(gx, gy - 1, gz, gx, gy, gz, 1);
+                            auto sY_T = sample_func(gx, gy + 1, gz, gx, gy, gz, 1);
+                            auto sZ_D = sample_func(gx, gy, gz - 1, gx, gy, gz, 2);
+                            auto sZ_U = sample_func(gx, gy, gz + 1, gx, gy, gz, 2);
+                            
+                            CellState3DT<RealType, IsMultiMaterial> d_x, d_y, d_z;
+                            d_x.rho = slope(sX_L.rho, sC.rho, sX_R.rho);
+                            d_x.ux = slope(sX_L.ux, sC.ux, sX_R.ux);
+                            d_x.uy = slope(sX_L.uy, sC.uy, sX_R.uy);
+                            d_x.uz = slope(sX_L.uz, sC.uz, sX_R.uz);
+                            d_x.p = slope(sX_L.p, sC.p, sX_R.p);
+                            if constexpr (IsMultiMaterial) {
+                                d_x.alpha1 = slope(sX_L.alpha1, sC.alpha1, sX_R.alpha1);
+                                d_x.alpha2 = slope(sX_L.alpha2, sC.alpha2, sX_R.alpha2);
+                                d_x.arho1 = slope(sX_L.arho1, sC.arho1, sX_R.arho1);
+                            } else {
+                                d_x.alpha1 = 0; d_x.alpha2 = 0; d_x.arho1 = 0; d_x.arho2 = 0;
+                            }
+
+                            d_y.rho = slope(sY_B.rho, sC.rho, sY_T.rho);
+                            d_y.ux = slope(sY_B.ux, sC.ux, sY_T.ux);
+                            d_y.uy = slope(sY_B.uy, sC.uy, sY_T.uy);
+                            d_y.uz = slope(sY_B.uz, sC.uz, sY_T.uz);
+                            d_y.p = slope(sY_B.p, sC.p, sY_T.p);
+                            if constexpr (IsMultiMaterial) {
+                                d_y.alpha1 = slope(sY_B.alpha1, sC.alpha1, sY_T.alpha1);
+                                d_y.alpha2 = slope(sY_B.alpha2, sC.alpha2, sY_T.alpha2);
+                                d_y.arho1 = slope(sY_B.arho1, sC.arho1, sY_T.arho1);
+                            } else {
+                                d_y.alpha1 = 0; d_y.alpha2 = 0; d_y.arho1 = 0; d_y.arho2 = 0;
+                            }
+
+                            d_z.rho = slope(sZ_D.rho, sC.rho, sZ_U.rho);
+                            d_z.ux = slope(sZ_D.ux, sC.ux, sZ_U.ux);
+                            d_z.uy = slope(sZ_D.uy, sC.uy, sZ_U.uy);
+                            d_z.uz = slope(sZ_D.uz, sC.uz, sZ_U.uz);
+                            d_z.p = slope(sZ_D.p, sC.p, sZ_U.p);
+                            if constexpr (IsMultiMaterial) {
+                                d_z.alpha1 = slope(sZ_D.alpha1, sC.alpha1, sZ_U.alpha1);
+                                d_z.alpha2 = slope(sZ_D.alpha2, sC.alpha2, sZ_U.alpha2);
+                                d_z.arho1 = slope(sZ_D.arho1, sC.arho1, sZ_U.arho1);
+                            } else {
+                                d_z.alpha1 = 0; d_z.alpha2 = 0; d_z.arho1 = 0; d_z.arho2 = 0;
+                            }
+                            
+                            CellState3DT<RealType, IsMultiMaterial> dW_dt_mid;
+                            computeTimeDerivative<RealType, IsMultiMaterial>(sC, d_x, d_y, d_z, gamma_r, dW_dt_mid);
+                            
+                            // states_pred contains the original state W^n because of the swap!
+                            auto& s_orig = states_pred[t];
+                            auto& dW_dt_orig = dW_dt_pool[t];
+                            
+                            s_int_tile.rho[idx] = s_orig.rho[idx] + (RealType)dt * ((RealType)(1.0/6.0) * dW_dt_orig.rho[idx] + (RealType)(2.0/3.0) * dW_dt_mid.rho);
+                            s_int_tile.ux[idx] = s_orig.ux[idx] + (RealType)dt * ((RealType)(1.0/6.0) * dW_dt_orig.ux[idx] + (RealType)(2.0/3.0) * dW_dt_mid.ux);
+                            s_int_tile.uy[idx] = s_orig.uy[idx] + (RealType)dt * ((RealType)(1.0/6.0) * dW_dt_orig.uy[idx] + (RealType)(2.0/3.0) * dW_dt_mid.uy);
+                            s_int_tile.uz[idx] = s_orig.uz[idx] + (RealType)dt * ((RealType)(1.0/6.0) * dW_dt_orig.uz[idx] + (RealType)(2.0/3.0) * dW_dt_mid.uz);
+                            s_int_tile.p[idx] = s_orig.p[idx] + (RealType)dt * ((RealType)(1.0/6.0) * dW_dt_orig.p[idx] + (RealType)(2.0/3.0) * dW_dt_mid.p);
+                            if constexpr (IsMultiMaterial) {
+                                s_int_tile.alpha1[idx] = s_orig.alpha1[idx] + (RealType)dt * ((RealType)(1.0/6.0) * dW_dt_orig.alpha1[idx] + (RealType)(2.0/3.0) * dW_dt_mid.alpha1);
+                                s_int_tile.alpha2[idx] = s_orig.alpha2[idx] + (RealType)dt * ((RealType)(1.0/6.0) * dW_dt_orig.alpha2[idx] + (RealType)(2.0/3.0) * dW_dt_mid.alpha2);
+                                s_int_tile.arho1[idx] = s_orig.arho1[idx] + (RealType)dt * ((RealType)(1.0/6.0) * dW_dt_orig.arho1[idx] + (RealType)(2.0/3.0) * dW_dt_mid.arho1);
+                                s_int_tile.arho2[idx] = s_orig.arho2[idx] + (RealType)dt * ((RealType)(1.0/6.0) * dW_dt_orig.arho2[idx] + (RealType)(2.0/3.0) * dW_dt_mid.arho2);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Swap back: states_pred now gets states_int (integrated), states_pool remains original
+            states_pred.swap(states_int);
+        }
+        
+        std::swap(states_pool, states_pred);
+        computeFluxes(dt, U_pool);
+        std::swap(states_pool, states_pred);
     }
 
     if constexpr (IsMultiMaterial) {

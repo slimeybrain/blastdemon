@@ -3840,6 +3840,16 @@ int main() {
                     // Start the asynchronous initialization thread
                     std::thread(init_3d_thread_func, msg).detach();
 
+                } else if (command == "UPDATE_CFL") {
+                    double cfl = msg.value("cfl", 0.4);
+                    global_cfl = cfl;
+                    global_cfl_2d = cfl;
+                    global_cfl_3d = cfl;
+                    global_cfl_mpm = static_cast<float>(cfl);
+                    global_cfl_fsi = static_cast<float>(cfl);
+                    std::string scope = msg.value("scope", "3d");
+                    emit_kernel_log("SYSTEM", "CFL updated to " + std::to_string(cfl), 0.0, scope);
+
                 } else if (command == "CONTOUR_CONFIG" || command == "VIEW3D_CONFIG") {
                     global_telemetry_stride = msg.value("stride", 1);
                     double rate = msg.value("refresh_rate", 0.0);

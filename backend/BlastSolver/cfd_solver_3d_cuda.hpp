@@ -100,6 +100,8 @@ class CFDSolver3DCuda : public CFDSolver3DImplBase {
     mutable void* d_U = nullptr;
     mutable void* d_dU = nullptr;
     mutable void* d_geom = nullptr;
+    mutable void* d_states_pred = nullptr;
+    mutable void* d_dW_dt = nullptr;
     mutable void* d_active_tiles = nullptr;
     mutable void* d_max_s_buf = nullptr;
     mutable void* d_slice_buf = nullptr;

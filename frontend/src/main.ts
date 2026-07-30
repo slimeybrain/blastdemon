@@ -186,10 +186,10 @@ const activeState = savedState || initialState;
 
 const layoutManager = new LayoutManager('app-container', stateManager);
 
-function getCflFromSolver(): number {
-    const state = stateManager.getCurrentState();
-    const solver = state?.nodes?.find(n => n.type === 'CFDSolver3D') || state?.nodes?.find(n => n.type === 'CFDSolver2D') || state?.nodes?.find(n => n.type === 'CFDSolver');
-    return solver?.parameters?.cfl || 0.4;
+function getCflFromSolver(modelId: string): number {
+    const model = stateManager.getAllModels().find(m => m.id === modelId);
+    const solver = model?.nodes?.find(n => n.type === 'CFDSolver3D' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver');
+    return solver?.parameters?.cfl !== undefined ? Number(solver.parameters.cfl) : 0.4;
 }
 
 (window as any).stateManager = stateManager;
@@ -1188,7 +1188,7 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
             if (sn) stateManager.pushTelemetry(sn.id, "[WARNING] Cannot step: solver not initialised. Click Init first.");
             return;
         }
-        const cfl = getCflFromSolver();
+        const cfl = getCflFromSolver(modelId);
         
         const has3D = model?.nodes.some(n => n.type === 'CFDSolver3D') || false;
         if (has3D) {
@@ -1213,7 +1213,7 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
     // ── EXEC_ALL ──────────────────────────────────────────────────────────────
     } else if (command === "EXEC_ALL") {
         const status = stateManager.getModelStatus(modelId);
-        const cfl = getCflFromSolver();
+        const cfl = getCflFromSolver(modelId);
 
         const has3D = model?.nodes.some(n => n.type === 'CFDSolver3D') || false;
 

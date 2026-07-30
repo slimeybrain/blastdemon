@@ -3998,6 +3998,33 @@ export class GraphRenderer {
                         }
                     }
                 }
+
+                const stsEl = form.querySelector('[data-key="space_time_scheme"]') as HTMLElement;
+                if (stsEl) {
+                    const so = node.parameters['spatial_order'] ?? 2;
+                    const to = node.parameters['temporal_order'] ?? 2;
+                    let currentVal = 'RK2 (2nd-Order Space/Time)';
+                    if (so === 1 && to === 1) currentVal = 'Euler (1st-Order Space/Time)';
+                    else if (so === 2 && to === 2) currentVal = 'RK2 (2nd-Order Space/Time)';
+                    else if (so === 3 && to === 3) currentVal = 'RK3 (3rd-Order Space/Time)';
+                    else if (so === 2 && to === 4) currentVal = 'MUSCL-Hancock (2nd-Order Space/Time)';
+                    else if (so === 2 && to === 5) currentVal = 'ADER-2 (2nd-Order Space/Time)';
+                    else if (so === 3 && to === 6) currentVal = 'ADER-3 (3rd-Order Space/Time)';
+                    
+                    const trigger = stsEl.querySelector('.custom-select-trigger');
+                    if (trigger) {
+                        trigger.textContent = currentVal;
+                    }
+                    stsEl.querySelectorAll('.custom-select-option').forEach(opt => {
+                        const optEl = opt as HTMLElement;
+                        if (optEl.dataset.value === currentVal) {
+                            optEl.classList.add('selected');
+                        } else {
+                            optEl.classList.remove('selected');
+                        }
+                    });
+                }
+
                 const gridInfo = form.querySelector('.grid-info-display') as HTMLDivElement;
                 if (gridInfo) {
                     const state = this.stateManager.getCurrentState();
@@ -4024,7 +4051,16 @@ export class GraphRenderer {
             form.dataset.renderedMaterialType = matType.toString();
         }
 
-        const paramKeys = Object.keys(node.parameters);
+        let paramKeys = Object.keys(node.parameters);
+        if (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D') {
+            paramKeys = paramKeys.filter(k => k !== 'spatial_order' && k !== 'temporal_order');
+            const idx = Object.keys(node.parameters).indexOf('spatial_order');
+            if (idx !== -1) {
+                paramKeys.splice(idx, 0, 'space_time_scheme');
+            } else {
+                paramKeys.push('space_time_scheme');
+            }
+        }
         if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D' || node.type === 'RefinementMesh3D') {
             paramKeys.sort((a, b) => {
                 if (a === 'cell_size') return -1;
@@ -4060,7 +4096,18 @@ export class GraphRenderer {
             : (state?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'DomainMesh3D') ?? false);
 
         for (const key of paramKeys) {
-            const value = node.parameters[key];
+            let value = node.parameters[key];
+            if (key === 'space_time_scheme') {
+                const so = node.parameters['spatial_order'] ?? 2;
+                const to = node.parameters['temporal_order'] ?? 2;
+                if (so === 1 && to === 1) value = 'Euler (1st-Order Space/Time)';
+                else if (so === 2 && to === 2) value = 'RK2 (2nd-Order Space/Time)';
+                else if (so === 3 && to === 3) value = 'RK3 (3rd-Order Space/Time)';
+                else if (so === 2 && to === 4) value = 'MUSCL-Hancock (2nd-Order Space/Time)';
+                else if (so === 2 && to === 5) value = 'ADER-2 (2nd-Order Space/Time)';
+                else if (so === 3 && to === 6) value = 'ADER-3 (3rd-Order Space/Time)';
+                else value = 'RK2 (2nd-Order Space/Time)';
+            }
             if (key === 'gauges' || key === 'slices' || key === 'primitives') continue;
             if (key === 'nr' || key === 'nz' || key === 'n_cells') continue;
             if (node.type === 'CFDSolver3D' && (key === 'mesh_type' || key === 'amr_max_levels' || key === 'amr_threshold' || key === 'amr_coarsen_ratio' || key === 'amr_tile_size')) continue;
@@ -4157,7 +4204,15 @@ export class GraphRenderer {
                 'shape_type': ['Rectangle', 'Circle'],
                 'coupling_mode': ['TwoWay_Full', 'OneWay_CFD_to_MPM', 'Disabled'],
                 'contour_quantity': ['von_mises', 'plastic_strain', 'density', 'velocity', 'pressure'],
-                'color_map': ['viridis', 'plasma', 'jet', 'coolwarm']
+                'color_map': ['viridis', 'plasma', 'jet', 'coolwarm'],
+                'space_time_scheme': [
+                    'Euler (1st-Order Space/Time)',
+                    'RK2 (2nd-Order Space/Time)',
+                    'RK3 (3rd-Order Space/Time)',
+                    'MUSCL-Hancock (2nd-Order Space/Time)',
+                    'ADER-2 (2nd-Order Space/Time)',
+                    'ADER-3 (3rd-Order Space/Time)'
+                ]
             };
 
             let inputEl: HTMLElement;
@@ -4179,6 +4234,22 @@ export class GraphRenderer {
                     value.toString(),
                     (newVal) => {
                         console.log("[DEBUG] Custom Dropdown onChange triggered:", key, newVal, "for node:", node.id);
+                        if (key === 'space_time_scheme') {
+                            let s_order = 2;
+                            let t_order = 2;
+                            if (newVal === 'Euler (1st-Order Space/Time)') { s_order = 1; t_order = 1; }
+                            else if (newVal === 'RK2 (2nd-Order Space/Time)') { s_order = 2; t_order = 2; }
+                            else if (newVal === 'RK3 (3rd-Order Space/Time)') { s_order = 3; t_order = 3; }
+                            else if (newVal === 'MUSCL-Hancock (2nd-Order Space/Time)') { s_order = 2; t_order = 4; }
+                            else if (newVal === 'ADER-2 (2nd-Order Space/Time)') { s_order = 2; t_order = 5; }
+                            else if (newVal === 'ADER-3 (3rd-Order Space/Time)') { s_order = 3; t_order = 6; }
+                            
+                            this.stateManager.updateNodeParameters(node.id, {
+                                spatial_order: s_order,
+                                temporal_order: t_order
+                            });
+                            return;
+                        }
                         const numericKeys = [
                             'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature',
                             'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
@@ -4572,6 +4643,7 @@ export class GraphRenderer {
                 input.style.border = '1px solid #444';
                 input.style.padding = '1px 2px';
 
+
                 input.addEventListener('input', () => {
                     const newVal = isNumeric ? Number(input.value) : input.value;
                     const updates: Record<string, any> = { [key]: newVal };
@@ -4581,7 +4653,33 @@ export class GraphRenderer {
                     if (node.type === 'Material' && ['ideal_rho_0', 'ideal_e_0'].includes(key)) {
                         updates['composition'] = 'Custom';
                     }
-                    this.stateManager.updateNodeParameters(node.id, updates);
+                    
+                    const isDynamicCfl = (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver') && key === 'cfl';
+                    if (isDynamicCfl) {
+                        this.stateManager.updateNodeParametersInPlace(node.id, updates);
+                        const net = (window as any).networkManager;
+                        if (net && net.isConnected()) {
+                            let targetModelId = node.id;
+                            const models = this.stateManager.getAppState().models;
+                            for (const [mid, m] of Object.entries(models)) {
+                                if (m.nodes.some(n => n.id === node.id)) {
+                                    targetModelId = mid;
+                                    break;
+                                }
+                            }
+                            let scope = "1d";
+                            if (node.type === 'CFDSolver3D') scope = "3d";
+                            else if (node.type === 'CFDSolver2D') scope = "2d";
+                            net.send({
+                                command: "UPDATE_CFL",
+                                modelId: targetModelId,
+                                cfl: Number(newVal),
+                                scope: scope
+                            });
+                        }
+                    } else {
+                        this.stateManager.updateNodeParameters(node.id, updates);
+                    }
                 });
 
                 if (key === 'stl_file') {

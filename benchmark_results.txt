@@ -1,0 +1,54 @@
+=== Detailed CUDA Profiling for 10M Cell Model (All Tiles Active) ===
+Grid: 320 x 256 x 128 (10.4858 M cells)
+Total Tiles: 20480 tiles
+
+| Precision | Physics Model | Flux Scheme | Numerical Scheme | Active Tiles | Avg Step Time | Steps/Sec |
+|-----------|---------------|-------------|------------------|--------------|---------------|-----------|
+| float | Ideal Gas | AUSM+ | RK1 | 20480 | 5.23131 ms | 191.157 |
+| float | Ideal Gas | AUSM+ | RK2 (2nd-Order) | 20480 | 13.1916 ms | 75.8056 |
+| float | Ideal Gas | AUSM+ | RK3 (3rd-Order) | 20480 | 32.1982 ms | 31.0576 |
+| float | Ideal Gas | AUSM+ | MUSCL-Hancock | 20480 | 13.3317 ms | 75.0094 |
+| float | Ideal Gas | AUSM+ | ADER-2 (2nd-Order) | 20480 | 11.9687 ms | 83.5509 |
+| float | Ideal Gas | AUSM+ | ADER-3 (3rd-Order) | 20480 | 15.7264 ms | 63.5875 |
+| float | Ideal Gas | Rusanov | RK1 | 20480 | 4.87289 ms | 205.217 |
+| float | Ideal Gas | Rusanov | RK2 (2nd-Order) | 20480 | 13.0104 ms | 76.8616 |
+| float | Ideal Gas | Rusanov | RK3 (3rd-Order) | 20480 | 31.2197 ms | 32.0311 |
+| float | Ideal Gas | Rusanov | MUSCL-Hancock | 20480 | 13.1407 ms | 76.0992 |
+| float | Ideal Gas | Rusanov | ADER-2 (2nd-Order) | 20480 | 11.7747 ms | 84.9281 |
+| float | Ideal Gas | Rusanov | ADER-3 (3rd-Order) | 20480 | 15.5837 ms | 64.1696 |
+| float | Multi-Material | AUSM+ | RK1 | 20480 | 11.2154 ms | 89.1634 |
+| float | Multi-Material | AUSM+ | RK2 (2nd-Order) | 20480 | 28.415 ms | 35.1927 |
+| float | Multi-Material | AUSM+ | RK3 (3rd-Order) | 20480 | 68.3207 ms | 14.6368 |
+| float | Multi-Material | AUSM+ | MUSCL-Hancock | 20480 | 25.4111 ms | 39.3528 |
+| float | Multi-Material | AUSM+ | ADER-2 (2nd-Order) | 20480 | 24.8132 ms | 40.3012 |
+| float | Multi-Material | AUSM+ | ADER-3 (3rd-Order) | 20480 | 30.7227 ms | 32.5492 |
+| float | Multi-Material | Rusanov | RK1 | 20480 | 10.7322 ms | 93.1773 |
+| float | Multi-Material | Rusanov | RK2 (2nd-Order) | 20480 | 27.9615 ms | 35.7635 |
+| float | Multi-Material | Rusanov | RK3 (3rd-Order) | 20480 | 67.9213 ms | 14.7229 |
+| float | Multi-Material | Rusanov | MUSCL-Hancock | 20480 | 24.8267 ms | 40.2792 |
+| float | Multi-Material | Rusanov | ADER-2 (2nd-Order) | 20480 | 24.8807 ms | 40.1917 |
+| float | Multi-Material | Rusanov | ADER-3 (3rd-Order) | 20480 | 30.1228 ms | 33.1975 |
+| double | Ideal Gas | AUSM+ | RK1 | 20480 | 88.1848 ms | 11.3398 |
+| double | Ideal Gas | AUSM+ | RK2 (2nd-Order) | 20480 | 234.708 ms | 4.26062 |
+| double | Ideal Gas | AUSM+ | RK3 (3rd-Order) | 20480 | 800.618 ms | 1.24904 |
+| double | Ideal Gas | AUSM+ | MUSCL-Hancock | 20480 | 145 ms | 6.89653 |
+| double | Ideal Gas | AUSM+ | ADER-2 (2nd-Order) | 20480 | 130.64 ms | 7.65464 |
+| double | Ideal Gas | AUSM+ | ADER-3 (3rd-Order) | 20480 | 288.171 ms | 3.47017 |
+| double | Ideal Gas | Rusanov | RK1 | 20480 | 51.4579 ms | 19.4334 |
+| double | Ideal Gas | Rusanov | RK2 (2nd-Order) | 20480 | 153.64 ms | 6.50872 |
+| double | Ideal Gas | Rusanov | RK3 (3rd-Order) | 20480 | 682.208 ms | 1.46583 |
+| double | Ideal Gas | Rusanov | MUSCL-Hancock | 20480 | 106.957 ms | 9.34959 |
+| double | Ideal Gas | Rusanov | ADER-2 (2nd-Order) | 20480 | 93.2673 ms | 10.7219 |
+| double | Ideal Gas | Rusanov | ADER-3 (3rd-Order) | 20480 | 249.351 ms | 4.01042 |
+| double | Multi-Material | AUSM+ | RK1 | 20480 | 215.509 ms | 4.64018 |
+| double | Multi-Material | AUSM+ | RK2 (2nd-Order) | 20480 | 521.757 ms | 1.9166 |
+| double | Multi-Material | AUSM+ | RK3 (3rd-Order) | 20480 | 1607.27 ms | 0.622172 |
+| double | Multi-Material | AUSM+ | MUSCL-Hancock | 20480 | 314.339 ms | 3.18128 |
+| double | Multi-Material | AUSM+ | ADER-2 (2nd-Order) | 20480 | 292.343 ms | 3.42064 |
+| double | Multi-Material | AUSM+ | ADER-3 (3rd-Order) | 20480 | 574.573 ms | 1.74042 |
+| double | Multi-Material | Rusanov | RK1 | 20480 | 187.481 ms | 5.33386 |
+| double | Multi-Material | Rusanov | RK2 (2nd-Order) | 20480 | 469.779 ms | 2.12866 |
+| double | Multi-Material | Rusanov | RK3 (3rd-Order) | 20480 | 1529.48 ms | 0.653815 |
+| double | Multi-Material | Rusanov | MUSCL-Hancock | 20480 | 283.732 ms | 3.52446 |
+| double | Multi-Material | Rusanov | ADER-2 (2nd-Order) | 20480 | 261.018 ms | 3.83116 |
+| double | Multi-Material | Rusanov | ADER-3 (3rd-Order) | 20480 | 541.917 ms | 1.8453 |
