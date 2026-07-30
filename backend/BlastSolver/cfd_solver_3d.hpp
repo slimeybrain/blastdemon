@@ -180,6 +180,7 @@ public:
 
     virtual bool isIdealGas() const = 0;
     virtual bool isMultiMaterial() const = 0;
+    virtual bool isCUDA() const { return false; }
     virtual void setGamma(double g) {}
     virtual void setIdealGas(bool val) {}
     virtual void setMaterialParameters(const MultiMat::MaterialSet& materials) {}

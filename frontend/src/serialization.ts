@@ -21,7 +21,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl',
         'spatial_order', 'temporal_order', 'gamma', 'plot_stride', 'refresh_rate',
         'ascii_precision', 'step_interval', 'time_interval', 'downsample_stride',
-        'telemetry_channel',
+        'telemetry_channel', 'telemetry_interval_ms', 'vtk_step_interval',
         // 2D CFD keys
         'nr', 'nz', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
         'charge_r', 'charge_z', 'charge_radius', 'charge_height',
@@ -760,34 +760,124 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         flattenedParams['ambient_rho'] = p / (287.058 * t);
 
         if (!flattenedParams['device']) flattenedParams['device'] = 'cpu';
+
+        // Check if there is a Material node connected locally in the 3D model
+        const localMatNode = state.nodes.find(n => n.type === 'Material');
+        if (localMatNode && localMatNode.parameters) {
+            const localMatType = localMatNode.parameters.material_type || 'JWL Charge';
+            if (localMatType === 'Ideal Gas Charge' || localMatType === 'Ideal Gas') {
+                flattenedParams['explosive_type'] = 'MaterialIdealGas';
+                flattenedParams['material_type'] = 'Ideal Gas Charge';
+                flattenedParams['is_ideal_gas'] = true;
+                flattenedParams['gamma'] = Number(localMatNode.parameters.ideal_gamma ?? 1.4);
+                flattenedParams['rho'] = Number(localMatNode.parameters.ideal_rho_0 ?? 1630.0);
+                flattenedParams['detonation_energy'] = Number(localMatNode.parameters.ideal_e_0 ?? 4290000);
+            }
+        }
+
         const remapConn3D = solverNode3D ? state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'remap') : null;
         const remapNode3D = remapConn3D ? state.nodes.find(n => n.id === remapConn3D.fromNode) : null;
         if (remapNode3D) {
-            // Find incoming connection to remap node
-            const remapInConn = state.connections.find(c => c.toNode === remapNode3D.id);
-            const sourceSolverNode = remapInConn ? state.nodes.find(n => n.id === remapInConn.fromNode) : null;
+            // Find incoming connection to remap node (workspace-wide search across models & pipes)
+            const globalSM = (typeof window !== 'undefined' && (window as any).stateManager) ? (window as any).stateManager : null;
+            const allModels: SimulationState[] = globalSM ? globalSM.getAllModels() : [state];
+            const allNodes: any[] = allModels.flatMap(m => m.nodes);
+            const allConns: any[] = allModels.flatMap(m => m.connections);
 
-            let sourceMatNode: any = null;
-            if (sourceSolverNode) {
-                const chargeConn = state.connections.find(c => c.toNode === sourceSolverNode.id && (c.toPort === 'charge' || c.toPort === 'explosive'));
-                const chargeNode = chargeConn ? state.nodes.find(n => n.id === chargeConn.fromNode) : null;
-                if (chargeNode) {
-                    const matConn = state.connections.find(c => c.toNode === chargeNode.id && c.toPort === 'material');
-                    if (matConn) {
-                        sourceMatNode = state.nodes.find(n => n.id === matConn.fromNode);
+            let remapInConn = allConns.find(c => c.toNode === remapNode3D.id);
+            let sourceSolverNode = remapInConn ? allNodes.find(n => n.id === remapInConn.fromNode) : null;
+
+            // If not found in standard connections, check model pipes
+            if (!sourceSolverNode && globalSM && globalSM.getAllPipes) {
+                const pipes = globalSM.getAllPipes();
+                const pipe = pipes.find((p: any) => p.targetModelId === modelId || p.toNodeId === remapNode3D.id);
+                if (pipe) {
+                    const sourceModel = allModels.find(m => ((m as any).id || (m as any).modelId) === (pipe.sourceModelId || pipe.model2dId || pipe.model1dId));
+                    if (sourceModel) {
+                        sourceSolverNode = sourceModel.nodes.find(n => n.type === 'CFDSolver2D' || n.type === 'CFDSolver');
                     }
                 }
             }
 
-            const matType = sourceMatNode?.parameters?.material_type;
-            const expType = sourceMatNode?.parameters?.explosive_type || flattenedParams['explosive_type'];
-            const isIdealGasSource = matType === 'Ideal Gas Charge' || matType === 'Ideal Gas' || expType === 'MaterialIdealGas';
+            // Fallback: search all models for any 2D / 1D solver node connected upstream
+            if (!sourceSolverNode) {
+                sourceSolverNode = allNodes.find(n => n.type === 'CFDSolver2D' || n.type === 'CFDSolver');
+            }
+
+            let sourceChargeNode: any = null;
+            let sourceMatNode: any = null;
+            if (sourceSolverNode) {
+                const chargeConn = allConns.find(c => c.toNode === sourceSolverNode.id && (c.toPort === 'charge' || c.toPort === 'explosive'));
+                sourceChargeNode = chargeConn ? allNodes.find(n => n.id === chargeConn.fromNode) : null;
+                if (!sourceChargeNode) {
+                    const sourceModel = allModels.find(m => m.nodes.some(n => n.id === sourceSolverNode.id));
+                    sourceChargeNode = sourceModel?.nodes.find(n => n.type === 'Charge2D' || n.type === 'Charge1D');
+                }
+
+                if (sourceChargeNode) {
+                    const matConn = allConns.find(c => c.toNode === sourceChargeNode.id && c.toPort === 'material');
+                    sourceMatNode = matConn ? allNodes.find(n => n.id === matConn.fromNode) : null;
+                    if (!sourceMatNode) {
+                        const sourceModel = allModels.find(m => m.nodes.some(n => n.id === sourceChargeNode.id));
+                        sourceMatNode = sourceModel?.nodes.find(n => n.type === 'Material');
+                    }
+                }
+            }
+
+            // Copy over charge parameters from source charge node if present
+            if (sourceChargeNode && sourceChargeNode.parameters) {
+                Object.entries(sourceChargeNode.parameters).forEach(([key, value]) => {
+                    if (flattenedParams[key] === undefined) {
+                        flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                    }
+                });
+            }
+
+            // Copy over material parameters from source material node if present
+            if (sourceMatNode && sourceMatNode.parameters) {
+                const matType = sourceMatNode.parameters.material_type || 'JWL Charge';
+                if (matType === 'Ideal Gas Charge' || matType === 'Ideal Gas') {
+                    flattenedParams['explosive_type'] = 'MaterialIdealGas';
+                    flattenedParams['material_type'] = 'Ideal Gas Charge';
+                    flattenedParams['is_ideal_gas'] = true;
+                    flattenedParams['gamma'] = Number(sourceMatNode.parameters.ideal_gamma ?? 1.4);
+                    flattenedParams['rho'] = Number(sourceMatNode.parameters.ideal_rho_0 ?? 1630.0);
+                    flattenedParams['detonation_energy'] = Number(sourceMatNode.parameters.ideal_e_0 ?? 4290000);
+                    if (sourceMatNode.parameters.composition !== undefined) {
+                        flattenedParams['composition'] = sourceMatNode.parameters.composition;
+                    }
+                } else if (matType === 'JWL Charge') {
+                    flattenedParams['explosive_type'] = 'MaterialExplosive';
+                    flattenedParams['material_type'] = 'JWL Charge';
+                    flattenedParams['is_ideal_gas'] = false;
+                    const jwlKeys = ['composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
+                    jwlKeys.forEach(key => {
+                        if (sourceMatNode.parameters[key] !== undefined) {
+                            flattenedParams[key] = numericKeys.includes(key) ? Number(sourceMatNode.parameters[key]) : sourceMatNode.parameters[key];
+                        }
+                    });
+                }
+            }
+
+            // Also check source solver parameters as fallback
+            const sourceInitMode = sourceSolverNode?.parameters?.init_mode;
+            const sourceExpType = sourceSolverNode?.parameters?.explosive_type;
+            const isIdealGasSource = (
+                sourceInitMode === 'Ideal Gas' ||
+                sourceExpType === 'MaterialIdealGas' ||
+                flattenedParams['explosive_type'] === 'MaterialIdealGas' ||
+                flattenedParams['material_type'] === 'Ideal Gas Charge'
+            );
 
             if (isIdealGasSource) {
                 flattenedParams['explosive_type'] = 'MaterialIdealGas';
                 flattenedParams['material_type'] = 'Ideal Gas Charge';
-                flattenedParams['init_mode'] = 'Ideal Gas';
-            } else if (remapNode3D.type === 'Remap2DTo3DNode') {
+                flattenedParams['is_ideal_gas'] = true;
+            } else {
+                if (!flattenedParams['explosive_type']) flattenedParams['explosive_type'] = 'MaterialExplosive';
+            }
+
+            if (remapNode3D.type === 'Remap2DTo3DNode') {
                 flattenedParams['init_mode'] = 'From2D';
             } else {
                 flattenedParams['init_mode'] = 'From1D';

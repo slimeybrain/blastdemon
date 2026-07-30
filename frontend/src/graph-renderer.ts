@@ -4131,6 +4131,9 @@ export class GraphRenderer {
                 'bc_z_min': ['Reflecting', 'Transmitting', 'Terminate'],
                 'bc_z_max': ['Reflecting', 'Transmitting', 'Terminate'],
                 'coordinate_system': ['Axisymmetric', 'Cartesian'],
+                'telemetry_mode': ['Enabled', 'Throttled (1 Hz)', 'Throttled (0.2 Hz)', 'Disabled'],
+                'enable_gauges': ['Enabled', 'Disabled'],
+                'enable_vtk': ['Disabled', 'Enabled'],
                 'device': ['cpu', 'cuda'],
                 'precision': ['double', 'single'],
                 'trigger_type': ['end', 'time', 'step'],
@@ -4182,7 +4185,7 @@ export class GraphRenderer {
                             'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl',
                             'spatial_order', 'temporal_order', 'gamma', 'plot_stride', 'refresh_rate',
                             'ascii_precision', 'step_interval', 'time_interval', 'downsample_stride',
-                            'telemetry_channel',
+                            'telemetry_channel', 'telemetry_interval_ms', 'vtk_step_interval',
                             // 2D CFD keys
                             'nr', 'nz', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
                             'charge_r', 'charge_z', 'charge_radius', 'charge_height',

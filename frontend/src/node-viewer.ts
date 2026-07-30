@@ -2101,7 +2101,7 @@ export class NodeViewer {
             'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl',
             'spatial_order', 'temporal_order', 'gamma', 'plot_stride', 'refresh_rate',
             'ascii_precision', 'step_interval', 'time_interval', 'downsample_stride',
-            'telemetry_channel',
+            'telemetry_channel', 'telemetry_interval_ms', 'vtk_step_interval',
             // 2D CFD keys
             'nr', 'nz', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
             'charge_r', 'charge_z', 'charge_radius', 'charge_height',

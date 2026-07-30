@@ -851,7 +851,7 @@ function tryRemapFrom1D(targetModelId: string, pipe: any): boolean {
             ambient_rho: Number(serialized1D.ambient_rho ?? 1.225),
             ambient_p: Number(serialized1D.ambient_p ?? 101325.0),
             gamma: Number(serialized1D.gamma ?? 1.4),
-            is_ideal_gas: serialized1D.explosive_type === 'MaterialIdealGas' || serialized1D.init_mode === 'Ideal Gas' || serialized1D.is_ideal_gas === true,
+            is_ideal_gas: (model?.nodes.find(n => n.type === 'Material')?.parameters?.material_type === 'Ideal Gas Charge' || model?.nodes.find(n => n.type === 'Material')?.parameters?.material_type === 'Ideal Gas' || serialized1D.explosive_type === 'MaterialIdealGas' || serialized1D.init_mode === 'Ideal Gas' || serialized1D.is_ideal_gas === true),
             composition: serialized1D.composition,
             explosive_type: serialized1D.explosive_type,
             rho: serialized1D.rho,
@@ -988,7 +988,10 @@ function tryRemapFrom2D(targetModelId: string, pipe: any): boolean {
         const matNode2D = matConn2D ? model2d?.nodes.find(n => n.id === matConn2D.fromNode) : null;
 
         const matType = matNode2D?.parameters?.material_type ?? 'JWL Charge';
-        const explosive_type = matType === 'Ideal Gas Charge' ? 'MaterialIdealGas' : 'MaterialExplosive';
+        const matNode3DLocal = model?.nodes.find(n => n.type === 'Material');
+        const isIdeal3D = (matNode3DLocal?.parameters?.material_type === 'Ideal Gas Charge' || matNode3DLocal?.parameters?.material_type === 'Ideal Gas');
+        const is_ideal_gas = isIdeal3D || (matType === 'Ideal Gas Charge' || matType === 'Ideal Gas' || solver3DNode?.parameters?.init_mode === 'Ideal Gas' || solver3DNode?.parameters?.is_ideal_gas === true);
+        const explosive_type = is_ideal_gas ? 'MaterialIdealGas' : 'MaterialExplosive';
         const composition = matNode2D?.parameters?.composition ?? 'TNT';
         const rho = Number(matNode2D?.parameters?.rho ?? 1630.0);
         const detonation_energy = Number(matNode2D?.parameters?.detonation_energy ?? 4290000);
@@ -1039,6 +1042,8 @@ function tryRemapFrom2D(targetModelId: string, pipe: any): boolean {
             gamma: gamma,
             ambient_rho: ambient_rho,
             ambient_p: atm_p,
+            is_ideal_gas: is_ideal_gas,
+            material_type: is_ideal_gas ? 'Ideal Gas Charge' : matType,
             explosive_type: explosive_type,
             composition: composition,
             rho: rho,

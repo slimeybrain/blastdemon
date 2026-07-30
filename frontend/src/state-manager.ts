@@ -974,10 +974,11 @@ export class StateManager {
                 return `[${timestamp}] [MPM] Time: ${data.time?.toExponential(6) || '0'}${dtStr}${wcStr}, Terminated: ${data.is_terminated || false}`;
             }
             if (data.type === 'TELEMETRY' || data.type === 'TELEMETRY_2D' || data.type === 'TELEMETRY_3D') {
-                const tag = data.type === 'TELEMETRY_2D' ? 'CFD' : 'SOLVER';
+                const tag = data.type === 'TELEMETRY_2D' ? 'CFD' : (data.type === 'TELEMETRY_3D' ? '3D' : 'SOLVER');
+                const engineType = data.is_ideal_gas ? ' (IG)' : ' (MM)';
                 const wcStr = data.wallclock !== undefined ? `, Wallclock: ${Number(data.wallclock).toFixed(4)}s` : '';
                 const dtStr = data.dt !== undefined ? `, dt: ${Number(data.dt).toExponential(6)}s` : '';
-                return `[${timestamp}] [${tag}] Time: ${data.time?.toExponential(6) || '0'}${dtStr}${wcStr}, Terminated: ${data.is_terminated || false}`;
+                return `[${timestamp}] [${tag}${engineType}] Time: ${data.time?.toExponential(6) || '0'}${dtStr}${wcStr}, Terminated: ${data.is_terminated || false}`;
             }
             if (data.type === 'resource_pulse') {
                 return `[${timestamp}] [RESOURCES] CPU: ${data.metrics?.cpu?.toFixed(1)}%, RAM: ${data.metrics?.ram?.toFixed(1)}%`;
@@ -1543,6 +1544,7 @@ export class StateManager {
             'VirtualGauges': {
                 gauges: [],
                 telemetry_channel: 0,
+                enable_gauges: 'Enabled',
                 export_ascii: false,
                 export_binary: false,
                 export_hdf5: false,
@@ -1716,7 +1718,11 @@ export class StateManager {
                 flux_scheme: 'AUSM+',
                 spatial_order: 2,
                 temporal_order: 2,
-                precision: 'single'
+                precision: 'single',
+                telemetry_mode: 'Enabled',
+                telemetry_interval_ms: 100,
+                enable_gauges: 'Enabled',
+                enable_vtk: 'Disabled'
             },
             'Telemetry3DViewport': {
                 colormap: 'plasma',
@@ -1785,7 +1791,7 @@ export class StateManager {
                 stl_wireframe: false,
                 stl_solids: true,
                 stl_opacity: 0.5,
-                stl_show_results: true,
+                stl_show_results: false,
                 stl_quantity: 'pressure',
                 stl_sampling_mode: 'nearest',
                 stl_auto_scale: true,

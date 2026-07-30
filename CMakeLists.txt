@@ -126,6 +126,23 @@ if(OpenMP_CXX_FOUND)
     target_compile_options(test_cuda_solver PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler -fopenmp>)
 endif()
 target_link_libraries(test_cuda_solver PRIVATE ${CMAKE_DL_LIBS} ZLIB::ZLIB)
+# test_benchmark_3d binary
+add_executable(test_benchmark_3d
+    backend/BlastSolver/test_benchmark_3d.cu
+    backend/BlastSolver/ImmersedBoundary.cpp
+    backend/BlastSolver/cfd_solver_3d.cpp
+    backend/BlastSolver/cfd_solver_3d_cuda.cu
+    backend/BlastSolver/remapper_3d.cpp
+)
+target_include_directories(test_benchmark_3d PRIVATE backend/BlastSolver/include)
+set_target_properties(test_benchmark_3d PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+target_compile_options(test_benchmark_3d PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3>)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(test_benchmark_3d PRIVATE OpenMP::OpenMP_CXX)
+    target_compile_options(test_benchmark_3d PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler -fopenmp>)
+endif()
+target_link_libraries(test_benchmark_3d PRIVATE ${CMAKE_DL_LIBS} ZLIB::ZLIB)
+
 # Optional test binaries (built only if source files exist)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/backend/BlastSolver/test_amr_2d_debug.cpp")
     add_executable(test_amr_2d_debug

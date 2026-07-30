@@ -3368,11 +3368,31 @@ export class Telemetry3DViewport {
             });
         }
         if (showSTL && stlShowResults) {
+            let volStride = 1;
+            const meshNode = this.getMeshNode();
+            if (meshNode) {
+                const cellSize = Number(meshNode.parameters.cell_size ?? 0.05);
+                const xmin = Number(meshNode.parameters.xmin ?? 0.0);
+                const xmax = Number(meshNode.parameters.xmax ?? 1.0);
+                const ymin = Number(meshNode.parameters.ymin ?? 0.0);
+                const ymax = Number(meshNode.parameters.ymax ?? 1.0);
+                const zmin = Number(meshNode.parameters.zmin ?? 0.0);
+                const zmax = Number(meshNode.parameters.zmax ?? 1.0);
+                const nx = Math.max(1, Math.round((xmax - xmin) / cellSize));
+                const ny = Math.max(1, Math.round((ymax - ymin) / cellSize));
+                const nz = Math.max(1, Math.round((zmax - zmin) / cellSize));
+                const totalCells = nx * ny * nz;
+                if (totalCells > 1000000) {
+                    volStride = 4;
+                } else if (totalCells > 200000) {
+                    volStride = 2;
+                }
+            }
             fullSlices.push({
                 axis: 'volume',
                 offset: 0.0,
                 quantities: [stlQuantity],
-                stride: 1
+                stride: volStride
             });
         }
 

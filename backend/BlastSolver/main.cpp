@@ -116,6 +116,9 @@ std::atomic<int> global_target_steps_3d{0};
 std::atomic<bool> global_exec_until_end_3d{false};
 std::atomic<double> global_cfl_3d{0.4};
 std::atomic<double> global_wallclock_3d{0.0};
+std::atomic<bool> global_enable_gauges{true};
+std::atomic<bool> global_enable_vtk{false};
+std::atomic<bool> global_telemetry_enabled{true};
 
 struct GaugeDef {
     std::string id;
@@ -1105,7 +1108,7 @@ void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFD
         double gamma_val = msg.value("gamma", 1.4);
         std::string explosive_type = msg.value("explosive_type", "");
         std::string material_type = msg.value("material_type", "");
-        bool is_ideal_gas_val = (explosive_type == "MaterialIdealGas" || msg.value("init_mode", "") == "Ideal Gas" || material_type == "Ideal Gas Charge");
+        bool is_ideal_gas_val = (msg.value("is_ideal_gas", false) || explosive_type == "MaterialIdealGas" || msg.value("init_mode", "") == "Ideal Gas" || material_type == "Ideal Gas Charge");
         bool is_multimat_needed = !is_ideal_gas_val;
         MultiMat::MaterialSet matSet_val = parseMaterialSet(msg);
 
@@ -1118,9 +1121,12 @@ void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFD
         double req_cellSize = msg.value("cell_size_3d", msg.value("cell_size", 0.01));
 
         bool needs_realloc = false;
+        std::string req_device = msg.value("device", "cuda");
         if (!solver_3d) {
             needs_realloc = true;
-        } else if (!solver_3d->isMultiMaterial() && is_multimat_needed) {
+        } else if (solver_3d->isMultiMaterial() != is_multimat_needed) {
+            needs_realloc = true;
+        } else if (solver_3d->isCUDA() != (req_device == "cuda")) {
             needs_realloc = true;
         } else if (solver_3d->getNx() != req_nx || solver_3d->getNy() != req_ny || solver_3d->getNz() != req_nz || std::abs(solver_3d->getCellSize() - req_cellSize) > 1e-6) {
             needs_realloc = true;
@@ -1130,6 +1136,7 @@ void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFD
             std::cout << "[INFO] Allocating/Reallocating 3D solver for REMAP_2D: current solver=" 
                       << (solver_3d ? (solver_3d->isMultiMaterial() ? "MultiMaterial" : "SingleMaterial") : "null")
                       << " needed IsMultiMaterial=" << is_multimat_needed << std::endl;
+            emit_kernel_log("REMAP_2D", std::string("3D Solver Engine allocated: ") + (is_multimat_needed ? "Multi-Material JWL" : "Single-Material Ideal Gas") + " on " + req_device, 0.0, "3d");
             int nx_val = req_nx;
             int ny_val = req_ny;
             int nz_val = req_nz;
@@ -1200,7 +1207,25 @@ void init_3d_thread_func(nlohmann::json msg) {
         std::string init_mode = msg.value("init_mode", "Multi-Material JWL");
         std::string explosive_type = msg.value("explosive_type", "");
         std::string material_type = msg.value("material_type", "");
-        bool is_multimat = (init_mode != "Ideal Gas" && explosive_type != "MaterialIdealGas" && material_type != "Ideal Gas Charge");
+        bool is_ideal_gas_3d = (msg.value("is_ideal_gas", false) || init_mode == "Ideal Gas" || explosive_type == "MaterialIdealGas" || material_type == "Ideal Gas Charge");
+        bool is_multimat = !is_ideal_gas_3d;
+
+        global_enable_gauges = (msg.value("enable_gauges", "Enabled") != "Disabled");
+        global_enable_vtk = (msg.value("enable_vtk", "Disabled") == "Enabled");
+        std::string telem_mode = msg.value("telemetry_mode", "Enabled");
+        if (telem_mode == "Disabled") {
+            global_telemetry_enabled = false;
+        } else if (telem_mode == "Throttled (1 Hz)") {
+            global_telemetry_enabled = true;
+            global_telemetry_interval_ms = 1000;
+        } else if (telem_mode == "Throttled (0.2 Hz)") {
+            global_telemetry_enabled = true;
+            global_telemetry_interval_ms = 5000;
+        } else {
+            global_telemetry_enabled = true;
+            int interval_param = msg.value("telemetry_interval_ms", 100);
+            if (interval_param > 0) global_telemetry_interval_ms = interval_param;
+        }
 
         std::unique_ptr<CFDSolver3D> local_solver_3d = nullptr;
         std::string precision = msg.value("precision", "single");
@@ -1377,7 +1402,10 @@ void init_3d_thread_func(nlohmann::json msg) {
 
         std::cout << "[DEBUG] Mesh sent. Initializing gauges..." << std::endl;
         init_gauges(msg);
-        emit_kernel_log("SYSTEM", "3D Solver Initialized", 0.0, "3d");
+        std::string precision_str = msg.value("precision", "single");
+        std::string device_str = msg.value("device", "cpu");
+        std::string engine_str = (is_multimat ? "Multi-Material JWL" : "Single-Material Ideal Gas");
+        emit_kernel_log("SYSTEM", "3D Solver Initialized: " + engine_str + " on " + device_str + " (" + precision_str + ")", 0.0, "3d");
         emit_telemetry_3d(0.0, false);
     } catch (const std::exception& e) {
         std::cerr << "[ERROR] Exception in 3D solver initialization thread: " << e.what() << std::endl;
@@ -1433,9 +1461,11 @@ void worker_3d_thread_func() {
 
         step_count++;
 
-        record_gauges_3d(global_t3d);
+        if (global_enable_gauges.load()) {
+            record_gauges_3d(global_t3d);
+        }
 
-        {
+        if (global_enable_vtk.load()) {
             bool trigger_vtk = false;
             if (global_vtk_config.step_interval > 0 && (step_count % global_vtk_config.step_interval == 0)) {
                 trigger_vtk = true;
@@ -1453,35 +1483,37 @@ void worker_3d_thread_func() {
             global_target_steps_3d--;
         }
 
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_telemetry_time).count();
-        if (elapsed_ms >= global_telemetry_interval_ms.load()) {
-            emit_telemetry_3d(global_t3d, false);
-            last_telemetry_time = now;
+        if (global_telemetry_enabled.load()) {
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_telemetry_time).count();
+            if (elapsed_ms >= global_telemetry_interval_ms.load()) {
+                emit_telemetry_3d(global_t3d, false);
+                last_telemetry_time = now;
 
-            nlohmann::json progress_msg;
-            progress_msg["type"] = "progress";
-            progress_msg["sim_time"] = global_t3d;
-            progress_msg["scope"] = "3d";
-            progress_msg["dt"] = global_dt_3d;
+                nlohmann::json progress_msg;
+                progress_msg["type"] = "progress";
+                progress_msg["sim_time"] = global_t3d;
+                progress_msg["scope"] = "3d";
+                progress_msg["dt"] = global_dt_3d;
 
-            if (global_exec_until_end_3d.load()) {
-                progress_msg["percent"] = 50;
-                progress_msg["mode"] = "EXEC_ALL_3D";
-            } else {
-                initial_steps = std::max(initial_steps, step_count + global_target_steps_3d.load());
-                if (initial_steps > 0) {
-                    int completed = initial_steps - global_target_steps_3d.load();
-                    int percent = std::clamp((int)((completed * 100) / initial_steps), 0, 100);
-                    step_progress_3d = percent;
-                    progress_msg["percent"] = percent;
-                    progress_msg["completed"] = completed;
-                    progress_msg["total"] = initial_steps;
-                    progress_msg["mode"] = "STEP_3D";
+                if (global_exec_until_end_3d.load()) {
+                    progress_msg["percent"] = 50;
+                    progress_msg["mode"] = "EXEC_ALL_3D";
+                } else {
+                    initial_steps = std::max(initial_steps, step_count + global_target_steps_3d.load());
+                    if (initial_steps > 0) {
+                        int completed = initial_steps - global_target_steps_3d.load();
+                        int percent = std::clamp((int)((completed * 100) / initial_steps), 0, 100);
+                        step_progress_3d = percent;
+                        progress_msg["percent"] = percent;
+                        progress_msg["completed"] = completed;
+                        progress_msg["total"] = initial_steps;
+                        progress_msg["mode"] = "STEP_3D";
+                    }
                 }
+                std::lock_guard<std::mutex> lock(cout_mutex);
+                std::cout << progress_msg.dump() << std::endl;
             }
-            std::lock_guard<std::mutex> lock(cout_mutex);
-            std::cout << progress_msg.dump() << std::endl;
         }
     }
 
@@ -2312,6 +2344,7 @@ struct TelemetryPayload {
     bool has_gauges = false;
     std::vector<double> gauge_times;
     std::vector<GaugeHistory> gauges_history;
+    bool is_ideal_gas = false;
 };
 
 struct AsyncTelemetry {
@@ -2376,6 +2409,7 @@ void async_telemetry_thread_func() {
             envelope["dt"] = payload->dt;
             envelope["is_terminated"] = payload->is_terminated;
             envelope["wallclock"] = payload->wallclock;
+            envelope["is_ideal_gas"] = payload->is_ideal_gas;
             if (payload->has_gauges) {
                 envelope["gauges_history"] = gh;
             }
@@ -2402,6 +2436,7 @@ void async_telemetry_thread_func() {
             envelope["nr"] = payload->out_nr;
             envelope["nz"] = payload->out_nz;
             envelope["wallclock"] = payload->wallclock;
+            envelope["is_ideal_gas"] = payload->is_ideal_gas;
             if (payload->has_gauges) {
                 envelope["gauges_history"] = gh;
             }
@@ -2428,6 +2463,7 @@ void async_telemetry_thread_func() {
             envelope["dt"] = payload->dt;
             envelope["is_terminated"] = payload->is_terminated;
             envelope["wallclock"] = payload->wallclock;
+            envelope["is_ideal_gas"] = payload->is_ideal_gas;
             if (payload->has_gauges) {
                 envelope["gauges_history"] = gh;
             }
@@ -2454,6 +2490,7 @@ void async_telemetry_thread_func() {
             envelope["nz"] = payload->nz;
             envelope["total_mass"] = payload->total_mass;
             envelope["total_energy"] = payload->total_energy;
+            envelope["is_ideal_gas"] = payload->is_ideal_gas;
             if (payload->has_gauges) {
                 envelope["gauges_history"] = gh;
             }
@@ -2572,6 +2609,7 @@ void emit_telemetry_2d(double elapsed, bool is_terminated) {
     payload->out_nz = out_nz;
     payload->wallclock = global_wallclock_2d.load();
     payload->grid_data = std::move(downsampled);
+    payload->is_ideal_gas = global_solver_2d_cuda ? global_solver_2d_cuda->isIdealGas() : (global_solver_2d ? global_solver_2d->isIdealGas() : false);
 
     {
         std::lock_guard<std::mutex> g_lock(global_gauges_mutex);
@@ -2662,6 +2700,7 @@ void emit_telemetry_3d(double elapsed, bool is_terminated) {
     payload->dt = global_dt_3d;
     payload->is_terminated = is_terminated;
     payload->wallclock = global_wallclock_3d.load();
+    payload->is_ideal_gas = global_solver_3d ? global_solver_3d->isIdealGas() : false;
     payload->xmin = global_solver_3d->getXMin();
     payload->ymin = global_solver_3d->getYMin();
     payload->zmin = global_solver_3d->getZMin();

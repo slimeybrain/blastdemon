@@ -1108,7 +1108,7 @@ export class PropertyEditor {
             'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl',
             'spatial_order', 'temporal_order', 'gamma', 'plot_stride', 'refresh_rate',
             'ascii_precision', 'step_interval', 'time_interval', 'downsample_stride',
-            'telemetry_channel',
+            'telemetry_channel', 'telemetry_interval_ms', 'vtk_step_interval',
             // 2D CFD keys
             'nr', 'nz', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
             'charge_r', 'charge_z', 'charge_radius', 'charge_height',
@@ -1131,6 +1131,9 @@ export class PropertyEditor {
         ];
 
         const dropdowns: Record<string, string[]> = {
+            'telemetry_mode': ['Enabled', 'Throttled (1 Hz)', 'Throttled (0.2 Hz)', 'Disabled'],
+            'enable_gauges': ['Enabled', 'Disabled'],
+            'enable_vtk': ['Disabled', 'Enabled'],
             'shape': ['box', 'sphere', 'cylinder'],
             'mesh_type': ['regular', 'amr'],
             'amr_tile_size': ['8', '16'],
@@ -2311,11 +2314,32 @@ export class PropertyEditor {
                     });
                 }
                 if (showSTL && stlShowResults) {
+                    let volStride = 1;
+                    const targetModel = this.stateManager.getAppState().models[targetModelId];
+                    const meshNode = targetModel?.nodes.find(n => n.type === 'DomainMesh3D');
+                    if (meshNode) {
+                        const cellSize = Number(meshNode.parameters.cell_size ?? 0.05);
+                        const xmin = Number(meshNode.parameters.xmin ?? 0.0);
+                        const xmax = Number(meshNode.parameters.xmax ?? 1.0);
+                        const ymin = Number(meshNode.parameters.ymin ?? 0.0);
+                        const ymax = Number(meshNode.parameters.ymax ?? 1.0);
+                        const zmin = Number(meshNode.parameters.zmin ?? 0.0);
+                        const zmax = Number(meshNode.parameters.zmax ?? 1.0);
+                        const nx = Math.max(1, Math.round((xmax - xmin) / cellSize));
+                        const ny = Math.max(1, Math.round((ymax - ymin) / cellSize));
+                        const nz = Math.max(1, Math.round((zmax - zmin) / cellSize));
+                        const totalCells = nx * ny * nz;
+                        if (totalCells > 1000000) {
+                            volStride = 4;
+                        } else if (totalCells > 200000) {
+                            volStride = 2;
+                        }
+                    }
                     slices.push({
                         axis: 'volume',
                         offset: 0.0,
                         quantities: [stlQuantity],
-                        stride: 1
+                        stride: volStride
                     });
                 }
                 net.send({
