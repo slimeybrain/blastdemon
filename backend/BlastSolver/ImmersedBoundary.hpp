@@ -173,11 +173,12 @@ HD_FUNC inline bool tri_box_overlap(const Point3D& boxcenter, float boxhalfsize,
     float e2x = v0x - v2x, e2y = v0y - v2y, e2z = v0z - v2z;
 
     float min_val, max_val;
+    const float eps = 1e-5f * boxhalfsize;
 
 #define TEST_CROSS_AXIS(p0, p1, p2, rad_val) \
     min_val = std::min({p0, p1, p2}); \
     max_val = std::max({p0, p1, p2}); \
-    if (min_val > rad_val || max_val < -rad_val) return false;
+    if (min_val > (rad_val) + eps || max_val < -(rad_val) - eps) return false;
 
     {
         float p0 = -v0y * e0z + v0z * e0y;
@@ -234,9 +235,9 @@ HD_FUNC inline bool tri_box_overlap(const Point3D& boxcenter, float boxhalfsize,
         TEST_CROSS_AXIS(p0, p1, p0, rad);
     }
 
-    if (std::min({v0x, v1x, v2x}) > boxhalfsize || std::max({v0x, v1x, v2x}) < -boxhalfsize) return false;
-    if (std::min({v0y, v1y, v2y}) > boxhalfsize || std::max({v0y, v1y, v2y}) < -boxhalfsize) return false;
-    if (std::min({v0z, v1z, v2z}) > boxhalfsize || std::max({v0z, v1z, v2z}) < -boxhalfsize) return false;
+    if (std::min({v0x, v1x, v2x}) > boxhalfsize + eps || std::max({v0x, v1x, v2x}) < -boxhalfsize - eps) return false;
+    if (std::min({v0y, v1y, v2y}) > boxhalfsize + eps || std::max({v0y, v1y, v2y}) < -boxhalfsize - eps) return false;
+    if (std::min({v0z, v1z, v2z}) > boxhalfsize + eps || std::max({v0z, v1z, v2z}) < -boxhalfsize - eps) return false;
 
     float nx = e0y * e1z - e0z * e1y;
     float ny = e0z * e1x - e0x * e1z;
@@ -250,8 +251,8 @@ HD_FUNC inline bool tri_box_overlap(const Point3D& boxcenter, float boxhalfsize,
     float vmin_z = (nz > 0.0f) ? -boxhalfsize : boxhalfsize;
     float vmax_z = (nz > 0.0f) ? boxhalfsize : -boxhalfsize;
 
-    if (nx * vmin_x + ny * vmin_y + nz * vmin_z + d > 0.0f) return false;
-    if (nx * vmax_x + ny * vmax_y + nz * vmax_z + d < 0.0f) return false;
+    if (nx * vmin_x + ny * vmin_y + nz * vmin_z + d > eps) return false;
+    if (nx * vmax_x + ny * vmax_y + nz * vmax_z + d < -eps) return false;
 
     return true;
 }

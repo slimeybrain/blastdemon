@@ -105,7 +105,22 @@ export class PropertyEditor {
             const warnings: string[] = [];
             if (state) {
                 const valResults = validateSimulationState(state);
-                warnings.push(...valResults.globalWarnings);
+                const activeWs = this.stateManager.getActiveWorkspace();
+                const activeModelId = activeWs ? activeWs.activeModelId : null;
+                const activeModel = activeModelId ? this.stateManager.getAppState().models[activeModelId] : null;
+                const activeNodeIds = activeModel ? new Set(activeModel.nodes.map(n => n.id)) : new Set<string>();
+
+                valResults.globalWarnings.forEach(w => {
+                    const match = w.match(/^\[[^\]]+?\s+"([^"]+)"\]/);
+                    if (match) {
+                        const nodeId = match[1];
+                        if (activeNodeIds.has(nodeId)) {
+                            warnings.push(w);
+                        }
+                    } else {
+                        warnings.push(w);
+                    }
+                });
             }
 
             let warnBox = this.container.querySelector('.validation-warning-box') as HTMLDivElement;
@@ -211,7 +226,22 @@ export class PropertyEditor {
         const warnings: string[] = [];
         if (state) {
             const valResults = validateSimulationState(state);
-            warnings.push(...valResults.globalWarnings);
+            const activeWs = this.stateManager.getActiveWorkspace();
+            const activeModelId = activeWs ? activeWs.activeModelId : null;
+            const activeModel = activeModelId ? this.stateManager.getAppState().models[activeModelId] : null;
+            const activeNodeIds = activeModel ? new Set(activeModel.nodes.map(n => n.id)) : new Set<string>();
+
+            valResults.globalWarnings.forEach(w => {
+                const match = w.match(/^\[[^\]]+?\s+"([^"]+)"\]/);
+                if (match) {
+                    const nodeId = match[1];
+                    if (activeNodeIds.has(nodeId)) {
+                        warnings.push(w);
+                    }
+                } else {
+                    warnings.push(w);
+                }
+            });
         }
 
         if (warnings.length > 0) {
@@ -1329,9 +1359,9 @@ export class PropertyEditor {
             return btn;
         };
 
-        addButtonsDiv.appendChild(createAddBtn('Cube', 'cuboid', { xmin: 0.0, xmax: 0.2, ymin: 0.0, ymax: 0.2, zmin: 0.0, zmax: 0.2, voxelization_method: 'watertight_floodfill' }));
-        addButtonsDiv.appendChild(createAddBtn('Cyl', 'cylinder', { x: 0.5, y: 0.5, z: 0.5, radius: 0.1, length: 0.2, orientation: 'Z', voxelization_method: 'watertight_floodfill' }));
-        addButtonsDiv.appendChild(createAddBtn('Wedge', 'wedge', { xmin: 0.0, xmax: 0.2, ymin: 0.0, ymax: 0.2, zmin: 0.0, zmax: 0.2, orientation: '+X', voxelization_method: 'watertight_floodfill' }));
+        addButtonsDiv.appendChild(createAddBtn('Cube', 'cuboid', { xmin: 0.0, xmax: 0.2, ymin: 0.0, ymax: 0.2, zmin: 0.0, zmax: 0.2, voxelization_method: 'use_node_default' }));
+        addButtonsDiv.appendChild(createAddBtn('Cyl', 'cylinder', { x: 0.5, y: 0.5, z: 0.5, radius: 0.1, length: 0.2, orientation: 'Z', voxelization_method: 'use_node_default' }));
+        addButtonsDiv.appendChild(createAddBtn('Wedge', 'wedge', { xmin: 0.0, xmax: 0.2, ymin: 0.0, ymax: 0.2, zmin: 0.0, zmax: 0.2, orientation: '+X', voxelization_method: 'use_node_default' }));
         leftHeader.appendChild(addButtonsDiv);
         leftPane.appendChild(leftHeader);
 
@@ -1475,12 +1505,12 @@ export class PropertyEditor {
                     select.style.padding = '4px';
                     select.style.fontSize = 'var(--font-sm)';
 
-                    const opts = ['watertight_floodfill', 'watertight_raycast', 'thin_shell', 'winding_number'];
+                    const opts = ['use_node_default', 'watertight_floodfill', 'watertight_raycast', 'thin_shell', 'winding_number'];
                     opts.forEach(o => {
                         const opt = document.createElement('option');
                         opt.value = o;
-                        opt.text = o.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-                        if (o === value) opt.selected = true;
+                        opt.text = (o === 'use_node_default') ? 'Use Node Default' : o.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+                        if (o === (value || 'use_node_default')) opt.selected = true;
                         select.appendChild(opt);
                     });
                     select.onchange = () => {

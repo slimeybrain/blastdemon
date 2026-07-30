@@ -172,18 +172,21 @@ public:
     virtual void retrieveNewGaugeSamples(std::vector<double>& times, std::vector<float>& values) {}
 
     virtual void initializeFrom1D(const std::vector<double>& r_1d, const std::vector<MultiMaterialState>& states_1d, double x_expl, double y_expl, double z_expl, double R_remap) = 0;
-    virtual void initializeFrom2D(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d, double x_expl, double y_expl, double z_expl, double R_remap) = 0;
+    virtual void initializeFrom2D(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d, double x_expl, double y_expl, double z_expl, double R_remap, double source_explosive_z = 0.0) = 0;
 
     virtual void setCellStateMulti(int i, int j, int k, const CellState3D<true>& s) = 0;
     virtual void setCellStateIdeal(int i, int j, int k, const CellState3D<false>& s) = 0;
     virtual void commitStates() = 0;
 
     virtual bool isIdealGas() const = 0;
+    virtual bool isMultiMaterial() const = 0;
     virtual void setGamma(double g) {}
     virtual void setIdealGas(bool val) {}
     virtual void setMaterialParameters(const MultiMat::MaterialSet& materials) {}
     virtual const MultiMat::MaterialSet& getMaterialParameters() const = 0;
     virtual double getAmbientP() const = 0;
+    virtual double getAmbientRho() const = 0;
+    virtual void setAmbientState(double rho, double p) {}
     virtual size_t getAllocatedVRAM() const { return 0; }
     virtual void setGeometry(const std::string& stl_filepath, const std::string& geometry_hash, const std::string& voxelization_method,
                              const std::atomic<bool>* terminate_flag = nullptr,
@@ -235,6 +238,11 @@ public:
     bool isIdealGas() const override { return is_ideal_gas_val; }
     const MultiMat::MaterialSet& getMaterialParameters() const override { return currentMaterials; }
     double getAmbientP() const override { return ambient_p; }
+    double getAmbientRho() const override { return ambient_rho; }
+    void setAmbientState(double rho, double p) override {
+        if (rho > 0.0) ambient_rho = rho;
+        if (p > 0.0) ambient_p = p;
+    }
 
     CFDSolver3DImplBase(int nx, int ny, int nz, double cellSize, double xmin = 0, double ymin = 0, double zmin = 0)
         : nx(nx), ny(ny), nz(nz), xmin(xmin), ymin(ymin), zmin(zmin), cellSize(cellSize) {
@@ -300,6 +308,7 @@ class CFDSolver3DImpl : public CFDSolver3DImplBase {
     int n_tiles_x, n_tiles_y, n_tiles_z;
 
 public:
+    bool isMultiMaterial() const override { return IsMultiMaterial; }
     CFDSolver3DImpl(int nx, int ny, int nz, double cellSize, double xmin = 0, double ymin = 0, double zmin = 0);
 
     void addSubMesh(const SubMeshParams3D& submesh) override;
@@ -337,7 +346,7 @@ public:
     void retrieveNewGaugeSamples(std::vector<double>& times, std::vector<float>& values) override;
 
     void initializeFrom1D(const std::vector<double>& r_1d, const std::vector<MultiMaterialState>& states_1d, double x_expl, double y_expl, double z_expl, double R_remap) override;
-    void initializeFrom2D(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d, double x_expl, double y_expl, double z_expl, double R_remap) override;
+    void initializeFrom2D(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d, double x_expl, double y_expl, double z_expl, double R_remap, double source_explosive_z = 0.0) override;
 
     void setCellStateMulti(int i, int j, int k, const CellState3D<true>& s) override;
     void setCellStateIdeal(int i, int j, int k, const CellState3D<false>& s) override;
@@ -902,7 +911,7 @@ void remap_1d_to_submesh(const std::vector<double>& r_1d, const std::vector<Mult
 template <typename RealType, bool IsMultiMaterial>
 void remap_2d_to_submesh(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d,
                          SubMesh3D<RealType, IsMultiMaterial>& sm, double x_expl, double y_expl, double z_expl, double R_remap,
-                         double gamma, const MultiMat::MaterialSet& materials, bool is_ideal_gas);
+                         double gamma, const MultiMat::MaterialSet& materials, bool is_ideal_gas, double source_explosive_z = 0.0);
 
 #endif
 

@@ -2103,7 +2103,7 @@ export class NodeViewer {
             'ascii_precision', 'step_interval', 'time_interval', 'downsample_stride',
             'telemetry_channel',
             // 2D CFD keys
-            'nr', 'nz', 'max_r', 'max_z', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
+            'nr', 'nz', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
             'charge_r', 'charge_z', 'charge_radius', 'charge_height',
             'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
             'ideal_gamma', 'ideal_rho_0', 'ideal_e_0',

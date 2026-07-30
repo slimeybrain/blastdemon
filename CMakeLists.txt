@@ -181,6 +181,39 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/backend/BlastSolver/test_amr_2d_compare.c
     endif()
 endif()
 
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/backend/BlastSolver/test_remap_tnt.cpp")
+    add_executable(test_remap_tnt
+        backend/BlastSolver/test_remap_tnt.cpp
+        backend/BlastSolver/cfd_solver.cpp
+        backend/BlastSolver/cfd_solver_init.cpp
+        backend/BlastSolver/cfd_solver_step.cpp
+        backend/BlastSolver/cfd_solver_fluxes.cpp
+        backend/BlastSolver/cfd_solver_2d_init.cpp
+        backend/BlastSolver/cfd_solver_2d_step.cpp
+        backend/BlastSolver/cfd_solver_2d_fluxes.cpp
+        backend/BlastSolver/cfd_solver_3d.cpp
+        backend/BlastSolver/cfd_solver_3d_cuda.cu
+        backend/BlastSolver/remapper_3d.cpp
+        backend/BlastSolver/ImmersedBoundary.cpp
+        backend/BlastSolver/VTKWriter.cpp
+    )
+    target_include_directories(test_remap_tnt PRIVATE backend/BlastSolver/include)
+    set_target_properties(test_remap_tnt PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+    target_compile_options(test_remap_tnt PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3>)
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(test_remap_tnt PRIVATE OpenMP::OpenMP_CXX)
+        target_compile_options(test_remap_tnt PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler -fopenmp>)
+    endif()
+    target_link_libraries(test_remap_tnt PRIVATE ${CMAKE_DL_LIBS} ZLIB::ZLIB)
+    if(HDF5_FOUND)
+        target_include_directories(test_remap_tnt PRIVATE ${HDF5_INCLUDE_DIRS})
+        target_link_libraries(test_remap_tnt PRIVATE ${HDF5_LIBRARIES})
+    else()
+        target_compile_definitions(test_remap_tnt PRIVATE NO_HDF5)
+    endif()
+endif()
+
+
 
 
 

@@ -732,9 +732,10 @@ __global__ void updatePrimitiveFromConservative_kernel(
         RealType e_internal = fmax(u_E - ke, p_floor / (gamma - (RealType)1.0));
         p = MultiMat::getMixturePressure(e_internal, u_rho, alpha1, alpha2, arho1, arho2, gamma, d_materials->products, d_materials->unreacted);
         
-        if (isnan(p) || isinf(p) || p < p_floor) {
+        if (isnan(p) || isinf(p)) {
             bad = true;
         } else {
+            p = fmax(p, p_floor);
             d_states_pool[pool_idx].rho[k] = rho_safe;
             d_states_pool[pool_idx].ur[k] = ur;
             d_states_pool[pool_idx].uz[k] = uz;

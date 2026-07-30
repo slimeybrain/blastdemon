@@ -41,6 +41,15 @@ public:
     std::vector<RealType> uz;
     std::vector<RealType> p;
     std::vector<RealType> E;
+    
+    // RK2 buffers
+    std::vector<RealType> rk_rho;
+    std::vector<RealType> rk_ux;
+    std::vector<RealType> rk_uy;
+    std::vector<RealType> rk_uz;
+    std::vector<RealType> rk_p;
+    std::vector<RealType> rk_E;
+    
     std::vector<RealType> peak_overpressure;
     std::vector<RealType> peak_impulse;
     
@@ -49,6 +58,11 @@ public:
     std::vector<RealType> alpha2;
     std::vector<RealType> arho1;
     std::vector<RealType> arho2;
+
+    std::vector<RealType> rk_alpha1;
+    std::vector<RealType> rk_alpha2;
+    std::vector<RealType> rk_arho1;
+    std::vector<RealType> rk_arho2;
 
     // Geometry boundary flags (0 = fluid, 1 = solid obstacle)
     std::vector<uint8_t> is_boundary;
@@ -73,6 +87,14 @@ public:
         uz.resize(total_cells, static_cast<RealType>(0.0));
         p.resize(total_cells, static_cast<RealType>(101325.0));
         E.resize(total_cells, static_cast<RealType>(101325.0 / 0.4));
+        
+        rk_rho.resize(total_cells, static_cast<RealType>(1.225));
+        rk_ux.resize(total_cells, static_cast<RealType>(0.0));
+        rk_uy.resize(total_cells, static_cast<RealType>(0.0));
+        rk_uz.resize(total_cells, static_cast<RealType>(0.0));
+        rk_p.resize(total_cells, static_cast<RealType>(101325.0));
+        rk_E.resize(total_cells, static_cast<RealType>(101325.0 / 0.4));
+        
         peak_overpressure.resize(total_cells, static_cast<RealType>(0.0));
         peak_impulse.resize(total_cells, static_cast<RealType>(0.0));
         is_boundary.resize(total_cells, 0);
@@ -82,6 +104,11 @@ public:
             alpha2.resize(total_cells, static_cast<RealType>(0.0));
             arho1.resize(total_cells, static_cast<RealType>(0.0));
             arho2.resize(total_cells, static_cast<RealType>(0.0));
+            
+            rk_alpha1.resize(total_cells, static_cast<RealType>(0.0));
+            rk_alpha2.resize(total_cells, static_cast<RealType>(0.0));
+            rk_arho1.resize(total_cells, static_cast<RealType>(0.0));
+            rk_arho2.resize(total_cells, static_cast<RealType>(0.0));
         }
     }
 

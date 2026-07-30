@@ -5246,9 +5246,9 @@ export class GraphRenderer {
             return btn;
         };
 
-        addRow.appendChild(createAddBtn('Cube', 'cuboid', { xmin: 0.0, xmax: 0.2, ymin: 0.0, ymax: 0.2, zmin: 0.0, zmax: 0.2, voxelization_method: 'watertight_floodfill' }));
-        addRow.appendChild(createAddBtn('Cyl', 'cylinder', { x: 0.5, y: 0.5, z: 0.5, radius: 0.1, length: 0.2, orientation: 'Z', voxelization_method: 'watertight_floodfill' }));
-        addRow.appendChild(createAddBtn('Wedge', 'wedge', { xmin: 0.0, xmax: 0.2, ymin: 0.0, ymax: 0.2, zmin: 0.0, zmax: 0.2, orientation: '+X', voxelization_method: 'watertight_floodfill' }));
+        addRow.appendChild(createAddBtn('Cube', 'cuboid', { xmin: 0.0, xmax: 0.2, ymin: 0.0, ymax: 0.2, zmin: 0.0, zmax: 0.2, voxelization_method: 'use_node_default' }));
+        addRow.appendChild(createAddBtn('Cyl', 'cylinder', { x: 0.5, y: 0.5, z: 0.5, radius: 0.1, length: 0.2, orientation: 'Z', voxelization_method: 'use_node_default' }));
+        addRow.appendChild(createAddBtn('Wedge', 'wedge', { xmin: 0.0, xmax: 0.2, ymin: 0.0, ymax: 0.2, zmin: 0.0, zmax: 0.2, orientation: '+X', voxelization_method: 'use_node_default' }));
         leftPane.appendChild(addRow);
         splitContainer.appendChild(leftPane);
 
@@ -5306,12 +5306,13 @@ export class GraphRenderer {
                 if (key === 'voxelization_method') {
                     const select = this.createCustomDropdown(
                         [
+                            { value: 'use_node_default', label: 'Use Node Default' },
                             { value: 'watertight_floodfill', label: 'Watertight Floodfill' },
                             { value: 'watertight_raycast', label: 'Watertight Raycast' },
                             { value: 'thin_shell', label: 'Thin Shell' },
                             { value: 'winding_number', label: 'Winding Number' }
                         ],
-                        String(value),
+                        String(value || 'use_node_default'),
                         (newVal) => {
                             updatePrimVal(key, newVal);
                         }

@@ -22,10 +22,14 @@ void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<MultiMate
     const auto& mat = solver_3d.getMaterialParameters();
 
     double r_max_1d = r_1d.back();
+    MultiMaterialState amb_state = states_1d.back();
+    if (solver_3d.getAmbientP() > 0.0) amb_state.p = solver_3d.getAmbientP();
+    if (solver_3d.getAmbientRho() > 0.0) amb_state.rho = solver_3d.getAmbientRho();
+    amb_state.u = 0.0;
 
     auto interp_1d = [&](double r) -> MultiMaterialState {
         if (r <= r_1d.front()) return states_1d.front();
-        if (r >= r_1d.back()) return states_1d.back();
+        if (r >= r_1d.back()) return amb_state;
 
         auto it = std::lower_bound(r_1d.begin(), r_1d.end(), r);
         size_t idx = std::distance(r_1d.begin(), it);
@@ -65,7 +69,7 @@ void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<MultiMate
                 // Cutoff only if dist is far outside max domain profile radius
                 double cut_r = (R_remap > 0.0) ? std::min(R_remap, r_max_1d) : r_max_1d;
                 if (dist > cut_r + dx * 2.0) {
-                    const auto& amb = states_1d.back();
+                    const auto& amb = amb_state;
                     if (is_ideal) {
                         CellState3D<false> s_gas;
                         s_gas.rho = amb.rho;
@@ -78,9 +82,9 @@ void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<MultiMate
                         s3d.rho = amb.rho;
                         s3d.ux = s3d.uy = s3d.uz = 0.0;
                         s3d.p = amb.p;
-                        s3d.alpha1 = 0.0; s3d.alpha2 = 1.0;
-                        s3d.arho1 = 0.0; s3d.arho2 = amb.rho;
-                        s3d.E = MultiMat::getMixtureEnergy(amb.p, amb.rho, 0.0, 1.0, 0.0, amb.rho, gamma, mat.products, mat.unreacted);
+                        s3d.alpha1 = 0.0; s3d.alpha2 = 0.0;
+                        s3d.arho1 = 0.0; s3d.arho2 = 0.0;
+                        s3d.E = amb.p / (gamma - 1.0);
                         solver_3d.setCellStateMulti(i, j, k, s3d);
                     }
                     continue;
@@ -91,7 +95,7 @@ void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<MultiMate
                 double sum_rhoux = 0.0;
                 double sum_rhouy = 0.0;
                 double sum_rhouz = 0.0;
-                double sum_E = 0.0;
+                double sum_p = 0.0;
                 double sum_alpha1 = 0.0;
                 double sum_alpha2 = 0.0;
                 double sum_arho1 = 0.0;
@@ -118,15 +122,10 @@ void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<MultiMate
                                 suz = s.u * (rz / sr);
                             }
 
-                            double ske = 0.5 * s.rho * (sux*sux + suy*suy + suz*suz);
-                            double sE = 0.0;
-                            if (is_ideal) {
-                                sE = s.p / (gamma - 1.0) + ske;
-                            } else {
+                            if (!is_ideal) {
                                 double a1 = s.alpha1, a2 = s.alpha2;
                                 if (a1 + a2 < 1e-6) { a1 = 0.0; a2 = 1.0; }
                                 double ar1 = s.arho1, ar2 = (a2 > 1e-6) ? s.arho2 : s.rho;
-                                sE = MultiMat::getMixtureEnergy(s.p, s.rho, a1, a2, ar1, ar2, gamma, mat.products, mat.unreacted) + ske;
                                 sum_alpha1 += a1;
                                 sum_alpha2 += a2;
                                 sum_arho1 += ar1;
@@ -137,7 +136,7 @@ void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<MultiMate
                             sum_rhoux += s.rho * sux;
                             sum_rhouy += s.rho * suy;
                             sum_rhouz += s.rho * suz;
-                            sum_E += sE;
+                            sum_p += s.p;
                         }
                     }
                 }
@@ -147,7 +146,7 @@ void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<MultiMate
                 double rhoux_avg = sum_rhoux * inv27;
                 double rhouy_avg = sum_rhouy * inv27;
                 double rhouz_avg = sum_rhouz * inv27;
-                double E_avg = sum_E * inv27;
+                double p_avg = std::max(1e-6, sum_p * inv27);
 
                 double ux_avg = rhoux_avg / std::max(1e-9, rho_avg);
                 double uy_avg = rhouy_avg / std::max(1e-9, rho_avg);
@@ -155,14 +154,13 @@ void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<MultiMate
                 double ke_avg = 0.5 * rho_avg * (ux_avg*ux_avg + uy_avg*uy_avg + uz_avg*uz_avg);
 
                 if (is_ideal) {
-                    double p_avg = std::max(1e-6, (gamma - 1.0) * (E_avg - ke_avg));
                     CellState3D<false> s_gas;
                     s_gas.rho = rho_avg;
                     s_gas.ux = ux_avg;
                     s_gas.uy = uy_avg;
                     s_gas.uz = uz_avg;
                     s_gas.p = p_avg;
-                    s_gas.E = E_avg;
+                    s_gas.E = p_avg / (gamma - 1.0) + ke_avg;
                     solver_3d.setCellStateIdeal(i, j, k, s_gas);
                 } else {
                     double a1_avg = sum_alpha1 * inv27;
@@ -171,16 +169,13 @@ void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<MultiMate
                     double ar1_avg = sum_arho1 * inv27;
                     double ar2_avg = sum_arho2 * inv27;
 
-                    double e_internal = std::max(1e-6, E_avg - ke_avg);
-                    double p_avg = MultiMat::getMixturePressure(e_internal, rho_avg, a1_avg, a2_avg, ar1_avg, ar2_avg, gamma, mat.products, mat.unreacted);
-
                     CellState3D<true> s3d;
                     s3d.rho = rho_avg;
                     s3d.ux = ux_avg;
                     s3d.uy = uy_avg;
                     s3d.uz = uz_avg;
                     s3d.p = p_avg;
-                    s3d.E = E_avg;
+                    s3d.E = MultiMat::getMixtureEnergy(p_avg, rho_avg, a1_avg, a2_avg, ar1_avg, ar2_avg, gamma, mat.products, mat.unreacted) + ke_avg;
                     s3d.alpha1 = a1_avg;
                     s3d.alpha2 = a2_avg;
                     s3d.arho1 = ar1_avg;
@@ -199,7 +194,7 @@ void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<MultiMate
  * Uses 27-point subgrid CONSERVATIVE volume integration per cell.
  */
 void remap_2d_to_3d(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d,
-                    CFDSolver3D& solver_3d, double x_expl, double y_expl, double z_expl, double R_remap) {
+                    CFDSolver3D& solver_3d, double x_expl, double y_expl, double z_expl, double R_remap, double source_explosive_z) {
 
     int nx = solver_3d.getNx();
     int ny = solver_3d.getNy();
@@ -212,12 +207,19 @@ void remap_2d_to_3d(int nr, int nz, double dr, double dz, const std::vector<Stat
     double max_r_2d = nr * dr;
     double max_z_2d = nz * dz;
 
+    State2D amb_state = states_2d.back();
+    if (solver_3d.getAmbientP() > 0.0) amb_state.p = solver_3d.getAmbientP();
+    if (solver_3d.getAmbientRho() > 0.0) amb_state.rho = solver_3d.getAmbientRho();
+    amb_state.ur = 0.0;
+    amb_state.uz = 0.0;
+
     auto interp_2d = [&](double r, double z) -> State2D {
         if (r < 0.0) r = 0.0;
         if (z < 0.0) z = 0.0;
 
-        if (r >= max_r_2d - 1e-9) r = max_r_2d - 1e-9;
-        if (z >= max_z_2d - 1e-9) z = max_z_2d - 1e-9;
+        if (r >= max_r_2d - 1e-9 || z >= max_z_2d - 1e-9) {
+            return amb_state;
+        }
 
         double r_idx_f = (r / dr) - 0.5;
         double z_idx_f = (z / dz) - 0.5;
@@ -233,10 +235,11 @@ void remap_2d_to_3d(int nr, int nz, double dr, double dz, const std::vector<Stat
         double tr = r_idx_f - i0;
         double tz = z_idx_f - j0;
 
-        const auto& s00 = states_2d[i0 + j0 * nr];
-        const auto& s10 = states_2d[i1 + j0 * nr];
-        const auto& s01 = states_2d[i0 + j1 * nr];
-        const auto& s11 = states_2d[i1 + j1 * nr];
+        // 2D telemetry is flattened as r_idx * nz + z_idx
+        const auto& s00 = states_2d[i0 * nz + j0];
+        const auto& s10 = states_2d[i1 * nz + j0];
+        const auto& s01 = states_2d[i0 * nz + j1];
+        const auto& s11 = states_2d[i1 * nz + j1];
 
         State2D res;
         auto blend = [&](double a, double b, double c, double d) {
@@ -268,9 +271,8 @@ void remap_2d_to_3d(int nr, int nz, double dr, double dz, const std::vector<Stat
                 double r_dist = std::sqrt(dx_expl * dx_expl + dy_expl * dy_expl);
                 double dist_total = std::sqrt(r_dist * r_dist + dz_expl * dz_expl);
 
-                double cut_r = (R_remap > 0.0) ? std::min(R_remap, max_r_2d) : max_r_2d;
-                if (dist_total > cut_r + dx * 2.0) {
-                    const auto& amb = states_2d.back();
+                if (R_remap > 0.0 && dist_total > R_remap) {
+                    const auto& amb = amb_state;
                     if (is_ideal) {
                         CellState3D<false> s_gas;
                         s_gas.rho = amb.rho;
@@ -283,9 +285,9 @@ void remap_2d_to_3d(int nr, int nz, double dr, double dz, const std::vector<Stat
                         s3d.rho = amb.rho;
                         s3d.ux = s3d.uy = s3d.uz = 0.0;
                         s3d.p = amb.p;
-                        s3d.alpha1 = 0.0; s3d.alpha2 = 1.0;
-                        s3d.arho1 = 0.0; s3d.arho2 = amb.rho;
-                        s3d.E = MultiMat::getMixtureEnergy(amb.p, amb.rho, 0.0, 1.0, 0.0, amb.rho, gamma, mat.products, mat.unreacted);
+                        s3d.alpha1 = 0.0; s3d.alpha2 = 0.0;
+                        s3d.arho1 = 0.0; s3d.arho2 = 0.0;
+                        s3d.E = MultiMat::getMixtureEnergy(amb.p, amb.rho, 0.0, 0.0, 0.0, 0.0, gamma, mat.products, mat.unreacted);
                         solver_3d.setCellStateMulti(i, j, k, s3d);
                     }
                     continue;
@@ -296,7 +298,7 @@ void remap_2d_to_3d(int nr, int nz, double dr, double dz, const std::vector<Stat
                 double sum_rhoux = 0.0;
                 double sum_rhouy = 0.0;
                 double sum_rhouz = 0.0;
-                double sum_E = 0.0;
+                double sum_p = 0.0;
                 double sum_alpha1 = 0.0;
                 double sum_alpha2 = 0.0;
                 double sum_arho1 = 0.0;
@@ -313,7 +315,22 @@ void remap_2d_to_3d(int nr, int nz, double dr, double dz, const std::vector<Stat
                             double ry = sy - y_expl;
                             double rz = sz - z_expl;
                             double sr = std::sqrt(rx * rx + ry * ry);
-                            double s_z = std::abs(rz);
+                            double s_z = source_explosive_z + rz;
+                            bool is_below_ground_hemisphere = false;
+                            if (s_z < 0.0) {
+                                if (source_explosive_z <= 1e-6) {
+                                    // 2D source was at z=0 (ground-burst hemisphere).
+                                    // Mirror z for bottom hemisphere in 3D and negate uz so velocity points downward away from charge.
+                                    s_z = -s_z;
+                                    is_below_ground_hemisphere = true;
+                                } else {
+                                    // 2D source was an air-burst (z > 0).
+                                    // s_z < 0 is below the 2D ground wall -> clamp to z=0.
+                                    s_z = 0.0;
+                                }
+                            } else if (s_z >= max_z_2d) {
+                                s_z = max_z_2d - 1e-9;
+                            }
 
                             auto s = interp_2d(sr, s_z);
 
@@ -322,17 +339,17 @@ void remap_2d_to_3d(int nr, int nz, double dr, double dz, const std::vector<Stat
                                 sux = s.ur * (rx / sr);
                                 suy = s.ur * (ry / sr);
                             }
-                            double suz = (rz >= 0.0) ? s.uz : -s.uz;
 
-                            double ske = 0.5 * s.rho * (sux*sux + suy*suy + suz*suz);
-                            double sE = 0.0;
-                            if (is_ideal) {
-                                sE = s.p / (gamma - 1.0) + ske;
-                            } else {
+                            double suz = s.uz;
+                            if (is_below_ground_hemisphere) {
+                                suz = -s.uz;
+                            } else if (source_explosive_z > 1e-6 && (source_explosive_z + rz) < 0.0) {
+                                suz = 0.0; // Below 2D ground wall
+                            }
+
+                            if (!is_ideal) {
                                 double a1 = s.alpha1, a2 = s.alpha2;
-                                if (a1 + a2 < 1e-6) { a1 = 0.0; a2 = 1.0; }
-                                double ar1 = s.arho1, ar2 = (a2 > 1e-6) ? s.arho2 : s.rho;
-                                sE = MultiMat::getMixtureEnergy(s.p, s.rho, a1, a2, ar1, ar2, gamma, mat.products, mat.unreacted) + ske;
+                                double ar1 = s.arho1, ar2 = s.arho2;
                                 sum_alpha1 += a1;
                                 sum_alpha2 += a2;
                                 sum_arho1 += ar1;
@@ -343,7 +360,7 @@ void remap_2d_to_3d(int nr, int nz, double dr, double dz, const std::vector<Stat
                             sum_rhoux += s.rho * sux;
                             sum_rhouy += s.rho * suy;
                             sum_rhouz += s.rho * suz;
-                            sum_E += sE;
+                            sum_p += s.p;
                         }
                     }
                 }
@@ -353,7 +370,7 @@ void remap_2d_to_3d(int nr, int nz, double dr, double dz, const std::vector<Stat
                 double rhoux_avg = sum_rhoux * inv27;
                 double rhouy_avg = sum_rhouy * inv27;
                 double rhouz_avg = sum_rhouz * inv27;
-                double E_avg = sum_E * inv27;
+                double p_avg = std::max(1e-6, sum_p * inv27);
 
                 double ux_avg = rhoux_avg / std::max(1e-9, rho_avg);
                 double uy_avg = rhouy_avg / std::max(1e-9, rho_avg);
@@ -361,14 +378,13 @@ void remap_2d_to_3d(int nr, int nz, double dr, double dz, const std::vector<Stat
                 double ke_avg = 0.5 * rho_avg * (ux_avg*ux_avg + uy_avg*uy_avg + uz_avg*uz_avg);
 
                 if (is_ideal) {
-                    double p_avg = std::max(1e-6, (gamma - 1.0) * (E_avg - ke_avg));
                     CellState3D<false> s_gas;
                     s_gas.rho = rho_avg;
                     s_gas.ux = ux_avg;
                     s_gas.uy = uy_avg;
                     s_gas.uz = uz_avg;
                     s_gas.p = p_avg;
-                    s_gas.E = E_avg;
+                    s_gas.E = p_avg / (gamma - 1.0) + ke_avg;
                     solver_3d.setCellStateIdeal(i, j, k, s_gas);
                 } else {
                     double a1_avg = sum_alpha1 * inv27;
@@ -377,16 +393,13 @@ void remap_2d_to_3d(int nr, int nz, double dr, double dz, const std::vector<Stat
                     double ar1_avg = sum_arho1 * inv27;
                     double ar2_avg = sum_arho2 * inv27;
 
-                    double e_internal = std::max(1e-6, E_avg - ke_avg);
-                    double p_avg = MultiMat::getMixturePressure(e_internal, rho_avg, a1_avg, a2_avg, ar1_avg, ar2_avg, gamma, mat.products, mat.unreacted);
-
                     CellState3D<true> s3d;
                     s3d.rho = rho_avg;
                     s3d.ux = ux_avg;
                     s3d.uy = uy_avg;
                     s3d.uz = uz_avg;
                     s3d.p = p_avg;
-                    s3d.E = E_avg;
+                    s3d.E = MultiMat::getMixtureEnergy(p_avg, rho_avg, a1_avg, a2_avg, ar1_avg, ar2_avg, gamma, mat.products, mat.unreacted) + ke_avg;
                     s3d.alpha1 = a1_avg;
                     s3d.alpha2 = a2_avg;
                     s3d.arho1 = ar1_avg;
@@ -410,10 +423,12 @@ void remap_1d_to_submesh(const std::vector<double>& r_1d, const std::vector<Mult
     RealType dx = sm.cellSize;
 
     double r_max_1d = r_1d.back();
+    MultiMaterialState amb_state = states_1d.back();
+    amb_state.u = 0.0;
 
     auto interp_1d = [&](double r) -> MultiMaterialState {
         if (r <= r_1d.front()) return states_1d.front();
-        if (r >= r_1d.back()) return states_1d.back();
+        if (r >= r_1d.back()) return amb_state;
 
         auto it = std::lower_bound(r_1d.begin(), r_1d.end(), r);
         size_t idx = std::distance(r_1d.begin(), it);
@@ -454,18 +469,18 @@ void remap_1d_to_submesh(const std::vector<double>& r_1d, const std::vector<Mult
 
                 double cut_r = (R_remap > 0.0) ? std::min(R_remap, r_max_1d) : r_max_1d;
                 if (dist > cut_r + (double)dx * 2.0) {
-                    const auto& amb = states_1d.back();
+                    const auto& amb = amb_state;
                     sm.rho[c_idx] = (RealType)amb.rho;
                     sm.ux[c_idx] = sm.uy[c_idx] = sm.uz[c_idx] = (RealType)0.0;
                     sm.p[c_idx] = (RealType)amb.p;
                     if constexpr (IsMultiMaterial) {
                         if (!sm.alpha1.empty()) {
                             sm.alpha1[c_idx] = 0.0;
-                            sm.alpha2[c_idx] = 1.0;
+                            sm.alpha2[c_idx] = 0.0;
                             sm.arho1[c_idx] = 0.0;
-                            sm.arho2[c_idx] = (RealType)amb.rho;
+                            sm.arho2[c_idx] = 0.0;
                         }
-                        sm.E[c_idx] = (RealType)MultiMat::getMixtureEnergy(amb.p, amb.rho, 0.0, 1.0, 0.0, amb.rho, gamma, materials.products, materials.unreacted);
+                        sm.E[c_idx] = (RealType)(amb.p / (gamma - 1.0));
                     } else {
                         sm.E[c_idx] = (RealType)(amb.p / (gamma - 1.0));
                     }
@@ -476,7 +491,7 @@ void remap_1d_to_submesh(const std::vector<double>& r_1d, const std::vector<Mult
                 double sum_rhoux = 0.0;
                 double sum_rhouy = 0.0;
                 double sum_rhouz = 0.0;
-                double sum_E = 0.0;
+                double sum_p = 0.0;
                 double sum_alpha1 = 0.0;
                 double sum_alpha2 = 0.0;
                 double sum_arho1 = 0.0;
@@ -503,15 +518,10 @@ void remap_1d_to_submesh(const std::vector<double>& r_1d, const std::vector<Mult
                                 suz = s.u * (rz / sr);
                             }
 
-                            double ske = 0.5 * s.rho * (sux*sux + suy*suy + suz*suz);
-                            double sE = 0.0;
-                            if (is_ideal_gas) {
-                                sE = s.p / (gamma - 1.0) + ske;
-                            } else {
+                            if (!is_ideal_gas) {
                                 double a1 = s.alpha1, a2 = s.alpha2;
                                 if (a1 + a2 < 1e-6) { a1 = 0.0; a2 = 1.0; }
                                 double ar1 = s.arho1, ar2 = (a2 > 1e-6) ? s.arho2 : s.rho;
-                                sE = MultiMat::getMixtureEnergy(s.p, s.rho, a1, a2, ar1, ar2, gamma, materials.products, materials.unreacted) + ske;
                                 sum_alpha1 += a1;
                                 sum_alpha2 += a2;
                                 sum_arho1 += ar1;
@@ -522,7 +532,7 @@ void remap_1d_to_submesh(const std::vector<double>& r_1d, const std::vector<Mult
                             sum_rhoux += s.rho * sux;
                             sum_rhouy += s.rho * suy;
                             sum_rhouz += s.rho * suz;
-                            sum_E += sE;
+                            sum_p += s.p;
                         }
                     }
                 }
@@ -532,7 +542,7 @@ void remap_1d_to_submesh(const std::vector<double>& r_1d, const std::vector<Mult
                 double rhoux_avg = sum_rhoux * inv27;
                 double rhouy_avg = sum_rhouy * inv27;
                 double rhouz_avg = sum_rhouz * inv27;
-                double E_avg = sum_E * inv27;
+                double p_avg = std::max(1e-6, sum_p * inv27);
 
                 double ux_avg = rhoux_avg / std::max(1e-9, rho_avg);
                 double uy_avg = rhouy_avg / std::max(1e-9, rho_avg);
@@ -545,9 +555,8 @@ void remap_1d_to_submesh(const std::vector<double>& r_1d, const std::vector<Mult
                 sm.uz[c_idx] = (RealType)uz_avg;
 
                 if (is_ideal_gas) {
-                    double p_avg = std::max(1e-6, (gamma - 1.0) * (E_avg - ke_avg));
                     sm.p[c_idx] = (RealType)p_avg;
-                    sm.E[c_idx] = (RealType)E_avg;
+                    sm.E[c_idx] = (RealType)(p_avg / (gamma - 1.0) + ke_avg);
                 } else {
                     double a1_avg = sum_alpha1 * inv27;
                     double a2_avg = sum_alpha2 * inv27;
@@ -555,11 +564,8 @@ void remap_1d_to_submesh(const std::vector<double>& r_1d, const std::vector<Mult
                     double ar1_avg = sum_arho1 * inv27;
                     double ar2_avg = sum_arho2 * inv27;
 
-                    double e_internal = std::max(1e-6, E_avg - ke_avg);
-                    double p_avg = MultiMat::getMixturePressure(e_internal, rho_avg, a1_avg, a2_avg, ar1_avg, ar2_avg, gamma, materials.products, materials.unreacted);
-
                     sm.p[c_idx] = (RealType)p_avg;
-                    sm.E[c_idx] = (RealType)E_avg;
+                    sm.E[c_idx] = (RealType)(MultiMat::getMixtureEnergy(p_avg, rho_avg, a1_avg, a2_avg, ar1_avg, ar2_avg, gamma, materials.products, materials.unreacted) + ke_avg);
                     if constexpr (IsMultiMaterial) {
                         if (!sm.alpha1.empty()) {
                             sm.alpha1[c_idx] = (RealType)a1_avg;
@@ -578,7 +584,7 @@ void remap_1d_to_submesh(const std::vector<double>& r_1d, const std::vector<Mult
 template <typename RealType, bool IsMultiMaterial>
 void remap_2d_to_submesh(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d,
                          SubMesh3D<RealType, IsMultiMaterial>& sm, double x_expl, double y_expl, double z_expl, double R_remap,
-                         double gamma, const MultiMat::MaterialSet& materials, bool is_ideal_gas) {
+                         double gamma, const MultiMat::MaterialSet& materials, bool is_ideal_gas, double source_explosive_z) {
 
     int nx = sm.nx;
     int ny = sm.ny;
@@ -588,12 +594,17 @@ void remap_2d_to_submesh(int nr, int nz, double dr, double dz, const std::vector
     double max_r_2d = nr * dr;
     double max_z_2d = nz * dz;
 
+    State2D amb_state = states_2d.back();
+    amb_state.ur = 0.0;
+    amb_state.uz = 0.0;
+
     auto interp_2d = [&](double r, double z) -> State2D {
         if (r < 0.0) r = 0.0;
         if (z < 0.0) z = 0.0;
 
-        if (r >= max_r_2d - 1e-9) r = max_r_2d - 1e-9;
-        if (z >= max_z_2d - 1e-9) z = max_z_2d - 1e-9;
+        if (r >= max_r_2d - 1e-9 || z >= max_z_2d - 1e-9) {
+            return amb_state;
+        }
 
         double r_idx_f = (r / dr) - 0.5;
         double z_idx_f = (z / dz) - 0.5;
@@ -609,10 +620,11 @@ void remap_2d_to_submesh(int nr, int nz, double dr, double dz, const std::vector
         double tr = r_idx_f - i0;
         double tz = z_idx_f - j0;
 
-        const auto& s00 = states_2d[i0 + j0 * nr];
-        const auto& s10 = states_2d[i1 + j0 * nr];
-        const auto& s01 = states_2d[i0 + j1 * nr];
-        const auto& s11 = states_2d[i1 + j1 * nr];
+        // 2D telemetry is flattened as r_idx * nz + z_idx
+        const auto& s00 = states_2d[i0 * nz + j0];
+        const auto& s10 = states_2d[i1 * nz + j0];
+        const auto& s01 = states_2d[i0 * nz + j1];
+        const auto& s11 = states_2d[i1 * nz + j1];
 
         State2D res;
         auto blend = [&](double a, double b, double c, double d) {
@@ -646,23 +658,21 @@ void remap_2d_to_submesh(int nr, int nz, double dr, double dz, const std::vector
 
                 size_t c_idx = sm.getIndex(i, j, k);
 
-                double cut_r = (R_remap > 0.0) ? std::min(R_remap, max_r_2d) : max_r_2d;
-                if (dist_total > cut_r + (double)dx * 2.0) {
-                    const auto& amb = states_2d.back();
+                if (R_remap > 0.0 && dist_total > R_remap) {
+                    const auto& amb = amb_state;
                     sm.rho[c_idx] = (RealType)amb.rho;
                     sm.ux[c_idx] = sm.uy[c_idx] = sm.uz[c_idx] = (RealType)0.0;
                     sm.p[c_idx] = (RealType)amb.p;
                     if constexpr (IsMultiMaterial) {
                         if (!sm.alpha1.empty()) {
-                            sm.alpha1[c_idx] = 0.0;
-                            sm.alpha2[c_idx] = 1.0;
-                            sm.arho1[c_idx] = 0.0;
-                            sm.arho2[c_idx] = (RealType)amb.rho;
+                            sm.alpha1[c_idx] = (RealType)0.0;
+                            sm.alpha2[c_idx] = (RealType)0.0;
+                            sm.arho1[c_idx] = (RealType)0.0;
+                            sm.arho2[c_idx] = (RealType)0.0;
                         }
-                        sm.E[c_idx] = (RealType)MultiMat::getMixtureEnergy(amb.p, amb.rho, 0.0, 1.0, 0.0, amb.rho, gamma, materials.products, materials.unreacted);
-                    } else {
-                        sm.E[c_idx] = (RealType)(amb.p / (gamma - 1.0));
                     }
+                    double ske = 0.0;
+                    sm.E[c_idx] = (RealType)(amb.p / (gamma - 1.0) + ske);
                     continue;
                 }
 
@@ -670,7 +680,7 @@ void remap_2d_to_submesh(int nr, int nz, double dr, double dz, const std::vector
                 double sum_rhoux = 0.0;
                 double sum_rhouy = 0.0;
                 double sum_rhouz = 0.0;
-                double sum_E = 0.0;
+                double sum_p = 0.0;
                 double sum_alpha1 = 0.0;
                 double sum_alpha2 = 0.0;
                 double sum_arho1 = 0.0;
@@ -687,7 +697,22 @@ void remap_2d_to_submesh(int nr, int nz, double dr, double dz, const std::vector
                             double ry = sy - y_expl;
                             double rz = sz - z_expl;
                             double sr = std::sqrt(rx * rx + ry * ry);
-                            double s_z = std::abs(rz);
+                            double s_z = source_explosive_z + rz;
+                            bool is_below_ground_hemisphere = false;
+                            if (s_z < 0.0) {
+                                if (source_explosive_z <= 1e-6) {
+                                    // 2D source was at z=0 (ground-burst hemisphere).
+                                    // Mirror z for bottom hemisphere in 3D and negate uz so velocity points downward away from charge.
+                                    s_z = -s_z;
+                                    is_below_ground_hemisphere = true;
+                                } else {
+                                    // 2D source was an air-burst (z > 0).
+                                    // s_z < 0 is below the 2D ground wall -> clamp to z=0.
+                                    s_z = 0.0;
+                                }
+                            } else if (s_z >= max_z_2d) {
+                                s_z = max_z_2d - 1e-9;
+                            }
 
                             auto s = interp_2d(sr, s_z);
 
@@ -696,17 +721,18 @@ void remap_2d_to_submesh(int nr, int nz, double dr, double dz, const std::vector
                                 sux = s.ur * (rx / sr);
                                 suy = s.ur * (ry / sr);
                             }
-                            double suz = (rz >= 0.0) ? s.uz : -s.uz;
 
-                            double ske = 0.5 * s.rho * (sux*sux + suy*suy + suz*suz);
-                            double sE = 0.0;
-                            if (is_ideal_gas) {
-                                sE = s.p / (gamma - 1.0) + ske;
-                            } else {
+                            double suz = s.uz;
+                            if (is_below_ground_hemisphere) {
+                                suz = -s.uz;
+                            } else if (source_explosive_z > 1e-6 && (source_explosive_z + rz) < 0.0) {
+                                suz = 0.0; // Below 2D ground wall
+                            }
+
+                            if (!is_ideal_gas) {
                                 double a1 = s.alpha1, a2 = s.alpha2;
                                 if (a1 + a2 < 1e-6) { a1 = 0.0; a2 = 1.0; }
                                 double ar1 = s.arho1, ar2 = (a2 > 1e-6) ? s.arho2 : s.rho;
-                                sE = MultiMat::getMixtureEnergy(s.p, s.rho, a1, a2, ar1, ar2, gamma, materials.products, materials.unreacted) + ske;
                                 sum_alpha1 += a1;
                                 sum_alpha2 += a2;
                                 sum_arho1 += ar1;
@@ -717,7 +743,7 @@ void remap_2d_to_submesh(int nr, int nz, double dr, double dz, const std::vector
                             sum_rhoux += s.rho * sux;
                             sum_rhouy += s.rho * suy;
                             sum_rhouz += s.rho * suz;
-                            sum_E += sE;
+                            sum_p += s.p;
                         }
                     }
                 }
@@ -727,7 +753,7 @@ void remap_2d_to_submesh(int nr, int nz, double dr, double dz, const std::vector
                 double rhoux_avg = sum_rhoux * inv27;
                 double rhouy_avg = sum_rhouy * inv27;
                 double rhouz_avg = sum_rhouz * inv27;
-                double E_avg = sum_E * inv27;
+                double p_avg = std::max(1e-6, sum_p * inv27);
 
                 double ux_avg = rhoux_avg / std::max(1e-9, rho_avg);
                 double uy_avg = rhouy_avg / std::max(1e-9, rho_avg);
@@ -740,9 +766,8 @@ void remap_2d_to_submesh(int nr, int nz, double dr, double dz, const std::vector
                 sm.uz[c_idx] = (RealType)uz_avg;
 
                 if (is_ideal_gas) {
-                    double p_avg = std::max(1e-6, (gamma - 1.0) * (E_avg - ke_avg));
                     sm.p[c_idx] = (RealType)p_avg;
-                    sm.E[c_idx] = (RealType)E_avg;
+                    sm.E[c_idx] = (RealType)(p_avg / (gamma - 1.0) + ke_avg);
                 } else {
                     double a1_avg = sum_alpha1 * inv27;
                     double a2_avg = sum_alpha2 * inv27;
@@ -750,11 +775,8 @@ void remap_2d_to_submesh(int nr, int nz, double dr, double dz, const std::vector
                     double ar1_avg = sum_arho1 * inv27;
                     double ar2_avg = sum_arho2 * inv27;
 
-                    double e_internal = std::max(1e-6, E_avg - ke_avg);
-                    double p_avg = MultiMat::getMixturePressure(e_internal, rho_avg, a1_avg, a2_avg, ar1_avg, ar2_avg, gamma, materials.products, materials.unreacted);
-
                     sm.p[c_idx] = (RealType)p_avg;
-                    sm.E[c_idx] = (RealType)E_avg;
+                    sm.E[c_idx] = (RealType)(MultiMat::getMixtureEnergy(p_avg, rho_avg, a1_avg, a2_avg, ar1_avg, ar2_avg, gamma, materials.products, materials.unreacted) + ke_avg);
                     if constexpr (IsMultiMaterial) {
                         if (!sm.alpha1.empty()) {
                             sm.alpha1[c_idx] = (RealType)a1_avg;
@@ -775,7 +797,7 @@ template void remap_1d_to_submesh<float, true>(const std::vector<double>&, const
 template void remap_1d_to_submesh<double, false>(const std::vector<double>&, const std::vector<MultiMaterialState>&, SubMesh3D<double, false>&, double, double, double, double, double, const MultiMat::MaterialSet&, bool);
 template void remap_1d_to_submesh<double, true>(const std::vector<double>&, const std::vector<MultiMaterialState>&, SubMesh3D<double, true>&, double, double, double, double, double, const MultiMat::MaterialSet&, bool);
 
-template void remap_2d_to_submesh<float, false>(int, int, double, double, const std::vector<State2D>&, SubMesh3D<float, false>&, double, double, double, double, double, const MultiMat::MaterialSet&, bool);
-template void remap_2d_to_submesh<float, true>(int, int, double, double, const std::vector<State2D>&, SubMesh3D<float, true>&, double, double, double, double, double, const MultiMat::MaterialSet&, bool);
-template void remap_2d_to_submesh<double, false>(int, int, double, double, const std::vector<State2D>&, SubMesh3D<double, false>&, double, double, double, double, double, const MultiMat::MaterialSet&, bool);
-template void remap_2d_to_submesh<double, true>(int, int, double, double, const std::vector<State2D>&, SubMesh3D<double, true>&, double, double, double, double, double, const MultiMat::MaterialSet&, bool);
+template void remap_2d_to_submesh<float, false>(int, int, double, double, const std::vector<State2D>&, SubMesh3D<float, false>&, double, double, double, double, double, const MultiMat::MaterialSet&, bool, double);
+template void remap_2d_to_submesh<float, true>(int, int, double, double, const std::vector<State2D>&, SubMesh3D<float, true>&, double, double, double, double, double, const MultiMat::MaterialSet&, bool, double);
+template void remap_2d_to_submesh<double, false>(int, int, double, double, const std::vector<State2D>&, SubMesh3D<double, false>&, double, double, double, double, double, const MultiMat::MaterialSet&, bool, double);
+template void remap_2d_to_submesh<double, true>(int, int, double, double, const std::vector<State2D>&, SubMesh3D<double, true>&, double, double, double, double, double, const MultiMat::MaterialSet&, bool, double);

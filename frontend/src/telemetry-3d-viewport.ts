@@ -1004,7 +1004,7 @@ export class Telemetry3DViewport {
         return null;
     }
 
-    private showRangePopover(targetEl: HTMLElement, qtyName: string, minVal: number, maxVal: number, autoScale: boolean, logScale: boolean, interpScale?: boolean, onApply?: (minV: number, maxV: number, autoV: boolean, logV: boolean, interpV: boolean) => void) {
+    private showRangePopover(targetEl: HTMLElement, qtyName: string, minVal: number, maxVal: number, autoScale: boolean, logScale: boolean, onApply?: (minV: number, maxV: number, autoV: boolean, logV: boolean) => void) {
         this.showPopover(targetEl, (popover) => {
             const title = document.createElement('div');
             title.textContent = `Scale (${qtyName})`;
@@ -1015,7 +1015,7 @@ export class Telemetry3DViewport {
             title.style.textTransform = 'uppercase';
             popover.appendChild(title);
 
-            // Auto, Log & Smooth toggles
+            // Auto & Log toggles
             const togglesRow = document.createElement('div');
             togglesRow.style.display = 'flex';
             togglesRow.style.gap = '8px';
@@ -1044,18 +1044,6 @@ export class Telemetry3DViewport {
             logLbl.appendChild(logCb);
             logLbl.appendChild(document.createTextNode('Log'));
             togglesRow.appendChild(logLbl);
-
-            const interpLbl = document.createElement('label');
-            interpLbl.style.display = 'flex';
-            interpLbl.style.alignItems = 'center';
-            interpLbl.style.gap = '3px';
-            interpLbl.style.cursor = 'pointer';
-            const interpCb = document.createElement('input');
-            interpCb.type = 'checkbox';
-            interpCb.checked = interpScale !== false;
-            interpLbl.appendChild(interpCb);
-            interpLbl.appendChild(document.createTextNode('Smooth'));
-            togglesRow.appendChild(interpLbl);
 
             popover.appendChild(togglesRow);
 
@@ -1087,7 +1075,7 @@ export class Telemetry3DViewport {
                 const minV = Number(minInp.value);
                 const maxV = Number(maxInp.value);
                 if (!isNaN(minV) && !isNaN(maxV) && onApply) {
-                    onApply(minV, maxV, autoCb.checked, logCb.checked, interpCb.checked);
+                    onApply(minV, maxV, autoCb.checked, logCb.checked);
                 }
             };
 
@@ -1104,9 +1092,6 @@ export class Telemetry3DViewport {
                 commitRange();
             };
             logCb.onchange = () => {
-                commitRange();
-            };
-            interpCb.onchange = () => {
                 commitRange();
             };
 
@@ -1939,13 +1924,8 @@ export class Telemetry3DViewport {
                 const curRange = vp.parameters.quantity_ranges?.[activeQty] || [101325.0, 1013250.0];
                 const autoV = vp.parameters.obstacles_auto_scale !== false;
                 const logV = vp.parameters.obstacles_log_scale === true;
-                const interpV = vp.parameters.obstacles_interpolate !== false;
-                this.showRangePopover(cfgBtn, activeQty, curRange[0], curRange[1], autoV, logV, interpV, (minV, maxV, autoVal, logVal, interpVal) => {
+                this.showRangePopover(cfgBtn, activeQty, curRange[0], curRange[1], autoV, logV, (minV, maxV, autoVal, logVal) => {
                     this.setQuantityRange(activeQty, minV, maxV, autoVal, logVal);
-                    if (interpVal !== undefined) {
-                        this.stateManager.updateNodeParametersInPlace(vp.id, { obstacles_interpolate: interpVal });
-                        this.worker.postMessage({ type: 'setConfig', data: { obstaclesInterpolate: interpVal } });
-                    }
                 });
             }
         });
@@ -2146,14 +2126,8 @@ export class Telemetry3DViewport {
                 const curRange = vp.parameters.quantity_ranges?.[activeQty] || [101325.0, 1013250.0];
                 const autoV = vp.parameters.stl_auto_scale !== false;
                 const logV = vp.parameters.stl_log_scale === true;
-                const interpV = vp.parameters.stl_sampling_mode !== 'nearest';
-                this.showRangePopover(cfgBtn, activeQty, curRange[0], curRange[1], autoV, logV, interpV, (minV, maxV, autoVal, logVal, interpVal) => {
+                this.showRangePopover(cfgBtn, activeQty, curRange[0], curRange[1], autoV, logV, (minV, maxV, autoVal, logVal) => {
                     this.setQuantityRange(activeQty, minV, maxV, autoVal, logVal);
-                    if (interpVal !== undefined) {
-                        const mode = interpVal ? 'linear' : 'nearest';
-                        this.stateManager.updateNodeParametersInPlace(vp.id, { stl_sampling_mode: mode });
-                        this.worker.postMessage({ type: 'setConfig', data: { stlSamplingMode: mode } });
-                    }
                 });
             }
         });
@@ -4005,7 +3979,7 @@ export class Telemetry3DViewport {
                     if (geomNode.type === 'STLGeometry') {
                         net.send({ command: "LOAD_STL_GEOMETRY", filePath: geomNode.parameters.stl_file || '', modelId: this.getCurrentModelId() });
                     } else if (geomNode.type === 'PrimitiveGeometry3D') {
-                        net.send({ command: "LOAD_PRIMITIVE_GEOMETRY", primitives: geomNode.parameters.primitives || [], modelId: this.getCurrentModelId() });
+                        net.send({ command: "LOAD_PRIMITIVE_GEOMETRY", primitives: geomNode.parameters.primitives || [], voxelization_method: geomNode.parameters.voxelization_method || 'watertight_floodfill', modelId: this.getCurrentModelId() });
                     }
                 }
                 // If not connected, do NOT update hash so we retry when connected
@@ -4038,7 +4012,7 @@ export class Telemetry3DViewport {
                 const cm = qCmaps[q] || s.colormap || 'plasma';
                 const op = s.opacity ?? 1.0;
                 const r = qRanges[q] || [s.min_val, s.max_val];
-                return `${s.axis}:${q}:${s.enabled !== false}:${cm}:${op}:${s.auto_scale !== false}:${s.log_scale === true}:${r?.[0]}:${r?.[1]}`;
+                return `${s.axis}:${q}:${s.enabled !== false}:${cm}:${op}:${s.auto_scale !== false}:${s.log_scale === true}:${s.interpolate !== false}:${r?.[0]}:${r?.[1]}`;
             }).join('|');
 
             if (currSliceKey !== this._lastSliceKey) {
@@ -4199,11 +4173,8 @@ export class Telemetry3DViewport {
 
                     const cfgBtn = this.createToggleBtn(`slice-cfg-btn-${idx}`, '⚙️', false, () => {
                         const curRange = vpNode.parameters.quantity_ranges?.[qty] || [slice.min_val ?? 101325.0, slice.max_val ?? 1013250.0];
-                        this.showRangePopover(cfgBtn, qty, curRange[0], curRange[1], autoScaleVal, logScaleVal, interpScaleVal, (minV, maxV, autoVal, logVal, interpVal) => {
+                        this.showRangePopover(cfgBtn, qty, curRange[0], curRange[1], autoScaleVal, logScaleVal, (minV, maxV, autoVal, logVal) => {
                             this.setQuantityRange(qty, minV, maxV, autoVal, logVal);
-                            if (interpVal !== undefined) {
-                                this.updateSliceProperty(idx, { interpolate: interpVal });
-                            }
                         });
                     });
                     sclWrap.appendChild(cfgBtn);
@@ -4314,18 +4285,13 @@ export class Telemetry3DViewport {
                         maxRangeVal = this.latestSliceRanges[idx].max;
                     }
 
-                    // Sync checkboxes
-                    const checkboxes = row.querySelectorAll('input[type="checkbox"]') as NodeListOf<HTMLInputElement>;
-                    if (checkboxes.length >= 3) {
-                        if (checkboxes[0].dataset.editing !== 'true' && document.activeElement !== checkboxes[0]) {
-                            checkboxes[0].checked = autoScaleVal;
-                        }
-                        if (checkboxes[1].dataset.editing !== 'true' && document.activeElement !== checkboxes[1]) {
-                            checkboxes[1].checked = slice.log_scale === true;
-                        }
-                        if (checkboxes[2].dataset.editing !== 'true' && document.activeElement !== checkboxes[2]) {
-                            checkboxes[2].checked = slice.interpolate !== false;
-                        }
+                    // Sync toggle buttons
+                    const interpBtn = document.getElementById(this.getElId(`slice-interp-btn-${idx}`));
+                    if (interpBtn) {
+                        const isInterp = slice.interpolate !== false;
+                        interpBtn.style.background = isInterp ? '#007acc' : 'transparent';
+                        interpBtn.style.border = isInterp ? '1px solid #007acc' : '1px solid rgba(255,255,255,0.2)';
+                        interpBtn.style.color = isInterp ? '#fff' : '#ccc';
                     }
 
                     // Sync colormap

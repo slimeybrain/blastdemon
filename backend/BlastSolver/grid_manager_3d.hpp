@@ -162,27 +162,51 @@ public:
                         bool flip_uz = false;
 
                         if (out_x_min) {
-                            i_src = 2 * n_ghost - 1 - i;
-                            if (bcXmin == BCType3D::REFLECTIVE) flip_ux = true;
+                            if (bcXmin == BCType3D::REFLECTIVE) {
+                                i_src = 2 * n_ghost - 1 - i;
+                                flip_ux = true;
+                            } else {
+                                i_src = n_ghost;
+                            }
                         } else if (out_x_max) {
-                            i_src = 2 * (child.nx - n_ghost) - 1 - i;
-                            if (bcXmax == BCType3D::REFLECTIVE) flip_ux = true;
+                            if (bcXmax == BCType3D::REFLECTIVE) {
+                                i_src = 2 * (child.nx - n_ghost) - 1 - i;
+                                flip_ux = true;
+                            } else {
+                                i_src = child.nx - n_ghost - 1;
+                            }
                         }
 
                         if (out_y_min) {
-                            j_src = 2 * n_ghost - 1 - j;
-                            if (bcYmin == BCType3D::REFLECTIVE) flip_uy = true;
+                            if (bcYmin == BCType3D::REFLECTIVE) {
+                                j_src = 2 * n_ghost - 1 - j;
+                                flip_uy = true;
+                            } else {
+                                j_src = n_ghost;
+                            }
                         } else if (out_y_max) {
-                            j_src = 2 * (child.ny - n_ghost) - 1 - j;
-                            if (bcYmax == BCType3D::REFLECTIVE) flip_uy = true;
+                            if (bcYmax == BCType3D::REFLECTIVE) {
+                                j_src = 2 * (child.ny - n_ghost) - 1 - j;
+                                flip_uy = true;
+                            } else {
+                                j_src = child.ny - n_ghost - 1;
+                            }
                         }
 
                         if (out_z_min) {
-                            k_src = 2 * n_ghost - 1 - k;
-                            if (bcZmin == BCType3D::REFLECTIVE) flip_uz = true;
+                            if (bcZmin == BCType3D::REFLECTIVE) {
+                                k_src = 2 * n_ghost - 1 - k;
+                                flip_uz = true;
+                            } else {
+                                k_src = n_ghost;
+                            }
                         } else if (out_z_max) {
-                            k_src = 2 * (child.nz - n_ghost) - 1 - k;
-                            if (bcZmax == BCType3D::REFLECTIVE) flip_uz = true;
+                            if (bcZmax == BCType3D::REFLECTIVE) {
+                                k_src = 2 * (child.nz - n_ghost) - 1 - k;
+                                flip_uz = true;
+                            } else {
+                                k_src = child.nz - n_ghost - 1;
+                            }
                         }
 
                         i_src = std::clamp(i_src, 0, child.nx - 1);
@@ -505,7 +529,7 @@ public:
         child.is_initialized = true;
     }
 
-    void syncRootFromTiles(const std::vector<PrimitiveTile3D<RealType, IsMultiMaterial>>& states_pool, int nx, int ny, int nz, int ntx, int nty, RealType gamma = static_cast<RealType>(1.4)) {
+    void syncRootFromTiles(const std::vector<PrimitiveTile3D<RealType, IsMultiMaterial>>& states_pool, int nx, int ny, int nz, int ntx, int nty, RealType gamma = static_cast<RealType>(1.4), const MultiMat::MaterialSet* materials = nullptr) {
         if (!root_mesh) return;
         #pragma omp parallel for collapse(3)
         for (int gz = 0; gz < nz; ++gz) {
@@ -524,12 +548,19 @@ public:
                     root_mesh->uz[r_idx] = tile.uz[c_idx];
                     root_mesh->p[r_idx] = tile.p[c_idx];
                     RealType gm1 = std::max(static_cast<RealType>(1e-4), gamma - static_cast<RealType>(1.0));
-                    root_mesh->E[r_idx] = tile.p[c_idx] / gm1 + static_cast<RealType>(0.5) * tile.rho[c_idx] * (tile.ux[c_idx]*tile.ux[c_idx] + tile.uy[c_idx]*tile.uy[c_idx] + tile.uz[c_idx]*tile.uz[c_idx]);
+                    RealType ke = static_cast<RealType>(0.5) * tile.rho[c_idx] * (tile.ux[c_idx]*tile.ux[c_idx] + tile.uy[c_idx]*tile.uy[c_idx] + tile.uz[c_idx]*tile.uz[c_idx]);
                     if constexpr (IsMultiMaterial) {
                         root_mesh->alpha1[r_idx] = tile.alpha1[c_idx];
                         root_mesh->alpha2[r_idx] = tile.alpha2[c_idx];
                         root_mesh->arho1[r_idx] = tile.arho1[c_idx];
                         root_mesh->arho2[r_idx] = tile.arho2[c_idx];
+                        if (materials) {
+                            root_mesh->E[r_idx] = MultiMat::getMixtureEnergy((double)tile.p[c_idx], (double)tile.rho[c_idx], (double)tile.alpha1[c_idx], (double)tile.alpha2[c_idx], (double)tile.arho1[c_idx], (double)tile.arho2[c_idx], (double)gamma, materials->products, materials->unreacted) + ke;
+                        } else {
+                            root_mesh->E[r_idx] = tile.p[c_idx] / gm1 + ke;
+                        }
+                    } else {
+                        root_mesh->E[r_idx] = tile.p[c_idx] / gm1 + ke;
                     }
                 }
             }
@@ -541,6 +572,21 @@ public:
             if (!sm->is_initialized) {
                 SMeshPtr parent_ptr = resolveParent(sm->parent_id);
                 prolongateAll(*sm, *parent_ptr);
+            }
+        }
+    }
+
+    void restrictAllToRoot(int n_ghost = 2) {
+        if (submeshes_sorted.empty()) return;
+        auto submeshes_desc = submeshes_sorted;
+        std::sort(submeshes_desc.begin(), submeshes_desc.end(), [](const SMeshPtr& a, const SMeshPtr& b) {
+            return a->level > b->level;
+        });
+
+        for (auto& sm : submeshes_desc) {
+            SMeshPtr parent_ptr = resolveParent(sm->parent_id);
+            if (parent_ptr) {
+                restrictToParent(*parent_ptr, *sm, n_ghost);
             }
         }
     }

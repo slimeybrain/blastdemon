@@ -633,14 +633,6 @@ function findRemapPipeline(modelId: string): RemapPipeline | null {
             if (!fromModel?.nodes.some(n => n.type === 'CFDSolver')) continue;
 
             if (modelId === toModelId) {
-                // Check if target solver explicitly disabled remap via init_mode parameter
-                const targetSolver = toModel?.nodes.find(n => n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D');
-                const initMode = targetSolver?.parameters?.init_mode;
-                if (initMode && initMode !== 'From1D') {
-                    console.log(`[findRemapPipeline] Remap pipeline ignored for ${modelId} because target solver init_mode is '${initMode}'`);
-                    continue;
-                }
-
                 return {
                     sourceModelId: fromModelId,
                     targetModelId: toModelId,
@@ -658,14 +650,6 @@ function findRemapPipeline(modelId: string): RemapPipeline | null {
             if (!fromModel?.nodes.some(n => n.type === 'CFDSolver2D')) continue;
 
             if (modelId === toModelId) {
-                // Check if target solver explicitly disabled remap via init_mode parameter
-                const targetSolver = toModel?.nodes.find(n => n.type === 'CFDSolver3D');
-                const initMode = targetSolver?.parameters?.init_mode;
-                if (initMode && initMode !== 'From2D') {
-                    console.log(`[findRemapPipeline] Remap pipeline ignored for ${modelId} because target solver init_mode is '${initMode}'`);
-                    continue;
-                }
-
                 return {
                     sourceModelId: fromModelId,
                     targetModelId: toModelId,
@@ -835,6 +819,15 @@ function tryRemapFrom1D(targetModelId: string, pipe: any): boolean {
         const explosive_r = Number(remapNode?.parameters?.explosive_r ?? 0.0);
         const remap_radius = Number(remapNode?.parameters?.remap_radius ?? (n_cells * cell_size));
 
+        const meshConn3D = model?.connections.find(c => c.toNode === solver3DNode?.id && c.toPort === 'mesh');
+        const meshNode3D = meshConn3D ? model?.nodes.find(n => n.id === meshConn3D.fromNode) : null;
+        const bc_x_min = String(meshNode3D?.parameters?.bc_x_min ?? solver3DNode?.parameters?.bc_x_min ?? 'Reflecting');
+        const bc_x_max = String(meshNode3D?.parameters?.bc_x_max ?? solver3DNode?.parameters?.bc_x_max ?? 'Transmitting');
+        const bc_y_min = String(meshNode3D?.parameters?.bc_y_min ?? solver3DNode?.parameters?.bc_y_min ?? 'Reflecting');
+        const bc_y_max = String(meshNode3D?.parameters?.bc_y_max ?? solver3DNode?.parameters?.bc_y_max ?? 'Transmitting');
+        const bc_z_min = String(meshNode3D?.parameters?.bc_z_min ?? solver3DNode?.parameters?.bc_z_min ?? 'Reflecting');
+        const bc_z_max = String(meshNode3D?.parameters?.bc_z_max ?? solver3DNode?.parameters?.bc_z_max ?? 'Transmitting');
+
         console.log(`[tryRemapFrom1D] Sending REMAP payload for target ${targetModelId} with ${n_cells} cells. Center: (${explosive_x}, ${explosive_y}, ${explosive_z}), radius: ${remap_radius}`);
         networkManager.send({
             command: "REMAP",
@@ -844,6 +837,12 @@ function tryRemapFrom1D(targetModelId: string, pipe: any): boolean {
             explosive_z: explosive_z,
             explosive_r: explosive_r,
             remap_radius: remap_radius,
+            bc_x_min: bc_x_min,
+            bc_x_max: bc_x_max,
+            bc_y_min: bc_y_min,
+            bc_y_max: bc_y_max,
+            bc_z_min: bc_z_min,
+            bc_z_max: bc_z_max,
             r_1d: r_1d,
             states_1d: states_1d,
             rho_1d: rho_1d,
@@ -902,7 +901,7 @@ function tryRemapFrom2D(targetModelId: string, pipe: any): boolean {
     try {
         const meshConn2D = model2d?.connections.find(c => c.toNode === solver2DNode!.id && c.toPort === 'mesh');
         const meshNode2D = meshConn2D ? model2d?.nodes.find(n => n.id === meshConn2D.fromNode) : null;
-        const cell_size = Number(meshNode2D?.parameters?.cell_size ?? 0.005);
+        const raw_cell_size = Number(meshNode2D?.parameters?.cell_size ?? 0.005);
         const max_r = Number(meshNode2D?.parameters?.max_r ?? 1.0);
         const max_z = Number(meshNode2D?.parameters?.max_z ?? 1.0);
 
@@ -911,16 +910,103 @@ function tryRemapFrom2D(targetModelId: string, pipe: any): boolean {
         const nz = view.getUint32(4, true);
         const num_materials = view.getUint32(8, true);
         const floats = new Float32Array(telemetry, 12);
+
+        // Adjust 2D cell_size for telemetry stride so 3D spatial extent equals original max_r / max_z
+        const orig_nr = Math.round(max_r / raw_cell_size);
+        const stride = (nr > 0 && orig_nr > 0) ? Math.max(1, Math.round(orig_nr / nr)) : 1;
+        const cell_size = raw_cell_size * stride;
         
         const remapConn = model?.connections.find(c => c.toNode === solver3DNode?.id && c.toPort === 'remap');
         const remapNode = remapConn ? model?.nodes.find(n => n.id === remapConn.fromNode) : null;
 
-        const explosive_x = Number(remapNode?.parameters?.explosive_x ?? 0.5);
-        const explosive_y = Number(remapNode?.parameters?.explosive_y ?? 0.5);
-        const explosive_z = Number(remapNode?.parameters?.explosive_z ?? 0.5);
-        const remap_radius = Number(remapNode?.parameters?.remap_radius ?? 0.5);
+        // Extract 3D target domain parameters
+        const meshConn3D = model?.connections.find(c => c.toNode === solver3DNode?.id && c.toPort === 'mesh');
+        const meshNode3D = meshConn3D ? model?.nodes.find(n => n.id === meshConn3D.fromNode) : null;
+        const cell_size_3d = Number(meshNode3D?.parameters?.cell_size ?? 0.01);
+        const xmin_3d = Number(meshNode3D?.parameters?.xmin ?? meshNode3D?.parameters?.x_min ?? 0.0);
+        const xmax_3d = Number(meshNode3D?.parameters?.xmax ?? meshNode3D?.parameters?.x_max ?? 1.0);
+        const ymin_3d = Number(meshNode3D?.parameters?.ymin ?? meshNode3D?.parameters?.y_min ?? 0.0);
+        const ymax_3d = Number(meshNode3D?.parameters?.ymax ?? meshNode3D?.parameters?.y_max ?? 1.0);
+        const zmin_3d = Number(meshNode3D?.parameters?.zmin ?? meshNode3D?.parameters?.z_min ?? 0.0);
+        const zmax_3d = Number(meshNode3D?.parameters?.zmax ?? meshNode3D?.parameters?.z_max ?? 1.0);
 
-        console.log(`[tryRemapFrom2D] Sending REMAP_2D payload for target ${targetModelId} with ${nr}x${nz} cells. Center: (${explosive_x}, ${explosive_y}, ${explosive_z}), radius: ${remap_radius}`);
+        // Auto-inherit explosive_x/y/z from 3D charge/detonator node if connected, or fallback to domain center
+        const detConn3D = model?.connections.find(c => c.toNode === solver3DNode?.id && (c.toPort === 'detonator' || c.toPort === 'detonator_location'));
+        const detNode3D = detConn3D ? model?.nodes.find(n => n.id === detConn3D.fromNode) : null;
+        const chargeConn3D = model?.connections.find(c => c.toNode === solver3DNode?.id && (c.toPort === 'charge' || c.toPort === 'explosive'));
+        const chargeNode3D = chargeConn3D ? model?.nodes.find(n => n.id === chargeConn3D.fromNode) : null;
+
+        let default_x = (xmin_3d + xmax_3d) / 2.0;
+        let default_y = (ymin_3d + ymax_3d) / 2.0;
+        let default_z = zmin_3d;
+
+        if (detNode3D?.parameters) {
+            default_x = Number(detNode3D.parameters.detonator_x ?? detNode3D.parameters.x ?? default_x);
+            default_y = Number(detNode3D.parameters.detonator_y ?? detNode3D.parameters.y ?? default_y);
+            default_z = Number(detNode3D.parameters.detonator_z ?? detNode3D.parameters.z ?? default_z);
+        } else if (chargeNode3D?.parameters) {
+            default_x = Number(chargeNode3D.parameters.x ?? chargeNode3D.parameters.charge_x ?? default_x);
+            default_y = Number(chargeNode3D.parameters.y ?? chargeNode3D.parameters.charge_y ?? default_y);
+            default_z = Number(chargeNode3D.parameters.z ?? chargeNode3D.parameters.charge_z ?? default_z);
+        }
+
+        const explosive_x = Number(remapNode?.parameters?.explosive_x ?? default_x);
+        const explosive_y = Number(remapNode?.parameters?.explosive_y ?? default_y);
+        const explosive_z = Number(remapNode?.parameters?.explosive_z ?? default_z);
+        const remap_radius = Number(remapNode?.parameters?.remap_radius ?? 0.0);
+        const nx_3d = Math.max(1, Math.round((xmax_3d - xmin_3d) / cell_size_3d));
+        const ny_3d = Math.max(1, Math.round((ymax_3d - ymin_3d) / cell_size_3d));
+        const nz_3d = Math.max(1, Math.round((zmax_3d - zmin_3d) / cell_size_3d));
+        const device = String(solver3DNode?.parameters?.device ?? 'cuda');
+        const precision = String(solver3DNode?.parameters?.precision ?? 'single');
+
+        // Extract 2D source detonator z location
+        const detConn2D = model2d?.connections.find(c => c.toNode === solver2DNode!.id && c.toPort === 'detonator');
+        const detNode2D = detConn2D ? model2d?.nodes.find(n => n.id === detConn2D.fromNode) : null;
+        let source_explosive_z = 0.0;
+        if (detNode2D && detNode2D.parameters) {
+            source_explosive_z = Number(detNode2D.parameters.detonator_z ?? detNode2D.parameters.explosive_z ?? 0.0);
+        } else {
+            const chargeConn2D = model2d?.connections.find(c => c.toNode === solver2DNode!.id && (c.toPort === 'charge' || c.toPort === 'explosive'));
+            const chargeNode2D = chargeConn2D ? model2d?.nodes.find(n => n.id === chargeConn2D.fromNode) : null;
+            if (chargeNode2D && chargeNode2D.parameters) {
+                source_explosive_z = Number(chargeNode2D.parameters.charge_z ?? chargeNode2D.parameters.explosive_z ?? 0.0);
+            }
+        }
+
+        // Extract material and ambient parameters from 2D model
+        const airConn2D = model2d?.connections.find(c => c.toNode === solver2DNode!.id && c.toPort === 'air');
+        const airNode2D = airConn2D ? model2d?.nodes.find(n => n.id === airConn2D.fromNode) : null;
+        const gamma = Number(airNode2D?.parameters?.gamma ?? solver2DNode?.parameters?.gamma ?? 1.4);
+        const atm_p = Number(airNode2D?.parameters?.atm_pressure ?? 101325.0);
+        const atm_t = Number(airNode2D?.parameters?.atm_temperature ?? 288.0);
+        const ambient_rho = atm_p / (287.058 * atm_t);
+
+        const expConn2D = model2d?.connections.find(c => c.toNode === solver2DNode!.id && (c.toPort === 'charge' || c.toPort === 'explosive'));
+        const chargeNode2D = expConn2D ? model2d?.nodes.find(n => n.id === expConn2D.fromNode) : null;
+        const matConn2D = chargeNode2D ? model2d?.connections.find(c => c.toNode === chargeNode2D.id && c.toPort === 'material') : null;
+        const matNode2D = matConn2D ? model2d?.nodes.find(n => n.id === matConn2D.fromNode) : null;
+
+        const matType = matNode2D?.parameters?.material_type ?? 'JWL Charge';
+        const explosive_type = matType === 'Ideal Gas Charge' ? 'MaterialIdealGas' : 'MaterialExplosive';
+        const composition = matNode2D?.parameters?.composition ?? 'TNT';
+        const rho = Number(matNode2D?.parameters?.rho ?? 1630.0);
+        const detonation_energy = Number(matNode2D?.parameters?.detonation_energy ?? 4290000);
+        const det_vel = Number(matNode2D?.parameters?.det_vel ?? 6930);
+        const jwl_A = Number(matNode2D?.parameters?.jwl_A ?? 373.77e9);
+        const jwl_B = Number(matNode2D?.parameters?.jwl_B ?? 3.747e9);
+        const jwl_R1 = Number(matNode2D?.parameters?.jwl_R1 ?? 4.15);
+        const jwl_R2 = Number(matNode2D?.parameters?.jwl_R2 ?? 0.90);
+        const jwl_omega = Number(matNode2D?.parameters?.jwl_omega ?? 0.35);
+
+        const bc_x_min = String(meshNode3D?.parameters?.bc_x_min ?? solver3DNode?.parameters?.bc_x_min ?? 'Reflecting');
+        const bc_x_max = String(meshNode3D?.parameters?.bc_x_max ?? solver3DNode?.parameters?.bc_x_max ?? 'Transmitting');
+        const bc_y_min = String(meshNode3D?.parameters?.bc_y_min ?? solver3DNode?.parameters?.bc_y_min ?? 'Reflecting');
+        const bc_y_max = String(meshNode3D?.parameters?.bc_y_max ?? solver3DNode?.parameters?.bc_y_max ?? 'Transmitting');
+        const bc_z_min = String(meshNode3D?.parameters?.bc_z_min ?? solver3DNode?.parameters?.bc_z_min ?? 'Reflecting');
+        const bc_z_max = String(meshNode3D?.parameters?.bc_z_max ?? solver3DNode?.parameters?.bc_z_max ?? 'Transmitting');
+
+        console.log(`[tryRemapFrom2D] Sending REMAP_2D payload for target ${targetModelId} with ${nr}x${nz} cells. 3D Center: (${explosive_x}, ${explosive_y}, ${explosive_z}), 2D detonator_z: ${source_explosive_z}, radius: ${remap_radius}`);
         networkManager.send({
             command: "REMAP_2D",
             modelId: targetModelId,
@@ -929,11 +1015,40 @@ function tryRemapFrom2D(targetModelId: string, pipe: any): boolean {
             cell_size: cell_size,
             max_r: max_r,
             max_z: max_z,
+            cell_size_3d: cell_size_3d,
+            xmin_3d: xmin_3d,
+            ymin_3d: ymin_3d,
+            zmin_3d: zmin_3d,
+            nx_3d: nx_3d,
+            ny_3d: ny_3d,
+            nz_3d: nz_3d,
+            device: device,
+            precision: precision,
+            bc_x_min: bc_x_min,
+            bc_x_max: bc_x_max,
+            bc_y_min: bc_y_min,
+            bc_y_max: bc_y_max,
+            bc_z_min: bc_z_min,
+            bc_z_max: bc_z_max,
             explosive_x: explosive_x,
             explosive_y: explosive_y,
             explosive_z: explosive_z,
+            source_explosive_z: source_explosive_z,
             remap_radius: remap_radius,
             num_materials: num_materials,
+            gamma: gamma,
+            ambient_rho: ambient_rho,
+            ambient_p: atm_p,
+            explosive_type: explosive_type,
+            composition: composition,
+            rho: rho,
+            detonation_energy: detonation_energy,
+            det_vel: det_vel,
+            jwl_A: jwl_A,
+            jwl_B: jwl_B,
+            jwl_R1: jwl_R1,
+            jwl_R2: jwl_R2,
+            jwl_omega: jwl_omega,
             telemetry_data: Array.from(floats)
         });
         return true;

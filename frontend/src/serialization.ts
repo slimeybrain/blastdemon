@@ -762,12 +762,38 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         if (!flattenedParams['device']) flattenedParams['device'] = 'cpu';
         const remapConn3D = solverNode3D ? state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'remap') : null;
         const remapNode3D = remapConn3D ? state.nodes.find(n => n.id === remapConn3D.fromNode) : null;
-        if (!flattenedParams['init_mode']) {
-            if (remapNode3D?.type === 'Remap2DTo3DNode') {
+        if (remapNode3D) {
+            // Find incoming connection to remap node
+            const remapInConn = state.connections.find(c => c.toNode === remapNode3D.id);
+            const sourceSolverNode = remapInConn ? state.nodes.find(n => n.id === remapInConn.fromNode) : null;
+
+            let sourceMatNode: any = null;
+            if (sourceSolverNode) {
+                const chargeConn = state.connections.find(c => c.toNode === sourceSolverNode.id && (c.toPort === 'charge' || c.toPort === 'explosive'));
+                const chargeNode = chargeConn ? state.nodes.find(n => n.id === chargeConn.fromNode) : null;
+                if (chargeNode) {
+                    const matConn = state.connections.find(c => c.toNode === chargeNode.id && c.toPort === 'material');
+                    if (matConn) {
+                        sourceMatNode = state.nodes.find(n => n.id === matConn.fromNode);
+                    }
+                }
+            }
+
+            const matType = sourceMatNode?.parameters?.material_type;
+            const expType = sourceMatNode?.parameters?.explosive_type || flattenedParams['explosive_type'];
+            const isIdealGasSource = matType === 'Ideal Gas Charge' || matType === 'Ideal Gas' || expType === 'MaterialIdealGas';
+
+            if (isIdealGasSource) {
+                flattenedParams['explosive_type'] = 'MaterialIdealGas';
+                flattenedParams['material_type'] = 'Ideal Gas Charge';
+                flattenedParams['init_mode'] = 'Ideal Gas';
+            } else if (remapNode3D.type === 'Remap2DTo3DNode') {
                 flattenedParams['init_mode'] = 'From2D';
-            } else if (remapConn3D) {
+            } else {
                 flattenedParams['init_mode'] = 'From1D';
-            } else if (flattenedParams['explosive_type'] === 'MaterialIdealGas') {
+            }
+        } else if (!flattenedParams['init_mode'] || flattenedParams['init_mode'] === 'From1D' || flattenedParams['init_mode'] === 'From2D') {
+            if (flattenedParams['explosive_type'] === 'MaterialIdealGas') {
                 flattenedParams['init_mode'] = 'Ideal Gas';
             } else {
                 flattenedParams['init_mode'] = 'Multi-Material JWL';

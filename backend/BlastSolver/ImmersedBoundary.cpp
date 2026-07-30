@@ -750,7 +750,10 @@ void voxelize_primitives(
         if (triangles.empty()) continue;
 
         std::vector<GeometryTile3D> temp_geom(total_tiles);
-        std::string prim_voxel_method = item.value("voxelization_method", voxelization_method);
+        std::string prim_voxel_method = item.value("voxelization_method", "use_node_default");
+        if (prim_voxel_method == "use_node_default" || prim_voxel_method.empty()) {
+            prim_voxel_method = voxelization_method;
+        }
         if (subtractive && prim_voxel_method == "thin_shell") {
             prim_voxel_method = "watertight_floodfill";
         }

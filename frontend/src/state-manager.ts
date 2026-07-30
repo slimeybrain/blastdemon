@@ -1627,7 +1627,7 @@ export class StateManager {
                 explosive_x: 0.5,
                 explosive_y: 0.5,
                 explosive_z: 0.5,
-                remap_radius: 0.5,
+                remap_radius: 0.0,
                 trigger_type: 'end',
                 trigger_val: 0.0
             },
@@ -1635,7 +1635,7 @@ export class StateManager {
                 explosive_x: 0.5,
                 explosive_y: 0.5,
                 explosive_z: 0.5,
-                remap_radius: 0.5,
+                remap_radius: 0.0,
                 trigger_type: 'end',
                 trigger_val: 0.0
             },
@@ -1862,7 +1862,7 @@ export class StateManager {
                         prim.subtractive = false;
                     }
                     if (prim.voxelization_method === undefined) {
-                        prim.voxelization_method = 'watertight_floodfill';
+                        prim.voxelization_method = 'use_node_default';
                     }
                 });
             }

@@ -273,7 +273,7 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setInitialCondition(const Charg
         }
     }
     if (grid_manager && grid_manager->getSubMeshCount() > 0) {
-        grid_manager->syncRootFromTiles(states_pool, nx, ny, nz, n_tiles_x, n_tiles_y, (RealType)gamma);
+        grid_manager->syncRootFromTiles(states_pool, nx, ny, nz, n_tiles_x, n_tiles_y, (RealType)gamma, &currentMaterials);
         RealType p_exp = (RealType)materials.unreacted.rho0 * (RealType)materials.detonation_energy * ((RealType)gamma - (RealType)1.0);
         grid_manager->initializeExplosiveSuperSampled(charge, (RealType)materials.unreacted.rho0, p_exp, (RealType)gamma);
         grid_manager->syncRootToTiles(states_pool, nx, ny, nz, n_tiles_x, n_tiles_y);
@@ -1199,8 +1199,9 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::applyBC() {}
 
 template <typename RealType, bool IsMultiMaterial>
 double CFDSolver3DImpl<RealType, IsMultiMaterial>::computeStepSize(double cfl) const {
-    RealType max_s = (RealType)1e-6;
     int n_active = (int)active_tile_indices.size();
+    if (n_active == 0) return 1e-6;
+    RealType max_s = (RealType)1e-6;
 
     #pragma omp parallel for reduction(max:max_s) schedule(guided)
     for (int a = 0; a < n_active; ++a) {
@@ -1213,11 +1214,9 @@ double CFDSolver3DImpl<RealType, IsMultiMaterial>::computeStepSize(double cfl) c
             RealType c;
             if constexpr (IsMultiMaterial) {
                 c = MultiMat::getMixtureSoundSpeed(tile.p[i], tile.rho[i], tile.alpha1[i], tile.alpha2[i], tile.arho1[i], tile.arho2[i], (RealType)gamma, currentMaterials.products, currentMaterials.unreacted);
-                RealType a1 = tile.alpha1[i];
                 RealType a2 = tile.alpha2[i];
-                RealType ar1 = tile.arho1[i];
                 RealType ar2 = tile.arho2[i];
-                if (a1 > (RealType)1e-4 || a2 > (RealType)1e-4 || (ar1 + ar2) > (RealType)1e-4) {
+                if (a2 > (RealType)1e-4 && ar2 > (RealType)10.0 && currentMaterials.det_vel > 0.0) {
                     c = max(c, (RealType)currentMaterials.det_vel);
                 }
             } else {
@@ -1731,12 +1730,14 @@ std::vector<SlicePayload3D> CFDSolver3DImpl<RealType, IsMultiMaterial>::extractA
 extern void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<MultiMaterialState>& states_1d,
                     CFDSolver3D& solver_3d, double x_expl, double y_expl, double z_expl, double R_remap);
 extern void remap_2d_to_3d(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d,
-                    CFDSolver3D& solver_3d, double x_expl, double y_expl, double z_expl, double R_remap);
+                    CFDSolver3D& solver_3d, double x_expl, double y_expl, double z_expl, double R_remap, double source_explosive_z = 0.0);
 
 template <typename RealType, bool IsMultiMaterial>
 void CFDSolver3DImpl<RealType, IsMultiMaterial>::initializeFrom1D(const std::vector<double>& r_1d, const std::vector<MultiMaterialState>& states_1d, double x_expl, double y_expl, double z_expl, double R_remap) {
-    double amb_rho = states_1d.back().rho;
-    double amb_p = states_1d.back().p;
+    currentTime = 0.0;
+    const auto& outer_state_1d = states_1d.back();
+    double amb_rho = (this->ambient_rho > 0.0) ? this->ambient_rho : outer_state_1d.rho;
+    double amb_p = (this->ambient_p > 0.0) ? this->ambient_p : outer_state_1d.p;
     ambient_rho = amb_rho;
     ambient_p = amb_p;
 
@@ -1752,12 +1753,12 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::initializeFrom1D(const std::vec
             tile.p[i] = (RealType)amb_p;
             CellState3D<IsMultiMaterial> temp_s;
             if constexpr (IsMultiMaterial) {
-                temp_s.alpha1 = 0.0; temp_s.alpha2 = 1.0;
-                temp_s.arho1 = 0.0; temp_s.arho2 = amb_rho;
+                temp_s.alpha1 = 0.0; temp_s.alpha2 = 0.0;
+                temp_s.arho1 = 0.0; temp_s.arho2 = 0.0;
                 tile.alpha1[i] = 0.0;
-                tile.alpha2[i] = 1.0;
+                tile.alpha2[i] = 0.0;
                 tile.arho1[i] = 0.0;
-                tile.arho2[i] = (RealType)amb_rho;
+                tile.arho2[i] = 0.0;
             }
             tile.floor_status[i] = 0;
             tile.peak_overpressure[i] = 0.0;
@@ -1771,9 +1772,9 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::initializeFrom1D(const std::vec
             u_tile.E[i] = (RealType)getEnergy3D<IsMultiMaterial>(amb_p, amb_rho, temp_s, gamma, currentMaterials.products, currentMaterials.unreacted);
             if constexpr (IsMultiMaterial) {
                 u_tile.alpha1[i] = 0.0;
-                u_tile.alpha2[i] = 1.0;
+                u_tile.alpha2[i] = 0.0;
                 u_tile.arho1[i] = 0.0;
-                u_tile.arho2[i] = (RealType)amb_rho;
+                u_tile.arho2[i] = 0.0;
             }
         }
     }
@@ -1786,14 +1787,68 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::initializeFrom1D(const std::vec
         for (auto& sm : grid_manager->getSubMeshes()) {
             remap_1d_to_submesh(r_1d, states_1d, *sm, x_expl, y_expl, z_expl, R_remap, (double)gamma, currentMaterials, is_ideal_gas_val);
         }
+        int n_ghost = (spatialOrder >= 2) ? 2 : 1;
+        grid_manager->restrictAllToRoot(n_ghost);
+        grid_manager->syncRootToTiles(states_pool, nx, ny, nz, n_tiles_x, n_tiles_y);
+    }
+    commitStates();
+
+    double cell_sz_1d = (double)cellSize;
+    #pragma omp parallel for
+    for (int t = 0; t < (int)states_pool.size(); ++t) {
+        int tx = t % n_tiles_x;
+        int ty = (t / n_tiles_x) % n_tiles_y;
+        int tz = t / (n_tiles_x * n_tiles_y);
+        double t_x = xmin + (tx + 0.5) * TILE_SIZE_3D * cell_sz_1d;
+        double t_y = ymin + (ty + 0.5) * TILE_SIZE_3D * cell_sz_1d;
+        double t_z = zmin + (tz + 0.5) * TILE_SIZE_3D * cell_sz_1d;
+        double dist = std::sqrt((t_x - x_expl)*(t_x - x_expl) + (t_y - y_expl)*(t_y - y_expl) + (t_z - z_expl)*(t_z - z_expl));
+        if (dist <= R_remap + TILE_SIZE_3D * cell_sz_1d * 1.5) {
+            active_tiles[t] = 1;
+        }
+    }
+
+    active_tile_indices.clear();
+    for (int t = 0; t < (int)states_pool.size(); ++t) {
+        if (active_tiles[t]) {
+            active_tile_indices.push_back(t);
+        } else {
+            auto& tile = states_pool[t];
+            auto& u_tile = U_pool[t];
+            for (int i = 0; i < TILE_CELLS_3D; ++i) {
+                tile.rho[i] = (RealType)ambient_rho;
+                tile.ux[i] = 0.0; tile.uy[i] = 0.0; tile.uz[i] = 0.0;
+                tile.p[i] = (RealType)ambient_p;
+                if constexpr (IsMultiMaterial) {
+                    tile.alpha1[i] = 0.0; tile.alpha2[i] = 0.0;
+                    tile.arho1[i] = 0.0; tile.arho2[i] = 0.0;
+                }
+                tile.floor_status[i] = 0;
+                tile.peak_overpressure[i] = 0.0;
+                tile.running_impulse[i] = 0.0;
+                tile.peak_impulse[i] = 0.0;
+
+                u_tile.rho[i] = (RealType)ambient_rho;
+                u_tile.rhoux[i] = 0.0; u_tile.rhouy[i] = 0.0; u_tile.rhouz[i] = 0.0;
+                if constexpr (IsMultiMaterial) {
+                    u_tile.alpha1[i] = 0.0; u_tile.alpha2[i] = 0.0;
+                    u_tile.arho1[i] = 0.0; u_tile.arho2[i] = 0.0;
+                    u_tile.E[i] = (RealType)MultiMat::getMixtureEnergy((double)ambient_p, (double)ambient_rho, 0.0, 0.0, 0.0, 0.0, (double)gamma, currentMaterials.products, currentMaterials.unreacted);
+                } else {
+                    u_tile.E[i] = (RealType)ambient_p / (gamma - (RealType)1.0);
+                }
+            }
+        }
     }
 }
 
 template <typename RealType, bool IsMultiMaterial>
-void CFDSolver3DImpl<RealType, IsMultiMaterial>::initializeFrom2D(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d, double x_expl, double y_expl, double z_expl, double R_remap) {
+void CFDSolver3DImpl<RealType, IsMultiMaterial>::initializeFrom2D(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d, double x_expl, double y_expl, double z_expl, double R_remap, double source_explosive_z) {
+    currentTime = 0.0;
     if (states_2d.empty()) return;
-    double amb_rho = states_2d.back().rho;
-    double amb_p = states_2d.back().p;
+    const auto& outer_state_2d = states_2d.back();
+    double amb_rho = (this->ambient_rho > 0.0) ? this->ambient_rho : outer_state_2d.rho;
+    double amb_p = (this->ambient_p > 0.0) ? this->ambient_p : outer_state_2d.p;
     ambient_rho = amb_rho;
     ambient_p = amb_p;
 
@@ -1807,10 +1862,10 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::initializeFrom2D(int nr, int nz
             tile.p[i] = (RealType)amb_p;
             CellState3D<IsMultiMaterial> temp_s;
             if constexpr (IsMultiMaterial) {
-                temp_s.alpha1 = 0.0; temp_s.alpha2 = 1.0;
-                temp_s.arho1 = 0.0; temp_s.arho2 = amb_rho;
-                tile.alpha1[i] = 0.0; tile.alpha2[i] = 1.0;
-                tile.arho1[i] = 0.0; tile.arho2[i] = (RealType)amb_rho;
+                temp_s.alpha1 = 0.0; temp_s.alpha2 = 0.0;
+                temp_s.arho1 = 0.0; temp_s.arho2 = 0.0;
+                tile.alpha1[i] = 0.0; tile.alpha2[i] = 0.0;
+                tile.arho1[i] = 0.0; tile.arho2[i] = 0.0;
             }
             tile.floor_status[i] = 0;
             tile.peak_overpressure[i] = 0.0;
@@ -1821,19 +1876,73 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::initializeFrom2D(int nr, int nz
             u_tile.rhoux[i] = 0.0; u_tile.rhouy[i] = 0.0; u_tile.rhouz[i] = 0.0;
             u_tile.E[i] = (RealType)getEnergy3D<IsMultiMaterial>(amb_p, amb_rho, temp_s, gamma, currentMaterials.products, currentMaterials.unreacted);
             if constexpr (IsMultiMaterial) {
-                u_tile.alpha1[i] = 0.0; u_tile.alpha2[i] = 1.0;
-                u_tile.arho1[i] = 0.0; u_tile.arho2[i] = (RealType)amb_rho;
+                u_tile.alpha1[i] = 0.0; u_tile.alpha2[i] = 0.0;
+                u_tile.arho1[i] = 0.0; u_tile.arho2[i] = 0.0;
             }
         }
     }
     active_tiles.assign(states_pool.size(), 0);
 
-    remap_2d_to_3d(nr, nz, dr, dz, states_2d, *this, x_expl, y_expl, z_expl, R_remap);
+    remap_2d_to_3d(nr, nz, dr, dz, states_2d, *this, x_expl, y_expl, z_expl, R_remap, source_explosive_z);
 
     if (grid_manager && grid_manager->getSubMeshCount() > 0) {
         grid_manager->syncRootFromTiles(states_pool, nx, ny, nz, n_tiles_x, n_tiles_y, (RealType)gamma);
         for (auto& sm : grid_manager->getSubMeshes()) {
-            remap_2d_to_submesh(nr, nz, dr, dz, states_2d, *sm, x_expl, y_expl, z_expl, R_remap, (double)gamma, currentMaterials, is_ideal_gas_val);
+            remap_2d_to_submesh(nr, nz, dr, dz, states_2d, *sm, x_expl, y_expl, z_expl, R_remap, (double)gamma, currentMaterials, is_ideal_gas_val, source_explosive_z);
+        }
+        int n_ghost = (spatialOrder >= 2) ? 2 : 1;
+        grid_manager->restrictAllToRoot(n_ghost);
+        grid_manager->syncRootToTiles(states_pool, nx, ny, nz, n_tiles_x, n_tiles_y);
+    }
+    commitStates();
+
+    double max_extent_2d = std::max((double)(nr * dr), (double)(nz * dz));
+    double cut_r = (R_remap > 0.0) ? R_remap : max_extent_2d;
+    double cell_sz_2d = (double)cellSize;
+    #pragma omp parallel for
+    for (int t = 0; t < (int)states_pool.size(); ++t) {
+        int tx = t % n_tiles_x;
+        int ty = (t / n_tiles_x) % n_tiles_y;
+        int tz = t / (n_tiles_x * n_tiles_y);
+        double t_x = xmin + (tx + 0.5) * TILE_SIZE_3D * cell_sz_2d;
+        double t_y = ymin + (ty + 0.5) * TILE_SIZE_3D * cell_sz_2d;
+        double t_z = zmin + (tz + 0.5) * TILE_SIZE_3D * cell_sz_2d;
+        double dist = std::sqrt((t_x - x_expl)*(t_x - x_expl) + (t_y - y_expl)*(t_y - y_expl) + (t_z - z_expl)*(t_z - z_expl));
+        if (dist <= cut_r + TILE_SIZE_3D * cell_sz_2d * 1.5) {
+            active_tiles[t] = 1;
+        }
+    }
+
+    active_tile_indices.clear();
+    for (int t = 0; t < (int)states_pool.size(); ++t) {
+        if (active_tiles[t]) {
+            active_tile_indices.push_back(t);
+        } else {
+            auto& tile = states_pool[t];
+            auto& u_tile = U_pool[t];
+            for (int i = 0; i < TILE_CELLS_3D; ++i) {
+                tile.rho[i] = (RealType)ambient_rho;
+                tile.ux[i] = 0.0; tile.uy[i] = 0.0; tile.uz[i] = 0.0;
+                tile.p[i] = (RealType)ambient_p;
+                if constexpr (IsMultiMaterial) {
+                    tile.alpha1[i] = 0.0; tile.alpha2[i] = 0.0;
+                    tile.arho1[i] = 0.0; tile.arho2[i] = 0.0;
+                }
+                tile.floor_status[i] = 0;
+                tile.peak_overpressure[i] = 0.0;
+                tile.running_impulse[i] = 0.0;
+                tile.peak_impulse[i] = 0.0;
+
+                u_tile.rho[i] = (RealType)ambient_rho;
+                u_tile.rhoux[i] = 0.0; u_tile.rhouy[i] = 0.0; u_tile.rhouz[i] = 0.0;
+                if constexpr (IsMultiMaterial) {
+                    u_tile.alpha1[i] = 0.0; u_tile.alpha2[i] = 0.0;
+                    u_tile.arho1[i] = 0.0; u_tile.arho2[i] = 0.0;
+                    u_tile.E[i] = (RealType)MultiMat::getMixtureEnergy((double)ambient_p, (double)ambient_rho, 0.0, 0.0, 0.0, 0.0, (double)gamma, currentMaterials.products, currentMaterials.unreacted);
+                } else {
+                    u_tile.E[i] = (RealType)ambient_p / (gamma - (RealType)1.0);
+                }
+            }
         }
     }
 }
@@ -1841,19 +1950,19 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::initializeFrom2D(int nr, int nz
 
 template <typename RealType, bool IsMultiMaterial>
 void CFDSolver3DImpl<RealType, IsMultiMaterial>::setCellStateMulti(int gx, int gy, int gz, const CellState3D<true>& s) {
+    int t_idx = (gx / TILE_SIZE_3D) + (gy / TILE_SIZE_3D) * n_tiles_x + (gz / TILE_SIZE_3D) * n_tiles_x * n_tiles_y;
+    int c_idx = (gx % TILE_SIZE_3D) + (gy % TILE_SIZE_3D) * TILE_SIZE_3D + (gz % TILE_SIZE_3D) * TILE_SIZE_3D * TILE_SIZE_3D;
+    auto& tile = states_pool[t_idx];
+    tile.rho[c_idx] = (RealType)s.rho; tile.ux[c_idx] = (RealType)s.ux; tile.uy[c_idx] = (RealType)s.uy; tile.uz[c_idx] = (RealType)s.uz;
+    tile.p[c_idx] = (RealType)s.p;
     if constexpr (IsMultiMaterial) {
-        int t_idx = (gx / TILE_SIZE_3D) + (gy / TILE_SIZE_3D) * n_tiles_x + (gz / TILE_SIZE_3D) * n_tiles_x * n_tiles_y;
-        int c_idx = (gx % TILE_SIZE_3D) + (gy % TILE_SIZE_3D) * TILE_SIZE_3D + (gz % TILE_SIZE_3D) * TILE_SIZE_3D * TILE_SIZE_3D;
-        auto& tile = states_pool[t_idx];
-        tile.rho[c_idx] = (RealType)s.rho; tile.ux[c_idx] = (RealType)s.ux; tile.uy[c_idx] = (RealType)s.uy; tile.uz[c_idx] = (RealType)s.uz;
-        tile.p[c_idx] = (RealType)s.p;
         tile.alpha1[c_idx] = (RealType)s.alpha1; tile.alpha2[c_idx] = (RealType)s.alpha2;
         tile.arho1[c_idx] = (RealType)s.arho1; tile.arho2[c_idx] = (RealType)s.arho2;
-        tile.peak_overpressure[c_idx] = 0.0;
-        tile.running_impulse[c_idx] = 0.0;
-        tile.peak_impulse[c_idx] = 0.0;
-        active_tiles[t_idx] = 1;
     }
+    tile.peak_overpressure[c_idx] = 0.0;
+    tile.running_impulse[c_idx] = 0.0;
+    tile.peak_impulse[c_idx] = 0.0;
+    active_tiles[t_idx] = 1;
 }
 
 template <typename RealType, bool IsMultiMaterial>
@@ -1878,7 +1987,6 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::commitStates() {
     
     #pragma omp parallel for
     for (int t = 0; t < (int)states_pool.size(); ++t) {
-        if (!active_tiles[t]) continue;
         const auto& state_tile = states_pool[t];
         auto& u_tile = U_pool[t];
         for (int i = 0; i < TILE_CELLS_3D; ++i) {

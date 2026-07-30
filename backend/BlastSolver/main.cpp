@@ -1000,15 +1000,25 @@ void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFD
                 s.u = ur_1d[i];
                 s.p = p_1d[i];
                 s.alpha1 = 0.0;
-                s.alpha2 = 1.0;
+                s.alpha2 = 0.0;
                 s.arho1 = 0.0;
-                s.arho2 = s.rho;
+                s.arho2 = 0.0;
                 s.E = s.p / (gamma - 1.0) + 0.5 * s.rho * s.u * s.u;
                 states_1d.push_back(s);
             }
         }
 
         if (solver_3d) {
+            auto map_bc_3d = [](const std::string& str) {
+                if (str == "Transmitting" || str == "TRANSMISSIVE") return BCType3D::TRANSMISSIVE;
+                if (str == "Terminate" || str == "OUTFLOW_RIEMANN") return BCType3D::OUTFLOW_RIEMANN;
+                return BCType3D::REFLECTIVE;
+            };
+            solver_3d->setBoundaryConditions(
+                map_bc_3d(msg.value("bc_x_min", "Reflecting")), map_bc_3d(msg.value("bc_x_max", "Transmitting")),
+                map_bc_3d(msg.value("bc_y_min", "Reflecting")), map_bc_3d(msg.value("bc_y_max", "Transmitting")),
+                map_bc_3d(msg.value("bc_z_min", "Reflecting")), map_bc_3d(msg.value("bc_z_max", "Transmitting"))
+            );
             solver_3d->setGamma(gamma);
             solver_3d->setIdealGas(is_ideal_gas);
             solver_3d->setMaterialParameters(matSet);
@@ -1046,12 +1056,15 @@ void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFD
         int nr = msg.value("nr", 100);
         int nz = msg.value("nz", 100);
         double cell_size = msg.value("cell_size", 0.005);
-        double dr = cell_size;
-        double dz = cell_size;
+        double max_r = msg.value("max_r", (double)nr * cell_size);
+        double max_z = msg.value("max_z", (double)nz * cell_size);
+        double dr = max_r / nr;
+        double dz = max_z / nz;
         double explosive_x = msg.value("explosive_x", 0.5);
         double explosive_y = msg.value("explosive_y", 0.5);
         double explosive_z = msg.value("explosive_z", 0.5);
-        double remap_radius = msg.value("remap_radius", 0.5);
+        double source_explosive_z = msg.value("source_explosive_z", msg.value("source_z", 0.0));
+        double remap_radius = msg.value("remap_radius", 0.0);
 
         std::vector<State2D> states_2d;
         if (msg.contains("states_2d")) {
@@ -1091,14 +1104,79 @@ void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFD
 
         double gamma_val = msg.value("gamma", 1.4);
         std::string explosive_type = msg.value("explosive_type", "");
-        bool is_ideal_gas_val = (explosive_type == "MaterialIdealGas" || msg.value("init_mode", "") == "Ideal Gas");
+        std::string material_type = msg.value("material_type", "");
+        bool is_ideal_gas_val = (explosive_type == "MaterialIdealGas" || msg.value("init_mode", "") == "Ideal Gas" || material_type == "Ideal Gas Charge");
+        bool is_multimat_needed = !is_ideal_gas_val;
         MultiMat::MaterialSet matSet_val = parseMaterialSet(msg);
 
+        double amb_p_val = msg.value("ambient_p", msg.value("atm_pressure", 101325.0));
+        double amb_rho_val = msg.value("ambient_rho", 1.225);
+
+        int req_nx = msg.value("nx_3d", msg.value("nx", 64));
+        int req_ny = msg.value("ny_3d", msg.value("ny", 64));
+        int req_nz = msg.value("nz_3d", msg.value("nz", 64));
+        double req_cellSize = msg.value("cell_size_3d", msg.value("cell_size", 0.01));
+
+        bool needs_realloc = false;
+        if (!solver_3d) {
+            needs_realloc = true;
+        } else if (!solver_3d->isMultiMaterial() && is_multimat_needed) {
+            needs_realloc = true;
+        } else if (solver_3d->getNx() != req_nx || solver_3d->getNy() != req_ny || solver_3d->getNz() != req_nz || std::abs(solver_3d->getCellSize() - req_cellSize) > 1e-6) {
+            needs_realloc = true;
+        }
+
+        if (needs_realloc) {
+            std::cout << "[INFO] Allocating/Reallocating 3D solver for REMAP_2D: current solver=" 
+                      << (solver_3d ? (solver_3d->isMultiMaterial() ? "MultiMaterial" : "SingleMaterial") : "null")
+                      << " needed IsMultiMaterial=" << is_multimat_needed << std::endl;
+            int nx_val = req_nx;
+            int ny_val = req_ny;
+            int nz_val = req_nz;
+            double cellSize = req_cellSize;
+            double xmin = msg.value("xmin_3d", msg.value("xmin", 0.0));
+            double ymin = msg.value("ymin_3d", msg.value("ymin", 0.0));
+            double zmin = msg.value("zmin_3d", msg.value("zmin", 0.0));
+            std::string device = msg.value("device", "cuda");
+            std::string precision = msg.value("precision", "single");
+
+            if (device == "cuda") {
+                if (precision == "double") {
+                    if (is_multimat_needed) global_solver_3d = std::make_unique<CFDSolver3DCuda<double, true>>(nx_val, ny_val, nz_val, cellSize, xmin, ymin, zmin);
+                    else global_solver_3d = std::make_unique<CFDSolver3DCuda<double, false>>(nx_val, ny_val, nz_val, cellSize, xmin, ymin, zmin);
+                } else {
+                    if (is_multimat_needed) global_solver_3d = std::make_unique<CFDSolver3DCuda<float, true>>(nx_val, ny_val, nz_val, cellSize, xmin, ymin, zmin);
+                    else global_solver_3d = std::make_unique<CFDSolver3DCuda<float, false>>(nx_val, ny_val, nz_val, cellSize, xmin, ymin, zmin);
+                }
+            } else {
+                if (precision == "double") {
+                    if (is_multimat_needed) global_solver_3d = std::make_unique<CFDSolver3DImpl<double, true>>(nx_val, ny_val, nz_val, cellSize, xmin, ymin, zmin);
+                    else global_solver_3d = std::make_unique<CFDSolver3DImpl<double, false>>(nx_val, ny_val, nz_val, cellSize, xmin, ymin, zmin);
+                } else {
+                    if (is_multimat_needed) global_solver_3d = std::make_unique<CFDSolver3DImpl<float, true>>(nx_val, ny_val, nz_val, cellSize, xmin, ymin, zmin);
+                    else global_solver_3d = std::make_unique<CFDSolver3DImpl<float, false>>(nx_val, ny_val, nz_val, cellSize, xmin, ymin, zmin);
+                }
+            }
+            solver_3d = global_solver_3d.get();
+        }
+
         if (solver_3d && !states_2d.empty()) {
+            auto map_bc_3d = [](const std::string& str) {
+                if (str == "Transmitting" || str == "TRANSMISSIVE") return BCType3D::TRANSMISSIVE;
+                if (str == "Terminate" || str == "OUTFLOW_RIEMANN") return BCType3D::OUTFLOW_RIEMANN;
+                return BCType3D::REFLECTIVE;
+            };
+            solver_3d->setBoundaryConditions(
+                map_bc_3d(msg.value("bc_x_min", "Reflecting")), map_bc_3d(msg.value("bc_x_max", "Transmitting")),
+                map_bc_3d(msg.value("bc_y_min", "Reflecting")), map_bc_3d(msg.value("bc_y_max", "Transmitting")),
+                map_bc_3d(msg.value("bc_z_min", "Reflecting")), map_bc_3d(msg.value("bc_z_max", "Transmitting"))
+            );
+
             solver_3d->setGamma(gamma_val);
             solver_3d->setIdealGas(is_ideal_gas_val);
             solver_3d->setMaterialParameters(matSet_val);
-            solver_3d->initializeFrom2D(nr, nz, dr, dz, states_2d, explosive_x, explosive_y, explosive_z, remap_radius);
+            solver_3d->setAmbientState(amb_rho_val, amb_p_val);
+            solver_3d->initializeFrom2D(nr, nz, dr, dz, states_2d, explosive_x, explosive_y, explosive_z, remap_radius, source_explosive_z);
             global_t3d = 0.0;
             global_wallclock_3d = 0.0;
             emit_kernel_log("REMAP_2D", "2D->3D remap applied successfully.", 0.0, "3d");
@@ -1120,7 +1198,9 @@ void init_3d_thread_func(nlohmann::json msg) {
         std::string device = msg.value("device", "cpu");
 
         std::string init_mode = msg.value("init_mode", "Multi-Material JWL");
-        bool is_multimat = (init_mode == "Multi-Material JWL");
+        std::string explosive_type = msg.value("explosive_type", "");
+        std::string material_type = msg.value("material_type", "");
+        bool is_multimat = (init_mode != "Ideal Gas" && explosive_type != "MaterialIdealGas" && material_type != "Ideal Gas Charge");
 
         std::unique_ptr<CFDSolver3D> local_solver_3d = nullptr;
         std::string precision = msg.value("precision", "single");
@@ -3605,6 +3685,12 @@ int main() {
                         apply_remap_payload(msg, "1D", nullptr, global_solver_2d.get(), nullptr);
                     } else if (global_solver_2d_cuda) {
                         apply_remap_payload(msg, "1D", nullptr, nullptr, global_solver_2d_cuda.get());
+                    } else {
+                        std::lock_guard<std::mutex> lock(g_pending_remap_mutex);
+                        g_pending_remap.has_pending = true;
+                        g_pending_remap.type = "1D";
+                        g_pending_remap.msg = msg;
+                        emit_kernel_log("REMAP", "Received 1D remap payload before solver creation. Queued for completion.", 0.0, "3d");
                     }
                 } else if (command == "REMAP_2D") {
                     if (sim3d_init_in_progress.load()) {
@@ -3615,6 +3701,12 @@ int main() {
                         emit_kernel_log("REMAP_2D", "Received 2D remap payload during 3D initialization. Queued for completion.", 0.0, "3d");
                     } else if (global_solver_3d) {
                         apply_remap_payload(msg, "2D", global_solver_3d.get(), nullptr, nullptr);
+                    } else {
+                        std::lock_guard<std::mutex> lock(g_pending_remap_mutex);
+                        g_pending_remap.has_pending = true;
+                        g_pending_remap.type = "2D";
+                        g_pending_remap.msg = msg;
+                        emit_kernel_log("REMAP_2D", "Received 2D remap payload before solver creation. Queued for completion.", 0.0, "3d");
                     }
                 } else if (command == "STEP_3D") {
                     if (sim3d_init_in_progress.load()) {
@@ -3671,6 +3763,7 @@ int main() {
                     global_solver_3d.reset();
                     sim3d_terminate = false;
                     sim3d_paused = false;
+                    sim3d_init_in_progress = true;
                     global_t3d = 0.0;
                     global_wallclock_3d = 0.0;
 

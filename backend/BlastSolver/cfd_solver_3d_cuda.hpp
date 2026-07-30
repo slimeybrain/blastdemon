@@ -60,6 +60,18 @@ struct GPUSubMeshBuffer3D {
     RealType* d_new_arho1 = nullptr;
     RealType* d_new_arho2 = nullptr;
 
+    RealType* d_rk_rho = nullptr;
+    RealType* d_rk_ux = nullptr;
+    RealType* d_rk_uy = nullptr;
+    RealType* d_rk_uz = nullptr;
+    RealType* d_rk_p = nullptr;
+    RealType* d_rk_E = nullptr;
+
+    RealType* d_rk_alpha1 = nullptr;
+    RealType* d_rk_alpha2 = nullptr;
+    RealType* d_rk_arho1 = nullptr;
+    RealType* d_rk_arho2 = nullptr;
+
     RealType* d_rho_old = nullptr;
     RealType* d_ux_old = nullptr;
     RealType* d_uy_old = nullptr;
@@ -167,6 +179,7 @@ private:
     void loadGeometryToGPU(const std::vector<GeometryTile3D>& host_geom, const std::atomic<bool>* terminate_flag);
 
 public:
+    bool isMultiMaterial() const override { return IsMultiMaterial; }
     void updateBoundaryConditions();
     CFDSolver3DCuda(int nx, int ny, int nz, double cellSize, double xmin = 0, double ymin = 0, double zmin = 0);
     ~CFDSolver3DCuda();
@@ -208,7 +221,7 @@ public:
     void retrieveNewGaugeSamples(std::vector<double>& times, std::vector<float>& values) override;
 
     void initializeFrom1D(const std::vector<double>& r_1d, const std::vector<MultiMaterialState>& states_1d, double x_expl, double y_expl, double z_expl, double R_remap) override;
-    void initializeFrom2D(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d, double x_expl, double y_expl, double z_expl, double R_remap) override;
+    void initializeFrom2D(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d, double x_expl, double y_expl, double z_expl, double R_remap, double source_explosive_z = 0.0) override;
 
     void setCellStateMulti(int i, int j, int k, const CellState3D<true>& s) override;
     void setCellStateIdeal(int i, int j, int k, const CellState3D<false>& s) override;
