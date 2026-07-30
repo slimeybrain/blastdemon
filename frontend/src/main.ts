@@ -828,10 +828,12 @@ function tryRemapFrom1D(targetModelId: string, pipe: any): boolean {
         const bc_z_min = String(meshNode3D?.parameters?.bc_z_min ?? solver3DNode?.parameters?.bc_z_min ?? 'Reflecting');
         const bc_z_max = String(meshNode3D?.parameters?.bc_z_max ?? solver3DNode?.parameters?.bc_z_max ?? 'Transmitting');
 
-        console.log(`[tryRemapFrom1D] Sending REMAP payload for target ${targetModelId} with ${n_cells} cells. Center: (${explosive_x}, ${explosive_y}, ${explosive_z}), radius: ${remap_radius}`);
+        const sourceTime = model1d ? stateManager.getModelSimTime(model1d.id) : 0.0;
+        console.log(`[tryRemapFrom1D] Sending REMAP payload for target ${targetModelId} with ${n_cells} cells. Center: (${explosive_x}, ${explosive_y}, ${explosive_z}), radius: ${remap_radius}, sourceTime: ${sourceTime}`);
         networkManager.send({
             command: "REMAP",
             modelId: targetModelId,
+            time: sourceTime,
             explosive_x: explosive_x,
             explosive_y: explosive_y,
             explosive_z: explosive_z,
@@ -1009,10 +1011,12 @@ function tryRemapFrom2D(targetModelId: string, pipe: any): boolean {
         const bc_z_min = String(meshNode3D?.parameters?.bc_z_min ?? solver3DNode?.parameters?.bc_z_min ?? 'Reflecting');
         const bc_z_max = String(meshNode3D?.parameters?.bc_z_max ?? solver3DNode?.parameters?.bc_z_max ?? 'Transmitting');
 
-        console.log(`[tryRemapFrom2D] Sending REMAP_2D payload for target ${targetModelId} with ${nr}x${nz} cells. 3D Center: (${explosive_x}, ${explosive_y}, ${explosive_z}), 2D detonator_z: ${source_explosive_z}, radius: ${remap_radius}`);
+        const sourceTime = model2d ? stateManager.getModelSimTime(model2d.id) : 0.0;
+        console.log(`[tryRemapFrom2D] Sending REMAP_2D payload for target ${targetModelId} with ${nr}x${nz} cells. 3D Center: (${explosive_x}, ${explosive_y}, ${explosive_z}), 2D detonator_z: ${source_explosive_z}, radius: ${remap_radius}, sourceTime: ${sourceTime}`);
         networkManager.send({
             command: "REMAP_2D",
             modelId: targetModelId,
+            time: sourceTime,
             nr: nr,
             nz: nz,
             cell_size: cell_size,

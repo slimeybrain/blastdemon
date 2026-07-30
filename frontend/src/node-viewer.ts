@@ -965,20 +965,28 @@ export class NodeViewer {
 
         const getActiveGaugesBounds = () => {
             const history = this.stateManager.getTelemetry(node.id);
-            const { minVal, maxVal, timesLength } = this.getGaugesBounds(node, this.gaugesChannel, history);
             const defaultMinX = 0;
+            const timesLength = history?.times?.length || 0;
             const defaultMaxX = timesLength - 1 || 1;
+            
+            let activeMinX = defaultMinX;
+            let activeMaxX = defaultMaxX;
             if (this.gaugesZoomedOrPanned) {
-                return {
-                    minX: this.gaugesZoomMinX,
-                    maxX: this.gaugesZoomMaxX,
-                    minY: minVal,
-                    maxY: maxVal
-                };
+                activeMinX = this.gaugesZoomMinX;
+                activeMaxX = this.gaugesZoomMaxX;
             }
+            
+            const { minVal, maxVal } = this.getGaugesBounds(
+                node,
+                this.gaugesChannel,
+                history,
+                this.gaugesZoomedOrPanned ? activeMinX : undefined,
+                this.gaugesZoomedOrPanned ? activeMaxX : undefined
+            );
+            
             return {
-                minX: defaultMinX,
-                maxX: defaultMaxX,
+                minX: activeMinX,
+                maxX: activeMaxX,
                 minY: minVal,
                 maxY: maxVal
             };
@@ -1004,8 +1012,9 @@ export class NodeViewer {
 
                 const dxScreen = mouseX - this.gaugesDragStartX;
 
-                const padding = 40;
-                const plotWidth = rect.width - 2 * padding;
+                const padLeft = 60;
+                const padRight = 30;
+                const plotWidth = rect.width - padLeft - padRight;
 
                 if (plotWidth > 0) {
                     const rangeX = this.gaugesDragStartMaxX - this.gaugesDragStartMinX;
@@ -1036,8 +1045,9 @@ export class NodeViewer {
             const rect = canvas.getBoundingClientRect();
             const mouseX = e.clientX - rect.left;
 
-            const padding = 40;
-            const plotWidth = rect.width - 2 * padding;
+            const padLeft = 60;
+            const padRight = 30;
+            const plotWidth = rect.width - padLeft - padRight;
 
             if (plotWidth <= 0) return;
 
@@ -1045,7 +1055,7 @@ export class NodeViewer {
 
             const zoomFactor = e.deltaY > 0 ? 1.1 : 0.9;
 
-            const pctX = (mouseX - padding) / plotWidth;
+            const pctX = (mouseX - padLeft) / plotWidth;
             const targetX = active.minX + pctX * (active.maxX - active.minX);
             const newRangeX = (active.maxX - active.minX) * zoomFactor;
 
@@ -1805,7 +1815,13 @@ export class NodeViewer {
         tableContainer.appendChild(table);
     }
 
-    private getGaugesBounds(node: Node, channel: number, history: any): { minVal: number; maxVal: number; timesLength: number } {
+    private getGaugesBounds(
+        node: Node,
+        channel: number,
+        history: any,
+        activeMinX?: number,
+        activeMaxX?: number
+    ): { minVal: number; maxVal: number; timesLength: number } {
         const gauges = node.parameters?.gauges || [];
         let minVal = 0;
         let maxVal = 1;
@@ -1814,17 +1830,22 @@ export class NodeViewer {
         if (history && history.times && history.times.length > 0 && history.values) {
             let minV = Infinity;
             let maxV = -Infinity;
+            const startIdx = activeMinX !== undefined ? Math.max(0, Math.floor(activeMinX)) : 0;
+            const endIdx = activeMaxX !== undefined ? Math.min(history.times.length - 1, Math.ceil(activeMaxX)) : history.times.length - 1;
+
             gauges.filter((g: any) => g.plot !== false).forEach((g: any) => {
                 const gData = history.values[g.id || g.name];
                 if (gData && gData[channel]) {
                     const arr = gData[channel];
-                    arr.forEach((v: number) => {
+                    const limit = Math.min(arr.length - 1, endIdx);
+                    for (let i = startIdx; i <= limit; i++) {
+                        const v = arr[i];
                         if (isFinite(v)) {
                             if (v < minV) minV = v;
                             if (v > maxV) maxV = v;
                             hasData = true;
                         }
-                    });
+                    }
                 }
             });
             if (hasData) {
@@ -1860,15 +1881,12 @@ export class NodeViewer {
         const times = history.times;
         const values = history.values;
 
-        const { minVal, maxVal, timesLength } = this.getGaugesBounds(node, channel, history);
-
         const defaultMinX = 0;
+        const timesLength = history?.times?.length || 0;
         const defaultMaxX = timesLength - 1 || 1;
 
         let activeMinX = defaultMinX;
         let activeMaxX = defaultMaxX;
-        const activeMinY = minVal;
-        const activeMaxY = maxVal;
 
         if (this.gaugesZoomedOrPanned) {
             activeMinX = this.gaugesZoomMinX;
@@ -1878,39 +1896,94 @@ export class NodeViewer {
             this.gaugesZoomMaxX = defaultMaxX;
         }
 
-        const padding = 40;
-        const plotWidth = width - 2 * padding;
-        const plotHeight = height - 2 * padding;
+        const { minVal, maxVal } = this.getGaugesBounds(
+            node,
+            channel,
+            history,
+            this.gaugesZoomedOrPanned ? activeMinX : undefined,
+            this.gaugesZoomedOrPanned ? activeMaxX : undefined
+        );
 
-        ctx.strokeStyle = '#333';
+        const padLeft = 60;
+        const padRight = 30;
+        const padTop = 20;
+        const padBottom = 40;
+        const plotWidth = width - padLeft - padRight;
+        const plotHeight = height - padTop - padBottom;
+
+        let activeMinY = minVal;
+        let activeMaxY = maxVal;
+        if (activeMinY === activeMaxY) {
+            activeMinY -= 1.0;
+            activeMaxY += 1.0;
+        } else {
+            const yRange = activeMaxY - activeMinY;
+            activeMinY -= yRange * 0.05;
+            activeMaxY += yRange * 0.05;
+        }
+
+        ctx.strokeStyle = '#475569';
         ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.moveTo(padding, padding);
-        ctx.lineTo(padding, height - padding);
-        ctx.lineTo(width - padding, height - padding);
+        ctx.moveTo(padLeft, padTop);
+        ctx.lineTo(padLeft, height - padBottom);
+        ctx.lineTo(width - padRight, height - padBottom);
         ctx.stroke();
 
         ctx.fillStyle = '#888';
         ctx.font = '9px monospace';
         ctx.textAlign = 'right';
         ctx.textBaseline = 'middle';
-        ctx.fillText(activeMaxY.toExponential(2), padding - 4, padding);
-        ctx.fillText(activeMinY.toExponential(2), padding - 4, height - padding);
 
-        // Display start and end times
-        const tStart = times[Math.max(0, Math.min(times.length - 1, Math.round(activeMinX)))];
-        const tEnd = times[Math.max(0, Math.min(times.length - 1, Math.round(activeMaxX)))];
-        ctx.textAlign = 'left';
-        ctx.fillText(`t = ${tStart.toFixed(5)}s`, padding, height - padding + 12);
-        ctx.textAlign = 'right';
-        ctx.fillText(`t = ${tEnd.toFixed(5)}s`, width - padding, height - padding + 12);
+        const numTicksY = 5;
+        const activeRangeY = activeMaxY - activeMinY || 1;
+        for (let i = 0; i < numTicksY; i++) {
+            const pct = i / (numTicksY - 1);
+            const val = activeMinY + pct * activeRangeY;
+            const y = height - padBottom - pct * plotHeight;
+            
+            ctx.strokeStyle = '#475569';
+            ctx.beginPath();
+            ctx.moveTo(padLeft - 4, y);
+            ctx.lineTo(padLeft, y);
+            ctx.stroke();
+            
+            ctx.fillText(val.toExponential(2), padLeft - 6, y);
+        }
+
+        const getTimeAtIndex = (idx: number) => {
+            if (!times || times.length === 0) return 0;
+            const low = Math.max(0, Math.min(times.length - 1, Math.floor(idx)));
+            const high = Math.max(0, Math.min(times.length - 1, Math.ceil(idx)));
+            if (low === high) return times[low];
+            const frac = idx - low;
+            return times[low] * (1 - frac) + times[high] * frac;
+        };
+
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        const numTicksX = 5;
+        const activeRangeX = activeMaxX - activeMinX || 1;
+        for (let i = 0; i < numTicksX; i++) {
+            const pct = i / (numTicksX - 1);
+            const idx = activeMinX + pct * activeRangeX;
+            const tVal = getTimeAtIndex(idx);
+            const x = padLeft + pct * plotWidth;
+            
+            ctx.strokeStyle = '#475569';
+            ctx.beginPath();
+            ctx.moveTo(x, height - padBottom);
+            ctx.lineTo(x, height - padBottom + 4);
+            ctx.stroke();
+            
+            ctx.fillText(`${tVal.toFixed(5)}s`, x, height - padBottom + 6);
+        }
 
         const colors = ['#38bdf8', '#fb7185', '#34d399', '#fbbf24', '#a78bfa', '#2dd4bf'];
         
         ctx.save();
-        // Clip to the plotting area so lines don't bleed into the axes/padding
         ctx.beginPath();
-        ctx.rect(padding, padding, plotWidth, plotHeight);
+        ctx.rect(padLeft, padTop, plotWidth, plotHeight);
         ctx.clip();
 
         gauges.filter(g => g.plot !== false).forEach((g, gIdx) => {
@@ -1924,8 +1997,8 @@ export class NodeViewer {
                 let first = true;
                 arr.forEach((v: number, i: number) => {
                     if (i >= times.length) return;
-                    const x = padding + ((i - activeMinX) / (activeMaxX - activeMinX || 1)) * plotWidth;
-                    const y = height - padding - ((v - activeMinY) / (activeMaxY - activeMinY || 1)) * plotHeight;
+                    const x = padLeft + ((i - activeMinX) / (activeMaxX - activeMinX || 1)) * plotWidth;
+                    const y = height - padBottom - ((v - activeMinY) / (activeRangeY)) * plotHeight;
                     if (first) {
                         ctx.moveTo(x, y);
                         first = false;
@@ -1940,8 +2013,8 @@ export class NodeViewer {
                     const lastVal = arr[lastIdx];
                     const labelIdx = Math.max(0, Math.min(lastIdx, Math.round(activeMaxX)));
                     const labelVal = arr[labelIdx] !== undefined ? arr[labelIdx] : lastVal;
-                    const x = padding + ((labelIdx - activeMinX) / (activeMaxX - activeMinX || 1)) * plotWidth;
-                    const y = height - padding - ((labelVal - activeMinY) / (activeMaxY - activeMinY || 1)) * plotHeight;
+                    const x = padLeft + ((labelIdx - activeMinX) / (activeMaxX - activeMinX || 1)) * plotWidth;
+                    const y = height - padBottom - ((labelVal - activeMinY) / (activeRangeY)) * plotHeight;
                     ctx.fillStyle = colors[gIdx % colors.length];
                     ctx.font = 'bold 8px monospace';
                     ctx.textAlign = 'left';

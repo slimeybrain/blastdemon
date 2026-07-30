@@ -188,6 +188,7 @@ public:
     virtual double getAmbientP() const = 0;
     virtual double getAmbientRho() const = 0;
     virtual void setAmbientState(double rho, double p) {}
+    virtual void setTime(double t) {}
     virtual size_t getAllocatedVRAM() const { return 0; }
     virtual void setGeometry(const std::string& stl_filepath, const std::string& geometry_hash, const std::string& voxelization_method,
                              const std::atomic<bool>* terminate_flag = nullptr,
@@ -276,6 +277,7 @@ public:
     void setGamma(double g) override { gamma = g; }
     void setIdealGas(bool val) override { is_ideal_gas_val = val; }
     void setMaterialParameters(const MultiMat::MaterialSet& materials) override { currentMaterials = materials; }
+    void setTime(double t) override { currentTime = t; }
     void setGeometry(const std::string& stl_filepath, const std::string& geometry_hash, const std::string& voxelization_method,
                      const std::atomic<bool>* terminate_flag = nullptr,
                      std::function<void(double)> progress_callback = nullptr) override {}

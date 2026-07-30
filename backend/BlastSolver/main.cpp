@@ -1027,10 +1027,12 @@ void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFD
             solver_3d->setMaterialParameters(matSet);
             double explosive_x = msg.value("explosive_x", 0.5);
             double explosive_y = msg.value("explosive_y", 0.5);
+            double start_time = msg.value("time", msg.value("sim_time", 0.0));
             solver_3d->initializeFrom1D(r_1d, states_1d, explosive_x, explosive_y, explosive_z, remap_radius);
-            global_t3d = 0.0;
+            solver_3d->setTime(start_time);
+            global_t3d = start_time;
             global_wallclock_3d = 0.0;
-            emit_kernel_log("REMAP", "1D->3D remap applied successfully.", 0.0, "3d");
+            emit_kernel_log("REMAP", "1D->3D remap applied successfully.", start_time, "3d");
             emit_telemetry_3d(global_t3d, false);
         } else if (solver_2d) {
             solver_2d->setGamma(gamma);
@@ -1183,10 +1185,12 @@ void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFD
             solver_3d->setIdealGas(is_ideal_gas_val);
             solver_3d->setMaterialParameters(matSet_val);
             solver_3d->setAmbientState(amb_rho_val, amb_p_val);
+            double start_time = msg.value("time", msg.value("sim_time", 0.0));
             solver_3d->initializeFrom2D(nr, nz, dr, dz, states_2d, explosive_x, explosive_y, explosive_z, remap_radius, source_explosive_z);
-            global_t3d = 0.0;
+            solver_3d->setTime(start_time);
+            global_t3d = start_time;
             global_wallclock_3d = 0.0;
-            emit_kernel_log("REMAP_2D", "2D->3D remap applied successfully.", 0.0, "3d");
+            emit_kernel_log("REMAP_2D", "2D->3D remap applied successfully.", start_time, "3d");
             emit_telemetry_3d(global_t3d, false);
         }
     }

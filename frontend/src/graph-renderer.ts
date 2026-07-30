@@ -5664,22 +5664,35 @@ export class GraphRenderer {
             let minVal = 0;
             let maxVal = 1;
             let timesLength = 0;
+            const defaultMinX = 0;
+            const defaultMaxX = history && history.times ? history.times.length - 1 || 1 : 1;
+            
+            const zoomedOrPanned = this.gaugesZoomedOrPanned.get(node.id) || false;
+            const activeMinX = zoomedOrPanned ? (this.gaugesZoomMinX.get(node.id) ?? defaultMinX) : defaultMinX;
+            const activeMaxX = zoomedOrPanned ? (this.gaugesZoomMaxX.get(node.id) ?? defaultMaxX) : defaultMaxX;
+
             if (history && history.times && history.times.length > 0 && history.values) {
                 timesLength = history.times.length;
                 let minV = Infinity;
                 let maxV = -Infinity;
                 let hasData = false;
+                
+                const startIdx = zoomedOrPanned ? Math.max(0, Math.floor(activeMinX)) : 0;
+                const endIdx = zoomedOrPanned ? Math.min(timesLength - 1, Math.ceil(activeMaxX)) : timesLength - 1;
+
                 gauges.filter((g: any) => g.plot !== false).forEach((g: any) => {
                     const gData = history.values[g.id];
                     if (gData && gData[currentChannel]) {
                         const arr = gData[currentChannel];
-                        arr.forEach((v: number) => {
+                        const limit = Math.min(arr.length - 1, endIdx);
+                        for (let i = startIdx; i <= limit; i++) {
+                            const v = arr[i];
                             if (isFinite(v)) {
                                 if (v < minV) minV = v;
                                 if (v > maxV) maxV = v;
                                 hasData = true;
                             }
-                        });
+                        }
                     }
                 });
                 if (hasData) {
@@ -5687,21 +5700,10 @@ export class GraphRenderer {
                     maxVal = maxV;
                 }
             }
-            const defaultMinX = 0;
-            const defaultMaxX = timesLength - 1 || 1;
             
-            const zoomedOrPanned = this.gaugesZoomedOrPanned.get(node.id) || false;
-            if (zoomedOrPanned) {
-                return {
-                    minX: this.gaugesZoomMinX.get(node.id) ?? defaultMinX,
-                    maxX: this.gaugesZoomMaxX.get(node.id) ?? defaultMaxX,
-                    minY: minVal,
-                    maxY: maxVal
-                };
-            }
             return {
-                minX: defaultMinX,
-                maxX: defaultMaxX,
+                minX: activeMinX,
+                maxX: activeMaxX,
                 minY: minVal,
                 maxY: maxVal
             };
@@ -5751,7 +5753,7 @@ export class GraphRenderer {
                 
                 const dxScreen = mouseX - (this.gaugesDragStartX.get(node.id) ?? 0);
                 
-                const paddingLeft = 38;
+                const paddingLeft = 50;
                 const paddingRight = 10;
                 const plotWidth = rect.width - paddingLeft - paddingRight;
                 
@@ -5794,7 +5796,7 @@ export class GraphRenderer {
             const rect = canvas.getBoundingClientRect();
             const mouseX = e.clientX - rect.left;
             
-            const paddingLeft = 38;
+            const paddingLeft = 50;
             const paddingRight = 10;
             const plotWidth = rect.width - paddingLeft - paddingRight;
             
@@ -6473,34 +6475,6 @@ export class GraphRenderer {
         const times = history.times;
         const values = history.values; // Record<gaugeId, Record<channelIdx, number[]>>
 
-        // Find min/max values for scaling
-        let minVal = Infinity;
-        let maxVal = -Infinity;
-        let hasData = false;
-
-        gauges.filter(g => g.plot !== false).forEach(g => {
-            const gData = values[g.id || g.name];
-            if (gData && gData[channel]) {
-                const arr = gData[channel];
-                arr.forEach((v: number) => {
-                    if (isFinite(v)) {
-                        if (v < minVal) minVal = v;
-                        if (v > maxVal) maxVal = v;
-                        hasData = true;
-                    }
-                });
-            }
-        });
-
-        if (!hasData) {
-            ctx.fillStyle = '#666';
-            ctx.font = '10px sans-serif';
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillText('No gauge data for selected channel', width / 2, height / 2);
-            return;
-        }
-
         const defaultMinX = 0;
         const defaultMaxX = times.length - 1 || 1;
 
@@ -6516,45 +6490,120 @@ export class GraphRenderer {
             this.gaugesZoomMaxX.set(nodeId, defaultMaxX);
         }
 
-        const paddingLeft = 38;
+        // Find min/max values for scaling over visible range
+        let minVal = Infinity;
+        let maxVal = -Infinity;
+        let hasData = false;
+
+        const startIdx = zoomedOrPanned ? Math.max(0, Math.floor(activeMinX)) : 0;
+        const endIdx = zoomedOrPanned ? Math.min(times.length - 1, Math.ceil(activeMaxX)) : times.length - 1;
+
+        gauges.filter(g => g.plot !== false).forEach(g => {
+            const gData = values[g.id || g.name];
+            if (gData && gData[channel]) {
+                const arr = gData[channel];
+                const limit = Math.min(arr.length - 1, endIdx);
+                for (let i = startIdx; i <= limit; i++) {
+                    const v = arr[i];
+                    if (isFinite(v)) {
+                        if (v < minVal) minVal = v;
+                        if (v > maxVal) maxVal = v;
+                        hasData = true;
+                    }
+                }
+            }
+        });
+
+        if (!hasData) {
+            ctx.fillStyle = '#666';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('No gauge data for selected channel', width / 2, height / 2);
+            return;
+        }
+
+        const paddingLeft = 50;
         const paddingRight = 10;
-        const paddingY = 15;
+        const paddingTop = 15;
+        const paddingBottom = 25;
         const plotWidth = width - paddingLeft - paddingRight;
-        const plotHeight = height - 2 * paddingY;
-        const range = maxVal - minVal === 0 ? 1.0 : maxVal - minVal;
+        const plotHeight = height - paddingTop - paddingBottom;
+
+        let activeMinY = minVal;
+        let activeMaxY = maxVal;
+        if (activeMinY === activeMaxY) {
+            activeMinY -= 1.0;
+            activeMaxY += 1.0;
+        } else {
+            const yRange = activeMaxY - activeMinY;
+            activeMinY -= yRange * 0.05;
+            activeMaxY += yRange * 0.05;
+        }
+
+        const activeRangeY = activeMaxY - activeMinY || 1;
 
         // Draw grid/bounds labels
         ctx.strokeStyle = '#333';
         ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.moveTo(paddingLeft, paddingY);
-        ctx.lineTo(paddingLeft, height - paddingY);
-        ctx.lineTo(width - paddingRight, height - paddingY);
+        ctx.moveTo(paddingLeft, paddingTop);
+        ctx.lineTo(paddingLeft, height - paddingBottom);
+        ctx.lineTo(width - paddingRight, height - paddingBottom);
         ctx.stroke();
 
         ctx.fillStyle = '#888';
         ctx.font = '8px monospace';
         ctx.textAlign = 'right';
         ctx.textBaseline = 'middle';
-        ctx.fillText(maxVal.toExponential(1), paddingLeft - 4, paddingY);
-        ctx.fillText(minVal.toExponential(1), paddingLeft - 4, height - paddingY);
+
+        const numTicksY = 4;
+        for (let i = 0; i < numTicksY; i++) {
+            const pct = i / (numTicksY - 1);
+            const val = activeMinY + pct * activeRangeY;
+            const y = height - paddingBottom - pct * plotHeight;
+            
+            ctx.strokeStyle = '#333';
+            ctx.beginPath();
+            ctx.moveTo(paddingLeft - 4, y);
+            ctx.lineTo(paddingLeft, y);
+            ctx.stroke();
+            
+            ctx.fillText(val.toExponential(1), paddingLeft - 4, y);
+        }
 
         // Display start and end times at the bottom of the chart
-        if (times.length > 0) {
-            const tStart = times[Math.max(0, Math.min(times.length - 1, Math.round(activeMinX)))];
-            const tEnd = times[Math.max(0, Math.min(times.length - 1, Math.round(activeMaxX)))];
-            ctx.fillStyle = '#666';
-            ctx.font = '8px monospace';
-            ctx.textAlign = 'left';
-            ctx.textBaseline = 'top';
-            ctx.fillText(`t=${tStart.toFixed(5)}s`, paddingLeft, height - paddingY + 2);
-            ctx.textAlign = 'right';
-            ctx.fillText(`t=${tEnd.toFixed(5)}s`, width - paddingRight, height - paddingY + 2);
+        const getTimeAtIndex = (idx: number) => {
+            if (!times || times.length === 0) return 0;
+            const low = Math.max(0, Math.min(times.length - 1, Math.floor(idx)));
+            const high = Math.max(0, Math.min(times.length - 1, Math.ceil(idx)));
+            if (low === high) return times[low];
+            const frac = idx - low;
+            return times[low] * (1 - frac) + times[high] * frac;
+        };
+
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        const numTicksX = 4;
+        const activeRangeX = activeMaxX - activeMinX || 1;
+        for (let i = 0; i < numTicksX; i++) {
+            const pct = i / (numTicksX - 1);
+            const idx = activeMinX + pct * activeRangeX;
+            const tVal = getTimeAtIndex(idx);
+            const x = paddingLeft + pct * plotWidth;
+            
+            ctx.strokeStyle = '#333';
+            ctx.beginPath();
+            ctx.moveTo(x, height - paddingBottom);
+            ctx.lineTo(x, height - paddingBottom + 4);
+            ctx.stroke();
+            
+            ctx.fillText(`t=${tVal.toFixed(4)}s`, x, height - paddingBottom + 2);
         }
 
         ctx.save();
         ctx.beginPath();
-        ctx.rect(paddingLeft, paddingY, plotWidth, plotHeight);
+        ctx.rect(paddingLeft, paddingTop, plotWidth, plotHeight);
         ctx.clip();
 
         // Draw curves
@@ -6571,7 +6620,7 @@ export class GraphRenderer {
                 arr.forEach((v: number, i: number) => {
                     if (i >= times.length) return;
                     const x = paddingLeft + ((i - activeMinX) / (activeMaxX - activeMinX || 1)) * plotWidth;
-                    const y = height - paddingY - ((v - minVal) / range) * plotHeight;
+                    const y = height - paddingBottom - ((v - activeMinY) / activeRangeY) * plotHeight;
                     if (first) {
                         ctx.moveTo(x, y);
                         first = false;
