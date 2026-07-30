@@ -9,6 +9,8 @@ set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 # Target the best available GPU architecture automatically
 set(CMAKE_CUDA_ARCHITECTURES native)
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --use_fast_math")
+
 
 # Apply strict compiler warnings and high optimizations
 if(MSVC)
@@ -136,7 +138,7 @@ add_executable(test_benchmark_3d
 )
 target_include_directories(test_benchmark_3d PRIVATE backend/BlastSolver/include)
 set_target_properties(test_benchmark_3d PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-target_compile_options(test_benchmark_3d PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3>)
+target_compile_options(test_benchmark_3d PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3 -Xptxas -v>)
 if(OpenMP_CXX_FOUND)
     target_link_libraries(test_benchmark_3d PRIVATE OpenMP::OpenMP_CXX)
     target_compile_options(test_benchmark_3d PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler -fopenmp>)

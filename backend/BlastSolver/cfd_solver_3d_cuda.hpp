@@ -115,6 +115,8 @@ private:
     mutable void* d_tile_energy = nullptr;
     mutable void* d_tile_is_near_boundary = nullptr;
     mutable bool constants_dirty = true;
+    mutable int step_count = 0;
+
 
     // GPU-side submesh device buffers
     mutable std::vector<GPUSubMeshBuffer3D<RealType>> gpu_submeshes;
