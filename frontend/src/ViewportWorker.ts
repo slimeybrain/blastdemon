@@ -22,6 +22,7 @@ uniform mat4 uProjection;
 uniform mat4 uView;
 uniform mat4 uModel;
 uniform mat4 uStlMatrix;
+uniform float uParticleSize;
 out vec2 vTexCoord;
 out vec2 vSliceSize;
 out vec3 vLocalPos;
@@ -34,6 +35,7 @@ void main() {
     vBoxPos = (uStlMatrix * vec4(position, 1.0)).xyz;
     vViewPos = uView * uModel * vec4(position, 1.0);
     gl_Position = uProjection * vViewPos;
+    gl_PointSize = uParticleSize > 0.0 ? uParticleSize : 4.0;
     vTexCoord = texCoord;
     vSliceSize = sliceSize;
 }
@@ -241,6 +243,11 @@ void main() {
             } else {
                 outColor = baseColor;
             }
+            return;
+        }
+
+        if (uIsWireframe == 14) {
+            outColor = vec4(vTexCoord.x, vTexCoord.y, vSliceSize.x, uAlpha);
             return;
         }
 
@@ -721,6 +728,11 @@ void main() {
 
         if (uIsWireframe == 12) {
             outColor = vec4(0.0, 0.9, 1.0, uAlpha);
+            return;
+        }
+
+        if (uIsWireframe == 14) {
+            outColor = vec4(vTexCoord.x, vTexCoord.y, vSliceSize.x, uAlpha);
             return;
         }
 
@@ -1392,6 +1404,8 @@ let cachedDepthTexture: any = null;
 let cachedDepthView: any = null;
 let cachedWidth = 0;
 let cachedHeight = 0;
+let lastRequestedWidth: number | null = null;
+let lastRequestedHeight: number | null = null;
 
 let gl: WebGL2RenderingContext | null = null;
 let program: WebGLProgram | null = null;
@@ -1609,6 +1623,59 @@ let quantityColormaps: Record<string, string> = {
 let slicesConfig: any[] = [];
 let quantityRanges: Record<string, [number, number]> = {};
 let focusedSliceIndex = 0;
+
+function getSliceConfig(idx: number): any {
+    const slice = cachedSlices[idx];
+    if (!slice) return {};
+    
+    let parentIdx = -1;
+    if (!slice.is_submesh) {
+        parentIdx = idx;
+    } else {
+        // Find parent slice with the same axis and offset
+        for (let j = 0; j < cachedSlices.length; j++) {
+            const p = cachedSlices[j];
+            if (!p.is_submesh && p.axis === slice.axis && Math.abs(p.offset - slice.offset) < 1e-4) {
+                parentIdx = j;
+                break;
+            }
+        }
+    }
+    
+    if (parentIdx === -1) {
+        return {};
+    }
+    
+    // Count how many parent slices exist in cachedSlices before and including parentIdx
+    let parentCount = 0;
+    for (let j = 0; j <= parentIdx; j++) {
+        if (!cachedSlices[j].is_submesh) {
+            parentCount++;
+        }
+    }
+    
+    const configIdx = parentCount - 1;
+    return slicesConfig[configIdx] || {};
+}
+
+function getCachedSliceByParentIndex(parentIdx: number): CachedSlice | undefined {
+    let parentCount = 0;
+    for (let i = 0; i < cachedSlices.length; i++) {
+        if (!cachedSlices[i].is_submesh) {
+            if (parentCount === parentIdx) {
+                return cachedSlices[i];
+            }
+            parentCount++;
+        }
+    }
+    // Fallback: first parent slice
+    for (let i = 0; i < cachedSlices.length; i++) {
+        if (!cachedSlices[i].is_submesh) {
+            return cachedSlices[i];
+        }
+    }
+    return cachedSlices[0];
+}
 
 function buildArrow(axis: number, ox: number, oy: number, oz: number): number[] {
     let D = [0, 0, 0];
@@ -2734,6 +2801,148 @@ let chargeCount: number = 0;
 let chargeWireBuffer: WebGLBuffer | null = null;
 let chargeWireCount: number = 0;
 
+let latestMPMParticlesData: Float32Array | null = null;
+let mpmParticlesBuffer: WebGLBuffer | null = null;
+let mpmParticlesCount: number = 0;
+let showMPMParticles: boolean = true;
+let mpmParticleSize: number = 4.0;
+let mpmParticleQuantity: string = 'vonMises';
+let mpmParticleColormap: string = 'plasma';
+let mpmParticleAutoScale: boolean = true;
+let mpmParticleMinVal: number | undefined = undefined;
+let mpmParticleMaxVal: number | undefined = undefined;
+
+function sampleColormapRGB(v: number, cmapName: string): [number, number, number] {
+    const val = Math.max(0.0, Math.min(1.0, v));
+    switch (cmapName) {
+        case 'plasma': {
+            const r = Math.min(1.0, Math.pow(val, 0.5));
+            const g = Math.pow(val, 2.0) * 0.85;
+            const b = Math.cos(val * Math.PI * 0.5);
+            return [r, Math.max(0, g), Math.max(0, b)];
+        }
+        case 'viridis': {
+            const r = 0.2 + 0.8 * Math.pow(val, 2);
+            const g = Math.sin(val * Math.PI * 0.8);
+            const b = 0.5 + 0.5 * Math.cos(val * Math.PI);
+            return [Math.max(0, Math.min(1.0, r)), Math.max(0, Math.min(1.0, g)), Math.max(0, Math.min(1.0, b))];
+        }
+        case 'coolwarm': {
+            const r = val;
+            const g = 1.0 - Math.abs(val - 0.5) * 2.0;
+            const b = 1.0 - val;
+            return [r, Math.max(0, g), Math.max(0, b)];
+        }
+        case 'rainbow':
+        case 'jet': {
+            const four = 4.0 * val;
+            const r = Math.min(1.0, Math.max(0.0, Math.min(four - 1.5, -four + 4.5)));
+            const g = Math.min(1.0, Math.max(0.0, Math.min(four - 0.5, -four + 3.5)));
+            const b = Math.min(1.0, Math.max(0.0, Math.min(four + 0.5, -four + 2.5)));
+            return [r, g, b];
+        }
+        case 'grayscale': {
+            return [val, val, val];
+        }
+        default: {
+            const r = Math.min(1.0, Math.pow(val, 0.5));
+            const g = Math.pow(val, 2.0) * 0.85;
+            const b = Math.cos(val * Math.PI * 0.5);
+            return [r, Math.max(0, g), Math.max(0, b)];
+        }
+    }
+}
+
+function getParticleQuantityValue(data: Float32Array, idx: number, qty: string): number {
+    const base = idx * 10;
+    if (qty === 'vonMises' || qty === 'von_mises') return data[base + 6];
+    if (qty === 'plastic_strain') return data[base + 7];
+    if (qty === 'density') return data[base + 8];
+    if (qty === 'pressure') return data[base + 9];
+    if (qty === 'velocity') {
+        const vx = data[base + 3], vy = data[base + 4], vz = data[base + 5];
+        return Math.sqrt(vx * vx + vy * vy + vz * vz);
+    }
+    return data[base + 6];
+}
+
+function updateMPMParticlesGeometry(data?: Float32Array) {
+    if (!gl) {
+        self.postMessage({ type: 'log', message: 'updateMPMParticlesGeometry failed: gl is null' });
+        return;
+    }
+    if (data) {
+        latestMPMParticlesData = data;
+    }
+    if (!latestMPMParticlesData || latestMPMParticlesData.length === 0) {
+        mpmParticlesCount = 0;
+        self.postMessage({ type: 'log', message: 'updateMPMParticlesGeometry failed: no latestMPMParticlesData' });
+        return;
+    }
+
+    const nParticles = Math.floor(latestMPMParticlesData.length / 10);
+    const sizeX = getDimX();
+    const sizeY = getDimY();
+    const sizeZ = getDimZ();
+    const sx = 1.0 / sizeX;
+    const sy = 1.0 / sizeY;
+    const sz = 1.0 / sizeZ;
+    const tx = -xmin * sx - 0.5;
+    const ty = -ymin * sy - 0.5;
+    const tz = -zmin * sz - 0.5;
+
+    self.postMessage({
+        type: 'log',
+        message: `updateMPMParticlesGeometry: nParticles = ${nParticles}, size = [${sizeX}, ${sizeY}, ${sizeZ}], min = [${xmin}, ${ymin}, ${zmin}], show = ${showMPMParticles}`
+    });
+
+    let minScalar = mpmParticleMinVal;
+    let maxScalar = mpmParticleMaxVal;
+    if (mpmParticleAutoScale || minScalar === undefined || maxScalar === undefined) {
+        minScalar = Infinity;
+        maxScalar = -Infinity;
+        for (let i = 0; i < nParticles; i++) {
+            const val = getParticleQuantityValue(latestMPMParticlesData, i, mpmParticleQuantity);
+            if (val < minScalar) minScalar = val;
+            if (val > maxScalar) maxScalar = val;
+        }
+        if (!isFinite(minScalar) || !isFinite(maxScalar) || maxScalar <= minScalar) {
+            minScalar = 0.0;
+            maxScalar = 1.0;
+        }
+    }
+
+    const range = Math.max(1e-9, maxScalar - minScalar);
+    const vertexData = new Float32Array(nParticles * 6);
+
+    for (let i = 0; i < nParticles; i++) {
+        const px = latestMPMParticlesData[i * 10 + 0];
+        const py = latestMPMParticlesData[i * 10 + 1];
+        const pz = latestMPMParticlesData[i * 10 + 2];
+
+        const wx = px * sx + tx;
+        const wy = py * sy + ty;
+        const wz = pz * sz + tz;
+
+        const val = getParticleQuantityValue(latestMPMParticlesData, i, mpmParticleQuantity);
+        const normVal = (val - minScalar) / range;
+        const [r, g, b] = sampleColormapRGB(normVal, mpmParticleColormap);
+
+        const vIdx = i * 6;
+        vertexData[vIdx + 0] = wx;
+        vertexData[vIdx + 1] = wy;
+        vertexData[vIdx + 2] = wz;
+        vertexData[vIdx + 3] = r;
+        vertexData[vIdx + 4] = g;
+        vertexData[vIdx + 5] = b;
+    }
+
+    if (!mpmParticlesBuffer) mpmParticlesBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, mpmParticlesBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, vertexData, gl.DYNAMIC_DRAW);
+    mpmParticlesCount = nParticles;
+}
+
 function getBoxVertices(x0: number, x1: number, y0: number, y1: number, z0: number, z1: number): number[] {
     const verts: number[] = [];
     const addTri = (p1: number[], p2: number[], p3: number[]) => {
@@ -3321,8 +3530,26 @@ function padFloatData(src: Float32Array, w: number, h: number): { data: Float32A
 }
 
 function handleFrame(buffer: ArrayBuffer) {
+    if (buffer.byteLength < 16) {
+        self.postMessage({ type: 'log', message: `handleFrame failed: buffer size too small (${buffer.byteLength})` });
+        return;
+    }
     const view = new DataView(buffer);
     const magic = view.getUint32(0, true);
+
+    if (magic === 0x4d504d33) { // "MPM3"
+        const numParticles = view.getUint32(8, true);
+        const floatsPerParticle = view.getUint32(12, true);
+        const particleDataStart = 16;
+        const totalFloats = numParticles * floatsPerParticle;
+        const availableFloats = Math.floor((buffer.byteLength - particleDataStart) / 4);
+        const count = Math.min(totalFloats, availableFloats);
+        self.postMessage({ type: 'log', message: `handleFrame: numParticles = ${numParticles}, floatsPerParticle = ${floatsPerParticle}, count = ${count}` });
+        const floatData = new Float32Array(buffer, particleDataStart, count);
+        updateMPMParticlesGeometry(floatData);
+        return;
+    }
+
     if (magic !== 0x43494c53) return; // "SLIC"
 
     const time = view.getFloat32(4, true);
@@ -3397,14 +3624,14 @@ function handleFrame(buffer: ArrayBuffer) {
                 data: new Float32Array(floatData)
             });
         }
-        cacheOffset = dataStart + (numElements * 4);
+        cacheOffset = dataStart + (actualElements * 4);
     }
 
     // Assign slice-specific ranges and configs
     const sliceRanges: { min: number, max: number }[] = [];
     for (let i = 0; i < cachedSlices.length; i++) {
         const slice = cachedSlices[i];
-        const config = slicesConfig[i] || {};
+        const config = getSliceConfig(i);
         const qty = config.quantities?.[0] || 'pressure';
         const sliceAutoScale = config.auto_scale !== false;
         const colormapVal = quantityColormaps[qty] || config.colormap || 'plasma';
@@ -3421,7 +3648,7 @@ function handleFrame(buffer: ArrayBuffer) {
                 if (v > 0 && v < slicePosMin) slicePosMin = v;
             }
         }
-        const logVal = config.log_scale === true || (sliceMax > 0 && sliceMin > 0 && (sliceMax / sliceMin > 50.0));
+        const logVal = config.log_scale === true || (config.log_scale !== false && sliceMax > 0 && sliceMin > 0 && (sliceMax / sliceMin > 50.0));
 
         let sliceMinY = minY;
         let sliceMaxY = maxY;
@@ -3465,7 +3692,7 @@ function handleFrame(buffer: ArrayBuffer) {
     self.postMessage({ type: 'sliceRanges', ranges: sliceRanges });
 
     // Send dynamic min/max range of the currently focused slice back to the main thread
-    const focusedSlice = cachedSlices[focusedSliceIndex] || cachedSlices[0];
+    const focusedSlice = getCachedSliceByParentIndex(focusedSliceIndex);
     if (focusedSlice) {
         let sliceMin = Infinity;
         let sliceMax = -Infinity;
@@ -4079,9 +4306,9 @@ function handleSetRotationCenterFromClick(mouseX: number, mouseY: number, width:
     // 3. Slices (Solid)
     if (cachedSlices && cachedSlices.length > 0) {
         cachedSlices.forEach((slice, idx) => {
-            const cfg = slicesConfig[idx];
+            const cfg = getSliceConfig(idx);
             if (cfg && cfg.enabled === false) return;
-            const opacity = sliceOpacities[idx] !== undefined ? sliceOpacities[idx] : 1.0;
+            const opacity = cfg && cfg.opacity !== undefined ? cfg.opacity : 1.0;
             if (opacity <= 0.01) return;
 
             const axis = slice.axis;
@@ -4457,7 +4684,7 @@ function render2D() {
     }
 
     const enabledSlices2D = activeSlices2D.filter((s, idx) => {
-        const cfg = slicesConfig[idx];
+        const cfg = getSliceConfig(idx);
         return !cfg || cfg.enabled !== false;
     });
     if (enabledSlices2D.length > 0) {
@@ -4939,7 +5166,7 @@ function render() {
 
         // 2. Draw Slices
         const slicesArray = Object.values(activeSlicesWebGPU).filter(s => {
-            const cfg = slicesConfig[s.index];
+            const cfg = getSliceConfig(s.index);
             return !cfg || cfg.enabled !== false;
         });
         if (slicesArray.length > 0) {
@@ -5394,13 +5621,7 @@ function render() {
     };
 
     const slicesArrayWebGL = Object.values(activeSlicesWebGL).filter(s => {
-        let cfg = slicesConfig[s.index];
-        if (s.is_submesh) {
-            const parent = Object.values(activeSlicesWebGL).find(p => !p.is_submesh && p.axis === s.axis && Math.abs(p.offset - s.offset) < 1e-4);
-            if (parent) {
-                cfg = slicesConfig[parent.index];
-            }
-        }
+        const cfg = getSliceConfig(s.index);
         return !cfg || cfg.enabled !== false;
     });
 
@@ -5519,31 +5740,48 @@ function render() {
             gl.drawArrays(gl.LINES, 0, sliceGridlinesCount);
             gl.depthMask(true);
         }
+    }
 
-        // Draw Charge Geometry
-        if (showCharge) {
-            if (chargeSolid && chargeBuffer && chargeCount > 0) {
-                gl.uniform1i(uIsWF, 13);
-                gl.uniform1f(uAlpha, chargeOpacity);
-                gl.bindBuffer(gl.ARRAY_BUFFER, chargeBuffer);
-                gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
-                gl.enableVertexAttribArray(0);
-                gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 28, 12);
-                gl.enableVertexAttribArray(1);
-                gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 28, 20);
-                gl.enableVertexAttribArray(2);
-                gl.drawArrays(gl.TRIANGLES, 0, chargeCount);
-            }
-            if (chargeWireframe && chargeWireBuffer && chargeWireCount > 0) {
-                gl.uniform1i(uIsWF, 13);
-                gl.uniform1f(uAlpha, 1.0);
-                gl.bindBuffer(gl.ARRAY_BUFFER, chargeWireBuffer);
-                gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 20, 0);
-                gl.enableVertexAttribArray(0);
-                gl.disableVertexAttribArray(1);
-                gl.disableVertexAttribArray(2);
-                gl.drawArrays(gl.LINES, 0, chargeWireCount);
-            }
+    // Draw 3D MPM Particles Point Cloud
+    if (showMPMParticles && mpmParticlesBuffer && mpmParticlesCount > 0) {
+        gl.uniform1i(uIsWF, 14);
+        gl.uniform1f(uAlpha, 1.0);
+        const uParticleSizeLoc = gl.getUniformLocation(program, "uParticleSize");
+        if (uParticleSizeLoc !== null) gl.uniform1f(uParticleSizeLoc, mpmParticleSize || 4.0);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, mpmParticlesBuffer);
+        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);  // position (x, y, z)
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 24, 12); // texCoord = (r, g)
+        gl.enableVertexAttribArray(1);
+        gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 24, 20); // sliceSize = (b, 0)
+        gl.enableVertexAttribArray(2);
+        gl.drawArrays(gl.POINTS, 0, mpmParticlesCount);
+    }
+
+    // Draw Charge Geometry
+    if (showCharge) {
+        if (chargeSolid && chargeBuffer && chargeCount > 0) {
+            gl.uniform1i(uIsWF, 13);
+            gl.uniform1f(uAlpha, chargeOpacity);
+            gl.bindBuffer(gl.ARRAY_BUFFER, chargeBuffer);
+            gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
+            gl.enableVertexAttribArray(0);
+            gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 28, 12);
+            gl.enableVertexAttribArray(1);
+            gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 28, 20);
+            gl.enableVertexAttribArray(2);
+            gl.drawArrays(gl.TRIANGLES, 0, chargeCount);
+        }
+        if (chargeWireframe && chargeWireBuffer && chargeWireCount > 0) {
+            gl.uniform1i(uIsWF, 13);
+            gl.uniform1f(uAlpha, 1.0);
+            gl.bindBuffer(gl.ARRAY_BUFFER, chargeWireBuffer);
+            gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 20, 0);
+            gl.enableVertexAttribArray(0);
+            gl.disableVertexAttribArray(1);
+            gl.disableVertexAttribArray(2);
+            gl.drawArrays(gl.LINES, 0, chargeWireCount);
         }
     }
     sendFrameMatrixMessage();
@@ -5601,7 +5839,29 @@ self.onmessage = async (e) => {
             canvas.width = w;
             canvas.height = h;
             await initContext(canvas);
-            updateMatrices(w, h);
+            
+            // Apply the final dimensions to the initialized context
+            const finalW = lastRequestedWidth !== null ? lastRequestedWidth : w;
+            const finalH = lastRequestedHeight !== null ? lastRequestedHeight : h;
+            if (is2DFallback && ctx2D) {
+                ctx2D.canvas.width = finalW;
+                ctx2D.canvas.height = finalH;
+            } else if (gpuContext && gpuDevice) {
+                const canvas = gpuContext.canvas as OffscreenCanvas;
+                canvas.width = finalW;
+                canvas.height = finalH;
+                const prefFormat = nav && nav.gpu ? nav.gpu.getPreferredCanvasFormat() : 'bgra8unorm';
+                gpuContext.configure({
+                    device: gpuDevice,
+                    format: prefFormat,
+                    alphaMode: 'opaque'
+                });
+            } else if (gl) {
+                gl.canvas.width = finalW;
+                gl.canvas.height = finalH;
+                gl.viewport(0, 0, finalW, finalH);
+            }
+            updateMatrices(finalW, finalH);
             render();
         } else if (type === "setSTLGeometry") {
             rawSTLVertices = data.vertices;
@@ -5636,6 +5896,8 @@ self.onmessage = async (e) => {
         } else if (type === "resize") {
             const w = data.width > 0 ? data.width : 300;
             const h = data.height > 0 ? data.height : 150;
+            lastRequestedWidth = w;
+            lastRequestedHeight = h;
             if (is2DFallback && ctx2D) {
                 ctx2D.canvas.width = w;
                 ctx2D.canvas.height = h;
@@ -5745,7 +6007,7 @@ self.onmessage = async (e) => {
                 quantityColormaps = { ...quantityColormaps, ...data.quantityColormaps };
                 if (cachedSlices.length > 0) {
                     cachedSlices.forEach((sliceObj, i) => {
-                        const config = slicesConfig[i];
+                        const config = getSliceConfig(i);
                         const qty = config?.quantities?.[0] || 'pressure';
                         sliceObj.colormap = quantityColormaps[qty] || config?.colormap || 'plasma';
                     });
@@ -5826,6 +6088,20 @@ self.onmessage = async (e) => {
                 updateChargeGeometry();
             }
 
+            if (data.showMPMParticles !== undefined) showMPMParticles = data.showMPMParticles;
+            if (data.mpmParticleSize !== undefined) mpmParticleSize = data.mpmParticleSize;
+            if (data.mpmParticleQuantity !== undefined) {
+                mpmParticleQuantity = data.mpmParticleQuantity;
+                updateMPMParticlesGeometry();
+            }
+            if (data.mpmParticleColormap !== undefined) {
+                mpmParticleColormap = data.mpmParticleColormap;
+                updateMPMParticlesGeometry();
+            }
+            if (data.mpmParticleAutoScale !== undefined) mpmParticleAutoScale = data.mpmParticleAutoScale;
+            if (data.mpmParticleMinVal !== undefined) mpmParticleMinVal = data.mpmParticleMinVal;
+            if (data.mpmParticleMaxVal !== undefined) mpmParticleMaxVal = data.mpmParticleMaxVal;
+
             if (data.xmin !== undefined || data.xmax !== undefined || data.ymin !== undefined || data.ymax !== undefined || data.zmin !== undefined || data.zmax !== undefined || data.dx !== undefined || data.nx !== undefined || data.ny !== undefined || data.nz !== undefined) {
                 gaugesChanged = true;
                 updateMatrices(canvasWidth(), canvasHeight());
@@ -5900,7 +6176,7 @@ self.onmessage = async (e) => {
                 
                 // Now, update cachedSlices configurations in-place
                 cachedSlices.forEach((sliceObj, i) => {
-                    const config = slicesConfig[i];
+                    const config = getSliceConfig(i);
                     if (!config) return;
                     const targetAxis = config.axis === 'xy' ? 0 : config.axis === 'xz' ? 1 : 2;
                     if (targetAxis === sliceObj.axis) {
@@ -5921,7 +6197,8 @@ self.onmessage = async (e) => {
                         const w = sliceObj.w;
                         const h = sliceObj.h;
                         const floatData = sliceObj.data;
-                        const opacity = sliceOpacities[i] !== undefined ? sliceOpacities[i] : 1.0;
+                        const config = getSliceConfig(i);
+                        const opacity = config && config.opacity !== undefined ? config.opacity : 1.0;
                         const geo = getSliceGeometry(axis, zOff, w, h, sliceObj.xmin, sliceObj.xmax, sliceObj.ymin, sliceObj.ymax, sliceObj.zmin, sliceObj.zmax, sliceObj.level);
 
                         if (activeSlicesWebGPU[i]) {
@@ -6060,7 +6337,8 @@ self.onmessage = async (e) => {
                         const w = sliceObj.w;
                         const h = sliceObj.h;
                         const floatData = sliceObj.data;
-                        const opacity = sliceOpacities[i] !== undefined ? sliceOpacities[i] : 1.0;
+                        const config = getSliceConfig(i);
+                        const opacity = config && config.opacity !== undefined ? config.opacity : 1.0;
                         const axisNum = axis;
 
                         if (activeSlicesWebGL[i]) {
@@ -6154,7 +6432,7 @@ self.onmessage = async (e) => {
                 const sliceRanges: { min: number, max: number }[] = [];
                 for (let i = 0; i < cachedSlices.length; i++) {
                     const slice = cachedSlices[i];
-                    const config = slicesConfig[i] || {};
+                    const config = getSliceConfig(i);
                     const qty = config.quantities?.[0] || 'pressure';
                     const sliceAutoScale = config.auto_scale !== false;
 
@@ -6170,7 +6448,7 @@ self.onmessage = async (e) => {
                         }
                     }
 
-                    const logVal = config.log_scale === true || (sliceMax > 0 && sliceMin > 0 && (sliceMax / sliceMin > 50.0));
+                    const logVal = config.log_scale === true || (config.log_scale !== false && sliceMax > 0 && sliceMin > 0 && (sliceMax / sliceMin > 50.0));
                     let sliceMinY = minY;
                     let sliceMaxY = maxY;
 

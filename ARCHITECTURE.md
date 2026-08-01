@@ -460,6 +460,11 @@ GPU version of the 3D solver. Uses:
 - `d_slice_buf`: temporary slice extraction buffer
 - `temp_h_states`, `temp_h_active`: host-side mirrors for the 1D remap phase
 
+#### Complete Purge of 3D AMR and 3D Subgrids
+- **3D Uniform Grid Pure Architecture:** All dynamic 3D AMR (adaptive mesh refinement), 3D static nested subgrids, submesh data structures (`SubMesh3D`, `GPUSubMeshBuffer3D`), restriction, prolongated ghost fills, and multi-mesh 3D hierarchy functions have been completely purged from the backend solver and frontend UI.
+- **Single-Block Uniform Domain:** All 3D simulation models execute exclusively on standard single-block uniform Cartesian grids (`DomainMesh3D`).
+- **1D / 2D Independence:** 1D and 2D solvers retain their existing AMR/subgrid features as-is.
+
 ### 6.8 Immersed Boundary Method & STL Voxelization (STL-Fluid Interaction)
 
 The system supports complex solid boundary definitions via STL (Stereolithography) geometry files imported into the 3D solver. This is handled using an Immersed Boundary Method (IBM) with a slip boundary condition on a voxelized Cartesian grid, implemented across [ImmersedBoundary.hpp](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/ImmersedBoundary.hpp) and [ImmersedBoundary.cpp](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/ImmersedBoundary.cpp).

@@ -608,6 +608,17 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             }
         }
 
+        if (node.type === 'MPMDomain3D') {
+            const meshConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'mesh');
+            if (!meshConn) {
+                addMessage(node.id, 'error', "No Mesh node connected to MPM Domain 3D. A DomainMesh3D node is required.");
+            }
+            const objConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'objects');
+            if (!objConn) {
+                addMessage(node.id, 'error', "No MPM Object 3D connected to MPM Domain 3D. At least one MPM Object node is required.");
+            }
+        }
+
         if (node.type === 'MPMObject2D') {
             const matConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'material');
             if (!matConn) {
@@ -616,6 +627,17 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             const outConn = state.connections.find(c => c.fromNode === node.id);
             if (!outConn) {
                 addMessage(node.id, 'warning', "MPM Object 2D is not connected to an MPM Domain 2D node.");
+            }
+        }
+
+        if (node.type === 'MPMObject3D') {
+            const matConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'material');
+            if (!matConn) {
+                addMessage(node.id, 'error', "No Material connected to MPM Object 3D. An MPM Material node is required.");
+            }
+            const outConn = state.connections.find(c => c.fromNode === node.id);
+            if (!outConn) {
+                addMessage(node.id, 'warning', "MPM Object 3D is not connected to an MPM Domain 3D node.");
             }
         }
 
@@ -977,7 +999,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             } else {
                 connList.forEach(conn => {
                     const fromNode = state.nodes.find(n => n.id === conn.fromNode);
-                    const solverTypes = ['CFDSolver', 'CFDSolver2D', 'CFDSolver3D', 'MPMDomain2D', 'FSICoupler2D'];
+                    const solverTypes = ['CFDSolver', 'CFDSolver2D', 'CFDSolver3D', 'MPMDomain2D', 'MPMDomain3D', 'FSICoupler2D', 'FSICoupler3D'];
                     if (!fromNode || !solverTypes.includes(fromNode.type)) {
                         const connKey = `${conn.fromNode}:${conn.fromPort}->${conn.toNode}:${conn.toPort}`;
                         flawedConnections.set(connKey, "TelemetryText must be connected to a solver or coupler source.");
@@ -988,23 +1010,23 @@ export function validateSimulationState(state: SimulationState): ValidationResul
         } else if (node.type === 'TelemetryGraph' || node.type === 'VTKOutput' || node.type === 'VirtualGauges' || node.type === 'Telemetry3DViewport') {
             const conn = state.connections.find(c => c.toNode === node.id && c.toPort === 'in');
             if (!conn) {
-                addMessage(node.id, 'warning', `Not connected to any CFD Solver. No data will be received.`);
+                addMessage(node.id, 'warning', `Not connected to any solver. No data will be received.`);
             } else {
                 const fromNode = state.nodes.find(n => n.id === conn.fromNode);
                 if (node.type === 'Telemetry3DViewport') {
-                    if (!fromNode || fromNode.type !== 'CFDSolver3D') {
+                    if (!fromNode || (fromNode.type !== 'CFDSolver3D' && fromNode.type !== 'MPMDomain3D' && fromNode.type !== 'FSICoupler3D')) {
                         const connKey = `${conn.fromNode}:${conn.fromPort}->${conn.toNode}:${conn.toPort}`;
-                        flawedConnections.set(connKey, `${node.type} requires a 3D CFD Solver source.`);
-                        addMessage(node.id, 'error', `${node.type} requires a 3D CFD Solver source.`);
+                        flawedConnections.set(connKey, `${node.type} requires a 3D Solver or Coupler source.`);
+                        addMessage(node.id, 'error', `${node.type} requires a 3D Solver or Coupler source.`);
                     }
                 } else if (node.type === 'TelemetryGraph' || node.type === 'VirtualGauges') {
-                    if (!fromNode || (fromNode.type !== 'CFDSolver' && fromNode.type !== 'CFDSolver2D' && fromNode.type !== 'CFDSolver3D' && fromNode.type !== 'MPMDomain2D')) {
+                    if (!fromNode || (fromNode.type !== 'CFDSolver' && fromNode.type !== 'CFDSolver2D' && fromNode.type !== 'CFDSolver3D' && fromNode.type !== 'MPMDomain2D' && fromNode.type !== 'MPMDomain3D' && fromNode.type !== 'FSICoupler2D' && fromNode.type !== 'FSICoupler3D')) {
                         const connKey = `${conn.fromNode}:${conn.fromPort}->${conn.toNode}:${conn.toPort}`;
                         flawedConnections.set(connKey, `${node.type} must be connected to a solver.`);
                         addMessage(node.id, 'error', `${node.type} must be connected to a solver.`);
                     }
                 } else {
-                    if (!fromNode || (fromNode.type !== 'CFDSolver' && fromNode.type !== 'CFDSolver2D' && fromNode.type !== 'CFDSolver3D' && fromNode.type !== 'MPMDomain2D')) {
+                    if (!fromNode || (fromNode.type !== 'CFDSolver' && fromNode.type !== 'CFDSolver2D' && fromNode.type !== 'CFDSolver3D' && fromNode.type !== 'MPMDomain2D' && fromNode.type !== 'MPMDomain3D' && fromNode.type !== 'FSICoupler2D' && fromNode.type !== 'FSICoupler3D')) {
                         const connKey = `${conn.fromNode}:${conn.fromPort}->${conn.toNode}:${conn.toPort}`;
                         flawedConnections.set(connKey, "Telemetry/Output must be connected to a solver.");
                         addMessage(node.id, 'error', "Telemetry/Output must be connected to a solver.");

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <stdint.h>
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
@@ -3036,7 +3037,7 @@ std::vector<float> CFDSolver2DAMRCudaImpl<RealType>::getCellValues(int i, int j)
 }
 
 template <typename RealType>
-std::vector<float> CFDSolver2DAMRCudaImpl<RealType>::getTelemetry2D(int stride) {
+std::vector<float> CFDSolver2DAMRCudaImpl<RealType>::getTelemetry2D(int /*stride*/) {
     this->syncPoolsToCPU();
     std::vector<float> data;
     uint32_t num_leaves = 0;
@@ -3045,8 +3046,11 @@ std::vector<float> CFDSolver2DAMRCudaImpl<RealType>::getTelemetry2D(int stride) 
     }
 
     uint32_t n_channels = 7;
-    data.push_back(*(float*)&num_leaves);
-    data.push_back(*(float*)&n_channels);
+    float f_val;
+    std::memcpy(&f_val, &num_leaves, sizeof(float));
+    data.push_back(f_val);
+    std::memcpy(&f_val, &n_channels, sizeof(float));
+    data.push_back(f_val);
 
     for (const auto& node : this->amr_nodes) {
         if (node.tile_id != -1 && node.is_active) {
@@ -3058,8 +3062,10 @@ std::vector<float> CFDSolver2DAMRCudaImpl<RealType>::getTelemetry2D(int stride) 
             uint32_t meta1 = (r_idx << 16) | z_idx;
             uint32_t meta2 = (lvl << 8) | padding;
             
-            data.push_back(*(float*)&meta1);
-            data.push_back(*(float*)&meta2);
+            std::memcpy(&f_val, &meta1, sizeof(float));
+            data.push_back(f_val);
+            std::memcpy(&f_val, &meta2, sizeof(float));
+            data.push_back(f_val);
 
             for (int i = 0; i < 16; ++i) {
                 int ti = i + 2;

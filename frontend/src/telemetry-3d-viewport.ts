@@ -141,6 +141,8 @@ export class Telemetry3DViewport {
                     this.debugOverlay.style.color = '#00ff66';
                     this.debugOverlay.innerHTML = `Renderer: ${renderer} Active`;
                 }
+            } else if (type === 'log') {
+                console.log("[ViewportWorker Log]", e.data.message);
             } else if (type === 'error') {
                 console.error("[ViewportWorker Error]", e.data.message);
                 const badge = document.getElementById(this.getElId('viewport-renderer-badge'));
@@ -756,6 +758,7 @@ export class Telemetry3DViewport {
         this.buildChargeRow(staticTbody);
         this.buildGridRow(staticTbody);
         this.buildGaugeRow(staticTbody);
+        this.buildMPMParticlesTableRow(staticTbody);
         this.buildLightingTableRow(staticTbody);
         this.buildColorbarTableRow(staticTbody);
     }
@@ -828,6 +831,8 @@ export class Telemetry3DViewport {
     private showQuantityPopover(targetEl: HTMLElement, currentQty: string, onSelect: (qty: string) => void) {
         const quantities = [
             { id: 'pressure', label: '📊 Pressure' },
+            { id: 'vonMises', label: '🛡️ Von Mises' },
+            { id: 'plastic_strain', label: '🔨 Plastic Strain' },
             { id: 'density', label: '⚖️ Density' },
             { id: 'velocity', label: '💨 Speed' },
             { id: 'energy', label: '🔥 Energy' },
@@ -1733,16 +1738,25 @@ export class Telemetry3DViewport {
         this.syncControls(true);
     }
 
+    private syncToggleBtnState(btn: HTMLElement | null, checked: boolean) {
+        if (!btn) return;
+        btn.dataset.checked = checked ? 'true' : 'false';
+        btn.style.background = checked ? '#007acc' : 'transparent';
+        btn.style.border = checked ? '1px solid #007acc' : '1px solid rgba(255,255,255,0.2)';
+        btn.style.color = checked ? '#fff' : '#ccc';
+    }
+
     private createToggleBtn(idStr: string, text: string, checked: boolean, onChange: (v: boolean) => void) {
         const btn = document.createElement('div');
         btn.id = this.getElId(idStr);
         btn.innerText = text;
+        btn.dataset.checked = checked ? 'true' : 'false';
         
-        let state = checked;
         const updateStyle = () => {
-            btn.style.background = state ? '#007acc' : 'transparent';
-            btn.style.border = state ? '1px solid #007acc' : '1px solid rgba(255,255,255,0.2)';
-            btn.style.color = state ? '#fff' : '#ccc';
+            const isChecked = btn.dataset.checked === 'true';
+            btn.style.background = isChecked ? '#007acc' : 'transparent';
+            btn.style.border = isChecked ? '1px solid #007acc' : '1px solid rgba(255,255,255,0.2)';
+            btn.style.color = isChecked ? '#fff' : '#ccc';
         };
         
         updateStyle();
@@ -1757,9 +1771,10 @@ export class Telemetry3DViewport {
         
         btn.onclick = (e: MouseEvent) => {
             e.stopPropagation();
-            state = !state;
+            const nextState = btn.dataset.checked !== 'true';
+            btn.dataset.checked = nextState ? 'true' : 'false';
             updateStyle();
-            onChange(state);
+            onChange(nextState);
         };
         this.bindEditingEvents(btn);
         return btn;
@@ -2855,8 +2870,8 @@ export class Telemetry3DViewport {
     private syncColorbarOverlay(vpNode: any) {
         if (!this.colorbarOverlay) {
             this.buildColorbarOverlay();
+            return;
         }
-        if (!this.colorbarOverlay) return;
         if (!vpNode) vpNode = { parameters: {} };
         const params = vpNode.parameters || {};
 
@@ -3239,6 +3254,206 @@ export class Telemetry3DViewport {
         tdTrash.innerHTML = '<span style="color:#555;">—</span>';
         tdTrash.style.textAlign = 'center';
         tr.appendChild(tdTrash);
+
+        parent.appendChild(tr);
+    }
+
+    private buildMPMParticlesTableRow(parent: HTMLElement) {
+        const vpNode = this.getViewportNode();
+        const initShow = vpNode ? (vpNode.parameters.showMPMParticles !== false) : true;
+        const initSize = vpNode ? (vpNode.parameters.mpmParticleSize ?? 4.0) : 4.0;
+        const initQty = vpNode ? (vpNode.parameters.mpmParticleQuantity || 'vonMises') : 'vonMises';
+        const initCmap = vpNode ? (vpNode.parameters.mpmParticleColormap || 'plasma') : 'plasma';
+
+        const tr = document.createElement('tr');
+        tr.style.borderBottom = '1px solid rgba(255,255,255,0.06)';
+
+        // Col 1: Vis Checkbox
+        const tdVis = document.createElement('td');
+        tdVis.style.padding = '3px 2px';
+        tdVis.style.textAlign = 'center';
+        const showCb = document.createElement('input');
+        showCb.type = 'checkbox';
+        showCb.id = this.getElId('viewport-mpm-particles-cb');
+        showCb.checked = initShow;
+        showCb.onchange = () => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { showMPMParticles: showCb.checked });
+                this.worker.postMessage({ type: 'setConfig', data: { showMPMParticles: showCb.checked } });
+            }
+        };
+        this.bindEditingEvents(showCb);
+        tdVis.appendChild(showCb);
+        tr.appendChild(tdVis);
+
+        // Col 2: Layer Title
+        const tdLayer = document.createElement('td');
+        tdLayer.style.padding = '3px 4px';
+        tdLayer.innerHTML = '🔮 <b>MPM Particles</b>';
+        tr.appendChild(tdLayer);
+
+        // Col 3, 4: Empty SOL / LINES
+        for (let i = 0; i < 2; i++) {
+            const tdEmpty = document.createElement('td');
+            tdEmpty.innerHTML = '<span style="color:#555;">—</span>';
+            tdEmpty.style.textAlign = 'center';
+            tr.appendChild(tdEmpty);
+        }
+
+        // Col 5: RES (Point Size Popover Pill)
+        const tdSize = document.createElement('td');
+        tdSize.style.padding = '3px 2px';
+        const sizePill = document.createElement('button');
+        sizePill.textContent = `Pt ${initSize}px ▾`;
+        this.applyButtonStyle(sizePill);
+        sizePill.style.fontSize = '8.5px';
+        sizePill.style.width = '100%';
+        sizePill.style.padding = '2px 0';
+        sizePill.onclick = (e) => {
+            e.stopPropagation();
+            this.showPopover(sizePill, (popover) => {
+                [2, 3, 4, 6, 8, 10].forEach(sz => {
+                    const item = document.createElement('div');
+                    item.textContent = `${sz}px`;
+                    item.style.padding = '3px 6px';
+                    item.style.cursor = 'pointer';
+                    item.onclick = (ev) => {
+                        ev.stopPropagation();
+                        const vp = this.getViewportNode();
+                        if (vp) {
+                            this.stateManager.updateNodeParametersInPlace(vp.id, { mpmParticleSize: sz });
+                            this.worker.postMessage({ type: 'setConfig', data: { mpmParticleSize: sz } });
+                            sizePill.textContent = `Pt ${sz}px ▾`;
+                            this.closePopover();
+                        }
+                    };
+                    popover.appendChild(item);
+                });
+            });
+        };
+        tdSize.appendChild(sizePill);
+        tr.appendChild(tdSize);
+
+        // Col 6: QTY (Quantity Selector Pill)
+        const tdQty = document.createElement('td');
+        tdQty.style.padding = '3px 4px';
+        const qtyPill = document.createElement('div');
+        qtyPill.style.fontSize = '9px';
+        qtyPill.style.padding = '2px 4px';
+        qtyPill.style.borderRadius = '3px';
+        qtyPill.style.cursor = 'pointer';
+        qtyPill.style.background = 'rgba(0, 173, 255, 0.12)';
+        qtyPill.style.border = '1px solid rgba(0, 173, 255, 0.3)';
+        qtyPill.style.color = '#00adff';
+        qtyPill.style.fontWeight = '500';
+        qtyPill.textContent = initQty;
+        qtyPill.onclick = (e) => {
+            e.stopPropagation();
+            this.showQuantityPopover(qtyPill, initQty, (newQ) => {
+                const vp = this.getViewportNode();
+                if (vp) {
+                    this.stateManager.updateNodeParametersInPlace(vp.id, { mpmParticleQuantity: newQ });
+                    this.worker.postMessage({ type: 'setConfig', data: { mpmParticleQuantity: newQ } });
+                    qtyPill.textContent = newQ;
+                }
+            });
+        };
+        tdQty.appendChild(qtyPill);
+        tr.appendChild(tdQty);
+
+        // Col 7: COLOR (Colormap Selector Pill)
+        const tdCmap = document.createElement('td');
+        tdCmap.style.padding = '3px 4px';
+        const cmapPill = document.createElement('div');
+        cmapPill.style.fontSize = '9px';
+        cmapPill.style.padding = '2px 4px';
+        cmapPill.style.borderRadius = '3px';
+        cmapPill.style.cursor = 'pointer';
+        cmapPill.style.background = 'rgba(255, 255, 255, 0.08)';
+        cmapPill.style.border = '1px solid rgba(255, 255, 255, 0.15)';
+        cmapPill.style.color = '#e0e0e0';
+        cmapPill.textContent = initCmap;
+        cmapPill.onclick = (e) => {
+            e.stopPropagation();
+            this.showColormapPopover(cmapPill, initCmap, (newC) => {
+                const vp = this.getViewportNode();
+                if (vp) {
+                    this.stateManager.updateNodeParametersInPlace(vp.id, { mpmParticleColormap: newC });
+                    this.worker.postMessage({ type: 'setConfig', data: { mpmParticleColormap: newC } });
+                    cmapPill.textContent = newC;
+                }
+            });
+        };
+        tdCmap.appendChild(cmapPill);
+        tr.appendChild(tdCmap);
+
+        // Col 8: SCL / Range Limit
+        const tdScl = document.createElement('td');
+        tdScl.style.padding = '3px 2px';
+        tdScl.style.textAlign = 'center';
+        const rangeBtn = document.createElement('button');
+        rangeBtn.innerHTML = '⚙️ Range';
+        this.applyButtonStyle(rangeBtn);
+        rangeBtn.style.fontSize = '8px';
+        rangeBtn.onclick = (e) => {
+            e.stopPropagation();
+            this.showPopover(rangeBtn, (popover) => {
+                const vp = this.getViewportNode();
+                const minV = vp?.parameters.mpmParticleMinVal ?? 0.0;
+                const maxV = vp?.parameters.mpmParticleMaxVal ?? 500e6;
+
+                popover.innerHTML = `
+                    <div style="font-weight:bold; color:#00adff; margin-bottom:6px;">MPM Particle Range</div>
+                    <div style="display:flex; flex-direction:column; gap:4px;">
+                        <label style="display:flex; justify-content:space-between; align-items:center; gap:6px;">
+                            <span>Min:</span>
+                            <input type="number" step="any" id="popover-mpm-min" value="${minV}" style="width:70px; background:#111; color:#fff; border:1px solid #444; border-radius:3px; padding:2px;">
+                        </label>
+                        <label style="display:flex; justify-content:space-between; align-items:center; gap:6px;">
+                            <span>Max:</span>
+                            <input type="number" step="any" id="popover-mpm-max" value="${maxV}" style="width:70px; background:#111; color:#fff; border:1px solid #444; border-radius:3px; padding:2px;">
+                        </label>
+                        <button id="popover-apply-mpm-range" style="margin-top:4px; background:#007acc; color:#fff; border:none; border-radius:3px; padding:3px; cursor:pointer;">Apply Range</button>
+                    </div>
+                `;
+                const applyBtn = popover.querySelector('#popover-apply-mpm-range') as HTMLButtonElement;
+                if (applyBtn) {
+                    applyBtn.onclick = () => {
+                        const minInp = popover.querySelector('#popover-mpm-min') as HTMLInputElement;
+                        const maxInp = popover.querySelector('#popover-mpm-max') as HTMLInputElement;
+                        if (minInp && maxInp && vp) {
+                            const minN = Number(minInp.value);
+                            const maxN = Number(maxInp.value);
+                            this.stateManager.updateNodeParametersInPlace(vp.id, {
+                                mpmParticleAutoScale: false,
+                                mpmParticleMinVal: minN,
+                                mpmParticleMaxVal: maxN
+                            });
+                            this.worker.postMessage({
+                                type: 'setConfig',
+                                data: {
+                                    mpmParticleAutoScale: false,
+                                    mpmParticleMinVal: minN,
+                                    mpmParticleMaxVal: maxN
+                                }
+                            });
+                            this.closePopover();
+                        }
+                    };
+                }
+            });
+        };
+        tdScl.appendChild(rangeBtn);
+        tr.appendChild(tdScl);
+
+        // Col 9, 10: OPACITY and TRASH
+        for (let i = 0; i < 2; i++) {
+            const tdEmpty = document.createElement('td');
+            tdEmpty.innerHTML = '<span style="color:#555;">—</span>';
+            tdEmpty.style.textAlign = 'center';
+            tr.appendChild(tdEmpty);
+        }
 
         parent.appendChild(tr);
     }
@@ -3869,11 +4084,12 @@ export class Telemetry3DViewport {
             const zmax = Number(domainMesh3D?.parameters.zmax ?? 1.0);
 
             // Resolve the charge node via connections from the model-scoped solver
-            const modelState = this.stateManager.getCurrentState();
-            const chargeConn = solverNode3D ? modelState?.connections.find((c: any) => c.toNode === solverNode3D.id && c.toPort === 'charge') : null;
+            const currentModelId = this.getCurrentModelId();
+            const modelState = currentModelId ? this.stateManager.getSimulationState(currentModelId) : null;
+            const chargeConn = (solverNode3D && modelState) ? modelState.connections.find((c: any) => c.toNode === solverNode3D.id && c.toPort === 'charge') : null;
             const chargeNode = chargeConn
                 ? modelState?.nodes.find((n: any) => n.id === chargeConn.fromNode)
-                : modelState?.nodes.find((n: any) => n.type === 'Charge3D' || n.type === 'Charge2D' || n.type === 'Charge1D');
+                : null;
 
             let chargeParams: any = null;
             if (chargeNode) {
@@ -3897,46 +4113,7 @@ export class Telemetry3DViewport {
                 };
             }
 
-            // Collect only RefinementMesh3D nodes belonging to this model's solver chain.
-            // We trace from the solver's mesh-port connection and walk the RefinementMesh3D
-            // chain upward, collecting every node in that chain.
             const submeshes: any[] = [];
-            {
-                const allModels2 = this.stateManager.getAllModels();
-                let targetModel2: any = null;
-                const currentModelId2 = this.getCurrentModelId();
-                if (currentModelId2) targetModel2 = allModels2.find((m: any) => m.id === currentModelId2) || null;
-                if (!targetModel2) {
-                    const vpNode3 = this.getViewportNode();
-                    for (const m of Object.values(allModels2) as any[]) {
-                        if (m.nodes.some((n: any) => n.id === vpNode3?.id)) { targetModel2 = m; break; }
-                    }
-                }
-                if (targetModel2 && solverNode3D) {
-                    // Find the node connected to the solver's mesh port
-                    const meshConn = targetModel2.connections.find((c: any) => c.toNode === solverNode3D.id && c.toPort === 'mesh');
-                    if (meshConn) {
-                        let curr: any = targetModel2.nodes.find((n: any) => n.id === meshConn.fromNode);
-                        let depth = 0;
-                        while (curr && curr.type === 'RefinementMesh3D' && depth < 20) {
-                            submeshes.push({
-                                id: curr.id,
-                                level: Number(curr.parameters.refinement_level ?? 1),
-                                x: Number(curr.parameters.submesh_x ?? 0.25),
-                                y: Number(curr.parameters.submesh_y ?? 0.25),
-                                z: Number(curr.parameters.submesh_z ?? 0.25),
-                                size_x: Number(curr.parameters.submesh_size_x ?? 0.5),
-                                size_y: Number(curr.parameters.submesh_size_y ?? 0.5),
-                                size_z: Number(curr.parameters.submesh_size_z ?? 0.5)
-                            });
-                            const parentConn = targetModel2.connections.find((c: any) => c.toNode === curr.id && c.toPort === 'parent_mesh');
-                            if (!parentConn) break;
-                            curr = targetModel2.nodes.find((n: any) => n.id === parentConn.fromNode);
-                            depth++;
-                        }
-                    }
-                }
-            }
 
             this.worker.postMessage({
                 type: 'setConfig',
@@ -4014,8 +4191,10 @@ export class Telemetry3DViewport {
             this.staticListContainer.innerHTML = '';
             this.buildObstacleRow(this.staticListContainer);
             this.buildSTLRow(this.staticListContainer);
+            this.buildChargeRow(this.staticListContainer);
             this.buildGridRow(this.staticListContainer);
             this.buildGaugeRow(this.staticListContainer);
+            this.buildMPMParticlesTableRow(this.staticListContainer);
             this.buildLightingTableRow(this.staticListContainer);
             this.buildColorbarTableRow(this.staticListContainer);
         }
@@ -4024,15 +4203,10 @@ export class Telemetry3DViewport {
         const slices = vpNode.parameters.slices || [];
         if (this.sliceListContainer) {
             const currentRows = this.sliceListContainer.children.length;
-            // Force rebuild if any slice parameter, colormap, opacity, or range changed
-            const qCmaps = vpNode.parameters.quantity_colormaps || {};
-            const qRanges = vpNode.parameters.quantity_ranges || {};
+            // Force rebuild if slice axis or quantity changed (structural changes)
             const currSliceKey = slices.map((s: any) => {
                 const q = s.quantities?.[0] || 'pressure';
-                const cm = qCmaps[q] || s.colormap || 'plasma';
-                const op = s.opacity ?? 1.0;
-                const r = qRanges[q] || [s.min_val, s.max_val];
-                return `${s.axis}:${q}:${s.enabled !== false}:${cm}:${op}:${s.auto_scale !== false}:${s.log_scale === true}:${s.interpolate !== false}:${r?.[0]}:${r?.[1]}`;
+                return `${s.axis}:${q}`;
             }).join('|');
 
             if (currSliceKey !== this._lastSliceKey) {
@@ -4088,6 +4262,7 @@ export class Telemetry3DViewport {
                     const axisShort = (slice.axis || 'xy').toUpperCase();
 
                     const posPill = document.createElement('button');
+                    posPill.className = 'slice-pos-pill';
                     posPill.innerHTML = `📐 <b>${axisShort}</b> @ ${curOffset.toFixed(2)}m ▾`;
                     this.applyButtonStyle(posPill);
                     posPill.style.fontSize = '8.5px';
@@ -4134,6 +4309,7 @@ export class Telemetry3DViewport {
                     const tdQty = document.createElement('td');
                     tdQty.style.padding = '3px 4px';
                     const qtyPill = document.createElement('button');
+                    qtyPill.className = 'slice-qty-pill';
                     const qtyLabels: Record<string, string> = {
                         pressure: 'Press', density: 'Density', velocity: 'Speed', energy: 'Energy',
                         species1: 'Reacted', species2: 'Unreacted', species3: 'Air',
@@ -4160,6 +4336,7 @@ export class Telemetry3DViewport {
                     tdCmap.style.padding = '3px 4px';
                     const curCmap = vpNode.parameters.quantity_colormaps?.[qty] || slice.colormap || 'plasma';
                     const cmapPill = document.createElement('button');
+                    cmapPill.className = 'slice-cmap-pill';
                     cmapPill.textContent = `${curCmap.charAt(0).toUpperCase() + curCmap.slice(1)} ▾`;
                     this.applyButtonStyle(cmapPill);
                     cmapPill.style.fontSize = '8.5px';
@@ -4207,6 +4384,7 @@ export class Telemetry3DViewport {
                     tdOpac.style.padding = '3px 4px';
                     const sliceOpac = slice.opacity ?? 1.0;
                     const opacPill = document.createElement('button');
+                    opacPill.className = 'slice-opac-pill';
                     opacPill.textContent = `${Math.round(sliceOpac * 100)}% ▾`;
                     this.applyButtonStyle(opacPill);
                     opacPill.style.fontSize = '8.5px';
@@ -4245,100 +4423,66 @@ export class Telemetry3DViewport {
                     const row = this.sliceListContainer!.children[idx] as HTMLElement;
                     if (!row) return;
 
-                    const linkGroup = slice.link_group || 'none';
-
-                    row.style.background = idx === focusedSliceIndex ? 'rgba(0, 173, 255, 0.05)' : 'rgba(255,255,255,0.03)';
-                    row.style.border = idx === focusedSliceIndex ? '1px solid #00adff' : '1px solid rgba(255,255,255,0.06)';
+                    row.style.background = idx === focusedSliceIndex ? 'rgba(0, 173, 255, 0.12)' : 'transparent';
                     row.style.opacity = slice.enabled !== false ? '1.0' : '0.55';
 
+                    // 1. Vis Checkbox
                     const enableCb = row.querySelector('.slice-enable-cb') as HTMLInputElement;
                     if (enableCb && enableCb.dataset.editing !== 'true' && document.activeElement !== enableCb) {
                         enableCb.checked = slice.enabled !== false;
                     }
 
+                    // 2. Position / axis Pill
                     const bounds = getSliceBounds(slice.axis, meshNode);
-
-                    // Sync basic selects if not active
-                    const axisSel = row.querySelector('.slice-axis-sel') as HTMLSelectElement;
-                    if (axisSel && axisSel.dataset.editing !== 'true' && document.activeElement !== axisSel) {
-                        axisSel.value = slice.axis;
-                    }
-                    const qSel = row.querySelector('.slice-qty-sel') as HTMLSelectElement;
-                    if (qSel && qSel.dataset.editing !== 'true' && document.activeElement !== qSel) {
-                        qSel.value = slice.quantities?.[0] || 'pressure';
-                    }
-                    const strideSel = row.querySelector('.slice-stride-sel') as HTMLSelectElement;
-                    if (strideSel && strideSel.dataset.editing !== 'true' && document.activeElement !== strideSel) {
-                        strideSel.value = String(slice.stride || 1);
+                    const curOffset = Number(slice.offset ?? (bounds.min + bounds.max) / 2.0);
+                    const axisShort = (slice.axis || 'xy').toUpperCase();
+                    const posPill = row.querySelector('.slice-pos-pill') as HTMLButtonElement;
+                    if (posPill) {
+                        posPill.innerHTML = `📐 <b>${axisShort}</b> @ ${curOffset.toFixed(2)}m ▾`;
                     }
 
-                    // Sync sliders
-                    const offSlider = row.querySelector('.slice-offset-slider') as HTMLInputElement;
-                    if (offSlider) {
-                        offSlider.min = bounds.min.toString();
-                        offSlider.max = bounds.max.toString();
-                        offSlider.step = Math.max(0.001, (bounds.max - bounds.min) / 100).toString();
-                        if (offSlider.dataset.editing !== 'true' && document.activeElement !== offSlider) {
-                            offSlider.value = slice.offset.toString();
-                        }
-                    }
-                    const offInp = row.querySelector('.slice-offset-val') as HTMLInputElement;
-                    if (offInp && offInp.dataset.editing !== 'true' && document.activeElement !== offInp) {
-                        offInp.value = slice.offset.toString();
-                    }
+                    // 3. Edg toggle
+                    const edgesBtn = document.getElementById(this.getElId(`slice-edges-btn-${idx}`));
+                    this.syncToggleBtnState(edgesBtn, vpNode.parameters.cell_edges === true);
 
-                    const opacSlider = row.querySelector('.slice-opac-slider') as HTMLInputElement;
-                    if (opacSlider && opacSlider.dataset.editing !== 'true' && document.activeElement !== opacSlider) {
-                        opacSlider.value = (slice.opacity !== undefined ? slice.opacity : 1.0).toString();
-                    }
-                    const opacInp = row.querySelector('.slice-opac-val') as HTMLInputElement;
-                    if (opacInp && opacInp.dataset.editing !== 'true' && document.activeElement !== opacInp) {
-                        opacInp.value = (slice.opacity !== undefined ? slice.opacity : 1.0).toString();
-                    }
-
-                    // Sync sub-panel inputs if expanded
-                    const autoScaleVal = slice.auto_scale !== false;
-                    let minRangeVal = slice.min_val !== undefined ? slice.min_val : 101325.0;
-                    let maxRangeVal = slice.max_val !== undefined ? slice.max_val : 101325.0 * 10.0;
-                    if (autoScaleVal && this.latestSliceRanges && this.latestSliceRanges[idx]) {
-                        minRangeVal = this.latestSliceRanges[idx].min;
-                        maxRangeVal = this.latestSliceRanges[idx].max;
-                    }
-
-                    // Sync toggle buttons
+                    // 4. Int toggle
                     const interpBtn = document.getElementById(this.getElId(`slice-interp-btn-${idx}`));
-                    if (interpBtn) {
-                        const isInterp = slice.interpolate !== false;
-                        interpBtn.style.background = isInterp ? '#007acc' : 'transparent';
-                        interpBtn.style.border = isInterp ? '1px solid #007acc' : '1px solid rgba(255,255,255,0.2)';
-                        interpBtn.style.color = isInterp ? '#fff' : '#ccc';
+                    this.syncToggleBtnState(interpBtn, slice.interpolate !== false);
+
+                    // 5. Qty Pill
+                    const qty = slice.quantities?.[0] || 'pressure';
+                    const qtyPill = row.querySelector('.slice-qty-pill') as HTMLButtonElement;
+                    if (qtyPill) {
+                        const qtyLabels: Record<string, string> = {
+                            pressure: 'Press', density: 'Density', velocity: 'Speed', energy: 'Energy',
+                            species1: 'Reacted', species2: 'Unreacted', species3: 'Air',
+                            peak_overpressure: 'Pk Press', peak_impulse: 'Pk Impulse', amr_level: 'AMR Level'
+                        };
+                        qtyPill.textContent = `${qtyLabels[qty] || qty} ▾`;
                     }
 
-                    // Sync colormap
-                    const cmSel = row.querySelector('.slice-colormap-sel') as HTMLSelectElement;
-                    if (cmSel && cmSel.dataset.editing !== 'true' && document.activeElement !== cmSel) {
-                        cmSel.value = slice.colormap || 'plasma';
+                    // 6. Cmap Pill
+                    const cmapPill = row.querySelector('.slice-cmap-pill') as HTMLButtonElement;
+                    if (cmapPill) {
+                        const curCmap = vpNode.parameters.quantity_colormaps?.[qty] || slice.colormap || 'plasma';
+                        cmapPill.textContent = `${curCmap.charAt(0).toUpperCase() + curCmap.slice(1)} ▾`;
                     }
 
-                    // Sync min / max inputs
-                    const minInput = row.querySelector('.slice-min-input') as HTMLInputElement;
-                    if (minInput) {
-                        minInput.disabled = autoScaleVal;
-                        minInput.style.background = autoScaleVal ? '#0c0c0d' : '#1a1a1c';
-                        minInput.style.color = autoScaleVal ? '#666' : '#ccc';
-                        if (minInput.dataset.editing !== 'true' && document.activeElement !== minInput) {
-                            minInput.value = String(minRangeVal);
-                        }
-                    }
+                    // 7. Auto scale / Log scale toggles
+                    const autoScaleVal = slice.auto_scale !== false;
+                    const logScaleVal = slice.log_scale === true;
 
-                    const maxInput = row.querySelector('.slice-max-input') as HTMLInputElement;
-                    if (maxInput) {
-                        maxInput.disabled = autoScaleVal;
-                        maxInput.style.background = autoScaleVal ? '#0c0c0d' : '#1a1a1c';
-                        maxInput.style.color = autoScaleVal ? '#666' : '#ccc';
-                        if (maxInput.dataset.editing !== 'true' && document.activeElement !== maxInput) {
-                            maxInput.value = String(maxRangeVal);
-                        }
+                    const autoBtn = document.getElementById(this.getElId(`slice-auto-btn-${idx}`));
+                    this.syncToggleBtnState(autoBtn, autoScaleVal);
+
+                    const logBtn = document.getElementById(this.getElId(`slice-log-btn-${idx}`));
+                    this.syncToggleBtnState(logBtn, logScaleVal);
+
+                    // 8. Opacity Pill
+                    const opacPill = row.querySelector('.slice-opac-pill') as HTMLButtonElement;
+                    if (opacPill) {
+                        const sliceOpac = slice.opacity ?? 1.0;
+                        opacPill.textContent = `${Math.round(sliceOpac * 100)}% ▾`;
                     }
                 });
             }

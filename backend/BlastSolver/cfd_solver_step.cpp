@@ -197,7 +197,7 @@ void CFDSolverImpl<RealType, IsMultiMaterial>::updatePrimitiveFromConservative(s
 }
 
 template <typename RealType, bool IsMultiMaterial>
-typename CFDSolverImpl<RealType, IsMultiMaterial>::ConservedState CFDSolverImpl<RealType, IsMultiMaterial>::computedUdt(const std::vector<ConservedState>& U_current, const std::vector<PrimitiveState>& states_current, int i, double dt) {
+typename CFDSolverImpl<RealType, IsMultiMaterial>::ConservedState CFDSolverImpl<RealType, IsMultiMaterial>::computedUdt(const std::vector<ConservedState>& /*U_current*/, const std::vector<PrimitiveState>& states_current, int i, double dt) {
     RealType V_i = (RealType)geom_V[i];
     RealType A_left = (RealType)geom_A[i];
     RealType A_right = (RealType)geom_A[i+1];

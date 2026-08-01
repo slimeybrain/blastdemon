@@ -232,8 +232,8 @@ void export_vtu_2d(const std::string& filename, int nr, int nz, double dr, doubl
 void export_vtk_particles(const std::string& filename, int num_particles,
                            const double* pos_x, const double* pos_y,
                            const double* init_pos_x, const double* init_pos_y,
-                           const double* stress_xx, const double* stress_yy,
-                           const double* stress_xy, const double* stress_vm) {
+                           const double* /*stress_xx*/, const double* /*stress_yy*/,
+                           const double* /*stress_xy*/, const double* stress_vm) {
     std::ofstream out(filename);
     if (!out) return;
 

@@ -24,8 +24,6 @@ struct Charge3DParams {
     double lx, ly, lz;
 };
 
-#include "grid_manager_3d.hpp"
-
 struct Gauge3D {
     std::string name;
     double x, y, z;
@@ -50,23 +48,12 @@ struct SlicePayload3D {
     double ymin = 0.0, ymax = 0.0;
     double zmin = 0.0, zmax = 0.0;
     int level = 0;
-    bool is_submesh = false;
 };
 
 
 struct ObstacleFace {
     int gx_fluid, gy_fluid, gz_fluid;
     float px[4], py[4], pz[4];
-    int submesh_index = -1; // -1 = base grid, >=0 = submesh index with local coords in gx/gy/gz_fluid
-};
-
-struct SubMeshParams3D {
-    std::string id;
-    int level = 1;
-    double xmin = 0.0, ymin = 0.0, zmin = 0.0;
-    double size_x = 0.5, size_y = 0.5, size_z = 0.5;
-    // "root" = direct child of the domain mesh; otherwise the id of the parent SubMesh3D
-    std::string parent_id = "root";
 };
 
 struct GPUObstacleFace {
@@ -167,9 +154,9 @@ public:
     }
     virtual std::vector<float> getCellValues(int i, int j, int k) const = 0;
 
-    virtual void setGauges(const std::vector<Gauge3D>& gauges) {}
-    virtual void recordGaugesAsync(double t) {}
-    virtual void retrieveNewGaugeSamples(std::vector<double>& times, std::vector<float>& values) {}
+    virtual void setGauges(const std::vector<Gauge3D>&) {}
+    virtual void recordGaugesAsync(double) {}
+    virtual void retrieveNewGaugeSamples(std::vector<double>&, std::vector<float>&) {}
 
     virtual void initializeFrom1D(const std::vector<double>& r_1d, const std::vector<MultiMaterialState>& states_1d, double x_expl, double y_expl, double z_expl, double R_remap) = 0;
     virtual void initializeFrom2D(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d, double x_expl, double y_expl, double z_expl, double R_remap, double source_explosive_z = 0.0) = 0;
@@ -181,14 +168,14 @@ public:
     virtual bool isIdealGas() const = 0;
     virtual bool isMultiMaterial() const = 0;
     virtual bool isCUDA() const { return false; }
-    virtual void setGamma(double g) {}
-    virtual void setIdealGas(bool val) {}
-    virtual void setMaterialParameters(const MultiMat::MaterialSet& materials) {}
+    virtual void setGamma(double) {}
+    virtual void setIdealGas(bool) {}
+    virtual void setMaterialParameters(const MultiMat::MaterialSet&) {}
     virtual const MultiMat::MaterialSet& getMaterialParameters() const = 0;
     virtual double getAmbientP() const = 0;
     virtual double getAmbientRho() const = 0;
-    virtual void setAmbientState(double rho, double p) {}
-    virtual void setTime(double t) {}
+    virtual void setAmbientState(double, double) {}
+    virtual void setTime(double) {}
     virtual size_t getAllocatedVRAM() const { return 0; }
     virtual void setGeometry(const std::string& stl_filepath, const std::string& geometry_hash, const std::string& voxelization_method,
                              const std::atomic<bool>* terminate_flag = nullptr,
@@ -199,9 +186,7 @@ public:
     virtual void setGeometryPrimitives(const nlohmann::json& primitives, const std::string& geometry_hash, const std::string& voxelization_method,
                                        const std::atomic<bool>* terminate_flag = nullptr,
                                        std::function<void(double)> progress_callback = nullptr) = 0;
-    virtual void uploadObstacleFaces(const std::vector<ObstacleFace>& faces) {}
-    virtual void appendSubMeshObstacleFaces(std::vector<ObstacleFace>& faces) {}
-    virtual void addSubMesh(const SubMeshParams3D& submesh) {}
+    virtual void uploadObstacleFaces(const std::vector<ObstacleFace>&) {}
     virtual std::pair<double, double> getConservationTotals() const = 0;
 };
 
@@ -217,7 +202,6 @@ protected:
     double ambient_rho = 1.225;
     double ambient_p = 101325.0;
     bool is_ideal_gas_val = false;
-    std::vector<SubMeshParams3D> submesh_regions;
 
     BCType3D bcXmin = BCType3D::REFLECTIVE;
     BCType3D bcXmax = BCType3D::TRANSMISSIVE;
@@ -278,22 +262,16 @@ public:
     void setIdealGas(bool val) override { is_ideal_gas_val = val; }
     void setMaterialParameters(const MultiMat::MaterialSet& materials) override { currentMaterials = materials; }
     void setTime(double t) override { currentTime = t; }
-    void setGeometry(const std::string& stl_filepath, const std::string& geometry_hash, const std::string& voxelization_method,
-                     const std::atomic<bool>* terminate_flag = nullptr,
-                     std::function<void(double)> progress_callback = nullptr) override {}
-    void setGeometryTriangles(const std::vector<Triangle>& triangles, const std::string& geometry_hash, const std::string& voxelization_method,
-                              const std::atomic<bool>* terminate_flag = nullptr,
-                              std::function<void(double)> progress_callback = nullptr) override {}
-    void setGeometryPrimitives(const nlohmann::json& primitives, const std::string& geometry_hash, const std::string& voxelization_method,
-                               const std::atomic<bool>* terminate_flag = nullptr,
-                               std::function<void(double)> progress_callback = nullptr) override {}
+    void setGeometry(const std::string&, const std::string&, const std::string&,
+                     const std::atomic<bool>* = nullptr,
+                     std::function<void(double)> = nullptr) override {}
+    void setGeometryTriangles(const std::vector<Triangle>&, const std::string&, const std::string&,
+                              const std::atomic<bool>* = nullptr,
+                              std::function<void(double)> = nullptr) override {}
+    void setGeometryPrimitives(const nlohmann::json&, const std::string&, const std::string&,
+                               const std::atomic<bool>* = nullptr,
+                               std::function<void(double)> = nullptr) override {}
     std::pair<double, double> getConservationTotals() const override { return {0.0, 0.0}; }
-    void addSubMesh(const SubMeshParams3D& submesh) override {
-        submesh_regions.push_back(submesh);
-    }
-    const std::vector<SubMeshParams3D>& getSubMeshRegions() const {
-        return submesh_regions;
-    }
 };
 
 template <typename RealType, bool IsMultiMaterial>
@@ -309,7 +287,6 @@ class CFDSolver3DImpl : public CFDSolver3DImplBase {
     std::vector<uint8_t> tile_is_fully_interior;
     std::vector<GeometryTile3D> geom_pool;
     std::vector<ObstacleFace> obstacle_faces;
-    std::unique_ptr<GridManager3D<RealType, IsMultiMaterial>> grid_manager;
 
     int n_tiles_x, n_tiles_y, n_tiles_z;
 
@@ -317,7 +294,6 @@ public:
     bool isMultiMaterial() const override { return IsMultiMaterial; }
     CFDSolver3DImpl(int nx, int ny, int nz, double cellSize, double xmin = 0, double ymin = 0, double zmin = 0);
 
-    void addSubMesh(const SubMeshParams3D& submesh) override;
     void setBoundaryConditions(BCType3D xmin, BCType3D xmax, BCType3D ymin, BCType3D ymax, BCType3D zmin, BCType3D zmax) override;
 
     void setInitialCondition(const Charge3DParams& charge, const MultiMat::MaterialSet& materials, double ambient_rho, double ambient_p) override;
@@ -337,7 +313,6 @@ public:
                                const std::atomic<bool>* terminate_flag = nullptr,
                                std::function<void(double)> progress_callback = nullptr) override;
     void uploadObstacleFaces(const std::vector<ObstacleFace>& faces) override;
-    void appendSubMeshObstacleFaces(std::vector<ObstacleFace>& faces) override;
     std::pair<double, double> getConservationTotals() const override;
 
     std::vector<float> sampleGauge(const Gauge3D& gauge) const override;
@@ -623,7 +598,7 @@ public:
         return sampleStateInternalWithMirror(gx, gy, gz, false);
     }
 
-    inline CellState3DT<RealType, IsMultiMaterial> sampleStateInternalWithMirror(int gx, int gy, int gz, bool enable_mirror) const {
+    inline CellState3DT<RealType, IsMultiMaterial> sampleStateInternalWithMirror(int gx, int gy, int gz, bool /*enable_mirror*/) const {
         bool reflective_x = false, reflective_y = false, reflective_z = false;
 
         applyBC3DHelper(gx, nx, bcXmin, bcXmax, reflective_x);
@@ -908,16 +883,6 @@ public:
         return s;
     }
 };
-
-template <typename RealType, bool IsMultiMaterial>
-void remap_1d_to_submesh(const std::vector<double>& r_1d, const std::vector<MultiMaterialState>& states_1d,
-                         SubMesh3D<RealType, IsMultiMaterial>& sm, double x_expl, double y_expl, double z_expl, double R_remap,
-                         double gamma, const MultiMat::MaterialSet& materials, bool is_ideal_gas);
-
-template <typename RealType, bool IsMultiMaterial>
-void remap_2d_to_submesh(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d,
-                         SubMesh3D<RealType, IsMultiMaterial>& sm, double x_expl, double y_expl, double z_expl, double R_remap,
-                         double gamma, const MultiMat::MaterialSet& materials, bool is_ideal_gas, double source_explosive_z = 0.0);
 
 #endif
 

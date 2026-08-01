@@ -57,7 +57,8 @@ struct MPMGridNode2D {
 
 enum class MPMTransferScheme {
     GIMP,
-    Standard
+    Standard,
+    BSpline
 };
 
 enum class MPMVelocityScheme {

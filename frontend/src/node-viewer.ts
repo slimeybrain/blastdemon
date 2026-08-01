@@ -2210,10 +2210,12 @@ export class NodeViewer {
             'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'refinement_level',
             'submesh_x', 'submesh_y', 'submesh_z', 'submesh_size_x', 'submesh_size_y', 'submesh_size_z',
             // MPM keys
-            'pos_x', 'pos_y', 'vel_x', 'vel_y', 'size_x', 'size_y', 'radius', 'angular_vel',
+            'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'radius',
+            'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
             'failure_strain', 'tensile_failure_stress',
-            'ppc', 'time_step', 'penalty_stiffness', 'contour_opacity', 'contour_min', 'contour_max'
+            'ppc', 'penalty_stiffness', 'contour_opacity', 'contour_min', 'contour_max',
+            'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal'
         ];
 
         const chargeShapeOptions = node.type === 'Charge3D' ? ['Sphere', 'Cylinder', 'Block'] : ['Sphere', 'Cylinder'];
@@ -2249,19 +2251,16 @@ export class NodeViewer {
             'plot_stride': ['1', '2', '5', '10', '20', '50', '100'],
             'charge_shape': chargeShapeOptions,
             'material_type': ['Air', 'JWL Charge', 'Ideal Gas Charge'],
-            'transfer_scheme': ['GIMP', 'Standard'],
+            'transfer_scheme': ['GIMP', 'Standard', 'BSpline'],
             'velocity_scheme': ['APIC', 'PIC', 'FLIP'],
-            'shape_type': ['Rectangle', 'Circle'],
+            'shape_type': (node.type === 'MPMObject3D') ? ['Box', 'Sphere'] : ['Rectangle', 'Circle'],
             'coupling_mode': ['TwoWay_Full', 'OneWay_CFD_to_MPM', 'Disabled'],
             'contour_quantity': ['von_mises', 'plastic_strain', 'density', 'velocity', 'pressure'],
             'color_map': ['viridis', 'plasma', 'jet', 'coolwarm'],
             'space_time_scheme': [
-                'Euler (1st-Order Space/Time)',
-                'RK2 (2nd-Order Space/Time)',
-                'RK3 (3rd-Order Space/Time)',
-                'MUSCL-Hancock (2nd-Order Space/Time)',
-                'ADER-2 (2nd-Order Space/Time)',
-                'ADER-3 (3rd-Order Space/Time)'
+                'USL (Update Stress Last / Symplectic Euler)',
+                'USF (Update Stress First)',
+                'RK2 (Midpoint Explicit)'
             ]
         };
 

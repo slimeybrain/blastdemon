@@ -44,7 +44,7 @@ typename CFDSolverImpl<RealType, IsMultiMaterial>::ConservedState CFDSolverImpl<
 }
 
 template <typename RealType, bool IsMultiMaterial>
-typename CFDSolverImpl<RealType, IsMultiMaterial>::ConservedState CFDSolverImpl<RealType, IsMultiMaterial>::getFlux(const PrimitiveState& sL, const PrimitiveState& sR, const ConservedState& uL, const ConservedState& uR, double dt, double& v_face) {
+typename CFDSolverImpl<RealType, IsMultiMaterial>::ConservedState CFDSolverImpl<RealType, IsMultiMaterial>::getFlux(const PrimitiveState& sL, const PrimitiveState& sR, const ConservedState& uL, const ConservedState& uR, double /*dt*/, double& v_face) {
     ConservedState f;
     if (currentScheme == AUSM_PLUS) {
         f = getFluxAUSMPlus(sL, sR, v_face);
@@ -216,7 +216,7 @@ typename CFDSolverImpl<RealType, IsMultiMaterial>::ConservedState CFDSolverImpl<
 }
 
 template <typename RealType, bool IsMultiMaterial>
-void CFDSolverImpl<RealType, IsMultiMaterial>::reconstruct(const std::vector<PrimitiveState>& states_current, int i, PrimitiveState& s_L, PrimitiveState& s_R, double dt) {
+void CFDSolverImpl<RealType, IsMultiMaterial>::reconstruct(const std::vector<PrimitiveState>& states_current, int i, PrimitiveState& s_L, PrimitiveState& s_R, double /*dt*/) {
     auto minmod = [](RealType a, RealType b) {
         if (a * b <= 0) return (RealType)0.0;
         return (std::abs(a) < std::abs(b)) ? a : b;

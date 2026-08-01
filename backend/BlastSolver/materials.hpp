@@ -11,24 +11,24 @@ namespace MultiMat {
     // Material 2: Unburned Explosive (JWL/Murnaghan, modeled as JWL for generality)
 
     struct JWLParams {
-        double A;
-        double B;
-        double R1;
-        double R2;
-        double omega;
-        double rho0;
-        double cv;
-        double T0;
+        double A = 0;
+        double B = 0;
+        double R1 = 0;
+        double R2 = 0;
+        double omega = 0;
+        double rho0 = 0;
+        double cv = 0;
+        double T0 = 0;
 
         // Precalculated terms for fast evaluation
-        double omega_over_R1;
-        double omega_over_R2;
-        double A_over_rho0;
-        double B_over_rho0;
-        double omega_plus_1;
-        double f2_const;
-        double c2_2_const1;
-        double c2_2_const2;
+        double omega_over_R1 = 0;
+        double omega_over_R2 = 0;
+        double A_over_rho0 = 0;
+        double B_over_rho0 = 0;
+        double omega_plus_1 = 0;
+        double f2_const = 0;
+        double c2_2_const1 = 0;
+        double c2_2_const2 = 0;
     };
 
     struct MaterialSet {
@@ -56,7 +56,6 @@ namespace MultiMat {
         matSet.unreacted.omega_plus_1 = matSet.unreacted.omega + 1.0;
         
         // f2_const for unreacted (V2 = 1.0)
-        double V2 = 1.0;
         matSet.unreacted.f2_const = matSet.unreacted.A * (1.0 - matSet.unreacted.omega / matSet.unreacted.R1) * exp(-matSet.unreacted.R1) +
                                     matSet.unreacted.B * (1.0 - matSet.unreacted.omega / matSet.unreacted.R2) * exp(-matSet.unreacted.R2);
         
@@ -138,6 +137,8 @@ __host__ __device__
 __host__ __device__
 #endif
     inline RealType getMixturePressure(RealType E_internal, RealType rho, RealType alpha1, RealType alpha2, RealType arho1, RealType arho2, RealType gamma0, const JWLParams& products, const JWLParams& unreacted) {
+        (void)rho;
+        (void)arho2;
         if (alpha1 + alpha2 < (RealType)1e-8) {
             return fmax((RealType)1e-6, E_internal * (gamma0 - (RealType)1.0));
         }
@@ -183,6 +184,8 @@ __host__ __device__
 __host__ __device__
 #endif
     inline RealType getMixtureEnergy(RealType p, RealType rho, RealType alpha1, RealType alpha2, RealType arho1, RealType arho2, RealType gamma0, const JWLParams& products, const JWLParams& unreacted) {
+        (void)rho;
+        (void)arho2;
         using std::exp;
         using std::fmax;
         using std::fmin;
@@ -283,6 +286,9 @@ __host__ __device__
             RealType products_rho0,
             RealType& alpha1, RealType& alpha2,
             RealType& arho1,  RealType& arho2) {
+
+        (void)dt;
+        (void)products_rho0;
 
         if (alpha2 <= (RealType)MIN_ALPHA) return (RealType)0.0;
 

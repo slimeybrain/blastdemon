@@ -61,12 +61,12 @@ public:
     virtual std::vector<float> getTelemetry2D(int stride = 1) = 0;
     virtual std::vector<float> getCellValues(int i, int j) = 0;
 
-    virtual void setGauges(const std::vector<Gauge2D>& gauges) {}
-    virtual void recordGaugesAsync(double t) {}
-    virtual void retrieveNewGaugeSamples(std::vector<double>& times, std::vector<float>& values) {}
+    virtual void setGauges(const std::vector<Gauge2D>& /*gauges*/) {}
+    virtual void recordGaugesAsync(double /*t*/) {}
+    virtual void retrieveNewGaugeSamples(std::vector<double>& /*times*/, std::vector<float>& /*values*/) {}
 
-    virtual void setSolidVelocities(const double* v) {}
-    virtual void setSolidMask(const uint8_t* mask) {}
+    virtual void setSolidVelocities(const double* /*v*/) {}
+    virtual void setSolidMask(const uint8_t* /*mask*/) {}
 
     virtual double getMaxWaveSpeed() = 0;
     virtual bool checkTerminationCondition() = 0;

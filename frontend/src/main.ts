@@ -1097,22 +1097,45 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
 
     const has2D       = model?.nodes.some(n => n.type === 'CFDSolver2D') || false;
     const hasMPM2D    = model?.nodes.some(n => n.type === 'MPMDomain2D') || false;
+    const hasMPM3D    = model?.nodes.some(n => n.type === 'MPMDomain3D') || false;
     const hasCoupler  = model?.nodes.some(n => n.type === 'FSICoupler2D') || false;
+    const hasCoupler3D = model?.nodes.some(n => n.type === 'FSICoupler3D') || false;
     const hasFSI2D    = hasCoupler || (has2D && hasMPM2D);
     const pipeline = findRemapPipeline(modelId);
     const has3D      = model?.nodes.some(n => n.type === 'CFDSolver3D') || false;
+    const hasFSI3D    = hasCoupler3D || (has3D && hasMPM3D);
 
     // Helper to get solver node for logging
     const getSolverNode = (mid: string) => {
         const m = stateManager.getAllModels().find(m => m.id === mid);
-        return m?.nodes.find(n => n.type === 'FSICoupler2D' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver' || n.type === 'MPMDomain2D');
+        return m?.nodes.find(n => n.type === 'FSICoupler3D' || n.type === 'FSICoupler2D' || n.type === 'CFDSolver3D' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver' || n.type === 'MPMDomain3D' || n.type === 'MPMDomain2D');
     };
     // ── INIT ─────────────────────────────────────────────────────────────────
     if (command === "INIT") {
         stateManager.setModelProgress(modelId, 0);
         stateManager.setModelSimTime(modelId, 0.0);
 
-        if (has3D) {
+        if (hasFSI3D) {
+            const state = stateManager.getSimulationState(modelId);
+            if (state) {
+                const payload = serializeForSolver(state, "INIT_FSI_3D", modelId, model?.filename);
+                console.log(`Sending INIT_FSI_3D for 3D FSI model ${modelId}`);
+                networkManager.send(payload);
+                sendView3DConfig(modelId);
+                stateManager.setModelStatus(modelId, 'INITIALIZED');
+            }
+        }
+        else if (hasMPM3D) {
+            const state = stateManager.getSimulationState(modelId);
+            if (state) {
+                const payload = serializeForSolver(state, "INIT_MPM_3D", modelId, model?.filename);
+                console.log(`Sending INIT_MPM_3D for 3D MPM model ${modelId}`);
+                networkManager.send(payload);
+                sendView3DConfig(modelId);
+                stateManager.setModelStatus(modelId, 'INITIALIZED');
+            }
+        }
+        else if (has3D) {
             const state = stateManager.getSimulationState(modelId);
             if (state) {
                 const payload = serializeForSolver(state, "INIT_3D", modelId, model?.filename);
@@ -1190,8 +1213,15 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
         }
         const cfl = getCflFromSolver(modelId);
         
-        const has3D = model?.nodes.some(n => n.type === 'CFDSolver3D') || false;
-        if (has3D) {
+        if (hasFSI3D) {
+            sendView3DConfig(modelId);
+            networkManager.send({ command: "STEP_FSI_3D", modelId: modelId, steps, cfl });
+        } else if (hasMPM3D) {
+            sendView3DConfig(modelId);
+            const mpmNode = model?.nodes.find(n => n.type === 'MPMDomain3D');
+            const mpmCfl = Number(mpmNode?.parameters?.cfl ?? 0.3);
+            networkManager.send({ command: "STEP_MPM_3D", modelId: modelId, steps, cfl: mpmCfl });
+        } else if (has3D) {
             sendView3DConfig(modelId);
             networkManager.send({ command: "STEP_3D", modelId: modelId, steps, cfl });
         } else if (hasFSI2D) {
@@ -1215,10 +1245,30 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
         const status = stateManager.getModelStatus(modelId);
         const cfl = getCflFromSolver(modelId);
 
-        const has3D = model?.nodes.some(n => n.type === 'CFDSolver3D') || false;
-
         if (status === 'UNINITIALIZED' || status === 'TERMINATED') {
-            if (has3D) {
+            if (hasFSI3D) {
+                const state = stateManager.getSimulationState(modelId);
+                if (state) {
+                    const payload = serializeForSolver(state, "INIT_FSI_3D", modelId, model?.filename);
+                    console.log(`[Auto-Run] Sending INIT_FSI_3D for 3D FSI model ${modelId}`);
+                    networkManager.send(payload);
+                    sendView3DConfig(modelId);
+                    networkManager.send({ command: "EXEC_ALL_FSI_3D", modelId: modelId, cfl });
+                    stateManager.setModelStatus(modelId, 'RUNNING');
+                }
+            } else if (hasMPM3D) {
+                const state = stateManager.getSimulationState(modelId);
+                if (state) {
+                    const payload = serializeForSolver(state, "INIT_MPM_3D", modelId, model?.filename);
+                    console.log(`[Auto-Run] Sending INIT_MPM_3D for 3D MPM model ${modelId}`);
+                    networkManager.send(payload);
+                    sendView3DConfig(modelId);
+                    const mpmNode = state.nodes.find(n => n.type === 'MPMDomain3D');
+                    const mpmCfl = Number(mpmNode?.parameters?.cfl ?? 0.3);
+                    networkManager.send({ command: "EXEC_ALL_MPM_3D", modelId: modelId, cfl: mpmCfl });
+                    stateManager.setModelStatus(modelId, 'RUNNING');
+                }
+            } else if (has3D) {
                 const state = stateManager.getSimulationState(modelId);
                 if (state) {
                     const payload = serializeForSolver(state, "INIT_3D", modelId, model?.filename);
@@ -1288,7 +1338,15 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
             }
         } else {
             // Already initialized / paused
-            if (has3D) {
+            if (hasFSI3D) {
+                sendView3DConfig(modelId);
+                networkManager.send({ command: "EXEC_ALL_FSI_3D", modelId: modelId, cfl });
+            } else if (hasMPM3D) {
+                sendView3DConfig(modelId);
+                const mpmNode = model?.nodes.find(n => n.type === 'MPMDomain3D');
+                const mpmCfl = Number(mpmNode?.parameters?.cfl ?? 0.3);
+                networkManager.send({ command: "EXEC_ALL_MPM_3D", modelId: modelId, cfl: mpmCfl });
+            } else if (has3D) {
                 sendView3DConfig(modelId);
                 networkManager.send({ command: "EXEC_ALL_3D", modelId: modelId, cfl });
             } else if (hasFSI2D) {
@@ -1310,8 +1368,11 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
 
     // ── PAUSE ─────────────────────────────────────────────────────────────────
     } else if (command === "PAUSE") {
-        const has3D = model?.nodes.some(n => n.type === 'CFDSolver3D') || false;
-        if (has3D) {
+        if (hasFSI3D) {
+            networkManager.send({ command: "PAUSE_FSI_3D", modelId: modelId });
+        } else if (hasMPM3D) {
+            networkManager.send({ command: "PAUSE_MPM_3D", modelId: modelId });
+        } else if (has3D) {
             networkManager.send({ command: "PAUSE_3D", modelId: modelId });
         } else if (hasFSI2D) {
             networkManager.send({ command: "PAUSE_FSI_2D", modelId: modelId });
@@ -1326,8 +1387,11 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
 
     // ── TERMINATE ─────────────────────────────────────────────────────────────
     } else if (command === "TERMINATE") {
-        const has3D = model?.nodes.some(n => n.type === 'CFDSolver3D') || false;
-        if (has3D) {
+        if (hasFSI3D) {
+            networkManager.send({ command: "TERMINATE_FSI_3D", modelId: modelId });
+        } else if (hasMPM3D) {
+            networkManager.send({ command: "TERMINATE_MPM_3D", modelId: modelId });
+        } else if (has3D) {
             networkManager.send({ command: "TERMINATE_3D", modelId: modelId });
         } else if (hasFSI2D) {
             networkManager.send({ command: "TERMINATE_FSI_2D", modelId: modelId });
@@ -1443,13 +1507,13 @@ networkManager.onMessage(async (data) => {
         }
 
         const model = stateManager.getAllModels().find(m => m.id === modelId);
-        const solverNodes = model?.nodes.filter(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D' || n.type === 'MPMDomain2D' || n.type === 'FSICoupler2D') || [];
+        const solverNodes = model?.nodes.filter(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D' || n.type === 'MPMDomain2D' || n.type === 'MPMDomain3D' || n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D') || [];
         if (solverNodes.length > 0) {
             solverNodes.forEach(solverNode => {
                 stateManager.pushTelemetry(solverNode.id, payloadBuffer, modelId);
                 stateManager.pushTelemetry(solverNode.id + "-binary", payloadBuffer, modelId);
             });
-            if (model?.nodes.some(n => n.type === 'CFDSolver3D')) {
+            if (model?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'MPMDomain3D' || n.type === 'FSICoupler3D')) {
                 layoutManager.components.forEach(comp => {
                     if (comp.type === 'TELEMETRY_3D') comp.instance.pushFrame(payloadBuffer.slice(0), modelId);
                     if (comp.type === 'NODE_VIEWER' && comp.instance) comp.instance.pushFrame(payloadBuffer.slice(0), modelId);
@@ -1695,7 +1759,7 @@ networkManager.onMessage(async (data) => {
                 }
 
                 if (model) {
-                    const solverNodes = model.nodes.filter(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D' || n.type === 'MPMDomain2D' || n.type === 'FSICoupler2D');
+                    const solverNodes = model.nodes.filter(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D' || n.type === 'MPMDomain2D' || n.type === 'MPMDomain3D' || n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D');
                     solverNodes.forEach(sn => stateManager.pushTelemetry(sn.id, dataJson, modelId));
                 }
             }
@@ -1728,7 +1792,7 @@ networkManager.onMessage(async (data) => {
                 }
 
                 if (model) {
-                    const solverNodes = model.nodes.filter(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D' || n.type === 'MPMDomain2D' || n.type === 'FSICoupler2D');
+                    const solverNodes = model.nodes.filter(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D' || n.type === 'MPMDomain2D' || n.type === 'MPMDomain3D' || n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D');
                     solverNodes.forEach(sn => stateManager.pushTelemetry(sn.id, dataJson, modelId));
                 }
                 if (dataJson.type === 'TELEMETRY_3D') {

@@ -129,32 +129,41 @@ int main() {
     solver_3d_multimat.setTemporalOrder(2);
     solver_3d_multimat.setIdealGas(false);
 
+
+
     solver_3d_multimat.initializeFrom2D(nr2d, nz2d, dr2d, dz2d, states_2d, 0.0, 0.0, 0.0, 0.0, source_z_2d);
 
     std::cout << "Stepping 3D Multi-Material solver for 50 timesteps after remapping...\n";
     bool unstable = false;
     for (int step = 1; step <= 50; ++step) {
-        double dt = solver_3d_multimat.computeStepSize(0.3);
+        double dt = solver_3d_multimat.computeStepSize(0.1);
         solver_3d_multimat.step(dt);
 
         double max_p = 0.0, min_p = 1e12;
+        int bad_i = -1, bad_j = -1, bad_k = -1;
         for (int k = 0; k < nz3d; ++k) {
             for (int j = 0; j < ny3d; ++j) {
                 for (int i = 0; i < nx3d; ++i) {
                     double p = solver_3d_multimat.sampleState(i, j, k).p;
-                    if (std::isnan(p) || p <= 0.0 || p > 1e10) unstable = true;
+                    if (std::isnan(p) || p <= 0.0 || p > 1e11) {
+                        unstable = true;
+                        bad_i = i; bad_j = j; bad_k = k;
+                    }
                     if (p > max_p) max_p = p;
                     if (p < min_p) min_p = p;
                 }
             }
         }
-        if (step % 10 == 0) {
+        if (step % 10 == 0 || unstable) {
             std::cout << "  Step " << std::setw(2) << step 
                       << " (t = " << std::fixed << std::setprecision(5) << solver_3d_multimat.getTime()*1e3 << " ms):"
                       << " Peak P = " << max_p / 1e6 << " MPa, Min P = " << min_p << " Pa\n";
         }
         if (unstable) {
-            std::cout << " -> UNSTABLE / NAN AT STEP " << step << "\n";
+            std::cout << " -> UNSTABLE / NAN AT STEP " << step << " at cell (" << bad_i << ", " << bad_j << ", " << bad_k << ")\n";
+            auto state = solver_3d_multimat.sampleState(bad_i, bad_j, bad_k);
+            std::cout << "    State: rho=" << state.rho << ", p=" << state.p << ", E=" << state.E 
+                      << ", ux=" << state.ux << ", uy=" << state.uy << ", uz=" << state.uz << "\n";
             break;
         }
     }

@@ -46,6 +46,15 @@
 ## 8. Automatic Broker Management Directive (ABSOLUTE RULE)
 - **Do NOT automatically start or restart the Broker:** Under no circumstances should the agent launch, start, or restart the `./Broker` daemon automatically in the background. The Broker process is managed manually by the user in their own terminal.
 
+## 9. 3D AMR and Subgrid Removal Directive (ABSOLUTE RULE)
+- **3D AMR and 3D Subgrids/Submeshes have been completely removed:** All dynamic 3D AMR, static 3D nested subgrids, submeshes, restriction, prolongated ghost fills, and multi-mesh 3D hierarchy code have been completely purged from the backend C++ solver and frontend UI.
+- **3D Uniform Grid Only:** All 3D simulation models execute strictly on standard single-block uniform grids. Do NOT attempt to reintroduce 3D AMR or 3D subgrid concepts.
+- **1D/2D Unchanged:** 1D and 2D solvers retain their existing AMR/subgrid features as-is.
+
+## 10. Architectural Consistency (ABSOLUTE RULE)
+- AI assistants MUST always inspect and cross-reference [ARCHITECTURE.md](file:///home/chris/antigrav/blastdemon/ARCHITECTURE.md) to ensure consistency with existing framework layouts before suggesting or making changes.
+
+
 
 
 

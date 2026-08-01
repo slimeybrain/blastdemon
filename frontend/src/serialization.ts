@@ -37,10 +37,12 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'refinement_level',
         'submesh_x', 'submesh_y', 'submesh_z', 'submesh_size_x', 'submesh_size_y', 'submesh_size_z',
         // MPM keys
-        'pos_x', 'pos_y', 'vel_x', 'vel_y', 'radius', 'angular_vel',
+        'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'radius',
+        'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
         'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
         'failure_strain', 'tensile_failure_stress',
-        'ppc', 'time_step', 'penalty_stiffness', 'contour_opacity', 'contour_min', 'contour_max'
+        'ppc', 'penalty_stiffness', 'contour_opacity', 'contour_min', 'contour_max',
+        'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal'
     ];
 
     const flattenedParams: Record<string, any> = {};
@@ -155,54 +157,14 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             flattenedParams['geometry_hash'] = '';
         }
 
-        // --- Recursive subgrid tree collection ---
-        // Walks all RefinementMesh3D nodes reachable from the DomainMesh3D via outgoing `mesh` connections.
-        // Each entry carries parent_id ("root" = direct child of domain, or another subgrid id).
-        const submeshList: any[] = [];
-
-        const collectSubgridTree = (parentNodeId: string, parentSubmeshId: string) => {
-            // Find all RefinementMesh3D nodes whose parent_mesh port connects FROM parentNodeId
-            const childConns = state.connections.filter(
-                c => c.fromNode === parentNodeId && c.fromPort === 'mesh'
-            );
-            for (const conn of childConns) {
-                const childNode = state.nodes.find(n => n.id === conn.toNode);
-                if (!childNode || childNode.type !== 'RefinementMesh3D') continue;
-                submeshList.push({
-                    id: childNode.id,
-                    parent_id: parentSubmeshId,
-                    level: Number(childNode.parameters.refinement_level ?? 1),
-                    x: Number(childNode.parameters.submesh_x ?? 0.25),
-                    y: Number(childNode.parameters.submesh_y ?? 0.25),
-                    z: Number(childNode.parameters.submesh_z ?? 0.25),
-                    size_x: Number(childNode.parameters.submesh_size_x ?? 0.5),
-                    size_y: Number(childNode.parameters.submesh_size_y ?? 0.5),
-                    size_z: Number(childNode.parameters.submesh_size_z ?? 0.5)
-                });
-                // Recurse: this subgrid's children use its id as parent_id
-                collectSubgridTree(childNode.id, childNode.id);
-            }
-        };
-
         // Find the DomainMesh3D connected to CFDSolver3D.mesh
-        // (new design: only DomainMesh3D plugs directly into solver.mesh)
         const meshConn3D = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'mesh');
         if (meshConn3D) {
-            let rootDomainNode = state.nodes.find(n => n.id === meshConn3D.fromNode);
-            // Auto-heal: if an old scene has RefinementMesh3D→solver, trace back to DomainMesh3D
-            let depth = 0;
-            while (rootDomainNode && rootDomainNode.type === 'RefinementMesh3D' && depth < 20) {
-                const parentConn = state.connections.find(c => c.toNode === rootDomainNode!.id && c.toPort === 'parent_mesh');
-                if (!parentConn) break;
-                rootDomainNode = state.nodes.find(n => n.id === parentConn.fromNode);
-                depth++;
-            }
+            const rootDomainNode = state.nodes.find(n => n.id === meshConn3D.fromNode);
             if (rootDomainNode && rootDomainNode.type === 'DomainMesh3D') {
                 Object.entries(rootDomainNode.parameters).forEach(([key, value]) => {
                     flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
                 });
-                // Walk all RefinementMesh3D children of the DomainMesh3D (and their children, recursively)
-                collectSubgridTree(rootDomainNode.id, 'root');
             }
         }
 
@@ -215,12 +177,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                         flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
                     }
                 });
-                collectSubgridTree(rootDomainMesh.id, 'root');
             }
-        }
-
-        if (submeshList.length > 0) {
-            flattenedParams['submeshes'] = submeshList;
         }
 
         // Trace Air for CFD Solver 3D
@@ -701,6 +658,62 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             for (const conn of objConns) {
                 const objNode = state.nodes.find(n => n.id === conn.fromNode);
                 if (objNode && objNode.type === 'MPMObject2D') {
+                    const objParams: any = {};
+                    Object.entries(objNode.parameters).forEach(([k, v]) => {
+                        objParams[k] = numericKeys.includes(k) ? Number(v) : v;
+                    });
+                    const matConn = state.connections.find(c => c.toNode === objNode.id && c.toPort === 'material');
+                    if (matConn) {
+                        const matNode = state.nodes.find(n => n.id === matConn.fromNode);
+                        if (matNode) {
+                            Object.entries(matNode.parameters).forEach(([k, v]) => {
+                                objParams[k] = numericKeys.includes(k) ? Number(v) : v;
+                            });
+                        }
+                    }
+                    if (objParams['ppc'] === undefined) {
+                        objParams['ppc'] = domainPpc;
+                    }
+                    mpmObjects.push(objParams);
+                }
+            }
+            flattenedParams['mpm_objects'] = mpmObjects;
+        }
+    } else if (command === "INIT_MPM_3D" || command === "INIT_3D_MPM") {
+        const mpmDomain = state.nodes.find(n => n.type === 'MPMDomain3D');
+        if (mpmDomain) {
+            Object.entries(mpmDomain.parameters).forEach(([key, value]) => {
+                flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+            });
+
+            const meshConn = state.connections.find(c => c.toNode === mpmDomain.id && c.toPort === 'mesh');
+            if (meshConn) {
+                const meshNode = state.nodes.find(n => n.id === meshConn.fromNode);
+                if (meshNode) {
+                    Object.entries(meshNode.parameters).forEach(([key, value]) => {
+                        flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                    });
+                    const cellSize = Number(meshNode.parameters?.cell_size ?? 0.01);
+                    const xmin = Number(meshNode.parameters?.xmin ?? 0.0);
+                    const xmax = Number(meshNode.parameters?.xmax ?? 1.0);
+                    const ymin = Number(meshNode.parameters?.ymin ?? 0.0);
+                    const ymax = Number(meshNode.parameters?.ymax ?? 1.0);
+                    const zmin = Number(meshNode.parameters?.zmin ?? 0.0);
+                    const zmax = Number(meshNode.parameters?.zmax ?? 1.0);
+                    flattenedParams['nx'] = Math.round((xmax - xmin) / cellSize);
+                    flattenedParams['ny'] = Math.round((ymax - ymin) / cellSize);
+                    flattenedParams['nz'] = Math.round((zmax - zmin) / cellSize);
+                }
+            }
+
+            const domainPpc = Number(mpmDomain.parameters?.ppc ?? 8);
+            flattenedParams['ppc'] = domainPpc;
+
+            const objConns = state.connections.filter(c => c.toNode === mpmDomain.id && c.toPort === 'objects');
+            const mpmObjects: any[] = [];
+            for (const conn of objConns) {
+                const objNode = state.nodes.find(n => n.id === conn.fromNode);
+                if (objNode && objNode.type === 'MPMObject3D') {
                     const objParams: any = {};
                     Object.entries(objNode.parameters).forEach(([k, v]) => {
                         objParams[k] = numericKeys.includes(k) ? Number(v) : v;

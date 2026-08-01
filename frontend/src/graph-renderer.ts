@@ -766,7 +766,7 @@ export class GraphRenderer {
                 if (toPortId === 'material') return fromType === 'Material';
                 return false;
             case 'Telemetry3DViewport':
-                if (toPortId === 'in') return fromType === 'CFDSolver3D';
+                if (toPortId === 'in') return fromType === 'CFDSolver3D' || fromType === 'MPMDomain3D' || fromType === 'FSICoupler3D';
                 return false;
             case 'ThePainter':
                 if (toPortId === 'mesh') return fromType === 'DomainMesh';
@@ -802,17 +802,26 @@ export class GraphRenderer {
                 return false;
             case 'TelemetryText':
             case 'TelemetryGraph':
-                return fromType === 'CFDSolver' || fromType === 'CFDSolver2D' || fromType === 'CFDSolver3D' || fromType === 'MPMDomain2D' || fromType === 'FSICoupler2D';
+                return fromType === 'CFDSolver' || fromType === 'CFDSolver2D' || fromType === 'CFDSolver3D' || fromType === 'MPMDomain2D' || fromType === 'MPMDomain3D' || fromType === 'FSICoupler2D' || fromType === 'FSICoupler3D';
             case 'MPMDomain2D':
                 if (toPortId === 'mesh') return fromType === 'DomainMesh2D';
                 if (toPortId === 'objects') return fromType === 'MPMObject2D';
                 return false;
+            case 'MPMDomain3D':
+                if (toPortId === 'mesh') return fromType === 'DomainMesh3D';
+                if (toPortId === 'objects') return fromType === 'MPMObject3D';
+                return false;
             case 'MPMObject2D':
+            case 'MPMObject3D':
                 if (toPortId === 'material') return fromType === 'MPMMaterialSteel';
                 return false;
             case 'FSICoupler2D':
                 if (toPortId === 'cfd_solver' || toPortId === 'cfd') return fromType === 'CFDSolver2D';
                 if (toPortId === 'mpm_domain' || toPortId === 'mpm') return fromType === 'MPMDomain2D';
+                return false;
+            case 'FSICoupler3D':
+                if (toPortId === 'cfd_solver' || toPortId === 'cfd') return fromType === 'CFDSolver3D';
+                if (toPortId === 'mpm_domain' || toPortId === 'mpm') return fromType === 'MPMDomain3D';
                 return false;
             case 'TelemetryContour':
                 return fromType === 'CFDSolver2D' || fromType === 'MPMDomain2D' || fromType === 'FSICoupler2D';
@@ -844,7 +853,7 @@ export class GraphRenderer {
                 const state = this.stateManager.getCurrentState();
                 if (state) {
                     const targetNode = state.nodes.find(n => n.id === this.hoveredPort!.nodeId);
-                    const isMultiInput = (targetNode?.type === 'MPMDomain2D' && this.hoveredPort!.portId === 'objects')
+                    const isMultiInput = ((targetNode?.type === 'MPMDomain2D' || targetNode?.type === 'MPMDomain3D') && this.hoveredPort!.portId === 'objects')
                         || targetNode?.type === 'TelemetryText'
                         || targetNode?.type === 'TelemetryContour';
 
@@ -1197,6 +1206,15 @@ export class GraphRenderer {
                     { label: 'MPM Object 2D (Primitive)', type: 'MPMObject2D' },
                     { label: 'MPM Steel Material', type: 'MPMMaterialSteel' },
                     { label: 'FSI Coupler 2D', type: 'FSICoupler2D' }
+                ]
+            },
+            {
+                name: 'MPM Simulation (3D)',
+                items: [
+                    { label: 'MPM Domain 3D', type: 'MPMDomain3D' },
+                    { label: 'MPM Object 3D (Primitive)', type: 'MPMObject3D' },
+                    { label: 'MPM Steel Material', type: 'MPMMaterialSteel' },
+                    { label: 'FSI Coupler 3D', type: 'FSICoupler3D' }
                 ]
             },
             {
@@ -1647,6 +1665,13 @@ export class GraphRenderer {
                 aoEnabled: true,
                 ambientLevel: 0.3,
                 specularIntensity: 0.4,
+                showMPMParticles: true,
+                mpmParticleSize: 4.0,
+                mpmParticleQuantity: 'vonMises',
+                mpmParticleColormap: 'plasma',
+                mpmParticleAutoScale: true,
+                mpmParticleMinVal: 0.0,
+                mpmParticleMaxVal: 500000000.0,
                 vtk_format: 'Binary',
                 step_interval: 10,
                 time_interval: 0.0,
@@ -1694,8 +1719,15 @@ export class GraphRenderer {
                 transfer_scheme: 'GIMP',
                 velocity_scheme: 'APIC',
                 ppc: 4,
-                cfl: 0.3,
-                time_step: 1.0e-5
+                cfl: 0.3
+            };
+            case 'MPMDomain3D': return {
+                transfer_scheme: 'GIMP',
+                velocity_scheme: 'APIC',
+                space_time_scheme: 'USL',
+                precision: 'single',
+                ppc: 8,
+                cfl: 0.3
             };
             case 'MPMObject2D': return {
                 shape_type: 'Rectangle',
@@ -1708,6 +1740,14 @@ export class GraphRenderer {
                 vel_y: 0.0,
                 angular_vel: 0.0
             };
+            case 'MPMObject3D': return {
+                shape_type: 'Box',
+                pos_x: 0.5, pos_y: 0.5, pos_z: 0.5,
+                size_x: 0.2, size_y: 0.2, size_z: 0.2,
+                radius: 0.1,
+                vel_x: 0.0, vel_y: 0.0, vel_z: 0.0,
+                angular_vel_x: 0.0, angular_vel_y: 0.0, angular_vel_z: 0.0
+            };
             case 'MPMMaterialSteel': return {
                 density: 7850.0,
                 youngs_modulus: 210.0e9,
@@ -1718,6 +1758,15 @@ export class GraphRenderer {
                 tensile_failure_stress: 600.0e6
             };
             case 'FSICoupler2D': return {
+                coupling_mode: 'TwoWay_Full',
+                penalty_stiffness: 1.0e9,
+                contour_quantity: 'von_mises',
+                color_map: 'viridis',
+                contour_opacity: 1.0,
+                contour_min: 0.0,
+                contour_max: 500.0e6
+            };
+            case 'FSICoupler3D': return {
                 coupling_mode: 'TwoWay_Full',
                 penalty_stiffness: 1.0e9,
                 contour_quantity: 'von_mises',
@@ -1851,9 +1900,12 @@ export class GraphRenderer {
             case 'STLGeometry':
             case 'PrimitiveGeometry3D': return 'STL';
             case 'MPMDomain2D':      return 'MPM2D';
+            case 'MPMDomain3D':      return 'MPM3D';
             case 'MPMObject2D':      return 'MPM OBJ';
+            case 'MPMObject3D':      return 'MPM OBJ3D';
             case 'MPMMaterialSteel': return 'MPM STEEL';
             case 'FSICoupler2D':     return 'FSI 2D';
+            case 'FSICoupler3D':     return 'FSI 3D';
             default: return (type as string).toUpperCase();
         }
     }
@@ -1887,9 +1939,12 @@ export class GraphRenderer {
             case 'STLGeometry':       return 'STL Geometry 3D';
             case 'PrimitiveGeometry3D': return 'Primitive Geometry 3D';
             case 'MPMDomain2D':      return 'MPM Domain 2D';
+            case 'MPMDomain3D':      return 'MPM Domain 3D';
             case 'MPMObject2D':      return 'MPM Object 2D';
+            case 'MPMObject3D':      return 'MPM Object 3D';
             case 'MPMMaterialSteel': return 'MPM Material (Steel)';
             case 'FSICoupler2D':     return 'FSI Coupler 2D';
+            case 'FSICoupler3D':     return 'FSI Coupler 3D';
             default: return type;
         }
     }
@@ -2424,17 +2479,16 @@ export class GraphRenderer {
                                 portsBottomEl.appendChild(p);
                             });
                         } else if (node.type === 'TelemetryText') {
-                            node.inputs.forEach((inputPort, idx) => {
+                            if (node.inputs.length > 0) {
                                 const p = document.createElement('div');
                                 p.className = 'port input representative';
-                                p.style.top = `${30 + idx * 24}px`;
-                                const colorClass = this.getPortColorClass(node.type, inputPort.id);
-                                p.innerHTML = `<div class="port-bullet ${colorClass}" id="${this.panelId}-port-in-${node.id}-${inputPort.id}" title="${inputPort.label}"></div>`;
+                                const colorClass = this.getPortColorClass(node.type, node.inputs[0].id);
+                                p.innerHTML = `<div class="port-bullet ${colorClass}" id="${this.panelId}-port-in-${node.id}-representative"></div>`;
                                 p.addEventListener('mousedown', (e) => {
-                                    this.handleInputPortMouseDown(e, node.id, inputPort.id);
+                                    this.handleInputPortMouseDown(e, node.id, node.inputs[0].id);
                                 });
                                 portsEl.appendChild(p);
-                            });
+                            }
                             if (node.outputs.length > 0) {
                                 const p = document.createElement('div');
                                 p.className = 'port output representative';
@@ -2815,7 +2869,7 @@ export class GraphRenderer {
 
     private getPortPosition(node: Node, portId: string, isInput: boolean): { x: number, y: number } | null {
         // compact, full-panel, and TelemetryText (all HORIZ modes) use representative bullets
-        const useRepresentative = node.displayMode === 'compact' || node.displayMode === 'full-panel';
+        const useRepresentative = node.displayMode === 'compact' || node.displayMode === 'full-panel' || (node.type === 'TelemetryText' && (node.orientation || 'HORIZ') === 'HORIZ');
         const bulletId = useRepresentative
             ? (isInput ? `${this.panelId}-port-in-${node.id}-representative` : `${this.panelId}-port-out-${node.id}-representative`)
             : (isInput ? `${this.panelId}-port-in-${node.id}-${portId}` : `${this.panelId}-port-out-${node.id}-${portId}`);
@@ -4272,10 +4326,12 @@ export class GraphRenderer {
                             'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'refinement_level',
                             'submesh_x', 'submesh_y', 'submesh_z', 'submesh_size_x', 'submesh_size_y', 'submesh_size_z',
                             // MPM keys
-                            'pos_x', 'pos_y', 'vel_x', 'vel_y', 'radius', 'angular_vel',
+                            'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'radius',
+                            'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
                             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
                             'failure_strain', 'tensile_failure_stress',
-                            'ppc', 'time_step', 'penalty_stiffness', 'contour_opacity', 'contour_min', 'contour_max'
+                            'ppc', 'penalty_stiffness', 'contour_opacity', 'contour_min', 'contour_max',
+                            'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal'
                         ];
                         let castValue: any = newVal;
                         if (numericKeys.includes(key)) {

@@ -421,89 +421,7 @@ export class PropertyEditor {
             form.appendChild(gridInfoDiv);
         }
 
-        if (node.type === 'RefinementMesh3D') {
-            const cellInfo = document.createElement('div');
-            cellInfo.id = 'grid-info-display';
-            cellInfo.style.fontSize = 'var(--font-xs)';
-            cellInfo.style.color = '#569cd6';
-            cellInfo.style.marginTop = '6px';
-            cellInfo.style.lineHeight = '1.3';
-            const sx = Number(node.parameters['submesh_size_x'] ?? 0.5);
-            const sy = Number(node.parameters['submesh_size_y'] ?? 0.5);
-            const sz = Number(node.parameters['submesh_size_z'] ?? 0.5);
-            const lvl = Number(node.parameters['refinement_level'] ?? 1);
-            cellInfo.innerHTML = `<div>SubMesh Level ${lvl} (${sx}m x ${sy}m x ${sz}m)</div>` + getMeshDisplayHTML(node, state ?? undefined);
-            form.appendChild(cellInfo);
 
-            const autoFitDiv = document.createElement('div');
-            autoFitDiv.style.marginTop = '12px';
-            autoFitDiv.style.padding = '8px';
-            autoFitDiv.style.background = '#252526';
-            autoFitDiv.style.border = '1px solid #3c3c3c';
-            autoFitDiv.style.borderRadius = '4px';
-
-            const autoFitTitle = document.createElement('div');
-            autoFitTitle.style.fontSize = 'var(--font-xs)';
-            autoFitTitle.style.fontWeight = 'bold';
-            autoFitTitle.style.color = '#569cd6';
-            autoFitTitle.style.marginBottom = '6px';
-            autoFitTitle.textContent = 'QUICK AUTO-FIT ACTIONS';
-            autoFitDiv.appendChild(autoFitTitle);
-
-            const btnContainer = document.createElement('div');
-            btnContainer.style.display = 'flex';
-            btnContainer.style.flexDirection = 'column';
-            btnContainer.style.gap = '6px';
-
-            const createActionBtn = (text: string, onClick: () => void) => {
-                const btn = document.createElement('button');
-                btn.textContent = text;
-                btn.style.padding = '5px 8px';
-                btn.style.fontSize = 'var(--font-xs)';
-                btn.style.background = '#0e639c';
-                btn.style.color = '#fff';
-                btn.style.border = 'none';
-                btn.style.borderRadius = '3px';
-                btn.style.cursor = 'pointer';
-                btn.onclick = onClick;
-                return btn;
-            };
-
-            btnContainer.appendChild(createActionBtn('🎯 Auto-Fit to Explosive Charge', () => {
-                const state = this.stateManager.getCurrentState();
-                const chargeNode = state?.nodes.find(n => n.type === 'Charge3D');
-                if (chargeNode) {
-                    const cx = Number(chargeNode.parameters.charge_x ?? 0.5);
-                    const cy = Number(chargeNode.parameters.charge_y ?? 0.5);
-                    const cz = Number(chargeNode.parameters.charge_z ?? 0.5);
-                    const r = Number(chargeNode.parameters.charge_radius ?? 0.1);
-                    const padding = 0.05;
-                    const size = Math.ceil(((r + padding) * 2) * 100) / 100;
-                    this.stateManager.updateNodeParameters(node.id, {
-                        submesh_x: Math.max(0, cx - size * 0.5),
-                        submesh_y: Math.max(0, cy - size * 0.5),
-                        submesh_z: Math.max(0, cz - size * 0.5),
-                        submesh_size_x: size,
-                        submesh_size_y: size,
-                        submesh_size_z: size
-                    });
-                }
-            }));
-
-            btnContainer.appendChild(createActionBtn('🔲 Center 50% in Parent Domain', () => {
-                this.stateManager.updateNodeParameters(node.id, {
-                    submesh_x: 0.25,
-                    submesh_y: 0.25,
-                    submesh_z: 0.25,
-                    submesh_size_x: 0.5,
-                    submesh_size_y: 0.5,
-                    submesh_size_z: 0.5
-                });
-            }));
-
-            autoFitDiv.appendChild(btnContainer);
-            form.appendChild(autoFitDiv);
-        }
         this.container.appendChild(form);
 
         // I/O Connections Sector (Phase 16.0 Requirement 6)
@@ -841,6 +759,15 @@ export class PropertyEditor {
             const gaugeQtyEl = this.createInputElement(node, 'gauge_quantity', node.parameters['gauge_quantity'] ?? 'pressure');
             addRowToPanel('gauge_quantity', 'GAUGE DISPLAY MODE', gaugeQtyEl, 0);
 
+            const mpmQtyEl = this.createInputElement(node, 'mpmParticleQuantity', node.parameters['mpmParticleQuantity'] ?? 'vonMises');
+            addRowToPanel('mpmParticleQuantity', 'MPM PARTICLE QTY', mpmQtyEl, 0);
+
+            const mpmCmapEl = this.createInputElement(node, 'mpmParticleColormap', node.parameters['mpmParticleColormap'] ?? 'plasma');
+            addRowToPanel('mpmParticleColormap', 'MPM PARTICLE COLORMAP', mpmCmapEl, 0);
+
+            const mpmSizeEl = this.createInputElement(node, 'mpmParticleSize', node.parameters['mpmParticleSize'] ?? 4.0);
+            addRowToPanel('mpmParticleSize', 'MPM PARTICLE POINT SIZE', mpmSizeEl, 0);
+
             const cbGrid = document.createElement('div');
             cbGrid.style.display = 'grid';
             cbGrid.style.gridTemplateColumns = 'repeat(2, 1fr)';
@@ -859,6 +786,7 @@ export class PropertyEditor {
             cbGrid.appendChild(createCheckboxField('stl_solids', node.parameters['stl_solids'] !== false, 'STL Solids'));
             cbGrid.appendChild(createCheckboxField('show_gauges', node.parameters['show_gauges'] !== false, 'Show Gauges'));
             cbGrid.appendChild(createCheckboxField('gauge_solid', node.parameters['gauge_solid'] !== false, 'Gauge Solid Spheres'));
+            cbGrid.appendChild(createCheckboxField('showMPMParticles', node.parameters['showMPMParticles'] !== false, 'Show MPM Particles'));
             panels[0].appendChild(cbGrid);
 
             const opacRow = document.createElement('div');
@@ -1158,13 +1086,17 @@ export class PropertyEditor {
             'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'refinement_level',
             'submesh_x', 'submesh_y', 'submesh_z', 'submesh_size_x', 'submesh_size_y', 'submesh_size_z',
             // MPM keys
-            'pos_x', 'pos_y', 'vel_x', 'vel_y', 'radius', 'angular_vel',
+            'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'radius',
+            'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
             'failure_strain', 'tensile_failure_stress',
-            'ppc', 'time_step', 'penalty_stiffness', 'contour_opacity', 'contour_min', 'contour_max'
+            'ppc', 'penalty_stiffness', 'contour_opacity', 'contour_min', 'contour_max',
+            'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal'
         ];
 
         const dropdowns: Record<string, string[]> = {
+            'mpmParticleQuantity': ['vonMises', 'pressure', 'velocity', 'density', 'plastic_strain'],
+            'mpmParticleColormap': ['plasma', 'viridis', 'coolwarm', 'rainbow', 'cividis', 'grayscale'],
             'telemetry_mode': ['Enabled', 'Throttled (1 Hz)', 'Throttled (0.2 Hz)', 'Disabled'],
             'enable_gauges': ['Enabled', 'Disabled'],
             'enable_vtk': ['Disabled', 'Enabled'],
@@ -1211,19 +1143,16 @@ export class PropertyEditor {
             'ascii_delimiter': ['Comma', 'Tab', 'Space'],
             'vtk_format': ['ASCII', 'Binary', 'Compressed Binary'],
             'voxelization_method': ['watertight_floodfill', 'watertight_raycast', 'thin_shell', 'winding_number'],
-            'transfer_scheme': ['GIMP', 'Standard'],
+            'transfer_scheme': ['GIMP', 'Standard', 'BSpline'],
             'velocity_scheme': ['APIC', 'PIC', 'FLIP'],
-            'shape_type': ['Rectangle', 'Circle'],
+            'shape_type': (node.type === 'MPMObject3D') ? ['Box', 'Sphere'] : ['Rectangle', 'Circle'],
             'coupling_mode': ['TwoWay_Full', 'OneWay_CFD_to_MPM', 'Disabled'],
             'contour_quantity': ['von_mises', 'plastic_strain', 'density', 'velocity', 'pressure'],
             'color_map': ['viridis', 'plasma', 'jet', 'coolwarm'],
             'space_time_scheme': [
-                'Euler (1st-Order Space/Time)',
-                'RK2 (2nd-Order Space/Time)',
-                'RK3 (3rd-Order Space/Time)',
-                'MUSCL-Hancock (2nd-Order Space/Time)',
-                'ADER-2 (2nd-Order Space/Time)',
-                'ADER-3 (3rd-Order Space/Time)'
+                'USL (Update Stress Last / Symplectic Euler)',
+                'USF (Update Stress First)',
+                'RK2 (Midpoint Explicit)'
             ]
         };
 

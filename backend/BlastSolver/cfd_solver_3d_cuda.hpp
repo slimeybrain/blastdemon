@@ -1,95 +1,12 @@
-#ifndef     CFD_SOLVER_3D_CUDA_HPP
-#define     CFD_SOLVER_3D_CUDA_HPP
+#ifndef CFD_SOLVER_3D_CUDA_HPP
+#define CFD_SOLVER_3D_CUDA_HPP
 
 #include "cfd_solver_3d.hpp"
-#include "grid_manager_3d.hpp"
 #include <unordered_map>
 
 struct GPUGauge3D {
     int t_idx;
     int c_idx;
-    int submesh_idx; // -1 if not in submesh, otherwise submesh index in gpu_submeshes
-    int sm_idx;      // flat linear index inside the submesh
-};
-
-template <typename RealType>
-struct GPUSubMeshDevicePointer3D {
-    RealType* rho;
-    RealType* ux;
-    RealType* uy;
-    RealType* uz;
-    RealType* p;
-    RealType* E;
-    RealType* alpha1;
-    RealType* alpha2;
-};
-
-template <typename RealType>
-struct GPUSubMeshBuffer3D {
-    std::string id;
-    std::string parent_id = "root";
-    int parent_idx = -1;
-    int level = 0;
-    int nx = 0, ny = 0, nz = 0;
-    RealType xmin = 0, xmax = 0;
-    RealType ymin = 0, ymax = 0;
-    RealType zmin = 0, zmax = 0;
-    RealType cellSize = 0;
-
-    RealType* d_rho = nullptr;
-    RealType* d_ux = nullptr;
-    RealType* d_uy = nullptr;
-    RealType* d_uz = nullptr;
-    RealType* d_p = nullptr;
-    RealType* d_E = nullptr;
-
-    RealType* d_new_rho = nullptr;
-    RealType* d_new_ux = nullptr;
-    RealType* d_new_uy = nullptr;
-    RealType* d_new_uz = nullptr;
-    RealType* d_new_p = nullptr;
-    RealType* d_new_E = nullptr;
-
-    RealType* d_alpha1 = nullptr;
-    RealType* d_alpha2 = nullptr;
-    RealType* d_arho1 = nullptr;
-    RealType* d_arho2 = nullptr;
-
-    RealType* d_new_alpha1 = nullptr;
-    RealType* d_new_alpha2 = nullptr;
-    RealType* d_new_arho1 = nullptr;
-    RealType* d_new_arho2 = nullptr;
-
-    RealType* d_rk_rho = nullptr;
-    RealType* d_rk_ux = nullptr;
-    RealType* d_rk_uy = nullptr;
-    RealType* d_rk_uz = nullptr;
-    RealType* d_rk_p = nullptr;
-    RealType* d_rk_E = nullptr;
-
-    RealType* d_rk_alpha1 = nullptr;
-    RealType* d_rk_alpha2 = nullptr;
-    RealType* d_rk_arho1 = nullptr;
-    RealType* d_rk_arho2 = nullptr;
-
-    RealType* d_rho_old = nullptr;
-    RealType* d_ux_old = nullptr;
-    RealType* d_uy_old = nullptr;
-    RealType* d_uz_old = nullptr;
-    RealType* d_p_old = nullptr;
-    RealType* d_E_old = nullptr;
-
-    RealType* d_alpha1_old = nullptr;
-    RealType* d_alpha2_old = nullptr;
-    RealType* d_arho1_old = nullptr;
-    RealType* d_arho2_old = nullptr;
-
-    RealType* d_peak_overpressure = nullptr;
-    RealType* d_peak_impulse = nullptr;
-
-    uint8_t* d_is_boundary = nullptr;
-
-    bool is_allocated = false;
 };
 
 template <typename RealType, bool IsMultiMaterial>
@@ -119,20 +36,12 @@ private:
     mutable bool constants_dirty = true;
     mutable int step_count = 0;
 
-
-    // GPU-side submesh device buffers
-    mutable std::vector<GPUSubMeshBuffer3D<RealType>> gpu_submeshes;
-    void allocateGPUSubMeshes() const;
-    void freeGPUSubMeshes() const;
-    void syncSubMeshesToGPU() const;
-    void syncSubMeshesToHost() const;
     void bind_constants() const;
 
     // GPU-side gauge variables
     int num_gauges = 0;
     mutable void* d_gauge_coords = nullptr;
     mutable void* d_gauge_results = nullptr;
-    mutable void* d_submesh_buffers_gauge = nullptr;
     void* gauge_stream = nullptr;
     void* step_done = nullptr;
     int num_obstacle_faces = 0;
@@ -152,6 +61,7 @@ private:
 
     // Host temporary mirrors during remapping
     PrimitiveTile3D<RealType, IsMultiMaterial>* temp_h_states = nullptr;
+    std::vector<PrimitiveTile3D<RealType, IsMultiMaterial>*>* temp_h_tiles_ptr = nullptr;
     uint8_t* temp_h_active = nullptr;
 
     mutable int last_cached_tile_idx = -1;
@@ -171,13 +81,7 @@ private:
     mutable std::vector<GPUGauge3D> paged_gauge_coords;
     mutable bool has_paged_gauges = false;
 
-    std::unique_ptr<GridManager3D<RealType, IsMultiMaterial>> grid_manager;
     std::vector<ObstacleFace> obstacle_faces;
-
-public:
-    void addSubMesh(const SubMeshParams3D& submesh) override;
-    std::vector<PrimitiveTile3D<RealType, IsMultiMaterial>> temp_h_tiles;
-    std::vector<PrimitiveTile3D<RealType, IsMultiMaterial>*>* temp_h_tiles_ptr = nullptr;
 
 private:
     void updateActiveRegions();
@@ -214,7 +118,6 @@ public:
                                const std::atomic<bool>* terminate_flag = nullptr,
                                std::function<void(double)> progress_callback = nullptr) override;
     void uploadObstacleFaces(const std::vector<ObstacleFace>& faces) override;
-    void appendSubMeshObstacleFaces(std::vector<ObstacleFace>& faces) override;
     std::pair<double, double> getConservationTotals() const override;
 
     std::vector<float> sampleGauge(const Gauge3D& gauge) const override;
