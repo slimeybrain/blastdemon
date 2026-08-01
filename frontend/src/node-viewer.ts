@@ -727,7 +727,21 @@ export class NodeViewer {
         grid.style.alignItems = 'center';
 
         let paramKeys = Object.keys(node.parameters);
-        if (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D') {
+        if (node.type === 'MPMDomain2D') {
+            const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
+            paramKeys = ['transfer_scheme', 'velocity_scheme'];
+            if (hasFLIP) {
+                paramKeys.push('flip_blend');
+            }
+            paramKeys.push('ppc', 'cfl');
+        } else if (node.type === 'MPMDomain3D') {
+            const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
+            paramKeys = ['transfer_scheme', 'velocity_scheme', 'space_time_scheme'];
+            if (hasFLIP) {
+                paramKeys.push('flip_blend');
+            }
+            paramKeys.push('ppc', 'cfl');
+        } else if (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D') {
             paramKeys = paramKeys.filter(k => k !== 'spatial_order' && k !== 'temporal_order');
             const idx = Object.keys(node.parameters).indexOf('spatial_order');
             if (idx !== -1) {
@@ -2214,8 +2228,8 @@ export class NodeViewer {
             'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
             'failure_strain', 'tensile_failure_stress',
-            'ppc', 'penalty_stiffness', 'contour_opacity', 'contour_min', 'contour_max',
-            'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal'
+            'ppc',
+            'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity'
         ];
 
         const chargeShapeOptions = node.type === 'Charge3D' ? ['Sphere', 'Cylinder', 'Block'] : ['Sphere', 'Cylinder'];
@@ -2257,11 +2271,9 @@ export class NodeViewer {
             'coupling_mode': ['TwoWay_Full', 'OneWay_CFD_to_MPM', 'Disabled'],
             'contour_quantity': ['von_mises', 'plastic_strain', 'density', 'velocity', 'pressure'],
             'color_map': ['viridis', 'plasma', 'jet', 'coolwarm'],
-            'space_time_scheme': [
-                'USL (Update Stress Last / Symplectic Euler)',
-                'USF (Update Stress First)',
-                'RK2 (Midpoint Explicit)'
-            ]
+            'space_time_scheme': (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') ? 
+                ['USL', 'USF', 'RK2'] : 
+                ['Euler (1st-Order Space/Time)', 'RK2 (2nd-Order Space/Time)', 'RK3 (3rd-Order Space/Time)', 'MUSCL-Hancock (2nd-Order Space/Time)', 'ADER-2 (2nd-Order Space/Time)', 'ADER-3 (3rd-Order Space/Time)']
         };
 
         if (typeof value === 'boolean') {
@@ -2307,20 +2319,24 @@ export class NodeViewer {
             select.addEventListener('change', () => {
                 let val: any = select.value;
                 if (key === 'space_time_scheme') {
-                    let s_order = 2;
-                    let t_order = 2;
-                    if (val === 'Euler (1st-Order Space/Time)') { s_order = 1; t_order = 1; }
-                    else if (val === 'RK2 (2nd-Order Space/Time)') { s_order = 2; t_order = 2; }
-                    else if (val === 'RK3 (3rd-Order Space/Time)') { s_order = 3; t_order = 3; }
-                    else if (val === 'MUSCL-Hancock (2nd-Order Space/Time)') { s_order = 2; t_order = 4; }
-                    else if (val === 'ADER-2 (2nd-Order Space/Time)') { s_order = 2; t_order = 5; }
-                    else if (val === 'ADER-3 (3rd-Order Space/Time)') { s_order = 3; t_order = 6; }
-                    
-                    this.stateManager.updateNodeParameters(node.id, {
-                        spatial_order: s_order,
-                        temporal_order: t_order
-                    });
-                    this.render();
+                    if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
+                        this.updateParameter(node, key, val);
+                    } else {
+                        let s_order = 2;
+                        let t_order = 2;
+                        if (val === 'Euler (1st-Order Space/Time)') { s_order = 1; t_order = 1; }
+                        else if (val === 'RK2 (2nd-Order Space/Time)') { s_order = 2; t_order = 2; }
+                        else if (val === 'RK3 (3rd-Order Space/Time)') { s_order = 3; t_order = 3; }
+                        else if (val === 'MUSCL-Hancock (2nd-Order Space/Time)') { s_order = 2; t_order = 4; }
+                        else if (val === 'ADER-2 (2nd-Order Space/Time)') { s_order = 2; t_order = 5; }
+                        else if (val === 'ADER-3 (3rd-Order Space/Time)') { s_order = 3; t_order = 6; }
+                        
+                        this.stateManager.updateNodeParameters(node.id, {
+                            spatial_order: s_order,
+                            temporal_order: t_order
+                        });
+                        this.render();
+                    }
                 } else {
                     if (numericKeys.includes(key)) val = Number(val);
                     this.updateParameter(node, key, val);

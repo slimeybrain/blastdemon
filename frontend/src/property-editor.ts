@@ -294,7 +294,21 @@ export class PropertyEditor {
         form.onsubmit = (e) => e.preventDefault();
 
         let paramKeys = Object.keys(node.parameters);
-        if (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D') {
+        if (node.type === 'MPMDomain2D') {
+            const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
+            paramKeys = ['transfer_scheme', 'velocity_scheme'];
+            if (hasFLIP) {
+                paramKeys.push('flip_blend');
+            }
+            paramKeys.push('ppc', 'cfl');
+        } else if (node.type === 'MPMDomain3D') {
+            const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
+            paramKeys = ['transfer_scheme', 'velocity_scheme', 'space_time_scheme'];
+            if (hasFLIP) {
+                paramKeys.push('flip_blend');
+            }
+            paramKeys.push('ppc', 'cfl');
+        } else if (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D') {
             paramKeys = paramKeys.filter(k => k !== 'spatial_order' && k !== 'temporal_order');
             const idx = Object.keys(node.parameters).indexOf('spatial_order');
             if (idx !== -1) {
@@ -409,6 +423,7 @@ export class PropertyEditor {
             let labelText = key.replace(/_/g, ' ').toUpperCase();
             if (key === 'qty_reacted') labelText = 'Reacted Explosive (Alpha1)';
             else if (key === 'qty_unreacted') labelText = 'Unreacted Explosive (Alpha2)';
+            else if (key === 'flip_blend') labelText = 'FLIP BLEND (% FLIP / % PIC)';
             label.textContent = labelText;
             row.appendChild(label);
 
@@ -759,6 +774,9 @@ export class PropertyEditor {
             const gaugeQtyEl = this.createInputElement(node, 'gauge_quantity', node.parameters['gauge_quantity'] ?? 'pressure');
             addRowToPanel('gauge_quantity', 'GAUGE DISPLAY MODE', gaugeQtyEl, 0);
 
+            const cbSourceEl = this.createInputElement(node, 'colorbar_source', node.parameters['colorbar_source'] ?? 'slice');
+            addRowToPanel('colorbar_source', 'COLOR BAR SOURCE', cbSourceEl, 0);
+
             const mpmQtyEl = this.createInputElement(node, 'mpmParticleQuantity', node.parameters['mpmParticleQuantity'] ?? 'vonMises');
             addRowToPanel('mpmParticleQuantity', 'MPM PARTICLE QTY', mpmQtyEl, 0);
 
@@ -787,6 +805,7 @@ export class PropertyEditor {
             cbGrid.appendChild(createCheckboxField('show_gauges', node.parameters['show_gauges'] !== false, 'Show Gauges'));
             cbGrid.appendChild(createCheckboxField('gauge_solid', node.parameters['gauge_solid'] !== false, 'Gauge Solid Spheres'));
             cbGrid.appendChild(createCheckboxField('showMPMParticles', node.parameters['showMPMParticles'] !== false, 'Show MPM Particles'));
+            cbGrid.appendChild(createCheckboxField('mpmParticleLogScale', !!node.parameters['mpmParticleLogScale'], 'MPM Log Scale'));
             panels[0].appendChild(cbGrid);
 
             const opacRow = document.createElement('div');
@@ -857,6 +876,29 @@ export class PropertyEditor {
             };
             gaugeOpacRow.appendChild(gaugeOpacSlider);
             panels[0].appendChild(gaugeOpacRow);
+
+            const mpmOpacRow = document.createElement('div');
+            mpmOpacRow.style.marginTop = '8px';
+            const mpmOpacLabel = document.createElement('label');
+            mpmOpacLabel.style.display = 'block';
+            mpmOpacLabel.style.fontSize = 'var(--font-sm)';
+            mpmOpacLabel.style.color = '#888';
+            mpmOpacLabel.textContent = `MPM PARTICLE OPACITY: ${Number(node.parameters['mpmParticleOpacity'] ?? 1.0).toFixed(2)}`;
+            mpmOpacRow.appendChild(mpmOpacLabel);
+
+            const mpmOpacSlider = document.createElement('input');
+            mpmOpacSlider.type = 'range';
+            mpmOpacSlider.min = '0';
+            mpmOpacSlider.max = '1';
+            mpmOpacSlider.step = '0.05';
+            mpmOpacSlider.value = String(node.parameters['mpmParticleOpacity'] ?? 1.0);
+            mpmOpacSlider.style.width = '100%';
+            mpmOpacSlider.oninput = () => {
+                mpmOpacLabel.textContent = `MPM PARTICLE OPACITY: ${Number(mpmOpacSlider.value).toFixed(2)}`;
+                this.updateParameter('mpmParticleOpacity', Number(mpmOpacSlider.value));
+            };
+            mpmOpacRow.appendChild(mpmOpacSlider);
+            panels[0].appendChild(mpmOpacRow);
 
             const gridOpacRow = document.createElement('div');
             gridOpacRow.style.marginTop = '8px';
@@ -1090,12 +1132,12 @@ export class PropertyEditor {
             'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
             'failure_strain', 'tensile_failure_stress',
-            'ppc', 'penalty_stiffness', 'contour_opacity', 'contour_min', 'contour_max',
-            'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal'
+            'ppc',
+            'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend'
         ];
 
         const dropdowns: Record<string, string[]> = {
-            'mpmParticleQuantity': ['vonMises', 'pressure', 'velocity', 'density', 'plastic_strain'],
+            'mpmParticleQuantity': ['vonMises', 'pressure', 'velocity', 'density', 'plastic_strain', 'damage', 'has_failed', 'object_id'],
             'mpmParticleColormap': ['plasma', 'viridis', 'coolwarm', 'rainbow', 'cividis', 'grayscale'],
             'telemetry_mode': ['Enabled', 'Throttled (1 Hz)', 'Throttled (0.2 Hz)', 'Disabled'],
             'enable_gauges': ['Enabled', 'Disabled'],
@@ -1143,17 +1185,13 @@ export class PropertyEditor {
             'ascii_delimiter': ['Comma', 'Tab', 'Space'],
             'vtk_format': ['ASCII', 'Binary', 'Compressed Binary'],
             'voxelization_method': ['watertight_floodfill', 'watertight_raycast', 'thin_shell', 'winding_number'],
+            'colorbar_source': ['slice', 'mpm', 'obstacles', 'stl'],
             'transfer_scheme': ['GIMP', 'Standard', 'BSpline'],
             'velocity_scheme': ['APIC', 'PIC', 'FLIP'],
             'shape_type': (node.type === 'MPMObject3D') ? ['Box', 'Sphere'] : ['Rectangle', 'Circle'],
-            'coupling_mode': ['TwoWay_Full', 'OneWay_CFD_to_MPM', 'Disabled'],
-            'contour_quantity': ['von_mises', 'plastic_strain', 'density', 'velocity', 'pressure'],
-            'color_map': ['viridis', 'plasma', 'jet', 'coolwarm'],
-            'space_time_scheme': [
-                'USL (Update Stress Last / Symplectic Euler)',
-                'USF (Update Stress First)',
-                'RK2 (Midpoint Explicit)'
-            ]
+            'space_time_scheme': (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') ? 
+                ['USL', 'USF', 'RK2'] : 
+                ['Euler (1st-Order Space/Time)', 'RK2 (2nd-Order Space/Time)', 'RK3 (3rd-Order Space/Time)', 'MUSCL-Hancock (2nd-Order Space/Time)', 'ADER-2 (2nd-Order Space/Time)', 'ADER-3 (3rd-Order Space/Time)']
         };
 
         if (dropdowns[key]) {
@@ -1190,20 +1228,24 @@ export class PropertyEditor {
             select.addEventListener('change', () => {
                 let val: any = select.value;
                 if (key === 'space_time_scheme') {
-                    let s_order = 2;
-                    let t_order = 2;
-                    if (val === 'Euler (1st-Order Space/Time)') { s_order = 1; t_order = 1; }
-                    else if (val === 'RK2 (2nd-Order Space/Time)') { s_order = 2; t_order = 2; }
-                    else if (val === 'RK3 (3rd-Order Space/Time)') { s_order = 3; t_order = 3; }
-                    else if (val === 'MUSCL-Hancock (2nd-Order Space/Time)') { s_order = 2; t_order = 4; }
-                    else if (val === 'ADER-2 (2nd-Order Space/Time)') { s_order = 2; t_order = 5; }
-                    else if (val === 'ADER-3 (3rd-Order Space/Time)') { s_order = 3; t_order = 6; }
-                    
-                    if (this.currentNodeId) {
-                        this.stateManager.updateNodeParameters(this.currentNodeId, {
-                            spatial_order: s_order,
-                            temporal_order: t_order
-                        });
+                    if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
+                        this.updateParameter(key, val);
+                    } else {
+                        let s_order = 2;
+                        let t_order = 2;
+                        if (val === 'Euler (1st-Order Space/Time)') { s_order = 1; t_order = 1; }
+                        else if (val === 'RK2 (2nd-Order Space/Time)') { s_order = 2; t_order = 2; }
+                        else if (val === 'RK3 (3rd-Order Space/Time)') { s_order = 3; t_order = 3; }
+                        else if (val === 'MUSCL-Hancock (2nd-Order Space/Time)') { s_order = 2; t_order = 4; }
+                        else if (val === 'ADER-2 (2nd-Order Space/Time)') { s_order = 2; t_order = 5; }
+                        else if (val === 'ADER-3 (3rd-Order Space/Time)') { s_order = 3; t_order = 6; }
+                        
+                        if (this.currentNodeId) {
+                            this.stateManager.updateNodeParameters(this.currentNodeId, {
+                                spatial_order: s_order,
+                                temporal_order: t_order
+                            });
+                        }
                     }
                 } else {
                     if (numericKeys.includes(key)) val = Number(val);
@@ -2365,7 +2407,7 @@ export class PropertyEditor {
             }
         }
         
-        const structuralKeys = ['material_type', 'composition', 'dimension', 'charge_shape', 'init_mode'];
+        const structuralKeys = ['material_type', 'composition', 'dimension', 'charge_shape', 'init_mode', 'velocity_scheme'];
         this.render(structuralKeys.includes(key));
     }
 
@@ -2415,7 +2457,27 @@ export class PropertyEditor {
             case 'PrimitiveGeometry3D':
                 return 'Primitive Geometry boundary. Specifies analytic cuboids, cylinders, or wedges for Immersed Boundary Method solid obstacles in 3D.';
             case 'MPMDomain2D':
-                return '2D Material Point Method (MPM) domain solver settings. Configures GIMP interpolation, APIC momentum transfer, and CFL time stepping.';
+                return `<strong>Material Point Method (MPM) 2D Domain</strong> solver settings.<br/><br/>` +
+                       `<strong>1. Transfer Schemes:</strong><br/>` +
+                       `• <i>Standard:</i> Dirac-delta interpolation. Fast but suffers from high grid-crossing noise.<br/>` +
+                       `• <i>GIMP:</i> Generalized Interpolation Material Point. Uses particle domains to completely eliminate grid-crossing noise, though slightly more expensive.<br/><br/>` +
+                       `<strong>2. Velocity Schemes:</strong><br/>` +
+                       `• <i>PIC:</i> Highly stable but extremely dissipative (damps kinetic energy rapidly).<br/>` +
+                       `• <i>FLIP:</i> Low dissipation but prone to noise accumulation. Blended with APIC (APIC-FLIP) via <i>flip_blend</i> (default 0.95).<br/>` +
+                       `• <i>APIC:</i> Conserves angular momentum and suppresses noise without damping energy. Recommended default.`;
+            case 'MPMDomain3D':
+                return `<strong>Material Point Method (MPM) 3D Domain</strong> solver settings.<br/><br/>` +
+                       `<strong>1. Transfer Schemes:</strong><br/>` +
+                       `• <i>Standard:</i> Dirac-delta interpolation. Fast but suffers from high grid-crossing noise.<br/>` +
+                       `• <i>GIMP:</i> Generalized Interpolation Material Point. Eliminates grid-crossing noise using a contiguous particle domain.<br/><br/>` +
+                       `<strong>2. Velocity Schemes:</strong><br/>` +
+                       `• <i>PIC:</i> Highly stable but extremely dissipative (damps energy quickly).<br/>` +
+                       `• <i>FLIP:</i> Low dissipation but prone to high-frequency noise. Blended with APIC (APIC-FLIP) via <i>flip_blend</i>.<br/>` +
+                       `• <i>APIC:</i> Affine Particle-in-Cell. Conserves angular momentum and suppresses noise. Recommended default.<br/><br/>` +
+                       `<strong>3. Space-Time Integration:</strong><br/>` +
+                       `• <i>USL:</i> Update Stress Last. 1st-order symplectic Euler, energy-conserving on average.<br/>` +
+                       `• <i>USF:</i> Update Stress First. 1st-order alternative, updates stress prior to grid velocities.<br/>` +
+                       `• <i>RK2:</i> 2nd-Order Midpoint Predictor-Corrector. 2nd-order space/time accurate, energy-conserving, highly stable, and objective with CFL changes.`;
             case 'MPMObject2D':
                 return '2D MPM Primitive Object. Defines shape geometry, initial position, translation/rotation velocities, and material binding.';
             case 'MPMMaterialSteel':

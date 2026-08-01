@@ -294,6 +294,8 @@ void MPMSolver2D::updateGridKinematics(float dt) {
             if (node.m > 1.0e-8f) {
                 node.v[0] = node.p[0] / node.m;
                 node.v[1] = node.p[1] / node.m;
+                node.v_old[0] = node.v[0];
+                node.v_old[1] = node.v[1];
 
                 // Total Force = External (FSI) - Internal
                 float f_tot_x = node.f_ext[0] - node.f_int[0];
@@ -332,6 +334,8 @@ void MPMSolver2D::gridToParticle(float dt) {
 
         float v_pic_x = 0.0f;
         float v_pic_y = 0.0f;
+        float v_flip_x = p.v[0];
+        float v_flip_y = p.v[1];
         float weight_sum = 0.0f;
 
         // Pass 1: Compute PIC interpolated velocity from active nodes
@@ -364,15 +368,14 @@ void MPMSolver2D::gridToParticle(float dt) {
                 if (node.m > 1.0e-8f) {
                     v_pic_x += weight * node.v[0];
                     v_pic_y += weight * node.v[1];
+                    v_flip_x += weight * (node.v[0] - node.v_old[0]);
+                    v_flip_y += weight * (node.v[1] - node.v_old[1]);
                     weight_sum += weight;
                 }
             }
         }
 
-        if (weight_sum > 1.0e-7f) {
-            v_pic_x /= weight_sum;
-            v_pic_y /= weight_sum;
-        } else {
+        if (weight_sum <= 1.0e-7f) {
             v_pic_x = p.v[0];
             v_pic_y = p.v[1];
         }
@@ -410,20 +413,33 @@ void MPMSolver2D::gridToParticle(float dt) {
                     float dist_x = node_x - p.x[0];
                     float dist_y = node_y - p.x[1];
 
-                    float rel_vx = node.v[0] - v_pic_x;
-                    float rel_vy = node.v[1] - v_pic_y;
-
-                    // Relative velocity gradient calculation ensures zero affine matrix B_p and zero stress during pure rigid translation
-                    B_new[0][0] += weight * rel_vx * dist_x * D_inv_x;
-                    B_new[0][1] += weight * rel_vx * dist_y * D_inv_y;
-                    B_new[1][0] += weight * rel_vy * dist_x * D_inv_x;
-                    B_new[1][1] += weight * rel_vy * dist_y * D_inv_y;
+                    B_new[0][0] += weight * node.v[0] * dist_x * D_inv_x;
+                    B_new[0][1] += weight * node.v[0] * dist_y * D_inv_y;
+                    B_new[1][0] += weight * node.v[1] * dist_x * D_inv_x;
+                    B_new[1][1] += weight * node.v[1] * dist_y * D_inv_y;
                 }
             }
         }
 
-        p.v[0] = std::clamp(v_pic_x, -5000.0f, 5000.0f);
-        p.v[1] = std::clamp(v_pic_y, -5000.0f, 5000.0f);
+        float target_vx = v_pic_x;
+        float target_vy = v_pic_y;
+
+        if (m_velocity_scheme == MPMVelocityScheme::FLIP || m_velocity_scheme == MPMVelocityScheme::APIC) {
+            // CFL-normalized FLIP blend (same as 3D: blend^(dt/tau_acoustic))
+            const float c_s_p = (p.youngs_modulus > 0.0f && p.density > 1.0f)
+                ? std::sqrt(p.youngs_modulus / p.density) : 5000.0f;
+            const float tau_acoustic = std::min(m_dx, m_dy) / c_s_p;
+            float per_step_blend = m_flip_blend;
+            if (dt > 1.0e-12f && tau_acoustic > 1.0e-12f) {
+                per_step_blend = std::pow(m_flip_blend, dt / tau_acoustic);
+                per_step_blend = std::clamp(per_step_blend, 0.0f, 1.0f);
+            }
+            target_vx = per_step_blend * v_flip_x + (1.0f - per_step_blend) * v_pic_x;
+            target_vy = per_step_blend * v_flip_y + (1.0f - per_step_blend) * v_pic_y;
+        }
+
+        p.v[0] = std::clamp(target_vx, -5000.0f, 5000.0f);
+        p.v[1] = std::clamp(target_vy, -5000.0f, 5000.0f);
 
         p.B[0][0] = std::clamp(B_new[0][0], -max_B, max_B);
         p.B[0][1] = std::clamp(B_new[0][1], -max_B, max_B);
@@ -541,8 +557,10 @@ void MPMSolver2D::updateStressState(float dt) {
             d_tensile = std::clamp(tensile_stress / p.tensile_failure_stress, 0.0f, 1.0f);
         }
 
-        float total_damage = std::max(p.damage, std::max(d_plastic, d_tensile));
-        p.damage = total_damage;
+        float target_damage = std::max(d_plastic, d_tensile);
+        // Rate-independent damage: set damage directly to target.
+        // No exponential relaxation (which is dt/CFL-dependent).
+        p.damage = std::max(p.damage, target_damage);
         if (p.damage >= 1.0f) {
             p.has_failed = true;
             p.damage = 1.0f;
@@ -580,7 +598,8 @@ float MPMSolver2D::computeStepSize(float cfl) const {
     }
     float min_h = std::min(m_dx, m_dy);
     float dt_crit = min_h / max_speed;
-    return std::max(1.0e-8f, cfl * dt_crit);
+    float stability_factor = 1.0f / std::sqrt(2.0f); // 2D Courant stability factor (~0.707)
+    return std::max(1.0e-8f, cfl * stability_factor * dt_crit);
 }
 
 void MPMSolver2D::stepWithDt(float dt, bool run_p2g) {

@@ -2922,6 +2922,9 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated) {
         payload->mpm_particles.push_back(p.ep_bar);
         payload->mpm_particles.push_back(p.density);
         payload->mpm_particles.push_back(press);
+        payload->mpm_particles.push_back(p.damage);
+        payload->mpm_particles.push_back(p.has_failed ? 1.0f : 0.0f);
+        payload->mpm_particles.push_back(static_cast<float>(p.object_id));
     }
 
     global_async_telemetry.push(std::move(payload));
@@ -3828,6 +3831,9 @@ int main() {
                     } else {
                         global_solver_mpm_3d->setVelocityScheme(Blast::MPMVelocityScheme::APIC);
                     }
+
+                    float flip_blend = static_cast<float>(get_json_double(msg, "flip_blend", 0.95));
+                    global_solver_mpm_3d->setFlipBlend(flip_blend);
 
                     if (space_time_scheme == "USL") {
                         global_solver_mpm_3d->setTimeScheme(Blast::MPMTimeIntegrationScheme::USL);

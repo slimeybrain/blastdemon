@@ -44,6 +44,7 @@ struct MPMGridNode2D {
     float m;            // Mass
     float p[2];         // Momentum (px, py)
     float v[2];         // Velocity (vx, vy)
+    float v_old[2];     // Pre-update velocity for FLIP scheme
     float f_int[2];     // Internal stress force
     float f_ext[2];     // External force (FSI coupling)
     
@@ -76,6 +77,7 @@ public:
     void initializeGrid(int nx, int ny, float dx, float dy);
     void setTransferScheme(MPMTransferScheme scheme) { m_transfer_scheme = scheme; }
     void setVelocityScheme(MPMVelocityScheme scheme) { m_velocity_scheme = scheme; }
+    void setFlipBlend(float blend) { m_flip_blend = std::clamp(blend, 0.0f, 1.0f); }
 
     // Object Adders (Primitives)
     void addRectangleObject(int obj_id, float pos_x, float pos_y, float size_x, float size_y,
@@ -129,6 +131,7 @@ private:
 
     MPMTransferScheme m_transfer_scheme{MPMTransferScheme::GIMP};
     MPMVelocityScheme m_velocity_scheme{MPMVelocityScheme::APIC};
+    float m_flip_blend{0.95f};
 
     std::vector<MPMGridNode2D> m_grid;
     std::vector<MPMParticle2D> m_particles;

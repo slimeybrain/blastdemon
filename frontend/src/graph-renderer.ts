@@ -1651,6 +1651,7 @@ export class GraphRenderer {
                 },
                 auto_scale: true,
                 log_scale: false,
+                colorbar_source: 'slice',
                 show_grid: true,
                 grid_meshlines: true,
                 show_grid_box: true,
@@ -1670,6 +1671,8 @@ export class GraphRenderer {
                 mpmParticleQuantity: 'vonMises',
                 mpmParticleColormap: 'plasma',
                 mpmParticleAutoScale: true,
+                mpmParticleLogScale: false,
+                mpmParticleOpacity: 1.0,
                 mpmParticleMinVal: 0.0,
                 mpmParticleMaxVal: 500000000.0,
                 vtk_format: 'Binary',
@@ -1718,14 +1721,15 @@ export class GraphRenderer {
             case 'MPMDomain2D': return {
                 transfer_scheme: 'GIMP',
                 velocity_scheme: 'APIC',
+                flip_blend: 0.95,
                 ppc: 4,
                 cfl: 0.3
             };
             case 'MPMDomain3D': return {
                 transfer_scheme: 'GIMP',
                 velocity_scheme: 'APIC',
-                space_time_scheme: 'USL',
-                precision: 'single',
+                space_time_scheme: 'RK2',
+                flip_blend: 0.95,
                 ppc: 8,
                 cfl: 0.3
             };
@@ -1757,24 +1761,8 @@ export class GraphRenderer {
                 failure_strain: 0.25,
                 tensile_failure_stress: 600.0e6
             };
-            case 'FSICoupler2D': return {
-                coupling_mode: 'TwoWay_Full',
-                penalty_stiffness: 1.0e9,
-                contour_quantity: 'von_mises',
-                color_map: 'viridis',
-                contour_opacity: 1.0,
-                contour_min: 0.0,
-                contour_max: 500.0e6
-            };
-            case 'FSICoupler3D': return {
-                coupling_mode: 'TwoWay_Full',
-                penalty_stiffness: 1.0e9,
-                contour_quantity: 'von_mises',
-                color_map: 'viridis',
-                contour_opacity: 1.0,
-                contour_min: 0.0,
-                contour_max: 500.0e6
-            };
+            case 'FSICoupler2D': return {};
+            case 'FSICoupler3D': return {};
 
             default: return {};
         }
@@ -4027,6 +4015,12 @@ export class GraphRenderer {
                     needsRebuild = true;
                 }
             }
+            if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
+                const velScheme = node.parameters['velocity_scheme'] || 'APIC';
+                if (form.dataset.renderedVelocityScheme !== velScheme.toString()) {
+                    needsRebuild = true;
+                }
+            }
             if (!needsRebuild) {
                 for (const [key, value] of Object.entries(node.parameters)) {
                     const el = form.querySelector(`[data-key="${key}"]`) as HTMLElement;
@@ -4104,9 +4098,27 @@ export class GraphRenderer {
             form.dataset.renderedComposition = comp.toString();
             form.dataset.renderedMaterialType = matType.toString();
         }
+        if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
+            const velScheme = node.parameters['velocity_scheme'] || 'APIC';
+            form.dataset.renderedVelocityScheme = velScheme.toString();
+        }
 
         let paramKeys = Object.keys(node.parameters);
-        if (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D') {
+        if (node.type === 'MPMDomain2D') {
+            const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
+            paramKeys = ['transfer_scheme', 'velocity_scheme'];
+            if (hasFLIP) {
+                paramKeys.push('flip_blend');
+            }
+            paramKeys.push('ppc', 'cfl');
+        } else if (node.type === 'MPMDomain3D') {
+            const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
+            paramKeys = ['transfer_scheme', 'velocity_scheme', 'space_time_scheme'];
+            if (hasFLIP) {
+                paramKeys.push('flip_blend');
+            }
+            paramKeys.push('ppc', 'cfl');
+        } else if (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D') {
             paramKeys = paramKeys.filter(k => k !== 'spatial_order' && k !== 'temporal_order');
             const idx = Object.keys(node.parameters).indexOf('spatial_order');
             if (idx !== -1) {
@@ -4209,7 +4221,9 @@ export class GraphRenderer {
             const label = document.createElement('label');
             label.style.fontSize = 'var(--font-xs)';
             label.style.color = '#888';
-            label.textContent = key.replace(/_/g, ' ').toUpperCase();
+            let labelText = key.replace(/_/g, ' ').toUpperCase();
+            if (key === 'flip_blend') labelText = 'FLIP BLEND (% FLIP / % PIC)';
+            label.textContent = labelText;
             row.appendChild(label);
 
             const dropdowns: Record<string, string[]> = {
@@ -4255,18 +4269,17 @@ export class GraphRenderer {
                 'obstacles_quantity': ['pressure', 'density', 'velocity', 'energy', 'species1', 'species2', 'species3', 'peak_overpressure', 'peak_impulse'],
                 'transfer_scheme': ['GIMP', 'Standard'],
                 'velocity_scheme': ['APIC', 'PIC', 'FLIP'],
-                'shape_type': ['Rectangle', 'Circle'],
-                'coupling_mode': ['TwoWay_Full', 'OneWay_CFD_to_MPM', 'Disabled'],
-                'contour_quantity': ['von_mises', 'plastic_strain', 'density', 'velocity', 'pressure'],
-                'color_map': ['viridis', 'plasma', 'jet', 'coolwarm'],
-                'space_time_scheme': [
-                    'Euler (1st-Order Space/Time)',
-                    'RK2 (2nd-Order Space/Time)',
-                    'RK3 (3rd-Order Space/Time)',
-                    'MUSCL-Hancock (2nd-Order Space/Time)',
-                    'ADER-2 (2nd-Order Space/Time)',
-                    'ADER-3 (3rd-Order Space/Time)'
-                ]
+                'colorbar_source': ['slice', 'mpm', 'obstacles', 'stl'],
+                'space_time_scheme': (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') ? 
+                    ['USL', 'USF', 'RK2'] : 
+                    [
+                        'Euler (1st-Order Space/Time)',
+                        'RK2 (2nd-Order Space/Time)',
+                        'RK3 (3rd-Order Space/Time)',
+                        'MUSCL-Hancock (2nd-Order Space/Time)',
+                        'ADER-2 (2nd-Order Space/Time)',
+                        'ADER-3 (3rd-Order Space/Time)'
+                    ]
             };
 
             let inputEl: HTMLElement;
@@ -4289,19 +4302,23 @@ export class GraphRenderer {
                     (newVal) => {
                         console.log("[DEBUG] Custom Dropdown onChange triggered:", key, newVal, "for node:", node.id);
                         if (key === 'space_time_scheme') {
-                            let s_order = 2;
-                            let t_order = 2;
-                            if (newVal === 'Euler (1st-Order Space/Time)') { s_order = 1; t_order = 1; }
-                            else if (newVal === 'RK2 (2nd-Order Space/Time)') { s_order = 2; t_order = 2; }
-                            else if (newVal === 'RK3 (3rd-Order Space/Time)') { s_order = 3; t_order = 3; }
-                            else if (newVal === 'MUSCL-Hancock (2nd-Order Space/Time)') { s_order = 2; t_order = 4; }
-                            else if (newVal === 'ADER-2 (2nd-Order Space/Time)') { s_order = 2; t_order = 5; }
-                            else if (newVal === 'ADER-3 (3rd-Order Space/Time)') { s_order = 3; t_order = 6; }
-                            
-                            this.stateManager.updateNodeParameters(node.id, {
-                                spatial_order: s_order,
-                                temporal_order: t_order
-                            });
+                            if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
+                                this.stateManager.updateNodeParameters(node.id, { [key]: newVal });
+                            } else {
+                                let s_order = 2;
+                                let t_order = 2;
+                                if (newVal === 'Euler (1st-Order Space/Time)') { s_order = 1; t_order = 1; }
+                                else if (newVal === 'RK2 (2nd-Order Space/Time)') { s_order = 2; t_order = 2; }
+                                else if (newVal === 'RK3 (3rd-Order Space/Time)') { s_order = 3; t_order = 3; }
+                                else if (newVal === 'MUSCL-Hancock (2nd-Order Space/Time)') { s_order = 2; t_order = 4; }
+                                else if (newVal === 'ADER-2 (2nd-Order Space/Time)') { s_order = 2; t_order = 5; }
+                                else if (newVal === 'ADER-3 (3rd-Order Space/Time)') { s_order = 3; t_order = 6; }
+                                
+                                this.stateManager.updateNodeParameters(node.id, {
+                                    spatial_order: s_order,
+                                    temporal_order: t_order
+                                });
+                            }
                             return;
                         }
                         const numericKeys = [
@@ -4330,8 +4347,8 @@ export class GraphRenderer {
                             'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
                             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
                             'failure_strain', 'tensile_failure_stress',
-                            'ppc', 'penalty_stiffness', 'contour_opacity', 'contour_min', 'contour_max',
-                            'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal'
+                            'ppc',
+                            'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity'
                         ];
                         let castValue: any = newVal;
                         if (numericKeys.includes(key)) {
@@ -4900,6 +4917,28 @@ export class GraphRenderer {
                 return 'Virtual gauges. Records and tracks simulation variables (pressure, density, velocity, species) at discrete coordinates over time.';
             case 'STLGeometry':
                 return 'STL Geometry configuration. Defines the path to the STL file representing the solid boundary mesh for Immersed Boundary method, and a unique hash representing it.';
+            case 'MPMDomain2D':
+                return `<strong>Material Point Method (MPM) 2D Domain</strong> solver settings.<br/><br/>` +
+                       `<strong>1. Transfer Schemes:</strong><br/>` +
+                       `• <i>Standard:</i> Dirac-delta interpolation. Fast but suffers from high grid-crossing noise.<br/>` +
+                       `• <i>GIMP:</i> Generalized Interpolation Material Point. Uses particle domains to completely eliminate grid-crossing noise, though slightly more expensive.<br/><br/>` +
+                       `<strong>2. Velocity Schemes:</strong><br/>` +
+                       `• <i>PIC:</i> Highly stable but extremely dissipative (damps kinetic energy rapidly).<br/>` +
+                       `• <i>FLIP:</i> Low dissipation but prone to noise accumulation. Blended with APIC (APIC-FLIP) via <i>flip_blend</i> (default 0.95).<br/>` +
+                       `• <i>APIC:</i> Conserves angular momentum and suppresses noise without damping energy. Recommended default.`;
+            case 'MPMDomain3D':
+                return `<strong>Material Point Method (MPM) 3D Domain</strong> solver settings.<br/><br/>` +
+                       `<strong>1. Transfer Schemes:</strong><br/>` +
+                       `• <i>Standard:</i> Dirac-delta interpolation. Fast but suffers from high grid-crossing noise.<br/>` +
+                       `• <i>GIMP:</i> Generalized Interpolation Material Point. Eliminates grid-crossing noise using a contiguous particle domain.<br/><br/>` +
+                       `<strong>2. Velocity Schemes:</strong><br/>` +
+                       `• <i>PIC:</i> Highly stable but extremely dissipative (damps energy quickly).<br/>` +
+                       `• <i>FLIP:</i> Low dissipation but prone to high-frequency noise. Blended with APIC (APIC-FLIP) via <i>flip_blend</i>.<br/>` +
+                       `• <i>APIC:</i> Affine Particle-in-Cell. Conserves angular momentum and suppresses noise. Recommended default.<br/><br/>` +
+                       `<strong>3. Space-Time Integration:</strong><br/>` +
+                       `• <i>USL:</i> Update Stress Last. 1st-order symplectic Euler, energy-conserving on average.<br/>` +
+                       `• <i>USF:</i> Update Stress First. 1st-order alternative, updates stress prior to grid velocities.<br/>` +
+                       `• <i>RK2:</i> 2nd-Order Midpoint Predictor-Corrector. 2nd-order space/time accurate, energy-conserving, highly stable, and objective with CFL changes.`;
             default:
                 return 'Simulation graph node.';
         }

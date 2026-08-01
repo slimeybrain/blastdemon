@@ -1753,6 +1753,7 @@ export class StateManager {
                 max_val: 101325.0 * 100.0,
                 show_color_bar: true,
                 color_bar_position: 'left-center',
+                colorbar_source: 'slice',
                 show_grid: true,
                 grid_meshlines: true,
                 show_grid_box: true,
@@ -1770,6 +1771,8 @@ export class StateManager {
                 mpmParticleQuantity: 'vonMises',
                 mpmParticleColormap: 'plasma',
                 mpmParticleAutoScale: true,
+                mpmParticleLogScale: false,
+                mpmParticleOpacity: 1.0,
                 mpmParticleMinVal: 0.0,
                 mpmParticleMaxVal: 500000000.0,
                 // VTK / File outputs
@@ -1822,14 +1825,15 @@ export class StateManager {
             'MPMDomain2D': {
                 transfer_scheme: 'GIMP',
                 velocity_scheme: 'APIC',
+                flip_blend: 0.95,
                 ppc: 4,
                 cfl: 0.3
             },
             'MPMDomain3D': {
                 transfer_scheme: 'GIMP',
                 velocity_scheme: 'APIC',
-                space_time_scheme: 'USL',
-                precision: 'single',
+                space_time_scheme: 'RK2',
+                flip_blend: 0.95,
                 ppc: 8,
                 cfl: 0.3
             },
@@ -1861,24 +1865,8 @@ export class StateManager {
                 failure_strain: 0.25,
                 tensile_failure_stress: 600.0e6
             },
-            'FSICoupler2D': {
-                coupling_mode: 'TwoWay_Full',
-                penalty_stiffness: 1.0e9,
-                contour_quantity: 'von_mises',
-                color_map: 'viridis',
-                contour_opacity: 1.0,
-                contour_min: 0.0,
-                contour_max: 500.0e6
-            },
-            'FSICoupler3D': {
-                coupling_mode: 'TwoWay_Full',
-                penalty_stiffness: 1.0e9,
-                contour_quantity: 'von_mises',
-                color_map: 'viridis',
-                contour_opacity: 1.0,
-                contour_min: 0.0,
-                contour_max: 500.0e6
-            }
+            'FSICoupler2D': {},
+            'FSICoupler3D': {}
         };
 
         nodes.forEach(node => {

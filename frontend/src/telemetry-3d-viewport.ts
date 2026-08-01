@@ -52,6 +52,9 @@ export class Telemetry3DViewport {
     private isOpen = true;
     private latestSliceRanges: { min: number, max: number }[] = [];
     private latestEmpiricalRange: { min: number, max: number } | null = null;
+    private latestMPMRange: { min: number, max: number } | null = null;
+    private latestSTLRange: { min: number, max: number } | null = null;
+    private latestObstaclesRange: { min: number, max: number } | null = null;
     private _lastSliceKey: string = '';
 
     // Colorbar Overlay Elements
@@ -193,6 +196,7 @@ export class Telemetry3DViewport {
                 const vpNode = this.getViewportNode();
                 if (vpNode) {
                     const { min, max } = e.data;
+                    this.latestObstaclesRange = { min, max };
                     this.stateManager.updateNodeParametersInPlace(vpNode.id, {
                         obstacles_auto_scale: false,
                         obstacles_min_val: min,
@@ -200,6 +204,14 @@ export class Telemetry3DViewport {
                     });
                     this.syncControls(true);
                 }
+            } else if (type === 'mpmRangeUpdated') {
+                const { min, max } = e.data;
+                this.latestMPMRange = { min, max };
+                this.syncControls(false);
+            } else if (type === 'stlRangeUpdated') {
+                const { min, max } = e.data;
+                this.latestSTLRange = { min, max };
+                this.syncControls(false);
             } else if (type === 'currentRange') {
                 const { min, max } = e.data;
                 this.latestEmpiricalRange = { min, max };
@@ -828,11 +840,9 @@ export class Telemetry3DViewport {
         }, 10);
     }
 
-    private showQuantityPopover(targetEl: HTMLElement, currentQty: string, onSelect: (qty: string) => void) {
-        const quantities = [
+    private showQuantityPopover(targetEl: HTMLElement, currentQty: string, context: 'cfd' | 'mpm', onSelect: (qty: string) => void) {
+        const cfdQuantities = [
             { id: 'pressure', label: '📊 Pressure' },
-            { id: 'vonMises', label: '🛡️ Von Mises' },
-            { id: 'plastic_strain', label: '🔨 Plastic Strain' },
             { id: 'density', label: '⚖️ Density' },
             { id: 'velocity', label: '💨 Speed' },
             { id: 'energy', label: '🔥 Energy' },
@@ -842,6 +852,19 @@ export class Telemetry3DViewport {
             { id: 'peak_overpressure', label: '📈 Pk Press' },
             { id: 'peak_impulse', label: '⏱️ Pk Impulse' }
         ];
+
+        const mpmQuantities = [
+            { id: 'vonMises', label: '🛡️ Von Mises' },
+            { id: 'plastic_strain', label: '🔨 Plastic Strain' },
+            { id: 'density', label: '⚖️ Density' },
+            { id: 'pressure', label: '📊 Pressure' },
+            { id: 'damage', label: '💥 Damage' },
+            { id: 'has_failed', label: '⚠️ Failure' },
+            { id: 'object_id', label: '🆔 Object ID' },
+            { id: 'velocity', label: '💨 Speed' }
+        ];
+
+        const quantities = context === 'mpm' ? mpmQuantities : cfdQuantities;
 
         this.showPopover(targetEl, (popover) => {
             const title = document.createElement('div');
@@ -1873,7 +1896,7 @@ export class Telemetry3DViewport {
         qtyPill.onclick = (e) => {
             e.stopPropagation();
             const currentQty = this.getViewportNode()?.parameters.obstacles_quantity || 'pressure';
-            this.showQuantityPopover(qtyPill, currentQty, (newQ) => {
+            this.showQuantityPopover(qtyPill, currentQty, 'cfd', (newQ) => {
                 const vp = this.getViewportNode();
                 if (vp) {
                     const qCmaps = vp.parameters.quantity_colormaps || {};
@@ -2075,7 +2098,7 @@ export class Telemetry3DViewport {
         qtyPill.onclick = (e) => {
             e.stopPropagation();
             const currentQty = this.getViewportNode()?.parameters.stl_quantity || 'pressure';
-            this.showQuantityPopover(qtyPill, currentQty, (newQ) => {
+            this.showQuantityPopover(qtyPill, currentQty, 'cfd', (newQ) => {
                 const vp = this.getViewportNode();
                 if (vp) {
                     const qCmaps = vp.parameters.quantity_colormaps || {};
@@ -2496,7 +2519,7 @@ export class Telemetry3DViewport {
         qtyPill.onclick = (e) => {
             e.stopPropagation();
             const currentQty = this.getViewportNode()?.parameters.gauge_quantity || 'pressure';
-            this.showQuantityPopover(qtyPill, currentQty, (newQ) => {
+            this.showQuantityPopover(qtyPill, currentQty, 'cfd', (newQ) => {
                 const vp = this.getViewportNode();
                 if (vp) {
                     this.stateManager.updateNodeParametersInPlace(vp.id, { gauge_quantity: newQ });
@@ -2737,9 +2760,37 @@ export class Telemetry3DViewport {
         titleSpan.onclick = (e) => {
             e.stopPropagation();
             const vpNode = this.getViewportNode();
-            const { quantity: curQty } = getFocusedQuantityAndRange(vpNode || {});
-            this.showQuantityPopover(titleSpan, curQty, (newQ) => {
-                this.setFocusedQuantity(newQ);
+            if (!vpNode) return;
+            const source = vpNode.parameters.colorbar_source || 'slice';
+            let curQty = 'pressure';
+            if (source === 'slice') {
+                curQty = getFocusedQuantityAndRange(vpNode).quantity;
+            } else if (source === 'mpm') {
+                curQty = vpNode.parameters.mpmParticleQuantity || 'vonMises';
+            } else if (source === 'obstacles') {
+                curQty = vpNode.parameters.obstacles_quantity || 'pressure';
+            } else if (source === 'stl') {
+                curQty = vpNode.parameters.stl_quantity || 'pressure';
+            }
+            const context = source === 'mpm' ? 'mpm' : 'cfd';
+            this.showQuantityPopover(titleSpan, curQty, context, (newQ) => {
+                const updates: any = {};
+                if (source === 'slice') {
+                    const activeIdx = vpNode.parameters.focusedSliceIndex ?? 0;
+                    if (vpNode.parameters.slices && vpNode.parameters.slices[activeIdx]) {
+                        const newSlices = [...vpNode.parameters.slices];
+                        newSlices[activeIdx] = { ...newSlices[activeIdx], quantities: [newQ] };
+                        updates.slices = newSlices;
+                    }
+                } else if (source === 'mpm') {
+                    updates.mpmParticleQuantity = newQ;
+                } else if (source === 'obstacles') {
+                    updates.obstacles_quantity = newQ;
+                } else if (source === 'stl') {
+                    updates.stl_quantity = newQ;
+                }
+                this.stateManager.updateNodeParametersInPlace(vpNode.id, updates);
+                this.syncControls(true);
             });
         };
         this.colorbarTitleEl = titleSpan;
@@ -3043,12 +3094,46 @@ export class Telemetry3DViewport {
 
     private buildColorbarTableRow(parent: HTMLElement) {
         const vpNode = this.getViewportNode();
+        const cbSource = vpNode ? (vpNode.parameters.colorbar_source || 'slice') : 'slice';
         const initShow = vpNode ? (vpNode.parameters.show_color_bar !== false) : true;
-        const initPos = vpNode ? (vpNode.parameters.color_bar_position || 'left-center') : 'left-center';
-        const initAuto = vpNode ? (vpNode.parameters.auto_scale !== false) : true;
-        const initLog = vpNode ? (vpNode.parameters.log_scale === true) : false;
-        const { quantity: initQty } = getFocusedQuantityAndRange(vpNode || {});
-        const initCmap = vpNode ? (vpNode.parameters.quantity_colormaps?.[initQty] || vpNode.parameters.stl_colormap || 'plasma') : 'plasma';
+
+        let initQty = 'pressure';
+        let initCmap = 'plasma';
+        let initAuto = true;
+        let initLog = false;
+        let minV = 0.0;
+        let maxV = 1.0;
+
+        if (cbSource === 'slice') {
+            const { quantity } = getFocusedQuantityAndRange(vpNode || {});
+            initQty = quantity;
+            initCmap = vpNode ? (vpNode.parameters.quantity_colormaps?.[initQty] || 'plasma') : 'plasma';
+            initAuto = vpNode ? (vpNode.parameters.auto_scale !== false) : true;
+            initLog = vpNode ? (vpNode.parameters.log_scale === true) : false;
+            minV = vpNode ? (vpNode.parameters.min_val ?? 0.0) : 0.0;
+            maxV = vpNode ? (vpNode.parameters.max_val ?? 1.0) : 1.0;
+        } else if (cbSource === 'mpm') {
+            initQty = vpNode ? (vpNode.parameters.mpmParticleQuantity || 'vonMises') : 'vonMises';
+            initCmap = vpNode ? (vpNode.parameters.mpmParticleColormap || 'plasma') : 'plasma';
+            initAuto = vpNode ? (vpNode.parameters.mpmParticleAutoScale !== false) : true;
+            initLog = vpNode ? (vpNode.parameters.mpmParticleLogScale === true) : false;
+            minV = vpNode ? (vpNode.parameters.mpmParticleMinVal ?? 0.0) : 0.0;
+            maxV = vpNode ? (vpNode.parameters.mpmParticleMaxVal ?? 500.0e6) : 500.0e6;
+        } else if (cbSource === 'obstacles') {
+            initQty = vpNode ? (vpNode.parameters.obstacles_quantity || 'pressure') : 'pressure';
+            initCmap = vpNode ? (vpNode.parameters.obstacles_colormap || 'plasma') : 'plasma';
+            initAuto = vpNode ? (vpNode.parameters.obstacles_auto_scale !== false) : true;
+            initLog = vpNode ? (vpNode.parameters.obstacles_log_scale === true) : false;
+            minV = vpNode ? (vpNode.parameters.obstacles_min_val ?? 101325.0) : 101325.0;
+            maxV = vpNode ? (vpNode.parameters.obstacles_max_val ?? 1013250.0) : 1013250.0;
+        } else if (cbSource === 'stl') {
+            initQty = vpNode ? (vpNode.parameters.stl_quantity || 'pressure') : 'pressure';
+            initCmap = vpNode ? (vpNode.parameters.stl_colormap || 'plasma') : 'plasma';
+            initAuto = vpNode ? (vpNode.parameters.stl_auto_scale !== false) : true;
+            initLog = vpNode ? (vpNode.parameters.stl_log_scale === true) : false;
+            minV = vpNode ? (vpNode.parameters.stl_min_val ?? 101325.0) : 101325.0;
+            maxV = vpNode ? (vpNode.parameters.stl_max_val ?? 1013250.0) : 1013250.0;
+        }
 
         const tr = document.createElement('tr');
         tr.style.borderBottom = '1px solid rgba(255,255,255,0.06)';
@@ -3078,32 +3163,33 @@ export class Telemetry3DViewport {
         tdLayer.innerHTML = '🎨 <b>Color Bar</b>';
         tr.appendChild(tdLayer);
 
-        // Col 3: SOL (Position Popover Pill)
-        const tdPos = document.createElement('td');
-        tdPos.style.padding = '3px 2px';
-        tdPos.style.textAlign = 'center';
-        const posPill = document.createElement('div');
-        posPill.style.fontSize = '8px';
-        posPill.style.padding = '2px 4px';
-        posPill.style.borderRadius = '3px';
-        posPill.style.cursor = 'pointer';
-        posPill.style.background = 'rgba(255,255,255,0.08)';
-        posPill.style.border = '1px solid rgba(255,255,255,0.15)';
-        posPill.style.color = '#00adff';
-        posPill.style.fontWeight = 'bold';
-        posPill.textContent = initPos.replace('-', ' ').toUpperCase();
-        posPill.onclick = (e) => {
+        // Col 3: SOL (Source selection popover pill)
+        const tdSource = document.createElement('td');
+        tdSource.style.padding = '3px 2px';
+        tdSource.style.textAlign = 'center';
+        const sourcePill = document.createElement('div');
+        sourcePill.id = this.getElId('viewport-colorbar-source-pill');
+        sourcePill.style.fontSize = '8px';
+        sourcePill.style.padding = '2px 4px';
+        sourcePill.style.borderRadius = '3px';
+        sourcePill.style.cursor = 'pointer';
+        sourcePill.style.background = 'rgba(255,255,255,0.08)';
+        sourcePill.style.border = '1px solid rgba(255,255,255,0.15)';
+        sourcePill.style.color = '#00adff';
+        sourcePill.style.fontWeight = 'bold';
+        sourcePill.textContent = cbSource.toUpperCase();
+        sourcePill.onclick = (e) => {
             e.stopPropagation();
-            this.showPopover(posPill, (popover) => {
-                const positions = [
-                    { id: 'left-center', label: 'Left Center' },
-                    { id: 'left-top', label: 'Left Top' },
-                    { id: 'left-bottom', label: 'Left Bottom' },
-                    { id: 'right-bottom', label: 'Right Bottom' }
+            this.showPopover(sourcePill, (popover) => {
+                const sources = [
+                    { id: 'slice', label: 'CFD Slice' },
+                    { id: 'mpm', label: 'MPM Particles' },
+                    { id: 'obstacles', label: 'Obstacles' },
+                    { id: 'stl', label: 'STL Results' }
                 ];
-                positions.forEach(p => {
+                sources.forEach(s => {
                     const item = document.createElement('div');
-                    item.textContent = p.label;
+                    item.textContent = s.label;
                     item.style.padding = '3px 6px';
                     item.style.borderRadius = '3px';
                     item.style.cursor = 'pointer';
@@ -3111,7 +3197,7 @@ export class Telemetry3DViewport {
                         ev.stopPropagation();
                         const vp = this.getViewportNode();
                         if (vp) {
-                            this.stateManager.updateNodeParametersInPlace(vp.id, { color_bar_position: p.id });
+                            this.stateManager.updateNodeParametersInPlace(vp.id, { colorbar_source: s.id });
                             this.syncControls(true);
                             this.closePopover();
                         }
@@ -3120,8 +3206,8 @@ export class Telemetry3DViewport {
                 });
             });
         };
-        tdPos.appendChild(posPill);
-        tr.appendChild(tdPos);
+        tdSource.appendChild(sourcePill);
+        tr.appendChild(tdSource);
 
         // Col 4: LINES (Auto-Scale Pill)
         const tdAuto = document.createElement('td');
@@ -3130,7 +3216,12 @@ export class Telemetry3DViewport {
         tdAuto.appendChild(this.createToggleBtn('viewport-colorbar-autoscale-btn', 'AUTO', initAuto, (v) => {
             const vp = this.getViewportNode();
             if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { auto_scale: v });
+                const updates: any = {};
+                if (cbSource === 'slice') updates.auto_scale = v;
+                else if (cbSource === 'mpm') updates.mpmParticleAutoScale = v;
+                else if (cbSource === 'obstacles') updates.obstacles_auto_scale = v;
+                else if (cbSource === 'stl') updates.stl_auto_scale = v;
+                this.stateManager.updateNodeParametersInPlace(vp.id, updates);
                 this.syncControls(true);
             }
         }));
@@ -3143,7 +3234,12 @@ export class Telemetry3DViewport {
         tdLog.appendChild(this.createToggleBtn('viewport-colorbar-logscale-btn', 'LOG', initLog, (v) => {
             const vp = this.getViewportNode();
             if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { log_scale: v });
+                const updates: any = {};
+                if (cbSource === 'slice') updates.log_scale = v;
+                else if (cbSource === 'mpm') updates.mpmParticleLogScale = v;
+                else if (cbSource === 'obstacles') updates.obstacles_log_scale = v;
+                else if (cbSource === 'stl') updates.stl_log_scale = v;
+                this.stateManager.updateNodeParametersInPlace(vp.id, updates);
                 this.syncControls(true);
             }
         }));
@@ -3153,6 +3249,7 @@ export class Telemetry3DViewport {
         const tdQty = document.createElement('td');
         tdQty.style.padding = '3px 4px';
         const qtyPill = document.createElement('div');
+        qtyPill.id = this.getElId('viewport-colorbar-qty-pill');
         qtyPill.style.fontSize = '9px';
         qtyPill.style.padding = '2px 4px';
         qtyPill.style.borderRadius = '3px';
@@ -3164,8 +3261,28 @@ export class Telemetry3DViewport {
         qtyPill.textContent = initQty;
         qtyPill.onclick = (e) => {
             e.stopPropagation();
-            this.showQuantityPopover(qtyPill, initQty, (newQ) => {
-                this.setFocusedQuantity(newQ);
+            const cbContext = cbSource === 'mpm' ? 'mpm' : 'cfd';
+            this.showQuantityPopover(qtyPill, initQty, cbContext, (newQ) => {
+                const vp = this.getViewportNode();
+                if (vp) {
+                    const updates: any = {};
+                    if (cbSource === 'slice') {
+                        const activeIdx = vp.parameters.focusedSliceIndex ?? 0;
+                        if (vp.parameters.slices && vp.parameters.slices[activeIdx]) {
+                            const newSlices = [...vp.parameters.slices];
+                            newSlices[activeIdx] = { ...newSlices[activeIdx], quantities: [newQ] };
+                            updates.slices = newSlices;
+                        }
+                    } else if (cbSource === 'mpm') {
+                        updates.mpmParticleQuantity = newQ;
+                    } else if (cbSource === 'obstacles') {
+                        updates.obstacles_quantity = newQ;
+                    } else if (cbSource === 'stl') {
+                        updates.stl_quantity = newQ;
+                    }
+                    this.stateManager.updateNodeParametersInPlace(vp.id, updates);
+                    this.syncControls(true);
+                }
             });
         };
         tdQty.appendChild(qtyPill);
@@ -3175,6 +3292,7 @@ export class Telemetry3DViewport {
         const tdCmap = document.createElement('td');
         tdCmap.style.padding = '3px 4px';
         const cmapPill = document.createElement('div');
+        cmapPill.id = this.getElId('viewport-colorbar-cmap-pill');
         cmapPill.style.fontSize = '9px';
         cmapPill.style.padding = '2px 4px';
         cmapPill.style.borderRadius = '3px';
@@ -3186,7 +3304,30 @@ export class Telemetry3DViewport {
         cmapPill.onclick = (e) => {
             e.stopPropagation();
             this.showColormapPopover(cmapPill, initCmap, (newC) => {
-                this.setQuantityColormap(initQty, newC);
+                const vp = this.getViewportNode();
+                if (vp) {
+                    const updates: any = {};
+                    if (cbSource === 'slice') {
+                        const activeIdx = vp.parameters.focusedSliceIndex ?? 0;
+                        if (vp.parameters.slices && vp.parameters.slices[activeIdx]) {
+                            const newSlices = [...vp.parameters.slices];
+                            newSlices[activeIdx] = { ...newSlices[activeIdx], colormap: newC };
+                            updates.slices = newSlices;
+                        }
+                        const qCmaps = { ...(vp.parameters.quantity_colormaps || {}) };
+                        const { quantity } = getFocusedQuantityAndRange(vp);
+                        qCmaps[quantity] = newC;
+                        updates.quantity_colormaps = qCmaps;
+                    } else if (cbSource === 'mpm') {
+                        updates.mpmParticleColormap = newC;
+                    } else if (cbSource === 'obstacles') {
+                        updates.obstacles_colormap = newC;
+                    } else if (cbSource === 'stl') {
+                        updates.stl_colormap = newC;
+                    }
+                    this.stateManager.updateNodeParametersInPlace(vp.id, updates);
+                    this.syncControls(true);
+                }
             });
         };
         tdCmap.appendChild(cmapPill);
@@ -3204,12 +3345,11 @@ export class Telemetry3DViewport {
             e.stopPropagation();
             this.showPopover(rangeBtn, (popover) => {
                 const vp = this.getViewportNode();
-                const minV = vp?.parameters.min_val ?? 0.0;
-                const maxV = vp?.parameters.max_val ?? 1.0;
+                const initPosVal = vp?.parameters.color_bar_position || 'left-center';
 
                 popover.innerHTML = `
-                    <div style="font-weight:bold; color:#00adff; margin-bottom:6px;">Manual Range Limits</div>
-                    <div style="display:flex; flex-direction:column; gap:4px;">
+                    <div style="font-weight:bold; color:#00adff; margin-bottom:6px;">Color Bar Range & Position</div>
+                    <div style="display:flex; flex-direction:column; gap:6px;">
                         <label style="display:flex; justify-content:space-between; align-items:center; gap:6px;">
                             <span>Min:</span>
                             <input type="number" step="any" id="popover-min-inp" value="${minV}" style="width:70px; background:#111; color:#fff; border:1px solid #444; border-radius:3px; padding:2px;">
@@ -3218,7 +3358,16 @@ export class Telemetry3DViewport {
                             <span>Max:</span>
                             <input type="number" step="any" id="popover-max-inp" value="${maxV}" style="width:70px; background:#111; color:#fff; border:1px solid #444; border-radius:3px; padding:2px;">
                         </label>
-                        <button id="popover-apply-range" style="margin-top:4px; background:#007acc; color:#fff; border:none; border-radius:3px; padding:3px; cursor:pointer;">Apply Range</button>
+                        <label style="display:flex; justify-content:space-between; align-items:center; gap:6px;">
+                            <span>Position:</span>
+                            <select id="popover-pos-sel" style="width:76px; background:#111; color:#fff; border:1px solid #444; border-radius:3px; padding:2px; font-size:8.5px;">
+                                <option value="left-center" ${initPosVal === 'left-center' ? 'selected' : ''}>Left Center</option>
+                                <option value="left-top" ${initPosVal === 'left-top' ? 'selected' : ''}>Left Top</option>
+                                <option value="left-bottom" ${initPosVal === 'left-bottom' ? 'selected' : ''}>Left Bottom</option>
+                                <option value="right-bottom" ${initPosVal === 'right-bottom' ? 'selected' : ''}>Right Bottom</option>
+                            </select>
+                        </label>
+                        <button id="popover-apply-range" style="margin-top:4px; background:#007acc; color:#fff; border:none; border-radius:3px; padding:4px; cursor:pointer; font-weight:bold;">Apply Settings</button>
                     </div>
                 `;
                 const applyBtn = popover.querySelector('#popover-apply-range') as HTMLButtonElement;
@@ -3226,14 +3375,30 @@ export class Telemetry3DViewport {
                     applyBtn.onclick = () => {
                         const minInp = popover.querySelector('#popover-min-inp') as HTMLInputElement;
                         const maxInp = popover.querySelector('#popover-max-inp') as HTMLInputElement;
-                        if (minInp && maxInp && vp) {
+                        const posSel = popover.querySelector('#popover-pos-sel') as HTMLSelectElement;
+                        if (minInp && maxInp && posSel && vp) {
                             const minN = Number(minInp.value);
                             const maxN = Number(maxInp.value);
-                            this.stateManager.updateNodeParametersInPlace(vp.id, {
-                                auto_scale: false,
-                                min_val: minN,
-                                max_val: maxN
-                            });
+                            const posVal = posSel.value;
+                            const updates: any = { color_bar_position: posVal };
+                            if (cbSource === 'slice') {
+                                updates.auto_scale = false;
+                                updates.min_val = minN;
+                                updates.max_val = maxN;
+                            } else if (cbSource === 'mpm') {
+                                updates.mpmParticleAutoScale = false;
+                                updates.mpmParticleMinVal = minN;
+                                updates.mpmParticleMaxVal = maxN;
+                            } else if (cbSource === 'obstacles') {
+                                updates.obstacles_auto_scale = false;
+                                updates.obstacles_min_val = minN;
+                                updates.obstacles_max_val = maxN;
+                            } else if (cbSource === 'stl') {
+                                updates.stl_auto_scale = false;
+                                updates.stl_min_val = minN;
+                                updates.stl_max_val = maxN;
+                            }
+                            this.stateManager.updateNodeParametersInPlace(vp.id, updates);
                             this.syncControls(true);
                             this.closePopover();
                         }
@@ -3305,6 +3470,7 @@ export class Telemetry3DViewport {
         const tdSize = document.createElement('td');
         tdSize.style.padding = '3px 2px';
         const sizePill = document.createElement('button');
+        sizePill.id = this.getElId('viewport-mpm-size-btn');
         sizePill.textContent = `Pt ${initSize}px ▾`;
         this.applyButtonStyle(sizePill);
         sizePill.style.fontSize = '8.5px';
@@ -3339,6 +3505,7 @@ export class Telemetry3DViewport {
         const tdQty = document.createElement('td');
         tdQty.style.padding = '3px 4px';
         const qtyPill = document.createElement('div');
+        qtyPill.id = this.getElId('viewport-mpm-qty-pill');
         qtyPill.style.fontSize = '9px';
         qtyPill.style.padding = '2px 4px';
         qtyPill.style.borderRadius = '3px';
@@ -3350,7 +3517,7 @@ export class Telemetry3DViewport {
         qtyPill.textContent = initQty;
         qtyPill.onclick = (e) => {
             e.stopPropagation();
-            this.showQuantityPopover(qtyPill, initQty, (newQ) => {
+            this.showQuantityPopover(qtyPill, initQty, 'mpm', (newQ) => {
                 const vp = this.getViewportNode();
                 if (vp) {
                     this.stateManager.updateNodeParametersInPlace(vp.id, { mpmParticleQuantity: newQ });
@@ -3366,6 +3533,7 @@ export class Telemetry3DViewport {
         const tdCmap = document.createElement('td');
         tdCmap.style.padding = '3px 4px';
         const cmapPill = document.createElement('div');
+        cmapPill.id = this.getElId('viewport-mpm-cmap-pill');
         cmapPill.style.fontSize = '9px';
         cmapPill.style.padding = '2px 4px';
         cmapPill.style.borderRadius = '3px';
@@ -3392,12 +3560,35 @@ export class Telemetry3DViewport {
         const tdScl = document.createElement('td');
         tdScl.style.padding = '3px 2px';
         tdScl.style.textAlign = 'center';
-        const rangeBtn = document.createElement('button');
-        rangeBtn.innerHTML = '⚙️ Range';
-        this.applyButtonStyle(rangeBtn);
-        rangeBtn.style.fontSize = '8px';
-        rangeBtn.onclick = (e) => {
-            e.stopPropagation();
+        
+        const sclWrap = document.createElement('div');
+        sclWrap.style.display = 'inline-flex';
+        sclWrap.style.gap = '2px';
+        sclWrap.style.justifyContent = 'center';
+        tdScl.appendChild(sclWrap);
+
+        const initAuto = vpNode ? (vpNode.parameters.mpmParticleAutoScale !== false) : true;
+        const initLog = vpNode ? (vpNode.parameters.mpmParticleLogScale === true) : false;
+
+        sclWrap.appendChild(this.createToggleBtn('viewport-mpm-auto-btn', 'A', initAuto, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { mpmParticleAutoScale: v });
+                this.worker.postMessage({ type: 'setConfig', data: { mpmParticleAutoScale: v } });
+                this.syncControls(true);
+            }
+        }));
+
+        sclWrap.appendChild(this.createToggleBtn('viewport-mpm-log-btn', 'L', initLog, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { mpmParticleLogScale: v });
+                this.worker.postMessage({ type: 'setConfig', data: { mpmParticleLogScale: v } });
+                this.syncControls(true);
+            }
+        }));
+
+        const rangeBtn = this.createToggleBtn('viewport-mpm-cfg-btn', '⚙️', false, () => {
             this.showPopover(rangeBtn, (popover) => {
                 const vp = this.getViewportNode();
                 const minV = vp?.parameters.mpmParticleMinVal ?? 0.0;
@@ -3438,22 +3629,48 @@ export class Telemetry3DViewport {
                                     mpmParticleMaxVal: maxN
                                 }
                             });
+                            this.syncControls(true);
                             this.closePopover();
                         }
                     };
                 }
             });
-        };
-        tdScl.appendChild(rangeBtn);
+        });
+        sclWrap.appendChild(rangeBtn);
+        tdScl.appendChild(sclWrap);
         tr.appendChild(tdScl);
 
-        // Col 9, 10: OPACITY and TRASH
-        for (let i = 0; i < 2; i++) {
-            const tdEmpty = document.createElement('td');
-            tdEmpty.innerHTML = '<span style="color:#555;">—</span>';
-            tdEmpty.style.textAlign = 'center';
-            tr.appendChild(tdEmpty);
-        }
+        // Col 9: OPACITY (Opacity Popover)
+        const tdOpac = document.createElement('td');
+        tdOpac.style.padding = '3px 4px';
+        const initOpacity = vpNode ? (vpNode.parameters.mpmParticleOpacity ?? 1.0) : 1.0;
+        const opacPill = document.createElement('button');
+        opacPill.id = this.getElId('viewport-mpm-opac-pill');
+        opacPill.textContent = `${Math.round(initOpacity * 100)}% ▾`;
+        this.applyButtonStyle(opacPill);
+        opacPill.style.fontSize = '8.5px';
+        opacPill.style.width = '100%';
+        opacPill.style.padding = '2px 0';
+        opacPill.onclick = (e) => {
+            e.stopPropagation();
+            const curVal = this.getViewportNode()?.parameters.mpmParticleOpacity ?? 1.0;
+            this.showOpacityPopover(opacPill, curVal, (newOpac) => {
+                const vp = this.getViewportNode();
+                if (vp) {
+                    this.stateManager.updateNodeParametersInPlace(vp.id, { mpmParticleOpacity: newOpac });
+                    this.worker.postMessage({ type: 'setConfig', data: { mpmParticleOpacity: newOpac } });
+                    opacPill.textContent = `${Math.round(newOpac * 100)}% ▾`;
+                }
+            });
+        };
+        tdOpac.appendChild(opacPill);
+        tr.appendChild(tdOpac);
+
+        // Col 10: Empty Delete Cell
+        const tdDel = document.createElement('td');
+        tdDel.innerHTML = '<span style="color:#444;">—</span>';
+        tdDel.style.textAlign = 'center';
+        tr.appendChild(tdDel);
 
         parent.appendChild(tr);
     }
@@ -4038,6 +4255,75 @@ export class Telemetry3DViewport {
             gaugeSolidCb.checked = gaugeSolid;
         }
 
+        // Color Bar Sync
+        const cbSource = vpNode.parameters.colorbar_source || 'slice';
+        let cbQty = 'pressure';
+        let cbCmap = 'plasma';
+        let cbAuto = true;
+        let cbLog = false;
+        if (cbSource === 'slice') {
+            const { quantity } = getFocusedQuantityAndRange(vpNode);
+            cbQty = quantity;
+            cbCmap = vpNode.parameters.quantity_colormaps?.[cbQty] || 'plasma';
+            cbAuto = vpNode.parameters.auto_scale !== false;
+            cbLog = vpNode.parameters.log_scale === true;
+        } else if (cbSource === 'mpm') {
+            cbQty = vpNode.parameters.mpmParticleQuantity || 'vonMises';
+            cbCmap = vpNode.parameters.mpmParticleColormap || 'plasma';
+            cbAuto = vpNode.parameters.mpmParticleAutoScale !== false;
+            cbLog = vpNode.parameters.mpmParticleLogScale === true;
+        } else if (cbSource === 'obstacles') {
+            cbQty = vpNode.parameters.obstacles_quantity || 'pressure';
+            cbCmap = vpNode.parameters.obstacles_colormap || 'plasma';
+            cbAuto = vpNode.parameters.obstacles_auto_scale !== false;
+            cbLog = vpNode.parameters.obstacles_log_scale === true;
+        } else if (cbSource === 'stl') {
+            cbQty = vpNode.parameters.stl_quantity || 'pressure';
+            cbCmap = vpNode.parameters.stl_colormap || 'plasma';
+            cbAuto = vpNode.parameters.stl_auto_scale !== false;
+            cbLog = vpNode.parameters.stl_log_scale === true;
+        }
+
+        const cbSourcePill = document.getElementById(this.getElId('viewport-colorbar-source-pill'));
+        if (cbSourcePill) {
+            cbSourcePill.textContent = cbSource.toUpperCase();
+        }
+        const cbQtyPill = document.getElementById(this.getElId('viewport-colorbar-qty-pill'));
+        if (cbQtyPill) {
+            cbQtyPill.textContent = cbQty;
+        }
+        const cbCmapPill = document.getElementById(this.getElId('viewport-colorbar-cmap-pill'));
+        if (cbCmapPill) {
+            cbCmapPill.textContent = cbCmap;
+        }
+        updateBtnStyle('viewport-colorbar-autoscale-btn', cbAuto);
+        updateBtnStyle('viewport-colorbar-logscale-btn', cbLog);
+
+        // MPM Particles Sync
+        const mpmShowCb = document.getElementById(this.getElId('viewport-mpm-particles-cb')) as HTMLInputElement;
+        if (mpmShowCb && document.activeElement !== mpmShowCb) {
+            mpmShowCb.checked = vpNode.parameters.showMPMParticles !== false;
+        }
+        updateBtnStyle('viewport-mpm-auto-btn', vpNode.parameters.mpmParticleAutoScale !== false);
+        updateBtnStyle('viewport-mpm-log-btn', vpNode.parameters.mpmParticleLogScale === true);
+
+        const mpmSizeBtn = document.getElementById(this.getElId('viewport-mpm-size-btn'));
+        if (mpmSizeBtn) {
+            mpmSizeBtn.textContent = `Pt ${vpNode.parameters.mpmParticleSize ?? 4.0}px ▾`;
+        }
+        const mpmQtyPill = document.getElementById(this.getElId('viewport-mpm-qty-pill'));
+        if (mpmQtyPill) {
+            mpmQtyPill.textContent = vpNode.parameters.mpmParticleQuantity || 'vonMises';
+        }
+        const mpmCmapPill = document.getElementById(this.getElId('viewport-mpm-cmap-pill'));
+        if (mpmCmapPill) {
+            mpmCmapPill.textContent = vpNode.parameters.mpmParticleColormap || 'plasma';
+        }
+        const mpmOpacPill = document.getElementById(this.getElId('viewport-mpm-opac-pill'));
+        if (mpmOpacPill) {
+            mpmOpacPill.textContent = `${Math.round((vpNode.parameters.mpmParticleOpacity ?? 1.0) * 100)}% ▾`;
+        }
+
         if (postToWorker) {
             const qCmaps = vpNode.parameters.quantity_colormaps || {};
             const stlQty = vpNode.parameters.stl_quantity || 'pressure';
@@ -4146,7 +4432,16 @@ export class Telemetry3DViewport {
                     chargeLighting: vpNode.parameters.charge_lighting !== false,
                     chargeOpacity: vpNode.parameters.charge_opacity ?? 0.65,
                     charge: chargeParams,
-                    submeshes: submeshes
+                    submeshes: submeshes,
+                    showMPMParticles: vpNode.parameters.showMPMParticles !== false,
+                    mpmParticleSize: vpNode.parameters.mpmParticleSize ?? 4.0,
+                    mpmParticleQuantity: vpNode.parameters.mpmParticleQuantity || 'vonMises',
+                    mpmParticleColormap: vpNode.parameters.mpmParticleColormap || 'plasma',
+                    mpmParticleAutoScale: vpNode.parameters.mpmParticleAutoScale !== false,
+                    mpmParticleLogScale: vpNode.parameters.mpmParticleLogScale === true,
+                    mpmParticleOpacity: vpNode.parameters.mpmParticleOpacity ?? 1.0,
+                    mpmParticleMinVal: vpNode.parameters.mpmParticleMinVal ?? 0.0,
+                    mpmParticleMaxVal: vpNode.parameters.mpmParticleMaxVal ?? 500.0e6
                 }
             });
         }
@@ -4322,7 +4617,7 @@ export class Telemetry3DViewport {
                     qtyPill.style.padding = '2px 0';
                     qtyPill.onclick = (e) => {
                         e.stopPropagation();
-                        this.showQuantityPopover(qtyPill, qty, (newQ) => {
+                        this.showQuantityPopover(qtyPill, qty, 'cfd', (newQ) => {
                             const qCmaps = vpNode.parameters.quantity_colormaps || {};
                             const newCmap = qCmaps[newQ] || 'plasma';
                             this.updateSliceProperty(idx, { quantities: [newQ], colormap: newCmap });

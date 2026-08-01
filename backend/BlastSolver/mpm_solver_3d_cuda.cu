@@ -184,6 +184,9 @@ __global__ void kernel_grid_update_3d(MPMGridNode3D* grid, int num_nodes, int nx
     node.v[0] = node.p[0] / node.m;
     node.v[1] = node.p[1] / node.m;
     node.v[2] = node.p[2] / node.m;
+    node.v_old[0] = node.v[0];
+    node.v_old[1] = node.v[1];
+    node.v_old[2] = node.v[2];
 
     float f_tot_x = node.f_ext[0] - node.f_int[0];
     float f_tot_y = node.f_ext[1] - node.f_int[1];
@@ -227,7 +230,8 @@ __global__ void kernel_grid_update_3d(MPMGridNode3D* grid, int num_nodes, int nx
 // 3. G2P Gather Kernel
 __global__ void kernel_g2p_3d(MPMParticle3D* particles, int num_particles,
                               const MPMGridNode3D* grid, int nx, int ny, int nz,
-                              float dx, float dy, float dz, float dt, int transfer_scheme) {
+                              float dx, float dy, float dz, float dt, int transfer_scheme,
+                              int velocity_scheme, float flip_blend) {
     int p_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (p_idx >= num_particles) return;
 
@@ -238,6 +242,7 @@ __global__ void kernel_g2p_3d(MPMParticle3D* particles, int num_particles,
     int base_k = static_cast<int>(floorf(p.x[2] / dz));
 
     float v_pic_x = 0.0f; float v_pic_y = 0.0f; float v_pic_z = 0.0f;
+    float v_flip_x = p.v[0]; float v_flip_y = p.v[1]; float v_flip_z = p.v[2];
     float weight_sum = 0.0f;
 
     for (int offset_i = -1; offset_i <= 2; ++offset_i) {
@@ -281,6 +286,9 @@ __global__ void kernel_g2p_3d(MPMParticle3D* particles, int num_particles,
                     v_pic_x += weight * node.v[0];
                     v_pic_y += weight * node.v[1];
                     v_pic_z += weight * node.v[2];
+                    v_flip_x += weight * (node.v[0] - node.v_old[0]);
+                    v_flip_y += weight * (node.v[1] - node.v_old[1]);
+                    v_flip_z += weight * (node.v[2] - node.v_old[2]);
                     weight_sum += weight;
                 }
             }
@@ -363,9 +371,19 @@ __global__ void kernel_g2p_3d(MPMParticle3D* particles, int num_particles,
         }
     }
 
-    p.v[0] = fminf(fmaxf(v_pic_x, -5000.0f), 5000.0f);
-    p.v[1] = fminf(fmaxf(v_pic_y, -5000.0f), 5000.0f);
-    p.v[2] = fminf(fmaxf(v_pic_z, -5000.0f), 5000.0f);
+    float target_vx = v_pic_x;
+    float target_vy = v_pic_y;
+    float target_vz = v_pic_z;
+
+    if (velocity_scheme == 2) { // FLIP
+        target_vx = flip_blend * v_flip_x + (1.0f - flip_blend) * v_pic_x;
+        target_vy = flip_blend * v_flip_y + (1.0f - flip_blend) * v_pic_y;
+        target_vz = flip_blend * v_flip_z + (1.0f - flip_blend) * v_pic_z;
+    }
+
+    p.v[0] = fminf(fmaxf(target_vx, -5000.0f), 5000.0f);
+    p.v[1] = fminf(fmaxf(target_vy, -5000.0f), 5000.0f);
+    p.v[2] = fminf(fmaxf(target_vz, -5000.0f), 5000.0f);
 
     for (int r = 0; r < 3; ++r) {
         for (int c = 0; c < 3; ++c) {
@@ -525,20 +543,26 @@ void MPMSolver3DCUDA::allocateDeviceMemory() {
 
     if (num_grid_nodes > m_allocated_grid_nodes) {
         if (d_grid) cudaFree(d_grid);
+        if (d_grid_n) cudaFree(d_grid_n);
         cudaMalloc(&d_grid, num_grid_nodes * sizeof(MPMGridNode3D));
+        cudaMalloc(&d_grid_n, num_grid_nodes * sizeof(MPMGridNode3D));
         m_allocated_grid_nodes = num_grid_nodes;
     }
 
     if (num_particles > m_allocated_particles) {
         if (d_particles) cudaFree(d_particles);
+        if (d_particles_n) cudaFree(d_particles_n);
         cudaMalloc(&d_particles, num_particles * sizeof(MPMParticle3D));
+        cudaMalloc(&d_particles_n, num_particles * sizeof(MPMParticle3D));
         m_allocated_particles = num_particles;
     }
 }
 
 void MPMSolver3DCUDA::freeDeviceMemory() {
     if (d_grid) { cudaFree(d_grid); d_grid = nullptr; }
+    if (d_grid_n) { cudaFree(d_grid_n); d_grid_n = nullptr; }
     if (d_particles) { cudaFree(d_particles); d_particles = nullptr; }
+    if (d_particles_n) { cudaFree(d_particles_n); d_particles_n = nullptr; }
     m_allocated_grid_nodes = 0;
     m_allocated_particles = 0;
 }
@@ -624,6 +648,54 @@ float MPMSolver3DCUDA::computeStepSize(float cfl) {
     return std::max(1.0e-8f, cfl * (min_h / max_speed));
 }
 
+__global__ void kernel_restore_grid_mass_momentum(MPMGridNode3D* grid, const MPMGridNode3D* grid_n, int num_nodes) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_nodes) return;
+    grid[idx].m = grid_n[idx].m;
+    grid[idx].p[0] = grid_n[idx].p[0];
+    grid[idx].p[1] = grid_n[idx].p[1];
+    grid[idx].p[2] = grid_n[idx].p[2];
+}
+
+__global__ void kernel_restore_particles_except_midpoint_x(MPMParticle3D* particles, const MPMParticle3D* particles_n, int num_particles) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_particles) return;
+    float mx = particles[idx].x[0];
+    float my = particles[idx].x[1];
+    float mz = particles[idx].x[2];
+    
+    particles[idx] = particles_n[idx];
+    
+    particles[idx].x[0] = mx;
+    particles[idx].x[1] = my;
+    particles[idx].x[2] = mz;
+}
+
+__global__ void kernel_corrector_position_update(MPMParticle3D* particles, const MPMParticle3D* particles_n, int num_particles,
+                                                 float dt, int nx, int ny, int nz, float dx, float dy, float dz) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_particles) return;
+    MPMParticle3D& p = particles[idx];
+    const MPMParticle3D& p_n = particles_n[idx];
+    
+    p.x[0] = p_n.x[0] + dt * p.v[0];
+    p.x[1] = p_n.x[1] + dt * p.v[1];
+    p.x[2] = p_n.x[2] + dt * p.v[2];
+    
+    float min_x = 1.5f * dx; float max_x = (static_cast<float>(nx) - 1.5f) * dx;
+    float min_y = 1.5f * dy; float max_y = (static_cast<float>(ny) - 1.5f) * dy;
+    float min_z = 1.5f * dz; float max_z = (static_cast<float>(nz) - 1.5f) * dz;
+
+    if (p.x[0] < min_x) { p.x[0] = min_x; if (p.v[0] < 0) p.v[0] = 0.0f; }
+    else if (p.x[0] > max_x) { p.x[0] = max_x; if (p.v[0] > 0) p.v[0] = 0.0f; }
+
+    if (p.x[1] < min_y) { p.x[1] = min_y; if (p.v[1] < 0) p.v[1] = 0.0f; }
+    else if (p.x[1] > max_y) { p.x[1] = max_y; if (p.v[1] > 0) p.v[1] = 0.0f; }
+
+    if (p.x[2] < min_z) { p.x[2] = min_z; if (p.v[2] < 0) p.v[2] = 0.0f; }
+    else if (p.x[2] > max_z) { p.x[2] = max_z; if (p.v[2] > 0) p.v[2] = 0.0f; }
+}
+
 void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
     if (m_host_particles.empty()) return;
     if (m_device_dirty) syncToDevice();
@@ -638,27 +710,94 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
     int threads_per_block = 256;
     int blocks_particles = (static_cast<int>(num_particles) + threads_per_block - 1) / threads_per_block;
     int blocks_nodes = (static_cast<int>(num_nodes) + threads_per_block - 1) / threads_per_block;
+    float avg_p_mass = m_host_particles.empty() ? 0.001f : m_host_particles[0].m;
 
-    if (run_p2g) {
+    if (m_time_scheme == MPMTimeIntegrationScheme::RK2) {
+        // --- 2nd-Order Midpoint RK2 ---
+        // 1. Save initial particle state (at t^n)
+        cudaMemcpy(d_particles_n, d_particles, num_particles * sizeof(MPMParticle3D), cudaMemcpyDeviceToDevice);
+
+        // 2. Predictor Stage (Half-step dt/2)
+        if (run_p2g) {
+            cudaMemset(d_grid, 0, num_nodes * sizeof(MPMGridNode3D));
+            kernel_p2g_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles),
+                                                                  d_grid, m_nx, m_ny, m_nz,
+                                                                  m_dx, m_dy, m_dz, static_cast<int>(m_transfer_scheme));
+        }
+
+        // Save initial grid state (at t^n)
+        cudaMemcpy(d_grid_n, d_grid, num_nodes * sizeof(MPMGridNode3D), cudaMemcpyDeviceToDevice);
+
+        // Update grid kinematics for half step dt/2
+        kernel_grid_update_3d<<<blocks_nodes, threads_per_block>>>(d_grid, static_cast<int>(num_nodes), m_nx, m_ny, m_nz,
+                                                                   0.5f * dt, avg_p_mass,
+                                                                   static_cast<int>(m_bc_x_min), static_cast<int>(m_bc_x_max),
+                                                                   static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
+                                                                   static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max));
+
+        // Gather midpoint velocities and update particle positions to x^{n+1/2}
+        kernel_g2p_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles),
+                                                               d_grid, m_nx, m_ny, m_nz,
+                                                               m_dx, m_dy, m_dz, 0.5f * dt, static_cast<int>(m_transfer_scheme),
+                                                               static_cast<int>(m_velocity_scheme), m_flip_blend);
+
+        // Update stress/internal state to midpoint sigma^{n+1/2}
+        kernel_stress_update_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles), 0.5f * dt);
+
+        // 3. Corrector Stage (Full-step dt)
+        // Scatter midpoint particle momentum/forces to grid using midpoint positions and stresses
         cudaMemset(d_grid, 0, num_nodes * sizeof(MPMGridNode3D));
         kernel_p2g_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles),
                                                               d_grid, m_nx, m_ny, m_nz,
                                                               m_dx, m_dy, m_dz, static_cast<int>(m_transfer_scheme));
+
+        // Restore initial grid mass and momentum (at t^n), keeping the midpoint internal forces f_int^{n+1/2}
+        kernel_restore_grid_mass_momentum<<<blocks_nodes, threads_per_block>>>(d_grid, d_grid_n, static_cast<int>(num_nodes));
+
+        // Update grid kinematics for full step dt using restored grid state and midpoint forces
+        kernel_grid_update_3d<<<blocks_nodes, threads_per_block>>>(d_grid, static_cast<int>(num_nodes), m_nx, m_ny, m_nz,
+                                                                   dt, avg_p_mass,
+                                                                   static_cast<int>(m_bc_x_min), static_cast<int>(m_bc_x_max),
+                                                                   static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
+                                                                   static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max));
+
+        // Restore particle states to initial state (t^n), keeping midpoint positions in d_particles
+        kernel_restore_particles_except_midpoint_x<<<blocks_particles, threads_per_block>>>(d_particles, d_particles_n, static_cast<int>(num_particles));
+
+        // Gather final velocity/affine matrices at midpoint, but don't advance position yet (dt = 0)
+        kernel_g2p_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles),
+                                                               d_grid, m_nx, m_ny, m_nz,
+                                                               m_dx, m_dy, m_dz, 0.0f, static_cast<int>(m_transfer_scheme),
+                                                               static_cast<int>(m_velocity_scheme), m_flip_blend);
+
+        // Update stresses to t^{n+1} using the midpoint velocity gradients over full step dt
+        kernel_stress_update_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles), dt);
+
+        // Advance particle positions from initial positions x^n using gathered midpoint velocities over full step dt
+        kernel_corrector_position_update<<<blocks_particles, threads_per_block>>>(d_particles, d_particles_n, static_cast<int>(num_particles),
+                                                                                  dt, m_nx, m_ny, m_nz, m_dx, m_dy, m_dz);
+    } else {
+        // --- 1st-Order USL / USF ---
+        if (run_p2g) {
+            cudaMemset(d_grid, 0, num_nodes * sizeof(MPMGridNode3D));
+            kernel_p2g_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles),
+                                                                  d_grid, m_nx, m_ny, m_nz,
+                                                                  m_dx, m_dy, m_dz, static_cast<int>(m_transfer_scheme));
+        }
+
+        kernel_grid_update_3d<<<blocks_nodes, threads_per_block>>>(d_grid, static_cast<int>(num_nodes), m_nx, m_ny, m_nz,
+                                                                   dt, avg_p_mass,
+                                                                   static_cast<int>(m_bc_x_min), static_cast<int>(m_bc_x_max),
+                                                                   static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
+                                                                   static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max));
+
+        kernel_g2p_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles),
+                                                               d_grid, m_nx, m_ny, m_nz,
+                                                               m_dx, m_dy, m_dz, dt, static_cast<int>(m_transfer_scheme),
+                                                               static_cast<int>(m_velocity_scheme), m_flip_blend);
+
+        kernel_stress_update_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles), dt);
     }
-
-    float avg_p_mass = m_host_particles.empty() ? 0.001f : m_host_particles[0].m;
-
-    kernel_grid_update_3d<<<blocks_nodes, threads_per_block>>>(d_grid, static_cast<int>(num_nodes), m_nx, m_ny, m_nz,
-                                                               dt, avg_p_mass,
-                                                               static_cast<int>(m_bc_x_min), static_cast<int>(m_bc_x_max),
-                                                               static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
-                                                               static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max));
-
-    kernel_g2p_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles),
-                                                           d_grid, m_nx, m_ny, m_nz,
-                                                           m_dx, m_dy, m_dz, dt, static_cast<int>(m_transfer_scheme));
-
-    kernel_stress_update_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles), dt);
 
     cudaDeviceSynchronize();
 }

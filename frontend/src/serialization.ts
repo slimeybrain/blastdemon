@@ -41,8 +41,8 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
         'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
         'failure_strain', 'tensile_failure_stress',
-        'ppc', 'penalty_stiffness', 'contour_opacity', 'contour_min', 'contour_max',
-        'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal'
+        'ppc',
+        'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend'
     ];
 
     const flattenedParams: Record<string, any> = {};

@@ -2,6 +2,8 @@
 #define MPM_SOLVER_3D_HPP
 
 #include "mpm_solver_2d.hpp"
+#include <vector>
+#include <array>
 
 namespace Blast {
 
@@ -39,6 +41,7 @@ struct MPMGridNode3D {
     float m;            // Mass
     float p[3];         // Momentum (px, py, pz)
     float v[3];         // Velocity (vx, vy, vz)
+    float v_old[3];     // Velocity before force update (vx, vy, vz)
     float f_int[3];     // Internal stress force
     float f_ext[3];     // External force (FSI coupling)
     
@@ -73,6 +76,8 @@ public:
     void setTransferScheme(MPMTransferScheme scheme) { m_transfer_scheme = scheme; }
     void setVelocityScheme(MPMVelocityScheme scheme) { m_velocity_scheme = scheme; }
     void setTimeScheme(MPMTimeIntegrationScheme scheme) { m_time_scheme = scheme; }
+    void setFlipBlend(float alpha) { m_flip_blend = alpha; }
+    float getFlipBlend() const { return m_flip_blend; }
     void setBoundaryConditions(MPMBoundaryCondition3D x_min, MPMBoundaryCondition3D x_max,
                                MPMBoundaryCondition3D y_min, MPMBoundaryCondition3D y_max,
                                MPMBoundaryCondition3D z_min, MPMBoundaryCondition3D z_max);
@@ -138,6 +143,7 @@ private:
     MPMTransferScheme m_transfer_scheme{MPMTransferScheme::GIMP};
     MPMVelocityScheme m_velocity_scheme{MPMVelocityScheme::APIC};
     MPMTimeIntegrationScheme m_time_scheme{MPMTimeIntegrationScheme::USL};
+    float m_flip_blend{0.95f};
 
     MPMBoundaryCondition3D m_bc_x_min{MPMBoundaryCondition3D::Sticky};
     MPMBoundaryCondition3D m_bc_x_max{MPMBoundaryCondition3D::Sticky};

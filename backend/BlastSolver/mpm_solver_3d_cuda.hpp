@@ -14,6 +14,8 @@ public:
     void setTransferScheme(MPMTransferScheme scheme) { m_transfer_scheme = scheme; }
     void setVelocityScheme(MPMVelocityScheme scheme) { m_velocity_scheme = scheme; }
     void setTimeScheme(MPMTimeIntegrationScheme scheme) { m_time_scheme = scheme; }
+    void setFlipBlend(float alpha) { m_flip_blend = alpha; }
+    float getFlipBlend() const { return m_flip_blend; }
     void setBoundaryConditions(MPMBoundaryCondition3D x_min, MPMBoundaryCondition3D x_max,
                                MPMBoundaryCondition3D y_min, MPMBoundaryCondition3D y_max,
                                MPMBoundaryCondition3D z_min, MPMBoundaryCondition3D z_max);
@@ -77,6 +79,7 @@ private:
     MPMTransferScheme m_transfer_scheme{MPMTransferScheme::GIMP};
     MPMVelocityScheme m_velocity_scheme{MPMVelocityScheme::APIC};
     MPMTimeIntegrationScheme m_time_scheme{MPMTimeIntegrationScheme::USL};
+    float m_flip_blend{0.95f};
 
     MPMBoundaryCondition3D m_bc_x_min{MPMBoundaryCondition3D::Sticky};
     MPMBoundaryCondition3D m_bc_x_max{MPMBoundaryCondition3D::Sticky};
@@ -89,7 +92,9 @@ private:
     std::vector<MPMParticle3D> m_host_particles;
 
     MPMGridNode3D* d_grid{nullptr};
+    MPMGridNode3D* d_grid_n{nullptr};
     MPMParticle3D* d_particles{nullptr};
+    MPMParticle3D* d_particles_n{nullptr};
     float* d_max_v_buf{nullptr};
 
     size_t m_allocated_grid_nodes{0};

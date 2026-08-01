@@ -2809,6 +2809,8 @@ let mpmParticleSize: number = 4.0;
 let mpmParticleQuantity: string = 'vonMises';
 let mpmParticleColormap: string = 'plasma';
 let mpmParticleAutoScale: boolean = true;
+let mpmParticleLogScale: boolean = false;
+let mpmParticleOpacity: number = 1.0;
 let mpmParticleMinVal: number | undefined = undefined;
 let mpmParticleMaxVal: number | undefined = undefined;
 
@@ -2854,11 +2856,14 @@ function sampleColormapRGB(v: number, cmapName: string): [number, number, number
 }
 
 function getParticleQuantityValue(data: Float32Array, idx: number, qty: string): number {
-    const base = idx * 10;
+    const base = idx * 13;
     if (qty === 'vonMises' || qty === 'von_mises') return data[base + 6];
     if (qty === 'plastic_strain') return data[base + 7];
     if (qty === 'density') return data[base + 8];
     if (qty === 'pressure') return data[base + 9];
+    if (qty === 'damage') return data[base + 10];
+    if (qty === 'has_failed') return data[base + 11];
+    if (qty === 'object_id') return data[base + 12];
     if (qty === 'velocity') {
         const vx = data[base + 3], vy = data[base + 4], vz = data[base + 5];
         return Math.sqrt(vx * vx + vy * vy + vz * vz);
@@ -2880,7 +2885,7 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
         return;
     }
 
-    const nParticles = Math.floor(latestMPMParticlesData.length / 10);
+    const nParticles = Math.floor(latestMPMParticlesData.length / 13);
     const sizeX = getDimX();
     const sizeY = getDimY();
     const sizeZ = getDimZ();
@@ -2898,34 +2903,47 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
 
     let minScalar = mpmParticleMinVal;
     let maxScalar = mpmParticleMaxVal;
-    if (mpmParticleAutoScale || minScalar === undefined || maxScalar === undefined) {
-        minScalar = Infinity;
-        maxScalar = -Infinity;
-        for (let i = 0; i < nParticles; i++) {
-            const val = getParticleQuantityValue(latestMPMParticlesData, i, mpmParticleQuantity);
-            if (val < minScalar) minScalar = val;
-            if (val > maxScalar) maxScalar = val;
-        }
-        if (!isFinite(minScalar) || !isFinite(maxScalar) || maxScalar <= minScalar) {
-            minScalar = 0.0;
-            maxScalar = 1.0;
-        }
+
+    let empiricalMin = Infinity;
+    let empiricalMax = -Infinity;
+    for (let i = 0; i < nParticles; i++) {
+        const val = getParticleQuantityValue(latestMPMParticlesData, i, mpmParticleQuantity);
+        if (val < empiricalMin) empiricalMin = val;
+        if (val > empiricalMax) empiricalMax = val;
+    }
+    if (!isFinite(empiricalMin) || !isFinite(empiricalMax) || empiricalMax <= empiricalMin) {
+        empiricalMin = 0.0;
+        empiricalMax = 1.0;
     }
 
-    const range = Math.max(1e-9, maxScalar - minScalar);
+    self.postMessage({ type: 'mpmRangeUpdated', min: empiricalMin, max: empiricalMax });
+
+    if (mpmParticleAutoScale || minScalar === undefined || maxScalar === undefined) {
+        minScalar = empiricalMin;
+        maxScalar = empiricalMax;
+    }
+
     const vertexData = new Float32Array(nParticles * 6);
 
     for (let i = 0; i < nParticles; i++) {
-        const px = latestMPMParticlesData[i * 10 + 0];
-        const py = latestMPMParticlesData[i * 10 + 1];
-        const pz = latestMPMParticlesData[i * 10 + 2];
+        const px = latestMPMParticlesData[i * 13 + 0];
+        const py = latestMPMParticlesData[i * 13 + 1];
+        const pz = latestMPMParticlesData[i * 13 + 2];
 
         const wx = px * sx + tx;
         const wy = py * sy + ty;
         const wz = pz * sz + tz;
 
         const val = getParticleQuantityValue(latestMPMParticlesData, i, mpmParticleQuantity);
-        const normVal = (val - minScalar) / range;
+        let normVal = 0.0;
+        if (mpmParticleLogScale) {
+            const logMin = Math.log(Math.max(minScalar, 1e-5));
+            const logMax = Math.log(Math.max(maxScalar, 1e-5));
+            const logVal = Math.log(Math.max(val, 1e-5));
+            normVal = (logVal - logMin) / (Math.max(1e-9, logMax - logMin));
+        } else {
+            normVal = (val - minScalar) / (Math.max(1e-9, maxScalar - minScalar));
+        }
         const [r, g, b] = sampleColormapRGB(normVal, mpmParticleColormap);
 
         const vIdx = i * 6;
@@ -3604,6 +3622,7 @@ function handleFrame(buffer: ArrayBuffer) {
             if (isFinite(vMin) && isFinite(vMax) && vMax > vMin) {
                 stlVolMin = vMin;
                 stlVolMax = vMax;
+                self.postMessage({ type: 'stlRangeUpdated', min: vMin, max: vMax });
             }
             updateVolume3DTexture(w, h, volNz);
             updateWebGL2Volume3DTexture(latestVolume3DData, w, h, volNz);
@@ -5745,7 +5764,7 @@ function render() {
     // Draw 3D MPM Particles Point Cloud
     if (showMPMParticles && mpmParticlesBuffer && mpmParticlesCount > 0) {
         gl.uniform1i(uIsWF, 14);
-        gl.uniform1f(uAlpha, 1.0);
+        gl.uniform1f(uAlpha, mpmParticleOpacity);
         const uParticleSizeLoc = gl.getUniformLocation(program, "uParticleSize");
         if (uParticleSizeLoc !== null) gl.uniform1f(uParticleSizeLoc, mpmParticleSize || 4.0);
 
@@ -6088,19 +6107,39 @@ self.onmessage = async (e) => {
                 updateChargeGeometry();
             }
 
+            let mpmChanged = false;
             if (data.showMPMParticles !== undefined) showMPMParticles = data.showMPMParticles;
             if (data.mpmParticleSize !== undefined) mpmParticleSize = data.mpmParticleSize;
             if (data.mpmParticleQuantity !== undefined) {
                 mpmParticleQuantity = data.mpmParticleQuantity;
-                updateMPMParticlesGeometry();
+                mpmChanged = true;
             }
             if (data.mpmParticleColormap !== undefined) {
                 mpmParticleColormap = data.mpmParticleColormap;
+                mpmChanged = true;
+            }
+            if (data.mpmParticleAutoScale !== undefined) {
+                mpmParticleAutoScale = data.mpmParticleAutoScale;
+                mpmChanged = true;
+            }
+            if (data.mpmParticleLogScale !== undefined) {
+                mpmParticleLogScale = data.mpmParticleLogScale;
+                mpmChanged = true;
+            }
+            if (data.mpmParticleMinVal !== undefined) {
+                mpmParticleMinVal = data.mpmParticleMinVal;
+                mpmChanged = true;
+            }
+            if (data.mpmParticleMaxVal !== undefined) {
+                mpmParticleMaxVal = data.mpmParticleMaxVal;
+                mpmChanged = true;
+            }
+            if (data.mpmParticleOpacity !== undefined) {
+                mpmParticleOpacity = data.mpmParticleOpacity;
+            }
+            if (mpmChanged) {
                 updateMPMParticlesGeometry();
             }
-            if (data.mpmParticleAutoScale !== undefined) mpmParticleAutoScale = data.mpmParticleAutoScale;
-            if (data.mpmParticleMinVal !== undefined) mpmParticleMinVal = data.mpmParticleMinVal;
-            if (data.mpmParticleMaxVal !== undefined) mpmParticleMaxVal = data.mpmParticleMaxVal;
 
             if (data.xmin !== undefined || data.xmax !== undefined || data.ymin !== undefined || data.ymax !== undefined || data.zmin !== undefined || data.zmax !== undefined || data.dx !== undefined || data.nx !== undefined || data.ny !== undefined || data.nz !== undefined) {
                 gaugesChanged = true;
