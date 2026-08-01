@@ -576,32 +576,18 @@ void MPMSolver3D::gridToParticle(float dt) {
         float target_vy = v_pic_y;
         float target_vz = v_pic_z;
 
-        if (m_velocity_scheme == MPMVelocityScheme::FLIP || m_velocity_scheme == MPMVelocityScheme::APIC) {
-            // CFL-normalized FLIP blend.
-            // The raw m_flip_blend is a per-acoustic-transit-time damping coefficient:
-            //   blend_per_tau = m_flip_blend  (e.g. 0.95 = 5% PIC per tau)
-            // The per-step blend is: blend^(dt/tau), where tau = dx/c_s.
-            // This makes total dissipation over physical time T equal to
-            //   blend^(T/tau), fully CFL-independent.
-            // Without this normalization, low-CFL runs (many small steps) would
-            // accumulate far more PIC dissipation than high-CFL runs.
-            const float c_s_p = (p.youngs_modulus > 0.0f && p.density > 1.0f)
-                ? std::sqrt(p.youngs_modulus / p.density) : 5000.0f;
-            const float tau_acoustic = std::min({m_dx, m_dy, m_dz}) / c_s_p;
-            float per_step_blend = m_flip_blend;
-            if (dt > 1.0e-12f && tau_acoustic > 1.0e-12f) {
-                per_step_blend = std::pow(m_flip_blend, dt / tau_acoustic);
-                per_step_blend = std::clamp(per_step_blend, 0.0f, 1.0f);
-            }
-            target_vx = per_step_blend * v_flip_x + (1.0f - per_step_blend) * v_pic_x;
-            target_vy = per_step_blend * v_flip_y + (1.0f - per_step_blend) * v_pic_y;
-            target_vz = per_step_blend * v_flip_z + (1.0f - per_step_blend) * v_pic_z;
+        if (m_velocity_scheme == MPMVelocityScheme::FLIP) {
+            float alpha = std::clamp(m_flip_blend, 0.0f, 1.0f);
+            target_vx = alpha * v_flip_x + (1.0f - alpha) * v_pic_x;
+            target_vy = alpha * v_flip_y + (1.0f - alpha) * v_pic_y;
+            target_vz = alpha * v_flip_z + (1.0f - alpha) * v_pic_z;
         }
 
         p.v[0] = std::clamp(target_vx, -5000.0f, 5000.0f);
         p.v[1] = std::clamp(target_vy, -5000.0f, 5000.0f);
         p.v[2] = std::clamp(target_vz, -5000.0f, 5000.0f);
 
+        // Store particle velocity gradient B_p = grad(v) for constitutive stress update
         for (int r = 0; r < 3; ++r) {
             for (int c = 0; c < 3; ++c) {
                 p.B[r][c] = std::clamp(B_new[r][c], -max_B, max_B);
@@ -635,15 +621,6 @@ void MPMSolver3D::updateStressState(float dt) {
         // This prevents failed debris from elastically coupling back to intact material
         // and the penetrator, which is the primary source of CFL-dependence in the
         // penetration result. Failed particles still carry mass and momentum.
-        if (p.has_failed) {
-            for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c) {
-                    p.sigma[r][c] = 0.0f;
-                    p.B[r][c]     = 0.0f;
-                }
-            continue;
-        }
-
         // Velocity gradient L = B_p (1/s, via D_inv absorbed into B)
         float L[3][3];
         for (int r = 0; r < 3; ++r)
@@ -657,6 +634,198 @@ void MPMSolver3D::updateStressState(float dt) {
                 deps[r][c] = 0.5f * (L[r][c] + L[c][r]) * dt;
                 W[r][c]    = 0.5f * (L[r][c] - L[c][r]);
             }
+        const float tr_deps = deps[0][0] + deps[1][1] + deps[2][2];
+
+        // --- Option B: Granular Coulomb Debris Model for Eroded/Failed Particles ---
+        if (p.has_failed) {
+            p.damage = 1.0f;
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    p.B[r][c] = 0.0f; // Zero affine velocity gradient to eliminate elastic coupling
+
+            p.V = std::clamp(p.V * (1.0f + tr_deps), 0.1f * p.V0, 10.0f * p.V0);
+
+            // 1. Bulk Pressure from Volumetric Compression J = V / V0
+            const float J = p.V / (p.V0 > 1.0e-12f ? p.V0 : 1.0e-12f);
+            float p_comp = 0.0f;
+            if (J < 1.0f) {
+                const float E_mod    = p.youngs_modulus;
+                const float nu       = p.poissons_ratio;
+                const float K_intact = E_mod / (3.0f * std::max(1.0e-4f, 1.0f - 2.0f * nu));
+                const float K_debris = 0.10f * K_intact; // 10% intact bulk modulus
+                p_comp = K_debris * (1.0f - J) / J;
+            }
+
+            // 2. Frictional Shear Resistance (Mohr-Coulomb / Drucker-Prager cone limit: q <= M * p_comp)
+            const float M_friction = 1.0f; // tan(phi) ~ 1.0 for phi ~ 30 deg
+            const float q_max = M_friction * p_comp;
+
+            const float E_mod = p.youngs_modulus;
+            const float nu = p.poissons_ratio;
+            const float mu_debris = 0.05f * (E_mod / (2.0f * (1.0f + nu)));
+
+            float deps_dev[3][3];
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c) {
+                    deps_dev[r][c] = deps[r][c];
+                    if (r == c) deps_dev[r][c] -= tr_deps / 3.0f;
+                }
+
+            float s_trial[3][3];
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    s_trial[r][c] = p.sigma[r][c] + 2.0f * mu_debris * deps_dev[r][c];
+
+            float press_s = -(s_trial[0][0] + s_trial[1][1] + s_trial[2][2]) / 3.0f;
+            for (int r = 0; r < 3; ++r)
+                s_trial[r][r] += press_s;
+
+            float s_s = 0.0f;
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    s_s += s_trial[r][c] * s_trial[r][c];
+            float q_trial = std::sqrt(1.5f * s_s);
+
+            if (q_trial > q_max && q_trial > 1.0e-7f) {
+                float scale = q_max / q_trial;
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c)
+                        p.sigma[r][c] = scale * s_trial[r][c];
+            } else {
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c)
+                        p.sigma[r][c] = s_trial[r][c];
+            }
+
+            for (int r = 0; r < 3; ++r)
+                p.sigma[r][r] -= p_comp;
+
+            continue;
+        }
+
+        // --- Johnson-Cook Plasticity + Mie-Grüneisen Shock EOS Model ---
+        if (p.material_model == MPMMaterialModel::JohnsonCookMieGruneisen) {
+            p.V = std::clamp(p.V * (1.0f + tr_deps), 0.1f * p.V0, 10.0f * p.V0);
+            const float J = p.V / (p.V0 > 1.0e-12f ? p.V0 : 1.0e-12f);
+            const float mu_vol = (1.0f - J) / J;
+
+            // 1. Mie-Grüneisen Shock EOS Hydrostatic Pressure
+            float p_hydro = 0.0f;
+            if (mu_vol > 0.0f) {
+                float denom = 1.0f - (p.mg_s - 1.0f) * mu_vol;
+                if (denom < 0.1f) denom = 0.1f;
+                float p_H = (p.density * p.mg_c0 * p.mg_c0 * mu_vol * (1.0f + mu_vol)) / (denom * denom);
+                float e_H = (p_H * mu_vol) / (2.0f * p.density * (1.0f + mu_vol));
+                p_hydro = p_H + p.mg_gamma0 * p.density * (p.e_int - e_H);
+            } else {
+                p_hydro = p.density * p.mg_c0 * p.mg_c0 * mu_vol;
+            }
+
+            // 2. Jaumann Stress Rotation
+            float W_sig[3][3] = {}, sig_W[3][3] = {};
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    for (int k = 0; k < 3; ++k) {
+                        W_sig[r][c] += W[r][k] * p.sigma[k][c];
+                        sig_W[r][c] += p.sigma[r][k] * W[k][c];
+                    }
+
+            float sig_base[3][3];
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    sig_base[r][c] = p.sigma[r][c] + (W_sig[r][c] - sig_W[r][c]) * dt;
+
+            const float E_mod    = p.youngs_modulus;
+            const float nu_val   = p.poissons_ratio;
+            const float mu_shear = E_mod / (2.0f * (1.0f + nu_val));
+
+            float deps_dev[3][3];
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c) {
+                    deps_dev[r][c] = deps[r][c];
+                    if (r == c) deps_dev[r][c] -= tr_deps / 3.0f;
+                }
+
+            float s_trial[3][3];
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    s_trial[r][c] = sig_base[r][c] + 2.0f * mu_shear * deps_dev[r][c];
+
+            float p_s = -(s_trial[0][0] + s_trial[1][1] + s_trial[2][2]) / 3.0f;
+            for (int r = 0; r < 3; ++r)
+                s_trial[r][r] += p_s;
+
+            float s_s = 0.0f;
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    s_s += s_trial[r][c] * s_trial[r][c];
+            const float q_trial = std::sqrt(1.5f * s_s);
+
+            // 3. Johnson-Cook Yield Stress
+            float ep_dot_star = std::max(1.0f, (tr_deps > 0.0f ? tr_deps : -tr_deps) / (dt > 1e-12f ? dt : 1e-12f));
+            float T_star = std::clamp((p.temperature - p.T_room) / (p.T_melt > p.T_room ? p.T_melt - p.T_room : 1.0f), 0.0f, 1.0f);
+
+            float term_strain = p.jc_A + p.jc_B * std::pow(std::max(0.0f, p.ep_bar), p.jc_n);
+            float term_rate   = 1.0f + p.jc_C * std::log(ep_dot_star);
+            float term_temp   = 1.0f - std::pow(T_star, p.jc_m);
+            if (term_temp < 0.0f) term_temp = 0.0f;
+
+            float jc_yield = term_strain * term_rate * term_temp;
+            if (T_star >= 1.0f) jc_yield = 0.0f; // Liquid hydrodynamic state
+
+            // 4. Radial Return Mapping & Plastic Work Conversion
+            float H_jc = (p.jc_n > 0.0f && p.ep_bar > 1.0e-6f)
+                ? (p.jc_n * p.jc_B * std::pow(p.ep_bar, p.jc_n - 1.0f) * term_rate * term_temp)
+                : p.hardening_modulus;
+            float delta_ep = 0.0f;
+            if (q_trial > 1.0e-5f && q_trial > jc_yield) {
+                delta_ep = (q_trial - jc_yield) / (3.0f * mu_shear + H_jc);
+                float scale = (q_trial > 1e-12f) ? (jc_yield / q_trial) : 0.0f;
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c) {
+                        p.sigma[r][c] = scale * s_trial[r][c];
+                        if (r == c) p.sigma[r][c] -= p_hydro;
+                    }
+                p.ep_bar += delta_ep;
+            } else {
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c) {
+                        p.sigma[r][c] = s_trial[r][c];
+                        if (r == c) p.sigma[r][c] -= p_hydro;
+                    }
+            }
+
+            if (delta_ep > 0.0f && p.density > 0.0f && p.Cp > 0.0f) {
+                float dw_p = jc_yield * delta_ep;
+                float de_p = (0.90f * dw_p) / p.density;
+                p.e_int += de_p;
+                p.temperature = p.T_room + p.e_int / p.Cp;
+            }
+
+            // 5. Thermal Re-Welding / Healing Rule:
+            // High temp (T >= 80% T_melt) under compression fuses molten interfaces
+            if (p.temperature >= 0.80f * p.T_melt && p_hydro > 0.0f) {
+                p.damage = 0.0f;
+                p.has_failed = false;
+            } else {
+                float d_plastic = (p.failure_strain > 0.0f) ? std::clamp(p.ep_bar / p.failure_strain, 0.0f, 1.0f) : 0.0f;
+                float tensile_stress = -p_hydro;
+                float d_tensile = (tensile_stress > 0.0f && p.tensile_failure_stress > 0.0f)
+                    ? std::clamp(tensile_stress / p.tensile_failure_stress, 0.0f, 1.0f) : 0.0f;
+
+                p.damage = std::max(p.damage, std::max(d_plastic, d_tensile));
+                if (p.damage >= 1.0f) {
+                    p.has_failed = true;
+                    p.damage = 1.0f;
+                    for (int r = 0; r < 3; ++r)
+                        for (int c = 0; c < 3; ++c)
+                            p.B[r][c] = 0.0f;
+                }
+            }
+
+            continue;
+        }
+
 
         // Jaumann objective stress rotation: sig_base = sig + (W*sig - sig*W)*dt
         float W_sig[3][3] = {}, sig_W[3][3] = {};
@@ -677,7 +846,6 @@ void MPMSolver3D::updateStressState(float dt) {
         const float nu     = p.poissons_ratio;
         const float mu     = E_mod / (2.0f * (1.0f + nu));
         const float lambda = (E_mod * nu) / ((1.0f + nu) * (1.0f - 2.0f * nu));
-        const float tr_deps = deps[0][0] + deps[1][1] + deps[2][2];
 
         // Trial elastic stress update
         float sig_trial[3][3];
@@ -721,8 +889,6 @@ void MPMSolver3D::updateStressState(float dt) {
         }
 
         // Rate-independent damage: direct mapping from state variable ep_bar.
-        // p.damage is a monotonically non-decreasing state variable.
-        // No exponential relaxation - that was dt/CFL-dependent and is now removed.
         const float d_plastic = (p.failure_strain > 0.0f)
             ? std::clamp(p.ep_bar / p.failure_strain, 0.0f, 1.0f) : 0.0f;
 
@@ -734,17 +900,29 @@ void MPMSolver3D::updateStressState(float dt) {
         p.damage = std::max(p.damage, std::max(d_plastic, d_tensile));
 
         if (p.damage >= 1.0f) {
-            // Particle fully failed this step: erase stress and B immediately.
-            // This makes the failure event and its effect on momentum transfer
-            // identical regardless of CFL.
             p.has_failed = true;
             p.damage = 1.0f;
             for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c) {
-                    p.sigma[r][c] = 0.0f;
-                    p.B[r][c]     = 0.0f;
-                }
+                for (int c = 0; c < 3; ++c)
+                    p.B[r][c] = 0.0f;
+
             p.V = std::clamp(p.V * (1.0f + tr_deps), 0.1f * p.V0, 10.0f * p.V0);
+
+            // Calculate debris stress for this step
+            const float J = p.V / (p.V0 > 1.0e-12f ? p.V0 : 1.0e-12f);
+            float p_comp = 0.0f;
+            if (J < 1.0f) {
+                const float E_mod    = p.youngs_modulus;
+                const float nu       = p.poissons_ratio;
+                const float K_intact = E_mod / (3.0f * std::max(1.0e-4f, 1.0f - 2.0f * nu));
+                const float K_debris = 0.10f * K_intact;
+                p_comp = K_debris * (1.0f - J) / J;
+            }
+
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    p.sigma[r][c] = (r == c) ? -p_comp : 0.0f;
+
             continue;
         }
 
@@ -754,8 +932,9 @@ void MPMSolver3D::updateStressState(float dt) {
             for (int c = 0; c < 3; ++c)
                 p.sigma[r][c] *= soft_factor;
 
-        // Volume update (first-order volumetric, stable for moderate strains)
+        // Volume update
         p.V = std::clamp(p.V * (1.0f + tr_deps), 0.1f * p.V0, 10.0f * p.V0);
+
     }
 }
 

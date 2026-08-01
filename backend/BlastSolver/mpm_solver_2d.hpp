@@ -10,6 +10,11 @@
 
 namespace Blast {
 
+enum class MPMMaterialModel {
+    HypoelasticSteel = 0,
+    JohnsonCookMieGruneisen = 1
+};
+
 struct MPMParticle2D {
     // Kinematics & Position
     float x[2];         // Position (x, y)
@@ -22,22 +27,42 @@ struct MPMParticle2D {
     float V0;           // Initial volume
     float V;            // Current volume
 
-    // Material Properties (Steel J2 Elastoplasticity & Fracture/Failure)
-    float density;               // kg/m^3 (e.g. 7850)
-    float youngs_modulus;        // Pa (e.g. 210e9)
-    float poissons_ratio;        // (e.g. 0.3)
-    float yield_stress;          // Pa (e.g. 400e6)
-    float hardening_modulus;     // Pa (e.g. 1e9)
-    float failure_strain;        // Critical equivalent plastic strain (e.g. 0.25)
-    float tensile_failure_stress;// Critical tensile stress cutoff Pa (e.g. 600e6)
+    // Material Model Selector
+    MPMMaterialModel material_model{MPMMaterialModel::HypoelasticSteel};
 
-    // Deformation, Stress & Damage State
-    float F[2][2];      // Deformation gradient
-    float sigma[2][2];  // Cauchy stress tensor
-    float ep_bar;       // Equivalent plastic strain
-    float damage;       // Scalar damage D in [0, 1]
-    bool has_failed;    // Total failure status flag
-    int object_id;
+    // Baseline Material Properties (Steel J2 Elastoplasticity & Fracture/Failure)
+    float density{7850.0f};               // kg/m^3 (e.g. 7850)
+    float youngs_modulus{210.0e9f};        // Pa (e.g. 210e9)
+    float poissons_ratio{0.3f};            // (e.g. 0.3)
+    float yield_stress{400.0e6f};          // Pa (e.g. 400e6)
+    float hardening_modulus{1.0e9f};     // Pa (e.g. 1e9)
+    float failure_strain{0.25f};        // Critical equivalent plastic strain (e.g. 0.25)
+    float tensile_failure_stress{600.0e6f};// Critical tensile stress cutoff Pa (e.g. 600e6)
+
+    // Johnson-Cook Plasticity & Thermal Softening Parameters
+    float jc_A{792.0e6f};        // Initial yield stress (Pa)
+    float jc_B{510.0e6f};        // Strain hardening constant (Pa)
+    float jc_n{0.26f};           // Strain hardening exponent
+    float jc_C{0.014f};          // Strain rate constant
+    float jc_m{1.03f};           // Thermal softening exponent
+    float T_melt{1793.0f};       // Melting temperature (K)
+    float T_room{293.0f};        // Room reference temperature (K)
+    float Cp{477.0f};            // Specific heat capacity (J/(kg K))
+
+    // Mie-Grüneisen Shock EOS Parameters
+    float mg_gamma0{1.81f};      // Grüneisen gamma parameter
+    float mg_c0{4570.0f};        // Bulk sound speed (m/s)
+    float mg_s{1.49f};           // Hugoniot Us-Up slope
+
+    // Dynamic State Variables
+    float e_int{0.0f};           // Specific internal energy (J/kg)
+    float temperature{293.0f};   // Current temperature (K)
+    float F[2][2];               // Deformation gradient
+    float sigma[2][2];           // Cauchy stress tensor
+    float ep_bar{0.0f};          // Equivalent plastic strain
+    float damage{0.0f};          // Scalar damage D in [0, 1]
+    bool has_failed{false};      // Total failure status flag
+    int object_id{0};
 };
 
 struct MPMGridNode2D {
@@ -96,7 +121,9 @@ public:
     float computeStepSize(float cfl = 0.3f) const;
 
     // Getters & Telemetry
+    std::vector<MPMParticle2D>& getParticles() { return m_particles; }
     const std::vector<MPMParticle2D>& getParticles() const { return m_particles; }
+
     std::vector<MPMGridNode2D>& getGrid() { return m_grid; }
     const std::vector<MPMGridNode2D>& getGrid() const { return m_grid; }
     int getNx() const { return m_nx; }

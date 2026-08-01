@@ -149,6 +149,11 @@ if(BUILD_TESTS)
     set_target_properties(test_3d_cpu_gpu_equivalence PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
     target_compile_options(test_3d_cpu_gpu_equivalence PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3 -lineinfo>)
     target_link_libraries(test_3d_cpu_gpu_equivalence PRIVATE BlastSolverCore)
+
+    add_executable(test_mpm_plasticity backend/BlastSolver/test_mpm_plasticity.cpp)
+    set_target_properties(test_mpm_plasticity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+    target_compile_options(test_mpm_plasticity PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3 -lineinfo>)
+    target_link_libraries(test_mpm_plasticity PRIVATE BlastSolverCore)
 endif()
 
 

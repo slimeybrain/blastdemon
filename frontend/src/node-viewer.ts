@@ -727,7 +727,15 @@ export class NodeViewer {
         grid.style.alignItems = 'center';
 
         let paramKeys = Object.keys(node.parameters);
-        if (node.type === 'MPMDomain2D') {
+        if (node.type === 'MPMMaterialSteel') {
+            if (!node.parameters['material_model']) {
+                node.parameters['material_model'] = 'Steel (Hypoelastic)';
+            }
+            const matModel = node.parameters['material_model'];
+            const baseKeys = ['material_model', 'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus', 'failure_strain', 'tensile_failure_stress'];
+            const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
+            paramKeys = (matModel === 'Johnson-Cook + Mie-Grüneisen') ? [...baseKeys, ...jcKeys] : baseKeys;
+        } else if (node.type === 'MPMDomain2D') {
             const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
             paramKeys = ['transfer_scheme', 'velocity_scheme'];
             if (hasFLIP) {
@@ -736,7 +744,7 @@ export class NodeViewer {
             paramKeys.push('ppc', 'cfl');
         } else if (node.type === 'MPMDomain3D') {
             const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
-            paramKeys = ['transfer_scheme', 'velocity_scheme', 'space_time_scheme'];
+            paramKeys = ['device', 'transfer_scheme', 'velocity_scheme', 'space_time_scheme'];
             if (hasFLIP) {
                 paramKeys.push('flip_blend');
             }
@@ -777,7 +785,13 @@ export class NodeViewer {
                 else if (so === 3 && to === 6) value = 'ADER-3 (3rd-Order Space/Time)';
                 else value = 'RK2 (2nd-Order Space/Time)';
             }
+            if (node.type === 'MPMMaterialSteel') {
+                const matModel = node.parameters['material_model'] || 'Steel (Hypoelastic)';
+                const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
+                if (matModel === 'Steel (Hypoelastic)' && jcKeys.includes(key)) continue;
+            }
             if (node.type === 'DomainMesh') {
+
                 const dim = node.parameters['dimension'] || '1D';
                 if ((key === 'y_min_bc' || key === 'y_max_bc') && dim === '1D') continue;
                 if ((key === 'z_min_bc' || key === 'z_max_bc') && (dim === '1D' || dim === '2D')) continue;
@@ -2228,6 +2242,8 @@ export class NodeViewer {
             'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
             'failure_strain', 'tensile_failure_stress',
+            'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
+            'mg_gamma0', 'mg_c0', 'mg_s',
             'ppc',
             'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity'
         ];
@@ -2235,7 +2251,9 @@ export class NodeViewer {
         const chargeShapeOptions = node.type === 'Charge3D' ? ['Sphere', 'Cylinder', 'Block'] : ['Sphere', 'Cylinder'];
 
         const dropdowns: Record<string, string[]> = {
+            'material_model': ['Steel (Hypoelastic)', 'Johnson-Cook + Mie-Grüneisen'],
             'shape': ['box', 'sphere', 'cylinder'],
+
             'mesh_type': ['regular', 'amr'],
             'dimension': ['1D', '2D', '3D'],
             'x_min_bc': ['Reflecting', 'Transmitting', 'Terminate'],
@@ -2311,7 +2329,12 @@ export class NodeViewer {
             dropdowns[key].forEach(opt => {
                 const option = document.createElement('option');
                 option.value = opt;
-                option.text = opt;
+                let text = opt;
+                if (key === 'device') {
+                    if (opt === 'cpu') text = 'CPU';
+                    else if (opt === 'cuda') text = 'CUDA GPU';
+                }
+                option.text = text;
                 if (opt === value.toString()) option.selected = true;
                 select.appendChild(option);
             });

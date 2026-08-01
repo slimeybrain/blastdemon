@@ -2784,6 +2784,7 @@ export class Telemetry3DViewport {
                     }
                 } else if (source === 'mpm') {
                     updates.mpmParticleQuantity = newQ;
+                    updates.mpmParticleAutoScale = true;
                 } else if (source === 'obstacles') {
                     updates.obstacles_quantity = newQ;
                 } else if (source === 'stl') {
@@ -3520,8 +3521,8 @@ export class Telemetry3DViewport {
             this.showQuantityPopover(qtyPill, initQty, 'mpm', (newQ) => {
                 const vp = this.getViewportNode();
                 if (vp) {
-                    this.stateManager.updateNodeParametersInPlace(vp.id, { mpmParticleQuantity: newQ });
-                    this.worker.postMessage({ type: 'setConfig', data: { mpmParticleQuantity: newQ } });
+                    this.stateManager.updateNodeParametersInPlace(vp.id, { mpmParticleQuantity: newQ, mpmParticleAutoScale: true });
+                    this.worker.postMessage({ type: 'setConfig', data: { mpmParticleQuantity: newQ, mpmParticleAutoScale: true } });
                     qtyPill.textContent = newQ;
                 }
             });

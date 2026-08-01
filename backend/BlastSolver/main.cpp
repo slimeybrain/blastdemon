@@ -194,6 +194,16 @@ struct VTKOutputConfig {
 
 std::string global_model_filename = "";
 
+static Blast::MPMTransferScheme parseTransferScheme(const std::string& str) {
+    if (str == "Standard" || str == "Normal" || str == "Linear") {
+        return Blast::MPMTransferScheme::Standard;
+    } else if (str == "BSpline" || str == "B-Spline") {
+        return Blast::MPMTransferScheme::BSpline;
+    } else {
+        return Blast::MPMTransferScheme::GIMP;
+    }
+}
+
 void write_gauge_files() {
     std::lock_guard<std::mutex> lock(global_gauges_mutex);
     if (global_gauges.empty()) return;
@@ -1782,7 +1792,11 @@ void worker_mpm_3d_thread_func() {
     int initial_steps = global_target_steps_mpm_3d.load();
     auto last_telemetry_time = std::chrono::steady_clock::now();
 
-    emit_kernel_log("INFO", "3D MPM asynchronous worker thread started.", global_solver_mpm_3d ? global_solver_mpm_3d->getSimTime() : 0.0, "mpm_3d");
+    double start_time = 0.0;
+    if (global_solver_mpm_3d_cuda) start_time = global_solver_mpm_3d_cuda->getSimTime();
+    else if (global_solver_mpm_3d) start_time = global_solver_mpm_3d->getSimTime();
+
+    emit_kernel_log("INFO", "3D MPM asynchronous worker thread started.", start_time, "mpm_3d");
 
     while (sim_mpm_3d_running.load()) {
         if (sim_mpm_3d_terminate.load()) break;
@@ -1799,7 +1813,66 @@ void worker_mpm_3d_thread_func() {
 
         if (done) break;
 
-        if (global_solver_mpm_3d) {
+        if (global_solver_mpm_3d_cuda) {
+            float cfl = global_cfl_mpm_3d.load();
+            global_solver_mpm_3d_cuda->step(cfl);
+            global_solver_mpm_3d_cuda->syncToHost();
+            step_count++;
+
+            if (!global_exec_until_end_mpm_3d.load()) {
+                global_target_steps_mpm_3d--;
+            }
+
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_telemetry_time).count();
+            int target_interval_ms = (int)(global_refresh_rate_mpm_3d.load() * 1000.0);
+            if (target_interval_ms <= 0) target_interval_ms = 33;
+
+            if (elapsed_ms >= target_interval_ms || done) {
+                double sim_time = global_solver_mpm_3d_cuda->getSimTime();
+                int current_step = global_solver_mpm_3d_cuda->getStepCount();
+
+                emit_telemetry_mpm_3d(sim_time, false);
+                last_telemetry_time = now;
+
+                char log_buf[256];
+                snprintf(log_buf, sizeof(log_buf),
+                         "Step %d | Time = %.4e s | dt = %.2e s | CFL = %.2f | v_max = %.1f m/s | Particles = %zu",
+                         current_step,
+                         sim_time,
+                         global_solver_mpm_3d_cuda->getLastDt(),
+                         global_solver_mpm_3d_cuda->getLastCFL(),
+                         global_solver_mpm_3d_cuda->getMaxVelocity(),
+                         global_solver_mpm_3d_cuda->getParticles().size());
+                emit_kernel_log("SYSTEM", log_buf, sim_time, "mpm_3d");
+
+                nlohmann::json progress_msg;
+                progress_msg["type"] = "progress";
+                progress_msg["sim_time"] = sim_time;
+                progress_msg["scope"] = "mpm_3d";
+                progress_msg["dt"] = global_solver_mpm_3d_cuda->getLastDt();
+
+                if (global_exec_until_end_mpm_3d.load()) {
+                    progress_msg["percent"] = 50;
+                    progress_msg["mode"] = "EXEC_ALL_MPM_3D";
+                } else {
+                    initial_steps = std::max(initial_steps, step_count + global_target_steps_mpm_3d.load());
+                    if (initial_steps > 0) {
+                        int completed = initial_steps - global_target_steps_mpm_3d.load();
+                        int percent = std::clamp((int)((completed * 100) / initial_steps), 0, 99);
+                        progress_msg["percent"] = percent;
+                        progress_msg["completed"] = completed;
+                        progress_msg["total"] = initial_steps;
+                        progress_msg["mode"] = "STEP_MPM_3D";
+                    }
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(cout_mutex);
+                    std::cout << progress_msg.dump() << std::endl;
+                }
+            }
+        } else if (global_solver_mpm_3d) {
             float cfl = global_cfl_mpm_3d.load();
             global_solver_mpm_3d->step(cfl);
             step_count++;
@@ -1862,7 +1935,10 @@ void worker_mpm_3d_thread_func() {
         }
     }
 
-    double final_sim_time = global_solver_mpm_3d ? global_solver_mpm_3d->getSimTime() : 0.0;
+    double final_sim_time = 0.0;
+    if (global_solver_mpm_3d_cuda) final_sim_time = global_solver_mpm_3d_cuda->getSimTime();
+    else if (global_solver_mpm_3d) final_sim_time = global_solver_mpm_3d->getSimTime();
+
     emit_telemetry_mpm_3d(final_sim_time, false);
 
     nlohmann::json progress_msg;
@@ -2634,8 +2710,8 @@ void async_telemetry_thread_func() {
             if (!payload->mpm_particles.empty()) {
                 const uint32_t magic = 0x4d504d33; // "MPM3"
                 const float time_f = static_cast<float>(payload->elapsed);
-                const uint32_t n_particles = static_cast<uint32_t>(payload->mpm_particles.size() / 10);
-                const uint32_t n_floats_per_particle = 10;
+                const uint32_t n_particles = static_cast<uint32_t>(payload->mpm_particles.size() / 13);
+                const uint32_t n_floats_per_particle = 13;
                 size_t particle_header_bytes = sizeof(uint32_t) * 3 + sizeof(float);
                 size_t particle_payload_bytes = payload->mpm_particles.size() * sizeof(float);
                 size_t total_particle_bytes = particle_header_bytes + particle_payload_bytes;
@@ -2796,20 +2872,43 @@ void emit_telemetry_mpm_2d(double elapsed, bool is_terminated) {
     std::cout.flush();
 }
 
-void emit_telemetry_mpm_3d(double elapsed, bool is_terminated) {
-    if (!global_solver_mpm_3d) return;
+static inline float getMPMGridQuantity(const Blast::MPMGridNode3D& node, const std::string& qty) {
+    if (node.m <= 1.0e-8f) return 0.0f;
+    if (qty == "density") return node.density;
+    if (qty == "pressure") return node.pressure;
+    if (qty == "plastic_strain") return node.plastic_strain;
+    if (qty == "damage") return node.damage;
+    if (qty == "velocity") {
+        return std::sqrt(node.v[0]*node.v[0] + node.v[1]*node.v[1] + node.v[2]*node.v[2]);
+    }
+    return node.von_mises;
+}
 
-    double sim_time = global_solver_mpm_3d->getSimTime();
-    int current_step = global_solver_mpm_3d->getStepCount();
-    float dt = global_solver_mpm_3d->getLastDt();
-    float cfl = global_solver_mpm_3d->getLastCFL();
-    float v_max = global_solver_mpm_3d->getMaxVelocity();
-    size_t n_particles = global_solver_mpm_3d->getParticles().size();
+void emit_telemetry_mpm_3d(double elapsed, bool is_terminated) {
+    if (!global_solver_mpm_3d && !global_solver_mpm_3d_cuda) return;
+
+    if (global_solver_mpm_3d_cuda) {
+        global_solver_mpm_3d_cuda->syncToHost();
+    }
+
+    double sim_time = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getSimTime() : global_solver_mpm_3d->getSimTime();
+    int current_step = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getStepCount() : global_solver_mpm_3d->getStepCount();
+    float dt = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getLastDt() : global_solver_mpm_3d->getLastDt();
+    float cfl = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getLastCFL() : global_solver_mpm_3d->getLastCFL();
+    float v_max = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getMaxVelocity() : global_solver_mpm_3d->getMaxVelocity();
+    const auto& particles = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles() : global_solver_mpm_3d->getParticles();
+    const auto& grid = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getGrid() : global_solver_mpm_3d->getGrid();
+    int nx = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getNx() : global_solver_mpm_3d->getNx();
+    int ny = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getNy() : global_solver_mpm_3d->getNy();
+    int nz = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getNz() : global_solver_mpm_3d->getNz();
+    float dx = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getDx() : global_solver_mpm_3d->getDx();
+    float dy = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getDy() : global_solver_mpm_3d->getDy();
+    float dz = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getDz() : global_solver_mpm_3d->getDz();
 
     char log_buf[256];
     snprintf(log_buf, sizeof(log_buf),
              "Step %d | Time = %.4e s | dt = %.2e s | CFL = %.2f | v_max = %.1f m/s | Particles = %zu",
-             current_step, sim_time, dt, cfl, v_max, n_particles);
+             current_step, sim_time, dt, cfl, v_max, particles.size());
     emit_kernel_log("SYSTEM", log_buf, sim_time, "mpm_3d");
 
     auto payload = std::make_unique<TelemetryPayload>();
@@ -2822,17 +2921,10 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated) {
     payload->xmin = 0.0;
     payload->ymin = 0.0;
     payload->zmin = 0.0;
-    payload->dx = global_solver_mpm_3d->getDx();
-    payload->nx = global_solver_mpm_3d->getNx();
-    payload->ny = global_solver_mpm_3d->getNy();
-    payload->nz = global_solver_mpm_3d->getNz();
-
-    int nx = global_solver_mpm_3d->getNx();
-    int ny = global_solver_mpm_3d->getNy();
-    int nz = global_solver_mpm_3d->getNz();
-    float dx = global_solver_mpm_3d->getDx();
-    float dy = global_solver_mpm_3d->getDy();
-    float dz = global_solver_mpm_3d->getDz();
+    payload->dx = dx;
+    payload->nx = nx;
+    payload->ny = ny;
+    payload->nz = nz;
 
     std::vector<Slice3D> slices_to_use = global_slices_3d;
     if (slices_to_use.empty()) {
@@ -2844,7 +2936,6 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated) {
         slices_to_use.push_back(s);
     }
 
-    const auto& grid = global_solver_mpm_3d->getGrid();
     for (const auto& s : slices_to_use) {
         TelemetryPayload::SlicePayload sp;
         sp.axis = s.axis;
@@ -2859,16 +2950,17 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated) {
         sp.level = 0;
         sp.is_submesh = false;
 
+        std::string req_qty = (!s.quantities.empty()) ? s.quantities[0] : "von_mises";
+
         if (s.axis == "xy") {
             int k = std::clamp(static_cast<int>(s.offset / dz), 0, nz - 1);
             sp.w = nx;
             sp.h = ny;
             sp.data.resize(nx * ny);
-            for (int i = 0; i < nx; ++i) {
-                for (int j = 0; j < ny; ++j) {
+            for (int j = 0; j < ny; ++j) {
+                for (int i = 0; i < nx; ++i) {
                     int idx = (i * ny + j) * nz + k;
-                    float val = (idx < (int)grid.size()) ? grid[idx].von_mises : 0.0f;
-                    if (val == 0.0f && idx < (int)grid.size()) val = grid[idx].pressure;
+                    float val = (idx < (int)grid.size()) ? getMPMGridQuantity(grid[idx], req_qty) : 0.0f;
                     sp.data[i + j * nx] = val;
                 }
             }
@@ -2877,11 +2969,10 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated) {
             sp.w = nx;
             sp.h = nz;
             sp.data.resize(nx * nz);
-            for (int i = 0; i < nx; ++i) {
-                for (int k = 0; k < nz; ++k) {
+            for (int k = 0; k < nz; ++k) {
+                for (int i = 0; i < nx; ++i) {
                     int idx = (i * ny + j_slice) * nz + k;
-                    float val = (idx < (int)grid.size()) ? grid[idx].von_mises : 0.0f;
-                    if (val == 0.0f && idx < (int)grid.size()) val = grid[idx].pressure;
+                    float val = (idx < (int)grid.size()) ? getMPMGridQuantity(grid[idx], req_qty) : 0.0f;
                     sp.data[i + k * nx] = val;
                 }
             }
@@ -2890,11 +2981,10 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated) {
             sp.w = ny;
             sp.h = nz;
             sp.data.resize(ny * nz);
-            for (int j = 0; j < ny; ++j) {
-                for (int k = 0; k < nz; ++k) {
+            for (int k = 0; k < nz; ++k) {
+                for (int j = 0; j < ny; ++j) {
                     int idx = (i_slice * ny + j) * nz + k;
-                    float val = (idx < (int)grid.size()) ? grid[idx].von_mises : 0.0f;
-                    if (val == 0.0f && idx < (int)grid.size()) val = grid[idx].pressure;
+                    float val = (idx < (int)grid.size()) ? getMPMGridQuantity(grid[idx], req_qty) : 0.0f;
                     sp.data[j + k * ny] = val;
                 }
             }
@@ -2902,7 +2992,6 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated) {
         payload->slices.push_back(std::move(sp));
     }
 
-    const auto& particles = global_solver_mpm_3d->getParticles();
     payload->mpm_particles.reserve(particles.size() * 10);
     for (const auto& p : particles) {
         float s00 = p.sigma[0][0], s11 = p.sigma[1][1], s22 = p.sigma[2][2];
@@ -3698,11 +3787,7 @@ int main() {
                     std::string transfer_scheme = msg.value("transfer_scheme", "GIMP");
                     std::string velocity_scheme = msg.value("velocity_scheme", "APIC");
 
-                    if (transfer_scheme == "Standard") {
-                        global_solver_mpm_2d->setTransferScheme(Blast::MPMTransferScheme::Standard);
-                    } else {
-                        global_solver_mpm_2d->setTransferScheme(Blast::MPMTransferScheme::GIMP);
-                    }
+                    global_solver_mpm_2d->setTransferScheme(parseTransferScheme(transfer_scheme));
 
                     if (velocity_scheme == "PIC") {
                         global_solver_mpm_2d->setVelocityScheme(Blast::MPMVelocityScheme::PIC);
@@ -3733,6 +3818,24 @@ int main() {
                             float tensile_failure_stress = static_cast<float>(get_json_double(obj, "tensile_failure_stress", 600.0e6));
                             int ppc = get_json_int(obj, "ppc", domain_ppc);
 
+                            std::string mat_model_str = obj.value("material_model", "Steel (Hypoelastic)");
+                            Blast::MPMMaterialModel mat_model = Blast::MPMMaterialModel::HypoelasticSteel;
+                            if (mat_model_str == "Johnson-Cook + Mie-Grüneisen") {
+                                mat_model = Blast::MPMMaterialModel::JohnsonCookMieGruneisen;
+                            }
+
+                            float jc_A = static_cast<float>(get_json_double(obj, "jc_A", 792.0e6));
+                            float jc_B = static_cast<float>(get_json_double(obj, "jc_B", 510.0e6));
+                            float jc_n = static_cast<float>(get_json_double(obj, "jc_n", 0.26));
+                            float jc_C = static_cast<float>(get_json_double(obj, "jc_C", 0.014));
+                            float jc_m = static_cast<float>(get_json_double(obj, "jc_m", 1.03));
+                            float T_melt = static_cast<float>(get_json_double(obj, "T_melt", 1793.0));
+                            float T_room = static_cast<float>(get_json_double(obj, "T_room", 293.0));
+                            float Cp = static_cast<float>(get_json_double(obj, "Cp", 477.0));
+                            float mg_gamma0 = static_cast<float>(get_json_double(obj, "mg_gamma0", 1.81));
+                            float mg_c0 = static_cast<float>(get_json_double(obj, "mg_c0", 4570.0));
+                            float mg_s = static_cast<float>(get_json_double(obj, "mg_s", 1.49));
+
                             if (shape == "Circle") {
                                 float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
                                 global_solver_mpm_2d->addCircleObject(obj_idx, pos_x, pos_y, radius, vel_x, vel_y, angular_vel, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
@@ -3741,7 +3844,27 @@ int main() {
                                 float size_y = static_cast<float>(get_json_double(obj, "size_y", 0.2));
                                 global_solver_mpm_2d->addRectangleObject(obj_idx, pos_x, pos_y, size_x, size_y, vel_x, vel_y, angular_vel, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
                             }
+
+                            for (auto& p : global_solver_mpm_2d->getParticles()) {
+                                if (p.object_id == obj_idx) {
+                                    p.material_model = mat_model;
+                                    p.jc_A = jc_A;
+                                    p.jc_B = jc_B;
+                                    p.jc_n = jc_n;
+                                    p.jc_C = jc_C;
+                                    p.jc_m = jc_m;
+                                    p.T_melt = T_melt;
+                                    p.T_room = T_room;
+                                    p.Cp = Cp;
+                                    p.mg_gamma0 = mg_gamma0;
+                                    p.mg_c0 = mg_c0;
+                                    p.mg_s = mg_s;
+                                    p.temperature = T_room;
+                                    p.e_int = 0.0f;
+                                }
+                            }
                         }
+
                     } else {
                         // Default steel impact primitives test case
                         global_solver_mpm_2d->addCircleObject(1, 0.3f, 0.5f, 0.1f, 150.0f, 0.0f, 0.0f, 7850.0f, 210.0e9f, 0.3f, 400.0e6f, 1.0e9f, 0.25f, 600.0e6f, domain_ppc);
@@ -3795,9 +3918,17 @@ int main() {
                     while (sim_mpm_3d_running.load()) {
                         std::this_thread::sleep_for(std::chrono::milliseconds(5));
                     }
-                    global_solver_mpm_3d = std::make_unique<Blast::MPMSolver3D>();
                     sim_mpm_3d_terminate = false;
                     sim_mpm_3d_paused = false;
+
+                    std::string device = msg.value("device", "cpu");
+                    if (device == "cuda") {
+                        global_solver_mpm_3d.reset();
+                        global_solver_mpm_3d_cuda = std::make_unique<Blast::MPMSolver3DCUDA>();
+                    } else {
+                        global_solver_mpm_3d_cuda.reset();
+                        global_solver_mpm_3d = std::make_unique<Blast::MPMSolver3D>();
+                    }
 
                     int nx = get_json_int(msg, "nx", get_json_int(msg, "nr", 32));
                     int ny = get_json_int(msg, "ny", 32);
@@ -3812,35 +3943,33 @@ int main() {
                     float dy = (ymax - ymin) / ny;
                     float dz = (zmax - zmin) / nz;
 
-                    global_solver_mpm_3d->initializeGrid(nx, ny, nz, dx, dy, dz);
+                    if (global_solver_mpm_3d_cuda) {
+                        global_solver_mpm_3d_cuda->initializeGrid(nx, ny, nz, dx, dy, dz);
+                    } else {
+                        global_solver_mpm_3d->initializeGrid(nx, ny, nz, dx, dy, dz);
+                    }
 
                     std::string transfer_scheme = msg.value("transfer_scheme", "GIMP");
                     std::string velocity_scheme = msg.value("velocity_scheme", "APIC");
                     std::string space_time_scheme = msg.value("space_time_scheme", "RK2");
 
-                    if (transfer_scheme == "Standard") {
-                        global_solver_mpm_3d->setTransferScheme(Blast::MPMTransferScheme::Standard);
-                    } else {
-                        global_solver_mpm_3d->setTransferScheme(Blast::MPMTransferScheme::GIMP);
-                    }
-
-                    if (velocity_scheme == "PIC") {
-                        global_solver_mpm_3d->setVelocityScheme(Blast::MPMVelocityScheme::PIC);
-                    } else if (velocity_scheme == "FLIP") {
-                        global_solver_mpm_3d->setVelocityScheme(Blast::MPMVelocityScheme::FLIP);
-                    } else {
-                        global_solver_mpm_3d->setVelocityScheme(Blast::MPMVelocityScheme::APIC);
-                    }
-
+                    auto ts = parseTransferScheme(transfer_scheme);
+                    auto vs = (velocity_scheme == "PIC") ? Blast::MPMVelocityScheme::PIC :
+                              ((velocity_scheme == "FLIP") ? Blast::MPMVelocityScheme::FLIP : Blast::MPMVelocityScheme::APIC);
                     float flip_blend = static_cast<float>(get_json_double(msg, "flip_blend", 0.95));
-                    global_solver_mpm_3d->setFlipBlend(flip_blend);
+                    auto st = (space_time_scheme == "USL") ? Blast::MPMTimeIntegrationScheme::USL :
+                              ((space_time_scheme == "USF") ? Blast::MPMTimeIntegrationScheme::USF : Blast::MPMTimeIntegrationScheme::RK2);
 
-                    if (space_time_scheme == "USL") {
-                        global_solver_mpm_3d->setTimeScheme(Blast::MPMTimeIntegrationScheme::USL);
-                    } else if (space_time_scheme == "USF") {
-                        global_solver_mpm_3d->setTimeScheme(Blast::MPMTimeIntegrationScheme::USF);
+                    if (global_solver_mpm_3d_cuda) {
+                        global_solver_mpm_3d_cuda->setTransferScheme(ts);
+                        global_solver_mpm_3d_cuda->setVelocityScheme(vs);
+                        global_solver_mpm_3d_cuda->setFlipBlend(flip_blend);
+                        global_solver_mpm_3d_cuda->setTimeScheme(st);
                     } else {
-                        global_solver_mpm_3d->setTimeScheme(Blast::MPMTimeIntegrationScheme::RK2);
+                        global_solver_mpm_3d->setTransferScheme(ts);
+                        global_solver_mpm_3d->setVelocityScheme(vs);
+                        global_solver_mpm_3d->setFlipBlend(flip_blend);
+                        global_solver_mpm_3d->setTimeScheme(st);
                     }
 
                     auto parse_bc_3d = [](const std::string& str) {
@@ -3849,14 +3978,19 @@ int main() {
                         if (str == "Reflecting") return Blast::MPMBoundaryCondition3D::Reflecting;
                         return Blast::MPMBoundaryCondition3D::Terminate;
                     };
-                    global_solver_mpm_3d->setBoundaryConditions(
-                        parse_bc_3d(msg.value("bc_x_min", "Reflecting")),
-                        parse_bc_3d(msg.value("bc_x_max", "Reflecting")),
-                        parse_bc_3d(msg.value("bc_y_min", "Reflecting")),
-                        parse_bc_3d(msg.value("bc_y_max", "Reflecting")),
-                        parse_bc_3d(msg.value("bc_z_min", "Reflecting")),
-                        parse_bc_3d(msg.value("bc_z_max", "Reflecting"))
-                    );
+
+                    auto bc1 = parse_bc_3d(msg.value("bc_x_min", "Reflecting"));
+                    auto bc2 = parse_bc_3d(msg.value("bc_x_max", "Reflecting"));
+                    auto bc3 = parse_bc_3d(msg.value("bc_y_min", "Reflecting"));
+                    auto bc4 = parse_bc_3d(msg.value("bc_y_max", "Reflecting"));
+                    auto bc5 = parse_bc_3d(msg.value("bc_z_min", "Reflecting"));
+                    auto bc6 = parse_bc_3d(msg.value("bc_z_max", "Reflecting"));
+
+                    if (global_solver_mpm_3d_cuda) {
+                        global_solver_mpm_3d_cuda->setBoundaryConditions(bc1, bc2, bc3, bc4, bc5, bc6);
+                    } else {
+                        global_solver_mpm_3d->setBoundaryConditions(bc1, bc2, bc3, bc4, bc5, bc6);
+                    }
 
                     int domain_ppc = get_json_int(msg, "ppc", 8);
 
@@ -3883,27 +4017,85 @@ int main() {
                             float tensile_failure_stress = static_cast<float>(get_json_double(obj, "tensile_failure_stress", 600.0e6));
                             int ppc = get_json_int(obj, "ppc", domain_ppc);
 
+                            std::string mat_model_str = obj.value("material_model", "Steel (Hypoelastic)");
+                            Blast::MPMMaterialModel mat_model = Blast::MPMMaterialModel::HypoelasticSteel;
+                            if (mat_model_str == "Johnson-Cook + Mie-Grüneisen") {
+                                mat_model = Blast::MPMMaterialModel::JohnsonCookMieGruneisen;
+                            }
+
+                            float jc_A = static_cast<float>(get_json_double(obj, "jc_A", 792.0e6));
+                            float jc_B = static_cast<float>(get_json_double(obj, "jc_B", 510.0e6));
+                            float jc_n = static_cast<float>(get_json_double(obj, "jc_n", 0.26));
+                            float jc_C = static_cast<float>(get_json_double(obj, "jc_C", 0.014));
+                            float jc_m = static_cast<float>(get_json_double(obj, "jc_m", 1.03));
+                            float T_melt = static_cast<float>(get_json_double(obj, "T_melt", 1793.0));
+                            float T_room = static_cast<float>(get_json_double(obj, "T_room", 293.0));
+                            float Cp = static_cast<float>(get_json_double(obj, "Cp", 477.0));
+                            float mg_gamma0 = static_cast<float>(get_json_double(obj, "mg_gamma0", 1.81));
+                            float mg_c0 = static_cast<float>(get_json_double(obj, "mg_c0", 4570.0));
+                            float mg_s = static_cast<float>(get_json_double(obj, "mg_s", 1.49));
+
                             if (shape == "Sphere") {
                                 float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
-                                global_solver_mpm_3d->addSphereObject(obj_idx, pos_x, pos_y, pos_z, radius, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                if (global_solver_mpm_3d_cuda) {
+                                    global_solver_mpm_3d_cuda->addSphereObject(obj_idx, pos_x, pos_y, pos_z, radius, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                } else {
+                                    global_solver_mpm_3d->addSphereObject(obj_idx, pos_x, pos_y, pos_z, radius, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                }
                             } else {
                                 float size_x = static_cast<float>(get_json_double(obj, "size_x", 0.2));
                                 float size_y = static_cast<float>(get_json_double(obj, "size_y", 0.2));
                                 float size_z = static_cast<float>(get_json_double(obj, "size_z", 0.2));
-                                global_solver_mpm_3d->addBoxObject(obj_idx, pos_x, pos_y, pos_z, size_x, size_y, size_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                if (global_solver_mpm_3d_cuda) {
+                                    global_solver_mpm_3d_cuda->addBoxObject(obj_idx, pos_x, pos_y, pos_z, size_x, size_y, size_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                } else {
+                                    global_solver_mpm_3d->addBoxObject(obj_idx, pos_x, pos_y, pos_z, size_x, size_y, size_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                }
+                            }
+
+                            auto& particles_ref = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles() : global_solver_mpm_3d->getParticles();
+                            for (auto& p : particles_ref) {
+                                if (p.object_id == obj_idx) {
+                                    p.material_model = mat_model;
+                                    p.jc_A = jc_A;
+                                    p.jc_B = jc_B;
+                                    p.jc_n = jc_n;
+                                    p.jc_C = jc_C;
+                                    p.jc_m = jc_m;
+                                    p.T_melt = T_melt;
+                                    p.T_room = T_room;
+                                    p.Cp = Cp;
+                                    p.mg_gamma0 = mg_gamma0;
+                                    p.mg_c0 = mg_c0;
+                                    p.mg_s = mg_s;
+                                    p.temperature = T_room;
+                                    p.e_int = 0.0f;
+                                }
                             }
                         }
+
                     } else {
-                        global_solver_mpm_3d->addBoxObject(1, 0.5f, 0.5f, 0.5f, 0.2f, 0.2f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 7850.0f, 210.0e9f, 0.3f, 400.0e6f, 1.0e9f, 0.25f, 600.0e6f, domain_ppc);
+                        if (global_solver_mpm_3d_cuda) {
+                            global_solver_mpm_3d_cuda->addBoxObject(1, 0.5f, 0.5f, 0.5f, 0.2f, 0.2f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 7850.0f, 210.0e9f, 0.3f, 400.0e6f, 1.0e9f, 0.25f, 600.0e6f, domain_ppc);
+                        } else {
+                            global_solver_mpm_3d->addBoxObject(1, 0.5f, 0.5f, 0.5f, 0.2f, 0.2f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 7850.0f, 210.0e9f, 0.3f, 400.0e6f, 1.0e9f, 0.25f, 600.0e6f, domain_ppc);
+                        }
                     }
 
-                    global_solver_mpm_3d->particleToGrid();
+                    if (global_solver_mpm_3d_cuda) {
+                        global_solver_mpm_3d_cuda->syncToDevice();
+                        global_solver_mpm_3d_cuda->syncToHost();
+                    } else {
+                        global_solver_mpm_3d->particleToGrid();
+                    }
+
                     emit_telemetry_mpm_3d(0.0, false);
-                    std::string init_log = "3D MPM Solver Initialized (" + std::to_string(global_solver_mpm_3d->getParticles().size()) + " particles, PPC=" + std::to_string(domain_ppc) + ")";
+                    size_t n_p = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles().size() : global_solver_mpm_3d->getParticles().size();
+                    std::string init_log = "3D MPM Solver Initialized (" + std::to_string(n_p) + " particles, PPC=" + std::to_string(domain_ppc) + ", Device=" + (device == "cuda" ? "CUDA GPU" : "CPU") + ")";
                     emit_kernel_log("SYSTEM", init_log, 0.0, "mpm_3d");
 
                 } else if (command == "STEP_MPM_3D" || command == "STEP_3D_MPM") {
-                    if (!global_solver_mpm_3d) continue;
+                    if (!global_solver_mpm_3d && !global_solver_mpm_3d_cuda) continue;
                     int steps = get_json_int(msg, "steps", 1);
                     global_cfl_mpm_3d = static_cast<float>(get_json_double(msg, "cfl", 0.3));
                     global_exec_until_end_mpm_3d = false;
@@ -3919,7 +4111,7 @@ int main() {
                     }
 
                 } else if (command == "EXEC_ALL_MPM_3D") {
-                    if (!global_solver_mpm_3d) continue;
+                    if (!global_solver_mpm_3d && !global_solver_mpm_3d_cuda) continue;
                     global_cfl_mpm_3d = static_cast<float>(get_json_double(msg, "cfl", 0.3));
                     global_exec_until_end_mpm_3d = true;
                     if (!sim_mpm_3d_running) {
@@ -3944,6 +4136,7 @@ int main() {
                         std::this_thread::sleep_for(std::chrono::milliseconds(5));
                     }
                     global_solver_mpm_3d.reset();
+                    global_solver_mpm_3d_cuda.reset();
                 } else if (command == "INIT_FSI_2D" || command == "INIT_FSI") {
                     sim2d_terminate = true;
                     while (sim2d_running.load() || sim_fsi_running.load()) {
@@ -4019,11 +4212,7 @@ int main() {
 
                     std::string transfer_scheme = msg.value("transfer_scheme", "GIMP");
                     std::string velocity_scheme = msg.value("velocity_scheme", "APIC");
-                    if (transfer_scheme == "Standard") {
-                        global_solver_mpm_2d->setTransferScheme(Blast::MPMTransferScheme::Standard);
-                    } else {
-                        global_solver_mpm_2d->setTransferScheme(Blast::MPMTransferScheme::GIMP);
-                    }
+                    global_solver_mpm_2d->setTransferScheme(parseTransferScheme(transfer_scheme));
                     if (velocity_scheme == "PIC") {
                         global_solver_mpm_2d->setVelocityScheme(Blast::MPMVelocityScheme::PIC);
                     } else if (velocity_scheme == "FLIP") {

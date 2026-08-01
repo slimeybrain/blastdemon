@@ -1204,7 +1204,8 @@ export class GraphRenderer {
                 items: [
                     { label: 'MPM Domain 2D', type: 'MPMDomain2D' },
                     { label: 'MPM Object 2D (Primitive)', type: 'MPMObject2D' },
-                    { label: 'MPM Steel Material', type: 'MPMMaterialSteel' },
+                    { label: 'MPM Steel Material (Hypoelastic)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Steel (Hypoelastic)' } },
+                    { label: 'MPM Johnson-Cook Material (EOS)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Johnson-Cook + Mie-Grüneisen' } },
                     { label: 'FSI Coupler 2D', type: 'FSICoupler2D' }
                 ]
             },
@@ -1213,7 +1214,8 @@ export class GraphRenderer {
                 items: [
                     { label: 'MPM Domain 3D', type: 'MPMDomain3D' },
                     { label: 'MPM Object 3D (Primitive)', type: 'MPMObject3D' },
-                    { label: 'MPM Steel Material', type: 'MPMMaterialSteel' },
+                    { label: 'MPM Steel Material (Hypoelastic)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Steel (Hypoelastic)' } },
+                    { label: 'MPM Johnson-Cook Material (EOS)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Johnson-Cook + Mie-Grüneisen' } },
                     { label: 'FSI Coupler 3D', type: 'FSICoupler3D' }
                 ]
             },
@@ -1268,11 +1270,12 @@ export class GraphRenderer {
                     item.textContent = nt.label;
                     item.onclick = (e) => {
                         e.stopPropagation();
-                        this.addNode(nt.type as NodeType, wx, wy);
+                        this.addNode(nt.type as NodeType, wx, wy, (nt as any).defaultParams);
                         menu.remove();
                     };
                     submenu.appendChild(item);
                 });
+
                 
                 catItem.appendChild(submenu);
             }
@@ -1351,7 +1354,7 @@ export class GraphRenderer {
         setTimeout(() => window.addEventListener('mousedown', closeMenu), 0);
     }
 
-    private addNode(type: NodeType, x: number, y: number): void {
+    private addNode(type: NodeType, x: number, y: number, initialParams?: Record<string, any>): void {
         const state = this.stateManager.getCurrentState();
         if (!state) return;
 
@@ -1387,8 +1390,9 @@ export class GraphRenderer {
             displayMode: 'expanded',
             inputs: this.stateManager.getDefaultInputs(type),
             outputs: this.stateManager.getDefaultOutputs(type),
-            parameters: this.getDefaultParameters(type)
+            parameters: { ...this.getDefaultParameters(type), ...(initialParams || {}) }
         };
+
 
         if (type === 'TelemetryText' || type === 'TelemetryGraph') {
             newNode.width = 350;
@@ -1719,13 +1723,17 @@ export class GraphRenderer {
                 obstacles_max_val: 101325.0 * 10.0
             };
             case 'MPMDomain2D': return {
+                precision: 'single',
                 transfer_scheme: 'GIMP',
                 velocity_scheme: 'APIC',
+                space_time_scheme: 'RK2',
                 flip_blend: 0.95,
                 ppc: 4,
                 cfl: 0.3
             };
             case 'MPMDomain3D': return {
+                device: 'cpu',
+                precision: 'single',
                 transfer_scheme: 'GIMP',
                 velocity_scheme: 'APIC',
                 space_time_scheme: 'RK2',
@@ -1753,14 +1761,27 @@ export class GraphRenderer {
                 angular_vel_x: 0.0, angular_vel_y: 0.0, angular_vel_z: 0.0
             };
             case 'MPMMaterialSteel': return {
+                material_model: 'Steel (Hypoelastic)',
                 density: 7850.0,
                 youngs_modulus: 210.0e9,
                 poissons_ratio: 0.3,
                 yield_stress: 400.0e6,
                 hardening_modulus: 1.0e9,
                 failure_strain: 0.25,
-                tensile_failure_stress: 600.0e6
+                tensile_failure_stress: 600.0e6,
+                jc_A: 792.0e6,
+                jc_B: 510.0e6,
+                jc_n: 0.26,
+                jc_C: 0.014,
+                jc_m: 1.03,
+                T_melt: 1793.0,
+                T_room: 293.0,
+                Cp: 477.0,
+                mg_gamma0: 1.81,
+                mg_c0: 4570.0,
+                mg_s: 1.49
             };
+
             case 'FSICoupler2D': return {};
             case 'FSICoupler3D': return {};
 
@@ -1859,8 +1880,10 @@ export class GraphRenderer {
         }
     }
 
-    private getCompactName(type: NodeType): string {
+    private getCompactName(nodeOrType: NodeType | Node): string {
+        const type = typeof nodeOrType === 'string' ? nodeOrType : nodeOrType.type;
         switch (type) {
+
             case 'DomainMesh':      return 'MESH';
             case 'Material':        return 'MATERIAL';
             case 'Charge1D':        return 'CHARGE1D';
@@ -1891,14 +1914,17 @@ export class GraphRenderer {
             case 'MPMDomain3D':      return 'MPM3D';
             case 'MPMObject2D':      return 'MPM OBJ';
             case 'MPMObject3D':      return 'MPM OBJ3D';
-            case 'MPMMaterialSteel': return 'MPM STEEL';
+            case 'MPMMaterialSteel': 
+                if (typeof nodeOrType !== 'string' && nodeOrType.parameters?.material_model === 'Johnson-Cook + Mie-Grüneisen') return 'MPM J-C';
+                return 'MPM STEEL';
             case 'FSICoupler2D':     return 'FSI 2D';
             case 'FSICoupler3D':     return 'FSI 3D';
-            default: return (type as string).toUpperCase();
+            default: return ((typeof nodeOrType === 'string' ? nodeOrType : nodeOrType.type) as string).toUpperCase();
         }
     }
 
-    private getFullNodeName(type: NodeType): string {
+    private getFullNodeName(nodeOrType: NodeType | Node): string {
+        const type = typeof nodeOrType === 'string' ? nodeOrType : nodeOrType.type;
         switch (type) {
             case 'DomainMesh':        return 'Domain Mesh';
             case 'Material':          return 'Material';
@@ -1930,12 +1956,17 @@ export class GraphRenderer {
             case 'MPMDomain3D':      return 'MPM Domain 3D';
             case 'MPMObject2D':      return 'MPM Object 2D';
             case 'MPMObject3D':      return 'MPM Object 3D';
-            case 'MPMMaterialSteel': return 'MPM Material (Steel)';
+            case 'MPMMaterialSteel':
+                if (typeof nodeOrType !== 'string' && nodeOrType.parameters?.material_model === 'Johnson-Cook + Mie-Grüneisen') {
+                    return 'MPM Material (Johnson-Cook)';
+                }
+                return 'MPM Material (Steel)';
             case 'FSICoupler2D':     return 'FSI Coupler 2D';
             case 'FSICoupler3D':     return 'FSI Coupler 3D';
             default: return type;
         }
     }
+
 
     private syncNodes(state: SimulationState): void {
         const valResults = this.validateGraph(state);
@@ -2050,7 +2081,8 @@ export class GraphRenderer {
 
                     const titleSpan = document.createElement('span');
                     titleSpan.className = 'node-title-span';
-                    titleSpan.textContent = this.getFullNodeName(node.type);
+                    titleSpan.textContent = this.getFullNodeName(node);
+
                     header.appendChild(titleSpan);
 
                     orientBtn.addEventListener('mousedown', (e) => e.stopPropagation());
@@ -4106,14 +4138,14 @@ export class GraphRenderer {
         let paramKeys = Object.keys(node.parameters);
         if (node.type === 'MPMDomain2D') {
             const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
-            paramKeys = ['transfer_scheme', 'velocity_scheme'];
+            paramKeys = ['precision', 'transfer_scheme', 'velocity_scheme'];
             if (hasFLIP) {
                 paramKeys.push('flip_blend');
             }
             paramKeys.push('ppc', 'cfl');
         } else if (node.type === 'MPMDomain3D') {
             const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
-            paramKeys = ['transfer_scheme', 'velocity_scheme', 'space_time_scheme'];
+            paramKeys = ['device', 'precision', 'transfer_scheme', 'velocity_scheme', 'space_time_scheme'];
             if (hasFLIP) {
                 paramKeys.push('flip_blend');
             }
@@ -4185,7 +4217,13 @@ export class GraphRenderer {
                 if ((key === 'y_min_bc' || key === 'y_max_bc') && dim === '1D') continue;
                 if ((key === 'z_min_bc' || key === 'z_max_bc') && (dim === '1D' || dim === '2D')) continue;
             }
+            if (node.type === 'MPMMaterialSteel') {
+                const matModel = node.parameters['material_model'] || 'Steel (Hypoelastic)';
+                const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
+                if (matModel === 'Steel (Hypoelastic)' && jcKeys.includes(key)) continue;
+            }
             if (node.type === 'Material') {
+
                 const matType = node.parameters['material_type'] || 'Air';
                 if (matType === 'Air') {
                     const airKeys = ['material_type', 'atm_pressure', 'atm_temperature', 'gamma'];
@@ -4227,7 +4265,9 @@ export class GraphRenderer {
             row.appendChild(label);
 
             const dropdowns: Record<string, string[]> = {
+                'material_model': ['Steel (Hypoelastic)', 'Johnson-Cook + Mie-Grüneisen'],
                 'mesh_type': ['regular', 'amr'],
+
                 'dimension': ['1D', '2D', '3D'],
                 'x_min_bc': ['Reflecting', 'Transmitting', 'Terminate'],
                 'x_max_bc': ['Reflecting', 'Transmitting', 'Terminate'],
@@ -4267,7 +4307,7 @@ export class GraphRenderer {
                 show_grid: ['true', 'false'],
                 'voxelization_method': ['watertight_floodfill', 'watertight_raycast', 'thin_shell', 'winding_number'],
                 'obstacles_quantity': ['pressure', 'density', 'velocity', 'energy', 'species1', 'species2', 'species3', 'peak_overpressure', 'peak_impulse'],
-                'transfer_scheme': ['GIMP', 'Standard'],
+                'transfer_scheme': ['GIMP', 'Standard', 'BSpline'],
                 'velocity_scheme': ['APIC', 'PIC', 'FLIP'],
                 'colorbar_source': ['slice', 'mpm', 'obstacles', 'stl'],
                 'space_time_scheme': (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') ? 
@@ -4296,8 +4336,16 @@ export class GraphRenderer {
                     key
                 );
             } else if (dropdowns[key]) {
+                const options = dropdowns[key].map(opt => {
+                    let label = opt;
+                    if (key === 'device') {
+                        if (opt === 'cpu') label = 'CPU';
+                        else if (opt === 'cuda') label = 'CUDA GPU';
+                    }
+                    return { value: opt, label: label };
+                });
                 inputEl = this.createCustomDropdown(
-                    dropdowns[key].map(opt => ({ value: opt, label: opt })),
+                    options,
                     value.toString(),
                     (newVal) => {
                         console.log("[DEBUG] Custom Dropdown onChange triggered:", key, newVal, "for node:", node.id);
@@ -4347,9 +4395,12 @@ export class GraphRenderer {
                             'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
                             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
                             'failure_strain', 'tensile_failure_stress',
+                            'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
+                            'mg_gamma0', 'mg_c0', 'mg_s',
                             'ppc',
                             'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity'
                         ];
+
                         let castValue: any = newVal;
                         if (numericKeys.includes(key)) {
                             castValue = Number(newVal);

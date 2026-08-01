@@ -86,11 +86,11 @@ __global__ void kernel_p2g_3d(const MPMParticle3D* particles, int num_particles,
         if (i < 0 || i >= nx) continue;
         float node_x = (static_cast<float>(i) + 0.5f) * dx;
 
-        float Sx = (transfer_scheme == 0) ? evalGIMP_S_dev(p.x[0], node_x, dx, p.lp[0]) :
+        float Sx = (transfer_scheme == 1) ? evalGIMP_S_dev(p.x[0], node_x, dx, p.lp[0]) :
                    ((transfer_scheme == 2) ? evalBSpline_S_dev(p.x[0], node_x, dx) :
                    fmaxf(0.0f, 1.0f - fabsf(p.x[0] - node_x) / dx));
 
-        float dSx = (transfer_scheme == 0) ? evalGIMP_dS_dev(p.x[0], node_x, dx, p.lp[0]) :
+        float dSx = (transfer_scheme == 1) ? evalGIMP_dS_dev(p.x[0], node_x, dx, p.lp[0]) :
                     ((transfer_scheme == 2) ? evalBSpline_dS_dev(p.x[0], node_x, dx) :
                     (p.x[0] >= node_x ? -1.0f / dx : 1.0f / dx));
 
@@ -101,11 +101,11 @@ __global__ void kernel_p2g_3d(const MPMParticle3D* particles, int num_particles,
             if (j < 0 || j >= ny) continue;
             float node_y = (static_cast<float>(j) + 0.5f) * dy;
 
-            float Sy = (transfer_scheme == 0) ? evalGIMP_S_dev(p.x[1], node_y, dy, p.lp[1]) :
+            float Sy = (transfer_scheme == 1) ? evalGIMP_S_dev(p.x[1], node_y, dy, p.lp[1]) :
                        ((transfer_scheme == 2) ? evalBSpline_S_dev(p.x[1], node_y, dy) :
                        fmaxf(0.0f, 1.0f - fabsf(p.x[1] - node_y) / dy));
 
-            float dSy = (transfer_scheme == 0) ? evalGIMP_dS_dev(p.x[1], node_y, dy, p.lp[1]) :
+            float dSy = (transfer_scheme == 1) ? evalGIMP_dS_dev(p.x[1], node_y, dy, p.lp[1]) :
                         ((transfer_scheme == 2) ? evalBSpline_dS_dev(p.x[1], node_y, dy) :
                         (p.x[1] >= node_y ? -1.0f / dy : 1.0f / dy));
 
@@ -116,11 +116,11 @@ __global__ void kernel_p2g_3d(const MPMParticle3D* particles, int num_particles,
                 if (k < 0 || k >= nz) continue;
                 float node_z = (static_cast<float>(k) + 0.5f) * dz;
 
-                float Sz = (transfer_scheme == 0) ? evalGIMP_S_dev(p.x[2], node_z, dz, p.lp[2]) :
+                float Sz = (transfer_scheme == 1) ? evalGIMP_S_dev(p.x[2], node_z, dz, p.lp[2]) :
                            ((transfer_scheme == 2) ? evalBSpline_S_dev(p.x[2], node_z, dz) :
                            fmaxf(0.0f, 1.0f - fabsf(p.x[2] - node_z) / dz));
 
-                float dSz = (transfer_scheme == 0) ? evalGIMP_dS_dev(p.x[2], node_z, dz, p.lp[2]) :
+                float dSz = (transfer_scheme == 1) ? evalGIMP_dS_dev(p.x[2], node_z, dz, p.lp[2]) :
                             ((transfer_scheme == 2) ? evalBSpline_dS_dev(p.x[2], node_z, dz) :
                             (p.x[2] >= node_z ? -1.0f / dz : 1.0f / dz));
 
@@ -250,7 +250,7 @@ __global__ void kernel_g2p_3d(MPMParticle3D* particles, int num_particles,
         if (i < 0 || i >= nx) continue;
         float node_x = (static_cast<float>(i) + 0.5f) * dx;
 
-        float Sx = (transfer_scheme == 0) ? evalGIMP_S_dev(p.x[0], node_x, dx, p.lp[0]) :
+        float Sx = (transfer_scheme == 1) ? evalGIMP_S_dev(p.x[0], node_x, dx, p.lp[0]) :
                    ((transfer_scheme == 2) ? evalBSpline_S_dev(p.x[0], node_x, dx) :
                    fmaxf(0.0f, 1.0f - fabsf(p.x[0] - node_x) / dx));
 
@@ -261,7 +261,7 @@ __global__ void kernel_g2p_3d(MPMParticle3D* particles, int num_particles,
             if (j < 0 || j >= ny) continue;
             float node_y = (static_cast<float>(j) + 0.5f) * dy;
 
-            float Sy = (transfer_scheme == 0) ? evalGIMP_S_dev(p.x[1], node_y, dy, p.lp[1]) :
+            float Sy = (transfer_scheme == 1) ? evalGIMP_S_dev(p.x[1], node_y, dy, p.lp[1]) :
                        ((transfer_scheme == 2) ? evalBSpline_S_dev(p.x[1], node_y, dy) :
                        fmaxf(0.0f, 1.0f - fabsf(p.x[1] - node_y) / dy));
 
@@ -272,7 +272,7 @@ __global__ void kernel_g2p_3d(MPMParticle3D* particles, int num_particles,
                 if (k < 0 || k >= nz) continue;
                 float node_z = (static_cast<float>(k) + 0.5f) * dz;
 
-                float Sz = (transfer_scheme == 0) ? evalGIMP_S_dev(p.x[2], node_z, dz, p.lp[2]) :
+                float Sz = (transfer_scheme == 1) ? evalGIMP_S_dev(p.x[2], node_z, dz, p.lp[2]) :
                            ((transfer_scheme == 2) ? evalBSpline_S_dev(p.x[2], node_z, dz) :
                            fmaxf(0.0f, 1.0f - fabsf(p.x[2] - node_z) / dz));
 
@@ -295,9 +295,7 @@ __global__ void kernel_g2p_3d(MPMParticle3D* particles, int num_particles,
         }
     }
 
-    if (weight_sum > 1.0e-7f) {
-        v_pic_x /= weight_sum; v_pic_y /= weight_sum; v_pic_z /= weight_sum;
-    } else {
+    if (weight_sum <= 1.0e-7f) {
         v_pic_x = p.v[0]; v_pic_y = p.v[1]; v_pic_z = p.v[2];
     }
 
@@ -314,7 +312,7 @@ __global__ void kernel_g2p_3d(MPMParticle3D* particles, int num_particles,
         if (i < 0 || i >= nx) continue;
         float node_x = (static_cast<float>(i) + 0.5f) * dx;
 
-        float Sx = (transfer_scheme == 0) ? evalGIMP_S_dev(p.x[0], node_x, dx, p.lp[0]) :
+        float Sx = (transfer_scheme == 1) ? evalGIMP_S_dev(p.x[0], node_x, dx, p.lp[0]) :
                    ((transfer_scheme == 2) ? evalBSpline_S_dev(p.x[0], node_x, dx) :
                    fmaxf(0.0f, 1.0f - fabsf(p.x[0] - node_x) / dx));
 
@@ -325,7 +323,7 @@ __global__ void kernel_g2p_3d(MPMParticle3D* particles, int num_particles,
             if (j < 0 || j >= ny) continue;
             float node_y = (static_cast<float>(j) + 0.5f) * dy;
 
-            float Sy = (transfer_scheme == 0) ? evalGIMP_S_dev(p.x[1], node_y, dy, p.lp[1]) :
+            float Sy = (transfer_scheme == 1) ? evalGIMP_S_dev(p.x[1], node_y, dy, p.lp[1]) :
                        ((transfer_scheme == 2) ? evalBSpline_S_dev(p.x[1], node_y, dy) :
                        fmaxf(0.0f, 1.0f - fabsf(p.x[1] - node_y) / dy));
 
@@ -336,7 +334,7 @@ __global__ void kernel_g2p_3d(MPMParticle3D* particles, int num_particles,
                 if (k < 0 || k >= nz) continue;
                 float node_z = (static_cast<float>(k) + 0.5f) * dz;
 
-                float Sz = (transfer_scheme == 0) ? evalGIMP_S_dev(p.x[2], node_z, dz, p.lp[2]) :
+                float Sz = (transfer_scheme == 1) ? evalGIMP_S_dev(p.x[2], node_z, dz, p.lp[2]) :
                            ((transfer_scheme == 2) ? evalBSpline_S_dev(p.x[2], node_z, dz) :
                            fmaxf(0.0f, 1.0f - fabsf(p.x[2] - node_z) / dz));
 
@@ -351,21 +349,17 @@ __global__ void kernel_g2p_3d(MPMParticle3D* particles, int num_particles,
                     float dist_y = node_y - p.x[1];
                     float dist_z = node_z - p.x[2];
 
-                    float rel_vx = node.v[0] - v_pic_x;
-                    float rel_vy = node.v[1] - v_pic_y;
-                    float rel_vz = node.v[2] - v_pic_z;
+                    B_new[0][0] += weight * node.v[0] * dist_x * D_inv_x;
+                    B_new[0][1] += weight * node.v[0] * dist_y * D_inv_y;
+                    B_new[0][2] += weight * node.v[0] * dist_z * D_inv_z;
 
-                    B_new[0][0] += weight * rel_vx * dist_x * D_inv_x;
-                    B_new[0][1] += weight * rel_vx * dist_y * D_inv_y;
-                    B_new[0][2] += weight * rel_vx * dist_z * D_inv_z;
+                    B_new[1][0] += weight * node.v[1] * dist_x * D_inv_x;
+                    B_new[1][1] += weight * node.v[1] * dist_y * D_inv_y;
+                    B_new[1][2] += weight * node.v[1] * dist_z * D_inv_z;
 
-                    B_new[1][0] += weight * rel_vy * dist_x * D_inv_x;
-                    B_new[1][1] += weight * rel_vy * dist_y * D_inv_y;
-                    B_new[1][2] += weight * rel_vy * dist_z * D_inv_z;
-
-                    B_new[2][0] += weight * rel_vz * dist_x * D_inv_x;
-                    B_new[2][1] += weight * rel_vz * dist_y * D_inv_y;
-                    B_new[2][2] += weight * rel_vz * dist_z * D_inv_z;
+                    B_new[2][0] += weight * node.v[2] * dist_x * D_inv_x;
+                    B_new[2][1] += weight * node.v[2] * dist_y * D_inv_y;
+                    B_new[2][2] += weight * node.v[2] * dist_z * D_inv_z;
                 }
             }
         }
@@ -376,15 +370,17 @@ __global__ void kernel_g2p_3d(MPMParticle3D* particles, int num_particles,
     float target_vz = v_pic_z;
 
     if (velocity_scheme == 2) { // FLIP
-        target_vx = flip_blend * v_flip_x + (1.0f - flip_blend) * v_pic_x;
-        target_vy = flip_blend * v_flip_y + (1.0f - flip_blend) * v_pic_y;
-        target_vz = flip_blend * v_flip_z + (1.0f - flip_blend) * v_pic_z;
+        float alpha = fminf(fmaxf(flip_blend, 0.0f), 1.0f);
+        target_vx = alpha * v_flip_x + (1.0f - alpha) * v_pic_x;
+        target_vy = alpha * v_flip_y + (1.0f - alpha) * v_pic_y;
+        target_vz = alpha * v_flip_z + (1.0f - alpha) * v_pic_z;
     }
 
     p.v[0] = fminf(fmaxf(target_vx, -5000.0f), 5000.0f);
     p.v[1] = fminf(fmaxf(target_vy, -5000.0f), 5000.0f);
     p.v[2] = fminf(fmaxf(target_vz, -5000.0f), 5000.0f);
 
+    // Store particle velocity gradient B_p = grad(v) for constitutive stress update
     for (int r = 0; r < 3; ++r) {
         for (int c = 0; c < 3; ++c) {
             p.B[r][c] = fminf(fmaxf(B_new[r][c], -max_B), max_B);
@@ -409,13 +405,14 @@ __global__ void kernel_g2p_3d(MPMParticle3D* particles, int num_particles,
     else if (p.x[2] > max_z) { p.x[2] = max_z; if (p.v[2] > 0) p.v[2] = 0; }
 }
 
-// 4. Stress Update Kernel
+// 4. Stress Update Kernel (Full Johnson-Cook + Mie-Grüneisen + Granular Debris + Hypoelasticity)
 __global__ void kernel_stress_update_3d(MPMParticle3D* particles, int num_particles, float dt) {
     int p_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (p_idx >= num_particles) return;
 
     MPMParticle3D& p = particles[p_idx];
 
+    // Velocity gradient L = B_p (1/s)
     float L[3][3];
     for (int r = 0; r < 3; ++r) {
         for (int c = 0; c < 3; ++c) {
@@ -423,111 +420,312 @@ __global__ void kernel_stress_update_3d(MPMParticle3D* particles, int num_partic
         }
     }
 
-    float deps[3][3];
-    float W[3][3];
+    // Symmetric strain increment D*dt and spin tensor W
+    float deps[3][3], W[3][3];
     for (int r = 0; r < 3; ++r) {
         for (int c = 0; c < 3; ++c) {
             deps[r][c] = 0.5f * (L[r][c] + L[c][r]) * dt;
-            W[r][c] = 0.5f * (L[r][c] - L[c][r]);
+            W[r][c]    = 0.5f * (L[r][c] - L[c][r]);
         }
     }
+    const float tr_deps = deps[0][0] + deps[1][1] + deps[2][2];
 
-    float W_sig[3][3] = {{0,0,0},{0,0,0},{0,0,0}};
-    float sig_W[3][3] = {{0,0,0},{0,0,0},{0,0,0}};
-    for (int r = 0; r < 3; ++r) {
-        for (int c = 0; c < 3; ++c) {
+    // --- Granular Coulomb Debris Model for Eroded/Failed Particles ---
+    if (p.has_failed) {
+        p.damage = 1.0f;
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                p.B[r][c] = 0.0f; // Zero affine velocity gradient to eliminate elastic coupling
+
+        p.V = fminf(fmaxf(p.V * (1.0f + tr_deps), 0.1f * p.V0), 10.0f * p.V0);
+
+        // 1. Bulk Pressure from Volumetric Compression J = V / V0
+        const float J = p.V / (p.V0 > 1.0e-12f ? p.V0 : 1.0e-12f);
+        float p_comp = 0.0f;
+        if (J < 1.0f) {
+            const float E_mod    = p.youngs_modulus;
+            const float nu       = p.poissons_ratio;
+            const float K_intact = E_mod / (3.0f * fmaxf(1.0e-4f, 1.0f - 2.0f * nu));
+            const float K_debris = 0.10f * K_intact; // 10% intact bulk modulus
+            p_comp = K_debris * (1.0f - J) / J;
+        }
+
+        // 2. Frictional Shear Resistance (Drucker-Prager cone limit: q <= M * p_comp)
+        const float M_friction = 1.0f;
+        const float q_max = M_friction * p_comp;
+
+        const float E_mod = p.youngs_modulus;
+        const float nu = p.poissons_ratio;
+        const float mu_debris = 0.05f * (E_mod / (2.0f * (1.0f + nu)));
+
+        float deps_dev[3][3];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) {
+                deps_dev[r][c] = deps[r][c];
+                if (r == c) deps_dev[r][c] -= tr_deps / 3.0f;
+            }
+
+        float s_trial[3][3];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                s_trial[r][c] = p.sigma[r][c] + 2.0f * mu_debris * deps_dev[r][c];
+
+        float press_s = -(s_trial[0][0] + s_trial[1][1] + s_trial[2][2]) / 3.0f;
+        for (int r = 0; r < 3; ++r)
+            s_trial[r][r] += press_s;
+
+        float s_s = 0.0f;
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                s_s += s_trial[r][c] * s_trial[r][c];
+        float q_trial = sqrtf(1.5f * s_s);
+
+        if (q_trial > q_max && q_trial > 1.0e-7f) {
+            float scale = q_max / q_trial;
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    p.sigma[r][c] = scale * s_trial[r][c];
+        } else {
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    p.sigma[r][c] = s_trial[r][c];
+        }
+
+        for (int r = 0; r < 3; ++r)
+            p.sigma[r][r] -= p_comp;
+
+        return;
+    }
+
+    // --- Johnson-Cook Plasticity + Mie-Grüneisen Shock EOS Model ---
+    if (p.material_model == MPMMaterialModel::JohnsonCookMieGruneisen) {
+        p.V = fminf(fmaxf(p.V * (1.0f + tr_deps), 0.1f * p.V0), 10.0f * p.V0);
+        const float J = p.V / (p.V0 > 1.0e-12f ? p.V0 : 1.0e-12f);
+        const float mu_vol = (1.0f - J) / J;
+
+        // 1. Mie-Grüneisen Shock EOS Hydrostatic Pressure
+        float p_hydro = 0.0f;
+        if (mu_vol > 0.0f) {
+            float denom = 1.0f - (p.mg_s - 1.0f) * mu_vol;
+            if (denom < 0.1f) denom = 0.1f;
+            float p_H = (p.density * p.mg_c0 * p.mg_c0 * mu_vol * (1.0f + mu_vol)) / (denom * denom);
+            float e_H = (p_H * mu_vol) / (2.0f * p.density * (1.0f + mu_vol));
+            p_hydro = p_H + p.mg_gamma0 * p.density * (p.e_int - e_H);
+        } else {
+            p_hydro = p.density * p.mg_c0 * p.mg_c0 * mu_vol;
+        }
+
+        // 2. Jaumann Stress Rotation
+        float W_sig[3][3] = {}, sig_W[3][3] = {};
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                for (int k = 0; k < 3; ++k) {
+                    W_sig[r][c] += W[r][k] * p.sigma[k][c];
+                    sig_W[r][c] += p.sigma[r][k] * W[k][c];
+                }
+
+        float sig_base[3][3];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                sig_base[r][c] = p.sigma[r][c] + (W_sig[r][c] - sig_W[r][c]) * dt;
+
+        const float E_mod    = p.youngs_modulus;
+        const float nu_val   = p.poissons_ratio;
+        const float mu_shear = E_mod / (2.0f * (1.0f + nu_val));
+
+        float deps_dev[3][3];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) {
+                deps_dev[r][c] = deps[r][c];
+                if (r == c) deps_dev[r][c] -= tr_deps / 3.0f;
+            }
+
+        float s_trial[3][3];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                s_trial[r][c] = sig_base[r][c] + 2.0f * mu_shear * deps_dev[r][c];
+
+        float p_s = -(s_trial[0][0] + s_trial[1][1] + s_trial[2][2]) / 3.0f;
+        for (int r = 0; r < 3; ++r)
+            s_trial[r][r] += p_s;
+
+        float s_s = 0.0f;
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                s_s += s_trial[r][c] * s_trial[r][c];
+        const float q_trial = sqrtf(1.5f * s_s);
+
+        // 3. Johnson-Cook Yield Stress
+        float ep_dot_star = fmaxf(1.0f, (tr_deps > 0.0f ? tr_deps : -tr_deps) / (dt > 1e-12f ? dt : 1e-12f));
+        float T_star = fminf(fmaxf((p.temperature - p.T_room) / (p.T_melt > p.T_room ? p.T_melt - p.T_room : 1.0f), 0.0f), 1.0f);
+
+        float term_strain = p.jc_A + p.jc_B * powf(fmaxf(0.0f, p.ep_bar), p.jc_n);
+        float term_rate   = 1.0f + p.jc_C * logf(ep_dot_star);
+        float term_temp   = 1.0f - powf(T_star, p.jc_m);
+        if (term_temp < 0.0f) term_temp = 0.0f;
+
+        float jc_yield = term_strain * term_rate * term_temp;
+        if (T_star >= 1.0f) jc_yield = 0.0f; // Liquid hydrodynamic state
+
+        // 4. Radial Return Mapping & Plastic Work Conversion
+        float H_jc = (p.jc_n > 0.0f && p.ep_bar > 1.0e-6f)
+            ? (p.jc_n * p.jc_B * powf(p.ep_bar, p.jc_n - 1.0f) * term_rate * term_temp)
+            : p.hardening_modulus;
+        float delta_ep = 0.0f;
+        if (q_trial > 1.0e-5f && q_trial > jc_yield) {
+            delta_ep = (q_trial - jc_yield) / (3.0f * mu_shear + H_jc);
+            float scale = (q_trial > 1e-12f) ? (jc_yield / q_trial) : 0.0f;
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c) {
+                    p.sigma[r][c] = scale * s_trial[r][c];
+                    if (r == c) p.sigma[r][c] -= p_hydro;
+                }
+            p.ep_bar += delta_ep;
+        } else {
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c) {
+                    p.sigma[r][c] = s_trial[r][c];
+                    if (r == c) p.sigma[r][c] -= p_hydro;
+                }
+        }
+
+        if (delta_ep > 0.0f && p.density > 0.0f && p.Cp > 0.0f) {
+            float dw_p = jc_yield * delta_ep;
+            float de_p = (0.90f * dw_p) / p.density;
+            p.e_int += de_p;
+            p.temperature = p.T_room + p.e_int / p.Cp;
+        }
+
+        // 5. Thermal Re-Welding / Healing Rule
+        if (p.temperature >= 0.80f * p.T_melt && p_hydro > 0.0f) {
+            p.damage = 0.0f;
+            p.has_failed = false;
+        } else {
+            float d_plastic = (p.failure_strain > 0.0f) ? fminf(fmaxf(p.ep_bar / p.failure_strain, 0.0f), 1.0f) : 0.0f;
+            float tensile_stress = -p_hydro;
+            float d_tensile = (tensile_stress > 0.0f && p.tensile_failure_stress > 0.0f)
+                ? fminf(fmaxf(tensile_stress / p.tensile_failure_stress, 0.0f), 1.0f) : 0.0f;
+
+            p.damage = fmaxf(p.damage, fmaxf(d_plastic, d_tensile));
+            if (p.damage >= 1.0f) {
+                p.has_failed = true;
+                p.damage = 1.0f;
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c)
+                        p.B[r][c] = 0.0f;
+            }
+        }
+
+        return;
+    }
+
+    // --- Standard Hypoelastic Model ---
+    // Jaumann stress rotation: sig_base = sig + (W*sig - sig*W)*dt
+    float W_sig[3][3] = {}, sig_W[3][3] = {};
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
             for (int k = 0; k < 3; ++k) {
                 W_sig[r][c] += W[r][k] * p.sigma[k][c];
                 sig_W[r][c] += p.sigma[r][k] * W[k][c];
             }
-        }
-    }
 
     float sig_base[3][3];
-    for (int r = 0; r < 3; ++r) {
-        for (int c = 0; c < 3; ++c) {
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
             sig_base[r][c] = p.sigma[r][c] + (W_sig[r][c] - sig_W[r][c]) * dt;
-        }
-    }
 
-    float E = p.youngs_modulus;
-    float nu = p.poissons_ratio;
-    float mu = E / (2.0f * (1.0f + nu));
-    float lambda = (E * nu) / ((1.0f + nu) * (1.0f - 2.0f * nu));
-    float tr_deps = deps[0][0] + deps[1][1] + deps[2][2];
+    // Volume update
+    p.V = fminf(fmaxf(p.V * (1.0f + tr_deps), 0.1f * p.V0), 10.0f * p.V0);
 
+    // Lame constants
+    const float E_mod  = p.youngs_modulus;
+    const float nu     = p.poissons_ratio;
+    const float mu     = E_mod / (2.0f * (1.0f + nu));
+    const float lambda = (E_mod * nu) / ((1.0f + nu) * (1.0f - 2.0f * nu));
+
+    // Trial elastic stress update
     float sig_trial[3][3];
-    for (int r = 0; r < 3; ++r) {
+    for (int r = 0; r < 3; ++r)
         for (int c = 0; c < 3; ++c) {
             sig_trial[r][c] = sig_base[r][c] + 2.0f * mu * deps[r][c];
             if (r == c) sig_trial[r][c] += lambda * tr_deps;
         }
-    }
 
-    float press = - (sig_trial[0][0] + sig_trial[1][1] + sig_trial[2][2]) / 3.0f;
+    // Deviatoric stress and Von Mises equivalent
+    const float press = -(sig_trial[0][0] + sig_trial[1][1] + sig_trial[2][2]) / 3.0f;
     float s[3][3];
-    for (int r = 0; r < 3; ++r) {
+    for (int r = 0; r < 3; ++r)
         for (int c = 0; c < 3; ++c) {
             s[r][c] = sig_trial[r][c];
             if (r == c) s[r][c] += press;
         }
-    }
 
     float s_s = 0.0f;
-    for (int r = 0; r < 3; ++r) {
-        for (int c = 0; c < 3; ++c) {
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
             s_s += s[r][c] * s[r][c];
-        }
-    }
-    float q_trial = sqrtf(1.5f * s_s);
-    float yield_surf = q_trial - (p.yield_stress + p.hardening_modulus * p.ep_bar);
+    const float q_trial   = sqrtf(1.5f * s_s);
+    const float yield_surf = q_trial - (p.yield_stress + p.hardening_modulus * p.ep_bar);
 
     if (q_trial > 1.0e-5f && yield_surf > 0.0f) {
-        float delta_ep = yield_surf / (3.0f * mu + p.hardening_modulus);
+        // Radial return mapping
+        const float delta_ep = yield_surf / (3.0f * mu + p.hardening_modulus);
         float scale = 1.0f - (3.0f * mu * delta_ep) / q_trial;
         if (scale < 0.0f) scale = 0.0f;
-
-        for (int r = 0; r < 3; ++r) {
+        for (int r = 0; r < 3; ++r)
             for (int c = 0; c < 3; ++c) {
                 p.sigma[r][c] = scale * s[r][c];
                 if (r == c) p.sigma[r][c] -= press;
             }
-        }
         p.ep_bar += delta_ep;
     } else {
-        for (int r = 0; r < 3; ++r) {
-            for (int c = 0; c < 3; ++c) {
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
                 p.sigma[r][c] = sig_trial[r][c];
-            }
-        }
     }
 
-    float d_plastic = 0.0f;
-    if (p.failure_strain > 0.0f) {
-        d_plastic = fminf(fmaxf(p.ep_bar / p.failure_strain, 0.0f), 1.0f);
-    }
+    // Rate-independent damage
+    const float d_plastic = (p.failure_strain > 0.0f)
+        ? fminf(fmaxf(p.ep_bar / p.failure_strain, 0.0f), 1.0f) : 0.0f;
 
-    float curr_press = - (p.sigma[0][0] + p.sigma[1][1] + p.sigma[2][2]) / 3.0f;
-    float tensile_stress = -curr_press;
-    float d_tensile = 0.0f;
-    if (tensile_stress > 0.0f && p.tensile_failure_stress > 0.0f) {
-        d_tensile = fminf(fmaxf(tensile_stress / p.tensile_failure_stress, 0.0f), 1.0f);
-    }
+    const float curr_press    = -(p.sigma[0][0] + p.sigma[1][1] + p.sigma[2][2]) / 3.0f;
+    const float tensile_stress = -curr_press;
+    const float d_tensile = (tensile_stress > 0.0f && p.tensile_failure_stress > 0.0f)
+        ? fminf(fmaxf(tensile_stress / p.tensile_failure_stress, 0.0f), 1.0f) : 0.0f;
 
     p.damage = fmaxf(p.damage, fmaxf(d_plastic, d_tensile));
+
     if (p.damage >= 1.0f) {
         p.has_failed = true;
         p.damage = 1.0f;
-    }
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                p.B[r][c] = 0.0f;
 
-    float soft_factor = fmaxf(0.0f, 1.0f - p.damage);
-    for (int r = 0; r < 3; ++r) {
-        for (int c = 0; c < 3; ++c) {
-            p.sigma[r][c] *= soft_factor;
+        p.V = fminf(fmaxf(p.V * (1.0f + tr_deps), 0.1f * p.V0), 10.0f * p.V0);
+
+        const float J = p.V / (p.V0 > 1.0e-12f ? p.V0 : 1.0e-12f);
+        float p_comp = 0.0f;
+        if (J < 1.0f) {
+            const float E_mod    = p.youngs_modulus;
+            const float nu       = p.poissons_ratio;
+            const float K_intact = E_mod / (3.0f * fmaxf(1.0e-4f, 1.0f - 2.0f * nu));
+            const float K_debris = 0.10f * K_intact;
+            p_comp = K_debris * (1.0f - J) / J;
         }
+
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                p.sigma[r][c] = (r == c) ? -p_comp : 0.0f;
+
+        return;
     }
 
-    p.V = fminf(fmaxf(p.V * (1.0f + tr_deps), 0.1f * p.V0), 10.0f * p.V0);
+    // Partial damage: scale stress by (1 - damage)
+    const float soft_factor = 1.0f - p.damage;
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            p.sigma[r][c] *= soft_factor;
 }
 
 // MPMSolver3DCUDA Implementation
@@ -556,6 +754,10 @@ void MPMSolver3DCUDA::allocateDeviceMemory() {
         cudaMalloc(&d_particles_n, num_particles * sizeof(MPMParticle3D));
         m_allocated_particles = num_particles;
     }
+
+    if (!d_max_v_buf) {
+        cudaMalloc(&d_max_v_buf, sizeof(float));
+    }
 }
 
 void MPMSolver3DCUDA::freeDeviceMemory() {
@@ -563,6 +765,7 @@ void MPMSolver3DCUDA::freeDeviceMemory() {
     if (d_grid_n) { cudaFree(d_grid_n); d_grid_n = nullptr; }
     if (d_particles) { cudaFree(d_particles); d_particles = nullptr; }
     if (d_particles_n) { cudaFree(d_particles_n); d_particles_n = nullptr; }
+    if (d_max_v_buf) { cudaFree(d_max_v_buf); d_max_v_buf = nullptr; }
     m_allocated_grid_nodes = 0;
     m_allocated_particles = 0;
 }
@@ -634,18 +837,61 @@ void MPMSolver3DCUDA::syncToHost() {
     cudaMemcpy(m_host_grid.data(), d_grid, num_grid_nodes * sizeof(MPMGridNode3D), cudaMemcpyDeviceToHost);
 }
 
-float MPMSolver3DCUDA::computeStepSize(float cfl) {
-    if (m_host_particles.empty()) return 1.0e-6f;
-    float max_speed = 100.0f;
-    for (const auto& p : m_host_particles) {
+__global__ void kernel_compute_max_speed(const MPMParticle3D* particles, int num_particles, float* d_max_speed) {
+    extern __shared__ float s_max[];
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    float local_max = 100.0f;
+    if (idx < num_particles) {
+        const MPMParticle3D& p = particles[idx];
         float E = p.youngs_modulus;
-        float rho = std::max(10.0f, p.density);
-        float c_s = std::sqrt(E / rho);
-        float v_mag = std::sqrt(p.v[0] * p.v[0] + p.v[1] * p.v[1] + p.v[2] * p.v[2]);
-        max_speed = std::max(max_speed, c_s + v_mag);
+        float rho = fabsf(p.density) > 10.0f ? fabsf(p.density) : 10.0f;
+        float c_s = sqrtf(E / rho);
+        if (isnan(c_s) || isinf(c_s)) c_s = 5000.0f;
+        float v_mag = sqrtf(p.v[0] * p.v[0] + p.v[1] * p.v[1] + p.v[2] * p.v[2]);
+        v_mag = fminf(5000.0f, v_mag);
+        local_max = fmaxf(local_max, c_s + v_mag);
     }
+    s_max[tid] = local_max;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            s_max[tid] = fmaxf(s_max[tid], s_max[tid + s]);
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        atomicMax((int*)d_max_speed, __float_as_int(s_max[0]));
+    }
+}
+
+float MPMSolver3DCUDA::computeStepSize(float cfl) {
+    size_t num_particles = m_host_particles.size();
+    if (num_particles == 0 || !d_particles || !d_max_v_buf) return 1.0e-6f;
+
+    float init_max_speed = 100.0f;
+    union { float f; int i; } u_init, u_res;
+    u_init.f = init_max_speed;
+    int init_int = u_init.i;
+
+    cudaMemcpy(d_max_v_buf, &init_int, sizeof(int), cudaMemcpyHostToDevice);
+
+    int threads = 256;
+    int blocks = (static_cast<int>(num_particles) + threads - 1) / threads;
+    kernel_compute_max_speed<<<blocks, threads, threads * sizeof(float)>>>(d_particles, static_cast<int>(num_particles), d_max_v_buf);
+
+    int result_int = 0;
+    cudaMemcpy(&result_int, d_max_v_buf, sizeof(int), cudaMemcpyDeviceToHost);
+    u_res.i = result_int;
+    float max_speed = u_res.f;
+
     float min_h = std::min({m_dx, m_dy, m_dz});
-    return std::max(1.0e-8f, cfl * (min_h / max_speed));
+    float dt_crit = min_h / max_speed;
+    float stability_factor = 1.0f / std::sqrt(3.0f); // 3D Courant stability factor (~0.577)
+    return std::max(1.0e-8f, cfl * stability_factor * dt_crit);
 }
 
 __global__ void kernel_restore_grid_mass_momentum(MPMGridNode3D* grid, const MPMGridNode3D* grid_n, int num_nodes) {
@@ -714,10 +960,7 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
 
     if (m_time_scheme == MPMTimeIntegrationScheme::RK2) {
         // --- 2nd-Order Midpoint RK2 ---
-        // 1. Save initial particle state (at t^n)
-        cudaMemcpy(d_particles_n, d_particles, num_particles * sizeof(MPMParticle3D), cudaMemcpyDeviceToDevice);
-
-        // 2. Predictor Stage (Half-step dt/2)
+        // 1. Predictor Stage (Half-step dt/2)
         if (run_p2g) {
             cudaMemset(d_grid, 0, num_nodes * sizeof(MPMGridNode3D));
             kernel_p2g_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles),
@@ -725,57 +968,37 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
                                                                   m_dx, m_dy, m_dz, static_cast<int>(m_transfer_scheme));
         }
 
-        // Save initial grid state (at t^n)
-        cudaMemcpy(d_grid_n, d_grid, num_nodes * sizeof(MPMGridNode3D), cudaMemcpyDeviceToDevice);
-
-        // Update grid kinematics for half step dt/2
         kernel_grid_update_3d<<<blocks_nodes, threads_per_block>>>(d_grid, static_cast<int>(num_nodes), m_nx, m_ny, m_nz,
                                                                    0.5f * dt, avg_p_mass,
                                                                    static_cast<int>(m_bc_x_min), static_cast<int>(m_bc_x_max),
                                                                    static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
                                                                    static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max));
 
-        // Gather midpoint velocities and update particle positions to x^{n+1/2}
         kernel_g2p_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles),
                                                                d_grid, m_nx, m_ny, m_nz,
                                                                m_dx, m_dy, m_dz, 0.5f * dt, static_cast<int>(m_transfer_scheme),
                                                                static_cast<int>(m_velocity_scheme), m_flip_blend);
 
-        // Update stress/internal state to midpoint sigma^{n+1/2}
         kernel_stress_update_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles), 0.5f * dt);
 
-        // 3. Corrector Stage (Full-step dt)
-        // Scatter midpoint particle momentum/forces to grid using midpoint positions and stresses
+        // 2. Corrector Stage (Half-step dt/2 from predictor state)
         cudaMemset(d_grid, 0, num_nodes * sizeof(MPMGridNode3D));
         kernel_p2g_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles),
                                                               d_grid, m_nx, m_ny, m_nz,
                                                               m_dx, m_dy, m_dz, static_cast<int>(m_transfer_scheme));
 
-        // Restore initial grid mass and momentum (at t^n), keeping the midpoint internal forces f_int^{n+1/2}
-        kernel_restore_grid_mass_momentum<<<blocks_nodes, threads_per_block>>>(d_grid, d_grid_n, static_cast<int>(num_nodes));
-
-        // Update grid kinematics for full step dt using restored grid state and midpoint forces
         kernel_grid_update_3d<<<blocks_nodes, threads_per_block>>>(d_grid, static_cast<int>(num_nodes), m_nx, m_ny, m_nz,
                                                                    dt, avg_p_mass,
                                                                    static_cast<int>(m_bc_x_min), static_cast<int>(m_bc_x_max),
                                                                    static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
                                                                    static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max));
 
-        // Restore particle states to initial state (t^n), keeping midpoint positions in d_particles
-        kernel_restore_particles_except_midpoint_x<<<blocks_particles, threads_per_block>>>(d_particles, d_particles_n, static_cast<int>(num_particles));
-
-        // Gather final velocity/affine matrices at midpoint, but don't advance position yet (dt = 0)
         kernel_g2p_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles),
                                                                d_grid, m_nx, m_ny, m_nz,
-                                                               m_dx, m_dy, m_dz, 0.0f, static_cast<int>(m_transfer_scheme),
+                                                               m_dx, m_dy, m_dz, 0.5f * dt, static_cast<int>(m_transfer_scheme),
                                                                static_cast<int>(m_velocity_scheme), m_flip_blend);
 
-        // Update stresses to t^{n+1} using the midpoint velocity gradients over full step dt
-        kernel_stress_update_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles), dt);
-
-        // Advance particle positions from initial positions x^n using gathered midpoint velocities over full step dt
-        kernel_corrector_position_update<<<blocks_particles, threads_per_block>>>(d_particles, d_particles_n, static_cast<int>(num_particles),
-                                                                                  dt, m_nx, m_ny, m_nz, m_dx, m_dy, m_dz);
+        kernel_stress_update_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles), 0.5f * dt);
     } else {
         // --- 1st-Order USL / USF ---
         if (run_p2g) {

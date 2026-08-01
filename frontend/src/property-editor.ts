@@ -294,16 +294,24 @@ export class PropertyEditor {
         form.onsubmit = (e) => e.preventDefault();
 
         let paramKeys = Object.keys(node.parameters);
-        if (node.type === 'MPMDomain2D') {
+        if (node.type === 'MPMMaterialSteel') {
+            if (!node.parameters['material_model']) {
+                node.parameters['material_model'] = 'Steel (Hypoelastic)';
+            }
+            const matModel = node.parameters['material_model'];
+            const baseKeys = ['material_model', 'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus', 'failure_strain', 'tensile_failure_stress'];
+            const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
+            paramKeys = (matModel === 'Johnson-Cook + Mie-Grüneisen') ? [...baseKeys, ...jcKeys] : baseKeys;
+        } else if (node.type === 'MPMDomain2D') {
             const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
-            paramKeys = ['transfer_scheme', 'velocity_scheme'];
+            paramKeys = ['precision', 'transfer_scheme', 'velocity_scheme'];
             if (hasFLIP) {
                 paramKeys.push('flip_blend');
             }
             paramKeys.push('ppc', 'cfl');
         } else if (node.type === 'MPMDomain3D') {
             const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
-            paramKeys = ['transfer_scheme', 'velocity_scheme', 'space_time_scheme'];
+            paramKeys = ['device', 'precision', 'transfer_scheme', 'velocity_scheme', 'space_time_scheme'];
             if (hasFLIP) {
                 paramKeys.push('flip_blend');
             }
@@ -317,6 +325,7 @@ export class PropertyEditor {
                 paramKeys.push('space_time_scheme');
             }
         }
+
         if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D') {
             paramKeys.sort((a, b) => {
                 if (a === 'cell_size') return -1;
@@ -365,7 +374,13 @@ export class PropertyEditor {
                 if ((key === 'y_min_bc' || key === 'y_max_bc') && dim === '1D') continue;
                 if ((key === 'z_min_bc' || key === 'z_max_bc') && (dim === '1D' || dim === '2D')) continue;
             }
+            if (node.type === 'MPMMaterialSteel') {
+                const matModel = node.parameters['material_model'] || 'Steel (Hypoelastic)';
+                const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
+                if (matModel === 'Steel (Hypoelastic)' && jcKeys.includes(key)) continue;
+            }
             if (node.type === 'Material') {
+
                 const matType = node.parameters['material_type'] || 'Air';
                 const airKeys = ['gamma', 'atm_pressure', 'atm_temperature'];
                 const jwlKeys = ['composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
@@ -1132,12 +1147,16 @@ export class PropertyEditor {
             'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
             'failure_strain', 'tensile_failure_stress',
+            'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
+            'mg_gamma0', 'mg_c0', 'mg_s',
             'ppc',
             'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend'
         ];
 
         const dropdowns: Record<string, string[]> = {
+            'material_model': ['Steel (Hypoelastic)', 'Johnson-Cook + Mie-Grüneisen'],
             'mpmParticleQuantity': ['vonMises', 'pressure', 'velocity', 'density', 'plastic_strain', 'damage', 'has_failed', 'object_id'],
+
             'mpmParticleColormap': ['plasma', 'viridis', 'coolwarm', 'rainbow', 'cividis', 'grayscale'],
             'telemetry_mode': ['Enabled', 'Throttled (1 Hz)', 'Throttled (0.2 Hz)', 'Disabled'],
             'enable_gauges': ['Enabled', 'Disabled'],
@@ -1206,7 +1225,10 @@ export class PropertyEditor {
                 const option = document.createElement('option');
                 option.value = opt;
                 let text = opt;
-                if (key === 'refresh_rate') {
+                if (key === 'device') {
+                    if (opt === 'cpu') text = 'CPU';
+                    else if (opt === 'cuda') text = 'CUDA GPU';
+                } else if (key === 'refresh_rate') {
                     if (opt === '0.0') text = 'Max Rate (0s)';
                     else if (opt === '0.016') text = '60 FPS (0.016s)';
                     else if (opt === '0.033') text = '30 FPS (0.033s)';
@@ -1219,11 +1241,11 @@ export class PropertyEditor {
                     else if (opt === '5.0') text = '0.2 FPS (5.0s)';
                     else if (opt === '10.0') text = '0.1 FPS (10.0s)';
                 }
-                option.text = text;
-                if (Math.abs(Number(opt) - Number(value)) < 0.001 || opt === value.toString()) option.selected = true;
+                if (Math.abs(Number(opt) - Number(value)) < 0.001 || opt === String(value ?? '')) option.selected = true;
                 select.appendChild(option);
             });
-            select.value = value.toString();
+            select.value = String(value ?? dropdowns[key][0]);
+
 
             select.addEventListener('change', () => {
                 let val: any = select.value;
@@ -2319,6 +2341,11 @@ export class PropertyEditor {
         } else {
             this.stateManager.updateNodeParameters(this.currentNodeId, updates);
         }
+
+        if (key === 'material_model' || key === 'material_type' || key === 'charge_shape') {
+            this.render(true);
+        }
+
 
         if (isDynamicCfl) {
             const net = (window as any).networkManager;

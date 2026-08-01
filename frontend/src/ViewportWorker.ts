@@ -6111,7 +6111,10 @@ self.onmessage = async (e) => {
             if (data.showMPMParticles !== undefined) showMPMParticles = data.showMPMParticles;
             if (data.mpmParticleSize !== undefined) mpmParticleSize = data.mpmParticleSize;
             if (data.mpmParticleQuantity !== undefined) {
-                mpmParticleQuantity = data.mpmParticleQuantity;
+                if (mpmParticleQuantity !== data.mpmParticleQuantity) {
+                    mpmParticleQuantity = data.mpmParticleQuantity;
+                    mpmParticleAutoScale = true;
+                }
                 mpmChanged = true;
             }
             if (data.mpmParticleColormap !== undefined) {

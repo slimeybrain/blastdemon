@@ -1823,13 +1823,17 @@ export class StateManager {
                 obstacles_max_val: 101325.0 * 10.0
             },
             'MPMDomain2D': {
+                precision: 'single',
                 transfer_scheme: 'GIMP',
                 velocity_scheme: 'APIC',
+                space_time_scheme: 'RK2',
                 flip_blend: 0.95,
                 ppc: 4,
                 cfl: 0.3
             },
             'MPMDomain3D': {
+                device: 'cpu',
+                precision: 'single',
                 transfer_scheme: 'GIMP',
                 velocity_scheme: 'APIC',
                 space_time_scheme: 'RK2',
@@ -1857,14 +1861,27 @@ export class StateManager {
                 angular_vel_x: 0.0, angular_vel_y: 0.0, angular_vel_z: 0.0
             },
             'MPMMaterialSteel': {
+                material_model: 'Steel (Hypoelastic)',
                 density: 7850.0,
                 youngs_modulus: 210.0e9,
                 poissons_ratio: 0.3,
                 yield_stress: 400.0e6,
                 hardening_modulus: 1.0e9,
                 failure_strain: 0.25,
-                tensile_failure_stress: 600.0e6
+                tensile_failure_stress: 600.0e6,
+                jc_A: 792.0e6,
+                jc_B: 510.0e6,
+                jc_n: 0.26,
+                jc_C: 0.014,
+                jc_m: 1.03,
+                T_melt: 1793.0,
+                T_room: 293.0,
+                Cp: 477.0,
+                mg_gamma0: 1.81,
+                mg_c0: 4570.0,
+                mg_s: 1.49
             },
+
             'FSICoupler2D': {},
             'FSICoupler3D': {}
         };

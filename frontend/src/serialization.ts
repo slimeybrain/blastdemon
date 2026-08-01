@@ -41,9 +41,12 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
         'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
         'failure_strain', 'tensile_failure_stress',
+        'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
+        'mg_gamma0', 'mg_c0', 'mg_s',
         'ppc',
         'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend'
     ];
+
 
     const flattenedParams: Record<string, any> = {};
 
@@ -708,6 +711,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
 
             const domainPpc = Number(mpmDomain.parameters?.ppc ?? 8);
             flattenedParams['ppc'] = domainPpc;
+            if (!flattenedParams['device']) flattenedParams['device'] = 'cpu';
 
             const objConns = state.connections.filter(c => c.toNode === mpmDomain.id && c.toPort === 'objects');
             const mpmObjects: any[] = [];
