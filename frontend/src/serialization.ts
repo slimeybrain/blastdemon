@@ -629,6 +629,175 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         const p = flattenedParams['atm_pressure'] || 101325.0;
         const t = flattenedParams['atm_temperature'] || 288.0;
         flattenedParams['ambient_rho'] = p / (287.058 * t);
+    } else if (command === "INIT_FSI_3D") {
+        // 1. Serialize 3D CFD Solver part
+        const solverNode3D = state.nodes.find(n => n.type === 'CFDSolver3D');
+        if (solverNode3D) {
+            Object.entries(solverNode3D.parameters).forEach(([key, value]) => {
+                flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+            });
+            const stlConn = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'stl');
+            if (stlConn) {
+                const stlNode = state.nodes.find(n => n.id === stlConn.fromNode);
+                if (stlNode && stlNode.type === 'STLGeometry') {
+                    flattenedParams['stl_file'] = stlNode.parameters.stl_file || '';
+                    flattenedParams['geometry_hash'] = stlNode.parameters.geometry_hash || '';
+                    flattenedParams['voxelization_method'] = stlNode.parameters.voxelization_method || 'watertight_floodfill';
+                } else if (stlNode && stlNode.type === 'PrimitiveGeometry3D') {
+                    flattenedParams['primitives'] = stlNode.parameters.primitives || [];
+                    const primsStr = JSON.stringify(stlNode.parameters.primitives || []) + '_' + (stlNode.parameters.voxelization_method || 'watertight_floodfill');
+                    let hash = 5381;
+                    for (let i = 0; i < primsStr.length; i++) {
+                        hash = ((hash << 5) + hash) + primsStr.charCodeAt(i);
+                        hash = hash & hash;
+                    }
+                    flattenedParams['geometry_hash'] = 'prims_' + Math.abs(hash).toString(16);
+                    flattenedParams['voxelization_method'] = stlNode.parameters.voxelization_method || 'watertight_floodfill';
+                }
+            }
+            const meshConn3D = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'mesh');
+            if (meshConn3D) {
+                const rootDomainNode = state.nodes.find(n => n.id === meshConn3D.fromNode);
+                if (rootDomainNode && rootDomainNode.type === 'DomainMesh3D') {
+                    Object.entries(rootDomainNode.parameters).forEach(([key, value]) => {
+                        flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                    });
+                }
+            }
+            const airConn3D = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'air');
+            if (airConn3D) {
+                const airNode3D = state.nodes.find(n => n.id === airConn3D.fromNode);
+                if (airNode3D && airNode3D.type === 'Material' && airNode3D.parameters?.material_type === 'Air') {
+                    ['atm_pressure', 'atm_temperature', 'gamma'].forEach(key => {
+                        if (airNode3D.parameters[key] !== undefined) {
+                            flattenedParams[key] = numericKeys.includes(key) ? Number(airNode3D.parameters[key]) : airNode3D.parameters[key];
+                        }
+                    });
+                }
+            }
+            const chargeConn3D = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'charge');
+            if (chargeConn3D) {
+                const chargeNode3D = state.nodes.find(n => n.id === chargeConn3D.fromNode);
+                if (chargeNode3D) {
+                    Object.entries(chargeNode3D.parameters).forEach(([key, value]) => {
+                        flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                    });
+                    const matConn = state.connections.find(c => c.toNode === chargeNode3D.id && c.toPort === 'material');
+                    if (matConn) {
+                        const matNode = state.nodes.find(n => n.id === matConn.fromNode);
+                        if (matNode) {
+                            const matType = matNode.parameters?.material_type || 'Air';
+                            if (matType === 'JWL Charge') {
+                                flattenedParams['explosive_type'] = 'MaterialExplosive';
+                                ['composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'].forEach(key => {
+                                    if (matNode.parameters[key] !== undefined) {
+                                        flattenedParams[key] = numericKeys.includes(key) ? Number(matNode.parameters[key]) : matNode.parameters[key];
+                                    }
+                                });
+                            } else if (matType === 'Ideal Gas Charge') {
+                                flattenedParams['explosive_type'] = 'MaterialIdealGas';
+                                flattenedParams['gamma'] = Number(matNode.parameters?.ideal_gamma ?? 1.4);
+                                flattenedParams['rho'] = Number(matNode.parameters?.ideal_rho_0 ?? 1630.0);
+                                flattenedParams['detonation_energy'] = Number(matNode.parameters?.ideal_e_0 ?? 4290000);
+                            }
+                        }
+                    }
+                }
+            }
+            const detConn3D = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'detonator');
+            if (detConn3D) {
+                const detNode3D = state.nodes.find(n => n.id === detConn3D.fromNode);
+                if (detNode3D && detNode3D.type === 'DetonatorLocation3D') {
+                    Object.entries(detNode3D.parameters).forEach(([key, value]) => {
+                        flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                    });
+                }
+            }
+            const telemetryConns = state.connections.filter(c => c.fromNode === solverNode3D.id && c.fromPort === 'telemetry');
+            for (const conn of telemetryConns) {
+                const viewNode = state.nodes.find(n => n.id === conn.toNode);
+                if (viewNode && viewNode.type === 'Telemetry3DViewport') {
+                    if (viewNode.parameters.slices) {
+                        flattenedParams['slices'] = viewNode.parameters.slices;
+                    }
+                }
+            }
+        }
+
+        // 2. Serialize 3D MPM Domain part
+        const mpmDomain = state.nodes.find(n => n.type === 'MPMDomain3D');
+        if (mpmDomain) {
+            Object.entries(mpmDomain.parameters).forEach(([key, value]) => {
+                flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+            });
+
+            const meshConn = state.connections.find(c => c.toNode === mpmDomain.id && c.toPort === 'mesh');
+            if (meshConn) {
+                const meshNode = state.nodes.find(n => n.id === meshConn.fromNode);
+                if (meshNode) {
+                    Object.entries(meshNode.parameters).forEach(([key, value]) => {
+                        flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                    });
+                }
+            }
+
+            const domainPpc = Number(mpmDomain.parameters?.ppc ?? 8);
+            flattenedParams['ppc'] = domainPpc;
+
+            const objConns = state.connections.filter(c => c.toNode === mpmDomain.id && c.toPort === 'objects');
+            const mpmObjects: any[] = [];
+            for (const conn of objConns) {
+                const objNode = state.nodes.find(n => n.id === conn.fromNode);
+                if (objNode && objNode.type === 'MPMObject3D') {
+                    const objParams: any = {};
+                    Object.entries(objNode.parameters).forEach(([k, v]) => {
+                        objParams[k] = numericKeys.includes(k) ? Number(v) : v;
+                    });
+                    const matConn = state.connections.find(c => c.toNode === objNode.id && c.toPort === 'material');
+                    if (matConn) {
+                        const matNode = state.nodes.find(n => n.id === matConn.fromNode);
+                        if (matNode) {
+                            Object.entries(matNode.parameters).forEach(([k, v]) => {
+                                objParams[k] = numericKeys.includes(k) ? Number(v) : v;
+                            });
+                        }
+                    }
+                    if (objParams['ppc'] === undefined) {
+                        objParams['ppc'] = domainPpc;
+                    }
+                    mpmObjects.push(objParams);
+                }
+            }
+            flattenedParams['mpm_objects'] = mpmObjects;
+        }
+
+        // 3. Serialize FSICoupler3D parameters
+        const couplerNode = state.nodes.find(n => n.type === 'FSICoupler3D');
+        if (couplerNode) {
+            Object.entries(couplerNode.parameters).forEach(([key, value]) => {
+                flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+            });
+        }
+
+        const cellSize = flattenedParams['cell_size'] || 0.01;
+        const xmin = flattenedParams['xmin'] !== undefined ? flattenedParams['xmin'] : 0.0;
+        const xmax = flattenedParams['xmax'] !== undefined ? flattenedParams['xmax'] : 1.0;
+        const ymin = flattenedParams['ymin'] !== undefined ? flattenedParams['ymin'] : 0.0;
+        const ymax = flattenedParams['ymax'] !== undefined ? flattenedParams['ymax'] : 1.0;
+        const zmin = flattenedParams['zmin'] !== undefined ? flattenedParams['zmin'] : 0.0;
+        const zmax = flattenedParams['zmax'] !== undefined ? flattenedParams['zmax'] : 1.0;
+        flattenedParams['nx'] = Math.round((xmax - xmin) / cellSize);
+        flattenedParams['ny'] = Math.round((ymax - ymin) / cellSize);
+        flattenedParams['nz'] = Math.round((zmax - zmin) / cellSize);
+        flattenedParams['xmin'] = xmin;
+        flattenedParams['ymin'] = ymin;
+        flattenedParams['zmin'] = zmin;
+
+        if (!flattenedParams['gamma']) flattenedParams['gamma'] = 1.4;
+        const p = flattenedParams['atm_pressure'] || 101325.0;
+        const t = flattenedParams['atm_temperature'] || 288.0;
+        flattenedParams['ambient_rho'] = p / (287.058 * t);
+        if (!flattenedParams['device']) flattenedParams['device'] = 'cpu';
     } else if (command === "INIT_MPM" || command === "INIT_2D_MPM") {
         const mpmDomain = state.nodes.find(n => n.type === 'MPMDomain2D');
         if (mpmDomain) {

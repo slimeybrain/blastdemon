@@ -2114,6 +2114,25 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::uploadObstacleFaces(const std::
     obstacle_faces = faces;
 }
 
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DImpl<RealType, IsMultiMaterial>::setSolidMask(const uint8_t* mask) {
+    if (!mask) return;
+    int total_tiles = n_tiles_x * n_tiles_y * n_tiles_z;
+    if (geom_pool.size() != static_cast<size_t>(total_tiles)) {
+        geom_pool.resize(total_tiles);
+    }
+    for (int gx = 0; gx < nx; ++gx) {
+        for (int gy = 0; gy < ny; ++gy) {
+            for (int gz = 0; gz < nz; ++gz) {
+                int cfd_idx = gx + gy * nx + gz * nx * ny;
+                int t_idx = (gx >> 3) + (gy >> 3) * n_tiles_x + (gz >> 3) * n_tiles_x * n_tiles_y;
+                int c_idx = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
+                geom_pool[t_idx].cells[c_idx].is_boundary = (mask[cfd_idx] != 0);
+            }
+        }
+    }
+}
+
 
 
 template <typename RealType, bool IsMultiMaterial>

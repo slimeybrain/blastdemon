@@ -20,6 +20,7 @@ struct MPMParticle2D {
     float x[2];         // Position (x, y)
     float v[2];         // Velocity (vx, vy)
     float B[2][2];      // APIC affine velocity matrix
+    float L_grad[2][2]; // True velocity gradient from shape function derivatives
     float lp[2];        // GIMP particle domain half-lengths
 
     // Mass & Volume
@@ -102,6 +103,8 @@ public:
     void initializeGrid(int nx, int ny, float dx, float dy);
     void setTransferScheme(MPMTransferScheme scheme) { m_transfer_scheme = scheme; }
     void setVelocityScheme(MPMVelocityScheme scheme) { m_velocity_scheme = scheme; }
+    void setSmoothPlasticStrain(bool smooth) { m_smooth_plastic_strain = smooth; }
+    bool getSmoothPlasticStrain() const { return m_smooth_plastic_strain; }
     void setFlipBlend(float blend) { m_flip_blend = std::clamp(blend, 0.0f, 1.0f); }
 
     // Object Adders (Primitives)
@@ -159,6 +162,7 @@ private:
     MPMTransferScheme m_transfer_scheme{MPMTransferScheme::GIMP};
     MPMVelocityScheme m_velocity_scheme{MPMVelocityScheme::APIC};
     float m_flip_blend{0.95f};
+    bool m_smooth_plastic_strain{true};
 
     std::vector<MPMGridNode2D> m_grid;
     std::vector<MPMParticle2D> m_particles;

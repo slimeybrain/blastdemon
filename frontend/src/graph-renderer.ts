@@ -1724,20 +1724,22 @@ export class GraphRenderer {
             };
             case 'MPMDomain2D': return {
                 precision: 'single',
-                transfer_scheme: 'GIMP',
+                transfer_scheme: 'BSpline',
                 velocity_scheme: 'APIC',
                 space_time_scheme: 'RK2',
                 flip_blend: 0.95,
+                smooth_plastic_strain: true,
                 ppc: 4,
                 cfl: 0.3
             };
             case 'MPMDomain3D': return {
                 device: 'cpu',
                 precision: 'single',
-                transfer_scheme: 'GIMP',
+                transfer_scheme: 'BSpline',
                 velocity_scheme: 'APIC',
                 space_time_scheme: 'RK2',
                 flip_blend: 0.95,
+                smooth_plastic_strain: true,
                 ppc: 8,
                 cfl: 0.3
             };
@@ -4138,14 +4140,14 @@ export class GraphRenderer {
         let paramKeys = Object.keys(node.parameters);
         if (node.type === 'MPMDomain2D') {
             const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
-            paramKeys = ['precision', 'transfer_scheme', 'velocity_scheme'];
+            paramKeys = ['precision', 'transfer_scheme', 'velocity_scheme', 'space_time_scheme', 'smooth_plastic_strain'];
             if (hasFLIP) {
                 paramKeys.push('flip_blend');
             }
             paramKeys.push('ppc', 'cfl');
         } else if (node.type === 'MPMDomain3D') {
             const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
-            paramKeys = ['device', 'precision', 'transfer_scheme', 'velocity_scheme', 'space_time_scheme'];
+            paramKeys = ['device', 'precision', 'transfer_scheme', 'velocity_scheme', 'space_time_scheme', 'smooth_plastic_strain'];
             if (hasFLIP) {
                 paramKeys.push('flip_blend');
             }
@@ -4307,7 +4309,7 @@ export class GraphRenderer {
                 show_grid: ['true', 'false'],
                 'voxelization_method': ['watertight_floodfill', 'watertight_raycast', 'thin_shell', 'winding_number'],
                 'obstacles_quantity': ['pressure', 'density', 'velocity', 'energy', 'species1', 'species2', 'species3', 'peak_overpressure', 'peak_impulse'],
-                'transfer_scheme': ['GIMP', 'Standard', 'BSpline'],
+                'transfer_scheme': ['BSpline', 'GIMP', 'Standard'],
                 'velocity_scheme': ['APIC', 'PIC', 'FLIP'],
                 'colorbar_source': ['slice', 'mpm', 'obstacles', 'stl'],
                 'space_time_scheme': (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') ? 

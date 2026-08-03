@@ -33,6 +33,8 @@ private:
     mutable void* d_tile_mass = nullptr;
     mutable void* d_tile_energy = nullptr;
     mutable void* d_tile_is_near_boundary = nullptr;
+    mutable void* d_solid_mask_fsi = nullptr;
+    mutable size_t d_solid_mask_fsi_capacity = 0;
     mutable bool constants_dirty = true;
     mutable int step_count = 0;
 
@@ -118,6 +120,7 @@ public:
                                const std::atomic<bool>* terminate_flag = nullptr,
                                std::function<void(double)> progress_callback = nullptr) override;
     void uploadObstacleFaces(const std::vector<ObstacleFace>& faces) override;
+    void setSolidMask(const uint8_t* mask) override;
     std::pair<double, double> getConservationTotals() const override;
 
     std::vector<float> sampleGauge(const Gauge3D& gauge) const override;
@@ -126,6 +129,8 @@ public:
     void getSliceDimensions(const Slice3D& slice, int& w, int& h, int& depth) const override;
     using CFDSolver3D::getSliceDimensions;
     std::vector<float> getCellValues(int i, int j, int k) const override;
+    std::vector<float> extractPressureField() const override;
+    void coupleFSIWithMPMGPU(void* mpm_solver_cuda) override;
 
     void setGauges(const std::vector<Gauge3D>& gauges) override;
     void recordGaugesAsync(double t) override;

@@ -240,12 +240,13 @@ void MPMSolver2D::particleToGrid() {
                 // Mass scatter
                 node.m += p.m * weight;
 
-                // APIC Momentum scatter: p_node += m_p * S * (v_p + B_p * dist)
+                // APIC Momentum scatter: p_node += m_p * S * (v_p + w_apic * B_p * dist)
                 float dist_x = node_x - p.x[0];
                 float dist_y = node_y - p.x[1];
 
-                float v_apic_x = p.v[0] + (p.B[0][0] * dist_x + p.B[0][1] * dist_y);
-                float v_apic_y = p.v[1] + (p.B[1][0] * dist_x + p.B[1][1] * dist_y);
+                float w_apic = 1.0f;
+                float v_apic_x = p.v[0] + w_apic * (p.B[0][0] * dist_x + p.B[0][1] * dist_y);
+                float v_apic_y = p.v[1] + w_apic * (p.B[1][0] * dist_x + p.B[1][1] * dist_y);
 
                 node.p[0] += p.m * weight * v_apic_x;
                 node.p[1] += p.m * weight * v_apic_y;
@@ -272,6 +273,38 @@ void MPMSolver2D::particleToGrid() {
             node.density /= node.m;
             node.pressure /= node.m;
             node.damage /= node.m;
+        }
+    }
+
+    if (m_smooth_plastic_strain) {
+        std::vector<float> smoothed_ep(m_grid.size(), 0.0f);
+        for (int i = 0; i < m_nx; ++i) {
+            for (int j = 0; j < m_ny; ++j) {
+                int idx = i * m_ny + j;
+                if (m_grid[idx].m <= 1.0e-8f) continue;
+                float sum_ep = 2.0f * m_grid[idx].plastic_strain;
+                float weight_sum = 2.0f;
+                for (int di = -1; di <= 1; ++di) {
+                    for (int dj = -1; dj <= 1; ++dj) {
+                        if (di == 0 && dj == 0) continue;
+                        int ni = i + di; int nj = j + dj;
+                        if (ni >= 0 && ni < m_nx && nj >= 0 && nj < m_ny) {
+                            int n_idx = ni * m_ny + nj;
+                            if (m_grid[n_idx].m > 1.0e-8f) {
+                                float w = 1.0f / static_cast<float>(std::abs(di) + std::abs(dj));
+                                sum_ep += w * m_grid[n_idx].plastic_strain;
+                                weight_sum += w;
+                            }
+                        }
+                    }
+                }
+                smoothed_ep[idx] = sum_ep / weight_sum;
+            }
+        }
+        for (size_t idx = 0; idx < m_grid.size(); ++idx) {
+            if (m_grid[idx].m > 1.0e-8f) {
+                m_grid[idx].plastic_strain = smoothed_ep[idx];
+            }
         }
     }
 }
@@ -323,8 +356,9 @@ void MPMSolver2D::updateGridKinematics(float dt) {
 }
 
 void MPMSolver2D::gridToParticle(float dt) {
-    float D_inv_x = 3.0f / (m_dx * m_dx);
-    float D_inv_y = 3.0f / (m_dy * m_dy);
+    float d_scale = (m_transfer_scheme == MPMTransferScheme::BSpline) ? 4.0f : 3.0f;
+    float D_inv_x = d_scale / (m_dx * m_dx);
+    float D_inv_y = d_scale / (m_dy * m_dy);
 
     float max_B = 5000.0f / std::min(m_dx, m_dy);
 
@@ -337,6 +371,7 @@ void MPMSolver2D::gridToParticle(float dt) {
         float v_flip_x = p.v[0];
         float v_flip_y = p.v[1];
         float weight_sum = 0.0f;
+        float ep_grid_sum = 0.0f;
 
         // Pass 1: Compute PIC interpolated velocity from active nodes
         for (int offset_i = -1; offset_i <= 2; ++offset_i) {
@@ -370,6 +405,7 @@ void MPMSolver2D::gridToParticle(float dt) {
                     v_pic_y += weight * node.v[1];
                     v_flip_x += weight * (node.v[0] - node.v_old[0]);
                     v_flip_y += weight * (node.v[1] - node.v_old[1]);
+                    ep_grid_sum += weight * node.plastic_strain;
                     weight_sum += weight;
                 }
             }
@@ -380,8 +416,9 @@ void MPMSolver2D::gridToParticle(float dt) {
             v_pic_y = p.v[1];
         }
 
-        // Pass 2: Compute APIC affine velocity matrix B_p from grid node velocities
+        // Pass 2: Compute APIC affine velocity matrix B_p and L_grad
         float B_new[2][2] = {{0.0f, 0.0f}, {0.0f, 0.0f}};
+        float L_new[2][2] = {{0.0f, 0.0f}, {0.0f, 0.0f}};
 
         for (int offset_i = -1; offset_i <= 2; ++offset_i) {
             int i = base_i + offset_i;
@@ -391,6 +428,10 @@ void MPMSolver2D::gridToParticle(float dt) {
             float Sx = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
                        evalGIMP_S(p.x[0], node_x, m_dx, p.lp[0]) :
                        std::max(0.0f, 1.0f - std::abs(p.x[0] - node_x) / m_dx);
+
+            float dSx = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
+                        evalGIMP_dS(p.x[0], node_x, m_dx, p.lp[0]) :
+                        (p.x[0] >= node_x ? -1.0f / m_dx : 1.0f / m_dx);
 
             if (std::abs(Sx) < 1.0e-7f) continue;
 
@@ -403,9 +444,16 @@ void MPMSolver2D::gridToParticle(float dt) {
                            evalGIMP_S(p.x[1], node_y, m_dy, p.lp[1]) :
                            std::max(0.0f, 1.0f - std::abs(p.x[1] - node_y) / m_dy);
 
+                float dSy = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
+                            evalGIMP_dS(p.x[1], node_y, m_dy, p.lp[1]) :
+                            (p.x[1] >= node_y ? -1.0f / m_dy : 1.0f / m_dy);
+
                 if (std::abs(Sy) < 1.0e-7f) continue;
 
                 float weight = Sx * Sy;
+                float dN_dx = dSx * Sy;
+                float dN_dy = Sx * dSy;
+
                 int node_idx = i * m_ny + j;
                 const auto& node = m_grid[node_idx];
 
@@ -413,10 +461,16 @@ void MPMSolver2D::gridToParticle(float dt) {
                     float dist_x = node_x - p.x[0];
                     float dist_y = node_y - p.x[1];
 
-                    B_new[0][0] += weight * node.v[0] * dist_x * D_inv_x;
-                    B_new[0][1] += weight * node.v[0] * dist_y * D_inv_y;
-                    B_new[1][0] += weight * node.v[1] * dist_x * D_inv_x;
-                    B_new[1][1] += weight * node.v[1] * dist_y * D_inv_y;
+                    float w_apic = 1.0f;
+                    B_new[0][0] += w_apic * weight * node.v[0] * dist_x * D_inv_x;
+                    B_new[0][1] += w_apic * weight * node.v[0] * dist_y * D_inv_y;
+                    B_new[1][0] += w_apic * weight * node.v[1] * dist_x * D_inv_x;
+                    B_new[1][1] += w_apic * weight * node.v[1] * dist_y * D_inv_y;
+
+                    L_new[0][0] += node.v[0] * dN_dx;
+                    L_new[0][1] += node.v[0] * dN_dy;
+                    L_new[1][0] += node.v[1] * dN_dx;
+                    L_new[1][1] += node.v[1] * dN_dy;
                 }
             }
         }
@@ -433,10 +487,15 @@ void MPMSolver2D::gridToParticle(float dt) {
         p.v[0] = std::clamp(target_vx, -5000.0f, 5000.0f);
         p.v[1] = std::clamp(target_vy, -5000.0f, 5000.0f);
 
-        p.B[0][0] = std::clamp(B_new[0][0], -max_B, max_B);
-        p.B[0][1] = std::clamp(B_new[0][1], -max_B, max_B);
-        p.B[1][0] = std::clamp(B_new[1][0], -max_B, max_B);
-        p.B[1][1] = std::clamp(B_new[1][1], -max_B, max_B);
+        p.B[0][0] = (m_velocity_scheme == MPMVelocityScheme::APIC) ? std::clamp(B_new[0][0], -max_B, max_B) : 0.0f;
+        p.B[0][1] = (m_velocity_scheme == MPMVelocityScheme::APIC) ? std::clamp(B_new[0][1], -max_B, max_B) : 0.0f;
+        p.B[1][0] = (m_velocity_scheme == MPMVelocityScheme::APIC) ? std::clamp(B_new[1][0], -max_B, max_B) : 0.0f;
+        p.B[1][1] = (m_velocity_scheme == MPMVelocityScheme::APIC) ? std::clamp(B_new[1][1], -max_B, max_B) : 0.0f;
+
+        p.L_grad[0][0] = std::clamp(L_new[0][0], -max_B, max_B);
+        p.L_grad[0][1] = std::clamp(L_new[0][1], -max_B, max_B);
+        p.L_grad[1][0] = std::clamp(L_new[1][0], -max_B, max_B);
+        p.L_grad[1][1] = std::clamp(L_new[1][1], -max_B, max_B);
 
         // Update Particle Position
         p.x[0] += dt * p.v[0];
@@ -472,10 +531,10 @@ void MPMSolver2D::gridToParticle(float dt) {
 
 void MPMSolver2D::updateStressState(float dt) {
     for (auto& p : m_particles) {
-        // For APIC, affine velocity matrix p.B represents velocity gradient L = grad(v)
+        // True velocity gradient L evaluated from exact shape function derivatives L_grad
         float L[2][2] = {
-            { p.B[0][0], p.B[0][1] },
-            { p.B[1][0], p.B[1][1] }
+            { p.L_grad[0][0], p.L_grad[0][1] },
+            { p.L_grad[1][0], p.L_grad[1][1] }
         };
 
         // Strain rate D = 0.5 * (L + L^T)

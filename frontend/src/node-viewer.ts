@@ -737,14 +737,14 @@ export class NodeViewer {
             paramKeys = (matModel === 'Johnson-Cook + Mie-Grüneisen') ? [...baseKeys, ...jcKeys] : baseKeys;
         } else if (node.type === 'MPMDomain2D') {
             const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
-            paramKeys = ['transfer_scheme', 'velocity_scheme'];
+            paramKeys = ['transfer_scheme', 'velocity_scheme', 'space_time_scheme', 'smooth_plastic_strain'];
             if (hasFLIP) {
                 paramKeys.push('flip_blend');
             }
             paramKeys.push('ppc', 'cfl');
         } else if (node.type === 'MPMDomain3D') {
             const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
-            paramKeys = ['device', 'transfer_scheme', 'velocity_scheme', 'space_time_scheme'];
+            paramKeys = ['device', 'transfer_scheme', 'velocity_scheme', 'space_time_scheme', 'smooth_plastic_strain'];
             if (hasFLIP) {
                 paramKeys.push('flip_blend');
             }
@@ -2283,7 +2283,7 @@ export class NodeViewer {
             'plot_stride': ['1', '2', '5', '10', '20', '50', '100'],
             'charge_shape': chargeShapeOptions,
             'material_type': ['Air', 'JWL Charge', 'Ideal Gas Charge'],
-            'transfer_scheme': ['GIMP', 'Standard', 'BSpline'],
+            'transfer_scheme': ['BSpline', 'GIMP', 'Standard'],
             'velocity_scheme': ['APIC', 'PIC', 'FLIP'],
             'shape_type': (node.type === 'MPMObject3D') ? ['Box', 'Sphere'] : ['Rectangle', 'Circle'],
             'coupling_mode': ['TwoWay_Full', 'OneWay_CFD_to_MPM', 'Disabled'],

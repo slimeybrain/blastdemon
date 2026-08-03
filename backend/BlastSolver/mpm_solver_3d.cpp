@@ -5,13 +5,16 @@ namespace Blast {
 MPMSolver3D::MPMSolver3D() {
 }
 
-void MPMSolver3D::initializeGrid(int nx, int ny, int nz, float dx, float dy, float dz) {
+void MPMSolver3D::initializeGrid(int nx, int ny, int nz, float dx, float dy, float dz, float xmin, float ymin, float zmin) {
     m_nx = nx;
     m_ny = ny;
     m_nz = nz;
     m_dx = dx;
     m_dy = dy;
     m_dz = dz;
+    m_xmin = xmin;
+    m_ymin = ymin;
+    m_zmin = zmin;
 
     m_grid.resize(static_cast<size_t>(m_nx) * m_ny * m_nz);
     m_particles.clear();
@@ -237,7 +240,7 @@ void MPMSolver3D::particleToGrid() {
         node.v[0] = 0.0f; node.v[1] = 0.0f; node.v[2] = 0.0f;
         node.v_old[0] = 0.0f; node.v_old[1] = 0.0f; node.v_old[2] = 0.0f;
         node.f_int[0] = 0.0f; node.f_int[1] = 0.0f; node.f_int[2] = 0.0f;
-        node.f_ext[0] = 0.0f; node.f_ext[1] = 0.0f; node.f_ext[2] = 0.0f;
+        // f_ext is maintained across P2G scatters and cleared only at step start if run_p2g is true
         node.von_mises = 0.0f;
         node.plastic_strain = 0.0f;
         node.density = 0.0f;
@@ -247,9 +250,13 @@ void MPMSolver3D::particleToGrid() {
 
     // P2G Scatter in 3D
     for (const auto& p : m_particles) {
-        int base_i = static_cast<int>(std::floor(p.x[0] / m_dx));
-        int base_j = static_cast<int>(std::floor(p.x[1] / m_dy));
-        int base_k = static_cast<int>(std::floor(p.x[2] / m_dz));
+        float px = p.x[0] - m_xmin;
+        float py = p.x[1] - m_ymin;
+        float pz = p.x[2] - m_zmin;
+
+        int base_i = static_cast<int>(std::floor(px / m_dx));
+        int base_j = static_cast<int>(std::floor(py / m_dy));
+        int base_k = static_cast<int>(std::floor(pz / m_dz));
 
         // Evaluate 3D Cauchy stress & Von Mises equivalent stress
         float s_xx = p.sigma[0][0]; float s_yy = p.sigma[1][1]; float s_zz = p.sigma[2][2];
@@ -273,14 +280,14 @@ void MPMSolver3D::particleToGrid() {
             float node_x = (static_cast<float>(i) + 0.5f) * m_dx;
 
             float Sx = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
-                       evalGIMP_S(p.x[0], node_x, m_dx, p.lp[0]) :
-                       ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_S(p.x[0], node_x, m_dx) :
-                       std::max(0.0f, 1.0f - std::abs(p.x[0] - node_x) / m_dx));
+                       evalGIMP_S(px, node_x, m_dx, p.lp[0]) :
+                       ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_S(px, node_x, m_dx) :
+                       std::max(0.0f, 1.0f - std::abs(px - node_x) / m_dx));
 
             float dSx = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
-                        evalGIMP_dS(p.x[0], node_x, m_dx, p.lp[0]) :
-                        ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_dS(p.x[0], node_x, m_dx) :
-                        (p.x[0] >= node_x ? -1.0f / m_dx : 1.0f / m_dx));
+                        evalGIMP_dS(px, node_x, m_dx, p.lp[0]) :
+                        ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_dS(px, node_x, m_dx) :
+                        (px >= node_x ? -1.0f / m_dx : 1.0f / m_dx));
 
             if (std::abs(Sx) < 1.0e-7f) continue;
 
@@ -290,14 +297,14 @@ void MPMSolver3D::particleToGrid() {
                 float node_y = (static_cast<float>(j) + 0.5f) * m_dy;
 
                 float Sy = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
-                           evalGIMP_S(p.x[1], node_y, m_dy, p.lp[1]) :
-                           ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_S(p.x[1], node_y, m_dy) :
-                           std::max(0.0f, 1.0f - std::abs(p.x[1] - node_y) / m_dy));
+                           evalGIMP_S(py, node_y, m_dy, p.lp[1]) :
+                           ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_S(py, node_y, m_dy) :
+                           std::max(0.0f, 1.0f - std::abs(py - node_y) / m_dy));
 
                 float dSy = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
-                            evalGIMP_dS(p.x[1], node_y, m_dy, p.lp[1]) :
-                            ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_dS(p.x[1], node_y, m_dy) :
-                            (p.x[1] >= node_y ? -1.0f / m_dy : 1.0f / m_dy));
+                            evalGIMP_dS(py, node_y, m_dy, p.lp[1]) :
+                            ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_dS(py, node_y, m_dy) :
+                            (py >= node_y ? -1.0f / m_dy : 1.0f / m_dy));
 
                 if (std::abs(Sy) < 1.0e-7f) continue;
 
@@ -307,14 +314,14 @@ void MPMSolver3D::particleToGrid() {
                     float node_z = (static_cast<float>(k) + 0.5f) * m_dz;
 
                     float Sz = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
-                               evalGIMP_S(p.x[2], node_z, m_dz, p.lp[2]) :
-                               ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_S(p.x[2], node_z, m_dz) :
-                               std::max(0.0f, 1.0f - std::abs(p.x[2] - node_z) / m_dz));
+                               evalGIMP_S(pz, node_z, m_dz, p.lp[2]) :
+                               ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_S(pz, node_z, m_dz) :
+                               std::max(0.0f, 1.0f - std::abs(pz - node_z) / m_dz));
 
                     float dSz = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
-                                evalGIMP_dS(p.x[2], node_z, m_dz, p.lp[2]) :
-                                ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_dS(p.x[2], node_z, m_dz) :
-                                (p.x[2] >= node_z ? -1.0f / m_dz : 1.0f / m_dz));
+                                evalGIMP_dS(pz, node_z, m_dz, p.lp[2]) :
+                                ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_dS(pz, node_z, m_dz) :
+                                (pz >= node_z ? -1.0f / m_dz : 1.0f / m_dz));
 
                     if (std::abs(Sz) < 1.0e-7f) continue;
 
@@ -329,14 +336,15 @@ void MPMSolver3D::particleToGrid() {
                     // Mass scatter
                     node.m += p.m * weight;
 
-                    // APIC Momentum scatter in 3D: p_node += m_p * S * (v_p + B_p * dist)
+                    // APIC Momentum scatter in 3D: p_node += m_p * S * (v_p + w_apic * B_p * dist)
                     float dist_x = node_x - p.x[0];
                     float dist_y = node_y - p.x[1];
                     float dist_z = node_z - p.x[2];
 
-                    float v_apic_x = p.v[0] + (p.B[0][0] * dist_x + p.B[0][1] * dist_y + p.B[0][2] * dist_z);
-                    float v_apic_y = p.v[1] + (p.B[1][0] * dist_x + p.B[1][1] * dist_y + p.B[1][2] * dist_z);
-                    float v_apic_z = p.v[2] + (p.B[2][0] * dist_x + p.B[2][1] * dist_y + p.B[2][2] * dist_z);
+                    float w_apic = 1.0f;
+                    float v_apic_x = p.v[0] + w_apic * (p.B[0][0] * dist_x + p.B[0][1] * dist_y + p.B[0][2] * dist_z);
+                    float v_apic_y = p.v[1] + w_apic * (p.B[1][0] * dist_x + p.B[1][1] * dist_y + p.B[1][2] * dist_z);
+                    float v_apic_z = p.v[2] + w_apic * (p.B[2][0] * dist_x + p.B[2][1] * dist_y + p.B[2][2] * dist_z);
 
                     node.p[0] += p.m * weight * v_apic_x;
                     node.p[1] += p.m * weight * v_apic_y;
@@ -366,6 +374,42 @@ void MPMSolver3D::particleToGrid() {
             node.density /= node.m;
             node.pressure /= node.m;
             node.damage /= node.m;
+        }
+    }
+
+    if (m_smooth_plastic_strain) {
+        std::vector<float> smoothed_ep(m_grid.size(), 0.0f);
+        for (int i = 0; i < m_nx; ++i) {
+            for (int j = 0; j < m_ny; ++j) {
+                for (int k = 0; k < m_nz; ++k) {
+                    size_t idx = (static_cast<size_t>(i) * m_ny + j) * m_nz + k;
+                    if (m_grid[idx].m <= 1.0e-8f) continue;
+                    float sum_ep = 2.0f * m_grid[idx].plastic_strain;
+                    float weight_sum = 2.0f;
+                    for (int di = -1; di <= 1; ++di) {
+                        for (int dj = -1; dj <= 1; ++dj) {
+                            for (int dk = -1; dk <= 1; ++dk) {
+                                if (di == 0 && dj == 0 && dk == 0) continue;
+                                int ni = i + di; int nj = j + dj; int nk = k + dk;
+                                if (ni >= 0 && ni < m_nx && nj >= 0 && nj < m_ny && nk >= 0 && nk < m_nz) {
+                                    size_t n_idx = (static_cast<size_t>(ni) * m_ny + nj) * m_nz + nk;
+                                    if (m_grid[n_idx].m > 1.0e-8f) {
+                                        float w = 1.0f / static_cast<float>(std::abs(di) + std::abs(dj) + std::abs(dk));
+                                        sum_ep += w * m_grid[n_idx].plastic_strain;
+                                        weight_sum += w;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    smoothed_ep[idx] = sum_ep / weight_sum;
+                }
+            }
+        }
+        for (size_t idx = 0; idx < m_grid.size(); ++idx) {
+            if (m_grid[idx].m > 1.0e-8f) {
+                m_grid[idx].plastic_strain = smoothed_ep[idx];
+            }
         }
     }
 }
@@ -435,31 +479,42 @@ void MPMSolver3D::updateGridKinematics(float dt) {
 }
 
 void MPMSolver3D::gridToParticle(float dt) {
-    float D_inv_x = 3.0f / (m_dx * m_dx);
-    float D_inv_y = 3.0f / (m_dy * m_dy);
-    float D_inv_z = 3.0f / (m_dz * m_dz);
+    float d_scale = (m_transfer_scheme == MPMTransferScheme::BSpline) ? 4.0f : 3.0f;
+    float D_inv_x = d_scale / (m_dx * m_dx);
+    float D_inv_y = d_scale / (m_dy * m_dy);
+    float D_inv_z = d_scale / (m_dz * m_dz);
 
     float max_B = 5000.0f / std::min({m_dx, m_dy, m_dz});
 
     for (auto& p : m_particles) {
-        int base_i = static_cast<int>(std::floor(p.x[0] / m_dx));
-        int base_j = static_cast<int>(std::floor(p.x[1] / m_dy));
-        int base_k = static_cast<int>(std::floor(p.x[2] / m_dz));
+        float px = p.x[0] - m_xmin;
+        float py = p.x[1] - m_ymin;
+        float pz = p.x[2] - m_zmin;
+
+        int base_i = static_cast<int>(std::floor(px / m_dx));
+        int base_j = static_cast<int>(std::floor(py / m_dy));
+        int base_k = static_cast<int>(std::floor(pz / m_dz));
 
         float v_pic_x = 0.0f; float v_pic_y = 0.0f; float v_pic_z = 0.0f;
         float v_flip_x = p.v[0]; float v_flip_y = p.v[1]; float v_flip_z = p.v[2];
         float weight_sum = 0.0f;
+        float ep_grid_sum = 0.0f;
 
-        // Pass 1: Interpolate PIC velocity
+        // Pass 1: Interpolate PIC velocity & smoothed plastic strain
         for (int offset_i = -1; offset_i <= 2; ++offset_i) {
             int i = base_i + offset_i;
             if (i < 0 || i >= m_nx) continue;
             float node_x = (static_cast<float>(i) + 0.5f) * m_dx;
 
             float Sx = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
-                       evalGIMP_S(p.x[0], node_x, m_dx, p.lp[0]) :
-                       ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_S(p.x[0], node_x, m_dx) :
-                       std::max(0.0f, 1.0f - std::abs(p.x[0] - node_x) / m_dx));
+                       evalGIMP_S(px, node_x, m_dx, p.lp[0]) :
+                       ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_S(px, node_x, m_dx) :
+                       std::max(0.0f, 1.0f - std::abs(px - node_x) / m_dx));
+
+            float dSx = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
+                        evalGIMP_dS(px, node_x, m_dx, p.lp[0]) :
+                        ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_dS(px, node_x, m_dx) :
+                        (px >= node_x ? -1.0f / m_dx : 1.0f / m_dx));
 
             if (std::abs(Sx) < 1.0e-7f) continue;
 
@@ -469,9 +524,14 @@ void MPMSolver3D::gridToParticle(float dt) {
                 float node_y = (static_cast<float>(j) + 0.5f) * m_dy;
 
                 float Sy = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
-                           evalGIMP_S(p.x[1], node_y, m_dy, p.lp[1]) :
-                           ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_S(p.x[1], node_y, m_dy) :
-                           std::max(0.0f, 1.0f - std::abs(p.x[1] - node_y) / m_dy));
+                           evalGIMP_S(py, node_y, m_dy, p.lp[1]) :
+                           ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_S(py, node_y, m_dy) :
+                           std::max(0.0f, 1.0f - std::abs(py - node_y) / m_dy));
+
+                float dSy = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
+                            evalGIMP_dS(py, node_y, m_dy, p.lp[1]) :
+                            ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_dS(py, node_y, m_dy) :
+                            (py >= node_y ? -1.0f / m_dy : 1.0f / m_dy));
 
                 if (std::abs(Sy) < 1.0e-7f) continue;
 
@@ -481,9 +541,14 @@ void MPMSolver3D::gridToParticle(float dt) {
                     float node_z = (static_cast<float>(k) + 0.5f) * m_dz;
 
                     float Sz = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
-                               evalGIMP_S(p.x[2], node_z, m_dz, p.lp[2]) :
-                               ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_S(p.x[2], node_z, m_dz) :
-                               std::max(0.0f, 1.0f - std::abs(p.x[2] - node_z) / m_dz));
+                               evalGIMP_S(pz, node_z, m_dz, p.lp[2]) :
+                               ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_S(pz, node_z, m_dz) :
+                               std::max(0.0f, 1.0f - std::abs(pz - node_z) / m_dz));
+
+                    float dSz = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
+                                evalGIMP_dS(pz, node_z, m_dz, p.lp[2]) :
+                                ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_dS(pz, node_z, m_dz) :
+                                (pz >= node_z ? -1.0f / m_dz : 1.0f / m_dz));
 
                     if (std::abs(Sz) < 1.0e-7f) continue;
 
@@ -498,6 +563,7 @@ void MPMSolver3D::gridToParticle(float dt) {
                         v_flip_x += weight * (node.v[0] - node.v_old[0]);
                         v_flip_y += weight * (node.v[1] - node.v_old[1]);
                         v_flip_z += weight * (node.v[2] - node.v_old[2]);
+                        ep_grid_sum += weight * node.plastic_strain;
                         weight_sum += weight;
                     }
                 }
@@ -508,8 +574,9 @@ void MPMSolver3D::gridToParticle(float dt) {
             v_pic_x = p.v[0]; v_pic_y = p.v[1]; v_pic_z = p.v[2];
         }
 
-        // Pass 2: APIC 3x3 affine velocity matrix B_p calculation
+        // Pass 2: APIC 3x3 affine velocity matrix B_p and spatial gradient L_grad calculation
         float B_new[3][3] = {{0,0,0},{0,0,0},{0,0,0}};
+        float L_new[3][3] = {{0,0,0},{0,0,0},{0,0,0}};
 
         for (int offset_i = -1; offset_i <= 2; ++offset_i) {
             int i = base_i + offset_i;
@@ -517,9 +584,14 @@ void MPMSolver3D::gridToParticle(float dt) {
             float node_x = (static_cast<float>(i) + 0.5f) * m_dx;
 
             float Sx = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
-                       evalGIMP_S(p.x[0], node_x, m_dx, p.lp[0]) :
-                       ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_S(p.x[0], node_x, m_dx) :
-                       std::max(0.0f, 1.0f - std::abs(p.x[0] - node_x) / m_dx));
+                       evalGIMP_S(px, node_x, m_dx, p.lp[0]) :
+                       ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_S(px, node_x, m_dx) :
+                       std::max(0.0f, 1.0f - std::abs(px - node_x) / m_dx));
+
+            float dSx = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
+                        evalGIMP_dS(px, node_x, m_dx, p.lp[0]) :
+                        ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_dS(px, node_x, m_dx) :
+                        (px >= node_x ? -1.0f / m_dx : 1.0f / m_dx));
 
             if (std::abs(Sx) < 1.0e-7f) continue;
 
@@ -529,9 +601,14 @@ void MPMSolver3D::gridToParticle(float dt) {
                 float node_y = (static_cast<float>(j) + 0.5f) * m_dy;
 
                 float Sy = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
-                           evalGIMP_S(p.x[1], node_y, m_dy, p.lp[1]) :
-                           ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_S(p.x[1], node_y, m_dy) :
-                           std::max(0.0f, 1.0f - std::abs(p.x[1] - node_y) / m_dy));
+                           evalGIMP_S(py, node_y, m_dy, p.lp[1]) :
+                           ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_S(py, node_y, m_dy) :
+                           std::max(0.0f, 1.0f - std::abs(py - node_y) / m_dy));
+
+                float dSy = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
+                            evalGIMP_dS(py, node_y, m_dy, p.lp[1]) :
+                            ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_dS(py, node_y, m_dy) :
+                            (py >= node_y ? -1.0f / m_dy : 1.0f / m_dy));
 
                 if (std::abs(Sy) < 1.0e-7f) continue;
 
@@ -541,32 +618,54 @@ void MPMSolver3D::gridToParticle(float dt) {
                     float node_z = (static_cast<float>(k) + 0.5f) * m_dz;
 
                     float Sz = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
-                               evalGIMP_S(p.x[2], node_z, m_dz, p.lp[2]) :
-                               ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_S(p.x[2], node_z, m_dz) :
-                               std::max(0.0f, 1.0f - std::abs(p.x[2] - node_z) / m_dz));
+                               evalGIMP_S(pz, node_z, m_dz, p.lp[2]) :
+                               ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_S(pz, node_z, m_dz) :
+                               std::max(0.0f, 1.0f - std::abs(pz - node_z) / m_dz));
+
+                    float dSz = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
+                                evalGIMP_dS(pz, node_z, m_dz, p.lp[2]) :
+                                ((m_transfer_scheme == MPMTransferScheme::BSpline) ? evalBSpline_dS(pz, node_z, m_dz) :
+                                (pz >= node_z ? -1.0f / m_dz : 1.0f / m_dz));
 
                     if (std::abs(Sz) < 1.0e-7f) continue;
 
                     float weight = Sx * Sy * Sz;
+                    float dN_dx = dSx * Sy * Sz;
+                    float dN_dy = Sx * dSy * Sz;
+                    float dN_dz = Sx * Sy * dSz;
+
                     size_t node_idx = (static_cast<size_t>(i) * m_ny + j) * m_nz + k;
                     const auto& node = m_grid[node_idx];
 
                     if (node.m > 1.0e-8f) {
-                        float dist_x = node_x - p.x[0];
-                        float dist_y = node_y - p.x[1];
-                        float dist_z = node_z - p.x[2];
+                        float dist_x = node_x - px;
+                        float dist_y = node_y - py;
+                        float dist_z = node_z - pz;
 
-                        B_new[0][0] += weight * node.v[0] * dist_x * D_inv_x;
-                        B_new[0][1] += weight * node.v[0] * dist_y * D_inv_y;
-                        B_new[0][2] += weight * node.v[0] * dist_z * D_inv_z;
+                        float w_apic = 1.0f;
+                        B_new[0][0] += w_apic * weight * node.v[0] * dist_x * D_inv_x;
+                        B_new[0][1] += w_apic * weight * node.v[0] * dist_y * D_inv_y;
+                        B_new[0][2] += w_apic * weight * node.v[0] * dist_z * D_inv_z;
 
-                        B_new[1][0] += weight * node.v[1] * dist_x * D_inv_x;
-                        B_new[1][1] += weight * node.v[1] * dist_y * D_inv_y;
-                        B_new[1][2] += weight * node.v[1] * dist_z * D_inv_z;
+                        B_new[1][0] += w_apic * weight * node.v[1] * dist_x * D_inv_x;
+                        B_new[1][1] += w_apic * weight * node.v[1] * dist_y * D_inv_y;
+                        B_new[1][2] += w_apic * weight * node.v[1] * dist_z * D_inv_z;
 
-                        B_new[2][0] += weight * node.v[2] * dist_x * D_inv_x;
-                        B_new[2][1] += weight * node.v[2] * dist_y * D_inv_y;
-                        B_new[2][2] += weight * node.v[2] * dist_z * D_inv_z;
+                        B_new[2][0] += w_apic * weight * node.v[2] * dist_x * D_inv_x;
+                        B_new[2][1] += w_apic * weight * node.v[2] * dist_y * D_inv_y;
+                        B_new[2][2] += w_apic * weight * node.v[2] * dist_z * D_inv_z;
+
+                        L_new[0][0] += node.v[0] * dN_dx;
+                        L_new[0][1] += node.v[0] * dN_dy;
+                        L_new[0][2] += node.v[0] * dN_dz;
+
+                        L_new[1][0] += node.v[1] * dN_dx;
+                        L_new[1][1] += node.v[1] * dN_dy;
+                        L_new[1][2] += node.v[1] * dN_dz;
+
+                        L_new[2][0] += node.v[2] * dN_dx;
+                        L_new[2][1] += node.v[2] * dN_dy;
+                        L_new[2][2] += node.v[2] * dN_dz;
                     }
                 }
             }
@@ -587,10 +686,10 @@ void MPMSolver3D::gridToParticle(float dt) {
         p.v[1] = std::clamp(target_vy, -5000.0f, 5000.0f);
         p.v[2] = std::clamp(target_vz, -5000.0f, 5000.0f);
 
-        // Store particle velocity gradient B_p = grad(v) for constitutive stress update
         for (int r = 0; r < 3; ++r) {
             for (int c = 0; c < 3; ++c) {
-                p.B[r][c] = std::clamp(B_new[r][c], -max_B, max_B);
+                p.B[r][c] = (m_velocity_scheme == MPMVelocityScheme::APIC) ? std::clamp(B_new[r][c], -max_B, max_B) : 0.0f;
+                p.L_grad[r][c] = std::clamp(L_new[r][c], -max_B, max_B);
             }
         }
 
@@ -600,9 +699,9 @@ void MPMSolver3D::gridToParticle(float dt) {
         p.x[2] += dt * p.v[2];
 
         // Domain Boundary Clamping
-        float min_x = 1.5f * m_dx; float max_x = (static_cast<float>(m_nx) - 1.5f) * m_dx;
-        float min_y = 1.5f * m_dy; float max_y = (static_cast<float>(m_ny) - 1.5f) * m_dy;
-        float min_z = 1.5f * m_dz; float max_z = (static_cast<float>(m_nz) - 1.5f) * m_dz;
+        float min_x = m_xmin + 1.5f * m_dx; float max_x = m_xmin + (static_cast<float>(m_nx) - 1.5f) * m_dx;
+        float min_y = m_ymin + 1.5f * m_dy; float max_y = m_ymin + (static_cast<float>(m_ny) - 1.5f) * m_dy;
+        float min_z = m_zmin + 1.5f * m_dz; float max_z = m_zmin + (static_cast<float>(m_nz) - 1.5f) * m_dz;
 
         if (p.x[0] < min_x) { p.x[0] = min_x; if (p.v[0] < 0) p.v[0] = 0; }
         else if (p.x[0] > max_x) { p.x[0] = max_x; if (p.v[0] > 0) p.v[0] = 0; }
@@ -618,14 +717,12 @@ void MPMSolver3D::gridToParticle(float dt) {
 void MPMSolver3D::updateStressState(float dt) {
     for (auto& p : m_particles) {
         // Fully failed particles: erase stress and APIC affine matrix.
-        // This prevents failed debris from elastically coupling back to intact material
-        // and the penetrator, which is the primary source of CFL-dependence in the
-        // penetration result. Failed particles still carry mass and momentum.
-        // Velocity gradient L = B_p (1/s, via D_inv absorbed into B)
+        // This prevents failed debris from elastically coupling back to intact material.
+        // Velocity gradient L evaluated from exact shape function derivatives L_grad
         float L[3][3];
         for (int r = 0; r < 3; ++r)
             for (int c = 0; c < 3; ++c)
-                L[r][c] = p.B[r][c];
+                L[r][c] = p.L_grad[r][c];
 
         // Symmetric strain increment D*dt and spin tensor W
         float deps[3][3], W[3][3];
@@ -636,14 +733,18 @@ void MPMSolver3D::updateStressState(float dt) {
             }
         const float tr_deps = deps[0][0] + deps[1][1] + deps[2][2];
 
+        p.V = std::clamp(p.V * (1.0f + tr_deps), 0.1f * p.V0, 10.0f * p.V0);
+        if (m_transfer_scheme == MPMTransferScheme::GIMP) {
+            float lp_val = 0.5f * std::cbrt(p.V);
+            p.lp[0] = lp_val; p.lp[1] = lp_val; p.lp[2] = lp_val;
+        }
+
         // --- Option B: Granular Coulomb Debris Model for Eroded/Failed Particles ---
         if (p.has_failed) {
             p.damage = 1.0f;
             for (int r = 0; r < 3; ++r)
                 for (int c = 0; c < 3; ++c)
                     p.B[r][c] = 0.0f; // Zero affine velocity gradient to eliminate elastic coupling
-
-            p.V = std::clamp(p.V * (1.0f + tr_deps), 0.1f * p.V0, 10.0f * p.V0);
 
             // 1. Bulk Pressure from Volumetric Compression J = V / V0
             const float J = p.V / (p.V0 > 1.0e-12f ? p.V0 : 1.0e-12f);
@@ -968,6 +1069,9 @@ void MPMSolver3D::stepWithDt(float dt, bool run_p2g) {
         // --- 2nd-Order Midpoint RK2 Scheme ---
         // 1. Predictor Stage (Half-step dt/2)
         if (run_p2g) {
+            for (auto& node : m_grid) {
+                node.f_ext[0] = 0.0f; node.f_ext[1] = 0.0f; node.f_ext[2] = 0.0f;
+            }
             particleToGrid();
         }
         updateGridKinematics(0.5f * dt);
@@ -984,6 +1088,9 @@ void MPMSolver3D::stepWithDt(float dt, bool run_p2g) {
     } else {
         // --- 1st-Order USL / USF ---
         if (run_p2g) {
+            for (auto& node : m_grid) {
+                node.f_ext[0] = 0.0f; node.f_ext[1] = 0.0f; node.f_ext[2] = 0.0f;
+            }
             particleToGrid();
         }
         

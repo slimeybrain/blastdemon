@@ -1824,20 +1824,22 @@ export class StateManager {
             },
             'MPMDomain2D': {
                 precision: 'single',
-                transfer_scheme: 'GIMP',
+                transfer_scheme: 'BSpline',
                 velocity_scheme: 'APIC',
                 space_time_scheme: 'RK2',
                 flip_blend: 0.95,
+                smooth_plastic_strain: true,
                 ppc: 4,
                 cfl: 0.3
             },
             'MPMDomain3D': {
                 device: 'cpu',
                 precision: 'single',
-                transfer_scheme: 'GIMP',
+                transfer_scheme: 'BSpline',
                 velocity_scheme: 'APIC',
                 space_time_scheme: 'RK2',
                 flip_blend: 0.95,
+                smooth_plastic_strain: true,
                 ppc: 8,
                 cfl: 0.3
             },

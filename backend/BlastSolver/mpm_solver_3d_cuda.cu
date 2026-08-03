@@ -58,18 +58,43 @@ __device__ inline float evalBSpline_dS_dev(float x_p, float x_i, float h) {
     return 0.0f;
 }
 
+// Clear previously active grid nodes kernel
+__global__ void kernel_clear_active_nodes_3d(MPMGridNode3D* grid, const int* active_nodes, int num_active) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_active) return;
+    int node_idx = active_nodes[idx];
+    MPMGridNode3D& node = grid[node_idx];
+    node.m = 0.0f;
+    node.p[0] = 0.0f; node.p[1] = 0.0f; node.p[2] = 0.0f;
+    node.v[0] = 0.0f; node.v[1] = 0.0f; node.v[2] = 0.0f;
+    node.v_old[0] = 0.0f; node.v_old[1] = 0.0f; node.v_old[2] = 0.0f;
+    node.f_int[0] = 0.0f; node.f_int[1] = 0.0f; node.f_int[2] = 0.0f;
+    node.f_ext[0] = 0.0f; node.f_ext[1] = 0.0f; node.f_ext[2] = 0.0f;
+    node.von_mises = 0.0f;
+    node.plastic_strain = 0.0f;
+    node.density = 0.0f;
+    node.pressure = 0.0f;
+    node.damage = 0.0f;
+}
+
 // 1. P2G Scatter Kernel
 __global__ void kernel_p2g_3d(const MPMParticle3D* particles, int num_particles,
                               MPMGridNode3D* grid, int nx, int ny, int nz,
-                              float dx, float dy, float dz, int transfer_scheme) {
+                              float dx, float dy, float dz, int transfer_scheme,
+                              float xmin, float ymin, float zmin,
+                              int* d_active_nodes, int* d_num_active_nodes) {
     int p_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (p_idx >= num_particles) return;
 
     const MPMParticle3D& p = particles[p_idx];
 
-    int base_i = static_cast<int>(floorf(p.x[0] / dx));
-    int base_j = static_cast<int>(floorf(p.x[1] / dy));
-    int base_k = static_cast<int>(floorf(p.x[2] / dz));
+    float px = p.x[0] - xmin;
+    float py = p.x[1] - ymin;
+    float pz = p.x[2] - zmin;
+
+    int base_i = static_cast<int>(floorf(px / dx));
+    int base_j = static_cast<int>(floorf(py / dy));
+    int base_k = static_cast<int>(floorf(pz / dz));
 
     float s_xx = p.sigma[0][0]; float s_yy = p.sigma[1][1]; float s_zz = p.sigma[2][2];
     float s_xy = p.sigma[0][1]; float s_yz = p.sigma[1][2]; float s_zx = p.sigma[2][0];
@@ -86,13 +111,13 @@ __global__ void kernel_p2g_3d(const MPMParticle3D* particles, int num_particles,
         if (i < 0 || i >= nx) continue;
         float node_x = (static_cast<float>(i) + 0.5f) * dx;
 
-        float Sx = (transfer_scheme == 1) ? evalGIMP_S_dev(p.x[0], node_x, dx, p.lp[0]) :
-                   ((transfer_scheme == 2) ? evalBSpline_S_dev(p.x[0], node_x, dx) :
-                   fmaxf(0.0f, 1.0f - fabsf(p.x[0] - node_x) / dx));
+        float Sx = (transfer_scheme == 1) ? evalGIMP_S_dev(px, node_x, dx, p.lp[0]) :
+                   ((transfer_scheme == 2) ? evalBSpline_S_dev(px, node_x, dx) :
+                   fmaxf(0.0f, 1.0f - fabsf(px - node_x) / dx));
 
-        float dSx = (transfer_scheme == 1) ? evalGIMP_dS_dev(p.x[0], node_x, dx, p.lp[0]) :
-                    ((transfer_scheme == 2) ? evalBSpline_dS_dev(p.x[0], node_x, dx) :
-                    (p.x[0] >= node_x ? -1.0f / dx : 1.0f / dx));
+        float dSx = (transfer_scheme == 1) ? evalGIMP_dS_dev(px, node_x, dx, p.lp[0]) :
+                    ((transfer_scheme == 2) ? evalBSpline_dS_dev(px, node_x, dx) :
+                    (px >= node_x ? -1.0f / dx : 1.0f / dx));
 
         if (fabsf(Sx) < 1.0e-7f) continue;
 
@@ -101,13 +126,13 @@ __global__ void kernel_p2g_3d(const MPMParticle3D* particles, int num_particles,
             if (j < 0 || j >= ny) continue;
             float node_y = (static_cast<float>(j) + 0.5f) * dy;
 
-            float Sy = (transfer_scheme == 1) ? evalGIMP_S_dev(p.x[1], node_y, dy, p.lp[1]) :
-                       ((transfer_scheme == 2) ? evalBSpline_S_dev(p.x[1], node_y, dy) :
-                       fmaxf(0.0f, 1.0f - fabsf(p.x[1] - node_y) / dy));
+            float Sy = (transfer_scheme == 1) ? evalGIMP_S_dev(py, node_y, dy, p.lp[1]) :
+                       ((transfer_scheme == 2) ? evalBSpline_S_dev(py, node_y, dy) :
+                       fmaxf(0.0f, 1.0f - fabsf(py - node_y) / dy));
 
-            float dSy = (transfer_scheme == 1) ? evalGIMP_dS_dev(p.x[1], node_y, dy, p.lp[1]) :
-                        ((transfer_scheme == 2) ? evalBSpline_dS_dev(p.x[1], node_y, dy) :
-                        (p.x[1] >= node_y ? -1.0f / dy : 1.0f / dy));
+            float dSy = (transfer_scheme == 1) ? evalGIMP_dS_dev(py, node_y, dy, p.lp[1]) :
+                        ((transfer_scheme == 2) ? evalBSpline_dS_dev(py, node_y, dy) :
+                        (py >= node_y ? -1.0f / dy : 1.0f / dy));
 
             if (fabsf(Sy) < 1.0e-7f) continue;
 
@@ -116,13 +141,13 @@ __global__ void kernel_p2g_3d(const MPMParticle3D* particles, int num_particles,
                 if (k < 0 || k >= nz) continue;
                 float node_z = (static_cast<float>(k) + 0.5f) * dz;
 
-                float Sz = (transfer_scheme == 1) ? evalGIMP_S_dev(p.x[2], node_z, dz, p.lp[2]) :
-                           ((transfer_scheme == 2) ? evalBSpline_S_dev(p.x[2], node_z, dz) :
-                           fmaxf(0.0f, 1.0f - fabsf(p.x[2] - node_z) / dz));
+                float Sz = (transfer_scheme == 1) ? evalGIMP_S_dev(pz, node_z, dz, p.lp[2]) :
+                           ((transfer_scheme == 2) ? evalBSpline_S_dev(pz, node_z, dz) :
+                           fmaxf(0.0f, 1.0f - fabsf(pz - node_z) / dz));
 
-                float dSz = (transfer_scheme == 1) ? evalGIMP_dS_dev(p.x[2], node_z, dz, p.lp[2]) :
-                            ((transfer_scheme == 2) ? evalBSpline_dS_dev(p.x[2], node_z, dz) :
-                            (p.x[2] >= node_z ? -1.0f / dz : 1.0f / dz));
+                float dSz = (transfer_scheme == 1) ? evalGIMP_dS_dev(pz, node_z, dz, p.lp[2]) :
+                            ((transfer_scheme == 2) ? evalBSpline_dS_dev(pz, node_z, dz) :
+                            (pz >= node_z ? -1.0f / dz : 1.0f / dz));
 
                 if (fabsf(Sz) < 1.0e-7f) continue;
 
@@ -134,15 +159,20 @@ __global__ void kernel_p2g_3d(const MPMParticle3D* particles, int num_particles,
                 size_t node_idx = (static_cast<size_t>(i) * ny + j) * nz + k;
                 MPMGridNode3D* node = &grid[node_idx];
 
-                atomicAdd(&node->m, p.m * weight);
+                float old_m = atomicAdd(&node->m, p.m * weight);
+                if (old_m == 0.0f && d_active_nodes && d_num_active_nodes) {
+                    int pos = atomicAdd(d_num_active_nodes, 1);
+                    d_active_nodes[pos] = static_cast<int>(node_idx);
+                }
 
-                float dist_x = node_x - p.x[0];
-                float dist_y = node_y - p.x[1];
-                float dist_z = node_z - p.x[2];
+                float dist_x = node_x - px;
+                float dist_y = node_y - py;
+                float dist_z = node_z - pz;
 
-                float v_apic_x = p.v[0] + (p.B[0][0] * dist_x + p.B[0][1] * dist_y + p.B[0][2] * dist_z);
-                float v_apic_y = p.v[1] + (p.B[1][0] * dist_x + p.B[1][1] * dist_y + p.B[1][2] * dist_z);
-                float v_apic_z = p.v[2] + (p.B[2][0] * dist_x + p.B[2][1] * dist_y + p.B[2][2] * dist_z);
+                float w_apic = 1.0f;
+                float v_apic_x = p.v[0] + w_apic * (p.B[0][0] * dist_x + p.B[0][1] * dist_y + p.B[0][2] * dist_z);
+                float v_apic_y = p.v[1] + w_apic * (p.B[1][0] * dist_x + p.B[1][1] * dist_y + p.B[1][2] * dist_z);
+                float v_apic_z = p.v[2] + w_apic * (p.B[2][0] * dist_x + p.B[2][1] * dist_y + p.B[2][2] * dist_z);
 
                 atomicAdd(&node->p[0], p.m * weight * v_apic_x);
                 atomicAdd(&node->p[1], p.m * weight * v_apic_y);
@@ -227,32 +257,79 @@ __global__ void kernel_grid_update_3d(MPMGridNode3D* grid, int num_nodes, int nx
     }
 }
 
-// 3. G2P Gather Kernel
+__global__ void kernel_smooth_plastic_strain_3d(const MPMGridNode3D* grid_in, MPMGridNode3D* grid_out, int nx, int ny, int nz) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int num_nodes = nx * ny * nz;
+    if (idx >= num_nodes) return;
+
+    grid_out[idx].plastic_strain = grid_in[idx].plastic_strain;
+    if (grid_in[idx].m <= 1.0e-8f) return;
+
+    int k = idx % nz;
+    int j = (idx / nz) % ny;
+    int i = idx / (ny * nz);
+
+    float sum_ep = 2.0f * grid_in[idx].plastic_strain;
+    float weight_sum = 2.0f;
+
+    for (int di = -1; di <= 1; ++di) {
+        for (int dj = -1; dj <= 1; ++dj) {
+            for (int dk = -1; dk <= 1; ++dk) {
+                if (di == 0 && dj == 0 && dk == 0) continue;
+                int ni = i + di; int nj = j + dj; int nk = k + dk;
+                if (ni >= 0 && ni < nx && nj >= 0 && nj < ny && nk >= 0 && nk < nz) {
+                    size_t n_idx = (static_cast<size_t>(ni) * ny + nj) * nz + nk;
+                    if (grid_in[n_idx].m > 1.0e-8f) {
+                        float w = 1.0f / static_cast<float>(abs(di) + abs(dj) + abs(dk));
+                        sum_ep += w * grid_in[n_idx].plastic_strain;
+                        weight_sum += w;
+                    }
+                }
+            }
+        }
+    }
+    grid_out[idx].plastic_strain = sum_ep / weight_sum;
+}
+
+__global__ void kernel_copy_smoothed_plastic_strain_3d(MPMGridNode3D* grid_in, const MPMGridNode3D* grid_out, int num_nodes) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_nodes) return;
+    if (grid_in[idx].m > 1.0e-8f) {
+        grid_in[idx].plastic_strain = grid_out[idx].plastic_strain;
+    }
+}
+
 __global__ void kernel_g2p_3d(MPMParticle3D* particles, int num_particles,
                               const MPMGridNode3D* grid, int nx, int ny, int nz,
                               float dx, float dy, float dz, float dt, int transfer_scheme,
-                              int velocity_scheme, float flip_blend) {
+                              int velocity_scheme, float flip_blend,
+                              float xmin, float ymin, float zmin) {
     int p_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (p_idx >= num_particles) return;
 
     MPMParticle3D& p = particles[p_idx];
 
-    int base_i = static_cast<int>(floorf(p.x[0] / dx));
-    int base_j = static_cast<int>(floorf(p.x[1] / dy));
-    int base_k = static_cast<int>(floorf(p.x[2] / dz));
+    float px = p.x[0] - xmin;
+    float py = p.x[1] - ymin;
+    float pz = p.x[2] - zmin;
+
+    int base_i = static_cast<int>(floorf(px / dx));
+    int base_j = static_cast<int>(floorf(py / dy));
+    int base_k = static_cast<int>(floorf(pz / dz));
 
     float v_pic_x = 0.0f; float v_pic_y = 0.0f; float v_pic_z = 0.0f;
     float v_flip_x = p.v[0]; float v_flip_y = p.v[1]; float v_flip_z = p.v[2];
     float weight_sum = 0.0f;
+    float ep_grid_sum = 0.0f;
 
     for (int offset_i = -1; offset_i <= 2; ++offset_i) {
         int i = base_i + offset_i;
         if (i < 0 || i >= nx) continue;
         float node_x = (static_cast<float>(i) + 0.5f) * dx;
 
-        float Sx = (transfer_scheme == 1) ? evalGIMP_S_dev(p.x[0], node_x, dx, p.lp[0]) :
-                   ((transfer_scheme == 2) ? evalBSpline_S_dev(p.x[0], node_x, dx) :
-                   fmaxf(0.0f, 1.0f - fabsf(p.x[0] - node_x) / dx));
+        float Sx = (transfer_scheme == 1) ? evalGIMP_S_dev(px, node_x, dx, p.lp[0]) :
+                   ((transfer_scheme == 2) ? evalBSpline_S_dev(px, node_x, dx) :
+                   fmaxf(0.0f, 1.0f - fabsf(px - node_x) / dx));
 
         if (fabsf(Sx) < 1.0e-7f) continue;
 
@@ -261,9 +338,9 @@ __global__ void kernel_g2p_3d(MPMParticle3D* particles, int num_particles,
             if (j < 0 || j >= ny) continue;
             float node_y = (static_cast<float>(j) + 0.5f) * dy;
 
-            float Sy = (transfer_scheme == 1) ? evalGIMP_S_dev(p.x[1], node_y, dy, p.lp[1]) :
-                       ((transfer_scheme == 2) ? evalBSpline_S_dev(p.x[1], node_y, dy) :
-                       fmaxf(0.0f, 1.0f - fabsf(p.x[1] - node_y) / dy));
+            float Sy = (transfer_scheme == 1) ? evalGIMP_S_dev(py, node_y, dy, p.lp[1]) :
+                       ((transfer_scheme == 2) ? evalBSpline_S_dev(py, node_y, dy) :
+                       fmaxf(0.0f, 1.0f - fabsf(py - node_y) / dy));
 
             if (fabsf(Sy) < 1.0e-7f) continue;
 
@@ -272,9 +349,9 @@ __global__ void kernel_g2p_3d(MPMParticle3D* particles, int num_particles,
                 if (k < 0 || k >= nz) continue;
                 float node_z = (static_cast<float>(k) + 0.5f) * dz;
 
-                float Sz = (transfer_scheme == 1) ? evalGIMP_S_dev(p.x[2], node_z, dz, p.lp[2]) :
-                           ((transfer_scheme == 2) ? evalBSpline_S_dev(p.x[2], node_z, dz) :
-                           fmaxf(0.0f, 1.0f - fabsf(p.x[2] - node_z) / dz));
+                float Sz = (transfer_scheme == 1) ? evalGIMP_S_dev(pz, node_z, dz, p.lp[2]) :
+                           ((transfer_scheme == 2) ? evalBSpline_S_dev(pz, node_z, dz) :
+                           fmaxf(0.0f, 1.0f - fabsf(pz - node_z) / dz));
 
                 if (fabsf(Sz) < 1.0e-7f) continue;
 
@@ -289,6 +366,7 @@ __global__ void kernel_g2p_3d(MPMParticle3D* particles, int num_particles,
                     v_flip_x += weight * (node.v[0] - node.v_old[0]);
                     v_flip_y += weight * (node.v[1] - node.v_old[1]);
                     v_flip_z += weight * (node.v[2] - node.v_old[2]);
+                    ep_grid_sum += weight * node.plastic_strain;
                     weight_sum += weight;
                 }
             }
@@ -299,22 +377,28 @@ __global__ void kernel_g2p_3d(MPMParticle3D* particles, int num_particles,
         v_pic_x = p.v[0]; v_pic_y = p.v[1]; v_pic_z = p.v[2];
     }
 
-    // APIC B_p computation
-    float D_inv_x = 3.0f / (dx * dx);
-    float D_inv_y = 3.0f / (dy * dy);
-    float D_inv_z = 3.0f / (dz * dz);
+    // APIC B_p & L_grad computation
+    float d_scale = (transfer_scheme == 2) ? 4.0f : 3.0f;
+    float D_inv_x = d_scale / (dx * dx);
+    float D_inv_y = d_scale / (dy * dy);
+    float D_inv_z = d_scale / (dz * dz);
     float max_B = 5000.0f / fminf(fminf(dx, dy), dz);
 
     float B_new[3][3] = {{0,0,0},{0,0,0},{0,0,0}};
+    float L_new[3][3] = {{0,0,0},{0,0,0},{0,0,0}};
 
     for (int offset_i = -1; offset_i <= 2; ++offset_i) {
         int i = base_i + offset_i;
         if (i < 0 || i >= nx) continue;
         float node_x = (static_cast<float>(i) + 0.5f) * dx;
 
-        float Sx = (transfer_scheme == 1) ? evalGIMP_S_dev(p.x[0], node_x, dx, p.lp[0]) :
-                   ((transfer_scheme == 2) ? evalBSpline_S_dev(p.x[0], node_x, dx) :
-                   fmaxf(0.0f, 1.0f - fabsf(p.x[0] - node_x) / dx));
+        float Sx = (transfer_scheme == 1) ? evalGIMP_S_dev(px, node_x, dx, p.lp[0]) :
+                   ((transfer_scheme == 2) ? evalBSpline_S_dev(px, node_x, dx) :
+                   fmaxf(0.0f, 1.0f - fabsf(px - node_x) / dx));
+
+        float dSx = (transfer_scheme == 1) ? evalGIMP_dS_dev(px, node_x, dx, p.lp[0]) :
+                    ((transfer_scheme == 2) ? evalBSpline_dS_dev(px, node_x, dx) :
+                    (px >= node_x ? -1.0f / dx : 1.0f / dx));
 
         if (fabsf(Sx) < 1.0e-7f) continue;
 
@@ -323,9 +407,13 @@ __global__ void kernel_g2p_3d(MPMParticle3D* particles, int num_particles,
             if (j < 0 || j >= ny) continue;
             float node_y = (static_cast<float>(j) + 0.5f) * dy;
 
-            float Sy = (transfer_scheme == 1) ? evalGIMP_S_dev(p.x[1], node_y, dy, p.lp[1]) :
-                       ((transfer_scheme == 2) ? evalBSpline_S_dev(p.x[1], node_y, dy) :
-                       fmaxf(0.0f, 1.0f - fabsf(p.x[1] - node_y) / dy));
+            float Sy = (transfer_scheme == 1) ? evalGIMP_S_dev(py, node_y, dy, p.lp[1]) :
+                       ((transfer_scheme == 2) ? evalBSpline_S_dev(py, node_y, dy) :
+                       fmaxf(0.0f, 1.0f - fabsf(py - node_y) / dy));
+
+            float dSy = (transfer_scheme == 1) ? evalGIMP_dS_dev(py, node_y, dy, p.lp[1]) :
+                        ((transfer_scheme == 2) ? evalBSpline_dS_dev(py, node_y, dy) :
+                        (py >= node_y ? -1.0f / dy : 1.0f / dy));
 
             if (fabsf(Sy) < 1.0e-7f) continue;
 
@@ -334,32 +422,53 @@ __global__ void kernel_g2p_3d(MPMParticle3D* particles, int num_particles,
                 if (k < 0 || k >= nz) continue;
                 float node_z = (static_cast<float>(k) + 0.5f) * dz;
 
-                float Sz = (transfer_scheme == 1) ? evalGIMP_S_dev(p.x[2], node_z, dz, p.lp[2]) :
-                           ((transfer_scheme == 2) ? evalBSpline_S_dev(p.x[2], node_z, dz) :
-                           fmaxf(0.0f, 1.0f - fabsf(p.x[2] - node_z) / dz));
+                float Sz = (transfer_scheme == 1) ? evalGIMP_S_dev(pz, node_z, dz, p.lp[2]) :
+                           ((transfer_scheme == 2) ? evalBSpline_S_dev(pz, node_z, dz) :
+                           fmaxf(0.0f, 1.0f - fabsf(pz - node_z) / dz));
+
+                float dSz = (transfer_scheme == 1) ? evalGIMP_dS_dev(pz, node_z, dz, p.lp[2]) :
+                            ((transfer_scheme == 2) ? evalBSpline_dS_dev(pz, node_z, dz) :
+                            (pz >= node_z ? -1.0f / dz : 1.0f / dz));
 
                 if (fabsf(Sz) < 1.0e-7f) continue;
 
                 float weight = Sx * Sy * Sz;
+                float dN_dx = dSx * Sy * Sz;
+                float dN_dy = Sx * dSy * Sz;
+                float dN_dz = Sx * Sy * dSz;
+
                 size_t node_idx = (static_cast<size_t>(i) * ny + j) * nz + k;
                 const MPMGridNode3D& node = grid[node_idx];
 
                 if (node.m > 1.0e-8f) {
-                    float dist_x = node_x - p.x[0];
-                    float dist_y = node_y - p.x[1];
-                    float dist_z = node_z - p.x[2];
+                    float dist_x = node_x - px;
+                    float dist_y = node_y - py;
+                    float dist_z = node_z - pz;
 
-                    B_new[0][0] += weight * node.v[0] * dist_x * D_inv_x;
-                    B_new[0][1] += weight * node.v[0] * dist_y * D_inv_y;
-                    B_new[0][2] += weight * node.v[0] * dist_z * D_inv_z;
+                    float w_apic = 1.0f;
+                    B_new[0][0] += w_apic * weight * node.v[0] * dist_x * D_inv_x;
+                    B_new[0][1] += w_apic * weight * node.v[0] * dist_y * D_inv_y;
+                    B_new[0][2] += w_apic * weight * node.v[0] * dist_z * D_inv_z;
 
-                    B_new[1][0] += weight * node.v[1] * dist_x * D_inv_x;
-                    B_new[1][1] += weight * node.v[1] * dist_y * D_inv_y;
-                    B_new[1][2] += weight * node.v[1] * dist_z * D_inv_z;
+                    B_new[1][0] += w_apic * weight * node.v[1] * dist_x * D_inv_x;
+                    B_new[1][1] += w_apic * weight * node.v[1] * dist_y * D_inv_y;
+                    B_new[1][2] += w_apic * weight * node.v[1] * dist_z * D_inv_z;
 
-                    B_new[2][0] += weight * node.v[2] * dist_x * D_inv_x;
-                    B_new[2][1] += weight * node.v[2] * dist_y * D_inv_y;
-                    B_new[2][2] += weight * node.v[2] * dist_z * D_inv_z;
+                    B_new[2][0] += w_apic * weight * node.v[2] * dist_x * D_inv_x;
+                    B_new[2][1] += w_apic * weight * node.v[2] * dist_y * D_inv_y;
+                    B_new[2][2] += w_apic * weight * node.v[2] * dist_z * D_inv_z;
+
+                    L_new[0][0] += node.v[0] * dN_dx;
+                    L_new[0][1] += node.v[0] * dN_dy;
+                    L_new[0][2] += node.v[0] * dN_dz;
+
+                    L_new[1][0] += node.v[1] * dN_dx;
+                    L_new[1][1] += node.v[1] * dN_dy;
+                    L_new[1][2] += node.v[1] * dN_dz;
+
+                    L_new[2][0] += node.v[2] * dN_dx;
+                    L_new[2][1] += node.v[2] * dN_dy;
+                    L_new[2][2] += node.v[2] * dN_dz;
                 }
             }
         }
@@ -383,7 +492,8 @@ __global__ void kernel_g2p_3d(MPMParticle3D* particles, int num_particles,
     // Store particle velocity gradient B_p = grad(v) for constitutive stress update
     for (int r = 0; r < 3; ++r) {
         for (int c = 0; c < 3; ++c) {
-            p.B[r][c] = fminf(fmaxf(B_new[r][c], -max_B), max_B);
+            p.B[r][c] = (velocity_scheme == 1) ? fminf(fmaxf(B_new[r][c], -max_B), max_B) : 0.0f;
+            p.L_grad[r][c] = fminf(fmaxf(L_new[r][c], -max_B), max_B);
         }
     }
 
@@ -391,9 +501,9 @@ __global__ void kernel_g2p_3d(MPMParticle3D* particles, int num_particles,
     p.x[1] += dt * p.v[1];
     p.x[2] += dt * p.v[2];
 
-    float min_x = 1.5f * dx; float max_x = (static_cast<float>(nx) - 1.5f) * dx;
-    float min_y = 1.5f * dy; float max_y = (static_cast<float>(ny) - 1.5f) * dy;
-    float min_z = 1.5f * dz; float max_z = (static_cast<float>(nz) - 1.5f) * dz;
+    float min_x = xmin + 1.5f * dx; float max_x = xmin + (static_cast<float>(nx) - 1.5f) * dx;
+    float min_y = ymin + 1.5f * dy; float max_y = ymin + (static_cast<float>(ny) - 1.5f) * dy;
+    float min_z = zmin + 1.5f * dz; float max_z = zmin + (static_cast<float>(nz) - 1.5f) * dz;
 
     if (p.x[0] < min_x) { p.x[0] = min_x; if (p.v[0] < 0) p.v[0] = 0; }
     else if (p.x[0] > max_x) { p.x[0] = max_x; if (p.v[0] > 0) p.v[0] = 0; }
@@ -412,11 +522,11 @@ __global__ void kernel_stress_update_3d(MPMParticle3D* particles, int num_partic
 
     MPMParticle3D& p = particles[p_idx];
 
-    // Velocity gradient L = B_p (1/s)
+    // Velocity gradient L evaluated from exact shape function derivatives L_grad
     float L[3][3];
     for (int r = 0; r < 3; ++r) {
         for (int c = 0; c < 3; ++c) {
-            L[r][c] = p.B[r][c];
+            L[r][c] = p.L_grad[r][c];
         }
     }
 
@@ -430,14 +540,16 @@ __global__ void kernel_stress_update_3d(MPMParticle3D* particles, int num_partic
     }
     const float tr_deps = deps[0][0] + deps[1][1] + deps[2][2];
 
+    p.V = fminf(fmaxf(p.V * (1.0f + tr_deps), 0.1f * p.V0), 10.0f * p.V0);
+    float lp_val = 0.5f * cbrtf(p.V);
+    p.lp[0] = lp_val; p.lp[1] = lp_val; p.lp[2] = lp_val;
+
     // --- Granular Coulomb Debris Model for Eroded/Failed Particles ---
     if (p.has_failed) {
         p.damage = 1.0f;
         for (int r = 0; r < 3; ++r)
             for (int c = 0; c < 3; ++c)
                 p.B[r][c] = 0.0f; // Zero affine velocity gradient to eliminate elastic coupling
-
-        p.V = fminf(fmaxf(p.V * (1.0f + tr_deps), 0.1f * p.V0), 10.0f * p.V0);
 
         // 1. Bulk Pressure from Volumetric Compression J = V / V0
         const float J = p.V / (p.V0 > 1.0e-12f ? p.V0 : 1.0e-12f);
@@ -760,19 +872,42 @@ void MPMSolver3DCUDA::allocateDeviceMemory() {
     }
 }
 
+void MPMSolver3DCUDA::allocateActiveNodeBuffers() {
+    size_t num_grid_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
+    if (num_grid_nodes > m_allocated_active_nodes) {
+        if (d_active_nodes) cudaFree(d_active_nodes);
+        if (d_num_active_nodes) cudaFree(d_num_active_nodes);
+        cudaMalloc(&d_active_nodes, num_grid_nodes * sizeof(int));
+        cudaMalloc(&d_num_active_nodes, sizeof(int));
+        cudaMemset(d_num_active_nodes, 0, sizeof(int));
+        m_allocated_active_nodes = num_grid_nodes;
+        m_num_active_nodes = 0;
+    }
+}
+
+void MPMSolver3DCUDA::freeActiveNodeBuffers() {
+    if (d_active_nodes) { cudaFree(d_active_nodes); d_active_nodes = nullptr; }
+    if (d_num_active_nodes) { cudaFree(d_num_active_nodes); d_num_active_nodes = nullptr; }
+    m_allocated_active_nodes = 0;
+    m_num_active_nodes = 0;
+}
+
 void MPMSolver3DCUDA::freeDeviceMemory() {
     if (d_grid) { cudaFree(d_grid); d_grid = nullptr; }
     if (d_grid_n) { cudaFree(d_grid_n); d_grid_n = nullptr; }
     if (d_particles) { cudaFree(d_particles); d_particles = nullptr; }
     if (d_particles_n) { cudaFree(d_particles_n); d_particles_n = nullptr; }
     if (d_max_v_buf) { cudaFree(d_max_v_buf); d_max_v_buf = nullptr; }
+    if (d_f_ext_fsi) { cudaFree(d_f_ext_fsi); d_f_ext_fsi = nullptr; }
+    freeActiveNodeBuffers();
     m_allocated_grid_nodes = 0;
     m_allocated_particles = 0;
 }
 
-void MPMSolver3DCUDA::initializeGrid(int nx, int ny, int nz, float dx, float dy, float dz) {
+void MPMSolver3DCUDA::initializeGrid(int nx, int ny, int nz, float dx, float dy, float dz, float xmin, float ymin, float zmin) {
     m_nx = nx; m_ny = ny; m_nz = nz;
     m_dx = dx; m_dy = dy; m_dz = dz;
+    m_xmin = xmin; m_ymin = ymin; m_zmin = zmin;
 
     m_host_grid.resize(static_cast<size_t>(m_nx) * m_ny * m_nz);
     m_host_particles.clear();
@@ -835,6 +970,93 @@ void MPMSolver3DCUDA::syncToHost() {
     size_t num_grid_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
     m_host_grid.resize(num_grid_nodes);
     cudaMemcpy(m_host_grid.data(), d_grid, num_grid_nodes * sizeof(MPMGridNode3D), cudaMemcpyDeviceToHost);
+}
+
+void MPMSolver3DCUDA::syncParticlesToHost() {
+    if (!m_host_particles.empty()) {
+        cudaMemcpy(m_host_particles.data(), d_particles, m_host_particles.size() * sizeof(MPMParticle3D), cudaMemcpyDeviceToHost);
+    }
+}
+
+void MPMSolver3DCUDA::uploadGridToDevice() {
+    if (d_grid && !m_host_grid.empty()) {
+        size_t num_grid_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
+        cudaMemcpy(d_grid, m_host_grid.data(), num_grid_nodes * sizeof(MPMGridNode3D), cudaMemcpyHostToDevice);
+        storeFSIForces();
+    }
+}
+
+void MPMSolver3DCUDA::clearGridDevice() {
+    if (!d_grid) return;
+    allocateActiveNodeBuffers();
+
+    if (m_num_active_nodes > 0 && d_active_nodes) {
+        int threads = 256;
+        int blocks = (m_num_active_nodes + threads - 1) / threads;
+        kernel_clear_active_nodes_3d<<<blocks, threads>>>(d_grid, d_active_nodes, m_num_active_nodes);
+    } else {
+        size_t num_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
+        cudaMemset(d_grid, 0, num_nodes * sizeof(MPMGridNode3D));
+    }
+    if (d_num_active_nodes) {
+        cudaMemset(d_num_active_nodes, 0, sizeof(int));
+    }
+    m_num_active_nodes = 0;
+}
+
+void MPMSolver3DCUDA::particleToGridOnly() {
+    if (m_host_particles.empty()) return;
+    if (m_device_dirty) syncToDevice();
+
+    size_t num_particles = m_host_particles.size();
+    size_t num_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
+
+    // Zero the active grid neighborhoods
+    clearGridDevice();
+
+    // Run P2G kernel only
+    int threads_per_block = 256;
+    int blocks_particles = (static_cast<int>(num_particles) + threads_per_block - 1) / threads_per_block;
+    kernel_p2g_3d<<<blocks_particles, threads_per_block>>>(
+        d_particles, static_cast<int>(num_particles),
+        d_grid, m_nx, m_ny, m_nz,
+        m_dx, m_dy, m_dz, static_cast<int>(m_transfer_scheme),
+        m_xmin, m_ymin, m_zmin,
+        d_active_nodes, d_num_active_nodes);
+
+    if (d_num_active_nodes) {
+        cudaMemcpy(&m_num_active_nodes, d_num_active_nodes, sizeof(int), cudaMemcpyDeviceToHost);
+    }
+
+    cudaDeviceSynchronize();
+
+    // Download grid to host so FSI forces can be injected into m_host_grid
+    m_host_grid.resize(num_nodes);
+    cudaMemcpy(m_host_grid.data(), d_grid, num_nodes * sizeof(MPMGridNode3D), cudaMemcpyDeviceToHost);
+}
+
+void MPMSolver3DCUDA::particleToGridDeviceOnly() {
+    if (m_host_particles.empty()) return;
+    if (m_device_dirty) syncToDevice();
+
+    size_t num_particles = m_host_particles.size();
+
+    // Zero the active grid neighborhoods
+    clearGridDevice();
+
+    // Run P2G kernel only (no CPU synchronization, no download!)
+    int threads_per_block = 256;
+    int blocks_particles = (static_cast<int>(num_particles) + threads_per_block - 1) / threads_per_block;
+    kernel_p2g_3d<<<blocks_particles, threads_per_block>>>(
+        d_particles, static_cast<int>(num_particles),
+        d_grid, m_nx, m_ny, m_nz,
+        m_dx, m_dy, m_dz, static_cast<int>(m_transfer_scheme),
+        m_xmin, m_ymin, m_zmin,
+        d_active_nodes, d_num_active_nodes);
+
+    if (d_num_active_nodes) {
+        cudaMemcpy(&m_num_active_nodes, d_num_active_nodes, sizeof(int), cudaMemcpyDeviceToHost);
+    }
 }
 
 __global__ void kernel_compute_max_speed(const MPMParticle3D* particles, int num_particles, float* d_max_speed) {
@@ -941,6 +1163,45 @@ __global__ void kernel_corrector_position_update(MPMParticle3D* particles, const
     if (p.x[2] < min_z) { p.x[2] = min_z; if (p.v[2] < 0) p.v[2] = 0.0f; }
     else if (p.x[2] > max_z) { p.x[2] = max_z; if (p.v[2] > 0) p.v[2] = 0.0f; }
 }
+// Kernel: Restore per-node f_ext from a flat FSI force buffer after P2G resets the grid
+// The FSI buffer holds [fx0, fy0, fz0, fx1, fy1, fz1, ...] for all grid nodes.
+__global__ void kernel_restore_fsi_forces(MPMGridNode3D* grid, const float* d_f_ext_fsi, int num_nodes) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_nodes) return;
+    grid[idx].f_ext[0] = d_f_ext_fsi[idx * 3 + 0];
+    grid[idx].f_ext[1] = d_f_ext_fsi[idx * 3 + 1];
+    grid[idx].f_ext[2] = d_f_ext_fsi[idx * 3 + 2];
+}
+
+// Kernel: Write per-node f_ext into the FSI force buffer (stores from grid → buffer)
+__global__ void kernel_store_fsi_forces(const MPMGridNode3D* grid, float* d_f_ext_fsi, int num_nodes) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_nodes) return;
+    d_f_ext_fsi[idx * 3 + 0] = grid[idx].f_ext[0];
+    d_f_ext_fsi[idx * 3 + 1] = grid[idx].f_ext[1];
+    d_f_ext_fsi[idx * 3 + 2] = grid[idx].f_ext[2];
+}
+
+void MPMSolver3DCUDA::storeFSIForces() {
+    if (!d_grid) return;
+    size_t num_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
+    size_t buf_size = num_nodes * 3;
+    if (!d_f_ext_fsi || m_allocated_f_ext_fsi < buf_size) {
+        if (d_f_ext_fsi) cudaFree(d_f_ext_fsi);
+        cudaMalloc(&d_f_ext_fsi, buf_size * sizeof(float));
+        m_allocated_f_ext_fsi = buf_size;
+    }
+    int threads = 256;
+    int blocks = (static_cast<int>(num_nodes) + threads - 1) / threads;
+    kernel_store_fsi_forces<<<blocks, threads>>>(d_grid, d_f_ext_fsi, static_cast<int>(num_nodes));
+    // No sync needed — stream-ordered before next kernel
+}
+
+void MPMSolver3DCUDA::clearFSIForces() {
+    if (d_f_ext_fsi && m_allocated_f_ext_fsi > 0) {
+        cudaMemset(d_f_ext_fsi, 0, m_allocated_f_ext_fsi * sizeof(float));
+    }
+}
 
 void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
     if (m_host_particles.empty()) return;
@@ -962,10 +1223,19 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
         // --- 2nd-Order Midpoint RK2 ---
         // 1. Predictor Stage (Half-step dt/2)
         if (run_p2g) {
-            cudaMemset(d_grid, 0, num_nodes * sizeof(MPMGridNode3D));
+            clearGridDevice();
             kernel_p2g_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles),
-                                                                  d_grid, m_nx, m_ny, m_nz,
-                                                                  m_dx, m_dy, m_dz, static_cast<int>(m_transfer_scheme));
+                                                                   d_grid, m_nx, m_ny, m_nz,
+                                                                   m_dx, m_dy, m_dz, static_cast<int>(m_transfer_scheme),
+                                                                   m_xmin, m_ymin, m_zmin,
+                                                                   d_active_nodes, d_num_active_nodes);
+            if (d_num_active_nodes) {
+                cudaMemcpy(&m_num_active_nodes, d_num_active_nodes, sizeof(int), cudaMemcpyDeviceToHost);
+            }
+        }
+        // Restore FSI forces if available (may have been wiped by cudaMemset above)
+        if (d_f_ext_fsi) {
+            kernel_restore_fsi_forces<<<blocks_nodes, threads_per_block>>>(d_grid, d_f_ext_fsi, static_cast<int>(num_nodes));
         }
 
         kernel_grid_update_3d<<<blocks_nodes, threads_per_block>>>(d_grid, static_cast<int>(num_nodes), m_nx, m_ny, m_nz,
@@ -974,38 +1244,32 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
                                                                    static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
                                                                    static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max));
 
+        if (m_smooth_plastic_strain) {
+            kernel_smooth_plastic_strain_3d<<<blocks_nodes, threads_per_block>>>(d_grid, d_grid_n, m_nx, m_ny, m_nz);
+            kernel_copy_smoothed_plastic_strain_3d<<<blocks_nodes, threads_per_block>>>(d_grid, d_grid_n, static_cast<int>(num_nodes));
+        }
+
         kernel_g2p_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles),
                                                                d_grid, m_nx, m_ny, m_nz,
                                                                m_dx, m_dy, m_dz, 0.5f * dt, static_cast<int>(m_transfer_scheme),
-                                                               static_cast<int>(m_velocity_scheme), m_flip_blend);
+                                                               static_cast<int>(m_velocity_scheme), m_flip_blend,
+                                                               m_xmin, m_ymin, m_zmin);
 
         kernel_stress_update_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles), 0.5f * dt);
 
-        // 2. Corrector Stage (Half-step dt/2 from predictor state)
-        cudaMemset(d_grid, 0, num_nodes * sizeof(MPMGridNode3D));
+        // 2. Corrector Stage — P2G from predictor midpoint state, then restore FSI forces
+        clearGridDevice();
         kernel_p2g_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles),
-                                                              d_grid, m_nx, m_ny, m_nz,
-                                                              m_dx, m_dy, m_dz, static_cast<int>(m_transfer_scheme));
-
-        kernel_grid_update_3d<<<blocks_nodes, threads_per_block>>>(d_grid, static_cast<int>(num_nodes), m_nx, m_ny, m_nz,
-                                                                   dt, avg_p_mass,
-                                                                   static_cast<int>(m_bc_x_min), static_cast<int>(m_bc_x_max),
-                                                                   static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
-                                                                   static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max));
-
-        kernel_g2p_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles),
                                                                d_grid, m_nx, m_ny, m_nz,
-                                                               m_dx, m_dy, m_dz, 0.5f * dt, static_cast<int>(m_transfer_scheme),
-                                                               static_cast<int>(m_velocity_scheme), m_flip_blend);
-
-        kernel_stress_update_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles), 0.5f * dt);
-    } else {
-        // --- 1st-Order USL / USF ---
-        if (run_p2g) {
-            cudaMemset(d_grid, 0, num_nodes * sizeof(MPMGridNode3D));
-            kernel_p2g_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles),
-                                                                  d_grid, m_nx, m_ny, m_nz,
-                                                                  m_dx, m_dy, m_dz, static_cast<int>(m_transfer_scheme));
+                                                               m_dx, m_dy, m_dz, static_cast<int>(m_transfer_scheme),
+                                                               m_xmin, m_ymin, m_zmin,
+                                                               d_active_nodes, d_num_active_nodes);
+        if (d_num_active_nodes) {
+            cudaMemcpy(&m_num_active_nodes, d_num_active_nodes, sizeof(int), cudaMemcpyDeviceToHost);
+        }
+        // Restore FSI pressure forces after the corrector grid reset
+        if (d_f_ext_fsi) {
+            kernel_restore_fsi_forces<<<blocks_nodes, threads_per_block>>>(d_grid, d_f_ext_fsi, static_cast<int>(num_nodes));
         }
 
         kernel_grid_update_3d<<<blocks_nodes, threads_per_block>>>(d_grid, static_cast<int>(num_nodes), m_nx, m_ny, m_nz,
@@ -1014,10 +1278,52 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
                                                                    static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
                                                                    static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max));
 
+        if (m_smooth_plastic_strain) {
+            kernel_smooth_plastic_strain_3d<<<blocks_nodes, threads_per_block>>>(d_grid, d_grid_n, m_nx, m_ny, m_nz);
+            kernel_copy_smoothed_plastic_strain_3d<<<blocks_nodes, threads_per_block>>>(d_grid, d_grid_n, static_cast<int>(num_nodes));
+        }
+
+        kernel_g2p_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles),
+                                                               d_grid, m_nx, m_ny, m_nz,
+                                                               m_dx, m_dy, m_dz, 0.5f * dt, static_cast<int>(m_transfer_scheme),
+                                                               static_cast<int>(m_velocity_scheme), m_flip_blend,
+                                                               m_xmin, m_ymin, m_zmin);
+
+        kernel_stress_update_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles), 0.5f * dt);
+    } else {
+        // --- 1st-Order USL / USF ---
+        if (run_p2g) {
+            clearGridDevice();
+            kernel_p2g_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles),
+                                                                   d_grid, m_nx, m_ny, m_nz,
+                                                                   m_dx, m_dy, m_dz, static_cast<int>(m_transfer_scheme),
+                                                                   m_xmin, m_ymin, m_zmin,
+                                                                   d_active_nodes, d_num_active_nodes);
+            if (d_num_active_nodes) {
+                cudaMemcpy(&m_num_active_nodes, d_num_active_nodes, sizeof(int), cudaMemcpyDeviceToHost);
+            }
+        }
+        // Restore FSI forces if available (may have been wiped by cudaMemset above)
+        if (d_f_ext_fsi) {
+            kernel_restore_fsi_forces<<<blocks_nodes, threads_per_block>>>(d_grid, d_f_ext_fsi, static_cast<int>(num_nodes));
+        }
+
+        kernel_grid_update_3d<<<blocks_nodes, threads_per_block>>>(d_grid, static_cast<int>(num_nodes), m_nx, m_ny, m_nz,
+                                                                   dt, avg_p_mass,
+                                                                   static_cast<int>(m_bc_x_min), static_cast<int>(m_bc_x_max),
+                                                                   static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
+                                                                   static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max));
+
+        if (m_smooth_plastic_strain) {
+            kernel_smooth_plastic_strain_3d<<<blocks_nodes, threads_per_block>>>(d_grid, d_grid_n, m_nx, m_ny, m_nz);
+            kernel_copy_smoothed_plastic_strain_3d<<<blocks_nodes, threads_per_block>>>(d_grid, d_grid_n, static_cast<int>(num_nodes));
+        }
+
         kernel_g2p_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles),
                                                                d_grid, m_nx, m_ny, m_nz,
                                                                m_dx, m_dy, m_dz, dt, static_cast<int>(m_transfer_scheme),
-                                                               static_cast<int>(m_velocity_scheme), m_flip_blend);
+                                                               static_cast<int>(m_velocity_scheme), m_flip_blend,
+                                                               m_xmin, m_ymin, m_zmin);
 
         kernel_stress_update_3d<<<blocks_particles, threads_per_block>>>(d_particles, static_cast<int>(num_particles), dt);
     }

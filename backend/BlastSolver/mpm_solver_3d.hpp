@@ -12,6 +12,7 @@ struct MPMParticle3D {
     float x[3];         // Position (x, y, z)
     float v[3];         // Velocity (vx, vy, vz)
     float B[3][3];      // APIC affine velocity matrix (3x3)
+    float L_grad[3][3]; // True continuum velocity gradient from shape function derivatives (3x3)
     float lp[3];        // GIMP particle domain half-widths (lx, ly, lz)
 
     // Mass & Volume
@@ -92,12 +93,17 @@ public:
     ~MPMSolver3D() = default;
 
     // Initialization & Grid Setup
-    void initializeGrid(int nx, int ny, int nz, float dx, float dy, float dz);
+    void initializeGrid(int nx, int ny, int nz, float dx, float dy, float dz, float xmin = 0.0f, float ymin = 0.0f, float zmin = 0.0f);
     void setTransferScheme(MPMTransferScheme scheme) { m_transfer_scheme = scheme; }
     void setVelocityScheme(MPMVelocityScheme scheme) { m_velocity_scheme = scheme; }
     void setTimeScheme(MPMTimeIntegrationScheme scheme) { m_time_scheme = scheme; }
+    void setSmoothPlasticStrain(bool smooth) { m_smooth_plastic_strain = smooth; }
+    bool getSmoothPlasticStrain() const { return m_smooth_plastic_strain; }
     void setFlipBlend(float alpha) { m_flip_blend = alpha; }
     float getFlipBlend() const { return m_flip_blend; }
+    float getXMin() const { return m_xmin; }
+    float getYMin() const { return m_ymin; }
+    float getZMin() const { return m_zmin; }
     void setBoundaryConditions(MPMBoundaryCondition3D x_min, MPMBoundaryCondition3D x_max,
                                MPMBoundaryCondition3D y_min, MPMBoundaryCondition3D y_max,
                                MPMBoundaryCondition3D z_min, MPMBoundaryCondition3D z_max);
@@ -161,11 +167,15 @@ private:
     float m_dx{0.01f};
     float m_dy{0.01f};
     float m_dz{0.01f};
+    float m_xmin{0.0f};
+    float m_ymin{0.0f};
+    float m_zmin{0.0f};
 
     MPMTransferScheme m_transfer_scheme{MPMTransferScheme::GIMP};
     MPMVelocityScheme m_velocity_scheme{MPMVelocityScheme::APIC};
     MPMTimeIntegrationScheme m_time_scheme{MPMTimeIntegrationScheme::USL};
     float m_flip_blend{0.95f};
+    bool m_smooth_plastic_strain{true};
 
     MPMBoundaryCondition3D m_bc_x_min{MPMBoundaryCondition3D::Sticky};
     MPMBoundaryCondition3D m_bc_x_max{MPMBoundaryCondition3D::Sticky};

@@ -154,6 +154,11 @@ if(BUILD_TESTS)
     set_target_properties(test_mpm_plasticity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
     target_compile_options(test_mpm_plasticity PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3 -lineinfo>)
     target_link_libraries(test_mpm_plasticity PRIVATE BlastSolverCore)
+
+    add_executable(test_fsi_3d backend/BlastSolver/test_fsi_3d.cu)
+    set_target_properties(test_fsi_3d PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+    target_compile_options(test_fsi_3d PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3 -lineinfo>)
+    target_link_libraries(test_fsi_3d PRIVATE BlastSolverCore)
 endif()
 
 

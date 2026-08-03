@@ -10,12 +10,17 @@ public:
     MPMSolver3DCUDA();
     ~MPMSolver3DCUDA();
 
-    void initializeGrid(int nx, int ny, int nz, float dx, float dy, float dz);
+    void initializeGrid(int nx, int ny, int nz, float dx, float dy, float dz, float xmin = 0.0f, float ymin = 0.0f, float zmin = 0.0f);
     void setTransferScheme(MPMTransferScheme scheme) { m_transfer_scheme = scheme; }
     void setVelocityScheme(MPMVelocityScheme scheme) { m_velocity_scheme = scheme; }
     void setTimeScheme(MPMTimeIntegrationScheme scheme) { m_time_scheme = scheme; }
+    void setSmoothPlasticStrain(bool smooth) { m_smooth_plastic_strain = smooth; }
+    bool getSmoothPlasticStrain() const { return m_smooth_plastic_strain; }
     void setFlipBlend(float alpha) { m_flip_blend = alpha; }
     float getFlipBlend() const { return m_flip_blend; }
+    float getXMin() const { return m_xmin; }
+    float getYMin() const { return m_ymin; }
+    float getZMin() const { return m_zmin; }
     void setBoundaryConditions(MPMBoundaryCondition3D x_min, MPMBoundaryCondition3D x_max,
                                MPMBoundaryCondition3D y_min, MPMBoundaryCondition3D y_max,
                                MPMBoundaryCondition3D z_min, MPMBoundaryCondition3D z_max);
@@ -41,7 +46,20 @@ public:
 
     // Synchronize host vectors from device memory
     void syncToHost();
+    void syncParticlesToHost();
     void syncToDevice();
+    void uploadGridToDevice();
+    // Clear the active grid regions via particle neighborhood (fast sparse clear)
+    void clearGridDevice();
+    // Run only the P2G scatter pass on GPU, then sync grid to host for FSI force injection
+    void particleToGridOnly();
+    // Run P2G scatter pass entirely on GPU, with no host synchronization (high performance FSI)
+    void particleToGridDeviceOnly();
+    // Store the current host-grid f_ext values into a persistent device-side FSI buffer,
+    // so they are automatically restored after every internal RK2 corrector P2G reset.
+    void storeFSIForces();
+    // Clear the persisted FSI forces (call at the start of each FSI timestep before building new forces)
+    void clearFSIForces();
 
     const std::vector<MPMParticle3D>& getParticles() const { return m_host_particles; }
     const std::vector<MPMGridNode3D>& getGrid() const { return m_host_grid; }
@@ -80,6 +98,7 @@ private:
     MPMVelocityScheme m_velocity_scheme{MPMVelocityScheme::APIC};
     MPMTimeIntegrationScheme m_time_scheme{MPMTimeIntegrationScheme::USL};
     float m_flip_blend{0.95f};
+    bool m_smooth_plastic_strain{true};
 
     MPMBoundaryCondition3D m_bc_x_min{MPMBoundaryCondition3D::Sticky};
     MPMBoundaryCondition3D m_bc_x_max{MPMBoundaryCondition3D::Sticky};
@@ -96,6 +115,16 @@ private:
     MPMParticle3D* d_particles{nullptr};
     MPMParticle3D* d_particles_n{nullptr};
     float* d_max_v_buf{nullptr};
+    // Persistent FSI external force buffer: 3 floats per node (fx, fy, fz)
+    float* d_f_ext_fsi{nullptr};
+    size_t m_allocated_f_ext_fsi{0};
+
+    int* d_active_nodes{nullptr};
+    int* d_num_active_nodes{nullptr};
+    size_t m_allocated_active_nodes{0};
+    int m_num_active_nodes{0};
+    void allocateActiveNodeBuffers();
+    void freeActiveNodeBuffers();
 
     size_t m_allocated_grid_nodes{0};
     size_t m_allocated_particles{0};
@@ -106,6 +135,9 @@ private:
     double m_sim_time{0.0};
     int m_step_count{0};
     bool m_device_dirty{true};
+    float m_xmin{0.0f};
+    float m_ymin{0.0f};
+    float m_zmin{0.0f};
 };
 
 } // namespace Blast

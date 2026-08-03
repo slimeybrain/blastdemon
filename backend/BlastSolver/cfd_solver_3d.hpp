@@ -153,6 +153,9 @@ public:
         getSliceDimensions(slice, w, h, d);
     }
     virtual std::vector<float> getCellValues(int i, int j, int k) const = 0;
+    // Bulk pressure extraction for FSI coupling — one cudaMemcpy for the whole field, not per-cell
+    virtual std::vector<float> extractPressureField() const { return {}; }
+    virtual void coupleFSIWithMPMGPU(void* mpm_solver_cuda) {}
 
     virtual void setGauges(const std::vector<Gauge3D>&) {}
     virtual void recordGaugesAsync(double) {}
@@ -187,6 +190,8 @@ public:
                                        const std::atomic<bool>* terminate_flag = nullptr,
                                        std::function<void(double)> progress_callback = nullptr) = 0;
     virtual void uploadObstacleFaces(const std::vector<ObstacleFace>&) {}
+    virtual void setSolidMask(const uint8_t*) {}
+    virtual void setSolidVelocities(const double*) {}
     virtual std::pair<double, double> getConservationTotals() const = 0;
 };
 
@@ -313,6 +318,7 @@ public:
                                const std::atomic<bool>* terminate_flag = nullptr,
                                std::function<void(double)> progress_callback = nullptr) override;
     void uploadObstacleFaces(const std::vector<ObstacleFace>& faces) override;
+    void setSolidMask(const uint8_t* mask) override;
     std::pair<double, double> getConservationTotals() const override;
 
     std::vector<float> sampleGauge(const Gauge3D& gauge) const override;

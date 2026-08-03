@@ -1604,7 +1604,11 @@ const DEFAULT_QUANTITY_RANGES: Record<string, [number, number]> = {
     species3: [0.0, 1.0],
     solid: [0.0, 1.0],
     overpressure: [0.0, 101325.0 * 99.0],
-    impulse: [0.0, 10000.0]
+    impulse: [0.0, 10000.0],
+    plastic_strain: [0.0, 0.5],
+    plasticStrain: [0.0, 0.5],
+    vonMises: [0.0, 500.0e6],
+    von_mises: [0.0, 500.0e6]
 };
 
 let quantityColormaps: Record<string, string> = {
@@ -1617,7 +1621,11 @@ let quantityColormaps: Record<string, string> = {
     species3: 'plasma',
     solid: 'grayscale',
     overpressure: 'inferno',
-    impulse: 'thermal'
+    impulse: 'thermal',
+    plastic_strain: 'rainbow',
+    plasticStrain: 'rainbow',
+    vonMises: 'plasma',
+    von_mises: 'plasma'
 };
 
 let slicesConfig: any[] = [];
@@ -2858,7 +2866,7 @@ function sampleColormapRGB(v: number, cmapName: string): [number, number, number
 function getParticleQuantityValue(data: Float32Array, idx: number, qty: string): number {
     const base = idx * 13;
     if (qty === 'vonMises' || qty === 'von_mises') return data[base + 6];
-    if (qty === 'plastic_strain') return data[base + 7];
+    if (qty === 'plastic_strain' || qty === 'plasticStrain') return data[base + 7];
     if (qty === 'density') return data[base + 8];
     if (qty === 'pressure') return data[base + 9];
     if (qty === 'damage') return data[base + 10];

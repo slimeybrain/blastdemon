@@ -1,4 +1,5 @@
 #include "cfd_solver_3d_cuda.hpp"
+#include "mpm_solver_3d_cuda.hpp"
 #include <cuda_runtime.h>
 #include "ImmersedBoundary.hpp"
 
@@ -2708,6 +2709,7 @@ CFDSolver3DCuda<RealType, IsMultiMaterial>::~CFDSolver3DCuda() {
     if (d_tile_mass) cudaFree(d_tile_mass);
     if (d_tile_energy) cudaFree(d_tile_energy);
     if (d_tile_is_near_boundary) cudaFree(d_tile_is_near_boundary);
+    if (d_solid_mask_fsi) { cudaFree(d_solid_mask_fsi); d_solid_mask_fsi = nullptr; }
 
     if (d_gauge_coords) cudaFree(d_gauge_coords);
     if (d_gauge_results) cudaFree(d_gauge_results);
@@ -5299,7 +5301,203 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::uploadObstacleFaces(const std::
     CHECK_CUDA(cudaMemcpy(d_obstacle_faces, local_faces.data(), num_obstacle_faces * sizeof(GPUObstacleFace), cudaMemcpyHostToDevice));
 }
 
+// Lightweight GPU kernel: writes solid mask directly into d_geom, no round-trip to host
+__global__ void kernel_apply_solid_mask(GeometryTile3D* d_geom,
+                                        const uint8_t* d_mask,
+                                        int nx, int ny, int nz, int ntx, int nty) {
+    int gx = blockIdx.x * blockDim.x + threadIdx.x;
+    int gy = blockIdx.y * blockDim.y + threadIdx.y;
+    int gz = blockIdx.z * blockDim.z + threadIdx.z;
+    if (gx >= nx || gy >= ny || gz >= nz) return;
+
+    int cfd_idx = gx + gy * nx + gz * nx * ny;
+    int t_idx   = (gx >> 3) + (gy >> 3) * ntx + (gz >> 3) * ntx * nty;
+    int c_idx   = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
+
+    d_geom[t_idx].cells[c_idx].is_boundary = (d_mask[cfd_idx] != 0);
+}
+
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DCuda<RealType, IsMultiMaterial>::setSolidMask(const uint8_t* mask) {
+    if (!mask) return;
+    int ntx = (nx + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    int nty = (ny + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    int ntz = (nz + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    int total_tiles = ntx * nty * ntz;
+
+    // Allocate geometry buffer if needed (first FSI call)
+    if (!d_geom) {
+        CHECK_CUDA(cudaMalloc(&d_geom, total_tiles * sizeof(GeometryTile3D)));
+        CHECK_CUDA(cudaMemset(d_geom, 0, total_tiles * sizeof(GeometryTile3D)));
+    }
+    if (!d_tile_is_near_boundary) {
+        CHECK_CUDA(cudaMalloc(&d_tile_is_near_boundary, total_tiles * sizeof(uint8_t)));
+        CHECK_CUDA(cudaMemset(d_tile_is_near_boundary, 1, total_tiles * sizeof(uint8_t)));
+    }
+
+    size_t mask_bytes = static_cast<size_t>(nx) * ny * nz * sizeof(uint8_t);
+    if (!d_solid_mask_fsi || d_solid_mask_fsi_capacity < mask_bytes) {
+        if (d_solid_mask_fsi) cudaFree(d_solid_mask_fsi);
+        CHECK_CUDA(cudaMalloc(&d_solid_mask_fsi, mask_bytes));
+        d_solid_mask_fsi_capacity = mask_bytes;
+    }
+
+    // Upload mask to GPU (asynchronously using default stream)
+    CHECK_CUDA(cudaMemcpy(d_solid_mask_fsi, mask, mask_bytes, cudaMemcpyHostToDevice));
+
+    // Write solid mask into d_geom on GPU — no host round-trip, no cout, no diagnostic scan, no sync
+    dim3 block(8, 8, 4);
+    dim3 grid((nx + 7) / 8, (ny + 7) / 8, (nz + 3) / 4);
+    kernel_apply_solid_mask<<<grid, block>>>(
+        (GeometryTile3D*)d_geom, (const uint8_t*)d_solid_mask_fsi, nx, ny, nz, ntx, nty);
+    CHECK_CUDA(cudaGetLastError());
+
+    // Update near-boundary flags on GPU with a simple flood-fill kernel (tiles)
+    // For simplicity set all near-boundary flags to 1 (conservative: all tiles processed)
+    CHECK_CUDA(cudaMemset(d_tile_is_near_boundary, 1, total_tiles * sizeof(uint8_t)));
+}
+
+// Bulk pressure extraction for FSI — one cudaMemcpy per tile array, not per cell
+template <typename RealType, bool IsMultiMaterial>
+std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::extractPressureField() const {
+    ensure_paged_in();
+    int ntx = (nx + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    int nty = (ny + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    int ntz = (nz + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    int total_tiles = ntx * nty * ntz;
+
+    // Download all primitive tiles in one transfer
+    using Tile = PrimitiveTile3D<RealType, IsMultiMaterial>;
+    std::vector<Tile> host_tiles(total_tiles);
+    CHECK_CUDA(cudaMemcpy(host_tiles.data(), (const Tile*)d_states,
+                          total_tiles * sizeof(Tile), cudaMemcpyDeviceToHost));
+
+    // Unpack tiled pressure into flat [gx + gy*nx + gz*nx*ny] layout
+    std::vector<float> pfield(static_cast<size_t>(nx) * ny * nz, 0.0f);
+    for (int gz = 0; gz < nz; ++gz) {
+        for (int gy = 0; gy < ny; ++gy) {
+            for (int gx = 0; gx < nx; ++gx) {
+                int t_idx = (gx >> 3) + (gy >> 3) * ntx + (gz >> 3) * ntx * nty;
+                int c_idx = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
+                pfield[gx + gy * nx + gz * nx * ny] = static_cast<float>(host_tiles[t_idx].p[c_idx]);
+            }
+        }
+    }
+    return pfield;
+}
+
+template <typename RealType, bool IsMultiMaterial>
+__device__ inline float get_fsi_pressure_at(
+    const PrimitiveTile3D<RealType, IsMultiMaterial>* d_states,
+    int x, int y, int z,
+    int nx, int ny, int nz,
+    int ntx, int nty
+) {
+    x = x < 0 ? 0 : (x >= nx ? nx - 1 : x);
+    y = y < 0 ? 0 : (y >= ny ? ny - 1 : y);
+    z = z < 0 ? 0 : (z >= nz ? nz - 1 : z);
+    int tx = x >> 3;
+    int ty = y >> 3;
+    int tz = z >> 3;
+    int t_idx = tx + ty * ntx + tz * ntx * nty;
+    int lx = x & 7;
+    int ly = y & 7;
+    int lz = z & 7;
+    int c_idx = lx + ly * 8 + lz * 64;
+    return static_cast<float>(d_states[t_idx].p[c_idx]);
+}
+
+template <typename RealType, bool IsMultiMaterial>
+__global__ void kernel_fsi_couple_gpu(
+    PrimitiveTile3D<RealType, IsMultiMaterial>* d_states,
+    GeometryTile3D* d_geom,
+    Blast::MPMGridNode3D* d_grid,
+    int nx, int ny, int nz,
+    int ntx, int nty,
+    float dx, float dy, float dz
+) {
+    int gx = blockIdx.x * blockDim.x + threadIdx.x;
+    int gy = blockIdx.y * blockDim.y + threadIdx.y;
+    int gz = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if (gx >= nx || gy >= ny || gz >= nz) return;
+
+    int mpm_idx = (gx * ny + gy) * nz + gz;
+    float mass = d_grid[mpm_idx].m;
+
+    int t_idx = (gx >> 3) + (gy >> 3) * ntx + (gz >> 3) * ntx * nty;
+    int c_idx = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
+
+    bool is_solid = (mass > 1.0e-8f);
+    d_geom[t_idx].cells[c_idx].is_boundary = is_solid;
+
+    if (is_solid) {
+        float p_left   = get_fsi_pressure_at<RealType, IsMultiMaterial>(d_states, gx - 1, gy, gz, nx, ny, nz, ntx, nty);
+        float p_right  = get_fsi_pressure_at<RealType, IsMultiMaterial>(d_states, gx + 1, gy, gz, nx, ny, nz, ntx, nty);
+        float p_bottom = get_fsi_pressure_at<RealType, IsMultiMaterial>(d_states, gx, gy - 1, gz, nx, ny, nz, ntx, nty);
+        float p_top    = get_fsi_pressure_at<RealType, IsMultiMaterial>(d_states, gx, gy + 1, gz, nx, ny, nz, ntx, nty);
+        float p_back   = get_fsi_pressure_at<RealType, IsMultiMaterial>(d_states, gx, gy, gz - 1, nx, ny, nz, ntx, nty);
+        float p_front  = get_fsi_pressure_at<RealType, IsMultiMaterial>(d_states, gx, gy, gz + 1, nx, ny, nz, ntx, nty);
+
+        d_grid[mpm_idx].f_ext[0] = (p_left - p_right) * dy * dz;
+        d_grid[mpm_idx].f_ext[1] = (p_bottom - p_top) * dx * dz;
+        d_grid[mpm_idx].f_ext[2] = (p_back - p_front) * dx * dy;
+    } else {
+        d_grid[mpm_idx].f_ext[0] = 0.0f;
+        d_grid[mpm_idx].f_ext[1] = 0.0f;
+        d_grid[mpm_idx].f_ext[2] = 0.0f;
+    }
+}
+
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithMPMGPU(void* mpm_solver_void) {
+    ensure_paged_in();
+    if (!mpm_solver_void) return;
+    Blast::MPMSolver3DCUDA* mpm_solver = static_cast<Blast::MPMSolver3DCUDA*>(mpm_solver_void);
+    Blast::MPMGridNode3D* d_grid = mpm_solver->getDeviceGrid();
+    if (!d_grid) return;
+
+    int ntx = (nx + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    int nty = (ny + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    int ntz = (nz + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    int total_tiles = ntx * nty * ntz;
+
+    // Allocate geometry buffers if needed
+    if (!d_geom) {
+        CHECK_CUDA(cudaMalloc(&d_geom, total_tiles * sizeof(GeometryTile3D)));
+        CHECK_CUDA(cudaMemset(d_geom, 0, total_tiles * sizeof(GeometryTile3D)));
+    }
+    if (!d_tile_is_near_boundary) {
+        CHECK_CUDA(cudaMalloc(&d_tile_is_near_boundary, total_tiles * sizeof(uint8_t)));
+        CHECK_CUDA(cudaMemset(d_tile_is_near_boundary, 1, total_tiles * sizeof(uint8_t)));
+    }
+
+    float mpm_dx = mpm_solver->getDx();
+    float mpm_dy = mpm_solver->getDy();
+    float mpm_dz = mpm_solver->getDz();
+
+    dim3 block(8, 8, 4);
+    dim3 grid((nx + 7) / 8, (ny + 7) / 8, (nz + 3) / 4);
+
+    kernel_fsi_couple_gpu<RealType, IsMultiMaterial><<<grid, block>>>(
+        (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+        (GeometryTile3D*)d_geom,
+        d_grid,
+        nx, ny, nz,
+        ntx, nty,
+        mpm_dx, mpm_dy, mpm_dz
+    );
+    CHECK_CUDA(cudaGetLastError());
+
+    // Automatically cache FSI forces on the device so RK2 corrector step can restore them
+    mpm_solver->storeFSIForces();
+
+    // Mark near-boundary flags as conservative (all processed)
+    CHECK_CUDA(cudaMemset(d_tile_is_near_boundary, 1, total_tiles * sizeof(uint8_t)));
+}
+
 template class CFDSolver3DCuda<float, true>;
 template class CFDSolver3DCuda<float, false>;
 template class CFDSolver3DCuda<double, true>;
 template class CFDSolver3DCuda<double, false>;
+
