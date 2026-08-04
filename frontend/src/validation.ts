@@ -639,6 +639,27 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             if (!outConn) {
                 addMessage(node.id, 'warning', "MPM Object 3D is not connected to an MPM Domain 3D node.");
             }
+            const shape = node.parameters?.shape_type || 'Box';
+            if (shape === 'STL') {
+                const stlConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'stl');
+                const stlFile = node.parameters?.stl_file;
+                if (!stlConn && (!stlFile || String(stlFile).trim() === '')) {
+                    addMessage(node.id, 'error', "MPM Object 3D with STL shape requires an STL file specified or an STLGeometry node connected.");
+                }
+            } else if (shape === 'Cylinder') {
+                const radius = Number(node.parameters?.radius ?? 0.1);
+                const innerRadius = Number(node.parameters?.inner_radius ?? 0.0);
+                const height = Number(node.parameters?.height ?? 0.2);
+                if (isNaN(radius) || radius <= 0) {
+                    addMessage(node.id, 'error', "Cylinder radius must be greater than 0.");
+                }
+                if (isNaN(innerRadius) || innerRadius < 0 || innerRadius >= radius) {
+                    addMessage(node.id, 'error', "Cylinder inner radius must be non-negative and less than outer radius.");
+                }
+                if (isNaN(height) || height <= 0) {
+                    addMessage(node.id, 'error', "Cylinder height must be greater than 0.");
+                }
+            }
         }
 
         if (node.type === 'Material') {

@@ -37,7 +37,8 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'refinement_level',
         'submesh_x', 'submesh_y', 'submesh_z', 'submesh_size_x', 'submesh_size_y', 'submesh_size_z',
         // MPM keys
-        'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'radius',
+        'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'radius', 'inner_radius',
+        'scale_x', 'scale_y', 'scale_z',
         'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
         'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
         'failure_strain', 'tensile_failure_stress',
@@ -753,6 +754,14 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     Object.entries(objNode.parameters).forEach(([k, v]) => {
                         objParams[k] = numericKeys.includes(k) ? Number(v) : v;
                     });
+                    const stlConn = state.connections.find(c => c.toNode === objNode.id && c.toPort === 'stl');
+                    if (stlConn) {
+                        const stlNode = state.nodes.find(n => n.id === stlConn.fromNode);
+                        if (stlNode && stlNode.type === 'STLGeometry') {
+                            objParams['stl_file'] = stlNode.parameters.stl_file || '';
+                            objParams['shape_type'] = 'STL';
+                        }
+                    }
                     const matConn = state.connections.find(c => c.toNode === objNode.id && c.toPort === 'material');
                     if (matConn) {
                         const matNode = state.nodes.find(n => n.id === matConn.fromNode);
@@ -891,6 +900,14 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     Object.entries(objNode.parameters).forEach(([k, v]) => {
                         objParams[k] = numericKeys.includes(k) ? Number(v) : v;
                     });
+                    const stlConn = state.connections.find(c => c.toNode === objNode.id && c.toPort === 'stl');
+                    if (stlConn) {
+                        const stlNode = state.nodes.find(n => n.id === stlConn.fromNode);
+                        if (stlNode && stlNode.type === 'STLGeometry') {
+                            objParams['stl_file'] = stlNode.parameters.stl_file || '';
+                            objParams['shape_type'] = 'STL';
+                        }
+                    }
                     const matConn = state.connections.find(c => c.toNode === objNode.id && c.toPort === 'material');
                     if (matConn) {
                         const matNode = state.nodes.find(n => n.id === matConn.fromNode);

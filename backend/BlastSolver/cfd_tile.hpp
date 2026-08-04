@@ -102,7 +102,8 @@ struct GeometryPayload {
     int8_t nx;
     int8_t ny;
     int8_t nz;
-    bool is_boundary;
+    uint8_t solid_fraction : 7;
+    uint8_t is_boundary : 1;
 };
 
 struct GeometryTile3D {

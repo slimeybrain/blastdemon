@@ -1453,6 +1453,10 @@ networkManager.onMessage(async (data) => {
                 const vertBuffer = payloadBuffer.slice(pOffset, pOffset + numFloats * 4);
                 const vertices = new Float32Array(vertBuffer);
 
+                if (meshId) {
+                    stateManager.registerSTLVertices(meshId, vertices);
+                }
+
                 layoutManager.components.forEach(comp => {
                     if (comp.type === 'TELEMETRY_3D' && comp.instance) {
                         comp.instance.setSTLGeometry(vertices, modelId, meshId);
@@ -1466,6 +1470,7 @@ networkManager.onMessage(async (data) => {
                         vpNodes.forEach(vpNode => {
                             comp.instance.setSTLGeometry(vpNode.id, vertices, meshId);
                         });
+                        comp.instance.render(state);
                     }
                 });
                 return;
@@ -1531,6 +1536,10 @@ networkManager.onMessage(async (data) => {
             if (dataJson.status === 'success') {
                 const verts = new Float32Array(dataJson.vertices);
                 const modelId = dataJson.modelId;
+                const filePath = dataJson.filePath || '';
+                if (filePath) {
+                    stateManager.registerSTLVertices(filePath, verts);
+                }
                 const state = stateManager.getSimulationState(modelId);
                 const vpNodes = state?.nodes.filter(n => n.type === 'Telemetry3DViewport') || [];
                 layoutManager.components.forEach(comp => {
@@ -1546,6 +1555,7 @@ networkManager.onMessage(async (data) => {
                             vpNodes.forEach(vpNode => {
                                 comp.instance.setSTLGeometry(vpNode.id, verts);
                             });
+                            comp.instance.render(state);
                         }
                     });
                 }

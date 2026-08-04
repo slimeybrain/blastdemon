@@ -5,6 +5,11 @@
 
 namespace Blast {
 
+// 3D MPM Tile structure matching TILE_SIZE_3D = 8 (512 nodes per block) for CFD-MPM alignment
+struct MPMTile3D {
+    MPMGridNode3D nodes[512];
+};
+
 class MPMSolver3DCUDA {
 public:
     MPMSolver3DCUDA();
@@ -40,6 +45,23 @@ public:
                          float yield_stress, float hardening, float failure_strain = 0.25f,
                          float tensile_failure_stress = 600.0e6f, int ppc = 8);
 
+    void addCylinderObject(int obj_id, float pos_x, float pos_y, float pos_z,
+                           float radius, float inner_radius, float height,
+                           float vel_x, float vel_y, float vel_z,
+                           float angular_vel_x, float angular_vel_y, float angular_vel_z,
+                           float density, float E, float nu,
+                           float yield_stress, float hardening, float failure_strain = 0.25f,
+                           float tensile_failure_stress = 600.0e6f, int ppc = 8);
+
+    void addSTLObject(int obj_id, const std::string& stl_filepath,
+                      float pos_x, float pos_y, float pos_z,
+                      float scale_x, float scale_y, float scale_z,
+                      float vel_x, float vel_y, float vel_z,
+                      float angular_vel_x, float angular_vel_y, float angular_vel_z,
+                      float density, float E, float nu,
+                      float yield_stress, float hardening, float failure_strain = 0.25f,
+                      float tensile_failure_stress = 600.0e6f, int ppc = 8);
+
     void step(float cfl = 0.3f);
     void stepWithDt(float dt, bool run_p2g = true);
     float computeStepSize(float cfl = 0.3f);
@@ -49,6 +71,8 @@ public:
     void syncParticlesToHost();
     void syncToDevice();
     void uploadGridToDevice();
+    void uploadMaterialTableToDevice();
+
     // Clear the active grid regions via particle neighborhood (fast sparse clear)
     void clearGridDevice();
     // Run only the P2G scatter pass on GPU, then sync grid to host for FSI force injection
@@ -82,6 +106,7 @@ public:
     MPMParticle3D* getDeviceParticles() { return d_particles; }
     MPMGridNode3D* getDeviceGrid() { return d_grid; }
     size_t getParticleCount() const { return m_host_particles.size(); }
+    size_t getAllocatedVRAM() const;
 
 private:
     void allocateDeviceMemory();
@@ -109,11 +134,11 @@ private:
 
     std::vector<MPMGridNode3D> m_host_grid;
     std::vector<MPMParticle3D> m_host_particles;
+    std::vector<MaterialTable3D> m_material_tables;
 
     MPMGridNode3D* d_grid{nullptr};
     MPMGridNode3D* d_grid_n{nullptr};
     MPMParticle3D* d_particles{nullptr};
-    MPMParticle3D* d_particles_n{nullptr};
     float* d_max_v_buf{nullptr};
     // Persistent FSI external force buffer: 3 floats per node (fx, fy, fz)
     float* d_f_ext_fsi{nullptr};
@@ -138,6 +163,8 @@ private:
     float m_xmin{0.0f};
     float m_ymin{0.0f};
     float m_zmin{0.0f};
+    float m_cached_dt{1.0e-6f};
+    int m_dt_calc_counter{0};
 };
 
 } // namespace Blast

@@ -1,4 +1,4 @@
-import { StateManager } from './state-manager.js';
+import { StateManager, getMeshDisplayHTML, getMPMDisplayHTML } from './state-manager.js';
 import { Node, NodeType } from './types.js';
 import { PropertyEditor } from './property-editor.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
@@ -836,6 +836,22 @@ export class NodeViewer {
         }
 
         this.container.appendChild(grid);
+
+        const state = this.stateManager.getCurrentState();
+        if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D') {
+            const meshInfoDiv = document.createElement('div');
+            meshInfoDiv.style.marginTop = '15px';
+            meshInfoDiv.style.fontSize = 'var(--font-sm)';
+            meshInfoDiv.style.color = '#569cd6';
+            meshInfoDiv.innerHTML = getMeshDisplayHTML(node, state ?? undefined);
+            this.container.appendChild(meshInfoDiv);
+        }
+        if (node.type === 'MPMObject3D' || node.type === 'MPMObject2D' || node.type === 'MPMDomain3D' || node.type === 'MPMDomain2D') {
+            const mpmInfoDiv = document.createElement('div');
+            mpmInfoDiv.style.marginTop = '15px';
+            mpmInfoDiv.innerHTML = getMPMDisplayHTML(node, state ?? undefined);
+            this.container.appendChild(mpmInfoDiv);
+        }
     }
 
     private handleTelemetry(nodeId: string, data: any): void {
@@ -2238,7 +2254,8 @@ export class NodeViewer {
             'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'refinement_level',
             'submesh_x', 'submesh_y', 'submesh_z', 'submesh_size_x', 'submesh_size_y', 'submesh_size_z',
             // MPM keys
-            'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'radius',
+            'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'radius', 'inner_radius',
+            'scale_x', 'scale_y', 'scale_z',
             'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
             'failure_strain', 'tensile_failure_stress',
@@ -2285,7 +2302,7 @@ export class NodeViewer {
             'material_type': ['Air', 'JWL Charge', 'Ideal Gas Charge'],
             'transfer_scheme': ['BSpline', 'GIMP', 'Standard'],
             'velocity_scheme': ['APIC', 'PIC', 'FLIP'],
-            'shape_type': (node.type === 'MPMObject3D') ? ['Box', 'Sphere'] : ['Rectangle', 'Circle'],
+            'shape_type': (node.type === 'MPMObject3D') ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle'],
             'coupling_mode': ['TwoWay_Full', 'OneWay_CFD_to_MPM', 'Disabled'],
             'contour_quantity': ['von_mises', 'plastic_strain', 'density', 'velocity', 'pressure'],
             'color_map': ['viridis', 'plasma', 'jet', 'coolwarm'],

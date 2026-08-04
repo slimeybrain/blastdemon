@@ -1,5 +1,5 @@
 import { SimulationState, Node, Connection, Port, NodeType } from './types.js';
-import { StateManager, calculateRefinementMeshInfo, getMeshDisplayHTML } from './state-manager.js';
+import { StateManager, calculateRefinementMeshInfo, getMeshDisplayHTML, getMPMDisplayHTML } from './state-manager.js';
 import { Telemetry3DViewport } from './telemetry-3d-viewport.js';
 import { validateSimulationState } from './validation.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
@@ -812,8 +812,11 @@ export class GraphRenderer {
                 if (toPortId === 'objects') return fromType === 'MPMObject3D';
                 return false;
             case 'MPMObject2D':
+                if (toPortId === 'material') return fromType === 'MPMMaterialSteel';
+                return false;
             case 'MPMObject3D':
                 if (toPortId === 'material') return fromType === 'MPMMaterialSteel';
+                if (toPortId === 'stl') return fromType === 'STLGeometry';
                 return false;
             case 'FSICoupler2D':
                 if (toPortId === 'cfd_solver' || toPortId === 'cfd') return fromType === 'CFDSolver2D';
@@ -1213,7 +1216,10 @@ export class GraphRenderer {
                 name: 'MPM Simulation (3D)',
                 items: [
                     { label: 'MPM Domain 3D', type: 'MPMDomain3D' },
-                    { label: 'MPM Object 3D (Primitive)', type: 'MPMObject3D' },
+                    { label: 'MPM Object 3D (Box)', type: 'MPMObject3D', defaultParams: { shape_type: 'Box' } },
+                    { label: 'MPM Object 3D (Sphere)', type: 'MPMObject3D', defaultParams: { shape_type: 'Sphere' } },
+                    { label: 'MPM Object 3D (Cylinder)', type: 'MPMObject3D', defaultParams: { shape_type: 'Cylinder' } },
+                    { label: 'MPM Object 3D (STL Geometry)', type: 'MPMObject3D', defaultParams: { shape_type: 'STL' } },
                     { label: 'MPM Steel Material (Hypoelastic)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Steel (Hypoelastic)' } },
                     { label: 'MPM Johnson-Cook Material (EOS)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Johnson-Cook + Mie-Grüneisen' } },
                     { label: 'FSI Coupler 3D', type: 'FSICoupler3D' }
@@ -1758,7 +1764,8 @@ export class GraphRenderer {
                 shape_type: 'Box',
                 pos_x: 0.5, pos_y: 0.5, pos_z: 0.5,
                 size_x: 0.2, size_y: 0.2, size_z: 0.2,
-                radius: 0.1,
+                radius: 0.1, inner_radius: 0.0, height: 0.2,
+                stl_file: '', scale_x: 1.0, scale_y: 1.0, scale_z: 1.0,
                 vel_x: 0.0, vel_y: 0.0, vel_z: 0.0,
                 angular_vel_x: 0.0, angular_vel_y: 0.0, angular_vel_z: 0.0
             };
@@ -4055,6 +4062,12 @@ export class GraphRenderer {
                     needsRebuild = true;
                 }
             }
+            if (node.type === 'MPMObject3D') {
+                const shapeType = node.parameters['shape_type'] || 'Box';
+                if (form.dataset.renderedShapeType !== shapeType.toString()) {
+                    needsRebuild = true;
+                }
+            }
             if (!needsRebuild) {
                 for (const [key, value] of Object.entries(node.parameters)) {
                     const el = form.querySelector(`[data-key="${key}"]`) as HTMLElement;
@@ -4112,6 +4125,11 @@ export class GraphRenderer {
                     const state = this.stateManager.getCurrentState();
                     gridInfo.innerHTML = getMeshDisplayHTML(node, state ?? undefined);
                 }
+                const mpmInfo = form.querySelector('.mpm-info-display') as HTMLDivElement;
+                if (mpmInfo) {
+                    const state = this.stateManager.getCurrentState();
+                    mpmInfo.innerHTML = getMPMDisplayHTML(node, state ?? undefined);
+                }
                 return;
             }
         }
@@ -4135,6 +4153,10 @@ export class GraphRenderer {
         if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
             const velScheme = node.parameters['velocity_scheme'] || 'APIC';
             form.dataset.renderedVelocityScheme = velScheme.toString();
+        }
+        if (node.type === 'MPMObject3D') {
+            const shapeType = node.parameters['shape_type'] || 'Box';
+            form.dataset.renderedShapeType = shapeType.toString();
         }
 
         let paramKeys = Object.keys(node.parameters);
@@ -4188,6 +4210,15 @@ export class GraphRenderer {
             gridInfoDiv = info;
         }
 
+        let mpmInfoDiv: HTMLDivElement | null = null;
+        if (node.type === 'MPMObject3D' || node.type === 'MPMObject2D' || node.type === 'MPMDomain3D' || node.type === 'MPMDomain2D') {
+            const state = this.stateManager.getCurrentState();
+            const info = document.createElement('div');
+            info.className = 'mpm-info-display';
+            info.innerHTML = getMPMDisplayHTML(node, state ?? undefined);
+            mpmInfoDiv = info;
+        }
+
         const state = this.stateManager.getCurrentState();
         const conn = state?.connections.find(c => c.toNode === node.id);
         const sourceNode = conn ? state?.nodes.find(n => n.id === conn.fromNode) : null;
@@ -4236,6 +4267,18 @@ export class GraphRenderer {
                 } else if (matType === 'Ideal Gas Charge') {
                     const igKeys = ['material_type', 'composition', 'ideal_rho_0', 'ideal_e_0'];
                     if (!igKeys.includes(key)) continue;
+                }
+            }
+            if (node.type === 'MPMObject3D') {
+                const shape = node.parameters['shape_type'] || 'Box';
+                if (shape === 'Box') {
+                    if (['radius', 'inner_radius', 'height', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) continue;
+                } else if (shape === 'Sphere') {
+                    if (['size_x', 'size_y', 'size_z', 'inner_radius', 'height', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) continue;
+                } else if (shape === 'Cylinder') {
+                    if (['size_x', 'size_y', 'size_z', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) continue;
+                } else if (shape === 'STL') {
+                    if (['size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height'].includes(key)) continue;
                 }
             }
             if (node.type === 'Charge2D' || node.type === 'Charge1D') {
@@ -4393,7 +4436,8 @@ export class GraphRenderer {
                             'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'refinement_level',
                             'submesh_x', 'submesh_y', 'submesh_z', 'submesh_size_x', 'submesh_size_y', 'submesh_size_z',
                             // MPM keys
-                            'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'radius',
+                            'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'radius', 'inner_radius',
+                            'scale_x', 'scale_y', 'scale_z',
                             'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
                             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
                             'failure_strain', 'tensile_failure_stress',
@@ -4857,6 +4901,9 @@ export class GraphRenderer {
         }
         if (gridInfoDiv) {
             form.appendChild(gridInfoDiv);
+        }
+        if (mpmInfoDiv) {
+            form.appendChild(mpmInfoDiv);
         }
 
         container.appendChild(form);

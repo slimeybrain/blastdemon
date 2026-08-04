@@ -3456,7 +3456,34 @@ export class Telemetry3DViewport {
         // Col 2: Layer Title
         const tdLayer = document.createElement('td');
         tdLayer.style.padding = '3px 4px';
-        tdLayer.innerHTML = '🔮 <b>MPM Particles</b>';
+        const state = this.stateManager.getCurrentState();
+        let particleCountText = '';
+        if (state) {
+            let totalEst = 0;
+            let objCount = 0;
+            const mpmMesh = state.nodes.find(n => n.type === 'DomainMesh3D' || n.type === 'MPMDomain3D');
+            const cellSize = Number(mpmMesh?.parameters['cell_size'] ?? 0.01);
+            const domainPpc = Number(mpmMesh?.parameters['ppc'] ?? 8);
+            const mpmObjects = state.nodes.filter(n => n.type === 'MPMObject3D' || n.type === 'MPMObject2D');
+            for (const objNode of mpmObjects) {
+                objCount++;
+                const st = String(objNode.parameters['shape_type'] || 'Box');
+                const ppc = Number(objNode.parameters['ppc'] ?? domainPpc);
+                const pPerDim = Math.max(1, Math.round(Math.cbrt(ppc)));
+                const pVol = Math.pow(cellSize / pPerDim, 3);
+                let vol = 0.008;
+                if (st === 'Box') vol = Number(objNode.parameters['size_x'] ?? 0.2) * Number(objNode.parameters['size_y'] ?? 0.2) * Number(objNode.parameters['size_z'] ?? 0.2);
+                else if (st === 'Sphere') vol = (4/3) * Math.PI * Math.pow(Number(objNode.parameters['radius'] ?? 0.1), 3);
+                else if (st === 'Cylinder') vol = Math.PI * Math.pow(Number(objNode.parameters['radius'] ?? 0.1), 2) * Number(objNode.parameters['height'] ?? 0.2);
+                else if (st === 'STL') vol = 0.001 * Number(objNode.parameters['scale_x'] ?? 1) * Number(objNode.parameters['scale_y'] ?? 1) * Number(objNode.parameters['scale_z'] ?? 1);
+                totalEst += Math.max(1, Math.round(vol / pVol));
+            }
+            if (objCount > 0) {
+                const vramMB = (totalEst * 292) / (1024 * 1024);
+                particleCountText = `<span style="font-size: 8px; color: #4ec9b0; font-weight: normal; margin-left: 4px;">(${totalEst.toLocaleString()} pts | ${vramMB.toFixed(1)}MB VRAM)</span>`;
+            }
+        }
+        tdLayer.innerHTML = `🔮 <b>MPM Particles</b>${particleCountText}`;
         tr.appendChild(tdLayer);
 
         // Col 3, 4: Empty SOL / LINES

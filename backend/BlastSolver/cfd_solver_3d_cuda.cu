@@ -46,6 +46,8 @@ __constant__ double d_detZ;
 __constant__ unsigned long long d_states_orig_global;
 __constant__ unsigned long long d_active_tiles_global;
 
+__device__ float* d_solid_vel_ptr = nullptr;
+
 struct GPUTriangle {
     float3 v0, v1, v2;
     float3 normal;
@@ -852,12 +854,47 @@ __device__ __forceinline__ GPUCellStateT<RealType, IsMultiMaterial> sample_gpu(
     
     // ALWAYS reflect velocity across the TRUE STL normal to ensure smooth slip flow
     // over stair-stepped voxelization artifacts, sacrificing strict mass conservation for flow quality.
-    float u_dot_n = (float)s_ghost.ux * nx_true + (float)s_ghost.uy * ny_true + (float)s_ghost.uz * nz_true;
-    s_ghost.ux = (RealType)((float)s_ghost.ux - 2.0f * u_dot_n * nx_true);
-    s_ghost.uy = (RealType)((float)s_ghost.uy - 2.0f * u_dot_n * ny_true);
-    s_ghost.uz = (RealType)((float)s_ghost.uz - 2.0f * u_dot_n * nz_true);
+    float vw_x = 0.0f, vw_y = 0.0f, vw_z = 0.0f;
+    if (d_solid_vel_ptr) {
+        int cx = target_x < 0 ? 0 : (target_x >= d_nx ? d_nx - 1 : target_x);
+        int cy = target_y < 0 ? 0 : (target_y >= d_ny ? d_ny - 1 : target_y);
+        int cz = target_z < 0 ? 0 : (target_z >= d_nz ? d_nz - 1 : target_z);
+        int target_flat = cx + cy * d_nx + cz * d_nx * d_ny;
+        vw_x = d_solid_vel_ptr[3 * target_flat + 0];
+        vw_y = d_solid_vel_ptr[3 * target_flat + 1];
+        vw_z = d_solid_vel_ptr[3 * target_flat + 2];
+    }
+
+    float solid_frac = 1.0f;
+    if (geom) {
+        int cx = target_x < 0 ? 0 : (target_x >= d_nx ? d_nx - 1 : target_x);
+        int cy = target_y < 0 ? 0 : (target_y >= d_ny ? d_ny - 1 : target_y);
+        int cz = target_z < 0 ? 0 : (target_z >= d_nz ? d_nz - 1 : target_z);
+        int ntx_dim = (d_nx + 7) >> 3;
+        int nty_dim = (d_ny + 7) >> 3;
+        int t_b = (cx >> 3) + (cy >> 3) * ntx_dim + (cz >> 3) * ntx_dim * nty_dim;
+        int c_b = (cx & 7) + (cy & 7) * 8 + (cz & 7) * 64;
+        bool b_flag; float nx_d, ny_d, nz_d;
+        unpack_geometry_payload(geom[t_b].cells[c_b], b_flag, nx_d, ny_d, nz_d, solid_frac);
+        if (!b_flag) solid_frac = 0.0f;
+    }
+
+    float u_rel_x = (float)s_ghost.ux - vw_x;
+    float u_rel_y = (float)s_ghost.uy - vw_y;
+    float u_rel_z = (float)s_ghost.uz - vw_z;
+
+    float u_dot_n = u_rel_x * nx_true + u_rel_y * ny_true + u_rel_z * nz_true;
+    float u_refl_x = vw_x + u_rel_x - 2.0f * u_dot_n * nx_true;
+    float u_refl_y = vw_y + u_rel_y - 2.0f * u_dot_n * ny_true;
+    float u_refl_z = vw_z + u_rel_z - 2.0f * u_dot_n * nz_true;
+
+    // Smoothly blend wall reflection with ambient/neighbor fluid velocity by solid_frac
+    s_ghost.ux = (RealType)(solid_frac * u_refl_x + (1.0f - solid_frac) * (float)s_ghost.ux);
+    s_ghost.uy = (RealType)(solid_frac * u_refl_y + (1.0f - solid_frac) * (float)s_ghost.uy);
+    s_ghost.uz = (RealType)(solid_frac * u_refl_z + (1.0f - solid_frac) * (float)s_ghost.uz);
     
-    s_ghost.E = (RealType)0.0;
+    RealType ke = (RealType)0.5 * s_ghost.rho * (s_ghost.ux * s_ghost.ux + s_ghost.uy * s_ghost.uy + s_ghost.uz * s_ghost.uz);
+    s_ghost.E = s_ghost.p / ((RealType)d_gamma - (RealType)1.0) + ke;
     
     return s_ghost;
 }
@@ -2710,6 +2747,7 @@ CFDSolver3DCuda<RealType, IsMultiMaterial>::~CFDSolver3DCuda() {
     if (d_tile_energy) cudaFree(d_tile_energy);
     if (d_tile_is_near_boundary) cudaFree(d_tile_is_near_boundary);
     if (d_solid_mask_fsi) { cudaFree(d_solid_mask_fsi); d_solid_mask_fsi = nullptr; }
+    if (d_solid_vel_fsi) { cudaFree(d_solid_vel_fsi); d_solid_vel_fsi = nullptr; }
 
     if (d_gauge_coords) cudaFree(d_gauge_coords);
     if (d_gauge_results) cudaFree(d_gauge_results);
@@ -3524,6 +3562,17 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setBoundaryConditions(BCType3D 
 }
 
 template <typename RealType, bool IsMultiMaterial>
+__global__ void kernel_fsi_apply_penalty_gpu(
+    PrimitiveTile3D<RealType, IsMultiMaterial>* d_states,
+    ConservativeTile3D<RealType, IsMultiMaterial>* d_U,
+    const Blast::MPMGridNode3D* d_grid,
+    int nx, int ny, int nz,
+    int ntx, int nty,
+    float dx, float dy, float dz,
+    float gamma
+);
+
+template <typename RealType, bool IsMultiMaterial>
 void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
     ensure_paged_in();
     bind_constants();
@@ -3708,6 +3757,21 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
     unsigned long long zero_val = 0;
     CHECK_CUDA(cudaMemcpyToSymbol(d_states_orig_global, &zero_val, sizeof(unsigned long long)));
     CHECK_CUDA(cudaMemcpyToSymbol(d_active_tiles_global, &zero_val, sizeof(unsigned long long)));
+
+    if (this->d_fsi_mpm_grid) {
+        dim3 penalty_threads(8, 8, 4);
+        dim3 penalty_grid((nx + 7) / 8, (ny + 7) / 8, (nz + 3) / 4);
+        kernel_fsi_apply_penalty_gpu<RealType, IsMultiMaterial><<<penalty_grid, penalty_threads>>>(
+            (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+            (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
+            (const Blast::MPMGridNode3D*)this->d_fsi_mpm_grid,
+            nx, ny, nz, ntx, nty,
+            (float)cellSize, (float)cellSize, (float)cellSize,
+            (float)gamma
+        );
+        CHECK_CUDA(cudaGetLastError());
+        CHECK_CUDA(cudaDeviceSynchronize());
+    }
 
     currentTime += dt;
     updateActiveRegions();
@@ -5357,6 +5421,35 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setSolidMask(const uint8_t* mas
     CHECK_CUDA(cudaMemset(d_tile_is_near_boundary, 1, total_tiles * sizeof(uint8_t)));
 }
 
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DCuda<RealType, IsMultiMaterial>::setSolidVelocities(const double* v) {
+    if (!v) return;
+    int ntx = (nx + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    int nty = (ny + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    int ntz = (nz + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    int total_tiles = ntx * nty * ntz;
+
+    if (!d_geom) {
+        CHECK_CUDA(cudaMalloc(&d_geom, total_tiles * sizeof(GeometryTile3D)));
+        CHECK_CUDA(cudaMemset(d_geom, 0, total_tiles * sizeof(GeometryTile3D)));
+    }
+
+    size_t vel_bytes = static_cast<size_t>(nx) * ny * nz * 3 * sizeof(float);
+    if (!d_solid_vel_fsi || d_solid_vel_fsi_capacity < vel_bytes) {
+        if (d_solid_vel_fsi) cudaFree(d_solid_vel_fsi);
+        CHECK_CUDA(cudaMalloc(&d_solid_vel_fsi, vel_bytes));
+        d_solid_vel_fsi_capacity = vel_bytes;
+        float* d_ptr = static_cast<float*>(d_solid_vel_fsi);
+        CHECK_CUDA(cudaMemcpyToSymbol(d_solid_vel_ptr, &d_ptr, sizeof(float*)));
+    }
+
+    std::vector<float> float_vel(static_cast<size_t>(nx) * ny * nz * 3);
+    for (size_t i = 0; i < float_vel.size(); ++i) {
+        float_vel[i] = static_cast<float>(v[i]);
+    }
+    CHECK_CUDA(cudaMemcpy(d_solid_vel_fsi, float_vel.data(), vel_bytes, cudaMemcpyHostToDevice));
+}
+
 // Bulk pressure extraction for FSI — one cudaMemcpy per tile array, not per cell
 template <typename RealType, bool IsMultiMaterial>
 std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::extractPressureField() const {
@@ -5407,11 +5500,20 @@ __device__ inline float get_fsi_pressure_at(
     return static_cast<float>(d_states[t_idx].p[c_idx]);
 }
 
+__device__ inline float get_mpm_mass_at(const Blast::MPMGridNode3D* grid, int x, int y, int z, int nx, int ny, int nz) {
+    x = x < 0 ? 0 : (x >= nx ? nx - 1 : x);
+    y = y < 0 ? 0 : (y >= ny ? ny - 1 : y);
+    z = z < 0 ? 0 : (z >= nz ? nz - 1 : z);
+    int mpm_idx = (x * ny + y) * nz + z;
+    return grid[mpm_idx].m;
+}
+
 template <typename RealType, bool IsMultiMaterial>
 __global__ void kernel_fsi_couple_gpu(
     PrimitiveTile3D<RealType, IsMultiMaterial>* d_states,
     GeometryTile3D* d_geom,
     Blast::MPMGridNode3D* d_grid,
+    float* d_solid_vel,
     int nx, int ny, int nz,
     int ntx, int nty,
     float dx, float dy, float dz
@@ -5428,8 +5530,43 @@ __global__ void kernel_fsi_couple_gpu(
     int t_idx = (gx >> 3) + (gy >> 3) * ntx + (gz >> 3) * ntx * nty;
     int c_idx = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
 
-    bool is_solid = (mass > 1.0e-8f);
-    d_geom[t_idx].cells[c_idx].is_boundary = is_solid;
+    bool is_solid = (mass > 1.0e-5f);
+    float vx = is_solid ? (d_grid[mpm_idx].p[0] / mass) : 0.0f;
+    float vy = is_solid ? (d_grid[mpm_idx].p[1] / mass) : 0.0f;
+    float vz = is_solid ? (d_grid[mpm_idx].p[2] / mass) : 0.0f;
+
+    int cfd_flat_idx = gx + gy * nx + gz * nx * ny;
+    if (d_solid_vel) {
+        d_solid_vel[3 * cfd_flat_idx + 0] = vx;
+        d_solid_vel[3 * cfd_flat_idx + 1] = vy;
+        d_solid_vel[3 * cfd_flat_idx + 2] = vz;
+    }
+
+    if (d_geom) {
+        if (is_solid) {
+            float m_L = get_mpm_mass_at(d_grid, gx - 1, gy, gz, nx, ny, nz);
+            float m_R = get_mpm_mass_at(d_grid, gx + 1, gy, gz, nx, ny, nz);
+            float m_B = get_mpm_mass_at(d_grid, gx, gy - 1, gz, nx, ny, nz);
+            float m_T = get_mpm_mass_at(d_grid, gx, gy + 1, gz, nx, ny, nz);
+            float m_D = get_mpm_mass_at(d_grid, gx, gy, gz - 1, nx, ny, nz);
+            float m_U = get_mpm_mass_at(d_grid, gx, gy, gz + 1, nx, ny, nz);
+
+            float grad_x = m_R - m_L;
+            float grad_y = m_T - m_B;
+            float grad_z = m_U - m_D;
+            float grad_mag = sqrtf(grad_x * grad_x + grad_y * grad_y + grad_z * grad_z);
+
+            float nx_normal = 0.0f, ny_normal = 0.0f, nz_normal = 0.0f;
+            if (grad_mag > 1.0e-8f) {
+                nx_normal = -grad_x / grad_mag;
+                ny_normal = -grad_y / grad_mag;
+                nz_normal = -grad_z / grad_mag;
+            }
+            d_geom[t_idx].cells[c_idx] = pack_geometry_payload(true, nx_normal, ny_normal, nz_normal, 1.0f);
+        } else {
+            d_geom[t_idx].cells[c_idx] = pack_geometry_payload(false, 0.0f, 0.0f, 0.0f, 0.0f);
+        }
+    }
 
     if (is_solid) {
         float p_left   = get_fsi_pressure_at<RealType, IsMultiMaterial>(d_states, gx - 1, gy, gz, nx, ny, nz, ntx, nty);
@@ -5450,19 +5587,137 @@ __global__ void kernel_fsi_couple_gpu(
 }
 
 template <typename RealType, bool IsMultiMaterial>
+__global__ void kernel_fsi_apply_penalty_gpu(
+    PrimitiveTile3D<RealType, IsMultiMaterial>* d_states,
+    ConservativeTile3D<RealType, IsMultiMaterial>* d_U,
+    const Blast::MPMGridNode3D* d_grid,
+    int nx, int ny, int nz,
+    int ntx, int nty,
+    float dx, float dy, float dz,
+    float gamma
+) {
+    int gx = blockIdx.x * blockDim.x + threadIdx.x;
+    int gy = blockIdx.y * blockDim.y + threadIdx.y;
+    int gz = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if (gx >= nx || gy >= ny || gz >= nz) return;
+
+    int mpm_idx = (gx * ny + gy) * nz + gz;
+    float mass = d_grid[mpm_idx].m;
+
+    if (mass <= 1.0e-5f) return;
+
+    float vx = d_grid[mpm_idx].p[0] / mass;
+    float vy = d_grid[mpm_idx].p[1] / mass;
+    float vz = d_grid[mpm_idx].p[2] / mass;
+
+    int t_idx = (gx >> 3) + (gy >> 3) * ntx + (gz >> 3) * ntx * nty;
+    int c_idx = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
+
+    RealType new_ux = (RealType)vx;
+    RealType new_uy = (RealType)vy;
+    RealType new_uz = (RealType)vz;
+
+    // Mirror fluid pressure from neighboring fluid cells to prevent unphysical pressure build-up
+    RealType mirrored_p = get_fsi_pressure_at<RealType, IsMultiMaterial>(d_states, gx, gy, gz, nx, ny, nz, ntx, nty);
+
+    // Update Primitive tile velocity and mirrored pressure
+    d_states[t_idx].ux[c_idx] = new_ux;
+    d_states[t_idx].uy[c_idx] = new_uy;
+    d_states[t_idx].uz[c_idx] = new_uz;
+    d_states[t_idx].p[c_idx]  = mirrored_p;
+
+    // Update Conservative tile (d_U) — SSOT for CFD solver!
+    if (d_U) {
+        RealType rho = d_U[t_idx].rho[c_idx];
+        if (rho < (RealType)1e-6) rho = (RealType)1e-6;
+
+        RealType new_rhoux = rho * new_ux;
+        RealType new_rhouy = rho * new_uy;
+        RealType new_rhouz = rho * new_uz;
+        RealType new_ke = (RealType)0.5 * rho * (new_ux * new_ux + new_uy * new_uy + new_uz * new_uz);
+
+        d_U[t_idx].rhoux[c_idx] = new_rhoux;
+        d_U[t_idx].rhouy[c_idx] = new_rhouy;
+        d_U[t_idx].rhouz[c_idx] = new_rhouz;
+        d_U[t_idx].E[c_idx]     = mirrored_p / ((RealType)gamma - (RealType)1.0) + new_ke;
+    }
+}
+
+__global__ void kernel_mark_tile_has_boundary_3d(
+    const GeometryTile3D* d_geom,
+    uint8_t* d_tile_has_boundary,
+    int total_tiles
+) {
+    int t_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t_idx >= total_tiles) return;
+
+    bool has_b = false;
+    for (int c = 0; c < TILE_CELLS_3D; ++c) {
+        if (d_geom[t_idx].cells[c].is_boundary) {
+            has_b = true;
+            break;
+        }
+    }
+    d_tile_has_boundary[t_idx] = has_b ? 1 : 0;
+}
+
+__global__ void kernel_update_fsi_tile_boundary_flags(
+    const uint8_t* d_tile_has_boundary,
+    uint8_t* d_tile_is_near_boundary,
+    int ntx, int nty, int ntz
+) {
+    int t_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_tiles = ntx * nty * ntz;
+    if (t_idx >= total_tiles) return;
+
+    int tz = t_idx / (ntx * nty);
+    int ty = (t_idx / ntx) % nty;
+    int tx = t_idx % ntx;
+
+    bool near = false;
+    for (int dz = -1; dz <= 1 && !near; ++dz) {
+        for (int dy = -1; dy <= 1 && !near; ++dy) {
+            for (int dx = -1; dx <= 1 && !near; ++dx) {
+                int nx_t = tx + dx;
+                int ny_t = ty + dy;
+                int nz_t = tz + dz;
+                if (nx_t >= 0 && nx_t < ntx && ny_t >= 0 && ny_t < nty && nz_t >= 0 && nz_t < ntz) {
+                    int n_idx = nx_t + ny_t * ntx + nz_t * ntx * nty;
+                    if (d_tile_has_boundary[n_idx]) {
+                        near = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    d_tile_is_near_boundary[t_idx] = near ? 1 : 0;
+}
+
+template <typename RealType, bool IsMultiMaterial>
 void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithMPMGPU(void* mpm_solver_void) {
     ensure_paged_in();
     if (!mpm_solver_void) return;
     Blast::MPMSolver3DCUDA* mpm_solver = static_cast<Blast::MPMSolver3DCUDA*>(mpm_solver_void);
     Blast::MPMGridNode3D* d_grid = mpm_solver->getDeviceGrid();
     if (!d_grid) return;
-
     int ntx = (nx + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
     int nty = (ny + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
     int ntz = (nz + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
     int total_tiles = ntx * nty * ntz;
 
-    // Allocate geometry buffers if needed
+    float mpm_dx = mpm_solver->getDx();
+    float mpm_dy = mpm_solver->getDy();
+    float mpm_dz = mpm_solver->getDz();
+
+    dim3 block(8, 8, 4);
+    dim3 grid((nx + 7) / 8, (ny + 7) / 8, (nz + 3) / 4);
+
+    // Save MPM grid pointer for CFD penalty step
+    this->d_fsi_mpm_grid = d_grid;
+
+    // Allocate geometry buffer and tile proximity flags if needed (first FSI call)
     if (!d_geom) {
         CHECK_CUDA(cudaMalloc(&d_geom, total_tiles * sizeof(GeometryTile3D)));
         CHECK_CUDA(cudaMemset(d_geom, 0, total_tiles * sizeof(GeometryTile3D)));
@@ -5472,28 +5727,65 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithMPMGPU(void* mpm_s
         CHECK_CUDA(cudaMemset(d_tile_is_near_boundary, 1, total_tiles * sizeof(uint8_t)));
     }
 
-    float mpm_dx = mpm_solver->getDx();
-    float mpm_dy = mpm_solver->getDy();
-    float mpm_dz = mpm_solver->getDz();
-
-    dim3 block(8, 8, 4);
-    dim3 grid((nx + 7) / 8, (ny + 7) / 8, (nz + 3) / 4);
+    size_t vel_bytes = static_cast<size_t>(nx) * ny * nz * 3 * sizeof(float);
+    if (!d_solid_vel_fsi || d_solid_vel_fsi_capacity < vel_bytes) {
+        if (d_solid_vel_fsi) cudaFree(d_solid_vel_fsi);
+        CHECK_CUDA(cudaMalloc(&d_solid_vel_fsi, vel_bytes));
+        d_solid_vel_fsi_capacity = vel_bytes;
+        float* d_ptr = static_cast<float*>(d_solid_vel_fsi);
+        CHECK_CUDA(cudaMemcpyToSymbol(d_solid_vel_ptr, &d_ptr, sizeof(float*)));
+    }
 
     kernel_fsi_couple_gpu<RealType, IsMultiMaterial><<<grid, block>>>(
         (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
         (GeometryTile3D*)d_geom,
         d_grid,
+        (float*)d_solid_vel_fsi,
         nx, ny, nz,
         ntx, nty,
         mpm_dx, mpm_dy, mpm_dz
     );
     CHECK_CUDA(cudaGetLastError());
 
+    kernel_fsi_apply_penalty_gpu<RealType, IsMultiMaterial><<<grid, block>>>(
+        (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+        (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
+        d_grid,
+        nx, ny, nz,
+        ntx, nty,
+        (float)mpm_dx, (float)mpm_dy, (float)mpm_dz,
+        (float)gamma
+    );
+    CHECK_CUDA(cudaGetLastError());
+
     // Automatically cache FSI forces on the device so RK2 corrector step can restore them
     mpm_solver->storeFSIForces();
 
-    // Mark near-boundary flags as conservative (all processed)
-    CHECK_CUDA(cudaMemset(d_tile_is_near_boundary, 1, total_tiles * sizeof(uint8_t)));
+    // Mark active boundary tile proximity flags on GPU using 2-pass fast tile reduction
+    int threads_tile = 256;
+    int blocks_tile = (total_tiles + threads_tile - 1) / threads_tile;
+    
+    static uint8_t* d_tile_has_boundary_buf = nullptr;
+    static size_t d_tile_has_boundary_capacity = 0;
+    if (!d_tile_has_boundary_buf || d_tile_has_boundary_capacity < total_tiles * sizeof(uint8_t)) {
+        if (d_tile_has_boundary_buf) cudaFree(d_tile_has_boundary_buf);
+        CHECK_CUDA(cudaMalloc(&d_tile_has_boundary_buf, total_tiles * sizeof(uint8_t)));
+        d_tile_has_boundary_capacity = total_tiles * sizeof(uint8_t);
+    }
+
+    kernel_mark_tile_has_boundary_3d<<<blocks_tile, threads_tile>>>(
+        (const GeometryTile3D*)d_geom,
+        d_tile_has_boundary_buf,
+        total_tiles
+    );
+    CHECK_CUDA(cudaGetLastError());
+
+    kernel_update_fsi_tile_boundary_flags<<<blocks_tile, threads_tile>>>(
+        (const uint8_t*)d_tile_has_boundary_buf,
+        (uint8_t*)d_tile_is_near_boundary,
+        ntx, nty, ntz
+    );
+    CHECK_CUDA(cudaGetLastError());
 }
 
 template class CFDSolver3DCuda<float, true>;

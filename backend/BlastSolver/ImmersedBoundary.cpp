@@ -161,7 +161,7 @@ void voxelize_geometry(
         int total_tiles = n_tiles_x * n_tiles_y * n_tiles_z;
         #pragma omp parallel for
         for (int t = 0; t < total_tiles; ++t) {
-            std::fill(geom_pool[t].cells, geom_pool[t].cells + TILE_CELLS_3D, GeometryPayload{0, 0, 0, false});
+            std::fill(geom_pool[t].cells, geom_pool[t].cells + TILE_CELLS_3D, GeometryPayload{});
         }
         return;
     }
@@ -174,7 +174,7 @@ void voxelize_geometry(
     int total_tiles = n_tiles_x * n_tiles_y * n_tiles_z;
     #pragma omp parallel for
     for (int t = 0; t < total_tiles; ++t) {
-        std::fill(geom_pool[t].cells, geom_pool[t].cells + TILE_CELLS_3D, GeometryPayload{0, 0, 0, false});
+        std::fill(geom_pool[t].cells, geom_pool[t].cells + TILE_CELLS_3D, GeometryPayload{});
     }
 
     float box_half = 0.5f * (float)cellSize;
@@ -577,7 +577,7 @@ void voxelize_geometry(
                             int ncy = y % TILE_SIZE_3D;
                             int ncz = z % TILE_SIZE_3D;
                             int nidx = ncx + ncy * TILE_SIZE_3D + ncz * TILE_SIZE_3D * TILE_SIZE_3D;
-                            return geom_pool[nt_idx].cells[nidx].is_boundary;
+                            return geom_pool[nt_idx].cells[nidx].is_boundary != 0;
                         };
                         
                         if (is_solid(gx+1, gy, gz)) solid_neighbors++;
@@ -661,7 +661,7 @@ void voxelize_stl(
         int total_tiles = n_tiles_x * n_tiles_y * n_tiles_z;
         #pragma omp parallel for
         for (int t = 0; t < total_tiles; ++t) {
-            std::fill(geom_pool[t].cells, geom_pool[t].cells + TILE_CELLS_3D, GeometryPayload{0, 0, 0, false});
+            std::fill(geom_pool[t].cells, geom_pool[t].cells + TILE_CELLS_3D, GeometryPayload{});
         }
         return;
     }
@@ -728,7 +728,7 @@ void voxelize_primitives(
     int total_tiles = n_tiles_x * n_tiles_y * n_tiles_z;
     #pragma omp parallel for
     for (int t = 0; t < total_tiles; ++t) {
-        std::fill(geom_pool[t].cells, geom_pool[t].cells + TILE_CELLS_3D, GeometryPayload{0, 0, 0, false});
+        std::fill(geom_pool[t].cells, geom_pool[t].cells + TILE_CELLS_3D, GeometryPayload{});
     }
 
     if (!primitives_json.is_array() || primitives_json.empty()) {
@@ -775,7 +775,7 @@ void voxelize_primitives(
             for (int i = 0; i < TILE_CELLS_3D; ++i) {
                 if (temp_geom[t].cells[i].is_boundary) {
                     if (subtractive) {
-                        geom_pool[t].cells[i] = GeometryPayload{0, 0, 0, false};
+                        geom_pool[t].cells[i] = GeometryPayload{};
                     } else {
                         geom_pool[t].cells[i] = temp_geom[t].cells[i];
                     }
@@ -820,7 +820,7 @@ void voxelize_primitives(
                             int ncy = y % TILE_SIZE_3D;
                             int ncz = z % TILE_SIZE_3D;
                             int nidx = ncx + ncy * TILE_SIZE_3D + ncz * TILE_SIZE_3D * TILE_SIZE_3D;
-                            return geom_pool[nt_idx].cells[nidx].is_boundary;
+                            return geom_pool[nt_idx].cells[nidx].is_boundary != 0;
                         };
                         
                         if (is_solid(gx+1, gy, gz)) solid_neighbors++;

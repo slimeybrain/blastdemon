@@ -2259,6 +2259,7 @@ void worker_fsi_3d_thread_func() {
                     // Grid is now populated from P2G — read it to build solid mask and inject pressure forces
                     auto& grid = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getGrid() : global_solver_mpm_3d->getGrid();
                     std::vector<uint8_t> solid_mask(static_cast<size_t>(nx) * ny * nz, 0);
+                    std::vector<double> solid_vel(3 * static_cast<size_t>(nx) * ny * nz, 0.0);
 
                     for (int i = 0; i < nx; ++i) {
                         for (int j = 0; j < ny; ++j) {
@@ -2268,6 +2269,9 @@ void worker_fsi_3d_thread_func() {
                                 size_t cfd_idx = static_cast<size_t>(i) + static_cast<size_t>(j) * nx + static_cast<size_t>(k) * nx * ny;
                                 if (node.m > 1.0e-8f) {
                                     solid_mask[cfd_idx] = 1;
+                                    solid_vel[3 * cfd_idx + 0] = node.v[0];
+                                    solid_vel[3 * cfd_idx + 1] = node.v[1];
+                                    solid_vel[3 * cfd_idx + 2] = node.v[2];
                                 }
                             }
                         }
@@ -2275,6 +2279,7 @@ void worker_fsi_3d_thread_func() {
 
                     // Pass MPM solid mask to 3D CFD solver so fluid shock/pressure reflects off MPM solids
                     global_solver_3d->setSolidMask(solid_mask.data());
+                    global_solver_3d->setSolidVelocities(solid_vel.data());
 
                     // Bulk-download entire pressure field in ONE transfer (avoids per-cell cudaMemcpy)
                     std::vector<float> pfield = global_solver_3d->extractPressureField();
@@ -2674,10 +2679,14 @@ void emit_resource_pulse() {
     if (gpu_monitor.get_process_vram(getpid(), nvml_vram)) {
         blastdemon_vram = nvml_vram;
     } else {
+        if (global_solver_mpm_3d_cuda != nullptr) {
+            blastdemon_vram += global_solver_mpm_3d_cuda->getAllocatedVRAM();
+        }
         if (global_solver_2d_cuda != nullptr) {
-            blastdemon_vram = global_solver_2d_cuda->getAllocatedVRAM();
-        } else if (global_solver_3d != nullptr) {
-            blastdemon_vram = global_solver_3d->getAllocatedVRAM();
+            blastdemon_vram += global_solver_2d_cuda->getAllocatedVRAM();
+        }
+        if (global_solver_3d != nullptr) {
+            blastdemon_vram += global_solver_3d->getAllocatedVRAM();
         }
     }
     pulse["vram_blastdaemon"] = blastdemon_vram;
@@ -3128,10 +3137,17 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated) {
     float dy = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getDy() : global_solver_mpm_3d->getDy();
     float dz = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getDz() : global_solver_mpm_3d->getDz();
 
+    size_t mpm_vram = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getAllocatedVRAM() : 0;
     char log_buf[256];
-    snprintf(log_buf, sizeof(log_buf),
-             "Step %d | Time = %.4e s | dt = %.2e s | CFL = %.2f | v_max = %.1f m/s | Particles = %zu",
-             current_step, sim_time, dt, cfl, v_max, particles.size());
+    if (mpm_vram > 0) {
+        snprintf(log_buf, sizeof(log_buf),
+                 "Step %d | Time = %.4e s | dt = %.2e s | CFL = %.2f | v_max = %.1f m/s | Particles = %zu (VRAM: %.2f MB)",
+                 current_step, sim_time, dt, cfl, v_max, particles.size(), mpm_vram / (1024.0 * 1024.0));
+    } else {
+        snprintf(log_buf, sizeof(log_buf),
+                 "Step %d | Time = %.4e s | dt = %.2e s | CFL = %.2f | v_max = %.1f m/s | Particles = %zu",
+                 current_step, sim_time, dt, cfl, v_max, particles.size());
+    }
     emit_kernel_log("SYSTEM", log_buf, sim_time, "mpm_3d");
 
     auto payload = std::make_unique<TelemetryPayload>();
@@ -4301,6 +4317,25 @@ int main() {
                                 } else {
                                     global_solver_mpm_3d->addSphereObject(obj_idx, pos_x, pos_y, pos_z, radius, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
                                 }
+                            } else if (shape == "Cylinder") {
+                                float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
+                                float inner_radius = static_cast<float>(get_json_double(obj, "inner_radius", 0.0));
+                                float height = static_cast<float>(get_json_double(obj, "height", 0.2));
+                                if (global_solver_mpm_3d_cuda) {
+                                    global_solver_mpm_3d_cuda->addCylinderObject(obj_idx, pos_x, pos_y, pos_z, radius, inner_radius, height, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                } else {
+                                    global_solver_mpm_3d->addCylinderObject(obj_idx, pos_x, pos_y, pos_z, radius, inner_radius, height, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                }
+                            } else if (shape == "STL") {
+                                std::string stl_file = obj.contains("stl_file") ? obj["stl_file"].get<std::string>() : "";
+                                float scale_x = static_cast<float>(get_json_double(obj, "scale_x", 1.0));
+                                float scale_y = static_cast<float>(get_json_double(obj, "scale_y", 1.0));
+                                float scale_z = static_cast<float>(get_json_double(obj, "scale_z", 1.0));
+                                if (global_solver_mpm_3d_cuda) {
+                                    global_solver_mpm_3d_cuda->addSTLObject(obj_idx, stl_file, pos_x, pos_y, pos_z, scale_x, scale_y, scale_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                } else {
+                                    global_solver_mpm_3d->addSTLObject(obj_idx, stl_file, pos_x, pos_y, pos_z, scale_x, scale_y, scale_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                }
                             } else {
                                 float size_x = static_cast<float>(get_json_double(obj, "size_x", 0.2));
                                 float size_y = static_cast<float>(get_json_double(obj, "size_y", 0.2));
@@ -4772,6 +4807,25 @@ int main() {
                                     global_solver_mpm_3d_cuda->addSphereObject(obj_idx, pos_x, pos_y, pos_z, radius, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
                                 } else {
                                     global_solver_mpm_3d->addSphereObject(obj_idx, pos_x, pos_y, pos_z, radius, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                }
+                            } else if (shape == "Cylinder") {
+                                float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
+                                float inner_radius = static_cast<float>(get_json_double(obj, "inner_radius", 0.0));
+                                float height = static_cast<float>(get_json_double(obj, "height", 0.2));
+                                if (global_solver_mpm_3d_cuda) {
+                                    global_solver_mpm_3d_cuda->addCylinderObject(obj_idx, pos_x, pos_y, pos_z, radius, inner_radius, height, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                } else {
+                                    global_solver_mpm_3d->addCylinderObject(obj_idx, pos_x, pos_y, pos_z, radius, inner_radius, height, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                }
+                            } else if (shape == "STL") {
+                                std::string stl_file = obj.contains("stl_file") ? obj["stl_file"].get<std::string>() : "";
+                                float scale_x = static_cast<float>(get_json_double(obj, "scale_x", 1.0));
+                                float scale_y = static_cast<float>(get_json_double(obj, "scale_y", 1.0));
+                                float scale_z = static_cast<float>(get_json_double(obj, "scale_z", 1.0));
+                                if (global_solver_mpm_3d_cuda) {
+                                    global_solver_mpm_3d_cuda->addSTLObject(obj_idx, stl_file, pos_x, pos_y, pos_z, scale_x, scale_y, scale_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                } else {
+                                    global_solver_mpm_3d->addSTLObject(obj_idx, stl_file, pos_x, pos_y, pos_z, scale_x, scale_y, scale_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
                                 }
                             } else {
                                 float size_x = static_cast<float>(get_json_double(obj, "size_x", 0.2));

@@ -100,8 +100,16 @@ void voxelize_flat_boundary(
 
 
 
-HD_FUNC inline GeometryPayload pack_geometry_payload(bool is_boundary, float nx, float ny, float nz) {
-    if (!is_boundary) return {0, 0, 0, false};
+HD_FUNC inline GeometryPayload pack_geometry_payload(bool is_boundary, float nx, float ny, float nz, float solid_fraction = 1.0f) {
+    if (!is_boundary) {
+        GeometryPayload payload;
+        payload.nx = 0;
+        payload.ny = 0;
+        payload.nz = 0;
+        payload.solid_fraction = 0;
+        payload.is_boundary = 0;
+        return payload;
+    }
     float len = sqrtf(nx*nx + ny*ny + nz*nz);
     if (len > 1e-6f) {
         nx /= len; ny /= len; nz /= len;
@@ -114,18 +122,34 @@ HD_FUNC inline GeometryPayload pack_geometry_payload(bool is_boundary, float nx,
     int8_t qx = static_cast<int8_t>(n_x_scaled > 127.0f ? 127.0f : (n_x_scaled < -127.0f ? -127.0f : n_x_scaled));
     int8_t qy = static_cast<int8_t>(n_y_scaled > 127.0f ? 127.0f : (n_y_scaled < -127.0f ? -127.0f : n_y_scaled));
     int8_t qz = static_cast<int8_t>(n_z_scaled > 127.0f ? 127.0f : (n_z_scaled < -127.0f ? -127.0f : n_z_scaled));
-    return {qx, qy, qz, true};
+    float s_scaled = solid_fraction * 127.0f;
+    uint8_t q_s = static_cast<uint8_t>(s_scaled > 127.0f ? 127.0f : (s_scaled < 0.0f ? 0.0f : s_scaled));
+    
+    GeometryPayload payload;
+    payload.nx = qx;
+    payload.ny = qy;
+    payload.nz = qz;
+    payload.solid_fraction = q_s;
+    payload.is_boundary = 1;
+    return payload;
 }
 
-HD_FUNC inline void unpack_geometry_payload(const GeometryPayload& payload, bool& is_boundary, float& nx, float& ny, float& nz) {
-    is_boundary = payload.is_boundary;
+HD_FUNC inline void unpack_geometry_payload(const GeometryPayload& payload, bool& is_boundary, float& nx, float& ny, float& nz, float& solid_fraction) {
+    is_boundary = (payload.is_boundary != 0);
     if (!is_boundary) {
         nx = 0.0f; ny = 0.0f; nz = 0.0f;
+        solid_fraction = 0.0f;
         return;
     }
     nx = static_cast<float>(payload.nx) / 127.0f;
     ny = static_cast<float>(payload.ny) / 127.0f;
     nz = static_cast<float>(payload.nz) / 127.0f;
+    solid_fraction = static_cast<float>(payload.solid_fraction) / 127.0f;
+}
+
+HD_FUNC inline void unpack_geometry_payload(const GeometryPayload& payload, bool& is_boundary, float& nx, float& ny, float& nz) {
+    float dummy_s = 0.0f;
+    unpack_geometry_payload(payload, is_boundary, nx, ny, nz, dummy_s);
 }
 
 HD_FUNC inline bool ray_triangle_intersect(

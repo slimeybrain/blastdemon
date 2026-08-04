@@ -1703,7 +1703,7 @@ std::vector<float> CFDSolver3DImpl<RealType, IsMultiMaterial>::extractSlice(cons
         if (cx < 0 || cx >= nx || cy < 0 || cy >= ny || cz < 0 || cz >= nz) return false;
         int t = (cx >> 3) + (cy >> 3) * n_tiles_x + (cz >> 3) * n_tiles_x * n_tiles_y;
         int c = (cx & 7) + (cy & 7) * 8 + (cz & 7) * 64;
-        return geom_pool[t].cells[c].is_boundary;
+        return geom_pool[t].cells[c].is_boundary != 0;
     };
 
     auto getVal = [&](const CellState3D<IsMultiMaterial>& s, int gx_c, int gy_c, int gz_c) -> float {

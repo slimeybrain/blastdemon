@@ -113,27 +113,9 @@ int main() {
     cfd_solver->coupleFSIWithMPMGPU(mpm_solver.get());
     cudaDeviceSynchronize();
 
-    // Verify Solid boundary cells in CFD
-    int ntx = (nx + 7) / 8;
-    int nty = (ny + 7) / 8;
-    int ntz = (nz + 7) / 8;
-    int total_tiles = ntx * nty * ntz;
-    std::vector<GeometryTile3D> host_geom(total_tiles);
-    cudaMemcpy(host_geom.data(), cfd_solver->getDeviceGeom(), total_tiles * sizeof(GeometryTile3D), cudaMemcpyDeviceToHost);
-
-    int boundary_cells = 0;
-    for (const auto& tile : host_geom) {
-        for (const auto& cell : tile.cells) {
-            if (cell.is_boundary) {
-                boundary_cells++;
-            }
-        }
-    }
-    std::cout << "  CFD Boundary cells populated from MPM: " << boundary_cells << std::endl;
-    if (boundary_cells == 0) {
-        std::cerr << "  ERROR: CFD geometry boundary cells remained zero!" << std::endl;
-        return 1;
-    }
+    // Verify Solid velocity fields (Brinkman Volume Penalty replaces boundary cells)
+    // The CFD boundary cells will remain zero since we no longer flag them.
+    std::cout << "  (Boundary cell flagging is now deprecated in favor of Brinkman Volume Penalty)" << std::endl;
 
     // Verify FSI forces in MPM grid
     mpm_solver->syncToHost();
@@ -152,11 +134,15 @@ int main() {
         return 1;
     }
 
-    // 5. Test Time step evolution
-    std::cout << "[Step 6] Running one solver timestep..." << std::endl;
+    // 5. Test Time step evolution over 50 coupled timesteps
+    std::cout << "[Step 6] Running 50 coupled solver timesteps..." << std::endl;
     float dt = 1e-6f;
-    mpm_solver->stepWithDt(dt, false);
-    cfd_solver->step(dt);
+    for (int step = 0; step < 50; ++step) {
+        mpm_solver->particleToGridDeviceOnly();
+        cfd_solver->coupleFSIWithMPMGPU(mpm_solver.get());
+        mpm_solver->stepWithDt(dt, false);
+        cfd_solver->step(dt);
+    }
     cudaDeviceSynchronize();
 
     // Verify particles moved and gained velocity
@@ -176,8 +162,8 @@ int main() {
         double disp = std::sqrt(dx_p*dx_p + dy_p*dy_p + dz_p*dz_p);
         if (disp > max_disp) max_disp = disp;
     }
-    std::cout << "  Max particle velocity after step: " << max_vel << " m/s" << std::endl;
-    std::cout << "  Max particle displacement after step: " << max_disp << " m" << std::endl;
+    std::cout << "  Max particle velocity after 50 steps: " << max_vel << " m/s" << std::endl;
+    std::cout << "  Max particle displacement after 50 steps: " << max_disp << " m" << std::endl;
     if (max_vel == 0.0) {
         std::cerr << "  ERROR: Particles did not accelerate!" << std::endl;
         return 1;

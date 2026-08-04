@@ -1,4 +1,5 @@
 #include "mpm_solver_3d.hpp"
+#include "ImmersedBoundary.hpp"
 
 namespace Blast {
 
@@ -230,6 +231,251 @@ void MPMSolver3D::addSphereObject(int obj_id, float pos_x, float pos_y, float po
             }
         }
     }
+}
+
+void MPMSolver3D::addCylinderObject(int obj_id, float pos_x, float pos_y, float pos_z,
+                                      float radius, float inner_radius, float height,
+                                      float vel_x, float vel_y, float vel_z,
+                                      float angular_vel_x, float angular_vel_y, float angular_vel_z,
+                                      float density, float E, float nu,
+                                      float yield_stress, float hardening, float failure_strain,
+                                      float tensile_failure_stress, int ppc) {
+    int particles_per_dim = static_cast<int>(std::round(std::cbrt(static_cast<float>(ppc))));
+    if (particles_per_dim < 1) particles_per_dim = 2;
+
+    float p_dx = m_dx / static_cast<float>(particles_per_dim);
+    float p_dy = m_dy / static_cast<float>(particles_per_dim);
+    float p_dz = m_dz / static_cast<float>(particles_per_dim);
+
+    float min_x = pos_x - radius; float max_x = pos_x + radius;
+    float min_y = pos_y - radius; float max_y = pos_y + radius;
+    float half_h = 0.5f * height;
+    float min_z = pos_z - half_h; float max_z = pos_z + half_h;
+
+    float r_outer2 = radius * radius;
+    float r_inner2 = inner_radius * inner_radius;
+    float p_vol = p_dx * p_dy * p_dz;
+    float p_mass = p_vol * density;
+
+    for (float x = min_x + 0.5f * p_dx; x < max_x; x += p_dx) {
+        for (float y = min_y + 0.5f * p_dy; y < max_y; y += p_dy) {
+            for (float z = min_z + 0.5f * p_dz; z < max_z; z += p_dz) {
+                float rx = x - pos_x;
+                float ry = y - pos_y;
+                float rz = z - pos_z;
+                float r2 = rx * rx + ry * ry;
+                if (r2 <= r_outer2 && r2 >= r_inner2 && std::abs(rz) <= half_h) {
+                    MPMParticle3D p{};
+                    p.x[0] = x; p.x[1] = y; p.x[2] = z;
+
+                    p.v[0] = vel_x + (angular_vel_y * rz - angular_vel_z * ry);
+                    p.v[1] = vel_y + (angular_vel_z * rx - angular_vel_x * rz);
+                    p.v[2] = vel_z + (angular_vel_x * ry - angular_vel_y * rx);
+
+                    p.B[0][0] = 0.0f;             p.B[0][1] = -angular_vel_z; p.B[0][2] =  angular_vel_y;
+                    p.B[1][0] =  angular_vel_z;   p.B[1][1] = 0.0f;           p.B[1][2] = -angular_vel_x;
+                    p.B[2][0] = -angular_vel_y;   p.B[2][1] =  angular_vel_x; p.B[2][2] = 0.0f;
+
+                    p.lp[0] = 0.5f * p_dx;
+                    p.lp[1] = 0.5f * p_dy;
+                    p.lp[2] = 0.5f * p_dz;
+
+                    p.m = p_mass;
+                    p.V0 = p_vol;
+                    p.V = p_vol;
+
+                    p.density = density;
+                    p.youngs_modulus = E;
+                    p.poissons_ratio = nu;
+                    p.yield_stress = yield_stress;
+                    p.hardening_modulus = hardening;
+                    p.failure_strain = failure_strain;
+                    p.tensile_failure_stress = tensile_failure_stress;
+                    p.damage = 0.0f;
+                    p.has_failed = false;
+
+                    for (int i = 0; i < 3; ++i) {
+                        for (int j = 0; j < 3; ++j) {
+                            p.F[i][j] = (i == j) ? 1.0f : 0.0f;
+                            p.sigma[i][j] = 0.0f;
+                        }
+                    }
+
+                    p.ep_bar = 0.0f;
+                    p.object_id = obj_id;
+
+                    m_particles.push_back(p);
+                }
+            }
+        }
+    }
+}
+
+void MPMSolver3D::addSTLObject(int obj_id, const std::string& stl_filepath,
+                              float pos_x, float pos_y, float pos_z,
+                              float scale_x, float scale_y, float scale_z,
+                              float vel_x, float vel_y, float vel_z,
+                              float angular_vel_x, float angular_vel_y, float angular_vel_z,
+                              float density, float E, float nu,
+                              float yield_stress, float hardening, float failure_strain,
+                              float tensile_failure_stress, int ppc) {
+    if (stl_filepath.empty()) return;
+    std::vector<Triangle> raw_triangles;
+    try {
+        raw_triangles = read_stl(stl_filepath);
+    } catch (const std::exception& e) {
+        std::cerr << "[ERROR] MPMSolver3D::addSTLObject failed to load STL: " << e.what() << std::endl;
+        return;
+    }
+    if (raw_triangles.empty()) return;
+
+    if (scale_x <= 0.0f) scale_x = 1.0f;
+    if (scale_y <= 0.0f) scale_y = 1.0f;
+    if (scale_z <= 0.0f) scale_z = 1.0f;
+
+    std::vector<Triangle> triangles = raw_triangles;
+    float min_x = 1.0e30f, max_x = -1.0e30f;
+    float min_y = 1.0e30f, max_y = -1.0e30f;
+    float min_z = 1.0e30f, max_z = -1.0e30f;
+
+    for (auto& tri : triangles) {
+        tri.v0.x = tri.v0.x * scale_x + pos_x;
+        tri.v0.y = tri.v0.y * scale_y + pos_y;
+        tri.v0.z = tri.v0.z * scale_z + pos_z;
+
+        tri.v1.x = tri.v1.x * scale_x + pos_x;
+        tri.v1.y = tri.v1.y * scale_y + pos_y;
+        tri.v1.z = tri.v1.z * scale_z + pos_z;
+
+        tri.v2.x = tri.v2.x * scale_x + pos_x;
+        tri.v2.y = tri.v2.y * scale_y + pos_y;
+        tri.v2.z = tri.v2.z * scale_z + pos_z;
+
+        min_x = std::min({min_x, tri.v0.x, tri.v1.x, tri.v2.x});
+        max_x = std::max({max_x, tri.v0.x, tri.v1.x, tri.v2.x});
+        min_y = std::min({min_y, tri.v0.y, tri.v1.y, tri.v2.y});
+        max_y = std::max({max_y, tri.v0.y, tri.v1.y, tri.v2.y});
+        min_z = std::min({min_z, tri.v0.z, tri.v1.z, tri.v2.z});
+        max_z = std::max({max_z, tri.v0.z, tri.v1.z, tri.v2.z});
+    }
+
+    int particles_per_dim = static_cast<int>(std::round(std::cbrt(static_cast<float>(ppc))));
+    if (particles_per_dim < 1) particles_per_dim = 2;
+
+    float p_dx = m_dx / static_cast<float>(particles_per_dim);
+    float p_dy = m_dy / static_cast<float>(particles_per_dim);
+    float p_dz = m_dz / static_cast<float>(particles_per_dim);
+
+    float p_vol = p_dx * p_dy * p_dz;
+    float p_mass = p_vol * density;
+
+    int ny_bins = std::max(1, static_cast<int>(std::ceil((max_y - min_y) / p_dy)));
+    int nz_bins = std::max(1, static_cast<int>(std::ceil((max_z - min_z) / p_dz)));
+    std::vector<std::vector<int>> yz_bins(ny_bins * nz_bins);
+
+    for (int i = 0; i < static_cast<int>(triangles.size()); ++i) {
+        const auto& tri = triangles[i];
+        float t_min_y = std::min({tri.v0.y, tri.v1.y, tri.v2.y});
+        float t_max_y = std::max({tri.v0.y, tri.v1.y, tri.v2.y});
+        float t_min_z = std::min({tri.v0.z, tri.v1.z, tri.v2.z});
+        float t_max_z = std::max({tri.v0.z, tri.v1.z, tri.v2.z});
+
+        int by0 = std::clamp(static_cast<int>(std::floor((t_min_y - min_y) / p_dy)), 0, ny_bins - 1);
+        int by1 = std::clamp(static_cast<int>(std::floor((t_max_y - min_y) / p_dy)), 0, ny_bins - 1);
+        int bz0 = std::clamp(static_cast<int>(std::floor((t_min_z - min_z) / p_dz)), 0, nz_bins - 1);
+        int bz1 = std::clamp(static_cast<int>(std::floor((t_max_z - min_z) / p_dz)), 0, nz_bins - 1);
+
+        for (int bz = bz0; bz <= bz1; ++bz) {
+            for (int by = by0; by <= by1; ++by) {
+                yz_bins[by + bz * ny_bins].push_back(i);
+            }
+        }
+    }
+
+    std::cout << "[INFO] MPMSolver3D::addSTLObject loaded " << triangles.size() << " triangles. Sampling interior particles..." << std::endl;
+    size_t particle_count_before = m_particles.size();
+
+    for (float y = min_y + 0.5f * p_dy; y < max_y; y += p_dy) {
+        int by = std::clamp(static_cast<int>(std::floor((y - min_y) / p_dy)), 0, ny_bins - 1);
+        for (float z = min_z + 0.5f * p_dz; z < max_z; z += p_dz) {
+            int bz = std::clamp(static_cast<int>(std::floor((z - min_z) / p_dz)), 0, nz_bins - 1);
+            const auto& candidate_indices = yz_bins[by + bz * ny_bins];
+            if (candidate_indices.empty()) continue;
+
+            float y_ray = y + 1.234e-4f * p_dy;
+            float z_ray = z + 5.678e-4f * p_dz;
+
+            Point3D O = { min_x - 1.0f * p_dx, y_ray, z_ray };
+            Point3D D = { 1.0f, 0.0f, 0.0f };
+            std::vector<float> intersects;
+
+            for (int idx : candidate_indices) {
+                const auto& tri = triangles[idx];
+                float t;
+                if (ray_triangle_intersect(O, D, tri.v0, tri.v1, tri.v2, t)) {
+                    intersects.push_back(O.x + t);
+                }
+            }
+
+            if (intersects.empty()) continue;
+            std::sort(intersects.begin(), intersects.end());
+
+            for (float x = min_x + 0.5f * p_dx; x < max_x; x += p_dx) {
+                int count = 0;
+                for (float xi : intersects) {
+                    if (xi < x) count++;
+                    else break;
+                }
+                if (count % 2 == 1) {
+                    MPMParticle3D p{};
+                    p.x[0] = x; p.x[1] = y; p.x[2] = z;
+
+                    float rx = x - pos_x;
+                    float ry = y - pos_y;
+                    float rz = z - pos_z;
+
+                    p.v[0] = vel_x + (angular_vel_y * rz - angular_vel_z * ry);
+                    p.v[1] = vel_y + (angular_vel_z * rx - angular_vel_x * rz);
+                    p.v[2] = vel_z + (angular_vel_x * ry - angular_vel_y * rx);
+
+                    p.B[0][0] = 0.0f;             p.B[0][1] = -angular_vel_z; p.B[0][2] =  angular_vel_y;
+                    p.B[1][0] =  angular_vel_z;   p.B[1][1] = 0.0f;           p.B[1][2] = -angular_vel_x;
+                    p.B[2][0] = -angular_vel_y;   p.B[2][1] =  angular_vel_x; p.B[2][2] = 0.0f;
+
+                    p.lp[0] = 0.5f * p_dx;
+                    p.lp[1] = 0.5f * p_dy;
+                    p.lp[2] = 0.5f * p_dz;
+
+                    p.m = p_mass;
+                    p.V0 = p_vol;
+                    p.V = p_vol;
+
+                    p.density = density;
+                    p.youngs_modulus = E;
+                    p.poissons_ratio = nu;
+                    p.yield_stress = yield_stress;
+                    p.hardening_modulus = hardening;
+                    p.failure_strain = failure_strain;
+                    p.tensile_failure_stress = tensile_failure_stress;
+                    p.damage = 0.0f;
+                    p.has_failed = false;
+
+                    for (int i = 0; i < 3; ++i) {
+                        for (int j = 0; j < 3; ++j) {
+                            p.F[i][j] = (i == j) ? 1.0f : 0.0f;
+                            p.sigma[i][j] = 0.0f;
+                        }
+                    }
+
+                    p.ep_bar = 0.0f;
+                    p.object_id = obj_id;
+
+                    m_particles.push_back(p);
+                }
+            }
+        }
+    }
+    std::cout << "[INFO] Generated " << (m_particles.size() - particle_count_before) << " MPM particles for STL object " << obj_id << std::endl;
 }
 
 void MPMSolver3D::particleToGrid() {

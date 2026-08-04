@@ -1858,7 +1858,8 @@ export class StateManager {
                 shape_type: 'Box',
                 pos_x: 0.5, pos_y: 0.5, pos_z: 0.5,
                 size_x: 0.2, size_y: 0.2, size_z: 0.2,
-                radius: 0.1,
+                radius: 0.1, inner_radius: 0.0, height: 0.2,
+                stl_file: '', scale_x: 1.0, scale_y: 1.0, scale_z: 1.0,
                 vel_x: 0.0, vel_y: 0.0, vel_z: 0.0,
                 angular_vel_x: 0.0, angular_vel_y: 0.0, angular_vel_z: 0.0
             },
@@ -2074,8 +2075,8 @@ export class StateManager {
             case 'Telemetry3DViewport': return [{ id: 'in', label: 'Data Stream' }];
             case 'MPMDomain2D': return [{ id: 'mesh', label: 'Grid' }, { id: 'objects', label: 'MPM Objects' }];
             case 'MPMDomain3D': return [{ id: 'mesh', label: 'Grid' }, { id: 'objects', label: 'MPM Objects' }];
-            case 'MPMObject2D':
-            case 'MPMObject3D': return [{ id: 'material', label: 'Material' }];
+            case 'MPMObject2D': return [{ id: 'material', label: 'Material' }];
+            case 'MPMObject3D': return [{ id: 'material', label: 'Material' }, { id: 'stl', label: 'STL Geometry' }];
             case 'FSICoupler2D': return [{ id: 'cfd', label: 'CFD Solver' }, { id: 'mpm', label: 'MPM Solver' }];
             case 'FSICoupler3D': return [{ id: 'cfd', label: 'CFD Solver 3D' }, { id: 'mpm', label: 'MPM Solver 3D' }];
             default: return [];
@@ -2115,6 +2116,10 @@ export class StateManager {
             case 'PrimitiveGeometry3D': return [{ id: 'stl', label: 'STL Geometry' }];
             default: return [];
         }
+    }
+
+    registerSTLVertices(filePath: string, vertices: Float32Array): STLGeometryMeta {
+        return registerSTLVertices(filePath, vertices);
     }
 }
 
@@ -2536,5 +2541,228 @@ export function getMeshDisplayHTML(node: Node, state?: SimulationState): string 
     }
     return '';
 }
+
+export interface STLGeometryMeta {
+    volume: number; // Volume in m^3 (unscaled)
+    bounds: [number, number, number, number, number, number]; // [minX, maxX, minY, maxY, minZ, maxZ]
+    triangleCount: number;
+}
+
+const stlGeometryCache = new Map<string, STLGeometryMeta>();
+
+export function registerSTLVertices(filePath: string, vertices: Float32Array): STLGeometryMeta {
+    if (!filePath || vertices.length < 9) {
+        const meta: STLGeometryMeta = { volume: 0.001, bounds: [-0.05, 0.05, -0.05, 0.05, -0.05, 0.05], triangleCount: 0 };
+        return meta;
+    }
+
+    let minX = Infinity, maxX = -Infinity;
+    let minY = Infinity, maxY = -Infinity;
+    let minZ = Infinity, maxZ = -Infinity;
+    let signedVolumeSum = 0.0;
+
+    const numTriangles = Math.floor(vertices.length / 9);
+    for (let i = 0; i < numTriangles; i++) {
+        const x0 = vertices[i * 9 + 0], y0 = vertices[i * 9 + 1], z0 = vertices[i * 9 + 2];
+        const x1 = vertices[i * 9 + 3], y1 = vertices[i * 9 + 4], z1 = vertices[i * 9 + 5];
+        const x2 = vertices[i * 9 + 6], y2 = vertices[i * 9 + 7], z2 = vertices[i * 9 + 8];
+
+        minX = Math.min(minX, x0, x1, x2); maxX = Math.max(maxX, x0, x1, x2);
+        minY = Math.min(minY, y0, y1, y2); maxY = Math.max(maxY, y0, y1, y2);
+        minZ = Math.min(minZ, z0, z1, z2); maxZ = Math.max(maxZ, z0, z1, z2);
+
+        // Signed volume of tetrahedron formed with origin: (1/6) * (v0 . (v1 x v2))
+        const v3 = x0 * (y1 * z2 - z1 * y2) - y0 * (x1 * z2 - z1 * x2) + z0 * (x1 * y2 - y1 * x2);
+        signedVolumeSum += v3;
+    }
+
+    let volume = Math.abs(signedVolumeSum) / 6.0;
+    const bboxVolume = (maxX - minX) * (maxY - minY) * (maxZ - minZ);
+
+    // Fallback if mesh is non-watertight or degenerate signed volume
+    if (volume <= 1e-12 && bboxVolume > 0) {
+        volume = bboxVolume * 0.5;
+    }
+
+    const meta: STLGeometryMeta = {
+        volume,
+        bounds: [minX, maxX, minY, maxY, minZ, maxZ],
+        triangleCount: numTriangles
+    };
+
+    stlGeometryCache.set(filePath, meta);
+    return meta;
+}
+
+export function getSTLGeometryMeta(filePath: string): STLGeometryMeta | undefined {
+    return stlGeometryCache.get(filePath);
+}
+
+export function getMPMObjectVolume(node: Node): { volume: number, isStlEstimated: boolean } {
+    const is3D = node.type === 'MPMObject3D';
+    const shapeType = String(node.parameters['shape_type'] || (is3D ? 'Box' : 'Rectangle'));
+    let isStlEstimated = false;
+    let volume = 0.0;
+
+    if (shapeType === 'Box') {
+        const sx = Number(node.parameters['size_x'] ?? 0.2);
+        const sy = Number(node.parameters['size_y'] ?? 0.2);
+        const sz = Number(node.parameters['size_z'] ?? 0.2);
+        volume = sx * sy * sz;
+    } else if (shapeType === 'Sphere') {
+        const r = Number(node.parameters['radius'] ?? 0.1);
+        volume = (4.0 / 3.0) * Math.PI * Math.pow(r, 3);
+    } else if (shapeType === 'Cylinder') {
+        const r = Number(node.parameters['radius'] ?? 0.1);
+        const ir = Number(node.parameters['inner_radius'] ?? 0.0);
+        const h = Number(node.parameters['height'] ?? 0.2);
+        volume = Math.max(0.0, Math.PI * (r * r - ir * ir) * h);
+    } else if (shapeType === 'STL') {
+        const scx = Number(node.parameters['scale_x'] ?? 1.0);
+        const scy = Number(node.parameters['scale_y'] ?? 1.0);
+        const scz = Number(node.parameters['scale_z'] ?? 1.0);
+        const stlFile = String(node.parameters['stl_file'] || '');
+        const meta = getSTLGeometryMeta(stlFile);
+
+        if (meta && meta.volume > 0) {
+            volume = meta.volume * scx * scy * scz;
+        } else if (node.parameters['stl_volume'] !== undefined && Number(node.parameters['stl_volume']) > 0) {
+            volume = Number(node.parameters['stl_volume']) * scx * scy * scz;
+        } else {
+            // Representative default volume (10cm cube) when STL file geometry is not yet fetched
+            volume = 0.001 * scx * scy * scz;
+            isStlEstimated = true;
+        }
+    } else if (shapeType === 'Rectangle') {
+        const sx = Number(node.parameters['size_x'] ?? 0.2);
+        const sy = Number(node.parameters['size_y'] ?? 0.2);
+        volume = sx * sy;
+    } else if (shapeType === 'Circle' || shapeType === 'Disk') {
+        const r = Number(node.parameters['radius'] ?? 0.1);
+        volume = Math.PI * r * r;
+    } else if (shapeType === 'Ring') {
+        const r = Number(node.parameters['radius'] ?? 0.1);
+        const ir = Number(node.parameters['inner_radius'] ?? 0.0);
+        volume = Math.max(0.0, Math.PI * (r * r - ir * ir));
+    } else {
+        const sx = Number(node.parameters['size_x'] ?? 0.2);
+        const sy = Number(node.parameters['size_y'] ?? 0.2);
+        volume = sx * sy;
+    }
+
+    return { volume, isStlEstimated };
+}
+
+function resolveMPMGridAndDomain(node: Node, state?: SimulationState) {
+    let cellSize = 0.01;
+    let domainPpc = 8;
+    if (!state) return { cellSize, domainPpc };
+
+    const is3D = node.type === 'MPMObject3D' || node.type === 'MPMDomain3D';
+    const domainType = is3D ? 'MPMDomain3D' : 'MPMDomain2D';
+    const meshType = is3D ? 'DomainMesh3D' : 'DomainMesh2D';
+
+    let domainNode: Node | undefined;
+    if (node.type === domainType) {
+        domainNode = node;
+    } else {
+        const conn = state.connections.find(c => c.fromNode === node.id && (c.toPort === 'objects' || c.toPort === 'mpm'));
+        if (conn) {
+            domainNode = state.nodes.find(n => n.id === conn.toNode);
+        }
+        if (!domainNode) {
+            domainNode = state.nodes.find(n => n.type === domainType);
+        }
+    }
+
+    if (domainNode && domainNode.parameters['ppc'] !== undefined) {
+        domainPpc = Number(domainNode.parameters['ppc']);
+    }
+
+    let meshNode: Node | undefined;
+    if (domainNode) {
+        const meshConn = state.connections.find(c => c.toNode === domainNode!.id && c.toPort === 'mesh');
+        if (meshConn) {
+            meshNode = state.nodes.find(n => n.id === meshConn.fromNode);
+        }
+    }
+    if (!meshNode) {
+        meshNode = state.nodes.find(n => n.type === meshType);
+    }
+    if (meshNode && meshNode.parameters['cell_size'] !== undefined) {
+        cellSize = Number(meshNode.parameters['cell_size']);
+    }
+
+    return { cellSize, domainPpc };
+}
+
+export function getMPMDisplayHTML(node: Node, state?: SimulationState): string {
+    const is3D = node.type === 'MPMObject3D' || node.type === 'MPMDomain3D';
+    const { cellSize, domainPpc } = resolveMPMGridAndDomain(node, state);
+
+    if (node.type === 'MPMObject3D' || node.type === 'MPMObject2D') {
+        const shapeType = String(node.parameters['shape_type'] || (is3D ? 'Box' : 'Rectangle'));
+        const ppc = Number(node.parameters['ppc'] ?? domainPpc);
+        
+        const particlesPerDim = is3D ? Math.max(1, Math.round(Math.cbrt(ppc))) : Math.max(1, Math.round(Math.sqrt(ppc)));
+        const p_dx = cellSize / particlesPerDim;
+        const p_vol = is3D ? Math.pow(p_dx, 3) : Math.pow(p_dx, 2);
+
+        const { volume, isStlEstimated } = getMPMObjectVolume(node);
+
+        const estParticles = Math.max(1, Math.round(volume / (p_vol > 0 ? p_vol : 1e-9)));
+        const bytesPerParticle = is3D ? 292 : 128;
+        const ramMB = (estParticles * bytesPerParticle) / (1024 * 1024);
+        const vramMB = (estParticles * bytesPerParticle) / (1024 * 1024);
+
+        const stlFile = String(node.parameters['stl_file'] || '');
+        const stlMeta = shapeType === 'STL' && stlFile ? getSTLGeometryMeta(stlFile) : undefined;
+
+        let stlInfo = '';
+        if (shapeType === 'STL' && stlFile) {
+            const fileName = stlFile.split('/').pop();
+            const estTag = isStlEstimated ? ` <span style="color: #e5c07b;">(Unloaded STL)</span>` : ` <span style="color: #98c379;">(${stlMeta ? stlMeta.triangleCount.toLocaleString() : 0} tris)</span>`;
+            stlInfo = `<div style="color: #aaa; margin-bottom: 3px; font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">STL: ${fileName}${estTag}</div>`;
+        }
+
+        return `<div style="background: rgba(86, 156, 214, 0.1); border: 1px solid #569cd6; border-radius: 4px; padding: 6px 8px; margin-top: 8px; font-size: 11px;">` +
+               `<div style="color: #569cd6; font-weight: bold; margin-bottom: 3px;">🔮 MPM Object Spec (${shapeType.toUpperCase()})</div>` +
+               stlInfo +
+               `<div>Est. Particles: <b style="color: #fff;">${estParticles.toLocaleString()}</b> (PPC = ${ppc})</div>` +
+               `<div>Particle Spacing: <b style="color: #4ec9b0;">${(p_dx * 1000).toFixed(2)} mm</b></div>` +
+               `<div>Est. Footprint: <b>RAM ${ramMB.toFixed(2)} MB</b> | <b>VRAM ${vramMB.toFixed(2)} MB</b></div>` +
+               `</div>`;
+    } else if (node.type === 'MPMDomain3D' || node.type === 'MPMDomain2D') {
+        const ppc = Number(node.parameters['ppc'] ?? domainPpc);
+        const particlesPerDim = is3D ? Math.max(1, Math.round(Math.cbrt(ppc))) : Math.max(1, Math.round(Math.sqrt(ppc)));
+        const p_dx = cellSize / particlesPerDim;
+        const p_vol = is3D ? Math.pow(p_dx, 3) : Math.pow(p_dx, 2);
+
+        let connectedParticles = 0;
+        let objCount = 0;
+        if (state) {
+            const objConns = state.connections.filter(c => c.toNode === node.id && (c.toPort === 'objects' || c.toPort === 'mpm'));
+            objCount = objConns.length;
+            for (const conn of objConns) {
+                const objNode = state.nodes.find(n => n.id === conn.fromNode);
+                if (objNode) {
+                    const { volume } = getMPMObjectVolume(objNode);
+                    connectedParticles += Math.max(1, Math.round(volume / (p_vol > 0 ? p_vol : 1e-9)));
+                }
+            }
+        }
+
+        const bytesPerParticle = is3D ? 292 : 128;
+        const totalVramMB = (connectedParticles * bytesPerParticle) / (1024 * 1024);
+
+        return `<div style="background: rgba(78, 201, 176, 0.1); border: 1px solid #4ec9b0; border-radius: 4px; padding: 6px 8px; margin-top: 8px; font-size: 11px;">` +
+               `<div style="color: #4ec9b0; font-weight: bold; margin-bottom: 3px;">⚡ MPM Domain & Memory Status</div>` +
+               `<div>Connected Objects: <b>${objCount}</b> (${connectedParticles.toLocaleString()} particles)</div>` +
+               `<div>Est. Particle VRAM: <b style="color: #569cd6;">${totalVramMB.toFixed(2)} MB</b></div>` +
+               `</div>`;
+    }
+    return '';
+}
+
 
 

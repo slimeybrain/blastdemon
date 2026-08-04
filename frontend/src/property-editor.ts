@@ -1,4 +1,4 @@
-import { StateManager, calculateRefinementMeshInfo, getMeshDisplayHTML } from './state-manager.js';
+import { StateManager, calculateRefinementMeshInfo, getMeshDisplayHTML, getMPMDisplayHTML } from './state-manager.js';
 import { Node } from './types.js';
 import { validateSimulationState } from './validation.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
@@ -112,6 +112,11 @@ export class PropertyEditor {
             const gridInfo = this.container.querySelector('#grid-info-display') as HTMLDivElement;
             if (gridInfo) {
                 gridInfo.innerHTML = getMeshDisplayHTML(node, state ?? undefined);
+            }
+
+            const mpmInfo = this.container.querySelector('#mpm-info-display') as HTMLDivElement;
+            if (mpmInfo) {
+                mpmInfo.innerHTML = getMPMDisplayHTML(node, state ?? undefined);
             }
 
 
@@ -352,6 +357,14 @@ export class PropertyEditor {
             gridInfoDiv = info;
         }
 
+        let mpmInfoDiv: HTMLDivElement | null = null;
+        if (node.type === 'MPMObject3D' || node.type === 'MPMObject2D' || node.type === 'MPMDomain3D' || node.type === 'MPMDomain2D') {
+            const info = document.createElement('div');
+            info.id = 'mpm-info-display';
+            info.innerHTML = getMPMDisplayHTML(node, state ?? undefined);
+            mpmInfoDiv = info;
+        }
+
         let addedQtyHeader = false;
         for (const key of paramKeys) {
             let value = node.parameters[key];
@@ -400,14 +413,16 @@ export class PropertyEditor {
                 const shape = node.parameters['charge_shape'] || 'Sphere';
                 if (key === 'charge_height' && shape !== 'Cylinder') continue;
             }
-            if (node.type === 'Charge3D') {
-                const shape = node.parameters['charge_shape'] || 'Sphere';
-                if (shape === 'Sphere') {
-                    if (key === 'charge_height' || key === 'charge_lx' || key === 'charge_ly' || key === 'charge_lz') continue;
+            if (node.type === 'MPMObject3D') {
+                const shape = node.parameters['shape_type'] || 'Box';
+                if (shape === 'Box') {
+                    if (key === 'radius' || key === 'inner_radius' || key === 'height' || key === 'stl_file' || key === 'scale_x' || key === 'scale_y' || key === 'scale_z') continue;
+                } else if (shape === 'Sphere') {
+                    if (key === 'size_x' || key === 'size_y' || key === 'size_z' || key === 'inner_radius' || key === 'height' || key === 'stl_file' || key === 'scale_x' || key === 'scale_y' || key === 'scale_z') continue;
                 } else if (shape === 'Cylinder') {
-                    if (key === 'charge_lx' || key === 'charge_ly' || key === 'charge_lz') continue;
-                } else if (shape === 'Block') {
-                    if (key === 'charge_radius' || key === 'charge_height') continue;
+                    if (key === 'size_x' || key === 'size_y' || key === 'size_z' || key === 'stl_file' || key === 'scale_x' || key === 'scale_y' || key === 'scale_z') continue;
+                } else if (shape === 'STL') {
+                    if (key === 'size_x' || key === 'size_y' || key === 'size_z' || key === 'radius' || key === 'inner_radius' || key === 'height') continue;
                 }
             }
             // DetonatorLocation and DetonatorLocation3D are separate nodes now, showing correct properties
@@ -449,6 +464,9 @@ export class PropertyEditor {
         }
         if (gridInfoDiv) {
             form.appendChild(gridInfoDiv);
+        }
+        if (mpmInfoDiv) {
+            form.appendChild(mpmInfoDiv);
         }
 
 
@@ -681,6 +699,12 @@ export class PropertyEditor {
                         const rand = Math.floor(Math.random() * 1000000);
                         const simpleHash = 'stl_' + rand.toString(36);
                         this.updateParameter('geometry_hash', simpleHash);
+                        const net = (window as any).networkManager;
+                        if (net && net.isConnected()) {
+                            const activeWs = this.stateManager.getActiveWorkspace();
+                            const modelId = activeWs?.activeModelId || 'default';
+                            net.send({ command: "LOAD_STL_GEOMETRY", filePath: path, modelId });
+                        }
                     });
                     browser.open(startPath);
                 };
@@ -1143,7 +1167,8 @@ export class PropertyEditor {
             'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'refinement_level',
             'submesh_x', 'submesh_y', 'submesh_z', 'submesh_size_x', 'submesh_size_y', 'submesh_size_z',
             // MPM keys
-            'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'radius',
+            'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'radius', 'inner_radius',
+            'scale_x', 'scale_y', 'scale_z',
             'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
             'failure_strain', 'tensile_failure_stress',
@@ -1207,7 +1232,7 @@ export class PropertyEditor {
             'colorbar_source': ['slice', 'mpm', 'obstacles', 'stl'],
             'transfer_scheme': ['BSpline', 'GIMP', 'Standard'],
             'velocity_scheme': ['APIC', 'PIC', 'FLIP'],
-            'shape_type': (node.type === 'MPMObject3D') ? ['Box', 'Sphere'] : ['Rectangle', 'Circle'],
+            'shape_type': (node.type === 'MPMObject3D') ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle'],
             'space_time_scheme': (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') ? 
                 ['USL', 'USF', 'RK2'] : 
                 ['Euler (1st-Order Space/Time)', 'RK2 (2nd-Order Space/Time)', 'RK3 (3rd-Order Space/Time)', 'MUSCL-Hancock (2nd-Order Space/Time)', 'ADER-2 (2nd-Order Space/Time)', 'ADER-3 (3rd-Order Space/Time)']
@@ -2342,7 +2367,7 @@ export class PropertyEditor {
             this.stateManager.updateNodeParameters(this.currentNodeId, updates);
         }
 
-        if (key === 'material_model' || key === 'material_type' || key === 'charge_shape') {
+        if (key === 'material_model' || key === 'material_type' || key === 'charge_shape' || key === 'shape_type') {
             this.render(true);
         }
 

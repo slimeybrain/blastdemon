@@ -292,6 +292,7 @@ class CFDSolver3DImpl : public CFDSolver3DImplBase {
     std::vector<uint8_t> tile_is_fully_interior;
     std::vector<GeometryTile3D> geom_pool;
     std::vector<ObstacleFace> obstacle_faces;
+    std::vector<double> solid_vel_vec;
 
     int n_tiles_x, n_tiles_y, n_tiles_z;
 
@@ -319,6 +320,10 @@ public:
                                std::function<void(double)> progress_callback = nullptr) override;
     void uploadObstacleFaces(const std::vector<ObstacleFace>& faces) override;
     void setSolidMask(const uint8_t* mask) override;
+    void setSolidVelocities(const double* v) override {
+        if (!v) { solid_vel_vec.clear(); return; }
+        solid_vel_vec.assign(v, v + 3 * static_cast<size_t>(nx) * ny * nz);
+    }
     std::pair<double, double> getConservationTotals() const override;
 
     std::vector<float> sampleGauge(const Gauge3D& gauge) const override;
@@ -586,10 +591,23 @@ public:
         }
 
         // ALWAYS reflect velocity across the TRUE STL normal to ensure smooth slip flow
-        float u_dot_n = (float)s_ghost.ux * nx_true + (float)s_ghost.uy * ny_true + (float)s_ghost.uz * nz_true;
-        s_ghost.ux = (RealType)((float)s_ghost.ux - 2.0f * u_dot_n * nx_true);
-        s_ghost.uy = (RealType)((float)s_ghost.uy - 2.0f * u_dot_n * ny_true);
-        s_ghost.uz = (RealType)((float)s_ghost.uz - 2.0f * u_dot_n * nz_true);
+        double vw_x = 0.0, vw_y = 0.0, vw_z = 0.0;
+        if (!solid_vel_vec.empty()) {
+            size_t cfd_flat_idx = static_cast<size_t>(target_x) + static_cast<size_t>(target_y) * nx + static_cast<size_t>(target_z) * nx * ny;
+            if (3 * cfd_flat_idx + 2 < solid_vel_vec.size()) {
+                vw_x = solid_vel_vec[3 * cfd_flat_idx + 0];
+                vw_y = solid_vel_vec[3 * cfd_flat_idx + 1];
+                vw_z = solid_vel_vec[3 * cfd_flat_idx + 2];
+            }
+        }
+        float u_rel_x = (float)s_ghost.ux - (float)vw_x;
+        float u_rel_y = (float)s_ghost.uy - (float)vw_y;
+        float u_rel_z = (float)s_ghost.uz - (float)vw_z;
+
+        float u_dot_n = u_rel_x * nx_true + u_rel_y * ny_true + u_rel_z * nz_true;
+        s_ghost.ux = (RealType)((float)vw_x + u_rel_x - 2.0f * u_dot_n * nx_true);
+        s_ghost.uy = (RealType)((float)vw_y + u_rel_y - 2.0f * u_dot_n * ny_true);
+        s_ghost.uz = (RealType)((float)vw_z + u_rel_z - 2.0f * u_dot_n * nz_true);
 
         RealType ke = (RealType)0.5 * s_ghost.rho * (s_ghost.ux*s_ghost.ux + s_ghost.uy*s_ghost.uy + s_ghost.uz*s_ghost.uz);
         if constexpr (IsMultiMaterial) {
@@ -722,7 +740,7 @@ public:
                     int ck = std::clamp(k, 0, nz - 1);
                     int t = (ci >> 3) + (cj >> 3) * n_tiles_x + (ck >> 3) * n_tiles_x * n_tiles_y;
                     int c = (ci & 7) + (cj & 7) * 8 + (ck & 7) * 64;
-                    return geom_pool[t].cells[c].is_boundary;
+                    return geom_pool[t].cells[c].is_boundary != 0;
                 };
 
                 double w[8];

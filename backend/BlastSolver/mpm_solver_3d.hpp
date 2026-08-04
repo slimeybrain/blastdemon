@@ -7,30 +7,17 @@
 
 namespace Blast {
 
-struct MPMParticle3D {
-    // Kinematics & Position in 3D
-    float x[3];         // Position (x, y, z)
-    float v[3];         // Velocity (vx, vy, vz)
-    float B[3][3];      // APIC affine velocity matrix (3x3)
-    float L_grad[3][3]; // True continuum velocity gradient from shape function derivatives (3x3)
-    float lp[3];        // GIMP particle domain half-widths (lx, ly, lz)
-
-    // Mass & Volume
-    float m;            // Mass
-    float V0;           // Initial volume
-    float V;            // Current volume
-
-    // Material Model Selector
+struct MaterialTable3D {
     MPMMaterialModel material_model{MPMMaterialModel::HypoelasticSteel};
 
-    // Baseline Material Properties (Steel / Metal J2 Elastoplasticity & Failure)
-    float density{7850.0f};               // kg/m^3 (e.g. 7850)
-    float youngs_modulus{210.0e9f};        // Pa (e.g. 210e9)
-    float poissons_ratio{0.3f};            // (e.g. 0.3)
-    float yield_stress{400.0e6f};          // Pa (e.g. 400e6)
-    float hardening_modulus{1.0e9f};     // Pa (e.g. 1e9)
-    float failure_strain{0.25f};        // Critical equivalent plastic strain (e.g. 0.25)
-    float tensile_failure_stress{600.0e6f};// Critical tensile stress cutoff Pa (e.g. 600e6)
+    // Baseline Material Properties
+    float density{7850.0f};               // kg/m^3
+    float youngs_modulus{210.0e9f};        // Pa
+    float poissons_ratio{0.3f};            // ratio
+    float yield_stress{400.0e6f};          // Pa
+    float hardening_modulus{1.0e9f};     // Pa
+    float failure_strain{0.25f};        // strain
+    float tensile_failure_stress{600.0e6f};// Pa
 
     // Johnson-Cook Plasticity & Thermal Softening Parameters
     float jc_A{792.0e6f};        // Initial yield stress (Pa)
@@ -46,6 +33,20 @@ struct MPMParticle3D {
     float mg_gamma0{1.81f};      // Grüneisen gamma parameter
     float mg_c0{4570.0f};        // Bulk sound speed (m/s)
     float mg_s{1.49f};           // Hugoniot Us-Up slope
+};
+
+struct MPMParticle3D {
+    // Kinematics & Position in 3D
+    float x[3];         // Position (x, y, z)
+    float v[3];         // Velocity (vx, vy, vz)
+    float B[3][3];      // APIC affine velocity matrix (3x3)
+    float L_grad[3][3]; // True continuum velocity gradient from shape function derivatives (3x3)
+    float lp[3];        // GIMP particle domain half-widths (lx, ly, lz)
+
+    // Mass & Volume
+    float m;            // Mass
+    float V0;           // Initial volume
+    float V;            // Current volume
 
     // Dynamic State Variables
     float e_int{0.0f};           // Specific internal energy (J/kg)
@@ -55,7 +56,28 @@ struct MPMParticle3D {
     float ep_bar{0.0f};          // Equivalent plastic strain
     float damage{0.0f};          // Scalar damage D in [0, 1]
     bool has_failed{false};      // Total failure status flag
-    int object_id{0};
+    int object_id{0};            // Object / Material Table ID
+
+    // Legacy Material Property Accessors & Fallback Parameters for Host Setup
+    MPMMaterialModel material_model{MPMMaterialModel::HypoelasticSteel};
+    float density{7850.0f};
+    float youngs_modulus{210.0e9f};
+    float poissons_ratio{0.3f};
+    float yield_stress{400.0e6f};
+    float hardening_modulus{1.0e9f};
+    float failure_strain{0.25f};
+    float tensile_failure_stress{600.0e6f};
+    float jc_A{792.0e6f};
+    float jc_B{510.0e6f};
+    float jc_n{0.26f};
+    float jc_C{0.014f};
+    float jc_m{1.03f};
+    float T_melt{1793.0f};
+    float T_room{293.0f};
+    float Cp{477.0f};
+    float mg_gamma0{1.81f};
+    float mg_c0{4570.0f};
+    float mg_s{1.49f};
 };
 
 struct MPMGridNode3D {
@@ -123,6 +145,23 @@ public:
                          float density, float E, float nu,
                          float yield_stress, float hardening, float failure_strain = 0.25f,
                          float tensile_failure_stress = 600.0e6f, int ppc = 8);
+
+    void addCylinderObject(int obj_id, float pos_x, float pos_y, float pos_z,
+                           float radius, float inner_radius, float height,
+                           float vel_x, float vel_y, float vel_z,
+                           float angular_vel_x, float angular_vel_y, float angular_vel_z,
+                           float density, float E, float nu,
+                           float yield_stress, float hardening, float failure_strain = 0.25f,
+                           float tensile_failure_stress = 600.0e6f, int ppc = 8);
+
+    void addSTLObject(int obj_id, const std::string& stl_filepath,
+                      float pos_x, float pos_y, float pos_z,
+                      float scale_x, float scale_y, float scale_z,
+                      float vel_x, float vel_y, float vel_z,
+                      float angular_vel_x, float angular_vel_y, float angular_vel_z,
+                      float density, float E, float nu,
+                      float yield_stress, float hardening, float failure_strain = 0.25f,
+                      float tensile_failure_stress = 600.0e6f, int ppc = 8);
 
     // Simulation Step
     void step(float cfl = 0.3f);
