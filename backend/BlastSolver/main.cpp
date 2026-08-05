@@ -3240,6 +3240,7 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated) {
         float vm_sq = dev00 * dev00 + dev11 * dev11 + dev22 * dev22 + 2.0f * (s01 * s01 + s02 * s02 + s12 * s12);
         float von_mises = std::sqrt(std::max(0.0f, 1.5f * vm_sq));
 
+        float den = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getMaterialTable(p.object_id).density : global_solver_mpm_3d->getMaterialTable(p.object_id).density;
         payload->mpm_particles.push_back(p.x[0]);
         payload->mpm_particles.push_back(p.x[1]);
         payload->mpm_particles.push_back(p.x[2]);
@@ -3248,7 +3249,7 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated) {
         payload->mpm_particles.push_back(p.v[2]);
         payload->mpm_particles.push_back(von_mises);
         payload->mpm_particles.push_back(p.ep_bar);
-        payload->mpm_particles.push_back(p.density);
+        payload->mpm_particles.push_back(den);
         payload->mpm_particles.push_back(press);
         payload->mpm_particles.push_back(p.damage);
         payload->mpm_particles.push_back(p.has_failed ? 1.0f : 0.0f);
@@ -3294,6 +3295,7 @@ void emit_telemetry_3d(double elapsed, bool is_terminated) {
             float von_mises = std::sqrt(0.5f * (diff_xy * diff_xy + diff_yz * diff_yz + diff_zx * diff_zx) +
                                         3.0f * (s_xy * s_xy + s_yz * s_yz + s_zx * s_zx));
             float press = - (p.sigma[0][0] + p.sigma[1][1] + p.sigma[2][2]) / 3.0f;
+            float den = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getMaterialTable(p.object_id).density : global_solver_mpm_3d->getMaterialTable(p.object_id).density;
             payload->mpm_particles.push_back(p.x[0]);
             payload->mpm_particles.push_back(p.x[1]);
             payload->mpm_particles.push_back(p.x[2]);
@@ -3302,7 +3304,7 @@ void emit_telemetry_3d(double elapsed, bool is_terminated) {
             payload->mpm_particles.push_back(p.v[2]);
             payload->mpm_particles.push_back(von_mises);
             payload->mpm_particles.push_back(p.ep_bar);
-            payload->mpm_particles.push_back(p.density);
+            payload->mpm_particles.push_back(den);
             payload->mpm_particles.push_back(press);
             payload->mpm_particles.push_back(p.damage);
             payload->mpm_particles.push_back(p.has_failed ? 1.0f : 0.0f);
@@ -4347,21 +4349,30 @@ int main() {
                                 }
                             }
 
+                            if (global_solver_mpm_3d_cuda) {
+                                auto& mat_tables = global_solver_mpm_3d_cuda->getMaterialTables();
+                                if (obj_idx >= 0 && obj_idx < static_cast<int>(mat_tables.size())) {
+                                    auto& mat = mat_tables[obj_idx];
+                                    mat.material_model = mat_model;
+                                    mat.jc_A = jc_A; mat.jc_B = jc_B; mat.jc_n = jc_n; mat.jc_C = jc_C; mat.jc_m = jc_m;
+                                    mat.T_melt = T_melt; mat.T_room = T_room; mat.Cp = Cp;
+                                    mat.mg_gamma0 = mg_gamma0; mat.mg_c0 = mg_c0; mat.mg_s = mg_s;
+                                }
+                                global_solver_mpm_3d_cuda->uploadMaterialTableToDevice();
+                            }
+                            if (global_solver_mpm_3d) {
+                                auto& mat_tables = global_solver_mpm_3d->getMaterialTables();
+                                if (obj_idx >= 0 && obj_idx < static_cast<int>(mat_tables.size())) {
+                                    auto& mat = mat_tables[obj_idx];
+                                    mat.material_model = mat_model;
+                                    mat.jc_A = jc_A; mat.jc_B = jc_B; mat.jc_n = jc_n; mat.jc_C = jc_C; mat.jc_m = jc_m;
+                                    mat.T_melt = T_melt; mat.T_room = T_room; mat.Cp = Cp;
+                                    mat.mg_gamma0 = mg_gamma0; mat.mg_c0 = mg_c0; mat.mg_s = mg_s;
+                                }
+                            }
                             auto& particles_ref = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles() : global_solver_mpm_3d->getParticles();
                             for (auto& p : particles_ref) {
                                 if (p.object_id == obj_idx) {
-                                    p.material_model = mat_model;
-                                    p.jc_A = jc_A;
-                                    p.jc_B = jc_B;
-                                    p.jc_n = jc_n;
-                                    p.jc_C = jc_C;
-                                    p.jc_m = jc_m;
-                                    p.T_melt = T_melt;
-                                    p.T_room = T_room;
-                                    p.Cp = Cp;
-                                    p.mg_gamma0 = mg_gamma0;
-                                    p.mg_c0 = mg_c0;
-                                    p.mg_s = mg_s;
                                     p.temperature = T_room;
                                     p.e_int = 0.0f;
                                 }
@@ -4838,13 +4849,30 @@ int main() {
                                 }
                             }
 
+                            if (global_solver_mpm_3d_cuda) {
+                                auto& mat_tables = global_solver_mpm_3d_cuda->getMaterialTables();
+                                if (obj_idx >= 0 && obj_idx < static_cast<int>(mat_tables.size())) {
+                                    auto& mat = mat_tables[obj_idx];
+                                    mat.material_model = mat_model;
+                                    mat.jc_A = jc_A; mat.jc_B = jc_B; mat.jc_n = jc_n; mat.jc_C = jc_C; mat.jc_m = jc_m;
+                                    mat.T_melt = T_melt; mat.T_room = T_room; mat.Cp = Cp;
+                                    mat.mg_gamma0 = mg_gamma0; mat.mg_c0 = mg_c0; mat.mg_s = mg_s;
+                                }
+                                global_solver_mpm_3d_cuda->uploadMaterialTableToDevice();
+                            }
+                            if (global_solver_mpm_3d) {
+                                auto& mat_tables = global_solver_mpm_3d->getMaterialTables();
+                                if (obj_idx >= 0 && obj_idx < static_cast<int>(mat_tables.size())) {
+                                    auto& mat = mat_tables[obj_idx];
+                                    mat.material_model = mat_model;
+                                    mat.jc_A = jc_A; mat.jc_B = jc_B; mat.jc_n = jc_n; mat.jc_C = jc_C; mat.jc_m = jc_m;
+                                    mat.T_melt = T_melt; mat.T_room = T_room; mat.Cp = Cp;
+                                    mat.mg_gamma0 = mg_gamma0; mat.mg_c0 = mg_c0; mat.mg_s = mg_s;
+                                }
+                            }
                             auto& particles_ref = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles() : global_solver_mpm_3d->getParticles();
                             for (auto& p : particles_ref) {
                                 if (p.object_id == obj_idx) {
-                                    p.material_model = mat_model;
-                                    p.jc_A = jc_A; p.jc_B = jc_B; p.jc_n = jc_n; p.jc_C = jc_C; p.jc_m = jc_m;
-                                    p.T_melt = T_melt; p.T_room = T_room; p.Cp = Cp;
-                                    p.mg_gamma0 = mg_gamma0; p.mg_c0 = mg_c0; p.mg_s = mg_s;
                                     p.temperature = T_room; p.e_int = 0.0f;
                                 }
                             }

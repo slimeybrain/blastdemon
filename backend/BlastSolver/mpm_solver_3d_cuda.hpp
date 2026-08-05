@@ -85,6 +85,16 @@ public:
     // Clear the persisted FSI forces (call at the start of each FSI timestep before building new forces)
     void clearFSIForces();
 
+    std::vector<MaterialTable3D>& getMaterialTables() { return m_material_tables; }
+    const std::vector<MaterialTable3D>& getMaterialTables() const { return m_material_tables; }
+    const MaterialTable3D& getMaterialTable(int object_id) const {
+        if (object_id >= 0 && object_id < static_cast<int>(m_material_tables.size())) {
+            return m_material_tables[object_id];
+        }
+        static MaterialTable3D default_mat{};
+        return default_mat;
+    }
+
     const std::vector<MPMParticle3D>& getParticles() const { return m_host_particles; }
     const std::vector<MPMGridNode3D>& getGrid() const { return m_host_grid; }
     std::vector<MPMParticle3D>& getParticles() { return m_host_particles; }
@@ -105,6 +115,7 @@ public:
     // Device memory getters
     MPMParticle3D* getDeviceParticles() { return d_particles; }
     MPMGridNode3D* getDeviceGrid() { return d_grid; }
+    MaterialTable3D* getDeviceMaterialTables() { return d_material_tables; }
     size_t getParticleCount() const { return m_host_particles.size(); }
     size_t getAllocatedVRAM() const;
 
@@ -139,6 +150,8 @@ private:
     MPMGridNode3D* d_grid{nullptr};
     MPMGridNode3D* d_grid_n{nullptr};
     MPMParticle3D* d_particles{nullptr};
+    MaterialTable3D* d_material_tables{nullptr};
+    size_t m_allocated_material_tables{0};
     float* d_max_v_buf{nullptr};
     // Persistent FSI external force buffer: 3 floats per node (fx, fy, fz)
     float* d_f_ext_fsi{nullptr};

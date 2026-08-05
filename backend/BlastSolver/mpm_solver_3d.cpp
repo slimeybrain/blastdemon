@@ -103,6 +103,18 @@ void MPMSolver3D::addBoxObject(int obj_id, float pos_x, float pos_y, float pos_z
     float p_vol = p_dx * p_dy * p_dz;
     float p_mass = p_vol * density;
 
+    if (obj_id >= static_cast<int>(m_material_tables.size())) {
+        m_material_tables.resize(obj_id + 1);
+    }
+    auto& mat = m_material_tables[obj_id];
+    mat.density = density;
+    mat.youngs_modulus = E;
+    mat.poissons_ratio = nu;
+    mat.yield_stress = yield_stress;
+    mat.hardening_modulus = hardening;
+    mat.failure_strain = failure_strain;
+    mat.tensile_failure_stress = tensile_failure_stress;
+
     for (float x = min_x + 0.5f * p_dx; x < max_x; x += p_dx) {
         for (float y = min_y + 0.5f * p_dy; y < max_y; y += p_dy) {
             for (float z = min_z + 0.5f * p_dz; z < max_z; z += p_dz) {
@@ -133,13 +145,6 @@ void MPMSolver3D::addBoxObject(int obj_id, float pos_x, float pos_y, float pos_z
                 p.V0 = p_vol;
                 p.V = p_vol;
 
-                p.density = density;
-                p.youngs_modulus = E;
-                p.poissons_ratio = nu;
-                p.yield_stress = yield_stress;
-                p.hardening_modulus = hardening;
-                p.failure_strain = failure_strain;
-                p.tensile_failure_stress = tensile_failure_stress;
                 p.damage = 0.0f;
                 p.has_failed = false;
 
@@ -180,6 +185,18 @@ void MPMSolver3D::addSphereObject(int obj_id, float pos_x, float pos_y, float po
     float p_vol = p_dx * p_dy * p_dz;
     float p_mass = p_vol * density;
 
+    if (obj_id >= static_cast<int>(m_material_tables.size())) {
+        m_material_tables.resize(obj_id + 1);
+    }
+    auto& mat = m_material_tables[obj_id];
+    mat.density = density;
+    mat.youngs_modulus = E;
+    mat.poissons_ratio = nu;
+    mat.yield_stress = yield_stress;
+    mat.hardening_modulus = hardening;
+    mat.failure_strain = failure_strain;
+    mat.tensile_failure_stress = tensile_failure_stress;
+
     for (float x = min_x + 0.5f * p_dx; x < max_x; x += p_dx) {
         for (float y = min_y + 0.5f * p_dy; y < max_y; y += p_dy) {
             for (float z = min_z + 0.5f * p_dz; z < max_z; z += p_dz) {
@@ -206,13 +223,6 @@ void MPMSolver3D::addSphereObject(int obj_id, float pos_x, float pos_y, float po
                     p.V0 = p_vol;
                     p.V = p_vol;
 
-                    p.density = density;
-                    p.youngs_modulus = E;
-                    p.poissons_ratio = nu;
-                    p.yield_stress = yield_stress;
-                    p.hardening_modulus = hardening;
-                    p.failure_strain = failure_strain;
-                    p.tensile_failure_stress = tensile_failure_stress;
                     p.damage = 0.0f;
                     p.has_failed = false;
 
@@ -257,6 +267,18 @@ void MPMSolver3D::addCylinderObject(int obj_id, float pos_x, float pos_y, float 
     float p_vol = p_dx * p_dy * p_dz;
     float p_mass = p_vol * density;
 
+    if (obj_id >= static_cast<int>(m_material_tables.size())) {
+        m_material_tables.resize(obj_id + 1);
+    }
+    auto& mat = m_material_tables[obj_id];
+    mat.density = density;
+    mat.youngs_modulus = E;
+    mat.poissons_ratio = nu;
+    mat.yield_stress = yield_stress;
+    mat.hardening_modulus = hardening;
+    mat.failure_strain = failure_strain;
+    mat.tensile_failure_stress = tensile_failure_stress;
+
     for (float x = min_x + 0.5f * p_dx; x < max_x; x += p_dx) {
         for (float y = min_y + 0.5f * p_dy; y < max_y; y += p_dy) {
             for (float z = min_z + 0.5f * p_dz; z < max_z; z += p_dz) {
@@ -284,13 +306,6 @@ void MPMSolver3D::addCylinderObject(int obj_id, float pos_x, float pos_y, float 
                     p.V0 = p_vol;
                     p.V = p_vol;
 
-                    p.density = density;
-                    p.youngs_modulus = E;
-                    p.poissons_ratio = nu;
-                    p.yield_stress = yield_stress;
-                    p.hardening_modulus = hardening;
-                    p.failure_strain = failure_strain;
-                    p.tensile_failure_stress = tensile_failure_stress;
                     p.damage = 0.0f;
                     p.has_failed = false;
 
@@ -392,6 +407,18 @@ void MPMSolver3D::addSTLObject(int obj_id, const std::string& stl_filepath,
         }
     }
 
+    if (obj_id >= static_cast<int>(m_material_tables.size())) {
+        m_material_tables.resize(obj_id + 1);
+    }
+    auto& mat = m_material_tables[obj_id];
+    mat.density = density;
+    mat.youngs_modulus = E;
+    mat.poissons_ratio = nu;
+    mat.yield_stress = yield_stress;
+    mat.hardening_modulus = hardening;
+    mat.failure_strain = failure_strain;
+    mat.tensile_failure_stress = tensile_failure_stress;
+
     std::cout << "[INFO] MPMSolver3D::addSTLObject loaded " << triangles.size() << " triangles. Sampling interior particles..." << std::endl;
     size_t particle_count_before = m_particles.size();
 
@@ -450,13 +477,6 @@ void MPMSolver3D::addSTLObject(int obj_id, const std::string& stl_filepath,
                     p.V0 = p_vol;
                     p.V = p_vol;
 
-                    p.density = density;
-                    p.youngs_modulus = E;
-                    p.poissons_ratio = nu;
-                    p.yield_stress = yield_stress;
-                    p.hardening_modulus = hardening;
-                    p.failure_strain = failure_strain;
-                    p.tensile_failure_stress = tensile_failure_stress;
                     p.damage = 0.0f;
                     p.has_failed = false;
 
@@ -602,9 +622,10 @@ void MPMSolver3D::particleToGrid() {
                     node.f_int[2] += p.V * (p.sigma[2][0] * dN_dx + p.sigma[2][1] * dN_dy + p.sigma[2][2] * dN_dz);
 
                     // Telemetry scalar scatter
+                    const auto& mat = getMaterialTable(p.object_id);
                     node.von_mises += p.m * weight * vm_stress;
                     node.plastic_strain += p.m * weight * p.ep_bar;
-                    node.density += p.m * weight * p.density;
+                    node.density += p.m * weight * mat.density;
                     node.pressure += p.m * weight * press;
                     node.damage += p.m * weight * p.damage;
                 }
@@ -962,6 +983,8 @@ void MPMSolver3D::gridToParticle(float dt) {
 
 void MPMSolver3D::updateStressState(float dt) {
     for (auto& p : m_particles) {
+        const auto& mat = getMaterialTable(p.object_id);
+
         // Fully failed particles: erase stress and APIC affine matrix.
         // This prevents failed debris from elastically coupling back to intact material.
         // Velocity gradient L evaluated from exact shape function derivatives L_grad
@@ -996,8 +1019,8 @@ void MPMSolver3D::updateStressState(float dt) {
             const float J = p.V / (p.V0 > 1.0e-12f ? p.V0 : 1.0e-12f);
             float p_comp = 0.0f;
             if (J < 1.0f) {
-                const float E_mod    = p.youngs_modulus;
-                const float nu       = p.poissons_ratio;
+                const float E_mod    = mat.youngs_modulus;
+                const float nu       = mat.poissons_ratio;
                 const float K_intact = E_mod / (3.0f * std::max(1.0e-4f, 1.0f - 2.0f * nu));
                 const float K_debris = 0.10f * K_intact; // 10% intact bulk modulus
                 p_comp = K_debris * (1.0f - J) / J;
@@ -1007,8 +1030,8 @@ void MPMSolver3D::updateStressState(float dt) {
             const float M_friction = 1.0f; // tan(phi) ~ 1.0 for phi ~ 30 deg
             const float q_max = M_friction * p_comp;
 
-            const float E_mod = p.youngs_modulus;
-            const float nu = p.poissons_ratio;
+            const float E_mod = mat.youngs_modulus;
+            const float nu = mat.poissons_ratio;
             const float mu_debris = 0.05f * (E_mod / (2.0f * (1.0f + nu)));
 
             float deps_dev[3][3];
@@ -1051,7 +1074,7 @@ void MPMSolver3D::updateStressState(float dt) {
         }
 
         // --- Johnson-Cook Plasticity + Mie-Grüneisen Shock EOS Model ---
-        if (p.material_model == MPMMaterialModel::JohnsonCookMieGruneisen) {
+        if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen) {
             p.V = std::clamp(p.V * (1.0f + tr_deps), 0.1f * p.V0, 10.0f * p.V0);
             const float J = p.V / (p.V0 > 1.0e-12f ? p.V0 : 1.0e-12f);
             const float mu_vol = (1.0f - J) / J;
@@ -1059,13 +1082,13 @@ void MPMSolver3D::updateStressState(float dt) {
             // 1. Mie-Grüneisen Shock EOS Hydrostatic Pressure
             float p_hydro = 0.0f;
             if (mu_vol > 0.0f) {
-                float denom = 1.0f - (p.mg_s - 1.0f) * mu_vol;
+                float denom = 1.0f - (mat.mg_s - 1.0f) * mu_vol;
                 if (denom < 0.1f) denom = 0.1f;
-                float p_H = (p.density * p.mg_c0 * p.mg_c0 * mu_vol * (1.0f + mu_vol)) / (denom * denom);
-                float e_H = (p_H * mu_vol) / (2.0f * p.density * (1.0f + mu_vol));
-                p_hydro = p_H + p.mg_gamma0 * p.density * (p.e_int - e_H);
+                float p_H = (mat.density * mat.mg_c0 * mat.mg_c0 * mu_vol * (1.0f + mu_vol)) / (denom * denom);
+                float e_H = (p_H * mu_vol) / (2.0f * mat.density * (1.0f + mu_vol));
+                p_hydro = p_H + mat.mg_gamma0 * mat.density * (p.e_int - e_H);
             } else {
-                p_hydro = p.density * p.mg_c0 * p.mg_c0 * mu_vol;
+                p_hydro = mat.density * mat.mg_c0 * mat.mg_c0 * mu_vol;
             }
 
             // 2. Jaumann Stress Rotation
@@ -1082,8 +1105,8 @@ void MPMSolver3D::updateStressState(float dt) {
                 for (int c = 0; c < 3; ++c)
                     sig_base[r][c] = p.sigma[r][c] + (W_sig[r][c] - sig_W[r][c]) * dt;
 
-            const float E_mod    = p.youngs_modulus;
-            const float nu_val   = p.poissons_ratio;
+            const float E_mod    = mat.youngs_modulus;
+            const float nu_val   = mat.poissons_ratio;
             const float mu_shear = E_mod / (2.0f * (1.0f + nu_val));
 
             float deps_dev[3][3];
@@ -1110,20 +1133,20 @@ void MPMSolver3D::updateStressState(float dt) {
 
             // 3. Johnson-Cook Yield Stress
             float ep_dot_star = std::max(1.0f, (tr_deps > 0.0f ? tr_deps : -tr_deps) / (dt > 1e-12f ? dt : 1e-12f));
-            float T_star = std::clamp((p.temperature - p.T_room) / (p.T_melt > p.T_room ? p.T_melt - p.T_room : 1.0f), 0.0f, 1.0f);
+            float T_star = std::clamp((p.temperature - mat.T_room) / (mat.T_melt > mat.T_room ? mat.T_melt - mat.T_room : 1.0f), 0.0f, 1.0f);
 
-            float term_strain = p.jc_A + p.jc_B * std::pow(std::max(0.0f, p.ep_bar), p.jc_n);
-            float term_rate   = 1.0f + p.jc_C * std::log(ep_dot_star);
-            float term_temp   = 1.0f - std::pow(T_star, p.jc_m);
+            float term_strain = mat.jc_A + mat.jc_B * std::pow(std::max(0.0f, p.ep_bar), mat.jc_n);
+            float term_rate   = 1.0f + mat.jc_C * std::log(ep_dot_star);
+            float term_temp   = 1.0f - std::pow(T_star, mat.jc_m);
             if (term_temp < 0.0f) term_temp = 0.0f;
 
             float jc_yield = term_strain * term_rate * term_temp;
             if (T_star >= 1.0f) jc_yield = 0.0f; // Liquid hydrodynamic state
 
             // 4. Radial Return Mapping & Plastic Work Conversion
-            float H_jc = (p.jc_n > 0.0f && p.ep_bar > 1.0e-6f)
-                ? (p.jc_n * p.jc_B * std::pow(p.ep_bar, p.jc_n - 1.0f) * term_rate * term_temp)
-                : p.hardening_modulus;
+            float H_jc = (mat.jc_n > 0.0f && p.ep_bar > 1.0e-6f)
+                ? (mat.jc_n * mat.jc_B * std::pow(p.ep_bar, mat.jc_n - 1.0f) * term_rate * term_temp)
+                : mat.hardening_modulus;
             float delta_ep = 0.0f;
             if (q_trial > 1.0e-5f && q_trial > jc_yield) {
                 delta_ep = (q_trial - jc_yield) / (3.0f * mu_shear + H_jc);
@@ -1142,23 +1165,23 @@ void MPMSolver3D::updateStressState(float dt) {
                     }
             }
 
-            if (delta_ep > 0.0f && p.density > 0.0f && p.Cp > 0.0f) {
+            if (delta_ep > 0.0f && mat.density > 0.0f && mat.Cp > 0.0f) {
                 float dw_p = jc_yield * delta_ep;
-                float de_p = (0.90f * dw_p) / p.density;
+                float de_p = (0.90f * dw_p) / mat.density;
                 p.e_int += de_p;
-                p.temperature = p.T_room + p.e_int / p.Cp;
+                p.temperature = mat.T_room + p.e_int / mat.Cp;
             }
 
             // 5. Thermal Re-Welding / Healing Rule:
             // High temp (T >= 80% T_melt) under compression fuses molten interfaces
-            if (p.temperature >= 0.80f * p.T_melt && p_hydro > 0.0f) {
+            if (p.temperature >= 0.80f * mat.T_melt && p_hydro > 0.0f) {
                 p.damage = 0.0f;
                 p.has_failed = false;
             } else {
-                float d_plastic = (p.failure_strain > 0.0f) ? std::clamp(p.ep_bar / p.failure_strain, 0.0f, 1.0f) : 0.0f;
+                float d_plastic = (mat.failure_strain > 0.0f) ? std::clamp(p.ep_bar / mat.failure_strain, 0.0f, 1.0f) : 0.0f;
                 float tensile_stress = -p_hydro;
-                float d_tensile = (tensile_stress > 0.0f && p.tensile_failure_stress > 0.0f)
-                    ? std::clamp(tensile_stress / p.tensile_failure_stress, 0.0f, 1.0f) : 0.0f;
+                float d_tensile = (tensile_stress > 0.0f && mat.tensile_failure_stress > 0.0f)
+                    ? std::clamp(tensile_stress / mat.tensile_failure_stress, 0.0f, 1.0f) : 0.0f;
 
                 p.damage = std::max(p.damage, std::max(d_plastic, d_tensile));
                 if (p.damage >= 1.0f) {
@@ -1189,8 +1212,8 @@ void MPMSolver3D::updateStressState(float dt) {
                 sig_base[r][c] = p.sigma[r][c] + (W_sig[r][c] - sig_W[r][c]) * dt;
 
         // Lame constants
-        const float E_mod  = p.youngs_modulus;
-        const float nu     = p.poissons_ratio;
+        const float E_mod  = mat.youngs_modulus;
+        const float nu     = mat.poissons_ratio;
         const float mu     = E_mod / (2.0f * (1.0f + nu));
         const float lambda = (E_mod * nu) / ((1.0f + nu) * (1.0f - 2.0f * nu));
 
@@ -1216,11 +1239,11 @@ void MPMSolver3D::updateStressState(float dt) {
             for (int c = 0; c < 3; ++c)
                 s_s += s[r][c] * s[r][c];
         const float q_trial   = std::sqrt(1.5f * s_s);
-        const float yield_surf = q_trial - (p.yield_stress + p.hardening_modulus * p.ep_bar);
+        const float yield_surf = q_trial - (mat.yield_stress + mat.hardening_modulus * p.ep_bar);
 
         if (q_trial > 1.0e-5f && yield_surf > 0.0f) {
             // Radial return mapping
-            const float delta_ep = yield_surf / (3.0f * mu + p.hardening_modulus);
+            const float delta_ep = yield_surf / (3.0f * mu + mat.hardening_modulus);
             float scale = 1.0f - (3.0f * mu * delta_ep) / q_trial;
             if (scale < 0.0f) scale = 0.0f;
             for (int r = 0; r < 3; ++r)
@@ -1236,13 +1259,13 @@ void MPMSolver3D::updateStressState(float dt) {
         }
 
         // Rate-independent damage: direct mapping from state variable ep_bar.
-        const float d_plastic = (p.failure_strain > 0.0f)
-            ? std::clamp(p.ep_bar / p.failure_strain, 0.0f, 1.0f) : 0.0f;
+        const float d_plastic = (mat.failure_strain > 0.0f)
+            ? std::clamp(p.ep_bar / mat.failure_strain, 0.0f, 1.0f) : 0.0f;
 
         const float curr_press    = -(p.sigma[0][0] + p.sigma[1][1] + p.sigma[2][2]) / 3.0f;
         const float tensile_stress = -curr_press;
-        const float d_tensile = (tensile_stress > 0.0f && p.tensile_failure_stress > 0.0f)
-            ? std::clamp(tensile_stress / p.tensile_failure_stress, 0.0f, 1.0f) : 0.0f;
+        const float d_tensile = (tensile_stress > 0.0f && mat.tensile_failure_stress > 0.0f)
+            ? std::clamp(tensile_stress / mat.tensile_failure_stress, 0.0f, 1.0f) : 0.0f;
 
         p.damage = std::max(p.damage, std::max(d_plastic, d_tensile));
 
@@ -1259,8 +1282,8 @@ void MPMSolver3D::updateStressState(float dt) {
             const float J = p.V / (p.V0 > 1.0e-12f ? p.V0 : 1.0e-12f);
             float p_comp = 0.0f;
             if (J < 1.0f) {
-                const float E_mod    = p.youngs_modulus;
-                const float nu       = p.poissons_ratio;
+                const float E_mod    = mat.youngs_modulus;
+                const float nu       = mat.poissons_ratio;
                 const float K_intact = E_mod / (3.0f * std::max(1.0e-4f, 1.0f - 2.0f * nu));
                 const float K_debris = 0.10f * K_intact;
                 p_comp = K_debris * (1.0f - J) / J;
@@ -1290,8 +1313,9 @@ float MPMSolver3D::computeStepSize(float cfl) const {
     float max_speed = 100.0f;
     for (const auto& p : m_particles) {
         if (std::isnan(p.v[0]) || std::isnan(p.v[1]) || std::isnan(p.v[2])) continue;
-        float E = p.youngs_modulus;
-        float rho = std::max(10.0f, p.density);
+        const auto& mat = getMaterialTable(p.object_id);
+        float E = mat.youngs_modulus;
+        float rho = std::max(10.0f, mat.density);
         float c_s = std::sqrt(E / rho);
         if (std::isnan(c_s) || std::isinf(c_s)) continue;
         float v_mag = std::sqrt(p.v[0] * p.v[0] + p.v[1] * p.v[1] + p.v[2] * p.v[2]);

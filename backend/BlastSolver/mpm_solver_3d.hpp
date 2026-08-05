@@ -57,27 +57,6 @@ struct MPMParticle3D {
     float damage{0.0f};          // Scalar damage D in [0, 1]
     bool has_failed{false};      // Total failure status flag
     int object_id{0};            // Object / Material Table ID
-
-    // Legacy Material Property Accessors & Fallback Parameters for Host Setup
-    MPMMaterialModel material_model{MPMMaterialModel::HypoelasticSteel};
-    float density{7850.0f};
-    float youngs_modulus{210.0e9f};
-    float poissons_ratio{0.3f};
-    float yield_stress{400.0e6f};
-    float hardening_modulus{1.0e9f};
-    float failure_strain{0.25f};
-    float tensile_failure_stress{600.0e6f};
-    float jc_A{792.0e6f};
-    float jc_B{510.0e6f};
-    float jc_n{0.26f};
-    float jc_C{0.014f};
-    float jc_m{1.03f};
-    float T_melt{1793.0f};
-    float T_room{293.0f};
-    float Cp{477.0f};
-    float mg_gamma0{1.81f};
-    float mg_c0{4570.0f};
-    float mg_s{1.49f};
 };
 
 struct MPMGridNode3D {
@@ -172,6 +151,16 @@ public:
     std::vector<MPMParticle3D>& getParticles() { return m_particles; }
     const std::vector<MPMParticle3D>& getParticles() const { return m_particles; }
 
+    std::vector<MaterialTable3D>& getMaterialTables() { return m_material_tables; }
+    const std::vector<MaterialTable3D>& getMaterialTables() const { return m_material_tables; }
+    const MaterialTable3D& getMaterialTable(int object_id) const {
+        if (object_id >= 0 && object_id < static_cast<int>(m_material_tables.size())) {
+            return m_material_tables[object_id];
+        }
+        static MaterialTable3D default_mat{};
+        return default_mat;
+    }
+
     std::vector<MPMGridNode3D>& getGrid() { return m_grid; }
     const std::vector<MPMGridNode3D>& getGrid() const { return m_grid; }
     int getNx() const { return m_nx; }
@@ -223,6 +212,7 @@ private:
     MPMBoundaryCondition3D m_bc_z_min{MPMBoundaryCondition3D::Sticky};
     MPMBoundaryCondition3D m_bc_z_max{MPMBoundaryCondition3D::Sticky};
 
+    std::vector<MaterialTable3D> m_material_tables;
     std::vector<MPMGridNode3D> m_grid;
     std::vector<MPMParticle3D> m_particles;
 
