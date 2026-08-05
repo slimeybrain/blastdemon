@@ -503,15 +503,7 @@ void MPMSolver3D::particleToGrid() {
     for (auto& node : m_grid) {
         node.m = 0.0f;
         node.p[0] = 0.0f; node.p[1] = 0.0f; node.p[2] = 0.0f;
-        node.v[0] = 0.0f; node.v[1] = 0.0f; node.v[2] = 0.0f;
-        node.v_old[0] = 0.0f; node.v_old[1] = 0.0f; node.v_old[2] = 0.0f;
-        node.f_int[0] = 0.0f; node.f_int[1] = 0.0f; node.f_int[2] = 0.0f;
-        // f_ext is maintained across P2G scatters and cleared only at step start if run_p2g is true
-        node.von_mises = 0.0f;
         node.plastic_strain = 0.0f;
-        node.density = 0.0f;
-        node.pressure = 0.0f;
-        node.damage = 0.0f;
     }
 
     // P2G Scatter in 3D
@@ -616,18 +608,13 @@ void MPMSolver3D::particleToGrid() {
                     node.p[1] += p.m * weight * v_apic_y;
                     node.p[2] += p.m * weight * v_apic_z;
 
-                    // 3D Internal Stress Force scatter: f_int += V_p * sigma_p * dN
-                    node.f_int[0] += p.V * (p.sigma[0][0] * dN_dx + p.sigma[0][1] * dN_dy + p.sigma[0][2] * dN_dz);
-                    node.f_int[1] += p.V * (p.sigma[1][0] * dN_dx + p.sigma[1][1] * dN_dy + p.sigma[1][2] * dN_dz);
-                    node.f_int[2] += p.V * (p.sigma[2][0] * dN_dx + p.sigma[2][1] * dN_dy + p.sigma[2][2] * dN_dz);
+                    // 3D Internal Stress Force directly updates momentum: p -= f_int
+                    node.p[0] -= p.V * (p.sigma[0][0] * dN_dx + p.sigma[0][1] * dN_dy + p.sigma[0][2] * dN_dz);
+                    node.p[1] -= p.V * (p.sigma[1][0] * dN_dx + p.sigma[1][1] * dN_dy + p.sigma[1][2] * dN_dz);
+                    node.p[2] -= p.V * (p.sigma[2][0] * dN_dx + p.sigma[2][1] * dN_dy + p.sigma[2][2] * dN_dz);
 
                     // Telemetry scalar scatter
-                    const auto& mat = getMaterialTable(p.object_id);
-                    node.von_mises += p.m * weight * vm_stress;
                     node.plastic_strain += p.m * weight * p.ep_bar;
-                    node.density += p.m * weight * mat.density;
-                    node.pressure += p.m * weight * press;
-                    node.damage += p.m * weight * p.damage;
                 }
             }
         }
@@ -636,11 +623,7 @@ void MPMSolver3D::particleToGrid() {
     // Normalize telemetry scalars
     for (auto& node : m_grid) {
         if (node.m > 1.0e-8f) {
-            node.von_mises /= node.m;
             node.plastic_strain /= node.m;
-            node.density /= node.m;
-            node.pressure /= node.m;
-            node.damage /= node.m;
         }
     }
 
@@ -693,51 +676,33 @@ void MPMSolver3D::updateGridKinematics(float dt) {
                 auto& node = m_grid[node_idx];
 
                 if (node.m > 1.0e-8f) {
-                    node.v[0] = node.p[0] / node.m;
-                    node.v[1] = node.p[1] / node.m;
-                    node.v[2] = node.p[2] / node.m;
-                    node.v_old[0] = node.v[0];
-                    node.v_old[1] = node.v[1];
-                    node.v_old[2] = node.v[2];
-
-                    // Total Force = External (FSI) - Internal
-                    float f_tot_x = node.f_ext[0] - node.f_int[0];
-                    float f_tot_y = node.f_ext[1] - node.f_int[1];
-                    float f_tot_z = node.f_ext[2] - node.f_int[2];
-
-                    float m_eff = std::max(node.m, m_eff_floor);
-                    node.v[0] += dt * (f_tot_x / m_eff);
-                    node.v[1] += dt * (f_tot_y / m_eff);
-                    node.v[2] += dt * (f_tot_z / m_eff);
-
-                    // Clamp node velocity
-                    node.v[0] = std::clamp(node.v[0], -5000.0f, 5000.0f);
-                    node.v[1] = std::clamp(node.v[1], -5000.0f, 5000.0f);
-                    node.v[2] = std::clamp(node.v[2], -5000.0f, 5000.0f);
+                    node.p[0] += dt * node.f_ext[0];
+                    node.p[1] += dt * node.f_ext[1];
+                    node.p[2] += dt * node.f_ext[2];
 
                     // Apply 3D Boundary Conditions (x, y, z min/max)
                     if ((i == 0 && m_bc_x_min == MPMBoundaryCondition3D::Sticky) ||
                         (i == m_nx - 1 && m_bc_x_max == MPMBoundaryCondition3D::Sticky)) {
-                        node.v[0] = 0.0f; node.v[1] = 0.0f; node.v[2] = 0.0f;
+                        node.p[0] = 0.0f; node.p[1] = 0.0f; node.p[2] = 0.0f;
                     } else if ((i == 0 && m_bc_x_min == MPMBoundaryCondition3D::FreeSlip) ||
                                (i == m_nx - 1 && m_bc_x_max == MPMBoundaryCondition3D::FreeSlip)) {
-                        node.v[0] = 0.0f;
+                        node.p[0] = 0.0f;
                     }
 
                     if ((j == 0 && m_bc_y_min == MPMBoundaryCondition3D::Sticky) ||
                         (j == m_ny - 1 && m_bc_y_max == MPMBoundaryCondition3D::Sticky)) {
-                        node.v[0] = 0.0f; node.v[1] = 0.0f; node.v[2] = 0.0f;
+                        node.p[0] = 0.0f; node.p[1] = 0.0f; node.p[2] = 0.0f;
                     } else if ((j == 0 && m_bc_y_min == MPMBoundaryCondition3D::FreeSlip) ||
                                (j == m_ny - 1 && m_bc_y_max == MPMBoundaryCondition3D::FreeSlip)) {
-                        node.v[1] = 0.0f;
+                        node.p[1] = 0.0f;
                     }
 
                     if ((k == 0 && m_bc_z_min == MPMBoundaryCondition3D::Sticky) ||
                         (k == m_nz - 1 && m_bc_z_max == MPMBoundaryCondition3D::Sticky)) {
-                        node.v[0] = 0.0f; node.v[1] = 0.0f; node.v[2] = 0.0f;
+                        node.p[0] = 0.0f; node.p[1] = 0.0f; node.p[2] = 0.0f;
                     } else if ((k == 0 && m_bc_z_min == MPMBoundaryCondition3D::FreeSlip) ||
                                (k == m_nz - 1 && m_bc_z_max == MPMBoundaryCondition3D::FreeSlip)) {
-                        node.v[2] = 0.0f;
+                        node.p[2] = 0.0f;
                     }
                 }
             }
@@ -824,12 +789,12 @@ void MPMSolver3D::gridToParticle(float dt) {
                     const auto& node = m_grid[node_idx];
 
                     if (node.m > 1.0e-8f) {
-                        v_pic_x += weight * node.v[0];
-                        v_pic_y += weight * node.v[1];
-                        v_pic_z += weight * node.v[2];
-                        v_flip_x += weight * (node.v[0] - node.v_old[0]);
-                        v_flip_y += weight * (node.v[1] - node.v_old[1]);
-                        v_flip_z += weight * (node.v[2] - node.v_old[2]);
+                        v_pic_x += weight * node.v(0);
+                        v_pic_y += weight * node.v(1);
+                        v_pic_z += weight * node.v(2);
+                        v_flip_x += weight * node.v(0);
+                        v_flip_y += weight * node.v(1);
+                        v_flip_z += weight * node.v(2);
                         ep_grid_sum += weight * node.plastic_strain;
                         weight_sum += weight;
                     }
@@ -910,29 +875,29 @@ void MPMSolver3D::gridToParticle(float dt) {
                         float dist_z = node_z - pz;
 
                         float w_apic = 1.0f;
-                        B_new[0][0] += w_apic * weight * node.v[0] * dist_x * D_inv_x;
-                        B_new[0][1] += w_apic * weight * node.v[0] * dist_y * D_inv_y;
-                        B_new[0][2] += w_apic * weight * node.v[0] * dist_z * D_inv_z;
+                        B_new[0][0] += w_apic * weight * node.v(0) * dist_x * D_inv_x;
+                        B_new[0][1] += w_apic * weight * node.v(0) * dist_y * D_inv_y;
+                        B_new[0][2] += w_apic * weight * node.v(0) * dist_z * D_inv_z;
 
-                        B_new[1][0] += w_apic * weight * node.v[1] * dist_x * D_inv_x;
-                        B_new[1][1] += w_apic * weight * node.v[1] * dist_y * D_inv_y;
-                        B_new[1][2] += w_apic * weight * node.v[1] * dist_z * D_inv_z;
+                        B_new[1][0] += w_apic * weight * node.v(1) * dist_x * D_inv_x;
+                        B_new[1][1] += w_apic * weight * node.v(1) * dist_y * D_inv_y;
+                        B_new[1][2] += w_apic * weight * node.v(1) * dist_z * D_inv_z;
 
-                        B_new[2][0] += w_apic * weight * node.v[2] * dist_x * D_inv_x;
-                        B_new[2][1] += w_apic * weight * node.v[2] * dist_y * D_inv_y;
-                        B_new[2][2] += w_apic * weight * node.v[2] * dist_z * D_inv_z;
+                        B_new[2][0] += w_apic * weight * node.v(2) * dist_x * D_inv_x;
+                        B_new[2][1] += w_apic * weight * node.v(2) * dist_y * D_inv_y;
+                        B_new[2][2] += w_apic * weight * node.v(2) * dist_z * D_inv_z;
 
-                        L_new[0][0] += node.v[0] * dN_dx;
-                        L_new[0][1] += node.v[0] * dN_dy;
-                        L_new[0][2] += node.v[0] * dN_dz;
+                        L_new[0][0] += node.v(0) * dN_dx;
+                        L_new[0][1] += node.v(0) * dN_dy;
+                        L_new[0][2] += node.v(0) * dN_dz;
 
-                        L_new[1][0] += node.v[1] * dN_dx;
-                        L_new[1][1] += node.v[1] * dN_dy;
-                        L_new[1][2] += node.v[1] * dN_dz;
+                        L_new[1][0] += node.v(1) * dN_dx;
+                        L_new[1][1] += node.v(1) * dN_dy;
+                        L_new[1][2] += node.v(1) * dN_dz;
 
-                        L_new[2][0] += node.v[2] * dN_dx;
-                        L_new[2][1] += node.v[2] * dN_dy;
-                        L_new[2][2] += node.v[2] * dN_dz;
+                        L_new[2][0] += node.v(2) * dN_dx;
+                        L_new[2][1] += node.v(2) * dN_dy;
+                        L_new[2][2] += node.v(2) * dN_dz;
                     }
                 }
             }

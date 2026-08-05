@@ -137,6 +137,8 @@ public:
     MPMGridNode3D* getDeviceGrid() { return d_grid; }
     int* getDeviceActiveNodes() { return d_active_nodes; }
     int getNumActiveNodes() const { return m_num_active_nodes; }
+    MPMTile3D** getDeviceTilePtrs() { return d_tile_ptrs; }
+    int* getDeviceTileTable() { return d_tile_table; }
     MaterialTable3D* getDeviceMaterialTables() { return d_material_tables; }
     size_t getParticleCount() const { return m_host_particles.size(); }
     size_t getAllocatedVRAM() const;
@@ -174,7 +176,14 @@ private:
     std::vector<MaterialTable3D> m_material_tables;
 
     MPMGridNode3D* d_grid{nullptr};
-    MPMGridNode3D* d_grid_n{nullptr};
+    float* d_grid_n{nullptr};
+    MPMTile3D** d_tile_ptrs{nullptr};
+    MPMTile3D* d_tile_pool{nullptr};
+    int* d_tile_table{nullptr};
+    int* d_num_active_tiles{nullptr};
+    size_t m_allocated_tile_table{0};
+    size_t m_allocated_tile_ptrs{0};
+    size_t m_allocated_tile_pool{0};
     MPMParticle3D* d_particles{nullptr};
     MPMParticle3DSoA d_soa{};
     void* d_soa_buffer{nullptr};

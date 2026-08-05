@@ -2269,9 +2269,9 @@ void worker_fsi_3d_thread_func() {
                                 size_t cfd_idx = static_cast<size_t>(i) + static_cast<size_t>(j) * nx + static_cast<size_t>(k) * nx * ny;
                                 if (node.m > 1.0e-8f) {
                                     solid_mask[cfd_idx] = 1;
-                                    solid_vel[3 * cfd_idx + 0] = node.v[0];
-                                    solid_vel[3 * cfd_idx + 1] = node.v[1];
-                                    solid_vel[3 * cfd_idx + 2] = node.v[2];
+                                    solid_vel[3 * cfd_idx + 0] = node.v(0);
+                                    solid_vel[3 * cfd_idx + 1] = node.v(1);
+                                    solid_vel[3 * cfd_idx + 2] = node.v(2);
                                 }
                             }
                         }
@@ -3106,14 +3106,12 @@ void emit_telemetry_mpm_2d(double elapsed, bool is_terminated) {
 
 static inline float getMPMGridQuantity(const Blast::MPMGridNode3D& node, const std::string& qty) {
     if (node.m <= 1.0e-8f) return 0.0f;
-    if (qty == "density") return node.density;
-    if (qty == "pressure") return node.pressure;
     if (qty == "plastic_strain") return node.plastic_strain;
-    if (qty == "damage") return node.damage;
     if (qty == "velocity") {
-        return std::sqrt(node.v[0]*node.v[0] + node.v[1]*node.v[1] + node.v[2]*node.v[2]);
+        float vx = node.v(0), vy = node.v(1), vz = node.v(2);
+        return std::sqrt(vx * vx + vy * vy + vz * vz);
     }
-    return node.von_mises;
+    return node.plastic_strain;
 }
 
 void emit_telemetry_mpm_3d(double elapsed, bool is_terminated) {
@@ -4661,6 +4659,7 @@ int main() {
                     std::string material_type = msg.value("material_type", "");
                     bool is_ideal_gas_3d = (msg.value("is_ideal_gas", false) || init_mode == "Ideal Gas" || explosive_type == "MaterialIdealGas" || material_type == "Ideal Gas Charge");
                     bool is_multimat = !is_ideal_gas_3d;
+                    std::cout << "[DEBUG] INIT_FSI_3D: device=" << device << " init_mode=" << init_mode << " explosive_type=" << explosive_type << " material_type=" << material_type << " is_ideal_gas_3d=" << is_ideal_gas_3d << " is_multimat=" << is_multimat << std::endl;
 
                     if (device == "cuda") {
                         if (precision == "single" || precision == "float") {

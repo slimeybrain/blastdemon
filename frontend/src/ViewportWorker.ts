@@ -3585,6 +3585,7 @@ function handleFrame(buffer: ArrayBuffer) {
     cachedSlices = [];
     let cacheOffset = 12;
     for (let i = 0; i < numSlices; i++) {
+        if (cacheOffset + 48 > buffer.byteLength) break;
         const axis = view.getUint32(cacheOffset, true);
         const zOff = view.getFloat32(cacheOffset + 4, true);
         const w = view.getUint32(cacheOffset + 8, true);

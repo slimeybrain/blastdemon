@@ -2689,9 +2689,9 @@ CFDSolver3DCuda<RealType, IsMultiMaterial>::CFDSolver3DCuda(int nx, int ny, int 
     CHECK_CUDA(cudaMalloc(&d_active_tile_indices, total_tiles * sizeof(int)));
     CHECK_CUDA(cudaMalloc(&d_active_count, sizeof(int)));
 
-    // Pre-allocate space-time schemes predictor/derivative buffers
-    CHECK_CUDA(cudaMalloc(&d_states_pred, total_tiles * sizeof(PrimitiveTile3D<RealType, IsMultiMaterial>)));
-    CHECK_CUDA(cudaMalloc(&d_dW_dt, total_tiles * sizeof(PrimitiveTile3D<RealType, IsMultiMaterial>)));
+    // Lazy-allocate space-time schemes predictor/derivative buffers (allocated only if ADER-3/MUSCL is used)
+    d_states_pred = nullptr;
+    d_dW_dt = nullptr;
 
     // Pre-allocate auxiliary buffers
     CHECK_CUDA(cudaMalloc(&d_max_s_buf, total_tiles * sizeof(RealType)));
@@ -2756,7 +2756,6 @@ CFDSolver3DCuda<RealType, IsMultiMaterial>::~CFDSolver3DCuda() {
     if (gauge_stream) cudaStreamDestroy((cudaStream_t)gauge_stream);
     if (step_done) cudaEventDestroy((cudaEvent_t)step_done);
     if (d_obstacle_faces) cudaFree(d_obstacle_faces);
-    if (d_states_old) { cudaFree(d_states_old); d_states_old = nullptr; }
 }
 
 template <typename RealType, bool IsMultiMaterial>
@@ -3663,6 +3662,11 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
         update_primitive_kernel_3d<RealType, IsMultiMaterial><<<n_active, threads>>>((PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states, (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U, (const int*)d_active_tile_indices, (const GeometryTile3D*)d_geom, dt_r);
     } else if (temporalOrder == 4 || temporalOrder == 5 || temporalOrder == 6) {
         // MUSCL-Hancock (4), ADER-2 (5), ADER-3 (6) on GPU
+        if (!d_states_pred) {
+            int total_tiles = ntx * nty * ntz;
+            CHECK_CUDA(cudaMalloc(&d_states_pred, total_tiles * sizeof(PrimitiveTile3D<RealType, IsMultiMaterial>)));
+            CHECK_CUDA(cudaMalloc(&d_dW_dt, total_tiles * sizeof(PrimitiveTile3D<RealType, IsMultiMaterial>)));
+        }
         auto states_pred_ptr = (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states_pred;
         auto dW_dt_ptr = (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_dW_dt;
 
@@ -4506,11 +4510,6 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::initializeFrom1D(const std::vec
         currentMaterials.products, currentMaterials.unreacted
     );
     CHECK_CUDA(cudaDeviceSynchronize());
-
-    if (!d_states_old) {
-        CHECK_CUDA(cudaMalloc(&d_states_old, total_tiles * sizeof(PrimitiveTile3D<RealType, IsMultiMaterial>)));
-    }
-    CHECK_CUDA(cudaMemcpy(d_states_old, d_states, total_tiles * sizeof(PrimitiveTile3D<RealType, IsMultiMaterial>), cudaMemcpyDeviceToDevice));
 }
 
 template <typename RealType, bool IsMultiMaterial>
@@ -4642,11 +4641,6 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::initializeFrom2D(int nr, int nz
         );
         CHECK_CUDA(cudaDeviceSynchronize());
     }
-
-    if (!d_states_old) {
-        CHECK_CUDA(cudaMalloc(&d_states_old, total_tiles * sizeof(PrimitiveTile3D<RealType, IsMultiMaterial>)));
-    }
-    CHECK_CUDA(cudaMemcpy(d_states_old, d_states, total_tiles * sizeof(PrimitiveTile3D<RealType, IsMultiMaterial>), cudaMemcpyDeviceToDevice));
 }
 
 

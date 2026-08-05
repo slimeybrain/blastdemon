@@ -802,6 +802,12 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         flattenedParams['ymin'] = ymin;
         flattenedParams['zmin'] = zmin;
 
+        const hasChargeConn3D = solverNode3D ? Boolean(state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'charge')) : false;
+        if (!hasChargeConn3D || flattenedParams['init_mode'] === 'Ideal Gas' || flattenedParams['explosive_type'] === 'MaterialIdealGas') {
+            flattenedParams['init_mode'] = 'Ideal Gas';
+            flattenedParams['is_ideal_gas'] = true;
+        }
+
         if (!flattenedParams['gamma']) flattenedParams['gamma'] = 1.4;
         const p = flattenedParams['atm_pressure'] || 101325.0;
         const t = flattenedParams['atm_temperature'] || 288.0;

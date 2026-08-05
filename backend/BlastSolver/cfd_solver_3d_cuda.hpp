@@ -13,7 +13,7 @@ template <typename RealType, bool IsMultiMaterial>
 class CFDSolver3DCuda : public CFDSolver3DImplBase {
     // GPU pointers and internal state
     mutable void* d_states = nullptr;
-    mutable void* d_states_old = nullptr;
+
     mutable void* d_U = nullptr;
     mutable void* d_dU = nullptr;
     mutable void* d_geom = nullptr;

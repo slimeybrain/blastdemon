@@ -59,20 +59,14 @@ struct MPMParticle3D {
     int object_id{0};            // Object / Material Table ID
 };
 
-struct MPMGridNode3D {
-    float m;            // Mass
-    float p[3];         // Momentum (px, py, pz)
-    float v[3];         // Velocity (vx, vy, vz)
-    float v_old[3];     // Velocity before force update (vx, vy, vz)
-    float f_int[3];     // Internal stress force
-    float f_ext[3];     // External force (FSI coupling)
-    
-    // Interpolated Telemetry Scalars
-    float von_mises;
-    float plastic_strain;
-    float density;
-    float pressure;
-    float damage;
+struct alignas(32) MPMGridNode3D {
+    float m{0.0f};            // Mass (4B)
+    float p[3]{0.0f, 0.0f, 0.0f};         // Momentum (px, py, pz) (12B)
+    float f_ext[3]{0.0f, 0.0f, 0.0f};     // External force (FSI coupling) (12B)
+    float plastic_strain{0.0f}; // Interpolated plastic strain for smoothing (4B)
+
+    // Inline velocity helpers (0 extra storage!)
+    float v(int i) const { return m > 1e-12f ? p[i] / m : 0.0f; }
 };
 
 enum class MPMTimeIntegrationScheme {
