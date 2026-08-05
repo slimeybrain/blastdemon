@@ -5949,6 +5949,42 @@ __global__ void kernel_fsi_couple_active_gpu(
 }
 
 template <typename RealType, bool IsMultiMaterial>
+__device__ inline RealType get_fsi_neighbor_fluid_pressure(
+    const PrimitiveTile3D<RealType, IsMultiMaterial>* d_states,
+    const Blast::MPMGridNode3D* d_grid,
+    int gx, int gy, int gz,
+    int nx, int ny, int nz,
+    int ntx, int nty
+) {
+    int t_idx_self = (gx >> 3) + (gy >> 3) * ntx + (gz >> 3) * ntx * nty;
+    int c_idx_self = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
+    RealType self_p = d_states[t_idx_self].p[c_idx_self];
+    RealType max_p = self_p;
+
+    const int dxs[6] = {-1, 1, 0, 0, 0, 0};
+    const int dys[6] = {0, 0, -1, 1, 0, 0};
+    const int dzs[6] = {0, 0, 0, 0, -1, 1};
+
+    for (int i = 0; i < 6; ++i) {
+        int nx_i = gx + dxs[i];
+        int ny_i = gy + dys[i];
+        int nz_i = gz + dzs[i];
+        if (nx_i >= 0 && nx_i < nx && ny_i >= 0 && ny_i < ny && nz_i >= 0 && nz_i < nz) {
+            int mpm_idx = (nx_i * ny + ny_i) * nz + nz_i;
+            if (d_grid[mpm_idx].m <= 1.0e-5f) {
+                int t_idx = (nx_i >> 3) + (ny_i >> 3) * ntx + (nz_i >> 3) * ntx * nty;
+                int c_idx = (nx_i & 7) + (ny_i & 7) * 8 + (nz_i & 7) * 64;
+                RealType p_neigh = d_states[t_idx].p[c_idx];
+                if (p_neigh > max_p) {
+                    max_p = p_neigh;
+                }
+            }
+        }
+    }
+    return max_p;
+}
+
+template <typename RealType, bool IsMultiMaterial>
 __global__ void kernel_fsi_apply_penalty_gpu(
     PrimitiveTile3D<RealType, IsMultiMaterial>* d_states,
     ConservativeTile3D<RealType, IsMultiMaterial>* d_U,
@@ -5980,8 +6016,8 @@ __global__ void kernel_fsi_apply_penalty_gpu(
     RealType new_uy = (RealType)vy;
     RealType new_uz = (RealType)vz;
 
-    // Mirror fluid pressure from neighboring fluid cells to prevent unphysical pressure build-up
-    RealType mirrored_p = get_fsi_pressure_at<RealType, IsMultiMaterial>(d_states, gx, gy, gz, nx, ny, nz, ntx, nty);
+    // Mirror fluid pressure from neighboring fluid cells to prevent unphysical pressure suppression
+    RealType mirrored_p = get_fsi_neighbor_fluid_pressure<RealType, IsMultiMaterial>(d_states, d_grid, gx, gy, gz, nx, ny, nz, ntx, nty);
 
     // Update Primitive tile velocity and mirrored pressure
     d_states[t_idx].ux[c_idx] = new_ux;
@@ -6041,7 +6077,7 @@ __global__ void kernel_fsi_apply_penalty_active_gpu(
     RealType new_uy = (RealType)vy;
     RealType new_uz = (RealType)vz;
 
-    RealType mirrored_p = get_fsi_pressure_at<RealType, IsMultiMaterial>(d_states, gx, gy, gz, nx, ny, nz, ntx, nty);
+    RealType mirrored_p = get_fsi_neighbor_fluid_pressure<RealType, IsMultiMaterial>(d_states, d_grid, gx, gy, gz, nx, ny, nz, ntx, nty);
 
     d_states[t_idx].ux[c_idx] = new_ux;
     d_states[t_idx].uy[c_idx] = new_uy;
