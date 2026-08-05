@@ -135,6 +135,8 @@ public:
     const MPMParticle3DSoA& getDeviceParticlesSoA() const { return d_soa; }
     MPMParticle3DSoA& getDeviceParticlesSoA() { return d_soa; }
     MPMGridNode3D* getDeviceGrid() { return d_grid; }
+    int* getDeviceActiveNodes() { return d_active_nodes; }
+    int getNumActiveNodes() const { return m_num_active_nodes; }
     MaterialTable3D* getDeviceMaterialTables() { return d_material_tables; }
     size_t getParticleCount() const { return m_host_particles.size(); }
     size_t getAllocatedVRAM() const;
