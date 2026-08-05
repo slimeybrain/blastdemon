@@ -444,6 +444,164 @@ __device__ __forceinline__ GPUCellStateT<RealType, IsMultiMaterial> sample_gpu_r
     return s;
 }
 
+template <typename RealType, bool IsMultiMaterial>
+__device__ __forceinline__ GPUCellStateT<RealType, IsMultiMaterial> sample_gpu_interior(
+    const PrimitiveTile3DCore<RealType, IsMultiMaterial>* states,
+    int gx, int gy, int gz
+) {
+    int tx = gx >> 3;
+    int ty = gy >> 3;
+    int tz = gz >> 3;
+    int t_idx = tx + ty * d_ntx + tz * d_ntx * d_nty;
+
+    int lx = gx & 7;
+    int ly = gy & 7;
+    int lz = gz & 7;
+    int c_idx = lx + ly * TILE_SIZE_3D + lz * TILE_SIZE_3D * TILE_SIZE_3D;
+
+    const auto* active_tiles = (const uint8_t*)d_active_tiles_global;
+    const auto* states_orig = (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states_orig_global;
+    if (active_tiles && states_orig && active_tiles[t_idx] == 0) {
+        const auto& tile = states_orig[t_idx];
+        GPUCellStateT<RealType, IsMultiMaterial> s;
+        s.rho = __ldg(&tile.rho[c_idx]);
+        s.ux = __ldg(&tile.ux[c_idx]);
+        s.uy = __ldg(&tile.uy[c_idx]);
+        s.uz = __ldg(&tile.uz[c_idx]);
+        s.p = __ldg(&tile.p[c_idx]);
+        s.E = (RealType)0.0;
+        s.peak_overpressure = __ldg(&tile.peak_overpressure[c_idx]);
+        s.peak_impulse = __ldg(&tile.peak_impulse[c_idx]);
+        if constexpr (IsMultiMaterial) {
+            s.alpha1 = __ldg(&tile.alpha1[c_idx]);
+            s.alpha2 = __ldg(&tile.alpha2[c_idx]);
+            s.arho1 = __ldg(&tile.arho1[c_idx]);
+            s.arho2 = __ldg(&tile.arho2[c_idx]);
+        }
+        return s;
+    }
+
+    const auto& tile = states[t_idx];
+    GPUCellStateT<RealType, IsMultiMaterial> s;
+    s.rho = __ldg(&tile.rho[c_idx]);
+    s.ux = __ldg(&tile.ux[c_idx]);
+    s.uy = __ldg(&tile.uy[c_idx]);
+    s.uz = __ldg(&tile.uz[c_idx]);
+    s.p = __ldg(&tile.p[c_idx]);
+    s.E = (RealType)0.0;
+    s.peak_overpressure = (RealType)0.0;
+    s.peak_impulse = (RealType)0.0;
+    if constexpr (IsMultiMaterial) {
+        s.alpha1 = __ldg(&tile.alpha1[c_idx]);
+        s.alpha2 = __ldg(&tile.alpha2[c_idx]);
+        s.arho1 = __ldg(&tile.arho1[c_idx]);
+        s.arho2 = __ldg(&tile.arho2[c_idx]);
+    }
+    return s;
+}
+
+template <typename RealType, bool IsMultiMaterial>
+__device__ __forceinline__ GPUCellStateT<RealType, IsMultiMaterial> sample_gpu_raw(const PrimitiveTile3DCore<RealType, IsMultiMaterial>* states, int gx, int gy, int gz) {
+    bool rx = false, ry = false, rz = false;
+
+    if (gx < 0) {
+        if (d_bcXmin == 0) { gx = -gx - 1; rx = true; }
+        else { gx = 0; }
+    } else if (gx >= d_nx) {
+        if (d_bcXmax == 0) { gx = 2 * d_nx - 1 - gx; rx = true; }
+        else { gx = d_nx - 1; }
+    }
+
+    if (gy < 0) {
+        if (d_bcYmin == 0) { gy = -gy - 1; ry = true; }
+        else { gy = 0; }
+    } else if (gy >= d_ny) {
+        if (d_bcYmax == 0) { gy = 2 * d_ny - 1 - gy; ry = true; }
+        else { gy = d_ny - 1; }
+    }
+
+    if (gz < 0) {
+        if (d_bcZmin == 0) { gz = -gz - 1; rz = true; }
+        else { gz = 0; }
+    } else if (gz >= d_nz) {
+        if (d_bcZmax == 0) { gz = 2 * d_nz - 1 - gz; rz = true; }
+        else { gz = d_nz - 1; }
+    }
+
+    gx = gx < 0 ? 0 : (gx >= d_nx ? d_nx - 1 : gx);
+    gy = gy < 0 ? 0 : (gy >= d_ny ? d_ny - 1 : gy);
+    gz = gz < 0 ? 0 : (gz >= d_nz ? d_nz - 1 : gz);
+
+    int tx = gx >> 3;
+    int ty = gy >> 3;
+    int tz = gz >> 3;
+    int t_idx = tx + ty * d_ntx + tz * d_ntx * d_nty;
+
+    int lx = gx & 7;
+    int ly = gy & 7;
+    int lz = gz & 7;
+    int c_idx = lx + ly * TILE_SIZE_3D + lz * TILE_SIZE_3D * TILE_SIZE_3D;
+
+    const auto* active_tiles = (const uint8_t*)d_active_tiles_global;
+    const auto* states_orig = (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states_orig_global;
+    if (active_tiles && states_orig && active_tiles[t_idx] == 0) {
+        const auto& tile = states_orig[t_idx];
+        GPUCellStateT<RealType, IsMultiMaterial> s;
+        s.rho = __ldg(&tile.rho[c_idx]);
+        s.ux = rx ? -__ldg(&tile.ux[c_idx]) : __ldg(&tile.ux[c_idx]);
+        s.uy = ry ? -__ldg(&tile.uy[c_idx]) : __ldg(&tile.uy[c_idx]);
+        s.uz = rz ? -__ldg(&tile.uz[c_idx]) : __ldg(&tile.uz[c_idx]);
+        s.p = __ldg(&tile.p[c_idx]);
+        s.E = (RealType)0.0;
+        s.peak_overpressure = __ldg(&tile.peak_overpressure[c_idx]);
+        s.peak_impulse = __ldg(&tile.peak_impulse[c_idx]);
+        if constexpr (IsMultiMaterial) {
+            s.alpha1 = __ldg(&tile.alpha1[c_idx]);
+            s.alpha2 = __ldg(&tile.alpha2[c_idx]);
+            s.arho1 = __ldg(&tile.arho1[c_idx]);
+            s.arho2 = __ldg(&tile.arho2[c_idx]);
+        }
+        return s;
+    }
+
+    const auto& tile = states[t_idx];
+    GPUCellStateT<RealType, IsMultiMaterial> s;
+    s.rho = __ldg(&tile.rho[c_idx]);
+    s.ux = rx ? -__ldg(&tile.ux[c_idx]) : __ldg(&tile.ux[c_idx]);
+    s.uy = ry ? -__ldg(&tile.uy[c_idx]) : __ldg(&tile.uy[c_idx]);
+    s.uz = rz ? -__ldg(&tile.uz[c_idx]) : __ldg(&tile.uz[c_idx]);
+    s.p = __ldg(&tile.p[c_idx]);
+    s.E = (RealType)0.0;
+    s.peak_overpressure = (RealType)0.0;
+    s.peak_impulse = (RealType)0.0;
+    if constexpr (IsMultiMaterial) {
+        s.alpha1 = __ldg(&tile.alpha1[c_idx]);
+        s.alpha2 = __ldg(&tile.alpha2[c_idx]);
+        s.arho1 = __ldg(&tile.arho1[c_idx]);
+        s.arho2 = __ldg(&tile.arho2[c_idx]);
+    }
+    return s;
+}
+
+template <typename RealType, bool IsMultiMaterial>
+__device__ __forceinline__ GPUCellStateT<RealType, IsMultiMaterial> sample_gpu(
+    const PrimitiveTile3DCore<RealType, IsMultiMaterial>* states,
+    const GeometryTile3D* geom,
+    int target_x, int target_y, int target_z,
+    int qx, int qy, int qz,
+    int dir,
+    bool is_near_boundary
+) {
+    bool is_solid = false;
+    if (is_near_boundary) {
+        is_solid = is_solid_cell_gpu(geom, target_x, target_y, target_z);
+    }
+    if (!is_solid) {
+        return sample_gpu_raw<RealType, IsMultiMaterial>(states, target_x, target_y, target_z);
+    }
+    return sample_gpu_raw<RealType, IsMultiMaterial>(states, target_x, target_y, target_z);
+}
+
 __device__ inline bool get_solid_normal_gpu(const GeometryTile3D* geom, int i, int j, int k, float& nx_b, float& ny_b, float& nz_b) {
     if (!geom) return false;
     int ci = i < 0 ? 0 : (i >= d_nx ? d_nx - 1 : i);
@@ -899,9 +1057,9 @@ __device__ __forceinline__ GPUCellStateT<RealType, IsMultiMaterial> sample_gpu(
     return s_ghost;
 }
 
-template <typename RealType, bool IsMultiMaterial, int SpatialOrder>
+template <typename RealType, bool IsMultiMaterial, int SpatialOrder, typename TileType = PrimitiveTile3D<RealType, IsMultiMaterial>>
 __device__ __forceinline__ void reconstruct_gpu(
-    const PrimitiveTile3D<RealType, IsMultiMaterial>* states,
+    const TileType* states,
     const GeometryTile3D* geom,
     int gx, int gy, int gz,
     int dir,
@@ -979,9 +1137,9 @@ __device__ __forceinline__ void reconstruct_gpu(
     }
 }
 
-template <typename RealType, bool IsMultiMaterial, int SpatialOrder>
+template <typename RealType, bool IsMultiMaterial, int SpatialOrder, typename TileType = PrimitiveTile3D<RealType, IsMultiMaterial>>
 __device__ __forceinline__ void get_face_flux_gpu(
-    const PrimitiveTile3D<RealType, IsMultiMaterial>* states,
+    const TileType* states,
     const GeometryTile3D* geom_pool,
     int gx_L, int gy_L, int gz_L,
     int gx_R, int gy_R, int gz_R,
@@ -1002,14 +1160,14 @@ __device__ __forceinline__ void get_face_flux_gpu(
     }
 
     GPUCellStateT<RealType, IsMultiMaterial> sL, sR;
-    reconstruct_gpu<RealType, IsMultiMaterial, SpatialOrder>(states, geom_pool, gx_R, gy_R, gz_R, dir, sL, sR, qx, qy, qz, is_near_boundary, force_first, force_first);
+    reconstruct_gpu<RealType, IsMultiMaterial, SpatialOrder, TileType>(states, geom_pool, gx_R, gy_R, gz_R, dir, sL, sR, qx, qy, qz, is_near_boundary, force_first, force_first);
     if (d_useAUSM) getAUSMPlusFluxGPU<RealType, IsMultiMaterial>(sL, sR, flx, dir, (RealType)d_gamma);
     else getRusanovFluxGPU<RealType, IsMultiMaterial>(sL, sR, flx, dir, (RealType)d_gamma);
 }
 
-template <typename RealType, bool IsMultiMaterial, int SpatialOrder>
+template <typename RealType, bool IsMultiMaterial, int SpatialOrder, typename TileType = PrimitiveTile3D<RealType, IsMultiMaterial>>
 __device__ __forceinline__ void reconstruct_interior_gpu(
-    const PrimitiveTile3D<RealType, IsMultiMaterial>* states,
+    const TileType* states,
     int gx, int gy, int gz,
     int dir,
     GPUCellStateT<RealType, IsMultiMaterial>& sL, GPUCellStateT<RealType, IsMultiMaterial>& sR
@@ -1078,14 +1236,14 @@ __device__ __forceinline__ void reconstruct_interior_gpu(
     }
 }
 
-template <typename RealType, bool IsMultiMaterial, int SpatialOrder>
+template <typename RealType, bool IsMultiMaterial, int SpatialOrder, typename TileType = PrimitiveTile3D<RealType, IsMultiMaterial>>
 __device__ __forceinline__ void get_face_flux_interior_gpu(
-    const PrimitiveTile3D<RealType, IsMultiMaterial>* states,
+    const TileType* states,
     int gx_R, int gy_R, int gz_R,
     int dir, RealType* flx
 ) {
     GPUCellStateT<RealType, IsMultiMaterial> sL, sR;
-    reconstruct_interior_gpu<RealType, IsMultiMaterial, SpatialOrder>(states, gx_R, gy_R, gz_R, dir, sL, sR);
+    reconstruct_interior_gpu<RealType, IsMultiMaterial, SpatialOrder, TileType>(states, gx_R, gy_R, gz_R, dir, sL, sR);
     if (d_useAUSM) getAUSMPlusFluxGPU<RealType, IsMultiMaterial>(sL, sR, flx, dir, (RealType)d_gamma);
     else getRusanovFluxGPU<RealType, IsMultiMaterial>(sL, sR, flx, dir, (RealType)d_gamma);
 }
@@ -1290,16 +1448,16 @@ __device__ __forceinline__ void reconstruct_interior_shared(
     else getRusanovFluxGPU<RealType, false>(sL, sR, flx, Dir, (RealType)d_gamma);
 }
 
-template <typename RealType, bool IsMultiMaterial>
+template <typename RealType, bool IsMultiMaterial, typename TileType = PrimitiveTile3D<RealType, IsMultiMaterial>>
 __device__ __forceinline__ void convert_conservative_to_primitive_gpu(
     ConservativeTile3D<RealType, IsMultiMaterial>* __restrict__ U,
-    PrimitiveTile3D<RealType, IsMultiMaterial>* __restrict__ states,
+    TileType* __restrict__ states,
     const GeometryTile3D* __restrict__ geom,
     int t_idx, int c_idx,
     RealType dt
 );
 
-template <typename RealType, bool IsMultiMaterial>
+template <typename RealType, bool IsMultiMaterial, typename TileType = PrimitiveTile3D<RealType, IsMultiMaterial>>
 __device__ __forceinline__ void apply_flux_update_gpu(
     ConservativeTile3D<RealType, IsMultiMaterial>* U,
     ConservativeTile3D<RealType, IsMultiMaterial>* U_prev,
@@ -1307,7 +1465,7 @@ __device__ __forceinline__ void apply_flux_update_gpu(
     const RealType* fL_x, const RealType* fR_x,
     const RealType* fL_y, const RealType* fR_y,
     const RealType* fL_z, const RealType* fR_z,
-    PrimitiveTile3D<RealType, IsMultiMaterial>* states,
+    TileType* states,
     int rk_stage,
     const GeometryTile3D* geom = nullptr,
     bool perform_primitive_update = false,
@@ -1374,13 +1532,13 @@ __device__ __forceinline__ void apply_flux_update_gpu(
     }
 }
 
-template <typename RealType, bool IsMultiMaterial>
+template <typename RealType, bool IsMultiMaterial, typename TileType = PrimitiveTile3D<RealType, IsMultiMaterial>>
 __device__ __forceinline__ void apply_flux_update_gpu_accumulated(
     ConservativeTile3D<RealType, IsMultiMaterial>* U,
     ConservativeTile3D<RealType, IsMultiMaterial>* U_prev,
     int t_idx, int c_idx, RealType dt_dx,
     const RealType* du,
-    PrimitiveTile3D<RealType, IsMultiMaterial>* states,
+    TileType* states,
     int rk_stage,
     const GeometryTile3D* geom = nullptr,
     bool perform_primitive_update = false,
@@ -1447,9 +1605,9 @@ __device__ __forceinline__ void apply_flux_update_gpu_accumulated(
     }
 }
 
-template <typename RealType, bool IsMultiMaterial, int SpatialOrder>
+template <typename RealType, bool IsMultiMaterial, int SpatialOrder, typename TileType = PrimitiveTile3D<RealType, IsMultiMaterial>>
 __global__ void __launch_bounds__(512) compute_flux_fused_3d(
-    PrimitiveTile3D<RealType, IsMultiMaterial>* __restrict__ states,
+    TileType* __restrict__ states,
     ConservativeTile3D<RealType, IsMultiMaterial>* __restrict__ U,
     const int* __restrict__ active_tile_indices,
     const uint8_t* __restrict__ tile_is_near_boundary,
@@ -1553,7 +1711,7 @@ __global__ void __launch_bounds__(512) compute_flux_fused_3d(
                     du[c] += (fR[c] - fL[c]);
                 }
 
-                apply_flux_update_gpu_accumulated<RealType, IsMultiMaterial>(U, U_prev, t_idx, c_idx, dt_dx, du, states, rk_stage, geom, perform_primitive_update, dt_for_peaks);
+                apply_flux_update_gpu_accumulated<RealType, IsMultiMaterial, TileType>(U, U_prev, t_idx, c_idx, dt_dx, du, states, rk_stage, geom, perform_primitive_update, dt_for_peaks);
             }
         } else {
             // Default global memory path
@@ -1563,18 +1721,18 @@ __global__ void __launch_bounds__(512) compute_flux_fused_3d(
                 RealType fL_z[10], fR_z[10];
 
                 // --- X Direction ---
-                get_face_flux_interior_gpu<RealType, IsMultiMaterial, SpatialOrder>(states, gx, gy, gz, 0, fL_x);
-                get_face_flux_interior_gpu<RealType, IsMultiMaterial, SpatialOrder>(states, gx + 1, gy, gz, 0, fR_x);
+                get_face_flux_interior_gpu<RealType, IsMultiMaterial, SpatialOrder, TileType>(states, gx, gy, gz, 0, fL_x);
+                get_face_flux_interior_gpu<RealType, IsMultiMaterial, SpatialOrder, TileType>(states, gx + 1, gy, gz, 0, fR_x);
 
                 // --- Y Direction ---
-                get_face_flux_interior_gpu<RealType, IsMultiMaterial, SpatialOrder>(states, gx, gy, gz, 1, fL_y);
-                get_face_flux_interior_gpu<RealType, IsMultiMaterial, SpatialOrder>(states, gx, gy + 1, gz, 1, fR_y);
+                get_face_flux_interior_gpu<RealType, IsMultiMaterial, SpatialOrder, TileType>(states, gx, gy, gz, 1, fL_y);
+                get_face_flux_interior_gpu<RealType, IsMultiMaterial, SpatialOrder, TileType>(states, gx, gy + 1, gz, 1, fR_y);
 
                 // --- Z Direction ---
-                get_face_flux_interior_gpu<RealType, IsMultiMaterial, SpatialOrder>(states, gx, gy, gz, 2, fL_z);
-                get_face_flux_interior_gpu<RealType, IsMultiMaterial, SpatialOrder>(states, gx, gy, gz + 1, 2, fR_z);
+                get_face_flux_interior_gpu<RealType, IsMultiMaterial, SpatialOrder, TileType>(states, gx, gy, gz, 2, fL_z);
+                get_face_flux_interior_gpu<RealType, IsMultiMaterial, SpatialOrder, TileType>(states, gx, gy, gz + 1, 2, fR_z);
 
-                apply_flux_update_gpu<RealType, IsMultiMaterial>(U, U_prev, t_idx, c_idx, dt_dx, fL_x, fR_x, fL_y, fR_y, fL_z, fR_z, states, rk_stage, geom, perform_primitive_update, dt_for_peaks);
+                apply_flux_update_gpu<RealType, IsMultiMaterial, TileType>(U, U_prev, t_idx, c_idx, dt_dx, fL_x, fR_x, fL_y, fR_y, fL_z, fR_z, states, rk_stage, geom, perform_primitive_update, dt_for_peaks);
             }
         }
     } else {
@@ -1593,18 +1751,18 @@ __global__ void __launch_bounds__(512) compute_flux_fused_3d(
                 RealType fL_z[10], fR_z[10];
 
                 // --- X Direction ---
-                get_face_flux_gpu<RealType, IsMultiMaterial, SpatialOrder>(states, geom, gx - 1, gy, gz, gx, gy, gz, 0, fL_x, gx, gy, gz, s_is_near_boundary);
-                get_face_flux_gpu<RealType, IsMultiMaterial, SpatialOrder>(states, geom, gx, gy, gz, gx + 1, gy, gz, 0, fR_x, gx, gy, gz, s_is_near_boundary);
+                get_face_flux_gpu<RealType, IsMultiMaterial, SpatialOrder, TileType>(states, geom, gx - 1, gy, gz, gx, gy, gz, 0, fL_x, gx, gy, gz, s_is_near_boundary);
+                get_face_flux_gpu<RealType, IsMultiMaterial, SpatialOrder, TileType>(states, geom, gx, gy, gz, gx + 1, gy, gz, 0, fR_x, gx, gy, gz, s_is_near_boundary);
 
                 // --- Y Direction ---
-                get_face_flux_gpu<RealType, IsMultiMaterial, SpatialOrder>(states, geom, gx, gy - 1, gz, gx, gy, gz, 1, fL_y, gx, gy, gz, s_is_near_boundary);
-                get_face_flux_gpu<RealType, IsMultiMaterial, SpatialOrder>(states, geom, gx, gy, gz, gx, gy + 1, gz, 1, fR_y, gx, gy, gz, s_is_near_boundary);
+                get_face_flux_gpu<RealType, IsMultiMaterial, SpatialOrder, TileType>(states, geom, gx, gy - 1, gz, gx, gy, gz, 1, fL_y, gx, gy, gz, s_is_near_boundary);
+                get_face_flux_gpu<RealType, IsMultiMaterial, SpatialOrder, TileType>(states, geom, gx, gy, gz, gx, gy + 1, gz, 1, fR_y, gx, gy, gz, s_is_near_boundary);
 
                 // --- Z Direction ---
-                get_face_flux_gpu<RealType, IsMultiMaterial, SpatialOrder>(states, geom, gx, gy, gz - 1, gx, gy, gz, 2, fL_z, gx, gy, gz, s_is_near_boundary);
-                get_face_flux_gpu<RealType, IsMultiMaterial, SpatialOrder>(states, geom, gx, gy, gz, gx, gy, gz + 1, 2, fR_z, gx, gy, gz, s_is_near_boundary);
+                get_face_flux_gpu<RealType, IsMultiMaterial, SpatialOrder, TileType>(states, geom, gx, gy, gz - 1, gx, gy, gz, 2, fL_z, gx, gy, gz, s_is_near_boundary);
+                get_face_flux_gpu<RealType, IsMultiMaterial, SpatialOrder, TileType>(states, geom, gx, gy, gz, gx, gy, gz + 1, 2, fR_z, gx, gy, gz, s_is_near_boundary);
 
-                apply_flux_update_gpu<RealType, IsMultiMaterial>(U, U_prev, t_idx, c_idx, dt_dx, fL_x, fR_x, fL_y, fR_y, fL_z, fR_z, states, rk_stage, geom, perform_primitive_update, dt_for_peaks);
+                apply_flux_update_gpu<RealType, IsMultiMaterial, TileType>(U, U_prev, t_idx, c_idx, dt_dx, fL_x, fR_x, fL_y, fR_y, fL_z, fR_z, states, rk_stage, geom, perform_primitive_update, dt_for_peaks);
             }
         }
     }
@@ -1853,10 +2011,10 @@ __global__ void __launch_bounds__(512) init_states_kernel_3d(
     }
 }
 
-template <typename RealType, bool IsMultiMaterial>
+template <typename RealType, bool IsMultiMaterial, typename TileType>
 __device__ __forceinline__ void convert_conservative_to_primitive_gpu(
     ConservativeTile3D<RealType, IsMultiMaterial>* __restrict__ U,
-    PrimitiveTile3D<RealType, IsMultiMaterial>* __restrict__ states,
+    TileType* __restrict__ states,
     const GeometryTile3D* __restrict__ geom,
     int t_idx, int c_idx,
     RealType dt
@@ -1867,29 +2025,29 @@ __device__ __forceinline__ void convert_conservative_to_primitive_gpu(
     RealType u_rhouz = U[t_idx].rhouz[c_idx];
     RealType u_E = U[t_idx].E[c_idx];
 
-    bool bad = isnan(u_rho) || isinf(u_rho) || u_rho < (RealType)1e-8 ||
-               isnan(u_rhoux) || isinf(u_rhoux) ||
-               isnan(u_rhouy) || isinf(u_rhouy) ||
-               isnan(u_rhouz) || isinf(u_rhouz) ||
-               isnan(u_E) || isinf(u_E);
-
-    if constexpr (IsMultiMaterial) {
-        bad = bad || isnan(U[t_idx].alpha1[c_idx]) || isinf(U[t_idx].alpha1[c_idx]) ||
-                    isnan(U[t_idx].alpha2[c_idx]) || isinf(U[t_idx].alpha2[c_idx]) ||
-                    isnan(U[t_idx].arho1[c_idx]) || isinf(U[t_idx].arho1[c_idx]) ||
-                    isnan(U[t_idx].arho2[c_idx]) || isinf(U[t_idx].arho2[c_idx]);
+    bool bad = false;
+    if (isnan(u_rho) || isinf(u_rho) || isnan(u_E) || isinf(u_E) || u_rho <= 0.0) {
+        bad = true;
     }
 
-    RealType rho = (RealType)d_ambient_rho;
+    RealType rho = 0.0;
     RealType ux = 0.0;
     RealType uy = 0.0;
     RealType uz = 0.0;
-    RealType p = (RealType)d_ambient_p;
-    RealType E;
-    if constexpr (IsMultiMaterial) {
-        E = MultiMat::getMixtureEnergy<RealType>((RealType)d_ambient_p, (RealType)d_ambient_rho, (RealType)0.0, (RealType)0.0, (RealType)0.0, (RealType)0.0, (RealType)d_gamma, d_products, d_unreacted);
-    } else {
-        E = (RealType)d_ambient_p / ((RealType)d_gamma - (RealType)1.0);
+    RealType p = 0.0;
+    RealType E = 0.0;
+
+    if (bad) {
+        rho = (RealType)d_ambient_rho;
+        ux = 0.0;
+        uy = 0.0;
+        uz = 0.0;
+        p = (RealType)d_ambient_p;
+        if constexpr (IsMultiMaterial) {
+            E = MultiMat::getMixtureEnergy<RealType>((RealType)d_ambient_p, (RealType)d_ambient_rho, (RealType)0.0, (RealType)0.0, (RealType)0.0, (RealType)0.0, (RealType)d_gamma, d_products, d_unreacted);
+        } else {
+            E = (RealType)d_ambient_p / ((RealType)d_gamma - (RealType)1.0);
+        }
     }
     RealType alpha1 = 0.0;
     RealType alpha2 = 0.0;
@@ -2043,14 +2201,16 @@ __device__ __forceinline__ void convert_conservative_to_primitive_gpu(
     }
 
     if (dt > (RealType)0.0) {
-        RealType op = p - (RealType)d_ambient_p;
-        if (op < (RealType)0.0) op = (RealType)0.0;
-        if (op > states[t_idx].peak_overpressure[c_idx]) {
-            states[t_idx].peak_overpressure[c_idx] = op;
-        }
-        states[t_idx].running_impulse[c_idx] += op * dt;
-        if (states[t_idx].running_impulse[c_idx] > states[t_idx].peak_impulse[c_idx]) {
-            states[t_idx].peak_impulse[c_idx] = states[t_idx].running_impulse[c_idx];
+        if constexpr (std::is_same_v<TileType, PrimitiveTile3D<RealType, IsMultiMaterial>>) {
+            RealType op = p - (RealType)d_ambient_p;
+            if (op < (RealType)0.0) op = (RealType)0.0;
+            if (op > states[t_idx].peak_overpressure[c_idx]) {
+                states[t_idx].peak_overpressure[c_idx] = op;
+            }
+            states[t_idx].running_impulse[c_idx] += op * dt;
+            if (states[t_idx].running_impulse[c_idx] > states[t_idx].peak_impulse[c_idx]) {
+                states[t_idx].peak_impulse[c_idx] = states[t_idx].running_impulse[c_idx];
+            }
         }
     }
 }
@@ -3244,8 +3404,8 @@ __device__ __forceinline__ void computeTimeDerivativeGPU(
 template <typename RealType, bool IsMultiMaterial, int SpatialOrder>
 __global__ void __launch_bounds__(512) predict_states_gpu_kernel_3d(
     const PrimitiveTile3D<RealType, IsMultiMaterial>* __restrict__ states,
-    PrimitiveTile3D<RealType, IsMultiMaterial>* __restrict__ states_pred,
-    PrimitiveTile3D<RealType, IsMultiMaterial>* __restrict__ dW_dt_pool,
+    PrimitiveTile3DCore<RealType, IsMultiMaterial>* __restrict__ states_pred,
+    PrimitiveTile3DCore<RealType, IsMultiMaterial>* __restrict__ dW_dt_pool,
     const int* __restrict__ active_tile_indices,
     const uint8_t* __restrict__ tile_is_near_boundary,
     const GeometryTile3D* __restrict__ geom,
@@ -3433,9 +3593,9 @@ __global__ void __launch_bounds__(512) predict_states_gpu_kernel_3d(
 template <typename RealType, bool IsMultiMaterial>
 __global__ void __launch_bounds__(512) predict_states_ader3_gpu_kernel_3d(
     const PrimitiveTile3D<RealType, IsMultiMaterial>* __restrict__ states_orig,
-    const PrimitiveTile3D<RealType, IsMultiMaterial>* __restrict__ states_mid,
-    const PrimitiveTile3D<RealType, IsMultiMaterial>* __restrict__ dW_dt_orig_pool,
-    PrimitiveTile3D<RealType, IsMultiMaterial>* __restrict__ states_int,
+    const PrimitiveTile3DCore<RealType, IsMultiMaterial>* __restrict__ states_mid,
+    const PrimitiveTile3DCore<RealType, IsMultiMaterial>* __restrict__ dW_dt_orig_pool,
+    PrimitiveTile3DCore<RealType, IsMultiMaterial>* __restrict__ states_int,
     const int* __restrict__ active_tile_indices,
     const uint8_t* __restrict__ tile_is_near_boundary,
     const GeometryTile3D* __restrict__ geom,
@@ -3470,8 +3630,8 @@ __global__ void __launch_bounds__(512) predict_states_ader3_gpu_kernel_3d(
         sC.uz = tile.uz[c_idx];
         sC.p = tile.p[c_idx];
         sC.E = (RealType)0.0;
-        sC.peak_overpressure = tile.peak_overpressure[c_idx];
-        sC.peak_impulse = tile.peak_impulse[c_idx];
+        sC.peak_overpressure = (RealType)0.0;
+        sC.peak_impulse = (RealType)0.0;
         if constexpr (IsMultiMaterial) {
             sC.alpha1 = tile.alpha1[c_idx];
             sC.alpha2 = tile.alpha2[c_idx];
@@ -3595,10 +3755,11 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
     int n_active = h_num_active_tiles;
     dim3 threads(TILE_SIZE_3D, TILE_SIZE_3D, TILE_SIZE_3D);
 
-    auto launch_fused_kernel = [&](auto U_dest, int stage, auto U_prev_ptr, bool prim_upd, RealType peak_dt) {
+    auto launch_fused_kernel_with_states = [&](auto states_ptr, auto U_dest, int stage, auto U_prev_ptr, bool prim_upd, RealType peak_dt) {
+        using TileT = typename std::remove_pointer<typename std::decay<decltype(states_ptr)>::type>::type;
         if (spatialOrder == 3) {
-            compute_flux_fused_3d<RealType, IsMultiMaterial, 3><<<n_active, threads>>>(
-                (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+            compute_flux_fused_3d<RealType, IsMultiMaterial, 3, TileT><<<n_active, threads>>>(
+                states_ptr,
                 (ConservativeTile3D<RealType, IsMultiMaterial>*)U_dest,
                 (const int*)d_active_tile_indices,
                 (const uint8_t*)d_tile_is_near_boundary,
@@ -3608,8 +3769,8 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
                 prim_upd, peak_dt
             );
         } else if (spatialOrder == 2) {
-            compute_flux_fused_3d<RealType, IsMultiMaterial, 2><<<n_active, threads>>>(
-                (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+            compute_flux_fused_3d<RealType, IsMultiMaterial, 2, TileT><<<n_active, threads>>>(
+                states_ptr,
                 (ConservativeTile3D<RealType, IsMultiMaterial>*)U_dest,
                 (const int*)d_active_tile_indices,
                 (const uint8_t*)d_tile_is_near_boundary,
@@ -3619,8 +3780,8 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
                 prim_upd, peak_dt
             );
         } else {
-            compute_flux_fused_3d<RealType, IsMultiMaterial, 1><<<n_active, threads>>>(
-                (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+            compute_flux_fused_3d<RealType, IsMultiMaterial, 1, TileT><<<n_active, threads>>>(
+                states_ptr,
                 (ConservativeTile3D<RealType, IsMultiMaterial>*)U_dest,
                 (const int*)d_active_tile_indices,
                 (const uint8_t*)d_tile_is_near_boundary,
@@ -3630,6 +3791,10 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
                 prim_upd, peak_dt
             );
         }
+    };
+
+    auto launch_fused_kernel = [&](auto U_dest, int stage, auto U_prev_ptr, bool prim_upd, RealType peak_dt) {
+        launch_fused_kernel_with_states((PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states, U_dest, stage, U_prev_ptr, prim_upd, peak_dt);
     };
 
     if (temporalOrder == 1) {
@@ -3664,11 +3829,11 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
         // MUSCL-Hancock (4), ADER-2 (5), ADER-3 (6) on GPU
         if (!d_states_pred) {
             int total_tiles = ntx * nty * ntz;
-            CHECK_CUDA(cudaMalloc(&d_states_pred, total_tiles * sizeof(PrimitiveTile3D<RealType, IsMultiMaterial>)));
-            CHECK_CUDA(cudaMalloc(&d_dW_dt, total_tiles * sizeof(PrimitiveTile3D<RealType, IsMultiMaterial>)));
+            CHECK_CUDA(cudaMalloc(&d_states_pred, total_tiles * sizeof(PrimitiveTile3DCore<RealType, IsMultiMaterial>)));
+            CHECK_CUDA(cudaMalloc(&d_dW_dt, total_tiles * sizeof(PrimitiveTile3DCore<RealType, IsMultiMaterial>)));
         }
-        auto states_pred_ptr = (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states_pred;
-        auto dW_dt_ptr = (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_dW_dt;
+        auto states_pred_ptr = (PrimitiveTile3DCore<RealType, IsMultiMaterial>*)d_states_pred;
+        auto dW_dt_ptr = (PrimitiveTile3DCore<RealType, IsMultiMaterial>*)d_dW_dt;
 
         // Removed staging copy; zero-copy sampling handles fallbacks on the fly
         // CHECK_CUDA(cudaMemcpy(states_pred_ptr, d_states, total_tiles * sizeof(PrimitiveTile3D<RealType, IsMultiMaterial>), cudaMemcpyDeviceToDevice));
@@ -3718,8 +3883,8 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
             // ADER-3 Second Pass: compute integrated states
             predict_states_ader3_gpu_kernel_3d<RealType, IsMultiMaterial><<<n_active, threads>>>(
                 (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states, // orig W^n
-                (const PrimitiveTile3D<RealType, IsMultiMaterial>*)states_pred_ptr, // mid W^{n+1/2}
-                (const PrimitiveTile3D<RealType, IsMultiMaterial>*)dW_dt_ptr, // dW_dt at t^n
+                states_pred_ptr, // mid W^{n+1/2}
+                dW_dt_ptr, // dW_dt at t^n
                 states_pred_ptr, // output: integrated states W^{int}
                 (const int*)d_active_tile_indices,
                 (const uint8_t*)d_tile_is_near_boundary,
@@ -3729,15 +3894,8 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
             );
         }
 
-        // Swap pointers and run fused update
-        void* temp_d_states = d_states;
-        d_states = states_pred_ptr;
-
-        // Perform flux update using predicted states
-        launch_fused_kernel(d_U, 0, nullptr, false, (RealType)0.0);
-
-        // Restore pointers
-        d_states = temp_d_states;
+        // Perform flux update using predicted states directly without pointer swap
+        launch_fused_kernel_with_states(states_pred_ptr, d_U, 0, nullptr, false, (RealType)0.0);
 
         if constexpr (IsMultiMaterial) {
             applyProgrammedBurn_kernel_3d<RealType, IsMultiMaterial><<<n_active, threads>>>(
