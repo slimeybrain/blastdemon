@@ -2121,16 +2121,108 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setSolidMask(const uint8_t* mas
     if (geom_pool.size() != static_cast<size_t>(total_tiles)) {
         geom_pool.resize(total_tiles);
     }
+
+    bool has_prev = (prev_geom_pool.size() == static_cast<size_t>(total_tiles));
+
     for (int gx = 0; gx < nx; ++gx) {
         for (int gy = 0; gy < ny; ++gy) {
             for (int gz = 0; gz < nz; ++gz) {
                 int cfd_idx = gx + gy * nx + gz * nx * ny;
                 int t_idx = (gx >> 3) + (gy >> 3) * n_tiles_x + (gz >> 3) * n_tiles_x * n_tiles_y;
                 int c_idx = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
-                geom_pool[t_idx].cells[c_idx].is_boundary = (mask[cfd_idx] != 0);
+
+                bool prev_is_solid = has_prev && prev_geom_pool[t_idx].cells[c_idx].is_boundary;
+                bool curr_is_solid = (mask[cfd_idx] != 0);
+
+                geom_pool[t_idx].cells[c_idx].is_boundary = curr_is_solid;
+
+                // Freshly uncovered cell: WAS solid, NOW fluid
+                if (prev_is_solid && !curr_is_solid) {
+                    RealType sum_w = (RealType)0.0;
+                    RealType sum_rho = (RealType)0.0;
+                    RealType sum_ux = (RealType)0.0;
+                    RealType sum_uy = (RealType)0.0;
+                    RealType sum_uz = (RealType)0.0;
+                    RealType sum_p = (RealType)0.0;
+                    RealType sum_a1 = (RealType)0.0;
+                    RealType sum_a2 = (RealType)0.0;
+                    RealType sum_arho1 = (RealType)0.0;
+                    RealType sum_arho2 = (RealType)0.0;
+
+                    for (int dz_n = -1; dz_n <= 1; ++dz_n) {
+                        for (int dy_n = -1; dy_n <= 1; ++dy_n) {
+                            for (int dx_n = -1; dx_n <= 1; ++dx_n) {
+                                if (dx_n == 0 && dy_n == 0 && dz_n == 0) continue;
+                                int nx_c = gx + dx_n;
+                                int ny_c = gy + dy_n;
+                                int nz_c = gz + dz_n;
+                                if (nx_c >= 0 && nx_c < nx && ny_c >= 0 && ny_c < ny && nz_c >= 0 && nz_c < nz) {
+                                    int nflat = nx_c + ny_c * nx + nz_c * nx * ny;
+                                    if (mask[nflat] == 0) {
+                                        int nt_idx = (nx_c >> 3) + (ny_c >> 3) * n_tiles_x + (nz_c >> 3) * n_tiles_x * n_tiles_y;
+                                        int nc_idx = (nx_c & 7) + (ny_c & 7) * 8 + (nz_c & 7) * 64;
+                                        RealType dist_sq = (RealType)(dx_n * dx_n + dy_n * dy_n + dz_n * dz_n);
+                                        RealType w = (RealType)1.0 / dist_sq;
+
+                                        sum_w += w;
+                                        sum_rho += w * states_pool[nt_idx].rho[nc_idx];
+                                        sum_ux  += w * states_pool[nt_idx].ux[nc_idx];
+                                        sum_uy  += w * states_pool[nt_idx].uy[nc_idx];
+                                        sum_uz  += w * states_pool[nt_idx].uz[nc_idx];
+                                        sum_p   += w * states_pool[nt_idx].p[nc_idx];
+                                        if constexpr (IsMultiMaterial) {
+                                            sum_a1    += w * states_pool[nt_idx].alpha1[nc_idx];
+                                            sum_a2    += w * states_pool[nt_idx].alpha2[nc_idx];
+                                            sum_arho1 += w * states_pool[nt_idx].arho1[nc_idx];
+                                            sum_arho2 += w * states_pool[nt_idx].arho2[nc_idx];
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (sum_w > (RealType)1e-8) {
+                        RealType inv_w = (RealType)1.0 / sum_w;
+                        RealType ext_rho = sum_rho * inv_w;
+                        RealType ext_ux  = sum_ux * inv_w;
+                        RealType ext_uy  = sum_uy * inv_w;
+                        RealType ext_uz  = sum_uz * inv_w;
+                        RealType ext_p   = sum_p * inv_w;
+
+                        states_pool[t_idx].rho[c_idx] = ext_rho;
+                        states_pool[t_idx].ux[c_idx]  = ext_ux;
+                        states_pool[t_idx].uy[c_idx]  = ext_uy;
+                        states_pool[t_idx].uz[c_idx]  = ext_uz;
+                        states_pool[t_idx].p[c_idx]   = ext_p;
+
+                        if constexpr (IsMultiMaterial) {
+                            states_pool[t_idx].alpha1[c_idx] = sum_a1 * inv_w;
+                            states_pool[t_idx].alpha2[c_idx] = sum_a2 * inv_w;
+                            states_pool[t_idx].arho1[c_idx]  = sum_arho1 * inv_w;
+                            states_pool[t_idx].arho2[c_idx]  = sum_arho2 * inv_w;
+                        }
+
+                        U_pool[t_idx].rho[c_idx]   = ext_rho;
+                        U_pool[t_idx].rhoux[c_idx] = ext_rho * ext_ux;
+                        U_pool[t_idx].rhouy[c_idx] = ext_rho * ext_uy;
+                        U_pool[t_idx].rhouz[c_idx] = ext_rho * ext_uz;
+
+                        RealType ke = (RealType)0.5 * ext_rho * (ext_ux * ext_ux + ext_uy * ext_uy + ext_uz * ext_uz);
+                        U_pool[t_idx].E[c_idx]     = ext_p / (gamma - (RealType)1.0) + ke;
+
+                        if constexpr (IsMultiMaterial) {
+                            U_pool[t_idx].alpha1[c_idx] = sum_a1 * inv_w;
+                            U_pool[t_idx].alpha2[c_idx] = sum_a2 * inv_w;
+                            U_pool[t_idx].arho1[c_idx]  = sum_arho1 * inv_w;
+                            U_pool[t_idx].arho2[c_idx]  = sum_arho2 * inv_w;
+                        }
+                    }
+                }
             }
         }
     }
+    prev_geom_pool = geom_pool;
 }
 
 

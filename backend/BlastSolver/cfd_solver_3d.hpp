@@ -291,6 +291,7 @@ class CFDSolver3DImpl : public CFDSolver3DImplBase {
     std::vector<int> active_tile_indices;
     std::vector<uint8_t> tile_is_fully_interior;
     std::vector<GeometryTile3D> geom_pool;
+    std::vector<GeometryTile3D> prev_geom_pool;
     std::vector<ObstacleFace> obstacle_faces;
     std::vector<double> solid_vel_vec;
 

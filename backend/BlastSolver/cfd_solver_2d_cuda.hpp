@@ -181,6 +181,7 @@ private:
     bool is_cartesian = false;
 
     uint8_t* d_solid_mask = nullptr;
+    uint8_t* d_prev_solid_mask = nullptr;
     double* d_solid_velocities = nullptr;
     size_t solid_capacity = 0;
 

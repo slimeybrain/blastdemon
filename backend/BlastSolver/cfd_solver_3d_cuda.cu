@@ -2737,6 +2737,7 @@ CFDSolver3DCuda<RealType, IsMultiMaterial>::~CFDSolver3DCuda() {
     if (d_U) cudaFree(d_U);
     if (d_dU) cudaFree(d_dU);
     if (d_geom) cudaFree(d_geom);
+    if (d_prev_geom) { cudaFree(d_prev_geom); d_prev_geom = nullptr; }
     if (d_active_tiles) cudaFree(d_active_tiles);
     if (d_tile_active_temp) cudaFree(d_tile_active_temp);
     if (d_active_tile_indices) cudaFree(d_active_tile_indices);
@@ -5365,6 +5366,114 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::uploadObstacleFaces(const std::
     CHECK_CUDA(cudaMemcpy(d_obstacle_faces, local_faces.data(), num_obstacle_faces * sizeof(GPUObstacleFace), cudaMemcpyHostToDevice));
 }
 
+// GPU kernel: smooth Inverse Distance Weighted (IDW) state extrapolation for freshly uncovered fluid cells
+template <typename RealType, bool IsMultiMaterial>
+__global__ void kernel_extrapolate_uncovered_cells_3d(
+    PrimitiveTile3D<RealType, IsMultiMaterial>* d_states,
+    ConservativeTile3D<RealType, IsMultiMaterial>* d_U,
+    const GeometryTile3D* d_geom,
+    const GeometryTile3D* d_prev_geom,
+    int nx, int ny, int nz,
+    int ntx, int nty,
+    RealType gamma
+) {
+    int gx = blockIdx.x * blockDim.x + threadIdx.x;
+    int gy = blockIdx.y * blockDim.y + threadIdx.y;
+    int gz = blockIdx.z * blockDim.z + threadIdx.z;
+    if (gx >= nx || gy >= ny || gz >= nz) return;
+
+    int t_idx = (gx >> 3) + (gy >> 3) * ntx + (gz >> 3) * ntx * nty;
+    int c_idx = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
+
+    bool prev_is_solid = d_prev_geom && d_prev_geom[t_idx].cells[c_idx].is_boundary;
+    bool curr_is_solid = d_geom && d_geom[t_idx].cells[c_idx].is_boundary;
+
+    // Freshly uncovered cell: WAS solid in prev_geom, NOW fluid in current geom
+    if (prev_is_solid && !curr_is_solid) {
+        RealType sum_w = (RealType)0.0;
+        RealType sum_rho = (RealType)0.0;
+        RealType sum_ux = (RealType)0.0;
+        RealType sum_uy = (RealType)0.0;
+        RealType sum_uz = (RealType)0.0;
+        RealType sum_p = (RealType)0.0;
+        RealType sum_a1 = (RealType)0.0;
+        RealType sum_a2 = (RealType)0.0;
+        RealType sum_arho1 = (RealType)0.0;
+        RealType sum_arho2 = (RealType)0.0;
+
+        for (int dz_n = -1; dz_n <= 1; ++dz_n) {
+            for (int dy_n = -1; dy_n <= 1; ++dy_n) {
+                for (int dx_n = -1; dx_n <= 1; ++dx_n) {
+                    if (dx_n == 0 && dy_n == 0 && dz_n == 0) continue;
+                    int nx_c = gx + dx_n;
+                    int ny_c = gy + dy_n;
+                    int nz_c = gz + dz_n;
+                    if (nx_c >= 0 && nx_c < nx && ny_c >= 0 && ny_c < ny && nz_c >= 0 && nz_c < nz) {
+                        int nt_idx = (nx_c >> 3) + (ny_c >> 3) * ntx + (nz_c >> 3) * ntx * nty;
+                        int nc_idx = (nx_c & 7) + (ny_c & 7) * 8 + (nz_c & 7) * 64;
+                        if (!d_geom[nt_idx].cells[nc_idx].is_boundary) {
+                            RealType dist_sq = (RealType)(dx_n * dx_n + dy_n * dy_n + dz_n * dz_n);
+                            RealType w = (RealType)1.0 / dist_sq;
+                            
+                            sum_w += w;
+                            sum_rho += w * d_states[nt_idx].rho[nc_idx];
+                            sum_ux += w * d_states[nt_idx].ux[nc_idx];
+                            sum_uy += w * d_states[nt_idx].uy[nc_idx];
+                            sum_uz += w * d_states[nt_idx].uz[nc_idx];
+                            sum_p  += w * d_states[nt_idx].p[nc_idx];
+                            if constexpr (IsMultiMaterial) {
+                                sum_a1    += w * d_states[nt_idx].alpha1[nc_idx];
+                                sum_a2    += w * d_states[nt_idx].alpha2[nc_idx];
+                                sum_arho1 += w * d_states[nt_idx].arho1[nc_idx];
+                                sum_arho2 += w * d_states[nt_idx].arho2[nc_idx];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (sum_w > (RealType)1e-8) {
+            RealType inv_w = (RealType)1.0 / sum_w;
+            RealType ext_rho = sum_rho * inv_w;
+            RealType ext_ux  = sum_ux * inv_w;
+            RealType ext_uy  = sum_uy * inv_w;
+            RealType ext_uz  = sum_uz * inv_w;
+            RealType ext_p   = sum_p * inv_w;
+
+            d_states[t_idx].rho[c_idx] = ext_rho;
+            d_states[t_idx].ux[c_idx]  = ext_ux;
+            d_states[t_idx].uy[c_idx]  = ext_uy;
+            d_states[t_idx].uz[c_idx]  = ext_uz;
+            d_states[t_idx].p[c_idx]   = ext_p;
+
+            if constexpr (IsMultiMaterial) {
+                d_states[t_idx].alpha1[c_idx] = sum_a1 * inv_w;
+                d_states[t_idx].alpha2[c_idx] = sum_a2 * inv_w;
+                d_states[t_idx].arho1[c_idx]  = sum_arho1 * inv_w;
+                d_states[t_idx].arho2[c_idx]  = sum_arho2 * inv_w;
+            }
+
+            if (d_U) {
+                d_U[t_idx].rho[c_idx]   = ext_rho;
+                d_U[t_idx].rhoux[c_idx] = ext_rho * ext_ux;
+                d_U[t_idx].rhouy[c_idx] = ext_rho * ext_uy;
+                d_U[t_idx].rhouz[c_idx] = ext_rho * ext_uz;
+
+                RealType ke = (RealType)0.5 * ext_rho * (ext_ux * ext_ux + ext_uy * ext_uy + ext_uz * ext_uz);
+                d_U[t_idx].E[c_idx]     = ext_p / (gamma - (RealType)1.0) + ke;
+
+                if constexpr (IsMultiMaterial) {
+                    d_U[t_idx].alpha1[c_idx] = sum_a1 * inv_w;
+                    d_U[t_idx].alpha2[c_idx] = sum_a2 * inv_w;
+                    d_U[t_idx].arho1[c_idx]  = sum_arho1 * inv_w;
+                    d_U[t_idx].arho2[c_idx]  = sum_arho2 * inv_w;
+                }
+            }
+        }
+    }
+}
+
 // Lightweight GPU kernel: writes solid mask directly into d_geom, no round-trip to host
 __global__ void kernel_apply_solid_mask(GeometryTile3D* d_geom,
                                         const uint8_t* d_mask,
@@ -5394,6 +5503,10 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setSolidMask(const uint8_t* mas
         CHECK_CUDA(cudaMalloc(&d_geom, total_tiles * sizeof(GeometryTile3D)));
         CHECK_CUDA(cudaMemset(d_geom, 0, total_tiles * sizeof(GeometryTile3D)));
     }
+    if (!d_prev_geom) {
+        CHECK_CUDA(cudaMalloc(&d_prev_geom, total_tiles * sizeof(GeometryTile3D)));
+        CHECK_CUDA(cudaMemset(d_prev_geom, 0, total_tiles * sizeof(GeometryTile3D)));
+    }
     if (!d_tile_is_near_boundary) {
         CHECK_CUDA(cudaMalloc(&d_tile_is_near_boundary, total_tiles * sizeof(uint8_t)));
         CHECK_CUDA(cudaMemset(d_tile_is_near_boundary, 1, total_tiles * sizeof(uint8_t)));
@@ -5409,15 +5522,31 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setSolidMask(const uint8_t* mas
     // Upload mask to GPU (asynchronously using default stream)
     CHECK_CUDA(cudaMemcpy(d_solid_mask_fsi, mask, mask_bytes, cudaMemcpyHostToDevice));
 
-    // Write solid mask into d_geom on GPU — no host round-trip, no cout, no diagnostic scan, no sync
     dim3 block(8, 8, 4);
     dim3 grid((nx + 7) / 8, (ny + 7) / 8, (nz + 3) / 4);
+
+    // Write solid mask into d_geom on GPU
     kernel_apply_solid_mask<<<grid, block>>>(
         (GeometryTile3D*)d_geom, (const uint8_t*)d_solid_mask_fsi, nx, ny, nz, ntx, nty);
     CHECK_CUDA(cudaGetLastError());
 
-    // Update near-boundary flags on GPU with a simple flood-fill kernel (tiles)
-    // For simplicity set all near-boundary flags to 1 (conservative: all tiles processed)
+    // Extrapolate freshly uncovered fluid cells if previous geometry snapshot exists
+    if (has_prev_geom && d_states) {
+        kernel_extrapolate_uncovered_cells_3d<RealType, IsMultiMaterial><<<grid, block>>>(
+            (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+            (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
+            (const GeometryTile3D*)d_geom,
+            (const GeometryTile3D*)d_prev_geom,
+            nx, ny, nz, ntx, nty, (RealType)gamma
+        );
+        CHECK_CUDA(cudaGetLastError());
+    }
+
+    // Update d_prev_geom snapshot for next step
+    CHECK_CUDA(cudaMemcpy(d_prev_geom, d_geom, total_tiles * sizeof(GeometryTile3D), cudaMemcpyDeviceToDevice));
+    has_prev_geom = true;
+
+    // Update near-boundary flags on GPU
     CHECK_CUDA(cudaMemset(d_tile_is_near_boundary, 1, total_tiles * sizeof(uint8_t)));
 }
 
@@ -5717,10 +5846,14 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithMPMGPU(void* mpm_s
     // Save MPM grid pointer for CFD penalty step
     this->d_fsi_mpm_grid = d_grid;
 
-    // Allocate geometry buffer and tile proximity flags if needed (first FSI call)
+    // Allocate geometry buffers and tile proximity flags if needed (first FSI call)
     if (!d_geom) {
         CHECK_CUDA(cudaMalloc(&d_geom, total_tiles * sizeof(GeometryTile3D)));
         CHECK_CUDA(cudaMemset(d_geom, 0, total_tiles * sizeof(GeometryTile3D)));
+    }
+    if (!d_prev_geom) {
+        CHECK_CUDA(cudaMalloc(&d_prev_geom, total_tiles * sizeof(GeometryTile3D)));
+        CHECK_CUDA(cudaMemset(d_prev_geom, 0, total_tiles * sizeof(GeometryTile3D)));
     }
     if (!d_tile_is_near_boundary) {
         CHECK_CUDA(cudaMalloc(&d_tile_is_near_boundary, total_tiles * sizeof(uint8_t)));
@@ -5746,6 +5879,22 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithMPMGPU(void* mpm_s
         mpm_dx, mpm_dy, mpm_dz
     );
     CHECK_CUDA(cudaGetLastError());
+
+    // Extrapolate freshly uncovered fluid cells if previous geometry snapshot exists
+    if (has_prev_geom && d_states) {
+        kernel_extrapolate_uncovered_cells_3d<RealType, IsMultiMaterial><<<grid, block>>>(
+            (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+            (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
+            (const GeometryTile3D*)d_geom,
+            (const GeometryTile3D*)d_prev_geom,
+            nx, ny, nz, ntx, nty, (RealType)gamma
+        );
+        CHECK_CUDA(cudaGetLastError());
+    }
+
+    // Update d_prev_geom snapshot for next step
+    CHECK_CUDA(cudaMemcpy(d_prev_geom, d_geom, total_tiles * sizeof(GeometryTile3D), cudaMemcpyDeviceToDevice));
+    has_prev_geom = true;
 
     kernel_fsi_apply_penalty_gpu<RealType, IsMultiMaterial><<<grid, block>>>(
         (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,

@@ -1009,9 +1009,82 @@ template <typename RealType>
 void CFDSolver2DImpl<RealType>::setSolidMask(const uint8_t* mask) {
     if (!mask) {
         solid_mask.clear();
+        prev_solid_mask.clear();
         return;
     }
-    solid_mask.assign(mask, mask + nr_cells * nz_cells);
+    std::vector<uint8_t> new_mask(mask, mask + nr_cells * nz_cells);
+    if (!prev_solid_mask.empty() && prev_solid_mask.size() == new_mask.size()) {
+        int num_tiles_z_loc = (nz_cells + TILE_SIZE - 1) / TILE_SIZE;
+        for (int i = 0; i < nr_cells; ++i) {
+            for (int j = 0; j < nz_cells; ++j) {
+                int flat = i * nz_cells + j;
+                if (prev_solid_mask[flat] != 0 && new_mask[flat] == 0) {
+                    int tr = i / TILE_SIZE;
+                    int tz = j / TILE_SIZE;
+                    int pool_idx = tile_map[tr * num_tiles_z_loc + tz];
+                    if (pool_idx == -1) continue;
+                    int k_curr = (i % TILE_SIZE) * TILE_SIZE + (j % TILE_SIZE);
+
+                    RealType sum_w = 0, sum_rho = 0, sum_ur = 0, sum_uz = 0, sum_p = 0;
+                    RealType sum_a1 = 0, sum_a2 = 0, sum_arho1 = 0, sum_arho2 = 0;
+
+                    for (int di = -1; di <= 1; ++di) {
+                        for (int dj = -1; dj <= 1; ++dj) {
+                            if (di == 0 && dj == 0) continue;
+                            int ni = i + di;
+                            int nj = j + dj;
+                            if (ni >= 0 && ni < nr_cells && nj >= 0 && nj < nz_cells) {
+                                int nflat = ni * nz_cells + nj;
+                                if (new_mask[nflat] == 0) {
+                                    int ntr = ni / TILE_SIZE;
+                                    int ntz = nj / TILE_SIZE;
+                                    int npool_idx = tile_map[ntr * num_tiles_z_loc + ntz];
+                                    if (npool_idx != -1) {
+                                        int nk = (ni % TILE_SIZE) * TILE_SIZE + (nj % TILE_SIZE);
+                                        RealType w = (RealType)1.0 / (RealType)(di * di + dj * dj);
+                                        sum_w += w;
+                                        sum_rho += w * states_pool[npool_idx].rho[nk];
+                                        sum_ur  += w * states_pool[npool_idx].ur[nk];
+                                        sum_uz  += w * states_pool[npool_idx].uz[nk];
+                                        sum_p   += w * states_pool[npool_idx].p[nk];
+                                        sum_a1  += w * states_pool[npool_idx].alpha1[nk];
+                                        sum_a2  += w * states_pool[npool_idx].alpha2[nk];
+                                        sum_arho1 += w * states_pool[npool_idx].arho1[nk];
+                                        sum_arho2 += w * states_pool[npool_idx].arho2[nk];
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (sum_w > (RealType)1e-8) {
+                        RealType inv_w = (RealType)1.0 / sum_w;
+                        RealType ext_rho = sum_rho * inv_w;
+                        RealType ext_ur  = sum_ur * inv_w;
+                        RealType ext_uz  = sum_uz * inv_w;
+                        RealType ext_p   = sum_p * inv_w;
+
+                        states_pool[pool_idx].rho[k_curr] = ext_rho;
+                        states_pool[pool_idx].ur[k_curr]  = ext_ur;
+                        states_pool[pool_idx].uz[k_curr]  = ext_uz;
+                        states_pool[pool_idx].p[k_curr]   = ext_p;
+                        states_pool[pool_idx].alpha1[k_curr] = sum_a1 * inv_w;
+                        states_pool[pool_idx].alpha2[k_curr] = sum_a2 * inv_w;
+                        states_pool[pool_idx].arho1[k_curr]  = sum_arho1 * inv_w;
+                        states_pool[pool_idx].arho2[k_curr]  = sum_arho2 * inv_w;
+
+                        U_pool[pool_idx].rho[k_curr]   = ext_rho;
+                        U_pool[pool_idx].rhour[k_curr] = ext_rho * ext_ur;
+                        U_pool[pool_idx].rhouz[k_curr] = ext_rho * ext_uz;
+                        RealType ke = (RealType)0.5 * ext_rho * (ext_ur * ext_ur + ext_uz * ext_uz);
+                        U_pool[pool_idx].E[k_curr]     = ext_p / ((RealType)gamma - (RealType)1.0) + ke;
+                    }
+                }
+            }
+        }
+    }
+    solid_mask = new_mask;
+    prev_solid_mask = solid_mask;
 }
 
 template <typename RealType>

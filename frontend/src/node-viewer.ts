@@ -2262,7 +2262,7 @@ export class NodeViewer {
             'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
             'mg_gamma0', 'mg_c0', 'mg_s',
             'ppc',
-            'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity'
+            'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend'
         ];
 
         const chargeShapeOptions = node.type === 'Charge3D' ? ['Sphere', 'Cylinder', 'Block'] : ['Sphere', 'Cylinder'];

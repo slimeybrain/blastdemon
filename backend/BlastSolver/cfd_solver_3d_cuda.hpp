@@ -37,6 +37,8 @@ private:
     mutable size_t d_solid_mask_fsi_capacity = 0;
     mutable void* d_solid_vel_fsi = nullptr;
     mutable size_t d_solid_vel_fsi_capacity = 0;
+    mutable void* d_prev_geom = nullptr;
+    mutable bool has_prev_geom = false;
     mutable bool constants_dirty = true;
     mutable int step_count = 0;
 

@@ -457,9 +457,42 @@ export class PropertyEditor {
             label.textContent = labelText;
             row.appendChild(label);
 
-            const input = this.createInputElement(node, key, value);
-            input.dataset.key = key;
-            row.appendChild(input);
+            if (key === 'stl_file') {
+                const wrapper = document.createElement('div');
+                wrapper.style.display = 'flex';
+                wrapper.style.gap = '8px';
+                wrapper.style.alignItems = 'center';
+
+                const input = this.createInputElement(node, key, value);
+                input.dataset.key = key;
+                input.style.flex = '1';
+                wrapper.appendChild(input);
+
+                const browseBtn = document.createElement('button');
+                browseBtn.type = 'button';
+                browseBtn.textContent = 'Browse';
+                browseBtn.style.padding = '4px 8px';
+                browseBtn.style.background = '#333';
+                browseBtn.style.color = '#fff';
+                browseBtn.style.border = '1px solid #555';
+                browseBtn.style.cursor = 'pointer';
+                browseBtn.onclick = () => {
+                    const startPath = node.parameters[key] || '';
+                    const browser = new HostFileBrowserModal((window as any).networkManager, 'open', 'select_file', (path: string) => {
+                        this.updateParameter(key, path);
+                        const rand = Math.floor(Math.random() * 1000000);
+                        const simpleHash = 'stl_' + rand.toString(36);
+                        this.updateParameter('geometry_hash', simpleHash);
+                    });
+                    browser.open(startPath);
+                };
+                wrapper.appendChild(browseBtn);
+                row.appendChild(wrapper);
+            } else {
+                const input = this.createInputElement(node, key, value);
+                input.dataset.key = key;
+                row.appendChild(input);
+            }
             form.appendChild(row);
         }
         if (gridInfoDiv) {

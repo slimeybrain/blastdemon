@@ -4062,8 +4062,8 @@ export class GraphRenderer {
                     needsRebuild = true;
                 }
             }
-            if (node.type === 'MPMObject3D') {
-                const shapeType = node.parameters['shape_type'] || 'Box';
+            if (node.type === 'MPMObject3D' || node.type === 'MPMObject2D') {
+                const shapeType = node.parameters['shape_type'] || (node.type === 'MPMObject3D' ? 'Box' : 'Rectangle');
                 if (form.dataset.renderedShapeType !== shapeType.toString()) {
                     needsRebuild = true;
                 }
@@ -4154,8 +4154,8 @@ export class GraphRenderer {
             const velScheme = node.parameters['velocity_scheme'] || 'APIC';
             form.dataset.renderedVelocityScheme = velScheme.toString();
         }
-        if (node.type === 'MPMObject3D') {
-            const shapeType = node.parameters['shape_type'] || 'Box';
+        if (node.type === 'MPMObject3D' || node.type === 'MPMObject2D') {
+            const shapeType = node.parameters['shape_type'] || (node.type === 'MPMObject3D' ? 'Box' : 'Rectangle');
             form.dataset.renderedShapeType = shapeType.toString();
         }
 
@@ -4354,6 +4354,7 @@ export class GraphRenderer {
                 'obstacles_quantity': ['pressure', 'density', 'velocity', 'energy', 'species1', 'species2', 'species3', 'peak_overpressure', 'peak_impulse'],
                 'transfer_scheme': ['BSpline', 'GIMP', 'Standard'],
                 'velocity_scheme': ['APIC', 'PIC', 'FLIP'],
+                'shape_type': (node.type === 'MPMObject3D') ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle'],
                 'colorbar_source': ['slice', 'mpm', 'obstacles', 'stl'],
                 'space_time_scheme': (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') ? 
                     ['USL', 'USF', 'RK2'] : 
@@ -4444,7 +4445,7 @@ export class GraphRenderer {
                             'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
                             'mg_gamma0', 'mg_c0', 'mg_s',
                             'ppc',
-                            'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity'
+                            'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend'
                         ];
 
                         let castValue: any = newVal;

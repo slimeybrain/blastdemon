@@ -190,6 +190,7 @@ private:
     BCType bcZmax = OUTFLOW_RIEMANN;
     bool is_cartesian = false;
     std::vector<uint8_t> solid_mask;
+    std::vector<uint8_t> prev_solid_mask;
     std::vector<double> solid_velocities;
     double ambient_rho;
     double ambient_p;

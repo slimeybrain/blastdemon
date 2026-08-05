@@ -976,8 +976,9 @@ CFDSolver2DCudaImpl<RealType>::~CFDSolver2DCudaImpl() {
     if (d_gauge_results) cudaFree(d_gauge_results);
     if (host_pinned_gauge_data) cudaFreeHost(host_pinned_gauge_data);
     if (gauge_stream) cudaStreamDestroy((cudaStream_t)gauge_stream);
-    if (step_done) cudaEventDestroy((cudaEvent_t)step_done);
-    if (d_telemetry_buf) cudaFree(d_telemetry_buf);
+    if (d_solid_mask) cudaFree(d_solid_mask);
+    if (d_prev_solid_mask) cudaFree(d_prev_solid_mask);
+    if (d_solid_velocities) cudaFree(d_solid_velocities);
 }
 
 template <typename RealType>
@@ -2042,17 +2043,139 @@ void CFDSolver2DCudaImpl<RealType>::exportVTK(const std::string& filename) {
 }
 
 template <typename RealType>
+__global__ void kernel_extrapolate_uncovered_cells_2d(
+    int num_tiles_r, int num_tiles_z,
+    int nr_cells, int nz_cells,
+    const int32_t* tile_map,
+    PrimitiveTileT<RealType>* states_pool,
+    ConservativeTileT<RealType>* U_pool,
+    const uint8_t* curr_mask,
+    const uint8_t* prev_mask,
+    RealType gamma
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+    if (i >= nr_cells || j >= nz_cells) return;
+
+    int flat = i * nz_cells + j;
+    bool prev_is_solid = prev_mask && (prev_mask[flat] != 0);
+    bool curr_is_solid = curr_mask && (curr_mask[flat] != 0);
+
+    // Freshly uncovered cell: WAS solid in prev_mask, NOW fluid in curr_mask
+    if (prev_is_solid && !curr_is_solid) {
+        int tr = i / TILE_SIZE;
+        int tz = j / TILE_SIZE;
+        int pool_idx = tile_map[tr * num_tiles_z + tz];
+        if (pool_idx == -1) return;
+        int k_curr = (i % TILE_SIZE) * TILE_SIZE + (j % TILE_SIZE);
+
+        RealType sum_w = (RealType)0.0;
+        RealType sum_rho = (RealType)0.0;
+        RealType sum_ur = (RealType)0.0;
+        RealType sum_uz = (RealType)0.0;
+        RealType sum_p = (RealType)0.0;
+        RealType sum_a1 = (RealType)0.0;
+        RealType sum_a2 = (RealType)0.0;
+        RealType sum_arho1 = (RealType)0.0;
+        RealType sum_arho2 = (RealType)0.0;
+
+        for (int di = -1; di <= 1; ++di) {
+            for (int dj = -1; dj <= 1; ++dj) {
+                if (di == 0 && dj == 0) continue;
+                int ni = i + di;
+                int nj = j + dj;
+                if (ni >= 0 && ni < nr_cells && nj >= 0 && nj < nz_cells) {
+                    int nflat = ni * nz_cells + nj;
+                    if (!curr_mask || curr_mask[nflat] == 0) {
+                        int ntr = ni / TILE_SIZE;
+                        int ntz = nj / TILE_SIZE;
+                        int npool_idx = tile_map[ntr * num_tiles_z + ntz];
+                        if (npool_idx != -1) {
+                            int nk = (ni % TILE_SIZE) * TILE_SIZE + (nj % TILE_SIZE);
+                            RealType dist_sq = (RealType)(di * di + dj * dj);
+                            RealType w = (RealType)1.0 / dist_sq;
+
+                            sum_w += w;
+                            sum_rho += w * states_pool[npool_idx].rho[nk];
+                            sum_ur  += w * states_pool[npool_idx].ur[nk];
+                            sum_uz  += w * states_pool[npool_idx].uz[nk];
+                            sum_p   += w * states_pool[npool_idx].p[nk];
+                            sum_a1  += w * states_pool[npool_idx].alpha1[nk];
+                            sum_a2  += w * states_pool[npool_idx].alpha2[nk];
+                            sum_arho1 += w * states_pool[npool_idx].arho1[nk];
+                            sum_arho2 += w * states_pool[npool_idx].arho2[nk];
+                        }
+                    }
+                }
+            }
+        }
+
+        if (sum_w > (RealType)1e-8) {
+            RealType inv_w = (RealType)1.0 / sum_w;
+            RealType ext_rho = sum_rho * inv_w;
+            RealType ext_ur  = sum_ur * inv_w;
+            RealType ext_uz  = sum_uz * inv_w;
+            RealType ext_p   = sum_p * inv_w;
+
+            states_pool[pool_idx].rho[k_curr] = ext_rho;
+            states_pool[pool_idx].ur[k_curr]  = ext_ur;
+            states_pool[pool_idx].uz[k_curr]  = ext_uz;
+            states_pool[pool_idx].p[k_curr]   = ext_p;
+            states_pool[pool_idx].alpha1[k_curr] = sum_a1 * inv_w;
+            states_pool[pool_idx].alpha2[k_curr] = sum_a2 * inv_w;
+            states_pool[pool_idx].arho1[k_curr]  = sum_arho1 * inv_w;
+            states_pool[pool_idx].arho2[k_curr]  = sum_arho2 * inv_w;
+
+            if (U_pool) {
+                U_pool[pool_idx].rho[k_curr]   = ext_rho;
+                U_pool[pool_idx].rhour[k_curr] = ext_rho * ext_ur;
+                U_pool[pool_idx].rhouz[k_curr] = ext_rho * ext_uz;
+
+                RealType ke = (RealType)0.5 * ext_rho * (ext_ur * ext_ur + ext_uz * ext_uz);
+                U_pool[pool_idx].E[k_curr]     = ext_p / (gamma - (RealType)1.0) + ke;
+                U_pool[pool_idx].alpha1[k_curr] = sum_a1 * inv_w;
+                U_pool[pool_idx].alpha2[k_curr] = sum_a2 * inv_w;
+                U_pool[pool_idx].arho1[k_curr]  = sum_arho1 * inv_w;
+                U_pool[pool_idx].arho2[k_curr]  = sum_arho2 * inv_w;
+            }
+        }
+    }
+}
+
+template <typename RealType>
 void CFDSolver2DCudaImpl<RealType>::setSolidMask(const uint8_t* mask) {
     if (!mask) return;
     int total = nr_cells * nz_cells;
     if ((size_t)total > solid_capacity) {
         if (d_solid_mask) CUDA_CHECK(cudaFree(d_solid_mask));
+        if (d_prev_solid_mask) CUDA_CHECK(cudaFree(d_prev_solid_mask));
         if (d_solid_velocities) CUDA_CHECK(cudaFree(d_solid_velocities));
         solid_capacity = total * 2;
         CUDA_CHECK(cudaMalloc(&d_solid_mask, solid_capacity * sizeof(uint8_t)));
+        CUDA_CHECK(cudaMalloc(&d_prev_solid_mask, solid_capacity * sizeof(uint8_t)));
+        CUDA_CHECK(cudaMemset(d_prev_solid_mask, 0, solid_capacity * sizeof(uint8_t)));
         CUDA_CHECK(cudaMalloc(&d_solid_velocities, solid_capacity * 2 * sizeof(double)));
     }
+
+    if (!d_prev_solid_mask) {
+        CUDA_CHECK(cudaMalloc(&d_prev_solid_mask, solid_capacity * sizeof(uint8_t)));
+        CUDA_CHECK(cudaMemset(d_prev_solid_mask, 0, solid_capacity * sizeof(uint8_t)));
+    }
+
     CUDA_CHECK(cudaMemcpy(d_solid_mask, mask, total * sizeof(uint8_t), cudaMemcpyHostToDevice));
+
+    // Run 2D extrapolation kernel for freshly uncovered cells
+    dim3 threads(16, 16);
+    dim3 blocks((nr_cells + 15) / 16, (nz_cells + 15) / 16);
+    kernel_extrapolate_uncovered_cells_2d<RealType><<<blocks, threads>>>(
+        num_tiles_r, num_tiles_z, nr_cells, nz_cells,
+        d_tile_map, d_states_pool, d_U_pool,
+        d_solid_mask, d_prev_solid_mask, (RealType)gamma
+    );
+    CUDA_CHECK(cudaGetLastError());
+
+    // Update snapshot for next step
+    CUDA_CHECK(cudaMemcpy(d_prev_solid_mask, d_solid_mask, total * sizeof(uint8_t), cudaMemcpyDeviceToDevice));
 }
 
 template <typename RealType>

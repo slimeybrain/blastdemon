@@ -2596,9 +2596,7 @@ export function registerSTLVertices(filePath: string, vertices: Float32Array): S
 
 export function getSTLGeometryMeta(filePath: string): STLGeometryMeta | undefined {
     return stlGeometryCache.get(filePath);
-}
-
-export function getMPMObjectVolume(node: Node): { volume: number, isStlEstimated: boolean } {
+}export function getMPMObjectVolume(node: Node, state?: SimulationState): { volume: number, isStlEstimated: boolean } {
     const is3D = node.type === 'MPMObject3D';
     const shapeType = String(node.parameters['shape_type'] || (is3D ? 'Box' : 'Rectangle'));
     let isStlEstimated = false;
@@ -2621,7 +2619,16 @@ export function getMPMObjectVolume(node: Node): { volume: number, isStlEstimated
         const scx = Number(node.parameters['scale_x'] ?? 1.0);
         const scy = Number(node.parameters['scale_y'] ?? 1.0);
         const scz = Number(node.parameters['scale_z'] ?? 1.0);
-        const stlFile = String(node.parameters['stl_file'] || '');
+        let stlFile = String(node.parameters['stl_file'] || '');
+        if (!stlFile && state) {
+            const stlConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'stl');
+            if (stlConn) {
+                const stlNode = state.nodes.find(n => n.id === stlConn.fromNode);
+                if (stlNode && stlNode.type === 'STLGeometry') {
+                    stlFile = String(stlNode.parameters['stl_file'] || '');
+                }
+            }
+        }
         const meta = getSTLGeometryMeta(stlFile);
 
         if (meta && meta.volume > 0) {
@@ -2686,6 +2693,7 @@ function resolveMPMGridAndDomain(node: Node, state?: SimulationState) {
             meshNode = state.nodes.find(n => n.id === meshConn.fromNode);
         }
     }
+
     if (!meshNode) {
         meshNode = state.nodes.find(n => n.type === meshType);
     }
@@ -2708,14 +2716,23 @@ export function getMPMDisplayHTML(node: Node, state?: SimulationState): string {
         const p_dx = cellSize / particlesPerDim;
         const p_vol = is3D ? Math.pow(p_dx, 3) : Math.pow(p_dx, 2);
 
-        const { volume, isStlEstimated } = getMPMObjectVolume(node);
+        const { volume, isStlEstimated } = getMPMObjectVolume(node, state);
 
         const estParticles = Math.max(1, Math.round(volume / (p_vol > 0 ? p_vol : 1e-9)));
         const bytesPerParticle = is3D ? 292 : 128;
         const ramMB = (estParticles * bytesPerParticle) / (1024 * 1024);
         const vramMB = (estParticles * bytesPerParticle) / (1024 * 1024);
 
-        const stlFile = String(node.parameters['stl_file'] || '');
+        let stlFile = String(node.parameters['stl_file'] || '');
+        if (!stlFile && state) {
+            const stlConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'stl');
+            if (stlConn) {
+                const stlNode = state.nodes.find(n => n.id === stlConn.fromNode);
+                if (stlNode && stlNode.type === 'STLGeometry') {
+                    stlFile = String(stlNode.parameters['stl_file'] || '');
+                }
+            }
+        }
         const stlMeta = shapeType === 'STL' && stlFile ? getSTLGeometryMeta(stlFile) : undefined;
 
         let stlInfo = '';
@@ -2746,7 +2763,7 @@ export function getMPMDisplayHTML(node: Node, state?: SimulationState): string {
             for (const conn of objConns) {
                 const objNode = state.nodes.find(n => n.id === conn.fromNode);
                 if (objNode) {
-                    const { volume } = getMPMObjectVolume(objNode);
+                    const { volume } = getMPMObjectVolume(objNode, state);
                     connectedParticles += Math.max(1, Math.round(volume / (p_vol > 0 ? p_vol : 1e-9)));
                 }
             }
