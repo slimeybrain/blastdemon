@@ -1036,19 +1036,32 @@ void MPMSolver3DCUDA::uploadAoS2SoA() {
     size_t count = m_host_particles.size();
     if (count == 0) return;
     allocateDeviceMemory();
-    cudaMemcpy(d_particles, m_host_particles.data(), count * sizeof(MPMParticle3D), cudaMemcpyHostToDevice);
+
+    MPMParticle3D* temp_d_particles = nullptr;
+    cudaMalloc(&temp_d_particles, count * sizeof(MPMParticle3D));
+    cudaMemcpy(temp_d_particles, m_host_particles.data(), count * sizeof(MPMParticle3D), cudaMemcpyHostToDevice);
+
     int threads = 256;
     int blocks = (static_cast<int>(count) + threads - 1) / threads;
-    kernel_pack_aos_to_soa<<<blocks, threads>>>(d_particles, d_soa, static_cast<int>(count));
+    kernel_pack_aos_to_soa<<<blocks, threads>>>(temp_d_particles, d_soa, static_cast<int>(count));
+    cudaDeviceSynchronize();
+
+    cudaFree(temp_d_particles);
 }
 
 void MPMSolver3DCUDA::downloadSoA2AoS() {
     size_t count = m_host_particles.size();
-    if (count == 0 || !d_soa_buffer || !d_particles) return;
+    if (count == 0 || !d_soa_buffer) return;
+
+    MPMParticle3D* temp_d_particles = nullptr;
+    cudaMalloc(&temp_d_particles, count * sizeof(MPMParticle3D));
+
     int threads = 256;
     int blocks = (static_cast<int>(count) + threads - 1) / threads;
-    kernel_unpack_soa_to_aos<<<blocks, threads>>>(d_particles, d_soa, static_cast<int>(count));
-    cudaMemcpy(m_host_particles.data(), d_particles, count * sizeof(MPMParticle3D), cudaMemcpyDeviceToHost);
+    kernel_unpack_soa_to_aos<<<blocks, threads>>>(temp_d_particles, d_soa, static_cast<int>(count));
+    cudaMemcpy(m_host_particles.data(), temp_d_particles, count * sizeof(MPMParticle3D), cudaMemcpyDeviceToHost);
+
+    cudaFree(temp_d_particles);
 }
 
 void MPMSolver3DCUDA::allocateDeviceMemory() {
@@ -1078,10 +1091,8 @@ void MPMSolver3DCUDA::allocateDeviceMemory() {
     }
 
     if (num_particles > m_allocated_particles) {
-        if (d_particles) cudaFree(d_particles);
-        cudaMalloc(&d_particles, num_particles * sizeof(MPMParticle3D));
-        m_allocated_particles = num_particles;
         allocateSoABuffer(num_particles);
+        m_allocated_particles = num_particles;
     }
 
     if (num_materials > m_allocated_material_tables) {
@@ -1106,7 +1117,6 @@ size_t MPMSolver3DCUDA::getAllocatedVRAM() const {
     total += m_allocated_grid_nodes * sizeof(MPMGridNode3D); // d_grid
     total += m_allocated_grid_nodes * sizeof(float);          // d_grid_n (helper)
     total += m_allocated_tile_table * sizeof(int);              // d_tile_table
-    total += m_allocated_particles * sizeof(MPMParticle3D);     // d_particles (AoS staging)
     total += m_allocated_soa_bytes;                            // d_soa_buffer (SoA)
     total += m_allocated_material_tables * sizeof(MaterialTable3D); // d_material_tables
     total += m_allocated_active_nodes * sizeof(int);           // d_active_nodes
@@ -1294,10 +1304,10 @@ void MPMSolver3DCUDA::clearGridDevice() {
         kernel_clear_active_nodes_3d<<<blocks, threads>>>(d_grid, d_active_nodes, m_num_active_nodes);
     } else {
         size_t num_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
-        cudaMemset(d_grid, 0, num_nodes * sizeof(MPMGridNode3D));
+        cudaMemsetAsync(d_grid, 0, num_nodes * sizeof(MPMGridNode3D));
     }
     if (d_num_active_nodes) {
-        cudaMemset(d_num_active_nodes, 0, sizeof(int));
+        cudaMemsetAsync(d_num_active_nodes, 0, sizeof(int));
     }
     m_num_active_nodes = 0;
 }
@@ -1326,8 +1336,6 @@ void MPMSolver3DCUDA::particleToGridOnly() {
     if (d_num_active_nodes) {
         cudaMemcpy(&m_num_active_nodes, d_num_active_nodes, sizeof(int), cudaMemcpyDeviceToHost);
     }
-
-    cudaDeviceSynchronize();
 
     // Download grid to host so FSI forces can be injected into m_host_grid
     m_host_grid.resize(num_nodes);
