@@ -5,6 +5,24 @@
 
 namespace Blast {
 
+struct MPMParticle3DSoA {
+    float* x[3]{nullptr, nullptr, nullptr};
+    float* v[3]{nullptr, nullptr, nullptr};
+    float* sigma[3][3]{};
+    float* B[3][3]{};
+    float* L_grad[3][3]{};
+    float* lp[3]{nullptr, nullptr, nullptr};
+    float* m{nullptr};
+    float* V0{nullptr};
+    float* V{nullptr};
+    float* e_int{nullptr};
+    float* temperature{nullptr};
+    float* ep_bar{nullptr};
+    float* damage{nullptr};
+    int* has_failed{nullptr};
+    int* object_id{nullptr};
+};
+
 // 3D MPM Tile structure matching TILE_SIZE_3D = 8 (512 nodes per block) for CFD-MPM alignment
 struct MPMTile3D {
     MPMGridNode3D nodes[512];
@@ -114,6 +132,8 @@ public:
 
     // Device memory getters
     MPMParticle3D* getDeviceParticles() { return d_particles; }
+    const MPMParticle3DSoA& getDeviceParticlesSoA() const { return d_soa; }
+    MPMParticle3DSoA& getDeviceParticlesSoA() { return d_soa; }
     MPMGridNode3D* getDeviceGrid() { return d_grid; }
     MaterialTable3D* getDeviceMaterialTables() { return d_material_tables; }
     size_t getParticleCount() const { return m_host_particles.size(); }
@@ -122,6 +142,10 @@ public:
 private:
     void allocateDeviceMemory();
     void freeDeviceMemory();
+    void allocateSoABuffer(size_t count);
+    void freeSoABuffer();
+    void uploadAoS2SoA();
+    void downloadSoA2AoS();
 
     int m_nx{32};
     int m_ny{32};
@@ -150,6 +174,9 @@ private:
     MPMGridNode3D* d_grid{nullptr};
     MPMGridNode3D* d_grid_n{nullptr};
     MPMParticle3D* d_particles{nullptr};
+    MPMParticle3DSoA d_soa{};
+    void* d_soa_buffer{nullptr};
+    size_t m_allocated_soa_bytes{0};
     MaterialTable3D* d_material_tables{nullptr};
     size_t m_allocated_material_tables{0};
     float* d_max_v_buf{nullptr};
