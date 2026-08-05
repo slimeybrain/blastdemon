@@ -87,6 +87,7 @@ public:
     // Synchronize host vectors from device memory
     void syncToHost();
     void syncParticlesToHost();
+    void syncGridToHost();
     void syncToDevice();
     void uploadGridToDevice();
     void uploadMaterialTableToDevice();

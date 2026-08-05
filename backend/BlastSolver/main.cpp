@@ -2226,7 +2226,7 @@ void worker_fsi_3d_thread_func() {
                 global_solver_3d->coupleFSIWithMPMGPU(global_solver_mpm_3d_cuda.get());
 
                 if (step_count % 200 == 0) {
-                    global_solver_mpm_3d_cuda->syncToHost();
+                    global_solver_mpm_3d_cuda->syncGridToHost();
                     auto& grid = global_solver_mpm_3d_cuda->getGrid();
                     double max_mass = 0.0, max_force = 0.0;
                     int num_solid = 0;

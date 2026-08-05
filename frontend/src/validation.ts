@@ -11,6 +11,68 @@ export interface ValidationResult {
     globalWarnings: string[];
 }
 
+export function isParameterRelevant(node: Node, key: string): boolean {
+    if (!node || !node.parameters) return true;
+
+    // Parameters that are system paths/hashes/collections/internal properties which can be empty or managed separately
+    if (['output_dir', 'vtk_dir', 'gauges', 'slices', 'stl_file', 'geometry_hash', 'primitives'].includes(key)) {
+        return false;
+    }
+
+    if (node.type === 'MPMObject3D') {
+        const shape = node.parameters['shape_type'] || 'Box';
+        if (shape === 'Box') {
+            if (['radius', 'inner_radius', 'height', 'stl_file', 'scale_x', 'scale_y', 'scale_z', 'geometry_hash'].includes(key)) return false;
+        } else if (shape === 'Sphere') {
+            if (['size_x', 'size_y', 'size_z', 'inner_radius', 'height', 'stl_file', 'scale_x', 'scale_y', 'scale_z', 'geometry_hash'].includes(key)) return false;
+        } else if (shape === 'Cylinder') {
+            if (['size_x', 'size_y', 'size_z', 'stl_file', 'scale_x', 'scale_y', 'scale_z', 'geometry_hash'].includes(key)) return false;
+        } else if (shape === 'STL') {
+            if (['size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height'].includes(key)) return false;
+        }
+    } else if (node.type === 'MPMObject2D') {
+        const shape = node.parameters['shape_type'] || 'Rectangle';
+        if (shape === 'Rectangle') {
+            if (key === 'radius') return false;
+        } else if (shape === 'Circle') {
+            if (['size_x', 'size_y'].includes(key)) return false;
+        }
+    } else if (node.type === 'Charge2D') {
+        const shape = node.parameters['charge_shape'] || 'Sphere';
+        if (shape === 'Sphere' && key === 'charge_height') return false;
+    } else if (node.type === 'Charge3D') {
+        const shape = node.parameters['charge_shape'] || 'Sphere';
+        if (shape === 'Sphere') {
+            if (['charge_height', 'charge_lx', 'charge_ly', 'charge_lz'].includes(key)) return false;
+        } else if (shape === 'Cylinder') {
+            if (['charge_lx', 'charge_ly', 'charge_lz'].includes(key)) return false;
+        } else if (shape === 'Block') {
+            if (['charge_radius', 'charge_height'].includes(key)) return false;
+        }
+    } else if (node.type === 'Material') {
+        const matType = node.parameters['material_type'] || 'Air';
+        const airKeys = ['gamma', 'atm_pressure', 'atm_temperature'];
+        const jwlKeys = ['composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
+        const igKeys = ['ideal_gamma', 'ideal_rho_0', 'ideal_e_0'];
+
+        if (matType === 'Air' && (jwlKeys.includes(key) || igKeys.includes(key))) return false;
+        if (matType === 'JWL Charge' && (airKeys.includes(key) || igKeys.includes(key))) return false;
+        if (matType === 'Ideal Gas Charge' && (airKeys.includes(key) || jwlKeys.includes(key))) return false;
+    } else if (node.type === 'MPMMaterialSteel') {
+        const matModel = node.parameters['material_model'] || 'Steel (Hypoelastic)';
+        const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
+        if (matModel === 'Steel (Hypoelastic)' && jcKeys.includes(key)) return false;
+    } else if (node.type === 'DomainMesh') {
+        const dim = node.parameters['dimension'] || '1D';
+        if (dim === '1D' && ['y_min_bc', 'y_max_bc', 'z_min_bc', 'z_max_bc'].includes(key)) return false;
+        if (dim === '2D' && ['z_min_bc', 'z_max_bc'].includes(key)) return false;
+    } else if (node.type === 'CFDSolver3D') {
+        if (['stl_file', 'geometry_hash', 'mesh_type', 'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio', 'amr_tile_size'].includes(key)) return false;
+    }
+
+    return true;
+}
+
 export function validateSimulationState(state: SimulationState): ValidationResult {
     const nodeStatus: Record<string, NodeStatus> = {};
     const flawedConnections = new Map<string, string>();
@@ -1118,7 +1180,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
     state.nodes.forEach(node => {
         if (node.parameters) {
             for (const [key, value] of Object.entries(node.parameters)) {
-                if (key === 'output_dir' || key === 'vtk_dir' || key === 'gauges' || key === 'slices') {
+                if (!isParameterRelevant(node, key)) {
                     continue;
                 }
                 if (value === undefined || value === null || value === "" || (typeof value === 'number' && isNaN(value))) {

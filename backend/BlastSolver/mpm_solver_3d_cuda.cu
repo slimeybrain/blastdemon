@@ -1286,6 +1286,14 @@ void MPMSolver3DCUDA::syncParticlesToHost() {
     }
 }
 
+void MPMSolver3DCUDA::syncGridToHost() {
+    if (d_grid) {
+        size_t num_grid_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
+        m_host_grid.resize(num_grid_nodes);
+        cudaMemcpy(m_host_grid.data(), d_grid, num_grid_nodes * sizeof(MPMGridNode3D), cudaMemcpyDeviceToHost);
+    }
+}
+
 void MPMSolver3DCUDA::uploadGridToDevice() {
     if (d_grid && !m_host_grid.empty()) {
         size_t num_grid_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
