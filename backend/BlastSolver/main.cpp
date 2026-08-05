@@ -1475,7 +1475,9 @@ void worker_3d_thread_func() {
         if (global_telemetry_enabled.load()) {
             auto now = std::chrono::steady_clock::now();
             auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_telemetry_time).count();
-            if (elapsed_ms >= global_telemetry_interval_ms.load()) {
+            int target_interval_ms = global_telemetry_interval_ms.load();
+            bool should_emit = (target_interval_ms > 0) ? (elapsed_ms >= target_interval_ms) : (step_count % 10 == 0);
+            if (should_emit) {
                 emit_telemetry_3d(global_t3d, false);
                 last_telemetry_time = now;
 
@@ -1826,9 +1828,9 @@ void worker_mpm_3d_thread_func() {
             auto now = std::chrono::steady_clock::now();
             auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_telemetry_time).count();
             int target_interval_ms = (int)(global_refresh_rate_mpm_3d.load() * 1000.0);
-            if (target_interval_ms <= 0) target_interval_ms = 33;
+            bool should_emit = (target_interval_ms > 0) ? (elapsed_ms >= target_interval_ms) : (step_count % 10 == 0);
 
-            if (elapsed_ms >= target_interval_ms || done) {
+            if (should_emit || done) {
                 double sim_time = global_solver_mpm_3d_cuda->getSimTime();
                 int current_step = global_solver_mpm_3d_cuda->getStepCount();
 
@@ -1884,9 +1886,9 @@ void worker_mpm_3d_thread_func() {
             auto now = std::chrono::steady_clock::now();
             auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_telemetry_time).count();
             int target_interval_ms = (int)(global_refresh_rate_mpm_3d.load() * 1000.0);
-            if (target_interval_ms <= 0) target_interval_ms = 33;
+            bool should_emit = (target_interval_ms > 0) ? (elapsed_ms >= target_interval_ms) : (step_count % 10 == 0);
 
-            if (elapsed_ms >= target_interval_ms || done) {
+            if (should_emit || done) {
                 double sim_time = global_solver_mpm_3d->getSimTime();
                 int current_step = global_solver_mpm_3d->getStepCount();
 
@@ -2363,8 +2365,10 @@ void worker_fsi_3d_thread_func() {
 
             auto now = std::chrono::steady_clock::now();
             auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_telemetry_time).count();
+            int target_interval_ms = global_telemetry_interval_ms.load();
+            bool should_emit = (target_interval_ms > 0) ? (elapsed_ms >= target_interval_ms) : (step_count % 10 == 0);
 
-            if (elapsed_ms >= 33 || done) {
+            if (should_emit || done) {
                 double sim_time = global_t3d;
 
                 // Emit single unified telemetry frame to eliminate 3D viewport flickering
@@ -3279,13 +3283,14 @@ void emit_telemetry_3d(double elapsed, bool is_terminated) {
     payload->total_mass = totals.first;
     payload->total_energy = totals.second;
 
-    if (global_solver_mpm_3d_cuda) {
-        global_solver_mpm_3d_cuda->syncParticlesToHost();
-    }
     if (global_solver_mpm_3d_cuda || global_solver_mpm_3d) {
         const auto& particles = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles() : global_solver_mpm_3d->getParticles();
-        payload->mpm_particles.reserve(particles.size() * 13);
-        for (const auto& p : particles) {
+        if (!particles.empty()) {
+            if (global_solver_mpm_3d_cuda) {
+                global_solver_mpm_3d_cuda->syncParticlesToHost();
+            }
+            payload->mpm_particles.reserve(particles.size() * 13);
+            for (const auto& p : particles) {
             float diff_xy = p.sigma[0][0] - p.sigma[1][1];
             float diff_yz = p.sigma[1][1] - p.sigma[2][2];
             float diff_zx = p.sigma[2][2] - p.sigma[0][0];
@@ -3309,6 +3314,7 @@ void emit_telemetry_3d(double elapsed, bool is_terminated) {
             payload->mpm_particles.push_back(static_cast<float>(p.object_id));
         }
     }
+}
 
     {
         std::lock_guard<std::mutex> g_lock(global_gauges_mutex);
@@ -5084,7 +5090,7 @@ int main() {
                 } else if (command == "CONTOUR_CONFIG" || command == "VIEW3D_CONFIG") {
                     global_telemetry_stride = msg.value("stride", 1);
                     double rate = msg.value("refresh_rate", 0.0);
-                    global_telemetry_interval_ms = (rate > 0.0) ? static_cast<int>(rate * 1000.0) : 33;
+                    global_telemetry_interval_ms = (rate > 0.0) ? static_cast<int>(rate * 1000.0) : 0;
                     global_refresh_rate_mpm = rate;
                     global_refresh_rate_mpm_3d = rate;
                     if (msg.contains("slices")) {

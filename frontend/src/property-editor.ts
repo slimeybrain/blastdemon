@@ -2,6 +2,7 @@ import { StateManager, calculateRefinementMeshInfo, getMeshDisplayHTML, getMPMDi
 import { Node } from './types.js';
 import { validateSimulationState } from './validation.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
+import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_PRESETS, MPM_MATERIAL_CATEGORIES } from './mpm-presets.js';
 
 export class PropertyEditor {
     public container: HTMLElement;
@@ -237,6 +238,11 @@ export class PropertyEditor {
                 const ref = EXPLOSIVE_REFS[comp] || 'N/A';
                 descText += ` | Composition: ${comp} (Reference: ${ref})`;
             }
+        } else if (node.type === 'MPMMaterialSteel') {
+            const presetName = node.parameters['preset'] || 'Structural Steel (A36)';
+            const presetData = MPM_MATERIAL_PRESETS[presetName];
+            const ref = presetData?.reference || 'N/A';
+            descText += ` | Preset: ${presetName} (Reference: ${ref})`;
         }
         descBlock.textContent = descText;
         this.container.appendChild(descBlock);
@@ -303,8 +309,11 @@ export class PropertyEditor {
             if (!node.parameters['material_model']) {
                 node.parameters['material_model'] = 'Steel (Hypoelastic)';
             }
+            if (!node.parameters['preset']) {
+                node.parameters['preset'] = 'Structural Steel (A36)';
+            }
             const matModel = node.parameters['material_model'];
-            const baseKeys = ['material_model', 'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus', 'failure_strain', 'tensile_failure_stress'];
+            const baseKeys = ['preset', 'material_model', 'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus', 'failure_strain', 'tensile_failure_stress'];
             const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
             paramKeys = (matModel === 'Johnson-Cook + Mie-Grüneisen') ? [...baseKeys, ...jcKeys] : baseKeys;
         } else if (node.type === 'MPMDomain2D') {
@@ -1212,6 +1221,7 @@ export class PropertyEditor {
         ];
 
         const dropdowns: Record<string, string[]> = {
+            'preset': [...MPM_MATERIAL_PRESET_NAMES],
             'material_model': ['Steel (Hypoelastic)', 'Johnson-Cook + Mie-Grüneisen'],
             'mpmParticleQuantity': ['vonMises', 'pressure', 'velocity', 'density', 'plastic_strain', 'damage', 'has_failed', 'object_id'],
 
@@ -1279,29 +1289,44 @@ export class PropertyEditor {
             select.style.border = '1px solid #444';
             select.style.padding = '4px';
 
-            dropdowns[key].forEach(opt => {
-                const option = document.createElement('option');
-                option.value = opt;
-                let text = opt;
-                if (key === 'device') {
-                    if (opt === 'cpu') text = 'CPU';
-                    else if (opt === 'cuda') text = 'CUDA GPU';
-                } else if (key === 'refresh_rate') {
-                    if (opt === '0.0') text = 'Max Rate (0s)';
-                    else if (opt === '0.016') text = '60 FPS (0.016s)';
-                    else if (opt === '0.033') text = '30 FPS (0.033s)';
-                    else if (opt === '0.05') text = '20 FPS (0.05s)';
-                    else if (opt === '0.1') text = '10 FPS (0.1s)';
-                    else if (opt === '0.2') text = '5 FPS (0.2s)';
-                    else if (opt === '0.5') text = '2 FPS (0.5s)';
-                    else if (opt === '1.0') text = '1 FPS (1.0s)';
-                    else if (opt === '2.0') text = '0.5 FPS (2.0s / Default)';
-                    else if (opt === '5.0') text = '0.2 FPS (5.0s)';
-                    else if (opt === '10.0') text = '0.1 FPS (10.0s)';
-                }
-                if (Math.abs(Number(opt) - Number(value)) < 0.001 || opt === String(value ?? '')) option.selected = true;
-                select.appendChild(option);
-            });
+            if (key === 'preset') {
+                MPM_MATERIAL_CATEGORIES.forEach(group => {
+                    const optgroup = document.createElement('optgroup');
+                    optgroup.label = group.category;
+                    group.presets.forEach(opt => {
+                        const option = document.createElement('option');
+                        option.value = opt;
+                        option.textContent = opt;
+                        if (opt === String(value ?? '')) option.selected = true;
+                        optgroup.appendChild(option);
+                    });
+                    select.appendChild(optgroup);
+                });
+            } else {
+                dropdowns[key].forEach(opt => {
+                    const option = document.createElement('option');
+                    option.value = opt;
+                    let text = opt;
+                    if (key === 'device') {
+                        if (opt === 'cpu') text = 'CPU';
+                        else if (opt === 'cuda') text = 'CUDA GPU';
+                    } else if (key === 'refresh_rate') {
+                        if (opt === '0.0') text = 'Max Rate (0s)';
+                        else if (opt === '0.016') text = '60 FPS (0.016s)';
+                        else if (opt === '0.033') text = '30 FPS (0.033s)';
+                        else if (opt === '0.05') text = '20 FPS (0.05s)';
+                        else if (opt === '0.1') text = '10 FPS (0.1s)';
+                        else if (opt === '0.2') text = '5 FPS (0.2s)';
+                        else if (opt === '0.5') text = '2 FPS (0.5s)';
+                        else if (opt === '1.0') text = '1 FPS (1.0s)';
+                        else if (opt === '2.0') text = '0.5 FPS (2.0s / Default)';
+                        else if (opt === '5.0') text = '0.2 FPS (5.0s)';
+                        else if (opt === '10.0') text = '0.1 FPS (10.0s)';
+                    }
+                    if (Math.abs(Number(opt) - Number(value)) < 0.001 || opt === String(value ?? '')) option.selected = true;
+                    select.appendChild(option);
+                });
+            }
             select.value = String(value ?? dropdowns[key][0]);
 
 
@@ -2492,7 +2517,7 @@ export class PropertyEditor {
             }
         }
         
-        const structuralKeys = ['material_type', 'composition', 'dimension', 'charge_shape', 'init_mode', 'velocity_scheme'];
+        const structuralKeys = ['material_type', 'composition', 'preset', 'material_model', 'dimension', 'charge_shape', 'init_mode', 'velocity_scheme'];
         this.render(structuralKeys.includes(key));
     }
 

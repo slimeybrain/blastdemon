@@ -4,6 +4,7 @@ import { Telemetry3DViewport } from './telemetry-3d-viewport.js';
 import { validateSimulationState } from './validation.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
 import { CustomDialog } from './custom-dialog.js';
+import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_CATEGORIES } from './mpm-presets.js';
 
 const DEFAULT_QUANTITY_RANGES: Record<string, [number, number]> = {
     pressure: [101325.0, 101325.0 * 100.0],
@@ -1771,21 +1772,22 @@ export class GraphRenderer {
             };
             case 'MPMMaterialSteel': return {
                 material_model: 'Steel (Hypoelastic)',
+                preset: 'Structural Steel (A36)',
                 density: 7850.0,
-                youngs_modulus: 210.0e9,
-                poissons_ratio: 0.3,
-                yield_stress: 400.0e6,
+                youngs_modulus: 200.0e9,
+                poissons_ratio: 0.26,
+                yield_stress: 250.0e6,
                 hardening_modulus: 1.0e9,
-                failure_strain: 0.25,
-                tensile_failure_stress: 600.0e6,
-                jc_A: 792.0e6,
+                failure_strain: 0.20,
+                tensile_failure_stress: 400.0e6,
+                jc_A: 250.0e6,
                 jc_B: 510.0e6,
                 jc_n: 0.26,
                 jc_C: 0.014,
                 jc_m: 1.03,
                 T_melt: 1793.0,
                 T_room: 293.0,
-                Cp: 477.0,
+                Cp: 486.0,
                 mg_gamma0: 1.81,
                 mg_c0: 4570.0,
                 mg_s: 1.49
@@ -4160,7 +4162,18 @@ export class GraphRenderer {
         }
 
         let paramKeys = Object.keys(node.parameters);
-        if (node.type === 'MPMDomain2D') {
+        if (node.type === 'MPMMaterialSteel') {
+            if (!node.parameters['material_model']) {
+                node.parameters['material_model'] = 'Steel (Hypoelastic)';
+            }
+            if (!node.parameters['preset']) {
+                node.parameters['preset'] = 'Structural Steel (A36)';
+            }
+            const matModel = node.parameters['material_model'];
+            const baseKeys = ['material_model', 'preset', 'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus', 'failure_strain', 'tensile_failure_stress'];
+            const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
+            paramKeys = (matModel === 'Johnson-Cook + Mie-Grüneisen') ? [...baseKeys, ...jcKeys] : baseKeys;
+        } else if (node.type === 'MPMDomain2D') {
             const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
             paramKeys = ['precision', 'transfer_scheme', 'velocity_scheme', 'space_time_scheme', 'smooth_plastic_strain'];
             if (hasFLIP) {
@@ -4310,6 +4323,7 @@ export class GraphRenderer {
             row.appendChild(label);
 
             const dropdowns: Record<string, string[]> = {
+                'preset': [...MPM_MATERIAL_PRESET_NAMES],
                 'material_model': ['Steel (Hypoelastic)', 'Johnson-Cook + Mie-Grüneisen'],
                 'mesh_type': ['regular', 'amr'],
 
@@ -4382,14 +4396,25 @@ export class GraphRenderer {
                     key
                 );
             } else if (dropdowns[key]) {
-                const options = dropdowns[key].map(opt => {
-                    let label = opt;
-                    if (key === 'device') {
-                        if (opt === 'cpu') label = 'CPU';
-                        else if (opt === 'cuda') label = 'CUDA GPU';
-                    }
-                    return { value: opt, label: label };
-                });
+                let options: { value: string; label: string; category?: string }[];
+                if (key === 'preset') {
+                    options = MPM_MATERIAL_CATEGORIES.flatMap(group => 
+                        group.presets.map(opt => ({
+                            value: opt,
+                            label: opt,
+                            category: group.category
+                        }))
+                    );
+                } else {
+                    options = dropdowns[key].map(opt => {
+                        let label = opt;
+                        if (key === 'device') {
+                            if (opt === 'cpu') label = 'CPU';
+                            else if (opt === 'cuda') label = 'CUDA GPU';
+                        }
+                        return { value: opt, label: label };
+                    });
+                }
                 inputEl = this.createCustomDropdown(
                     options,
                     value.toString(),
@@ -4911,7 +4936,7 @@ export class GraphRenderer {
     }
 
     private createCustomDropdown(
-        options: { value: string; label: string }[],
+        options: { value: string; label: string; category?: string }[],
         currentValue: string,
         onChange: (val: string) => void,
         dataKey?: string
@@ -4933,7 +4958,24 @@ export class GraphRenderer {
         optionsDiv.className = 'custom-select-options';
         optionsDiv.style.display = 'none';
 
+        let lastCategory = '';
         options.forEach(opt => {
+            if (opt.category && opt.category !== lastCategory) {
+                lastCategory = opt.category;
+                const headerDiv = document.createElement('div');
+                headerDiv.className = 'custom-select-category-header';
+                headerDiv.textContent = lastCategory;
+                headerDiv.style.fontWeight = 'bold';
+                headerDiv.style.fontSize = '10px';
+                headerDiv.style.textTransform = 'uppercase';
+                headerDiv.style.letterSpacing = '0.5px';
+                headerDiv.style.color = '#569cd6';
+                headerDiv.style.padding = '6px 8px 3px 8px';
+                headerDiv.style.borderBottom = '1px solid #333';
+                headerDiv.style.pointerEvents = 'none';
+                optionsDiv.appendChild(headerDiv);
+            }
+
             const optDiv = document.createElement('div');
             optDiv.className = 'custom-select-option';
             optDiv.dataset.value = opt.value;

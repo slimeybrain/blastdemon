@@ -1,4 +1,37 @@
 import { SimulationState, SimulationStatus, LayoutNode, PanelNode, SplitNode, LayoutDirection, PanelType, Model, Workspace, AppState, Node, Connection, NodeType, Port } from './types.js';
+import { MPM_MATERIAL_PRESETS } from './mpm-presets.js';
+
+export function syncMPMMaterialParameters(node: Node, parameters: Record<string, any>, updatedKey?: string): void {
+    if (node.type !== 'MPMMaterialSteel') {
+        return;
+    }
+
+    if (parameters['preset'] === undefined) {
+        parameters['preset'] = 'Structural Steel (A36)';
+    }
+
+    const presetName = parameters['preset'];
+    if (updatedKey === 'preset' || (updatedKey === undefined && presetName !== 'Custom')) {
+        if (presetName !== 'Custom' && MPM_MATERIAL_PRESETS[presetName]) {
+            const presetData = MPM_MATERIAL_PRESETS[presetName];
+            for (const [k, v] of Object.entries(presetData)) {
+                if (k !== 'reference') {
+                    parameters[k] = v;
+                }
+            }
+        }
+    } else {
+        const materialKeys = [
+            'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
+            'failure_strain', 'tensile_failure_stress',
+            'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
+            'mg_gamma0', 'mg_c0', 'mg_s'
+        ];
+        if (updatedKey && materialKeys.includes(updatedKey)) {
+            parameters['preset'] = 'Custom';
+        }
+    }
+}
 
 export class StateManager {
     private appState: AppState;
@@ -742,8 +775,9 @@ export class StateManager {
             const node = model.nodes.find(n => n.id === nodeId);
             if (node) {
                 const merged = { ...node.parameters, ...parameters };
-                const updatedKey = Object.keys(parameters).find(k => k === 'charge_mass') || Object.keys(parameters)[0];
+                const updatedKey = Object.keys(parameters).find(k => k === 'charge_mass' || k === 'preset') || Object.keys(parameters)[0];
                 syncExplosiveParameters(node, merged, model, updatedKey);
+                syncMPMMaterialParameters(node, merged, updatedKey);
                 syncQuantityRanges(node, parameters, merged);
                 node.parameters = merged;
                 console.log("[DEBUG] Node parameters updated in memory. New parameters:", node.parameters);
@@ -780,8 +814,9 @@ export class StateManager {
             const node = model.nodes.find(n => n.id === nodeId);
             if (node) {
                 const merged = { ...node.parameters, ...parameters };
-                const updatedKey = Object.keys(parameters).find(k => k === 'charge_mass') || Object.keys(parameters)[0];
+                const updatedKey = Object.keys(parameters).find(k => k === 'charge_mass' || k === 'preset') || Object.keys(parameters)[0];
                 syncExplosiveParameters(node, merged, model, updatedKey);
+                syncMPMMaterialParameters(node, merged, updatedKey);
                 syncQuantityRanges(node, parameters, merged);
                 
                 for (const [key, value] of Object.entries(merged)) {
@@ -1865,21 +1900,22 @@ export class StateManager {
             },
             'MPMMaterialSteel': {
                 material_model: 'Steel (Hypoelastic)',
+                preset: 'Structural Steel (A36)',
                 density: 7850.0,
-                youngs_modulus: 210.0e9,
-                poissons_ratio: 0.3,
-                yield_stress: 400.0e6,
+                youngs_modulus: 200.0e9,
+                poissons_ratio: 0.26,
+                yield_stress: 250.0e6,
                 hardening_modulus: 1.0e9,
-                failure_strain: 0.25,
-                tensile_failure_stress: 600.0e6,
-                jc_A: 792.0e6,
+                failure_strain: 0.20,
+                tensile_failure_stress: 400.0e6,
+                jc_A: 250.0e6,
                 jc_B: 510.0e6,
                 jc_n: 0.26,
                 jc_C: 0.014,
                 jc_m: 1.03,
                 T_melt: 1793.0,
                 T_room: 293.0,
-                Cp: 477.0,
+                Cp: 486.0,
                 mg_gamma0: 1.81,
                 mg_c0: 4570.0,
                 mg_s: 1.49
@@ -2010,6 +2046,7 @@ export class StateManager {
                 model = Object.values(this.appState.models).find(m => m.nodes.some(n => n.id === node.id)) || null;
             }
             syncExplosiveParameters(node, node.parameters, model);
+            syncMPMMaterialParameters(node, node.parameters);
         });
     }
 
@@ -2347,7 +2384,6 @@ function syncExplosiveParameters(node: Node, parameters: Record<string, any>, st
                     parameters['charge_lz'] = size;
                 }
             } else {
-                parameters['charge_radius'] = Math.pow((3.0 * mass) / (4.0 * Math.PI * rho), 1.0 / 3.0);
             }
         }
     }

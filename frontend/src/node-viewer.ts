@@ -3,6 +3,7 @@ import { Node, NodeType } from './types.js';
 import { PropertyEditor } from './property-editor.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
 import { Telemetry3DViewport } from './telemetry-3d-viewport.js';
+import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_CATEGORIES } from './mpm-presets.js';
 
 export class NodeViewer {
     private container: HTMLElement;
@@ -731,8 +732,11 @@ export class NodeViewer {
             if (!node.parameters['material_model']) {
                 node.parameters['material_model'] = 'Steel (Hypoelastic)';
             }
+            if (!node.parameters['preset']) {
+                node.parameters['preset'] = 'Structural Steel (A36)';
+            }
             const matModel = node.parameters['material_model'];
-            const baseKeys = ['material_model', 'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus', 'failure_strain', 'tensile_failure_stress'];
+            const baseKeys = ['material_model', 'preset', 'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus', 'failure_strain', 'tensile_failure_stress'];
             const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
             paramKeys = (matModel === 'Johnson-Cook + Mie-Grüneisen') ? [...baseKeys, ...jcKeys] : baseKeys;
         } else if (node.type === 'MPMDomain2D') {
@@ -2291,6 +2295,7 @@ export class NodeViewer {
             'bc_z_max': ['Reflecting', 'Transmitting', 'Terminate'],
             'coordinate_system': ['Axisymmetric', 'Cartesian'],
             'device': ['cpu', 'cuda'],
+            'preset': [...MPM_MATERIAL_PRESET_NAMES],
             'trigger_type': ['end', 'time', 'step'],
             'composition': ['Aluminized ANFO', 'Ammonal', 'ANFO', 'Baratol', 'C-4', 'Composition A-3', 'Composition B', 'Composition C-3', 'Cyclotol', 'Heavy ANFO', 'HMX', 'LX-04', 'LX-07', 'LX-10', 'LX-14', 'LX-17', 'Mining Emulsion', 'Octol', 'PBX 9404', 'PBX 9501', 'PBX 9502', 'PE-10', 'PE-12', 'PE-4', 'PE-8', 'Pentolite', 'PETN', 'RDX', 'TATB', 'Tetryl', 'TNT', 'Water Gel', 'Custom'],
             'init_mode': node.type === 'CFDSolver3D' ? ['From1D', 'From2D', 'Multi-Material JWL', 'Ideal Gas'] : ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
@@ -2343,18 +2348,33 @@ export class NodeViewer {
             select.style.padding = '4px';
             select.style.fontSize = 'var(--font-sm)';
 
-            dropdowns[key].forEach(opt => {
-                const option = document.createElement('option');
-                option.value = opt;
-                let text = opt;
-                if (key === 'device') {
-                    if (opt === 'cpu') text = 'CPU';
-                    else if (opt === 'cuda') text = 'CUDA GPU';
-                }
-                option.text = text;
-                if (opt === value.toString()) option.selected = true;
-                select.appendChild(option);
-            });
+            if (key === 'preset') {
+                MPM_MATERIAL_CATEGORIES.forEach(group => {
+                    const optgroup = document.createElement('optgroup');
+                    optgroup.label = group.category;
+                    group.presets.forEach(opt => {
+                        const option = document.createElement('option');
+                        option.value = opt;
+                        option.text = opt;
+                        if (opt === value.toString()) option.selected = true;
+                        optgroup.appendChild(option);
+                    });
+                    select.appendChild(optgroup);
+                });
+            } else {
+                dropdowns[key].forEach(opt => {
+                    const option = document.createElement('option');
+                    option.value = opt;
+                    let text = opt;
+                    if (key === 'device') {
+                        if (opt === 'cpu') text = 'CPU';
+                        else if (opt === 'cuda') text = 'CUDA GPU';
+                    }
+                    option.text = text;
+                    if (opt === value.toString()) option.selected = true;
+                    select.appendChild(option);
+                });
+            }
 
             select.addEventListener('change', () => {
                 let val: any = select.value;
