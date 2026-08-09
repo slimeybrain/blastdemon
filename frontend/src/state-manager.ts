@@ -2416,6 +2416,7 @@ function syncExplosiveParameters(node: Node, parameters: Record<string, any>, st
                     parameters['charge_lz'] = size;
                 }
             } else {
+                parameters['charge_radius'] = Math.pow((3.0 * mass) / (4.0 * Math.PI * rho), 1.0 / 3.0);
             }
         }
     }
