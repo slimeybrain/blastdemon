@@ -1389,6 +1389,9 @@ let gpuPipeline: any = null;
 let gpuSlicePipeline: any = null;
 let gpuLinePipeline: any = null;
 let gpuSTLLinePipeline: any = null;
+let gpuPointPipeline: any = null;
+let gpuMPMParticlesBuffer: any = null;
+let gpuUniformBufferMPM: any = null;
 let gpuSampler: any = null;
 let gpuSamplerLinear: any = null;
 let gpuSamplerNearest: any = null;
@@ -2470,6 +2473,41 @@ async function initContext(canvas: OffscreenCanvas) {
                         }
                     });
 
+                    // Create point pipeline for MPM Particles point cloud
+                    gpuPointPipeline = gpuDevice.createRenderPipeline({
+                        layout: pipelineLayout,
+                        vertex: {
+                            module: shaderModule,
+                            entryPoint: 'vs_main',
+                            buffers: [{
+                                arrayStride: 24,
+                                attributes: [
+                                    { shaderLocation: 0, offset: 0, format: 'float32x3' },
+                                    { shaderLocation: 1, offset: 12, format: 'float32x2' },
+                                    { shaderLocation: 2, offset: 20, format: 'float32' }
+                                ]
+                            }]
+                        },
+                        fragment: {
+                            module: shaderModule,
+                            entryPoint: 'fs_main',
+                            targets: [{
+                                format: nav.gpu.getPreferredCanvasFormat(),
+                                blend: {
+                                    color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+                                    alpha: { srcFactor: 'one', dstFactor: 'zero', operation: 'add' }
+                                }
+                            }]
+                        },
+                        primitive: { topology: 'point-list' },
+                        multisample: { count: 4 },
+                        depthStencil: {
+                            depthWriteEnabled: true,
+                            depthCompare: 'less-equal',
+                            format: 'depth24plus'
+                        }
+                    });
+
                     gpuSamplerLinear = gpuDevice.createSampler({
                         magFilter: isFilterable ? 'linear' : 'nearest',
                         minFilter: isFilterable ? 'linear' : 'nearest'
@@ -2880,8 +2918,8 @@ function getParticleQuantityValue(data: Float32Array, idx: number, qty: string):
 }
 
 function updateMPMParticlesGeometry(data?: Float32Array) {
-    if (!gl) {
-        self.postMessage({ type: 'log', message: 'updateMPMParticlesGeometry failed: gl is null' });
+    if (!gl && (!isWebGPU || !gpuDevice)) {
+        self.postMessage({ type: 'log', message: 'updateMPMParticlesGeometry failed: gl and WebGPU are null' });
         return;
     }
     if (data) {
@@ -2963,9 +3001,21 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
         vertexData[vIdx + 5] = b;
     }
 
-    if (!mpmParticlesBuffer) mpmParticlesBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, mpmParticlesBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, vertexData, gl.DYNAMIC_DRAW);
+    if (gl) {
+        if (!mpmParticlesBuffer) mpmParticlesBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, mpmParticlesBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, vertexData, gl.DYNAMIC_DRAW);
+    }
+    if (isWebGPU && gpuDevice) {
+        if (gpuMPMParticlesBuffer) gpuMPMParticlesBuffer.destroy();
+        gpuMPMParticlesBuffer = gpuDevice.createBuffer({
+            size: vertexData.byteLength,
+            usage: 32 | 8, // VERTEX | COPY_DST
+            mappedAtCreation: true
+        });
+        new Float32Array(gpuMPMParticlesBuffer.getMappedRange()).set(vertexData);
+        gpuMPMParticlesBuffer.unmap();
+    }
     mpmParticlesCount = nParticles;
 }
 
@@ -3692,6 +3742,9 @@ function handleFrame(buffer: ArrayBuffer) {
                     sliceMinY = sliceMin;
                     sliceMaxY = sliceMax;
                 }
+            } else if (isFinite(sliceMin)) {
+                sliceMinY = sliceMin > 0 ? sliceMin * 0.99 : sliceMin - 1.0;
+                sliceMaxY = sliceMin > 0 ? sliceMin * 1.01 : sliceMin + 1.0;
             } else {
                 const range = config.min_val !== undefined && config.max_val !== undefined ? [config.min_val, config.max_val] : (quantityRanges[qty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0]);
                 sliceMinY = range[0];
@@ -3711,6 +3764,8 @@ function handleFrame(buffer: ArrayBuffer) {
 
         if (sliceMin < sliceMax) {
             sliceRanges.push({ min: sliceMin, max: sliceMax });
+        } else if (isFinite(sliceMin)) {
+            sliceRanges.push({ min: sliceMin > 0 ? sliceMin * 0.99 : sliceMin - 1.0, max: sliceMin > 0 ? sliceMin * 1.01 : sliceMin + 1.0 });
         } else {
             const range = config.min_val !== undefined && config.max_val !== undefined ? [config.min_val, config.max_val] : (quantityRanges[qty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0]);
             sliceRanges.push({ min: range[0], max: range[1] });
@@ -3733,6 +3788,8 @@ function handleFrame(buffer: ArrayBuffer) {
         }
         if (sliceMin < sliceMax) {
             self.postMessage({ type: 'currentRange', min: sliceMin, max: sliceMax });
+        } else if (isFinite(sliceMin)) {
+            self.postMessage({ type: 'currentRange', min: sliceMin > 0 ? sliceMin * 0.99 : sliceMin - 1.0, max: sliceMin > 0 ? sliceMin * 1.01 : sliceMin + 1.0 });
         } else {
             const focusedConfig = slicesConfig[focusedSliceIndex] || slicesConfig[0] || {};
             const focusedQty = focusedConfig.quantities?.[0] || 'pressure';
@@ -5192,6 +5249,35 @@ function render() {
             }
         }
 
+        // Draw 3D MPM Particles Point Cloud in WebGPU
+        if (showMPMParticles && gpuMPMParticlesBuffer && mpmParticlesCount > 0 && gpuPointPipeline) {
+            if (!gpuUniformBufferMPM) {
+                gpuUniformBufferMPM = gpuDevice.createBuffer({
+                    size: 384,
+                    usage: 64 | 8
+                });
+            }
+            const uMPM = new Float32Array(uniformData);
+            uMPM[48] = mpmParticleOpacity;
+            uMPM[53] = 14.0; // 14.0 for MPM particles
+            gpuDevice.queue.writeBuffer(gpuUniformBufferMPM, 0, uMPM.buffer);
+
+            const mpmBindGroup = gpuDevice.createBindGroup({
+                layout: bindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: gpuUniformBufferMPM } },
+                    { binding: 1, resource: Object.values(activeSlicesWebGPU)[0]?.gpuTextureView || gpuDummyTextureView },
+                    { binding: 2, resource: gpuSampler! },
+                    { binding: 3, resource: gpuVolume3DTextureView || gpuDummy3DTextureView }
+                ]
+            });
+
+            passEncoder.setPipeline(gpuPointPipeline);
+            passEncoder.setBindGroup(0, mpmBindGroup);
+            passEncoder.setVertexBuffer(0, gpuMPMParticlesBuffer);
+            passEncoder.draw(mpmParticlesCount);
+        }
+
         // 2. Draw Slices
         const slicesArray = Object.values(activeSlicesWebGPU).filter(s => {
             const cfg = getSliceConfig(s.index);
@@ -5782,7 +5868,7 @@ function render() {
         gl.enableVertexAttribArray(0);
         gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 24, 12); // texCoord = (r, g)
         gl.enableVertexAttribArray(1);
-        gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 24, 20); // sliceSize = (b, 0)
+        gl.vertexAttribPointer(2, 1, gl.FLOAT, false, 24, 20); // sliceSize = (b)
         gl.enableVertexAttribArray(2);
         gl.drawArrays(gl.POINTS, 0, mpmParticlesCount);
     }

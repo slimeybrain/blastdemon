@@ -531,6 +531,13 @@ double CFDSolverImpl<RealType, IsMultiMaterial>::computeStepSize(double cfl) con
 
     for (int i = 0; i < limit; ++i) {
         RealType c = getSoundSpeed<RealType, IsMultiMaterial>(states[i].p, states[i].rho, states[i], (RealType)gamma, currentMaterials.products, currentMaterials.unreacted);
+        if constexpr (IsMultiMaterial) {
+            RealType a2 = states[i].alpha2;
+            RealType ar2 = states[i].arho2;
+            if (a2 > (RealType)1e-4 && ar2 > (RealType)10.0 && currentMaterials.det_vel > 0.0) {
+                c = std::max(c, (RealType)currentMaterials.det_vel);
+            }
+        }
         RealType val = std::abs(states[i].u) + c;
         if (!std::isnan(val) && !std::isinf(val)) {
             max_u_c = std::max(max_u_c, val);
@@ -591,6 +598,13 @@ std::vector<double> CFDSolverImpl<RealType, IsMultiMaterial>::getLocalTimesteps(
 
     for (int i = 0; i < n_cells; ++i) {
         RealType c = getSoundSpeed<RealType, IsMultiMaterial>(states[i].p, states[i].rho, states[i], (RealType)gamma, currentMaterials.products, currentMaterials.unreacted);
+        if constexpr (IsMultiMaterial) {
+            RealType a2 = states[i].alpha2;
+            RealType ar2 = states[i].arho2;
+            if (a2 > (RealType)1e-4 && ar2 > (RealType)10.0 && currentMaterials.det_vel > 0.0) {
+                c = std::max(c, (RealType)currentMaterials.det_vel);
+            }
+        }
         RealType denom = std::abs(states[i].u) + c;
         if (denom < (RealType)1e-6) denom = (RealType)1e-6;
         dt_local[i] = dynamic_cfl * dr / (double)denom;

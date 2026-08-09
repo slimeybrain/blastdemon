@@ -57,19 +57,33 @@ export class Telemetry3DViewport {
     private latestObstaclesRange: { min: number, max: number } | null = null;
     private _lastSliceKey: string = '';
 
-    // Colorbar Overlay Elements
-    private colorbarOverlay: HTMLElement | null = null;
-    private colorbarGradientEl: HTMLElement | null = null;
-    private colorbarTitleEl: HTMLElement | null = null;
-    private colorbarTicksContainer: HTMLElement | null = null;
-    private colorbarAutoBadge: HTMLElement | null = null;
-    private colorbarLogBadge: HTMLElement | null = null;
-    private colorbarCmapBadge: HTMLElement | null = null;
+    // Colorbar Overlay Container
+    private colorbarContainer: HTMLElement | null = null;
     private usePerspective: boolean = true;
 
     private viewTypeSuffix: string;
     private viewportNodeId: string | null = null;
     private virtualNodes: Record<string, any> = {};
+    private resizeObserver: ResizeObserver | null = null;
+
+    private triggerResize = () => {
+        const r = this.container.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        if (r.width > 0 && r.height > 0) {
+            this.worker.postMessage({
+                type: 'resize',
+                data: {
+                    width: r.width * dpr,
+                    height: r.height * dpr
+                }
+            });
+            if (this.overlayCanvas) {
+                this.overlayCanvas.width = r.width * dpr;
+                this.overlayCanvas.height = r.height * dpr;
+                this.drawTicks();
+            }
+        }
+    };
 
     private getElId(base: string): string {
         return `${base}-${this.panelId}${this.viewTypeSuffix}`;
@@ -259,46 +273,30 @@ export class Telemetry3DViewport {
         this.debugOverlay.innerHTML = 'STL Status: Initializing...';
         this.container.appendChild(this.debugOverlay);
 
-        const triggerResize = () => {
-            const r = this.container.getBoundingClientRect();
-            const dpr = window.devicePixelRatio || 1;
-            if (r.width > 0 && r.height > 0) {
-                this.worker.postMessage({
-                    type: 'resize',
-                    data: {
-                        width: r.width * dpr,
-                        height: r.height * dpr
-                    }
-                });
-                if (this.overlayCanvas) {
-                    this.overlayCanvas.width = r.width * dpr;
-                    this.overlayCanvas.height = r.height * dpr;
-                    this.drawTicks();
-                }
-            }
-        };
-
-        new ResizeObserver(entries => {
+        this.resizeObserver = new ResizeObserver(entries => {
             for (let entry of entries) {
                 const dpr = window.devicePixelRatio || 1;
-                this.worker.postMessage({
-                    type: 'resize',
-                    data: {
-                        width: entry.contentRect.width * dpr,
-                        height: entry.contentRect.height * dpr
+                if (entry.contentRect.width > 0 && entry.contentRect.height > 0) {
+                    this.worker.postMessage({
+                        type: 'resize',
+                        data: {
+                            width: entry.contentRect.width * dpr,
+                            height: entry.contentRect.height * dpr
+                        }
+                    });
+                    if (this.overlayCanvas) {
+                        this.overlayCanvas.width = entry.contentRect.width * dpr;
+                        this.overlayCanvas.height = entry.contentRect.height * dpr;
+                        this.drawTicks();
                     }
-                });
-                if (this.overlayCanvas) {
-                    this.overlayCanvas.width = entry.contentRect.width * dpr;
-                    this.overlayCanvas.height = entry.contentRect.height * dpr;
-                    this.drawTicks();
                 }
             }
-        }).observe(this.container);
+        });
+        this.resizeObserver.observe(this.container);
 
-        requestAnimationFrame(triggerResize);
-        setTimeout(triggerResize, 100);
-        setTimeout(triggerResize, 500);
+        requestAnimationFrame(this.triggerResize);
+        setTimeout(this.triggerResize, 100);
+        setTimeout(this.triggerResize, 500);
 
         const net = (window as any).networkManager;
         if (net) {
@@ -772,7 +770,6 @@ export class Telemetry3DViewport {
         this.buildGaugeRow(staticTbody);
         this.buildMPMParticlesTableRow(staticTbody);
         this.buildLightingTableRow(staticTbody);
-        this.buildColorbarTableRow(staticTbody);
     }
 
     private activePopover: HTMLElement | null = null;
@@ -1911,14 +1908,19 @@ export class Telemetry3DViewport {
         tdQty.appendChild(qtyPill);
         tr.appendChild(tdQty);
 
-        // Col 7: COLOR (Colormap Popover Button)
+        // Col 7: COLOR (Colormap Popover Button + Colorbar Toggle)
         const tdCmap = document.createElement('td');
         tdCmap.style.padding = '3px 4px';
+        const cmapWrap = document.createElement('div');
+        cmapWrap.style.display = 'flex';
+        cmapWrap.style.gap = '3px';
+        cmapWrap.style.alignItems = 'center';
+
         const cmapPill = document.createElement('button');
         cmapPill.textContent = `${initCmap.charAt(0).toUpperCase() + initCmap.slice(1)} ▾`;
         this.applyButtonStyle(cmapPill);
         cmapPill.style.fontSize = '8.5px';
-        cmapPill.style.width = '100%';
+        cmapPill.style.flex = '1';
         cmapPill.style.padding = '2px 0';
         cmapPill.onclick = (e) => {
             e.stopPropagation();
@@ -1929,7 +1931,21 @@ export class Telemetry3DViewport {
                 this.setQuantityColormap(activeQty, newC);
             });
         };
-        tdCmap.appendChild(cmapPill);
+        cmapWrap.appendChild(cmapPill);
+
+        const initCbShow = vpNode ? (vpNode.parameters.obstacles_show_colorbar === true) : false;
+        const cbToggleBtn = this.createToggleBtn('viewport-obs-cb-btn', '🎨', initCbShow, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { obstacles_show_colorbar: v });
+                this.syncControls(true);
+            }
+        });
+        cbToggleBtn.style.width = '20px';
+        cbToggleBtn.title = 'Toggle Color Bar for Obstacles in 3D Viewport';
+        cmapWrap.appendChild(cbToggleBtn);
+
+        tdCmap.appendChild(cmapWrap);
         tr.appendChild(tdCmap);
 
         // Col 8: SCL (Auto, Log & Range Popover)
@@ -2113,14 +2129,19 @@ export class Telemetry3DViewport {
         tdQty.appendChild(qtyPill);
         tr.appendChild(tdQty);
 
-        // Col 7: COLOR (Colormap Popover Button)
+        // Col 7: COLOR (Colormap Popover Button + Colorbar Toggle)
         const tdCmap = document.createElement('td');
         tdCmap.style.padding = '3px 4px';
+        const cmapWrap = document.createElement('div');
+        cmapWrap.style.display = 'flex';
+        cmapWrap.style.gap = '3px';
+        cmapWrap.style.alignItems = 'center';
+
         const cmapPill = document.createElement('button');
         cmapPill.textContent = `${initCmap.charAt(0).toUpperCase() + initCmap.slice(1)} ▾`;
         this.applyButtonStyle(cmapPill);
         cmapPill.style.fontSize = '8.5px';
-        cmapPill.style.width = '100%';
+        cmapPill.style.flex = '1';
         cmapPill.style.padding = '2px 0';
         cmapPill.onclick = (e) => {
             e.stopPropagation();
@@ -2131,7 +2152,21 @@ export class Telemetry3DViewport {
                 this.setQuantityColormap(activeQty, newC);
             });
         };
-        tdCmap.appendChild(cmapPill);
+        cmapWrap.appendChild(cmapPill);
+
+        const initCbShow = vpNode ? (vpNode.parameters.stl_show_colorbar === true) : false;
+        const cbToggleBtn = this.createToggleBtn('viewport-stl-cb-btn', '🎨', initCbShow, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { stl_show_colorbar: v });
+                this.syncControls(true);
+            }
+        });
+        cbToggleBtn.style.width = '20px';
+        cbToggleBtn.title = 'Toggle Color Bar for STL Mesh in 3D Viewport';
+        cmapWrap.appendChild(cbToggleBtn);
+
+        tdCmap.appendChild(cmapWrap);
         tr.appendChild(tdCmap);
 
         // Col 8: SCL (Auto, Log & Range Popover)
@@ -2717,133 +2752,123 @@ export class Telemetry3DViewport {
         this.syncControls(true);
     }
 
-    private buildColorbarOverlay() {
-        if (this.colorbarOverlay) return;
+    private buildColorbarContainer() {
+        if (this.colorbarContainer) return;
+        const container = document.createElement('div');
+        container.id = this.getElId('viewport-colorbars-container');
+        container.className = 'viewport-colorbars-container';
+        container.style.position = 'absolute';
+        container.style.top = '40px';
+        container.style.left = '12px';
+        container.style.zIndex = '1000';
+        container.style.display = 'flex';
+        container.style.flexDirection = 'row';
+        container.style.flexWrap = 'wrap';
+        container.style.gap = '12px';
+        container.style.pointerEvents = 'none';
+        this.colorbarContainer = container;
+        this.container.appendChild(container);
+    }
 
-        const overlay = document.createElement('div');
-        overlay.id = this.getElId('viewport-colorbar-overlay');
-        overlay.className = 'viewport-colorbar-container';
-        overlay.style.position = 'absolute';
-        overlay.style.zIndex = '1000';
-        overlay.style.background = 'rgba(16, 16, 19, 0.85)';
-        overlay.style.backdropFilter = 'blur(12px)';
-        overlay.style.border = '1px solid rgba(255, 255, 255, 0.15)';
-        overlay.style.borderRadius = '8px';
-        overlay.style.padding = '8px 10px';
-        overlay.style.display = 'flex';
-        overlay.style.flexDirection = 'column';
-        overlay.style.gap = '6px';
-        overlay.style.color = '#e0e0e0';
-        overlay.style.fontFamily = 'system-ui, -apple-system, sans-serif';
-        overlay.style.fontSize = '10px';
-        overlay.style.boxShadow = '0 8px 24px rgba(0, 0, 0, 0.6)';
-        overlay.style.userSelect = 'none';
-        overlay.style.boxSizing = 'border-box';
-        overlay.style.pointerEvents = 'auto';
+    private createColorbarCard(spec: {
+        id: string;
+        title: string;
+        quantity: string;
+        colormap: string;
+        autoScale: boolean;
+        logScale: boolean;
+        minVal: number;
+        maxVal: number;
+        onToggleOff: () => void;
+        onToggleAuto: () => void;
+        onToggleLog: () => void;
+        onSelectColormap: (anchorEl: HTMLElement) => void;
+        onSetMinMax: (min: number, max: number) => void;
+        onSelectQuantity: (anchorEl: HTMLElement) => void;
+    }): HTMLElement {
+        const card = document.createElement('div');
+        card.id = this.getElId(`viewport-colorbar-card-${spec.id}`);
+        card.className = 'viewport-colorbar-card';
+        card.style.background = 'rgba(16, 16, 19, 0.85)';
+        card.style.backdropFilter = 'blur(12px)';
+        card.style.border = '1px solid rgba(255, 255, 255, 0.15)';
+        card.style.borderRadius = '8px';
+        card.style.padding = '8px 10px';
+        card.style.display = 'flex';
+        card.style.flexDirection = 'column';
+        card.style.gap = '6px';
+        card.style.color = '#e0e0e0';
+        card.style.fontFamily = 'system-ui, -apple-system, sans-serif';
+        card.style.fontSize = '10px';
+        card.style.boxShadow = '0 8px 24px rgba(0, 0, 0, 0.6)';
+        card.style.userSelect = 'none';
+        card.style.boxSizing = 'border-box';
+        card.style.pointerEvents = 'auto';
 
-        // 1. Header (Title + Badges)
+        // 1. Header (Title + Badges + Close)
         const header = document.createElement('div');
         header.style.display = 'flex';
         header.style.alignItems = 'center';
         header.style.justifyContent = 'space-between';
         header.style.gap = '6px';
 
-        // Quantity Title Button
         const titleSpan = document.createElement('span');
         titleSpan.style.fontWeight = 'bold';
         titleSpan.style.color = '#00adff';
         titleSpan.style.cursor = 'pointer';
-        titleSpan.style.fontSize = '10px';
+        titleSpan.style.fontSize = '9.5px';
         titleSpan.style.letterSpacing = '0.5px';
         titleSpan.style.textTransform = 'uppercase';
+        titleSpan.textContent = spec.title;
         titleSpan.title = 'Click to change quantity';
         titleSpan.onclick = (e) => {
             e.stopPropagation();
-            const vpNode = this.getViewportNode();
-            if (!vpNode) return;
-            const source = vpNode.parameters.colorbar_source || 'slice';
-            let curQty = 'pressure';
-            if (source === 'slice') {
-                curQty = getFocusedQuantityAndRange(vpNode).quantity;
-            } else if (source === 'mpm') {
-                curQty = vpNode.parameters.mpmParticleQuantity || 'vonMises';
-            } else if (source === 'obstacles') {
-                curQty = vpNode.parameters.obstacles_quantity || 'pressure';
-            } else if (source === 'stl') {
-                curQty = vpNode.parameters.stl_quantity || 'pressure';
-            }
-            const context = source === 'mpm' ? 'mpm' : 'cfd';
-            this.showQuantityPopover(titleSpan, curQty, context, (newQ) => {
-                const updates: any = {};
-                if (source === 'slice') {
-                    const activeIdx = vpNode.parameters.focusedSliceIndex ?? 0;
-                    if (vpNode.parameters.slices && vpNode.parameters.slices[activeIdx]) {
-                        const newSlices = [...vpNode.parameters.slices];
-                        newSlices[activeIdx] = { ...newSlices[activeIdx], quantities: [newQ] };
-                        updates.slices = newSlices;
-                    }
-                } else if (source === 'mpm') {
-                    updates.mpmParticleQuantity = newQ;
-                    updates.mpmParticleAutoScale = true;
-                } else if (source === 'obstacles') {
-                    updates.obstacles_quantity = newQ;
-                } else if (source === 'stl') {
-                    updates.stl_quantity = newQ;
-                }
-                this.stateManager.updateNodeParametersInPlace(vpNode.id, updates);
-                this.syncControls(true);
-            });
+            spec.onSelectQuantity(titleSpan);
         };
-        this.colorbarTitleEl = titleSpan;
         header.appendChild(titleSpan);
 
-        // Badges container
         const badgesWrap = document.createElement('div');
         badgesWrap.style.display = 'flex';
         badgesWrap.style.alignItems = 'center';
         badgesWrap.style.gap = '4px';
 
-        // Auto / Manual Badge
+        // Auto badge
         const autoBadge = document.createElement('span');
         autoBadge.style.fontSize = '8px';
         autoBadge.style.fontWeight = 'bold';
         autoBadge.style.padding = '1px 4px';
         autoBadge.style.borderRadius = '3px';
         autoBadge.style.cursor = 'pointer';
+        autoBadge.textContent = spec.autoScale ? 'AUTO' : 'MANUAL';
+        autoBadge.style.background = spec.autoScale ? 'rgba(0, 173, 255, 0.2)' : 'rgba(255, 170, 0, 0.2)';
+        autoBadge.style.color = spec.autoScale ? '#00adff' : '#ffaa00';
+        autoBadge.style.border = spec.autoScale ? '1px solid rgba(0, 173, 255, 0.4)' : '1px solid rgba(255, 170, 0, 0.4)';
         autoBadge.title = 'Click to toggle Auto / Manual scale';
         autoBadge.onclick = (e) => {
             e.stopPropagation();
-            const vpNode = this.getViewportNode();
-            if (vpNode) {
-                const curAuto = vpNode.parameters.auto_scale !== false;
-                this.stateManager.updateNodeParametersInPlace(vpNode.id, { auto_scale: !curAuto });
-                this.syncControls(true);
-            }
+            spec.onToggleAuto();
         };
-        this.colorbarAutoBadge = autoBadge;
         badgesWrap.appendChild(autoBadge);
 
-        // Lin / Log Badge
+        // Log badge
         const logBadge = document.createElement('span');
         logBadge.style.fontSize = '8px';
         logBadge.style.fontWeight = 'bold';
         logBadge.style.padding = '1px 4px';
         logBadge.style.borderRadius = '3px';
         logBadge.style.cursor = 'pointer';
+        logBadge.textContent = spec.logScale ? 'LOG' : 'LIN';
+        logBadge.style.background = spec.logScale ? 'rgba(170, 0, 255, 0.2)' : 'rgba(255, 255, 255, 0.1)';
+        logBadge.style.color = spec.logScale ? '#d080ff' : '#aaa';
+        logBadge.style.border = spec.logScale ? '1px solid rgba(170, 0, 255, 0.4)' : '1px solid rgba(255, 255, 255, 0.2)';
         logBadge.title = 'Click to toggle Linear / Logarithmic scale';
         logBadge.onclick = (e) => {
             e.stopPropagation();
-            const vpNode = this.getViewportNode();
-            if (vpNode) {
-                const curLog = vpNode.parameters.log_scale === true;
-                this.stateManager.updateNodeParametersInPlace(vpNode.id, { log_scale: !curLog });
-                this.syncControls(true);
-            }
+            spec.onToggleLog();
         };
-        this.colorbarLogBadge = logBadge;
         badgesWrap.appendChild(logBadge);
 
-        // Colormap Badge
+        // Colormap badge
         const cmapBadge = document.createElement('span');
         cmapBadge.style.fontSize = '8px';
         cmapBadge.style.fontWeight = 'bold';
@@ -2853,22 +2878,31 @@ export class Telemetry3DViewport {
         cmapBadge.style.background = 'rgba(255, 255, 255, 0.1)';
         cmapBadge.style.border = '1px solid rgba(255, 255, 255, 0.2)';
         cmapBadge.style.color = '#fff';
+        cmapBadge.textContent = spec.colormap.toUpperCase();
         cmapBadge.title = 'Click to change colormap';
         cmapBadge.onclick = (e) => {
             e.stopPropagation();
-            const vpNode = this.getViewportNode();
-            const { quantity: curQty } = getFocusedQuantityAndRange(vpNode || {});
-            const qCmaps = vpNode?.parameters.quantity_colormaps || {};
-            const curCmap = qCmaps[curQty] || vpNode?.parameters.stl_colormap || 'plasma';
-            this.showColormapPopover(cmapBadge, curCmap, (newCmap) => {
-                this.setQuantityColormap(curQty, newCmap);
-            });
+            spec.onSelectColormap(cmapBadge);
         };
-        this.colorbarCmapBadge = cmapBadge;
         badgesWrap.appendChild(cmapBadge);
 
+        // Close button
+        const closeBtn = document.createElement('span');
+        closeBtn.style.fontSize = '10px';
+        closeBtn.style.fontWeight = 'bold';
+        closeBtn.style.color = '#ff6666';
+        closeBtn.style.cursor = 'pointer';
+        closeBtn.style.marginLeft = '4px';
+        closeBtn.textContent = '✕';
+        closeBtn.title = 'Close color bar';
+        closeBtn.onclick = (e) => {
+            e.stopPropagation();
+            spec.onToggleOff();
+        };
+        badgesWrap.appendChild(closeBtn);
+
         header.appendChild(badgesWrap);
-        overlay.appendChild(header);
+        card.appendChild(header);
 
         // 2. Main Body (Gradient Bar + Ticks)
         const bodyRow = document.createElement('div');
@@ -2876,26 +2910,20 @@ export class Telemetry3DViewport {
         bodyRow.style.alignItems = 'stretch';
         bodyRow.style.gap = '8px';
 
-        // Gradient Bar
+        // Gradient Bar using exact colormap defined for this object!
         const gradBar = document.createElement('div');
         gradBar.style.width = '16px';
-        gradBar.style.height = '180px';
+        gradBar.style.height = '160px';
         gradBar.style.borderRadius = '4px';
         gradBar.style.border = '1px solid rgba(255, 255, 255, 0.25)';
         gradBar.style.boxShadow = 'inset 0 0 4px rgba(0,0,0,0.5)';
         gradBar.style.cursor = 'pointer';
-        gradBar.title = 'Click to select colormap';
+        gradBar.style.background = this.getColormapCssGradient(spec.colormap, 'to top');
+        gradBar.title = `Color Scheme: ${spec.colormap.toUpperCase()} (Click to change)`;
         gradBar.onclick = (e) => {
             e.stopPropagation();
-            const vpNode = this.getViewportNode();
-            const { quantity: curQty } = getFocusedQuantityAndRange(vpNode || {});
-            const qCmaps = vpNode?.parameters.quantity_colormaps || {};
-            const curCmap = qCmaps[curQty] || vpNode?.parameters.stl_colormap || 'plasma';
-            this.showColormapPopover(gradBar, curCmap, (newCmap) => {
-                this.setQuantityColormap(curQty, newCmap);
-            });
+            spec.onSelectColormap(gradBar);
         };
-        this.colorbarGradientEl = gradBar;
         bodyRow.appendChild(gradBar);
 
         // Ticks Container
@@ -2903,141 +2931,19 @@ export class Telemetry3DViewport {
         ticksCol.style.display = 'flex';
         ticksCol.style.flexDirection = 'column';
         ticksCol.style.justifyContent = 'space-between';
-        ticksCol.style.height = '180px';
+        ticksCol.style.height = '160px';
         ticksCol.style.fontSize = '9px';
         ticksCol.style.fontFamily = 'monospace';
         ticksCol.style.color = '#ccc';
         ticksCol.style.minWidth = '80px';
-        this.colorbarTicksContainer = ticksCol;
-
-        bodyRow.appendChild(ticksCol);
-        overlay.appendChild(bodyRow);
-
-        this.colorbarOverlay = overlay;
-        this.container.appendChild(overlay);
-        const vpNode = this.getViewportNode();
-        this.syncColorbarOverlay(vpNode || { parameters: {} });
-    }
-
-    private syncColorbarOverlay(vpNode: any) {
-        if (!this.colorbarOverlay) {
-            this.buildColorbarOverlay();
-            return;
-        }
-        if (!vpNode) vpNode = { parameters: {} };
-        const params = vpNode.parameters || {};
-
-        const showCb = params.show_color_bar !== false;
-        if (!showCb) {
-            this.colorbarOverlay.style.display = 'none';
-            return;
-        }
-
-        this.colorbarOverlay.style.display = 'flex';
-
-        // Position
-        const pos = params.color_bar_position || 'left-center';
-        if (pos === 'left-top') {
-            this.colorbarOverlay.style.top = '40px';
-            this.colorbarOverlay.style.left = '12px';
-            this.colorbarOverlay.style.bottom = 'auto';
-            this.colorbarOverlay.style.right = 'auto';
-            this.colorbarOverlay.style.transform = 'none';
-        } else if (pos === 'left-bottom') {
-            this.colorbarOverlay.style.bottom = '20px';
-            this.colorbarOverlay.style.left = '12px';
-            this.colorbarOverlay.style.top = 'auto';
-            this.colorbarOverlay.style.right = 'auto';
-            this.colorbarOverlay.style.transform = 'none';
-        } else if (pos === 'right-bottom') {
-            this.colorbarOverlay.style.bottom = '20px';
-            this.colorbarOverlay.style.right = this.isOpen ? '480px' : '12px';
-            this.colorbarOverlay.style.top = 'auto';
-            this.colorbarOverlay.style.left = 'auto';
-            this.colorbarOverlay.style.transform = 'none';
-        } else {
-            // left-center (default): fixed top offset (80px) to prevent translateY clipping when container bounds update
-            this.colorbarOverlay.style.top = '80px';
-            this.colorbarOverlay.style.left = '12px';
-            this.colorbarOverlay.style.bottom = 'auto';
-            this.colorbarOverlay.style.right = 'auto';
-            this.colorbarOverlay.style.transform = 'none';
-        }
-
-        const { quantity: focusedQty } = getFocusedQuantityAndRange(vpNode);
-        const qCmaps = params.quantity_colormaps || {};
-        const activeCmap = qCmaps[focusedQty] || params.stl_colormap || params.obstacles_colormap || 'plasma';
-
-        // Update Title & Units
-        const unitMap: Record<string, string> = {
-            pressure: 'Pa',
-            density: 'kg/m³',
-            velocity: 'm/s',
-            energy: 'J/kg',
-            species1: 'frac',
-            species2: 'frac',
-            species3: 'frac',
-            peak_overpressure: 'Pa',
-            peak_impulse: 'Pa·s'
-        };
-        const unitStr = unitMap[focusedQty] ? ` (${unitMap[focusedQty]})` : '';
-        if (this.colorbarTitleEl) {
-            this.colorbarTitleEl.textContent = `${focusedQty.toUpperCase()}${unitStr}`;
-        }
-
-        // Update Gradient
-        if (this.colorbarGradientEl) {
-            this.colorbarGradientEl.style.background = this.getColormapCssGradient(activeCmap, 'to top');
-        }
-
-        // Update Badges
-        const isAuto = params.auto_scale !== false;
-        if (this.colorbarAutoBadge) {
-            this.colorbarAutoBadge.textContent = isAuto ? 'AUTO' : 'MANUAL';
-            this.colorbarAutoBadge.style.background = isAuto ? 'rgba(0, 173, 255, 0.2)' : 'rgba(255, 170, 0, 0.2)';
-            this.colorbarAutoBadge.style.color = isAuto ? '#00adff' : '#ffaa00';
-            this.colorbarAutoBadge.style.border = isAuto ? '1px solid rgba(0, 173, 255, 0.4)' : '1px solid rgba(255, 170, 0, 0.4)';
-        }
-
-        const isLog = params.log_scale === true;
-        if (this.colorbarLogBadge) {
-            this.colorbarLogBadge.textContent = isLog ? 'LOG' : 'LIN';
-            this.colorbarLogBadge.style.background = isLog ? 'rgba(170, 0, 255, 0.2)' : 'rgba(255, 255, 255, 0.1)';
-            this.colorbarLogBadge.style.color = isLog ? '#d080ff' : '#aaa';
-            this.colorbarLogBadge.style.border = isLog ? '1px solid rgba(170, 0, 255, 0.4)' : '1px solid rgba(255, 255, 255, 0.2)';
-        }
-
-        if (this.colorbarCmapBadge) {
-            this.colorbarCmapBadge.textContent = activeCmap.toUpperCase();
-        }
-
-        // Determine Min/Max range
-        let minVal = 0.0;
-        let maxVal = 1.0;
-        if (isAuto && this.latestEmpiricalRange) {
-            minVal = this.latestEmpiricalRange.min;
-            maxVal = this.latestEmpiricalRange.max;
-        } else if (params.min_val !== undefined && params.max_val !== undefined) {
-            minVal = Number(params.min_val);
-            maxVal = Number(params.max_val);
-        } else {
-            const ranges = params.quantity_ranges || {};
-            const r = ranges[focusedQty] || DEFAULT_QUANTITY_RANGES[focusedQty] || [0.0, 1.0];
-            minVal = r[0];
-            maxVal = r[1];
-        }
-
-        // Calculate 5 ticks (100%, 75%, 50%, 25%, 0%)
-        const ticksContainer = this.colorbarTicksContainer;
-        if (!ticksContainer) return;
-
-        ticksContainer.innerHTML = '';
 
         const numTicks = 5;
+        const minVal = spec.minVal;
+        const maxVal = spec.maxVal;
         for (let i = 0; i < numTicks; i++) {
-            const t = (numTicks - 1 - i) / (numTicks - 1); // 1.0 down to 0.0
+            const t = (numTicks - 1 - i) / (numTicks - 1);
             let val = minVal + t * (maxVal - minVal);
-            if (isLog && minVal > 0 && maxVal > minVal) {
+            if (spec.logScale && minVal > 0 && maxVal > minVal) {
                 val = minVal * Math.pow(maxVal / minVal, t);
             }
 
@@ -3053,7 +2959,6 @@ export class Telemetry3DViewport {
             tickRow.appendChild(tickLine);
 
             if (i === 0 || i === numTicks - 1) {
-                // Top (Max) or Bottom (Min): Editable numerical input!
                 const isMax = (i === 0);
                 const input = document.createElement('input');
                 input.type = 'number';
@@ -3073,355 +2978,292 @@ export class Telemetry3DViewport {
                 this.bindEditingEvents(input, () => {
                     const newV = Number(input.value);
                     if (!isNaN(newV)) {
-                        const updates: any = { auto_scale: false };
-                        if (isMax) updates.max_val = newV;
-                        else updates.min_val = newV;
-                        this.stateManager.updateNodeParametersInPlace(vpNode.id, updates);
-                        this.syncControls(true);
+                        if (isMax) spec.onSetMinMax(minVal, newV);
+                        else spec.onSetMinMax(newV, maxVal);
                     }
                 });
                 tickRow.appendChild(input);
             } else {
-                // Intermediate tick label
                 const label = document.createElement('span');
                 label.textContent = this.formatRangeValue(val);
                 label.style.color = '#aaa';
                 tickRow.appendChild(label);
             }
 
-            ticksContainer.appendChild(tickRow);
+            ticksCol.appendChild(tickRow);
         }
+
+        bodyRow.appendChild(ticksCol);
+        card.appendChild(bodyRow);
+        return card;
     }
 
-    private buildColorbarTableRow(parent: HTMLElement) {
-        const vpNode = this.getViewportNode();
-        const cbSource = vpNode ? (vpNode.parameters.colorbar_source || 'slice') : 'slice';
-        const initShow = vpNode ? (vpNode.parameters.show_color_bar !== false) : true;
+    private syncColorbarOverlay(vpNode: any) {
+        if (!this.colorbarContainer) {
+            this.buildColorbarContainer();
+        }
+        if (!this.colorbarContainer) return;
+        if (!vpNode) vpNode = { parameters: {} };
+        const params = vpNode.parameters || {};
 
-        let initQty = 'pressure';
-        let initCmap = 'plasma';
-        let initAuto = true;
-        let initLog = false;
-        let minV = 0.0;
-        let maxV = 1.0;
+        const unitMap: Record<string, string> = {
+            pressure: 'Pa',
+            density: 'kg/m³',
+            velocity: 'm/s',
+            energy: 'J/kg',
+            species1: 'frac',
+            species2: 'frac',
+            species3: 'frac',
+            peak_overpressure: 'Pa',
+            peak_impulse: 'Pa·s',
+            vonMises: 'Pa',
+            plastic_strain: 'frac',
+            damage: 'frac'
+        };
 
-        if (cbSource === 'slice') {
-            const { quantity } = getFocusedQuantityAndRange(vpNode || {});
-            initQty = quantity;
-            initCmap = vpNode ? (vpNode.parameters.quantity_colormaps?.[initQty] || 'plasma') : 'plasma';
-            initAuto = vpNode ? (vpNode.parameters.auto_scale !== false) : true;
-            initLog = vpNode ? (vpNode.parameters.log_scale === true) : false;
-            minV = vpNode ? (vpNode.parameters.min_val ?? 0.0) : 0.0;
-            maxV = vpNode ? (vpNode.parameters.max_val ?? 1.0) : 1.0;
-        } else if (cbSource === 'mpm') {
-            initQty = vpNode ? (vpNode.parameters.mpmParticleQuantity || 'vonMises') : 'vonMises';
-            initCmap = vpNode ? (vpNode.parameters.mpmParticleColormap || 'plasma') : 'plasma';
-            initAuto = vpNode ? (vpNode.parameters.mpmParticleAutoScale !== false) : true;
-            initLog = vpNode ? (vpNode.parameters.mpmParticleLogScale === true) : false;
-            minV = vpNode ? (vpNode.parameters.mpmParticleMinVal ?? 0.0) : 0.0;
-            maxV = vpNode ? (vpNode.parameters.mpmParticleMaxVal ?? 500.0e6) : 500.0e6;
-        } else if (cbSource === 'obstacles') {
-            initQty = vpNode ? (vpNode.parameters.obstacles_quantity || 'pressure') : 'pressure';
-            initCmap = vpNode ? (vpNode.parameters.obstacles_colormap || 'plasma') : 'plasma';
-            initAuto = vpNode ? (vpNode.parameters.obstacles_auto_scale !== false) : true;
-            initLog = vpNode ? (vpNode.parameters.obstacles_log_scale === true) : false;
-            minV = vpNode ? (vpNode.parameters.obstacles_min_val ?? 101325.0) : 101325.0;
-            maxV = vpNode ? (vpNode.parameters.obstacles_max_val ?? 1013250.0) : 1013250.0;
-        } else if (cbSource === 'stl') {
-            initQty = vpNode ? (vpNode.parameters.stl_quantity || 'pressure') : 'pressure';
-            initCmap = vpNode ? (vpNode.parameters.stl_colormap || 'plasma') : 'plasma';
-            initAuto = vpNode ? (vpNode.parameters.stl_auto_scale !== false) : true;
-            initLog = vpNode ? (vpNode.parameters.stl_log_scale === true) : false;
-            minV = vpNode ? (vpNode.parameters.stl_min_val ?? 101325.0) : 101325.0;
-            maxV = vpNode ? (vpNode.parameters.stl_max_val ?? 1013250.0) : 1013250.0;
+        const specs: Array<{
+            id: string;
+            title: string;
+            quantity: string;
+            colormap: string;
+            autoScale: boolean;
+            logScale: boolean;
+            minVal: number;
+            maxVal: number;
+            onToggleOff: () => void;
+            onToggleAuto: () => void;
+            onToggleLog: () => void;
+            onSelectColormap: (anchorEl: HTMLElement) => void;
+            onSetMinMax: (min: number, max: number) => void;
+            onSelectQuantity: (anchorEl: HTMLElement) => void;
+        }> = [];
+
+        // 1. Slices
+        const slices = params.slices || [];
+        slices.forEach((slice: any, idx: number) => {
+            if (slice.show_colorbar === true && slice.enabled !== false) {
+                const qty = slice.quantities?.[0] || 'pressure';
+                const colormap = params.quantity_colormaps?.[qty] || slice.colormap || 'plasma';
+                const autoScale = slice.auto_scale !== false;
+                const logScale = slice.log_scale === true;
+                let minVal = slice.min_val ?? 101325.0;
+                let maxVal = slice.max_val ?? 1013250.0;
+                if (autoScale && this.latestEmpiricalRange) {
+                    minVal = this.latestEmpiricalRange.min;
+                    maxVal = this.latestEmpiricalRange.max;
+                }
+                const unitStr = unitMap[qty] ? ` (${unitMap[qty]})` : '';
+                specs.push({
+                    id: `slice-${idx}`,
+                    title: `SLICE #${idx + 1}: ${qty.toUpperCase()}${unitStr}`,
+                    quantity: qty,
+                    colormap: colormap,
+                    autoScale: autoScale,
+                    logScale: logScale,
+                    minVal: minVal,
+                    maxVal: maxVal,
+                    onToggleOff: () => {
+                        this.updateSliceProperty(idx, { show_colorbar: false });
+                    },
+                    onToggleAuto: () => {
+                        this.updateSliceProperty(idx, { auto_scale: !autoScale });
+                    },
+                    onToggleLog: () => {
+                        this.updateSliceProperty(idx, { log_scale: !logScale });
+                    },
+                    onSelectColormap: (anchorEl: HTMLElement) => {
+                        this.showColormapPopover(anchorEl, colormap, (newCmap) => {
+                            this.setQuantityColormap(qty, newCmap);
+                        });
+                    },
+                    onSetMinMax: (minN: number, maxN: number) => {
+                        this.updateSliceProperty(idx, { auto_scale: false, min_val: minN, max_val: maxN });
+                    },
+                    onSelectQuantity: (anchorEl: HTMLElement) => {
+                        this.showQuantityPopover(anchorEl, qty, 'cfd', (newQ) => {
+                            const qCmaps = params.quantity_colormaps || {};
+                            const newCmap = qCmaps[newQ] || 'plasma';
+                            this.updateSliceProperty(idx, { quantities: [newQ], colormap: newCmap });
+                        });
+                    }
+                });
+            }
+        });
+
+        // 2. Obstacles
+        if (params.obstacles_show_colorbar === true && params.show_obstacles !== false) {
+            const qty = params.obstacles_quantity || 'pressure';
+            const colormap = params.quantity_colormaps?.[qty] || params.obstacles_colormap || 'plasma';
+            const autoScale = params.obstacles_auto_scale !== false;
+            const logScale = params.obstacles_log_scale === true;
+            let minVal = params.obstacles_min_val ?? 101325.0;
+            let maxVal = params.obstacles_max_val ?? 1013250.0;
+            if (autoScale && this.latestEmpiricalRange) {
+                minVal = this.latestEmpiricalRange.min;
+                maxVal = this.latestEmpiricalRange.max;
+            }
+            const unitStr = unitMap[qty] ? ` (${unitMap[qty]})` : '';
+            specs.push({
+                id: 'obstacles',
+                title: `OBSTACLES: ${qty.toUpperCase()}${unitStr}`,
+                quantity: qty,
+                colormap: colormap,
+                autoScale: autoScale,
+                logScale: logScale,
+                minVal: minVal,
+                maxVal: maxVal,
+                onToggleOff: () => {
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { obstacles_show_colorbar: false });
+                    this.syncControls(true);
+                },
+                onToggleAuto: () => {
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { obstacles_auto_scale: !autoScale });
+                    this.syncControls(true);
+                },
+                onToggleLog: () => {
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { obstacles_log_scale: !logScale });
+                    this.syncControls(true);
+                },
+                onSelectColormap: (anchorEl: HTMLElement) => {
+                    this.showColormapPopover(anchorEl, colormap, (newCmap) => {
+                        this.setQuantityColormap(qty, newCmap);
+                    });
+                },
+                onSetMinMax: (minN: number, maxN: number) => {
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { obstacles_auto_scale: false, obstacles_min_val: minN, obstacles_max_val: maxN });
+                    this.syncControls(true);
+                },
+                onSelectQuantity: (anchorEl: HTMLElement) => {
+                    this.showQuantityPopover(anchorEl, qty, 'cfd', (newQ) => {
+                        const qCmaps = params.quantity_colormaps || {};
+                        const newCmap = qCmaps[newQ] || 'plasma';
+                        this.stateManager.updateNodeParametersInPlace(vpNode.id, { obstacles_quantity: newQ, obstacles_colormap: newCmap });
+                        this.syncControls(true);
+                    });
+                }
+            });
         }
 
-        const tr = document.createElement('tr');
-        tr.style.borderBottom = '1px solid rgba(255,255,255,0.06)';
-
-        // Col 1: Vis Checkbox (Enable Color Bar)
-        const tdVis = document.createElement('td');
-        tdVis.style.padding = '3px 2px';
-        tdVis.style.textAlign = 'center';
-        const showCb = document.createElement('input');
-        showCb.type = 'checkbox';
-        showCb.id = this.getElId('viewport-colorbar-cb');
-        showCb.checked = initShow;
-        showCb.onchange = () => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { show_color_bar: showCb.checked });
-                this.syncControls(true);
+        // 3. STL Mesh
+        if (params.stl_show_colorbar === true && params.show_stl !== false) {
+            const qty = params.stl_quantity || 'pressure';
+            const colormap = params.quantity_colormaps?.[qty] || params.stl_colormap || 'plasma';
+            const autoScale = params.stl_auto_scale !== false;
+            const logScale = params.stl_log_scale === true;
+            let minVal = params.stl_min_val ?? 101325.0;
+            let maxVal = params.stl_max_val ?? 1013250.0;
+            if (autoScale && this.latestEmpiricalRange) {
+                minVal = this.latestEmpiricalRange.min;
+                maxVal = this.latestEmpiricalRange.max;
             }
-        };
-        this.bindEditingEvents(showCb);
-        tdVis.appendChild(showCb);
-        tr.appendChild(tdVis);
-
-        // Col 2: Layer Title
-        const tdLayer = document.createElement('td');
-        tdLayer.style.padding = '3px 4px';
-        tdLayer.innerHTML = '🎨 <b>Color Bar</b>';
-        tr.appendChild(tdLayer);
-
-        // Col 3: SOL (Source selection popover pill)
-        const tdSource = document.createElement('td');
-        tdSource.style.padding = '3px 2px';
-        tdSource.style.textAlign = 'center';
-        const sourcePill = document.createElement('div');
-        sourcePill.id = this.getElId('viewport-colorbar-source-pill');
-        sourcePill.style.fontSize = '8px';
-        sourcePill.style.padding = '2px 4px';
-        sourcePill.style.borderRadius = '3px';
-        sourcePill.style.cursor = 'pointer';
-        sourcePill.style.background = 'rgba(255,255,255,0.08)';
-        sourcePill.style.border = '1px solid rgba(255,255,255,0.15)';
-        sourcePill.style.color = '#00adff';
-        sourcePill.style.fontWeight = 'bold';
-        sourcePill.textContent = cbSource.toUpperCase();
-        sourcePill.onclick = (e) => {
-            e.stopPropagation();
-            this.showPopover(sourcePill, (popover) => {
-                const sources = [
-                    { id: 'slice', label: 'CFD Slice' },
-                    { id: 'mpm', label: 'MPM Particles' },
-                    { id: 'obstacles', label: 'Obstacles' },
-                    { id: 'stl', label: 'STL Results' }
-                ];
-                sources.forEach(s => {
-                    const item = document.createElement('div');
-                    item.textContent = s.label;
-                    item.style.padding = '3px 6px';
-                    item.style.borderRadius = '3px';
-                    item.style.cursor = 'pointer';
-                    item.onclick = (ev) => {
-                        ev.stopPropagation();
-                        const vp = this.getViewportNode();
-                        if (vp) {
-                            this.stateManager.updateNodeParametersInPlace(vp.id, { colorbar_source: s.id });
-                            this.syncControls(true);
-                            this.closePopover();
-                        }
-                    };
-                    popover.appendChild(item);
-                });
-            });
-        };
-        tdSource.appendChild(sourcePill);
-        tr.appendChild(tdSource);
-
-        // Col 4: LINES (Auto-Scale Pill)
-        const tdAuto = document.createElement('td');
-        tdAuto.style.padding = '3px 2px';
-        tdAuto.style.textAlign = 'center';
-        tdAuto.appendChild(this.createToggleBtn('viewport-colorbar-autoscale-btn', 'AUTO', initAuto, (v) => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                const updates: any = {};
-                if (cbSource === 'slice') updates.auto_scale = v;
-                else if (cbSource === 'mpm') updates.mpmParticleAutoScale = v;
-                else if (cbSource === 'obstacles') updates.obstacles_auto_scale = v;
-                else if (cbSource === 'stl') updates.stl_auto_scale = v;
-                this.stateManager.updateNodeParametersInPlace(vp.id, updates);
-                this.syncControls(true);
-            }
-        }));
-        tr.appendChild(tdAuto);
-
-        // Col 5: RES (Log Scale Pill)
-        const tdLog = document.createElement('td');
-        tdLog.style.padding = '3px 2px';
-        tdLog.style.textAlign = 'center';
-        tdLog.appendChild(this.createToggleBtn('viewport-colorbar-logscale-btn', 'LOG', initLog, (v) => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                const updates: any = {};
-                if (cbSource === 'slice') updates.log_scale = v;
-                else if (cbSource === 'mpm') updates.mpmParticleLogScale = v;
-                else if (cbSource === 'obstacles') updates.obstacles_log_scale = v;
-                else if (cbSource === 'stl') updates.stl_log_scale = v;
-                this.stateManager.updateNodeParametersInPlace(vp.id, updates);
-                this.syncControls(true);
-            }
-        }));
-        tr.appendChild(tdLog);
-
-        // Col 6: QTY (Quantity Selector Pill)
-        const tdQty = document.createElement('td');
-        tdQty.style.padding = '3px 4px';
-        const qtyPill = document.createElement('div');
-        qtyPill.id = this.getElId('viewport-colorbar-qty-pill');
-        qtyPill.style.fontSize = '9px';
-        qtyPill.style.padding = '2px 4px';
-        qtyPill.style.borderRadius = '3px';
-        qtyPill.style.cursor = 'pointer';
-        qtyPill.style.background = 'rgba(0, 173, 255, 0.12)';
-        qtyPill.style.border = '1px solid rgba(0, 173, 255, 0.3)';
-        qtyPill.style.color = '#00adff';
-        qtyPill.style.fontWeight = '500';
-        qtyPill.textContent = initQty;
-        qtyPill.onclick = (e) => {
-            e.stopPropagation();
-            const cbContext = cbSource === 'mpm' ? 'mpm' : 'cfd';
-            this.showQuantityPopover(qtyPill, initQty, cbContext, (newQ) => {
-                const vp = this.getViewportNode();
-                if (vp) {
-                    const updates: any = {};
-                    if (cbSource === 'slice') {
-                        const activeIdx = vp.parameters.focusedSliceIndex ?? 0;
-                        if (vp.parameters.slices && vp.parameters.slices[activeIdx]) {
-                            const newSlices = [...vp.parameters.slices];
-                            newSlices[activeIdx] = { ...newSlices[activeIdx], quantities: [newQ] };
-                            updates.slices = newSlices;
-                        }
-                    } else if (cbSource === 'mpm') {
-                        updates.mpmParticleQuantity = newQ;
-                    } else if (cbSource === 'obstacles') {
-                        updates.obstacles_quantity = newQ;
-                    } else if (cbSource === 'stl') {
-                        updates.stl_quantity = newQ;
-                    }
-                    this.stateManager.updateNodeParametersInPlace(vp.id, updates);
+            const unitStr = unitMap[qty] ? ` (${unitMap[qty]})` : '';
+            specs.push({
+                id: 'stl',
+                title: `STL MESH: ${qty.toUpperCase()}${unitStr}`,
+                quantity: qty,
+                colormap: colormap,
+                autoScale: autoScale,
+                logScale: logScale,
+                minVal: minVal,
+                maxVal: maxVal,
+                onToggleOff: () => {
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_show_colorbar: false });
                     this.syncControls(true);
-                }
-            });
-        };
-        tdQty.appendChild(qtyPill);
-        tr.appendChild(tdQty);
-
-        // Col 7: COLOR (Colormap Selector Pill)
-        const tdCmap = document.createElement('td');
-        tdCmap.style.padding = '3px 4px';
-        const cmapPill = document.createElement('div');
-        cmapPill.id = this.getElId('viewport-colorbar-cmap-pill');
-        cmapPill.style.fontSize = '9px';
-        cmapPill.style.padding = '2px 4px';
-        cmapPill.style.borderRadius = '3px';
-        cmapPill.style.cursor = 'pointer';
-        cmapPill.style.background = 'rgba(255, 255, 255, 0.08)';
-        cmapPill.style.border = '1px solid rgba(255, 255, 255, 0.15)';
-        cmapPill.style.color = '#e0e0e0';
-        cmapPill.textContent = initCmap;
-        cmapPill.onclick = (e) => {
-            e.stopPropagation();
-            this.showColormapPopover(cmapPill, initCmap, (newC) => {
-                const vp = this.getViewportNode();
-                if (vp) {
-                    const updates: any = {};
-                    if (cbSource === 'slice') {
-                        const activeIdx = vp.parameters.focusedSliceIndex ?? 0;
-                        if (vp.parameters.slices && vp.parameters.slices[activeIdx]) {
-                            const newSlices = [...vp.parameters.slices];
-                            newSlices[activeIdx] = { ...newSlices[activeIdx], colormap: newC };
-                            updates.slices = newSlices;
-                        }
-                        const qCmaps = { ...(vp.parameters.quantity_colormaps || {}) };
-                        const { quantity } = getFocusedQuantityAndRange(vp);
-                        qCmaps[quantity] = newC;
-                        updates.quantity_colormaps = qCmaps;
-                    } else if (cbSource === 'mpm') {
-                        updates.mpmParticleColormap = newC;
-                    } else if (cbSource === 'obstacles') {
-                        updates.obstacles_colormap = newC;
-                    } else if (cbSource === 'stl') {
-                        updates.stl_colormap = newC;
-                    }
-                    this.stateManager.updateNodeParametersInPlace(vp.id, updates);
+                },
+                onToggleAuto: () => {
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_auto_scale: !autoScale });
                     this.syncControls(true);
+                },
+                onToggleLog: () => {
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_log_scale: !logScale });
+                    this.syncControls(true);
+                },
+                onSelectColormap: (anchorEl: HTMLElement) => {
+                    this.showColormapPopover(anchorEl, colormap, (newCmap) => {
+                        this.setQuantityColormap(qty, newCmap);
+                    });
+                },
+                onSetMinMax: (minN: number, maxN: number) => {
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_auto_scale: false, stl_min_val: minN, stl_max_val: maxN });
+                    this.syncControls(true);
+                },
+                onSelectQuantity: (anchorEl: HTMLElement) => {
+                    this.showQuantityPopover(anchorEl, qty, 'cfd', (newQ) => {
+                        const qCmaps = params.quantity_colormaps || {};
+                        const newCmap = qCmaps[newQ] || 'plasma';
+                        this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_quantity: newQ, stl_colormap: newCmap });
+                        this.syncControls(true);
+                    });
                 }
             });
-        };
-        tdCmap.appendChild(cmapPill);
-        tr.appendChild(tdCmap);
+        }
 
-        // Col 8: SCL (Range limits popover button)
-        const tdScl = document.createElement('td');
-        tdScl.style.padding = '3px 2px';
-        tdScl.style.textAlign = 'center';
-        const rangeBtn = document.createElement('button');
-        rangeBtn.innerHTML = '⚙️ Range';
-        this.applyButtonStyle(rangeBtn);
-        rangeBtn.style.fontSize = '8px';
-        rangeBtn.onclick = (e) => {
-            e.stopPropagation();
-            this.showPopover(rangeBtn, (popover) => {
-                const vp = this.getViewportNode();
-                const initPosVal = vp?.parameters.color_bar_position || 'left-center';
-
-                popover.innerHTML = `
-                    <div style="font-weight:bold; color:#00adff; margin-bottom:6px;">Color Bar Range & Position</div>
-                    <div style="display:flex; flex-direction:column; gap:6px;">
-                        <label style="display:flex; justify-content:space-between; align-items:center; gap:6px;">
-                            <span>Min:</span>
-                            <input type="number" step="any" id="popover-min-inp" value="${minV}" style="width:70px; background:#111; color:#fff; border:1px solid #444; border-radius:3px; padding:2px;">
-                        </label>
-                        <label style="display:flex; justify-content:space-between; align-items:center; gap:6px;">
-                            <span>Max:</span>
-                            <input type="number" step="any" id="popover-max-inp" value="${maxV}" style="width:70px; background:#111; color:#fff; border:1px solid #444; border-radius:3px; padding:2px;">
-                        </label>
-                        <label style="display:flex; justify-content:space-between; align-items:center; gap:6px;">
-                            <span>Position:</span>
-                            <select id="popover-pos-sel" style="width:76px; background:#111; color:#fff; border:1px solid #444; border-radius:3px; padding:2px; font-size:8.5px;">
-                                <option value="left-center" ${initPosVal === 'left-center' ? 'selected' : ''}>Left Center</option>
-                                <option value="left-top" ${initPosVal === 'left-top' ? 'selected' : ''}>Left Top</option>
-                                <option value="left-bottom" ${initPosVal === 'left-bottom' ? 'selected' : ''}>Left Bottom</option>
-                                <option value="right-bottom" ${initPosVal === 'right-bottom' ? 'selected' : ''}>Right Bottom</option>
-                            </select>
-                        </label>
-                        <button id="popover-apply-range" style="margin-top:4px; background:#007acc; color:#fff; border:none; border-radius:3px; padding:4px; cursor:pointer; font-weight:bold;">Apply Settings</button>
-                    </div>
-                `;
-                const applyBtn = popover.querySelector('#popover-apply-range') as HTMLButtonElement;
-                if (applyBtn) {
-                    applyBtn.onclick = () => {
-                        const minInp = popover.querySelector('#popover-min-inp') as HTMLInputElement;
-                        const maxInp = popover.querySelector('#popover-max-inp') as HTMLInputElement;
-                        const posSel = popover.querySelector('#popover-pos-sel') as HTMLSelectElement;
-                        if (minInp && maxInp && posSel && vp) {
-                            const minN = Number(minInp.value);
-                            const maxN = Number(maxInp.value);
-                            const posVal = posSel.value;
-                            const updates: any = { color_bar_position: posVal };
-                            if (cbSource === 'slice') {
-                                updates.auto_scale = false;
-                                updates.min_val = minN;
-                                updates.max_val = maxN;
-                            } else if (cbSource === 'mpm') {
-                                updates.mpmParticleAutoScale = false;
-                                updates.mpmParticleMinVal = minN;
-                                updates.mpmParticleMaxVal = maxN;
-                            } else if (cbSource === 'obstacles') {
-                                updates.obstacles_auto_scale = false;
-                                updates.obstacles_min_val = minN;
-                                updates.obstacles_max_val = maxN;
-                            } else if (cbSource === 'stl') {
-                                updates.stl_auto_scale = false;
-                                updates.stl_min_val = minN;
-                                updates.stl_max_val = maxN;
-                            }
-                            this.stateManager.updateNodeParametersInPlace(vp.id, updates);
-                            this.syncControls(true);
-                            this.closePopover();
-                        }
-                    };
+        // 4. MPM Particles
+        if (params.mpmParticleShowColorbar === true && params.showMPMParticles !== false) {
+            const qty = params.mpmParticleQuantity || 'vonMises';
+            const colormap = params.mpmParticleColormap || 'plasma';
+            const autoScale = params.mpmParticleAutoScale !== false;
+            const logScale = params.mpmParticleLogScale === true;
+            let minVal = params.mpmParticleMinVal ?? 0.0;
+            let maxVal = params.mpmParticleMaxVal ?? 500000000.0;
+            if (autoScale && this.latestEmpiricalRange) {
+                minVal = this.latestEmpiricalRange.min;
+                maxVal = this.latestEmpiricalRange.max;
+            }
+            const unitStr = unitMap[qty] ? ` (${unitMap[qty]})` : '';
+            specs.push({
+                id: 'mpm',
+                title: `MPM: ${qty.toUpperCase()}${unitStr}`,
+                quantity: qty,
+                colormap: colormap,
+                autoScale: autoScale,
+                logScale: logScale,
+                minVal: minVal,
+                maxVal: maxVal,
+                onToggleOff: () => {
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmParticleShowColorbar: false });
+                    this.syncControls(true);
+                },
+                onToggleAuto: () => {
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmParticleAutoScale: !autoScale });
+                    this.syncControls(true);
+                },
+                onToggleLog: () => {
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmParticleLogScale: !logScale });
+                    this.syncControls(true);
+                },
+                onSelectColormap: (anchorEl: HTMLElement) => {
+                    this.showColormapPopover(anchorEl, colormap, (newCmap) => {
+                        this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmParticleColormap: newCmap });
+                        this.worker.postMessage({ type: 'setConfig', data: { mpmParticleColormap: newCmap } });
+                        this.syncControls(true);
+                    });
+                },
+                onSetMinMax: (minN: number, maxN: number) => {
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmParticleAutoScale: false, mpmParticleMinVal: minN, mpmParticleMaxVal: maxN });
+                    this.syncControls(true);
+                },
+                onSelectQuantity: (anchorEl: HTMLElement) => {
+                    this.showQuantityPopover(anchorEl, qty, 'mpm', (newQ) => {
+                        this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmParticleQuantity: newQ, mpmParticleAutoScale: true });
+                        this.worker.postMessage({ type: 'setConfig', data: { mpmParticleQuantity: newQ, mpmParticleAutoScale: true } });
+                        this.syncControls(true);
+                    });
                 }
             });
-        };
-        tdScl.appendChild(rangeBtn);
-        tr.appendChild(tdScl);
+        }
 
-        // Col 9, 10: OPACITY and TRASH
-        const tdOpac = document.createElement('td');
-        tdOpac.innerHTML = '<span style="color:#555;">—</span>';
-        tdOpac.style.textAlign = 'center';
-        tr.appendChild(tdOpac);
+        if (specs.length === 0) {
+            this.colorbarContainer.style.display = 'none';
+            this.colorbarContainer.innerHTML = '';
+            return;
+        }
 
-        const tdTrash = document.createElement('td');
-        tdTrash.innerHTML = '<span style="color:#555;">—</span>';
-        tdTrash.style.textAlign = 'center';
-        tr.appendChild(tdTrash);
-
-        parent.appendChild(tr);
+        this.colorbarContainer.style.display = 'flex';
+        this.colorbarContainer.innerHTML = '';
+        specs.forEach(spec => {
+            this.colorbarContainer!.appendChild(this.createColorbarCard(spec));
+        });
     }
 
     private buildMPMParticlesTableRow(parent: HTMLElement) {
@@ -3557,9 +3399,14 @@ export class Telemetry3DViewport {
         tdQty.appendChild(qtyPill);
         tr.appendChild(tdQty);
 
-        // Col 7: COLOR (Colormap Selector Pill)
+        // Col 7: COLOR (Colormap Selector Pill + Colorbar Toggle)
         const tdCmap = document.createElement('td');
         tdCmap.style.padding = '3px 4px';
+        const cmapWrap = document.createElement('div');
+        cmapWrap.style.display = 'flex';
+        cmapWrap.style.gap = '3px';
+        cmapWrap.style.alignItems = 'center';
+
         const cmapPill = document.createElement('div');
         cmapPill.id = this.getElId('viewport-mpm-cmap-pill');
         cmapPill.style.fontSize = '9px';
@@ -3569,6 +3416,7 @@ export class Telemetry3DViewport {
         cmapPill.style.background = 'rgba(255, 255, 255, 0.08)';
         cmapPill.style.border = '1px solid rgba(255, 255, 255, 0.15)';
         cmapPill.style.color = '#e0e0e0';
+        cmapPill.style.flex = '1';
         cmapPill.textContent = initCmap;
         cmapPill.onclick = (e) => {
             e.stopPropagation();
@@ -3578,10 +3426,25 @@ export class Telemetry3DViewport {
                     this.stateManager.updateNodeParametersInPlace(vp.id, { mpmParticleColormap: newC });
                     this.worker.postMessage({ type: 'setConfig', data: { mpmParticleColormap: newC } });
                     cmapPill.textContent = newC;
+                    this.syncControls(true);
                 }
             });
         };
-        tdCmap.appendChild(cmapPill);
+        cmapWrap.appendChild(cmapPill);
+
+        const initCbShow = vpNode ? (vpNode.parameters.mpmParticleShowColorbar === true) : false;
+        const cbToggleBtn = this.createToggleBtn('viewport-mpm-cb-btn', '🎨', initCbShow, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { mpmParticleShowColorbar: v });
+                this.syncControls(true);
+            }
+        });
+        cbToggleBtn.style.width = '20px';
+        cbToggleBtn.title = 'Toggle Color Bar for MPM Particles in 3D Viewport';
+        cmapWrap.appendChild(cbToggleBtn);
+
+        tdCmap.appendChild(cmapWrap);
         tr.appendChild(tdCmap);
 
         // Col 8: SCL / Range Limit
@@ -3903,23 +3766,20 @@ export class Telemetry3DViewport {
         }
         if (!targetModel) return null;
 
-        const connToViewport = targetModel.connections.find((c: any) => c.toNode === vpNode.id);
-        if (connToViewport) {
-            const solverNode = targetModel.nodes.find((n: any) => n.id === connToViewport.fromNode);
-            if (solverNode) {
-                const connToSolver = targetModel.connections.find((c: any) => c.toNode === solverNode.id && c.toPort === 'mesh');
-                if (connToSolver) {
-                    let currNode = targetModel.nodes.find((n: any) => n.id === connToSolver.fromNode);
-                    let depth = 0;
-                    while (currNode && currNode.type === 'RefinementMesh3D' && depth < 20) {
-                        const parentConn = targetModel.connections.find((c: any) => c.toNode === currNode.id && c.toPort === 'parent_mesh');
-                        if (!parentConn) break;
-                        currNode = targetModel.nodes.find((n: any) => n.id === parentConn.fromNode);
-                        depth++;
-                    }
-                    if (currNode && currNode.type === 'DomainMesh3D') {
-                        return currNode;
-                    }
+        const solverNode = this.getSolverNode();
+        if (solverNode && solverNode.type === 'CFDSolver3D') {
+            const connToSolver = targetModel.connections.find((c: any) => c.toNode === solverNode.id && c.toPort === 'mesh');
+            if (connToSolver) {
+                let currNode = targetModel.nodes.find((n: any) => n.id === connToSolver.fromNode);
+                let depth = 0;
+                while (currNode && currNode.type === 'RefinementMesh3D' && depth < 20) {
+                    const parentConn = targetModel.connections.find((c: any) => c.toNode === currNode.id && c.toPort === 'parent_mesh');
+                    if (!parentConn) break;
+                    currNode = targetModel.nodes.find((n: any) => n.id === parentConn.fromNode);
+                    depth++;
+                }
+                if (currNode && currNode.type === 'DomainMesh3D') {
+                    return currNode;
                 }
             }
         }
@@ -3948,7 +3808,18 @@ export class Telemetry3DViewport {
 
         const connToViewport = targetModel.connections.find((c: any) => c.toNode === vpNode.id);
         if (connToViewport) {
-            return targetModel.nodes.find((n: any) => n.id === connToViewport.fromNode) || null;
+            const connectedNode = targetModel.nodes.find((n: any) => n.id === connToViewport.fromNode);
+            if (connectedNode) {
+                if (connectedNode.type === 'FSICoupler3D') {
+                    const cfdConn = targetModel.connections.find((c: any) => c.toNode === connectedNode.id && c.toPort === 'cfd');
+                    if (cfdConn) {
+                        const cfdSolver = targetModel.nodes.find((n: any) => n.id === cfdConn.fromNode);
+                        if (cfdSolver) return cfdSolver;
+                    }
+                } else {
+                    return connectedNode;
+                }
+            }
         }
         return targetModel.nodes.find((n: any) => n.type === 'CFDSolver3D') || null;
     }
@@ -4508,7 +4379,6 @@ export class Telemetry3DViewport {
                 this.worker.postMessage({ type: 'setSTLGeometry', data: { vertices: null } });
             }
         }
-
         // Re-render static component rows below slices so popovers and buttons update instantly
         if (this.staticListContainer && !this.activePopover) {
             this.staticListContainer.innerHTML = '';
@@ -4519,7 +4389,6 @@ export class Telemetry3DViewport {
             this.buildGaugeRow(this.staticListContainer);
             this.buildMPMParticlesTableRow(this.staticListContainer);
             this.buildLightingTableRow(this.staticListContainer);
-            this.buildColorbarTableRow(this.staticListContainer);
         }
 
         // 2. Sync Slices Row list
@@ -4654,16 +4523,21 @@ export class Telemetry3DViewport {
                     tdQty.appendChild(qtyPill);
                     tr.appendChild(tdQty);
 
-                    // Col 7: COLOR (Colormap Popover Button)
+                    // Col 7: COLOR (Colormap Popover Button + Colorbar Toggle)
                     const tdCmap = document.createElement('td');
                     tdCmap.style.padding = '3px 4px';
+                    const cmapWrap = document.createElement('div');
+                    cmapWrap.style.display = 'flex';
+                    cmapWrap.style.gap = '3px';
+                    cmapWrap.style.alignItems = 'center';
+
                     const curCmap = vpNode.parameters.quantity_colormaps?.[qty] || slice.colormap || 'plasma';
                     const cmapPill = document.createElement('button');
                     cmapPill.className = 'slice-cmap-pill';
                     cmapPill.textContent = `${curCmap.charAt(0).toUpperCase() + curCmap.slice(1)} ▾`;
                     this.applyButtonStyle(cmapPill);
                     cmapPill.style.fontSize = '8.5px';
-                    cmapPill.style.width = '100%';
+                    cmapPill.style.flex = '1';
                     cmapPill.style.padding = '2px 0';
                     cmapPill.onclick = (e) => {
                         e.stopPropagation();
@@ -4671,7 +4545,17 @@ export class Telemetry3DViewport {
                             this.setQuantityColormap(qty, newC);
                         });
                     };
-                    tdCmap.appendChild(cmapPill);
+                    cmapWrap.appendChild(cmapPill);
+
+                    const initSliceCbShow = slice.show_colorbar === true;
+                    const sliceCbBtn = this.createToggleBtn(`slice-cb-btn-${idx}`, '🎨', initSliceCbShow, (v) => {
+                        this.updateSliceProperty(idx, { show_colorbar: v });
+                    });
+                    sliceCbBtn.style.width = '20px';
+                    sliceCbBtn.title = `Toggle Color Bar for Slice #${idx + 1} in 3D Viewport`;
+                    cmapWrap.appendChild(sliceCbBtn);
+
+                    tdCmap.appendChild(cmapWrap);
                     tr.appendChild(tdCmap);
 
                     // Col 8: SCL (Auto, Log & Range Popover)
@@ -4950,6 +4834,7 @@ export class Telemetry3DViewport {
             const allModels = this.stateManager.getAllModels();
             const matchedModel = allModels.find(m => m.id === this.viewportNodeId);
             if (matchedModel) return matchedModel.id;
+            return this.viewportNodeId;
         }
         const ws = this.stateManager.getActiveWorkspace();
         return ws ? ws.activeModelId : null;
@@ -4980,6 +4865,9 @@ export class Telemetry3DViewport {
     }
 
     public attachTo(container: HTMLElement) {
+        if (this.resizeObserver) {
+            this.resizeObserver.disconnect();
+        }
         this.container = container;
         this.container.style.position = 'relative';
         this.container.style.overflow = 'hidden';
@@ -4999,8 +4887,8 @@ export class Telemetry3DViewport {
         if (this.debugOverlay && this.debugOverlay.parentNode !== this.container) {
             this.container.appendChild(this.debugOverlay);
         }
-        if (this.colorbarOverlay && this.colorbarOverlay.parentNode !== this.container) {
-            this.container.appendChild(this.colorbarOverlay);
+        if (this.colorbarContainer && this.colorbarContainer.parentNode !== this.container) {
+            this.container.appendChild(this.colorbarContainer);
         }
 
         const vpNode = this.getViewportNode();
@@ -5008,6 +4896,15 @@ export class Telemetry3DViewport {
 
         // Force geometry reload
         this.currentGeometryHash = '';
+
+        if (this.resizeObserver) {
+            this.resizeObserver.observe(this.container);
+        }
+
+        this.triggerResize();
+        requestAnimationFrame(this.triggerResize);
+        setTimeout(this.triggerResize, 100);
+        setTimeout(this.triggerResize, 500);
     }
 
     private buildSTLControls(parent: HTMLElement) {
@@ -5772,6 +5669,10 @@ export class Telemetry3DViewport {
     }
 
     public destroy() {
+        if (this.resizeObserver) {
+            this.resizeObserver.disconnect();
+            this.resizeObserver = null;
+        }
         this.stateManager.offStateChange(this.stateListener);
         const net = (window as any).networkManager;
         if (net) {
@@ -5783,7 +5684,7 @@ export class Telemetry3DViewport {
         if (this.overlayCanvas) this.overlayCanvas.remove();
         if (this.controlsOverlay) this.controlsOverlay.remove();
         if (this.floatOpenBtn) this.floatOpenBtn.remove();
-        if (this.colorbarOverlay) this.colorbarOverlay.remove();
+        if (this.colorbarContainer) this.colorbarContainer.remove();
     }
 
     private syncProjectionButtons() {

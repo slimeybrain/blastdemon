@@ -1208,7 +1208,7 @@ export class GraphRenderer {
                 items: [
                     { label: 'MPM Domain 2D', type: 'MPMDomain2D' },
                     { label: 'MPM Object 2D (Primitive)', type: 'MPMObject2D' },
-                    { label: 'MPM Steel Material (Hypoelastic)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Steel (Hypoelastic)' } },
+                    { label: 'MPM Material (Hypoelastic)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Hypoelastic' } },
                     { label: 'MPM Johnson-Cook Material (EOS)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Johnson-Cook + Mie-Grüneisen' } },
                     { label: 'FSI Coupler 2D', type: 'FSICoupler2D' }
                 ]
@@ -1221,7 +1221,7 @@ export class GraphRenderer {
                     { label: 'MPM Object 3D (Sphere)', type: 'MPMObject3D', defaultParams: { shape_type: 'Sphere' } },
                     { label: 'MPM Object 3D (Cylinder)', type: 'MPMObject3D', defaultParams: { shape_type: 'Cylinder' } },
                     { label: 'MPM Object 3D (STL Geometry)', type: 'MPMObject3D', defaultParams: { shape_type: 'STL' } },
-                    { label: 'MPM Steel Material (Hypoelastic)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Steel (Hypoelastic)' } },
+                    { label: 'MPM Material (Hypoelastic)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Hypoelastic' } },
                     { label: 'MPM Johnson-Cook Material (EOS)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Johnson-Cook + Mie-Grüneisen' } },
                     { label: 'FSI Coupler 3D', type: 'FSICoupler3D' }
                 ]
@@ -1662,6 +1662,8 @@ export class GraphRenderer {
                 },
                 auto_scale: true,
                 log_scale: false,
+                show_color_bar: false,
+                color_bar_position: 'left-center',
                 colorbar_source: 'slice',
                 show_grid: true,
                 grid_meshlines: true,
@@ -1671,7 +1673,7 @@ export class GraphRenderer {
                 min_val: 101325.0,
                 max_val: 101325.0 * 10.0,
                 slices: [
-                    { axis: 'xy', offset: 0.5, stride: 1, quantities: ['pressure'], opacity: 1.0, colormap: 'plasma', auto_scale: true, log_scale: false, interpolate: true, min_val: 101325.0, max_val: 101325.0 * 10.0, enabled: true }
+                    { axis: 'xy', offset: 0.5, stride: 1, quantities: ['pressure'], opacity: 1.0, colormap: 'plasma', auto_scale: true, log_scale: false, interpolate: true, min_val: 101325.0, max_val: 101325.0 * 10.0, enabled: true, show_colorbar: false }
                 ],
                 lightingEnabled: true,
                 aoEnabled: true,
@@ -1683,6 +1685,7 @@ export class GraphRenderer {
                 mpmParticleColormap: 'plasma',
                 mpmParticleAutoScale: true,
                 mpmParticleLogScale: false,
+                mpmParticleShowColorbar: false,
                 mpmParticleOpacity: 1.0,
                 mpmParticleMinVal: 0.0,
                 mpmParticleMaxVal: 500000000.0,
@@ -1710,6 +1713,9 @@ export class GraphRenderer {
                 stl_show_results: true,
                 stl_quantity: 'pressure',
                 stl_sampling_mode: 'nearest',
+                stl_auto_scale: true,
+                stl_log_scale: false,
+                stl_show_colorbar: false,
                 refresh_rate: 2.0,
                 show_gauges: true,
                 gauge_size: 1.0,
@@ -1725,6 +1731,7 @@ export class GraphRenderer {
                 obstacles_quantity: 'pressure',
                 obstacles_auto_scale: true,
                 obstacles_log_scale: false,
+                obstacles_show_colorbar: false,
                 obstacles_interpolate: true,
                 obstacles_min_val: 101325.0,
                 obstacles_max_val: 101325.0 * 10.0
@@ -1771,7 +1778,7 @@ export class GraphRenderer {
                 angular_vel_x: 0.0, angular_vel_y: 0.0, angular_vel_z: 0.0
             };
             case 'MPMMaterialSteel': return {
-                material_model: 'Steel (Hypoelastic)',
+                material_model: 'Hypoelastic',
                 preset: 'Structural Steel (A36)',
                 density: 7850.0,
                 youngs_modulus: 200.0e9,
@@ -1927,7 +1934,7 @@ export class GraphRenderer {
             case 'MPMObject3D':      return 'MPM OBJ3D';
             case 'MPMMaterialSteel': 
                 if (typeof nodeOrType !== 'string' && nodeOrType.parameters?.material_model === 'Johnson-Cook + Mie-Grüneisen') return 'MPM J-C';
-                return 'MPM STEEL';
+                return 'MPM HYPO';
             case 'FSICoupler2D':     return 'FSI 2D';
             case 'FSICoupler3D':     return 'FSI 3D';
             default: return ((typeof nodeOrType === 'string' ? nodeOrType : nodeOrType.type) as string).toUpperCase();
@@ -1971,7 +1978,7 @@ export class GraphRenderer {
                 if (typeof nodeOrType !== 'string' && nodeOrType.parameters?.material_model === 'Johnson-Cook + Mie-Grüneisen') {
                     return 'MPM Material (Johnson-Cook)';
                 }
-                return 'MPM Material (Steel)';
+                return 'MPM Material (Hypoelastic)';
             case 'FSICoupler2D':     return 'FSI Coupler 2D';
             case 'FSICoupler3D':     return 'FSI Coupler 3D';
             default: return type;
@@ -2277,7 +2284,13 @@ export class GraphRenderer {
 
                 // Update validation status classes and tooltips
                 const valStatus = valResults.nodeStatus[node.id] || { state: 'valid', messages: [] };
-                nodeEl.classList.toggle('has-error', valStatus.state === 'error');
+                const modelStatus = modelId ? this.stateManager.getModelStatus(modelId) : 'UNINITIALIZED';
+                const isSolverNode = node.type === 'CFDSolver' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver3D' || 
+                                     node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D' || 
+                                     node.type === 'FSICoupler2D' || node.type === 'FSICoupler3D';
+                const hasRuntimeError = isSolverNode && modelStatus === 'ERROR';
+
+                nodeEl.classList.toggle('has-error', valStatus.state === 'error' || hasRuntimeError);
                 nodeEl.classList.toggle('has-warning', valStatus.state === 'warning');
 
                 const header = nodeEl.querySelector('.node-header') as HTMLElement;
@@ -2296,9 +2309,19 @@ export class GraphRenderer {
                         warningBadge.textContent = '⚠️';
                         header.appendChild(warningBadge);
                     }
-                    const tooltipText = valStatus.messages.join('\n');
+                    
+                    let tooltipText = valStatus.messages.join('\n');
+                    if (hasRuntimeError) {
+                        tooltipText = (tooltipText ? tooltipText + '\n' : '') + 'Runtime Error: Solver process terminated or returned error log. See Telemetry log for details.';
+                    }
                     errorBadge.setAttribute('title', tooltipText);
                     warningBadge.setAttribute('title', tooltipText);
+                    
+                    if (hasRuntimeError && valStatus.state !== 'error') {
+                        errorBadge.style.display = 'inline-block';
+                    } else if (valStatus.state !== 'error') {
+                        errorBadge.style.display = 'none';
+                    }
                 }
 
 
@@ -4058,6 +4081,12 @@ export class GraphRenderer {
                     needsRebuild = true;
                 }
             }
+            if (node.type === 'MPMMaterialSteel') {
+                const matModel = node.parameters['material_model'] || 'Hypoelastic';
+                if (form.dataset.renderedMaterialModel !== matModel.toString()) {
+                    needsRebuild = true;
+                }
+            }
             if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
                 const velScheme = node.parameters['velocity_scheme'] || 'APIC';
                 if (form.dataset.renderedVelocityScheme !== velScheme.toString()) {
@@ -4076,8 +4105,9 @@ export class GraphRenderer {
                     if (el) {
                         if (el.classList.contains('custom-select-container')) {
                             const trigger = el.querySelector('.custom-select-trigger');
+                            const optElSelected = el.querySelector(`.custom-select-option[data-value="${value.toString()}"]`) as HTMLElement;
                             if (trigger) {
-                                trigger.textContent = value.toString();
+                                trigger.textContent = optElSelected ? optElSelected.textContent : value.toString();
                             }
                             el.querySelectorAll('.custom-select-option').forEach(opt => {
                                 const optEl = opt as HTMLElement;
@@ -4152,6 +4182,10 @@ export class GraphRenderer {
             form.dataset.renderedComposition = comp.toString();
             form.dataset.renderedMaterialType = matType.toString();
         }
+        if (node.type === 'MPMMaterialSteel') {
+            const matModel = node.parameters['material_model'] || 'Hypoelastic';
+            form.dataset.renderedMaterialModel = matModel.toString();
+        }
         if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
             const velScheme = node.parameters['velocity_scheme'] || 'APIC';
             form.dataset.renderedVelocityScheme = velScheme.toString();
@@ -4164,7 +4198,7 @@ export class GraphRenderer {
         let paramKeys = Object.keys(node.parameters);
         if (node.type === 'MPMMaterialSteel') {
             if (!node.parameters['material_model']) {
-                node.parameters['material_model'] = 'Steel (Hypoelastic)';
+                node.parameters['material_model'] = 'Hypoelastic';
             }
             if (!node.parameters['preset']) {
                 node.parameters['preset'] = 'Structural Steel (A36)';
@@ -4264,9 +4298,9 @@ export class GraphRenderer {
                 if ((key === 'z_min_bc' || key === 'z_max_bc') && (dim === '1D' || dim === '2D')) continue;
             }
             if (node.type === 'MPMMaterialSteel') {
-                const matModel = node.parameters['material_model'] || 'Steel (Hypoelastic)';
+                const matModel = node.parameters['material_model'] || 'Hypoelastic';
                 const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
-                if (matModel === 'Steel (Hypoelastic)' && jcKeys.includes(key)) continue;
+                if (matModel === 'Hypoelastic' && jcKeys.includes(key)) continue;
             }
             if (node.type === 'Material') {
 
@@ -4324,7 +4358,7 @@ export class GraphRenderer {
 
             const dropdowns: Record<string, string[]> = {
                 'preset': [...MPM_MATERIAL_PRESET_NAMES],
-                'material_model': ['Steel (Hypoelastic)', 'Johnson-Cook + Mie-Grüneisen'],
+                'material_model': ['Hypoelastic', 'Johnson-Cook + Mie-Grüneisen'],
                 'mesh_type': ['regular', 'amr'],
 
                 'dimension': ['1D', '2D', '3D'],
@@ -4451,16 +4485,18 @@ export class GraphRenderer {
                             'nr', 'nz', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
                             'charge_r', 'charge_z', 'charge_radius', 'charge_height',
                             'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
-                            'ideal_gamma', 'ideal_rho_0', 'ideal_e_0',
+                            'ideal_gamma', 'ideal_rho_0', 'ideal_e_0', 'high_rho', 'ambient_rho', 'ambient_p',
                             // 3D CFD keys
                             'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
                             'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
                             'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
+                            'origin_x', 'origin_y', 'origin_z', 'dim_x', 'dim_y', 'dim_z', 'scale_factor',
                             'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
                             'refinement_opacity', 'charge_opacity',
                             'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio', 'amr_tile_size',
                             'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'refinement_level',
                             'submesh_x', 'submesh_y', 'submesh_z', 'submesh_size_x', 'submesh_size_y', 'submesh_size_z',
+                            'offset', 'stride',
                             // MPM keys
                             'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'radius', 'inner_radius',
                             'scale_x', 'scale_y', 'scale_z',

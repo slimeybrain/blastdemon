@@ -54,8 +54,13 @@
 ## 10. Architectural Consistency (ABSOLUTE RULE)
 - AI assistants MUST always inspect and cross-reference [ARCHITECTURE.md](file:///home/chris/antigrav/blastdemon/ARCHITECTURE.md) to ensure consistency with existing framework layouts before suggesting or making changes.
 
+## 11. Strict Parameter Override Prevention and Device Fail-Safe (ABSOLUTE RULE)
+- **No Floating Parameter Overrides:** When serializing parameters from multiple canvas nodes (such as in FSI coupling), ensure that solver configurations (like `device` and `precision` on `CFDSolver3D`) are never silently overridden or overwritten by default parameters from other nodes (like `MPMDomain3D`). Re-apply solver parameters at the end of the serialization pipeline to guarantee precedence.
+- **Fail Loudly on Device/Allocation Errors:** The solver must validate all CUDA memory allocations. Never allow execution to proceed with failed allocations or null pointers (which triggers asynchronous GPU crashes). Always throw explicit exceptions, log errors, and exit solver processes to trigger clean Broker process cleanup and UI error states.
 
-
-
-
-
+## 12. Unified Parameter Pipeline & Mandatory State Invalidation (ABSOLUTE RULE)
+- **Mandatory Model Status Invalidation:** Whenever ANY physical solver parameter (mesh dimensions, cell size, charge mass/geometry, material EOS, detonator location, boundary conditions, CFL, flux scheme, solver order, hardware device/precision, MPM properties, FSI coupling parameters) is modified on a node in the UI—whether via standard form submit, in-place edit, slider input, or inline canvas control—the state manager MUST explicitly invalidate the model state by setting `setModelStatus(modelId, 'UNINITIALIZED')`.
+- **Strict Prohibition of Global Status Shims for Models:** `updateNodeParameters` and `updateNodeParametersInPlace` MUST target the specific `modelId` owning the node and call `this.setModelStatus(modelId, 'UNINITIALIZED')` for all physical parameter edits. Never call the global `this.setStatus('UNINITIALIZED')` shim in place of per-model status updates.
+- **Complete Re-initialization Enforcement:** When `executeModelCommand()` receives a `STEP` or `EXEC_ALL` request for a model whose status is `'UNINITIALIZED'`, it MUST send the appropriate `INIT` / `INIT_2D` / `INIT_3D` / `INIT_FSI_2D` / `INIT_FSI_3D` command to the backend prior to issuing execution steps.
+- **Precedence & Serialization Isolation:** Serializing parameters across multi-node graphs (e.g., FSI coupling, remap pipelines) MUST enforce strict parameter precedence. Solver configuration keys (`device`, `precision`, `cfl`, `init_mode`) on primary solver nodes MUST be re-applied at the end of the serialization pipeline to prevent default parameters from connected domain nodes (e.g. MPMDomain3D) from silently overwriting user selections.
+- **Synchronized Numeric Casting (`numericKeys`):** Any numeric key added to any node parameter schema MUST be added to all 4 `numericKeys` lists in `serialization.ts`, `property-editor.ts`, `node-viewer.ts`, and `graph-renderer.ts`.

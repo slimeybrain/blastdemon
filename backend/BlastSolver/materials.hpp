@@ -171,7 +171,7 @@ __host__ __device__
         }
 
         if (S2 > (RealType)0.0) {
-            RealType f2 = (RealType)unreacted.f2_const;
+            RealType f2 = fmax((RealType)0.0, (RealType)unreacted.f2_const);
             sum_alpha_f_omega += alpha2 * S2 * f2 / omega2;
         }
 
@@ -212,7 +212,7 @@ __host__ __device__
         }
 
         if (S2 > (RealType)0.0) {
-            RealType f2 = (RealType)unreacted.f2_const;
+            RealType f2 = fmax((RealType)0.0, (RealType)unreacted.f2_const);
             sum_alpha_f_omega += alpha2 * S2 * f2 / omega2;
         }
 

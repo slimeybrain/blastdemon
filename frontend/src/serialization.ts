@@ -26,16 +26,18 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'nr', 'nz', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
         'charge_r', 'charge_z', 'charge_radius', 'charge_height',
         'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
-        'ideal_gamma', 'ideal_rho_0', 'ideal_e_0',
+        'ideal_gamma', 'ideal_rho_0', 'ideal_e_0', 'high_rho', 'ambient_rho', 'ambient_p',
         // 3D CFD keys
         'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
         'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
         'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
+        'origin_x', 'origin_y', 'origin_z', 'dim_x', 'dim_y', 'dim_z', 'scale_factor',
         'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
         'refinement_opacity', 'charge_opacity',
         'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio', 'amr_tile_size',
         'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'refinement_level',
         'submesh_x', 'submesh_y', 'submesh_z', 'submesh_size_x', 'submesh_size_y', 'submesh_size_z',
+        'offset', 'stride',
         // MPM keys
         'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'radius', 'inner_radius',
         'scale_x', 'scale_y', 'scale_z',
@@ -786,6 +788,21 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             Object.entries(couplerNode.parameters).forEach(([key, value]) => {
                 flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
             });
+            const telemetryConns = state.connections.filter(c => c.fromNode === couplerNode.id && c.fromPort === 'telemetry');
+            for (const conn of telemetryConns) {
+                const viewNode = state.nodes.find(n => n.id === conn.toNode);
+                if (viewNode && viewNode.type === 'Telemetry3DViewport') {
+                    if (viewNode.parameters.slices) {
+                        flattenedParams['slices'] = viewNode.parameters.slices;
+                    }
+                    // Trace file output options and other view options
+                    Object.entries(viewNode.parameters).forEach(([key, value]) => {
+                        if (key !== 'slices' && key !== 'colormap' && key !== 'refresh_rate' && key !== 'log_scale' && key !== 'auto_scale' && key !== 'min_val' && key !== 'max_val' && key !== 'show_grid' && key !== 'interpolate') {
+                            flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                        }
+                    });
+                }
+            }
         }
 
         const cellSize = flattenedParams['cell_size'] || 0.01;
@@ -813,6 +830,16 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         const t = flattenedParams['atm_temperature'] || 288.0;
         flattenedParams['ambient_rho'] = p / (287.058 * t);
         if (!flattenedParams['device']) flattenedParams['device'] = 'cpu';
+
+        // Re-apply CFD solver's device/precision parameters to ensure they take precedence
+        if (solverNode3D) {
+            if (solverNode3D.parameters.device !== undefined) {
+                flattenedParams['device'] = solverNode3D.parameters.device;
+            }
+            if (solverNode3D.parameters.precision !== undefined) {
+                flattenedParams['precision'] = solverNode3D.parameters.precision;
+            }
+        }
     } else if (command === "INIT_MPM" || command === "INIT_2D_MPM") {
         const mpmDomain = state.nodes.find(n => n.type === 'MPMDomain2D');
         if (mpmDomain) {

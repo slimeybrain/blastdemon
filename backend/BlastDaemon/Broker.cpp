@@ -267,7 +267,9 @@ std::string get_json_value(const std::string& json, const std::string& key) {
     }
 }
 
-void process_json(const std::string& json_str, std::shared_ptr<ClientConnection> client, std::map<std::string, std::shared_ptr<Process>>& active_processes) {
+void process_json(const std::string& json_str, std::shared_ptr<ClientConnection> client, 
+                  std::map<std::string, std::shared_ptr<Process>>& active_processes,
+                  std::map<std::string, std::shared_ptr<std::atomic<bool>>>& expected_terminations) {
     nlohmann::json payload;
     try {
         payload = nlohmann::json::parse(json_str);
@@ -594,8 +596,12 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
     if (command == "STOP") {
         std::cout << "--- STOP COMMAND RECEIVED for modelId " << modelId << " ---" << std::endl;
         if (active_processes.count(modelId) && active_processes[modelId]) {
+            if (expected_terminations.count(modelId) && expected_terminations[modelId]) {
+                expected_terminations[modelId]->store(true);
+            }
             active_processes[modelId]->terminate();
             active_processes.erase(modelId);
+            expected_terminations.erase(modelId);
             std::cout << "Process for modelId " << modelId << " terminated by user." << std::endl;
         }
         return;
@@ -638,20 +644,32 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
                 if (routed) return;
                 std::cerr << "[WARN] Existing process for " << modelId
                           << " died before " << command << " could be routed — spawning fresh." << std::endl;
+                if (expected_terminations.count(modelId) && expected_terminations[modelId]) {
+                    expected_terminations[modelId]->store(true);
+                }
                 existing->terminate();
                 active_processes.erase(modelId);
+                expected_terminations.erase(modelId);
             } else {
                 // Fresh initialization or reset: terminate stale process so new solver process gets clean state
                 std::cout << "[INFO] Terminating existing solver process for modelId " << modelId << " to ensure clean re-initialization." << std::endl;
+                if (expected_terminations.count(modelId) && expected_terminations[modelId]) {
+                    expected_terminations[modelId]->store(true);
+                }
                 active_processes[modelId]->terminate();
                 active_processes.erase(modelId);
+                expected_terminations.erase(modelId);
             }
         }
 
         // Kill any stale process for this model before spawning a fresh one.
         if (active_processes.count(modelId) && active_processes[modelId]) {
+            if (expected_terminations.count(modelId) && expected_terminations[modelId]) {
+                expected_terminations[modelId]->store(true);
+            }
             active_processes[modelId]->terminate();
             active_processes.erase(modelId);
+            expected_terminations.erase(modelId);
         }
 
         auto active_process = std::make_shared<Process>();
@@ -666,12 +684,15 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
         }
 #endif
 
+        auto expected_term = std::make_shared<std::atomic<bool>>(false);
+        expected_terminations[modelId] = expected_term;
+
         if (active_process->start(solver_path)) {
             std::cout << "Starting BlastSolver for modelId " << modelId << std::endl;
             active_process->writeStdin(json_str + "\n\n");
             active_processes[modelId] = active_process;
 
-            std::thread([client, proc = active_process, modelId]() {
+            std::thread([client, proc = active_process, modelId, expected_term]() {
                 std::vector<uint8_t> buffer(8192);
                 std::vector<uint8_t> accumulator;
                 while (true) {
@@ -716,9 +737,10 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
                             auto nl_it = std::find(accumulator.begin(), accumulator.end(), (uint8_t)'\n');
                             if (nl_it == accumulator.end()) break;
 
+                            std::string size_str;
                             try {
-                                std::string size_str(reinterpret_cast<char*>(accumulator.data() + marker.size()),
-                                                     std::distance(accumulator.begin() + marker.size(), nl_it));
+                                size_str = std::string(reinterpret_cast<char*>(accumulator.data() + marker.size()),
+                                                       std::distance(accumulator.begin() + marker.size(), nl_it));
                                 size_t payload_size = std::stoul(size_str);
                                 size_t header_size = std::distance(accumulator.begin(), nl_it) + 1;
 
@@ -734,8 +756,8 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
                                 send_websocket_binary(client, ws_payload.data(), ws_payload.size());
                                 accumulator.erase(accumulator.begin(),
                                                   accumulator.begin() + header_size + payload_size);
-                            } catch (const std::exception&) {
-                                std::cout << "Malformed binary frame size" << std::endl;
+                            } catch (const std::exception& e) {
+                                std::cout << "Malformed binary frame size. Marker: '" << marker << "', size_str: '" << size_str << "', error: " << e.what() << std::endl;
                                 auto nl = std::find(accumulator.begin(), accumulator.end(), (uint8_t)'\n');
                                 accumulator.erase(accumulator.begin(), nl + 1);
                                 continue;
@@ -749,7 +771,8 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
                             if (!line.empty() && line.back() == '\r') line.pop_back();
                             if (!line.empty()) {
                                 if (line.rfind("{\"type\":\"obstacles_mesh\"", 0) == 0) {
-                                    send_websocket_text(client, line);
+                                    std::string modified = "{\"type\":\"obstacles_mesh\",\"modelId\":\"" + modelId + "\"," + line.substr(25);
+                                    send_websocket_text(client, modified);
                                 } else {
                                     try {
                                         nlohmann::json log_json = nlohmann::json::parse(line);
@@ -769,6 +792,21 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
                     }
                 }
                 std::cout << "Telemetry relay thread finished for modelId " << modelId << std::endl;
+
+                if (expected_term && !expected_term->load()) {
+                    nlohmann::json log_envelope;
+                    log_envelope["type"] = "log";
+                    log_envelope["level"] = "ERROR";
+                    log_envelope["modelId"] = modelId;
+                    log_envelope["message"] = "BlastSolver process terminated or crashed unexpectedly.";
+                    send_websocket_text(client, log_envelope.dump());
+
+                    nlohmann::json status_envelope;
+                    status_envelope["type"] = "status";
+                    status_envelope["status"] = "TERMINATED";
+                    status_envelope["modelId"] = modelId;
+                    send_websocket_text(client, status_envelope.dump());
+                }
             }).detach();
         } else {
             std::cerr << "Failed to start BlastSolver for modelId " << modelId << std::endl;
@@ -799,9 +837,17 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
                     auto target_proc = active_processes[modelId];
                     std::vector<std::string> to_erase;
                     for (auto const& [id, proc_val] : active_processes) {
-                        if (proc_val == target_proc) to_erase.push_back(id);
+                        if (proc_val == target_proc) {
+                            to_erase.push_back(id);
+                            if (expected_terminations.count(id) && expected_terminations[id]) {
+                                expected_terminations[id]->store(true);
+                            }
+                        }
                     }
-                    for (const auto& id : to_erase) active_processes.erase(id);
+                    for (const auto& id : to_erase) {
+                        active_processes.erase(id);
+                        expected_terminations.erase(id);
+                    }
                 }
             } else {
                 std::cerr << "Command " << command << " ignored: Solver not responsive or running for modelId " << modelId << std::endl;
@@ -827,6 +873,7 @@ void handle_client(SOCKET_TYPE client_fd) {
     client->fd = client_fd;
 
     std::map<std::string, std::shared_ptr<Process>> active_processes;
+    std::map<std::string, std::shared_ptr<std::atomic<bool>>> expected_terminations;
     char handshake_buffer[8192];
     int bytes_read = recv(client->fd, handshake_buffer, sizeof(handshake_buffer) - 1, 0);
     if (bytes_read <= 0) {
@@ -898,7 +945,7 @@ void handle_client(SOCKET_TYPE client_fd) {
                 if (fin) {
                     if (current_msg_opcode == 0x1) {
                         std::string message(ws_message_accumulator.begin(), ws_message_accumulator.end());
-                        process_json(message, client, active_processes);
+                        process_json(message, client, active_processes, expected_terminations);
                     }
                     ws_message_accumulator.clear();
                     current_msg_opcode = 0;
@@ -909,6 +956,9 @@ void handle_client(SOCKET_TYPE client_fd) {
 
     for (auto& pair : active_processes) {
         if (pair.second) {
+            if (expected_terminations.count(pair.first) && expected_terminations[pair.first]) {
+                expected_terminations[pair.first]->store(true);
+            }
             pair.second->terminate();
         }
     }
@@ -935,6 +985,9 @@ int main() {
     // client will now yield EPIPE/EBADF from write()/send() instead of killing
     // the Broker process with SIGPIPE (exit code 141).
     signal(SIGPIPE, SIG_IGN);
+    // Terminate any leftover orphaned BlastSolver processes on startup to free GPU VRAM
+    int dummy = system("pkill -9 BlastSolver 2>/dev/null");
+    (void)dummy;
 #endif
 
     SOCKET_TYPE server_fd = socket(AF_INET, SOCK_STREAM, 0);

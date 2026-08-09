@@ -503,6 +503,8 @@ void MPMSolver3D::particleToGrid() {
     for (auto& node : m_grid) {
         node.m = 0.0f;
         node.p[0] = 0.0f; node.p[1] = 0.0f; node.p[2] = 0.0f;
+        node.f_ext[0] = 0.0f; node.f_ext[1] = 0.0f; node.f_ext[2] = 0.0f;
+        node.f_int[0] = 0.0f; node.f_int[1] = 0.0f; node.f_int[2] = 0.0f;
         node.plastic_strain = 0.0f;
     }
 
@@ -595,9 +597,9 @@ void MPMSolver3D::particleToGrid() {
                     node.m += p.m * weight;
 
                     // APIC Momentum scatter in 3D: p_node += m_p * S * (v_p + w_apic * B_p * dist)
-                    float dist_x = node_x - p.x[0];
-                    float dist_y = node_y - p.x[1];
-                    float dist_z = node_z - p.x[2];
+                    float dist_x = node_x - px;
+                    float dist_y = node_y - py;
+                    float dist_z = node_z - pz;
 
                     float w_apic = 1.0f;
                     float v_apic_x = p.v[0] + w_apic * (p.B[0][0] * dist_x + p.B[0][1] * dist_y + p.B[0][2] * dist_z);
@@ -608,10 +610,10 @@ void MPMSolver3D::particleToGrid() {
                     node.p[1] += p.m * weight * v_apic_y;
                     node.p[2] += p.m * weight * v_apic_z;
 
-                    // 3D Internal Stress Force directly updates momentum: p -= f_int
-                    node.p[0] -= p.V * (p.sigma[0][0] * dN_dx + p.sigma[0][1] * dN_dy + p.sigma[0][2] * dN_dz);
-                    node.p[1] -= p.V * (p.sigma[1][0] * dN_dx + p.sigma[1][1] * dN_dy + p.sigma[1][2] * dN_dz);
-                    node.p[2] -= p.V * (p.sigma[2][0] * dN_dx + p.sigma[2][1] * dN_dy + p.sigma[2][2] * dN_dz);
+                    // 3D Internal Stress Force scatter: f_int += -V_p * sigma_p * dN
+                    node.f_int[0] -= p.V * (p.sigma[0][0] * dN_dx + p.sigma[0][1] * dN_dy + p.sigma[0][2] * dN_dz);
+                    node.f_int[1] -= p.V * (p.sigma[1][0] * dN_dx + p.sigma[1][1] * dN_dy + p.sigma[1][2] * dN_dz);
+                    node.f_int[2] -= p.V * (p.sigma[2][0] * dN_dx + p.sigma[2][1] * dN_dy + p.sigma[2][2] * dN_dz);
 
                     // Telemetry scalar scatter
                     node.plastic_strain += p.m * weight * p.ep_bar;
@@ -622,7 +624,7 @@ void MPMSolver3D::particleToGrid() {
 
     // Normalize telemetry scalars
     for (auto& node : m_grid) {
-        if (node.m > 1.0e-8f) {
+        if (node.m > MPMGridNode3D::MIN_MASS) {
             node.plastic_strain /= node.m;
         }
     }
@@ -633,7 +635,7 @@ void MPMSolver3D::particleToGrid() {
             for (int j = 0; j < m_ny; ++j) {
                 for (int k = 0; k < m_nz; ++k) {
                     size_t idx = (static_cast<size_t>(i) * m_ny + j) * m_nz + k;
-                    if (m_grid[idx].m <= 1.0e-8f) continue;
+                    if (m_grid[idx].m <= MPMGridNode3D::MIN_MASS) continue;
                     float sum_ep = 2.0f * m_grid[idx].plastic_strain;
                     float weight_sum = 2.0f;
                     for (int di = -1; di <= 1; ++di) {
@@ -643,7 +645,7 @@ void MPMSolver3D::particleToGrid() {
                                 int ni = i + di; int nj = j + dj; int nk = k + dk;
                                 if (ni >= 0 && ni < m_nx && nj >= 0 && nj < m_ny && nk >= 0 && nk < m_nz) {
                                     size_t n_idx = (static_cast<size_t>(ni) * m_ny + nj) * m_nz + nk;
-                                    if (m_grid[n_idx].m > 1.0e-8f) {
+                                    if (m_grid[n_idx].m > MPMGridNode3D::MIN_MASS) {
                                         float w = 1.0f / static_cast<float>(std::abs(di) + std::abs(dj) + std::abs(dk));
                                         sum_ep += w * m_grid[n_idx].plastic_strain;
                                         weight_sum += w;
@@ -657,7 +659,7 @@ void MPMSolver3D::particleToGrid() {
             }
         }
         for (size_t idx = 0; idx < m_grid.size(); ++idx) {
-            if (m_grid[idx].m > 1.0e-8f) {
+            if (m_grid[idx].m > MPMGridNode3D::MIN_MASS) {
                 m_grid[idx].plastic_strain = smoothed_ep[idx];
             }
         }
@@ -675,33 +677,33 @@ void MPMSolver3D::updateGridKinematics(float dt) {
                 size_t node_idx = (static_cast<size_t>(i) * m_ny + j) * m_nz + k;
                 auto& node = m_grid[node_idx];
 
-                if (node.m > 1.0e-8f) {
-                    node.p[0] += dt * node.f_ext[0];
-                    node.p[1] += dt * node.f_ext[1];
-                    node.p[2] += dt * node.f_ext[2];
+                if (node.m > MPMGridNode3D::MIN_MASS) {
+                    node.p[0] += dt * (node.f_ext[0] + node.f_int[0]);
+                    node.p[1] += dt * (node.f_ext[1] + node.f_int[1]);
+                    node.p[2] += dt * (node.f_ext[2] + node.f_int[2]);
 
-                    // Apply 3D Boundary Conditions (x, y, z min/max)
-                    if ((i == 0 && m_bc_x_min == MPMBoundaryCondition3D::Sticky) ||
-                        (i == m_nx - 1 && m_bc_x_max == MPMBoundaryCondition3D::Sticky)) {
+                    // Apply 3D Boundary Conditions (x, y, z min/max across physical boundary faces)
+                    if ((i <= 3 && m_bc_x_min == MPMBoundaryCondition3D::Sticky) ||
+                        (i >= m_nx - 4 && m_bc_x_max == MPMBoundaryCondition3D::Sticky)) {
                         node.p[0] = 0.0f; node.p[1] = 0.0f; node.p[2] = 0.0f;
-                    } else if ((i == 0 && m_bc_x_min == MPMBoundaryCondition3D::FreeSlip) ||
-                               (i == m_nx - 1 && m_bc_x_max == MPMBoundaryCondition3D::FreeSlip)) {
+                    } else if ((i <= 3 && (m_bc_x_min == MPMBoundaryCondition3D::FreeSlip || m_bc_x_min == MPMBoundaryCondition3D::Reflecting)) ||
+                               (i >= m_nx - 4 && (m_bc_x_max == MPMBoundaryCondition3D::FreeSlip || m_bc_x_max == MPMBoundaryCondition3D::Reflecting))) {
                         node.p[0] = 0.0f;
                     }
 
-                    if ((j == 0 && m_bc_y_min == MPMBoundaryCondition3D::Sticky) ||
-                        (j == m_ny - 1 && m_bc_y_max == MPMBoundaryCondition3D::Sticky)) {
+                    if ((j <= 3 && m_bc_y_min == MPMBoundaryCondition3D::Sticky) ||
+                        (j >= m_ny - 4 && m_bc_y_max == MPMBoundaryCondition3D::Sticky)) {
                         node.p[0] = 0.0f; node.p[1] = 0.0f; node.p[2] = 0.0f;
-                    } else if ((j == 0 && m_bc_y_min == MPMBoundaryCondition3D::FreeSlip) ||
-                               (j == m_ny - 1 && m_bc_y_max == MPMBoundaryCondition3D::FreeSlip)) {
+                    } else if ((j <= 3 && (m_bc_y_min == MPMBoundaryCondition3D::FreeSlip || m_bc_y_min == MPMBoundaryCondition3D::Reflecting)) ||
+                               (j >= m_ny - 4 && (m_bc_y_max == MPMBoundaryCondition3D::FreeSlip || m_bc_y_max == MPMBoundaryCondition3D::Reflecting))) {
                         node.p[1] = 0.0f;
                     }
 
-                    if ((k == 0 && m_bc_z_min == MPMBoundaryCondition3D::Sticky) ||
-                        (k == m_nz - 1 && m_bc_z_max == MPMBoundaryCondition3D::Sticky)) {
+                    if ((k <= 3 && m_bc_z_min == MPMBoundaryCondition3D::Sticky) ||
+                        (k >= m_nz - 4 && m_bc_z_max == MPMBoundaryCondition3D::Sticky)) {
                         node.p[0] = 0.0f; node.p[1] = 0.0f; node.p[2] = 0.0f;
-                    } else if ((k == 0 && m_bc_z_min == MPMBoundaryCondition3D::FreeSlip) ||
-                               (k == m_nz - 1 && m_bc_z_max == MPMBoundaryCondition3D::FreeSlip)) {
+                    } else if ((k <= 3 && (m_bc_z_min == MPMBoundaryCondition3D::FreeSlip || m_bc_z_min == MPMBoundaryCondition3D::Reflecting)) ||
+                               (k >= m_nz - 4 && (m_bc_z_max == MPMBoundaryCondition3D::FreeSlip || m_bc_z_max == MPMBoundaryCondition3D::Reflecting))) {
                         node.p[2] = 0.0f;
                     }
                 }
@@ -788,7 +790,7 @@ void MPMSolver3D::gridToParticle(float dt) {
                     size_t node_idx = (static_cast<size_t>(i) * m_ny + j) * m_nz + k;
                     const auto& node = m_grid[node_idx];
 
-                    if (node.m > 1.0e-8f) {
+                    if (node.m > MPMGridNode3D::MIN_MASS) {
                         v_pic_x += weight * node.v(0);
                         v_pic_y += weight * node.v(1);
                         v_pic_z += weight * node.v(2);
@@ -869,35 +871,39 @@ void MPMSolver3D::gridToParticle(float dt) {
                     size_t node_idx = (static_cast<size_t>(i) * m_ny + j) * m_nz + k;
                     const auto& node = m_grid[node_idx];
 
-                    if (node.m > 1.0e-8f) {
+                    if (node.m > MPMGridNode3D::MIN_MASS) {
                         float dist_x = node_x - px;
                         float dist_y = node_y - py;
                         float dist_z = node_z - pz;
 
                         float w_apic = 1.0f;
-                        B_new[0][0] += w_apic * weight * node.v(0) * dist_x * D_inv_x;
-                        B_new[0][1] += w_apic * weight * node.v(0) * dist_y * D_inv_y;
-                        B_new[0][2] += w_apic * weight * node.v(0) * dist_z * D_inv_z;
+                        float diff_vx = node.v(0) - p.v[0];
+                        float diff_vy = node.v(1) - p.v[1];
+                        float diff_vz = node.v(2) - p.v[2];
 
-                        B_new[1][0] += w_apic * weight * node.v(1) * dist_x * D_inv_x;
-                        B_new[1][1] += w_apic * weight * node.v(1) * dist_y * D_inv_y;
-                        B_new[1][2] += w_apic * weight * node.v(1) * dist_z * D_inv_z;
+                        B_new[0][0] += w_apic * weight * diff_vx * dist_x * D_inv_x;
+                        B_new[0][1] += w_apic * weight * diff_vx * dist_y * D_inv_y;
+                        B_new[0][2] += w_apic * weight * diff_vx * dist_z * D_inv_z;
 
-                        B_new[2][0] += w_apic * weight * node.v(2) * dist_x * D_inv_x;
-                        B_new[2][1] += w_apic * weight * node.v(2) * dist_y * D_inv_y;
-                        B_new[2][2] += w_apic * weight * node.v(2) * dist_z * D_inv_z;
+                        B_new[1][0] += w_apic * weight * diff_vy * dist_x * D_inv_x;
+                        B_new[1][1] += w_apic * weight * diff_vy * dist_y * D_inv_y;
+                        B_new[1][2] += w_apic * weight * diff_vy * dist_z * D_inv_z;
 
-                        L_new[0][0] += node.v(0) * dN_dx;
-                        L_new[0][1] += node.v(0) * dN_dy;
-                        L_new[0][2] += node.v(0) * dN_dz;
+                        B_new[2][0] += w_apic * weight * diff_vz * dist_x * D_inv_x;
+                        B_new[2][1] += w_apic * weight * diff_vz * dist_y * D_inv_y;
+                        B_new[2][2] += w_apic * weight * diff_vz * dist_z * D_inv_z;
 
-                        L_new[1][0] += node.v(1) * dN_dx;
-                        L_new[1][1] += node.v(1) * dN_dy;
-                        L_new[1][2] += node.v(1) * dN_dz;
+                        L_new[0][0] += diff_vx * dN_dx;
+                        L_new[0][1] += diff_vx * dN_dy;
+                        L_new[0][2] += diff_vx * dN_dz;
 
-                        L_new[2][0] += node.v(2) * dN_dx;
-                        L_new[2][1] += node.v(2) * dN_dy;
-                        L_new[2][2] += node.v(2) * dN_dz;
+                        L_new[1][0] += diff_vy * dN_dx;
+                        L_new[1][1] += diff_vy * dN_dy;
+                        L_new[1][2] += diff_vy * dN_dz;
+
+                        L_new[2][0] += diff_vz * dN_dx;
+                        L_new[2][1] += diff_vz * dN_dy;
+                        L_new[2][2] += diff_vz * dN_dz;
                     }
                 }
             }
@@ -930,19 +936,40 @@ void MPMSolver3D::gridToParticle(float dt) {
         p.x[1] += dt * p.v[1];
         p.x[2] += dt * p.v[2];
 
-        // Domain Boundary Clamping
-        float min_x = m_xmin + 1.5f * m_dx; float max_x = m_xmin + (static_cast<float>(m_nx) - 1.5f) * m_dx;
-        float min_y = m_ymin + 1.5f * m_dy; float max_y = m_ymin + (static_cast<float>(m_ny) - 1.5f) * m_dy;
-        float min_z = m_zmin + 1.5f * m_dz; float max_z = m_zmin + (static_cast<float>(m_nz) - 1.5f) * m_dz;
+        // Domain Boundary Clamping at Physical Domain Boundaries (inside ghost padding)
+        float phys_min_x = m_xmin + 3.0f * m_dx; float phys_max_x = m_xmin + (static_cast<float>(m_nx - 4)) * m_dx;
+        float phys_min_y = m_ymin + 3.0f * m_dy; float phys_max_y = m_ymin + (static_cast<float>(m_ny - 4)) * m_dy;
+        float phys_min_z = m_zmin + 3.0f * m_dz; float phys_max_z = m_zmin + (static_cast<float>(m_nz - 4)) * m_dz;
 
-        if (p.x[0] < min_x) { p.x[0] = min_x; if (p.v[0] < 0) p.v[0] = 0; }
-        else if (p.x[0] > max_x) { p.x[0] = max_x; if (p.v[0] > 0) p.v[0] = 0; }
+        if (p.x[0] < phys_min_x && m_bc_x_min != MPMBoundaryCondition3D::Terminate) {
+            p.x[0] = phys_min_x;
+            if (m_bc_x_min == MPMBoundaryCondition3D::Reflecting) { p.v[0] = std::abs(p.v[0]); }
+            else if (p.v[0] < 0) { p.v[0] = 0; }
+        } else if (p.x[0] > phys_max_x && m_bc_x_max != MPMBoundaryCondition3D::Terminate) {
+            p.x[0] = phys_max_x;
+            if (m_bc_x_max == MPMBoundaryCondition3D::Reflecting) { p.v[0] = -std::abs(p.v[0]); }
+            else if (p.v[0] > 0) { p.v[0] = 0; }
+        }
 
-        if (p.x[1] < min_y) { p.x[1] = min_y; if (p.v[1] < 0) p.v[1] = 0; }
-        else if (p.x[1] > max_y) { p.x[1] = max_y; if (p.v[1] > 0) p.v[1] = 0; }
+        if (p.x[1] < phys_min_y && m_bc_y_min != MPMBoundaryCondition3D::Terminate) {
+            p.x[1] = phys_min_y;
+            if (m_bc_y_min == MPMBoundaryCondition3D::Reflecting) { p.v[1] = std::abs(p.v[1]); }
+            else if (p.v[1] < 0) { p.v[1] = 0; }
+        } else if (p.x[1] > phys_max_y && m_bc_y_max != MPMBoundaryCondition3D::Terminate) {
+            p.x[1] = phys_max_y;
+            if (m_bc_y_max == MPMBoundaryCondition3D::Reflecting) { p.v[1] = -std::abs(p.v[1]); }
+            else if (p.v[1] > 0) { p.v[1] = 0; }
+        }
 
-        if (p.x[2] < min_z) { p.x[2] = min_z; if (p.v[2] < 0) p.v[2] = 0; }
-        else if (p.x[2] > max_z) { p.x[2] = max_z; if (p.v[2] > 0) p.v[2] = 0; }
+        if (p.x[2] < phys_min_z && m_bc_z_min != MPMBoundaryCondition3D::Terminate) {
+            p.x[2] = phys_min_z;
+            if (m_bc_z_min == MPMBoundaryCondition3D::Reflecting) { p.v[2] = std::abs(p.v[2]); }
+            else if (p.v[2] < 0) { p.v[2] = 0; }
+        } else if (p.x[2] > phys_max_z && m_bc_z_max != MPMBoundaryCondition3D::Terminate) {
+            p.x[2] = phys_max_z;
+            if (m_bc_z_max == MPMBoundaryCondition3D::Reflecting) { p.v[2] = -std::abs(p.v[2]); }
+            else if (p.v[2] > 0) { p.v[2] = 0; }
+        }
     }
 }
 
@@ -981,7 +1008,7 @@ void MPMSolver3D::updateStressState(float dt) {
                     p.B[r][c] = 0.0f; // Zero affine velocity gradient to eliminate elastic coupling
 
             // 1. Bulk Pressure from Volumetric Compression J = V / V0
-            const float J = p.V / (p.V0 > 1.0e-12f ? p.V0 : 1.0e-12f);
+            const float J = p.V / (p.V0 > 1.0e-20f ? p.V0 : 1.0e-20f);
             float p_comp = 0.0f;
             if (J < 1.0f) {
                 const float E_mod    = mat.youngs_modulus;
@@ -1041,7 +1068,7 @@ void MPMSolver3D::updateStressState(float dt) {
         // --- Johnson-Cook Plasticity + Mie-Grüneisen Shock EOS Model ---
         if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen) {
             p.V = std::clamp(p.V * (1.0f + tr_deps), 0.1f * p.V0, 10.0f * p.V0);
-            const float J = p.V / (p.V0 > 1.0e-12f ? p.V0 : 1.0e-12f);
+            const float J = p.V / (p.V0 > 1.0e-20f ? p.V0 : 1.0e-20f);
             const float mu_vol = (1.0f - J) / J;
 
             // 1. Mie-Grüneisen Shock EOS Hydrostatic Pressure
@@ -1097,7 +1124,12 @@ void MPMSolver3D::updateStressState(float dt) {
             const float q_trial = std::sqrt(1.5f * s_s);
 
             // 3. Johnson-Cook Yield Stress
-            float ep_dot_star = std::max(1.0f, (tr_deps > 0.0f ? tr_deps : -tr_deps) / (dt > 1e-12f ? dt : 1e-12f));
+            float double_contraction = 0.0f;
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    double_contraction += deps_dev[r][c] * deps_dev[r][c];
+            float deps_eq = std::sqrt((2.0f / 3.0f) * double_contraction);
+            float ep_dot_star = std::max(1.0f, deps_eq / (dt > 1e-12f ? dt : 1e-12f));
             float T_star = std::clamp((p.temperature - mat.T_room) / (mat.T_melt > mat.T_room ? mat.T_melt - mat.T_room : 1.0f), 0.0f, 1.0f);
 
             float term_strain = mat.jc_A + mat.jc_B * std::pow(std::max(0.0f, p.ep_bar), mat.jc_n);
@@ -1244,7 +1276,7 @@ void MPMSolver3D::updateStressState(float dt) {
             p.V = std::clamp(p.V * (1.0f + tr_deps), 0.1f * p.V0, 10.0f * p.V0);
 
             // Calculate debris stress for this step
-            const float J = p.V / (p.V0 > 1.0e-12f ? p.V0 : 1.0e-12f);
+            const float J = p.V / (p.V0 > 1.0e-20f ? p.V0 : 1.0e-20f);
             float p_comp = 0.0f;
             if (J < 1.0f) {
                 const float E_mod    = mat.youngs_modulus;
@@ -1281,7 +1313,20 @@ float MPMSolver3D::computeStepSize(float cfl) const {
         const auto& mat = getMaterialTable(p.object_id);
         float E = mat.youngs_modulus;
         float rho = std::max(10.0f, mat.density);
-        float c_s = std::sqrt(E / rho);
+        float nu = mat.poissons_ratio;
+        float c_s = 0.0f;
+        if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen) {
+            float C0 = mat.mg_c0;
+            c_s = std::sqrt(C0 * C0 + (2.0f / 3.0f) * E / (rho * (1.0f + nu)));
+        } else {
+            if (nu >= 0.0f && nu < 0.5f) {
+                float denom = (1.0f + nu) * std::max(0.02f, 1.0f - 2.0f * nu);
+                float factor = (1.0f - nu) / denom;
+                c_s = std::sqrt(E * factor / rho);
+            } else {
+                c_s = std::sqrt(E / rho);
+            }
+        }
         if (std::isnan(c_s) || std::isinf(c_s)) continue;
         float v_mag = std::sqrt(p.v[0] * p.v[0] + p.v[1] * p.v[1] + p.v[2] * p.v[2]);
         v_mag = std::min(5000.0f, v_mag);
@@ -1347,6 +1392,11 @@ void MPMSolver3D::stepWithDt(float dt, bool run_p2g) {
 void MPMSolver3D::step(float cfl) {
     if (m_particles.empty()) return;
     float dt = computeStepSize(cfl);
+    if (m_step_count == 0) {
+        dt = std::min(dt, 1.0e-7f);
+    } else {
+        dt = std::min(dt, 1.3f * (m_last_dt > 0.0f ? m_last_dt : 1.0e-7f));
+    }
     m_last_cfl = cfl;
     stepWithDt(dt);
 }

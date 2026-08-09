@@ -267,7 +267,7 @@ void MPMSolver2D::particleToGrid() {
 
     // Normalize Telemetry Scalars on Grid Nodes
     for (auto& node : m_grid) {
-        if (node.m > 1.0e-8f) {
+        if (node.m > 1.0e-14f) {
             node.von_mises /= node.m;
             node.plastic_strain /= node.m;
             node.density /= node.m;
@@ -281,7 +281,7 @@ void MPMSolver2D::particleToGrid() {
         for (int i = 0; i < m_nx; ++i) {
             for (int j = 0; j < m_ny; ++j) {
                 int idx = i * m_ny + j;
-                if (m_grid[idx].m <= 1.0e-8f) continue;
+                if (m_grid[idx].m <= 1.0e-14f) continue;
                 float sum_ep = 2.0f * m_grid[idx].plastic_strain;
                 float weight_sum = 2.0f;
                 for (int di = -1; di <= 1; ++di) {
@@ -290,7 +290,7 @@ void MPMSolver2D::particleToGrid() {
                         int ni = i + di; int nj = j + dj;
                         if (ni >= 0 && ni < m_nx && nj >= 0 && nj < m_ny) {
                             int n_idx = ni * m_ny + nj;
-                            if (m_grid[n_idx].m > 1.0e-8f) {
+                            if (m_grid[n_idx].m > 1.0e-14f) {
                                 float w = 1.0f / static_cast<float>(std::abs(di) + std::abs(dj));
                                 sum_ep += w * m_grid[n_idx].plastic_strain;
                                 weight_sum += w;
@@ -302,7 +302,7 @@ void MPMSolver2D::particleToGrid() {
             }
         }
         for (size_t idx = 0; idx < m_grid.size(); ++idx) {
-            if (m_grid[idx].m > 1.0e-8f) {
+            if (m_grid[idx].m > 1.0e-14f) {
                 m_grid[idx].plastic_strain = smoothed_ep[idx];
             }
         }
@@ -324,7 +324,7 @@ void MPMSolver2D::updateGridKinematics(float dt) {
             int node_idx = i * m_ny + j;
             auto& node = m_grid[node_idx];
 
-            if (node.m > 1.0e-8f) {
+            if (node.m > 1.0e-14f) {
                 node.v[0] = node.p[0] / node.m;
                 node.v[1] = node.p[1] / node.m;
                 node.v_old[0] = node.v[0];
@@ -400,7 +400,7 @@ void MPMSolver2D::gridToParticle(float dt) {
                 int node_idx = i * m_ny + j;
                 const auto& node = m_grid[node_idx];
 
-                if (node.m > 1.0e-8f) {
+                if (node.m > 1.0e-14f) {
                     v_pic_x += weight * node.v[0];
                     v_pic_y += weight * node.v[1];
                     v_flip_x += weight * (node.v[0] - node.v_old[0]);
@@ -457,20 +457,23 @@ void MPMSolver2D::gridToParticle(float dt) {
                 int node_idx = i * m_ny + j;
                 const auto& node = m_grid[node_idx];
 
-                if (node.m > 1.0e-8f) {
+                if (node.m > 1.0e-14f) {
                     float dist_x = node_x - p.x[0];
                     float dist_y = node_y - p.x[1];
 
-                    float w_apic = 1.0f;
-                    B_new[0][0] += w_apic * weight * node.v[0] * dist_x * D_inv_x;
-                    B_new[0][1] += w_apic * weight * node.v[0] * dist_y * D_inv_y;
-                    B_new[1][0] += w_apic * weight * node.v[1] * dist_x * D_inv_x;
-                    B_new[1][1] += w_apic * weight * node.v[1] * dist_y * D_inv_y;
+                    float diff_vx = node.v[0] - p.v[0];
+                    float diff_vy = node.v[1] - p.v[1];
 
-                    L_new[0][0] += node.v[0] * dN_dx;
-                    L_new[0][1] += node.v[0] * dN_dy;
-                    L_new[1][0] += node.v[1] * dN_dx;
-                    L_new[1][1] += node.v[1] * dN_dy;
+                    float w_apic = 1.0f;
+                    B_new[0][0] += w_apic * weight * diff_vx * dist_x * D_inv_x;
+                    B_new[0][1] += w_apic * weight * diff_vx * dist_y * D_inv_y;
+                    B_new[1][0] += w_apic * weight * diff_vy * dist_x * D_inv_x;
+                    B_new[1][1] += w_apic * weight * diff_vy * dist_y * D_inv_y;
+
+                    L_new[0][0] += diff_vx * dN_dx;
+                    L_new[0][1] += diff_vx * dN_dy;
+                    L_new[1][0] += diff_vy * dN_dx;
+                    L_new[1][1] += diff_vy * dN_dy;
                 }
             }
         }
@@ -552,7 +555,7 @@ void MPMSolver2D::updateStressState(float dt) {
             p.V = std::clamp(p.V * (1.0f + tr_deps), 0.1f * p.V0, 10.0f * p.V0);
 
             // 1. Bulk Pressure from Volumetric Compression J = V / V0
-            const float J = p.V / (p.V0 > 1.0e-12f ? p.V0 : 1.0e-12f);
+            const float J = p.V / (p.V0 > 1.0e-20f ? p.V0 : 1.0e-20f);
             float p_comp = 0.0f;
             if (J < 1.0f) {
                 const float E_mod    = p.youngs_modulus;
@@ -599,7 +602,7 @@ void MPMSolver2D::updateStressState(float dt) {
         // --- Johnson-Cook Plasticity + Mie-Grüneisen Shock EOS Model ---
         if (p.material_model == MPMMaterialModel::JohnsonCookMieGruneisen) {
             p.V = std::clamp(p.V * (1.0f + tr_deps), 0.1f * p.V0, 10.0f * p.V0);
-            const float J = p.V / (p.V0 > 1.0e-12f ? p.V0 : 1.0e-12f);
+            const float J = p.V / (p.V0 > 1.0e-20f ? p.V0 : 1.0e-20f);
             const float mu_vol = (1.0f - J) / J;
 
             // 1. Mie-Grüneisen Shock EOS Hydrostatic Pressure
@@ -639,7 +642,11 @@ void MPMSolver2D::updateStressState(float dt) {
             float q_trial = std::sqrt(s_xx_trial * s_xx_trial + s_yy_trial * s_yy_trial + 2.0f * s_xy_trial * s_xy_trial);
 
             // 3. Johnson-Cook Yield Stress
-            float ep_dot_star = std::max(1.0f, (tr_deps > 0.0f ? tr_deps : -tr_deps) / (dt > 1e-12f ? dt : 1e-12f));
+            float dev_xx = deps_xx - 0.5f * tr_deps;
+            float dev_yy = deps_yy - 0.5f * tr_deps;
+            float dev_xy = deps_xy;
+            float deps_eq = std::sqrt(dev_xx * dev_xx + dev_yy * dev_yy + 2.0f * dev_xy * dev_xy);
+            float ep_dot_star = std::max(1.0f, deps_eq / (dt > 1e-12f ? dt : 1e-12f));
             float T_star = std::clamp((p.temperature - p.T_room) / (p.T_melt > p.T_room ? p.T_melt - p.T_room : 1.0f), 0.0f, 1.0f);
 
             float term_strain = p.jc_A + p.jc_B * std::pow(std::max(0.0f, p.ep_bar), p.jc_n);
@@ -772,7 +779,7 @@ void MPMSolver2D::updateStressState(float dt) {
 
             p.V = std::clamp(p.V * (1.0f + tr_deps), 0.1f * p.V0, 10.0f * p.V0);
 
-            const float J = p.V / (p.V0 > 1.0e-12f ? p.V0 : 1.0e-12f);
+            const float J = p.V / (p.V0 > 1.0e-20f ? p.V0 : 1.0e-20f);
             float p_comp = 0.0f;
             if (J < 1.0f) {
                 const float E_mod    = p.youngs_modulus;
@@ -813,7 +820,20 @@ float MPMSolver2D::computeStepSize(float cfl) const {
         if (std::isnan(p.v[0]) || std::isnan(p.v[1]) || std::isinf(p.v[0]) || std::isinf(p.v[1])) continue;
         float E = p.youngs_modulus;
         float rho = std::max(10.0f, p.density);
-        float c_s = std::sqrt(E / rho);
+        float nu = p.poissons_ratio;
+        float c_s = 0.0f;
+        if (p.material_model == MPMMaterialModel::JohnsonCookMieGruneisen) {
+            float C0 = p.mg_c0;
+            c_s = std::sqrt(C0 * C0 + (2.0f / 3.0f) * E / (rho * (1.0f + nu)));
+        } else {
+            if (nu >= 0.0f && nu < 0.5f) {
+                float denom = (1.0f + nu) * std::max(0.02f, 1.0f - 2.0f * nu);
+                float factor = (1.0f - nu) / denom;
+                c_s = std::sqrt(E * factor / rho);
+            } else {
+                c_s = std::sqrt(E / rho);
+            }
+        }
         if (std::isnan(c_s) || std::isinf(c_s)) continue;
         float v_mag = std::sqrt(p.v[0] * p.v[0] + p.v[1] * p.v[1]);
         if (v_mag > 5000.0f) v_mag = 5000.0f;
@@ -824,7 +844,7 @@ float MPMSolver2D::computeStepSize(float cfl) const {
     float min_h = std::min(m_dx, m_dy);
     float dt_crit = min_h / max_speed;
     float stability_factor = 1.0f / std::sqrt(2.0f); // 2D Courant stability factor (~0.707)
-    return std::max(1.0e-8f, cfl * stability_factor * dt_crit);
+    return std::max(1.0e-14f, cfl * stability_factor * dt_crit);
 }
 
 void MPMSolver2D::stepWithDt(float dt, bool run_p2g) {
@@ -844,6 +864,11 @@ void MPMSolver2D::stepWithDt(float dt, bool run_p2g) {
 void MPMSolver2D::step(float cfl) {
     if (m_particles.empty()) return;
     float dt = computeStepSize(cfl);
+    if (m_step_count == 0) {
+        dt = std::min(dt, 1.0e-7f);
+    } else {
+        dt = std::min(dt, 1.3f * (m_last_dt > 0.0f ? m_last_dt : 1.0e-7f));
+    }
     m_last_cfl = cfl;
     stepWithDt(dt);
 }

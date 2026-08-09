@@ -203,12 +203,15 @@ private:
     void allocateActiveNodeBuffers();
     void freeActiveNodeBuffers();
 
+    MPMParticle3D* d_temp_aos_particles{nullptr};
+    size_t m_allocated_temp_aos_particles{0};
+
     size_t m_allocated_grid_nodes{0};
     size_t m_allocated_particles{0};
 
     float m_last_dt{0.0f};
     float m_last_cfl{0.3f};
-    float m_last_v_max{0.0f};
+    mutable float m_last_v_max{0.0f};
     double m_sim_time{0.0};
     int m_step_count{0};
     bool m_device_dirty{true};

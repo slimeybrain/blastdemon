@@ -82,9 +82,9 @@ void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<MultiMate
                         s3d.rho = amb.rho;
                         s3d.ux = s3d.uy = s3d.uz = 0.0;
                         s3d.p = amb.p;
-                        s3d.alpha1 = 0.0; s3d.alpha2 = 1.0;
-                        s3d.arho1 = 0.0; s3d.arho2 = amb.rho;
-                        s3d.E = MultiMat::getMixtureEnergy(amb.p, amb.rho, 0.0, 1.0, 0.0, amb.rho, gamma, mat.products, mat.unreacted);
+                        s3d.alpha1 = 0.0; s3d.alpha2 = 0.0;
+                        s3d.arho1 = 0.0; s3d.arho2 = 0.0;
+                        s3d.E = amb.p / (gamma - 1.0);
                         solver_3d.setCellStateMulti(i, j, k, s3d);
                     }
                     continue;
@@ -285,9 +285,9 @@ void remap_2d_to_3d(int nr, int nz, double dr, double dz, const std::vector<Stat
                         s3d.rho = amb.rho;
                         s3d.ux = s3d.uy = s3d.uz = 0.0;
                         s3d.p = amb.p;
-                        s3d.alpha1 = 0.0; s3d.alpha2 = 1.0;
-                        s3d.arho1 = 0.0; s3d.arho2 = amb.rho;
-                        s3d.E = MultiMat::getMixtureEnergy(amb.p, amb.rho, 0.0, 1.0, 0.0, amb.rho, gamma, mat.products, mat.unreacted);
+                        s3d.alpha1 = 0.0; s3d.alpha2 = 0.0;
+                        s3d.arho1 = 0.0; s3d.arho2 = 0.0;
+                        s3d.E = amb.p / (gamma - 1.0);
                         solver_3d.setCellStateMulti(i, j, k, s3d);
                     }
                     continue;

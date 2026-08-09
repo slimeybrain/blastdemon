@@ -66,33 +66,6 @@ struct ConservativeTile3D<RealType, true> {
 };
 
 template <typename RealType, bool IsMultiMaterial>
-struct PrimitiveTile3DCore;
-
-template <typename RealType>
-struct PrimitiveTile3DCore<RealType, false> {
-    RealType rho[TILE_CELLS_3D];
-    RealType ux[TILE_CELLS_3D];
-    RealType uy[TILE_CELLS_3D];
-    RealType uz[TILE_CELLS_3D];
-    RealType p[TILE_CELLS_3D];
-    uint8_t floor_status[TILE_CELLS_3D];
-};
-
-template <typename RealType>
-struct PrimitiveTile3DCore<RealType, true> {
-    RealType rho[TILE_CELLS_3D];
-    RealType ux[TILE_CELLS_3D];
-    RealType uy[TILE_CELLS_3D];
-    RealType uz[TILE_CELLS_3D];
-    RealType p[TILE_CELLS_3D];
-    RealType alpha1[TILE_CELLS_3D];
-    RealType alpha2[TILE_CELLS_3D];
-    RealType arho1[TILE_CELLS_3D];
-    RealType arho2[TILE_CELLS_3D];
-    uint8_t floor_status[TILE_CELLS_3D];
-};
-
-template <typename RealType, bool IsMultiMaterial>
 struct PrimitiveTile3D;
 
 template <typename RealType>

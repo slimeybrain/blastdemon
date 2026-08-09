@@ -797,6 +797,9 @@ __global__ void computeMaxWaveSpeed_kernel(
         p, rho, alpha1, alpha2, arho1, arho2, gamma,
         d_materials->products, d_materials->unreacted
     );
+    if (alpha2 > (RealType)1e-4 && arho2 > (RealType)10.0 && d_materials->det_vel > 0.0) {
+        c = fmax(c, (RealType)d_materials->det_vel);
+    }
     double s = fmax(fabs(ur), fabs(uz)) + c;
     
     __shared__ RealType s_data[256];
@@ -2086,7 +2089,7 @@ __global__ void kernel_extrapolate_uncovered_cells_2d(
                 int nj = j + dj;
                 if (ni >= 0 && ni < nr_cells && nj >= 0 && nj < nz_cells) {
                     int nflat = ni * nz_cells + nj;
-                    if (!curr_mask || curr_mask[nflat] == 0) {
+                    if (!prev_mask || prev_mask[nflat] == 0) {
                         int ntr = ni / TILE_SIZE;
                         int ntz = nj / TILE_SIZE;
                         int npool_idx = tile_map[ntr * num_tiles_z + ntz];

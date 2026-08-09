@@ -111,54 +111,26 @@ option(BUILD_TESTS "Build standalone test executables" OFF)
 if(BUILD_TESTS)
     message(STATUS "Building standalone test executables.")
 
-    # test_cuda_solver binary
-    add_executable(test_cuda_solver backend/BlastSolver/test_cuda_solver.cu)
-    set_target_properties(test_cuda_solver PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-    target_compile_options(test_cuda_solver PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3 -lineinfo>)
-    target_link_libraries(test_cuda_solver PRIVATE BlastSolverCore)
+    # Helper macro to add test executable if source file exists
+    macro(add_test_executable_if_exists target_name source_file)
+        if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${source_file}")
+            add_executable(${target_name} ${source_file})
+            set_target_properties(${target_name} PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+            target_compile_options(${target_name} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3 -lineinfo>)
+            target_link_libraries(${target_name} PRIVATE BlastSolverCore)
+        endif()
+    endmacro()
 
-    # test_benchmark_3d binary
-    add_executable(test_benchmark_3d backend/BlastSolver/test_benchmark_3d.cu)
-    set_target_properties(test_benchmark_3d PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-    target_compile_options(test_benchmark_3d PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3 -lineinfo -Xptxas -v>)
-    target_link_libraries(test_benchmark_3d PRIVATE BlastSolverCore)
-
-    # Optional test binaries (built only if source files exist)
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/backend/BlastSolver/test_amr_2d_debug.cpp")
-        add_executable(test_amr_2d_debug backend/BlastSolver/test_amr_2d_debug.cpp)
-        set_target_properties(test_amr_2d_debug PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-        target_compile_options(test_amr_2d_debug PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3 -lineinfo>)
-        target_link_libraries(test_amr_2d_debug PRIVATE BlastSolverCore)
-    endif()
-
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/backend/BlastSolver/test_amr_2d_compare.cpp")
-        add_executable(test_amr_2d_compare backend/BlastSolver/test_amr_2d_compare.cpp)
-        set_target_properties(test_amr_2d_compare PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-        target_compile_options(test_amr_2d_compare PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3 -lineinfo>)
-        target_link_libraries(test_amr_2d_compare PRIVATE BlastSolverCore)
-    endif()
-
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/backend/BlastSolver/test_remap_tnt.cpp")
-        add_executable(test_remap_tnt backend/BlastSolver/test_remap_tnt.cpp)
-        set_target_properties(test_remap_tnt PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-        target_compile_options(test_remap_tnt PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3 -lineinfo>)
-        target_link_libraries(test_remap_tnt PRIVATE BlastSolverCore)
-    endif()
-
-    add_executable(test_3d_cpu_gpu_equivalence backend/BlastSolver/test_3d_cpu_gpu_equivalence.cu)
-    set_target_properties(test_3d_cpu_gpu_equivalence PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-    target_compile_options(test_3d_cpu_gpu_equivalence PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3 -lineinfo>)
-    target_link_libraries(test_3d_cpu_gpu_equivalence PRIVATE BlastSolverCore)
-
-    add_executable(test_mpm_plasticity backend/BlastSolver/test_mpm_plasticity.cpp)
-    set_target_properties(test_mpm_plasticity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-    target_compile_options(test_mpm_plasticity PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3 -lineinfo>)
-    target_link_libraries(test_mpm_plasticity PRIVATE BlastSolverCore)
-
-    add_executable(test_fsi_3d backend/BlastSolver/test_fsi_3d.cu)
-    set_target_properties(test_fsi_3d PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-    target_compile_options(test_fsi_3d PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3 -lineinfo>)
-    target_link_libraries(test_fsi_3d PRIVATE BlastSolverCore)
+    add_test_executable_if_exists(test_cuda_solver backend/BlastSolver/test_cuda_solver.cu)
+    add_test_executable_if_exists(test_benchmark_3d backend/BlastSolver/test_benchmark_3d.cu)
+    add_test_executable_if_exists(test_amr_2d_debug backend/BlastSolver/test_amr_2d_debug.cpp)
+    add_test_executable_if_exists(test_amr_2d_compare backend/BlastSolver/test_amr_2d_compare.cpp)
+    add_test_executable_if_exists(test_remap_tnt backend/BlastSolver/test_remap_tnt.cpp)
+    add_test_executable_if_exists(test_3d_cpu_gpu_equivalence backend/BlastSolver/test_3d_cpu_gpu_equivalence.cu)
+    add_test_executable_if_exists(test_mpm_plasticity backend/BlastSolver/test_mpm_plasticity.cpp)
+    add_test_executable_if_exists(test_cylinder_impact backend/BlastSolver/test_cylinder_impact.cpp)
+    add_test_executable_if_exists(test_fsi_3d backend/BlastSolver/test_fsi_3d.cu)
 endif()
+
 
 

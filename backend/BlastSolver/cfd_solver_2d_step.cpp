@@ -917,6 +917,12 @@ double CFDSolver2DImpl<RealType>::computeStepSize(double cfl) const {
             RealType c = MultiMat::getMixtureSoundSpeed(p, rho, states_pool[pool_idx].alpha1[k], states_pool[pool_idx].alpha2[k], states_pool[pool_idx].arho1[k], states_pool[pool_idx].arho2[k], (RealType)gamma, currentMaterials.products, currentMaterials.unreacted);
             if (std::isnan(c) || std::isinf(c)) continue;
 
+            RealType a2 = states_pool[pool_idx].alpha2[k];
+            RealType ar2 = states_pool[pool_idx].arho2[k];
+            if (a2 > (RealType)1e-4 && ar2 > (RealType)10.0 && currentMaterials.det_vel > 0.0) {
+                c = max(c, (RealType)currentMaterials.det_vel);
+            }
+
             RealType s = max(abs(ur), abs(uz)) + c;
             if (s > (RealType)20000.0) s = (RealType)20000.0;
             max_speed = max(max_speed, s);
@@ -1098,6 +1104,9 @@ std::vector<double> CFDSolver2DImpl<RealType>::getLocalTimesteps(double cfl) con
             using std::abs;
             using std::max;
             RealType c = MultiMat::getMixtureSoundSpeed(s.p, s.rho, s.alpha1, s.alpha2, s.arho1, s.arho2, (RealType)gamma, currentMaterials.products, currentMaterials.unreacted);
+            if (s.alpha2 > (RealType)1e-4 && s.arho2 > (RealType)10.0 && currentMaterials.det_vel > 0.0) {
+                c = max(c, (RealType)currentMaterials.det_vel);
+            }
             RealType denom = max(abs(s.ur), abs(s.uz)) + c;
             if (denom < (RealType)1e-6) denom = (RealType)1e-6;
             dt_local[i * nz_cells + j] = cfl * std::min(dr, dz) / (double)denom;

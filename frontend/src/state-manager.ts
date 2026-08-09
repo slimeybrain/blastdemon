@@ -15,7 +15,7 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
         if (presetName !== 'Custom' && MPM_MATERIAL_PRESETS[presetName]) {
             const presetData = MPM_MATERIAL_PRESETS[presetName];
             for (const [k, v] of Object.entries(presetData)) {
-                if (k !== 'reference') {
+                if (k !== 'reference' && k !== 'category') {
                     parameters[k] = v;
                 }
             }
@@ -24,14 +24,30 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
         const materialKeys = [
             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
             'failure_strain', 'tensile_failure_stress',
-            'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
-            'mg_gamma0', 'mg_c0', 'mg_s'
+            'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp'
         ];
         if (updatedKey && materialKeys.includes(updatedKey)) {
             parameters['preset'] = 'Custom';
         }
     }
 }
+
+const DISPLAY_ONLY_KEYS = new Set([
+    'colormap', 'quantity_colormaps', 'quantity_ranges', 'slices', 'log_scale', 'auto_scale',
+    'show_color_bar', 'color_bar_position', 'colorbar_source', 'show_grid', 'grid_meshlines',
+    'show_grid_box', 'grid_opacity', 'cell_edges', 'interpolate', 'min_val', 'max_val',
+    'lightingEnabled', 'aoEnabled', 'ambientLevel', 'specularIntensity', 'showMPMParticles',
+    'mpmParticleSize', 'mpmParticleQuantity', 'mpmParticleColormap', 'mpmParticleAutoScale',
+    'mpmParticleLogScale', 'mpmParticleShowColorbar', 'mpmParticleOpacity', 'mpmParticleMinVal',
+    'mpmParticleMaxVal', 'show_stl', 'stl_colormap', 'stl_wireframe', 'stl_solids', 'stl_opacity',
+    'stl_show_results', 'stl_quantity', 'stl_sampling_mode', 'stl_auto_scale', 'stl_log_scale',
+    'stl_show_colorbar', 'stl_min_val', 'stl_max_val', 'show_gauges', 'gauge_size', 'gauge_opacity',
+    'gauge_quantity', 'gauge_solid', 'show_obstacles', 'obstacles_colormap', 'obstacles_gridlines',
+    'obstacles_solid', 'obstacles_lighting', 'obstacles_opacity', 'obstacles_quantity',
+    'obstacles_auto_scale', 'obstacles_log_scale', 'obstacles_show_colorbar',
+    'obstacles_interpolate', 'obstacles_min_val', 'obstacles_max_val', 'focusedSliceIndex',
+    'color', 'x_axis_mode', 'plot_stride'
+]);
 
 export class StateManager {
     private appState: AppState;
@@ -107,6 +123,12 @@ export class StateManager {
         if (oldStatus !== status) {
             this.modelStatuses.set(modelId, status);
             this.modelStatusListeners.forEach(l => l(modelId, status));
+            
+            if (status === 'PAUSED' && oldStatus === 'RUNNING') {
+                this.pushTelemetry('Simulation Interrupted/Paused', undefined, modelId);
+            } else if (status === 'TERMINATED') {
+                this.pushTelemetry('Simulation Terminated', undefined, modelId);
+            }
             
             const activeWs = this.getActiveWorkspace();
             if (activeWs && activeWs.activeModelId === modelId) {
@@ -770,10 +792,13 @@ export class StateManager {
         console.log("[DEBUG] updateNodeParameters called for node:", nodeId, "params:", parameters);
         const appStateCopy = JSON.parse(JSON.stringify(this.appState)) as AppState;
         let found = false;
+        let targetModelId: string | null = null;
+        let isPhysicalChange = false;
         
         for (const model of Object.values(appStateCopy.models)) {
             const node = model.nodes.find(n => n.id === nodeId);
             if (node) {
+                targetModelId = model.id;
                 const merged = { ...node.parameters, ...parameters };
                 const updatedKey = Object.keys(parameters).find(k => k === 'charge_mass' || k === 'preset') || Object.keys(parameters)[0];
                 syncExplosiveParameters(node, merged, model, updatedKey);
@@ -792,13 +817,23 @@ export class StateManager {
                     });
                 }
                 
+                for (const key of Object.keys(parameters)) {
+                    if (!DISPLAY_ONLY_KEYS.has(key)) {
+                        isPhysicalChange = true;
+                        break;
+                    }
+                }
+                
                 found = true;
                 break;
             }
         }
 
         if (found) {
-            this.setStatus('UNINITIALIZED');
+            if (targetModelId && isPhysicalChange) {
+                this.setModelStatus(targetModelId, 'UNINITIALIZED');
+                this.setModelProgress(targetModelId, 0);
+            }
             this.pushAppState(appStateCopy);
         } else {
             console.error("[DEBUG] Node NOT found for parameter update:", nodeId);
@@ -809,10 +844,13 @@ export class StateManager {
         const appStateCopy = JSON.parse(JSON.stringify(this.appState)) as AppState;
         let found = false;
         let changed = false;
+        let targetModelId: string | null = null;
+        let isPhysicalChange = false;
         
         for (const model of Object.values(appStateCopy.models)) {
             const node = model.nodes.find(n => n.id === nodeId);
             if (node) {
+                targetModelId = model.id;
                 const merged = { ...node.parameters, ...parameters };
                 const updatedKey = Object.keys(parameters).find(k => k === 'charge_mass' || k === 'preset') || Object.keys(parameters)[0];
                 syncExplosiveParameters(node, merged, model, updatedKey);
@@ -823,6 +861,9 @@ export class StateManager {
                     if (node.parameters[key] !== value) {
                         node.parameters[key] = value;
                         changed = true;
+                        if (!DISPLAY_ONLY_KEYS.has(key)) {
+                            isPhysicalChange = true;
+                        }
                     }
                 }
 
@@ -839,6 +880,7 @@ export class StateManager {
                             syncExplosiveParameters(depNode, depNode.parameters, model, 'rho');
                             if (depNode.parameters['charge_radius'] !== oldRadius) {
                                 changed = true;
+                                isPhysicalChange = true;
                             }
                         }
                     });
@@ -850,6 +892,10 @@ export class StateManager {
         }
 
         if (found && changed) {
+            if (targetModelId && isPhysicalChange) {
+                this.setModelStatus(targetModelId, 'UNINITIALIZED');
+                this.setModelProgress(targetModelId, 0);
+            }
             this.appState = appStateCopy;
             this.saveWorkspace();
             this.notifyListeners();
@@ -910,15 +956,8 @@ export class StateManager {
 
     setStatus(status: SimulationStatus): void {
         if (this.simulationStatus !== status) {
-            const oldStatus = this.simulationStatus;
             this.simulationStatus = status;
             this.notifyStatusListeners();
-
-            if (status === 'PAUSED' && oldStatus === 'RUNNING') {
-                this.pushTelemetry('Simulation Interrupted/Paused');
-            } else if (status === 'TERMINATED') {
-                this.pushTelemetry('Simulation Terminated');
-            }
         }
     }
 
@@ -1072,17 +1111,7 @@ export class StateManager {
         this.telemetryStore.set(nodeId, telemetryToStore);
         this.notifyTelemetryUpdate(nodeId, telemetryToStore);
 
-        const solverNodeTypes = ['CFDSolver', 'CFDSolver2D', 'CFDSolver3D', 'MPMDomain2D', 'MPMDomain3D', 'FSICoupler2D', 'FSICoupler3D'];
-        const isSolverOrCoupler = targetNode && solverNodeTypes.includes(targetNode.type);
-
-        const telemetryConnections = connections.filter(e => {
-            if (e.fromNode === nodeId) return true;
-            if (isSolverOrCoupler) {
-                const fromN = nodes.find(n => n.id === e.fromNode);
-                return fromN && solverNodeTypes.includes(fromN.type);
-            }
-            return false;
-        });
+        const telemetryConnections = connections.filter(e => e.fromNode === nodeId);
         const updatedNodeIds = new Set<string>();
 
         telemetryConnections.forEach(connection => {
@@ -1781,12 +1810,12 @@ export class StateManager {
                     impulse: [0.0, 10000.0]
                 },
                 refresh_rate: 2.0,
-                slices: [{ axis: 'xy', offset: 0.5, quantities: ['pressure'], stride: 1, opacity: 1.0, colormap: 'plasma', auto_scale: true, log_scale: false, interpolate: true, min_val: 101325.0, max_val: 101325.0 * 10.0, enabled: true }],
+                slices: [{ axis: 'xy', offset: 0.5, quantities: ['pressure'], stride: 1, opacity: 1.0, colormap: 'plasma', auto_scale: true, log_scale: false, interpolate: true, min_val: 101325.0, max_val: 101325.0 * 10.0, enabled: true, show_colorbar: false }],
                 log_scale: false,
                 auto_scale: true,
                 min_val: 101325.0,
                 max_val: 101325.0 * 100.0,
-                show_color_bar: true,
+                show_color_bar: false,
                 color_bar_position: 'left-center',
                 colorbar_source: 'slice',
                 show_grid: true,
@@ -1807,6 +1836,7 @@ export class StateManager {
                 mpmParticleColormap: 'plasma',
                 mpmParticleAutoScale: true,
                 mpmParticleLogScale: false,
+                mpmParticleShowColorbar: false,
                 mpmParticleOpacity: 1.0,
                 mpmParticleMinVal: 0.0,
                 mpmParticleMaxVal: 500000000.0,
@@ -1837,6 +1867,7 @@ export class StateManager {
                 stl_sampling_mode: 'nearest',
                 stl_auto_scale: true,
                 stl_log_scale: false,
+                stl_show_colorbar: false,
                 stl_min_val: 101325.0,
                 stl_max_val: 1013250.0,
                 show_gauges: true,
@@ -1853,6 +1884,7 @@ export class StateManager {
                 obstacles_quantity: 'pressure',
                 obstacles_auto_scale: true,
                 obstacles_log_scale: false,
+                obstacles_show_colorbar: false,
                 obstacles_interpolate: true,
                 obstacles_min_val: 101325.0,
                 obstacles_max_val: 101325.0 * 10.0
@@ -1899,7 +1931,7 @@ export class StateManager {
                 angular_vel_x: 0.0, angular_vel_y: 0.0, angular_vel_z: 0.0
             },
             'MPMMaterialSteel': {
-                material_model: 'Steel (Hypoelastic)',
+                material_model: 'Hypoelastic',
                 preset: 'Structural Steel (A36)',
                 density: 7850.0,
                 youngs_modulus: 200.0e9,

@@ -59,9 +59,9 @@ export function isParameterRelevant(node: Node, key: string): boolean {
         if (matType === 'JWL Charge' && (airKeys.includes(key) || igKeys.includes(key))) return false;
         if (matType === 'Ideal Gas Charge' && (airKeys.includes(key) || jwlKeys.includes(key))) return false;
     } else if (node.type === 'MPMMaterialSteel') {
-        const matModel = node.parameters['material_model'] || 'Steel (Hypoelastic)';
+        const matModel = node.parameters['material_model'] || 'Hypoelastic';
         const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
-        if (matModel === 'Steel (Hypoelastic)' && jcKeys.includes(key)) return false;
+        if (matModel === 'Hypoelastic' && jcKeys.includes(key)) return false;
     } else if (node.type === 'DomainMesh') {
         const dim = node.parameters['dimension'] || '1D';
         if (dim === '1D' && ['y_min_bc', 'y_max_bc', 'z_min_bc', 'z_max_bc'].includes(key)) return false;

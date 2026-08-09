@@ -888,11 +888,17 @@ export class LayoutManager {
     private renderTelemetry3D(node: PanelNode, container: HTMLElement): void {
         // Auto-assign targetNodeId to an unclaimed Telemetry3DViewport if it is currently null/empty
         if (!node.targetNodeId) {
+            const activeWs = this.stateManager.getActiveWorkspace();
+            const activeModelId = activeWs?.activeModelId;
             const allModels = this.stateManager.getWorkspaceModels();
-            const vpNodes: any[] = [];
-            allModels.forEach(m => {
-                vpNodes.push(...m.nodes.filter(n => n.type === 'Telemetry3DViewport'));
+            
+            const activeModel = allModels.find(m => m.id === activeModelId);
+            const activeVpNodes = activeModel ? activeModel.nodes.filter(n => n.type === 'Telemetry3DViewport') : [];
+            const otherVpNodes: any[] = [];
+            allModels.filter(m => m.id !== activeModelId).forEach(m => {
+                otherVpNodes.push(...m.nodes.filter(n => n.type === 'Telemetry3DViewport'));
             });
+            const vpNodes = [...activeVpNodes, ...otherVpNodes];
 
             const claimedIds = new Set<string>();
             const collectClaimed = (layoutNode: LayoutNode) => {
@@ -905,7 +911,6 @@ export class LayoutManager {
                     collectClaimed(layoutNode.secondChild);
                 }
             };
-            const activeWs = this.stateManager.getActiveWorkspace();
             if (activeWs) {
                 collectClaimed(activeWs.layout);
             }
@@ -930,10 +935,12 @@ export class LayoutManager {
                 };
                 if (activeWs) collectClaimedModels(activeWs.layout);
 
-                const allModels = this.stateManager.getWorkspaceModels();
-                const unclaimedModel = allModels.find(m =>
-                    m.nodes.some(n => n.type === 'CFDSolver3D') && !claimedModelIds.has(m.id)
-                );
+                let unclaimedModel = (activeModel && activeModel.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'FSICoupler3D' || n.type === 'MPMDomain3D') && !claimedModelIds.has(activeModel.id)) ? activeModel : null;
+                if (!unclaimedModel) {
+                    unclaimedModel = allModels.find(m =>
+                        m.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'FSICoupler3D' || n.type === 'MPMDomain3D') && !claimedModelIds.has(m.id)
+                    ) || null;
+                }
                 if (unclaimedModel) {
                     console.log(`[Layout] Auto-assigning model ${unclaimedModel.id} to 3D panel ${node.id}`);
                     node.targetNodeId = unclaimedModel.id;
@@ -2345,6 +2352,11 @@ class ExecutionManagerComponent {
                 if (pauseBtn) pauseBtn.disabled = true;
                 if (termBtn) termBtn.disabled = false;
                 stepButtons.forEach(b => b.disabled = false);
+            } else if (status === 'ERROR') {
+                if (playBtn) playBtn.disabled = false;
+                if (pauseBtn) pauseBtn.disabled = true;
+                if (termBtn) termBtn.disabled = false; // Enabled to allow manual process cleanup
+                stepButtons.forEach(b => b.disabled = true);
             } else {
                 // Not initialised (UNINITIALIZED or TERMINATED)
                 if (playBtn) playBtn.disabled = false; // Enabled for Auto-Run

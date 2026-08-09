@@ -730,7 +730,7 @@ export class NodeViewer {
         let paramKeys = Object.keys(node.parameters);
         if (node.type === 'MPMMaterialSteel') {
             if (!node.parameters['material_model']) {
-                node.parameters['material_model'] = 'Steel (Hypoelastic)';
+                node.parameters['material_model'] = 'Hypoelastic';
             }
             if (!node.parameters['preset']) {
                 node.parameters['preset'] = 'Structural Steel (A36)';
@@ -790,9 +790,9 @@ export class NodeViewer {
                 else value = 'RK2 (2nd-Order Space/Time)';
             }
             if (node.type === 'MPMMaterialSteel') {
-                const matModel = node.parameters['material_model'] || 'Steel (Hypoelastic)';
+                const matModel = node.parameters['material_model'] || 'Hypoelastic';
                 const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
-                if (matModel === 'Steel (Hypoelastic)' && jcKeys.includes(key)) continue;
+                if (matModel === 'Hypoelastic' && jcKeys.includes(key)) continue;
             }
             if (node.type === 'DomainMesh') {
 
@@ -2247,16 +2247,18 @@ export class NodeViewer {
             'nr', 'nz', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
             'charge_r', 'charge_z', 'charge_radius', 'charge_height',
             'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
-            'ideal_gamma', 'ideal_rho_0', 'ideal_e_0',
+            'ideal_gamma', 'ideal_rho_0', 'ideal_e_0', 'high_rho', 'ambient_rho', 'ambient_p',
             // 3D CFD keys
             'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
             'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
             'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
+            'origin_x', 'origin_y', 'origin_z', 'dim_x', 'dim_y', 'dim_z', 'scale_factor',
             'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
             'refinement_opacity', 'charge_opacity',
-            'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio',
+            'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio', 'amr_tile_size',
             'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'refinement_level',
             'submesh_x', 'submesh_y', 'submesh_z', 'submesh_size_x', 'submesh_size_y', 'submesh_size_z',
+            'offset', 'stride',
             // MPM keys
             'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'radius', 'inner_radius',
             'scale_x', 'scale_y', 'scale_z',
@@ -2272,7 +2274,7 @@ export class NodeViewer {
         const chargeShapeOptions = node.type === 'Charge3D' ? ['Sphere', 'Cylinder', 'Block'] : ['Sphere', 'Cylinder'];
 
         const dropdowns: Record<string, string[]> = {
-            'material_model': ['Steel (Hypoelastic)', 'Johnson-Cook + Mie-Grüneisen'],
+            'material_model': ['Hypoelastic', 'Johnson-Cook + Mie-Grüneisen'],
             'shape': ['box', 'sphere', 'cylinder'],
 
             'mesh_type': ['regular', 'amr'],

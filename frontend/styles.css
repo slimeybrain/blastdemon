@@ -233,6 +233,7 @@ body {
 .badge-running { background: #28a745; color: #fff; }
 .badge-paused { background: #eab308; color: #000; }
 .badge-terminated { background: #dc3545; color: #fff; }
+.badge-error { background: #ef4444; color: #fff; }
 
 .header-actions {
     display: flex;
@@ -616,7 +617,7 @@ body {
 .port-label { padding: 0 12px; }
 
 .node-content {
-    overflow: hidden;
+    overflow: visible;
     flex: 1;
     /* min-height: 0 is required so this flex item can shrink below its
        content size; without it the text body can overflow the node bounds. */

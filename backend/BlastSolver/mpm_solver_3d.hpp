@@ -63,10 +63,11 @@ struct alignas(32) MPMGridNode3D {
     float m{0.0f};            // Mass (4B)
     float p[3]{0.0f, 0.0f, 0.0f};         // Momentum (px, py, pz) (12B)
     float f_ext[3]{0.0f, 0.0f, 0.0f};     // External force (FSI coupling) (12B)
+    float f_int[3]{0.0f, 0.0f, 0.0f};     // Internal stress force (12B)
     float plastic_strain{0.0f}; // Interpolated plastic strain for smoothing (4B)
 
-    // Inline velocity helpers (0 extra storage!)
-    float v(int i) const { return m > 1e-12f ? p[i] / m : 0.0f; }
+    static constexpr float MIN_MASS = 1.0e-11f;
+    float v(int i) const { return m > MIN_MASS ? p[i] / m : 0.0f; }
 };
 
 enum class MPMTimeIntegrationScheme {
@@ -212,7 +213,7 @@ private:
 
     float m_last_dt{0.0f};
     float m_last_cfl{0.3f};
-    float m_last_v_max{0.0f};
+    mutable float m_last_v_max{0.0f};
     double m_sim_time{0.0};
     int m_step_count{0};
 };

@@ -12,6 +12,7 @@ export class PropertyEditor {
     private activeTabIdx: number = 0;
     private _forceNextFull: boolean = false;
     private _lastSlicesJson: string = '';
+    private _lastStructJson: string = '';
     private selectedPrimitiveIndex: number = 0;
 
     constructor(parent: HTMLElement, stateManager: StateManager) {
@@ -32,6 +33,19 @@ export class PropertyEditor {
                     this._lastSlicesJson = slicesJson;
                     force = true;
                 }
+                const structJson = JSON.stringify([
+                    node.parameters.material_model,
+                    node.parameters.material_type,
+                    node.parameters.composition,
+                    node.parameters.charge_shape,
+                    node.parameters.shape_type,
+                    node.parameters.dimension,
+                    node.parameters.velocity_scheme
+                ]);
+                if (structJson !== this._lastStructJson) {
+                    this._lastStructJson = structJson;
+                    force = true;
+                }
             }
             this.render(force);
         };
@@ -40,6 +54,15 @@ export class PropertyEditor {
         const state = this.stateManager.getCurrentState();
         const node = state?.nodes.find(n => n.id === this.currentNodeId);
         this._lastSlicesJson = node ? JSON.stringify(node.parameters.slices || []) : '';
+        this._lastStructJson = node ? JSON.stringify([
+            node.parameters.material_model,
+            node.parameters.material_type,
+            node.parameters.composition,
+            node.parameters.charge_shape,
+            node.parameters.shape_type,
+            node.parameters.dimension,
+            node.parameters.velocity_scheme
+        ]) : '';
         
         this.render();
     }
@@ -307,13 +330,13 @@ export class PropertyEditor {
         let paramKeys = Object.keys(node.parameters);
         if (node.type === 'MPMMaterialSteel') {
             if (!node.parameters['material_model']) {
-                node.parameters['material_model'] = 'Steel (Hypoelastic)';
+                node.parameters['material_model'] = 'Hypoelastic';
             }
             if (!node.parameters['preset']) {
                 node.parameters['preset'] = 'Structural Steel (A36)';
             }
             const matModel = node.parameters['material_model'];
-            const baseKeys = ['preset', 'material_model', 'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus', 'failure_strain', 'tensile_failure_stress'];
+            const baseKeys = ['material_model', 'preset', 'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus', 'failure_strain', 'tensile_failure_stress'];
             const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
             paramKeys = (matModel === 'Johnson-Cook + Mie-Grüneisen') ? [...baseKeys, ...jcKeys] : baseKeys;
         } else if (node.type === 'MPMDomain2D') {
@@ -397,9 +420,9 @@ export class PropertyEditor {
                 if ((key === 'z_min_bc' || key === 'z_max_bc') && (dim === '1D' || dim === '2D')) continue;
             }
             if (node.type === 'MPMMaterialSteel') {
-                const matModel = node.parameters['material_model'] || 'Steel (Hypoelastic)';
+                const matModel = node.parameters['material_model'] || 'Hypoelastic';
                 const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
-                if (matModel === 'Steel (Hypoelastic)' && jcKeys.includes(key)) continue;
+                if (matModel === 'Hypoelastic' && jcKeys.includes(key)) continue;
             }
             if (node.type === 'Material') {
 
@@ -1198,16 +1221,18 @@ export class PropertyEditor {
             'nr', 'nz', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
             'charge_r', 'charge_z', 'charge_radius', 'charge_height',
             'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
-            'ideal_gamma', 'ideal_rho_0', 'ideal_e_0',
+            'ideal_gamma', 'ideal_rho_0', 'ideal_e_0', 'high_rho', 'ambient_rho', 'ambient_p',
             // 3D CFD keys
             'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
             'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
             'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
+            'origin_x', 'origin_y', 'origin_z', 'dim_x', 'dim_y', 'dim_z', 'scale_factor',
             'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
             'refinement_opacity', 'charge_opacity',
             'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio', 'amr_tile_size',
             'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'refinement_level',
             'submesh_x', 'submesh_y', 'submesh_z', 'submesh_size_x', 'submesh_size_y', 'submesh_size_z',
+            'offset', 'stride',
             // MPM keys
             'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'radius', 'inner_radius',
             'scale_x', 'scale_y', 'scale_z',
@@ -1222,7 +1247,7 @@ export class PropertyEditor {
 
         const dropdowns: Record<string, string[]> = {
             'preset': [...MPM_MATERIAL_PRESET_NAMES],
-            'material_model': ['Steel (Hypoelastic)', 'Johnson-Cook + Mie-Grüneisen'],
+            'material_model': ['Hypoelastic', 'Johnson-Cook + Mie-Grüneisen'],
             'mpmParticleQuantity': ['vonMises', 'pressure', 'velocity', 'density', 'plastic_strain', 'damage', 'has_failed', 'object_id'],
 
             'mpmParticleColormap': ['plasma', 'viridis', 'coolwarm', 'rainbow', 'cividis', 'grayscale'],
@@ -1828,19 +1853,7 @@ export class PropertyEditor {
                 const state = this.stateManager.getCurrentState();
                 const node = state?.nodes.find(n => n.id === this.currentNodeId);
                 if (node) {
-                    let meshNode: any = null;
-                    if (state) {
-                        const solverConn = state.connections.find(c => c.toNode === node.id);
-                        if (solverConn) {
-                            const solverNode = state.nodes.find(n => n.id === solverConn.fromNode);
-                            if (solverNode && (solverNode.type === 'CFDSolver3D' || solverNode.type === 'CFDSolver2D')) {
-                                const connToSolver = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'mesh');
-                                if (connToSolver) {
-                                    meshNode = state.nodes.find(n => n.id === connToSolver.fromNode);
-                                }
-                            }
-                        }
-                    }
+                    const meshNode = this.findMeshNodeForViewport(state, node.id);
 
                     if (meshNode && meshNode.type === 'DomainMesh3D') {
                         const xmin = Number(meshNode.parameters?.xmin ?? 0.0);
@@ -2000,19 +2013,7 @@ export class PropertyEditor {
             const state = this.stateManager.getCurrentState();
             const node = state?.nodes.find(n => n.id === this.currentNodeId);
             if (node) {
-                let meshNode: any = null;
-                if (state) {
-                    const solverConn = state.connections.find(c => c.toNode === node.id);
-                    if (solverConn) {
-                        const solverNode = state.nodes.find(n => n.id === solverConn.fromNode);
-                        if (solverNode && (solverNode.type === 'CFDSolver3D' || solverNode.type === 'CFDSolver2D')) {
-                            const connToSolver = state.connections.find(c => c.toNode === solverNode.id);
-                            if (connToSolver) {
-                                meshNode = state.nodes.find(n => n.id === connToSolver.fromNode);
-                            }
-                        }
-                    }
-                }
+                const meshNode = this.findMeshNodeForViewport(state, node.id);
 
                 if (meshNode && meshNode.type === 'DomainMesh3D') {
                     const zmin = Number(meshNode.parameters?.zmin ?? 0.0);
@@ -2045,6 +2046,103 @@ export class PropertyEditor {
     }
 
 
+    private findMeshNodeForViewport(state: any, viewportNodeId: string): any {
+        if (!state) return null;
+        const node = state.nodes.find((n: any) => n.id === viewportNodeId);
+        if (!node) return null;
+
+        const queue: string[] = [viewportNodeId];
+        const visited = new Set<string>([viewportNodeId]);
+        
+        while (queue.length > 0) {
+            const currId = queue.shift()!;
+            const currNode = state.nodes.find((n: any) => n.id === currId);
+            if (currNode && (currNode.type === 'DomainMesh3D' || currNode.type === 'DomainMesh2D')) {
+                return currNode;
+            }
+            
+            const incoming = state.connections.filter((c: any) => c.toNode === currId);
+            for (const conn of incoming) {
+                if (!visited.has(conn.fromNode)) {
+                    visited.add(conn.fromNode);
+                    queue.push(conn.fromNode);
+                }
+            }
+        }
+        
+        const is3D = node.type.includes('3D') || node.type === 'Telemetry3DViewport';
+        const targetType = is3D ? 'DomainMesh3D' : 'DomainMesh2D';
+        return state.nodes.find((n: any) => n.type === targetType) || null;
+    }
+
+    private sendView3DConfigForNode(nodeId: string, slices: any[]): void {
+        const net = (window as any).networkManager;
+        if (net && net.isConnected()) {
+            const state = this.stateManager.getCurrentState();
+            const node = state?.nodes.find(n => n.id === nodeId);
+            if (!node || node.type !== 'Telemetry3DViewport') return;
+            
+            let targetModelId = nodeId;
+            const models = this.stateManager.getAppState().models;
+            for (const [mid, m] of Object.entries(models)) {
+                if (m.nodes.some(n => n.id === node.id)) {
+                    targetModelId = mid;
+                    break;
+                }
+            }
+            const showObstacles = node.parameters.show_obstacles === true;
+            const obstaclesQuantity = node.parameters.obstacles_quantity || 'pressure';
+            const showSTL = node.parameters.show_stl !== false;
+            const stlShowResults = node.parameters.stl_show_results !== false;
+            const stlQuantity = node.parameters.stl_quantity || 'pressure';
+
+            const fullSlices = [...slices];
+            if (showObstacles) {
+                fullSlices.push({
+                    axis: 'obstacles',
+                    offset: 0.0,
+                    quantities: [obstaclesQuantity],
+                    stride: 1
+                });
+            }
+            if (showSTL && stlShowResults) {
+                let volStride = 1;
+                const targetModel = this.stateManager.getAppState().models[targetModelId];
+                const meshNode = this.findMeshNodeForViewport(targetModel, nodeId);
+                if (meshNode) {
+                    const cellSize = Number(meshNode.parameters.cell_size ?? 0.05);
+                    const xmin = Number(meshNode.parameters.xmin ?? 0.0);
+                    const xmax = Number(meshNode.parameters.xmax ?? 1.0);
+                    const ymin = Number(meshNode.parameters.ymin ?? 0.0);
+                    const ymax = Number(meshNode.parameters.ymax ?? 1.0);
+                    const zmin = Number(meshNode.parameters.zmin ?? 0.0);
+                    const zmax = Number(meshNode.parameters.zmax ?? 1.0);
+                    const nx = Math.max(1, Math.round((xmax - xmin) / cellSize));
+                    const ny = Math.max(1, Math.round((ymax - ymin) / cellSize));
+                    const nz = Math.max(1, Math.round((zmax - zmin) / cellSize));
+                    const totalCells = nx * ny * nz;
+                    if (totalCells > 1000000) {
+                        volStride = 4;
+                    } else if (totalCells > 200000) {
+                        volStride = 2;
+                    }
+                }
+                fullSlices.push({
+                    axis: 'volume',
+                    offset: 0.0,
+                    quantities: [stlQuantity],
+                    stride: volStride
+                });
+            }
+            net.send({
+                command: "VIEW3D_CONFIG",
+                modelId: targetModelId,
+                slices: fullSlices,
+                refresh_rate: Number(node.parameters.refresh_rate ?? 2.0)
+            });
+        }
+    }
+
     // FIX 4: For interactive slice mutations, use in-place update to avoid polluting undo history
     // and avoid incorrectly resetting simulation status (matches overlay panel behavior).
     // Set _forceNextFull so the state-change notification causes an immediate full DOM rebuild
@@ -2053,6 +2151,7 @@ export class PropertyEditor {
         if (!this.currentNodeId) return;
         this._forceNextFull = true;
         this.stateManager.updateNodeParametersInPlace(this.currentNodeId, { slices });
+        this.sendView3DConfigForNode(this.currentNodeId, slices);
     }
 
     private updateParameter(key: string, value: any): void {

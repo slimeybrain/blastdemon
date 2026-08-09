@@ -39,6 +39,13 @@
 #include "mpm_solver_3d_cuda.hpp"
 #include "fsi_coupler_3d.hpp"
 
+void select_cuda_device(const std::string& device);
+bool is_cuda_device(const std::string& device);
+extern "C" int cudaSetDevice(int device);
+
+size_t global_last_valid_nvml_vram = 0;
+int global_cuda_device_index = 0;
+
 std::unique_ptr<Blast::MPMSolver2D> global_solver_mpm_2d = nullptr;
 std::unique_ptr<Blast::MPMSolver3D> global_solver_mpm_3d = nullptr;
 std::unique_ptr<Blast::MPMSolver3DCUDA> global_solver_mpm_3d_cuda = nullptr;
@@ -194,6 +201,7 @@ struct VTKOutputConfig {
 } global_vtk_config;
 
 std::string global_model_filename = "";
+std::string global_model_id = "";
 
 static Blast::MPMTransferScheme parseTransferScheme(const std::string& str) {
     if (str == "Standard" || str == "Normal" || str == "Linear") {
@@ -224,6 +232,9 @@ void write_gauge_files() {
         }
     }
     std::string out_dir = get_absolute_path(global_gauge_config.output_dir, default_dir);
+    if (!global_model_id.empty()) {
+        out_dir = out_dir + "/" + global_model_id;
+    }
 
     try {
         std::filesystem::create_directories(out_dir);
@@ -383,6 +394,9 @@ void write_vtk_outputs(int step, double time) {
         }
     }
     std::string out_dir = get_absolute_path(global_vtk_config.vtk_dir, default_dir);
+    if (!global_model_id.empty()) {
+        out_dir = out_dir + "/" + global_model_id;
+    }
 
     try {
         std::filesystem::create_directories(out_dir);
@@ -694,14 +708,15 @@ void worker_thread_func() {
         sim_running = false;
         return;
     }
-
-    auto last_telemetry_time = std::chrono::steady_clock::now();
+    try {
+        auto last_telemetry_time = std::chrono::steady_clock::now();
     int initial_steps = global_target_steps.load();
     int initial_idx = global_solver->getActiveIndex();
     int total_range = global_solver->getNumCells() - initial_idx;
 
     int step_count = 0;
     double last_vtk_time = global_t;
+    double last_dt = 1.0e-7;
 
     emit_kernel_log("INFO", "Asynchronous worker thread started.", global_t, "1d");
 
@@ -724,7 +739,13 @@ void worker_thread_func() {
 
         auto step_start = std::chrono::steady_clock::now();
         double dt = global_solver->computeStepSize(global_cfl.load());
+        if (step_count == 0) {
+            dt = std::min(dt, 1.0e-7);
+        } else {
+            dt = std::min(dt, 1.3 * last_dt);
+        }
         global_dt_1d = dt;
+        last_dt = dt;
         global_solver->step(dt);
         auto step_end = std::chrono::steady_clock::now();
         global_wallclock_1d = global_wallclock_1d.load() + std::chrono::duration<double>(step_end - step_start).count();
@@ -805,12 +826,21 @@ void worker_thread_func() {
     step_progress = 100;
     emit_kernel_log("INFO", "Worker thread execution cycle ended.", global_t, "1d");
     write_gauge_files();
-    write_vtk_outputs(step_count, global_t);
-    sim_running = false;
-    sim_paused = false;
-    sim_terminate = false;
-    global_target_steps = 0;
-    global_exec_until_end = false;
+        write_vtk_outputs(step_count, global_t);
+        sim_running = false;
+        sim_paused = false;
+        sim_terminate = false;
+        global_target_steps = 0;
+        global_exec_until_end = false;
+    } catch (const std::exception& e) {
+        emit_kernel_log("ERROR", std::string("1D worker thread error: ") + e.what(), global_t, "1d");
+        sim_running = false;
+        std::exit(1);
+    } catch (...) {
+        emit_kernel_log("ERROR", "1D worker thread error: unknown exception", global_t, "1d");
+        sim_running = false;
+        std::exit(1);
+    }
 }
 
 extern std::vector<GeometryTile3D> global_geometry_tiles;
@@ -1133,7 +1163,7 @@ void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFD
             needs_realloc = true;
         } else if (solver_3d->isMultiMaterial() != is_multimat_needed) {
             needs_realloc = true;
-        } else if (solver_3d->isCUDA() != (req_device == "cuda")) {
+        } else if (solver_3d->isCUDA() != is_cuda_device(req_device)) {
             needs_realloc = true;
         } else if (solver_3d->getNx() != req_nx || solver_3d->getNy() != req_ny || solver_3d->getNz() != req_nz || std::abs(solver_3d->getCellSize() - req_cellSize) > 1e-6) {
             needs_realloc = true;
@@ -1154,7 +1184,8 @@ void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFD
             std::string device = msg.value("device", "cuda");
             std::string precision = msg.value("precision", "single");
 
-            if (device == "cuda") {
+            select_cuda_device(device);
+            if (is_cuda_device(device)) {
                 if (precision == "double") {
                     if (is_multimat_needed) global_solver_3d = std::make_unique<CFDSolver3DCuda<double, true>>(nx_val, ny_val, nz_val, cellSize, xmin, ymin, zmin);
                     else global_solver_3d = std::make_unique<CFDSolver3DCuda<double, false>>(nx_val, ny_val, nz_val, cellSize, xmin, ymin, zmin);
@@ -1238,7 +1269,8 @@ void init_3d_thread_func(nlohmann::json msg) {
 
         std::unique_ptr<CFDSolver3D> local_solver_3d = nullptr;
         std::string precision = msg.value("precision", "single");
-        if (device == "cuda") {
+        select_cuda_device(device);
+        if (is_cuda_device(device)) {
             if (precision == "single" || precision == "float") {
                 if (is_multimat) {
                     local_solver_3d = std::make_unique<CFDSolver3DCuda<float, true>>(nx, ny, nz, cellSize, xmin, ymin, zmin);
@@ -1407,6 +1439,7 @@ void init_3d_thread_func(nlohmann::json msg) {
 }
 
 void worker_3d_thread_func() {
+    cudaSetDevice(global_cuda_device_index);
     emit_kernel_log("INFO", "3D worker thread started.", global_t3d, "3d");
 
     if (!global_solver_3d) {
@@ -1414,11 +1447,12 @@ void worker_3d_thread_func() {
         sim3d_running = false;
         return;
     }
-
-    auto last_telemetry_time = std::chrono::steady_clock::now();
+    try {
+        auto last_telemetry_time = std::chrono::steady_clock::now();
     int initial_steps = global_target_steps_3d.load();
     int step_count = 0;
     double last_vtk_time = global_t3d;
+    double last_dt = 1.0e-7;
 
     while (sim3d_running) {
         if (sim3d_terminate) break;
@@ -1442,10 +1476,16 @@ void worker_3d_thread_func() {
 
         auto step_start = std::chrono::steady_clock::now();
         double dt = global_solver_3d->computeStepSize(global_cfl_3d.load());
+        if (step_count == 0) {
+            dt = std::min(dt, 1.0e-7);
+        } else {
+            dt = std::min(dt, 1.3 * last_dt);
+        }
         global_solver_3d->step(dt);
         auto step_end = std::chrono::steady_clock::now();
         global_wallclock_3d = global_wallclock_3d.load() + std::chrono::duration<double>(step_end - step_start).count();
         global_dt_3d = dt;
+        last_dt = dt;
         global_t3d += dt;
 
         step_count++;
@@ -1527,14 +1567,24 @@ void worker_3d_thread_func() {
     write_gauge_files();
     write_vtk_outputs(step_count, global_t3d);
 
-    sim3d_running = false;
-    sim3d_paused = false;
-    sim3d_terminate = false;
-    global_target_steps_3d = 0;
-    global_exec_until_end_3d = false;
+        sim3d_running = false;
+        sim3d_paused = false;
+        sim3d_terminate = false;
+        global_target_steps_3d = 0;
+        global_exec_until_end_3d = false;
+    } catch (const std::exception& e) {
+        emit_kernel_log("ERROR", std::string("3D worker thread error: ") + e.what(), global_t3d, "3d");
+        sim3d_running = false;
+        std::exit(1);
+    } catch (...) {
+        emit_kernel_log("ERROR", "3D worker thread error: unknown exception", global_t3d, "3d");
+        sim3d_running = false;
+        std::exit(1);
+    }
 }
 
 void worker_2d_thread_func() {
+    cudaSetDevice(global_cuda_device_index);
     emit_kernel_log("INFO", "2D worker thread started.", global_t2d, "2d");
 
     if (!has_solver_2d()) {
@@ -1542,11 +1592,12 @@ void worker_2d_thread_func() {
         sim2d_running = false;
         return;
     }
-
-    auto last_telemetry_time = std::chrono::steady_clock::now();
+    try {
+        auto last_telemetry_time = std::chrono::steady_clock::now();
     int initial_steps = global_target_steps_2d.load();
     int step_count = 0;
     double last_vtk_time = global_t2d;
+    double last_dt = 1.0e-7;
 
     while (sim2d_running) {
         if (sim2d_terminate) break;
@@ -1588,15 +1639,26 @@ void worker_2d_thread_func() {
             } else {
                 double max_s = global_solver_2d_cuda->getMaxWaveSpeed();
                 dt = global_cfl_2d.load() * std::min(global_solver_2d_cuda->getDr(), global_solver_2d_cuda->getDz()) / max_s;
+                if (step_count == 0) {
+                    dt = std::min(dt, 1.0e-7);
+                } else {
+                    dt = std::min(dt, 1.3 * last_dt);
+                }
                 global_solver_2d_cuda->step(dt);
             }
         } else if (global_solver_2d) {
             dt = global_solver_2d->computeStepSize(global_cfl_2d.load());
+            if (step_count == 0) {
+                dt = std::min(dt, 1.0e-7);
+            } else {
+                dt = std::min(dt, 1.3 * last_dt);
+            }
             global_solver_2d->step(dt);
         }
         auto step_end = std::chrono::steady_clock::now();
         global_wallclock_2d = global_wallclock_2d.load() + std::chrono::duration<double>(step_end - step_start).count();
         global_dt_2d = dt;
+        last_dt = dt;
         global_t2d += dt;
 
         step_count++;
@@ -1670,11 +1732,20 @@ void worker_2d_thread_func() {
     emit_kernel_log("INFO", "2D worker thread execution cycle ended.", global_t2d, "2d");
     write_gauge_files();
     write_vtk_outputs(step_count, global_t2d);
-    sim2d_running = false;
-    sim2d_paused = false;
-    sim2d_terminate = false;
-    global_target_steps_2d = 0;
-    global_exec_until_end_2d = false;
+        sim2d_running = false;
+        sim2d_paused = false;
+        sim2d_terminate = false;
+        global_target_steps_2d = 0;
+        global_exec_until_end_2d = false;
+    } catch (const std::exception& e) {
+        emit_kernel_log("ERROR", std::string("2D worker thread error: ") + e.what(), global_t2d, "2d");
+        sim2d_running = false;
+        std::exit(1);
+    } catch (...) {
+        emit_kernel_log("ERROR", "2D worker thread error: unknown exception", global_t2d, "2d");
+        sim2d_running = false;
+        std::exit(1);
+    }
 }
 
 std::atomic<bool> sim_mpm_running{false};
@@ -1688,9 +1759,10 @@ std::atomic<double> global_refresh_rate_mpm{0.0};
 void emit_telemetry_mpm_2d(double elapsed = 0.0, bool is_terminated = false);
 
 void worker_mpm_2d_thread_func() {
-    int step_count = 0;
-    int initial_steps = 0;
-    auto last_telemetry_time = std::chrono::steady_clock::now();
+    try {
+        int step_count = 0;
+        int initial_steps = 0;
+        auto last_telemetry_time = std::chrono::steady_clock::now();
 
     while (!sim_mpm_terminate.load()) {
         if (sim_mpm_paused.load()) {
@@ -1783,17 +1855,28 @@ void worker_mpm_2d_thread_func() {
         std::cout << progress_msg.dump() << std::endl;
     }
 
-    sim_mpm_running = false;
-    sim_mpm_paused = false;
-    sim_mpm_terminate = false;
-    global_target_steps_mpm = 0;
-    global_exec_until_end_mpm = false;
+        sim_mpm_running = false;
+        sim_mpm_paused = false;
+        sim_mpm_terminate = false;
+        global_target_steps_mpm = 0;
+        global_exec_until_end_mpm = false;
+    } catch (const std::exception& e) {
+        emit_kernel_log("ERROR", std::string("2D MPM worker thread error: ") + e.what(), 0.0, "mpm_2d");
+        sim_mpm_running = false;
+        std::exit(1);
+    } catch (...) {
+        emit_kernel_log("ERROR", "2D MPM worker thread error: unknown exception", 0.0, "mpm_2d");
+        sim_mpm_running = false;
+        std::exit(1);
+    }
 }
 
 void worker_mpm_3d_thread_func() {
-    int step_count = 0;
-    int initial_steps = global_target_steps_mpm_3d.load();
-    auto last_telemetry_time = std::chrono::steady_clock::now();
+    cudaSetDevice(global_cuda_device_index);
+    try {
+        int step_count = 0;
+        int initial_steps = global_target_steps_mpm_3d.load();
+        auto last_telemetry_time = std::chrono::steady_clock::now();
 
     double start_time = 0.0;
     if (global_solver_mpm_3d_cuda) start_time = global_solver_mpm_3d_cuda->getSimTime();
@@ -1954,11 +2037,20 @@ void worker_mpm_3d_thread_func() {
         std::cout << progress_msg.dump() << std::endl;
     }
 
-    sim_mpm_3d_running = false;
-    sim_mpm_3d_paused = false;
-    sim_mpm_3d_terminate = false;
-    global_target_steps_mpm_3d = 0;
-    global_exec_until_end_mpm_3d = false;
+        sim_mpm_3d_running = false;
+        sim_mpm_3d_paused = false;
+        sim_mpm_3d_terminate = false;
+        global_target_steps_mpm_3d = 0;
+        global_exec_until_end_mpm_3d = false;
+    } catch (const std::exception& e) {
+        emit_kernel_log("ERROR", std::string("3D MPM worker thread error: ") + e.what(), 0.0, "mpm_3d");
+        sim_mpm_3d_running = false;
+        std::exit(1);
+    } catch (...) {
+        emit_kernel_log("ERROR", "3D MPM worker thread error: unknown exception", 0.0, "mpm_3d");
+        sim_mpm_3d_running = false;
+        std::exit(1);
+    }
 }
 
 std::atomic<bool> sim_fsi_running{false};
@@ -1976,9 +2068,11 @@ std::atomic<int> global_target_steps_fsi_3d{0};
 std::atomic<float> global_cfl_fsi_3d{0.35f};
 
 void worker_fsi_2d_thread_func() {
-    int step_count = 0;
-    int initial_steps = 0;
-    auto last_telemetry_time = std::chrono::steady_clock::now();
+    try {
+        int step_count = 0;
+        int initial_steps = 0;
+        auto last_telemetry_time = std::chrono::steady_clock::now();
+        double last_dt = 1.0e-7;
 
     while (!sim_fsi_terminate.load()) {
         if (sim_fsi_paused.load()) {
@@ -2040,9 +2134,9 @@ void worker_fsi_2d_thread_func() {
                                 const auto& m_node = mpm_grid[mpm_idx];
                                 int cfd_idx = i * nz + j;
 
-                                // Hysteresis threshold: turn solid at mass > 1.0e-5, stay solid until mass < 2.0e-6
+                                // Hysteresis threshold: turn solid at mass > 1.0e-8, stay solid until mass < 2.0e-9
                                 bool was_solid = (prev_solid_mask[cfd_idx] != 0);
-                                float threshold = was_solid ? 2.0e-6f : 1.0e-5f;
+                                float threshold = was_solid ? 2.0e-9f : 1.0e-14f;
 
                                 if (m_node.m > threshold) {
                                     solid_mask[cfd_idx] = 1;
@@ -2062,7 +2156,7 @@ void worker_fsi_2d_thread_func() {
                                 auto& m_node = mpm_grid[mpm_idx];
                                 int cfd_idx = i * nz + j;
 
-                                if (m_node.m > 1.0e-8f) {
+                                if (m_node.m > 1.0e-14f) {
                                     // Check if node is on the surface (adjacent to fluid)
                                     bool is_surface = false;
                                     double p_left = cfd_states[cfd_idx].p;
@@ -2121,8 +2215,14 @@ void worker_fsi_2d_thread_func() {
             }
 
             double dt_common = std::min(static_cast<double>(dt_mpm), dt_cfd);
-            dt_common = std::clamp(dt_common, 1.0e-8, 1.0e-4);
+            if (step_count == 0) {
+                dt_common = std::min(dt_common, 1.0e-7);
+            } else {
+                dt_common = std::min(dt_common, 1.3 * last_dt);
+            }
+            dt_common = std::clamp(dt_common, 1.0e-11, 1.0e-4);
             global_dt_2d = dt_common;
+            last_dt = dt_common;
 
             if (global_solver_mpm_2d) {
                 global_solver_mpm_2d->stepWithDt(static_cast<float>(dt_common), false);
@@ -2192,17 +2292,29 @@ void worker_fsi_2d_thread_func() {
         std::cout << progress_msg.dump() << std::endl;
     }
 
-    sim_fsi_running = false;
-    sim_fsi_paused = false;
-    sim_fsi_terminate = false;
-    global_target_steps_fsi = 0;
-    global_exec_until_end_fsi = false;
+        sim_fsi_running = false;
+        sim_fsi_paused = false;
+        sim_fsi_terminate = false;
+        global_target_steps_fsi = 0;
+        global_exec_until_end_fsi = false;
+    } catch (const std::exception& e) {
+        emit_kernel_log("ERROR", std::string("2D FSI worker thread error: ") + e.what(), 0.0, "2d");
+        sim_fsi_running = false;
+        std::exit(1);
+    } catch (...) {
+        emit_kernel_log("ERROR", "2D FSI worker thread error: unknown exception", 0.0, "2d");
+        sim_fsi_running = false;
+        std::exit(1);
+    }
 }
 
 void worker_fsi_3d_thread_func() {
-    int step_count = 0;
-    int initial_steps = 0;
-    auto last_telemetry_time = std::chrono::steady_clock::now();
+    cudaSetDevice(global_cuda_device_index);
+    try {
+        int step_count = 0;
+        int initial_steps = 0;
+        auto last_telemetry_time = std::chrono::steady_clock::now();
+        double last_dt = 1.0e-7;
 
     while (!sim_fsi_3d_terminate.load()) {
         if (sim_fsi_3d_paused.load()) {
@@ -2232,7 +2344,7 @@ void worker_fsi_3d_thread_func() {
                     int num_solid = 0;
                     for (const auto& node : grid) {
                         if (node.m > max_mass) max_mass = node.m;
-                        if (node.m > 1.0e-8f) num_solid++;
+                        if (node.m > 1.0e-14f) num_solid++;
                         double f_mag = std::sqrt(node.f_ext[0]*node.f_ext[0] + node.f_ext[1]*node.f_ext[1] + node.f_ext[2]*node.f_ext[2]);
                         if (f_mag > max_force) max_force = f_mag;
                     }
@@ -2344,7 +2456,14 @@ void worker_fsi_3d_thread_func() {
             double dt_cfd = global_solver_3d ? global_solver_3d->computeStepSize(cfl) : 1.0e-4;
 
             double dt_common = std::min(static_cast<double>(dt_mpm), dt_cfd);
-            dt_common = std::clamp(dt_common, 1.0e-8, 1.0e-4);
+            if (step_count == 0) {
+                dt_common = std::min(dt_common, 1.0e-7);
+            } else {
+                dt_common = std::min(dt_common, 1.05 * last_dt);
+            }
+            dt_common = std::clamp(dt_common, 1.0e-11, 1.0e-4);
+            last_dt = dt_common;
+            global_dt_3d = dt_common; // Ensure telemetry reports the correct timestep
 
             if (global_solver_mpm_3d_cuda) {
                 global_solver_mpm_3d_cuda->stepWithDt(static_cast<float>(dt_common), false);
@@ -2415,11 +2534,20 @@ void worker_fsi_3d_thread_func() {
         std::cout << progress_msg.dump() << std::endl;
     }
 
-    sim_fsi_3d_running = false;
-    sim_fsi_3d_paused = false;
-    sim_fsi_3d_terminate = false;
-    global_target_steps_fsi_3d = 0;
-    global_exec_until_end_fsi_3d = false;
+        sim_fsi_3d_running = false;
+        sim_fsi_3d_paused = false;
+        sim_fsi_3d_terminate = false;
+        global_target_steps_fsi_3d = 0;
+        global_exec_until_end_fsi_3d = false;
+    } catch (const std::exception& e) {
+        emit_kernel_log("ERROR", std::string("3D FSI worker thread error: ") + e.what(), 0.0, "3d");
+        sim_fsi_3d_running = false;
+        std::exit(1);
+    } catch (...) {
+        emit_kernel_log("ERROR", "3D FSI worker thread error: unknown exception", 0.0, "3d");
+        sim_fsi_3d_running = false;
+        std::exit(1);
+    }
 }
 
 // NVML Dynamic Loading Declarations
@@ -2557,6 +2685,19 @@ struct GPUMonitor {
         return success;
     }
 
+    unsigned int current_device_index = 0;
+
+    void set_device_index(unsigned int index) {
+        current_device_index = index;
+        if (initialized && p_nvmlDeviceGetHandleByIndex) {
+            p_nvmlDeviceGetHandleByIndex(index, &device);
+        }
+    }
+
+    unsigned int get_device_index() const {
+        return current_device_index;
+    }
+
     bool get_process_vram(unsigned int pid, unsigned long long& vram_bytes) {
         if (!initialized) return false;
 
@@ -2591,6 +2732,30 @@ struct GPUMonitor {
         return false;
     }
 };
+
+GPUMonitor global_gpu_monitor;
+
+extern "C" int cudaSetDevice(int device);
+
+bool is_cuda_device(const std::string& device) {
+    return device.rfind("cuda", 0) == 0;
+}
+
+void select_cuda_device(const std::string& device) {
+    if (is_cuda_device(device)) {
+        int index = 0;
+        if (device.length() > 5 && device[4] == ':') {
+            try {
+                index = std::stoi(device.substr(5));
+            } catch (...) {
+                index = 0;
+            }
+        }
+        global_cuda_device_index = index;
+        cudaSetDevice(index);
+        global_gpu_monitor.set_device_index(index);
+    }
+}
 
 uint64_t get_process_ram_bytes() {
     std::ifstream statm("/proc/self/statm");
@@ -2637,8 +2802,8 @@ uint64_t get_system_used_ram_bytes() {
 }
 
 void emit_resource_pulse() {
+    cudaSetDevice(global_cuda_device_index);
     static CPUMonitor cpu_monitor;
-    static GPUMonitor gpu_monitor;
     static uint64_t system_ram = get_system_ram_bytes();
 
     std::lock_guard<std::mutex> lock(cout_mutex);
@@ -2656,7 +2821,7 @@ void emit_resource_pulse() {
     get_cuda_vram_info(free_vram, total_vram);
 
     // NVML query
-    bool nvml_ok = gpu_monitor.get_metrics(gpu_util, gpu_temp);
+    bool nvml_ok = global_gpu_monitor.get_metrics(gpu_util, gpu_temp);
     if (!nvml_ok) {
         // If NVML is not available, we can mock it when the simulation is active
         if (sim_running || sim2d_running || sim3d_running) {
@@ -2678,20 +2843,36 @@ void emit_resource_pulse() {
     pulse["vram_alloc"] = total_vram - free_vram;
     pulse["vram_total"] = total_vram;
     
+    size_t solver_vram = 0;
+    if (global_solver_mpm_3d_cuda != nullptr) {
+        solver_vram += global_solver_mpm_3d_cuda->getAllocatedVRAM();
+    }
+    if (global_solver_2d_cuda != nullptr) {
+        solver_vram += global_solver_2d_cuda->getAllocatedVRAM();
+    }
+    if (global_solver_3d != nullptr) {
+        solver_vram += global_solver_3d->getAllocatedVRAM();
+    }
+
     size_t blastdemon_vram = 0;
     unsigned long long nvml_vram = 0;
-    if (gpu_monitor.get_process_vram(getpid(), nvml_vram)) {
-        blastdemon_vram = nvml_vram;
+    static std::vector<unsigned long long> vram_window;
+
+    if (global_gpu_monitor.get_process_vram(getpid(), nvml_vram) && nvml_vram > 0) {
+        vram_window.push_back(nvml_vram);
+        if (vram_window.size() > 10) {
+            vram_window.erase(vram_window.begin());
+        }
+        unsigned long long min_vram = vram_window[0];
+        for (auto v : vram_window) {
+            if (v < min_vram) min_vram = v;
+        }
+        global_last_valid_nvml_vram = min_vram;
+        blastdemon_vram = min_vram;
+    } else if (global_last_valid_nvml_vram > 0) {
+        blastdemon_vram = std::max<size_t>(global_last_valid_nvml_vram, solver_vram);
     } else {
-        if (global_solver_mpm_3d_cuda != nullptr) {
-            blastdemon_vram += global_solver_mpm_3d_cuda->getAllocatedVRAM();
-        }
-        if (global_solver_2d_cuda != nullptr) {
-            blastdemon_vram += global_solver_2d_cuda->getAllocatedVRAM();
-        }
-        if (global_solver_3d != nullptr) {
-            blastdemon_vram += global_solver_3d->getAllocatedVRAM();
-        }
+        blastdemon_vram = solver_vram;
     }
     pulse["vram_blastdaemon"] = blastdemon_vram;
     pulse["gpu_temp"] = gpu_temp;
@@ -3109,7 +3290,7 @@ void emit_telemetry_mpm_2d(double elapsed, bool is_terminated) {
 }
 
 static inline float getMPMGridQuantity(const Blast::MPMGridNode3D& node, const std::string& qty) {
-    if (node.m <= 1.0e-8f) return 0.0f;
+    if (node.m <= 1.0e-14f) return 0.0f;
     if (qty == "plastic_strain") return node.plastic_strain;
     if (qty == "velocity") {
         float vx = node.v(0), vy = node.v(1), vz = node.v(2);
@@ -3159,9 +3340,12 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated) {
     payload->is_terminated = is_terminated;
     payload->wallclock = 0.0;
     payload->is_ideal_gas = false;
-    payload->xmin = 0.0;
-    payload->ymin = 0.0;
-    payload->zmin = 0.0;
+    float xmin_val = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getXMin() : global_solver_mpm_3d->getXMin();
+    float ymin_val = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getYMin() : global_solver_mpm_3d->getYMin();
+    float zmin_val = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getZMin() : global_solver_mpm_3d->getZMin();
+    payload->xmin = xmin_val;
+    payload->ymin = ymin_val;
+    payload->zmin = zmin_val;
     payload->dx = dx;
     payload->nx = nx;
     payload->ny = ny;
@@ -3182,12 +3366,15 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated) {
         sp.axis = s.axis;
         sp.offset = s.offset;
         sp.stride = s.stride;
-        sp.xmin = 0.0f;
-        sp.xmax = nx * dx;
-        sp.ymin = 0.0f;
-        sp.ymax = ny * dy;
-        sp.zmin = 0.0f;
-        sp.zmax = nz * dz;
+        float xmin_val = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getXMin() : global_solver_mpm_3d->getXMin();
+        float ymin_val = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getYMin() : global_solver_mpm_3d->getYMin();
+        float zmin_val = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getZMin() : global_solver_mpm_3d->getZMin();
+        sp.xmin = xmin_val;
+        sp.xmax = xmin_val + nx * dx;
+        sp.ymin = ymin_val;
+        sp.ymax = ymin_val + ny * dy;
+        sp.zmin = zmin_val;
+        sp.zmax = zmin_val + nz * dz;
         sp.level = 0;
         sp.is_submesh = false;
 
@@ -3291,30 +3478,30 @@ void emit_telemetry_3d(double elapsed, bool is_terminated) {
             }
             payload->mpm_particles.reserve(particles.size() * 13);
             for (const auto& p : particles) {
-            float diff_xy = p.sigma[0][0] - p.sigma[1][1];
-            float diff_yz = p.sigma[1][1] - p.sigma[2][2];
-            float diff_zx = p.sigma[2][2] - p.sigma[0][0];
-            float s_xy = p.sigma[0][1]; float s_yz = p.sigma[1][2]; float s_zx = p.sigma[2][0];
-            float von_mises = std::sqrt(0.5f * (diff_xy * diff_xy + diff_yz * diff_yz + diff_zx * diff_zx) +
-                                        3.0f * (s_xy * s_xy + s_yz * s_yz + s_zx * s_zx));
-            float press = - (p.sigma[0][0] + p.sigma[1][1] + p.sigma[2][2]) / 3.0f;
-            float den = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getMaterialTable(p.object_id).density : global_solver_mpm_3d->getMaterialTable(p.object_id).density;
-            payload->mpm_particles.push_back(p.x[0]);
-            payload->mpm_particles.push_back(p.x[1]);
-            payload->mpm_particles.push_back(p.x[2]);
-            payload->mpm_particles.push_back(p.v[0]);
-            payload->mpm_particles.push_back(p.v[1]);
-            payload->mpm_particles.push_back(p.v[2]);
-            payload->mpm_particles.push_back(von_mises);
-            payload->mpm_particles.push_back(p.ep_bar);
-            payload->mpm_particles.push_back(den);
-            payload->mpm_particles.push_back(press);
-            payload->mpm_particles.push_back(p.damage);
-            payload->mpm_particles.push_back(p.has_failed ? 1.0f : 0.0f);
-            payload->mpm_particles.push_back(static_cast<float>(p.object_id));
+                float diff_xy = p.sigma[0][0] - p.sigma[1][1];
+                float diff_yz = p.sigma[1][1] - p.sigma[2][2];
+                float diff_zx = p.sigma[2][2] - p.sigma[0][0];
+                float s_xy = p.sigma[0][1]; float s_yz = p.sigma[1][2]; float s_zx = p.sigma[2][0];
+                float von_mises = std::sqrt(0.5f * (diff_xy * diff_xy + diff_yz * diff_yz + diff_zx * diff_zx) +
+                                            3.0f * (s_xy * s_xy + s_yz * s_yz + s_zx * s_zx));
+                float press = - (p.sigma[0][0] + p.sigma[1][1] + p.sigma[2][2]) / 3.0f;
+                float den = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getMaterialTable(p.object_id).density : global_solver_mpm_3d->getMaterialTable(p.object_id).density;
+                payload->mpm_particles.push_back(p.x[0]);
+                payload->mpm_particles.push_back(p.x[1]);
+                payload->mpm_particles.push_back(p.x[2]);
+                payload->mpm_particles.push_back(p.v[0]);
+                payload->mpm_particles.push_back(p.v[1]);
+                payload->mpm_particles.push_back(p.v[2]);
+                payload->mpm_particles.push_back(von_mises);
+                payload->mpm_particles.push_back(p.ep_bar);
+                payload->mpm_particles.push_back(den);
+                payload->mpm_particles.push_back(press);
+                payload->mpm_particles.push_back(p.damage);
+                payload->mpm_particles.push_back(p.has_failed ? 1.0f : 0.0f);
+                payload->mpm_particles.push_back(static_cast<float>(p.object_id));
+            }
         }
     }
-}
 
     {
         std::lock_guard<std::mutex> g_lock(global_gauges_mutex);
@@ -3460,6 +3647,12 @@ int main() {
             try {
                 nlohmann::json msg = nlohmann::json::parse(line);
                 std::string command = msg.value("command", "");
+                if (command.rfind("INIT", 0) == 0 || command.rfind("REMAP", 0) == 0) {
+                    global_last_valid_nvml_vram = 0;
+                }
+                if (msg.contains("modelId")) {
+                    global_model_id = msg.value("modelId", "");
+                }
 
                 if (command == "INIT") {
                     sim_terminate = true;
@@ -3868,7 +4061,8 @@ int main() {
                     amr_coarsen_ratio = std::clamp(amr_coarsen_ratio, 0.1, 0.9);
 
                     std::string precision = msg.value("precision", "double");
-                    if (device == "cuda") {
+                    select_cuda_device(device);
+                    if (is_cuda_device(device)) {
                         {
                             std::lock_guard<std::mutex> lock(cout_mutex);
                             global_solver_2d.reset();
@@ -4095,7 +4289,7 @@ int main() {
                             float tensile_failure_stress = static_cast<float>(get_json_double(obj, "tensile_failure_stress", 600.0e6));
                             int ppc = get_json_int(obj, "ppc", domain_ppc);
 
-                            std::string mat_model_str = obj.value("material_model", "Steel (Hypoelastic)");
+                            std::string mat_model_str = obj.value("material_model", "Hypoelastic");
                             Blast::MPMMaterialModel mat_model = Blast::MPMMaterialModel::HypoelasticSteel;
                             if (mat_model_str == "Johnson-Cook + Mie-Grüneisen") {
                                 mat_model = Blast::MPMMaterialModel::JohnsonCookMieGruneisen;
@@ -4199,7 +4393,8 @@ int main() {
                     sim_mpm_3d_paused = false;
 
                     std::string device = msg.value("device", "cpu");
-                    if (device == "cuda") {
+                    select_cuda_device(device);
+                    if (is_cuda_device(device)) {
                         global_solver_mpm_3d.reset();
                         global_solver_mpm_3d_cuda = std::make_unique<Blast::MPMSolver3DCUDA>();
                     } else {
@@ -4207,18 +4402,33 @@ int main() {
                         global_solver_mpm_3d = std::make_unique<Blast::MPMSolver3D>();
                     }
 
-                    int nx = get_json_int(msg, "nx", get_json_int(msg, "nr", 32));
-                    int ny = get_json_int(msg, "ny", 32);
-                    int nz = get_json_int(msg, "nz", get_json_int(msg, "nz", 32));
                     float xmin = static_cast<float>(get_json_double(msg, "xmin", 0.0));
                     float xmax = static_cast<float>(get_json_double(msg, "xmax", 1.0));
                     float ymin = static_cast<float>(get_json_double(msg, "ymin", 0.0));
                     float ymax = static_cast<float>(get_json_double(msg, "ymax", 1.0));
                     float zmin = static_cast<float>(get_json_double(msg, "zmin", 0.0));
                     float zmax = static_cast<float>(get_json_double(msg, "zmax", 1.0));
-                    float dx = (xmax - xmin) / nx;
-                    float dy = (ymax - ymin) / ny;
-                    float dz = (zmax - zmin) / nz;
+
+                    int nx, ny, nz;
+                    float dx, dy, dz;
+                    if (msg.contains("cell_size")) {
+                        float cell_size = static_cast<float>(get_json_double(msg, "cell_size", 0.01));
+                        dx = cell_size; dy = cell_size; dz = cell_size;
+                        int pad = 3; // Ghost cells for B-Spline stencil
+                        nx = std::max(1, static_cast<int>(std::round((xmax - xmin) / cell_size))) + 2 * pad;
+                        ny = std::max(1, static_cast<int>(std::round((ymax - ymin) / cell_size))) + 2 * pad;
+                        nz = std::max(1, static_cast<int>(std::round((zmax - zmin) / cell_size))) + 2 * pad;
+                        xmin -= pad * cell_size;
+                        ymin -= pad * cell_size;
+                        zmin -= pad * cell_size;
+                    } else {
+                        nx = get_json_int(msg, "nx", get_json_int(msg, "nr", 32));
+                        ny = get_json_int(msg, "ny", 32);
+                        nz = get_json_int(msg, "nz", get_json_int(msg, "nz", 32));
+                        dx = (xmax - xmin) / static_cast<float>(nx);
+                        dy = (ymax - ymin) / static_cast<float>(ny);
+                        dz = (zmax - zmin) / static_cast<float>(nz);
+                    }
 
                     if (global_solver_mpm_3d_cuda) {
                         global_solver_mpm_3d_cuda->initializeGrid(nx, ny, nz, dx, dy, dz, xmin, ymin, zmin);
@@ -4298,7 +4508,7 @@ int main() {
                             float tensile_failure_stress = static_cast<float>(get_json_double(obj, "tensile_failure_stress", 600.0e6));
                             int ppc = get_json_int(obj, "ppc", domain_ppc);
 
-                            std::string mat_model_str = obj.value("material_model", "Steel (Hypoelastic)");
+                            std::string mat_model_str = obj.value("material_model", "Hypoelastic");
                             Blast::MPMMaterialModel mat_model = Blast::MPMMaterialModel::HypoelasticSteel;
                             if (mat_model_str == "Johnson-Cook + Mie-Grüneisen") {
                                 mat_model = Blast::MPMMaterialModel::JohnsonCookMieGruneisen;
@@ -4400,7 +4610,7 @@ int main() {
 
                     emit_telemetry_mpm_3d(0.0, false);
                     size_t n_p = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles().size() : global_solver_mpm_3d->getParticles().size();
-                    std::string init_log = "3D MPM Solver Initialized (" + std::to_string(n_p) + " particles, PPC=" + std::to_string(domain_ppc) + ", Device=" + (device == "cuda" ? "CUDA GPU" : "CPU") + ")";
+                    std::string init_log = "3D MPM Solver Initialized (" + std::to_string(n_p) + " particles, PPC=" + std::to_string(domain_ppc) + ", Device=" + (is_cuda_device(device) ? "CUDA GPU" : "CPU") + ")";
                     emit_kernel_log("SYSTEM", init_log, 0.0, "mpm_3d");
 
                 } else if (command == "STEP_MPM_3D" || command == "STEP_3D_MPM") {
@@ -4447,7 +4657,8 @@ int main() {
                     global_solver_mpm_3d.reset();
                     global_solver_mpm_3d_cuda.reset();
                 } else if (command == "INIT_FSI_2D" || command == "INIT_FSI") {
-                    sim2d_terminate = true;
+                    try {
+                        sim2d_terminate = true;
                     while (sim2d_running.load() || sim_fsi_running.load()) {
                         std::this_thread::sleep_for(std::chrono::milliseconds(5));
                     }
@@ -4563,11 +4774,20 @@ int main() {
                         global_solver_mpm_2d->addRectangleObject(1, 0.7f, 0.5f, 0.2f, 0.4f, 0.0f, 0.0f, 0.0f, 7850.0f, 210.0e9f, 0.3f, 400.0e6f, 1.0e9f, 0.25f, 600.0e6f, domain_ppc);
                     }
 
-                    global_solver_mpm_2d->particleToGrid();
-                    init_gauges(msg);
-                    emit_kernel_log("SYSTEM", "2D Coupled FSI Solver (CFD + MPM) Initialized", 0.0, "2d");
-                    emit_telemetry_2d(0.0, false);
-                    emit_telemetry_mpm_2d(0.0, false);
+                        global_solver_mpm_2d->particleToGrid();
+                        init_gauges(msg);
+                        emit_kernel_log("SYSTEM", "2D Coupled FSI Solver (CFD + MPM) Initialized", 0.0, "2d");
+                        emit_telemetry_2d(0.0, false);
+                        emit_telemetry_mpm_2d(0.0, false);
+                    } catch (const std::exception& e) {
+                        std::cerr << "[ERROR] Exception in INIT_FSI_2D: " << e.what() << std::endl;
+                        emit_kernel_log("ERROR", std::string("FSI 2D initialization failed: ") + e.what(), 0.0, "2d");
+                        std::exit(1);
+                    } catch (...) {
+                        std::cerr << "[ERROR] Unknown exception in INIT_FSI_2D" << std::endl;
+                        emit_kernel_log("ERROR", "FSI 2D initialization failed with unknown error", 0.0, "2d");
+                        std::exit(1);
+                    }
                 } else if (command == "STEP_FSI_2D" || command == "STEP_FSI") {
                     int steps = get_json_int(msg, "steps", 1);
                     global_cfl_fsi = static_cast<float>(get_json_double(msg, "cfl", 0.35));
@@ -4605,7 +4825,8 @@ int main() {
                     global_solver_mpm_2d.reset();
                     solver2d_initialized = false;
                 } else if (command == "INIT_FSI_3D") {
-                    sim3d_terminate = true;
+                    try {
+                        sim3d_terminate = true;
                     sim_mpm_3d_terminate = true;
                     sim_fsi_3d_terminate = true;
                     while (sim3d_running.load() || sim3d_init_in_progress.load() || sim_mpm_3d_running.load() || sim_fsi_3d_running.load()) {
@@ -4667,7 +4888,8 @@ int main() {
                     bool is_multimat = !is_ideal_gas_3d;
                     std::cout << "[DEBUG] INIT_FSI_3D: device=" << device << " init_mode=" << init_mode << " explosive_type=" << explosive_type << " material_type=" << material_type << " is_ideal_gas_3d=" << is_ideal_gas_3d << " is_multimat=" << is_multimat << std::endl;
 
-                    if (device == "cuda") {
+                    select_cuda_device(device);
+                    if (is_cuda_device(device)) {
                         if (precision == "single" || precision == "float") {
                             if (is_multimat) global_solver_3d = std::make_unique<CFDSolver3DCuda<float, true>>(nx, ny, nz, cellSize, xmin, ymin, zmin);
                             else global_solver_3d = std::make_unique<CFDSolver3DCuda<float, false>>(nx, ny, nz, cellSize, xmin, ymin, zmin);
@@ -4727,7 +4949,7 @@ int main() {
                     float dx = static_cast<float>(cellSize);
                     float dy = static_cast<float>(cellSize);
                     float dz = static_cast<float>(cellSize);
-                    if (device == "cuda") {
+                    if (is_cuda_device(device)) {
                         global_solver_mpm_3d_cuda = std::make_unique<Blast::MPMSolver3DCUDA>();
                         global_solver_mpm_3d_cuda->initializeGrid(nx, ny, nz, dx, dy, dz, xmin, ymin, zmin);
                     } else {
@@ -4800,7 +5022,7 @@ int main() {
                             float tensile_failure_stress = static_cast<float>(get_json_double(obj, "tensile_failure_stress", 600.0e6));
                             int ppc = get_json_int(obj, "ppc", domain_ppc);
 
-                            std::string mat_model_str = obj.value("material_model", "Steel (Hypoelastic)");
+                            std::string mat_model_str = obj.value("material_model", "Hypoelastic");
                             Blast::MPMMaterialModel mat_model = Blast::MPMMaterialModel::HypoelasticSteel;
                             if (mat_model_str == "Johnson-Cook + Mie-Grüneisen") {
                                 mat_model = Blast::MPMMaterialModel::JohnsonCookMieGruneisen;
@@ -4902,14 +5124,23 @@ int main() {
                     emit_telemetry_3d(0.0, false);
                     emit_telemetry_mpm_3d(0.0, false);
 
-                    nlohmann::json prog_report;
-                    prog_report["type"] = "progress";
-                    prog_report["percent"] = 100;
-                    prog_report["scope"] = "3d";
-                    prog_report["mode"] = "INIT_FSI_3D";
-                    {
-                        std::lock_guard<std::mutex> lock(cout_mutex);
-                        std::cout << prog_report.dump() << std::endl;
+                        nlohmann::json prog_report;
+                        prog_report["type"] = "progress";
+                        prog_report["percent"] = 100;
+                        prog_report["scope"] = "3d";
+                        prog_report["mode"] = "INIT_FSI_3D";
+                        {
+                            std::lock_guard<std::mutex> lock(cout_mutex);
+                            std::cout << prog_report.dump() << std::endl;
+                        }
+                    } catch (const std::exception& e) {
+                        std::cerr << "[ERROR] Exception in INIT_FSI_3D: " << e.what() << std::endl;
+                        emit_kernel_log("ERROR", std::string("FSI 3D initialization failed: ") + e.what(), 0.0, "3d");
+                        std::exit(1);
+                    } catch (...) {
+                        std::cerr << "[ERROR] Unknown exception in INIT_FSI_3D" << std::endl;
+                        emit_kernel_log("ERROR", "FSI 3D initialization failed with unknown error", 0.0, "3d");
+                        std::exit(1);
                     }
 
                 } else if (command == "STEP_FSI_3D") {

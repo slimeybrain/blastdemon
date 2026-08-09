@@ -144,10 +144,11 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setInitialCondition(const Charg
                                     tile.alpha2[c_idx] = (RealType)f_vol;
                                     tile.arho1[c_idx] = 0.0;
                                     tile.arho2[c_idx] = tile.alpha2[c_idx] * (RealType)materials.unreacted.rho0;
-                                    tile.rho[c_idx] = tile.arho2[c_idx] + (1.0 - f_vol) * (RealType)ambient_rho;
-                                    tile.p[c_idx] = (RealType)ambient_p;
-                                    temp_s.alpha1 = 0.0; temp_s.alpha2 = (double)tile.alpha2[c_idx];
-                                    temp_s.arho1 = 0.0; temp_s.arho2 = (double)tile.arho2[c_idx];
+                                    tile.rho[c_idx] = ((RealType)1.0 - (RealType)f_vol) * (RealType)ambient_rho + tile.arho2[c_idx];
+                                    RealType p_solid = (RealType)MultiMat::getReferencePressure_Unreacted<RealType>(materials.unreacted);
+                                    tile.p[c_idx] = ((RealType)1.0 - f_vol) * (RealType)ambient_p + f_vol * std::max((RealType)ambient_p, p_solid);
+                                    temp_s.alpha1 = (double)tile.alpha1[c_idx]; temp_s.alpha2 = (double)tile.alpha2[c_idx];
+                                    temp_s.arho1 = (double)tile.arho1[c_idx]; temp_s.arho2 = (double)tile.arho2[c_idx];
                                 } else {
                                     tile.rho[c_idx] = (RealType)(f_vol * materials.unreacted.rho0 + (1.0 - f_vol) * ambient_rho);
                                     double p_high = (gamma - 1.0) * materials.unreacted.rho0 * materials.detonation_energy;
@@ -1336,6 +1337,9 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
 
     } else if (temporalOrder == 5 || temporalOrder == 6) { // ADER-2 (5) and ADER-3 (6)
         int total_tiles = n_tiles_x * n_tiles_y * n_tiles_z;
+        if (states_pred.size() != (size_t)total_tiles) states_pred.resize(total_tiles);
+        if (dW_dt_pool.size() != (size_t)total_tiles) dW_dt_pool.resize(total_tiles);
+        if (states_int.size() != (size_t)total_tiles) states_int.resize(total_tiles);
         #pragma omp parallel for schedule(static)
         for (int t = 0; t < total_tiles; ++t) {
             states_pred[t] = states_pool[t];
@@ -1583,8 +1587,8 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
                 }
             }
             
-            // Swap back: states_pred now gets states_int (integrated), states_pool remains original
-            states_pred.swap(states_int);
+            // Copy integrated states to states_pred so local states_int destruction does not leave dangling pointers
+            states_pred = states_int;
         }
         
         std::swap(states_pool, states_pred);
@@ -1633,6 +1637,7 @@ double CFDSolver3DImpl<RealType, IsMultiMaterial>::computeStepSize(double cfl) c
         int t = active_tile_indices[a];
         const auto& tile = states_pool[t];
         for (int i = 0; i < TILE_CELLS_3D; ++i) {
+            if (!geom_pool.empty() && geom_pool[t].cells[i].is_boundary) continue;
             using std::abs;
             using std::sqrt;
             using std::max;
@@ -2317,6 +2322,7 @@ std::pair<double, double> CFDSolver3DImpl<RealType, IsMultiMaterial>::getConserv
     for (int t = 0; t < total_tiles; ++t) {
         const auto& tile = U_pool[t];
         for (int c = 0; c < TILE_CELLS_3D; ++c) {
+            if (!geom_pool.empty() && geom_pool[t].cells[c].is_boundary) continue;
             total_mass += tile.rho[c] * cell_vol;
             total_energy += tile.E[c] * cell_vol;
         }

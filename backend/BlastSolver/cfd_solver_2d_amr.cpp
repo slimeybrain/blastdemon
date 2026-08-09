@@ -2021,6 +2021,11 @@ double CFDSolver2DAMRImpl<RealType>::computeStepSize(double cfl) const {
                         c = std::sqrt(gamma_val * S.p[k] / S.rho[k]);
                     } else {
                         c = MultiMat::getMixtureSoundSpeed(S.p[k], S.rho[k], S.alpha1[k], S.alpha2[k], S.arho1[k], S.arho2[k], (RealType)gamma_val, materials_val.products, materials_val.unreacted);
+                        RealType a2 = S.alpha2[k];
+                        RealType ar2 = S.arho2[k];
+                        if (a2 > (RealType)1e-4 && ar2 > (RealType)10.0 && materials_val.det_vel > 0.0) {
+                            c = std::max(c, (double)materials_val.det_vel);
+                        }
                     }
                     double speed_r = std::abs(S.ur[k]) + c;
                     double speed_z = std::abs(S.uz[k]) + c;

@@ -217,9 +217,17 @@ backend/BlastSolver/rm_sample.py
 backend/BlastSolver/test_cmds_gpu.json
 backend/BlastSolver/test_cuda_solver.cu
 backend/BlastSolver/test_restore.py
+backend/BlastSolver/test_taylor_cpu*
 backend/BlastSolver/update_tasks.py
 backend/BlastSolver/verify_precision.py
 backend/test_gpu.py
+/match.py
+/test_clamp*
+/test_cout_*
+/test_fmax*
+/test_min*
+/test_nan*
+/test_taylor_cpu*
 
 # ─── Frontend scratch scripts ─────────────────────────────────────────────────
 frontend/scratch_math.js

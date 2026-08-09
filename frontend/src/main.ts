@@ -201,7 +201,8 @@ const networkManager = new NetworkManager('ws://localhost:8080');
 networkManager.onOpen(() => {
     const state = stateManager.getCurrentState();
     if (state) networkManager.send(serializeSimulationState(state));
-    stateManager.setModelStatus('all', stateManager.getStatus());
+    // Reset status to UNINITIALIZED so the UI knows the fresh Broker needs initialization
+    stateManager.getAllModels().forEach(m => stateManager.setModelStatus(m.id, 'UNINITIALIZED'));
 });
 
 networkManager.onClose(() => {
@@ -1721,11 +1722,21 @@ networkManager.onMessage(async (data) => {
 
         let model = stateManager.getAllModels().find(m => m.id === modelId);
 
+        if (dataJson.type === 'status') {
+            if (modelId) {
+                stateManager.setModelStatus(modelId, dataJson.status);
+            }
+            return;
+        }
+
         if (dataJson.type === 'log') {
             if (modelId && model) {
                 const solverNode = model.nodes.find(n => n.type === targetType);
                 if (solverNode) {
                     stateManager.pushTelemetry(solverNode.id, dataJson.message, modelId);
+                }
+                if (dataJson.level === 'ERROR') {
+                    stateManager.setModelStatus(modelId, 'ERROR');
                 }
             }
             return;

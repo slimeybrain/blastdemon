@@ -333,6 +333,19 @@ public:
     void getSliceDimensions(const Slice3D& slice, int& w, int& h, int& depth) const override;
     using CFDSolver3D::getSliceDimensions;
     std::vector<float> getCellValues(int i, int j, int k) const override;
+    std::vector<float> extractPressureField() const override {
+        std::vector<float> pfield(static_cast<size_t>(nx) * ny * nz);
+        for (int i = 0; i < nx; ++i) {
+            for (int j = 0; j < ny; ++j) {
+                for (int k = 0; k < nz; ++k) {
+                    int t_idx = (i >> 3) + (j >> 3) * n_tiles_x + (k >> 3) * n_tiles_x * n_tiles_y;
+                    int c_idx = (i & 7) + (j & 7) * 8 + (k & 7) * 64;
+                    pfield[static_cast<size_t>(i) + static_cast<size_t>(j) * nx + static_cast<size_t>(k) * nx * ny] = static_cast<float>(states_pool[t_idx].p[c_idx]);
+                }
+            }
+        }
+        return pfield;
+    }
 
     void setGauges(const std::vector<Gauge3D>& gauges) override;
     void recordGaugesAsync(double t) override;
@@ -605,10 +618,10 @@ public:
         float u_rel_y = (float)s_ghost.uy - (float)vw_y;
         float u_rel_z = (float)s_ghost.uz - (float)vw_z;
 
-        float u_dot_n = u_rel_x * nx_true + u_rel_y * ny_true + u_rel_z * nz_true;
-        s_ghost.ux = (RealType)((float)vw_x + u_rel_x - 2.0f * u_dot_n * nx_true);
-        s_ghost.uy = (RealType)((float)vw_y + u_rel_y - 2.0f * u_dot_n * ny_true);
-        s_ghost.uz = (RealType)((float)vw_z + u_rel_z - 2.0f * u_dot_n * nz_true);
+        float u_dot_n = u_rel_x * nx_dec + u_rel_y * ny_dec + u_rel_z * nz_dec;
+        s_ghost.ux = (RealType)((float)vw_x + u_rel_x - 2.0f * u_dot_n * nx_dec);
+        s_ghost.uy = (RealType)((float)vw_y + u_rel_y - 2.0f * u_dot_n * ny_dec);
+        s_ghost.uz = (RealType)((float)vw_z + u_rel_z - 2.0f * u_dot_n * nz_dec);
 
         RealType ke = (RealType)0.5 * s_ghost.rho * (s_ghost.ux*s_ghost.ux + s_ghost.uy*s_ghost.uy + s_ghost.uz*s_ghost.uz);
         if constexpr (IsMultiMaterial) {
@@ -807,10 +820,22 @@ public:
                     s_ghost.peak_overpressure = peak_op_i;
                     s_ghost.peak_impulse = peak_imp_i;
 
-                    double u_dot_n = ux_i * nx_u + uy_i * ny_u + uz_i * nz_u;
-                    s_ghost.ux = ux_i - 2.0 * u_dot_n * nx_u;
-                    s_ghost.uy = uy_i - 2.0 * u_dot_n * ny_u;
-                    s_ghost.uz = uz_i - 2.0 * u_dot_n * nz_u;
+                    double vw_x = 0.0, vw_y = 0.0, vw_z = 0.0;
+                    if (!solid_vel_vec.empty()) {
+                        size_t cfd_flat_idx = static_cast<size_t>(clamped_gx) + static_cast<size_t>(clamped_gy) * nx + static_cast<size_t>(clamped_gz) * nx * ny;
+                        if (3 * cfd_flat_idx + 2 < solid_vel_vec.size()) {
+                            vw_x = solid_vel_vec[3 * cfd_flat_idx + 0];
+                            vw_y = solid_vel_vec[3 * cfd_flat_idx + 1];
+                            vw_z = solid_vel_vec[3 * cfd_flat_idx + 2];
+                        }
+                    }
+                    double u_rel_x = ux_i - vw_x;
+                    double u_rel_y = uy_i - vw_y;
+                    double u_rel_z = uz_i - vw_z;
+                    double u_dot_n = u_rel_x * nx_u + u_rel_y * ny_u + u_rel_z * nz_u;
+                    s_ghost.ux = vw_x + u_rel_x - 2.0 * u_dot_n * nx_u;
+                    s_ghost.uy = vw_y + u_rel_y - 2.0 * u_dot_n * ny_u;
+                    s_ghost.uz = vw_z + u_rel_z - 2.0 * u_dot_n * nz_u;
 
                     if constexpr (IsMultiMaterial) {
                         s_ghost.alpha1 = w[0]*s000.alpha1 + w[1]*s100.alpha1 + w[2]*s010.alpha1 + w[3]*s110.alpha1 +
@@ -879,10 +904,22 @@ public:
                         nz_dec /= n_len_dec;
                     }
                 }
-                double u_dot_n = s_fluid.ux * nx_dec + s_fluid.uy * ny_dec + s_fluid.uz * nz_dec;
-                s_ghost.ux = s_fluid.ux - 2.0 * u_dot_n * nx_dec;
-                s_ghost.uy = s_fluid.uy - 2.0 * u_dot_n * ny_dec;
-                s_ghost.uz = s_fluid.uz - 2.0 * u_dot_n * nz_dec;
+                double vw_x = 0.0, vw_y = 0.0, vw_z = 0.0;
+                if (!solid_vel_vec.empty()) {
+                    size_t cfd_flat_idx = static_cast<size_t>(clamped_gx) + static_cast<size_t>(clamped_gy) * nx + static_cast<size_t>(clamped_gz) * nx * ny;
+                    if (3 * cfd_flat_idx + 2 < solid_vel_vec.size()) {
+                        vw_x = solid_vel_vec[3 * cfd_flat_idx + 0];
+                        vw_y = solid_vel_vec[3 * cfd_flat_idx + 1];
+                        vw_z = solid_vel_vec[3 * cfd_flat_idx + 2];
+                    }
+                }
+                double u_rel_x = s_fluid.ux - vw_x;
+                double u_rel_y = s_fluid.uy - vw_y;
+                double u_rel_z = s_fluid.uz - vw_z;
+                double u_dot_n = u_rel_x * nx_dec + u_rel_y * ny_dec + u_rel_z * nz_dec;
+                s_ghost.ux = vw_x + u_rel_x - 2.0 * u_dot_n * nx_dec;
+                s_ghost.uy = vw_y + u_rel_y - 2.0 * u_dot_n * ny_dec;
+                s_ghost.uz = vw_z + u_rel_z - 2.0 * u_dot_n * nz_dec;
                 return s_ghost;
             }
         }
