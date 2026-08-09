@@ -2159,31 +2159,29 @@ void worker_fsi_2d_thread_func() {
                                 if (m_node.m > 1.0e-14f) {
                                     // Check if node is on the surface (adjacent to fluid)
                                     bool is_surface = false;
-                                    double p_left = cfd_states[cfd_idx].p;
-                                    double p_right = cfd_states[cfd_idx].p;
-                                    double p_bottom = cfd_states[cfd_idx].p;
-                                    double p_top = cfd_states[cfd_idx].p;
+                                    double f_r = 0.0;
+                                    double f_z = 0.0;
 
                                     if (i > 0 && solid_mask[(i - 1) * nz + j] == 0) {
-                                        p_left = cfd_states[(i - 1) * nz + j].p;
+                                        f_r += cfd_states[(i - 1) * nz + j].p;
                                         is_surface = true;
                                     }
                                     if (i < nr - 1 && solid_mask[(i + 1) * nz + j] == 0) {
-                                        p_right = cfd_states[(i + 1) * nz + j].p;
+                                        f_r -= cfd_states[(i + 1) * nz + j].p;
                                         is_surface = true;
                                     }
                                     if (j > 0 && solid_mask[i * nz + (j - 1)] == 0) {
-                                        p_bottom = cfd_states[i * nz + (j - 1)].p;
+                                        f_z += cfd_states[i * nz + (j - 1)].p;
                                         is_surface = true;
                                     }
                                     if (j < nz - 1 && solid_mask[i * nz + (j + 1)] == 0) {
-                                        p_top = cfd_states[i * nz + (j + 1)].p;
+                                        f_z -= cfd_states[i * nz + (j + 1)].p;
                                         is_surface = true;
                                     }
 
                                     if (is_surface) {
-                                        m_node.f_ext[0] = static_cast<float>((p_left - p_right) * dz);
-                                        m_node.f_ext[1] = static_cast<float>((p_bottom - p_top) * dr);
+                                        m_node.f_ext[0] = static_cast<float>(f_r * dz);
+                                        m_node.f_ext[1] = static_cast<float>(f_z * dr);
                                     } else {
                                         m_node.f_ext[0] = 0.0f;
                                         m_node.f_ext[1] = 0.0f;
@@ -2407,7 +2405,13 @@ void worker_fsi_3d_thread_func() {
                                 size_t node_idx = (static_cast<size_t>(i) * ny + j) * nz + k;
                                 auto& node = grid[node_idx];
                                 if (node.m > 1.0e-8f) {
-                                    double p_center, p_left, p_right, p_bottom, p_top, p_back, p_front;
+                                    auto is_fluid = [&](int xi, int yi, int zi) -> bool {
+                                        if (xi < 0 || xi >= nx || yi < 0 || yi >= ny || zi < 0 || zi >= nz) return false;
+                                        size_t idx = (static_cast<size_t>(xi) * ny + yi) * nz + zi;
+                                        return grid[idx].m <= 1.0e-8f;
+                                    };
+
+                                    double f_x = 0.0, f_y = 0.0, f_z = 0.0;
                                     if (use_bulk) {
                                         auto pidx = [&](int xi, int yi, int zi) -> double {
                                             xi = std::clamp(xi, 0, nx-1);
@@ -2415,28 +2419,42 @@ void worker_fsi_3d_thread_func() {
                                             zi = std::clamp(zi, 0, nz-1);
                                             return pfield[xi + yi * nx + zi * nx * ny];
                                         };
-                                        p_center = pidx(i,   j,   k  );
-                                        p_left   = pidx(i-1, j,   k  );
-                                        p_right  = pidx(i+1, j,   k  );
-                                        p_bottom = pidx(i,   j-1, k  );
-                                        p_top    = pidx(i,   j+1, k  );
-                                        p_back   = pidx(i,   j,   k-1);
-                                        p_front  = pidx(i,   j,   k+1);
+                                        if (is_fluid(i-1, j, k)) f_x += pidx(i-1, j, k);
+                                        if (is_fluid(i+1, j, k)) f_x -= pidx(i+1, j, k);
+                                        if (is_fluid(i, j-1, k)) f_y += pidx(i, j-1, k);
+                                        if (is_fluid(i, j+1, k)) f_y -= pidx(i, j+1, k);
+                                        if (is_fluid(i, j, k-1)) f_z += pidx(i, j, k-1);
+                                        if (is_fluid(i, j, k+1)) f_z -= pidx(i, j, k+1);
                                     } else {
-                                        std::vector<float> cell_vals = global_solver_3d->getCellValues(i, j, k);
-                                        if (cell_vals.empty()) continue;
-                                        p_center = cell_vals[0];
-                                        p_left   = (i > 0)    ? global_solver_3d->getCellValues(i-1, j,   k  )[0] : p_center;
-                                        p_right  = (i < nx-1) ? global_solver_3d->getCellValues(i+1, j,   k  )[0] : p_center;
-                                        p_bottom = (j > 0)    ? global_solver_3d->getCellValues(i,   j-1, k  )[0] : p_center;
-                                        p_top    = (j < ny-1) ? global_solver_3d->getCellValues(i,   j+1, k  )[0] : p_center;
-                                        p_back   = (k > 0)    ? global_solver_3d->getCellValues(i,   j,   k-1)[0] : p_center;
-                                        p_front  = (k < nz-1) ? global_solver_3d->getCellValues(i,   j,   k+1)[0] : p_center;
+                                        if (i > 0 && is_fluid(i-1, j, k)) {
+                                            auto cv = global_solver_3d->getCellValues(i-1, j, k);
+                                            if (!cv.empty()) f_x += cv[0];
+                                        }
+                                        if (i < nx-1 && is_fluid(i+1, j, k)) {
+                                            auto cv = global_solver_3d->getCellValues(i+1, j, k);
+                                            if (!cv.empty()) f_x -= cv[0];
+                                        }
+                                        if (j > 0 && is_fluid(i, j-1, k)) {
+                                            auto cv = global_solver_3d->getCellValues(i, j-1, k);
+                                            if (!cv.empty()) f_y += cv[0];
+                                        }
+                                        if (j < ny-1 && is_fluid(i, j+1, k)) {
+                                            auto cv = global_solver_3d->getCellValues(i, j+1, k);
+                                            if (!cv.empty()) f_y -= cv[0];
+                                        }
+                                        if (k > 0 && is_fluid(i, j, k-1)) {
+                                            auto cv = global_solver_3d->getCellValues(i, j, k-1);
+                                            if (!cv.empty()) f_z += cv[0];
+                                        }
+                                        if (k < nz-1 && is_fluid(i, j, k+1)) {
+                                            auto cv = global_solver_3d->getCellValues(i, j, k+1);
+                                            if (!cv.empty()) f_z -= cv[0];
+                                        }
                                     }
 
-                                    node.f_ext[0] = static_cast<float>((p_left - p_right) * dy * dz);
-                                    node.f_ext[1] = static_cast<float>((p_bottom - p_top) * dx * dz);
-                                    node.f_ext[2] = static_cast<float>((p_back - p_front) * dx * dy);
+                                    node.f_ext[0] = static_cast<float>(f_x * dy * dz);
+                                    node.f_ext[1] = static_cast<float>(f_y * dx * dz);
+                                    node.f_ext[2] = static_cast<float>(f_z * dx * dy);
                                 }
                             }
                         }
