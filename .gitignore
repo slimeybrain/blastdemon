@@ -243,3 +243,8 @@ frontend/test_view.js
 # ─── Profiling outputs ────────────────────────────────────────────────────────
 *.nsys-rep
 *.sqlite
+Testing/
+/fix.py
+/fix2.py
+/fix3.py
+/verify_contact.py

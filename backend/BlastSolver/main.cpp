@@ -38,6 +38,11 @@
 #include "mpm_solver_3d.hpp"
 #include "mpm_solver_3d_cuda.hpp"
 #include "fsi_coupler_3d.hpp"
+#include "fem_solver_3d.hpp"
+#include "fem_solver_3d_cuda.hpp"
+#include "ls_dyna_reader_3d.hpp"
+#include "fem_contact_3d.hpp"
+#include "fem_fsi_coupler_3d.hpp"
 
 void select_cuda_device(const std::string& device);
 bool is_cuda_device(const std::string& device);
@@ -49,6 +54,13 @@ int global_cuda_device_index = 0;
 std::unique_ptr<Blast::MPMSolver2D> global_solver_mpm_2d = nullptr;
 std::unique_ptr<Blast::MPMSolver3D> global_solver_mpm_3d = nullptr;
 std::unique_ptr<Blast::MPMSolver3DCUDA> global_solver_mpm_3d_cuda = nullptr;
+
+std::unordered_map<std::string, std::unique_ptr<Blast::FEMSolver3D<float>>> global_fem_solvers_float;
+std::unordered_map<std::string, std::unique_ptr<Blast::FEMSolver3D<double>>> global_fem_solvers_double;
+std::unordered_map<std::string, std::unique_ptr<Blast::FEMSolver3DCUDA<float>>> global_fem_solvers_cuda_float;
+std::unordered_map<std::string, std::unique_ptr<Blast::FEMSolver3DCUDA<double>>> global_fem_solvers_cuda_double;
+std::unordered_map<std::string, std::unique_ptr<Blast::FEMFSICoupler3D<float>>> global_fem_fsi_couplers_float;
+std::unordered_map<std::string, std::unique_ptr<Blast::FEMFSICoupler3D<double>>> global_fem_fsi_couplers_double;
 
 std::string get_absolute_path(const std::string& path, const std::string& base_dir) {
     if (path.empty()) return base_dir;
@@ -139,6 +151,14 @@ std::atomic<bool> global_exec_until_end_mpm_3d{false};
 std::atomic<int> global_target_steps_mpm_3d{0};
 std::atomic<float> global_cfl_mpm_3d{0.3f};
 std::atomic<double> global_refresh_rate_mpm_3d{0.033};
+
+std::atomic<bool> sim_fem_3d_running{false};
+std::atomic<bool> sim_fem_3d_paused{false};
+std::atomic<bool> sim_fem_3d_terminate{false};
+std::atomic<bool> global_exec_until_end_fem_3d{false};
+std::atomic<int> global_target_steps_fem_3d{0};
+std::atomic<float> global_cfl_fem_3d{0.3f};
+std::atomic<double> global_refresh_rate_fem_3d{0.033};
 
 struct GaugeDef {
     std::string id;
@@ -696,6 +716,9 @@ void emit_kernel_log(const std::string& level, const std::string& msg, double t,
     log["message"] = msg;
     log["time"] = t;
     log["scope"] = scope;
+    if (!global_model_id.empty()) {
+        log["modelId"] = global_model_id;
+    }
     std::cout << log.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) << std::endl;
 }
 
@@ -2050,6 +2073,257 @@ void worker_mpm_3d_thread_func() {
         emit_kernel_log("ERROR", "3D MPM worker thread error: unknown exception", 0.0, "mpm_3d");
         sim_mpm_3d_running = false;
         std::exit(1);
+    }
+}
+
+void emit_telemetry_fem_3d(double elapsed = 0.0, bool is_terminated = false);
+
+void worker_fem_3d_thread_func() {
+    try {
+        int step_count = 0;
+        int initial_steps = global_target_steps_fem_3d.load();
+        auto last_telemetry_time = std::chrono::steady_clock::now();
+        emit_kernel_log("INFO", "3D FEM asynchronous worker thread started.", 0.0, "fem_3d");
+
+        while (sim_fem_3d_running.load()) {
+            if (sim_fem_3d_terminate.load()) break;
+
+            if (sim_fem_3d_paused.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                continue;
+            }
+
+            bool done = false;
+            if (!global_exec_until_end_fem_3d.load()) {
+                if (global_target_steps_fem_3d.load() <= 0) done = true;
+            }
+
+            if (done) break;
+
+            std::string m_id = global_model_id.empty() ? "default_fem" : global_model_id;
+            float cfl = global_cfl_fem_3d.load();
+            double sim_time = 0.0;
+            double last_dt = 0.0;
+            int current_step = 0;
+            double max_v = 0.0;
+            double max_vm = 0.0;
+            double max_ep = 0.0;
+            size_t n_nodes = 0;
+            size_t n_elems = 0;
+            double e_int = 0.0;
+
+            if (global_fem_solvers_cuda_float.count(m_id) && global_fem_solvers_cuda_float[m_id]) {
+                auto* fem = global_fem_solvers_cuda_float[m_id].get();
+                fem->step(cfl);
+                sim_time = static_cast<double>(fem->getSimTime());
+                last_dt = static_cast<double>(fem->getLastDt());
+            } else if (global_fem_solvers_cuda_double.count(m_id) && global_fem_solvers_cuda_double[m_id]) {
+                auto* fem = global_fem_solvers_cuda_double[m_id].get();
+                fem->step(static_cast<double>(cfl));
+                sim_time = fem->getSimTime();
+                last_dt = fem->getLastDt();
+            } else if (global_fem_solvers_float.count(m_id) && global_fem_solvers_float[m_id]) {
+                auto* fem = global_fem_solvers_float[m_id].get();
+                fem->step(cfl);
+                sim_time = static_cast<double>(fem->getSimTime());
+                last_dt = static_cast<double>(fem->getLastDt());
+            } else if (global_fem_solvers_double.count(m_id) && global_fem_solvers_double[m_id]) {
+                auto* fem = global_fem_solvers_double[m_id].get();
+                fem->step(static_cast<double>(cfl));
+                sim_time = fem->getSimTime();
+                last_dt = fem->getLastDt();
+            } else if (!global_fem_solvers_cuda_float.empty()) {
+                auto* fem = global_fem_solvers_cuda_float.begin()->second.get();
+                fem->step(cfl);
+                sim_time = static_cast<double>(fem->getSimTime());
+                last_dt = static_cast<double>(fem->getLastDt());
+            } else if (!global_fem_solvers_cuda_double.empty()) {
+                auto* fem = global_fem_solvers_cuda_double.begin()->second.get();
+                fem->step(static_cast<double>(cfl));
+                sim_time = fem->getSimTime();
+                last_dt = fem->getLastDt();
+            } else if (!global_fem_solvers_float.empty()) {
+                auto* fem = global_fem_solvers_float.begin()->second.get();
+                fem->step(cfl);
+                sim_time = static_cast<double>(fem->getSimTime());
+                last_dt = static_cast<double>(fem->getLastDt());
+            } else if (!global_fem_solvers_double.empty()) {
+                auto* fem = global_fem_solvers_double.begin()->second.get();
+                fem->step(static_cast<double>(cfl));
+                sim_time = fem->getSimTime();
+                last_dt = fem->getLastDt();
+            } else {
+                break;
+            }
+
+            step_count++;
+            if (!global_exec_until_end_fem_3d.load()) {
+                global_target_steps_fem_3d--;
+            }
+
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_telemetry_time).count();
+            int target_interval_ms = static_cast<int>(global_refresh_rate_fem_3d.load() * 1000.0);
+            if (target_interval_ms <= 0) target_interval_ms = 33;
+            bool should_emit = (elapsed_ms >= target_interval_ms);
+
+            if (should_emit || done) {
+                if (global_fem_solvers_cuda_float.count(m_id) && global_fem_solvers_cuda_float[m_id]) {
+                    auto* fem = global_fem_solvers_cuda_float[m_id].get();
+                    current_step = fem->getStepCount();
+                    max_v = static_cast<double>(fem->getMaxVelocity());
+                    max_vm = static_cast<double>(fem->getMaxVonMisesStress());
+                    max_ep = static_cast<double>(fem->getMaxPlasticStrain());
+                    n_nodes = fem->getNodes().size();
+                    n_elems = fem->getElements().size();
+                    e_int = static_cast<double>(fem->getEnergyTracker().E_int);
+                } else if (global_fem_solvers_cuda_double.count(m_id) && global_fem_solvers_cuda_double[m_id]) {
+                    auto* fem = global_fem_solvers_cuda_double[m_id].get();
+                    current_step = fem->getStepCount();
+                    max_v = fem->getMaxVelocity();
+                    max_vm = fem->getMaxVonMisesStress();
+                    max_ep = fem->getMaxPlasticStrain();
+                    n_nodes = fem->getNodes().size();
+                    n_elems = fem->getElements().size();
+                    e_int = fem->getEnergyTracker().E_int;
+                } else if (global_fem_solvers_float.count(m_id) && global_fem_solvers_float[m_id]) {
+                    auto* fem = global_fem_solvers_float[m_id].get();
+                    current_step = fem->getStepCount();
+                    max_v = static_cast<double>(fem->getMaxVelocity());
+                    max_vm = static_cast<double>(fem->getMaxVonMisesStress());
+                    max_ep = static_cast<double>(fem->getMaxPlasticStrain());
+                    n_nodes = fem->getNodes().size();
+                    n_elems = fem->getElements().size();
+                    e_int = static_cast<double>(fem->getEnergyTracker().E_int);
+                } else if (global_fem_solvers_double.count(m_id) && global_fem_solvers_double[m_id]) {
+                    auto* fem = global_fem_solvers_double[m_id].get();
+                    current_step = fem->getStepCount();
+                    max_v = fem->getMaxVelocity();
+                    max_vm = fem->getMaxVonMisesStress();
+                    max_ep = fem->getMaxPlasticStrain();
+                    n_nodes = fem->getNodes().size();
+                    n_elems = fem->getElements().size();
+                    e_int = fem->getEnergyTracker().E_int;
+                } else if (!global_fem_solvers_cuda_float.empty()) {
+                    auto* fem = global_fem_solvers_cuda_float.begin()->second.get();
+                    current_step = fem->getStepCount();
+                    max_v = static_cast<double>(fem->getMaxVelocity());
+                    max_vm = static_cast<double>(fem->getMaxVonMisesStress());
+                    max_ep = static_cast<double>(fem->getMaxPlasticStrain());
+                    n_nodes = fem->getNodes().size();
+                    n_elems = fem->getElements().size();
+                    e_int = static_cast<double>(fem->getEnergyTracker().E_int);
+                } else if (!global_fem_solvers_cuda_double.empty()) {
+                    auto* fem = global_fem_solvers_cuda_double.begin()->second.get();
+                    current_step = fem->getStepCount();
+                    max_v = fem->getMaxVelocity();
+                    max_vm = fem->getMaxVonMisesStress();
+                    max_ep = fem->getMaxPlasticStrain();
+                    n_nodes = fem->getNodes().size();
+                    n_elems = fem->getElements().size();
+                    e_int = fem->getEnergyTracker().E_int;
+                } else if (!global_fem_solvers_float.empty()) {
+                    auto* fem = global_fem_solvers_float.begin()->second.get();
+                    current_step = fem->getStepCount();
+                    max_v = static_cast<double>(fem->getMaxVelocity());
+                    max_vm = static_cast<double>(fem->getMaxVonMisesStress());
+                    max_ep = static_cast<double>(fem->getMaxPlasticStrain());
+                    n_nodes = fem->getNodes().size();
+                    n_elems = fem->getElements().size();
+                    e_int = static_cast<double>(fem->getEnergyTracker().E_int);
+                } else if (!global_fem_solvers_double.empty()) {
+                    auto* fem = global_fem_solvers_double.begin()->second.get();
+                    current_step = fem->getStepCount();
+                    max_v = fem->getMaxVelocity();
+                    max_vm = fem->getMaxVonMisesStress();
+                    max_ep = fem->getMaxPlasticStrain();
+                    n_nodes = fem->getNodes().size();
+                    n_elems = fem->getElements().size();
+                    e_int = fem->getEnergyTracker().E_int;
+                }
+
+                emit_telemetry_fem_3d(sim_time, false);
+                last_telemetry_time = now;
+
+                char log_buf[512];
+                snprintf(log_buf, sizeof(log_buf),
+                         "Step %d | Time = %.4e s | dt = %.2e s | CFL = %.2f | v_max = %.1f m/s | sig_max = %.2e Pa | ep_max = %.3f | E_int = %.2e J | Nodes = %zu | Hex8 = %zu",
+                         current_step,
+                         sim_time,
+                         last_dt,
+                         cfl,
+                         max_v,
+                         max_vm,
+                         max_ep,
+                         e_int,
+                         n_nodes,
+                         n_elems);
+                emit_kernel_log("SYSTEM", log_buf, sim_time, "fem_3d");
+
+                nlohmann::json progress_msg;
+                progress_msg["type"] = "progress";
+                progress_msg["sim_time"] = sim_time;
+                progress_msg["dt"] = last_dt;
+                progress_msg["scope"] = "fem_3d";
+                if (global_exec_until_end_fem_3d.load()) {
+                    progress_msg["percent"] = 50;
+                    progress_msg["mode"] = "EXEC_ALL_FEM_3D";
+                } else {
+                    initial_steps = std::max(initial_steps, step_count + global_target_steps_fem_3d.load());
+                    if (initial_steps > 0) {
+                        int completed = initial_steps - global_target_steps_fem_3d.load();
+                        int percent = std::clamp((int)((completed * 100) / initial_steps), 0, 99);
+                        progress_msg["percent"] = percent;
+                        progress_msg["completed"] = completed;
+                        progress_msg["total"] = initial_steps;
+                        progress_msg["mode"] = "STEP_FEM_3D";
+                    }
+                }
+                {
+                    std::lock_guard<std::mutex> lock(cout_mutex);
+                    std::cout << progress_msg.dump() << std::endl;
+                }
+            }
+        }
+
+        double final_sim_time = 0.0;
+        std::string m_id = global_model_id.empty() ? "default_fem" : global_model_id;
+        if (global_fem_solvers_float.count(m_id) && global_fem_solvers_float[m_id]) {
+            final_sim_time = static_cast<double>(global_fem_solvers_float[m_id]->getSimTime());
+        } else if (global_fem_solvers_double.count(m_id) && global_fem_solvers_double[m_id]) {
+            final_sim_time = global_fem_solvers_double[m_id]->getSimTime();
+        } else if (!global_fem_solvers_float.empty()) {
+            final_sim_time = static_cast<double>(global_fem_solvers_float.begin()->second->getSimTime());
+        } else if (!global_fem_solvers_double.empty()) {
+            final_sim_time = global_fem_solvers_double.begin()->second->getSimTime();
+        }
+
+        emit_telemetry_fem_3d(final_sim_time, false);
+
+        emit_kernel_log("INFO", "3D FEM worker thread execution cycle ended.", final_sim_time, "fem_3d");
+
+        nlohmann::json progress_msg;
+        progress_msg["type"] = "progress";
+        progress_msg["sim_time"] = final_sim_time;
+        progress_msg["scope"] = "fem_3d";
+        progress_msg["percent"] = 100;
+        progress_msg["mode"] = global_exec_until_end_fem_3d.load() ? "EXEC_ALL_FEM_3D" : "STEP_FEM_3D";
+        {
+            std::lock_guard<std::mutex> lock(cout_mutex);
+            std::cout << progress_msg.dump() << std::endl;
+        }
+
+        sim_fem_3d_running = false;
+        sim_fem_3d_paused = false;
+        sim_fem_3d_terminate = false;
+        global_target_steps_fem_3d = 0;
+        global_exec_until_end_fem_3d = false;
+    } catch (const std::exception& e) {
+        emit_kernel_log("ERROR", std::string("3D FEM worker thread error: ") + e.what(), 0.0, "fem_3d");
+        sim_fem_3d_running = false;
+    } catch (...) {
+        emit_kernel_log("ERROR", "3D FEM worker thread error: unknown exception", 0.0, "fem_3d");
+        sim_fem_3d_running = false;
     }
 }
 
@@ -3464,6 +3738,175 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated) {
     }
 
     global_async_telemetry.push(std::move(payload));
+}
+
+void emit_telemetry_fem_3d(double elapsed, bool is_terminated) {
+    Blast::FEMSolver3D<float>* fem_float = nullptr;
+    Blast::FEMSolver3D<double>* fem_double = nullptr;
+
+    std::string m_id = global_model_id.empty() ? "default_fem" : global_model_id;
+    if (global_fem_solvers_cuda_float.count(m_id) && global_fem_solvers_cuda_float[m_id]) {
+        fem_float = &global_fem_solvers_cuda_float[m_id]->getCpuSolver();
+        global_fem_solvers_cuda_float[m_id]->syncToHost();
+    } else if (global_fem_solvers_cuda_double.count(m_id) && global_fem_solvers_cuda_double[m_id]) {
+        fem_double = &global_fem_solvers_cuda_double[m_id]->getCpuSolver();
+        global_fem_solvers_cuda_double[m_id]->syncToHost();
+    } else if (global_fem_solvers_float.count(m_id) && global_fem_solvers_float[m_id]) {
+        fem_float = global_fem_solvers_float[m_id].get();
+    } else if (!global_fem_solvers_float.empty()) {
+        fem_float = global_fem_solvers_float.begin()->second.get();
+    }
+
+    if (!fem_float && !fem_double) {
+        if (global_fem_solvers_double.count(m_id) && global_fem_solvers_double[m_id]) {
+            fem_double = global_fem_solvers_double[m_id].get();
+        } else if (!global_fem_solvers_double.empty()) {
+            fem_double = global_fem_solvers_double.begin()->second.get();
+        }
+    }
+
+    if (!fem_float && !fem_double) return;
+
+    nlohmann::json telemetry;
+    telemetry["type"] = "TELEMETRY_FEM_3D";
+    telemetry["time"] = elapsed;
+    double last_dt = fem_float ? static_cast<double>(fem_float->getLastDt()) : fem_double->getLastDt();
+    int current_step = fem_float ? fem_float->getStepCount() : fem_double->getStepCount();
+    double v_max = fem_float ? static_cast<double>(fem_float->getMaxVelocity()) : fem_double->getMaxVelocity();
+    double sig_max = fem_float ? static_cast<double>(fem_float->getMaxVonMisesStress()) : fem_double->getMaxVonMisesStress();
+    double ep_max = fem_float ? static_cast<double>(fem_float->getMaxPlasticStrain()) : fem_double->getMaxPlasticStrain();
+    telemetry["dt"] = last_dt;
+    telemetry["step"] = current_step;
+    telemetry["v_max"] = v_max;
+    telemetry["sig_max"] = sig_max;
+    telemetry["ep_max"] = ep_max;
+    telemetry["is_terminated"] = is_terminated;
+    if (!global_model_id.empty()) {
+        telemetry["modelId"] = global_model_id;
+    }
+    {
+        std::lock_guard<std::mutex> lock(cout_mutex);
+        std::cout << telemetry.dump() << std::endl;
+    }
+
+    uint32_t magic = 0x46454d33; // "FEM3"
+    float time_f = static_cast<float>(elapsed);
+
+    size_t n_nodes = fem_float ? fem_float->getNodes().size() : fem_double->getNodes().size();
+    size_t n_facets = fem_float ? fem_float->getSurfaceFacets().size() : fem_double->getSurfaceFacets().size();
+    if (n_nodes == 0) return;
+
+    uint32_t n_nodes_u = static_cast<uint32_t>(n_nodes);
+    uint32_t n_facets_u = static_cast<uint32_t>(n_facets);
+    uint32_t n_floats_per_node = 7;
+    uint32_t n_floats_per_facet = 8;
+
+    size_t node_bytes = n_nodes * n_floats_per_node * sizeof(float);
+    size_t facet_bytes = n_facets * n_floats_per_facet * sizeof(float);
+    size_t header_bytes = sizeof(uint32_t) * 6;
+    size_t total_bytes = header_bytes + node_bytes + facet_bytes;
+
+    std::vector<float> node_data(n_nodes * n_floats_per_node);
+    if (fem_float) {
+        const auto& nodes = fem_float->getNodes();
+        for (size_t i = 0; i < n_nodes; ++i) {
+            float vx = static_cast<float>(nodes[i].v[0]);
+            float vy = static_cast<float>(nodes[i].v[1]);
+            float vz = static_cast<float>(nodes[i].v[2]);
+            float v_mag = std::sqrt(vx * vx + vy * vy + vz * vz);
+            node_data[i * 7 + 0] = static_cast<float>(nodes[i].x[0]);
+            node_data[i * 7 + 1] = static_cast<float>(nodes[i].x[1]);
+            node_data[i * 7 + 2] = static_cast<float>(nodes[i].x[2]);
+            node_data[i * 7 + 3] = vx;
+            node_data[i * 7 + 4] = vy;
+            node_data[i * 7 + 5] = vz;
+            node_data[i * 7 + 6] = v_mag;
+        }
+    } else {
+        const auto& nodes = fem_double->getNodes();
+        for (size_t i = 0; i < n_nodes; ++i) {
+            float vx = static_cast<float>(nodes[i].v[0]);
+            float vy = static_cast<float>(nodes[i].v[1]);
+            float vz = static_cast<float>(nodes[i].v[2]);
+            float v_mag = std::sqrt(vx * vx + vy * vy + vz * vz);
+            node_data[i * 7 + 0] = static_cast<float>(nodes[i].x[0]);
+            node_data[i * 7 + 1] = static_cast<float>(nodes[i].x[1]);
+            node_data[i * 7 + 2] = static_cast<float>(nodes[i].x[2]);
+            node_data[i * 7 + 3] = vx;
+            node_data[i * 7 + 4] = vy;
+            node_data[i * 7 + 5] = vz;
+            node_data[i * 7 + 6] = v_mag;
+        }
+    }
+
+    std::vector<float> facet_data(n_facets * n_floats_per_facet);
+    if (fem_float) {
+        const auto& facets = fem_float->getSurfaceFacets();
+        const auto& elements = fem_float->getElements();
+        for (size_t f = 0; f < n_facets; ++f) {
+            const auto& facet = facets[f];
+            int elem_idx = facet.element_id;
+            float vm = 0.0f, ep = 0.0f, press = 0.0f, dmg = 0.0f;
+            if (elem_idx >= 0 && elem_idx < (int)elements.size()) {
+                const auto& elem = elements[elem_idx];
+                float s00 = elem.sigma[0][0], s11 = elem.sigma[1][1], s22 = elem.sigma[2][2];
+                float s01 = elem.sigma[0][1], s02 = elem.sigma[0][2], s12 = elem.sigma[1][2];
+                press = -(s00 + s11 + s22) / 3.0f;
+                float dev00 = s00 + press, dev11 = s11 + press, dev22 = s22 + press;
+                float vm_sq = dev00 * dev00 + dev11 * dev11 + dev22 * dev22 + 2.0f * (s01 * s01 + s02 * s02 + s12 * s12);
+                vm = std::sqrt(std::max(0.0f, 1.5f * vm_sq));
+                ep = elem.ep_bar;
+                dmg = elem.damage;
+            }
+            facet_data[f * 8 + 0] = static_cast<float>(facet.node_ids[0]);
+            facet_data[f * 8 + 1] = static_cast<float>(facet.node_ids[1]);
+            facet_data[f * 8 + 2] = static_cast<float>(facet.node_ids[2]);
+            facet_data[f * 8 + 3] = static_cast<float>(facet.node_ids[3]);
+            facet_data[f * 8 + 4] = vm;
+            facet_data[f * 8 + 5] = ep;
+            facet_data[f * 8 + 6] = press;
+            facet_data[f * 8 + 7] = dmg;
+        }
+    } else {
+        const auto& facets = fem_double->getSurfaceFacets();
+        const auto& elements = fem_double->getElements();
+        for (size_t f = 0; f < n_facets; ++f) {
+            const auto& facet = facets[f];
+            int elem_idx = facet.element_id;
+            float vm = 0.0f, ep = 0.0f, press = 0.0f, dmg = 0.0f;
+            if (elem_idx >= 0 && elem_idx < (int)elements.size()) {
+                const auto& elem = elements[elem_idx];
+                double s00 = elem.sigma[0][0], s11 = elem.sigma[1][1], s22 = elem.sigma[2][2];
+                double s01 = elem.sigma[0][1], s02 = elem.sigma[0][2], s12 = elem.sigma[1][2];
+                press = static_cast<float>(-(s00 + s11 + s22) / 3.0);
+                double dev00 = s00 + press, dev11 = s11 + press, dev22 = s22 + press;
+                double vm_sq = dev00 * dev00 + dev11 * dev11 + dev22 * dev22 + 2.0 * (s01 * s01 + s02 * s02 + s12 * s12);
+                vm = static_cast<float>(std::sqrt(std::max(0.0, 1.5 * vm_sq)));
+                ep = static_cast<float>(elem.ep_bar);
+                dmg = static_cast<float>(elem.damage);
+            }
+            facet_data[f * 8 + 0] = static_cast<float>(facet.node_ids[0]);
+            facet_data[f * 8 + 1] = static_cast<float>(facet.node_ids[1]);
+            facet_data[f * 8 + 2] = static_cast<float>(facet.node_ids[2]);
+            facet_data[f * 8 + 3] = static_cast<float>(facet.node_ids[3]);
+            facet_data[f * 8 + 4] = vm;
+            facet_data[f * 8 + 5] = ep;
+            facet_data[f * 8 + 6] = press;
+            facet_data[f * 8 + 7] = dmg;
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(cout_mutex);
+    std::cout << "BIN_FEM_3D_MESH " << total_bytes << "\n";
+    std::cout.write(reinterpret_cast<const char*>(&magic), sizeof(uint32_t));
+    std::cout.write(reinterpret_cast<const char*>(&time_f), sizeof(float));
+    std::cout.write(reinterpret_cast<const char*>(&n_nodes_u), sizeof(uint32_t));
+    std::cout.write(reinterpret_cast<const char*>(&n_facets_u), sizeof(uint32_t));
+    std::cout.write(reinterpret_cast<const char*>(&n_floats_per_node), sizeof(uint32_t));
+    std::cout.write(reinterpret_cast<const char*>(&n_floats_per_facet), sizeof(uint32_t));
+    std::cout.write(reinterpret_cast<const char*>(node_data.data()), node_bytes);
+    std::cout.write(reinterpret_cast<const char*>(facet_data.data()), facet_bytes);
+    std::cout.flush();
 }
 
 void emit_telemetry_3d(double elapsed, bool is_terminated) {
@@ -5139,18 +5582,19 @@ int main() {
 
                     init_gauges(msg);
                     emit_kernel_log("SYSTEM", "3D Coupled FSI Solver (CFD + MPM) Initialized", 0.0, "3d");
+
                     emit_telemetry_3d(0.0, false);
                     emit_telemetry_mpm_3d(0.0, false);
 
-                        nlohmann::json prog_report;
-                        prog_report["type"] = "progress";
-                        prog_report["percent"] = 100;
-                        prog_report["scope"] = "3d";
-                        prog_report["mode"] = "INIT_FSI_3D";
-                        {
-                            std::lock_guard<std::mutex> lock(cout_mutex);
-                            std::cout << prog_report.dump() << std::endl;
-                        }
+                    nlohmann::json prog_report;
+                    prog_report["type"] = "progress";
+                    prog_report["percent"] = 100;
+                    prog_report["scope"] = "3d";
+                    prog_report["mode"] = "INIT_FSI_3D";
+                    {
+                        std::lock_guard<std::mutex> lock(cout_mutex);
+                        std::cout << prog_report.dump() << std::endl;
+                    }
                     } catch (const std::exception& e) {
                         std::cerr << "[ERROR] Exception in INIT_FSI_3D: " << e.what() << std::endl;
                         emit_kernel_log("ERROR", std::string("FSI 3D initialization failed: ") + e.what(), 0.0, "3d");
@@ -5160,7 +5604,387 @@ int main() {
                         emit_kernel_log("ERROR", "FSI 3D initialization failed with unknown error", 0.0, "3d");
                         std::exit(1);
                     }
+                } else if (command == "INIT_FEM_3D" || command == "INIT_3D_FEM") {
+                    std::string model_id = msg.value("modelId", msg.value("model_id", global_model_id.empty() ? "default_fem" : global_model_id));
+                    std::string precision = msg.value("precision", "single");
+                    std::string device = msg.value("device", "cpu");
+                    select_cuda_device(device);
+                    bool use_gpu = is_cuda_device(device) || device == "gpu" || device == "cuda";
 
+                    global_fem_solvers_float.erase(model_id);
+                    global_fem_solvers_double.erase(model_id);
+                    global_fem_solvers_cuda_float.erase(model_id);
+                    global_fem_solvers_cuda_double.erase(model_id);
+
+                    if (use_gpu) {
+                        if (precision == "double") {
+                            auto fem = std::make_unique<Blast::FEMSolver3DCUDA<double>>();
+                            fem->setHourglassCoeff(static_cast<double>(get_json_double(msg, "hourglass_coeff", 0.1)));
+                            fem->setContactPenaltyScale(static_cast<double>(get_json_double(msg, "contact_penalty_scale", 1.0)));
+                            fem->setFrictionCoefficients(static_cast<double>(get_json_double(msg, "friction_static", 0.3)), static_cast<double>(get_json_double(msg, "friction_kinetic", 0.2)));
+
+                            std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoStiffness");
+                            if (hg_model_str == "FlanaganBelytschkoViscous") {
+                                fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoViscous);
+                            } else {
+                                fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoStiffness);
+                            }
+
+                            std::string scheme_str = msg.value("integration_scheme", "OnePointFB");
+                            if (scheme_str == "FullGauss8" || scheme_str == "FullIntegration8Pt") {
+                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::FullGauss8);
+                            } else {
+                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointFB);
+                            }
+
+                            Blast::MaterialTable3D def_mat;
+                            if (msg.contains("fem_objects") && msg["fem_objects"].is_array() && !msg["fem_objects"].empty()) {
+                                for (const auto& obj : msg["fem_objects"]) {
+                                    int nx = get_json_int(obj, "nx", 10);
+                                    int ny = get_json_int(obj, "ny", 10);
+                                    int nz = get_json_int(obj, "nz", 10);
+                                    double lx = get_json_double(obj, "size_x", 1.0);
+                                    double ly = get_json_double(obj, "size_y", 1.0);
+                                    double lz = get_json_double(obj, "size_z", 1.0);
+                                    double pos_x = get_json_double(obj, "pos_x", 0.0);
+                                    double pos_y = get_json_double(obj, "pos_y", 0.0);
+                                    double pos_z = get_json_double(obj, "pos_z", 0.0);
+                                    double vel_x = get_json_double(obj, "vel_x", 0.0);
+                                    double vel_y = get_json_double(obj, "vel_y", 0.0);
+                                    double vel_z = get_json_double(obj, "vel_z", 0.0);
+
+                                    Blast::MaterialTable3D obj_mat = def_mat;
+                                    obj_mat.density = static_cast<float>(get_json_double(obj, "density", 7850.0));
+                                    obj_mat.youngs_modulus = static_cast<float>(get_json_double(obj, "youngs_modulus", 210.0e9));
+                                    obj_mat.poissons_ratio = static_cast<float>(get_json_double(obj, "poissons_ratio", 0.3));
+                                    obj_mat.yield_stress = static_cast<float>(get_json_double(obj, "yield_stress", 400.0e6));
+                                    obj_mat.hardening_modulus = static_cast<float>(get_json_double(obj, "hardening_modulus", 1.0e9));
+                                    obj_mat.failure_strain = static_cast<float>(get_json_double(obj, "failure_strain", 0.50));
+                                    obj_mat.tensile_failure_stress = static_cast<float>(get_json_double(obj, "tensile_failure_stress", 600.0e6));
+                                    obj_mat.bulk_viscosity_b1 = static_cast<float>(get_json_double(obj, "bulk_viscosity_b1", 0.06));
+                                    obj_mat.bulk_viscosity_b2 = static_cast<float>(get_json_double(obj, "bulk_viscosity_b2", 1.20));
+                                    obj_mat.timestep_erosion_factor = static_cast<float>(get_json_double(obj, "timestep_erosion_factor", 0.10));
+
+                                    std::string k_file = obj.value("k_file", "");
+                                    std::string mesh_src = obj.value("mesh_source", "Box Generator");
+                                    std::string shape_type = obj.value("shape_type", "Box");
+                                    std::string bc_cond = obj.value("boundary_condition", "Free");
+                                    if (mesh_src == "Cylinder Generator" || shape_type == "Cylinder") {
+                                        double radius = get_json_double(obj, "radius", 0.1);
+                                        if (radius <= 0.0) radius = get_json_double(obj, "size_x", 0.2) * 0.5;
+                                        double inner_radius = get_json_double(obj, "inner_radius", 0.0);
+                                        double height = get_json_double(obj, "height", 0.2);
+                                        if (height <= 0.0) height = get_json_double(obj, "size_z", 0.2);
+                                        fem->addStructuredCylinderMesh(nx, nz, radius, height, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond);
+                                    } else if (mesh_src == "LS-DYNA Keyword File" || shape_type == "LS-DYNA File" || !k_file.empty()) {
+                                        Blast::LSDynaReader3D<double> reader;
+                                        std::vector<Blast::FEMNode3D<double>> nodes;
+                                        std::vector<Blast::FEMElement3D<double>> elements;
+                                        std::vector<Blast::MaterialTable3D> mat_list;
+                                        reader.parseFile(k_file, nodes, elements, obj_mat, mat_list);
+                                        fem->appendNodesAndElements(nodes, elements, obj_mat);
+                                    } else {
+                                        fem->addStructuredBoxMesh(nx, ny, nz, lx, ly, lz, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
+                                    }
+                                }
+                            } else if (msg.contains("k_file") && !msg["k_file"].get<std::string>().empty()) {
+                                Blast::LSDynaReader3D<double> reader;
+                                std::vector<Blast::FEMNode3D<double>> nodes;
+                                std::vector<Blast::FEMElement3D<double>> elements;
+                                std::vector<Blast::MaterialTable3D> mat_list;
+                                reader.parseFile(msg["k_file"].get<std::string>(), nodes, elements, def_mat, mat_list);
+                                fem->setNodesAndElements(nodes, elements, def_mat);
+                            }
+                            global_fem_solvers_cuda_double[model_id] = std::move(fem);
+                        } else {
+                            auto fem = std::make_unique<Blast::FEMSolver3DCUDA<float>>();
+                            fem->setHourglassCoeff(static_cast<float>(get_json_double(msg, "hourglass_coeff", 0.1)));
+                            fem->setContactPenaltyScale(static_cast<float>(get_json_double(msg, "contact_penalty_scale", 1.0)));
+                            fem->setFrictionCoefficients(static_cast<float>(get_json_double(msg, "friction_static", 0.3)), static_cast<float>(get_json_double(msg, "friction_kinetic", 0.2)));
+
+                            std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoStiffness");
+                            if (hg_model_str == "FlanaganBelytschkoViscous") {
+                                fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoViscous);
+                            } else {
+                                fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoStiffness);
+                            }
+
+                            std::string scheme_str = msg.value("integration_scheme", "OnePointFB");
+                            if (scheme_str == "FullGauss8" || scheme_str == "FullIntegration8Pt") {
+                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::FullGauss8);
+                            } else {
+                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointFB);
+                            }
+
+                            Blast::MaterialTable3D def_mat;
+                            if (msg.contains("fem_objects") && msg["fem_objects"].is_array() && !msg["fem_objects"].empty()) {
+                                for (const auto& obj : msg["fem_objects"]) {
+                                    int nx = get_json_int(obj, "nx", 10);
+                                    int ny = get_json_int(obj, "ny", 10);
+                                    int nz = get_json_int(obj, "nz", 10);
+                                    float lx = static_cast<float>(get_json_double(obj, "size_x", 1.0));
+                                    float ly = static_cast<float>(get_json_double(obj, "size_y", 1.0));
+                                    float lz = static_cast<float>(get_json_double(obj, "size_z", 1.0));
+                                    float pos_x = static_cast<float>(get_json_double(obj, "pos_x", 0.0));
+                                    float pos_y = static_cast<float>(get_json_double(obj, "pos_y", 0.0));
+                                    float pos_z = static_cast<float>(get_json_double(obj, "pos_z", 0.0));
+                                    float vel_x = static_cast<float>(get_json_double(obj, "vel_x", 0.0));
+                                    float vel_y = static_cast<float>(get_json_double(obj, "vel_y", 0.0));
+                                    float vel_z = static_cast<float>(get_json_double(obj, "vel_z", 0.0));
+
+                                    Blast::MaterialTable3D obj_mat = def_mat;
+                                    obj_mat.density = static_cast<float>(get_json_double(obj, "density", 7850.0));
+                                    obj_mat.youngs_modulus = static_cast<float>(get_json_double(obj, "youngs_modulus", 210.0e9));
+                                    obj_mat.poissons_ratio = static_cast<float>(get_json_double(obj, "poissons_ratio", 0.3));
+                                    obj_mat.yield_stress = static_cast<float>(get_json_double(obj, "yield_stress", 400.0e6));
+                                    obj_mat.hardening_modulus = static_cast<float>(get_json_double(obj, "hardening_modulus", 1.0e9));
+                                    obj_mat.failure_strain = static_cast<float>(get_json_double(obj, "failure_strain", 0.50));
+                                    obj_mat.tensile_failure_stress = static_cast<float>(get_json_double(obj, "tensile_failure_stress", 600.0e6));
+                                    obj_mat.bulk_viscosity_b1 = static_cast<float>(get_json_double(obj, "bulk_viscosity_b1", 0.06));
+                                    obj_mat.bulk_viscosity_b2 = static_cast<float>(get_json_double(obj, "bulk_viscosity_b2", 1.20));
+                                    obj_mat.timestep_erosion_factor = static_cast<float>(get_json_double(obj, "timestep_erosion_factor", 0.10));
+
+                                    std::string k_file = obj.value("k_file", "");
+                                    std::string mesh_src = obj.value("mesh_source", "Box Generator");
+                                    std::string shape_type = obj.value("shape_type", "Box");
+                                    std::string bc_cond = obj.value("boundary_condition", "Free");
+                                    if (mesh_src == "Cylinder Generator" || shape_type == "Cylinder") {
+                                        float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
+                                        if (radius <= 0.0f) radius = static_cast<float>(get_json_double(obj, "size_x", 0.2)) * 0.5f;
+                                        float inner_radius = static_cast<float>(get_json_double(obj, "inner_radius", 0.0));
+                                        float height = static_cast<float>(get_json_double(obj, "height", 0.2));
+                                        if (height <= 0.0f) height = static_cast<float>(get_json_double(obj, "size_z", 0.2));
+                                        fem->addStructuredCylinderMesh(nx, nz, radius, height, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond);
+                                    } else if (mesh_src == "LS-DYNA Keyword File" || shape_type == "LS-DYNA File" || !k_file.empty()) {
+                                        Blast::LSDynaReader3D<float> reader;
+                                        std::vector<Blast::FEMNode3D<float>> nodes;
+                                        std::vector<Blast::FEMElement3D<float>> elements;
+                                        std::vector<Blast::MaterialTable3D> mat_list;
+                                        reader.parseFile(k_file, nodes, elements, obj_mat, mat_list);
+                                        fem->appendNodesAndElements(nodes, elements, obj_mat);
+                                    } else {
+                                        fem->addStructuredBoxMesh(nx, ny, nz, lx, ly, lz, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
+                                    }
+                                }
+                            } else if (msg.contains("k_file") && !msg["k_file"].get<std::string>().empty()) {
+                                Blast::LSDynaReader3D<float> reader;
+                                std::vector<Blast::FEMNode3D<float>> nodes;
+                                std::vector<Blast::FEMElement3D<float>> elements;
+                                std::vector<Blast::MaterialTable3D> mat_list;
+                                reader.parseFile(msg["k_file"].get<std::string>(), nodes, elements, def_mat, mat_list);
+                                fem->setNodesAndElements(nodes, elements, def_mat);
+                            }
+                            global_fem_solvers_cuda_float[model_id] = std::move(fem);
+                        }
+                    } else {
+                        if (precision == "double") {
+                            auto fem = std::make_unique<Blast::FEMSolver3D<double>>();
+                            fem->setHourglassCoeff(static_cast<double>(get_json_double(msg, "hourglass_coeff", 0.1)));
+                            fem->setContactPenaltyScale(static_cast<double>(get_json_double(msg, "contact_penalty_scale", 1.0)));
+                            fem->setFrictionCoefficients(static_cast<double>(get_json_double(msg, "friction_static", 0.3)), static_cast<double>(get_json_double(msg, "friction_kinetic", 0.2)));
+
+                            std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoStiffness");
+                            if (hg_model_str == "FlanaganBelytschkoViscous") {
+                                fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoViscous);
+                            } else {
+                                fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoStiffness);
+                            }
+
+                            std::string scheme_str = msg.value("integration_scheme", "OnePointFB");
+                            if (scheme_str == "FullGauss8" || scheme_str == "FullIntegration8Pt") {
+                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::FullGauss8);
+                            } else {
+                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointFB);
+                            }
+
+                            Blast::MaterialTable3D def_mat;
+                            if (msg.contains("fem_objects") && msg["fem_objects"].is_array() && !msg["fem_objects"].empty()) {
+                                for (const auto& obj : msg["fem_objects"]) {
+                                    int nx = get_json_int(obj, "nx", 10);
+                                    int ny = get_json_int(obj, "ny", 10);
+                                    int nz = get_json_int(obj, "nz", 10);
+                                    double lx = get_json_double(obj, "size_x", 1.0);
+                                    double ly = get_json_double(obj, "size_y", 1.0);
+                                    double lz = get_json_double(obj, "size_z", 1.0);
+                                    double pos_x = get_json_double(obj, "pos_x", 0.0);
+                                    double pos_y = get_json_double(obj, "pos_y", 0.0);
+                                    double pos_z = get_json_double(obj, "pos_z", 0.0);
+                                    double vel_x = get_json_double(obj, "vel_x", 0.0);
+                                    double vel_y = get_json_double(obj, "vel_y", 0.0);
+                                    double vel_z = get_json_double(obj, "vel_z", 0.0);
+
+                                    Blast::MaterialTable3D obj_mat = def_mat;
+                                    obj_mat.density = static_cast<float>(get_json_double(obj, "density", 7850.0));
+                                    obj_mat.youngs_modulus = static_cast<float>(get_json_double(obj, "youngs_modulus", 210.0e9));
+                                    obj_mat.poissons_ratio = static_cast<float>(get_json_double(obj, "poissons_ratio", 0.3));
+                                    obj_mat.yield_stress = static_cast<float>(get_json_double(obj, "yield_stress", 400.0e6));
+                                    obj_mat.hardening_modulus = static_cast<float>(get_json_double(obj, "hardening_modulus", 1.0e9));
+                                    obj_mat.failure_strain = static_cast<float>(get_json_double(obj, "failure_strain", 0.50));
+                                    obj_mat.tensile_failure_stress = static_cast<float>(get_json_double(obj, "tensile_failure_stress", 600.0e6));
+                                    obj_mat.bulk_viscosity_b1 = static_cast<float>(get_json_double(obj, "bulk_viscosity_b1", 0.06));
+                                    obj_mat.bulk_viscosity_b2 = static_cast<float>(get_json_double(obj, "bulk_viscosity_b2", 1.20));
+                                    obj_mat.timestep_erosion_factor = static_cast<float>(get_json_double(obj, "timestep_erosion_factor", 0.10));
+
+                                    std::string k_file = obj.value("k_file", "");
+                                    std::string mesh_src = obj.value("mesh_source", "Box Generator");
+                                    std::string shape_type = obj.value("shape_type", "Box");
+                                    std::string bc_cond = obj.value("boundary_condition", "Free");
+                                    if (mesh_src == "Cylinder Generator" || shape_type == "Cylinder") {
+                                        double radius = get_json_double(obj, "radius", 0.1);
+                                        if (radius <= 0.0) radius = get_json_double(obj, "size_x", 0.2) * 0.5;
+                                        double inner_radius = get_json_double(obj, "inner_radius", 0.0);
+                                        double height = get_json_double(obj, "height", 0.2);
+                                        if (height <= 0.0) height = get_json_double(obj, "size_z", 0.2);
+                                        fem->addStructuredCylinderMesh(nx, nz, radius, height, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond);
+                                    } else if (mesh_src == "LS-DYNA Keyword File" || shape_type == "LS-DYNA File" || !k_file.empty()) {
+                                        Blast::LSDynaReader3D<double> reader;
+                                        std::vector<Blast::FEMNode3D<double>> nodes;
+                                        std::vector<Blast::FEMElement3D<double>> elements;
+                                        std::vector<Blast::MaterialTable3D> mat_list;
+                                        reader.parseFile(k_file, nodes, elements, obj_mat, mat_list);
+                                        fem->appendNodesAndElements(nodes, elements, obj_mat);
+                                    } else {
+                                        fem->addStructuredBoxMesh(nx, ny, nz, lx, ly, lz, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
+                                    }
+                                }
+                            } else if (msg.contains("k_file") && !msg["k_file"].get<std::string>().empty()) {
+                                Blast::LSDynaReader3D<double> reader;
+                                std::vector<Blast::FEMNode3D<double>> nodes;
+                                std::vector<Blast::FEMElement3D<double>> elements;
+                                std::vector<Blast::MaterialTable3D> mat_list;
+                                reader.parseFile(msg["k_file"].get<std::string>(), nodes, elements, def_mat, mat_list);
+                                fem->setNodesAndElements(nodes, elements, def_mat);
+                            }
+                            global_fem_solvers_double[model_id] = std::move(fem);
+                        } else {
+                            auto fem = std::make_unique<Blast::FEMSolver3D<float>>();
+                            fem->setHourglassCoeff(static_cast<float>(get_json_double(msg, "hourglass_coeff", 0.1)));
+                            fem->setContactPenaltyScale(static_cast<float>(get_json_double(msg, "contact_penalty_scale", 1.0)));
+                            fem->setFrictionCoefficients(static_cast<float>(get_json_double(msg, "friction_static", 0.3)), static_cast<float>(get_json_double(msg, "friction_kinetic", 0.2)));
+
+                            std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoStiffness");
+                            if (hg_model_str == "FlanaganBelytschkoViscous") {
+                                fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoViscous);
+                            } else {
+                                fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoStiffness);
+                            }
+
+                            std::string scheme_str = msg.value("integration_scheme", "OnePointFB");
+                            if (scheme_str == "FullGauss8" || scheme_str == "FullIntegration8Pt") {
+                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::FullGauss8);
+                            } else {
+                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointFB);
+                            }
+
+                            Blast::MaterialTable3D def_mat;
+                            if (msg.contains("fem_objects") && msg["fem_objects"].is_array() && !msg["fem_objects"].empty()) {
+                                for (const auto& obj : msg["fem_objects"]) {
+                                    int nx = get_json_int(obj, "nx", 10);
+                                    int ny = get_json_int(obj, "ny", 10);
+                                    int nz = get_json_int(obj, "nz", 10);
+                                    float lx = static_cast<float>(get_json_double(obj, "size_x", 1.0));
+                                    float ly = static_cast<float>(get_json_double(obj, "size_y", 1.0));
+                                    float lz = static_cast<float>(get_json_double(obj, "size_z", 1.0));
+                                    float pos_x = static_cast<float>(get_json_double(obj, "pos_x", 0.0));
+                                    float pos_y = static_cast<float>(get_json_double(obj, "pos_y", 0.0));
+                                    float pos_z = static_cast<float>(get_json_double(obj, "pos_z", 0.0));
+                                    float vel_x = static_cast<float>(get_json_double(obj, "vel_x", 0.0));
+                                    float vel_y = static_cast<float>(get_json_double(obj, "vel_y", 0.0));
+                                    float vel_z = static_cast<float>(get_json_double(obj, "vel_z", 0.0));
+
+                                    Blast::MaterialTable3D obj_mat = def_mat;
+                                    obj_mat.density = static_cast<float>(get_json_double(obj, "density", 7850.0));
+                                    obj_mat.youngs_modulus = static_cast<float>(get_json_double(obj, "youngs_modulus", 210.0e9));
+                                    obj_mat.poissons_ratio = static_cast<float>(get_json_double(obj, "poissons_ratio", 0.3));
+                                    obj_mat.yield_stress = static_cast<float>(get_json_double(obj, "yield_stress", 400.0e6));
+                                    obj_mat.hardening_modulus = static_cast<float>(get_json_double(obj, "hardening_modulus", 1.0e9));
+                                    obj_mat.failure_strain = static_cast<float>(get_json_double(obj, "failure_strain", 0.50));
+                                    obj_mat.tensile_failure_stress = static_cast<float>(get_json_double(obj, "tensile_failure_stress", 600.0e6));
+                                    obj_mat.bulk_viscosity_b1 = static_cast<float>(get_json_double(obj, "bulk_viscosity_b1", 0.06));
+                                    obj_mat.bulk_viscosity_b2 = static_cast<float>(get_json_double(obj, "bulk_viscosity_b2", 1.20));
+                                    obj_mat.timestep_erosion_factor = static_cast<float>(get_json_double(obj, "timestep_erosion_factor", 0.10));
+
+                                    std::string k_file = obj.value("k_file", "");
+                                    std::string mesh_src = obj.value("mesh_source", "Box Generator");
+                                    std::string shape_type = obj.value("shape_type", "Box");
+                                    std::string bc_cond = obj.value("boundary_condition", "Free");
+                                    if (mesh_src == "Cylinder Generator" || shape_type == "Cylinder") {
+                                        float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
+                                        if (radius <= 0.0f) radius = static_cast<float>(get_json_double(obj, "size_x", 0.2)) * 0.5f;
+                                        float inner_radius = static_cast<float>(get_json_double(obj, "inner_radius", 0.0));
+                                        float height = static_cast<float>(get_json_double(obj, "height", 0.2));
+                                        if (height <= 0.0f) height = static_cast<float>(get_json_double(obj, "size_z", 0.2));
+                                        fem->addStructuredCylinderMesh(nx, nz, radius, height, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond);
+                                    } else if (mesh_src == "LS-DYNA Keyword File" || shape_type == "LS-DYNA File" || !k_file.empty()) {
+                                        Blast::LSDynaReader3D<float> reader;
+                                        std::vector<Blast::FEMNode3D<float>> nodes;
+                                        std::vector<Blast::FEMElement3D<float>> elements;
+                                        std::vector<Blast::MaterialTable3D> mat_list;
+                                        reader.parseFile(k_file, nodes, elements, obj_mat, mat_list);
+                                        fem->appendNodesAndElements(nodes, elements, obj_mat);
+                                    } else {
+                                        fem->addStructuredBoxMesh(nx, ny, nz, lx, ly, lz, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
+                                    }
+                                }
+                            } else if (msg.contains("k_file") && !msg["k_file"].get<std::string>().empty()) {
+                                Blast::LSDynaReader3D<float> reader;
+                                std::vector<Blast::FEMNode3D<float>> nodes;
+                                std::vector<Blast::FEMElement3D<float>> elements;
+                                std::vector<Blast::MaterialTable3D> mat_list;
+                                reader.parseFile(msg["k_file"].get<std::string>(), nodes, elements, def_mat, mat_list);
+                                fem->setNodesAndElements(nodes, elements, def_mat);
+                            }
+                            global_fem_solvers_float[model_id] = std::move(fem);
+                        }
+                    }
+                    emit_kernel_log("SYSTEM", "3D Hexahedral Explicit FEM Solver Initialized for model " + model_id, 0.0, "3d");
+                    emit_telemetry_fem_3d(0.0, false);
+                } else if (command == "STEP_FEM_3D") {
+                    int steps = get_json_int(msg, "steps", 1);
+                    global_cfl_fem_3d = static_cast<float>(get_json_double(msg, "cfl", 0.3));
+                    if (msg.contains("refresh_rate")) {
+                        global_refresh_rate_fem_3d = get_json_double(msg, "refresh_rate", 0.033);
+                    }
+                    global_exec_until_end_fem_3d = false;
+                    if (!sim_fem_3d_running) {
+                        global_target_steps_fem_3d = steps;
+                        sim_fem_3d_running = true;
+                        sim_fem_3d_paused = false;
+                        sim_fem_3d_terminate = false;
+                        std::thread(worker_fem_3d_thread_func).detach();
+                    } else {
+                        global_target_steps_fem_3d.fetch_add(steps);
+                        sim_fem_3d_paused = false;
+                    }
+
+                } else if (command == "EXEC_ALL_FEM_3D") {
+                    global_cfl_fem_3d = static_cast<float>(get_json_double(msg, "cfl", 0.3));
+                    if (msg.contains("refresh_rate")) {
+                        global_refresh_rate_fem_3d = get_json_double(msg, "refresh_rate", 0.033);
+                    }
+                    global_exec_until_end_fem_3d = true;
+                    if (!sim_fem_3d_running) {
+                        sim_fem_3d_running = true;
+                        sim_fem_3d_paused = false;
+                        sim_fem_3d_terminate = false;
+                        std::thread(worker_fem_3d_thread_func).detach();
+                    } else {
+                        sim_fem_3d_paused = false;
+                    }
+
+                } else if (command == "PAUSE_FEM_3D") {
+                    sim_fem_3d_paused = true;
+                    global_target_steps_fem_3d = 0;
+
+                } else if (command == "TERMINATE_FEM_3D") {
+                    sim_fem_3d_terminate = true;
+                    while (sim_fem_3d_running.load()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    }
+                    global_fem_solvers_float.clear();
+                    global_fem_solvers_double.clear();
+                    global_fem_solvers_cuda_float.clear();
+                    global_fem_solvers_cuda_double.clear();
                 } else if (command == "STEP_FSI_3D") {
                     int steps = get_json_int(msg, "steps", 1);
                     global_cfl_fsi_3d = static_cast<float>(get_json_double(msg, "cfl", 0.35));
@@ -5342,6 +6166,7 @@ int main() {
                     global_telemetry_interval_ms = (rate > 0.0) ? static_cast<int>(rate * 1000.0) : 0;
                     global_refresh_rate_mpm = rate;
                     global_refresh_rate_mpm_3d = rate;
+                    global_refresh_rate_fem_3d = rate;
                     if (msg.contains("slices")) {
                         global_slices_3d.clear();
                         for (const auto& s_msg : msg["slices"]) {

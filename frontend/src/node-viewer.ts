@@ -800,6 +800,10 @@ export class NodeViewer {
                 if ((key === 'y_min_bc' || key === 'y_max_bc') && dim === '1D') continue;
                 if ((key === 'z_min_bc' || key === 'z_max_bc') && (dim === '1D' || dim === '2D')) continue;
             }
+            if (node.type === 'FEMDomain3D') {
+                const scheme = node.parameters['integration_scheme'] || 'OnePointFB';
+                if ((scheme === 'FullGauss8' || scheme === 'SelectiveReduced') && (key === 'hourglass_model' || key === 'hourglass_coeff')) continue;
+            }
             if (node.type === 'Material') {
                 const matType = node.parameters['material_type'] || 'Air';
                 if (matType === 'Air') {
@@ -2256,7 +2260,7 @@ export class NodeViewer {
             'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
             'refinement_opacity', 'charge_opacity',
             'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio', 'amr_tile_size',
-            'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'refinement_level',
+            'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'length', 'refinement_level',
             'submesh_x', 'submesh_y', 'submesh_z', 'submesh_size_x', 'submesh_size_y', 'submesh_size_z',
             'offset', 'stride',
             // MPM keys
@@ -2268,7 +2272,9 @@ export class NodeViewer {
             'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
             'mg_gamma0', 'mg_c0', 'mg_s',
             'ppc',
-            'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend'
+            'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
+            // FEM keys
+            'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping'
         ];
 
         const chargeShapeOptions = node.type === 'Charge3D' ? ['Sphere', 'Cylinder', 'Block'] : ['Sphere', 'Cylinder'];
@@ -2297,6 +2303,10 @@ export class NodeViewer {
             'bc_z_max': ['Reflecting', 'Transmitting', 'Terminate'],
             'coordinate_system': ['Axisymmetric', 'Cartesian'],
             'device': ['cpu', 'cuda'],
+            'precision': ['double', 'single'],
+            'integration_scheme': ['OnePointFB', 'OnePointKF', 'FullGauss8', 'SelectiveReduced'],
+            'hourglass_model': ['FlanaganBelytschkoStiffness', 'FlanaganBelytschkoViscous', 'KosloffFrazier'],
+            'mesh_source': ['Box Generator', 'Cylinder Generator', 'LS-DYNA Keyword File'],
             'preset': [...MPM_MATERIAL_PRESET_NAMES],
             'trigger_type': ['end', 'time', 'step'],
             'composition': ['Aluminized ANFO', 'Ammonal', 'ANFO', 'Baratol', 'C-4', 'Composition A-3', 'Composition B', 'Composition C-3', 'Cyclotol', 'Heavy ANFO', 'HMX', 'LX-04', 'LX-07', 'LX-10', 'LX-14', 'LX-17', 'Mining Emulsion', 'Octol', 'PBX 9404', 'PBX 9501', 'PBX 9502', 'PE-10', 'PE-12', 'PE-4', 'PE-8', 'Pentolite', 'PETN', 'RDX', 'TATB', 'Tetryl', 'TNT', 'Water Gel', 'Custom'],
@@ -2309,7 +2319,7 @@ export class NodeViewer {
             'material_type': ['Air', 'JWL Charge', 'Ideal Gas Charge'],
             'transfer_scheme': ['BSpline', 'GIMP', 'Standard'],
             'velocity_scheme': ['APIC', 'PIC', 'FLIP'],
-            'shape_type': (node.type === 'MPMObject3D') ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle'],
+            'shape_type': node.type === 'FEMObject3D' ? ['Box', 'Cylinder', 'LS-DYNA File'] : (node.type === 'MPMObject3D' ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle']),
             'coupling_mode': ['TwoWay_Full', 'OneWay_CFD_to_MPM', 'Disabled'],
             'contour_quantity': ['von_mises', 'plastic_strain', 'density', 'velocity', 'pressure'],
             'color_map': ['viridis', 'plasma', 'jet', 'coolwarm'],

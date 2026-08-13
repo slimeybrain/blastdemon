@@ -784,3 +784,98 @@ void export_vtu_amr_2d(const std::string& filename,
 
     out.close();
 }
+
+#include "fem_solver_3d.hpp"
+
+template <typename T>
+void export_vtu_fem_3d(const std::string& filename, const Blast::FEMSolver3D<T>& solver) {
+    std::ofstream out(filename);
+    if (!out) return;
+
+    const auto& nodes = solver.getNodes();
+    const auto& elements = solver.getElements();
+
+    int num_points = static_cast<int>(nodes.size());
+    int num_cells = 0;
+
+    for (const auto& elem : elements) {
+        if (!elem.is_eroded) num_cells++;
+    }
+
+    std::vector<double> points(num_points * 3);
+    for (int i = 0; i < num_points; ++i) {
+        points[i * 3 + 0] = static_cast<double>(nodes[i].x[0]);
+        points[i * 3 + 1] = static_cast<double>(nodes[i].x[1]);
+        points[i * 3 + 2] = static_cast<double>(nodes[i].x[2]);
+    }
+
+    std::vector<int32_t> connectivity(num_cells * 8);
+    std::vector<int32_t> offsets(num_cells);
+    std::vector<uint8_t> types(num_cells, 12); // VTK_HEXAHEDRON (12)
+    std::vector<double> von_mises(num_cells, 0.0);
+    std::vector<double> plastic_strain(num_cells, 0.0);
+
+    int c_idx = 0;
+    for (const auto& elem : elements) {
+        if (elem.is_eroded) continue;
+
+        for (int n = 0; n < 8; ++n) {
+            connectivity[c_idx * 8 + n] = elem.node_ids[n];
+        }
+        offsets[c_idx] = (c_idx + 1) * 8;
+
+        double mean_s = (elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / 3.0;
+        double s00 = elem.sigma[0][0] - mean_s;
+        double s11 = elem.sigma[1][1] - mean_s;
+        double s22 = elem.sigma[2][2] - mean_s;
+        double s01 = elem.sigma[0][1];
+        double s12 = elem.sigma[1][2];
+        double s20 = elem.sigma[2][0];
+
+        von_mises[c_idx] = std::sqrt(1.5 * (s00*s00 + s11*s11 + s22*s22 + 2.0*(s01*s01 + s12*s12 + s20*s20)));
+        plastic_strain[c_idx] = static_cast<double>(elem.ep_bar);
+        c_idx++;
+    }
+
+    out << "<?xml version=\"1.0\"?>\n";
+    out << "<VTKFile type=\"UnstructuredGrid\" version=\"0.1\" byte_order=\"LittleEndian\" header_type=\"UInt32\" compressor=\"vtkZLibDataCompressor\">\n";
+    out << "  <UnstructuredGrid>\n";
+    out << "    <Piece NumberOfPoints=\"" << num_points << "\" NumberOfCells=\"" << num_cells << "\">\n";
+
+    out << "      <Points>\n";
+    out << "        <DataArray type=\"Float64\" Name=\"Points\" NumberOfComponents=\"3\" format=\"binary\">\n";
+    out << "          " << binary_encode(points) << "\n";
+    out << "        </DataArray>\n";
+    out << "      </Points>\n";
+
+    out << "      <Cells>\n";
+    out << "        <DataArray type=\"Int32\" Name=\"connectivity\" format=\"binary\">\n";
+    out << "          " << binary_encode(connectivity) << "\n";
+    out << "        </DataArray>\n";
+    out << "        <DataArray type=\"Int32\" Name=\"offsets\" format=\"binary\">\n";
+    out << "          " << binary_encode(offsets) << "\n";
+    out << "        </DataArray>\n";
+    out << "        <DataArray type=\"UInt8\" Name=\"types\" format=\"binary\">\n";
+    out << "          " << binary_encode(types) << "\n";
+    out << "        </DataArray>\n";
+    out << "      </Cells>\n";
+
+    out << "      <CellData>\n";
+    out << "        <DataArray type=\"Float64\" Name=\"von_Mises_Stress\" format=\"binary\">\n";
+    out << "          " << binary_encode(von_mises) << "\n";
+    out << "        </DataArray>\n";
+    out << "        <DataArray type=\"Float64\" Name=\"Plastic_Strain\" format=\"binary\">\n";
+    out << "          " << binary_encode(plastic_strain) << "\n";
+    out << "        </DataArray>\n";
+    out << "      </CellData>\n";
+
+    out << "    </Piece>\n";
+    out << "  </UnstructuredGrid>\n";
+    out << "</VTKFile>\n";
+
+    out.close();
+}
+
+template void export_vtu_fem_3d<float>(const std::string&, const Blast::FEMSolver3D<float>&);
+template void export_vtu_fem_3d<double>(const std::string&, const Blast::FEMSolver3D<double>&);
+

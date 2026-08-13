@@ -246,6 +246,11 @@ void main() {
             return;
         }
 
+        if (uIsWireframe == 15) {
+            outColor = vec4(0.0, 0.0, 0.0, 1.0);
+            return;
+        }
+
         if (uIsWireframe == 14) {
             outColor = vec4(vTexCoord.x, vTexCoord.y, vSliceSize.x, uAlpha);
             return;
@@ -728,6 +733,11 @@ void main() {
 
         if (uIsWireframe == 12) {
             outColor = vec4(0.0, 0.9, 1.0, uAlpha);
+            return;
+        }
+
+        if (uIsWireframe == 15) {
+            outColor = vec4(0.0, 0.0, 0.0, 1.0);
             return;
         }
 
@@ -1431,7 +1441,7 @@ let projectionMatrix = new Float32Array(16);
 let viewMatrix = new Float32Array(16);
 let modelMatrix = new Float32Array(16);
 
-let distance = 2.45;
+let distance = 1.35;
 let pitch = 0.42;
 let yaw = 1.107;
 let targetX = 0.0;
@@ -1442,6 +1452,8 @@ let fov = 45.0;
 let cameraEyeX = 0.0;
 let cameraEyeY = 0.0;
 let cameraEyeZ = 0.0;
+let hasCFDSolver = false;
+let femBoundsInitialized = false;
 
 // Contour Visualization Configurations
 let colormap = 0; // 0=plasma, 1=viridis
@@ -1533,6 +1545,8 @@ let gpuObstaclesTriIndexBuffer: any = null;
 let gpuObstaclesWireIndexBuffer: any = null;
 let gpuUniformBufferObstaclesSolid: any = null;
 let gpuUniformBufferObstaclesWire: any = null;
+let gpuUniformBufferFEMSolid: any = null;
+let gpuUniformBufferFEMWire: any = null;
 
 interface CachedSlice {
     axis: number;
@@ -2860,6 +2874,236 @@ let mpmParticleOpacity: number = 1.0;
 let mpmParticleMinVal: number | undefined = undefined;
 let mpmParticleMaxVal: number | undefined = undefined;
 
+let latestFEMNodesData: Float32Array | null = null;
+let latestFEMFacetsData: Float32Array | null = null;
+let femSolidBuffer: WebGLBuffer | null = null;
+let femSolidCount: number = 0;
+let femWireframeBuffer: WebGLBuffer | null = null;
+let femWireframeCount: number = 0;
+let gpuFEMSolidBuffer: any = null;
+let gpuFEMWireframeBuffer: any = null;
+
+let showFEMMesh: boolean = true;
+let femSolid: boolean = true;
+let femWireframe: boolean = true;
+let femResults: boolean = true;
+let femQuantity: string = 'vonMises';
+let femColormap: string = 'plasma';
+let femAutoScale: boolean = true;
+let femLogScale: boolean = false;
+let femOpacity: number = 1.0;
+let femMinVal: number | undefined = undefined;
+let femMaxVal: number | undefined = undefined;
+
+function getFEMFacetQuantityValue(facetIdx: number, qty: string): number {
+    if (!latestFEMFacetsData) return 0;
+    const base = facetIdx * 8;
+    if (qty === 'vonMises') return latestFEMFacetsData[base + 4];
+    if (qty === 'plasticStrain') return latestFEMFacetsData[base + 5];
+    if (qty === 'pressure') return latestFEMFacetsData[base + 6];
+    if (qty === 'damage') return latestFEMFacetsData[base + 7];
+    if (qty === 'velocity') {
+        if (!latestFEMNodesData) return 0;
+        const n0 = Math.round(latestFEMFacetsData[base + 0]);
+        const n1 = Math.round(latestFEMFacetsData[base + 1]);
+        const n2 = Math.round(latestFEMFacetsData[base + 2]);
+        const n3 = Math.round(latestFEMFacetsData[base + 3]);
+        const nTotal = Math.floor(latestFEMNodesData.length / 7);
+        const v0 = (n0 >= 0 && n0 < nTotal) ? latestFEMNodesData[n0 * 7 + 6] : 0;
+        const v1 = (n1 >= 0 && n1 < nTotal) ? latestFEMNodesData[n1 * 7 + 6] : 0;
+        const v2 = (n2 >= 0 && n2 < nTotal) ? latestFEMNodesData[n2 * 7 + 6] : 0;
+        const v3 = (n3 >= 0 && n3 < nTotal) ? latestFEMNodesData[n3 * 7 + 6] : 0;
+        return (v0 + v1 + v2 + v3) * 0.25;
+    }
+    return latestFEMFacetsData[base + 4];
+}
+
+function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
+    if (!gl && (!isWebGPU || !gpuDevice)) return;
+    if (buffer) {
+        if (buffer.byteLength < 24) return;
+        const view = new DataView(buffer);
+        const magic = view.getUint32(0, true);
+        if (magic !== 0x46454d33) return;
+        const time = view.getFloat32(4, true);
+        const nNodes = view.getUint32(8, true);
+        const nFacets = view.getUint32(12, true);
+        const nFloatsPerNode = view.getUint32(16, true);
+        const nFloatsPerFacet = view.getUint32(20, true);
+
+        const nodeDataBytes = nNodes * nFloatsPerNode * 4;
+        const facetDataBytes = nFacets * nFloatsPerFacet * 4;
+        if (24 + nodeDataBytes + facetDataBytes > buffer.byteLength) return;
+
+        latestFEMNodesData = new Float32Array(buffer, 24, nNodes * nFloatsPerNode);
+        latestFEMFacetsData = new Float32Array(buffer, 24 + nodeDataBytes, nFacets * nFloatsPerFacet);
+    }
+
+    if (!latestFEMNodesData || !latestFEMFacetsData || latestFEMNodesData.length === 0 || latestFEMFacetsData.length === 0) {
+        femSolidCount = 0;
+        femWireframeCount = 0;
+        return;
+    }
+
+    const nNodes = Math.floor(latestFEMNodesData.length / 7);
+    const nFacets = Math.floor(latestFEMFacetsData.length / 8);
+
+    // Compute actual spatial bounding box of the FEM nodes
+    let femMinX = Infinity, femMaxX = -Infinity;
+    let femMinY = Infinity, femMaxY = -Infinity;
+    let femMinZ = Infinity, femMaxZ = -Infinity;
+
+    for (let i = 0; i < nNodes; i++) {
+        const x = latestFEMNodesData[i * 7 + 0];
+        const y = latestFEMNodesData[i * 7 + 1];
+        const z = latestFEMNodesData[i * 7 + 2];
+        if (isFinite(x) && isFinite(y) && isFinite(z)) {
+            if (x < femMinX) femMinX = x;
+            if (x > femMaxX) femMaxX = x;
+            if (y < femMinY) femMinY = y;
+            if (y > femMaxY) femMaxY = y;
+            if (z < femMinZ) femMinZ = z;
+            if (z > femMaxZ) femMaxZ = z;
+        }
+    }
+
+    // If FEM-only model (no active CFD solver present), initialize spatial bounds ONCE on initial frame load.
+    // Do NOT auto-reset camera or bounds on every frame render while the simulation is running!
+    if (!hasCFDSolver && !femBoundsInitialized && isFinite(femMinX) && isFinite(femMaxX) && femMaxX > femMinX) {
+        xmin = femMinX;
+        xmax = femMaxX;
+        ymin = femMinY;
+        ymax = femMaxY;
+        zmin = femMinZ;
+        zmax = femMaxZ;
+        femBoundsInitialized = true;
+        const w = canvasWidth();
+        const h = canvasHeight();
+        updateMatrices(w, h);
+    }
+
+    const sizeX = getDimX();
+    const sizeY = getDimY();
+    const sizeZ = getDimZ();
+    const sx = 1.0 / sizeX;
+    const sy = 1.0 / sizeY;
+    const sz = 1.0 / sizeZ;
+    const tx = -xmin * sx - 0.5;
+    const ty = -ymin * sy - 0.5;
+    const tz = -zmin * sz - 0.5;
+
+    let empiricalMin = Infinity;
+    let empiricalMax = -Infinity;
+
+    for (let f = 0; f < nFacets; f++) {
+        const val = getFEMFacetQuantityValue(f, femQuantity);
+        if (isFinite(val)) {
+            if (val < empiricalMin) empiricalMin = val;
+            if (val > empiricalMax) empiricalMax = val;
+        }
+    }
+    if (!isFinite(empiricalMin) || !isFinite(empiricalMax) || empiricalMax <= empiricalMin) {
+        empiricalMin = 0.0;
+        empiricalMax = 1.0;
+    }
+
+    self.postMessage({ type: 'femRangeUpdated', min: empiricalMin, max: empiricalMax });
+
+    let minScalar = femMinVal;
+    let maxScalar = femMaxVal;
+    if (femAutoScale || minScalar === undefined || maxScalar === undefined) {
+        minScalar = empiricalMin;
+        maxScalar = empiricalMax;
+    }
+
+    const solidVertexData = new Float32Array(nFacets * 6 * 6);
+    const wireframeVertexData = new Float32Array(nFacets * 8 * 5);
+
+    let solidIdx = 0;
+    let wireIdx = 0;
+
+    for (let f = 0; f < nFacets; f++) {
+        const n0 = Math.round(latestFEMFacetsData[f * 8 + 0]);
+        const n1 = Math.round(latestFEMFacetsData[f * 8 + 1]);
+        const n2 = Math.round(latestFEMFacetsData[f * 8 + 2]);
+        const n3 = Math.round(latestFEMFacetsData[f * 8 + 3]);
+
+        if (n0 < 0 || n0 >= nNodes || n1 < 0 || n1 >= nNodes || n2 < 0 || n2 >= nNodes || n3 < 0 || n3 >= nNodes) {
+            continue;
+        }
+
+        const p0 = [latestFEMNodesData[n0 * 7 + 0] * sx + tx, latestFEMNodesData[n0 * 7 + 1] * sy + ty, latestFEMNodesData[n0 * 7 + 2] * sz + tz];
+        const p1 = [latestFEMNodesData[n1 * 7 + 0] * sx + tx, latestFEMNodesData[n1 * 7 + 1] * sy + ty, latestFEMNodesData[n1 * 7 + 2] * sz + tz];
+        const p2 = [latestFEMNodesData[n2 * 7 + 0] * sx + tx, latestFEMNodesData[n2 * 7 + 1] * sy + ty, latestFEMNodesData[n2 * 7 + 2] * sz + tz];
+        const p3 = [latestFEMNodesData[n3 * 7 + 0] * sx + tx, latestFEMNodesData[n3 * 7 + 1] * sy + ty, latestFEMNodesData[n3 * 7 + 2] * sz + tz];
+
+        const val = getFEMFacetQuantityValue(f, femQuantity);
+        let normVal = 0.0;
+        if (femLogScale) {
+            const logMin = Math.log(Math.max(minScalar, 1e-5));
+            const logMax = Math.log(Math.max(maxScalar, 1e-5));
+            const logVal = Math.log(Math.max(val, 1e-5));
+            normVal = (logVal - logMin) / (Math.max(1e-9, logMax - logMin));
+        } else {
+            normVal = (val - minScalar) / (Math.max(1e-9, maxScalar - minScalar));
+        }
+        const [r, g, b] = sampleColormapRGB(normVal, femColormap);
+
+        const triVerts = [p0, p1, p2, p0, p2, p3];
+        for (let tv = 0; tv < 6; tv++) {
+            const pt = triVerts[tv];
+            solidVertexData[solidIdx++] = pt[0];
+            solidVertexData[solidIdx++] = pt[1];
+            solidVertexData[solidIdx++] = pt[2];
+            solidVertexData[solidIdx++] = r;
+            solidVertexData[solidIdx++] = g;
+            solidVertexData[solidIdx++] = b;
+        }
+
+        const edgeVerts = [p0, p1, p1, p2, p2, p3, p3, p0];
+        for (let ev = 0; ev < 8; ev++) {
+            const pt = edgeVerts[ev];
+            wireframeVertexData[wireIdx++] = pt[0];
+            wireframeVertexData[wireIdx++] = pt[1];
+            wireframeVertexData[wireIdx++] = pt[2];
+            wireframeVertexData[wireIdx++] = 0;
+            wireframeVertexData[wireIdx++] = 0;
+        }
+    }
+
+    femSolidCount = solidIdx / 6;
+    femWireframeCount = wireIdx / 5;
+
+    if (gl) {
+        if (!femSolidBuffer) femSolidBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, femSolidBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, solidVertexData.subarray(0, solidIdx), gl.DYNAMIC_DRAW);
+
+        if (!femWireframeBuffer) femWireframeBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, femWireframeBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, wireframeVertexData.subarray(0, wireIdx), gl.DYNAMIC_DRAW);
+    }
+    if (isWebGPU && gpuDevice) {
+        if (gpuFEMSolidBuffer) gpuFEMSolidBuffer.destroy();
+        gpuFEMSolidBuffer = gpuDevice.createBuffer({
+            size: solidVertexData.subarray(0, solidIdx).byteLength,
+            usage: 32 | 8,
+            mappedAtCreation: true
+        });
+        new Float32Array(gpuFEMSolidBuffer.getMappedRange()).set(solidVertexData.subarray(0, solidIdx));
+        gpuFEMSolidBuffer.unmap();
+
+        if (gpuFEMWireframeBuffer) gpuFEMWireframeBuffer.destroy();
+        gpuFEMWireframeBuffer = gpuDevice.createBuffer({
+            size: wireframeVertexData.subarray(0, wireIdx).byteLength,
+            usage: 32 | 8,
+            mappedAtCreation: true
+        });
+        new Float32Array(gpuFEMWireframeBuffer.getMappedRange()).set(wireframeVertexData.subarray(0, wireIdx));
+        gpuFEMWireframeBuffer.unmap();
+    }
+}
+
 function sampleColormapRGB(v: number, cmapName: string): [number, number, number] {
     const val = Math.max(0.0, Math.min(1.0, v));
     switch (cmapName) {
@@ -3612,6 +3856,11 @@ function handleFrame(buffer: ArrayBuffer) {
     }
     const view = new DataView(buffer);
     const magic = view.getUint32(0, true);
+
+    if (magic === 0x46454d33) { // "FEM3"
+        updateFEMMeshGeometry(buffer);
+        return;
+    }
 
     if (magic === 0x4d504d33) { // "MPM3"
         const numParticles = view.getUint32(8, true);
@@ -5278,6 +5527,67 @@ function render() {
             passEncoder.draw(mpmParticlesCount);
         }
 
+        // Draw 3D FEM Mesh in WebGPU
+        if (showFEMMesh) {
+            if (!gpuUniformBufferFEMSolid) {
+                gpuUniformBufferFEMSolid = gpuDevice.createBuffer({
+                    size: 384,
+                    usage: 64 | 8
+                });
+            }
+            if (!gpuUniformBufferFEMWire) {
+                gpuUniformBufferFEMWire = gpuDevice.createBuffer({
+                    size: 384,
+                    usage: 64 | 8
+                });
+            }
+            const dummyTexView = Object.values(activeSlicesWebGPU)[0]?.gpuTextureView || gpuDummyTextureView;
+
+            if (femSolid && gpuFEMSolidBuffer && femSolidCount > 0 && gpuPipeline) {
+                const uSolid = new Float32Array(uniformData);
+                uSolid[48] = femOpacity;
+                uSolid[53] = 14.0; // FEM Solid colored by facet quantity
+                gpuDevice.queue.writeBuffer(gpuUniformBufferFEMSolid, 0, uSolid.buffer);
+
+                const solidBindGroup = gpuDevice.createBindGroup({
+                    layout: bindGroupLayout,
+                    entries: [
+                        { binding: 0, resource: { buffer: gpuUniformBufferFEMSolid } },
+                        { binding: 1, resource: dummyTexView },
+                        { binding: 2, resource: gpuSampler! },
+                        { binding: 3, resource: gpuVolume3DTextureView || gpuDummy3DTextureView }
+                    ]
+                });
+
+                passEncoder.setPipeline(gpuPipeline);
+                passEncoder.setBindGroup(0, solidBindGroup);
+                passEncoder.setVertexBuffer(0, gpuFEMSolidBuffer);
+                passEncoder.draw(femSolidCount);
+            }
+
+            if (femWireframe && gpuFEMWireframeBuffer && femWireframeCount > 0 && gpuLinePipeline) {
+                const uWire = new Float32Array(uniformData);
+                uWire[48] = 1.0;
+                uWire[53] = 15.0; // FEM Wireframe (Always Solid Black)
+                gpuDevice.queue.writeBuffer(gpuUniformBufferFEMWire, 0, uWire.buffer);
+
+                const wireBindGroup = gpuDevice.createBindGroup({
+                    layout: bindGroupLayout,
+                    entries: [
+                        { binding: 0, resource: { buffer: gpuUniformBufferFEMWire } },
+                        { binding: 1, resource: dummyTexView },
+                        { binding: 2, resource: gpuSampler! },
+                        { binding: 3, resource: gpuVolume3DTextureView || gpuDummy3DTextureView }
+                    ]
+                });
+
+                passEncoder.setPipeline(gpuLinePipeline);
+                passEncoder.setBindGroup(0, wireBindGroup);
+                passEncoder.setVertexBuffer(0, gpuFEMWireframeBuffer);
+                passEncoder.draw(femWireframeCount);
+            }
+        }
+
         // 2. Draw Slices
         const slicesArray = Object.values(activeSlicesWebGPU).filter(s => {
             const cfg = getSliceConfig(s.index);
@@ -5873,6 +6183,35 @@ function render() {
         gl.drawArrays(gl.POINTS, 0, mpmParticlesCount);
     }
 
+    // Draw 3D FEM Mesh (Solid Surface & Wireframe Edges)
+    if (showFEMMesh) {
+        if (femSolid && femSolidBuffer && femSolidCount > 0) {
+            gl.enable(gl.POLYGON_OFFSET_FILL);
+            gl.polygonOffset(1.0, 1.0);
+            gl.uniform1i(uIsWF, 14);
+            gl.uniform1f(uAlpha, femOpacity);
+            gl.bindBuffer(gl.ARRAY_BUFFER, femSolidBuffer);
+            gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);  // position (x, y, z)
+            gl.enableVertexAttribArray(0);
+            gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 24, 12); // (r, g)
+            gl.enableVertexAttribArray(1);
+            gl.vertexAttribPointer(2, 1, gl.FLOAT, false, 24, 20); // (b)
+            gl.enableVertexAttribArray(2);
+            gl.drawArrays(gl.TRIANGLES, 0, femSolidCount);
+            gl.disable(gl.POLYGON_OFFSET_FILL);
+        }
+        if (femWireframe && femWireframeBuffer && femWireframeCount > 0) {
+            gl.uniform1i(uIsWF, 15);
+            gl.uniform1f(uAlpha, 1.0);
+            gl.bindBuffer(gl.ARRAY_BUFFER, femWireframeBuffer);
+            gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 20, 0);
+            gl.enableVertexAttribArray(0);
+            gl.disableVertexAttribArray(1);
+            gl.disableVertexAttribArray(2);
+            gl.drawArrays(gl.LINES, 0, femWireframeCount);
+        }
+    }
+
     // Draw Charge Geometry
     if (showCharge) {
         if (chargeSolid && chargeBuffer && chargeCount > 0) {
@@ -6087,6 +6426,7 @@ self.onmessage = async (e) => {
             handleFrame(data.buffer);
             render();
         } else if (type === "setConfig") {
+            if (data.hasCFDSolver !== undefined) hasCFDSolver = data.hasCFDSolver;
             if (data.colormap !== undefined) {
                 colormap = getColormapIndex(data.colormap);
             }
@@ -6181,6 +6521,45 @@ self.onmessage = async (e) => {
             let gaugesChanged = false;
             if (data.showGauges !== undefined) showGauges = data.showGauges;
             if (data.gaugeOpacity !== undefined) gaugeOpacity = data.gaugeOpacity;
+
+            let femChanged = false;
+            if (data.showFEMMesh !== undefined) showFEMMesh = data.showFEMMesh;
+            if (data.femSolid !== undefined) femSolid = data.femSolid;
+            if (data.femWireframe !== undefined) femWireframe = data.femWireframe;
+            if (data.femResults !== undefined) femResults = data.femResults;
+            if (data.femQuantity !== undefined) {
+                if (femQuantity !== data.femQuantity) {
+                    femQuantity = data.femQuantity;
+                    femAutoScale = true;
+                }
+                femChanged = true;
+            }
+            if (data.femColormap !== undefined) {
+                femColormap = data.femColormap;
+                femChanged = true;
+            }
+            if (data.femAutoScale !== undefined) {
+                femAutoScale = data.femAutoScale;
+                femChanged = true;
+            }
+            if (data.femLogScale !== undefined) {
+                femLogScale = data.femLogScale;
+                femChanged = true;
+            }
+            if (data.femMinVal !== undefined) {
+                femMinVal = data.femMinVal;
+                femChanged = true;
+            }
+            if (data.femMaxVal !== undefined) {
+                femMaxVal = data.femMaxVal;
+                femChanged = true;
+            }
+            if (data.femOpacity !== undefined) {
+                femOpacity = data.femOpacity;
+            }
+            if (femChanged) {
+                updateFEMMeshGeometry();
+            }
             if (data.gaugeQuantity !== undefined) gaugeQuantity = data.gaugeQuantity;
             if (data.gaugeSolid !== undefined) gaugeSolid = data.gaugeSolid;
             if (data.gaugeSize !== undefined) {

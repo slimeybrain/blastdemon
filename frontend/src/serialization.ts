@@ -35,7 +35,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
         'refinement_opacity', 'charge_opacity',
         'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio', 'amr_tile_size',
-        'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'refinement_level',
+        'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'length', 'refinement_level',
         'submesh_x', 'submesh_y', 'submesh_z', 'submesh_size_x', 'submesh_size_y', 'submesh_size_z',
         'offset', 'stride',
         // MPM keys
@@ -47,7 +47,9 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
         'mg_gamma0', 'mg_c0', 'mg_s',
         'ppc',
-        'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend'
+        'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
+        // FEM keys
+        'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping'
     ];
 
 
@@ -957,6 +959,65 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 }
             }
             flattenedParams['mpm_objects'] = mpmObjects;
+        }
+    } else if (command === "INIT_FEM_3D" || command === "INIT_3D_FEM") {
+        const femDomain = state.nodes.find(n => n.type === 'FEMDomain3D');
+        if (femDomain) {
+            Object.entries(femDomain.parameters).forEach(([key, value]) => {
+                flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+            });
+
+            const femObjects: any[] = [];
+            const processedNodeIds = new Set<string>();
+
+            const processObjNode = (objNode: any) => {
+                if (!objNode || objNode.type !== 'FEMObject3D' || processedNodeIds.has(objNode.id)) return;
+                processedNodeIds.add(objNode.id);
+
+                const objParams: any = {};
+                Object.entries(objNode.parameters).forEach(([k, v]) => {
+                    objParams[k] = numericKeys.includes(k) ? Number(v) : v;
+                });
+                const impConn = state.connections.find(c => c.toNode === objNode.id && c.toPort === 'importer');
+                if (impConn) {
+                    const impNode = state.nodes.find(n => n.id === impConn.fromNode);
+                    if (impNode && impNode.type === 'LSDynaImporter3D') {
+                        objParams['k_file'] = impNode.parameters.k_file || '';
+                        objParams['mesh_source'] = 'LS-DYNA Keyword File';
+                    }
+                }
+                const matConn = state.connections.find(c => c.toNode === objNode.id && c.toPort === 'material');
+                if (matConn) {
+                    const matNode = state.nodes.find(n => n.id === matConn.fromNode);
+                    if (matNode) {
+                        Object.entries(matNode.parameters).forEach(([mk, mv]) => {
+                            objParams[mk] = numericKeys.includes(mk) ? Number(mv) : mv;
+                        });
+                    }
+                }
+                const meshSrc = objParams['mesh_source'] || 'Box Generator';
+                if (meshSrc === 'Cylinder Generator') {
+                    objParams['shape_type'] = 'Cylinder';
+                } else if (meshSrc === 'LS-DYNA Keyword File') {
+                    objParams['shape_type'] = 'LS-DYNA File';
+                } else {
+                    objParams['shape_type'] = 'Box';
+                }
+
+                if (objParams['failure_strain'] === undefined) objParams['failure_strain'] = 0.20;
+                if (objParams['tensile_failure_stress'] === undefined) objParams['tensile_failure_stress'] = 400.0e6;
+                femObjects.push(objParams);
+            };
+
+            const objConns = state.connections.filter(c => c.toNode === femDomain.id && c.toPort === 'objects');
+            for (const conn of objConns) {
+                const objNode = state.nodes.find(n => n.id === conn.fromNode);
+                processObjNode(objNode);
+            }
+
+            state.nodes.filter(n => n.type === 'FEMObject3D').forEach(processObjNode);
+
+            flattenedParams['fem_objects'] = femObjects;
         }
     } else if (command === "INIT_3D") {
         const cellSize = flattenedParams['cell_size'] || 0.01;

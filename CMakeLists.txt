@@ -56,6 +56,12 @@ add_library(BlastSolverCore STATIC
     backend/BlastSolver/mpm_solver_3d.cpp
     backend/BlastSolver/mpm_solver_3d_cuda.cu
     backend/BlastSolver/fsi_coupler_3d.cpp
+    # 3D Hexahedral FEM solver
+    backend/BlastSolver/fem_solver_3d.cpp
+    backend/BlastSolver/ls_dyna_reader_3d.cpp
+    backend/BlastSolver/fem_contact_3d.cpp
+    backend/BlastSolver/fem_fsi_coupler_3d.cpp
+    backend/BlastSolver/fem_solver_3d_cuda.cu
     # 2D CUDA solver
     backend/BlastSolver/cfd_solver_2d_cuda.cu
     backend/BlastSolver/cfd_solver_2d_amr_cuda.cu
@@ -130,6 +136,19 @@ if(BUILD_TESTS)
     add_test_executable_if_exists(test_mpm_plasticity backend/BlastSolver/test_mpm_plasticity.cpp)
     add_test_executable_if_exists(test_cylinder_impact backend/BlastSolver/test_cylinder_impact.cpp)
     add_test_executable_if_exists(test_fsi_3d backend/BlastSolver/test_fsi_3d.cu)
+    add_test_executable_if_exists(test_fem_3d_element_math backend/BlastSolver/test_fem_3d_element_math.cpp)
+    add_test_executable_if_exists(test_fem_3d_hourglass backend/BlastSolver/test_fem_3d_hourglass.cpp)
+    add_test_executable_if_exists(test_fem_3d_taylor_impact backend/BlastSolver/test_fem_3d_taylor_impact.cpp)
+    add_test_executable_if_exists(test_fem_3d_contact backend/BlastSolver/test_fem_3d_contact.cpp)
+    add_test_executable_if_exists(test_fem_3d_sliding_contact backend/BlastSolver/test_fem_3d_sliding_contact.cpp)
+    add_test_executable_if_exists(test_fem_3d_ls_dyna_reader backend/BlastSolver/test_fem_3d_ls_dyna_reader.cpp)
+    add_test_executable_if_exists(test_fem_3d_precision_parity backend/BlastSolver/test_fem_3d_precision_parity.cu)
+    add_test_executable_if_exists(test_fem_3d_cpu_gpu_equivalence backend/BlastSolver/test_fem_3d_cpu_gpu_equivalence.cu)
+    add_test_executable_if_exists(test_fem_fsi_3d_uncovering backend/BlastSolver/test_fem_fsi_3d_uncovering.cpp)
+    add_test_executable_if_exists(test_contact_impact backend/BlastSolver/test_contact_impact.cpp)
+    add_test_executable_if_exists(test_fem_3d_large_rotation backend/BlastSolver/test_fem_3d_large_rotation.cpp)
+    add_test_executable_if_exists(test_fem_3d_erosion_stability backend/BlastSolver/test_fem_3d_erosion_stability.cpp)
+    add_test_executable_if_exists(test_fem_3d_ballistic_impact backend/BlastSolver/test_fem_3d_ballistic_impact.cpp)
 endif()
 
 

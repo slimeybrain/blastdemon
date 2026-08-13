@@ -32,6 +32,27 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
     }
 }
 
+export function syncFEMObjectParameters(node: Node, parameters: Record<string, any>, _updatedKey?: string): void {
+    if (node.type !== 'FEMObject3D') {
+        return;
+    }
+
+    if (!parameters['mesh_source']) {
+        parameters['mesh_source'] = 'Box Generator';
+    }
+
+    const src = parameters['mesh_source'];
+    if (src === 'Cylinder Generator') {
+        parameters['shape_type'] = 'Cylinder';
+    } else if (src === 'LS-DYNA Keyword File') {
+        parameters['shape_type'] = 'LS-DYNA File';
+    } else {
+        parameters['mesh_source'] = 'Box Generator';
+        parameters['shape_type'] = 'Box';
+    }
+}
+
+
 const DISPLAY_ONLY_KEYS = new Set([
     'colormap', 'quantity_colormaps', 'quantity_ranges', 'slices', 'log_scale', 'auto_scale',
     'show_color_bar', 'color_bar_position', 'colorbar_source', 'show_grid', 'grid_meshlines',
@@ -510,7 +531,11 @@ export class StateManager {
             'MPMMaterialSteel': 'node-mpm-steel',
             'FSICoupler2D': 'node-fsi-coupler',
             'FSICoupler3D': 'node-fsi-coupler3d',
-            'RefinementMesh3D': 'node-refinement3d'
+            'RefinementMesh3D': 'node-refinement3d',
+            'FEMDomain3D': 'node-fem-domain3d',
+            'FEMObject3D': 'node-fem-obj3d',
+            'LSDynaImporter3D': 'node-lsdyna-importer3d',
+            'FEMFSICoupler3D': 'node-fem-fsi-coupler3d'
         };
         const prefix = prefixMap[type] || `node-${type.toLowerCase()}`;
 
@@ -803,6 +828,7 @@ export class StateManager {
                 const updatedKey = Object.keys(parameters).find(k => k === 'charge_mass' || k === 'preset') || Object.keys(parameters)[0];
                 syncExplosiveParameters(node, merged, model, updatedKey);
                 syncMPMMaterialParameters(node, merged, updatedKey);
+                syncFEMObjectParameters(node, merged, updatedKey);
                 syncQuantityRanges(node, parameters, merged);
                 node.parameters = merged;
                 console.log("[DEBUG] Node parameters updated in memory. New parameters:", node.parameters);
@@ -855,6 +881,7 @@ export class StateManager {
                 const updatedKey = Object.keys(parameters).find(k => k === 'charge_mass' || k === 'preset') || Object.keys(parameters)[0];
                 syncExplosiveParameters(node, merged, model, updatedKey);
                 syncMPMMaterialParameters(node, merged, updatedKey);
+                syncFEMObjectParameters(node, merged, updatedKey);
                 syncQuantityRanges(node, parameters, merged);
                 
                 for (const [key, value] of Object.entries(merged)) {
@@ -1050,6 +1077,12 @@ export class StateManager {
                 const dtStr = data.dt !== undefined ? `, dt: ${Number(data.dt).toExponential(6)}s` : '';
                 return `[${timestamp}] [MPM] Time: ${data.time?.toExponential(6) || '0'}${dtStr}${wcStr}, Terminated: ${data.is_terminated || false}`;
             }
+            if (data.type === 'TELEMETRY_FEM_3D') {
+                const wcStr = data.wallclock !== undefined ? `, Wallclock: ${Number(data.wallclock).toFixed(4)}s` : '';
+                const dtStr = data.dt !== undefined ? `, dt: ${Number(data.dt).toExponential(6)}s` : '';
+                const stepStr = data.step !== undefined ? `, Step: ${data.step}` : '';
+                return `[${timestamp}] [FEM 3D] Time: ${data.time?.toExponential(6) || '0'}${stepStr}${dtStr}${wcStr}, Terminated: ${data.is_terminated || false}`;
+            }
             if (data.type === 'TELEMETRY' || data.type === 'TELEMETRY_2D' || data.type === 'TELEMETRY_3D') {
                 const tag = data.type === 'TELEMETRY_2D' ? 'CFD' : (data.type === 'TELEMETRY_3D' ? '3D' : 'SOLVER');
                 const engineType = data.is_ideal_gas ? ' (IG)' : ' (MM)';
@@ -1081,12 +1114,12 @@ export class StateManager {
             nodeId = nodeIdOrData;
             data = optionalData;
         } else if (typeof nodeIdOrData === 'string') {
-            const solverNode = nodes.find(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D' || n.type === 'MPMDomain2D' || n.type === 'MPMDomain3D' || n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D');
+            const solverNode = nodes.find(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D' || n.type === 'MPMDomain2D' || n.type === 'MPMDomain3D' || n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D' || n.type === 'FEMDomain3D' || n.type === 'FEMFSICoupler3D');
             if (!solverNode) return;
             nodeId = solverNode.id;
             data = nodeIdOrData;
         } else {
-            const solverNode = nodes.find(n => n.id === 'node-solver') || nodes.find(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D' || n.type === 'MPMDomain2D' || n.type === 'MPMDomain3D' || n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D');
+            const solverNode = nodes.find(n => n.id === 'node-solver') || nodes.find(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D' || n.type === 'MPMDomain2D' || n.type === 'MPMDomain3D' || n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D' || n.type === 'FEMDomain3D' || n.type === 'FEMFSICoupler3D');
             if (!solverNode) return;
             nodeId = solverNode.id;
             data = nodeIdOrData;
@@ -1096,7 +1129,7 @@ export class StateManager {
 
         const targetNode = nodes.find(n => n.id === nodeId);
         let telemetryToStore = data;
-        if ((targetNode?.type === 'TelemetryText' || targetNode?.type === 'CFDSolver' || targetNode?.type === 'CFDSolver2D' || targetNode?.type === 'CFDSolver3D' || targetNode?.type === 'MPMDomain2D' || targetNode?.type === 'MPMDomain3D' || targetNode?.type === 'FSICoupler2D' || targetNode?.type === 'FSICoupler3D') && !(data instanceof ArrayBuffer)) {
+        if ((targetNode?.type === 'TelemetryText' || targetNode?.type === 'CFDSolver' || targetNode?.type === 'CFDSolver2D' || targetNode?.type === 'CFDSolver3D' || targetNode?.type === 'MPMDomain2D' || targetNode?.type === 'MPMDomain3D' || targetNode?.type === 'FSICoupler2D' || targetNode?.type === 'FSICoupler3D' || targetNode?.type === 'FEMDomain3D' || targetNode?.type === 'FEMFSICoupler3D') && !(data instanceof ArrayBuffer)) {
             if (data && typeof data === 'object' && (data.type === 'progress' || data.type === 'progress_2d' || data.type === 'resource_pulse')) {
                  // Skip
             } else {
@@ -1119,7 +1152,11 @@ export class StateManager {
             if (connectedNode) {
                 updatedNodeIds.add(connectedNode.id);
                 if (connectedNode.type === 'TelemetryGraph') {
-                    if (data instanceof ArrayBuffer || (data && (data.type === 'TELEMETRY' || data.type === 'TELEMETRY_2D' || data.type === 'TELEMETRY_3D' || data.type === 'TELEMETRY_MPM_2D'))) {
+                    const is3DBuf = data instanceof ArrayBuffer && data.byteLength >= 4 && (() => {
+                        const m = new DataView(data).getUint32(0, true);
+                        return m === 0x46454d33 || m === 0x4d504d33 || m === 0x43494c53 || m === 0x4253544c || m === 0x424f4253;
+                    })();
+                    if ((data instanceof ArrayBuffer && !is3DBuf) || (data && (data.type === 'TELEMETRY' || data.type === 'TELEMETRY_2D' || data.type === 'TELEMETRY_3D' || data.type === 'TELEMETRY_MPM_2D' || data.type === 'TELEMETRY_FEM_3D'))) {
                          this.telemetryStore.set(connectedNode.id, data);
                          this.notifyTelemetryUpdate(connectedNode.id, data);
                     }
@@ -1129,9 +1166,9 @@ export class StateManager {
                          this.notifyTelemetryUpdate(connectedNode.id, data.gauges_history);
                     }
                 } else if (connectedNode.type === 'TelemetryContour' || connectedNode.type === 'Telemetry3DViewport') {
-                    if (data instanceof ArrayBuffer || (data && (data.type === 'TELEMETRY_3D' || data.type === 'TELEMETRY_2D' || data.type === 'TELEMETRY_MPM_2D'))) {
+                    if (data instanceof ArrayBuffer || (data && (data.type === 'TELEMETRY_3D' || data.type === 'TELEMETRY_2D' || data.type === 'TELEMETRY_MPM_2D' || data.type === 'TELEMETRY_FEM_3D'))) {
                          this.telemetryStore.set(connectedNode.id, data);
-                         if (data && data.type === 'TELEMETRY_3D') {
+                         if (data && (data.type === 'TELEMETRY_3D' || data.type === 'TELEMETRY_FEM_3D')) {
                              this.telemetryStore.set(connectedNode.id + "-config-3d", data);
                          }
                          this.notifyTelemetryUpdate(connectedNode.id, data);
@@ -1954,7 +1991,41 @@ export class StateManager {
             },
 
             'FSICoupler2D': {},
-            'FSICoupler3D': {}
+            'FSICoupler3D': {},
+            'FEMDomain3D': {
+                device: 'cpu',
+                precision: 'single',
+                integration_scheme: 'OnePointFB',
+                hourglass_model: 'FlanaganBelytschkoStiffness',
+                hourglass_coeff: 0.10,
+                contact_penalty_scale: 1.0,
+                friction_static: 0.3,
+                friction_kinetic: 0.2,
+                cfl: 0.4
+            },
+            'FEMObject3D': {
+                mesh_source: 'Box Generator',
+                shape_type: 'Box',
+                boundary_condition: 'Free',
+                pos_x: 0.0, pos_y: 0.0, pos_z: 0.0,
+                size_x: 1.0, size_y: 1.0, size_z: 1.0,
+                radius: 0.1, inner_radius: 0.0, length: 0.2, height: 0.2,
+                nx: 10, ny: 10, nz: 10,
+                vel_x: 0.0, vel_y: 0.0, vel_z: 0.0,
+                bulk_viscosity_b1: 0.06,
+                bulk_viscosity_b2: 1.20,
+                timestep_erosion_factor: 0.10,
+                k_file: ''
+            },
+            'LSDynaImporter3D': {
+                k_file: '',
+                scale_factor: 1.0
+            },
+            'FEMFSICoupler3D': {
+                fsi_algorithm: 'CutCellPenalty',
+                coupling_frequency: 1,
+                pressure_substepping: true
+            }
         };
 
         nodes.forEach(node => {
@@ -1990,6 +2061,20 @@ export class StateManager {
                 delete node.parameters['amr_threshold'];
                 delete node.parameters['amr_coarsen_ratio'];
                 delete node.parameters['amr_tile_size'];
+            }
+            if (node.type === 'FEMDomain3D') {
+                delete node.parameters['failure_strain'];
+                delete node.parameters['tensile_failure_stress'];
+                delete node.parameters['bulk_viscosity_b1'];
+                delete node.parameters['bulk_viscosity_b2'];
+                delete node.parameters['timestep_erosion_factor'];
+                delete node.parameters['contact_stiffness'];
+            }
+            if (node.type === 'FEMObject3D') {
+                delete node.parameters['failure_strain'];
+                delete node.parameters['tensile_failure_stress'];
+                if (!node.parameters['shape_type']) node.parameters['shape_type'] = 'Box';
+                if (!node.parameters['mesh_source']) node.parameters['mesh_source'] = 'Box Generator';
             }
             if (node.type === 'DomainMesh') {
                 if (node.parameters['x_min_bc'] !== undefined) {
@@ -2079,6 +2164,7 @@ export class StateManager {
             }
             syncExplosiveParameters(node, node.parameters, model);
             syncMPMMaterialParameters(node, node.parameters);
+            syncFEMObjectParameters(node, node.parameters);
         });
     }
 
@@ -2148,6 +2234,10 @@ export class StateManager {
             case 'MPMObject3D': return [{ id: 'material', label: 'Material' }, { id: 'stl', label: 'STL Geometry' }];
             case 'FSICoupler2D': return [{ id: 'cfd', label: 'CFD Solver' }, { id: 'mpm', label: 'MPM Solver' }];
             case 'FSICoupler3D': return [{ id: 'cfd', label: 'CFD Solver 3D' }, { id: 'mpm', label: 'MPM Solver 3D' }];
+            case 'FEMDomain3D': return [{ id: 'mesh', label: 'Hex Mesh' }, { id: 'objects', label: 'FEM Objects' }];
+            case 'FEMObject3D': return [{ id: 'material', label: 'Material' }, { id: 'importer', label: 'LS-DYNA File' }];
+            case 'LSDynaImporter3D': return [];
+            case 'FEMFSICoupler3D': return [{ id: 'cfd', label: 'CFD Solver 3D' }, { id: 'fem', label: 'FEM Solver 3D' }];
             default: return [];
         }
     }
@@ -2181,6 +2271,10 @@ export class StateManager {
             case 'MPMMaterialSteel': return [{ id: 'out', label: 'Material Spec' }];
             case 'FSICoupler2D':
             case 'FSICoupler3D': return [{ id: 'telemetry', label: 'Telemetry' }];
+            case 'FEMDomain3D': return [{ id: 'telemetry', label: 'Telemetry' }, { id: 'fem_out', label: 'FEM State' }];
+            case 'FEMObject3D': return [{ id: 'out', label: 'Object Spec' }];
+            case 'LSDynaImporter3D': return [{ id: 'out', label: 'Mesh Spec' }];
+            case 'FEMFSICoupler3D': return [{ id: 'telemetry', label: 'Telemetry' }];
             case 'STLGeometry':
             case 'PrimitiveGeometry3D': return [{ id: 'stl', label: 'STL Geometry' }];
             default: return [];

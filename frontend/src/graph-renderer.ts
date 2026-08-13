@@ -767,7 +767,7 @@ export class GraphRenderer {
                 if (toPortId === 'material') return fromType === 'Material';
                 return false;
             case 'Telemetry3DViewport':
-                if (toPortId === 'in') return fromType === 'CFDSolver3D' || fromType === 'MPMDomain3D' || fromType === 'FSICoupler3D';
+                if (toPortId === 'in') return fromType === 'CFDSolver3D' || fromType === 'MPMDomain3D' || fromType === 'FSICoupler3D' || fromType === 'FEMDomain3D' || fromType === 'FEMFSICoupler3D';
                 return false;
             case 'ThePainter':
                 if (toPortId === 'mesh') return fromType === 'DomainMesh';
@@ -803,7 +803,7 @@ export class GraphRenderer {
                 return false;
             case 'TelemetryText':
             case 'TelemetryGraph':
-                return fromType === 'CFDSolver' || fromType === 'CFDSolver2D' || fromType === 'CFDSolver3D' || fromType === 'MPMDomain2D' || fromType === 'MPMDomain3D' || fromType === 'FSICoupler2D' || fromType === 'FSICoupler3D';
+                return fromType === 'CFDSolver' || fromType === 'CFDSolver2D' || fromType === 'CFDSolver3D' || fromType === 'MPMDomain2D' || fromType === 'MPMDomain3D' || fromType === 'FSICoupler2D' || fromType === 'FSICoupler3D' || fromType === 'FEMDomain3D' || fromType === 'FEMFSICoupler3D';
             case 'MPMDomain2D':
                 if (toPortId === 'mesh') return fromType === 'DomainMesh2D';
                 if (toPortId === 'objects') return fromType === 'MPMObject2D';
@@ -813,11 +813,11 @@ export class GraphRenderer {
                 if (toPortId === 'objects') return fromType === 'MPMObject3D';
                 return false;
             case 'MPMObject2D':
-                if (toPortId === 'material') return fromType === 'MPMMaterialSteel';
+                if (toPortId === 'material') return fromType === 'MPMMaterialSteel' || fromType === 'Material';
                 return false;
             case 'MPMObject3D':
-                if (toPortId === 'material') return fromType === 'MPMMaterialSteel';
-                if (toPortId === 'stl') return fromType === 'STLGeometry';
+                if (toPortId === 'material') return fromType === 'MPMMaterialSteel' || fromType === 'Material';
+                if (toPortId === 'stl') return fromType === 'STLGeometry' || fromType === 'PrimitiveGeometry3D';
                 return false;
             case 'FSICoupler2D':
                 if (toPortId === 'cfd_solver' || toPortId === 'cfd') return fromType === 'CFDSolver2D';
@@ -827,10 +827,22 @@ export class GraphRenderer {
                 if (toPortId === 'cfd_solver' || toPortId === 'cfd') return fromType === 'CFDSolver3D';
                 if (toPortId === 'mpm_domain' || toPortId === 'mpm') return fromType === 'MPMDomain3D';
                 return false;
+            case 'FEMDomain3D':
+                if (toPortId === 'mesh') return fromType === 'DomainMesh3D';
+                if (toPortId === 'objects') return fromType === 'FEMObject3D' || fromType === 'LSDynaImporter3D';
+                return false;
+            case 'FEMObject3D':
+                if (toPortId === 'material') return fromType === 'MPMMaterialSteel' || fromType === 'Material';
+                if (toPortId === 'importer') return fromType === 'LSDynaImporter3D';
+                return false;
+            case 'FEMFSICoupler3D':
+                if (toPortId === 'cfd_solver' || toPortId === 'cfd') return fromType === 'CFDSolver3D';
+                if (toPortId === 'fem_domain' || toPortId === 'fem' || toPortId === 'fem_solver') return fromType === 'FEMDomain3D';
+                return false;
             case 'TelemetryContour':
                 return fromType === 'CFDSolver2D' || fromType === 'MPMDomain2D' || fromType === 'FSICoupler2D';
             case 'VTKOutput':
-                if (toPortId === 'in') return fromType === 'CFDSolver' || fromType === 'CFDSolver2D' || fromType === 'CFDSolver3D';
+                if (toPortId === 'in') return fromType === 'CFDSolver' || fromType === 'CFDSolver2D' || fromType === 'CFDSolver3D' || fromType === 'MPMDomain3D' || fromType === 'FEMDomain3D';
                 return false;
             default:
                 return false;
@@ -857,7 +869,7 @@ export class GraphRenderer {
                 const state = this.stateManager.getCurrentState();
                 if (state) {
                     const targetNode = state.nodes.find(n => n.id === this.hoveredPort!.nodeId);
-                    const isMultiInput = ((targetNode?.type === 'MPMDomain2D' || targetNode?.type === 'MPMDomain3D') && this.hoveredPort!.portId === 'objects')
+                    const isMultiInput = ((targetNode?.type === 'MPMDomain2D' || targetNode?.type === 'MPMDomain3D' || targetNode?.type === 'FEMDomain3D') && this.hoveredPort!.portId === 'objects')
                         || targetNode?.type === 'TelemetryText'
                         || targetNode?.type === 'TelemetryContour';
 
@@ -1168,7 +1180,11 @@ export class GraphRenderer {
         const categories = [
             {
                 name: 'Material',
-                action: () => this.addNode('Material', wx, wy)
+                items: [
+                    { label: 'Fluid / Explosive Material (Air / JWL / Ideal Gas)', type: 'Material' },
+                    { label: 'Solid Structural Material (Hypoelastic)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Hypoelastic' } },
+                    { label: 'Solid Structural Material (Johnson-Cook EOS)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Johnson-Cook + Mie-Grüneisen' } }
+                ]
             },
             {
                 name: '1D Simulation',
@@ -1208,8 +1224,8 @@ export class GraphRenderer {
                 items: [
                     { label: 'MPM Domain 2D', type: 'MPMDomain2D' },
                     { label: 'MPM Object 2D (Primitive)', type: 'MPMObject2D' },
-                    { label: 'MPM Material (Hypoelastic)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Hypoelastic' } },
-                    { label: 'MPM Johnson-Cook Material (EOS)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Johnson-Cook + Mie-Grüneisen' } },
+                    { label: 'Solid Material (Hypoelastic)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Hypoelastic' } },
+                    { label: 'Solid Material (Johnson-Cook EOS)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Johnson-Cook + Mie-Grüneisen' } },
                     { label: 'FSI Coupler 2D', type: 'FSICoupler2D' }
                 ]
             },
@@ -1221,9 +1237,20 @@ export class GraphRenderer {
                     { label: 'MPM Object 3D (Sphere)', type: 'MPMObject3D', defaultParams: { shape_type: 'Sphere' } },
                     { label: 'MPM Object 3D (Cylinder)', type: 'MPMObject3D', defaultParams: { shape_type: 'Cylinder' } },
                     { label: 'MPM Object 3D (STL Geometry)', type: 'MPMObject3D', defaultParams: { shape_type: 'STL' } },
-                    { label: 'MPM Material (Hypoelastic)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Hypoelastic' } },
-                    { label: 'MPM Johnson-Cook Material (EOS)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Johnson-Cook + Mie-Grüneisen' } },
+                    { label: 'Solid Material (Hypoelastic)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Hypoelastic' } },
+                    { label: 'Solid Material (Johnson-Cook EOS)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Johnson-Cook + Mie-Grüneisen' } },
                     { label: 'FSI Coupler 3D', type: 'FSICoupler3D' }
+                ]
+            },
+            {
+                name: 'FEM Structural (3D)',
+                items: [
+                    { label: 'FEM Domain 3D (Hex8 Explicit)', type: 'FEMDomain3D' },
+                    { label: 'FEM Object 3D (Box Mesh)', type: 'FEMObject3D', defaultParams: { mesh_source: 'Box Generator' } },
+                    { label: 'Solid Material (Hypoelastic)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Hypoelastic' } },
+                    { label: 'Solid Material (Johnson-Cook EOS)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Johnson-Cook + Mie-Grüneisen' } },
+                    { label: 'LS-DYNA Importer (.k / .key)', type: 'LSDynaImporter3D' },
+                    { label: 'FEM-CFD FSI Coupler 3D', type: 'FEMFSICoupler3D' }
                 ]
             },
             {
@@ -1800,6 +1827,36 @@ export class GraphRenderer {
                 mg_s: 1.49
             };
 
+            case 'FEMDomain3D': return {
+                device: 'cpu',
+                precision: 'single',
+                cfl: 0.4,
+                hourglass_coeff: 0.1,
+                contact_penalty_scale: 1.0,
+                friction_static: 0.3,
+                friction_kinetic: 0.2,
+                integration_scheme: 'OnePointFB',
+                hourglass_model: 'FlanaganBelytschkoStiffness'
+            };
+            case 'FEMObject3D': return {
+                mesh_source: 'Box Generator',
+                shape_type: 'Box',
+                boundary_condition: 'Free',
+                pos_x: 0.0, pos_y: 0.0, pos_z: 0.0,
+                size_x: 1.0, size_y: 1.0, size_z: 1.0,
+                radius: 0.1, inner_radius: 0.0, length: 0.2, height: 0.2,
+                nx: 10, ny: 10, nz: 10,
+                vel_x: 0.0, vel_y: 0.0, vel_z: 0.0,
+                bulk_viscosity_b1: 0.06,
+                bulk_viscosity_b2: 1.20,
+                timestep_erosion_factor: 0.10,
+                k_file: ''
+            };
+            case 'LSDynaImporter3D': return {
+                k_file: ''
+            };
+            case 'FEMFSICoupler3D': return {};
+
             case 'FSICoupler2D': return {};
             case 'FSICoupler3D': return {};
 
@@ -1937,6 +1994,10 @@ export class GraphRenderer {
                 return 'MPM HYPO';
             case 'FSICoupler2D':     return 'FSI 2D';
             case 'FSICoupler3D':     return 'FSI 3D';
+            case 'FEMDomain3D':      return 'FEM3D';
+            case 'FEMObject3D':      return 'FEM OBJ';
+            case 'LSDynaImporter3D': return 'DYNA.K';
+            case 'FEMFSICoupler3D':  return 'FEM-FSI';
             default: return ((typeof nodeOrType === 'string' ? nodeOrType : nodeOrType.type) as string).toUpperCase();
         }
     }
@@ -1976,11 +2037,15 @@ export class GraphRenderer {
             case 'MPMObject3D':      return 'MPM Object 3D';
             case 'MPMMaterialSteel':
                 if (typeof nodeOrType !== 'string' && nodeOrType.parameters?.material_model === 'Johnson-Cook + Mie-Grüneisen') {
-                    return 'MPM Material (Johnson-Cook)';
+                    return 'Solid Material (Johnson-Cook)';
                 }
-                return 'MPM Material (Hypoelastic)';
+                return 'Solid Material (Hypoelastic)';
             case 'FSICoupler2D':     return 'FSI Coupler 2D';
             case 'FSICoupler3D':     return 'FSI Coupler 3D';
+            case 'FEMDomain3D':      return 'FEM Domain 3D (Hex8 Explicit)';
+            case 'FEMObject3D':      return 'FEM Object 3D';
+            case 'LSDynaImporter3D': return 'LS-DYNA Importer (.k)';
+            case 'FEMFSICoupler3D':  return 'FEM-CFD FSI Coupler 3D';
             default: return type;
         }
     }
@@ -4099,6 +4164,19 @@ export class GraphRenderer {
                     needsRebuild = true;
                 }
             }
+            if (node.type === 'FEMObject3D') {
+                const meshSrc = node.parameters['mesh_source'] || 'Box Generator';
+                const shapeType = node.parameters['shape_type'] || 'Box';
+                if (form.dataset.renderedMeshSource !== meshSrc.toString() || form.dataset.renderedShapeType !== shapeType.toString()) {
+                    needsRebuild = true;
+                }
+            }
+            if (node.type === 'FEMDomain3D') {
+                const scheme = node.parameters['integration_scheme'] || 'OnePointFB';
+                if (form.dataset.renderedIntegrationScheme !== scheme.toString()) {
+                    needsRebuild = true;
+                }
+            }
             if (!needsRebuild) {
                 for (const [key, value] of Object.entries(node.parameters)) {
                     const el = form.querySelector(`[data-key="${key}"]`) as HTMLElement;
@@ -4194,6 +4272,16 @@ export class GraphRenderer {
             const shapeType = node.parameters['shape_type'] || (node.type === 'MPMObject3D' ? 'Box' : 'Rectangle');
             form.dataset.renderedShapeType = shapeType.toString();
         }
+        if (node.type === 'FEMObject3D') {
+            const meshSrc = node.parameters['mesh_source'] || 'Box Generator';
+            const shapeType = node.parameters['shape_type'] || 'Box';
+            form.dataset.renderedMeshSource = meshSrc.toString();
+            form.dataset.renderedShapeType = shapeType.toString();
+        }
+        if (node.type === 'FEMDomain3D') {
+            const scheme = node.parameters['integration_scheme'] || 'OnePointFB';
+            form.dataset.renderedIntegrationScheme = scheme.toString();
+        }
 
         let paramKeys = Object.keys(node.parameters);
         if (node.type === 'MPMMaterialSteel') {
@@ -4229,6 +4317,10 @@ export class GraphRenderer {
             } else {
                 paramKeys.push('space_time_scheme');
             }
+        } else if (node.type === 'FEMDomain3D') {
+            paramKeys = ['device', 'precision', 'cfl', 'hourglass_coeff', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'integration_scheme', 'hourglass_model'];
+        } else if (node.type === 'FEMObject3D') {
+            paramKeys = ['mesh_source', 'shape_type', 'boundary_condition', 'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'nx', 'ny', 'nz', 'vel_x', 'vel_y', 'vel_z', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'k_file'];
         }
         if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D' || node.type === 'RefinementMesh3D') {
             paramKeys.sort((a, b) => {
@@ -4275,6 +4367,7 @@ export class GraphRenderer {
 
         for (const key of paramKeys) {
             let value = node.parameters[key];
+            if (value === undefined || value === null) continue;
             if (key === 'space_time_scheme') {
                 const so = node.parameters['spatial_order'] ?? 2;
                 const to = node.parameters['temporal_order'] ?? 2;
@@ -4287,7 +4380,8 @@ export class GraphRenderer {
                 else value = 'RK2 (2nd-Order Space/Time)';
             }
             if (key === 'gauges' || key === 'slices' || key === 'primitives') continue;
-            if (key === 'nr' || key === 'nz' || key === 'n_cells') continue;
+            if (key === 'nr' || key === 'n_cells') continue;
+            if (key === 'nz' && node.type === 'DomainMesh2D') continue;
             if (node.type === 'CFDSolver3D' && (key === 'mesh_type' || key === 'amr_max_levels' || key === 'amr_threshold' || key === 'amr_coarsen_ratio' || key === 'amr_tile_size')) continue;
             if (node.type === 'VTKOutput' && !is3D && (key === 'export_slices' || key === 'export_volumes')) continue;
             if (node.type === 'VirtualGauges' && key === 'telemetry_channel') continue;
@@ -4296,6 +4390,21 @@ export class GraphRenderer {
                 const dim = node.parameters['dimension'] || '1D';
                 if ((key === 'y_min_bc' || key === 'y_max_bc') && dim === '1D') continue;
                 if ((key === 'z_min_bc' || key === 'z_max_bc') && (dim === '1D' || dim === '2D')) continue;
+            }
+            if (node.type === 'FEMDomain3D') {
+                const scheme = node.parameters['integration_scheme'] || 'OnePointFB';
+                if ((scheme === 'FullGauss8' || scheme === 'SelectiveReduced') && (key === 'hourglass_model' || key === 'hourglass_coeff')) continue;
+            }
+            if (node.type === 'FEMObject3D') {
+                if (key === 'shape_type') continue;
+                const source = node.parameters['mesh_source'] || 'Box Generator';
+                if (source === 'Cylinder Generator') {
+                    if (['size_x', 'size_y', 'size_z', 'length', 'ny', 'k_file', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) continue;
+                } else if (source === 'Box Generator') {
+                    if (['radius', 'inner_radius', 'height', 'length', 'k_file', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) continue;
+                } else if (source === 'LS-DYNA Keyword File') {
+                    if (['pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'length', 'nx', 'ny', 'nz', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) continue;
+                }
             }
             if (node.type === 'MPMMaterialSteel') {
                 const matModel = node.parameters['material_model'] || 'Hypoelastic';
@@ -4384,6 +4493,10 @@ export class GraphRenderer {
                 'enable_vtk': ['Disabled', 'Enabled'],
                 'device': ['cpu', 'cuda'],
                 'precision': ['double', 'single'],
+                'integration_scheme': ['OnePointFB', 'OnePointKF', 'FullGauss8', 'SelectiveReduced'],
+                'hourglass_model': ['FlanaganBelytschkoStiffness', 'FlanaganBelytschkoViscous', 'KosloffFrazier'],
+                'mesh_source': ['Box Generator', 'Cylinder Generator', 'LS-DYNA Keyword File'],
+                'fsi_algorithm': ['CutCellPenalty', 'ImmersedBoundary', 'DirectMassCoupled'],
                 'trigger_type': ['end', 'time', 'step'],
                 // Explosive composition — JWL parameter sets (Ideal Gas uses its own node)
                 'composition': ['Aluminized ANFO', 'Ammonal', 'ANFO', 'Baratol', 'C-4', 'Composition A-3', 'Composition B', 'Composition C-3', 'Cyclotol', 'Heavy ANFO', 'HMX', 'LX-04', 'LX-07', 'LX-10', 'LX-14', 'LX-17', 'Mining Emulsion', 'Octol', 'PBX 9404', 'PBX 9501', 'PBX 9502', 'PE-10', 'PE-12', 'PE-4', 'PE-8', 'Pentolite', 'PETN', 'RDX', 'TATB', 'Tetryl', 'TNT', 'Water Gel', 'Custom'],
@@ -4402,7 +4515,8 @@ export class GraphRenderer {
                 'obstacles_quantity': ['pressure', 'density', 'velocity', 'energy', 'species1', 'species2', 'species3', 'peak_overpressure', 'peak_impulse'],
                 'transfer_scheme': ['BSpline', 'GIMP', 'Standard'],
                 'velocity_scheme': ['APIC', 'PIC', 'FLIP'],
-                'shape_type': (node.type === 'MPMObject3D') ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle'],
+                'boundary_condition': ['Free', 'Fixed Base', 'Fixed Entire'],
+                'shape_type': node.type === 'FEMObject3D' ? ['Box', 'Cylinder', 'LS-DYNA File'] : (node.type === 'MPMObject3D' ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle']),
                 'colorbar_source': ['slice', 'mpm', 'obstacles', 'stl'],
                 'space_time_scheme': (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') ? 
                     ['USL', 'USF', 'RK2'] : 
@@ -4494,7 +4608,7 @@ export class GraphRenderer {
                             'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
                             'refinement_opacity', 'charge_opacity',
                             'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio', 'amr_tile_size',
-                            'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'refinement_level',
+                            'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'length', 'refinement_level',
                             'submesh_x', 'submesh_y', 'submesh_z', 'submesh_size_x', 'submesh_size_y', 'submesh_size_z',
                             'offset', 'stride',
                             // MPM keys
@@ -4506,7 +4620,9 @@ export class GraphRenderer {
                             'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
                             'mg_gamma0', 'mg_c0', 'mg_s',
                             'ppc',
-                            'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend'
+                            'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
+                            // FEM keys
+                            'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping'
                         ];
 
                         let castValue: any = newVal;

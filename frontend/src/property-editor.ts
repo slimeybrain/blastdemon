@@ -39,6 +39,8 @@ export class PropertyEditor {
                     node.parameters.composition,
                     node.parameters.charge_shape,
                     node.parameters.shape_type,
+                    node.parameters.mesh_source,
+                    node.parameters.integration_scheme,
                     node.parameters.dimension,
                     node.parameters.velocity_scheme
                 ]);
@@ -60,6 +62,8 @@ export class PropertyEditor {
             node.parameters.composition,
             node.parameters.charge_shape,
             node.parameters.shape_type,
+            node.parameters.mesh_source,
+            node.parameters.integration_scheme,
             node.parameters.dimension,
             node.parameters.velocity_scheme
         ]) : '';
@@ -361,6 +365,10 @@ export class PropertyEditor {
             } else {
                 paramKeys.push('space_time_scheme');
             }
+        } else if (node.type === 'FEMDomain3D') {
+            paramKeys = ['device', 'precision', 'cfl', 'hourglass_coeff', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'integration_scheme', 'hourglass_model'];
+        } else if (node.type === 'FEMObject3D') {
+            paramKeys = ['mesh_source', 'shape_type', 'boundary_condition', 'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'nx', 'ny', 'nz', 'vel_x', 'vel_y', 'vel_z', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'k_file'];
         }
 
         if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D') {
@@ -445,7 +453,21 @@ export class PropertyEditor {
                 const shape = node.parameters['charge_shape'] || 'Sphere';
                 if (key === 'charge_height' && shape !== 'Cylinder') continue;
             }
-            if (node.type === 'MPMObject3D') {
+            if (node.type === 'FEMDomain3D') {
+                const scheme = node.parameters['integration_scheme'] || 'OnePointFB';
+                if ((scheme === 'FullGauss8' || scheme === 'SelectiveReduced') && (key === 'hourglass_model' || key === 'hourglass_coeff')) continue;
+            }
+            if (node.type === 'FEMObject3D') {
+                if (key === 'shape_type') continue;
+                const source = node.parameters['mesh_source'] || 'Box Generator';
+                if (source === 'Cylinder Generator') {
+                    if (['size_x', 'size_y', 'size_z', 'length', 'ny', 'k_file', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) continue;
+                } else if (source === 'Box Generator') {
+                    if (['radius', 'inner_radius', 'height', 'length', 'k_file', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) continue;
+                } else if (source === 'LS-DYNA Keyword File') {
+                    if (['pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'length', 'nx', 'ny', 'nz', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) continue;
+                }
+            } else if (node.type === 'MPMObject3D') {
                 const shape = node.parameters['shape_type'] || 'Box';
                 if (shape === 'Box') {
                     if (key === 'radius' || key === 'inner_radius' || key === 'height' || key === 'stl_file' || key === 'scale_x' || key === 'scale_y' || key === 'scale_z') continue;
@@ -1230,7 +1252,7 @@ export class PropertyEditor {
             'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
             'refinement_opacity', 'charge_opacity',
             'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio', 'amr_tile_size',
-            'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'refinement_level',
+            'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'length', 'refinement_level',
             'submesh_x', 'submesh_y', 'submesh_z', 'submesh_size_x', 'submesh_size_y', 'submesh_size_z',
             'offset', 'stride',
             // MPM keys
@@ -1242,7 +1264,9 @@ export class PropertyEditor {
             'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
             'mg_gamma0', 'mg_c0', 'mg_s',
             'ppc',
-            'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend'
+            'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
+            // FEM keys
+            'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping'
         ];
 
         const dropdowns: Record<string, string[]> = {
@@ -1277,6 +1301,9 @@ export class PropertyEditor {
             'coordinate_system': ['Axisymmetric', 'Cartesian'],
             'device': ['cpu', 'cuda'],
             'precision': ['double', 'single'],
+            'integration_scheme': ['OnePointFB', 'OnePointKF', 'FullGauss8', 'SelectiveReduced'],
+            'hourglass_model': ['FlanaganBelytschkoStiffness', 'FlanaganBelytschkoViscous', 'KosloffFrazier'],
+            'mesh_source': ['Box Generator', 'Cylinder Generator', 'LS-DYNA Keyword File'],
             'trigger_type': ['end', 'time', 'step'],
             'composition': ['Aluminized ANFO', 'Ammonal', 'ANFO', 'Baratol', 'C-4', 'Composition A-3', 'Composition B', 'Composition C-3', 'Cyclotol', 'Heavy ANFO', 'HMX', 'LX-04', 'LX-07', 'LX-10', 'LX-14', 'LX-17', 'Mining Emulsion', 'Octol', 'PBX 9404', 'PBX 9501', 'PBX 9502', 'PE-10', 'PE-12', 'PE-4', 'PE-8', 'Pentolite', 'PETN', 'RDX', 'TATB', 'Tetryl', 'TNT', 'Water Gel', 'Custom'],
             'init_mode': node.type === 'CFDSolver3D' ? ['From1D', 'From2D', 'Multi-Material JWL', 'Ideal Gas'] : ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
@@ -1300,7 +1327,8 @@ export class PropertyEditor {
             'colorbar_source': ['slice', 'mpm', 'obstacles', 'stl'],
             'transfer_scheme': ['BSpline', 'GIMP', 'Standard'],
             'velocity_scheme': ['APIC', 'PIC', 'FLIP'],
-            'shape_type': (node.type === 'MPMObject3D') ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle'],
+            'boundary_condition': ['Free', 'Fixed Base', 'Fixed Entire'],
+            'shape_type': node.type === 'FEMObject3D' ? ['Box', 'Cylinder', 'LS-DYNA File'] : (node.type === 'MPMObject3D' ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle']),
             'space_time_scheme': (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') ? 
                 ['USL', 'USF', 'RK2'] : 
                 ['Euler (1st-Order Space/Time)', 'RK2 (2nd-Order Space/Time)', 'RK3 (3rd-Order Space/Time)', 'MUSCL-Hancock (2nd-Order Space/Time)', 'ADER-2 (2nd-Order Space/Time)', 'ADER-3 (3rd-Order Space/Time)']

@@ -33,6 +33,11 @@ struct MaterialTable3D {
     float mg_gamma0{1.81f};      // Grüneisen gamma parameter
     float mg_c0{4570.0f};        // Bulk sound speed (m/s)
     float mg_s{1.49f};           // Hugoniot Us-Up slope
+
+    // Artificial Bulk Viscosity & Timestep Erosion Parameters
+    float bulk_viscosity_b1{0.06f};       // Linear artificial bulk viscosity coefficient
+    float bulk_viscosity_b2{1.20f};       // Quadratic artificial bulk viscosity coefficient
+    float timestep_erosion_factor{0.10f}; // Timestep erosion ratio threshold
 };
 
 struct MPMParticle3D {

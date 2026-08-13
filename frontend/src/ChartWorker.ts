@@ -408,6 +408,12 @@ self.onmessage = (event) => {
     const data = event.data;
 
     if (data instanceof ArrayBuffer) {
+        if (data.byteLength >= 4) {
+            const magic = new DataView(data).getUint32(0, true);
+            if (magic === 0x46454d33 || magic === 0x4d504d33 || magic === 0x43494c53 || magic === 0x4253544c || magic === 0x424f4253) {
+                return; // Ignore 3D viewport / mesh / particle frames
+            }
+        }
         lastBuffer = data;
         rawData = extractChannel(data, selectedChannel);
         updateAutoScale();

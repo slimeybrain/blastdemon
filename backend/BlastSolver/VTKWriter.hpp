@@ -39,4 +39,11 @@ void export_vtu_volume_3d(const std::string& filename, const CFDSolver3D& solver
                           bool has_reacted, bool has_unreacted, bool has_air,
                           bool has_solid = true, bool has_overpressure = true, bool has_impulse = true);
 
+namespace Blast {
+template <typename T> class FEMSolver3D;
+}
+
+template <typename T>
+void export_vtu_fem_3d(const std::string& filename, const Blast::FEMSolver3D<T>& solver);
+
 #endif

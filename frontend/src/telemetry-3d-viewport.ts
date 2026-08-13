@@ -45,14 +45,16 @@ export class Telemetry3DViewport {
     // Overlay Elements
     private controlsOverlay: HTMLElement | null = null;
     private floatOpenBtn: HTMLElement | null = null;
+    private bottomViewDock: HTMLElement | null = null;
     private sliceListContainer: HTMLElement | null = null;
     private staticListContainer: HTMLElement | null = null;
     private expandedSliceIndices = new Set<number>();
     private needsSlicesRebuild = true;
-    private isOpen = true;
+    private isOpen = false;
     private latestSliceRanges: { min: number, max: number }[] = [];
     private latestEmpiricalRange: { min: number, max: number } | null = null;
     private latestMPMRange: { min: number, max: number } | null = null;
+    private latestFEMRange: { min: number, max: number } | null = null;
     private latestSTLRange: { min: number, max: number } | null = null;
     private latestObstaclesRange: { min: number, max: number } | null = null;
     private _lastSliceKey: string = '';
@@ -221,6 +223,10 @@ export class Telemetry3DViewport {
             } else if (type === 'mpmRangeUpdated') {
                 const { min, max } = e.data;
                 this.latestMPMRange = { min, max };
+                this.syncControls(false);
+            } else if (type === 'femRangeUpdated') {
+                const { min, max } = e.data;
+                this.latestFEMRange = { min, max };
                 this.syncControls(false);
             } else if (type === 'stlRangeUpdated') {
                 const { min, max } = e.data;
@@ -439,19 +445,19 @@ export class Telemetry3DViewport {
         };
         this.container.appendChild(this.floatOpenBtn);
 
-        // 2. Controls Panel Overlay (on the right side)
+        // 2. Controls Panel Overlay (on the right side - hidden by default)
         this.controlsOverlay = document.createElement('div');
         this.controlsOverlay.style.position = 'absolute';
         this.controlsOverlay.style.top = '10px';
         this.controlsOverlay.style.right = '10px';
-        this.controlsOverlay.style.bottom = '10px';
+        this.controlsOverlay.style.bottom = '55px';
         this.controlsOverlay.style.width = '460px';
         this.controlsOverlay.style.maxWidth = 'calc(100% - 20px)';
         this.controlsOverlay.style.background = 'rgba(16, 16, 19, 0.92)';
         this.controlsOverlay.style.backdropFilter = 'blur(16px)';
         this.controlsOverlay.style.border = '1px solid rgba(255, 255, 255, 0.12)';
         this.controlsOverlay.style.borderRadius = '8px';
-        this.controlsOverlay.style.display = 'flex';
+        this.controlsOverlay.style.display = this.isOpen ? 'flex' : 'none';
         this.controlsOverlay.style.flexDirection = 'column';
         this.controlsOverlay.style.color = '#e0e0e0';
         this.controlsOverlay.style.fontFamily = 'system-ui, -apple-system, sans-serif';
@@ -478,25 +484,11 @@ export class Telemetry3DViewport {
         titleWrap.style.alignItems = 'center';
 
         const title = document.createElement('span');
-        title.innerHTML = '⚡ 3D Controls';
+        title.innerHTML = '⚡ 3D Controls Matrix';
         title.style.fontWeight = '700';
         title.style.fontSize = '11px';
         title.style.letterSpacing = '0.5px';
         titleWrap.appendChild(title);
-
-        const badge = document.getElementById(this.getElId('viewport-renderer-badge')) || document.createElement('span');
-        badge.id = this.getElId('viewport-renderer-badge');
-        badge.innerHTML = 'Detecting...';
-        badge.style.fontSize = '8px';
-        badge.style.padding = '1px 4px';
-        badge.style.borderRadius = '3px';
-        badge.style.border = '1px solid rgba(255,255,255,0.15)';
-        badge.style.fontWeight = 'bold';
-        badge.style.marginLeft = '8px';
-        badge.style.textTransform = 'uppercase';
-        badge.style.color = '#00adff';
-        badge.style.background = 'rgba(0,173,255,0.1)';
-        titleWrap.appendChild(badge);
 
         header.appendChild(titleWrap);
 
@@ -510,7 +502,7 @@ export class Telemetry3DViewport {
         closeBtn.onclick = () => {
             this.isOpen = false;
             if (this.controlsOverlay) this.controlsOverlay.style.display = 'none';
-            if (this.floatOpenBtn) this.floatOpenBtn.style.display = 'block';
+            if (this.floatOpenBtn) this.floatOpenBtn.style.display = 'none';
         };
         header.appendChild(closeBtn);
         this.controlsOverlay.appendChild(header);
@@ -534,8 +526,8 @@ export class Telemetry3DViewport {
         // Build Camera & View Card
         this.buildCameraViewCard(content);
 
-        // Build Floating HUD View Toolbar
-        this.buildFloatingViewHUD();
+        // Build Single-Level Bottom Controls Dock
+        this.buildBottomControlsDock();
     }
 
     private formatRangeValue(val: number): string {
@@ -769,6 +761,7 @@ export class Telemetry3DViewport {
         this.buildGridRow(staticTbody);
         this.buildGaugeRow(staticTbody);
         this.buildMPMParticlesTableRow(staticTbody);
+        this.buildFEMMeshTableRow(staticTbody);
         this.buildLightingTableRow(staticTbody);
     }
 
@@ -837,7 +830,7 @@ export class Telemetry3DViewport {
         }, 10);
     }
 
-    private showQuantityPopover(targetEl: HTMLElement, currentQty: string, context: 'cfd' | 'mpm', onSelect: (qty: string) => void) {
+    private showQuantityPopover(targetEl: HTMLElement, currentQty: string, context: 'cfd' | 'mpm' | 'fem', onSelect: (qty: string) => void) {
         const cfdQuantities = [
             { id: 'pressure', label: '📊 Pressure' },
             { id: 'density', label: '⚖️ Density' },
@@ -861,7 +854,15 @@ export class Telemetry3DViewport {
             { id: 'velocity', label: '💨 Speed' }
         ];
 
-        const quantities = context === 'mpm' ? mpmQuantities : cfdQuantities;
+        const femQuantities = [
+            { id: 'vonMises', label: '🛡️ Von Mises' },
+            { id: 'plasticStrain', label: '🔨 Plastic Strain' },
+            { id: 'pressure', label: '📊 Pressure' },
+            { id: 'velocity', label: '💨 Velocity' },
+            { id: 'damage', label: '💥 Damage' }
+        ];
+
+        const quantities = context === 'mpm' ? mpmQuantities : (context === 'fem' ? femQuantities : cfdQuantities);
 
         this.showPopover(targetEl, (popover) => {
             const title = document.createElement('div');
@@ -2355,9 +2356,9 @@ export class Telemetry3DViewport {
 
     private buildGridRow(parent: HTMLElement) {
         const vpNode = this.getViewportNode();
-        const initShow = vpNode ? (vpNode.parameters.show_grid !== false) : true;
+        const initShow = this.isGridEnabled(vpNode);
         const initEdges = vpNode ? (!!vpNode.parameters.cell_edges) : false;
-        const initBox = vpNode ? (vpNode.parameters.show_grid_box !== false) : true;
+        const initBox = this.isGridBoxEnabled(vpNode);
         const initOpacity = vpNode ? (vpNode.parameters.grid_opacity ?? 1.0) : 1.0;
 
         const tr = document.createElement('tr');
@@ -2374,7 +2375,7 @@ export class Telemetry3DViewport {
         showCb.onchange = () => {
             const vp = this.getViewportNode();
             if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { show_grid: showCb.checked });
+                this.stateManager.updateNodeParametersInPlace(vp.id, { show_grid: showCb.checked, show_grid_user_enabled: showCb.checked });
                 this.worker.postMessage({ type: 'setConfig', data: { showGrid: showCb.checked } });
             }
         };
@@ -2410,7 +2411,7 @@ export class Telemetry3DViewport {
         mshWrap.appendChild(this.createToggleBtn('viewport-box-btn', 'Box', initBox, (v) => {
             const vp = this.getViewportNode();
             if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { show_grid_box: v });
+                this.stateManager.updateNodeParametersInPlace(vp.id, { show_grid_box: v, show_grid_box_user_enabled: v });
                 this.worker.postMessage({ type: 'setConfig', data: { showGridBox: v } });
             }
         }));
@@ -3566,6 +3567,294 @@ export class Telemetry3DViewport {
         parent.appendChild(tr);
     }
 
+    private buildFEMMeshTableRow(parent: HTMLElement) {
+        const vpNode = this.getViewportNode();
+        const initShow = vpNode ? (vpNode.parameters.showFEMMesh !== false) : true;
+        const initSol = vpNode ? (vpNode.parameters.femSolid !== false) : true;
+        const initWir = vpNode ? (vpNode.parameters.femWireframe !== false) : true;
+        const initRes = vpNode ? (vpNode.parameters.femResults !== false) : true;
+        const initQty = vpNode ? (vpNode.parameters.femQuantity || 'vonMises') : 'vonMises';
+        const initCmap = vpNode ? (vpNode.parameters.femColormap || 'plasma') : 'plasma';
+        const initOpac = vpNode ? (vpNode.parameters.femOpacity ?? 1.0) : 1.0;
+
+        const tr = document.createElement('tr');
+        tr.style.borderBottom = '1px solid rgba(255,255,255,0.06)';
+
+        // Col 1: Vis Checkbox
+        const tdVis = document.createElement('td');
+        tdVis.style.padding = '3px 2px';
+        tdVis.style.textAlign = 'center';
+        const showCb = document.createElement('input');
+        showCb.type = 'checkbox';
+        showCb.id = this.getElId('viewport-fem-mesh-cb');
+        showCb.checked = initShow;
+        showCb.onchange = () => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { showFEMMesh: showCb.checked });
+                this.worker.postMessage({ type: 'setConfig', data: { showFEMMesh: showCb.checked } });
+            }
+        };
+        this.bindEditingEvents(showCb);
+        tdVis.appendChild(showCb);
+        tr.appendChild(tdVis);
+
+        // Col 2: Layer Title
+        const tdLayer = document.createElement('td');
+        tdLayer.style.padding = '3px 4px';
+        const state = this.stateManager.getCurrentState();
+        let femCountText = '';
+        if (state) {
+            const femNodes = state.nodes.filter(n => n.type === 'FEMDomain3D' || n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D');
+            if (femNodes.length > 0) {
+                femCountText = `<span style="font-size: 8px; color: #00ff66; font-weight: normal; margin-left: 4px;">(Hex Mesh)</span>`;
+            }
+        }
+        tdLayer.innerHTML = `🏗️ <b>FEM Mesh</b>${femCountText}`;
+        tr.appendChild(tdLayer);
+
+        // Col 3: SOL (Solid Toggle Button)
+        const tdSol = document.createElement('td');
+        tdSol.style.padding = '3px 2px';
+        tdSol.style.textAlign = 'center';
+        const solBtn = this.createToggleBtn('viewport-fem-sol-btn', 'Sol', initSol, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { femSolid: v });
+                this.worker.postMessage({ type: 'setConfig', data: { femSolid: v } });
+                this.syncControls(true);
+            }
+        });
+        tdSol.appendChild(solBtn);
+        tr.appendChild(tdSol);
+
+        // Col 4: LINES (Wireframe Toggle Button)
+        const tdWir = document.createElement('td');
+        tdWir.style.padding = '3px 2px';
+        tdWir.style.textAlign = 'center';
+        const wirBtn = this.createToggleBtn('viewport-fem-wir-btn', 'Wir', initWir, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { femWireframe: v });
+                this.worker.postMessage({ type: 'setConfig', data: { femWireframe: v } });
+                this.syncControls(true);
+            }
+        });
+        tdWir.appendChild(wirBtn);
+        tr.appendChild(tdWir);
+
+        // Col 5: RES (Results Toggle Button)
+        const tdRes = document.createElement('td');
+        tdRes.style.padding = '3px 2px';
+        tdRes.style.textAlign = 'center';
+        const resBtn = this.createToggleBtn('viewport-fem-res-btn', 'Res', initRes, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { femResults: v });
+                this.worker.postMessage({ type: 'setConfig', data: { femResults: v } });
+                this.syncControls(true);
+            }
+        });
+        tdRes.appendChild(resBtn);
+        tr.appendChild(tdRes);
+
+        // Col 6: QTY (Quantity Selector Pill)
+        const tdQty = document.createElement('td');
+        tdQty.style.padding = '3px 4px';
+        const qtyPill = document.createElement('div');
+        qtyPill.id = this.getElId('viewport-fem-qty-pill');
+        qtyPill.style.fontSize = '9px';
+        qtyPill.style.padding = '2px 4px';
+        qtyPill.style.borderRadius = '3px';
+        qtyPill.style.cursor = 'pointer';
+        qtyPill.style.background = 'rgba(0, 255, 102, 0.12)';
+        qtyPill.style.border = '1px solid rgba(0, 255, 102, 0.3)';
+        qtyPill.style.color = '#00ff66';
+        qtyPill.style.fontWeight = '500';
+        qtyPill.textContent = initQty;
+        qtyPill.onclick = (e) => {
+            e.stopPropagation();
+            this.showQuantityPopover(qtyPill, initQty, 'fem', (newQ) => {
+                const vp = this.getViewportNode();
+                if (vp) {
+                    this.stateManager.updateNodeParametersInPlace(vp.id, { femQuantity: newQ, femAutoScale: true });
+                    this.worker.postMessage({ type: 'setConfig', data: { femQuantity: newQ, femAutoScale: true } });
+                    qtyPill.textContent = newQ;
+                }
+            });
+        };
+        tdQty.appendChild(qtyPill);
+        tr.appendChild(tdQty);
+
+        // Col 7: COLOR (Colormap Selector Pill + Colorbar Toggle)
+        const tdCmap = document.createElement('td');
+        tdCmap.style.padding = '3px 4px';
+        const cmapWrap = document.createElement('div');
+        cmapWrap.style.display = 'flex';
+        cmapWrap.style.gap = '3px';
+        cmapWrap.style.alignItems = 'center';
+
+        const cmapPill = document.createElement('div');
+        cmapPill.id = this.getElId('viewport-fem-cmap-pill');
+        cmapPill.style.fontSize = '9px';
+        cmapPill.style.padding = '2px 4px';
+        cmapPill.style.borderRadius = '3px';
+        cmapPill.style.cursor = 'pointer';
+        cmapPill.style.background = 'rgba(255, 255, 255, 0.08)';
+        cmapPill.style.border = '1px solid rgba(255, 255, 255, 0.15)';
+        cmapPill.style.color = '#e0e0e0';
+        cmapPill.style.flex = '1';
+        cmapPill.textContent = initCmap;
+        cmapPill.onclick = (e) => {
+            e.stopPropagation();
+            this.showColormapPopover(cmapPill, initCmap, (newC) => {
+                const vp = this.getViewportNode();
+                if (vp) {
+                    this.stateManager.updateNodeParametersInPlace(vp.id, { femColormap: newC });
+                    this.worker.postMessage({ type: 'setConfig', data: { femColormap: newC } });
+                    cmapPill.textContent = newC;
+                    this.syncControls(true);
+                }
+            });
+        };
+        cmapWrap.appendChild(cmapPill);
+
+        const initCbShow = vpNode ? (vpNode.parameters.femShowColorbar === true) : false;
+        const cbToggleBtn = this.createToggleBtn('viewport-fem-cb-btn', '🎨', initCbShow, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { femShowColorbar: v });
+                this.syncControls(true);
+            }
+        });
+        cbToggleBtn.style.width = '20px';
+        cbToggleBtn.title = 'Toggle Color Bar for FEM Mesh in 3D Viewport';
+        cmapWrap.appendChild(cbToggleBtn);
+
+        tdCmap.appendChild(cmapWrap);
+        tr.appendChild(tdCmap);
+
+        // Col 8: SCL / Range Limits
+        const tdScl = document.createElement('td');
+        tdScl.style.padding = '3px 2px';
+        tdScl.style.textAlign = 'center';
+
+        const sclWrap = document.createElement('div');
+        sclWrap.style.display = 'inline-flex';
+        sclWrap.style.gap = '2px';
+        sclWrap.style.justifyContent = 'center';
+        tdScl.appendChild(sclWrap);
+
+        const initAuto = vpNode ? (vpNode.parameters.femAutoScale !== false) : true;
+        const initLog = vpNode ? (vpNode.parameters.femLogScale === true) : false;
+
+        sclWrap.appendChild(this.createToggleBtn('viewport-fem-auto-btn', 'A', initAuto, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { femAutoScale: v });
+                this.worker.postMessage({ type: 'setConfig', data: { femAutoScale: v } });
+                this.syncControls(true);
+            }
+        }));
+
+        sclWrap.appendChild(this.createToggleBtn('viewport-fem-log-btn', 'L', initLog, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { femLogScale: v });
+                this.worker.postMessage({ type: 'setConfig', data: { femLogScale: v } });
+                this.syncControls(true);
+            }
+        }));
+
+        const rangeBtn = this.createToggleBtn('viewport-fem-cfg-btn', '⚙️', false, () => {
+            this.showPopover(rangeBtn, (popover) => {
+                const vp = this.getViewportNode();
+                const minV = vp?.parameters.femMinVal ?? 0.0;
+                const maxV = vp?.parameters.femMaxVal ?? 500e6;
+
+                popover.innerHTML = `
+                    <div style="font-weight:bold; color:#00ff66; margin-bottom:6px;">FEM Mesh Range</div>
+                    <div style="display:flex; flex-direction:column; gap:4px;">
+                        <label style="display:flex; justify-content:space-between; align-items:center; gap:6px;">
+                            <span>Min:</span>
+                            <input type="number" step="any" id="popover-fem-min" value="${minV}" style="width:70px; background:#111; color:#fff; border:1px solid #444; border-radius:3px; padding:2px;">
+                        </label>
+                        <label style="display:flex; justify-content:space-between; align-items:center; gap:6px;">
+                            <span>Max:</span>
+                            <input type="number" step="any" id="popover-fem-max" value="${maxV}" style="width:70px; background:#111; color:#fff; border:1px solid #444; border-radius:3px; padding:2px;">
+                        </label>
+                        <button id="popover-apply-fem-range" style="margin-top:4px; background:#007acc; color:#fff; border:none; border-radius:3px; padding:3px; cursor:pointer;">Apply Range</button>
+                    </div>
+                `;
+                const applyBtn = popover.querySelector('#popover-apply-fem-range') as HTMLButtonElement;
+                if (applyBtn) {
+                    applyBtn.onclick = () => {
+                        const minInp = popover.querySelector('#popover-fem-min') as HTMLInputElement;
+                        const maxInp = popover.querySelector('#popover-fem-max') as HTMLInputElement;
+                        if (minInp && maxInp && vp) {
+                            const minN = Number(minInp.value);
+                            const maxN = Number(maxInp.value);
+                            this.stateManager.updateNodeParametersInPlace(vp.id, {
+                                femAutoScale: false,
+                                femMinVal: minN,
+                                femMaxVal: maxN
+                            });
+                            this.worker.postMessage({
+                                type: 'setConfig',
+                                data: {
+                                    femAutoScale: false,
+                                    femMinVal: minN,
+                                    femMaxVal: maxN
+                                }
+                            });
+                            this.closePopover();
+                            this.syncControls(true);
+                        }
+                    };
+                }
+            });
+        });
+        sclWrap.appendChild(rangeBtn);
+        tr.appendChild(tdScl);
+
+        // Col 9: OPACITY (Opacity Slider)
+        const tdOpac = document.createElement('td');
+        tdOpac.style.padding = '3px 4px';
+        tdOpac.style.textAlign = 'center';
+        const opacSel = document.createElement('select');
+        opacSel.id = this.getElId('viewport-fem-opac-sel');
+        this.applySelectStyle(opacSel);
+        opacSel.style.width = '100%';
+        opacSel.innerHTML = `
+            <option value="1.0">100%</option>
+            <option value="0.8">80%</option>
+            <option value="0.6">60%</option>
+            <option value="0.4">40%</option>
+            <option value="0.2">20%</option>
+            <option value="0.0">0%</option>
+        `;
+        this.selectOptionByNumericValue(opacSel, initOpac);
+        this.bindEditingEvents(opacSel, () => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                const val = Number(opacSel.value);
+                this.stateManager.updateNodeParametersInPlace(vp.id, { femOpacity: val });
+                this.worker.postMessage({ type: 'setConfig', data: { femOpacity: val } });
+            }
+        });
+        tdOpac.appendChild(opacSel);
+        tr.appendChild(tdOpac);
+
+        // Col 10: Delete / Empty
+        const tdDel = document.createElement('td');
+        tdDel.style.padding = '3px 2px';
+        tdDel.style.textAlign = 'center';
+        tdDel.innerHTML = '<span style="color:#555;">—</span>';
+        tr.appendChild(tdDel);
+
+        parent.appendChild(tr);
+    }
+
     private selectOptionByNumericValue(sel: HTMLSelectElement | null, val: number | string): void {
         if (!sel) return;
         const target = Number(val);
@@ -3950,9 +4239,42 @@ export class Telemetry3DViewport {
         // Resolve connected DomainMesh3D
         const meshNode = this.getMeshNode();
 
+        // Sync Bottom Controls Dock Chips & Inputs
+        const updateChipStyle = (idSuffix: string, active: boolean) => {
+            const chip = document.getElementById(this.getElId(`viewport-chip-${idSuffix}`));
+            if (chip) {
+                chip.dataset.active = String(active);
+                chip.style.background = active ? '#007acc' : '#25252a';
+                chip.style.border = active ? '1px solid #00adff' : '1px solid rgba(255,255,255,0.12)';
+                chip.style.color = active ? '#ffffff' : '#aaaaaa';
+                chip.style.fontWeight = active ? '600' : '500';
+            }
+        };
+
+        const slicesEnabled = (vpNode.parameters.slices || []).some((s: any) => s.enabled !== false);
+        updateChipStyle('slices', slicesEnabled);
+        updateChipStyle('fem', !!vpNode.parameters.femWireframe);
+        updateChipStyle('mpm', vpNode.parameters.showMPMParticles !== false);
+        updateChipStyle('stl', vpNode.parameters.show_stl !== false);
+        updateChipStyle('obstacles', vpNode.parameters.show_obstacles === true);
+        updateChipStyle('grid', this.isGridEnabled(vpNode));
+        updateChipStyle('gauges', vpNode.parameters.show_gauges !== false);
+        updateChipStyle('lighting', vpNode.parameters.lightingEnabled !== false);
+
+        const dockQtySel = document.getElementById(this.getElId('viewport-dock-qty-sel')) as HTMLSelectElement;
+        if (dockQtySel && dockQtySel.dataset.editing !== 'true' && document.activeElement !== dockQtySel) {
+            const { quantity } = getFocusedQuantityAndRange(vpNode);
+            dockQtySel.value = quantity || 'pressure';
+        }
+
+        const dockCmapSel = document.getElementById(this.getElId('viewport-dock-cmap-sel')) as HTMLSelectElement;
+        if (dockCmapSel && dockCmapSel.dataset.editing !== 'true' && document.activeElement !== dockCmapSel) {
+            dockCmapSel.value = vpNode.parameters.colormap || 'plasma';
+        }
+
         // 1. Sync Render Settings
         const gridCb = document.getElementById(this.getElId('viewport-grid-cb')) as HTMLInputElement;
-        if (gridCb && document.activeElement !== gridCb) gridCb.checked = vpNode.parameters.show_grid !== false;
+        if (gridCb && document.activeElement !== gridCb) gridCb.checked = this.isGridEnabled(vpNode);
 
         const edgesCb = document.getElementById(this.getElId('viewport-edges-cb')) as HTMLInputElement;
         if (edgesCb && document.activeElement !== edgesCb) edgesCb.checked = !!vpNode.parameters.cell_edges;
@@ -4116,7 +4438,7 @@ export class Telemetry3DViewport {
 
         const boxCb = document.getElementById(this.getElId('viewport-box-cb')) as HTMLInputElement;
         if (boxCb && document.activeElement !== boxCb) {
-            boxCb.checked = vpNode.parameters.show_grid_box !== false;
+            boxCb.checked = this.isGridBoxEnabled(vpNode);
         }
 
         // Gauges Sync
@@ -4312,7 +4634,7 @@ export class Telemetry3DViewport {
                     gauges,
                     gridOpacity: vpNode.parameters.grid_opacity ?? 1.0,
                     gridMeshlines: vpNode.parameters.cell_edges === true,
-                    showGridBox: vpNode.parameters.show_grid_box !== false,
+                    showGridBox: this.isGridBoxEnabled(vpNode),
                     stlColormap: resStlCmap,
                     obstaclesColormap: resObsCmap,
                     obstaclesQuantity: obsQty,
@@ -4388,6 +4710,7 @@ export class Telemetry3DViewport {
             this.buildGridRow(this.staticListContainer);
             this.buildGaugeRow(this.staticListContainer);
             this.buildMPMParticlesTableRow(this.staticListContainer);
+            this.buildFEMMeshTableRow(this.staticListContainer);
             this.buildLightingTableRow(this.staticListContainer);
         }
 
@@ -4733,6 +5056,62 @@ export class Telemetry3DViewport {
             dimY = ymax - ymin;
             dimZ = zmax - zmin;
             cellSize = Number(meshNode.parameters?.cell_size ?? 0.01);
+        } else {
+            const targetModel = this.getCurrentModel();
+            if (targetModel) {
+                const femObjNodes = targetModel.nodes.filter((n: any) => n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D');
+                if (femObjNodes.length > 0) {
+                    let minX = Infinity, maxX = -Infinity;
+                    let minY = Infinity, maxY = -Infinity;
+                    let minZ = Infinity, maxZ = -Infinity;
+                    for (const obj of femObjNodes) {
+                        const px = Number(obj.parameters?.pos_x ?? 0.0);
+                        const py = Number(obj.parameters?.pos_y ?? 0.0);
+                        const pz = Number(obj.parameters?.pos_z ?? 0.0);
+                        const shape = obj.parameters?.shape_type || 'Box';
+                        const meshSrc = obj.parameters?.mesh_source || 'Box Generator';
+
+                        let objMinX = px, objMaxX = px;
+                        let objMinY = py, objMaxY = py;
+                        let objMinZ = pz, objMaxZ = pz;
+
+                        if (shape === 'Cylinder' || meshSrc === 'Cylinder Generator') {
+                            const rad = Number(obj.parameters?.radius ?? 0.1);
+                            const h = Number(obj.parameters?.height ?? obj.parameters?.length ?? obj.parameters?.size_z ?? 0.2);
+                            objMinX = px - rad; objMaxX = px + rad;
+                            objMinY = py - rad; objMaxY = py + rad;
+                            objMinZ = pz; objMaxZ = pz + h;
+                        } else if (shape === 'Sphere' || meshSrc === 'Sphere Generator') {
+                            const rad = Number(obj.parameters?.radius ?? 0.1);
+                            objMinX = px - rad; objMaxX = px + rad;
+                            objMinY = py - rad; objMaxY = py + rad;
+                            objMinZ = pz - rad; objMaxZ = pz + rad;
+                        } else {
+                            const lx = Number(obj.parameters?.size_x ?? obj.parameters?.length ?? 0.1);
+                            const ly = Number(obj.parameters?.size_y ?? obj.parameters?.length ?? 0.1);
+                            const lz = Number(obj.parameters?.size_z ?? obj.parameters?.height ?? 0.1);
+                            objMinX = px; objMaxX = px + lx;
+                            objMinY = py; objMaxY = py + ly;
+                            objMinZ = pz; objMaxZ = pz + lz;
+                        }
+
+                        minX = Math.min(minX, objMinX);
+                        maxX = Math.max(maxX, objMaxX);
+                        minY = Math.min(minY, objMinY);
+                        maxY = Math.max(maxY, objMaxY);
+                        minZ = Math.min(minZ, objMinZ);
+                        maxZ = Math.max(maxZ, objMaxZ);
+                    }
+                    if (isFinite(minX) && isFinite(maxX) && maxX > minX) {
+                        xmin = minX; xmax = maxX;
+                        ymin = minY; ymax = maxY;
+                        zmin = minZ; zmax = maxZ;
+                        dimX = xmax - xmin;
+                        dimY = ymax - ymin;
+                        dimZ = zmax - zmin;
+                    }
+                }
+            }
         }
         const nx = Math.round(dimX / cellSize);
         const ny = Math.round(dimY / cellSize);
@@ -4752,13 +5131,17 @@ export class Telemetry3DViewport {
             return { ...s, colormap: qCmaps[q] || s.colormap || 'plasma' };
         });
 
+        const targetModel = this.getCurrentModel();
+        const hasCFDSolver = targetModel ? targetModel.nodes.some((n: any) => n.type === 'CFDSolver3D' || n.type === 'FSICoupler3D' || n.type === 'FEMFSICoupler3D') : false;
+
         const configData: any = {
+            hasCFDSolver: hasCFDSolver,
             meshType: solverNode?.parameters?.mesh_type || 'regular',
             colormap: vpNode.parameters.colormap || 'plasma',
             minY: syncFocusedMin,
             maxY: syncFocusedMax,
             autoScale: vpNode.parameters.auto_scale !== false,
-            showGrid: vpNode.parameters.show_grid !== false,
+            showGrid: this.isGridEnabled(vpNode),
             useLogScale: vpNode.parameters.log_scale === true,
             showCellEdges: vpNode.parameters.cell_edges === true,
             interpolate: vpNode.parameters.interpolate === true,
@@ -4840,6 +5223,37 @@ export class Telemetry3DViewport {
         return ws ? ws.activeModelId : null;
     }
 
+    public isGridBoxEnabled(vpNode: any): boolean {
+        if (!vpNode || !vpNode.parameters) return false;
+        if (this.isFEMOnlyModel()) {
+            return vpNode.parameters.show_grid_box_user_enabled === true;
+        }
+        return vpNode.parameters.show_grid_box !== false;
+    }
+
+    public isGridEnabled(vpNode: any): boolean {
+        if (!vpNode || !vpNode.parameters) return false;
+        if (this.isFEMOnlyModel()) {
+            return vpNode.parameters.show_grid_user_enabled === true;
+        }
+        return vpNode.parameters.show_grid !== false;
+    }
+
+    public getCurrentModel(): any {
+        const modelId = this.getCurrentModelId();
+        if (!modelId) return null;
+        return this.stateManager.getAllModels().find(m => m.id === modelId) || null;
+    }
+
+    public isFEMOnlyModel(): boolean {
+        if (this.getMeshNode()) return false;
+        const solver = this.getSolverNode();
+        if (solver?.type === 'FEMDomain3D') return true;
+        const model = this.getCurrentModel();
+        if (model && model.nodes.some((n: any) => n.type === 'FEMDomain3D')) return true;
+        return false;
+    }
+
     public pushFrame(buffer: ArrayBuffer, modelId?: string) {
         if (modelId && this.getCurrentModelId() !== modelId) return;
         this.worker.postMessage({ type: 'frame', data: { buffer } }, [buffer]);
@@ -4880,6 +5294,9 @@ export class Telemetry3DViewport {
         }
         if (this.controlsOverlay && this.controlsOverlay.parentNode !== this.container) {
             this.container.appendChild(this.controlsOverlay);
+        }
+        if (this.bottomViewDock && this.bottomViewDock.parentNode !== this.container) {
+            this.container.appendChild(this.bottomViewDock);
         }
         if (this.floatOpenBtn && this.floatOpenBtn.parentNode !== this.container) {
             this.container.appendChild(this.floatOpenBtn);
@@ -5540,10 +5957,17 @@ export class Telemetry3DViewport {
         const dz_physical = (zmax - zmin) * 0.05;
 
         for (const axis of axes) {
-            const { major, minor } = this.getTickInterval(axis.min, axis.max);
+            const pStart = project(axis.pointAt(axis.min)[0], axis.pointAt(axis.min)[1], axis.pointAt(axis.min)[2]);
+            const pEnd = project(axis.pointAt(axis.max)[0], axis.pointAt(axis.max)[1], axis.pointAt(axis.max)[2]);
+            const screenLen = Math.hypot(pEnd.x - pStart.x, pEnd.y - pStart.y);
+            const targetTicks = Math.max(2, Math.min(5, Math.floor(screenLen / (90 * dpr))));
+
+            const { major, minor } = this.getTickInterval(axis.min, axis.max, targetTicks);
             
             let tickVal = Math.ceil(axis.min / major) * major;
             const limit = axis.max + major * 1e-5;
+
+            let lastLabelPos: { x: number, y: number } | null = null;
 
             while (tickVal <= limit) {
                 const val = tickVal;
@@ -5596,23 +6020,34 @@ export class Telemetry3DViewport {
                 ctx.lineWidth = 1.5 * dpr;
                 ctx.stroke();
 
-                ctx.fillStyle = '#ffffff';
-                
-                if (ux > 0.3) ctx.textAlign = 'left';
-                else if (ux < -0.3) ctx.textAlign = 'right';
-                else ctx.textAlign = 'center';
+                let skipLabel = false;
+                if (lastLabelPos) {
+                    const dist = Math.hypot(pLabelPos.x - lastLabelPos.x, pLabelPos.y - lastLabelPos.y);
+                    if (dist < 45 * dpr) {
+                        skipLabel = true;
+                    }
+                }
 
-                if (uy > 0.3) ctx.textBaseline = 'top';
-                else if (uy < -0.3) ctx.textBaseline = 'bottom';
-                else ctx.textBaseline = 'middle';
+                if (!skipLabel) {
+                    ctx.fillStyle = '#ffffff';
+                    
+                    if (ux > 0.3) ctx.textAlign = 'left';
+                    else if (ux < -0.3) ctx.textAlign = 'right';
+                    else ctx.textAlign = 'center';
 
-                const displayVal = this.formatTickValue(clampedVal, major);
-                ctx.fillText(`${displayVal}${axis.labelSuffix}`, pLabelPos.x, pLabelPos.y);
+                    if (uy > 0.3) ctx.textBaseline = 'top';
+                    else if (uy < -0.3) ctx.textBaseline = 'bottom';
+                    else ctx.textBaseline = 'middle';
+
+                    const displayVal = this.formatTickValue(clampedVal, major);
+                    ctx.fillText(`${displayVal}${axis.labelSuffix}`, pLabelPos.x, pLabelPos.y);
+                    lastLabelPos = { x: pLabelPos.x, y: pLabelPos.y };
+                }
 
                 tickVal += major;
             }
 
-            if (minor > 0) {
+            if (minor > 0 && screenLen > 160 * dpr) {
                 let minorVal = Math.ceil(axis.min / minor) * minor;
                 const minorLimit = axis.max + minor * 1e-5;
                 while (minorVal <= minorLimit) {
@@ -5683,6 +6118,7 @@ export class Telemetry3DViewport {
         this.canvas.remove();
         if (this.overlayCanvas) this.overlayCanvas.remove();
         if (this.controlsOverlay) this.controlsOverlay.remove();
+        if (this.bottomViewDock) this.bottomViewDock.remove();
         if (this.floatOpenBtn) this.floatOpenBtn.remove();
         if (this.colorbarContainer) this.colorbarContainer.remove();
     }
@@ -5698,48 +6134,110 @@ export class Telemetry3DViewport {
         }
     }
 
+    private alignCamera(val: string) {
+        this.usePerspective = false;
+        this.syncProjectionButtons();
+        this.worker.postMessage({
+            type: 'setConfig',
+            data: { usePerspective: false }
+        });
+
+        let pitch = 0.0;
+        let yaw = 0.0;
+        if (val === 'top') {
+            pitch = Math.PI / 2 - 0.01;
+            yaw = 0.0;
+        } else if (val === 'bottom') {
+            pitch = -Math.PI / 2 + 0.01;
+            yaw = 0.0;
+        } else if (val === 'front') {
+            pitch = 0.0;
+            yaw = Math.PI;
+        } else if (val === 'back') {
+            pitch = 0.0;
+            yaw = 0.0;
+        } else if (val === 'left') {
+            pitch = 0.0;
+            yaw = -Math.PI / 2;
+        } else if (val === 'right') {
+            pitch = 0.0;
+            yaw = Math.PI / 2;
+        }
+
+        this.worker.postMessage({
+            type: 'setView',
+            data: {
+                pitch,
+                yaw,
+                distance: 1.35,
+                targetX: 0.0,
+                targetY: 0.0,
+                targetZ: 0.0
+            }
+        });
+    }
+
+    private createDockSeparator(): HTMLElement {
+        const sep = document.createElement('div');
+        sep.style.width = '1px';
+        sep.style.height = '16px';
+        sep.style.background = 'rgba(255, 255, 255, 0.15)';
+        sep.style.margin = '0 3px';
+        return sep;
+    }
+
     private buildFloatingViewHUD() {
-        const viewHUD = document.createElement('div');
-        viewHUD.style.position = 'absolute';
-        viewHUD.style.top = '10px';
-        viewHUD.style.left = '10px';
-        viewHUD.style.display = 'flex';
-        viewHUD.style.gap = '4px';
-        viewHUD.style.background = 'rgba(16, 16, 19, 0.82)';
-        viewHUD.style.backdropFilter = 'blur(12px)';
-        viewHUD.style.border = '1px solid rgba(255, 255, 255, 0.12)';
-        viewHUD.style.borderRadius = '6px';
-        viewHUD.style.padding = '3px';
-        viewHUD.style.zIndex = '10';
-        viewHUD.style.boxShadow = '0 4px 12px rgba(0, 0, 0, 0.5)';
-        
-        // Reset View Button
+        // Floating top HUD replaced by single-level bottom view dock
+    }
+
+    private buildBottomControlsDock() {
+        this.bottomViewDock = document.createElement('div');
+        this.bottomViewDock.style.position = 'absolute';
+        this.bottomViewDock.style.bottom = '8px';
+        this.bottomViewDock.style.left = '8px';
+        this.bottomViewDock.style.right = '8px';
+        this.bottomViewDock.style.display = 'flex';
+        this.bottomViewDock.style.flexWrap = 'wrap';
+        this.bottomViewDock.style.alignItems = 'center';
+        this.bottomViewDock.style.justifyContent = 'space-between';
+        this.bottomViewDock.style.gap = '4px 6px';
+        this.bottomViewDock.style.background = 'rgba(16, 16, 19, 0.90)';
+        this.bottomViewDock.style.backdropFilter = 'blur(14px)';
+        this.bottomViewDock.style.border = '1px solid rgba(255, 255, 255, 0.12)';
+        this.bottomViewDock.style.borderRadius = '6px';
+        this.bottomViewDock.style.padding = '4px 8px';
+        this.bottomViewDock.style.zIndex = '12';
+        this.bottomViewDock.style.boxShadow = '0 6px 20px rgba(0, 0, 0, 0.6)';
+        this.bottomViewDock.style.color = '#e0e0e0';
+        this.bottomViewDock.style.fontFamily = 'system-ui, -apple-system, sans-serif';
+        this.bottomViewDock.style.fontSize = '10.5px';
+        this.bottomViewDock.style.pointerEvents = 'auto';
+        this.container.appendChild(this.bottomViewDock);
+
+        // Group 1: Camera & View Presets
+        const cameraGroup = document.createElement('div');
+        cameraGroup.style.display = 'flex';
+        cameraGroup.style.alignItems = 'center';
+        cameraGroup.style.gap = '3px';
+
         const resetBtn = document.createElement('button');
         resetBtn.innerHTML = '🏠 Reset';
         this.applyButtonStyle(resetBtn);
-        resetBtn.style.padding = '3px 6px';
-        resetBtn.title = 'Reset view to default angle and distance';
+        resetBtn.style.padding = '2px 6px';
+        resetBtn.title = 'Reset view angle & zoom';
         resetBtn.onclick = () => {
             this.worker.postMessage({
                 type: 'setView',
-                data: {
-                    pitch: 0.42,
-                    yaw: 1.107,
-                    distance: 2.45,
-                    targetX: 0.0,
-                    targetY: 0.0,
-                    targetZ: 0.0
-                }
+                data: { pitch: 0.42, yaw: 1.107, distance: 1.35, targetX: 0.0, targetY: 0.0, targetZ: 0.0 }
             });
         };
-        viewHUD.appendChild(resetBtn);
+        cameraGroup.appendChild(resetBtn);
 
-        // Perspective/Orthographic Toggle Button
         const projBtn = document.createElement('button');
-        projBtn.id = this.getElId('viewport-hud-proj-btn');
+        projBtn.id = this.getElId('viewport-dock-proj-btn');
         projBtn.innerHTML = this.usePerspective ? '👁️ Persp' : '📐 Ortho';
         this.applyButtonStyle(projBtn);
-        projBtn.style.padding = '3px 6px';
+        projBtn.style.padding = '2px 6px';
         projBtn.title = 'Toggle Perspective / Orthographic projection';
         projBtn.onclick = () => {
             this.usePerspective = !this.usePerspective;
@@ -5749,79 +6247,266 @@ export class Telemetry3DViewport {
                 data: { usePerspective: this.usePerspective }
             });
         };
-        viewHUD.appendChild(projBtn);
-
-        // Standard Views Buttons with a separator
-        const separator = document.createElement('div');
-        separator.style.width = '1px';
-        separator.style.height = '14px';
-        separator.style.background = 'rgba(255, 255, 255, 0.15)';
-        separator.style.alignSelf = 'center';
-        separator.style.margin = '0 3px';
-        viewHUD.appendChild(separator);
+        cameraGroup.appendChild(projBtn);
 
         const views = [
-            { name: 'Top', val: 'top', title: 'Align camera to Top (Z+)' },
-            { name: 'Bottom', val: 'bottom', title: 'Align camera to Bottom (Z-)' },
-            { name: 'Front', val: 'front', title: 'Align camera to Front (Y-)' },
-            { name: 'Back', val: 'back', title: 'Align camera to Back (Y+)' },
-            { name: 'Left', val: 'left', title: 'Align camera to Left (X-)' },
-            { name: 'Right', val: 'right', title: 'Align camera to Right (X+)' }
+            { name: 'Top', val: 'top' },
+            { name: 'Bottom', val: 'bottom' },
+            { name: 'Front', val: 'front' },
+            { name: 'Back', val: 'back' },
+            { name: 'Left', val: 'left' },
+            { name: 'Right', val: 'right' }
         ];
-
         views.forEach(v => {
             const btn = document.createElement('button');
             btn.innerHTML = v.name;
             this.applyButtonStyle(btn);
-            btn.style.padding = '3px 6px';
-            btn.title = v.title;
-            btn.onclick = () => {
-                // Standard CAD alignment behavior: switch to orthographic
-                this.usePerspective = false;
-                this.syncProjectionButtons();
-                this.worker.postMessage({
-                    type: 'setConfig',
-                    data: { usePerspective: false }
-                });
-
-                let pitch = 0.0;
-                let yaw = 0.0;
-                if (v.val === 'top') {
-                    pitch = Math.PI / 2 - 0.01;
-                    yaw = 0.0;
-                } else if (v.val === 'bottom') {
-                    pitch = -Math.PI / 2 + 0.01;
-                    yaw = 0.0;
-                } else if (v.val === 'front') {
-                    pitch = 0.0;
-                    yaw = Math.PI;
-                } else if (v.val === 'back') {
-                    pitch = 0.0;
-                    yaw = 0.0;
-                } else if (v.val === 'left') {
-                    pitch = 0.0;
-                    yaw = -Math.PI / 2;
-                } else if (v.val === 'right') {
-                    pitch = 0.0;
-                    yaw = Math.PI / 2;
-                }
-
-                this.worker.postMessage({
-                    type: 'setView',
-                    data: {
-                        pitch,
-                        yaw,
-                        targetX: 0.0,
-                        targetY: 0.0,
-                        targetZ: 0.0
-                    }
-                });
-            };
-            this.bindEditingEvents(btn);
-            viewHUD.appendChild(btn);
+            btn.style.padding = '2px 5px';
+            btn.onclick = () => this.alignCamera(v.val);
+            cameraGroup.appendChild(btn);
         });
 
-        this.container.appendChild(viewHUD);
+        this.bottomViewDock.appendChild(cameraGroup);
+
+        // Separator
+        this.bottomViewDock.appendChild(this.createDockSeparator());
+
+        // Group 2: Quick Toggle Chips
+        const layerGroup = document.createElement('div');
+        layerGroup.style.display = 'flex';
+        layerGroup.style.alignItems = 'center';
+        layerGroup.style.gap = '3px';
+
+        const createToggleChip = (idSuffix: string, label: string, title: string, onClick: (active: boolean) => void) => {
+            const btn = document.createElement('button');
+            btn.id = this.getElId(`viewport-chip-${idSuffix}`);
+            btn.innerHTML = label;
+            btn.title = title;
+            this.applyButtonStyle(btn);
+            btn.style.padding = '2px 6px';
+            btn.onclick = () => {
+                const vpNode = this.getViewportNode();
+                if (!vpNode) return;
+                const curState = btn.dataset.active === 'true';
+                onClick(!curState);
+            };
+            return btn;
+        };
+
+        layerGroup.appendChild(createToggleChip('slices', '🥞 Slices', 'Toggle Slices', (active) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                const slices = (vp.parameters.slices || []).map((s: any) => ({ ...s, enabled: active }));
+                this.stateManager.updateNodeParametersInPlace(vp.id, { slices });
+                this.updateSlices(slices);
+                this.syncControls(true);
+            }
+        }));
+
+        layerGroup.appendChild(createToggleChip('fem', '🏗️ FEM', 'Toggle FEM Wireframe Mesh', (active) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { femWireframe: active });
+                this.worker.postMessage({ type: 'setConfig', data: { femWireframe: active } });
+                this.syncControls(true);
+            }
+        }));
+
+        layerGroup.appendChild(createToggleChip('mpm', '✨ MPM', 'Toggle MPM Particles', (active) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { showMPMParticles: active });
+                this.worker.postMessage({ type: 'setConfig', data: { showMPMParticles: active } });
+                this.syncControls(true);
+            }
+        }));
+
+        layerGroup.appendChild(createToggleChip('stl', '📐 STL', 'Toggle STL Geometry', (active) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { show_stl: active });
+                this.worker.postMessage({ type: 'setConfig', data: { showSTL: active } });
+                this.syncControls(true);
+            }
+        }));
+
+        layerGroup.appendChild(createToggleChip('obstacles', '🧱 Obs', 'Toggle Obstacles', (active) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { show_obstacles: active });
+                this.worker.postMessage({ type: 'setConfig', data: { showObstacles: active } });
+                this.syncControls(true);
+            }
+        }));
+
+        layerGroup.appendChild(createToggleChip('grid', '🌐 Grid', 'Toggle Domain Grid & Box', (active) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { show_grid: active, show_grid_box: active });
+                this.worker.postMessage({ type: 'setConfig', data: { showGrid: active, showGridBox: active } });
+                this.syncControls(true);
+            }
+        }));
+
+        layerGroup.appendChild(createToggleChip('gauges', '🎯 Gauges', 'Toggle Virtual Gauges', (active) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { show_gauges: active });
+                this.worker.postMessage({ type: 'setConfig', data: { showGauges: active } });
+                this.syncControls(true);
+            }
+        }));
+
+        layerGroup.appendChild(createToggleChip('lighting', '💡 Light', 'Toggle Lighting & AO', (active) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { lightingEnabled: active, aoEnabled: active });
+                this.worker.postMessage({ type: 'setConfig', data: { lightingEnabled: active, aoEnabled: active } });
+                this.syncControls(true);
+            }
+        }));
+
+        this.bottomViewDock.appendChild(layerGroup);
+
+        // Separator
+        this.bottomViewDock.appendChild(this.createDockSeparator());
+
+        // Group 3: Quantity & Colormap
+        const qtyGroup = document.createElement('div');
+        qtyGroup.style.display = 'flex';
+        qtyGroup.style.alignItems = 'center';
+        qtyGroup.style.gap = '4px';
+
+        const qtyLabel = document.createElement('span');
+        qtyLabel.innerHTML = 'Qty:';
+        qtyLabel.style.color = '#aaa';
+        qtyGroup.appendChild(qtyLabel);
+
+        const qtySel = document.createElement('select');
+        qtySel.id = this.getElId('viewport-dock-qty-sel');
+        this.applySelectStyle(qtySel);
+        qtySel.style.width = '85px';
+        qtySel.innerHTML = `
+            <option value="pressure">Pressure</option>
+            <option value="density">Density</option>
+            <option value="velocity">Velocity</option>
+            <option value="energy">Energy</option>
+            <option value="overpressure">Overpressure</option>
+            <option value="impulse">Impulse</option>
+            <option value="vonMises">von Mises</option>
+        `;
+        this.bindEditingEvents(qtySel, () => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                const qty = qtySel.value;
+                const slices = (vp.parameters.slices || []).map((s: any) => ({ ...s, quantities: [qty] }));
+                this.stateManager.updateNodeParametersInPlace(vp.id, {
+                    slices,
+                    mpmParticleQuantity: qty,
+                    femQuantity: qty,
+                    stl_quantity: qty
+                });
+                this.updateSlices(slices);
+                this.syncControls(true);
+            }
+        });
+        qtyGroup.appendChild(qtySel);
+
+        const cmapLabel = document.createElement('span');
+        cmapLabel.innerHTML = 'Map:';
+        cmapLabel.style.color = '#aaa';
+        qtyGroup.appendChild(cmapLabel);
+
+        const cmapSel = document.createElement('select');
+        cmapSel.id = this.getElId('viewport-dock-cmap-sel');
+        this.applySelectStyle(cmapSel);
+        cmapSel.style.width = '80px';
+        cmapSel.innerHTML = `
+            <option value="plasma">Plasma</option>
+            <option value="viridis">Viridis</option>
+            <option value="inferno">Inferno</option>
+            <option value="magma">Magma</option>
+            <option value="coolwarm">Coolwarm</option>
+            <option value="rainbow">Rainbow</option>
+            <option value="grayscale">Grayscale</option>
+        `;
+        this.bindEditingEvents(cmapSel, () => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                const cmap = cmapSel.value;
+                const slices = (vp.parameters.slices || []).map((s: any) => ({ ...s, colormap: cmap }));
+                this.stateManager.updateNodeParametersInPlace(vp.id, {
+                    colormap: cmap,
+                    slices,
+                    mpmParticleColormap: cmap,
+                    stl_colormap: cmap
+                });
+                this.updateSlices(slices);
+                this.syncControls(true);
+            }
+        });
+        qtyGroup.appendChild(cmapSel);
+
+        this.bottomViewDock.appendChild(qtyGroup);
+
+        // Separator
+        this.bottomViewDock.appendChild(this.createDockSeparator());
+
+        // Group 4: Refresh Rate & Details
+        const rightGroup = document.createElement('div');
+        rightGroup.style.display = 'flex';
+        rightGroup.style.alignItems = 'center';
+        rightGroup.style.gap = '4px';
+
+        const rateSel = document.createElement('select');
+        rateSel.id = this.getElId('viewport-refresh-rate-sel');
+        this.applySelectStyle(rateSel);
+        rateSel.style.width = '75px';
+        rateSel.innerHTML = `
+            <option value="0.0">Max FPS</option>
+            <option value="0.016">60 FPS</option>
+            <option value="0.033">30 FPS</option>
+            <option value="0.1">10 FPS</option>
+            <option value="0.5">2 FPS</option>
+            <option value="2.0">0.5 FPS</option>
+        `;
+        this.bindEditingEvents(rateSel, () => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { refresh_rate: Number(rateSel.value) });
+                this.sendView3DConfig();
+            }
+        });
+        rightGroup.appendChild(rateSel);
+
+        // Badge
+        const badge = document.getElementById(this.getElId('viewport-renderer-badge')) || document.createElement('span');
+        badge.id = this.getElId('viewport-renderer-badge');
+        badge.innerHTML = 'WebGL2';
+        badge.style.fontSize = '8.5px';
+        badge.style.padding = '1px 5px';
+        badge.style.borderRadius = '3px';
+        badge.style.border = '1px solid rgba(255,255,255,0.15)';
+        badge.style.fontWeight = 'bold';
+        badge.style.color = '#00adff';
+        badge.style.background = 'rgba(0,173,255,0.1)';
+        rightGroup.appendChild(badge);
+
+        // Side panel toggle
+        const panelToggleBtn = document.createElement('button');
+        panelToggleBtn.id = this.getElId('viewport-panel-toggle-btn');
+        panelToggleBtn.innerHTML = '⚡ Matrix';
+        this.applyButtonStyle(panelToggleBtn);
+        panelToggleBtn.style.padding = '2px 6px';
+        panelToggleBtn.title = 'Toggle Detailed Slice & Layer Matrix Panel';
+        panelToggleBtn.onclick = () => {
+            this.isOpen = !this.isOpen;
+            if (this.controlsOverlay) this.controlsOverlay.style.display = this.isOpen ? 'flex' : 'none';
+            if (this.floatOpenBtn) this.floatOpenBtn.style.display = 'none';
+        };
+        rightGroup.appendChild(panelToggleBtn);
+
+        this.bottomViewDock.appendChild(rightGroup);
     }
 
     private buildCameraViewCard(parent: HTMLElement) {
@@ -5917,6 +6602,7 @@ export class Telemetry3DViewport {
                     data: {
                         pitch,
                         yaw,
+                        distance: 1.35,
                         targetX: 0.0,
                         targetY: 0.0,
                         targetZ: 0.0
@@ -5945,7 +6631,7 @@ export class Telemetry3DViewport {
                 data: {
                     pitch: 0.42,
                     yaw: 1.107,
-                    distance: 2.45,
+                    distance: 1.35,
                     targetX: 0.0,
                     targetY: 0.0,
                     targetZ: 0.0

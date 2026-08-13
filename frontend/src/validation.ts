@@ -15,11 +15,24 @@ export function isParameterRelevant(node: Node, key: string): boolean {
     if (!node || !node.parameters) return true;
 
     // Parameters that are system paths/hashes/collections/internal properties which can be empty or managed separately
-    if (['output_dir', 'vtk_dir', 'gauges', 'slices', 'stl_file', 'geometry_hash', 'primitives'].includes(key)) {
+    if (['output_dir', 'vtk_dir', 'gauges', 'slices', 'stl_file', 'geometry_hash', 'primitives', 'k_file'].includes(key)) {
         return false;
     }
 
-    if (node.type === 'MPMObject3D') {
+    if (node.type === 'FEMDomain3D') {
+        const scheme = node.parameters['integration_scheme'] || 'OnePointFB';
+        if ((scheme === 'FullGauss8' || scheme === 'SelectiveReduced') && ['hourglass_model', 'hourglass_coeff'].includes(key)) return false;
+    } else if (node.type === 'FEMObject3D') {
+        if (key === 'shape_type') return false;
+        const meshSource = node.parameters['mesh_source'] || 'Box Generator';
+        if (meshSource === 'Cylinder Generator') {
+            if (['size_x', 'size_y', 'size_z', 'length', 'ny', 'k_file', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) return false;
+        } else if (meshSource === 'Box Generator') {
+            if (['radius', 'inner_radius', 'height', 'length', 'k_file', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) return false;
+        } else if (meshSource === 'LS-DYNA Keyword File') {
+            if (['pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'length', 'nx', 'ny', 'nz', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) return false;
+        }
+    } else if (node.type === 'MPMObject3D') {
         const shape = node.parameters['shape_type'] || 'Box';
         if (shape === 'Box') {
             if (['radius', 'inner_radius', 'height', 'stl_file', 'scale_x', 'scale_y', 'scale_z', 'geometry_hash'].includes(key)) return false;
@@ -681,10 +694,80 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             }
         }
 
+        if (node.type === 'FEMDomain3D') {
+            const meshConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'mesh');
+            if (meshConn) {
+                const meshNode = state.nodes.find(n => n.id === meshConn.fromNode);
+                if (meshNode && meshNode.type !== 'DomainMesh3D') {
+                    addMessage(node.id, 'error', "Only DomainMesh3D can be connected to the Hex Mesh input of FEM Domain 3D.");
+                }
+            }
+            const objConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'objects');
+            if (!objConn) {
+                addMessage(node.id, 'error', "No FEM Object connected to FEM Domain 3D. At least one FEM Object 3D or LS-DYNA Importer node is required.");
+            }
+        }
+
+        if (node.type === 'FEMObject3D') {
+            const matConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'material');
+            if (!matConn) {
+                addMessage(node.id, 'error', "No Material connected to FEM Object 3D.");
+            }
+            const outConn = state.connections.find(c => c.fromNode === node.id);
+            if (!outConn) {
+                addMessage(node.id, 'warning', "FEM Object 3D is not connected to a FEM Domain 3D node.");
+            }
+            const meshSource = node.parameters['mesh_source'] || 'Box Generator';
+            const shape = node.parameters['shape_type'] || 'Box';
+            if (meshSource === 'Cylinder Generator' || shape === 'Cylinder') {
+                const radius = Number(node.parameters['radius'] ?? 0.1);
+                const innerRadius = Number(node.parameters['inner_radius'] ?? 0.0);
+                const height = Number(node.parameters['height'] ?? 0.2);
+                const nx = Number(node.parameters['nx'] ?? 10);
+                const nz = Number(node.parameters['nz'] ?? 10);
+                if (isNaN(radius) || radius <= 0) addMessage(node.id, 'error', "Cylinder radius must be greater than 0.");
+                if (isNaN(innerRadius) || innerRadius < 0) addMessage(node.id, 'error', "Cylinder inner radius cannot be negative.");
+                if (innerRadius >= radius) addMessage(node.id, 'error', "Cylinder inner radius must be smaller than outer radius.");
+                if (isNaN(height) || height <= 0) addMessage(node.id, 'error', "Cylinder height must be greater than 0.");
+                if (isNaN(nx) || nx < 1) addMessage(node.id, 'error', "Nodal resolution NX (NR) must be at least 1.");
+                if (isNaN(nz) || nz < 1) addMessage(node.id, 'error', "Nodal resolution NZ must be at least 1.");
+            } else if (meshSource === 'Box Generator' || shape === 'Box') {
+                const sx = Number(node.parameters['size_x'] ?? 1.0);
+                const sy = Number(node.parameters['size_y'] ?? 1.0);
+                const sz = Number(node.parameters['size_z'] ?? 1.0);
+                const nx = Number(node.parameters['nx'] ?? 10);
+                const ny = Number(node.parameters['ny'] ?? 10);
+                const nz = Number(node.parameters['nz'] ?? 10);
+                if (isNaN(sx) || sx <= 0) addMessage(node.id, 'error', "Box size_x must be greater than 0.");
+                if (isNaN(sy) || sy <= 0) addMessage(node.id, 'error', "Box size_y must be greater than 0.");
+                if (isNaN(sz) || sz <= 0) addMessage(node.id, 'error', "Box size_z must be greater than 0.");
+                if (isNaN(nx) || nx < 1) addMessage(node.id, 'error', "Grid division NX must be at least 1.");
+                if (isNaN(ny) || ny < 1) addMessage(node.id, 'error', "Grid division NY must be at least 1.");
+                if (isNaN(nz) || nz < 1) addMessage(node.id, 'error', "Grid division NZ must be at least 1.");
+            } else if (meshSource === 'LS-DYNA Keyword File' || shape === 'LS-DYNA File') {
+                const kFile = node.parameters['k_file'] || '';
+                const impConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'importer');
+                if (!kFile && !impConn) {
+                    addMessage(node.id, 'error', "LS-DYNA mesh source requires specifying a .k file path or connecting an LS-DYNA Importer node.");
+                }
+            }
+        }
+
+        if (node.type === 'FEMFSICoupler3D') {
+            const cfdConn = state.connections.find(c => c.toNode === node.id && (c.toPort === 'cfd' || c.toPort === 'cfd_solver'));
+            if (!cfdConn) {
+                addMessage(node.id, 'error', "No CFD Solver 3D connected to FEM-CFD FSI Coupler 3D.");
+            }
+            const femConn = state.connections.find(c => c.toNode === node.id && (c.toPort === 'fem' || c.toPort === 'fem_domain' || c.toPort === 'fem_solver'));
+            if (!femConn) {
+                addMessage(node.id, 'error', "No FEM Domain 3D connected to FEM-CFD FSI Coupler 3D.");
+            }
+        }
+
         if (node.type === 'MPMObject2D') {
             const matConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'material');
             if (!matConn) {
-                addMessage(node.id, 'error', "No Material connected to MPM Object 2D. An MPM Material (Steel) node is required.");
+                addMessage(node.id, 'error', "No Material connected to MPM Object 2D. A Material or Solid Material node is required.");
             }
             const outConn = state.connections.find(c => c.fromNode === node.id);
             if (!outConn) {
@@ -695,7 +778,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
         if (node.type === 'MPMObject3D') {
             const matConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'material');
             if (!matConn) {
-                addMessage(node.id, 'error', "No Material connected to MPM Object 3D. An MPM Material node is required.");
+                addMessage(node.id, 'error', "No Material connected to MPM Object 3D. A Material or Solid Material node is required.");
             }
             const outConn = state.connections.find(c => c.fromNode === node.id);
             if (!outConn) {
@@ -1082,7 +1165,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             } else {
                 connList.forEach(conn => {
                     const fromNode = state.nodes.find(n => n.id === conn.fromNode);
-                    const solverTypes = ['CFDSolver', 'CFDSolver2D', 'CFDSolver3D', 'MPMDomain2D', 'MPMDomain3D', 'FSICoupler2D', 'FSICoupler3D'];
+                    const solverTypes = ['CFDSolver', 'CFDSolver2D', 'CFDSolver3D', 'MPMDomain2D', 'MPMDomain3D', 'FSICoupler2D', 'FSICoupler3D', 'FEMDomain3D', 'FEMFSICoupler3D'];
                     if (!fromNode || !solverTypes.includes(fromNode.type)) {
                         const connKey = `${conn.fromNode}:${conn.fromPort}->${conn.toNode}:${conn.toPort}`;
                         flawedConnections.set(connKey, "TelemetryText must be connected to a solver or coupler source.");
@@ -1097,19 +1180,19 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             } else {
                 const fromNode = state.nodes.find(n => n.id === conn.fromNode);
                 if (node.type === 'Telemetry3DViewport') {
-                    if (!fromNode || (fromNode.type !== 'CFDSolver3D' && fromNode.type !== 'MPMDomain3D' && fromNode.type !== 'FSICoupler3D')) {
+                    if (!fromNode || (fromNode.type !== 'CFDSolver3D' && fromNode.type !== 'MPMDomain3D' && fromNode.type !== 'FSICoupler3D' && fromNode.type !== 'FEMDomain3D' && fromNode.type !== 'FEMFSICoupler3D')) {
                         const connKey = `${conn.fromNode}:${conn.fromPort}->${conn.toNode}:${conn.toPort}`;
                         flawedConnections.set(connKey, `${node.type} requires a 3D Solver or Coupler source.`);
                         addMessage(node.id, 'error', `${node.type} requires a 3D Solver or Coupler source.`);
                     }
                 } else if (node.type === 'TelemetryGraph' || node.type === 'VirtualGauges') {
-                    if (!fromNode || (fromNode.type !== 'CFDSolver' && fromNode.type !== 'CFDSolver2D' && fromNode.type !== 'CFDSolver3D' && fromNode.type !== 'MPMDomain2D' && fromNode.type !== 'MPMDomain3D' && fromNode.type !== 'FSICoupler2D' && fromNode.type !== 'FSICoupler3D')) {
+                    if (!fromNode || (fromNode.type !== 'CFDSolver' && fromNode.type !== 'CFDSolver2D' && fromNode.type !== 'CFDSolver3D' && fromNode.type !== 'MPMDomain2D' && fromNode.type !== 'MPMDomain3D' && fromNode.type !== 'FSICoupler2D' && fromNode.type !== 'FSICoupler3D' && fromNode.type !== 'FEMDomain3D' && fromNode.type !== 'FEMFSICoupler3D')) {
                         const connKey = `${conn.fromNode}:${conn.fromPort}->${conn.toNode}:${conn.toPort}`;
                         flawedConnections.set(connKey, `${node.type} must be connected to a solver.`);
                         addMessage(node.id, 'error', `${node.type} must be connected to a solver.`);
                     }
                 } else {
-                    if (!fromNode || (fromNode.type !== 'CFDSolver' && fromNode.type !== 'CFDSolver2D' && fromNode.type !== 'CFDSolver3D' && fromNode.type !== 'MPMDomain2D' && fromNode.type !== 'MPMDomain3D' && fromNode.type !== 'FSICoupler2D' && fromNode.type !== 'FSICoupler3D')) {
+                    if (!fromNode || (fromNode.type !== 'CFDSolver' && fromNode.type !== 'CFDSolver2D' && fromNode.type !== 'CFDSolver3D' && fromNode.type !== 'MPMDomain2D' && fromNode.type !== 'MPMDomain3D' && fromNode.type !== 'FSICoupler2D' && fromNode.type !== 'FSICoupler3D' && fromNode.type !== 'FEMDomain3D' && fromNode.type !== 'FEMFSICoupler3D')) {
                         const connKey = `${conn.fromNode}:${conn.fromPort}->${conn.toNode}:${conn.toPort}`;
                         flawedConnections.set(connKey, "Telemetry/Output must be connected to a solver.");
                         addMessage(node.id, 'error', "Telemetry/Output must be connected to a solver.");
