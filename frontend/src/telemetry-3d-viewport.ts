@@ -11,7 +11,15 @@ const DEFAULT_QUANTITY_RANGES: Record<string, [number, number]> = {
     species3: [0.0, 1.0],
     solid: [0.0, 1.0],
     overpressure: [0.0, 101325.0 * 99.0],
-    impulse: [0.0, 10000.0]
+    impulse: [0.0, 10000.0],
+    peak_overpressure: [0.0, 101325.0 * 99.0],
+    peak_impulse: [0.0, 10000.0],
+    vonMises: [0.0, 500000000.0],
+    plasticStrain: [0.0, 1.0],
+    plastic_strain: [0.0, 1.0],
+    damage: [0.0, 1.0],
+    has_failed: [0.0, 1.0],
+    object_id: [0.0, 10.0]
 };
 
 function getFocusedQuantityAndRange(vpNode: any): { quantity: string, min: number, max: number } {
@@ -675,7 +683,7 @@ export class Telemetry3DViewport {
         rateRow.appendChild(document.createTextNode('Refresh Rate:'));
 
         const rateSel = document.createElement('select');
-        rateSel.id = this.getElId('viewport-refresh-rate-sel');
+        rateSel.id = this.getElId('viewport-refresh-rate-sel-matrix');
         this.applySelectStyle(rateSel);
         rateSel.style.width = '120px';
         rateSel.innerHTML = `
@@ -3018,8 +3026,11 @@ export class Telemetry3DViewport {
             peak_overpressure: 'Pa',
             peak_impulse: 'Pa·s',
             vonMises: 'Pa',
+            plasticStrain: 'frac',
             plastic_strain: 'frac',
-            damage: 'frac'
+            damage: 'frac',
+            has_failed: 'frac',
+            object_id: 'ID'
         };
 
         const specs: Array<{
@@ -3207,9 +3218,10 @@ export class Telemetry3DViewport {
             const logScale = params.mpmParticleLogScale === true;
             let minVal = params.mpmParticleMinVal ?? 0.0;
             let maxVal = params.mpmParticleMaxVal ?? 500000000.0;
-            if (autoScale && this.latestEmpiricalRange) {
-                minVal = this.latestEmpiricalRange.min;
-                maxVal = this.latestEmpiricalRange.max;
+            if (autoScale && (this.latestMPMRange || this.latestEmpiricalRange)) {
+                const r = this.latestMPMRange || this.latestEmpiricalRange!;
+                minVal = r.min;
+                maxVal = r.max;
             }
             const unitStr = unitMap[qty] ? ` (${unitMap[qty]})` : '';
             specs.push({
@@ -3248,6 +3260,65 @@ export class Telemetry3DViewport {
                     this.showQuantityPopover(anchorEl, qty, 'mpm', (newQ) => {
                         this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmParticleQuantity: newQ, mpmParticleAutoScale: true });
                         this.worker.postMessage({ type: 'setConfig', data: { mpmParticleQuantity: newQ, mpmParticleAutoScale: true } });
+                        this.syncControls(true);
+                    });
+                }
+            });
+        }
+
+        // 5. FEM Mesh
+        if (params.femShowColorbar === true && params.showFEMMesh !== false) {
+            const qty = params.femQuantity || 'vonMises';
+            const colormap = params.femColormap || 'plasma';
+            const autoScale = params.femAutoScale !== false;
+            const logScale = params.femLogScale === true;
+            let minVal = params.femMinVal ?? 0.0;
+            let maxVal = params.femMaxVal ?? (qty === 'plasticStrain' ? 1.0 : 500000000.0);
+            if (autoScale && (this.latestFEMRange || this.latestEmpiricalRange)) {
+                const r = this.latestFEMRange || this.latestEmpiricalRange!;
+                minVal = r.min;
+                maxVal = r.max;
+            }
+            const unitStr = unitMap[qty] ? ` (${unitMap[qty]})` : '';
+            specs.push({
+                id: 'fem',
+                title: `FEM MESH: ${qty.toUpperCase()}${unitStr}`,
+                quantity: qty,
+                colormap: colormap,
+                autoScale: autoScale,
+                logScale: logScale,
+                minVal: minVal,
+                maxVal: maxVal,
+                onToggleOff: () => {
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { femShowColorbar: false });
+                    this.syncControls(true);
+                },
+                onToggleAuto: () => {
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { femAutoScale: !autoScale });
+                    this.worker.postMessage({ type: 'setConfig', data: { femAutoScale: !autoScale } });
+                    this.syncControls(true);
+                },
+                onToggleLog: () => {
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { femLogScale: !logScale });
+                    this.worker.postMessage({ type: 'setConfig', data: { femLogScale: !logScale } });
+                    this.syncControls(true);
+                },
+                onSelectColormap: (anchorEl: HTMLElement) => {
+                    this.showColormapPopover(anchorEl, colormap, (newCmap) => {
+                        this.stateManager.updateNodeParametersInPlace(vpNode.id, { femColormap: newCmap });
+                        this.worker.postMessage({ type: 'setConfig', data: { femColormap: newCmap } });
+                        this.syncControls(true);
+                    });
+                },
+                onSetMinMax: (minN: number, maxN: number) => {
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { femAutoScale: false, femMinVal: minN, femMaxVal: maxN });
+                    this.worker.postMessage({ type: 'setConfig', data: { femAutoScale: false, femMinVal: minN, femMaxVal: maxN } });
+                    this.syncControls(true);
+                },
+                onSelectQuantity: (anchorEl: HTMLElement) => {
+                    this.showQuantityPopover(anchorEl, qty, 'fem', (newQ) => {
+                        this.stateManager.updateNodeParametersInPlace(vpNode.id, { femQuantity: newQ, femAutoScale: true });
+                        this.worker.postMessage({ type: 'setConfig', data: { femQuantity: newQ, femAutoScale: true } });
                         this.syncControls(true);
                     });
                 }
@@ -3952,6 +4023,51 @@ export class Telemetry3DViewport {
         return null;
     }
 
+    private getActiveLayerContext(vpNode: any): { layer: string, quantity: string, colormap: string } {
+        const state = this.stateManager.getCurrentState();
+        const nodes = state?.nodes || [];
+        const hasFEM = nodes.some(n => n.type === 'FEMDomain3D' || n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D' || n.type === 'FEMFSICoupler3D');
+        const hasMPM = nodes.some(n => n.type === 'MPMDomain3D' || n.type === 'MPMObject3D');
+        const hasCFD = nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'FSICoupler3D');
+        const slices = vpNode?.parameters?.slices || [];
+        const anySliceEnabled = slices.some((s: any) => s.enabled !== false);
+
+        // If CFD has active slices and CFD solver is present, prioritize CFD slice
+        if (anySliceEnabled && hasCFD) {
+            const focusedIdx = vpNode?.parameters?.focusedSliceIndex ?? 0;
+            const slice = slices[focusedIdx] || slices[0] || { quantities: ['pressure'] };
+            const qty = slice.quantities?.[0] || 'pressure';
+            const cmap = vpNode?.parameters?.quantity_colormaps?.[qty] || slice.colormap || vpNode?.parameters?.colormap || 'plasma';
+            return { layer: 'slice', quantity: qty, colormap: cmap };
+        }
+
+        // If FEM is present or FEM mesh is explicitly visible
+        if (hasFEM || (vpNode?.parameters?.showFEMMesh !== false && (vpNode?.parameters?.femSolid !== false || vpNode?.parameters?.femWireframe !== false))) {
+            const qty = vpNode?.parameters?.femQuantity || 'plasticStrain';
+            const cmap = vpNode?.parameters?.femColormap || 'rainbow';
+            return { layer: 'fem', quantity: qty, colormap: cmap };
+        }
+
+        // If MPM is present or MPM particles are visible
+        if (hasMPM || (vpNode?.parameters?.showMPMParticles !== false)) {
+            const qty = vpNode?.parameters?.mpmParticleQuantity || 'vonMises';
+            const cmap = vpNode?.parameters?.mpmParticleColormap || 'plasma';
+            return { layer: 'mpm', quantity: qty, colormap: cmap };
+        }
+
+        // If STL results are active
+        if (vpNode?.parameters?.show_stl !== false && vpNode?.parameters?.stl_show_results !== false) {
+            const qty = vpNode?.parameters?.stl_quantity || 'pressure';
+            const cmap = vpNode?.parameters?.stl_colormap || 'plasma';
+            return { layer: 'stl', quantity: qty, colormap: cmap };
+        }
+
+        // Fallback to focused slice
+        const { quantity } = getFocusedQuantityAndRange(vpNode || { parameters: {} });
+        const cmap = vpNode?.parameters?.colormap || 'plasma';
+        return { layer: 'slice', quantity, colormap: cmap };
+    }
+
 
 
     public sendView3DConfig(): void {
@@ -4252,8 +4368,9 @@ export class Telemetry3DViewport {
         };
 
         const slicesEnabled = (vpNode.parameters.slices || []).some((s: any) => s.enabled !== false);
+        const femVisible = vpNode.parameters.showFEMMesh !== false && (vpNode.parameters.femSolid !== false || vpNode.parameters.femWireframe !== false);
         updateChipStyle('slices', slicesEnabled);
-        updateChipStyle('fem', !!vpNode.parameters.femWireframe);
+        updateChipStyle('fem', femVisible);
         updateChipStyle('mpm', vpNode.parameters.showMPMParticles !== false);
         updateChipStyle('stl', vpNode.parameters.show_stl !== false);
         updateChipStyle('obstacles', vpNode.parameters.show_obstacles === true);
@@ -4261,15 +4378,15 @@ export class Telemetry3DViewport {
         updateChipStyle('gauges', vpNode.parameters.show_gauges !== false);
         updateChipStyle('lighting', vpNode.parameters.lightingEnabled !== false);
 
+        const activeCtx = this.getActiveLayerContext(vpNode);
         const dockQtySel = document.getElementById(this.getElId('viewport-dock-qty-sel')) as HTMLSelectElement;
         if (dockQtySel && dockQtySel.dataset.editing !== 'true' && document.activeElement !== dockQtySel) {
-            const { quantity } = getFocusedQuantityAndRange(vpNode);
-            dockQtySel.value = quantity || 'pressure';
+            dockQtySel.value = activeCtx.quantity || 'pressure';
         }
 
         const dockCmapSel = document.getElementById(this.getElId('viewport-dock-cmap-sel')) as HTMLSelectElement;
         if (dockCmapSel && dockCmapSel.dataset.editing !== 'true' && document.activeElement !== dockCmapSel) {
-            dockCmapSel.value = vpNode.parameters.colormap || 'plasma';
+            dockCmapSel.value = activeCtx.colormap || 'plasma';
         }
 
         // 1. Sync Render Settings
@@ -4281,14 +4398,14 @@ export class Telemetry3DViewport {
 
         const rateVal = Number(vpNode.parameters.refresh_rate ?? 2.0);
 
-        const rateSel = document.getElementById(this.getElId('viewport-refresh-rate-sel')) as HTMLSelectElement;
-        if (rateSel && rateSel.dataset.editing !== 'true' && document.activeElement !== rateSel) {
-            this.selectOptionByNumericValue(rateSel, rateVal);
+        const rateSelMatrix = document.getElementById(this.getElId('viewport-refresh-rate-sel-matrix')) as HTMLSelectElement;
+        if (rateSelMatrix && rateSelMatrix.dataset.editing !== 'true' && document.activeElement !== rateSelMatrix) {
+            this.selectOptionByNumericValue(rateSelMatrix, rateVal);
         }
 
-        const rateSelSlice = document.getElementById(this.getElId('viewport-refresh-rate-sel-slice')) as HTMLSelectElement;
-        if (rateSelSlice && rateSelSlice.dataset.editing !== 'true' && document.activeElement !== rateSelSlice) {
-            this.selectOptionByNumericValue(rateSelSlice, rateVal);
+        const rateSelDock = document.getElementById(this.getElId('viewport-refresh-rate-sel-dock')) as HTMLSelectElement;
+        if (rateSelDock && rateSelDock.dataset.editing !== 'true' && document.activeElement !== rateSelDock) {
+            this.selectOptionByNumericValue(rateSelDock, rateVal);
         }
 
         // FIX 1: Sync lighting/AO checkboxes and sliders from state
@@ -4662,7 +4779,18 @@ export class Telemetry3DViewport {
                     mpmParticleLogScale: vpNode.parameters.mpmParticleLogScale === true,
                     mpmParticleOpacity: vpNode.parameters.mpmParticleOpacity ?? 1.0,
                     mpmParticleMinVal: vpNode.parameters.mpmParticleMinVal ?? 0.0,
-                    mpmParticleMaxVal: vpNode.parameters.mpmParticleMaxVal ?? 500.0e6
+                    mpmParticleMaxVal: vpNode.parameters.mpmParticleMaxVal ?? 500.0e6,
+                    showFEMMesh: vpNode.parameters.showFEMMesh !== false,
+                    femSolid: vpNode.parameters.femSolid !== false,
+                    femWireframe: vpNode.parameters.femWireframe !== false,
+                    femResults: vpNode.parameters.femResults !== false,
+                    femQuantity: vpNode.parameters.femQuantity || 'vonMises',
+                    femColormap: vpNode.parameters.femColormap || 'plasma',
+                    femAutoScale: vpNode.parameters.femAutoScale !== false,
+                    femLogScale: vpNode.parameters.femLogScale === true,
+                    femOpacity: vpNode.parameters.femOpacity ?? 1.0,
+                    femMinVal: vpNode.parameters.femMinVal ?? 0.0,
+                    femMaxVal: vpNode.parameters.femMaxVal ?? 500.0e6
                 }
             });
         }
@@ -5166,7 +5294,18 @@ export class Telemetry3DViewport {
             obstaclesLighting: vpNode.parameters.obstacles_lighting !== false,
             obstaclesOpacity: vpNode.parameters.obstacles_opacity ?? 1.0,
             obstaclesQuantity: obsQty,
-            obstaclesColormap: resObsCmap
+            obstaclesColormap: resObsCmap,
+            showFEMMesh: vpNode.parameters.showFEMMesh !== false,
+            femSolid: vpNode.parameters.femSolid !== false,
+            femWireframe: vpNode.parameters.femWireframe !== false,
+            femResults: vpNode.parameters.femResults !== false,
+            femQuantity: vpNode.parameters.femQuantity || 'vonMises',
+            femColormap: vpNode.parameters.femColormap || 'plasma',
+            femAutoScale: vpNode.parameters.femAutoScale !== false,
+            femLogScale: vpNode.parameters.femLogScale === true,
+            femOpacity: vpNode.parameters.femOpacity ?? 1.0,
+            femMinVal: vpNode.parameters.femMinVal ?? 0.0,
+            femMaxVal: vpNode.parameters.femMaxVal ?? 500.0e6
         };
 
         configData.xmin = xmin;
@@ -6303,11 +6442,16 @@ export class Telemetry3DViewport {
             }
         }));
 
-        layerGroup.appendChild(createToggleChip('fem', '🏗️ FEM', 'Toggle FEM Wireframe Mesh', (active) => {
+        layerGroup.appendChild(createToggleChip('fem', '🏗️ FEM', 'Toggle FEM Mesh', (active) => {
             const vp = this.getViewportNode();
             if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { femWireframe: active });
-                this.worker.postMessage({ type: 'setConfig', data: { femWireframe: active } });
+                const updates: any = { showFEMMesh: active };
+                if (active && vp.parameters.femSolid === false && vp.parameters.femWireframe === false) {
+                    updates.femSolid = true;
+                    updates.femWireframe = true;
+                }
+                this.stateManager.updateNodeParametersInPlace(vp.id, updates);
+                this.worker.postMessage({ type: 'setConfig', data: { showFEMMesh: active, ...updates } });
                 this.syncControls(true);
             }
         }));
@@ -6394,17 +6538,37 @@ export class Telemetry3DViewport {
             <option value="overpressure">Overpressure</option>
             <option value="impulse">Impulse</option>
             <option value="vonMises">von Mises</option>
+            <option value="plasticStrain">Plastic Strain</option>
+            <option value="plastic_strain">Plastic Strain (MPM)</option>
+            <option value="damage">Damage</option>
+            <option value="species1">Species 1</option>
+            <option value="species2">Species 2</option>
+            <option value="species3">Species 3</option>
+            <option value="peak_overpressure">Peak Overpressure</option>
+            <option value="peak_impulse">Peak Impulse</option>
+            <option value="has_failed">Failure</option>
+            <option value="object_id">Object ID</option>
         `;
         this.bindEditingEvents(qtySel, () => {
             const vp = this.getViewportNode();
             if (vp) {
                 const qty = qtySel.value;
                 const slices = (vp.parameters.slices || []).map((s: any) => ({ ...s, quantities: [qty] }));
+                const mpmQ = qty === 'plasticStrain' ? 'plastic_strain' : qty;
+                const femQ = qty === 'plastic_strain' ? 'plasticStrain' : qty;
                 this.stateManager.updateNodeParametersInPlace(vp.id, {
                     slices,
-                    mpmParticleQuantity: qty,
-                    femQuantity: qty,
+                    mpmParticleQuantity: mpmQ,
+                    femQuantity: femQ,
                     stl_quantity: qty
+                });
+                this.worker.postMessage({
+                    type: 'setConfig',
+                    data: {
+                        mpmParticleQuantity: mpmQ,
+                        femQuantity: femQ,
+                        stlQuantity: qty
+                    }
                 });
                 this.updateSlices(slices);
                 this.syncControls(true);
@@ -6428,6 +6592,7 @@ export class Telemetry3DViewport {
             <option value="magma">Magma</option>
             <option value="coolwarm">Coolwarm</option>
             <option value="rainbow">Rainbow</option>
+            <option value="cividis">Cividis</option>
             <option value="grayscale">Grayscale</option>
         `;
         this.bindEditingEvents(cmapSel, () => {
@@ -6439,7 +6604,17 @@ export class Telemetry3DViewport {
                     colormap: cmap,
                     slices,
                     mpmParticleColormap: cmap,
+                    femColormap: cmap,
                     stl_colormap: cmap
+                });
+                this.worker.postMessage({
+                    type: 'setConfig',
+                    data: {
+                        colormap: cmap,
+                        mpmParticleColormap: cmap,
+                        femColormap: cmap,
+                        stlColormap: cmap
+                    }
                 });
                 this.updateSlices(slices);
                 this.syncControls(true);
@@ -6459,7 +6634,7 @@ export class Telemetry3DViewport {
         rightGroup.style.gap = '4px';
 
         const rateSel = document.createElement('select');
-        rateSel.id = this.getElId('viewport-refresh-rate-sel');
+        rateSel.id = this.getElId('viewport-refresh-rate-sel-dock');
         this.applySelectStyle(rateSel);
         rateSel.style.width = '75px';
         rateSel.innerHTML = `

@@ -38,6 +38,13 @@ struct MaterialTable3D {
     float bulk_viscosity_b1{0.06f};       // Linear artificial bulk viscosity coefficient
     float bulk_viscosity_b2{1.20f};       // Quadratic artificial bulk viscosity coefficient
     float timestep_erosion_factor{0.10f}; // Timestep erosion ratio threshold
+
+    // Material Removal & Erosion Criteria (Independent of constitutive failure)
+    bool enable_strain_erosion{false};
+    float erosion_strain{0.50f};          // Plastic strain erosion threshold (ep_bar >= erosion_strain)
+    bool enable_stress_erosion{false};
+    float erosion_stress{600.0e6f};       // Tensile hydrostatic stress threshold (Pa)
+    bool enable_timestep_erosion{false};
 };
 
 struct MPMParticle3D {

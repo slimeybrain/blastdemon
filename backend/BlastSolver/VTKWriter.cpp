@@ -814,6 +814,9 @@ void export_vtu_fem_3d(const std::string& filename, const Blast::FEMSolver3D<T>&
     std::vector<uint8_t> types(num_cells, 12); // VTK_HEXAHEDRON (12)
     std::vector<double> von_mises(num_cells, 0.0);
     std::vector<double> plastic_strain(num_cells, 0.0);
+    std::vector<double> pressure(num_cells, 0.0);
+    std::vector<double> temperature(num_cells, 0.0);
+    std::vector<double> damage(num_cells, 0.0);
 
     int c_idx = 0;
     for (const auto& elem : elements) {
@@ -834,6 +837,9 @@ void export_vtu_fem_3d(const std::string& filename, const Blast::FEMSolver3D<T>&
 
         von_mises[c_idx] = std::sqrt(1.5 * (s00*s00 + s11*s11 + s22*s22 + 2.0*(s01*s01 + s12*s12 + s20*s20)));
         plastic_strain[c_idx] = static_cast<double>(elem.ep_bar);
+        pressure[c_idx] = -mean_s;
+        temperature[c_idx] = static_cast<double>(elem.temperature);
+        damage[c_idx] = static_cast<double>(elem.damage);
         c_idx++;
     }
 
@@ -866,6 +872,15 @@ void export_vtu_fem_3d(const std::string& filename, const Blast::FEMSolver3D<T>&
     out << "        </DataArray>\n";
     out << "        <DataArray type=\"Float64\" Name=\"Plastic_Strain\" format=\"binary\">\n";
     out << "          " << binary_encode(plastic_strain) << "\n";
+    out << "        </DataArray>\n";
+    out << "        <DataArray type=\"Float64\" Name=\"Hydrostatic_Pressure\" format=\"binary\">\n";
+    out << "          " << binary_encode(pressure) << "\n";
+    out << "        </DataArray>\n";
+    out << "        <DataArray type=\"Float64\" Name=\"Temperature\" format=\"binary\">\n";
+    out << "          " << binary_encode(temperature) << "\n";
+    out << "        </DataArray>\n";
+    out << "        <DataArray type=\"Float64\" Name=\"Damage\" format=\"binary\">\n";
+    out << "          " << binary_encode(damage) << "\n";
     out << "        </DataArray>\n";
     out << "      </CellData>\n";
 

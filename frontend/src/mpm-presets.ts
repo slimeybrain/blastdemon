@@ -6,6 +6,12 @@ export interface MPMMaterialParams {
     hardening_modulus: number;
     failure_strain: number;
     tensile_failure_stress: number;
+    enable_strain_erosion?: boolean;
+    erosion_strain?: number;
+    enable_stress_erosion?: boolean;
+    erosion_stress?: number;
+    enable_timestep_erosion?: boolean;
+    timestep_erosion_factor?: number;
     jc_A: number;
     jc_B: number;
     jc_n: number;
@@ -20,6 +26,221 @@ export interface MPMMaterialParams {
     reference: string;
     category: string;
 }
+
+export interface MPMMaterialParamInfo {
+    key: string;
+    label: string;
+    shortDesc: string;
+    unit?: string;
+    section: 'model' | 'elasticity' | 'plasticity' | 'failure' | 'erosion' | 'johnson_cook' | 'mie_gruneisen';
+    tooltip: string;
+}
+
+export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
+    'material_model': {
+        key: 'material_model',
+        label: 'Material Model',
+        shortDesc: 'Constitutive formulation',
+        section: 'model',
+        tooltip: 'Selects the constitutive formulation (Hypoelastic linear hardening vs Johnson-Cook + Mie-Grüneisen shock EOS).'
+    },
+    'preset': {
+        key: 'preset',
+        label: 'Material Preset',
+        shortDesc: 'Pre-calibrated empirical parameters',
+        section: 'model',
+        tooltip: 'Loads calibrated material parameters from published shock physics literature.'
+    },
+    'density': {
+        key: 'density',
+        label: 'Density',
+        shortDesc: 'Solid mass density (ρ₀)',
+        unit: 'kg/m³',
+        section: 'elasticity',
+        tooltip: 'Reference uncompressed solid mass density (rho_0) in kg/m³ for inertia, mass, and shock impedance.'
+    },
+    'youngs_modulus': {
+        key: 'youngs_modulus',
+        label: 'Young\'s Modulus (E)',
+        shortDesc: 'Elastic tensile stiffness',
+        unit: 'Pa',
+        section: 'elasticity',
+        tooltip: 'Linear elastic tensile modulus E (Pa) - governs elastic stiffness before yielding.'
+    },
+    'poissons_ratio': {
+        key: 'poissons_ratio',
+        label: 'Poisson\'s Ratio (ν)',
+        shortDesc: 'Lateral contraction ratio',
+        unit: 'dim',
+        section: 'elasticity',
+        tooltip: 'Poisson\'s ratio nu - ratio of transverse contraction to axial extension. Establishes shear modulus G.'
+    },
+    'yield_stress': {
+        key: 'yield_stress',
+        label: 'Yield Stress (σ_y0)',
+        shortDesc: 'Static initial yield limit',
+        unit: 'Pa',
+        section: 'plasticity',
+        tooltip: 'Static initial yield stress (Pa) where reversible elastic strain ends and plastic flow begins.'
+    },
+    'hardening_modulus': {
+        key: 'hardening_modulus',
+        label: 'Hardening Modulus (H)',
+        shortDesc: 'Linear plastic tangent slope',
+        unit: 'Pa',
+        section: 'plasticity',
+        tooltip: 'Linear plastic tangent slope H (Pa) for work hardening (Stress = Yield_Stress + H * ep).'
+    },
+    'failure_strain': {
+        key: 'failure_strain',
+        label: 'Failure Strain (ε_f)',
+        shortDesc: 'Plastic fracture threshold',
+        unit: 'dim',
+        section: 'failure',
+        tooltip: 'Equivalent plastic strain threshold ep_f where ductile fracture occurs and shear resistance is lost.'
+    },
+    'tensile_failure_stress': {
+        key: 'tensile_failure_stress',
+        label: 'Tensile Limit / Spall (σ_t)',
+        shortDesc: 'Hydrodynamic spallation cutoff',
+        unit: 'Pa',
+        section: 'failure',
+        tooltip: 'Maximum allowable hydrostatic tensile stress (Pa) before cavitation / spall rupture occurs.'
+    },
+    'enable_strain_erosion': {
+        key: 'enable_strain_erosion',
+        label: 'Enable Strain Erosion',
+        shortDesc: 'Delete element when plastic strain exceeds threshold',
+        section: 'erosion',
+        tooltip: 'Erode (delete) FEM elements when their accumulated equivalent plastic strain exceeds the erosion strain threshold.'
+    },
+    'erosion_strain': {
+        key: 'erosion_strain',
+        label: 'Erosion Strain (ε_ero)',
+        shortDesc: 'Plastic strain erosion cutoff',
+        unit: 'dim',
+        section: 'erosion',
+        tooltip: 'Equivalent plastic strain threshold ep_bar at or above which the element is eroded and deleted from the active mesh.'
+    },
+    'enable_stress_erosion': {
+        key: 'enable_stress_erosion',
+        label: 'Enable Stress Erosion',
+        shortDesc: 'Delete element under hydrostatic tensile rupture',
+        section: 'erosion',
+        tooltip: 'Erode (delete) FEM elements when mean tensile stress exceeds the tensile erosion threshold.'
+    },
+    'erosion_stress': {
+        key: 'erosion_stress',
+        label: 'Erosion Tensile Stress (σ_ero)',
+        shortDesc: 'Tensile stress erosion cutoff',
+        unit: 'Pa',
+        section: 'erosion',
+        tooltip: 'Maximum allowable hydrostatic mean tensile stress (Pa) before element is eroded and deleted.'
+    },
+    'enable_timestep_erosion': {
+        key: 'enable_timestep_erosion',
+        label: 'Enable Timestep Erosion',
+        shortDesc: 'Delete distorted elements choking Courant dt',
+        section: 'erosion',
+        tooltip: 'Erode highly deformed or inverted elements whose stable Courant time step drops below the fraction threshold of its initial time step.'
+    },
+    'timestep_erosion_factor': {
+        key: 'timestep_erosion_factor',
+        label: 'Timestep Erosion Factor (η)',
+        shortDesc: 'Courant step erosion ratio dt/dt0',
+        unit: 'dim',
+        section: 'erosion',
+        tooltip: 'Fraction of initial element time step dt0 below which severe distortion triggers element erosion (default 0.10).'
+    },
+    'jc_A': {
+        key: 'jc_A',
+        label: 'JC A: Base Yield Stress',
+        shortDesc: 'Quasi-static yield strength (A)',
+        unit: 'Pa',
+        section: 'johnson_cook',
+        tooltip: 'Johnson-Cook base yield strength A (Pa) at reference strain rate and room temperature.'
+    },
+    'jc_B': {
+        key: 'jc_B',
+        label: 'JC B: Hardening Modulus',
+        shortDesc: 'Strain hardening coefficient (B)',
+        unit: 'Pa',
+        section: 'johnson_cook',
+        tooltip: 'Johnson-Cook strain hardening coefficient B (Pa) in the flow stress term (A + B * ep^n).'
+    },
+    'jc_n': {
+        key: 'jc_n',
+        label: 'JC n: Hardening Exponent',
+        shortDesc: 'Power-law hardening curvature (n)',
+        unit: 'dim',
+        section: 'johnson_cook',
+        tooltip: 'Johnson-Cook work-hardening exponent n (parabolic hardening when n < 1).'
+    },
+    'jc_C': {
+        key: 'jc_C',
+        label: 'JC C: Strain Rate Coeff',
+        shortDesc: 'Dynamic rate sensitivity (C)',
+        unit: 'dim',
+        section: 'johnson_cook',
+        tooltip: 'Johnson-Cook strain rate sensitivity coefficient C - dynamic strengthening under blast rates.'
+    },
+    'jc_m': {
+        key: 'jc_m',
+        label: 'JC m: Thermal Softening',
+        shortDesc: 'Softening rate as T → T_melt (m)',
+        unit: 'dim',
+        section: 'johnson_cook',
+        tooltip: 'Johnson-Cook thermal softening exponent m - governs flow stress drop as temperature rises.'
+    },
+    'T_melt': {
+        key: 'T_melt',
+        label: 'T Melt: Melting Point',
+        shortDesc: 'Zero shear strength temperature',
+        unit: 'K',
+        section: 'johnson_cook',
+        tooltip: 'Melting temperature T_melt (K) - yield stress drops to 0 at or above this temperature.'
+    },
+    'T_room': {
+        key: 'T_room',
+        label: 'T Room: Reference Temp',
+        shortDesc: 'Ambient temperature baseline',
+        unit: 'K',
+        section: 'johnson_cook',
+        tooltip: 'Reference ambient temperature T_room (K) used to calculate homologous temperature T*.'
+    },
+    'Cp': {
+        key: 'Cp',
+        label: 'Cp: Specific Heat',
+        shortDesc: 'Plastic work to heat conversion',
+        unit: 'J/(kg·K)',
+        section: 'johnson_cook',
+        tooltip: 'Specific heat capacity Cp (J/kg·K) - converts 90% of plastic work into adiabatic heating.'
+    },
+    'mg_gamma0': {
+        key: 'mg_gamma0',
+        label: 'MG Γ₀: Grüneisen Coeff',
+        shortDesc: 'Thermal pressure coupling (Γ₀)',
+        unit: 'dim',
+        section: 'mie_gruneisen',
+        tooltip: 'Grüneisen parameter Gamma_0 (dimensionless) - couples thermal internal energy to volumetric shock pressure.'
+    },
+    'mg_c0': {
+        key: 'mg_c0',
+        label: 'MG C₀: Bulk Sound Speed',
+        shortDesc: 'Zero-pressure shock speed (C₀)',
+        unit: 'm/s',
+        section: 'mie_gruneisen',
+        tooltip: 'Bulk sound speed in uncompressed solid C_0 (m/s) in the shock Hugoniot equation (Us = C_0 + s * Up).'
+    },
+    'mg_s': {
+        key: 'mg_s',
+        label: 'MG s: Hugoniot Slope',
+        shortDesc: 'Shock velocity vs particle velocity slope (s)',
+        unit: 'dim',
+        section: 'mie_gruneisen',
+        tooltip: 'Dimensionless slope s of the shock velocity vs. particle velocity Hugoniot curve (Us = C_0 + s * Up).'
+    }
+};
 
 export interface MPMCategoryGroup {
     category: string;

@@ -43,13 +43,14 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'scale_x', 'scale_y', 'scale_z',
         'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
         'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
-        'failure_strain', 'tensile_failure_stress',
+        'failure_strain', 'tensile_failure_stress', 'erosion_strain', 'erosion_stress',
         'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
         'mg_gamma0', 'mg_c0', 'mg_s',
         'ppc',
         'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
         // FEM keys
-        'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping'
+        'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
+        'femMinVal', 'femMaxVal', 'femOpacity'
     ];
 
 

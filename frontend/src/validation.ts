@@ -75,6 +75,7 @@ export function isParameterRelevant(node: Node, key: string): boolean {
         const matModel = node.parameters['material_model'] || 'Hypoelastic';
         const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
         if (matModel === 'Hypoelastic' && jcKeys.includes(key)) return false;
+        if (matModel === 'Johnson-Cook + Mie-Grüneisen' && (key === 'yield_stress' || key === 'hardening_modulus')) return false;
     } else if (node.type === 'DomainMesh') {
         const dim = node.parameters['dimension'] || '1D';
         if (dim === '1D' && ['y_min_bc', 'y_max_bc', 'z_min_bc', 'z_max_bc'].includes(key)) return false;

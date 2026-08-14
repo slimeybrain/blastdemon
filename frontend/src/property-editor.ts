@@ -2,7 +2,7 @@ import { StateManager, calculateRefinementMeshInfo, getMeshDisplayHTML, getMPMDi
 import { Node } from './types.js';
 import { validateSimulationState } from './validation.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
-import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_PRESETS, MPM_MATERIAL_CATEGORIES } from './mpm-presets.js';
+import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_PRESETS, MPM_MATERIAL_CATEGORIES, MPM_MATERIAL_PARAM_INFO } from './mpm-presets.js';
 
 export class PropertyEditor {
     public container: HTMLElement;
@@ -340,9 +340,28 @@ export class PropertyEditor {
                 node.parameters['preset'] = 'Structural Steel (A36)';
             }
             const matModel = node.parameters['material_model'];
-            const baseKeys = ['material_model', 'preset', 'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus', 'failure_strain', 'tensile_failure_stress'];
-            const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
-            paramKeys = (matModel === 'Johnson-Cook + Mie-Grüneisen') ? [...baseKeys, ...jcKeys] : baseKeys;
+            if (matModel === 'Johnson-Cook + Mie-Grüneisen') {
+                paramKeys = [
+                    'material_model', 'preset',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'failure_strain', 'tensile_failure_stress',
+                    'enable_strain_erosion', 'erosion_strain',
+                    'enable_stress_erosion', 'erosion_stress',
+                    'enable_timestep_erosion', 'timestep_erosion_factor',
+                    'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
+                    'mg_gamma0', 'mg_c0', 'mg_s'
+                ];
+            } else {
+                paramKeys = [
+                    'material_model', 'preset',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'yield_stress', 'hardening_modulus',
+                    'failure_strain', 'tensile_failure_stress',
+                    'enable_strain_erosion', 'erosion_strain',
+                    'enable_stress_erosion', 'erosion_stress',
+                    'enable_timestep_erosion', 'timestep_erosion_factor'
+                ];
+            }
         } else if (node.type === 'MPMDomain2D') {
             const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
             paramKeys = ['precision', 'transfer_scheme', 'velocity_scheme', 'space_time_scheme', 'smooth_plastic_strain'];
@@ -431,6 +450,29 @@ export class PropertyEditor {
                 const matModel = node.parameters['material_model'] || 'Hypoelastic';
                 const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
                 if (matModel === 'Hypoelastic' && jcKeys.includes(key)) continue;
+                if (matModel === 'Johnson-Cook + Mie-Grüneisen' && (key === 'yield_stress' || key === 'hardening_modulus')) continue;
+
+                let sectionTitle: string | null = null;
+                if (key === 'density') sectionTitle = 'ELASTICITY & MASS';
+                else if (key === 'yield_stress') sectionTitle = 'PLASTIC YIELD & HARDENING';
+                else if (key === 'failure_strain') sectionTitle = 'CONSTITUTIVE FAILURE & SPALL';
+                else if (key === 'enable_strain_erosion') sectionTitle = 'ELEMENT EROSION & DELETION';
+                else if (key === 'jc_A') sectionTitle = 'JOHNSON-COOK VISCOPLASTICITY';
+                else if (key === 'mg_gamma0') sectionTitle = 'MIE-GRÜNEISEN SHOCK EOS';
+
+                if (sectionTitle) {
+                    const secHeader = document.createElement('div');
+                    secHeader.style.fontWeight = 'bold';
+                    secHeader.style.fontSize = '11px';
+                    secHeader.style.color = '#ff79c6';
+                    secHeader.style.letterSpacing = '0.5px';
+                    secHeader.style.marginTop = '14px';
+                    secHeader.style.marginBottom = '6px';
+                    secHeader.style.paddingBottom = '3px';
+                    secHeader.style.borderBottom = '1px solid rgba(255, 121, 198, 0.25)';
+                    secHeader.textContent = sectionTitle;
+                    form.appendChild(secHeader);
+                }
             }
             if (node.type === 'Material') {
 
@@ -509,6 +551,17 @@ export class PropertyEditor {
             else if (key === 'qty_unreacted') labelText = 'Unreacted Explosive (Alpha2)';
             else if (key === 'flip_blend') labelText = 'FLIP BLEND (% FLIP / % PIC)';
             label.textContent = labelText;
+
+            if (node.type === 'MPMMaterialSteel' && MPM_MATERIAL_PARAM_INFO[key]) {
+                const info = MPM_MATERIAL_PARAM_INFO[key];
+                label.title = info.tooltip;
+                label.style.cursor = 'help';
+                label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
+                    `<span style="font-weight:600; color:#ddd;">${info.label.toUpperCase()}</span>` +
+                    (info.unit && info.unit !== 'dim' ? `<span style="font-size:10px; color:#569cd6; font-family:monospace; background:rgba(86,156,214,0.1); padding:1px 4px; border-radius:3px;">${info.unit}</span>` : '') +
+                    `</div>` +
+                    `<div style="font-size:10px; color:#888; margin-top:1px; margin-bottom:2px;">${info.shortDesc}</div>`;
+            }
             row.appendChild(label);
 
             if (key === 'stl_file') {
@@ -545,6 +598,9 @@ export class PropertyEditor {
             } else {
                 const input = this.createInputElement(node, key, value);
                 input.dataset.key = key;
+                if (node.type === 'MPMMaterialSteel' && MPM_MATERIAL_PARAM_INFO[key]) {
+                    input.title = MPM_MATERIAL_PARAM_INFO[key].tooltip;
+                }
                 row.appendChild(input);
             }
             form.appendChild(row);
@@ -912,6 +968,12 @@ export class PropertyEditor {
             const mpmSizeEl = this.createInputElement(node, 'mpmParticleSize', node.parameters['mpmParticleSize'] ?? 4.0);
             addRowToPanel('mpmParticleSize', 'MPM PARTICLE POINT SIZE', mpmSizeEl, 0);
 
+            const femQtyEl = this.createInputElement(node, 'femQuantity', node.parameters['femQuantity'] ?? 'vonMises');
+            addRowToPanel('femQuantity', 'FEM MESH QTY', femQtyEl, 0);
+
+            const femCmapEl = this.createInputElement(node, 'femColormap', node.parameters['femColormap'] ?? 'plasma');
+            addRowToPanel('femColormap', 'FEM MESH COLORMAP', femCmapEl, 0);
+
             const cbGrid = document.createElement('div');
             cbGrid.style.display = 'grid';
             cbGrid.style.gridTemplateColumns = 'repeat(2, 1fr)';
@@ -932,6 +994,13 @@ export class PropertyEditor {
             cbGrid.appendChild(createCheckboxField('gauge_solid', node.parameters['gauge_solid'] !== false, 'Gauge Solid Spheres'));
             cbGrid.appendChild(createCheckboxField('showMPMParticles', node.parameters['showMPMParticles'] !== false, 'Show MPM Particles'));
             cbGrid.appendChild(createCheckboxField('mpmParticleLogScale', !!node.parameters['mpmParticleLogScale'], 'MPM Log Scale'));
+            cbGrid.appendChild(createCheckboxField('showFEMMesh', node.parameters['showFEMMesh'] !== false, 'Show FEM Mesh'));
+            cbGrid.appendChild(createCheckboxField('femSolid', node.parameters['femSolid'] !== false, 'FEM Solid Facets'));
+            cbGrid.appendChild(createCheckboxField('femWireframe', node.parameters['femWireframe'] !== false, 'FEM Wireframe'));
+            cbGrid.appendChild(createCheckboxField('femResults', node.parameters['femResults'] !== false, 'FEM Results Map'));
+            cbGrid.appendChild(createCheckboxField('femAutoScale', node.parameters['femAutoScale'] !== false, 'FEM Auto Scale'));
+            cbGrid.appendChild(createCheckboxField('femLogScale', !!node.parameters['femLogScale'], 'FEM Log Scale'));
+            cbGrid.appendChild(createCheckboxField('femShowColorbar', !!node.parameters['femShowColorbar'], 'FEM Show Colorbar'));
             panels[0].appendChild(cbGrid);
 
             const opacRow = document.createElement('div');
@@ -1025,6 +1094,29 @@ export class PropertyEditor {
             };
             mpmOpacRow.appendChild(mpmOpacSlider);
             panels[0].appendChild(mpmOpacRow);
+
+            const femOpacRow = document.createElement('div');
+            femOpacRow.style.marginTop = '8px';
+            const femOpacLabel = document.createElement('label');
+            femOpacLabel.style.display = 'block';
+            femOpacLabel.style.fontSize = 'var(--font-sm)';
+            femOpacLabel.style.color = '#888';
+            femOpacLabel.textContent = `FEM OPACITY: ${Number(node.parameters['femOpacity'] ?? 1.0).toFixed(2)}`;
+            femOpacRow.appendChild(femOpacLabel);
+
+            const femOpacSlider = document.createElement('input');
+            femOpacSlider.type = 'range';
+            femOpacSlider.min = '0';
+            femOpacSlider.max = '1';
+            femOpacSlider.step = '0.05';
+            femOpacSlider.value = String(node.parameters['femOpacity'] ?? 1.0);
+            femOpacSlider.style.width = '100%';
+            femOpacSlider.oninput = () => {
+                femOpacLabel.textContent = `FEM OPACITY: ${Number(femOpacSlider.value).toFixed(2)}`;
+                this.updateParameter('femOpacity', Number(femOpacSlider.value));
+            };
+            femOpacRow.appendChild(femOpacSlider);
+            panels[0].appendChild(femOpacRow);
 
             const gridOpacRow = document.createElement('div');
             gridOpacRow.style.marginTop = '8px';
@@ -1260,21 +1352,23 @@ export class PropertyEditor {
             'scale_x', 'scale_y', 'scale_z',
             'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
-            'failure_strain', 'tensile_failure_stress',
+            'failure_strain', 'tensile_failure_stress', 'erosion_strain', 'erosion_stress',
             'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
             'mg_gamma0', 'mg_c0', 'mg_s',
             'ppc',
             'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
             // FEM keys
-            'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping'
+            'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
+            'femMinVal', 'femMaxVal', 'femOpacity'
         ];
 
         const dropdowns: Record<string, string[]> = {
             'preset': [...MPM_MATERIAL_PRESET_NAMES],
             'material_model': ['Hypoelastic', 'Johnson-Cook + Mie-Grüneisen'],
             'mpmParticleQuantity': ['vonMises', 'pressure', 'velocity', 'density', 'plastic_strain', 'damage', 'has_failed', 'object_id'],
-
             'mpmParticleColormap': ['plasma', 'viridis', 'coolwarm', 'rainbow', 'cividis', 'grayscale'],
+            'femQuantity': ['vonMises', 'plasticStrain', 'pressure', 'velocity', 'damage'],
+            'femColormap': ['plasma', 'viridis', 'coolwarm', 'rainbow', 'cividis', 'grayscale'],
             'telemetry_mode': ['Enabled', 'Throttled (1 Hz)', 'Throttled (0.2 Hz)', 'Disabled'],
             'enable_gauges': ['Enabled', 'Disabled'],
             'enable_vtk': ['Disabled', 'Enabled'],

@@ -149,6 +149,7 @@ if(BUILD_TESTS)
     add_test_executable_if_exists(test_fem_3d_large_rotation backend/BlastSolver/test_fem_3d_large_rotation.cpp)
     add_test_executable_if_exists(test_fem_3d_erosion_stability backend/BlastSolver/test_fem_3d_erosion_stability.cpp)
     add_test_executable_if_exists(test_fem_3d_ballistic_impact backend/BlastSolver/test_fem_3d_ballistic_impact.cpp)
+    add_test_executable_if_exists(test_fem_3d_ballistic_compare backend/BlastSolver/test_fem_3d_ballistic_compare.cu)
 endif()
 
 

@@ -181,6 +181,20 @@ void FEMContact3D<T>::updateDynamicSurfaceNormals(FEMSolver3D<T>& solver) {
             facet.area = static_cast<T>(0.5f) * len;
         }
 
+        T min_fx = std::min({n0.x[0], n1.x[0], n2.x[0], n3.x[0]});
+        T max_fx = std::max({n0.x[0], n1.x[0], n2.x[0], n3.x[0]});
+        T min_fy = std::min({n0.x[1], n1.x[1], n2.x[1], n3.x[1]});
+        T max_fy = std::max({n0.x[1], n1.x[1], n2.x[1], n3.x[1]});
+        T min_fz = std::min({n0.x[2], n1.x[2], n2.x[2], n3.x[2]});
+        T max_fz = std::max({n0.x[2], n1.x[2], n2.x[2], n3.x[2]});
+        T margin = static_cast<T>(0.8f) * std::sqrt(facet.area > static_cast<T>(1.0e-12f) ? facet.area : static_cast<T>(1.0e-4f));
+        facet.bbox_min[0] = min_fx - margin;
+        facet.bbox_min[1] = min_fy - margin;
+        facet.bbox_min[2] = min_fz - margin;
+        facet.bbox_max[0] = max_fx + margin;
+        facet.bbox_max[1] = max_fy + margin;
+        facet.bbox_max[2] = max_fz + margin;
+
         for (int k = 0; k < 4; ++k) {
             int nid = facet.node_ids[k];
             if (nid >= 0 && nid < static_cast<int>(nodes.size())) {
@@ -265,26 +279,12 @@ void FEMContact3D<T>::applyPenaltyForces(FEMSolver3D<T>& solver, T dt) {
             }
         }
 
+        // Fast bounding box reject using precomputed bounds
+        if (node.x[0] < facet.bbox_min[0] || node.x[0] > facet.bbox_max[0] ||
+            node.x[1] < facet.bbox_min[1] || node.x[1] > facet.bbox_max[1] ||
+            node.x[2] < facet.bbox_min[2] || node.x[2] > facet.bbox_max[2]) continue;
+
         T v0[3] = {nodes[facet.node_ids[0]].x[0], nodes[facet.node_ids[0]].x[1], nodes[facet.node_ids[0]].x[2]};
-
-        T min_fx = v0[0], max_fx = v0[0];
-        T min_fy = v0[1], max_fy = v0[1];
-        T min_fz = v0[2], max_fz = v0[2];
-        for (int k = 1; k < 4; ++k) {
-            int nid = facet.node_ids[k];
-            min_fx = std::min(min_fx, nodes[nid].x[0]); max_fx = std::max(max_fx, nodes[nid].x[0]);
-            min_fy = std::min(min_fy, nodes[nid].x[1]); max_fy = std::max(max_fy, nodes[nid].x[1]);
-            min_fz = std::min(min_fz, nodes[nid].x[2]); max_fz = std::max(max_fz, nodes[nid].x[2]);
-        }
-        T margin = static_cast<T>(0.3f) * std::sqrt(facet.area > static_cast<T>(1.0e-12f) ? facet.area : static_cast<T>(1.0e-4f));
-        min_fx -= margin; max_fx += margin;
-        min_fy -= margin; max_fy += margin;
-        min_fz -= margin; max_fz += margin;
-
-        if (node.x[0] < min_fx || node.x[0] > max_fx ||
-            node.x[1] < min_fy || node.x[1] > max_fy ||
-            node.x[2] < min_fz || node.x[2] > max_fz) continue;
-
         T v1[3] = {nodes[facet.node_ids[1]].x[0], nodes[facet.node_ids[1]].x[1], nodes[facet.node_ids[1]].x[2]};
         T v2[3] = {nodes[facet.node_ids[2]].x[0], nodes[facet.node_ids[2]].x[1], nodes[facet.node_ids[2]].x[2]};
         T v3[3] = {nodes[facet.node_ids[3]].x[0], nodes[facet.node_ids[3]].x[1], nodes[facet.node_ids[3]].x[2]};
@@ -312,9 +312,8 @@ void FEMContact3D<T>::applyPenaltyForces(FEMSolver3D<T>& solver, T dt) {
             v_param = (len3_sq > static_cast<T>(1.0e-12f)) ? ((dx_v0[0]*e3[0] + dx_v0[1]*e3[1] + dx_v0[2]*e3[2]) / len3_sq) : static_cast<T>(0.5f);
         }
 
-        // Expanded candidate bounds tolerance ([-0.20, 1.20]) to prevent dropout gaps across convex edges
-        if (u_param < static_cast<T>(-0.20f) || u_param > static_cast<T>(1.20f) ||
-            v_param < static_cast<T>(-0.20f) || v_param > static_cast<T>(1.20f)) continue;
+        if (u_param < static_cast<T>(-0.05f) || u_param > static_cast<T>(1.05f) ||
+            v_param < static_cast<T>(-0.05f) || v_param > static_cast<T>(1.05f)) continue;
 
         T u_clamped = std::max(static_cast<T>(0.0f), std::min(static_cast<T>(1.0f), u_param));
         T v_clamped = std::max(static_cast<T>(0.0f), std::min(static_cast<T>(1.0f), v_param));
@@ -335,33 +334,30 @@ void FEMContact3D<T>::applyPenaltyForces(FEMSolver3D<T>& solver, T dt) {
         // True geometric distance vector from exact projected surface point
         T dx_surf[3] = {node.x[0] - x_surf[0], node.x[1] - x_surf[1], node.x[2] - x_surf[2]};
 
-        // Bilinearly interpolate smooth contact normal from 4 corner nodal surface normals
-        T n_smooth[3] = {static_cast<T>(0.0f), static_cast<T>(0.0f), static_cast<T>(0.0f)};
-        for (int k = 0; k < 4; ++k) {
-            n_smooth[0] += N_shape[k] * m_facet_corner_normals[candidate.facet_idx][k][0];
-            n_smooth[1] += N_shape[k] * m_facet_corner_normals[candidate.facet_idx][k][1];
-            n_smooth[2] += N_shape[k] * m_facet_corner_normals[candidate.facet_idx][k][2];
-        }
-        T n_smooth_len = std::sqrt(n_smooth[0]*n_smooth[0] + n_smooth[1]*n_smooth[1] + n_smooth[2]*n_smooth[2]);
-        T contact_normal[3];
-        if (n_smooth_len > static_cast<T>(1.0e-12f)) {
-            contact_normal[0] = n_smooth[0] / n_smooth_len;
-            contact_normal[1] = n_smooth[1] / n_smooth_len;
-            contact_normal[2] = n_smooth[2] / n_smooth_len;
-        } else {
-            contact_normal[0] = facet.normal[0];
-            contact_normal[1] = facet.normal[1];
-            contact_normal[2] = facet.normal[2];
-        }
+        T contact_normal[3] = {facet.normal[0], facet.normal[1], facet.normal[2]};
 
         // Exact penetration depth along smooth surface contact normal
         T penetration = -(dx_surf[0]*contact_normal[0] + dx_surf[1]*contact_normal[1] + dx_surf[2]*contact_normal[2]);
 
         T h_elem = std::sqrt(facet.area > static_cast<T>(1.0e-24f) ? facet.area : static_cast<T>(1.0e-24f));
-        T max_penetration = static_cast<T>(3.0f) * h_elem;
+        const auto& elements = solver.getElements();
+        if (facet.element_id >= 0 && facet.element_id < static_cast<int>(elements.size())) {
+            T elem_V = elements[facet.element_id].V;
+            if (elem_V > static_cast<T>(1.0e-30f) && facet.area > static_cast<T>(1.0e-24f)) {
+                h_elem = elem_V / facet.area;
+            }
+        }
+        T max_penetration = static_cast<T>(0.35f) * h_elem;
+
+        // Tangential offset check: Ensure node is physically over the facet and not far off the edge
+        T dx_t0 = dx_surf[0] + penetration * contact_normal[0];
+        T dx_t1 = dx_surf[1] + penetration * contact_normal[1];
+        T dx_t2 = dx_surf[2] + penetration * contact_normal[2];
+        T d_tangent_sq = dx_t0*dx_t0 + dx_t1*dx_t1 + dx_t2*dx_t2;
+        if (d_tangent_sq > static_cast<T>(0.04f) * h_elem * h_elem) continue;
 
         if (penetration > static_cast<T>(0.0f) && penetration <= max_penetration) {
-            T eff_penetration = std::min(penetration, static_cast<T>(1.5f) * h_elem);
+            T eff_penetration = std::min(penetration, static_cast<T>(0.30f) * h_elem);
             const auto& elements = solver.getElements();
             const auto& materials = solver.getMaterialTables();
 

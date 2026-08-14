@@ -27,17 +27,11 @@ std::vector<std::string> LSDynaReader3D<T>::splitLine(const std::string& line) c
             tokens.push_back(trim(token));
         }
     } else {
-        // Fixed 10-character fields or whitespace free-format
-        if (line.length() >= 10) {
-            for (size_t i = 0; i < line.length(); i += 10) {
-                tokens.push_back(trim(line.substr(i, 10)));
-            }
-        } else {
-            std::stringstream ss(line);
-            std::string token;
-            while (ss >> token) {
-                tokens.push_back(trim(token));
-            }
+        // Whitespace free-format
+        std::stringstream ss(line);
+        std::string token;
+        while (ss >> token) {
+            tokens.push_back(trim(token));
         }
     }
     return tokens;
@@ -45,18 +39,16 @@ std::vector<std::string> LSDynaReader3D<T>::splitLine(const std::string& line) c
 
 template <typename T>
 T LSDynaReader3D<T>::parseFieldVal(const std::string& line, int field_idx, T default_val) const {
-    if (line.find(',') != std::string::npos) {
-        std::vector<std::string> tokens = splitLine(line);
-        if (field_idx >= 0 && field_idx < static_cast<int>(tokens.size()) && !tokens[field_idx].empty()) {
-            try { return static_cast<T>(std::stod(tokens[field_idx])); } catch (...) {}
-        }
-    } else {
-        size_t start = field_idx * 10;
-        if (start < line.length()) {
-            std::string sub = trim(line.substr(start, std::min<size_t>(10, line.length() - start)));
-            if (!sub.empty()) {
-                try { return static_cast<T>(std::stod(sub)); } catch (...) {}
-            }
+    std::vector<std::string> tokens = splitLine(line);
+    if (field_idx >= 0 && field_idx < static_cast<int>(tokens.size()) && !tokens[field_idx].empty()) {
+        try { return static_cast<T>(std::stod(tokens[field_idx])); } catch (...) {}
+    }
+    // Fixed 10-character columns fallback (for fixed-format cards with blank fields)
+    size_t start = field_idx * 10;
+    if (start < line.length()) {
+        std::string sub = trim(line.substr(start, std::min<size_t>(10, line.length() - start)));
+        if (!sub.empty()) {
+            try { return static_cast<T>(std::stod(sub)); } catch (...) {}
         }
     }
     return default_val;
@@ -177,6 +169,7 @@ bool LSDynaReader3D<T>::parseStream(
             out_default_mat.poissons_ratio = static_cast<float>(pr);
         } else if (current_keyword.rfind("*MAT_JOHNSON_COOK", 0) == 0 || current_keyword.rfind("*MAT_015", 0) == 0) {
             // Card 1: MID, RO, E, PR, A, B, N, C
+            out_default_mat.material_model = MPMMaterialModel::JohnsonCookMieGruneisen;
             out_default_mat.density = static_cast<float>(parseFieldVal(line, 1, 7850.0f));
             out_default_mat.youngs_modulus = static_cast<float>(parseFieldVal(line, 2, 210.0e9f));
             out_default_mat.poissons_ratio = static_cast<float>(parseFieldVal(line, 3, 0.30f));
@@ -184,6 +177,37 @@ bool LSDynaReader3D<T>::parseStream(
             out_default_mat.jc_B = static_cast<float>(parseFieldVal(line, 5, 510.0e6f));
             out_default_mat.jc_n = static_cast<float>(parseFieldVal(line, 6, 0.26f));
             out_default_mat.jc_C = static_cast<float>(parseFieldVal(line, 7, 0.014f));
+
+            // Card 2: M, TM, TR, CP, PC, SPALL, ...
+            std::streampos pos = file.tellg();
+            std::string line2;
+            while (std::getline(file, line2)) {
+                std::string trimmed2 = trim(line2);
+                if (trimmed2.empty()) continue;
+                if (trimmed2[0] == '$') continue;
+                if (trimmed2[0] == '*') {
+                    file.seekg(pos);
+                    break;
+                }
+                out_default_mat.jc_m = static_cast<float>(parseFieldVal(line2, 0, 1.03f));
+                out_default_mat.T_melt = static_cast<float>(parseFieldVal(line2, 1, 1793.0f));
+                out_default_mat.T_room = static_cast<float>(parseFieldVal(line2, 2, 293.0f));
+                out_default_mat.Cp = static_cast<float>(parseFieldVal(line2, 3, 477.0f));
+                T spall = parseFieldVal(line2, 5, 0.0f);
+                if (spall > 0.0f) out_default_mat.tensile_failure_stress = static_cast<float>(spall);
+                break;
+            }
+        } else if (current_keyword.rfind("*EOS_GRUNEISEN", 0) == 0 || current_keyword.rfind("*EOS_004", 0) == 0) {
+            // Card 1: EOSID, C, S1, S2, S3, GAMAO, A, E0
+            out_default_mat.mg_c0 = static_cast<float>(parseFieldVal(line, 1, 4570.0f));
+            out_default_mat.mg_s = static_cast<float>(parseFieldVal(line, 2, 1.49f));
+            out_default_mat.mg_gamma0 = static_cast<float>(parseFieldVal(line, 5, 1.81f));
+        } else if (current_keyword.rfind("*MAT_ADD_EROSION", 0) == 0) {
+            // Card 1: MID, EXFAIL, MXEPS, EPSTH, SIGP1, SIGVM, ...
+            T exf = parseFieldVal(line, 1, 0.0f);
+            T sigp1 = parseFieldVal(line, 4, 0.0f);
+            if (exf > 0.0f) out_default_mat.failure_strain = static_cast<float>(exf);
+            if (sigp1 > 0.0f) out_default_mat.tensile_failure_stress = static_cast<float>(sigp1);
         } else if (current_keyword.rfind("*INITIAL_VELOCITY", 0) == 0) {
             int64_t node_id = static_cast<int64_t>(parseFieldVal(line, 0, 0.0f));
             T vx = parseFieldVal(line, 1, 0.0f);

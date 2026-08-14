@@ -1142,7 +1142,8 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                 T strain_rate_factor_g = static_cast<T>(1.0f);
                 if (ep_dot_g > static_cast<T>(1.0e-3f)) {
                     if (C_rate_g > static_cast<T>(0.0f)) {
-                        strain_rate_factor_g += C_rate_g * std::log(ep_dot_g);
+                        T ep_dot_star = std::max(static_cast<T>(1.0f), ep_dot_g);
+                        strain_rate_factor_g += C_rate_g * std::log(ep_dot_star);
                         if (strain_rate_factor_g < static_cast<T>(0.1f)) strain_rate_factor_g = static_cast<T>(0.1f);
                     } else if (cs_C > static_cast<T>(0.0f) && cs_P > static_cast<T>(0.0f)) {
                         strain_rate_factor_g += std::pow(ep_dot_g / cs_C, static_cast<T>(1.0f) / cs_P);
@@ -1468,7 +1469,8 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
         T strain_rate_factor = static_cast<T>(1.0f);
         if (ep_dot > static_cast<T>(1.0e-3f)) {
             if (C_rate > static_cast<T>(0.0f)) {
-                strain_rate_factor += C_rate * std::log(ep_dot);
+                T ep_dot_star = std::max(static_cast<T>(1.0f), ep_dot);
+                strain_rate_factor += C_rate * std::log(ep_dot_star);
                 if (strain_rate_factor < static_cast<T>(0.1f)) strain_rate_factor = static_cast<T>(0.1f);
             } else if (cs_C > static_cast<T>(0.0f) && cs_P > static_cast<T>(0.0f)) {
                 strain_rate_factor += std::pow(ep_dot / cs_C, static_cast<T>(1.0f) / cs_P);
@@ -1712,23 +1714,23 @@ void FEMSolver3D<T>::evaluateErosionCriteria() {
             newly_eroded = true;
         }
 
-        if (m_erosion_criteria.enable_timestep_erosion && mat.timestep_erosion_factor > static_cast<T>(1.0e-5f)) {
-            T eta = static_cast<T>(mat.timestep_erosion_factor);
+        if ((mat.enable_timestep_erosion || m_erosion_criteria.enable_timestep_erosion) && mat.timestep_erosion_factor > static_cast<T>(1.0e-5f)) {
+            T eta = static_cast<T>(mat.timestep_erosion_factor > 0.0f ? mat.timestep_erosion_factor : m_erosion_criteria.timestep_erosion_factor);
             if (current_dt <= eta * elem.dt0) {
                 newly_eroded = true;
             }
         }
 
-        if (m_erosion_criteria.enable_strain_erosion) {
-            T fail_strain = static_cast<T>(mat.failure_strain > 0.0f ? mat.failure_strain : m_erosion_criteria.failure_strain);
+        if (mat.enable_strain_erosion || m_erosion_criteria.enable_strain_erosion) {
+            T fail_strain = static_cast<T>(mat.erosion_strain > 0.0f ? mat.erosion_strain : (mat.failure_strain > 0.0f ? mat.failure_strain : m_erosion_criteria.failure_strain));
             if (fail_strain > static_cast<T>(0.0f) && elem.ep_bar >= fail_strain) {
                 newly_eroded = true;
             }
         }
 
-        if (m_erosion_criteria.enable_stress_erosion) {
+        if (mat.enable_stress_erosion || m_erosion_criteria.enable_stress_erosion) {
             T mean_s = (elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f);
-            T fail_stress = static_cast<T>(mat.tensile_failure_stress > 0.0f ? mat.tensile_failure_stress : m_erosion_criteria.tensile_failure_stress);
+            T fail_stress = static_cast<T>(mat.erosion_stress > 0.0f ? mat.erosion_stress : (mat.tensile_failure_stress > 0.0f ? mat.tensile_failure_stress : m_erosion_criteria.tensile_failure_stress));
             if (fail_stress > static_cast<T>(0.0f) && mean_s >= fail_stress) {
                 newly_eroded = true;
             }
@@ -1843,6 +1845,7 @@ void FEMSolver3D<T>::extractBoundaryFacets() {
                 FEMFacet3D<T> facet{};
                 for (int k = 0; k < 4; ++k) facet.node_ids[k] = elem.node_ids[HEX_FACES[f][k]];
                 facet.element_id = e;
+                facet.part_id = elem.part_id;
                 facet.is_eroded = false;
 
                 // Compute normal & area using unbiased diagonal cross product (v2 - v0) x (v3 - v1)
@@ -1850,6 +1853,13 @@ void FEMSolver3D<T>::extractBoundaryFacets() {
                 T v1[3] = {m_nodes[facet.node_ids[1]].x[0], m_nodes[facet.node_ids[1]].x[1], m_nodes[facet.node_ids[1]].x[2]};
                 T v2[3] = {m_nodes[facet.node_ids[2]].x[0], m_nodes[facet.node_ids[2]].x[1], m_nodes[facet.node_ids[2]].x[2]};
                 T v3[3] = {m_nodes[facet.node_ids[3]].x[0], m_nodes[facet.node_ids[3]].x[1], m_nodes[facet.node_ids[3]].x[2]};
+
+                T min_fx = std::min({v0[0], v1[0], v2[0], v3[0]});
+                T max_fx = std::max({v0[0], v1[0], v2[0], v3[0]});
+                T min_fy = std::min({v0[1], v1[1], v2[1], v3[1]});
+                T max_fy = std::max({v0[1], v1[1], v2[1], v3[1]});
+                T min_fz = std::min({v0[2], v1[2], v2[2], v3[2]});
+                T max_fz = std::max({v0[2], v1[2], v2[2], v3[2]});
 
                 T d1[3] = {v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]};
                 T d2[3] = {v3[0] - v1[0], v3[1] - v1[1], v3[2] - v1[2]};
@@ -1865,6 +1875,15 @@ void FEMSolver3D<T>::extractBoundaryFacets() {
                     facet.normal[2] /= norm;
                     facet.area = static_cast<T>(0.5f) * norm;
                 }
+
+                T h_elem = std::sqrt(facet.area > static_cast<T>(1.0e-24f) ? facet.area : static_cast<T>(1.0e-24f));
+                T margin = static_cast<T>(0.8f) * h_elem;
+                facet.bbox_min[0] = min_fx - margin;
+                facet.bbox_min[1] = min_fy - margin;
+                facet.bbox_min[2] = min_fz - margin;
+                facet.bbox_max[0] = max_fx + margin;
+                facet.bbox_max[1] = max_fy + margin;
+                facet.bbox_max[2] = max_fz + margin;
 
                 m_surface_facets.push_back(facet);
             }

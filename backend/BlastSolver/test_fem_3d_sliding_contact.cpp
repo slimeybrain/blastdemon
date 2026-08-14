@@ -27,10 +27,9 @@ int main() {
     // Tangential sliding velocity: v_x = +20 m/s (frictionless)
     solver.addStructuredBoxMesh(1, 1, 1, 0.04f, 0.04f, 0.02f, 0.02f, 0.03f, 0.020f, mat, 20.0f, 0.0f, 0.0f, "Free");
 
-    FEMContact3D<float> contact;
-    contact.setContactPenaltyScale(0.1f);
-    contact.setContactDamping(0.1f);
-    contact.setFrictionCoefficients(0.0f, 0.0f); // Pure frictionless sliding
+    solver.setContactPenaltyScale(0.1f);
+    solver.setContactDamping(0.1f);
+    solver.setFrictionCoefficients(0.0f, 0.0f); // Pure frictionless sliding
 
     float initial_x = solver.getNodes()[solver.getNodes().size() - 8].x[0];
     std::cout << "  Slave block initial X position: " << initial_x << " m, initial v_x = 20.0 m/s" << std::endl;
@@ -41,7 +40,6 @@ int main() {
     for (int step = 1; step <= 8000; ++step) {
         float dt = solver.computeStepSize(0.3f);
         solver.stepWithDt(dt);
-        contact.solveContact(solver, dt);
 
         const auto& nodes = solver.getNodes();
         // Track position and velocity of slave block nodes (last 8 nodes)
@@ -54,6 +52,8 @@ int main() {
         }
         avg_x /= 8.0f;
         avg_vx /= 8.0f;
+
+
 
 
 

@@ -3,7 +3,7 @@ import { Node, NodeType } from './types.js';
 import { PropertyEditor } from './property-editor.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
 import { Telemetry3DViewport } from './telemetry-3d-viewport.js';
-import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_CATEGORIES } from './mpm-presets.js';
+import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_CATEGORIES, MPM_MATERIAL_PARAM_INFO } from './mpm-presets.js';
 
 export class NodeViewer {
     private container: HTMLElement;
@@ -736,9 +736,28 @@ export class NodeViewer {
                 node.parameters['preset'] = 'Structural Steel (A36)';
             }
             const matModel = node.parameters['material_model'];
-            const baseKeys = ['material_model', 'preset', 'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus', 'failure_strain', 'tensile_failure_stress'];
-            const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
-            paramKeys = (matModel === 'Johnson-Cook + Mie-Grüneisen') ? [...baseKeys, ...jcKeys] : baseKeys;
+            if (matModel === 'Johnson-Cook + Mie-Grüneisen') {
+                paramKeys = [
+                    'material_model', 'preset',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'failure_strain', 'tensile_failure_stress',
+                    'enable_strain_erosion', 'erosion_strain',
+                    'enable_stress_erosion', 'erosion_stress',
+                    'enable_timestep_erosion', 'timestep_erosion_factor',
+                    'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
+                    'mg_gamma0', 'mg_c0', 'mg_s'
+                ];
+            } else {
+                paramKeys = [
+                    'material_model', 'preset',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'yield_stress', 'hardening_modulus',
+                    'failure_strain', 'tensile_failure_stress',
+                    'enable_strain_erosion', 'erosion_strain',
+                    'enable_stress_erosion', 'erosion_stress',
+                    'enable_timestep_erosion', 'timestep_erosion_factor'
+                ];
+            }
         } else if (node.type === 'MPMDomain2D') {
             const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
             paramKeys = ['transfer_scheme', 'velocity_scheme', 'space_time_scheme', 'smooth_plastic_strain'];
@@ -793,6 +812,7 @@ export class NodeViewer {
                 const matModel = node.parameters['material_model'] || 'Hypoelastic';
                 const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
                 if (matModel === 'Hypoelastic' && jcKeys.includes(key)) continue;
+                if (matModel === 'Johnson-Cook + Mie-Grüneisen' && (key === 'yield_stress' || key === 'hardening_modulus')) continue;
             }
             if (node.type === 'DomainMesh') {
 
@@ -834,12 +854,27 @@ export class NodeViewer {
             // DetonatorLocation and DetonatorLocation3D are separate nodes now, showing correct properties
 
             const label = document.createElement('label');
-            label.textContent = key.replace(/_/g, ' ').toUpperCase();
+            let labelText = key.replace(/_/g, ' ').toUpperCase();
+            label.textContent = labelText;
             label.style.fontSize = 'var(--font-sm)';
             label.style.color = '#888';
+
+            if (node.type === 'MPMMaterialSteel' && MPM_MATERIAL_PARAM_INFO[key]) {
+                const info = MPM_MATERIAL_PARAM_INFO[key];
+                label.title = info.tooltip;
+                label.style.cursor = 'help';
+                label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
+                    `<span style="font-weight:600; color:#ccc;">${info.label.toUpperCase()}</span>` +
+                    (info.unit && info.unit !== 'dim' ? `<span style="font-size:10px; color:#569cd6; font-family:monospace; background:rgba(86,156,214,0.1); padding:1px 4px; border-radius:3px;">${info.unit}</span>` : '') +
+                    `</div>` +
+                    `<div style="font-size:10px; color:#777; margin-top:1px; margin-bottom:2px;">${info.shortDesc}</div>`;
+            }
             grid.appendChild(label);
 
             const input = this.createInputElement(node, key, value);
+            if (node.type === 'MPMMaterialSteel' && MPM_MATERIAL_PARAM_INFO[key]) {
+                input.title = MPM_MATERIAL_PARAM_INFO[key].tooltip;
+            }
             grid.appendChild(input);
         }
 
@@ -2268,13 +2303,14 @@ export class NodeViewer {
             'scale_x', 'scale_y', 'scale_z',
             'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
-            'failure_strain', 'tensile_failure_stress',
+            'failure_strain', 'tensile_failure_stress', 'erosion_strain', 'erosion_stress',
             'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
             'mg_gamma0', 'mg_c0', 'mg_s',
             'ppc',
             'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
             // FEM keys
-            'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping'
+            'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
+            'femMinVal', 'femMaxVal', 'femOpacity'
         ];
 
         const chargeShapeOptions = node.type === 'Charge3D' ? ['Sphere', 'Cylinder', 'Block'] : ['Sphere', 'Cylinder'];

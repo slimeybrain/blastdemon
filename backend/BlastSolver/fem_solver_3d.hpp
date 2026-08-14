@@ -44,14 +44,14 @@ struct BlastPhysicsParams {
 
 template <typename T>
 struct FEMErosionCriteria {
-    T timestep_erosion_factor{0.0f};   // Erode when dt_e <= eta * dt_e,0 (default 0 = disabled)
+    T timestep_erosion_factor{0.10f};  // Erode when dt_e <= eta * dt_e,0 (default 0.10)
     T failure_strain{0.50f};           // Equivalent plastic strain threshold
     T tensile_failure_stress{600.0e6f};// Tensile failure stress threshold (Pa)
     T min_volume_ratio{0.05f};         // V / V0 minimum compression ratio limit
     T max_volume_ratio{5.00f};         // V / V0 maximum expansion ratio limit
     T max_damage{1.0f};                // Johnson-Cook cumulative damage threshold D >= 1.0
-    bool enable_timestep_erosion{false};
-    bool enable_strain_erosion{false};
+    bool enable_timestep_erosion{true};
+    bool enable_strain_erosion{true};
     bool enable_stress_erosion{false};
     bool enable_damage_erosion{false};
 };
@@ -102,7 +102,10 @@ struct FEMFacet3D {
     int node_ids[4];   // 4 nodes forming a quadrilateral boundary facet
     T normal[3];       // Outward unit normal vector (nx, ny, nz)
     T area{0.0f};      // Facet surface area
+    T bbox_min[3]{0.0f, 0.0f, 0.0f}; // Precomputed AABB minimum bounds (with margin)
+    T bbox_max[3]{0.0f, 0.0f, 0.0f}; // Precomputed AABB maximum bounds (with margin)
     int element_id{-1};
+    int part_id{-1};
     bool is_eroded{false};
 };
 

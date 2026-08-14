@@ -4,7 +4,7 @@ import { Telemetry3DViewport } from './telemetry-3d-viewport.js';
 import { validateSimulationState } from './validation.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
 import { CustomDialog } from './custom-dialog.js';
-import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_CATEGORIES } from './mpm-presets.js';
+import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_CATEGORIES, MPM_MATERIAL_PARAM_INFO } from './mpm-presets.js';
 
 const DEFAULT_QUANTITY_RANGES: Record<string, [number, number]> = {
     pressure: [101325.0, 101325.0 * 100.0],
@@ -80,6 +80,7 @@ export class GraphRenderer {
     private connectionRafId: number | null = null;
 
     private expandedSliceIndices = new Set<string>(); // "nodeId-sliceIdx"
+    private collapsedMaterialSections: Set<string> = new Set(); // "nodeId:sectionTitle"
     private gaugesPanelOpen: Map<string, boolean> = new Map();
     private focusedPrimitiveIndexMap: Map<string, number> = new Map();
     private gaugesActiveTab: Map<string, 'list' | 'settings'> = new Map();
@@ -1716,6 +1717,18 @@ export class GraphRenderer {
                 mpmParticleOpacity: 1.0,
                 mpmParticleMinVal: 0.0,
                 mpmParticleMaxVal: 500000000.0,
+                showFEMMesh: true,
+                femSolid: true,
+                femWireframe: true,
+                femResults: true,
+                femQuantity: 'vonMises',
+                femColormap: 'plasma',
+                femAutoScale: true,
+                femLogScale: false,
+                femShowColorbar: false,
+                femOpacity: 1.0,
+                femMinVal: 0.0,
+                femMaxVal: 500000000.0,
                 vtk_format: 'Binary',
                 step_interval: 10,
                 time_interval: 0.0,
@@ -1814,6 +1827,12 @@ export class GraphRenderer {
                 hardening_modulus: 1.0e9,
                 failure_strain: 0.20,
                 tensile_failure_stress: 400.0e6,
+                enable_strain_erosion: false,
+                erosion_strain: 0.20,
+                enable_stress_erosion: false,
+                erosion_stress: 400.0e6,
+                enable_timestep_erosion: false,
+                timestep_erosion_factor: 0.10,
                 jc_A: 250.0e6,
                 jc_B: 510.0e6,
                 jc_n: 0.26,
@@ -4292,9 +4311,28 @@ export class GraphRenderer {
                 node.parameters['preset'] = 'Structural Steel (A36)';
             }
             const matModel = node.parameters['material_model'];
-            const baseKeys = ['material_model', 'preset', 'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus', 'failure_strain', 'tensile_failure_stress'];
-            const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
-            paramKeys = (matModel === 'Johnson-Cook + Mie-Grüneisen') ? [...baseKeys, ...jcKeys] : baseKeys;
+            if (matModel === 'Johnson-Cook + Mie-Grüneisen') {
+                paramKeys = [
+                    'material_model', 'preset',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'failure_strain', 'tensile_failure_stress',
+                    'enable_strain_erosion', 'erosion_strain',
+                    'enable_stress_erosion', 'erosion_stress',
+                    'enable_timestep_erosion', 'timestep_erosion_factor',
+                    'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
+                    'mg_gamma0', 'mg_c0', 'mg_s'
+                ];
+            } else {
+                paramKeys = [
+                    'material_model', 'preset',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'yield_stress', 'hardening_modulus',
+                    'failure_strain', 'tensile_failure_stress',
+                    'enable_strain_erosion', 'erosion_strain',
+                    'enable_stress_erosion', 'erosion_stress',
+                    'enable_timestep_erosion', 'timestep_erosion_factor'
+                ];
+            }
         } else if (node.type === 'MPMDomain2D') {
             const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
             paramKeys = ['precision', 'transfer_scheme', 'velocity_scheme', 'space_time_scheme', 'smooth_plastic_strain'];
@@ -4365,6 +4403,8 @@ export class GraphRenderer {
             ? (sourceNode.type === 'CFDSolver3D') 
             : (state?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'DomainMesh3D') ?? false);
 
+        let currentGridDiv: HTMLDivElement | null = null;
+
         for (const key of paramKeys) {
             let value = node.parameters[key];
             if (value === undefined || value === null) continue;
@@ -4410,6 +4450,71 @@ export class GraphRenderer {
                 const matModel = node.parameters['material_model'] || 'Hypoelastic';
                 const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
                 if (matModel === 'Hypoelastic' && jcKeys.includes(key)) continue;
+                if (matModel === 'Johnson-Cook + Mie-Grüneisen' && (key === 'yield_stress' || key === 'hardening_modulus')) continue;
+
+                let sectionTitle: string | null = null;
+                if (key === 'density') sectionTitle = 'ELASTICITY & MASS';
+                else if (key === 'yield_stress') sectionTitle = 'PLASTIC YIELD & HARDENING';
+                else if (key === 'failure_strain') sectionTitle = 'CONSTITUTIVE FAILURE & SPALL';
+                else if (key === 'enable_strain_erosion') sectionTitle = 'ELEMENT EROSION & DELETION';
+                else if (key === 'jc_A') sectionTitle = 'JOHNSON-COOK VISCOPLASTICITY';
+                else if (key === 'mg_gamma0') sectionTitle = 'MIE-GRÜNEISEN SHOCK EOS';
+
+                if (sectionTitle) {
+                    const sectionKey = `${node.id}:${sectionTitle}`;
+                    const isCollapsed = this.collapsedMaterialSections.has(sectionKey);
+
+                    const secHeader = document.createElement('div');
+                    secHeader.style.display = 'flex';
+                    secHeader.style.alignItems = 'center';
+                    secHeader.style.justifyContent = 'space-between';
+                    secHeader.style.fontWeight = 'bold';
+                    secHeader.style.fontSize = '9px';
+                    secHeader.style.color = '#ff79c6';
+                    secHeader.style.letterSpacing = '0.5px';
+                    secHeader.style.marginTop = '6px';
+                    secHeader.style.marginBottom = '2px';
+                    secHeader.style.padding = '2px 4px';
+                    secHeader.style.background = 'rgba(255, 121, 198, 0.08)';
+                    secHeader.style.borderRadius = '3px';
+                    secHeader.style.border = '1px solid rgba(255, 121, 198, 0.2)';
+                    secHeader.style.cursor = 'pointer';
+                    secHeader.style.userSelect = 'none';
+
+                    const titleSpan = document.createElement('span');
+                    titleSpan.textContent = sectionTitle;
+
+                    const arrowSpan = document.createElement('span');
+                    arrowSpan.textContent = isCollapsed ? '▶' : '▼';
+                    arrowSpan.style.fontSize = '8px';
+                    arrowSpan.style.opacity = '0.8';
+
+                    secHeader.appendChild(titleSpan);
+                    secHeader.appendChild(arrowSpan);
+                    form.appendChild(secHeader);
+
+                    const gridDiv = document.createElement('div');
+                    gridDiv.style.display = isCollapsed ? 'none' : 'grid';
+                    gridDiv.style.gridTemplateColumns = '1fr 1fr';
+                    gridDiv.style.gap = '3px 5px';
+                    gridDiv.style.marginBottom = '4px';
+                    form.appendChild(gridDiv);
+
+                    secHeader.onclick = (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (this.collapsedMaterialSections.has(sectionKey)) {
+                            this.collapsedMaterialSections.delete(sectionKey);
+                            gridDiv.style.display = 'grid';
+                            arrowSpan.textContent = '▼';
+                        } else {
+                            this.collapsedMaterialSections.add(sectionKey);
+                            gridDiv.style.display = 'none';
+                            arrowSpan.textContent = '▶';
+                        }
+                    };
+                    currentGridDiv = gridDiv;
+                }
             }
             if (node.type === 'Material') {
 
@@ -4453,7 +4558,7 @@ export class GraphRenderer {
             }
 
             const row = document.createElement('div');
-            row.style.marginBottom = '4px';
+            row.style.marginBottom = node.type === 'MPMMaterialSteel' && currentGridDiv ? '0px' : '4px';
             row.style.display = 'flex';
             row.style.flexDirection = 'column';
 
@@ -4463,6 +4568,17 @@ export class GraphRenderer {
             let labelText = key.replace(/_/g, ' ').toUpperCase();
             if (key === 'flip_blend') labelText = 'FLIP BLEND (% FLIP / % PIC)';
             label.textContent = labelText;
+
+            if (node.type === 'MPMMaterialSteel' && MPM_MATERIAL_PARAM_INFO[key]) {
+                const info = MPM_MATERIAL_PARAM_INFO[key];
+                label.title = info.tooltip;
+                label.style.cursor = 'help';
+                label.style.marginBottom = '1px';
+                label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline; overflow:hidden;">` +
+                    `<span style="font-weight:600; color:#ccc; font-size:9px; white-space:nowrap; text-overflow:ellipsis; overflow:hidden;">${info.label.split(':')[0].trim().toUpperCase()}</span>` +
+                    (info.unit && info.unit !== 'dim' ? `<span style="font-size:8px; color:#569cd6; font-family:monospace; background:rgba(86,156,214,0.12); padding:0px 2px; border-radius:2px; margin-left:2px; flex-shrink:0;">${info.unit}</span>` : '') +
+                    `</div>`;
+            }
             row.appendChild(label);
 
             const dropdowns: Record<string, string[]> = {
@@ -4532,10 +4648,11 @@ export class GraphRenderer {
 
             let inputEl: HTMLElement;
             if (typeof value === 'boolean') {
+                const isEnableKey = key.startsWith('enable_') || key.startsWith('smooth_');
                 inputEl = this.createCustomDropdown(
                     [
-                        { value: 'true', label: 'True' },
-                        { value: 'false', label: 'False' }
+                        { value: 'true', label: isEnableKey ? 'Enabled' : 'True' },
+                        { value: 'false', label: isEnableKey ? 'Disabled' : 'False' }
                     ],
                     value ? 'true' : 'false',
                     (newVal) => {
@@ -4616,13 +4733,14 @@ export class GraphRenderer {
                             'scale_x', 'scale_y', 'scale_z',
                             'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
                             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
-                            'failure_strain', 'tensile_failure_stress',
+                            'failure_strain', 'tensile_failure_stress', 'erosion_strain', 'erosion_stress',
                             'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
                             'mg_gamma0', 'mg_c0', 'mg_s',
                             'ppc',
                             'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
                             // FEM keys
-                            'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping'
+                            'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
+                            'femMinVal', 'femMaxVal', 'femOpacity'
                         ];
 
                         let castValue: any = newVal;
@@ -4990,6 +5108,9 @@ export class GraphRenderer {
                 input.style.color = '#ccc';
                 input.style.border = '1px solid #444';
                 input.style.padding = '1px 2px';
+                if (node.type === 'MPMMaterialSteel' && MPM_MATERIAL_PARAM_INFO[key]) {
+                    input.title = MPM_MATERIAL_PARAM_INFO[key].tooltip;
+                }
 
 
                 input.addEventListener('input', () => {
@@ -5075,7 +5196,11 @@ export class GraphRenderer {
 
             inputEl.addEventListener('mousedown', (e) => e.stopPropagation());
             row.appendChild(inputEl);
-            form.appendChild(row);
+            if (node.type === 'MPMMaterialSteel' && currentGridDiv) {
+                currentGridDiv.appendChild(row);
+            } else {
+                form.appendChild(row);
+            }
         }
         if (gridInfoDiv) {
             form.appendChild(gridInfoDiv);

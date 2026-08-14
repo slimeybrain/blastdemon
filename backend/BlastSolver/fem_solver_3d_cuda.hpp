@@ -54,9 +54,59 @@ void launch_fem_nodal_full_step_kernel_3d(
 template <typename T>
 void launch_fem_initial_timestep_erosion_kernel_3d(
     FEMNode3D<T>* d_nodes,
+    int num_nodes,
     FEMElement3D<T>* d_elements,
     int num_elements,
+    const MaterialTable3D* d_materials,
     FEMErosionCriteria<T> erosion_criteria,
+    int* d_node_active_count,
+    int* d_erosion_flag,
+    cudaStream_t stream
+);
+
+template <typename T>
+void launch_fem_update_surface_facets_kernel_3d(
+    FEMNode3D<T>* d_nodes,
+    int num_nodes,
+    const FEMElement3D<T>* d_elements,
+    int num_elements,
+    FEMFacet3D<T>* d_facets,
+    int num_facets,
+    T* d_node_normals,
+    cudaStream_t stream
+);
+
+template <typename T>
+void launch_fem_contact_forces_kernel_3d(
+    FEMNode3D<T>* d_nodes,
+    int num_nodes,
+    const FEMElement3D<T>* d_elements,
+    int num_elements,
+    const FEMFacet3D<T>* d_facets,
+    int num_facets,
+    const int* d_surface_nodes,
+    int num_surface_nodes,
+    const int* d_node_part_id,
+    const int* d_part_mat_id,
+    int max_parts,
+    const T* d_node_normals,
+    const MaterialTable3D* d_materials,
+    T contact_penalty_scale,
+    T mu_static,
+    T mu_kinetic,
+    T contact_damping,
+    T dt,
+    cudaStream_t stream
+);
+
+template <typename T>
+T launch_fem_compute_step_size_kernel_3d(
+    const FEMNode3D<T>* d_nodes,
+    const FEMElement3D<T>* d_elements,
+    int num_elements,
+    const MaterialTable3D* d_materials,
+    T cfl,
+    T* d_reduction_buffer,
     cudaStream_t stream
 );
 
@@ -72,8 +122,16 @@ public:
     void setHourglassCoeff(T q_hg) { m_cpu_solver.setHourglassCoeff(q_hg); }
     void setHourglassModel(FEMHourglassModel model) { m_cpu_solver.setHourglassModel(model); }
     void setIntegrationScheme(FEMIntegrationScheme scheme) { m_cpu_solver.setIntegrationScheme(scheme); }
+    void setPhysicsParams(const BlastPhysicsParams<T>& params) { m_cpu_solver.setPhysicsParams(params); }
+    void setErosionCriteria(const FEMErosionCriteria<T>& criteria) { m_cpu_solver.setErosionCriteria(criteria); }
     void setContactPenaltyScale(T scale) { m_cpu_solver.setContactPenaltyScale(scale); }
+    void setContactDamping(T damping) { m_cpu_solver.setContactDamping(damping); }
     void setFrictionCoefficients(T mu_s, T mu_k) { m_cpu_solver.setFrictionCoefficients(mu_s, mu_k); }
+
+    void createStructuredBoxMesh(int nx, int ny, int nz, T lx, T ly, T lz, T pos_x, T pos_y, T pos_z, const MaterialTable3D& mat, const std::string& bc = "Free") {
+        m_cpu_solver.createStructuredBoxMesh(nx, ny, nz, lx, ly, lz, pos_x, pos_y, pos_z, mat, bc);
+        syncToDevice();
+    }
 
     void addStructuredBoxMesh(int nx, int ny, int nz, T lx, T ly, T lz, T pos_x, T pos_y, T pos_z, const MaterialTable3D& mat, T vx = static_cast<T>(0), T vy = static_cast<T>(0), T vz = static_cast<T>(0), const std::string& bc = "Free") {
         m_cpu_solver.addStructuredBoxMesh(nx, ny, nz, lx, ly, lz, pos_x, pos_y, pos_z, mat, vx, vy, vz, bc);
@@ -95,6 +153,11 @@ public:
         syncToDevice();
     }
 
+    void setNodeFixed(int node_idx, bool fix_x, bool fix_y, bool fix_z) {
+        m_cpu_solver.setNodeFixed(node_idx, fix_x, fix_y, fix_z);
+        if (m_d_nodes) syncToDevice();
+    }
+
     void syncToDevice();
     void syncToHost() const;
 
@@ -110,25 +173,64 @@ public:
     std::vector<FEMFacet3D<T>>& getSurfaceFacets() { syncToHost(); return m_cpu_solver.getSurfaceFacets(); }
     const std::vector<FEMFacet3D<T>>& getSurfaceFacets() const { syncToHost(); return m_cpu_solver.getSurfaceFacets(); }
 
+    size_t getNodeCount() const { return m_cpu_solver.getNodes().size(); }
+    size_t getElementCount() const { return m_cpu_solver.getElements().size(); }
+    size_t getSurfaceFacetCount() const { return m_num_surface_facets; }
+    FEMFacet3D<T>* getSurfaceFacetsDevice() { return m_d_facets; }
+    const FEMFacet3D<T>* getSurfaceFacetsDevice() const { return m_d_facets; }
+    FEMNode3D<T>* getNodesDevice() { return m_d_nodes; }
+    const FEMNode3D<T>* getNodesDevice() const { return m_d_nodes; }
+
+    void extractTelemetry(std::vector<float>& h_node_data, std::vector<float>& h_facet_data) const;
+
     T getSimTime() const { return m_sim_time; }
     int getStepCount() const { return m_step_count; }
     T getLastDt() const { return m_last_dt; }
     T getLastCFL() const { return m_last_cfl; }
-    T getMaxVelocity() const { syncToHost(); return m_cpu_solver.getMaxVelocity(); }
-    T getMaxPlasticStrain() const { syncToHost(); return m_cpu_solver.getMaxPlasticStrain(); }
-    T getMaxVonMisesStress() const { syncToHost(); return m_cpu_solver.getMaxVonMisesStress(); }
+    T getMaxVelocity() const { return m_last_v_max; }
+    T getMaxPlasticStrain() const { return m_last_ep_max; }
+    T getMaxVonMisesStress() const { return m_last_vm_max; }
 
-    const FEMEnergyTracker<T>& getEnergyTracker() const { syncToHost(); return m_cpu_solver.getEnergyTracker(); }
+    const FEMEnergyTracker<T>& getEnergyTracker() const { return m_energy_tracker; }
     FEMSolver3D<T>& getCpuSolver() { return m_cpu_solver; }
+    cudaStream_t getStream() const { return m_cuda_stream; }
 
 private:
     FEMSolver3D<T> m_cpu_solver;
     FEMNode3D<T>* m_d_nodes{nullptr};
     FEMElement3D<T>* m_d_elements{nullptr};
     MaterialTable3D* m_d_materials{nullptr};
+    FEMFacet3D<T>* m_d_facets{nullptr};
+    int* m_d_surface_nodes{nullptr};
+    int* m_d_node_part_id{nullptr};
+    int* m_d_part_mat_id{nullptr};
+    T* m_d_node_normals{nullptr};
+    T* m_d_reduction_buffer{nullptr};
+    int* m_d_node_active_count{nullptr};
+    int* m_d_erosion_flag{nullptr};
+
+    // GPU Spatial Hash Grid for Contact
+    int* m_d_cell_counts{nullptr};
+    int* m_d_cell_facet_ids{nullptr};
+    size_t m_spatial_grid_capacity{65536};
+    static constexpr int MAX_FACETS_PER_CELL{32};
+
+    // GPU Direct Telemetry Extraction Buffers
+    mutable float* m_d_telemetry_nodes{nullptr};
+    mutable float* m_d_telemetry_facets{nullptr};
+    mutable size_t m_allocated_telemetry_nodes{0};
+    mutable size_t m_allocated_telemetry_facets{0};
+
     size_t m_allocated_nodes{0};
     size_t m_allocated_elements{0};
     size_t m_allocated_materials{0};
+    size_t m_allocated_facets{0};
+    size_t m_allocated_surface_nodes{0};
+    size_t m_allocated_node_parts{0};
+    size_t m_allocated_part_mat_id{0};
+    size_t m_num_surface_facets{0};
+    size_t m_num_surface_nodes{0};
+    int m_max_part_id{0};
 
     cudaStream_t m_cuda_stream{nullptr};
     T m_sim_time{0.0f};
@@ -136,6 +238,11 @@ private:
     T m_last_cfl{0.3f};
     int m_step_count{0};
     mutable bool m_gpu_dirty{false};
+    mutable bool m_topology_dirty{false};
+    mutable T m_last_v_max{0.0f};
+    mutable T m_last_vm_max{0.0f};
+    mutable T m_last_ep_max{0.0f};
+    mutable FEMEnergyTracker<T> m_energy_tracker{};
 };
 
 } // namespace Blast
