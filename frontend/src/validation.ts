@@ -74,8 +74,22 @@ export function isParameterRelevant(node: Node, key: string): boolean {
     } else if (node.type === 'MPMMaterialSteel') {
         const matModel = node.parameters['material_model'] || 'Hypoelastic';
         const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
-        if (matModel === 'Hypoelastic' && jcKeys.includes(key)) return false;
-        if (matModel === 'Johnson-Cook + Mie-Grüneisen' && (key === 'yield_stress' || key === 'hardening_modulus')) return false;
+        const concreteBaseKeys = ['fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension'];
+        const rhtKeys = ['rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2', 'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat'];
+        const kcKeys = ['kc_auto_generate', 'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega'];
+        const cscmKeys = ['cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2'];
+
+        if (matModel === 'Hypoelastic') {
+            if (jcKeys.includes(key) || concreteBaseKeys.includes(key) || rhtKeys.includes(key) || kcKeys.includes(key) || cscmKeys.includes(key)) return false;
+        } else if (matModel === 'Johnson-Cook + Mie-Grüneisen') {
+            if (['yield_stress', 'hardening_modulus'].includes(key) || concreteBaseKeys.includes(key) || rhtKeys.includes(key) || kcKeys.includes(key) || cscmKeys.includes(key)) return false;
+        } else if (matModel === 'RHT Concrete') {
+            if (jcKeys.includes(key) || ['yield_stress', 'hardening_modulus'].includes(key) || kcKeys.includes(key) || cscmKeys.includes(key)) return false;
+        } else if (matModel === 'Karagozian & Case (K&C)' || matModel === 'Karagozian & Case') {
+            if (jcKeys.includes(key) || ['yield_stress', 'hardening_modulus'].includes(key) || rhtKeys.includes(key) || cscmKeys.includes(key)) return false;
+        } else if (matModel === 'CSCM Concrete') {
+            if (jcKeys.includes(key) || ['yield_stress', 'hardening_modulus'].includes(key) || rhtKeys.includes(key) || kcKeys.includes(key)) return false;
+        }
     } else if (node.type === 'DomainMesh') {
         const dim = node.parameters['dimension'] || '1D';
         if (dim === '1D' && ['y_min_bc', 'y_max_bc', 'z_min_bc', 'z_max_bc'].includes(key)) return false;

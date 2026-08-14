@@ -19,6 +19,7 @@ struct MPMParticle3DSoA {
     float* temperature{nullptr};
     float* ep_bar{nullptr};
     float* damage{nullptr};
+    float* lambda{nullptr};
     int* has_failed{nullptr};
     int* object_id{nullptr};
 };

@@ -83,6 +83,7 @@ struct FEMElement3D {
     T ep_bar{0.0f};      // Equivalent plastic strain
     T temperature{293.0f}; // Local temperature (K)
     T damage{0.0f};      // Scalar damage D in [0, 1]
+    T lambda{0.0f};      // Modified damage scaling parameter (K&C / CSCM cap)
     T q_visc{0.0f};      // Artificial bulk viscosity pressure
     bool is_eroded{false};
     int mat_id{0};       // Material Table ID
@@ -95,6 +96,7 @@ struct FEMElement3D {
     T ep_bar_gp[8];
     T temp_gp[8];
     T damage_gp[8];
+    T lambda_gp[8];
 };
 
 template <typename T>

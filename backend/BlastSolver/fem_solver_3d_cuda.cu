@@ -1,5 +1,6 @@
 #include "fem_solver_3d_cuda.hpp"
 #include "fem_contact_3d.hpp"
+#include "constitutive_concrete_models.hpp"
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 #include <cmath>
@@ -456,25 +457,93 @@ __global__ void fem_element_forces_kernel_3d_device(
                 }
             }
 
-            T s_norm_g = sqrt(
-                elem.s_dev_gp[g][0][0]*elem.s_dev_gp[g][0][0] + elem.s_dev_gp[g][1][1]*elem.s_dev_gp[g][1][1] + elem.s_dev_gp[g][2][2]*elem.s_dev_gp[g][2][2] +
-                static_cast<T>(2.0f)*(elem.s_dev_gp[g][0][1]*elem.s_dev_gp[g][0][1] + elem.s_dev_gp[g][1][2]*elem.s_dev_gp[g][1][2] + elem.s_dev_gp[g][2][0]*elem.s_dev_gp[g][2][0])
-            );
-            T vm_trial_g = sqrt(static_cast<T>(1.5f)) * s_norm_g;
+            if (mat.material_model == MPMMaterialModel::RHTConcrete) {
+                RHTStateVariables<T> rht_state;
+                rht_state.damage = elem.damage_gp[g];
+                rht_state.ep_bar = elem.ep_bar_gp[g];
+                rht_state.p_hydro = p_hydro_g;
+                updateRHTStress<T>(
+                    elem.s_dev_gp[g], p_hydro_g, vol_strain_g, dt, h_e_g, ep_dot_g,
+                    static_cast<T>(mat.fc), static_cast<T>(mat.ft), G, K,
+                    static_cast<T>(mat.G_f), static_cast<T>(mat.moisture_content),
+                    static_cast<T>(mat.rht_A), static_cast<T>(mat.rht_N),
+                    static_cast<T>(mat.rht_B), static_cast<T>(mat.rht_M),
+                    static_cast<T>(mat.rht_Q0), static_cast<T>(mat.rht_BQ),
+                    static_cast<T>(mat.rht_D1), static_cast<T>(mat.rht_D2),
+                    static_cast<T>(mat.rht_p_crush), static_cast<T>(mat.rht_p_lock),
+                    static_cast<T>(mat.rht_alpha0), static_cast<T>(mat.rht_n_comp),
+                    static_cast<T>(mat.rht_betac), static_cast<T>(mat.rht_deltat),
+                    static_cast<T>(mat.dif_cap_compression), static_cast<T>(mat.dif_cap_tension),
+                    rht_state
+                );
+                elem.damage_gp[g] = rht_state.damage;
+                elem.ep_bar_gp[g] = rht_state.ep_bar;
+                p_hydro_g = rht_state.p_hydro;
+            } else if (mat.material_model == MPMMaterialModel::KCConcrete) {
+                KCStateVariables<T> kc_state;
+                kc_state.damage = elem.damage_gp[g];
+                kc_state.lambda = elem.lambda_gp[g];
+                kc_state.ep_bar = elem.ep_bar_gp[g];
+                kc_state.p_hydro = p_hydro_g;
+                updateKCStress<T>(
+                    elem.s_dev_gp[g], p_hydro_g, vol_strain_g, dt, h_e_g, ep_dot_g,
+                    static_cast<T>(mat.fc), static_cast<T>(mat.ft), G, K,
+                    static_cast<T>(mat.G_f), static_cast<T>(mat.moisture_content),
+                    mat.kc_auto_generate,
+                    static_cast<T>(mat.kc_a0), static_cast<T>(mat.kc_a1), static_cast<T>(mat.kc_a2),
+                    static_cast<T>(mat.kc_a0y), static_cast<T>(mat.kc_a1y), static_cast<T>(mat.kc_a2y),
+                    static_cast<T>(mat.kc_a1r), static_cast<T>(mat.kc_a2r),
+                    static_cast<T>(mat.kc_b1), static_cast<T>(mat.kc_omega),
+                    static_cast<T>(mat.dif_cap_compression), static_cast<T>(mat.dif_cap_tension),
+                    kc_state
+                );
+                elem.damage_gp[g] = kc_state.damage;
+                elem.lambda_gp[g] = kc_state.lambda;
+                elem.ep_bar_gp[g] = kc_state.ep_bar;
+                p_hydro_g = kc_state.p_hydro;
+            } else if (mat.material_model == MPMMaterialModel::CSCMConcrete) {
+                CSCMStateVariables<T> cscm_state;
+                cscm_state.damage = elem.damage_gp[g];
+                cscm_state.kappa = elem.lambda_gp[g];
+                cscm_state.ep_bar = elem.ep_bar_gp[g];
+                cscm_state.p_hydro = p_hydro_g;
+                updateCSCMStress<T>(
+                    elem.s_dev_gp[g], p_hydro_g, vol_strain_g, dt, h_e_g, ep_dot_g,
+                    static_cast<T>(mat.fc), static_cast<T>(mat.ft), G, K,
+                    static_cast<T>(mat.G_f),
+                    static_cast<T>(mat.cscm_alpha), static_cast<T>(mat.cscm_theta),
+                    static_cast<T>(mat.cscm_lambda), static_cast<T>(mat.cscm_beta),
+                    static_cast<T>(mat.cscm_R), static_cast<T>(mat.cscm_X0),
+                    static_cast<T>(mat.cscm_W), static_cast<T>(mat.cscm_D1),
+                    static_cast<T>(mat.cscm_D2),
+                    static_cast<T>(mat.dif_cap_compression), static_cast<T>(mat.dif_cap_tension),
+                    cscm_state
+                );
+                elem.damage_gp[g] = cscm_state.damage;
+                elem.lambda_gp[g] = cscm_state.kappa;
+                elem.ep_bar_gp[g] = cscm_state.ep_bar;
+                p_hydro_g = cscm_state.p_hydro;
+            } else {
+                T s_norm_g = sqrt(
+                    elem.s_dev_gp[g][0][0]*elem.s_dev_gp[g][0][0] + elem.s_dev_gp[g][1][1]*elem.s_dev_gp[g][1][1] + elem.s_dev_gp[g][2][2]*elem.s_dev_gp[g][2][2] +
+                    static_cast<T>(2.0f)*(elem.s_dev_gp[g][0][1]*elem.s_dev_gp[g][0][1] + elem.s_dev_gp[g][1][2]*elem.s_dev_gp[g][1][2] + elem.s_dev_gp[g][2][0]*elem.s_dev_gp[g][2][0])
+                );
+                T vm_trial_g = sqrt(static_cast<T>(1.5f)) * s_norm_g;
 
-            if (vm_trial_g > dynamic_yield_g && vm_trial_g > static_cast<T>(1.0e-6f)) {
-                T scale = dynamic_yield_g / vm_trial_g;
-                T d_ep = (vm_trial_g - dynamic_yield_g) / (static_cast<T>(3.0f) * G + static_cast<T>(mat.hardening_modulus));
-                elem.ep_bar_gp[g] += d_ep;
-                for (int r = 0; r < 3; ++r) {
-                    for (int c = 0; c < 3; ++c) {
-                        elem.s_dev_gp[g][r][c] *= scale;
+                if (vm_trial_g > dynamic_yield_g && vm_trial_g > static_cast<T>(1.0e-6f)) {
+                    T scale = dynamic_yield_g / vm_trial_g;
+                    T d_ep = (vm_trial_g - dynamic_yield_g) / (static_cast<T>(3.0f) * G + static_cast<T>(mat.hardening_modulus));
+                    elem.ep_bar_gp[g] += d_ep;
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            elem.s_dev_gp[g][r][c] *= scale;
+                        }
                     }
+                    T plastic_work = dynamic_yield_g * d_ep;
+                    T chi = physics_params.taylor_quinney_factor;
+                    T Cp = static_cast<T>(mat.Cp > 0.0f ? mat.Cp : 477.0f);
+                    elem.temp_gp[g] += (chi * plastic_work) / (density * Cp);
                 }
-                T plastic_work = dynamic_yield_g * d_ep;
-                T chi = physics_params.taylor_quinney_factor;
-                T Cp = static_cast<T>(mat.Cp > 0.0f ? mat.Cp : 477.0f);
-                elem.temp_gp[g] += (chi * plastic_work) / (density * Cp);
             }
 
             T eta_shear_g = static_cast<T>(mat.bulk_viscosity_b1 > 0.0f ? mat.bulk_viscosity_b1 : 0.06f) * density * cd * h_e_g;
@@ -786,28 +855,95 @@ __global__ void fem_element_forces_kernel_3d_device(
         }
     }
 
-    // Von Mises Trial Stress & Radial Return Mapping
-    T s_norm = sqrt(
-        elem.s_dev[0][0]*elem.s_dev[0][0] + elem.s_dev[1][1]*elem.s_dev[1][1] + elem.s_dev[2][2]*elem.s_dev[2][2] +
-        static_cast<T>(2.0f)*(elem.s_dev[0][1]*elem.s_dev[0][1] + elem.s_dev[1][2]*elem.s_dev[1][2] + elem.s_dev[2][0]*elem.s_dev[2][0])
-    );
-    T vm_trial = sqrt(static_cast<T>(1.5f)) * s_norm;
+    if (mat.material_model == MPMMaterialModel::RHTConcrete) {
+        RHTStateVariables<T> rht_state;
+        rht_state.damage = elem.damage;
+        rht_state.ep_bar = elem.ep_bar;
+        rht_state.p_hydro = p_hydro;
+        updateRHTStress<T>(
+            elem.s_dev, p_hydro, vol_strain, dt, h_e, ep_dot,
+            static_cast<T>(mat.fc), static_cast<T>(mat.ft), G, K,
+            static_cast<T>(mat.G_f), static_cast<T>(mat.moisture_content),
+            static_cast<T>(mat.rht_A), static_cast<T>(mat.rht_N),
+            static_cast<T>(mat.rht_B), static_cast<T>(mat.rht_M),
+            static_cast<T>(mat.rht_Q0), static_cast<T>(mat.rht_BQ),
+            static_cast<T>(mat.rht_D1), static_cast<T>(mat.rht_D2),
+            static_cast<T>(mat.rht_p_crush), static_cast<T>(mat.rht_p_lock),
+            static_cast<T>(mat.rht_alpha0), static_cast<T>(mat.rht_n_comp),
+            static_cast<T>(mat.rht_betac), static_cast<T>(mat.rht_deltat),
+            static_cast<T>(mat.dif_cap_compression), static_cast<T>(mat.dif_cap_tension),
+            rht_state
+        );
+        elem.damage = rht_state.damage;
+        elem.ep_bar = rht_state.ep_bar;
+        p_hydro = rht_state.p_hydro;
+    } else if (mat.material_model == MPMMaterialModel::KCConcrete) {
+        KCStateVariables<T> kc_state;
+        kc_state.damage = elem.damage;
+        kc_state.lambda = elem.lambda;
+        kc_state.ep_bar = elem.ep_bar;
+        kc_state.p_hydro = p_hydro;
+        updateKCStress<T>(
+            elem.s_dev, p_hydro, vol_strain, dt, h_e, ep_dot,
+            static_cast<T>(mat.fc), static_cast<T>(mat.ft), G, K,
+            static_cast<T>(mat.G_f), static_cast<T>(mat.moisture_content),
+            mat.kc_auto_generate,
+            static_cast<T>(mat.kc_a0), static_cast<T>(mat.kc_a1), static_cast<T>(mat.kc_a2),
+            static_cast<T>(mat.kc_a0y), static_cast<T>(mat.kc_a1y), static_cast<T>(mat.kc_a2y),
+            static_cast<T>(mat.kc_a1r), static_cast<T>(mat.kc_a2r),
+            static_cast<T>(mat.kc_b1), static_cast<T>(mat.kc_omega),
+            static_cast<T>(mat.dif_cap_compression), static_cast<T>(mat.dif_cap_tension),
+            kc_state
+        );
+        elem.damage = kc_state.damage;
+        elem.lambda = kc_state.lambda;
+        elem.ep_bar = kc_state.ep_bar;
+        p_hydro = kc_state.p_hydro;
+    } else if (mat.material_model == MPMMaterialModel::CSCMConcrete) {
+        CSCMStateVariables<T> cscm_state;
+        cscm_state.damage = elem.damage;
+        cscm_state.kappa = elem.lambda;
+        cscm_state.ep_bar = elem.ep_bar;
+        cscm_state.p_hydro = p_hydro;
+        updateCSCMStress<T>(
+            elem.s_dev, p_hydro, vol_strain, dt, h_e, ep_dot,
+            static_cast<T>(mat.fc), static_cast<T>(mat.ft), G, K,
+            static_cast<T>(mat.G_f),
+            static_cast<T>(mat.cscm_alpha), static_cast<T>(mat.cscm_theta),
+            static_cast<T>(mat.cscm_lambda), static_cast<T>(mat.cscm_beta),
+            static_cast<T>(mat.cscm_R), static_cast<T>(mat.cscm_X0),
+            static_cast<T>(mat.cscm_W), static_cast<T>(mat.cscm_D1),
+            static_cast<T>(mat.cscm_D2),
+            static_cast<T>(mat.dif_cap_compression), static_cast<T>(mat.dif_cap_tension),
+            cscm_state
+        );
+        elem.damage = cscm_state.damage;
+        elem.lambda = cscm_state.kappa;
+        elem.ep_bar = cscm_state.ep_bar;
+        p_hydro = cscm_state.p_hydro;
+    } else {
+        T s_norm = sqrt(
+            elem.s_dev[0][0]*elem.s_dev[0][0] + elem.s_dev[1][1]*elem.s_dev[1][1] + elem.s_dev[2][2]*elem.s_dev[2][2] +
+            static_cast<T>(2.0f)*(elem.s_dev[0][1]*elem.s_dev[0][1] + elem.s_dev[1][2]*elem.s_dev[1][2] + elem.s_dev[2][0]*elem.s_dev[2][0])
+        );
+        T vm_trial = sqrt(static_cast<T>(1.5f)) * s_norm;
 
-    if (vm_trial > dynamic_yield && vm_trial > static_cast<T>(1.0e-6f)) {
-        T scale = dynamic_yield / vm_trial;
-        T d_ep = (vm_trial - dynamic_yield) / (static_cast<T>(3.0f) * G + static_cast<T>(mat.hardening_modulus));
-        elem.ep_bar += d_ep;
+        if (vm_trial > dynamic_yield && vm_trial > static_cast<T>(1.0e-6f)) {
+            T scale = dynamic_yield / vm_trial;
+            T d_ep = (vm_trial - dynamic_yield) / (static_cast<T>(3.0f) * G + static_cast<T>(mat.hardening_modulus));
+            elem.ep_bar += d_ep;
 
-        for (int r = 0; r < 3; ++r) {
-            for (int c = 0; c < 3; ++c) {
-                elem.s_dev[r][c] *= scale;
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    elem.s_dev[r][c] *= scale;
+                }
             }
-        }
 
-        T plastic_work = dynamic_yield * d_ep;
-        T chi = physics_params.taylor_quinney_factor;
-        T Cp = static_cast<T>(mat.Cp > 0.0f ? mat.Cp : 477.0f);
-        elem.temperature += (chi * plastic_work) / (density * Cp);
+            T plastic_work = dynamic_yield * d_ep;
+            T chi = physics_params.taylor_quinney_factor;
+            T Cp = static_cast<T>(mat.Cp > 0.0f ? mat.Cp : 477.0f);
+            elem.temperature += (chi * plastic_work) / (density * Cp);
+        }
     }
 
     // Stress Assembly (sigma = s_dev - p*I)
@@ -1923,6 +2059,9 @@ __global__ void fem_compute_step_size_kernel_3d_device(
             T density = static_cast<T>(mat.density > 0.0f ? mat.density : 7850.0f);
             T G = E / (static_cast<T>(2.0f) * (static_cast<T>(1.0f) + nu));
             T K = E / (static_cast<T>(3.0f) * (static_cast<T>(1.0f) - static_cast<T>(2.0f) * nu));
+            if (mat.material_model == MPMMaterialModel::RHTConcrete || mat.material_model == MPMMaterialModel::KCConcrete || mat.material_model == MPMMaterialModel::CSCMConcrete) {
+                K *= static_cast<T>(1.6f);
+            }
             T cd = sqrt((K + static_cast<T>(4.0f) / static_cast<T>(3.0f) * G) / density);
 
             if (cd > static_cast<T>(1.0e-6f)) {

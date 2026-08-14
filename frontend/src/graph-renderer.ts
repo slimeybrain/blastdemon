@@ -1184,7 +1184,10 @@ export class GraphRenderer {
                 items: [
                     { label: 'Fluid / Explosive Material (Air / JWL / Ideal Gas)', type: 'Material' },
                     { label: 'Solid Structural Material (Hypoelastic)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Hypoelastic' } },
-                    { label: 'Solid Structural Material (Johnson-Cook EOS)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Johnson-Cook + Mie-Grüneisen' } }
+                    { label: 'Solid Structural Material (Johnson-Cook EOS)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Johnson-Cook + Mie-Grüneisen' } },
+                    { label: 'Concrete Material (RHT Model)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'RHT Concrete', preset: 'Standard Structural Concrete C30/37 (30 MPa)' } },
+                    { label: 'Concrete Material (K&C Model)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Karagozian & Case (K&C)', preset: 'Standard Structural Concrete C30/37 (30 MPa)' } },
+                    { label: 'Concrete Material (CSCM Model)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'CSCM Concrete', preset: 'Standard Structural Concrete C30/37 (30 MPa)' } }
                 ]
             },
             {
@@ -2009,7 +2012,13 @@ export class GraphRenderer {
             case 'MPMObject2D':      return 'MPM OBJ';
             case 'MPMObject3D':      return 'MPM OBJ3D';
             case 'MPMMaterialSteel': 
-                if (typeof nodeOrType !== 'string' && nodeOrType.parameters?.material_model === 'Johnson-Cook + Mie-Grüneisen') return 'MPM J-C';
+                if (typeof nodeOrType !== 'string') {
+                    const mm = nodeOrType.parameters?.material_model;
+                    if (mm === 'Johnson-Cook + Mie-Grüneisen') return 'MPM J-C';
+                    if (mm === 'RHT Concrete') return 'RHT';
+                    if (mm === 'Karagozian & Case (K&C)' || mm === 'Karagozian & Case') return 'K&C';
+                    if (mm === 'CSCM Concrete') return 'CSCM';
+                }
                 return 'MPM HYPO';
             case 'FSICoupler2D':     return 'FSI 2D';
             case 'FSICoupler3D':     return 'FSI 3D';
@@ -2055,8 +2064,12 @@ export class GraphRenderer {
             case 'MPMObject2D':      return 'MPM Object 2D';
             case 'MPMObject3D':      return 'MPM Object 3D';
             case 'MPMMaterialSteel':
-                if (typeof nodeOrType !== 'string' && nodeOrType.parameters?.material_model === 'Johnson-Cook + Mie-Grüneisen') {
-                    return 'Solid Material (Johnson-Cook)';
+                if (typeof nodeOrType !== 'string') {
+                    const mm = nodeOrType.parameters?.material_model;
+                    if (mm === 'Johnson-Cook + Mie-Grüneisen') return 'Solid Material (Johnson-Cook)';
+                    if (mm === 'RHT Concrete') return 'Concrete (RHT Model)';
+                    if (mm === 'Karagozian & Case (K&C)' || mm === 'Karagozian & Case') return 'Concrete (K&C Model)';
+                    if (mm === 'CSCM Concrete') return 'Concrete (CSCM Model)';
                 }
                 return 'Solid Material (Hypoelastic)';
             case 'FSICoupler2D':     return 'FSI Coupler 2D';
@@ -4322,6 +4335,37 @@ export class GraphRenderer {
                     'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
                     'mg_gamma0', 'mg_c0', 'mg_s'
                 ];
+            } else if (matModel === 'RHT Concrete') {
+                paramKeys = [
+                    'material_model', 'preset',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
+                    'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
+                    'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
+                    'enable_strain_erosion', 'erosion_strain',
+                    'enable_stress_erosion', 'erosion_stress',
+                    'enable_timestep_erosion', 'timestep_erosion_factor'
+                ];
+            } else if (matModel === 'Karagozian & Case (K&C)' || matModel === 'Karagozian & Case') {
+                paramKeys = [
+                    'material_model', 'preset',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
+                    'kc_auto_generate', 'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
+                    'enable_strain_erosion', 'erosion_strain',
+                    'enable_stress_erosion', 'erosion_stress',
+                    'enable_timestep_erosion', 'timestep_erosion_factor'
+                ];
+            } else if (matModel === 'CSCM Concrete') {
+                paramKeys = [
+                    'material_model', 'preset',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
+                    'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
+                    'enable_strain_erosion', 'erosion_strain',
+                    'enable_stress_erosion', 'erosion_stress',
+                    'enable_timestep_erosion', 'timestep_erosion_factor'
+                ];
             } else {
                 paramKeys = [
                     'material_model', 'preset',
@@ -4459,6 +4503,10 @@ export class GraphRenderer {
                 else if (key === 'enable_strain_erosion') sectionTitle = 'ELEMENT EROSION & DELETION';
                 else if (key === 'jc_A') sectionTitle = 'JOHNSON-COOK VISCOPLASTICITY';
                 else if (key === 'mg_gamma0') sectionTitle = 'MIE-GRÜNEISEN SHOCK EOS';
+                else if (key === 'fc') sectionTitle = 'CONCRETE CORE & FRACTURE ENERGY';
+                else if (key === 'rht_A') sectionTitle = 'RHT ENVELOPES & POROUS EOS';
+                else if (key === 'kc_auto_generate' || key === 'kc_a0') sectionTitle = 'K&C 3-SURFACE DAMAGE PLASTICITY';
+                else if (key === 'cscm_alpha') sectionTitle = 'CSCM SMOOTH CAP & DAMAGE';
 
                 if (sectionTitle) {
                     const sectionKey = `${node.id}:${sectionTitle}`;
@@ -4583,7 +4631,7 @@ export class GraphRenderer {
 
             const dropdowns: Record<string, string[]> = {
                 'preset': [...MPM_MATERIAL_PRESET_NAMES],
-                'material_model': ['Hypoelastic', 'Johnson-Cook + Mie-Grüneisen'],
+                'material_model': ['Hypoelastic', 'Johnson-Cook + Mie-Grüneisen', 'RHT Concrete', 'Karagozian & Case (K&C)', 'CSCM Concrete'],
                 'mesh_type': ['regular', 'amr'],
 
                 'dimension': ['1D', '2D', '3D'],
@@ -4740,7 +4788,13 @@ export class GraphRenderer {
                             'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
                             // FEM keys
                             'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
-                            'femMinVal', 'femMaxVal', 'femOpacity'
+                            'femMinVal', 'femMaxVal', 'femOpacity',
+                            // Concrete Core & Models (RHT, K&C, CSCM)
+                            'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
+                            'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
+                            'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
+                            'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
+                            'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2'
                         ];
 
                         let castValue: any = newVal;

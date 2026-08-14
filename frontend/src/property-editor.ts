@@ -1359,12 +1359,18 @@ export class PropertyEditor {
             'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
             // FEM keys
             'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
-            'femMinVal', 'femMaxVal', 'femOpacity'
+            'femMinVal', 'femMaxVal', 'femOpacity',
+            // Concrete Core & Models (RHT, K&C, CSCM)
+            'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
+            'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
+            'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
+            'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
+            'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2'
         ];
 
         const dropdowns: Record<string, string[]> = {
             'preset': [...MPM_MATERIAL_PRESET_NAMES],
-            'material_model': ['Hypoelastic', 'Johnson-Cook + Mie-Grüneisen'],
+            'material_model': ['Hypoelastic', 'Johnson-Cook + Mie-Grüneisen', 'RHT Concrete', 'Karagozian & Case (K&C)', 'CSCM Concrete'],
             'mpmParticleQuantity': ['vonMises', 'pressure', 'velocity', 'density', 'plastic_strain', 'damage', 'has_failed', 'object_id'],
             'mpmParticleColormap': ['plasma', 'viridis', 'coolwarm', 'rainbow', 'cividis', 'grayscale'],
             'femQuantity': ['vonMises', 'plasticStrain', 'pressure', 'velocity', 'damage'],

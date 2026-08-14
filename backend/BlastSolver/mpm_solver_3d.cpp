@@ -1213,6 +1213,7 @@ void MPMSolver3D::updateStressState(float dt) {
         const float nu     = mat.poissons_ratio;
         const float mu     = E_mod / (2.0f * (1.0f + nu));
         const float lambda = (E_mod * nu) / ((1.0f + nu) * (1.0f - 2.0f * nu));
+        const float K_bulk = E_mod / (3.0f * (1.0f - 2.0f * nu));
 
         // Trial elastic stress update
         float sig_trial[3][3];
@@ -1222,8 +1223,8 @@ void MPMSolver3D::updateStressState(float dt) {
                 if (r == c) sig_trial[r][c] += lambda * tr_deps;
             }
 
-        // Deviatoric stress and Von Mises equivalent
-        const float press = -(sig_trial[0][0] + sig_trial[1][1] + sig_trial[2][2]) / 3.0f;
+        // Deviatoric stress and pressure
+        float press = -(sig_trial[0][0] + sig_trial[1][1] + sig_trial[2][2]) / 3.0f;
         float s[3][3];
         for (int r = 0; r < 3; ++r)
             for (int c = 0; c < 3; ++c) {
@@ -1231,40 +1232,131 @@ void MPMSolver3D::updateStressState(float dt) {
                 if (r == c) s[r][c] += press;
             }
 
-        float s_s = 0.0f;
+        float char_len_p = std::cbrt(p.V > 1.0e-20f ? p.V : 1.0e-6f);
+        float deps_norm = 0.0f;
         for (int r = 0; r < 3; ++r)
             for (int c = 0; c < 3; ++c)
-                s_s += s[r][c] * s[r][c];
-        const float q_trial   = std::sqrt(1.5f * s_s);
-        const float yield_surf = q_trial - (mat.yield_stress + mat.hardening_modulus * p.ep_bar);
+                deps_norm += deps[r][c] * deps[r][c];
+        float ep_dot = std::sqrt((2.0f / 3.0f) * deps_norm) / (dt > 1.0e-12f ? dt : 1.0e-12f);
 
-        if (q_trial > 1.0e-5f && yield_surf > 0.0f) {
-            // Radial return mapping
-            const float delta_ep = yield_surf / (3.0f * mu + mat.hardening_modulus);
-            float scale = 1.0f - (3.0f * mu * delta_ep) / q_trial;
-            if (scale < 0.0f) scale = 0.0f;
+        if (mat.material_model == MPMMaterialModel::RHTConcrete) {
+            RHTStateVariables<float> rht_state;
+            rht_state.damage = p.damage;
+            rht_state.ep_bar = p.ep_bar;
+            rht_state.p_hydro = press;
+            updateRHTStress<float>(
+                s, press, tr_deps, dt, char_len_p, ep_dot,
+                mat.fc, mat.ft, mu, K_bulk,
+                mat.G_f, mat.moisture_content,
+                mat.rht_A, mat.rht_N,
+                mat.rht_B, mat.rht_M,
+                mat.rht_Q0, mat.rht_BQ,
+                mat.rht_D1, mat.rht_D2,
+                mat.rht_p_crush, mat.rht_p_lock,
+                mat.rht_alpha0, mat.rht_n_comp,
+                mat.rht_betac, mat.rht_deltat,
+                mat.dif_cap_compression, mat.dif_cap_tension,
+                rht_state
+            );
+            p.damage = rht_state.damage;
+            p.ep_bar = rht_state.ep_bar;
+            press = rht_state.p_hydro;
             for (int r = 0; r < 3; ++r)
                 for (int c = 0; c < 3; ++c) {
-                    p.sigma[r][c] = scale * s[r][c];
+                    p.sigma[r][c] = s[r][c];
                     if (r == c) p.sigma[r][c] -= press;
                 }
-            p.ep_bar += delta_ep;
+        } else if (mat.material_model == MPMMaterialModel::KCConcrete) {
+            KCStateVariables<float> kc_state;
+            kc_state.damage = p.damage;
+            kc_state.lambda = p.lambda;
+            kc_state.ep_bar = p.ep_bar;
+            kc_state.p_hydro = press;
+            updateKCStress<float>(
+                s, press, tr_deps, dt, char_len_p, ep_dot,
+                mat.fc, mat.ft, mu, K_bulk,
+                mat.G_f, mat.moisture_content,
+                mat.kc_auto_generate,
+                mat.kc_a0, mat.kc_a1, mat.kc_a2,
+                mat.kc_a0y, mat.kc_a1y, mat.kc_a2y,
+                mat.kc_a1r, mat.kc_a2r,
+                mat.kc_b1, mat.kc_omega,
+                mat.dif_cap_compression, mat.dif_cap_tension,
+                kc_state
+            );
+            p.damage = kc_state.damage;
+            p.lambda = kc_state.lambda;
+            p.ep_bar = kc_state.ep_bar;
+            press = kc_state.p_hydro;
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c) {
+                    p.sigma[r][c] = s[r][c];
+                    if (r == c) p.sigma[r][c] -= press;
+                }
+        } else if (mat.material_model == MPMMaterialModel::CSCMConcrete) {
+            CSCMStateVariables<float> cscm_state;
+            cscm_state.damage = p.damage;
+            cscm_state.kappa = p.lambda;
+            cscm_state.ep_bar = p.ep_bar;
+            cscm_state.p_hydro = press;
+            updateCSCMStress<float>(
+                s, press, tr_deps, dt, char_len_p, ep_dot,
+                mat.fc, mat.ft, mu, K_bulk,
+                mat.G_f,
+                mat.cscm_alpha, mat.cscm_theta,
+                mat.cscm_lambda, mat.cscm_beta,
+                mat.cscm_R, mat.cscm_X0,
+                mat.cscm_W, mat.cscm_D1,
+                mat.cscm_D2,
+                mat.dif_cap_compression, mat.dif_cap_tension,
+                cscm_state
+            );
+            p.damage = cscm_state.damage;
+            p.lambda = cscm_state.kappa;
+            p.ep_bar = cscm_state.ep_bar;
+            press = cscm_state.p_hydro;
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c) {
+                    p.sigma[r][c] = s[r][c];
+                    if (r == c) p.sigma[r][c] -= press;
+                }
         } else {
+            // Default Hypoelastic J2 Elastoplasticity
+            float s_s = 0.0f;
             for (int r = 0; r < 3; ++r)
                 for (int c = 0; c < 3; ++c)
-                    p.sigma[r][c] = sig_trial[r][c];
+                    s_s += s[r][c] * s[r][c];
+            const float q_trial   = std::sqrt(1.5f * s_s);
+            const float yield_surf = q_trial - (mat.yield_stress + mat.hardening_modulus * p.ep_bar);
+
+            if (q_trial > 1.0e-5f && yield_surf > 0.0f) {
+                // Radial return mapping
+                const float delta_ep = yield_surf / (3.0f * mu + mat.hardening_modulus);
+                float scale = 1.0f - (3.0f * mu * delta_ep) / q_trial;
+                if (scale < 0.0f) scale = 0.0f;
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c) {
+                        p.sigma[r][c] = scale * s[r][c];
+                        if (r == c) p.sigma[r][c] -= press;
+                    }
+                p.ep_bar += delta_ep;
+            } else {
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c)
+                        p.sigma[r][c] = sig_trial[r][c];
+            }
+
+            // Rate-independent damage: direct mapping from state variable ep_bar.
+            const float d_plastic = (mat.failure_strain > 0.0f)
+                ? std::clamp(p.ep_bar / mat.failure_strain, 0.0f, 1.0f) : 0.0f;
+
+            const float curr_press    = -(p.sigma[0][0] + p.sigma[1][1] + p.sigma[2][2]) / 3.0f;
+            const float tensile_stress = -curr_press;
+            const float d_tensile = (tensile_stress > 0.0f && mat.tensile_failure_stress > 0.0f)
+                ? std::clamp(tensile_stress / mat.tensile_failure_stress, 0.0f, 1.0f) : 0.0f;
+
+            p.damage = std::max(p.damage, std::max(d_plastic, d_tensile));
         }
-
-        // Rate-independent damage: direct mapping from state variable ep_bar.
-        const float d_plastic = (mat.failure_strain > 0.0f)
-            ? std::clamp(p.ep_bar / mat.failure_strain, 0.0f, 1.0f) : 0.0f;
-
-        const float curr_press    = -(p.sigma[0][0] + p.sigma[1][1] + p.sigma[2][2]) / 3.0f;
-        const float tensile_stress = -curr_press;
-        const float d_tensile = (tensile_stress > 0.0f && mat.tensile_failure_stress > 0.0f)
-            ? std::clamp(tensile_stress / mat.tensile_failure_stress, 0.0f, 1.0f) : 0.0f;
-
-        p.damage = std::max(p.damage, std::max(d_plastic, d_tensile));
 
         if (p.damage >= 1.0f) {
             p.has_failed = true;
@@ -1279,9 +1371,9 @@ void MPMSolver3D::updateStressState(float dt) {
             const float J = p.V / (p.V0 > 1.0e-20f ? p.V0 : 1.0e-20f);
             float p_comp = 0.0f;
             if (J < 1.0f) {
-                const float E_mod    = mat.youngs_modulus;
-                const float nu       = mat.poissons_ratio;
-                const float K_intact = E_mod / (3.0f * std::max(1.0e-4f, 1.0f - 2.0f * nu));
+                const float E_mod_d  = mat.youngs_modulus;
+                const float nu_d     = mat.poissons_ratio;
+                const float K_intact = E_mod_d / (3.0f * std::max(1.0e-4f, 1.0f - 2.0f * nu_d));
                 const float K_debris = 0.10f * K_intact;
                 p_comp = K_debris * (1.0f - J) / J;
             }
@@ -1293,11 +1385,13 @@ void MPMSolver3D::updateStressState(float dt) {
             continue;
         }
 
-        // Partial damage: scale stress by (1 - damage)
-        const float soft_factor = 1.0f - p.damage;
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c)
-                p.sigma[r][c] *= soft_factor;
+        // Partial damage softening: scale deviatoric stress by (1 - damage)
+        if (mat.material_model == MPMMaterialModel::Hypoelastic) {
+            const float soft_factor = 1.0f - p.damage;
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    p.sigma[r][c] *= soft_factor;
+        }
 
         // Volume update
         p.V = std::clamp(p.V * (1.0f + tr_deps), 0.1f * p.V0, 10.0f * p.V0);
@@ -1318,6 +1412,10 @@ float MPMSolver3D::computeStepSize(float cfl) const {
         if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen) {
             float C0 = mat.mg_c0;
             c_s = std::sqrt(C0 * C0 + (2.0f / 3.0f) * E / (rho * (1.0f + nu)));
+        } else if (mat.material_model == MPMMaterialModel::RHTConcrete || mat.material_model == MPMMaterialModel::KCConcrete || mat.material_model == MPMMaterialModel::CSCMConcrete) {
+            float G = E / (2.0f * (1.0f + nu));
+            float K = 1.6f * (E / (3.0f * std::max(0.02f, 1.0f - 2.0f * nu)));
+            c_s = std::sqrt((K + 4.0f / 3.0f * G) / rho);
         } else {
             if (nu >= 0.0f && nu < 0.5f) {
                 float denom = (1.0f + nu) * std::max(0.02f, 1.0f - 2.0f * nu);

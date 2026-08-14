@@ -64,3 +64,10 @@
 - **Complete Re-initialization Enforcement:** When `executeModelCommand()` receives a `STEP` or `EXEC_ALL` request for a model whose status is `'UNINITIALIZED'`, it MUST send the appropriate `INIT` / `INIT_2D` / `INIT_3D` / `INIT_FSI_2D` / `INIT_FSI_3D` command to the backend prior to issuing execution steps.
 - **Precedence & Serialization Isolation:** Serializing parameters across multi-node graphs (e.g., FSI coupling, remap pipelines) MUST enforce strict parameter precedence. Solver configuration keys (`device`, `precision`, `cfl`, `init_mode`) on primary solver nodes MUST be re-applied at the end of the serialization pipeline to prevent default parameters from connected domain nodes (e.g. MPMDomain3D) from silently overwriting user selections.
 - **Synchronized Numeric Casting (`numericKeys`):** Any numeric key added to any node parameter schema MUST be added to all 4 `numericKeys` lists in `serialization.ts`, `property-editor.ts`, `node-viewer.ts`, and `graph-renderer.ts`.
+
+## 13. High Compute Performance and Minimal Memory Footprint (ABSOLUTE RULE)
+- **Zero Dynamic Allocations in Hot Paths:** Never allocate memory (e.g. `std::vector`, `new`, `malloc`, string manipulations) inside solver step loops, Gauss point loops, or particle updates. All buffers, temporary arrays, and state tables must be pre-allocated during initialization.
+- **Cache Locality & Coalesced Memory Access:** Ensure particle and element data layouts maintain contiguous, cache-friendly, or Structure-of-Arrays (SoA) alignment for full SIMD / GPU warp memory coalescing.
+- **Minimal Per-Entity State Variables:** Keep per-element and per-particle state history minimal and strictly packed. Do not store redundant or easily recomputable tensors in persistent memory.
+- **Fast Closed-Form Invariant & Return-Mapping Math:** Prefer analytical, branch-minimized, and closed-form implementations for yield evaluations, tensor invariants, and return mapping over costly iterative root-finders where possible.
+

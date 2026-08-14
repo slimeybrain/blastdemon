@@ -23,6 +23,50 @@ export interface MPMMaterialParams {
     mg_gamma0: number;
     mg_c0: number;
     mg_s: number;
+    // Concrete Core Properties
+    fc?: number;
+    ft?: number;
+    G_f?: number;
+    moisture_content?: number;
+    dif_cap_compression?: number;
+    dif_cap_tension?: number;
+    // RHT Concrete
+    rht_A?: number;
+    rht_N?: number;
+    rht_B?: number;
+    rht_M?: number;
+    rht_Q0?: number;
+    rht_BQ?: number;
+    rht_D1?: number;
+    rht_D2?: number;
+    rht_p_crush?: number;
+    rht_p_lock?: number;
+    rht_alpha0?: number;
+    rht_n_comp?: number;
+    rht_betac?: number;
+    rht_deltat?: number;
+    // K&C Concrete
+    kc_auto_generate?: boolean;
+    kc_a0?: number;
+    kc_a1?: number;
+    kc_a2?: number;
+    kc_a0y?: number;
+    kc_a1y?: number;
+    kc_a2y?: number;
+    kc_a1r?: number;
+    kc_a2r?: number;
+    kc_b1?: number;
+    kc_omega?: number;
+    // CSCM Concrete
+    cscm_alpha?: number;
+    cscm_theta?: number;
+    cscm_lambda?: number;
+    cscm_beta?: number;
+    cscm_R?: number;
+    cscm_X0?: number;
+    cscm_W?: number;
+    cscm_D1?: number;
+    cscm_D2?: number;
     reference: string;
     category: string;
 }
@@ -32,7 +76,7 @@ export interface MPMMaterialParamInfo {
     label: string;
     shortDesc: string;
     unit?: string;
-    section: 'model' | 'elasticity' | 'plasticity' | 'failure' | 'erosion' | 'johnson_cook' | 'mie_gruneisen';
+    section: 'model' | 'elasticity' | 'plasticity' | 'failure' | 'erosion' | 'johnson_cook' | 'mie_gruneisen' | 'concrete_base' | 'rht' | 'kc' | 'cscm';
     tooltip: string;
 }
 
@@ -239,6 +283,329 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         unit: 'dim',
         section: 'mie_gruneisen',
         tooltip: 'Dimensionless slope s of the shock velocity vs. particle velocity Hugoniot curve (Us = C_0 + s * Up).'
+    },
+    // Concrete Core & Fracture Energy
+    'fc': {
+        key: 'fc',
+        label: 'fc: Compressive Strength',
+        shortDesc: 'Uniaxial compressive strength',
+        unit: 'Pa',
+        section: 'concrete_base',
+        tooltip: 'Uniaxial quasi-static compressive strength fc (Pa).'
+    },
+    'ft': {
+        key: 'ft',
+        label: 'ft: Tensile Strength',
+        shortDesc: 'Direct tensile strength',
+        unit: 'Pa',
+        section: 'concrete_base',
+        tooltip: 'Direct tensile cracking strength ft (Pa).'
+    },
+    'G_f': {
+        key: 'G_f',
+        label: 'G_f: Fracture Energy',
+        shortDesc: 'Tensile crack fracture energy',
+        unit: 'N/m',
+        section: 'concrete_base',
+        tooltip: 'Tensile fracture energy G_f (N/m) for mesh-objective crack regularization (Hillerborg model).'
+    },
+    'moisture_content': {
+        key: 'moisture_content',
+        label: 'Moisture Content',
+        shortDesc: 'Water saturation mass fraction',
+        unit: 'dim',
+        section: 'concrete_base',
+        tooltip: 'Pore moisture saturation fraction S_w (0 = dry, 1 = fully saturated) for enhanced acoustic shock speed and pore stiffening.'
+    },
+    'dif_cap_compression': {
+        key: 'dif_cap_compression',
+        label: 'DIF Cap (Compression)',
+        shortDesc: 'Max compressive rate factor',
+        unit: 'dim',
+        section: 'concrete_base',
+        tooltip: 'Maximum allowable Dynamic Increase Factor (DIF) under extreme strain rate compression.'
+    },
+    'dif_cap_tension': {
+        key: 'dif_cap_tension',
+        label: 'DIF Cap (Tension)',
+        shortDesc: 'Max tensile rate factor',
+        unit: 'dim',
+        section: 'concrete_base',
+        tooltip: 'Maximum allowable Dynamic Increase Factor (DIF) under extreme strain rate tension.'
+    },
+    // RHT Model
+    'rht_A': {
+        key: 'rht_A',
+        label: 'RHT A: Failure Surface Coeff',
+        shortDesc: 'Failure surface multiplier',
+        unit: 'dim',
+        section: 'rht',
+        tooltip: 'RHT failure surface pre-factor A.'
+    },
+    'rht_N': {
+        key: 'rht_N',
+        label: 'RHT N: Pressure Exponent',
+        shortDesc: 'Failure surface pressure exponent',
+        unit: 'dim',
+        section: 'rht',
+        tooltip: 'RHT failure surface pressure hardening exponent N.'
+    },
+    'rht_B': {
+        key: 'rht_B',
+        label: 'RHT B: Residual Surface Coeff',
+        shortDesc: 'Residual shear multiplier',
+        unit: 'dim',
+        section: 'rht',
+        tooltip: 'RHT residual friction surface pre-factor B.'
+    },
+    'rht_M': {
+        key: 'rht_M',
+        label: 'RHT M: Residual Exponent',
+        shortDesc: 'Residual friction exponent',
+        unit: 'dim',
+        section: 'rht',
+        tooltip: 'RHT residual friction pressure exponent M.'
+    },
+    'rht_Q0': {
+        key: 'rht_Q0',
+        label: 'RHT Q₀: Lode Ratio',
+        shortDesc: 'Tensile/compressive meridian ratio',
+        unit: 'dim',
+        section: 'rht',
+        tooltip: 'RHT Lode meridian strength ratio Q0 at zero pressure.'
+    },
+    'rht_BQ': {
+        key: 'rht_BQ',
+        label: 'RHT B_Q: Lode Exponent',
+        shortDesc: 'Lode angle pressure dependency',
+        unit: 'dim',
+        section: 'rht',
+        tooltip: 'RHT Lode angle dependence factor BQ.'
+    },
+    'rht_D1': {
+        key: 'rht_D1',
+        label: 'RHT D₁: Damage Strain Scaling',
+        shortDesc: 'Compressive damage growth factor',
+        unit: 'dim',
+        section: 'rht',
+        tooltip: 'RHT damage accumulation parameter D1.'
+    },
+    'rht_D2': {
+        key: 'rht_D2',
+        label: 'RHT D₂: Damage Pressure Exponent',
+        shortDesc: 'Damage pressure confinement factor',
+        unit: 'dim',
+        section: 'rht',
+        tooltip: 'RHT damage confinement exponent D2.'
+    },
+    'rht_p_crush': {
+        key: 'rht_p_crush',
+        label: 'RHT p_crush: Pore Crush',
+        shortDesc: 'Porous compaction initiation',
+        unit: 'Pa',
+        section: 'rht',
+        tooltip: 'P-alpha EOS pore crush initiation pressure p_crush (Pa).'
+    },
+    'rht_p_lock': {
+        key: 'rht_p_lock',
+        label: 'RHT p_lock: Solid Compaction',
+        shortDesc: 'Complete pore closure pressure',
+        unit: 'Pa',
+        section: 'rht',
+        tooltip: 'P-alpha EOS solid lock pressure p_lock (Pa) where porosity reaches 0.'
+    },
+    'rht_alpha0': {
+        key: 'rht_alpha0',
+        label: 'RHT α₀: Initial Porosity',
+        shortDesc: 'Initial porous compaction ratio',
+        unit: 'dim',
+        section: 'rht',
+        tooltip: 'P-alpha EOS initial porous ratio alpha0 = rho_solid / rho_porous.'
+    },
+    'rht_n_comp': {
+        key: 'rht_n_comp',
+        label: 'RHT n_comp: Compaction Exponent',
+        shortDesc: 'Porous compaction rate',
+        unit: 'dim',
+        section: 'rht',
+        tooltip: 'P-alpha compaction curvature exponent n_comp.'
+    },
+    'rht_betac': {
+        key: 'rht_betac',
+        label: 'RHT β_c: Compressive DIF Slope',
+        shortDesc: 'DIF compressive rate sensitivity',
+        unit: 'dim',
+        section: 'rht',
+        tooltip: 'Compressive DIF strain rate sensitivity slope beta_c.'
+    },
+    'rht_deltat': {
+        key: 'rht_deltat',
+        label: 'RHT δ_t: Tensile DIF Slope',
+        shortDesc: 'DIF tensile rate sensitivity',
+        unit: 'dim',
+        section: 'rht',
+        tooltip: 'Tensile DIF strain rate sensitivity slope delta_t.'
+    },
+    // K&C Model
+    'kc_auto_generate': {
+        key: 'kc_auto_generate',
+        label: 'K&C Auto-Generate Parameters',
+        shortDesc: 'Derive surfaces from fc and ft',
+        section: 'kc',
+        tooltip: 'Automatically computes K&C (MAT_072R3) 3-surface failure envelopes from unconfined compressive strength fc.'
+    },
+    'kc_a0': {
+        key: 'kc_a0',
+        label: 'K&C a₀: Max Surface Cohesion',
+        shortDesc: 'Maximum failure cohesion',
+        unit: 'Pa',
+        section: 'kc',
+        tooltip: 'K&C maximum yield surface cohesion a0 (Pa).'
+    },
+    'kc_a1': {
+        key: 'kc_a1',
+        label: 'K&C a₁: Max Surface Slope',
+        shortDesc: 'Maximum friction slope',
+        unit: 'dim',
+        section: 'kc',
+        tooltip: 'K&C maximum yield surface pressure slope a1.'
+    },
+    'kc_a2': {
+        key: 'kc_a2',
+        label: 'K&C a₂: Max Surface Curvature',
+        shortDesc: 'Maximum pressure curvature',
+        unit: '1/Pa',
+        section: 'kc',
+        tooltip: 'K&C maximum yield surface pressure curvature a2 (1/Pa).'
+    },
+    'kc_a0y': {
+        key: 'kc_a0y',
+        label: 'K&C a₀y: Initial Yield Cohesion',
+        shortDesc: 'Initial elastic limit cohesion',
+        unit: 'Pa',
+        section: 'kc',
+        tooltip: 'K&C initial yield surface cohesion a0y (Pa).'
+    },
+    'kc_a1y': {
+        key: 'kc_a1y',
+        label: 'K&C a₁y: Initial Yield Slope',
+        shortDesc: 'Initial elastic limit friction',
+        unit: 'dim',
+        section: 'kc',
+        tooltip: 'K&C initial yield surface pressure slope a1y.'
+    },
+    'kc_a2y': {
+        key: 'kc_a2y',
+        label: 'K&C a₂y: Initial Yield Curvature',
+        shortDesc: 'Initial yield pressure curvature',
+        unit: '1/Pa',
+        section: 'kc',
+        tooltip: 'K&C initial yield surface pressure curvature a2y (1/Pa).'
+    },
+    'kc_a1r': {
+        key: 'kc_a1r',
+        label: 'K&C a₁r: Residual Friction',
+        shortDesc: 'Residual friction slope',
+        unit: 'dim',
+        section: 'kc',
+        tooltip: 'K&C residual yield surface pressure slope a1r.'
+    },
+    'kc_a2r': {
+        key: 'kc_a2r',
+        label: 'K&C a₂r: Residual Curvature',
+        shortDesc: 'Residual pressure curvature',
+        unit: '1/Pa',
+        section: 'kc',
+        tooltip: 'K&C residual yield surface pressure curvature a2r (1/Pa).'
+    },
+    'kc_b1': {
+        key: 'kc_b1',
+        label: 'K&C b₁: Damage Softening Rate',
+        shortDesc: 'Post-peak softening parameter',
+        unit: 'dim',
+        section: 'kc',
+        tooltip: 'K&C post-peak damage softening evolution parameter b1.'
+    },
+    'kc_omega': {
+        key: 'kc_omega',
+        label: 'K&C ω: Dilatancy Factor',
+        shortDesc: 'Fractional plastic dilatancy',
+        unit: 'dim',
+        section: 'kc',
+        tooltip: 'K&C fractional dilatancy parameter omega.'
+    },
+    // CSCM Model
+    'cscm_alpha': {
+        key: 'cscm_alpha',
+        label: 'CSCM α: Triaxial Limit',
+        shortDesc: 'Triaxial compression limit',
+        unit: 'Pa',
+        section: 'cscm',
+        tooltip: 'CSCM shear failure surface intercept alpha (Pa).'
+    },
+    'cscm_theta': {
+        key: 'cscm_theta',
+        label: 'CSCM θ: Friction Slope',
+        shortDesc: 'High-pressure friction slope',
+        unit: 'dim',
+        section: 'cscm',
+        tooltip: 'CSCM linear friction angle parameter theta.'
+    },
+    'cscm_lambda': {
+        key: 'cscm_lambda',
+        label: 'CSCM λ: Curvature Strength',
+        shortDesc: 'Nonlinear curvature multiplier',
+        unit: 'Pa',
+        section: 'cscm',
+        tooltip: 'CSCM nonlinear shear envelope parameter lambda (Pa).'
+    },
+    'cscm_beta': {
+        key: 'cscm_beta',
+        label: 'CSCM β: Curvature Exponent',
+        shortDesc: 'Pressure curvature decay',
+        unit: '1/Pa',
+        section: 'cscm',
+        tooltip: 'CSCM exponential curvature decay beta (1/Pa).'
+    },
+    'cscm_R': {
+        key: 'cscm_R',
+        label: 'CSCM R: Cap Aspect Ratio',
+        shortDesc: 'Elliptical hardening cap ratio',
+        unit: 'dim',
+        section: 'cscm',
+        tooltip: 'CSCM elliptical cap aspect ratio R.'
+    },
+    'cscm_X0': {
+        key: 'cscm_X0',
+        label: 'CSCM X₀: Initial Cap Position',
+        shortDesc: 'Pore crush cap threshold',
+        unit: 'Pa',
+        section: 'cscm',
+        tooltip: 'CSCM initial cap yield position X0 (Pa).'
+    },
+    'cscm_W': {
+        key: 'cscm_W',
+        label: 'CSCM W: Max Plastic Compaction',
+        shortDesc: 'Maximum plastic volumetric strain',
+        unit: 'dim',
+        section: 'cscm',
+        tooltip: 'CSCM maximum plastic volume compaction strain W.'
+    },
+    'cscm_D1': {
+        key: 'cscm_D1',
+        label: 'CSCM D₁: Brittle Damage Constant',
+        shortDesc: 'Tensile brittle damage growth',
+        unit: '1/Pa',
+        section: 'cscm',
+        tooltip: 'CSCM brittle damage growth parameter D1 (1/Pa).'
+    },
+    'cscm_D2': {
+        key: 'cscm_D2',
+        label: 'CSCM D₂: Ductile Damage Constant',
+        shortDesc: 'Shear ductile damage growth',
+        unit: 'dim',
+        section: 'cscm',
+        tooltip: 'CSCM ductile damage accumulation parameter D2.'
     }
 };
 
@@ -596,41 +963,73 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     // ---------------------------------------------------------
     'Normal-Strength Concrete C20/25 (20 MPa)': {
         density: 2300.0, youngs_modulus: 30.0e9, poissons_ratio: 0.20, yield_stress: 20.0e6, hardening_modulus: 200.0e6, failure_strain: 0.0035, tensile_failure_stress: 2.2e6,
+        fc: 20.0e6, ft: 2.2e6, G_f: 75.0, moisture_content: 0.04, dif_cap_compression: 2.5, dif_cap_tension: 5.0,
+        rht_A: 1.60, rht_N: 0.61, rht_B: 0.70, rht_M: 0.80, rht_Q0: 0.68, rht_BQ: 0.0105, rht_D1: 0.04, rht_D2: 1.0, rht_p_crush: 6.67e6, rht_p_lock: 6.0e9, rht_alpha0: 1.28, rht_n_comp: 3.0, rht_betac: 0.032, rht_deltat: 0.036,
+        kc_auto_generate: true, kc_a0: 6.67e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 5.33e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.60, kc_omega: 0.50,
+        cscm_alpha: 7.0e6, cscm_theta: 0.38, cscm_lambda: 5.0e6, cscm_beta: 1.5e-8, cscm_R: 4.0, cscm_X0: 60.0e6, cscm_W: 0.05, cscm_D1: 2.5e-9, cscm_D2: 1.0,
         jc_A: 20.0e6, jc_B: 150.0e6, jc_n: 0.40, jc_C: 0.005, jc_m: 1.00, T_melt: 1500.0, T_room: 293.0, Cp: 900.0, mg_gamma0: 1.00, mg_c0: 3000.0, mg_s: 1.20,
         category: 'Concrete & Masonry Strength Grades', reference: 'Eurocode 2 EN 1992-1-1 / Riedel-Hiermaier-Thoma (RHT) Model'
     },
     'Standard Structural Concrete C30/37 (30 MPa)': {
         density: 2350.0, youngs_modulus: 33.0e9, poissons_ratio: 0.20, yield_stress: 30.0e6, hardening_modulus: 250.0e6, failure_strain: 0.0035, tensile_failure_stress: 2.9e6,
+        fc: 30.0e6, ft: 2.9e6, G_f: 90.0, moisture_content: 0.04, dif_cap_compression: 2.5, dif_cap_tension: 5.0,
+        rht_A: 1.60, rht_N: 0.61, rht_B: 0.70, rht_M: 0.80, rht_Q0: 0.68, rht_BQ: 0.0105, rht_D1: 0.04, rht_D2: 1.0, rht_p_crush: 10.0e6, rht_p_lock: 6.0e9, rht_alpha0: 1.25, rht_n_comp: 3.0, rht_betac: 0.032, rht_deltat: 0.036,
+        kc_auto_generate: true, kc_a0: 10.0e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 8.0e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.60, kc_omega: 0.50,
+        cscm_alpha: 10.5e6, cscm_theta: 0.40, cscm_lambda: 7.0e6, cscm_beta: 1.5e-8, cscm_R: 4.0, cscm_X0: 85.0e6, cscm_W: 0.05, cscm_D1: 2.5e-9, cscm_D2: 1.0,
         jc_A: 30.0e6, jc_B: 180.0e6, jc_n: 0.40, jc_C: 0.005, jc_m: 1.00, T_melt: 1500.0, T_room: 293.0, Cp: 900.0, mg_gamma0: 1.00, mg_c0: 3100.0, mg_s: 1.25,
         category: 'Concrete & Masonry Strength Grades', reference: 'Eurocode 2 C30/37 Standard / RHT Benchmark'
     },
     'High-Strength Concrete C50/60 (50 MPa)': {
         density: 2400.0, youngs_modulus: 37.0e9, poissons_ratio: 0.20, yield_stress: 50.0e6, hardening_modulus: 350.0e6, failure_strain: 0.0030, tensile_failure_stress: 4.1e6,
+        fc: 50.0e6, ft: 4.1e6, G_f: 120.0, moisture_content: 0.04, dif_cap_compression: 2.5, dif_cap_tension: 5.0,
+        rht_A: 1.60, rht_N: 0.61, rht_B: 0.70, rht_M: 0.80, rht_Q0: 0.68, rht_BQ: 0.0105, rht_D1: 0.04, rht_D2: 1.0, rht_p_crush: 16.67e6, rht_p_lock: 6.0e9, rht_alpha0: 1.20, rht_n_comp: 3.0, rht_betac: 0.032, rht_deltat: 0.036,
+        kc_auto_generate: true, kc_a0: 16.67e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 13.33e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.60, kc_omega: 0.50,
+        cscm_alpha: 17.5e6, cscm_theta: 0.42, cscm_lambda: 12.0e6, cscm_beta: 1.5e-8, cscm_R: 4.0, cscm_X0: 140.0e6, cscm_W: 0.05, cscm_D1: 2.5e-9, cscm_D2: 1.0,
         jc_A: 50.0e6, jc_B: 220.0e6, jc_n: 0.38, jc_C: 0.005, jc_m: 1.00, T_melt: 1500.0, T_room: 293.0, Cp: 900.0, mg_gamma0: 1.00, mg_c0: 3300.0, mg_s: 1.30,
         category: 'Concrete & Masonry Strength Grades', reference: 'Riedel et al., Int. J. Impact Eng. (1999)'
     },
     'Ultra-High Performance Concrete C100/115 (100 MPa)': {
         density: 2500.0, youngs_modulus: 45.0e9, poissons_ratio: 0.20, yield_stress: 100.0e6, hardening_modulus: 500.0e6, failure_strain: 0.0035, tensile_failure_stress: 7.0e6,
+        fc: 100.0e6, ft: 7.0e6, G_f: 180.0, moisture_content: 0.02, dif_cap_compression: 2.5, dif_cap_tension: 5.0,
+        rht_A: 1.65, rht_N: 0.60, rht_B: 0.75, rht_M: 0.80, rht_Q0: 0.70, rht_BQ: 0.0105, rht_D1: 0.035, rht_D2: 1.0, rht_p_crush: 33.33e6, rht_p_lock: 7.0e9, rht_alpha0: 1.12, rht_n_comp: 3.0, rht_betac: 0.030, rht_deltat: 0.034,
+        kc_auto_generate: true, kc_a0: 33.33e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 26.67e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.60, kc_omega: 0.50,
+        cscm_alpha: 35.0e6, cscm_theta: 0.45, cscm_lambda: 24.0e6, cscm_beta: 1.5e-8, cscm_R: 4.0, cscm_X0: 280.0e6, cscm_W: 0.04, cscm_D1: 2.5e-9, cscm_D2: 1.0,
         jc_A: 100.0e6, jc_B: 300.0e6, jc_n: 0.35, jc_C: 0.006, jc_m: 1.00, T_melt: 1500.0, T_room: 293.0, Cp: 950.0, mg_gamma0: 1.10, mg_c0: 3600.0, mg_s: 1.35,
         category: 'Concrete & Masonry Strength Grades', reference: 'Forquin et al., Int. J. Impact Eng. (2010)'
     },
     'UHPC / Ductal (150 MPa)': {
         density: 2550.0, youngs_modulus: 55.0e9, poissons_ratio: 0.21, yield_stress: 150.0e6, hardening_modulus: 700.0e6, failure_strain: 0.0050, tensile_failure_stress: 12.0e6,
+        fc: 150.0e6, ft: 12.0e6, G_f: 300.0, moisture_content: 0.01, dif_cap_compression: 2.5, dif_cap_tension: 5.0,
+        rht_A: 1.70, rht_N: 0.58, rht_B: 0.80, rht_M: 0.80, rht_Q0: 0.72, rht_BQ: 0.0105, rht_D1: 0.030, rht_D2: 1.0, rht_p_crush: 50.0e6, rht_p_lock: 8.0e9, rht_alpha0: 1.08, rht_n_comp: 3.0, rht_betac: 0.028, rht_deltat: 0.032,
+        kc_auto_generate: true, kc_a0: 50.0e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 40.0e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.60, kc_omega: 0.50,
+        cscm_alpha: 52.5e6, cscm_theta: 0.48, cscm_lambda: 36.0e6, cscm_beta: 1.5e-8, cscm_R: 4.0, cscm_X0: 420.0e6, cscm_W: 0.03, cscm_D1: 2.5e-9, cscm_D2: 1.0,
         jc_A: 150.0e6, jc_B: 400.0e6, jc_n: 0.30, jc_C: 0.007, jc_m: 1.00, T_melt: 1500.0, T_room: 293.0, Cp: 950.0, mg_gamma0: 1.15, mg_c0: 3800.0, mg_s: 1.38,
         category: 'Concrete & Masonry Strength Grades', reference: 'Lafarge Holcim Ductal Technical Manual'
     },
     'Fiber-Reinforced Concrete (FRC 60 MPa)': {
         density: 2450.0, youngs_modulus: 39.0e9, poissons_ratio: 0.20, yield_stress: 60.0e6, hardening_modulus: 450.0e6, failure_strain: 0.0080, tensile_failure_stress: 8.5e6,
+        fc: 60.0e6, ft: 8.5e6, G_f: 500.0, moisture_content: 0.03, dif_cap_compression: 2.5, dif_cap_tension: 5.0,
+        rht_A: 1.62, rht_N: 0.61, rht_B: 0.72, rht_M: 0.80, rht_Q0: 0.68, rht_BQ: 0.0105, rht_D1: 0.04, rht_D2: 1.0, rht_p_crush: 20.0e6, rht_p_lock: 6.0e9, rht_alpha0: 1.18, rht_n_comp: 3.0, rht_betac: 0.032, rht_deltat: 0.036,
+        kc_auto_generate: true, kc_a0: 20.0e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 16.0e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.40, kc_omega: 0.50,
+        cscm_alpha: 21.0e6, cscm_theta: 0.43, cscm_lambda: 14.5e6, cscm_beta: 1.5e-8, cscm_R: 4.0, cscm_X0: 170.0e6, cscm_W: 0.05, cscm_D1: 2.0e-9, cscm_D2: 1.0,
         jc_A: 60.0e6, jc_B: 280.0e6, jc_n: 0.35, jc_C: 0.006, jc_m: 1.00, T_melt: 1500.0, T_room: 293.0, Cp: 920.0, mg_gamma0: 1.05, mg_c0: 3400.0, mg_s: 1.32,
         category: 'Concrete & Masonry Strength Grades', reference: 'Nold, ACI Materials Journal (2012)'
     },
     'Clay Brick Masonry': {
         density: 1800.0, youngs_modulus: 10.0e9, poissons_ratio: 0.18, yield_stress: 12.0e6, hardening_modulus: 80.0e6, failure_strain: 0.0020, tensile_failure_stress: 1.2e6,
+        fc: 12.0e6, ft: 1.2e6, G_f: 40.0, moisture_content: 0.05, dif_cap_compression: 2.0, dif_cap_tension: 4.0,
+        rht_A: 1.50, rht_N: 0.65, rht_B: 0.65, rht_M: 0.80, rht_Q0: 0.65, rht_BQ: 0.0105, rht_D1: 0.05, rht_D2: 1.0, rht_p_crush: 4.0e6, rht_p_lock: 4.0e9, rht_alpha0: 1.35, rht_n_comp: 3.0, rht_betac: 0.035, rht_deltat: 0.040,
+        kc_auto_generate: true, kc_a0: 4.0e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 3.2e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.80, kc_omega: 0.50,
+        cscm_alpha: 4.2e6, cscm_theta: 0.35, cscm_lambda: 3.0e6, cscm_beta: 1.5e-8, cscm_R: 4.0, cscm_X0: 35.0e6, cscm_W: 0.06, cscm_D1: 3.0e-9, cscm_D2: 1.0,
         jc_A: 12.0e6, jc_B: 50.0e6, jc_n: 0.45, jc_C: 0.003, jc_m: 1.00, T_melt: 1400.0, T_room: 293.0, Cp: 840.0, mg_gamma0: 0.85, mg_c0: 2200.0, mg_s: 1.15,
         category: 'Concrete & Masonry Strength Grades', reference: 'Lourenco, PhD Thesis TU Delft'
     },
     'Aerated Autoclaved Concrete (AAC)': {
         density: 600.0, youngs_modulus: 2.0e9, poissons_ratio: 0.15, yield_stress: 4.0e6, hardening_modulus: 20.0e6, failure_strain: 0.0050, tensile_failure_stress: 0.5e6,
+        fc: 4.0e6, ft: 0.5e6, G_f: 15.0, moisture_content: 0.06, dif_cap_compression: 2.0, dif_cap_tension: 4.0,
+        rht_A: 1.40, rht_N: 0.70, rht_B: 0.60, rht_M: 0.80, rht_Q0: 0.60, rht_BQ: 0.0105, rht_D1: 0.06, rht_D2: 1.0, rht_p_crush: 1.33e6, rht_p_lock: 2.0e9, rht_alpha0: 1.50, rht_n_comp: 3.0, rht_betac: 0.040, rht_deltat: 0.045,
+        kc_auto_generate: true, kc_a0: 1.33e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 1.07e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 2.00, kc_omega: 0.50,
+        cscm_alpha: 1.4e6, cscm_theta: 0.30, cscm_lambda: 1.0e6, cscm_beta: 1.5e-8, cscm_R: 4.0, cscm_X0: 12.0e6, cscm_W: 0.08, cscm_D1: 4.0e-9, cscm_D2: 1.0,
         jc_A: 4.0e6, jc_B: 15.0e6, jc_n: 0.50, jc_C: 0.002, jc_m: 1.00, T_melt: 1400.0, T_room: 293.0, Cp: 1000.0, mg_gamma0: 0.50, mg_c0: 1200.0, mg_s: 1.10,
         category: 'Concrete & Masonry Strength Grades', reference: 'Autoclaved Aerated Concrete Handbook'
     },

@@ -101,6 +101,101 @@ inline bool get_json_bool(const nlohmann::json& j, const std::string& key, bool 
     return default_val;
 }
 
+inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
+    Blast::MaterialTable3D mat;
+    std::string mat_model_str = obj.value("material_model", "Hypoelastic");
+    if (mat_model_str == "Johnson-Cook + Mie-Grüneisen" || mat_model_str == "Johnson-Cook") {
+        mat.material_model = Blast::MPMMaterialModel::JohnsonCookMieGruneisen;
+    } else if (mat_model_str == "RHT Concrete" || mat_model_str == "RHT") {
+        mat.material_model = Blast::MPMMaterialModel::RHTConcrete;
+    } else if (mat_model_str == "Karagozian & Case (K&C)" || mat_model_str == "K&C" || mat_model_str == "KC Concrete" || mat_model_str == "Karagozian & Case") {
+        mat.material_model = Blast::MPMMaterialModel::KCConcrete;
+    } else if (mat_model_str == "CSCM Concrete" || mat_model_str == "CSCM") {
+        mat.material_model = Blast::MPMMaterialModel::CSCMConcrete;
+    } else {
+        mat.material_model = Blast::MPMMaterialModel::Hypoelastic;
+    }
+    mat.density = static_cast<float>(get_json_double(obj, "density", 7850.0));
+    mat.youngs_modulus = static_cast<float>(get_json_double(obj, "youngs_modulus", 210.0e9));
+    mat.poissons_ratio = static_cast<float>(get_json_double(obj, "poissons_ratio", 0.3));
+    mat.yield_stress = static_cast<float>(get_json_double(obj, "yield_stress", 400.0e6));
+    mat.hardening_modulus = static_cast<float>(get_json_double(obj, "hardening_modulus", 1.0e9));
+    mat.failure_strain = static_cast<float>(get_json_double(obj, "failure_strain", 0.50));
+    mat.tensile_failure_stress = static_cast<float>(get_json_double(obj, "tensile_failure_stress", 600.0e6));
+    mat.enable_strain_erosion = get_json_bool(obj, "enable_strain_erosion", true);
+    mat.erosion_strain = static_cast<float>(get_json_double(obj, "erosion_strain", mat.failure_strain));
+    mat.enable_stress_erosion = get_json_bool(obj, "enable_stress_erosion", false);
+    mat.erosion_stress = static_cast<float>(get_json_double(obj, "erosion_stress", mat.tensile_failure_stress));
+    mat.enable_timestep_erosion = get_json_bool(obj, "enable_timestep_erosion", true);
+    mat.timestep_erosion_factor = static_cast<float>(get_json_double(obj, "timestep_erosion_factor", 0.10));
+    
+    // JC
+    mat.jc_A = static_cast<float>(get_json_double(obj, "jc_A", 792.0e6));
+    mat.jc_B = static_cast<float>(get_json_double(obj, "jc_B", 510.0e6));
+    mat.jc_n = static_cast<float>(get_json_double(obj, "jc_n", 0.26));
+    mat.jc_C = static_cast<float>(get_json_double(obj, "jc_C", 0.014));
+    mat.jc_m = static_cast<float>(get_json_double(obj, "jc_m", 1.03));
+    mat.T_melt = static_cast<float>(get_json_double(obj, "T_melt", 1793.0));
+    mat.T_room = static_cast<float>(get_json_double(obj, "T_room", 293.0));
+    mat.Cp = static_cast<float>(get_json_double(obj, "Cp", 477.0));
+    mat.mg_gamma0 = static_cast<float>(get_json_double(obj, "mg_gamma0", 1.81));
+    mat.mg_c0 = static_cast<float>(get_json_double(obj, "mg_c0", 4570.0));
+    mat.mg_s = static_cast<float>(get_json_double(obj, "mg_s", 1.49));
+    mat.bulk_viscosity_b1 = static_cast<float>(get_json_double(obj, "bulk_viscosity_b1", 0.06));
+    mat.bulk_viscosity_b2 = static_cast<float>(get_json_double(obj, "bulk_viscosity_b2", 1.20));
+
+    // Concrete Base
+    mat.fc = static_cast<float>(get_json_double(obj, "fc", 35.0e6));
+    mat.ft = static_cast<float>(get_json_double(obj, "ft", 3.5e6));
+    mat.G_f = static_cast<float>(get_json_double(obj, "G_f", 100.0));
+    mat.moisture_content = static_cast<float>(get_json_double(obj, "moisture_content", 0.04));
+    mat.dif_cap_compression = static_cast<float>(get_json_double(obj, "dif_cap_compression", 2.5));
+    mat.dif_cap_tension = static_cast<float>(get_json_double(obj, "dif_cap_tension", 5.0));
+
+    // RHT
+    mat.rht_A = static_cast<float>(get_json_double(obj, "rht_A", 1.60));
+    mat.rht_N = static_cast<float>(get_json_double(obj, "rht_N", 0.61));
+    mat.rht_B = static_cast<float>(get_json_double(obj, "rht_B", 0.70));
+    mat.rht_M = static_cast<float>(get_json_double(obj, "rht_M", 0.80));
+    mat.rht_Q0 = static_cast<float>(get_json_double(obj, "rht_Q0", 0.68));
+    mat.rht_BQ = static_cast<float>(get_json_double(obj, "rht_BQ", 0.0105));
+    mat.rht_D1 = static_cast<float>(get_json_double(obj, "rht_D1", 0.04));
+    mat.rht_D2 = static_cast<float>(get_json_double(obj, "rht_D2", 1.0));
+    mat.rht_p_crush = static_cast<float>(get_json_double(obj, "rht_p_crush", 35.0e6 / 3.0));
+    mat.rht_p_lock = static_cast<float>(get_json_double(obj, "rht_p_lock", 6.0e9));
+    mat.rht_alpha0 = static_cast<float>(get_json_double(obj, "rht_alpha0", 1.25));
+    mat.rht_n_comp = static_cast<float>(get_json_double(obj, "rht_n_comp", 3.0));
+    mat.rht_betac = static_cast<float>(get_json_double(obj, "rht_betac", 0.032));
+    mat.rht_deltat = static_cast<float>(get_json_double(obj, "rht_deltat", 0.036));
+
+    // K&C
+    mat.kc_auto_generate = get_json_bool(obj, "kc_auto_generate", true);
+    mat.kc_a0 = static_cast<float>(get_json_double(obj, "kc_a0", 11.67e6));
+    mat.kc_a1 = static_cast<float>(get_json_double(obj, "kc_a1", 0.44));
+    mat.kc_a2 = static_cast<float>(get_json_double(obj, "kc_a2", 0.77e-9));
+    mat.kc_a0y = static_cast<float>(get_json_double(obj, "kc_a0y", 9.33e6));
+    mat.kc_a1y = static_cast<float>(get_json_double(obj, "kc_a1y", 0.35));
+    mat.kc_a2y = static_cast<float>(get_json_double(obj, "kc_a2y", 0.62e-9));
+    mat.kc_a1r = static_cast<float>(get_json_double(obj, "kc_a1r", 0.25));
+    mat.kc_a2r = static_cast<float>(get_json_double(obj, "kc_a2r", 0.50e-9));
+    mat.kc_b1 = static_cast<float>(get_json_double(obj, "kc_b1", 1.60));
+    mat.kc_omega = static_cast<float>(get_json_double(obj, "kc_omega", 0.50));
+
+    // CSCM
+    mat.cscm_alpha = static_cast<float>(get_json_double(obj, "cscm_alpha", 12.0e6));
+    mat.cscm_theta = static_cast<float>(get_json_double(obj, "cscm_theta", 0.40));
+    mat.cscm_lambda = static_cast<float>(get_json_double(obj, "cscm_lambda", 8.0e6));
+    mat.cscm_beta = static_cast<float>(get_json_double(obj, "cscm_beta", 1.5e-8));
+    mat.cscm_R = static_cast<float>(get_json_double(obj, "cscm_R", 4.0));
+    mat.cscm_X0 = static_cast<float>(get_json_double(obj, "cscm_X0", 100.0e6));
+    mat.cscm_W = static_cast<float>(get_json_double(obj, "cscm_W", 0.05));
+    mat.cscm_D1 = static_cast<float>(get_json_double(obj, "cscm_D1", 2.5e-9));
+    mat.cscm_D2 = static_cast<float>(get_json_double(obj, "cscm_D2", 1.0));
+
+    return mat;
+}
+
+
 
 // Global shared state for Phase 16.0 - Zero-Omission Architecture
 std::atomic<bool> sim_running{false};
@@ -5626,25 +5721,18 @@ int main() {
                                 }
                             }
 
+                            Blast::MaterialTable3D parsed_mat = parseMaterialTable3D(obj);
                             if (global_solver_mpm_3d_cuda) {
                                 auto& mat_tables = global_solver_mpm_3d_cuda->getMaterialTables();
                                 if (obj_idx >= 0 && obj_idx < static_cast<int>(mat_tables.size())) {
-                                    auto& mat = mat_tables[obj_idx];
-                                    mat.material_model = mat_model;
-                                    mat.jc_A = jc_A; mat.jc_B = jc_B; mat.jc_n = jc_n; mat.jc_C = jc_C; mat.jc_m = jc_m;
-                                    mat.T_melt = T_melt; mat.T_room = T_room; mat.Cp = Cp;
-                                    mat.mg_gamma0 = mg_gamma0; mat.mg_c0 = mg_c0; mat.mg_s = mg_s;
+                                    mat_tables[obj_idx] = parsed_mat;
                                 }
                                 global_solver_mpm_3d_cuda->uploadMaterialTableToDevice();
                             }
                             if (global_solver_mpm_3d) {
                                 auto& mat_tables = global_solver_mpm_3d->getMaterialTables();
                                 if (obj_idx >= 0 && obj_idx < static_cast<int>(mat_tables.size())) {
-                                    auto& mat = mat_tables[obj_idx];
-                                    mat.material_model = mat_model;
-                                    mat.jc_A = jc_A; mat.jc_B = jc_B; mat.jc_n = jc_n; mat.jc_C = jc_C; mat.jc_m = jc_m;
-                                    mat.T_melt = T_melt; mat.T_room = T_room; mat.Cp = Cp;
-                                    mat.mg_gamma0 = mg_gamma0; mat.mg_c0 = mg_c0; mat.mg_s = mg_s;
+                                    mat_tables[obj_idx] = parsed_mat;
                                 }
                             }
                             auto& particles_ref = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles() : global_solver_mpm_3d->getParticles();
@@ -5751,40 +5839,7 @@ int main() {
                                     double vel_x = get_json_double(obj, "vel_x", 0.0);
                                     double vel_y = get_json_double(obj, "vel_y", 0.0);
                                     double vel_z = get_json_double(obj, "vel_z", 0.0);
-
-                                    Blast::MaterialTable3D obj_mat = def_mat;
-                                    std::string mat_model_str = obj.value("material_model", "Hypoelastic");
-                                    if (mat_model_str == "Johnson-Cook + Mie-Grüneisen" || mat_model_str == "Johnson-Cook") {
-                                        obj_mat.material_model = Blast::MPMMaterialModel::JohnsonCookMieGruneisen;
-                                    } else {
-                                        obj_mat.material_model = Blast::MPMMaterialModel::HypoelasticSteel;
-                                    }
-                                    obj_mat.density = static_cast<float>(get_json_double(obj, "density", 7850.0));
-                                    obj_mat.youngs_modulus = static_cast<float>(get_json_double(obj, "youngs_modulus", 210.0e9));
-                                    obj_mat.poissons_ratio = static_cast<float>(get_json_double(obj, "poissons_ratio", 0.3));
-                                    obj_mat.yield_stress = static_cast<float>(get_json_double(obj, "yield_stress", 400.0e6));
-                                    obj_mat.hardening_modulus = static_cast<float>(get_json_double(obj, "hardening_modulus", 1.0e9));
-                                    obj_mat.failure_strain = static_cast<float>(get_json_double(obj, "failure_strain", 0.50));
-                                    obj_mat.tensile_failure_stress = static_cast<float>(get_json_double(obj, "tensile_failure_stress", 600.0e6));
-                                    obj_mat.enable_strain_erosion = get_json_bool(obj, "enable_strain_erosion", true);
-                                    obj_mat.erosion_strain = static_cast<float>(get_json_double(obj, "erosion_strain", obj_mat.failure_strain));
-                                    obj_mat.enable_stress_erosion = get_json_bool(obj, "enable_stress_erosion", false);
-                                    obj_mat.erosion_stress = static_cast<float>(get_json_double(obj, "erosion_stress", obj_mat.tensile_failure_stress));
-                                    obj_mat.enable_timestep_erosion = get_json_bool(obj, "enable_timestep_erosion", true);
-                                    obj_mat.timestep_erosion_factor = static_cast<float>(get_json_double(obj, "timestep_erosion_factor", 0.10));
-                                    obj_mat.jc_A = static_cast<float>(get_json_double(obj, "jc_A", 792.0e6));
-                                    obj_mat.jc_B = static_cast<float>(get_json_double(obj, "jc_B", 510.0e6));
-                                    obj_mat.jc_n = static_cast<float>(get_json_double(obj, "jc_n", 0.26));
-                                    obj_mat.jc_C = static_cast<float>(get_json_double(obj, "jc_C", 0.014));
-                                    obj_mat.jc_m = static_cast<float>(get_json_double(obj, "jc_m", 1.03));
-                                    obj_mat.T_melt = static_cast<float>(get_json_double(obj, "T_melt", 1793.0));
-                                    obj_mat.T_room = static_cast<float>(get_json_double(obj, "T_room", 293.0));
-                                    obj_mat.Cp = static_cast<float>(get_json_double(obj, "Cp", 477.0));
-                                    obj_mat.mg_gamma0 = static_cast<float>(get_json_double(obj, "mg_gamma0", 1.81));
-                                    obj_mat.mg_c0 = static_cast<float>(get_json_double(obj, "mg_c0", 4570.0));
-                                    obj_mat.mg_s = static_cast<float>(get_json_double(obj, "mg_s", 1.49));
-                                    obj_mat.bulk_viscosity_b1 = static_cast<float>(get_json_double(obj, "bulk_viscosity_b1", 0.06));
-                                    obj_mat.bulk_viscosity_b2 = static_cast<float>(get_json_double(obj, "bulk_viscosity_b2", 1.20));
+                                    Blast::MaterialTable3D obj_mat = parseMaterialTable3D(obj);
 
                                     if (obj_mat.enable_strain_erosion) erosion.enable_strain_erosion = true;
                                     if (obj_mat.enable_stress_erosion) erosion.enable_stress_erosion = true;
@@ -5866,40 +5921,7 @@ int main() {
                                     float vel_x = static_cast<float>(get_json_double(obj, "vel_x", 0.0));
                                     float vel_y = static_cast<float>(get_json_double(obj, "vel_y", 0.0));
                                     float vel_z = static_cast<float>(get_json_double(obj, "vel_z", 0.0));
-
-                                    Blast::MaterialTable3D obj_mat = def_mat;
-                                    std::string mat_model_str = obj.value("material_model", "Hypoelastic");
-                                    if (mat_model_str == "Johnson-Cook + Mie-Grüneisen" || mat_model_str == "Johnson-Cook") {
-                                        obj_mat.material_model = Blast::MPMMaterialModel::JohnsonCookMieGruneisen;
-                                    } else {
-                                        obj_mat.material_model = Blast::MPMMaterialModel::HypoelasticSteel;
-                                    }
-                                    obj_mat.density = static_cast<float>(get_json_double(obj, "density", 7850.0));
-                                    obj_mat.youngs_modulus = static_cast<float>(get_json_double(obj, "youngs_modulus", 210.0e9));
-                                    obj_mat.poissons_ratio = static_cast<float>(get_json_double(obj, "poissons_ratio", 0.3));
-                                    obj_mat.yield_stress = static_cast<float>(get_json_double(obj, "yield_stress", 400.0e6));
-                                    obj_mat.hardening_modulus = static_cast<float>(get_json_double(obj, "hardening_modulus", 1.0e9));
-                                    obj_mat.failure_strain = static_cast<float>(get_json_double(obj, "failure_strain", 0.50));
-                                    obj_mat.tensile_failure_stress = static_cast<float>(get_json_double(obj, "tensile_failure_stress", 600.0e6));
-                                    obj_mat.enable_strain_erosion = get_json_bool(obj, "enable_strain_erosion", true);
-                                    obj_mat.erosion_strain = static_cast<float>(get_json_double(obj, "erosion_strain", obj_mat.failure_strain));
-                                    obj_mat.enable_stress_erosion = get_json_bool(obj, "enable_stress_erosion", false);
-                                    obj_mat.erosion_stress = static_cast<float>(get_json_double(obj, "erosion_stress", obj_mat.tensile_failure_stress));
-                                    obj_mat.enable_timestep_erosion = get_json_bool(obj, "enable_timestep_erosion", true);
-                                    obj_mat.timestep_erosion_factor = static_cast<float>(get_json_double(obj, "timestep_erosion_factor", 0.10));
-                                    obj_mat.jc_A = static_cast<float>(get_json_double(obj, "jc_A", 792.0e6));
-                                    obj_mat.jc_B = static_cast<float>(get_json_double(obj, "jc_B", 510.0e6));
-                                    obj_mat.jc_n = static_cast<float>(get_json_double(obj, "jc_n", 0.26));
-                                    obj_mat.jc_C = static_cast<float>(get_json_double(obj, "jc_C", 0.014));
-                                    obj_mat.jc_m = static_cast<float>(get_json_double(obj, "jc_m", 1.03));
-                                    obj_mat.T_melt = static_cast<float>(get_json_double(obj, "T_melt", 1793.0));
-                                    obj_mat.T_room = static_cast<float>(get_json_double(obj, "T_room", 293.0));
-                                    obj_mat.Cp = static_cast<float>(get_json_double(obj, "Cp", 477.0));
-                                    obj_mat.mg_gamma0 = static_cast<float>(get_json_double(obj, "mg_gamma0", 1.81));
-                                    obj_mat.mg_c0 = static_cast<float>(get_json_double(obj, "mg_c0", 4570.0));
-                                    obj_mat.mg_s = static_cast<float>(get_json_double(obj, "mg_s", 1.49));
-                                    obj_mat.bulk_viscosity_b1 = static_cast<float>(get_json_double(obj, "bulk_viscosity_b1", 0.06));
-                                    obj_mat.bulk_viscosity_b2 = static_cast<float>(get_json_double(obj, "bulk_viscosity_b2", 1.20));
+                                    Blast::MaterialTable3D obj_mat = parseMaterialTable3D(obj);
 
                                     if (obj_mat.enable_strain_erosion) erosion.enable_strain_erosion = true;
                                     if (obj_mat.enable_stress_erosion) erosion.enable_stress_erosion = true;
@@ -5983,40 +6005,7 @@ int main() {
                                     double vel_x = get_json_double(obj, "vel_x", 0.0);
                                     double vel_y = get_json_double(obj, "vel_y", 0.0);
                                     double vel_z = get_json_double(obj, "vel_z", 0.0);
-
-                                    Blast::MaterialTable3D obj_mat = def_mat;
-                                    std::string mat_model_str = obj.value("material_model", "Hypoelastic");
-                                    if (mat_model_str == "Johnson-Cook + Mie-Grüneisen" || mat_model_str == "Johnson-Cook") {
-                                        obj_mat.material_model = Blast::MPMMaterialModel::JohnsonCookMieGruneisen;
-                                    } else {
-                                        obj_mat.material_model = Blast::MPMMaterialModel::HypoelasticSteel;
-                                    }
-                                    obj_mat.density = static_cast<float>(get_json_double(obj, "density", 7850.0));
-                                    obj_mat.youngs_modulus = static_cast<float>(get_json_double(obj, "youngs_modulus", 210.0e9));
-                                    obj_mat.poissons_ratio = static_cast<float>(get_json_double(obj, "poissons_ratio", 0.3));
-                                    obj_mat.yield_stress = static_cast<float>(get_json_double(obj, "yield_stress", 400.0e6));
-                                    obj_mat.hardening_modulus = static_cast<float>(get_json_double(obj, "hardening_modulus", 1.0e9));
-                                    obj_mat.failure_strain = static_cast<float>(get_json_double(obj, "failure_strain", 0.50));
-                                    obj_mat.tensile_failure_stress = static_cast<float>(get_json_double(obj, "tensile_failure_stress", 600.0e6));
-                                    obj_mat.enable_strain_erosion = get_json_bool(obj, "enable_strain_erosion", true);
-                                    obj_mat.erosion_strain = static_cast<float>(get_json_double(obj, "erosion_strain", obj_mat.failure_strain));
-                                    obj_mat.enable_stress_erosion = get_json_bool(obj, "enable_stress_erosion", false);
-                                    obj_mat.erosion_stress = static_cast<float>(get_json_double(obj, "erosion_stress", obj_mat.tensile_failure_stress));
-                                    obj_mat.enable_timestep_erosion = get_json_bool(obj, "enable_timestep_erosion", true);
-                                    obj_mat.timestep_erosion_factor = static_cast<float>(get_json_double(obj, "timestep_erosion_factor", 0.10));
-                                    obj_mat.jc_A = static_cast<float>(get_json_double(obj, "jc_A", 792.0e6));
-                                    obj_mat.jc_B = static_cast<float>(get_json_double(obj, "jc_B", 510.0e6));
-                                    obj_mat.jc_n = static_cast<float>(get_json_double(obj, "jc_n", 0.26));
-                                    obj_mat.jc_C = static_cast<float>(get_json_double(obj, "jc_C", 0.014));
-                                    obj_mat.jc_m = static_cast<float>(get_json_double(obj, "jc_m", 1.03));
-                                    obj_mat.T_melt = static_cast<float>(get_json_double(obj, "T_melt", 1793.0));
-                                    obj_mat.T_room = static_cast<float>(get_json_double(obj, "T_room", 293.0));
-                                    obj_mat.Cp = static_cast<float>(get_json_double(obj, "Cp", 477.0));
-                                    obj_mat.mg_gamma0 = static_cast<float>(get_json_double(obj, "mg_gamma0", 1.81));
-                                    obj_mat.mg_c0 = static_cast<float>(get_json_double(obj, "mg_c0", 4570.0));
-                                    obj_mat.mg_s = static_cast<float>(get_json_double(obj, "mg_s", 1.49));
-                                    obj_mat.bulk_viscosity_b1 = static_cast<float>(get_json_double(obj, "bulk_viscosity_b1", 0.06));
-                                    obj_mat.bulk_viscosity_b2 = static_cast<float>(get_json_double(obj, "bulk_viscosity_b2", 1.20));
+                                    Blast::MaterialTable3D obj_mat = parseMaterialTable3D(obj);
 
                                     if (obj_mat.enable_strain_erosion) erosion.enable_strain_erosion = true;
                                     if (obj_mat.enable_stress_erosion) erosion.enable_stress_erosion = true;
@@ -6098,40 +6087,7 @@ int main() {
                                     float vel_x = static_cast<float>(get_json_double(obj, "vel_x", 0.0));
                                     float vel_y = static_cast<float>(get_json_double(obj, "vel_y", 0.0));
                                     float vel_z = static_cast<float>(get_json_double(obj, "vel_z", 0.0));
-
-                                    Blast::MaterialTable3D obj_mat = def_mat;
-                                    std::string mat_model_str = obj.value("material_model", "Hypoelastic");
-                                    if (mat_model_str == "Johnson-Cook + Mie-Grüneisen" || mat_model_str == "Johnson-Cook") {
-                                        obj_mat.material_model = Blast::MPMMaterialModel::JohnsonCookMieGruneisen;
-                                    } else {
-                                        obj_mat.material_model = Blast::MPMMaterialModel::HypoelasticSteel;
-                                    }
-                                    obj_mat.density = static_cast<float>(get_json_double(obj, "density", 7850.0));
-                                    obj_mat.youngs_modulus = static_cast<float>(get_json_double(obj, "youngs_modulus", 210.0e9));
-                                    obj_mat.poissons_ratio = static_cast<float>(get_json_double(obj, "poissons_ratio", 0.3));
-                                    obj_mat.yield_stress = static_cast<float>(get_json_double(obj, "yield_stress", 400.0e6));
-                                    obj_mat.hardening_modulus = static_cast<float>(get_json_double(obj, "hardening_modulus", 1.0e9));
-                                    obj_mat.failure_strain = static_cast<float>(get_json_double(obj, "failure_strain", 0.50));
-                                    obj_mat.tensile_failure_stress = static_cast<float>(get_json_double(obj, "tensile_failure_stress", 600.0e6));
-                                    obj_mat.enable_strain_erosion = get_json_bool(obj, "enable_strain_erosion", true);
-                                    obj_mat.erosion_strain = static_cast<float>(get_json_double(obj, "erosion_strain", obj_mat.failure_strain));
-                                    obj_mat.enable_stress_erosion = get_json_bool(obj, "enable_stress_erosion", false);
-                                    obj_mat.erosion_stress = static_cast<float>(get_json_double(obj, "erosion_stress", obj_mat.tensile_failure_stress));
-                                    obj_mat.enable_timestep_erosion = get_json_bool(obj, "enable_timestep_erosion", true);
-                                    obj_mat.timestep_erosion_factor = static_cast<float>(get_json_double(obj, "timestep_erosion_factor", 0.10));
-                                    obj_mat.jc_A = static_cast<float>(get_json_double(obj, "jc_A", 792.0e6));
-                                    obj_mat.jc_B = static_cast<float>(get_json_double(obj, "jc_B", 510.0e6));
-                                    obj_mat.jc_n = static_cast<float>(get_json_double(obj, "jc_n", 0.26));
-                                    obj_mat.jc_C = static_cast<float>(get_json_double(obj, "jc_C", 0.014));
-                                    obj_mat.jc_m = static_cast<float>(get_json_double(obj, "jc_m", 1.03));
-                                    obj_mat.T_melt = static_cast<float>(get_json_double(obj, "T_melt", 1793.0));
-                                    obj_mat.T_room = static_cast<float>(get_json_double(obj, "T_room", 293.0));
-                                    obj_mat.Cp = static_cast<float>(get_json_double(obj, "Cp", 477.0));
-                                    obj_mat.mg_gamma0 = static_cast<float>(get_json_double(obj, "mg_gamma0", 1.81));
-                                    obj_mat.mg_c0 = static_cast<float>(get_json_double(obj, "mg_c0", 4570.0));
-                                    obj_mat.mg_s = static_cast<float>(get_json_double(obj, "mg_s", 1.49));
-                                    obj_mat.bulk_viscosity_b1 = static_cast<float>(get_json_double(obj, "bulk_viscosity_b1", 0.06));
-                                    obj_mat.bulk_viscosity_b2 = static_cast<float>(get_json_double(obj, "bulk_viscosity_b2", 1.20));
+                                    Blast::MaterialTable3D obj_mat = parseMaterialTable3D(obj);
 
                                     if (obj_mat.enable_strain_erosion) erosion.enable_strain_erosion = true;
                                     if (obj_mat.enable_stress_erosion) erosion.enable_stress_erosion = true;
