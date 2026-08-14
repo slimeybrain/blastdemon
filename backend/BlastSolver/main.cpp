@@ -122,11 +122,11 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
     mat.hardening_modulus = static_cast<float>(get_json_double(obj, "hardening_modulus", 1.0e9));
     mat.failure_strain = static_cast<float>(get_json_double(obj, "failure_strain", 0.50));
     mat.tensile_failure_stress = static_cast<float>(get_json_double(obj, "tensile_failure_stress", 600.0e6));
-    mat.enable_strain_erosion = get_json_bool(obj, "enable_strain_erosion", true);
+    mat.enable_strain_erosion = get_json_bool(obj, "enable_strain_erosion", false);
     mat.erosion_strain = static_cast<float>(get_json_double(obj, "erosion_strain", mat.failure_strain));
     mat.enable_stress_erosion = get_json_bool(obj, "enable_stress_erosion", false);
     mat.erosion_stress = static_cast<float>(get_json_double(obj, "erosion_stress", mat.tensile_failure_stress));
-    mat.enable_timestep_erosion = get_json_bool(obj, "enable_timestep_erosion", true);
+    mat.enable_timestep_erosion = get_json_bool(obj, "enable_timestep_erosion", false);
     mat.timestep_erosion_factor = static_cast<float>(get_json_double(obj, "timestep_erosion_factor", 0.10));
     
     // JC
@@ -195,7 +195,53 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
     return mat;
 }
 
+template <typename T>
+inline void loadAndTransformLSDynaMesh(
+    const std::string& k_file,
+    T pos_x, T pos_y, T pos_z,
+    T vel_x, T vel_y, T vel_z,
+    T scale_x, T scale_y, T scale_z,
+    const std::string& bc_cond,
+    const Blast::MaterialTable3D& obj_mat,
+    std::vector<Blast::FEMNode3D<T>>& out_nodes,
+    std::vector<Blast::FEMElement3D<T>>& out_elements
+) {
+    Blast::LSDynaReader3D<T> reader;
+    std::vector<Blast::MaterialTable3D> mat_list;
+    Blast::MaterialTable3D mutable_mat = obj_mat;
+    reader.parseFile(k_file, out_nodes, out_elements, mutable_mat, mat_list);
 
+    bool is_fixed_base = (bc_cond == "Fixed Base");
+    bool is_fixed_entire = (bc_cond == "Fixed Entire");
+    T min_z = static_cast<T>(1e30);
+    if (is_fixed_base) {
+        for (const auto& nd : out_nodes) {
+            T z_val = nd.x[2] * scale_z + pos_z;
+            if (z_val < min_z) min_z = z_val;
+        }
+    }
+
+    for (auto& nd : out_nodes) {
+        nd.x[0] = nd.x[0] * scale_x + pos_x;
+        nd.x[1] = nd.x[1] * scale_y + pos_y;
+        nd.x[2] = nd.x[2] * scale_z + pos_z;
+        nd.x0[0] = nd.x[0];
+        nd.x0[1] = nd.x[1];
+        nd.x0[2] = nd.x[2];
+
+        if (vel_x != static_cast<T>(0) || vel_y != static_cast<T>(0) || vel_z != static_cast<T>(0)) {
+            nd.v[0] += vel_x;
+            nd.v[1] += vel_y;
+            nd.v[2] += vel_z;
+        }
+
+        if (is_fixed_entire || (is_fixed_base && std::abs(nd.x[2] - min_z) < static_cast<T>(1e-4))) {
+            nd.is_fixed[0] = true;
+            nd.is_fixed[1] = true;
+            nd.is_fixed[2] = true;
+        }
+    }
+}
 
 // Global shared state for Phase 16.0 - Zero-Omission Architecture
 std::atomic<bool> sim_running{false};
@@ -5817,11 +5863,12 @@ int main() {
                             }
 
                             Blast::FEMErosionCriteria<double> erosion{};
-                            erosion.enable_strain_erosion = true;
-                            erosion.enable_timestep_erosion = true;
+                            erosion.enable_strain_erosion = false;
+                            erosion.enable_timestep_erosion = false;
+                            erosion.enable_stress_erosion = false;
                             erosion.failure_strain = static_cast<double>(get_json_double(msg, "failure_strain", 0.50));
                             erosion.timestep_erosion_factor = static_cast<double>(get_json_double(msg, "timestep_erosion_factor", 0.10));
-                            erosion.min_volume_ratio = static_cast<double>(get_json_double(msg, "min_volume_ratio", 0.05));
+                            erosion.min_volume_ratio = static_cast<double>(get_json_double(msg, "min_volume_ratio", 0.02));
                             erosion.tensile_failure_stress = static_cast<double>(get_json_double(msg, "tensile_failure_stress", 600.0e6));
 
                             Blast::MaterialTable3D def_mat;
@@ -5841,10 +5888,6 @@ int main() {
                                     double vel_z = get_json_double(obj, "vel_z", 0.0);
                                     Blast::MaterialTable3D obj_mat = parseMaterialTable3D(obj);
 
-                                    if (obj_mat.enable_strain_erosion) erosion.enable_strain_erosion = true;
-                                    if (obj_mat.enable_stress_erosion) erosion.enable_stress_erosion = true;
-                                    if (obj_mat.enable_timestep_erosion) erosion.enable_timestep_erosion = true;
-
                                     std::string k_file = obj.value("k_file", "");
                                     std::string mesh_src = obj.value("mesh_source", "Box Generator");
                                     std::string shape_type = obj.value("shape_type", "Box");
@@ -5857,22 +5900,31 @@ int main() {
                                         if (height <= 0.0) height = get_json_double(obj, "size_z", 0.2);
                                         fem->addStructuredCylinderMesh(nx, nz, radius, height, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond);
                                     } else if (mesh_src == "LS-DYNA Keyword File" || shape_type == "LS-DYNA File" || !k_file.empty()) {
-                                        Blast::LSDynaReader3D<double> reader;
                                         std::vector<Blast::FEMNode3D<double>> nodes;
                                         std::vector<Blast::FEMElement3D<double>> elements;
-                                        std::vector<Blast::MaterialTable3D> mat_list;
-                                        reader.parseFile(k_file, nodes, elements, obj_mat, mat_list);
+                                        double scale_x = get_json_double(obj, "scale_x", get_json_double(obj, "scale_factor", 1.0));
+                                        double scale_y = get_json_double(obj, "scale_y", get_json_double(obj, "scale_factor", 1.0));
+                                        double scale_z = get_json_double(obj, "scale_z", get_json_double(obj, "scale_factor", 1.0));
+                                        loadAndTransformLSDynaMesh<double>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements);
                                         fem->appendNodesAndElements(nodes, elements, obj_mat);
                                     } else {
                                         fem->addStructuredBoxMesh(nx, ny, nz, lx, ly, lz, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
                                     }
                                 }
                             } else if (msg.contains("k_file") && !msg["k_file"].get<std::string>().empty()) {
-                                Blast::LSDynaReader3D<double> reader;
                                 std::vector<Blast::FEMNode3D<double>> nodes;
                                 std::vector<Blast::FEMElement3D<double>> elements;
-                                std::vector<Blast::MaterialTable3D> mat_list;
-                                reader.parseFile(msg["k_file"].get<std::string>(), nodes, elements, def_mat, mat_list);
+                                double pos_x = get_json_double(msg, "pos_x", 0.0);
+                                double pos_y = get_json_double(msg, "pos_y", 0.0);
+                                double pos_z = get_json_double(msg, "pos_z", 0.0);
+                                double vel_x = get_json_double(msg, "vel_x", 0.0);
+                                double vel_y = get_json_double(msg, "vel_y", 0.0);
+                                double vel_z = get_json_double(msg, "vel_z", 0.0);
+                                double scale_x = get_json_double(msg, "scale_x", get_json_double(msg, "scale_factor", 1.0));
+                                double scale_y = get_json_double(msg, "scale_y", get_json_double(msg, "scale_factor", 1.0));
+                                double scale_z = get_json_double(msg, "scale_z", get_json_double(msg, "scale_factor", 1.0));
+                                std::string bc_cond = msg.value("boundary_condition", "Free");
+                                loadAndTransformLSDynaMesh<double>(msg["k_file"].get<std::string>(), pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, def_mat, nodes, elements);
                                 fem->setNodesAndElements(nodes, elements, def_mat);
                             }
                             fem->setErosionCriteria(erosion);
@@ -5899,11 +5951,12 @@ int main() {
                             }
 
                             Blast::FEMErosionCriteria<float> erosion{};
-                            erosion.enable_strain_erosion = true;
-                            erosion.enable_timestep_erosion = true;
+                            erosion.enable_strain_erosion = false;
+                            erosion.enable_timestep_erosion = false;
+                            erosion.enable_stress_erosion = false;
                             erosion.failure_strain = static_cast<float>(get_json_double(msg, "failure_strain", 0.50));
                             erosion.timestep_erosion_factor = static_cast<float>(get_json_double(msg, "timestep_erosion_factor", 0.10));
-                            erosion.min_volume_ratio = static_cast<float>(get_json_double(msg, "min_volume_ratio", 0.05));
+                            erosion.min_volume_ratio = static_cast<float>(get_json_double(msg, "min_volume_ratio", 0.02));
                             erosion.tensile_failure_stress = static_cast<float>(get_json_double(msg, "tensile_failure_stress", 600.0e6));
 
                             Blast::MaterialTable3D def_mat;
@@ -5923,10 +5976,6 @@ int main() {
                                     float vel_z = static_cast<float>(get_json_double(obj, "vel_z", 0.0));
                                     Blast::MaterialTable3D obj_mat = parseMaterialTable3D(obj);
 
-                                    if (obj_mat.enable_strain_erosion) erosion.enable_strain_erosion = true;
-                                    if (obj_mat.enable_stress_erosion) erosion.enable_stress_erosion = true;
-                                    if (obj_mat.enable_timestep_erosion) erosion.enable_timestep_erosion = true;
-
                                     std::string k_file = obj.value("k_file", "");
                                     std::string mesh_src = obj.value("mesh_source", "Box Generator");
                                     std::string shape_type = obj.value("shape_type", "Box");
@@ -5939,22 +5988,31 @@ int main() {
                                         if (height <= 0.0f) height = static_cast<float>(get_json_double(obj, "size_z", 0.2));
                                         fem->addStructuredCylinderMesh(nx, nz, radius, height, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond);
                                     } else if (mesh_src == "LS-DYNA Keyword File" || shape_type == "LS-DYNA File" || !k_file.empty()) {
-                                        Blast::LSDynaReader3D<float> reader;
                                         std::vector<Blast::FEMNode3D<float>> nodes;
                                         std::vector<Blast::FEMElement3D<float>> elements;
-                                        std::vector<Blast::MaterialTable3D> mat_list;
-                                        reader.parseFile(k_file, nodes, elements, obj_mat, mat_list);
+                                        float scale_x = static_cast<float>(get_json_double(obj, "scale_x", get_json_double(obj, "scale_factor", 1.0)));
+                                        float scale_y = static_cast<float>(get_json_double(obj, "scale_y", get_json_double(obj, "scale_factor", 1.0)));
+                                        float scale_z = static_cast<float>(get_json_double(obj, "scale_z", get_json_double(obj, "scale_factor", 1.0)));
+                                        loadAndTransformLSDynaMesh<float>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements);
                                         fem->appendNodesAndElements(nodes, elements, obj_mat);
                                     } else {
                                         fem->addStructuredBoxMesh(nx, ny, nz, lx, ly, lz, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
                                     }
                                 }
                             } else if (msg.contains("k_file") && !msg["k_file"].get<std::string>().empty()) {
-                                Blast::LSDynaReader3D<float> reader;
                                 std::vector<Blast::FEMNode3D<float>> nodes;
                                 std::vector<Blast::FEMElement3D<float>> elements;
-                                std::vector<Blast::MaterialTable3D> mat_list;
-                                reader.parseFile(msg["k_file"].get<std::string>(), nodes, elements, def_mat, mat_list);
+                                float pos_x = static_cast<float>(get_json_double(msg, "pos_x", 0.0));
+                                float pos_y = static_cast<float>(get_json_double(msg, "pos_y", 0.0));
+                                float pos_z = static_cast<float>(get_json_double(msg, "pos_z", 0.0));
+                                float vel_x = static_cast<float>(get_json_double(msg, "vel_x", 0.0));
+                                float vel_y = static_cast<float>(get_json_double(msg, "vel_y", 0.0));
+                                float vel_z = static_cast<float>(get_json_double(msg, "vel_z", 0.0));
+                                float scale_x = static_cast<float>(get_json_double(msg, "scale_x", get_json_double(msg, "scale_factor", 1.0)));
+                                float scale_y = static_cast<float>(get_json_double(msg, "scale_y", get_json_double(msg, "scale_factor", 1.0)));
+                                float scale_z = static_cast<float>(get_json_double(msg, "scale_z", get_json_double(msg, "scale_factor", 1.0)));
+                                std::string bc_cond = msg.value("boundary_condition", "Free");
+                                loadAndTransformLSDynaMesh<float>(msg["k_file"].get<std::string>(), pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, def_mat, nodes, elements);
                                 fem->setNodesAndElements(nodes, elements, def_mat);
                             }
                             fem->setErosionCriteria(erosion);
@@ -5983,11 +6041,12 @@ int main() {
                             }
 
                             Blast::FEMErosionCriteria<double> erosion{};
-                            erosion.enable_strain_erosion = true;
-                            erosion.enable_timestep_erosion = true;
+                            erosion.enable_strain_erosion = false;
+                            erosion.enable_timestep_erosion = false;
+                            erosion.enable_stress_erosion = false;
                             erosion.failure_strain = static_cast<double>(get_json_double(msg, "failure_strain", 0.50));
                             erosion.timestep_erosion_factor = static_cast<double>(get_json_double(msg, "timestep_erosion_factor", 0.10));
-                            erosion.min_volume_ratio = static_cast<double>(get_json_double(msg, "min_volume_ratio", 0.05));
+                            erosion.min_volume_ratio = static_cast<double>(get_json_double(msg, "min_volume_ratio", 0.02));
                             erosion.tensile_failure_stress = static_cast<double>(get_json_double(msg, "tensile_failure_stress", 600.0e6));
 
                             Blast::MaterialTable3D def_mat;
@@ -6007,10 +6066,6 @@ int main() {
                                     double vel_z = get_json_double(obj, "vel_z", 0.0);
                                     Blast::MaterialTable3D obj_mat = parseMaterialTable3D(obj);
 
-                                    if (obj_mat.enable_strain_erosion) erosion.enable_strain_erosion = true;
-                                    if (obj_mat.enable_stress_erosion) erosion.enable_stress_erosion = true;
-                                    if (obj_mat.enable_timestep_erosion) erosion.enable_timestep_erosion = true;
-
                                     std::string k_file = obj.value("k_file", "");
                                     std::string mesh_src = obj.value("mesh_source", "Box Generator");
                                     std::string shape_type = obj.value("shape_type", "Box");
@@ -6023,22 +6078,31 @@ int main() {
                                         if (height <= 0.0) height = get_json_double(obj, "size_z", 0.2);
                                         fem->addStructuredCylinderMesh(nx, nz, radius, height, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond);
                                     } else if (mesh_src == "LS-DYNA Keyword File" || shape_type == "LS-DYNA File" || !k_file.empty()) {
-                                        Blast::LSDynaReader3D<double> reader;
                                         std::vector<Blast::FEMNode3D<double>> nodes;
                                         std::vector<Blast::FEMElement3D<double>> elements;
-                                        std::vector<Blast::MaterialTable3D> mat_list;
-                                        reader.parseFile(k_file, nodes, elements, obj_mat, mat_list);
+                                        double scale_x = get_json_double(obj, "scale_x", get_json_double(obj, "scale_factor", 1.0));
+                                        double scale_y = get_json_double(obj, "scale_y", get_json_double(obj, "scale_factor", 1.0));
+                                        double scale_z = get_json_double(obj, "scale_z", get_json_double(obj, "scale_factor", 1.0));
+                                        loadAndTransformLSDynaMesh<double>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements);
                                         fem->appendNodesAndElements(nodes, elements, obj_mat);
                                     } else {
                                         fem->addStructuredBoxMesh(nx, ny, nz, lx, ly, lz, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
                                     }
                                 }
                             } else if (msg.contains("k_file") && !msg["k_file"].get<std::string>().empty()) {
-                                Blast::LSDynaReader3D<double> reader;
                                 std::vector<Blast::FEMNode3D<double>> nodes;
                                 std::vector<Blast::FEMElement3D<double>> elements;
-                                std::vector<Blast::MaterialTable3D> mat_list;
-                                reader.parseFile(msg["k_file"].get<std::string>(), nodes, elements, def_mat, mat_list);
+                                double pos_x = get_json_double(msg, "pos_x", 0.0);
+                                double pos_y = get_json_double(msg, "pos_y", 0.0);
+                                double pos_z = get_json_double(msg, "pos_z", 0.0);
+                                double vel_x = get_json_double(msg, "vel_x", 0.0);
+                                double vel_y = get_json_double(msg, "vel_y", 0.0);
+                                double vel_z = get_json_double(msg, "vel_z", 0.0);
+                                double scale_x = get_json_double(msg, "scale_x", get_json_double(msg, "scale_factor", 1.0));
+                                double scale_y = get_json_double(msg, "scale_y", get_json_double(msg, "scale_factor", 1.0));
+                                double scale_z = get_json_double(msg, "scale_z", get_json_double(msg, "scale_factor", 1.0));
+                                std::string bc_cond = msg.value("boundary_condition", "Free");
+                                loadAndTransformLSDynaMesh<double>(msg["k_file"].get<std::string>(), pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, def_mat, nodes, elements);
                                 fem->setNodesAndElements(nodes, elements, def_mat);
                             }
                             fem->setErosionCriteria(erosion);
@@ -6065,11 +6129,12 @@ int main() {
                             }
 
                             Blast::FEMErosionCriteria<float> erosion{};
-                            erosion.enable_strain_erosion = true;
-                            erosion.enable_timestep_erosion = true;
+                            erosion.enable_strain_erosion = false;
+                            erosion.enable_timestep_erosion = false;
+                            erosion.enable_stress_erosion = false;
                             erosion.failure_strain = static_cast<float>(get_json_double(msg, "failure_strain", 0.50));
                             erosion.timestep_erosion_factor = static_cast<float>(get_json_double(msg, "timestep_erosion_factor", 0.10));
-                            erosion.min_volume_ratio = static_cast<float>(get_json_double(msg, "min_volume_ratio", 0.05));
+                            erosion.min_volume_ratio = static_cast<float>(get_json_double(msg, "min_volume_ratio", 0.02));
                             erosion.tensile_failure_stress = static_cast<float>(get_json_double(msg, "tensile_failure_stress", 600.0e6));
 
                             Blast::MaterialTable3D def_mat;
@@ -6089,10 +6154,6 @@ int main() {
                                     float vel_z = static_cast<float>(get_json_double(obj, "vel_z", 0.0));
                                     Blast::MaterialTable3D obj_mat = parseMaterialTable3D(obj);
 
-                                    if (obj_mat.enable_strain_erosion) erosion.enable_strain_erosion = true;
-                                    if (obj_mat.enable_stress_erosion) erosion.enable_stress_erosion = true;
-                                    if (obj_mat.enable_timestep_erosion) erosion.enable_timestep_erosion = true;
-
                                     std::string k_file = obj.value("k_file", "");
                                     std::string mesh_src = obj.value("mesh_source", "Box Generator");
                                     std::string shape_type = obj.value("shape_type", "Box");
@@ -6105,22 +6166,31 @@ int main() {
                                         if (height <= 0.0f) height = static_cast<float>(get_json_double(obj, "size_z", 0.2));
                                         fem->addStructuredCylinderMesh(nx, nz, radius, height, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond);
                                     } else if (mesh_src == "LS-DYNA Keyword File" || shape_type == "LS-DYNA File" || !k_file.empty()) {
-                                        Blast::LSDynaReader3D<float> reader;
                                         std::vector<Blast::FEMNode3D<float>> nodes;
                                         std::vector<Blast::FEMElement3D<float>> elements;
-                                        std::vector<Blast::MaterialTable3D> mat_list;
-                                        reader.parseFile(k_file, nodes, elements, obj_mat, mat_list);
+                                        float scale_x = static_cast<float>(get_json_double(obj, "scale_x", get_json_double(obj, "scale_factor", 1.0)));
+                                        float scale_y = static_cast<float>(get_json_double(obj, "scale_y", get_json_double(obj, "scale_factor", 1.0)));
+                                        float scale_z = static_cast<float>(get_json_double(obj, "scale_z", get_json_double(obj, "scale_factor", 1.0)));
+                                        loadAndTransformLSDynaMesh<float>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements);
                                         fem->appendNodesAndElements(nodes, elements, obj_mat);
                                     } else {
                                         fem->addStructuredBoxMesh(nx, ny, nz, lx, ly, lz, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
                                     }
                                 }
                             } else if (msg.contains("k_file") && !msg["k_file"].get<std::string>().empty()) {
-                                Blast::LSDynaReader3D<float> reader;
                                 std::vector<Blast::FEMNode3D<float>> nodes;
                                 std::vector<Blast::FEMElement3D<float>> elements;
-                                std::vector<Blast::MaterialTable3D> mat_list;
-                                reader.parseFile(msg["k_file"].get<std::string>(), nodes, elements, def_mat, mat_list);
+                                float pos_x = static_cast<float>(get_json_double(msg, "pos_x", 0.0));
+                                float pos_y = static_cast<float>(get_json_double(msg, "pos_y", 0.0));
+                                float pos_z = static_cast<float>(get_json_double(msg, "pos_z", 0.0));
+                                float vel_x = static_cast<float>(get_json_double(msg, "vel_x", 0.0));
+                                float vel_y = static_cast<float>(get_json_double(msg, "vel_y", 0.0));
+                                float vel_z = static_cast<float>(get_json_double(msg, "vel_z", 0.0));
+                                float scale_x = static_cast<float>(get_json_double(msg, "scale_x", get_json_double(msg, "scale_factor", 1.0)));
+                                float scale_y = static_cast<float>(get_json_double(msg, "scale_y", get_json_double(msg, "scale_factor", 1.0)));
+                                float scale_z = static_cast<float>(get_json_double(msg, "scale_z", get_json_double(msg, "scale_factor", 1.0)));
+                                std::string bc_cond = msg.value("boundary_condition", "Free");
+                                loadAndTransformLSDynaMesh<float>(msg["k_file"].get<std::string>(), pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, def_mat, nodes, elements);
                                 fem->setNodesAndElements(nodes, elements, def_mat);
                             }
                             fem->setErosionCriteria(erosion);

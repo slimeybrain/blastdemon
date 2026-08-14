@@ -507,7 +507,7 @@ export class PropertyEditor {
                 } else if (source === 'Box Generator') {
                     if (['radius', 'inner_radius', 'height', 'length', 'k_file', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) continue;
                 } else if (source === 'LS-DYNA Keyword File') {
-                    if (['pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'length', 'nx', 'ny', 'nz', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) continue;
+                    if (['size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'length', 'nx', 'ny', 'nz', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) continue;
                 }
             } else if (node.type === 'MPMObject3D') {
                 const shape = node.parameters['shape_type'] || 'Box';
@@ -564,7 +564,7 @@ export class PropertyEditor {
             }
             row.appendChild(label);
 
-            if (key === 'stl_file') {
+            if (key === 'stl_file' || key === 'k_file') {
                 const wrapper = document.createElement('div');
                 wrapper.style.display = 'flex';
                 wrapper.style.gap = '8px';
@@ -588,7 +588,8 @@ export class PropertyEditor {
                     const browser = new HostFileBrowserModal((window as any).networkManager, 'open', 'select_file', (path: string) => {
                         this.updateParameter(key, path);
                         const rand = Math.floor(Math.random() * 1000000);
-                        const simpleHash = 'stl_' + rand.toString(36);
+                        const prefix = key === 'k_file' ? 'k_' : 'stl_';
+                        const simpleHash = prefix + rand.toString(36);
                         this.updateParameter('geometry_hash', simpleHash);
                     });
                     browser.open(startPath);

@@ -123,7 +123,7 @@ public:
     void setHourglassModel(FEMHourglassModel model) { m_cpu_solver.setHourglassModel(model); }
     void setIntegrationScheme(FEMIntegrationScheme scheme) { m_cpu_solver.setIntegrationScheme(scheme); }
     void setPhysicsParams(const BlastPhysicsParams<T>& params) { m_cpu_solver.setPhysicsParams(params); }
-    void setErosionCriteria(const FEMErosionCriteria<T>& criteria) { m_cpu_solver.setErosionCriteria(criteria); }
+    void setErosionCriteria(const FEMErosionCriteria<T>& criteria);
     void setContactPenaltyScale(T scale) { m_cpu_solver.setContactPenaltyScale(scale); }
     void setContactDamping(T damping) { m_cpu_solver.setContactDamping(damping); }
     void setFrictionCoefficients(T mu_s, T mu_k) { m_cpu_solver.setFrictionCoefficients(mu_s, mu_k); }

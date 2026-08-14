@@ -30,7 +30,7 @@ export function isParameterRelevant(node: Node, key: string): boolean {
         } else if (meshSource === 'Box Generator') {
             if (['radius', 'inner_radius', 'height', 'length', 'k_file', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) return false;
         } else if (meshSource === 'LS-DYNA Keyword File') {
-            if (['pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'length', 'nx', 'ny', 'nz', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) return false;
+            if (['size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'length', 'nx', 'ny', 'nz', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) return false;
         }
     } else if (node.type === 'MPMObject3D') {
         const shape = node.parameters['shape_type'] || 'Box';

@@ -991,6 +991,9 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     if (impNode && impNode.type === 'LSDynaImporter3D') {
                         objParams['k_file'] = impNode.parameters.k_file || '';
                         objParams['mesh_source'] = 'LS-DYNA Keyword File';
+                        if (impNode.parameters.scale_factor !== undefined) {
+                            objParams['scale_factor'] = Number(impNode.parameters.scale_factor);
+                        }
                     }
                 }
                 const matConn = state.connections.find(c => c.toNode === objNode.id && c.toPort === 'material');

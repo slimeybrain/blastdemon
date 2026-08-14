@@ -623,7 +623,7 @@ __global__ void fem_element_forces_kernel_3d_device(
            - J[0][1] * (J[1][0]*J[2][2] - J[1][2]*J[2][0])
            + J[0][2] * (J[1][0]*J[2][1] - J[1][1]*J[2][0]);
 
-    min_vol_r = static_cast<T>(mat.timestep_erosion_factor > 0.0f ? mat.timestep_erosion_factor : 0.05f);
+    min_vol_r = static_cast<T>(0.02f);
     if (detJ <= static_cast<T>(1.0e-15f) || (elem.V0 > static_cast<T>(1.0e-18f) && (detJ * static_cast<T>(8.0f) / elem.V0) <= min_vol_r)) {
         elem.is_eroded = true;
         return; // Skip force generation for inverted or severely crushed elements
@@ -1150,21 +1150,21 @@ __global__ void fem_initial_timestep_erosion_kernel_3d_device(
         newly_eroded = true;
     }
 
-    if ((mat.enable_timestep_erosion || erosion_criteria.enable_timestep_erosion) && mat.timestep_erosion_factor > static_cast<T>(1.0e-5f)) {
+    if (mat.enable_timestep_erosion && mat.timestep_erosion_factor > static_cast<T>(1.0e-5f)) {
         T eta = static_cast<T>(mat.timestep_erosion_factor > 0.0f ? mat.timestep_erosion_factor : erosion_criteria.timestep_erosion_factor);
         if (current_dt <= eta * elem.dt0) {
             newly_eroded = true;
         }
     }
 
-    if (mat.enable_strain_erosion || erosion_criteria.enable_strain_erosion) {
+    if (mat.enable_strain_erosion) {
         T fail_strain = static_cast<T>(mat.erosion_strain > 0.0f ? mat.erosion_strain : (mat.failure_strain > 0.0f ? mat.failure_strain : erosion_criteria.failure_strain));
         if (fail_strain > static_cast<T>(0.0f) && elem.ep_bar >= fail_strain) {
             newly_eroded = true;
         }
     }
 
-    if (mat.enable_stress_erosion || erosion_criteria.enable_stress_erosion) {
+    if (mat.enable_stress_erosion) {
         T mean_s = (elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f);
         T fail_stress = static_cast<T>(mat.erosion_stress > 0.0f ? mat.erosion_stress : (mat.tensile_failure_stress > 0.0f ? mat.tensile_failure_stress : erosion_criteria.tensile_failure_stress));
         if (fail_stress > static_cast<T>(0.0f) && mean_s >= fail_stress) {
@@ -2355,6 +2355,15 @@ FEMSolver3DCUDA<T>::~FEMSolver3DCUDA() {
     if (m_d_telemetry_nodes) { cudaFree(m_d_telemetry_nodes); m_d_telemetry_nodes = nullptr; }
     if (m_d_telemetry_facets) { cudaFree(m_d_telemetry_facets); m_d_telemetry_facets = nullptr; }
     if (m_cuda_stream) { cudaStreamDestroy(m_cuda_stream); m_cuda_stream = nullptr; }
+}
+
+template <typename T>
+void FEMSolver3DCUDA<T>::setErosionCriteria(const FEMErosionCriteria<T>& criteria) {
+    m_cpu_solver.setErosionCriteria(criteria);
+    const auto& materials = m_cpu_solver.getMaterialTables();
+    if (m_d_materials && !materials.empty()) {
+        cudaMemcpyAsync(m_d_materials, materials.data(), sizeof(MaterialTable3D) * materials.size(), cudaMemcpyHostToDevice, m_cuda_stream);
+    }
 }
 
 template <typename T>

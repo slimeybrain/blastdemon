@@ -50,8 +50,8 @@ struct FEMErosionCriteria {
     T min_volume_ratio{0.05f};         // V / V0 minimum compression ratio limit
     T max_volume_ratio{5.00f};         // V / V0 maximum expansion ratio limit
     T max_damage{1.0f};                // Johnson-Cook cumulative damage threshold D >= 1.0
-    bool enable_timestep_erosion{true};
-    bool enable_strain_erosion{true};
+    bool enable_timestep_erosion{false};
+    bool enable_strain_erosion{false};
     bool enable_stress_erosion{false};
     bool enable_damage_erosion{false};
 };
@@ -144,7 +144,14 @@ public:
     void setHourglassModel(FEMHourglassModel model) { m_hourglass_model = model; }
     void setHourglassCoeff(T q_hg) { m_hourglass_coeff = q_hg; }
     void setPhysicsParams(const BlastPhysicsParams<T>& params) { m_physics_params = params; }
-    void setErosionCriteria(const FEMErosionCriteria<T>& criteria) { m_erosion_criteria = criteria; }
+    void setErosionCriteria(const FEMErosionCriteria<T>& criteria) {
+        m_erosion_criteria = criteria;
+        for (auto& mat : m_material_tables) {
+            if (criteria.enable_strain_erosion) mat.enable_strain_erosion = true;
+            if (criteria.enable_stress_erosion) mat.enable_stress_erosion = true;
+            if (criteria.enable_timestep_erosion) mat.enable_timestep_erosion = true;
+        }
+    }
     void setContactPenaltyScale(T scale) { m_contact_penalty_scale = scale; }
     void setFrictionCoefficients(T mu_static, T mu_kinetic) { m_friction_static = mu_static; m_friction_kinetic = mu_kinetic; }
     void setContactDamping(T damping) { m_contact_damping = std::max(static_cast<T>(0.0f), std::min(static_cast<T>(1.0f), damping)); }

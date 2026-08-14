@@ -967,7 +967,7 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
 
             T B_center[6][24], detJ_center;
             computeHex8BMatrix(x_mid, B_center, detJ_center);
-            T min_vol_r = static_cast<T>(mat.timestep_erosion_factor > 0.0f ? mat.timestep_erosion_factor : 0.05f);
+            T min_vol_r = m_erosion_criteria.min_volume_ratio > static_cast<T>(0.0f) ? m_erosion_criteria.min_volume_ratio : static_cast<T>(0.02f);
             if (detJ_center <= static_cast<T>(1.0e-15f) || (elem.V0 > static_cast<T>(1.0e-18f) && (detJ_center * static_cast<T>(8.0f) / elem.V0) <= min_vol_r)) {
                 elem.is_eroded = true;
                 m_surface_facets_dirty = true;
@@ -1458,7 +1458,7 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
         T B[6][24], detJ;
         computeHex8BMatrix(x_mid, B, detJ);
         
-        T min_vol_r = static_cast<T>(mat.timestep_erosion_factor > 0.0f ? mat.timestep_erosion_factor : 0.05f);
+        T min_vol_r = m_erosion_criteria.min_volume_ratio > static_cast<T>(0.0f) ? m_erosion_criteria.min_volume_ratio : static_cast<T>(0.02f);
         if (detJ <= static_cast<T>(1.0e-15f) || (elem.V0 > static_cast<T>(1.0e-18f) && (detJ * static_cast<T>(8.0f) / elem.V0) <= min_vol_r)) {
             elem.is_eroded = true;
             m_surface_facets_dirty = true;
@@ -1850,21 +1850,21 @@ void FEMSolver3D<T>::evaluateErosionCriteria() {
             newly_eroded = true;
         }
 
-        if ((mat.enable_timestep_erosion || m_erosion_criteria.enable_timestep_erosion) && mat.timestep_erosion_factor > static_cast<T>(1.0e-5f)) {
+        if (mat.enable_timestep_erosion && mat.timestep_erosion_factor > static_cast<T>(1.0e-5f)) {
             T eta = static_cast<T>(mat.timestep_erosion_factor > 0.0f ? mat.timestep_erosion_factor : m_erosion_criteria.timestep_erosion_factor);
             if (current_dt <= eta * elem.dt0) {
                 newly_eroded = true;
             }
         }
 
-        if (mat.enable_strain_erosion || m_erosion_criteria.enable_strain_erosion) {
+        if (mat.enable_strain_erosion) {
             T fail_strain = static_cast<T>(mat.erosion_strain > 0.0f ? mat.erosion_strain : (mat.failure_strain > 0.0f ? mat.failure_strain : m_erosion_criteria.failure_strain));
             if (fail_strain > static_cast<T>(0.0f) && elem.ep_bar >= fail_strain) {
                 newly_eroded = true;
             }
         }
 
-        if (mat.enable_stress_erosion || m_erosion_criteria.enable_stress_erosion) {
+        if (mat.enable_stress_erosion) {
             T mean_s = (elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f);
             T fail_stress = static_cast<T>(mat.erosion_stress > 0.0f ? mat.erosion_stress : (mat.tensile_failure_stress > 0.0f ? mat.tensile_failure_stress : m_erosion_criteria.tensile_failure_stress));
             if (fail_stress > static_cast<T>(0.0f) && mean_s >= fail_stress) {
