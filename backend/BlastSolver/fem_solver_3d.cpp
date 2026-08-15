@@ -55,6 +55,34 @@ FEMSolver3D<T>::~FEMSolver3D() {
 }
 
 template <typename T>
+void FEMSolver3D<T>::ensureGaussPointHistory() {
+    if (m_integration_scheme == FEMIntegrationScheme::FullGauss8 || m_integration_scheme == FEMIntegrationScheme::SelectiveReduced) {
+        if (m_gp_history.size() != m_elements.size()) {
+            size_t old_size = m_gp_history.size();
+            m_gp_history.resize(m_elements.size());
+            for (size_t e = old_size; e < m_elements.size(); ++e) {
+                for (int g = 0; g < 8; ++g) {
+                    std::memset(m_gp_history[e].F_gp[g], 0, sizeof(m_gp_history[e].F_gp[g]));
+                    m_gp_history[e].F_gp[g][0][0] = static_cast<T>(1.0f);
+                    m_gp_history[e].F_gp[g][1][1] = static_cast<T>(1.0f);
+                    m_gp_history[e].F_gp[g][2][2] = static_cast<T>(1.0f);
+                    std::memset(m_gp_history[e].s_dev_gp[g], 0, sizeof(m_gp_history[e].s_dev_gp[g]));
+                    m_gp_history[e].ep_bar_gp[g] = static_cast<T>(0.0f);
+                    m_gp_history[e].temp_gp[g] = static_cast<T>(293.0f);
+                    m_gp_history[e].damage_gp[g] = static_cast<T>(0.0f);
+                    m_gp_history[e].lambda_gp[g] = static_cast<T>(0.0f);
+                }
+            }
+        }
+    } else {
+        if (!m_gp_history.empty()) {
+            m_gp_history.clear();
+            m_gp_history.shrink_to_fit();
+        }
+    }
+}
+
+template <typename T>
 void FEMSolver3D<T>::initializeDomain(T xmin, T xmax, T ymin, T ymax, T zmin, T zmax) {
     m_xmin = xmin; m_xmax = xmax;
     m_ymin = ymin; m_ymax = ymax;
@@ -137,15 +165,6 @@ void FEMSolver3D<T>::addStructuredBoxMesh(int nx, int ny, int nz, T lx, T ly, T 
                 std::memset(elem.sigma, 0, sizeof(elem.sigma));
                 std::memset(elem.s_dev, 0, sizeof(elem.s_dev));
 
-                for (int g = 0; g < 8; ++g) {
-                    std::memset(elem.F_gp[g], 0, sizeof(elem.F_gp[g]));
-                    elem.F_gp[g][0][0] = 1.0f; elem.F_gp[g][1][1] = 1.0f; elem.F_gp[g][2][2] = 1.0f;
-                    std::memset(elem.s_dev_gp[g], 0, sizeof(elem.s_dev_gp[g]));
-                    elem.ep_bar_gp[g] = 0.0f;
-                    elem.temp_gp[g] = 293.0f;
-                    elem.damage_gp[g] = 0.0f;
-                }
-
                 T x_nodes[8][3];
                 for (int n = 0; n < 8; ++n) {
                     int nid = elem.node_ids[n];
@@ -196,6 +215,7 @@ void FEMSolver3D<T>::addStructuredBoxMesh(int nx, int ny, int nz, T lx, T ly, T 
         T cd = std::sqrt((K + static_cast<T>(4.0f)/static_cast<T>(3.0f) * G) / density);
         elem.dt0 = h_min / (cd > static_cast<T>(1.0f) ? cd : static_cast<T>(5000.0f));
     }
+    ensureGaussPointHistory();
 }
 
 template <typename T>
@@ -421,15 +441,6 @@ void FEMSolver3D<T>::addStructuredCylinderMesh(int nr, int nz, T radius, T heigh
                 std::memset(elem.sigma, 0, sizeof(elem.sigma));
                 std::memset(elem.s_dev, 0, sizeof(elem.s_dev));
 
-                for (int g = 0; g < 8; ++g) {
-                    std::memset(elem.F_gp[g], 0, sizeof(elem.F_gp[g]));
-                    elem.F_gp[g][0][0] = 1.0f; elem.F_gp[g][1][1] = 1.0f; elem.F_gp[g][2][2] = 1.0f;
-                    std::memset(elem.s_dev_gp[g], 0, sizeof(elem.s_dev_gp[g]));
-                    elem.ep_bar_gp[g] = 0.0f;
-                    elem.temp_gp[g] = 293.0f;
-                    elem.damage_gp[g] = 0.0f;
-                }
-
                 T x_nodes[8][3];
                 for (int n = 0; n < 8; ++n) {
                     int nid = elem.node_ids[n];
@@ -522,15 +533,6 @@ void FEMSolver3D<T>::addStructuredCylinderMesh(int nr, int nz, T radius, T heigh
                     std::memset(elem.sigma, 0, sizeof(elem.sigma));
                     std::memset(elem.s_dev, 0, sizeof(elem.s_dev));
 
-                    for (int g = 0; g < 8; ++g) {
-                        std::memset(elem.F_gp[g], 0, sizeof(elem.F_gp[g]));
-                        elem.F_gp[g][0][0] = 1.0f; elem.F_gp[g][1][1] = 1.0f; elem.F_gp[g][2][2] = 1.0f;
-                        std::memset(elem.s_dev_gp[g], 0, sizeof(elem.s_dev_gp[g]));
-                        elem.ep_bar_gp[g] = 0.0f;
-                        elem.temp_gp[g] = 293.0f;
-                        elem.damage_gp[g] = 0.0f;
-                    }
-
                     T x_nodes[8][3];
                     for (int n = 0; n < 8; ++n) {
                         int nid = elem.node_ids[n];
@@ -582,6 +584,7 @@ void FEMSolver3D<T>::addStructuredCylinderMesh(int nr, int nz, T radius, T heigh
         T cd = std::sqrt((K + static_cast<T>(4.0f)/static_cast<T>(3.0f) * G) / density);
         elem.dt0 = h_min / (cd > static_cast<T>(1.0f) ? cd : static_cast<T>(5000.0f));
     }
+    ensureGaussPointHistory();
 }
 
 template <typename T>
@@ -633,15 +636,6 @@ void FEMSolver3D<T>::appendNodesAndElements(const std::vector<FEMNode3D<T>>& nod
         elem.V0 = std::abs(detJ) * static_cast<T>(8.0f);
         elem.V = elem.V0;
 
-        for (int g = 0; g < 8; ++g) {
-            std::memset(elem.F_gp[g], 0, sizeof(elem.F_gp[g]));
-            elem.F_gp[g][0][0] = 1.0f; elem.F_gp[g][1][1] = 1.0f; elem.F_gp[g][2][2] = 1.0f;
-            std::memset(elem.s_dev_gp[g], 0, sizeof(elem.s_dev_gp[g]));
-            elem.ep_bar_gp[g] = 0.0f;
-            elem.temp_gp[g] = 293.0f;
-            elem.damage_gp[g] = 0.0f;
-        }
-
         T h_min = static_cast<T>(1.0e30f);
         for (int e_edge = 0; e_edge < 12; ++e_edge) {
             int n1 = elem.node_ids[HEX8_EDGES[e_edge][0]];
@@ -662,6 +656,7 @@ void FEMSolver3D<T>::appendNodesAndElements(const std::vector<FEMNode3D<T>>& nod
         T cd = std::sqrt((K + static_cast<T>(4.0f)/static_cast<T>(3.0f) * G) / density);
         elem.dt0 = h_min / (cd > static_cast<T>(1.0f) ? cd : static_cast<T>(5000.0f));
     }
+    ensureGaussPointHistory();
 
     m_surface_facets_dirty = true;
     computeLumpedMasses();
@@ -954,6 +949,8 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
         T cd = std::sqrt((K + static_cast<T>(4.0f) / static_cast<T>(3.0f) * G) / density);
 
         if (m_integration_scheme == FEMIntegrationScheme::FullGauss8 || m_integration_scheme == FEMIntegrationScheme::SelectiveReduced) {
+            ensureGaussPointHistory();
+            auto& gp_hist = m_gp_history[e];
             static const T gp_coords[8][3] = {
                 {static_cast<T>(-0.5773502691896257), static_cast<T>(-0.5773502691896257), static_cast<T>(-0.5773502691896257)},
                 {static_cast<T>( 0.5773502691896257), static_cast<T>(-0.5773502691896257), static_cast<T>(-0.5773502691896257)},
@@ -1107,10 +1104,12 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                     div_v_g = static_cast<T>(0.0f);
                 }
 
-                T h_e_g = std::cbrt(detJ_g * static_cast<T>(8.0f));
-                T q_visc_g = (div_v_g < static_cast<T>(0.0f))
-                           ? (density * (-b1 * h_e_g * div_v_g * cd + b2 * h_e_g * h_e_g * div_v_g * div_v_g))
-                           : static_cast<T>(0.0f);
+                T h_e_g = std::cbrt(std::max(static_cast<T>(1.0e-18f), detJ_g * static_cast<T>(8.0f)));
+                T q_visc_g = static_cast<T>(0.0f);
+                if (div_v_g < static_cast<T>(0.0f)) {
+                    T div_v_mag = -div_v_g;
+                    q_visc_g = density * (b1 * cd * h_e_g * div_v_mag + b2 * (h_e_g * div_v_mag) * (h_e_g * div_v_mag));
+                }
 
                 T d_dev_g[3][3];
                 T active_div_v = (m_integration_scheme == FEMIntegrationScheme::SelectiveReduced) ? div_v_center : div_v_g;
@@ -1136,7 +1135,7 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                 T T_melt_g = static_cast<T>(mat.T_melt > 0.0f ? mat.T_melt : 1793.0f);
                 T T_room_g = static_cast<T>(mat.T_room > 0.0f ? mat.T_room : 293.0f);
 
-                T ep_val_g = std::max(static_cast<T>(0.0f), elem.ep_bar_gp[g]);
+                T ep_val_g = std::max(static_cast<T>(0.0f), gp_hist.ep_bar_gp[g]);
                 T sigma_hard_g = A_g + (B_g_mat > static_cast<T>(0.0f) ? B_g_mat * std::pow(ep_val_g, n_exp_g) : static_cast<T>(0.0f));
 
                 T strain_rate_factor_g = static_cast<T>(1.0f);
@@ -1152,7 +1151,7 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
 
                 T thermal_factor_g = static_cast<T>(1.0f);
                 if (m_exp_g > static_cast<T>(0.0f) && T_melt_g > T_room_g) {
-                    T T_star_g = (elem.temp_gp[g] - T_room_g) / (T_melt_g - T_room_g);
+                    T T_star_g = (gp_hist.temp_gp[g] - T_room_g) / (T_melt_g - T_room_g);
                     T_star_g = std::max(static_cast<T>(0.0f), std::min(static_cast<T>(1.0f), T_star_g));
                     thermal_factor_g = static_cast<T>(1.0f) - std::pow(T_star_g, m_exp_g);
                     if (thermal_factor_g < static_cast<T>(0.01f)) thermal_factor_g = static_cast<T>(0.01f);
@@ -1207,15 +1206,15 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                     for (int r = 0; r < 3; ++r) {
                         for (int c = 0; c < 3; ++c) {
                             for (int k = 0; k < 3; ++k) {
-                                s_temp[r][c] += R_dt_g[r][k] * elem.s_dev_gp[g][k][c];
+                                s_temp[r][c] += R_dt_g[r][k] * gp_hist.s_dev_gp[g][k][c];
                             }
                         }
                     }
                     for (int r = 0; r < 3; ++r) {
                         for (int c = 0; c < 3; ++c) {
-                            elem.s_dev_gp[g][r][c] = static_cast<T>(0.0f);
+                            gp_hist.s_dev_gp[g][r][c] = static_cast<T>(0.0f);
                             for (int k = 0; k < 3; ++k) {
-                                elem.s_dev_gp[g][r][c] += s_temp[r][k] * R_dt_g[c][k];
+                                gp_hist.s_dev_gp[g][r][c] += s_temp[r][k] * R_dt_g[c][k];
                             }
                         }
                     }
@@ -1231,13 +1230,13 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                 for (int r = 0; r < 3; ++r) {
                     for (int c = 0; c < 3; ++c) {
                         for (int k = 0; k < 3; ++k) {
-                            F_new_g[r][c] += I_plus_Ldt_g[r][k] * elem.F_gp[g][k][c];
+                            F_new_g[r][c] += I_plus_Ldt_g[r][k] * gp_hist.F_gp[g][k][c];
                         }
                     }
                 }
                 for (int r = 0; r < 3; ++r) {
                     for (int c = 0; c < 3; ++c) {
-                        elem.F_gp[g][r][c] = F_new_g[r][c];
+                        gp_hist.F_gp[g][r][c] = F_new_g[r][c];
                     }
                 }
 
@@ -1248,9 +1247,9 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                             + elem.F[0][2] * (elem.F[1][0]*elem.F[2][1] - elem.F[1][1]*elem.F[2][0]);
                     vol_strain_g = F_det - static_cast<T>(1.0f);
                 } else {
-                    T F_det = elem.F_gp[g][0][0] * (elem.F_gp[g][1][1]*elem.F_gp[g][2][2] - elem.F_gp[g][1][2]*elem.F_gp[g][2][1])
-                            - elem.F_gp[g][0][1] * (elem.F_gp[g][1][0]*elem.F_gp[g][2][2] - elem.F_gp[g][1][2]*elem.F_gp[g][2][0])
-                            + elem.F_gp[g][0][2] * (elem.F_gp[g][1][0]*elem.F_gp[g][2][1] - elem.F_gp[g][1][1]*elem.F_gp[g][2][0]);
+                    T F_det = gp_hist.F_gp[g][0][0] * (gp_hist.F_gp[g][1][1]*gp_hist.F_gp[g][2][2] - gp_hist.F_gp[g][1][2]*gp_hist.F_gp[g][2][1])
+                            - gp_hist.F_gp[g][0][1] * (gp_hist.F_gp[g][1][0]*gp_hist.F_gp[g][2][2] - gp_hist.F_gp[g][1][2]*gp_hist.F_gp[g][2][0])
+                            + gp_hist.F_gp[g][0][2] * (gp_hist.F_gp[g][1][0]*gp_hist.F_gp[g][2][1] - gp_hist.F_gp[g][1][1]*gp_hist.F_gp[g][2][0]);
                     vol_strain_g = F_det - static_cast<T>(1.0f);
                 }
                 if (std::abs(vol_strain_g) < static_cast<T>(1.0e-6f)) {
@@ -1269,7 +1268,7 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                     if (std::abs(mu) < static_cast<T>(1.0e-6f)) {
                         mu = static_cast<T>(0.0f);
                     }
-                    T E_v = density * (mat.Cp > 0.0f ? mat.Cp : 477.0f) * (elem.temp_gp[g] - (mat.T_room > 0.0f ? mat.T_room : 293.0f));
+                    T E_v = density * (mat.Cp > 0.0f ? mat.Cp : 477.0f) * (gp_hist.temp_gp[g] - (mat.T_room > 0.0f ? mat.T_room : 293.0f));
                     if (mu > static_cast<T>(0.0f)) {
                         T denom = static_cast<T>(1.0f) - (s1 - static_cast<T>(1.0f)) * mu;
                         if (denom > static_cast<T>(0.1f)) {
@@ -1287,17 +1286,17 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
 
                 for (int r = 0; r < 3; ++r) {
                     for (int c = 0; c < 3; ++c) {
-                        elem.s_dev_gp[g][r][c] += static_cast<T>(2.0f) * G * d_dev_g[r][c] * dt;
+                        gp_hist.s_dev_gp[g][r][c] += static_cast<T>(2.0f) * G * d_dev_g[r][c] * dt;
                     }
                 }
 
                 if (mat.material_model == MPMMaterialModel::RHTConcrete) {
                     RHTStateVariables<T> rht_state;
-                    rht_state.damage = elem.damage_gp[g];
-                    rht_state.ep_bar = elem.ep_bar_gp[g];
+                    rht_state.damage = gp_hist.damage_gp[g];
+                    rht_state.ep_bar = gp_hist.ep_bar_gp[g];
                     rht_state.p_hydro = p_hydro_g;
                     updateRHTStress<T>(
-                        elem.s_dev_gp[g], p_hydro_g, vol_strain_g, dt, h_e_g, ep_dot_g,
+                        gp_hist.s_dev_gp[g], p_hydro_g, vol_strain_g, dt, h_e_g, ep_dot_g,
                         static_cast<T>(mat.fc), static_cast<T>(mat.ft), G, K,
                         static_cast<T>(mat.G_f), static_cast<T>(mat.moisture_content),
                         static_cast<T>(mat.rht_A), static_cast<T>(mat.rht_N),
@@ -1310,17 +1309,17 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                         static_cast<T>(mat.dif_cap_compression), static_cast<T>(mat.dif_cap_tension),
                         rht_state
                     );
-                    elem.damage_gp[g] = rht_state.damage;
-                    elem.ep_bar_gp[g] = rht_state.ep_bar;
+                    gp_hist.damage_gp[g] = rht_state.damage;
+                    gp_hist.ep_bar_gp[g] = rht_state.ep_bar;
                     p_hydro_g = rht_state.p_hydro;
                 } else if (mat.material_model == MPMMaterialModel::KCConcrete) {
                     KCStateVariables<T> kc_state;
-                    kc_state.damage = elem.damage_gp[g];
-                    kc_state.lambda = elem.lambda_gp[g];
-                    kc_state.ep_bar = elem.ep_bar_gp[g];
+                    kc_state.damage = gp_hist.damage_gp[g];
+                    kc_state.lambda = gp_hist.lambda_gp[g];
+                    kc_state.ep_bar = gp_hist.ep_bar_gp[g];
                     kc_state.p_hydro = p_hydro_g;
                     updateKCStress<T>(
-                        elem.s_dev_gp[g], p_hydro_g, vol_strain_g, dt, h_e_g, ep_dot_g,
+                        gp_hist.s_dev_gp[g], p_hydro_g, vol_strain_g, dt, h_e_g, ep_dot_g,
                         static_cast<T>(mat.fc), static_cast<T>(mat.ft), G, K,
                         static_cast<T>(mat.G_f), static_cast<T>(mat.moisture_content),
                         mat.kc_auto_generate,
@@ -1331,18 +1330,18 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                         static_cast<T>(mat.dif_cap_compression), static_cast<T>(mat.dif_cap_tension),
                         kc_state
                     );
-                    elem.damage_gp[g] = kc_state.damage;
-                    elem.lambda_gp[g] = kc_state.lambda;
-                    elem.ep_bar_gp[g] = kc_state.ep_bar;
+                    gp_hist.damage_gp[g] = kc_state.damage;
+                    gp_hist.lambda_gp[g] = kc_state.lambda;
+                    gp_hist.ep_bar_gp[g] = kc_state.ep_bar;
                     p_hydro_g = kc_state.p_hydro;
                 } else if (mat.material_model == MPMMaterialModel::CSCMConcrete) {
                     CSCMStateVariables<T> cscm_state;
-                    cscm_state.damage = elem.damage_gp[g];
-                    cscm_state.kappa = elem.lambda_gp[g];
-                    cscm_state.ep_bar = elem.ep_bar_gp[g];
+                    cscm_state.damage = gp_hist.damage_gp[g];
+                    cscm_state.kappa = gp_hist.lambda_gp[g];
+                    cscm_state.ep_bar = gp_hist.ep_bar_gp[g];
                     cscm_state.p_hydro = p_hydro_g;
                     updateCSCMStress<T>(
-                        elem.s_dev_gp[g], p_hydro_g, vol_strain_g, dt, h_e_g, ep_dot_g,
+                        gp_hist.s_dev_gp[g], p_hydro_g, vol_strain_g, dt, h_e_g, ep_dot_g,
                         static_cast<T>(mat.fc), static_cast<T>(mat.ft), G, K,
                         static_cast<T>(mat.G_f),
                         static_cast<T>(mat.cscm_alpha), static_cast<T>(mat.cscm_theta),
@@ -1353,30 +1352,30 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                         static_cast<T>(mat.dif_cap_compression), static_cast<T>(mat.dif_cap_tension),
                         cscm_state
                     );
-                    elem.damage_gp[g] = cscm_state.damage;
-                    elem.lambda_gp[g] = cscm_state.kappa;
-                    elem.ep_bar_gp[g] = cscm_state.ep_bar;
+                    gp_hist.damage_gp[g] = cscm_state.damage;
+                    gp_hist.lambda_gp[g] = cscm_state.kappa;
+                    gp_hist.ep_bar_gp[g] = cscm_state.ep_bar;
                     p_hydro_g = cscm_state.p_hydro;
                 } else {
                     T s_norm_g = std::sqrt(
-                        elem.s_dev_gp[g][0][0]*elem.s_dev_gp[g][0][0] + elem.s_dev_gp[g][1][1]*elem.s_dev_gp[g][1][1] + elem.s_dev_gp[g][2][2]*elem.s_dev_gp[g][2][2] +
-                        static_cast<T>(2.0f)*(elem.s_dev_gp[g][0][1]*elem.s_dev_gp[g][0][1] + elem.s_dev_gp[g][1][2]*elem.s_dev_gp[g][1][2] + elem.s_dev_gp[g][2][0]*elem.s_dev_gp[g][2][0])
+                        gp_hist.s_dev_gp[g][0][0]*gp_hist.s_dev_gp[g][0][0] + gp_hist.s_dev_gp[g][1][1]*gp_hist.s_dev_gp[g][1][1] + gp_hist.s_dev_gp[g][2][2]*gp_hist.s_dev_gp[g][2][2] +
+                        static_cast<T>(2.0f)*(gp_hist.s_dev_gp[g][0][1]*gp_hist.s_dev_gp[g][0][1] + gp_hist.s_dev_gp[g][1][2]*gp_hist.s_dev_gp[g][1][2] + gp_hist.s_dev_gp[g][2][0]*gp_hist.s_dev_gp[g][2][0])
                     );
                     T vm_trial_g = std::sqrt(static_cast<T>(1.5f)) * s_norm_g;
 
                     if (vm_trial_g > dynamic_yield_g && vm_trial_g > static_cast<T>(1.0e-6f)) {
                         T scale = dynamic_yield_g / vm_trial_g;
                         T d_ep = (vm_trial_g - dynamic_yield_g) / (static_cast<T>(3.0f) * G + static_cast<T>(mat.hardening_modulus));
-                        elem.ep_bar_gp[g] += d_ep;
+                        gp_hist.ep_bar_gp[g] += d_ep;
                         for (int r = 0; r < 3; ++r) {
                             for (int c = 0; c < 3; ++c) {
-                                elem.s_dev_gp[g][r][c] *= scale;
+                                gp_hist.s_dev_gp[g][r][c] *= scale;
                             }
                         }
                         T plastic_work = dynamic_yield_g * d_ep;
                         T chi = m_physics_params.taylor_quinney_factor;
                         T Cp = static_cast<T>(mat.Cp > 0.0f ? mat.Cp : 477.0f);
-                        elem.temp_gp[g] += (chi * plastic_work) / (density * Cp);
+                        gp_hist.temp_gp[g] += (chi * plastic_work) / (density * Cp);
                     }
                 }
 
@@ -1384,7 +1383,7 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                 T sigma_g[3][3];
                 for (int r = 0; r < 3; ++r) {
                     for (int c = 0; c < 3; ++c) {
-                        sigma_g[r][c] = elem.s_dev_gp[g][r][c] + static_cast<T>(2.0f) * eta_shear_g * d_dev_g[r][c] - (r == c ? p_hydro_g : static_cast<T>(0.0f));
+                        sigma_g[r][c] = gp_hist.s_dev_gp[g][r][c] + static_cast<T>(2.0f) * eta_shear_g * d_dev_g[r][c] - (r == c ? p_hydro_g : static_cast<T>(0.0f));
                     }
                 }
 
@@ -1419,12 +1418,12 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                 for (int r = 0; r < 3; ++r) {
                     for (int c = 0; c < 3; ++c) {
                         sigma_avg[r][c] += 0.125f * sigma_g[r][c];
-                        s_dev_avg[r][c] += 0.125f * elem.s_dev_gp[g][r][c];
+                        s_dev_avg[r][c] += 0.125f * gp_hist.s_dev_gp[g][r][c];
                     }
                 }
-                ep_bar_avg += 0.125f * elem.ep_bar_gp[g];
-                temp_avg += 0.125f * elem.temp_gp[g];
-                damage_avg += 0.125f * elem.damage_gp[g];
+                ep_bar_avg += 0.125f * gp_hist.ep_bar_gp[g];
+                temp_avg += 0.125f * gp_hist.temp_gp[g];
+                damage_avg += 0.125f * gp_hist.damage_gp[g];
             }
 
             if (elem.is_eroded) continue;
@@ -1438,14 +1437,14 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
             elem.ep_bar = ep_bar_avg;
             elem.temperature = temp_avg;
             elem.damage = damage_avg;
-            elem.lambda = elem.lambda_gp[0];
+            elem.lambda = gp_hist.lambda_gp[0];
             elem.V = V_sum;
 
             T F_avg[3][3] = {{0.0f}};
             for (int g = 0; g < 8; ++g) {
                 for (int r = 0; r < 3; ++r) {
                     for (int c = 0; c < 3; ++c) {
-                        F_avg[r][c] += 0.125f * elem.F_gp[g][r][c];
+                        F_avg[r][c] += 0.125f * gp_hist.F_gp[g][r][c];
                     }
                 }
             }

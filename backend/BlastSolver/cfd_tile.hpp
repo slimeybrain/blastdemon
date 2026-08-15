@@ -110,4 +110,8 @@ struct GeometryTile3D {
     GeometryPayload cells[TILE_CELLS_3D];
 };
 
+struct UncoveringMaskTile3D {
+    uint64_t words[8]; // 512 bits per tile for 1-bit boundary state (64 bytes vs 2048 bytes)
+};
+
 #endif // CFD_TILE_HPP

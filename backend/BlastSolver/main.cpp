@@ -6342,6 +6342,10 @@ int main() {
                             std::string scheme_str = msg.value("integration_scheme", "OnePointFB");
                             if (scheme_str == "FullGauss8" || scheme_str == "FullIntegration8Pt") {
                                 fem->setIntegrationScheme(Blast::FEMIntegrationScheme::FullGauss8);
+                            } else if (scheme_str == "SelectiveReduced") {
+                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::SelectiveReduced);
+                            } else if (scheme_str == "OnePointKF") {
+                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointKF);
                             } else {
                                 fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointFB);
                             }
@@ -6430,6 +6434,10 @@ int main() {
                             std::string scheme_str = msg.value("integration_scheme", "OnePointFB");
                             if (scheme_str == "FullGauss8" || scheme_str == "FullIntegration8Pt") {
                                 fem->setIntegrationScheme(Blast::FEMIntegrationScheme::FullGauss8);
+                            } else if (scheme_str == "SelectiveReduced") {
+                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::SelectiveReduced);
+                            } else if (scheme_str == "OnePointKF") {
+                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointKF);
                             } else {
                                 fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointFB);
                             }
@@ -6520,6 +6528,10 @@ int main() {
                             std::string scheme_str = msg.value("integration_scheme", "OnePointFB");
                             if (scheme_str == "FullGauss8" || scheme_str == "FullIntegration8Pt") {
                                 fem->setIntegrationScheme(Blast::FEMIntegrationScheme::FullGauss8);
+                            } else if (scheme_str == "SelectiveReduced") {
+                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::SelectiveReduced);
+                            } else if (scheme_str == "OnePointKF") {
+                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointKF);
                             } else {
                                 fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointFB);
                             }
@@ -6608,6 +6620,10 @@ int main() {
                             std::string scheme_str = msg.value("integration_scheme", "OnePointFB");
                             if (scheme_str == "FullGauss8" || scheme_str == "FullIntegration8Pt") {
                                 fem->setIntegrationScheme(Blast::FEMIntegrationScheme::FullGauss8);
+                            } else if (scheme_str == "SelectiveReduced") {
+                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::SelectiveReduced);
+                            } else if (scheme_str == "OnePointKF") {
+                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointKF);
                             } else {
                                 fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointFB);
                             }
@@ -6934,6 +6950,10 @@ int main() {
                                 std::string scheme_str = msg.value("integration_scheme", "OnePointFB");
                                 if (scheme_str == "FullGauss8" || scheme_str == "FullIntegration8Pt") {
                                     fem->setIntegrationScheme(Blast::FEMIntegrationScheme::FullGauss8);
+                                } else if (scheme_str == "SelectiveReduced") {
+                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::SelectiveReduced);
+                                } else if (scheme_str == "OnePointKF") {
+                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointKF);
                                 } else {
                                     fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointFB);
                                 }
@@ -7000,6 +7020,10 @@ int main() {
                                 std::string scheme_str = msg.value("integration_scheme", "OnePointFB");
                                 if (scheme_str == "FullGauss8" || scheme_str == "FullIntegration8Pt") {
                                     fem->setIntegrationScheme(Blast::FEMIntegrationScheme::FullGauss8);
+                                } else if (scheme_str == "SelectiveReduced") {
+                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::SelectiveReduced);
+                                } else if (scheme_str == "OnePointKF") {
+                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointKF);
                                 } else {
                                     fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointFB);
                                 }

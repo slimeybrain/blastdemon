@@ -40,8 +40,8 @@ private:
     mutable size_t d_solid_vel_fsi_capacity = 0;
     mutable void* d_tile_has_boundary_buf = nullptr;
     mutable size_t d_tile_has_boundary_capacity = 0;
-    mutable void* d_prev_geom = nullptr;
-    mutable bool has_prev_geom = false;
+    mutable UncoveringMaskTile3D* d_prev_mask = nullptr;
+    mutable bool has_prev_mask = false;
     mutable bool constants_dirty = true;
     mutable int step_count = 0;
 
@@ -90,8 +90,8 @@ private:
     mutable std::vector<GPUGauge3D> paged_gauge_coords;
     mutable bool has_paged_gauges = false;
 
-    mutable bool has_paged_prev_geom = false;
-    mutable std::vector<GeometryTile3D> paged_prev_geom;
+    mutable bool has_paged_prev_mask = false;
+    mutable std::vector<UncoveringMaskTile3D> paged_prev_mask;
     mutable bool has_paged_solid_mask = false;
     mutable std::vector<uint8_t> paged_solid_mask;
     mutable bool has_paged_solid_vel = false;

@@ -2152,7 +2152,7 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setSolidMask(const uint8_t* mas
         geom_pool.resize(total_tiles);
     }
 
-    bool has_prev = (prev_geom_pool.size() == static_cast<size_t>(total_tiles));
+    bool has_prev = (prev_mask_pool.size() == static_cast<size_t>(total_tiles));
 
     for (int gx = 0; gx < nx; ++gx) {
         for (int gy = 0; gy < ny; ++gy) {
@@ -2161,7 +2161,7 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setSolidMask(const uint8_t* mas
                 int t_idx = (gx >> 3) + (gy >> 3) * n_tiles_x + (gz >> 3) * n_tiles_x * n_tiles_y;
                 int c_idx = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
 
-                bool prev_is_solid = has_prev && prev_geom_pool[t_idx].cells[c_idx].is_boundary;
+                bool prev_is_solid = has_prev && ((prev_mask_pool[t_idx].words[c_idx >> 6] & (1ULL << (c_idx & 63))) != 0);
                 bool curr_is_solid = (mask[cfd_idx] != 0);
 
                 geom_pool[t_idx].cells[c_idx].is_boundary = curr_is_solid;
@@ -2252,7 +2252,23 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setSolidMask(const uint8_t* mas
             }
         }
     }
-    prev_geom_pool = geom_pool;
+    if (prev_mask_pool.size() != static_cast<size_t>(total_tiles)) {
+        prev_mask_pool.resize(total_tiles);
+    }
+    for (int t = 0; t < total_tiles; ++t) {
+        const auto& gt = geom_pool[t];
+        auto& mt = prev_mask_pool[t];
+        for (int w = 0; w < 8; ++w) {
+            uint64_t word = 0;
+            int base = w * 64;
+            for (int b = 0; b < 64; ++b) {
+                if (gt.cells[base + b].is_boundary) {
+                    word |= (1ULL << b);
+                }
+            }
+            mt.words[w] = word;
+        }
+    }
 }
 
 

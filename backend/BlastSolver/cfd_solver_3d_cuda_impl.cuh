@@ -2769,7 +2769,7 @@ CFDSolver3DCuda<RealType, IsMultiMaterial>::~CFDSolver3DCuda() {
     if (d_U) cudaFree(d_U);
     if (d_dU) cudaFree(d_dU);
     if (d_geom) cudaFree(d_geom);
-    if (d_prev_geom) { cudaFree(d_prev_geom); d_prev_geom = nullptr; }
+    if (d_prev_mask) { cudaFree(d_prev_mask); d_prev_mask = nullptr; }
     if (d_active_tiles) cudaFree(d_active_tiles);
     if (d_tile_active_temp) cudaFree(d_tile_active_temp);
     if (d_active_tile_indices) cudaFree(d_active_tile_indices);
@@ -2852,12 +2852,12 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::ensure_paged_out() const {
         has_paged_obstacle_faces = false;
     }
 
-    if (d_prev_geom) {
-        paged_prev_geom.resize(total_tiles);
-        CHECK_CUDA(cudaMemcpy(paged_prev_geom.data(), d_prev_geom, total_tiles * sizeof(GeometryTile3D), cudaMemcpyDeviceToHost));
-        has_paged_prev_geom = true;
+    if (d_prev_mask) {
+        paged_prev_mask.resize(total_tiles);
+        CHECK_CUDA(cudaMemcpy(paged_prev_mask.data(), d_prev_mask, total_tiles * sizeof(UncoveringMaskTile3D), cudaMemcpyDeviceToHost));
+        has_paged_prev_mask = true;
     } else {
-        has_paged_prev_geom = false;
+        has_paged_prev_mask = false;
     }
 
     size_t mask_bytes = static_cast<size_t>(nx) * ny * nz * sizeof(uint8_t);
@@ -2892,7 +2892,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::ensure_paged_out() const {
     if (d_U) { cudaFree(d_U); d_U = nullptr; }
     if (d_dU) { cudaFree(d_dU); d_dU = nullptr; }
     if (d_geom) { cudaFree(d_geom); d_geom = nullptr; }
-    if (d_prev_geom) { cudaFree(d_prev_geom); d_prev_geom = nullptr; }
+    if (d_prev_mask) { cudaFree(d_prev_mask); d_prev_mask = nullptr; }
     if (d_active_tiles) { cudaFree(d_active_tiles); d_active_tiles = nullptr; }
     if (d_tile_active_temp) { cudaFree(d_tile_active_temp); d_tile_active_temp = nullptr; }
     if (d_active_tile_indices) { cudaFree(d_active_tile_indices); d_active_tile_indices = nullptr; }
@@ -2985,9 +2985,9 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::ensure_paged_in() const {
         CHECK_CUDA(cudaMemcpy(d_obstacle_faces, paged_obstacle_faces.data(), num_obstacle_faces * sizeof(GPUObstacleFace), cudaMemcpyHostToDevice));
     }
 
-    if (has_paged_prev_geom) {
-        CHECK_CUDA(cudaMalloc(&d_prev_geom, total_tiles * sizeof(GeometryTile3D)));
-        CHECK_CUDA(cudaMemcpy(d_prev_geom, paged_prev_geom.data(), total_tiles * sizeof(GeometryTile3D), cudaMemcpyHostToDevice));
+    if (has_paged_prev_mask) {
+        CHECK_CUDA(cudaMalloc(&d_prev_mask, total_tiles * sizeof(UncoveringMaskTile3D)));
+        CHECK_CUDA(cudaMemcpy(d_prev_mask, paged_prev_mask.data(), total_tiles * sizeof(UncoveringMaskTile3D), cudaMemcpyHostToDevice));
     }
     if (has_paged_solid_mask) {
         size_t mask_bytes = static_cast<size_t>(nx) * ny * nz * sizeof(uint8_t);
@@ -3016,7 +3016,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::ensure_paged_in() const {
     paged_tile_is_near_boundary.clear(); paged_tile_is_near_boundary.shrink_to_fit();
     paged_gauge_coords.clear(); paged_gauge_coords.shrink_to_fit();
     paged_obstacle_faces.clear(); paged_obstacle_faces.shrink_to_fit();
-    paged_prev_geom.clear(); paged_prev_geom.shrink_to_fit();
+    paged_prev_mask.clear(); paged_prev_mask.shrink_to_fit();
     paged_solid_mask.clear(); paged_solid_mask.shrink_to_fit();
     paged_solid_vel.clear(); paged_solid_vel.shrink_to_fit();
     paged_tile_boundary.clear(); paged_tile_boundary.shrink_to_fit();
@@ -5537,13 +5537,39 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::uploadObstacleFaces(const std::
     CHECK_CUDA(cudaMemcpy(d_obstacle_faces, local_faces.data(), num_obstacle_faces * sizeof(GPUObstacleFace), cudaMemcpyHostToDevice));
 }
 
+// GPU kernel: extract 1-bit solid boundary mask per cell (64 bytes/tile vs 2048 bytes/tile)
+static __global__ void kernel_extract_uncovering_mask_3d(
+    UncoveringMaskTile3D* d_mask,
+    const GeometryTile3D* d_geom,
+    int total_tiles
+) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= total_tiles) return;
+
+    const GeometryTile3D& gt = d_geom[tid];
+    UncoveringMaskTile3D& mt = d_mask[tid];
+
+    #pragma unroll
+    for (int w = 0; w < 8; ++w) {
+        uint64_t word = 0;
+        int base = w * 64;
+        #pragma unroll
+        for (int b = 0; b < 64; ++b) {
+            if (gt.cells[base + b].is_boundary) {
+                word |= (1ULL << b);
+            }
+        }
+        mt.words[w] = word;
+    }
+}
+
 // GPU kernel: smooth Inverse Distance Weighted (IDW) state extrapolation for freshly uncovered fluid cells
 template <typename RealType, bool IsMultiMaterial>
 __global__ void kernel_extrapolate_uncovered_cells_3d(
     PrimitiveTile3D<RealType, IsMultiMaterial>* d_states,
     ConservativeTile3D<RealType, IsMultiMaterial>* d_U,
     const GeometryTile3D* d_geom,
-    const GeometryTile3D* d_prev_geom,
+    const UncoveringMaskTile3D* d_prev_mask,
     int nx, int ny, int nz,
     int ntx, int nty,
     RealType gamma,
@@ -5563,7 +5589,7 @@ __global__ void kernel_extrapolate_uncovered_cells_3d(
     int t_idx = (gx >> 3) + (gy >> 3) * ntx + (gz >> 3) * ntx * nty;
     int c_idx = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
 
-    bool prev_is_solid = d_prev_geom && d_prev_geom[t_idx].cells[c_idx].is_boundary;
+    bool prev_is_solid = d_prev_mask && ((d_prev_mask[t_idx].words[c_idx >> 6] & (1ULL << (c_idx & 63))) != 0);
     bool curr_is_solid = d_geom && d_geom[t_idx].cells[c_idx].is_boundary;
 
     // Freshly uncovered cell: WAS solid in prev_geom, NOW fluid in current geom
@@ -5589,7 +5615,8 @@ __global__ void kernel_extrapolate_uncovered_cells_3d(
                     if (nx_c >= 0 && nx_c < nx && ny_c >= 0 && ny_c < ny && nz_c >= 0 && nz_c < nz) {
                         int nt_idx = (nx_c >> 3) + (ny_c >> 3) * ntx + (nz_c >> 3) * ntx * nty;
                         int nc_idx = (nx_c & 7) + (ny_c & 7) * 8 + (nz_c & 7) * 64;
-                        if (!d_prev_geom[nt_idx].cells[nc_idx].is_boundary) {
+                        bool n_prev_solid = d_prev_mask && ((d_prev_mask[nt_idx].words[nc_idx >> 6] & (1ULL << (nc_idx & 63))) != 0);
+                        if (!n_prev_solid) {
                             RealType dist_sq = (RealType)(dx_n * dx_n + dy_n * dy_n + dz_n * dz_n);
                             RealType w = (RealType)1.0 / dist_sq;
                             
@@ -5686,9 +5713,9 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setSolidMask(const uint8_t* mas
         CHECK_CUDA(cudaMalloc(&d_geom, total_tiles * sizeof(GeometryTile3D)));
         CHECK_CUDA(cudaMemset(d_geom, 0, total_tiles * sizeof(GeometryTile3D)));
     }
-    if (!d_prev_geom) {
-        CHECK_CUDA(cudaMalloc(&d_prev_geom, total_tiles * sizeof(GeometryTile3D)));
-        CHECK_CUDA(cudaMemset(d_prev_geom, 0, total_tiles * sizeof(GeometryTile3D)));
+    if (!d_prev_mask) {
+        CHECK_CUDA(cudaMalloc(&d_prev_mask, total_tiles * sizeof(UncoveringMaskTile3D)));
+        CHECK_CUDA(cudaMemset(d_prev_mask, 0, total_tiles * sizeof(UncoveringMaskTile3D)));
     }
     if (!d_tile_is_near_boundary) {
         CHECK_CUDA(cudaMalloc(&d_tile_is_near_boundary, total_tiles * sizeof(uint8_t)));
@@ -5714,20 +5741,23 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setSolidMask(const uint8_t* mas
     CHECK_CUDA(cudaGetLastError());
 
     // Extrapolate freshly uncovered fluid cells if previous geometry snapshot exists
-    if (has_prev_geom && d_states) {
+    if (has_prev_mask && d_states) {
         kernel_extrapolate_uncovered_cells_3d<RealType, IsMultiMaterial><<<grid, block>>>(
             (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
             (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
             (const GeometryTile3D*)d_geom,
-            (const GeometryTile3D*)d_prev_geom,
+            (const UncoveringMaskTile3D*)d_prev_mask,
             nx, ny, nz, ntx, nty, (RealType)gamma
         );
         CHECK_CUDA(cudaGetLastError());
     }
 
-    // Update d_prev_geom snapshot for next step
-    CHECK_CUDA(cudaMemcpy(d_prev_geom, d_geom, total_tiles * sizeof(GeometryTile3D), cudaMemcpyDeviceToDevice));
-    has_prev_geom = true;
+    // Update d_prev_mask snapshot for next step
+    int threads_mask = 256;
+    int blocks_mask = (total_tiles + threads_mask - 1) / threads_mask;
+    kernel_extract_uncovering_mask_3d<<<blocks_mask, threads_mask>>>(d_prev_mask, (const GeometryTile3D*)d_geom, total_tiles);
+    CHECK_CUDA(cudaGetLastError());
+    has_prev_mask = true;
 
     // Update near-boundary flags on GPU
     CHECK_CUDA(cudaMemset(d_tile_is_near_boundary, 1, total_tiles * sizeof(uint8_t)));
@@ -6430,9 +6460,9 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithMPMGPU(void* mpm_s
         CHECK_CUDA(cudaMalloc(&d_geom, total_tiles * sizeof(GeometryTile3D)));
         CHECK_CUDA(cudaMemset(d_geom, 0, total_tiles * sizeof(GeometryTile3D)));
     }
-    if (!d_prev_geom) {
-        CHECK_CUDA(cudaMalloc(&d_prev_geom, total_tiles * sizeof(GeometryTile3D)));
-        CHECK_CUDA(cudaMemset(d_prev_geom, 0, total_tiles * sizeof(GeometryTile3D)));
+    if (!d_prev_mask) {
+        CHECK_CUDA(cudaMalloc(&d_prev_mask, total_tiles * sizeof(UncoveringMaskTile3D)));
+        CHECK_CUDA(cudaMemset(d_prev_mask, 0, total_tiles * sizeof(UncoveringMaskTile3D)));
     }
     if (!d_tile_is_near_boundary) {
         CHECK_CUDA(cudaMalloc(&d_tile_is_near_boundary, total_tiles * sizeof(uint8_t)));
@@ -6472,19 +6502,22 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithMPMGPU(void* mpm_s
         );
         CHECK_CUDA(cudaGetLastError());
 
-        if (has_prev_geom && d_states) {
+        if (has_prev_mask && d_states) {
             kernel_extrapolate_uncovered_cells_3d<RealType, IsMultiMaterial><<<grid, block>>>(
                 (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
                 (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
                 (const GeometryTile3D*)d_geom,
-                (const GeometryTile3D*)d_prev_geom,
+                (const UncoveringMaskTile3D*)d_prev_mask,
                 nx, ny, nz, ntx, nty, (RealType)gamma
             );
             CHECK_CUDA(cudaGetLastError());
         }
 
-        CHECK_CUDA(cudaMemcpy(d_prev_geom, d_geom, total_tiles * sizeof(GeometryTile3D), cudaMemcpyDeviceToDevice));
-        has_prev_geom = true;
+        int threads_mask = 256;
+        int blocks_mask = (total_tiles + threads_mask - 1) / threads_mask;
+        kernel_extract_uncovering_mask_3d<<<blocks_mask, threads_mask>>>(d_prev_mask, (const GeometryTile3D*)d_geom, total_tiles);
+        CHECK_CUDA(cudaGetLastError());
+        has_prev_mask = true;
 
         kernel_fsi_apply_penalty_active_gpu<RealType, IsMultiMaterial><<<blocks_active, threads_active>>>(
             (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
@@ -6516,19 +6549,22 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithMPMGPU(void* mpm_s
         );
         CHECK_CUDA(cudaGetLastError());
 
-        if (has_prev_geom && d_states) {
+        if (has_prev_mask && d_states) {
             kernel_extrapolate_uncovered_cells_3d<RealType, IsMultiMaterial><<<grid, block>>>(
                 (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
                 (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
                 (const GeometryTile3D*)d_geom,
-                (const GeometryTile3D*)d_prev_geom,
+                (const UncoveringMaskTile3D*)d_prev_mask,
                 nx, ny, nz, ntx, nty, (RealType)gamma
             );
             CHECK_CUDA(cudaGetLastError());
         }
 
-        CHECK_CUDA(cudaMemcpy(d_prev_geom, d_geom, total_tiles * sizeof(GeometryTile3D), cudaMemcpyDeviceToDevice));
-        has_prev_geom = true;
+        int threads_mask = 256;
+        int blocks_mask = (total_tiles + threads_mask - 1) / threads_mask;
+        kernel_extract_uncovering_mask_3d<<<blocks_mask, threads_mask>>>(d_prev_mask, (const GeometryTile3D*)d_geom, total_tiles);
+        CHECK_CUDA(cudaGetLastError());
+        has_prev_mask = true;
 
         kernel_fsi_apply_penalty_gpu<RealType, IsMultiMaterial><<<grid, block>>>(
             (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
@@ -6587,9 +6623,9 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithFEMGPU(void* fem_s
         CHECK_CUDA(cudaMalloc(&d_geom, total_tiles * sizeof(GeometryTile3D)));
         CHECK_CUDA(cudaMemset(d_geom, 0, total_tiles * sizeof(GeometryTile3D)));
     }
-    if (!d_prev_geom) {
-        CHECK_CUDA(cudaMalloc(&d_prev_geom, total_tiles * sizeof(GeometryTile3D)));
-        CHECK_CUDA(cudaMemset(d_prev_geom, 0, total_tiles * sizeof(GeometryTile3D)));
+    if (!d_prev_mask) {
+        CHECK_CUDA(cudaMalloc(&d_prev_mask, total_tiles * sizeof(UncoveringMaskTile3D)));
+        CHECK_CUDA(cudaMemset(d_prev_mask, 0, total_tiles * sizeof(UncoveringMaskTile3D)));
     }
     if (!d_tile_is_near_boundary) {
         CHECK_CUDA(cudaMalloc(&d_tile_is_near_boundary, total_tiles * sizeof(uint8_t)));
@@ -6638,7 +6674,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithFEMGPU(void* fem_s
             );
             CHECK_CUDA(cudaGetLastError());
 
-            if (has_prev_geom && d_states) {
+            if (has_prev_mask && d_states) {
                 double fmin_x = xmin, fmax_x = xmin + nx * cellSize;
                 double fmin_y = ymin, fmax_y = ymin + ny * cellSize;
                 double fmin_z = zmin, fmax_z = zmin + nz * cellSize;
@@ -6658,15 +6694,18 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithFEMGPU(void* fem_s
                     (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
                     (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
                     (const GeometryTile3D*)d_geom,
-                    (const GeometryTile3D*)d_prev_geom,
+                    (const UncoveringMaskTile3D*)d_prev_mask,
                     nx, ny, nz, ntx, nty, (RealType)gamma,
                     imin, imax, jmin, jmax, kmin, kmax
                 );
                 CHECK_CUDA(cudaGetLastError());
             }
 
-            CHECK_CUDA(cudaMemcpyAsync(d_prev_geom, d_geom, total_tiles * sizeof(GeometryTile3D), cudaMemcpyDeviceToDevice));
-            has_prev_geom = true;
+            int threads_mask = 256;
+            int blocks_mask = (total_tiles + threads_mask - 1) / threads_mask;
+            kernel_extract_uncovering_mask_3d<<<blocks_mask, threads_mask>>>(d_prev_mask, (const GeometryTile3D*)d_geom, total_tiles);
+            CHECK_CUDA(cudaGetLastError());
+            has_prev_mask = true;
 
             Blast::launch_integrate_cfd_pressure_to_fem_nodes_3d<double, RealType, IsMultiMaterial>(
                 (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
@@ -6715,7 +6754,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithFEMGPU(void* fem_s
             );
             CHECK_CUDA(cudaGetLastError());
 
-            if (has_prev_geom && d_states) {
+            if (has_prev_mask && d_states) {
                 float fmin_x = static_cast<float>(xmin), fmax_x = static_cast<float>(xmin + nx * cellSize);
                 float fmin_y = static_cast<float>(ymin), fmax_y = static_cast<float>(ymin + ny * cellSize);
                 float fmin_z = static_cast<float>(zmin), fmax_z = static_cast<float>(zmin + nz * cellSize);
@@ -6735,15 +6774,18 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithFEMGPU(void* fem_s
                     (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
                     (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
                     (const GeometryTile3D*)d_geom,
-                    (const GeometryTile3D*)d_prev_geom,
+                    (const UncoveringMaskTile3D*)d_prev_mask,
                     nx, ny, nz, ntx, nty, (RealType)gamma,
                     imin, imax, jmin, jmax, kmin, kmax
                 );
                 CHECK_CUDA(cudaGetLastError());
             }
 
-            CHECK_CUDA(cudaMemcpyAsync(d_prev_geom, d_geom, total_tiles * sizeof(GeometryTile3D), cudaMemcpyDeviceToDevice));
-            has_prev_geom = true;
+            int threads_mask = 256;
+            int blocks_mask = (total_tiles + threads_mask - 1) / threads_mask;
+            kernel_extract_uncovering_mask_3d<<<blocks_mask, threads_mask>>>(d_prev_mask, (const GeometryTile3D*)d_geom, total_tiles);
+            CHECK_CUDA(cudaGetLastError());
+            has_prev_mask = true;
 
             Blast::launch_integrate_cfd_pressure_to_fem_nodes_3d<float, RealType, IsMultiMaterial>(
                 (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,

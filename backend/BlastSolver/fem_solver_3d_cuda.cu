@@ -54,6 +54,7 @@ __global__ void fem_element_forces_kernel_3d_device(
     int num_nodes,
     FEMElement3D<T>* d_elements,
     int num_elements,
+    FEMGaussPointHistory3D<T>* d_gp_history,
     const MaterialTable3D* d_materials,
     BlastPhysicsParams<T> physics_params,
     T dt,
@@ -136,7 +137,8 @@ __global__ void fem_element_forces_kernel_3d_device(
     T cd = sqrt((K + static_cast<T>(4.0f) / static_cast<T>(3.0f) * G) / density);
 
     if (integration_scheme == FEMIntegrationScheme::FullGauss8 || integration_scheme == FEMIntegrationScheme::SelectiveReduced) {
-        const T gp_coords[8][3] = {
+        FEMGaussPointHistory3D<T>* gp_hist_ptr = d_gp_history ? &d_gp_history[idx] : nullptr;
+        static const T gp_coords[8][3] = {
             {static_cast<T>(-0.5773502691896257), static_cast<T>(-0.5773502691896257), static_cast<T>(-0.5773502691896257)},
             {static_cast<T>( 0.5773502691896257), static_cast<T>(-0.5773502691896257), static_cast<T>(-0.5773502691896257)},
             {static_cast<T>( 0.5773502691896257), static_cast<T>( 0.5773502691896257), static_cast<T>(-0.5773502691896257)},
@@ -194,7 +196,7 @@ __global__ void fem_element_forces_kernel_3d_device(
                 }
             }
 
-            T strain_rate_center[3] = {0.0f, 0.0f, 0.0f};
+            T strain_rate_center[6] = {0.0f};
             for (int i = 0; i < 8; ++i) {
                 strain_rate_center[0] += dN_dx_center[i][0] * v_rel[i][0];
                 strain_rate_center[1] += dN_dx_center[i][1] * v_rel[i][1];
@@ -306,7 +308,7 @@ __global__ void fem_element_forces_kernel_3d_device(
             T T_melt_g = static_cast<T>(mat.T_melt > 0.0f ? mat.T_melt : 1793.0f);
             T T_room_g = static_cast<T>(mat.T_room > 0.0f ? mat.T_room : 293.0f);
 
-            T ep_val_g = (elem.ep_bar_gp[g] > static_cast<T>(0.0f)) ? elem.ep_bar_gp[g] : static_cast<T>(0.0f);
+            T ep_val_g = (gp_hist_ptr && gp_hist_ptr->ep_bar_gp[g] > static_cast<T>(0.0f)) ? gp_hist_ptr->ep_bar_gp[g] : static_cast<T>(0.0f);
             T sigma_hard_g = A_g + (B_g_mat > static_cast<T>(0.0f) ? B_g_mat * pow(ep_val_g, n_exp_g) : static_cast<T>(0.0f));
 
             T strain_rate_factor_g = static_cast<T>(1.0f);
@@ -321,8 +323,8 @@ __global__ void fem_element_forces_kernel_3d_device(
             }
 
             T thermal_factor_g = static_cast<T>(1.0f);
-            if (m_exp_g > static_cast<T>(0.0f) && T_melt_g > T_room_g) {
-                T T_star_g = (elem.temp_gp[g] - T_room_g) / (T_melt_g - T_room_g);
+            if (m_exp_g > static_cast<T>(0.0f) && T_melt_g > T_room_g && gp_hist_ptr) {
+                T T_star_g = (gp_hist_ptr->temp_gp[g] - T_room_g) / (T_melt_g - T_room_g);
                 T_star_g = (T_star_g < static_cast<T>(0.0f)) ? static_cast<T>(0.0f) : ((T_star_g > static_cast<T>(1.0f)) ? static_cast<T>(1.0f) : T_star_g);
                 thermal_factor_g = static_cast<T>(1.0f) - pow(T_star_g, m_exp_g);
                 if (thermal_factor_g < static_cast<T>(0.01f)) thermal_factor_g = static_cast<T>(0.01f);
@@ -373,19 +375,21 @@ __global__ void fem_element_forces_kernel_3d_device(
                                      + c1 * Omega[r][c] + c2 * Om2[r][c];
                     }
                 }
-                T s_temp[3][3] = {{static_cast<T>(0.0f)}};
-                for (int r = 0; r < 3; ++r) {
-                    for (int c = 0; c < 3; ++c) {
-                        for (int k = 0; k < 3; ++k) {
-                            s_temp[r][c] += R_dt_g[r][k] * elem.s_dev_gp[g][k][c];
+                if (gp_hist_ptr) {
+                    T s_temp[3][3] = {{static_cast<T>(0.0f)}};
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            for (int k = 0; k < 3; ++k) {
+                                s_temp[r][c] += R_dt_g[r][k] * gp_hist_ptr->s_dev_gp[g][k][c];
+                            }
                         }
                     }
-                }
-                for (int r = 0; r < 3; ++r) {
-                    for (int c = 0; c < 3; ++c) {
-                        elem.s_dev_gp[g][r][c] = static_cast<T>(0.0f);
-                        for (int k = 0; k < 3; ++k) {
-                            elem.s_dev_gp[g][r][c] += s_temp[r][k] * R_dt_g[c][k];
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            gp_hist_ptr->s_dev_gp[g][r][c] = static_cast<T>(0.0f);
+                            for (int k = 0; k < 3; ++k) {
+                                gp_hist_ptr->s_dev_gp[g][r][c] += s_temp[r][k] * R_dt_g[c][k];
+                            }
                         }
                     }
                 }
@@ -398,16 +402,18 @@ __global__ void fem_element_forces_kernel_3d_device(
                     I_plus_Ldt_g[r][c] = (r == c ? static_cast<T>(1.0f) : static_cast<T>(0.0f)) + L_g[r][c] * dt;
                 }
             }
-            for (int r = 0; r < 3; ++r) {
-                for (int c = 0; c < 3; ++c) {
-                    for (int k = 0; k < 3; ++k) {
-                        F_new_g[r][c] += I_plus_Ldt_g[r][k] * elem.F_gp[g][k][c];
+            if (gp_hist_ptr) {
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) {
+                        for (int k = 0; k < 3; ++k) {
+                            F_new_g[r][c] += I_plus_Ldt_g[r][k] * gp_hist_ptr->F_gp[g][k][c];
+                        }
                     }
                 }
-            }
-            for (int r = 0; r < 3; ++r) {
-                for (int c = 0; c < 3; ++c) {
-                    elem.F_gp[g][r][c] = F_new_g[r][c];
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) {
+                        gp_hist_ptr->F_gp[g][r][c] = F_new_g[r][c];
+                    }
                 }
             }
 
@@ -417,10 +423,10 @@ __global__ void fem_element_forces_kernel_3d_device(
                         - elem.F[0][1] * (elem.F[1][0]*elem.F[2][2] - elem.F[1][2]*elem.F[2][0])
                         + elem.F[0][2] * (elem.F[1][0]*elem.F[2][1] - elem.F[1][1]*elem.F[2][0]);
                 vol_strain_g = F_det - static_cast<T>(1.0f);
-            } else {
-                T F_det = elem.F_gp[g][0][0] * (elem.F_gp[g][1][1]*elem.F_gp[g][2][2] - elem.F_gp[g][1][2]*elem.F_gp[g][2][1])
-                        - elem.F_gp[g][0][1] * (elem.F_gp[g][1][0]*elem.F_gp[g][2][2] - elem.F_gp[g][1][2]*elem.F_gp[g][2][0])
-                        + elem.F_gp[g][0][2] * (elem.F_gp[g][1][0]*elem.F_gp[g][2][1] - elem.F_gp[g][1][1]*elem.F_gp[g][2][0]);
+            } else if (gp_hist_ptr) {
+                T F_det = gp_hist_ptr->F_gp[g][0][0] * (gp_hist_ptr->F_gp[g][1][1]*gp_hist_ptr->F_gp[g][2][2] - gp_hist_ptr->F_gp[g][1][2]*gp_hist_ptr->F_gp[g][2][1])
+                        - gp_hist_ptr->F_gp[g][0][1] * (gp_hist_ptr->F_gp[g][1][0]*gp_hist_ptr->F_gp[g][2][2] - gp_hist_ptr->F_gp[g][1][2]*gp_hist_ptr->F_gp[g][2][0])
+                        + gp_hist_ptr->F_gp[g][0][2] * (gp_hist_ptr->F_gp[g][1][0]*gp_hist_ptr->F_gp[g][2][1] - gp_hist_ptr->F_gp[g][1][1]*gp_hist_ptr->F_gp[g][2][0]);
                 vol_strain_g = F_det - static_cast<T>(1.0f);
             }
             if (fabs(vol_strain_g) < static_cast<T>(1.0e-6f)) {
@@ -438,7 +444,8 @@ __global__ void fem_element_forces_kernel_3d_device(
                 if (fabs(mu) < static_cast<T>(1.0e-6f)) {
                     mu = static_cast<T>(0.0f);
                 }
-                T E_v = density * (mat.Cp > 0.0f ? mat.Cp : 477.0f) * (elem.temp_gp[g] - (mat.T_room > 0.0f ? mat.T_room : 293.0f));
+                T temp_val = (gp_hist_ptr ? gp_hist_ptr->temp_gp[g] : static_cast<T>(293.0f));
+                T E_v = density * (mat.Cp > 0.0f ? mat.Cp : 477.0f) * (temp_val - (mat.T_room > 0.0f ? mat.T_room : 293.0f));
                 if (mu > static_cast<T>(0.0f)) {
                     T denom = static_cast<T>(1.0f) - (s1 - static_cast<T>(1.0f)) * mu;
                     if (denom > static_cast<T>(0.1f)) {
@@ -454,129 +461,131 @@ __global__ void fem_element_forces_kernel_3d_device(
                 p_hydro_g = -K * vol_strain_g + q_visc_g;
             }
 
-            for (int r = 0; r < 3; ++r) {
-                for (int c = 0; c < 3; ++c) {
-                    elem.s_dev_gp[g][r][c] += static_cast<T>(2.0f) * G * d_dev_g[r][c] * dt;
-                }
-            }
-
-            if (mat.material_model == MPMMaterialModel::RHTConcrete) {
-                RHTStateVariables<T> rht_state;
-                rht_state.damage = elem.damage_gp[g];
-                rht_state.ep_bar = elem.ep_bar_gp[g];
-                rht_state.p_hydro = p_hydro_g;
-                updateRHTStress<T>(
-                    elem.s_dev_gp[g], p_hydro_g, vol_strain_g, dt, h_e_g, ep_dot_g,
-                    static_cast<T>(mat.fc), static_cast<T>(mat.ft), G, K,
-                    static_cast<T>(mat.G_f), static_cast<T>(mat.moisture_content),
-                    static_cast<T>(mat.rht_A), static_cast<T>(mat.rht_N),
-                    static_cast<T>(mat.rht_B), static_cast<T>(mat.rht_M),
-                    static_cast<T>(mat.rht_Q0), static_cast<T>(mat.rht_BQ),
-                    static_cast<T>(mat.rht_D1), static_cast<T>(mat.rht_D2),
-                    static_cast<T>(mat.rht_p_crush), static_cast<T>(mat.rht_p_lock),
-                    static_cast<T>(mat.rht_alpha0), static_cast<T>(mat.rht_n_comp),
-                    static_cast<T>(mat.rht_betac), static_cast<T>(mat.rht_deltat),
-                    static_cast<T>(mat.dif_cap_compression), static_cast<T>(mat.dif_cap_tension),
-                    rht_state
-                );
-                elem.damage_gp[g] = rht_state.damage;
-                elem.ep_bar_gp[g] = rht_state.ep_bar;
-                p_hydro_g = rht_state.p_hydro;
-            } else if (mat.material_model == MPMMaterialModel::KCConcrete) {
-                KCStateVariables<T> kc_state;
-                kc_state.damage = elem.damage_gp[g];
-                kc_state.lambda = elem.lambda_gp[g];
-                kc_state.ep_bar = elem.ep_bar_gp[g];
-                kc_state.p_hydro = p_hydro_g;
-                updateKCStress<T>(
-                    elem.s_dev_gp[g], p_hydro_g, vol_strain_g, dt, h_e_g, ep_dot_g,
-                    static_cast<T>(mat.fc), static_cast<T>(mat.ft), G, K,
-                    static_cast<T>(mat.G_f), static_cast<T>(mat.moisture_content),
-                    mat.kc_auto_generate,
-                    static_cast<T>(mat.kc_a0), static_cast<T>(mat.kc_a1), static_cast<T>(mat.kc_a2),
-                    static_cast<T>(mat.kc_a0y), static_cast<T>(mat.kc_a1y), static_cast<T>(mat.kc_a2y),
-                    static_cast<T>(mat.kc_a1r), static_cast<T>(mat.kc_a2r),
-                    static_cast<T>(mat.kc_b1), static_cast<T>(mat.kc_omega),
-                    static_cast<T>(mat.dif_cap_compression), static_cast<T>(mat.dif_cap_tension),
-                    kc_state
-                );
-                elem.damage_gp[g] = kc_state.damage;
-                elem.lambda_gp[g] = kc_state.lambda;
-                elem.ep_bar_gp[g] = kc_state.ep_bar;
-                p_hydro_g = kc_state.p_hydro;
-            } else if (mat.material_model == MPMMaterialModel::CSCMConcrete) {
-                CSCMStateVariables<T> cscm_state;
-                cscm_state.damage = elem.damage_gp[g];
-                cscm_state.kappa = elem.lambda_gp[g];
-                cscm_state.ep_bar = elem.ep_bar_gp[g];
-                cscm_state.p_hydro = p_hydro_g;
-                updateCSCMStress<T>(
-                    elem.s_dev_gp[g], p_hydro_g, vol_strain_g, dt, h_e_g, ep_dot_g,
-                    static_cast<T>(mat.fc), static_cast<T>(mat.ft), G, K,
-                    static_cast<T>(mat.G_f),
-                    static_cast<T>(mat.cscm_alpha), static_cast<T>(mat.cscm_theta),
-                    static_cast<T>(mat.cscm_lambda), static_cast<T>(mat.cscm_beta),
-                    static_cast<T>(mat.cscm_R), static_cast<T>(mat.cscm_X0),
-                    static_cast<T>(mat.cscm_W), static_cast<T>(mat.cscm_D1),
-                    static_cast<T>(mat.cscm_D2),
-                    static_cast<T>(mat.dif_cap_compression), static_cast<T>(mat.dif_cap_tension),
-                    cscm_state
-                );
-                elem.damage_gp[g] = cscm_state.damage;
-                elem.lambda_gp[g] = cscm_state.kappa;
-                elem.ep_bar_gp[g] = cscm_state.ep_bar;
-                p_hydro_g = cscm_state.p_hydro;
-            } else {
-                T s_norm_g = sqrt(
-                    elem.s_dev_gp[g][0][0]*elem.s_dev_gp[g][0][0] + elem.s_dev_gp[g][1][1]*elem.s_dev_gp[g][1][1] + elem.s_dev_gp[g][2][2]*elem.s_dev_gp[g][2][2] +
-                    static_cast<T>(2.0f)*(elem.s_dev_gp[g][0][1]*elem.s_dev_gp[g][0][1] + elem.s_dev_gp[g][1][2]*elem.s_dev_gp[g][1][2] + elem.s_dev_gp[g][2][0]*elem.s_dev_gp[g][2][0])
-                );
-                T vm_trial_g = sqrt(static_cast<T>(1.5f)) * s_norm_g;
-
-                if (vm_trial_g > dynamic_yield_g && vm_trial_g > static_cast<T>(1.0e-6f)) {
-                    T scale = dynamic_yield_g / vm_trial_g;
-                    T d_ep = (vm_trial_g - dynamic_yield_g) / (static_cast<T>(3.0f) * G + static_cast<T>(mat.hardening_modulus));
-                    elem.ep_bar_gp[g] += d_ep;
-                    for (int r = 0; r < 3; ++r) {
-                        for (int c = 0; c < 3; ++c) {
-                            elem.s_dev_gp[g][r][c] *= scale;
-                        }
+            if (gp_hist_ptr) {
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) {
+                        gp_hist_ptr->s_dev_gp[g][r][c] += static_cast<T>(2.0f) * G * d_dev_g[r][c] * dt;
                     }
-                    T plastic_work = dynamic_yield_g * d_ep;
-                    T chi = physics_params.taylor_quinney_factor;
-                    T Cp = static_cast<T>(mat.Cp > 0.0f ? mat.Cp : 477.0f);
-                    elem.temp_gp[g] += (chi * plastic_work) / (density * Cp);
                 }
-            }
 
-            T eta_shear_g = static_cast<T>(mat.bulk_viscosity_b1 > 0.0f ? mat.bulk_viscosity_b1 : 0.06f) * density * cd * h_e_g;
-            T sigma_g[3][3];
-            for (int r = 0; r < 3; ++r) {
-                for (int c = 0; c < 3; ++c) {
-                    sigma_g[r][c] = elem.s_dev_gp[g][r][c] + static_cast<T>(2.0f) * eta_shear_g * d_dev_g[r][c] - (r == c ? p_hydro_g : static_cast<T>(0.0f));
+                if (mat.material_model == MPMMaterialModel::RHTConcrete) {
+                    RHTStateVariables<T> rht_state;
+                    rht_state.damage = gp_hist_ptr->damage_gp[g];
+                    rht_state.ep_bar = gp_hist_ptr->ep_bar_gp[g];
+                    rht_state.p_hydro = p_hydro_g;
+                    updateRHTStress<T>(
+                        gp_hist_ptr->s_dev_gp[g], p_hydro_g, vol_strain_g, dt, h_e_g, ep_dot_g,
+                        static_cast<T>(mat.fc), static_cast<T>(mat.ft), G, K,
+                        static_cast<T>(mat.G_f), static_cast<T>(mat.moisture_content),
+                        static_cast<T>(mat.rht_A), static_cast<T>(mat.rht_N),
+                        static_cast<T>(mat.rht_B), static_cast<T>(mat.rht_M),
+                        static_cast<T>(mat.rht_Q0), static_cast<T>(mat.rht_BQ),
+                        static_cast<T>(mat.rht_D1), static_cast<T>(mat.rht_D2),
+                        static_cast<T>(mat.rht_p_crush), static_cast<T>(mat.rht_p_lock),
+                        static_cast<T>(mat.rht_alpha0), static_cast<T>(mat.rht_n_comp),
+                        static_cast<T>(mat.rht_betac), static_cast<T>(mat.rht_deltat),
+                        static_cast<T>(mat.dif_cap_compression), static_cast<T>(mat.dif_cap_tension),
+                        rht_state
+                    );
+                    gp_hist_ptr->damage_gp[g] = rht_state.damage;
+                    gp_hist_ptr->ep_bar_gp[g] = rht_state.ep_bar;
+                    p_hydro_g = rht_state.p_hydro;
+                } else if (mat.material_model == MPMMaterialModel::KCConcrete) {
+                    KCStateVariables<T> kc_state;
+                    kc_state.damage = gp_hist_ptr->damage_gp[g];
+                    kc_state.lambda = gp_hist_ptr->lambda_gp[g];
+                    kc_state.ep_bar = gp_hist_ptr->ep_bar_gp[g];
+                    kc_state.p_hydro = p_hydro_g;
+                    updateKCStress<T>(
+                        gp_hist_ptr->s_dev_gp[g], p_hydro_g, vol_strain_g, dt, h_e_g, ep_dot_g,
+                        static_cast<T>(mat.fc), static_cast<T>(mat.ft), G, K,
+                        static_cast<T>(mat.G_f), static_cast<T>(mat.moisture_content),
+                        mat.kc_auto_generate,
+                        static_cast<T>(mat.kc_a0), static_cast<T>(mat.kc_a1), static_cast<T>(mat.kc_a2),
+                        static_cast<T>(mat.kc_a0y), static_cast<T>(mat.kc_a1y), static_cast<T>(mat.kc_a2y),
+                        static_cast<T>(mat.kc_a1r), static_cast<T>(mat.kc_a2r),
+                        static_cast<T>(mat.kc_b1), static_cast<T>(mat.kc_omega),
+                        static_cast<T>(mat.dif_cap_compression), static_cast<T>(mat.dif_cap_tension),
+                        kc_state
+                    );
+                    gp_hist_ptr->damage_gp[g] = kc_state.damage;
+                    gp_hist_ptr->lambda_gp[g] = kc_state.lambda;
+                    gp_hist_ptr->ep_bar_gp[g] = kc_state.ep_bar;
+                    p_hydro_g = kc_state.p_hydro;
+                } else if (mat.material_model == MPMMaterialModel::CSCMConcrete) {
+                    CSCMStateVariables<T> cscm_state;
+                    cscm_state.damage = gp_hist_ptr->damage_gp[g];
+                    cscm_state.kappa = gp_hist_ptr->lambda_gp[g];
+                    cscm_state.ep_bar = gp_hist_ptr->ep_bar_gp[g];
+                    cscm_state.p_hydro = p_hydro_g;
+                    updateCSCMStress<T>(
+                        gp_hist_ptr->s_dev_gp[g], p_hydro_g, vol_strain_g, dt, h_e_g, ep_dot_g,
+                        static_cast<T>(mat.fc), static_cast<T>(mat.ft), G, K,
+                        static_cast<T>(mat.G_f),
+                        static_cast<T>(mat.cscm_alpha), static_cast<T>(mat.cscm_theta),
+                        static_cast<T>(mat.cscm_lambda), static_cast<T>(mat.cscm_beta),
+                        static_cast<T>(mat.cscm_R), static_cast<T>(mat.cscm_X0),
+                        static_cast<T>(mat.cscm_W), static_cast<T>(mat.cscm_D1),
+                        static_cast<T>(mat.cscm_D2),
+                        static_cast<T>(mat.dif_cap_compression), static_cast<T>(mat.dif_cap_tension),
+                        cscm_state
+                    );
+                    gp_hist_ptr->damage_gp[g] = cscm_state.damage;
+                    gp_hist_ptr->lambda_gp[g] = cscm_state.kappa;
+                    gp_hist_ptr->ep_bar_gp[g] = cscm_state.ep_bar;
+                    p_hydro_g = cscm_state.p_hydro;
+                } else {
+                    T s_norm_g = sqrt(
+                        gp_hist_ptr->s_dev_gp[g][0][0]*gp_hist_ptr->s_dev_gp[g][0][0] + gp_hist_ptr->s_dev_gp[g][1][1]*gp_hist_ptr->s_dev_gp[g][1][1] + gp_hist_ptr->s_dev_gp[g][2][2]*gp_hist_ptr->s_dev_gp[g][2][2] +
+                        static_cast<T>(2.0f)*(gp_hist_ptr->s_dev_gp[g][0][1]*gp_hist_ptr->s_dev_gp[g][0][1] + gp_hist_ptr->s_dev_gp[g][1][2]*gp_hist_ptr->s_dev_gp[g][1][2] + gp_hist_ptr->s_dev_gp[g][2][0]*gp_hist_ptr->s_dev_gp[g][2][0])
+                    );
+                    T vm_trial_g = sqrt(static_cast<T>(1.5f)) * s_norm_g;
+
+                    if (vm_trial_g > dynamic_yield_g && vm_trial_g > static_cast<T>(1.0e-6f)) {
+                        T scale = dynamic_yield_g / vm_trial_g;
+                        T d_ep = (vm_trial_g - dynamic_yield_g) / (static_cast<T>(3.0f) * G + static_cast<T>(mat.hardening_modulus));
+                        gp_hist_ptr->ep_bar_gp[g] += d_ep;
+                        for (int r = 0; r < 3; ++r) {
+                            for (int c = 0; c < 3; ++c) {
+                                gp_hist_ptr->s_dev_gp[g][r][c] *= scale;
+                            }
+                        }
+                        T plastic_work = dynamic_yield_g * d_ep;
+                        T chi = physics_params.taylor_quinney_factor;
+                        T Cp = static_cast<T>(mat.Cp > 0.0f ? mat.Cp : 477.0f);
+                        gp_hist_ptr->temp_gp[g] += (chi * plastic_work) / (density * Cp);
+                    }
                 }
-            }
 
-            for (int i = 0; i < 8; ++i) {
-                int nid = elem.node_ids[i];
-                T f_x = (dN_dx_g[i][0] * sigma_g[0][0] + dN_dx_g[i][1] * sigma_g[0][1] + dN_dx_g[i][2] * sigma_g[0][2]) * detJ_g;
-                T f_y = (dN_dx_g[i][0] * sigma_g[1][0] + dN_dx_g[i][1] * sigma_g[1][1] + dN_dx_g[i][2] * sigma_g[1][2]) * detJ_g;
-                T f_z = (dN_dx_g[i][0] * sigma_g[2][0] + dN_dx_g[i][1] * sigma_g[2][1] + dN_dx_g[i][2] * sigma_g[2][2]) * detJ_g;
-
-                atomicAdd(&d_nodes[nid].f_int[0], f_x);
-                atomicAdd(&d_nodes[nid].f_int[1], f_y);
-                atomicAdd(&d_nodes[nid].f_int[2], f_z);
-            }
-
-            for (int r = 0; r < 3; ++r) {
-                for (int c = 0; c < 3; ++c) {
-                    sigma_avg[r][c] += 0.125f * sigma_g[r][c];
-                    s_dev_avg[r][c] += 0.125f * elem.s_dev_gp[g][r][c];
+                T eta_shear_g = static_cast<T>(mat.bulk_viscosity_b1 > 0.0f ? mat.bulk_viscosity_b1 : 0.06f) * density * cd * h_e_g;
+                T sigma_g[3][3];
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) {
+                        sigma_g[r][c] = gp_hist_ptr->s_dev_gp[g][r][c] + static_cast<T>(2.0f) * eta_shear_g * d_dev_g[r][c] - (r == c ? p_hydro_g : static_cast<T>(0.0f));
+                    }
                 }
+
+                for (int i = 0; i < 8; ++i) {
+                    int nid = elem.node_ids[i];
+                    T f_x = (dN_dx_g[i][0] * sigma_g[0][0] + dN_dx_g[i][1] * sigma_g[0][1] + dN_dx_g[i][2] * sigma_g[0][2]) * detJ_g;
+                    T f_y = (dN_dx_g[i][0] * sigma_g[1][0] + dN_dx_g[i][1] * sigma_g[1][1] + dN_dx_g[i][2] * sigma_g[1][2]) * detJ_g;
+                    T f_z = (dN_dx_g[i][0] * sigma_g[2][0] + dN_dx_g[i][1] * sigma_g[2][1] + dN_dx_g[i][2] * sigma_g[2][2]) * detJ_g;
+
+                    atomicAdd(&d_nodes[nid].f_int[0], f_x);
+                    atomicAdd(&d_nodes[nid].f_int[1], f_y);
+                    atomicAdd(&d_nodes[nid].f_int[2], f_z);
+                }
+
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) {
+                        sigma_avg[r][c] += 0.125f * sigma_g[r][c];
+                        s_dev_avg[r][c] += 0.125f * gp_hist_ptr->s_dev_gp[g][r][c];
+                    }
+                }
+                ep_bar_avg += 0.125f * gp_hist_ptr->ep_bar_gp[g];
+                temp_avg += 0.125f * gp_hist_ptr->temp_gp[g];
+                damage_avg += 0.125f * gp_hist_ptr->damage_gp[g];
             }
-            ep_bar_avg += 0.125f * elem.ep_bar_gp[g];
-            temp_avg += 0.125f * elem.temp_gp[g];
-            damage_avg += 0.125f * elem.damage_gp[g];
         }
 
         for (int r = 0; r < 3; ++r) {
@@ -590,17 +599,19 @@ __global__ void fem_element_forces_kernel_3d_device(
         elem.damage = damage_avg;
         elem.V = V_sum;
 
-        T F_avg[3][3] = {{0.0f}};
-        for (int g = 0; g < 8; ++g) {
-            for (int r = 0; r < 3; ++r) {
-                for (int c = 0; c < 3; ++c) {
-                    F_avg[r][c] += 0.125f * elem.F_gp[g][r][c];
+        if (gp_hist_ptr) {
+            T F_avg[3][3] = {{0.0f}};
+            for (int g = 0; g < 8; ++g) {
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) {
+                        F_avg[r][c] += 0.125f * gp_hist_ptr->F_gp[g][r][c];
+                    }
                 }
             }
-        }
-        for (int r = 0; r < 3; ++r) {
-            for (int c = 0; c < 3; ++c) {
-                elem.F[r][c] = F_avg[r][c];
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    elem.F[r][c] = F_avg[r][c];
+                }
             }
         }
         return;
@@ -2147,6 +2158,7 @@ void launch_fem_element_forces_kernel_3d(
     int num_nodes,
     FEMElement3D<T>* d_elements,
     int num_elements,
+    FEMGaussPointHistory3D<T>* d_gp_history,
     const MaterialTable3D* d_materials,
     BlastPhysicsParams<T> physics_params,
     T dt,
@@ -2158,7 +2170,7 @@ void launch_fem_element_forces_kernel_3d(
     int block_size = 256;
     int grid_size = (num_elements + block_size - 1) / block_size;
     fem_element_forces_kernel_3d_device<T><<<grid_size, block_size, 0, stream>>>(
-        d_nodes, num_nodes, d_elements, num_elements, d_materials, physics_params, dt, hourglass_coeff, hg_model, integration_scheme
+        d_nodes, num_nodes, d_elements, num_elements, d_gp_history, d_materials, physics_params, dt, hourglass_coeff, hg_model, integration_scheme
     );
 }
 
@@ -2350,6 +2362,7 @@ FEMSolver3DCUDA<T>::~FEMSolver3DCUDA() {
     if (m_h_erosion_flag_pinned) { cudaFreeHost(m_h_erosion_flag_pinned); m_h_erosion_flag_pinned = nullptr; }
     if (m_d_nodes) { cudaFree(m_d_nodes); m_d_nodes = nullptr; }
     if (m_d_elements) { cudaFree(m_d_elements); m_d_elements = nullptr; }
+    if (m_d_gp_history) { cudaFree(m_d_gp_history); m_d_gp_history = nullptr; }
     if (m_d_materials) { cudaFree(m_d_materials); m_d_materials = nullptr; }
     if (m_d_facets) { cudaFree(m_d_facets); m_d_facets = nullptr; }
     if (m_d_surface_nodes) { cudaFree(m_d_surface_nodes); m_d_surface_nodes = nullptr; }
@@ -2442,6 +2455,21 @@ void FEMSolver3DCUDA<T>::syncToDevice() {
     }
     cudaMemcpyAsync(m_d_elements, elements.data(), sizeof(FEMElement3D<T>) * elements.size(), cudaMemcpyHostToDevice, m_cuda_stream);
 
+    // Conditionally allocate and copy Gauss point history only for 8-point Gauss schemes
+    if (m_cpu_solver.getIntegrationScheme() == FEMIntegrationScheme::FullGauss8 ||
+        m_cpu_solver.getIntegrationScheme() == FEMIntegrationScheme::SelectiveReduced) {
+        m_cpu_solver.ensureGaussPointHistory();
+        const auto& gp_hist = m_cpu_solver.getGaussPointHistory();
+        if (!gp_hist.empty()) {
+            if (gp_hist.size() > m_allocated_gp_history) {
+                if (m_d_gp_history) cudaFree(m_d_gp_history);
+                m_allocated_gp_history = gp_hist.size();
+                cudaMalloc(&m_d_gp_history, sizeof(FEMGaussPointHistory3D<T>) * m_allocated_gp_history);
+            }
+            cudaMemcpyAsync(m_d_gp_history, gp_hist.data(), sizeof(FEMGaussPointHistory3D<T>) * gp_hist.size(), cudaMemcpyHostToDevice, m_cuda_stream);
+        }
+    }
+
     if (materials.size() > m_allocated_materials) {
         if (m_d_materials) cudaFree(m_d_materials);
         m_allocated_materials = materials.size();
@@ -2511,6 +2539,12 @@ void FEMSolver3DCUDA<T>::syncToHost() const {
     }
     if (m_d_elements && !elements.empty()) {
         cudaMemcpyAsync(elements.data(), m_d_elements, sizeof(FEMElement3D<T>) * elements.size(), cudaMemcpyDeviceToHost, m_cuda_stream);
+    }
+    if (m_d_gp_history) {
+        auto& gp_hist = const_cast<std::vector<FEMGaussPointHistory3D<T>>&>(m_cpu_solver.getGaussPointHistory());
+        if (!gp_hist.empty()) {
+            cudaMemcpyAsync(gp_hist.data(), m_d_gp_history, sizeof(FEMGaussPointHistory3D<T>) * gp_hist.size(), cudaMemcpyDeviceToHost, m_cuda_stream);
+        }
     }
     cudaStreamSynchronize(m_cuda_stream);
     const_cast<FEMSolver3D<T>&>(m_cpu_solver).computeGlobalEnergy();
@@ -2653,7 +2687,7 @@ void FEMSolver3DCUDA<T>::stepWithDt(T dt) {
 
     // 4. Compute Hex8 Element Stresses and Hourglass Forces on GPU
     launch_fem_element_forces_kernel_3d<T>(
-        m_d_nodes, num_nodes, m_d_elements, num_elements, m_d_materials,
+        m_d_nodes, num_nodes, m_d_elements, num_elements, m_d_gp_history, m_d_materials,
         m_cpu_solver.getPhysicsParams(), dt, m_cpu_solver.getHourglassCoeff(),
         m_cpu_solver.getHourglassModel(), m_cpu_solver.getIntegrationScheme(), m_cuda_stream
     );
@@ -2744,8 +2778,8 @@ void FEMSolver3DCUDA<T>::step(T cfl) {
 template void launch_fem_reset_nodal_forces_kernel_3d<float>(FEMNode3D<float>*, int, cudaStream_t);
 template void launch_fem_reset_nodal_forces_kernel_3d<double>(FEMNode3D<double>*, int, cudaStream_t);
 
-template void launch_fem_element_forces_kernel_3d<float>(FEMNode3D<float>*, int, FEMElement3D<float>*, int, const MaterialTable3D*, BlastPhysicsParams<float>, float, float, FEMHourglassModel, FEMIntegrationScheme, cudaStream_t);
-template void launch_fem_element_forces_kernel_3d<double>(FEMNode3D<double>*, int, FEMElement3D<double>*, int, const MaterialTable3D*, BlastPhysicsParams<double>, double, double, FEMHourglassModel, FEMIntegrationScheme, cudaStream_t);
+template void launch_fem_element_forces_kernel_3d<float>(FEMNode3D<float>*, int, FEMElement3D<float>*, int, FEMGaussPointHistory3D<float>*, const MaterialTable3D*, BlastPhysicsParams<float>, float, float, FEMHourglassModel, FEMIntegrationScheme, cudaStream_t);
+template void launch_fem_element_forces_kernel_3d<double>(FEMNode3D<double>*, int, FEMElement3D<double>*, int, FEMGaussPointHistory3D<double>*, const MaterialTable3D*, BlastPhysicsParams<double>, double, double, FEMHourglassModel, FEMIntegrationScheme, cudaStream_t);
 
 template void launch_fem_nodal_half_step_kernel_3d<float>(FEMNode3D<float>*, int, float, cudaStream_t);
 template void launch_fem_nodal_half_step_kernel_3d<double>(FEMNode3D<double>*, int, double, cudaStream_t);

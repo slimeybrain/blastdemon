@@ -25,6 +25,7 @@ void launch_fem_element_forces_kernel_3d(
     int num_nodes,
     FEMElement3D<T>* d_elements,
     int num_elements,
+    FEMGaussPointHistory3D<T>* d_gp_history,
     const MaterialTable3D* d_materials,
     BlastPhysicsParams<T> physics_params,
     T dt,
@@ -180,6 +181,8 @@ public:
     const FEMFacet3D<T>* getSurfaceFacetsDevice() const { return m_d_facets; }
     FEMElement3D<T>* getElementsDevice() { return m_d_elements; }
     const FEMElement3D<T>* getElementsDevice() const { return m_d_elements; }
+    FEMGaussPointHistory3D<T>* getGaussPointHistoryDevice() { return m_d_gp_history; }
+    const FEMGaussPointHistory3D<T>* getGaussPointHistoryDevice() const { return m_d_gp_history; }
     FEMNode3D<T>* getNodesDevice() { return m_d_nodes; }
     const FEMNode3D<T>* getNodesDevice() const { return m_d_nodes; }
 
@@ -208,6 +211,8 @@ private:
     FEMSolver3D<T> m_cpu_solver;
     FEMNode3D<T>* m_d_nodes{nullptr};
     FEMElement3D<T>* m_d_elements{nullptr};
+    FEMGaussPointHistory3D<T>* m_d_gp_history{nullptr};
+    size_t m_allocated_gp_history{0};
     MaterialTable3D* m_d_materials{nullptr};
     FEMFacet3D<T>* m_d_facets{nullptr};
     int* m_d_surface_nodes{nullptr};

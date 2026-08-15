@@ -72,7 +72,17 @@ struct alignas(32) FEMNode3D {
 };
 
 template <typename T>
-struct FEMElement3D {
+struct alignas(32) FEMGaussPointHistory3D {
+    T F_gp[8][3][3];
+    T s_dev_gp[8][3][3];
+    T ep_bar_gp[8];
+    T temp_gp[8];
+    T damage_gp[8];
+    T lambda_gp[8];
+};
+
+template <typename T>
+struct alignas(32) FEMElement3D {
     int node_ids[8];     // 8 node indices forming Hex8 element
     T V0{0.0f};          // Initial reference element volume
     T V{0.0f};           // Current element volume
@@ -89,14 +99,6 @@ struct FEMElement3D {
     int mat_id{0};       // Material Table ID
     int part_id{0};      // LS-DYNA Part ID
     int64_t lsdyna_id{-1}; // Original LS-DYNA element ID
-
-    // Gauss Point history variables for FullGauss8 and SelectiveReduced integration
-    T F_gp[8][3][3];
-    T s_dev_gp[8][3][3];
-    T ep_bar_gp[8];
-    T temp_gp[8];
-    T damage_gp[8];
-    T lambda_gp[8];
 };
 
 template <typename T>
@@ -140,7 +142,10 @@ public:
 
     // Setup & Configuration
     void initializeDomain(T xmin, T xmax, T ymin, T ymax, T zmin, T zmax);
-    void setIntegrationScheme(FEMIntegrationScheme scheme) { m_integration_scheme = scheme; }
+    void setIntegrationScheme(FEMIntegrationScheme scheme) {
+        m_integration_scheme = scheme;
+        ensureGaussPointHistory();
+    }
     void setHourglassModel(FEMHourglassModel model) { m_hourglass_model = model; }
     void setHourglassCoeff(T q_hg) { m_hourglass_coeff = q_hg; }
     void setPhysicsParams(const BlastPhysicsParams<T>& params) { m_physics_params = params; }
@@ -191,6 +196,10 @@ public:
 
     std::vector<FEMElement3D<T>>& getElements() { return m_elements; }
     const std::vector<FEMElement3D<T>>& getElements() const { return m_elements; }
+
+    std::vector<FEMGaussPointHistory3D<T>>& getGaussPointHistory() { return m_gp_history; }
+    const std::vector<FEMGaussPointHistory3D<T>>& getGaussPointHistory() const { return m_gp_history; }
+    void ensureGaussPointHistory();
 
     std::vector<FEMFacet3D<T>>& getSurfaceFacets() { if (m_surface_facets_dirty) extractBoundaryFacets(); return m_surface_facets; }
     const std::vector<FEMFacet3D<T>>& getSurfaceFacets() const { if (m_surface_facets_dirty) const_cast<FEMSolver3D<T>*>(this)->extractBoundaryFacets(); return m_surface_facets; }
@@ -271,6 +280,7 @@ private:
     // Core Data Containers
     std::vector<FEMNode3D<T>> m_nodes;
     std::vector<FEMElement3D<T>> m_elements;
+    std::vector<FEMGaussPointHistory3D<T>> m_gp_history;
     std::vector<FEMFacet3D<T>> m_surface_facets;
     std::vector<MaterialTable3D> m_material_tables;
     bool m_surface_facets_dirty{true};
