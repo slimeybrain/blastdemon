@@ -373,6 +373,7 @@ private:
     std::vector<FEMTrussElement3D<T>> m_trusses;
     std::vector<FEMBeam3DElement<T>> m_beams;
     std::vector<FEMNodeRotationalState3D<T>> m_rot_nodes;
+    std::vector<int> m_global_to_rot_node;
     std::vector<FEMGaussPointHistory3D<T>> m_gp_history;
     std::vector<FEMFacet3D<T>> m_surface_facets;
     std::vector<MaterialTable3D> m_material_tables;

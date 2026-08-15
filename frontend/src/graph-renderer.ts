@@ -1741,6 +1741,11 @@ export class GraphRenderer {
                 femOpacity: 1.0,
                 femMinVal: 0.0,
                 femMaxVal: 500000000.0,
+                // Rebar Mesh Defaults
+                showRebar: true,
+                rebarSolid: true,
+                rebarWireframe: true,
+                rebarRadius: 0.008,
                 vtk_format: 'Binary',
                 step_interval: 10,
                 time_interval: 0.0,
@@ -4841,7 +4846,7 @@ export class GraphRenderer {
                             'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
                             // FEM keys
                             'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
-                            'convert_failed_elements_to_mpm', 'mpm_particles_per_failed_element', 'rebar_diameter', 'rebar_area',
+                            'convert_failed_elements_to_mpm', 'mpm_particles_per_failed_element', 'rebar_diameter', 'rebar_area', 'rebarRadius', 'rebar_radius',
                             'femMinVal', 'femMaxVal', 'femOpacity', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',
                             // Concrete Core & Models (RHT, K&C, CSCM)
                             'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',

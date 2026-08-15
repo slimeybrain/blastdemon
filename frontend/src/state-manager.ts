@@ -2013,6 +2013,11 @@ export class StateManager {
                 femOpacity: 1.0,
                 femMinVal: 0.0,
                 femMaxVal: 500000000.0,
+                // Rebar Mesh Defaults
+                showRebar: true,
+                rebarSolid: true,
+                rebarWireframe: true,
+                rebarRadius: 0.008,
                 // VTK / File outputs
                 vtk_dir: '',
                 export_slices: true,

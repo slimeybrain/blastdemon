@@ -207,12 +207,18 @@ inline void loadAndTransformLSDynaMesh(
     const std::string& bc_cond,
     const Blast::MaterialTable3D& obj_mat,
     std::vector<Blast::FEMNode3D<T>>& out_nodes,
-    std::vector<Blast::FEMElement3D<T>>& out_elements
+    std::vector<Blast::FEMElement3D<T>>& out_elements,
+    std::vector<Blast::FEMTrussElement3D<T>>* out_trusses = nullptr,
+    std::vector<Blast::FEMBeam3DElement<T>>* out_beams = nullptr
 ) {
     Blast::LSDynaReader3D<T> reader;
     std::vector<Blast::MaterialTable3D> mat_list;
     Blast::MaterialTable3D mutable_mat = obj_mat;
-    reader.parseFile(k_file, out_nodes, out_elements, mutable_mat, mat_list);
+    std::vector<Blast::FEMTrussElement3D<T>> local_trusses;
+    std::vector<Blast::FEMBeam3DElement<T>> local_beams;
+    auto& trusses_ref = out_trusses ? *out_trusses : local_trusses;
+    auto& beams_ref = out_beams ? *out_beams : local_beams;
+    reader.parseFile(k_file, out_nodes, out_elements, trusses_ref, beams_ref, mutable_mat, mat_list);
 
     bool is_fixed_base = (bc_cond == "Fixed Base");
     bool is_fixed_entire = (bc_cond == "Fixed Entire");
@@ -4299,9 +4305,9 @@ void emit_telemetry_fem_3d(double elapsed, bool is_terminated, int step) {
         size_t n_nodes = cuda_fem_float->getNodeCount();
         size_t n_facets = cuda_fem_float->getSurfaceFacetCount();
         payload->fem_n_nodes = static_cast<uint32_t>(n_nodes);
-        payload->fem_n_facets = static_cast<uint32_t>(n_facets);
         if (n_nodes > 0) {
             cuda_fem_float->extractTelemetry(payload->fem_node_data, payload->fem_facet_data);
+            payload->fem_n_facets = static_cast<uint32_t>(payload->fem_facet_data.size() / 8);
         }
         payload->fem_v_max = static_cast<double>(cuda_fem_float->getMaxVelocity());
         payload->fem_sig_max = static_cast<double>(cuda_fem_float->getMaxVonMisesStress());
@@ -4334,6 +4340,7 @@ void emit_telemetry_fem_3d(double elapsed, bool is_terminated, int step) {
         payload->fem_n_facets = static_cast<uint32_t>(n_facets);
         if (n_nodes > 0) {
             cuda_fem_double->extractTelemetry(payload->fem_node_data, payload->fem_facet_data);
+            payload->fem_n_facets = static_cast<uint32_t>(payload->fem_facet_data.size() / 8);
         }
         payload->fem_v_max = cuda_fem_double->getMaxVelocity();
         payload->fem_sig_max = cuda_fem_double->getMaxVonMisesStress();
@@ -4378,8 +4385,11 @@ void emit_telemetry_fem_3d(double elapsed, bool is_terminated, int step) {
 
     size_t n_nodes = fem_float ? fem_float->getNodes().size() : fem_double->getNodes().size();
     size_t n_facets = fem_float ? fem_float->getSurfaceFacets().size() : fem_double->getSurfaceFacets().size();
+    size_t n_trusses = fem_float ? fem_float->getTrusses().size() : fem_double->getTrusses().size();
+    size_t n_beams = fem_float ? fem_float->getBeams().size() : fem_double->getBeams().size();
+    size_t total_facets = n_facets + n_trusses + n_beams;
     payload->fem_n_nodes = static_cast<uint32_t>(n_nodes);
-    payload->fem_n_facets = static_cast<uint32_t>(n_facets);
+    payload->fem_n_facets = static_cast<uint32_t>(total_facets);
 
     if (n_nodes > 0) {
         payload->fem_node_data.resize(n_nodes * 7);
@@ -4415,7 +4425,7 @@ void emit_telemetry_fem_3d(double elapsed, bool is_terminated, int step) {
             }
         }
 
-        payload->fem_facet_data.resize(n_facets * 8);
+        payload->fem_facet_data.resize(total_facets * 8);
         if (fem_float) {
             const auto& facets = fem_float->getSurfaceFacets();
             const auto& elements = fem_float->getElements();
@@ -4443,6 +4453,34 @@ void emit_telemetry_fem_3d(double elapsed, bool is_terminated, int step) {
                 payload->fem_facet_data[f * 8 + 6] = press;
                 payload->fem_facet_data[f * 8 + 7] = dmg;
             }
+
+            size_t offset = n_facets;
+            const auto& trusses = fem_float->getTrusses();
+            for (size_t t = 0; t < n_trusses; ++t) {
+                const auto& tr = trusses[t];
+                payload->fem_facet_data[(offset + t) * 8 + 0] = static_cast<float>(tr.node_ids[0]);
+                payload->fem_facet_data[(offset + t) * 8 + 1] = static_cast<float>(tr.node_ids[1]);
+                payload->fem_facet_data[(offset + t) * 8 + 2] = -1.0f;
+                payload->fem_facet_data[(offset + t) * 8 + 3] = -1.0f;
+                payload->fem_facet_data[(offset + t) * 8 + 4] = static_cast<float>(std::abs(tr.sigma));
+                payload->fem_facet_data[(offset + t) * 8 + 5] = static_cast<float>(tr.ep_bar);
+                payload->fem_facet_data[(offset + t) * 8 + 6] = 0.0f;
+                payload->fem_facet_data[(offset + t) * 8 + 7] = tr.is_eroded ? 1.0f : 0.0f;
+            }
+            offset += n_trusses;
+            const auto& beams = fem_float->getBeams();
+            for (size_t b = 0; b < n_beams; ++b) {
+                const auto& bm = beams[b];
+                float sig = static_cast<float>(bm.ep_bar > 0.0f ? (500.0e6f + 2.0e9f * bm.ep_bar) : 0.0f);
+                payload->fem_facet_data[(offset + b) * 8 + 0] = static_cast<float>(bm.node_ids[0]);
+                payload->fem_facet_data[(offset + b) * 8 + 1] = static_cast<float>(bm.node_ids[1]);
+                payload->fem_facet_data[(offset + b) * 8 + 2] = -1.0f;
+                payload->fem_facet_data[(offset + b) * 8 + 3] = -1.0f;
+                payload->fem_facet_data[(offset + b) * 8 + 4] = sig;
+                payload->fem_facet_data[(offset + b) * 8 + 5] = static_cast<float>(bm.ep_bar);
+                payload->fem_facet_data[(offset + b) * 8 + 6] = 0.0f;
+                payload->fem_facet_data[(offset + b) * 8 + 7] = bm.is_eroded ? 1.0f : 0.0f;
+            }
         } else {
             const auto& facets = fem_double->getSurfaceFacets();
             const auto& elements = fem_double->getElements();
@@ -4469,6 +4507,34 @@ void emit_telemetry_fem_3d(double elapsed, bool is_terminated, int step) {
                 payload->fem_facet_data[f * 8 + 5] = ep;
                 payload->fem_facet_data[f * 8 + 6] = press;
                 payload->fem_facet_data[f * 8 + 7] = dmg;
+            }
+
+            size_t offset = n_facets;
+            const auto& trusses = fem_double->getTrusses();
+            for (size_t t = 0; t < n_trusses; ++t) {
+                const auto& tr = trusses[t];
+                payload->fem_facet_data[(offset + t) * 8 + 0] = static_cast<float>(tr.node_ids[0]);
+                payload->fem_facet_data[(offset + t) * 8 + 1] = static_cast<float>(tr.node_ids[1]);
+                payload->fem_facet_data[(offset + t) * 8 + 2] = -1.0f;
+                payload->fem_facet_data[(offset + t) * 8 + 3] = -1.0f;
+                payload->fem_facet_data[(offset + t) * 8 + 4] = static_cast<float>(std::abs(tr.sigma));
+                payload->fem_facet_data[(offset + t) * 8 + 5] = static_cast<float>(tr.ep_bar);
+                payload->fem_facet_data[(offset + t) * 8 + 6] = 0.0f;
+                payload->fem_facet_data[(offset + t) * 8 + 7] = tr.is_eroded ? 1.0f : 0.0f;
+            }
+            offset += n_trusses;
+            const auto& beams = fem_double->getBeams();
+            for (size_t b = 0; b < n_beams; ++b) {
+                const auto& bm = beams[b];
+                float sig = static_cast<float>(bm.ep_bar > 0.0 ? (500.0e6 + 2.0e9 * bm.ep_bar) : 0.0);
+                payload->fem_facet_data[(offset + b) * 8 + 0] = static_cast<float>(bm.node_ids[0]);
+                payload->fem_facet_data[(offset + b) * 8 + 1] = static_cast<float>(bm.node_ids[1]);
+                payload->fem_facet_data[(offset + b) * 8 + 2] = -1.0f;
+                payload->fem_facet_data[(offset + b) * 8 + 3] = -1.0f;
+                payload->fem_facet_data[(offset + b) * 8 + 4] = sig;
+                payload->fem_facet_data[(offset + b) * 8 + 5] = static_cast<float>(bm.ep_bar);
+                payload->fem_facet_data[(offset + b) * 8 + 6] = 0.0f;
+                payload->fem_facet_data[(offset + b) * 8 + 7] = bm.is_eroded ? 1.0f : 0.0f;
             }
         }
     }
@@ -4552,22 +4618,24 @@ void emit_telemetry_3d(double elapsed, bool is_terminated, int step) {
 
     if (cuda_fem_float) {
         size_t n_nodes = cuda_fem_float->getNodeCount();
-        size_t n_facets = cuda_fem_float->getSurfaceFacetCount();
         payload->fem_n_nodes = static_cast<uint32_t>(n_nodes);
-        payload->fem_n_facets = static_cast<uint32_t>(n_facets);
         if (n_nodes > 0) {
             cuda_fem_float->extractTelemetry(payload->fem_node_data, payload->fem_facet_data);
+            payload->fem_n_facets = static_cast<uint32_t>(payload->fem_facet_data.size() / 8);
+        } else {
+            payload->fem_n_facets = 0;
         }
         payload->fem_v_max = static_cast<double>(cuda_fem_float->getMaxVelocity());
         payload->fem_sig_max = static_cast<double>(cuda_fem_float->getMaxVonMisesStress());
         payload->fem_ep_max = static_cast<double>(cuda_fem_float->getMaxPlasticStrain());
     } else if (cuda_fem_double) {
         size_t n_nodes = cuda_fem_double->getNodeCount();
-        size_t n_facets = cuda_fem_double->getSurfaceFacetCount();
         payload->fem_n_nodes = static_cast<uint32_t>(n_nodes);
-        payload->fem_n_facets = static_cast<uint32_t>(n_facets);
         if (n_nodes > 0) {
             cuda_fem_double->extractTelemetry(payload->fem_node_data, payload->fem_facet_data);
+            payload->fem_n_facets = static_cast<uint32_t>(payload->fem_facet_data.size() / 8);
+        } else {
+            payload->fem_n_facets = 0;
         }
         payload->fem_v_max = cuda_fem_double->getMaxVelocity();
         payload->fem_sig_max = cuda_fem_double->getMaxVonMisesStress();
@@ -4575,8 +4643,11 @@ void emit_telemetry_3d(double elapsed, bool is_terminated, int step) {
     } else if (fem_float) {
         size_t n_nodes = fem_float->getNodes().size();
         size_t n_facets = fem_float->getSurfaceFacets().size();
+        const auto& trusses = fem_float->getTrusses();
+        const auto& beams = fem_float->getBeams();
+        size_t total_facets = n_facets + trusses.size() + beams.size();
         payload->fem_n_nodes = static_cast<uint32_t>(n_nodes);
-        payload->fem_n_facets = static_cast<uint32_t>(n_facets);
+        payload->fem_n_facets = static_cast<uint32_t>(total_facets);
         if (n_nodes > 0) {
             payload->fem_node_data.resize(n_nodes * 7);
             const auto& nodes = fem_float->getNodes();
@@ -4593,7 +4664,7 @@ void emit_telemetry_3d(double elapsed, bool is_terminated, int step) {
                 payload->fem_node_data[i * 7 + 5] = vz;
                 payload->fem_node_data[i * 7 + 6] = v_mag;
             }
-            payload->fem_facet_data.resize(n_facets * 8);
+            payload->fem_facet_data.resize(total_facets * 8);
             const auto& facets = fem_float->getSurfaceFacets();
             for (size_t i = 0; i < n_facets; ++i) {
                 payload->fem_facet_data[i * 8 + 0] = static_cast<float>(facets[i].node_ids[0]);
@@ -4605,6 +4676,30 @@ void emit_telemetry_3d(double elapsed, bool is_terminated, int step) {
                 payload->fem_facet_data[i * 8 + 6] = facets[i].normal[2];
                 payload->fem_facet_data[i * 8 + 7] = facets[i].area;
             }
+            for (size_t t = 0; t < trusses.size(); ++t) {
+                const auto& tr = trusses[t];
+                payload->fem_facet_data[(n_facets + t) * 8 + 0] = static_cast<float>(tr.node_ids[0]);
+                payload->fem_facet_data[(n_facets + t) * 8 + 1] = static_cast<float>(tr.node_ids[1]);
+                payload->fem_facet_data[(n_facets + t) * 8 + 2] = -1.0f;
+                payload->fem_facet_data[(n_facets + t) * 8 + 3] = -1.0f;
+                payload->fem_facet_data[(n_facets + t) * 8 + 4] = static_cast<float>(std::abs(tr.sigma));
+                payload->fem_facet_data[(n_facets + t) * 8 + 5] = static_cast<float>(tr.ep_bar);
+                payload->fem_facet_data[(n_facets + t) * 8 + 6] = 0.0f;
+                payload->fem_facet_data[(n_facets + t) * 8 + 7] = tr.is_eroded ? 1.0f : 0.0f;
+            }
+            size_t beam_offset = n_facets + trusses.size();
+            for (size_t b = 0; b < beams.size(); ++b) {
+                const auto& bm = beams[b];
+                float sig = static_cast<float>(bm.ep_bar > 0.0f ? (500.0e6f + 2.0e9f * bm.ep_bar) : 0.0f);
+                payload->fem_facet_data[(beam_offset + b) * 8 + 0] = static_cast<float>(bm.node_ids[0]);
+                payload->fem_facet_data[(beam_offset + b) * 8 + 1] = static_cast<float>(bm.node_ids[1]);
+                payload->fem_facet_data[(beam_offset + b) * 8 + 2] = -1.0f;
+                payload->fem_facet_data[(beam_offset + b) * 8 + 3] = -1.0f;
+                payload->fem_facet_data[(beam_offset + b) * 8 + 4] = sig;
+                payload->fem_facet_data[(beam_offset + b) * 8 + 5] = static_cast<float>(bm.ep_bar);
+                payload->fem_facet_data[(beam_offset + b) * 8 + 6] = 0.0f;
+                payload->fem_facet_data[(beam_offset + b) * 8 + 7] = bm.is_eroded ? 1.0f : 0.0f;
+            }
         }
         payload->fem_v_max = static_cast<double>(fem_float->getMaxVelocity());
         payload->fem_sig_max = static_cast<double>(fem_float->getMaxVonMisesStress());
@@ -4612,8 +4707,11 @@ void emit_telemetry_3d(double elapsed, bool is_terminated, int step) {
     } else if (fem_double) {
         size_t n_nodes = fem_double->getNodes().size();
         size_t n_facets = fem_double->getSurfaceFacets().size();
+        const auto& trusses = fem_double->getTrusses();
+        const auto& beams = fem_double->getBeams();
+        size_t total_facets = n_facets + trusses.size() + beams.size();
         payload->fem_n_nodes = static_cast<uint32_t>(n_nodes);
-        payload->fem_n_facets = static_cast<uint32_t>(n_facets);
+        payload->fem_n_facets = static_cast<uint32_t>(total_facets);
         if (n_nodes > 0) {
             payload->fem_node_data.resize(n_nodes * 7);
             const auto& nodes = fem_double->getNodes();
@@ -4630,7 +4728,7 @@ void emit_telemetry_3d(double elapsed, bool is_terminated, int step) {
                 payload->fem_node_data[i * 7 + 5] = vz;
                 payload->fem_node_data[i * 7 + 6] = v_mag;
             }
-            payload->fem_facet_data.resize(n_facets * 8);
+            payload->fem_facet_data.resize(total_facets * 8);
             const auto& facets = fem_double->getSurfaceFacets();
             for (size_t i = 0; i < n_facets; ++i) {
                 payload->fem_facet_data[i * 8 + 0] = static_cast<float>(facets[i].node_ids[0]);
@@ -4641,6 +4739,30 @@ void emit_telemetry_3d(double elapsed, bool is_terminated, int step) {
                 payload->fem_facet_data[i * 8 + 5] = static_cast<float>(facets[i].normal[1]);
                 payload->fem_facet_data[i * 8 + 6] = static_cast<float>(facets[i].normal[2]);
                 payload->fem_facet_data[i * 8 + 7] = static_cast<float>(facets[i].area);
+            }
+            for (size_t t = 0; t < trusses.size(); ++t) {
+                const auto& tr = trusses[t];
+                payload->fem_facet_data[(n_facets + t) * 8 + 0] = static_cast<float>(tr.node_ids[0]);
+                payload->fem_facet_data[(n_facets + t) * 8 + 1] = static_cast<float>(tr.node_ids[1]);
+                payload->fem_facet_data[(n_facets + t) * 8 + 2] = -1.0f;
+                payload->fem_facet_data[(n_facets + t) * 8 + 3] = -1.0f;
+                payload->fem_facet_data[(n_facets + t) * 8 + 4] = static_cast<float>(std::abs(tr.sigma));
+                payload->fem_facet_data[(n_facets + t) * 8 + 5] = static_cast<float>(tr.ep_bar);
+                payload->fem_facet_data[(n_facets + t) * 8 + 6] = 0.0f;
+                payload->fem_facet_data[(n_facets + t) * 8 + 7] = tr.is_eroded ? 1.0f : 0.0f;
+            }
+            size_t beam_offset = n_facets + trusses.size();
+            for (size_t b = 0; b < beams.size(); ++b) {
+                const auto& bm = beams[b];
+                float sig = static_cast<float>(bm.ep_bar > 0.0f ? (500.0e6f + 2.0e9f * bm.ep_bar) : 0.0f);
+                payload->fem_facet_data[(beam_offset + b) * 8 + 0] = static_cast<float>(bm.node_ids[0]);
+                payload->fem_facet_data[(beam_offset + b) * 8 + 1] = static_cast<float>(bm.node_ids[1]);
+                payload->fem_facet_data[(beam_offset + b) * 8 + 2] = -1.0f;
+                payload->fem_facet_data[(beam_offset + b) * 8 + 3] = -1.0f;
+                payload->fem_facet_data[(beam_offset + b) * 8 + 4] = sig;
+                payload->fem_facet_data[(beam_offset + b) * 8 + 5] = static_cast<float>(bm.ep_bar);
+                payload->fem_facet_data[(beam_offset + b) * 8 + 6] = 0.0f;
+                payload->fem_facet_data[(beam_offset + b) * 8 + 7] = bm.is_eroded ? 1.0f : 0.0f;
             }
         }
         payload->fem_v_max = fem_double->getMaxVelocity();
@@ -6390,11 +6512,34 @@ int main() {
                                     } else if (mesh_src == "LS-DYNA Keyword File" || shape_type == "LS-DYNA File" || !k_file.empty()) {
                                         std::vector<Blast::FEMNode3D<double>> nodes;
                                         std::vector<Blast::FEMElement3D<double>> elements;
+                                        std::vector<Blast::FEMTrussElement3D<double>> trusses;
+                                        std::vector<Blast::FEMBeam3DElement<double>> beams;
                                         double scale_x = get_json_double(obj, "scale_x", get_json_double(obj, "scale_factor", 1.0));
                                         double scale_y = get_json_double(obj, "scale_y", get_json_double(obj, "scale_factor", 1.0));
                                         double scale_z = get_json_double(obj, "scale_z", get_json_double(obj, "scale_factor", 1.0));
-                                        loadAndTransformLSDynaMesh<double>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements);
+                                        loadAndTransformLSDynaMesh<double>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams);
                                         fem->appendNodesAndElements(nodes, elements, obj_mat);
+                                        std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
+                                        for (const auto& t : trusses) {
+                                            if (rebar_form == "TimoshenkoBeam3D") {
+                                                double d_eq = std::sqrt(4.0 * t.A / 3.141592653589793);
+                                                fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, obj_mat, t.failure_strain, t.lsdyna_id);
+                                            } else {
+                                                fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, obj_mat, t.failure_strain, t.lsdyna_id);
+                                            }
+                                        }
+                                        for (const auto& b : beams) {
+                                            if (rebar_form == "AxialTruss1D") {
+                                                double a_eq = 0.25 * 3.141592653589793 * b.d * b.d;
+                                                fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, obj_mat, b.failure_strain, b.lsdyna_id);
+                                            } else {
+                                                fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, obj_mat, b.failure_strain, b.lsdyna_id);
+                                            }
+                                        }
+                                        char log_buf[256];
+                                        snprintf(log_buf, sizeof(log_buf), "LS-DYNA Ingested: %zu Nodes, %zu Solids, %zu Trusses, %zu Beams (Rebar Mode: %s)",
+                                                 nodes.size(), elements.size(), trusses.size(), beams.size(), rebar_form.c_str());
+                                        emit_kernel_log("INFO", log_buf, 0.0, "fem_3d", 0);
                                     } else {
                                         fem->addStructuredBoxMesh(nx, ny, nz, lx, ly, lz, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
                                     }
@@ -6402,6 +6547,8 @@ int main() {
                             } else if (msg.contains("k_file") && !msg["k_file"].get<std::string>().empty()) {
                                 std::vector<Blast::FEMNode3D<double>> nodes;
                                 std::vector<Blast::FEMElement3D<double>> elements;
+                                std::vector<Blast::FEMTrussElement3D<double>> trusses;
+                                std::vector<Blast::FEMBeam3DElement<double>> beams;
                                 double pos_x = get_json_double(msg, "pos_x", 0.0);
                                 double pos_y = get_json_double(msg, "pos_y", 0.0);
                                 double pos_z = get_json_double(msg, "pos_z", 0.0);
@@ -6412,8 +6559,29 @@ int main() {
                                 double scale_y = get_json_double(msg, "scale_y", get_json_double(msg, "scale_factor", 1.0));
                                 double scale_z = get_json_double(msg, "scale_z", get_json_double(msg, "scale_factor", 1.0));
                                 std::string bc_cond = msg.value("boundary_condition", "Free");
-                                loadAndTransformLSDynaMesh<double>(msg["k_file"].get<std::string>(), pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, def_mat, nodes, elements);
+                                loadAndTransformLSDynaMesh<double>(msg["k_file"].get<std::string>(), pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, def_mat, nodes, elements, &trusses, &beams);
                                 fem->setNodesAndElements(nodes, elements, def_mat);
+                                std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
+                                for (const auto& t : trusses) {
+                                    if (rebar_form == "TimoshenkoBeam3D") {
+                                        double d_eq = std::sqrt(4.0 * t.A / 3.141592653589793);
+                                        fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, def_mat, t.failure_strain, t.lsdyna_id);
+                                    } else {
+                                        fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, def_mat, t.failure_strain, t.lsdyna_id);
+                                    }
+                                }
+                                for (const auto& b : beams) {
+                                    if (rebar_form == "AxialTruss1D") {
+                                        double a_eq = 0.25 * 3.141592653589793 * b.d * b.d;
+                                        fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, def_mat, b.failure_strain, b.lsdyna_id);
+                                    } else {
+                                        fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, def_mat, b.failure_strain, b.lsdyna_id);
+                                    }
+                                }
+                                char log_buf[256];
+                                snprintf(log_buf, sizeof(log_buf), "LS-DYNA Ingested: %zu Nodes, %zu Solids, %zu Trusses, %zu Beams (Rebar Mode: %s)",
+                                         nodes.size(), elements.size(), trusses.size(), beams.size(), rebar_form.c_str());
+                                emit_kernel_log("INFO", log_buf, 0.0, "fem_3d", 0);
                             }
                             fem->setErosionCriteria(erosion);
                             global_fem_solvers_cuda_double[model_id] = std::move(fem);
@@ -6482,11 +6650,34 @@ int main() {
                                     } else if (mesh_src == "LS-DYNA Keyword File" || shape_type == "LS-DYNA File" || !k_file.empty()) {
                                         std::vector<Blast::FEMNode3D<float>> nodes;
                                         std::vector<Blast::FEMElement3D<float>> elements;
+                                        std::vector<Blast::FEMTrussElement3D<float>> trusses;
+                                        std::vector<Blast::FEMBeam3DElement<float>> beams;
                                         float scale_x = static_cast<float>(get_json_double(obj, "scale_x", get_json_double(obj, "scale_factor", 1.0)));
                                         float scale_y = static_cast<float>(get_json_double(obj, "scale_y", get_json_double(obj, "scale_factor", 1.0)));
                                         float scale_z = static_cast<float>(get_json_double(obj, "scale_z", get_json_double(obj, "scale_factor", 1.0)));
-                                        loadAndTransformLSDynaMesh<float>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements);
+                                        loadAndTransformLSDynaMesh<float>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams);
                                         fem->appendNodesAndElements(nodes, elements, obj_mat);
+                                        std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
+                                        for (const auto& t : trusses) {
+                                            if (rebar_form == "TimoshenkoBeam3D") {
+                                                float d_eq = std::sqrt(4.0f * t.A / 3.141592653589793f);
+                                                fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, obj_mat, t.failure_strain, t.lsdyna_id);
+                                            } else {
+                                                fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, obj_mat, t.failure_strain, t.lsdyna_id);
+                                            }
+                                        }
+                                        for (const auto& b : beams) {
+                                            if (rebar_form == "AxialTruss1D") {
+                                                float a_eq = 0.25f * 3.141592653589793f * b.d * b.d;
+                                                fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, obj_mat, b.failure_strain, b.lsdyna_id);
+                                            } else {
+                                                fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, obj_mat, b.failure_strain, b.lsdyna_id);
+                                            }
+                                        }
+                                        char log_buf[256];
+                                        snprintf(log_buf, sizeof(log_buf), "LS-DYNA Ingested: %zu Nodes, %zu Solids, %zu Trusses, %zu Beams (Rebar Mode: %s)",
+                                                 nodes.size(), elements.size(), trusses.size(), beams.size(), rebar_form.c_str());
+                                        emit_kernel_log("INFO", log_buf, 0.0, "fem_3d", 0);
                                     } else {
                                         fem->addStructuredBoxMesh(nx, ny, nz, lx, ly, lz, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
                                     }
@@ -6494,6 +6685,8 @@ int main() {
                             } else if (msg.contains("k_file") && !msg["k_file"].get<std::string>().empty()) {
                                 std::vector<Blast::FEMNode3D<float>> nodes;
                                 std::vector<Blast::FEMElement3D<float>> elements;
+                                std::vector<Blast::FEMTrussElement3D<float>> trusses;
+                                std::vector<Blast::FEMBeam3DElement<float>> beams;
                                 float pos_x = static_cast<float>(get_json_double(msg, "pos_x", 0.0));
                                 float pos_y = static_cast<float>(get_json_double(msg, "pos_y", 0.0));
                                 float pos_z = static_cast<float>(get_json_double(msg, "pos_z", 0.0));
@@ -6504,8 +6697,29 @@ int main() {
                                 float scale_y = static_cast<float>(get_json_double(msg, "scale_y", get_json_double(msg, "scale_factor", 1.0)));
                                 float scale_z = static_cast<float>(get_json_double(msg, "scale_z", get_json_double(msg, "scale_factor", 1.0)));
                                 std::string bc_cond = msg.value("boundary_condition", "Free");
-                                loadAndTransformLSDynaMesh<float>(msg["k_file"].get<std::string>(), pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, def_mat, nodes, elements);
+                                loadAndTransformLSDynaMesh<float>(msg["k_file"].get<std::string>(), pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, def_mat, nodes, elements, &trusses, &beams);
                                 fem->setNodesAndElements(nodes, elements, def_mat);
+                                std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
+                                for (const auto& t : trusses) {
+                                    if (rebar_form == "TimoshenkoBeam3D") {
+                                        float d_eq = std::sqrt(4.0f * t.A / 3.141592653589793f);
+                                        fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, def_mat, t.failure_strain, t.lsdyna_id);
+                                    } else {
+                                        fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, def_mat, t.failure_strain, t.lsdyna_id);
+                                    }
+                                }
+                                for (const auto& b : beams) {
+                                    if (rebar_form == "AxialTruss1D") {
+                                        float a_eq = 0.25f * 3.141592653589793f * b.d * b.d;
+                                        fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, def_mat, b.failure_strain, b.lsdyna_id);
+                                    } else {
+                                        fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, def_mat, b.failure_strain, b.lsdyna_id);
+                                    }
+                                }
+                                char log_buf[256];
+                                snprintf(log_buf, sizeof(log_buf), "LS-DYNA Ingested: %zu Nodes, %zu Solids, %zu Trusses, %zu Beams (Rebar Mode: %s)",
+                                         nodes.size(), elements.size(), trusses.size(), beams.size(), rebar_form.c_str());
+                                emit_kernel_log("INFO", log_buf, 0.0, "fem_3d", 0);
                             }
                             fem->setErosionCriteria(erosion);
                             global_fem_solvers_cuda_float[model_id] = std::move(fem);
@@ -6584,11 +6798,34 @@ int main() {
                                     } else if (mesh_src == "LS-DYNA Keyword File" || shape_type == "LS-DYNA File" || !k_file.empty()) {
                                         std::vector<Blast::FEMNode3D<double>> nodes;
                                         std::vector<Blast::FEMElement3D<double>> elements;
+                                        std::vector<Blast::FEMTrussElement3D<double>> trusses;
+                                        std::vector<Blast::FEMBeam3DElement<double>> beams;
                                         double scale_x = get_json_double(obj, "scale_x", get_json_double(obj, "scale_factor", 1.0));
                                         double scale_y = get_json_double(obj, "scale_y", get_json_double(obj, "scale_factor", 1.0));
                                         double scale_z = get_json_double(obj, "scale_z", get_json_double(obj, "scale_factor", 1.0));
-                                        loadAndTransformLSDynaMesh<double>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements);
+                                        loadAndTransformLSDynaMesh<double>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams);
                                         fem->appendNodesAndElements(nodes, elements, obj_mat);
+                                        std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
+                                        for (const auto& t : trusses) {
+                                            if (rebar_form == "TimoshenkoBeam3D") {
+                                                double d_eq = std::sqrt(4.0 * t.A / 3.141592653589793);
+                                                fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, obj_mat, t.failure_strain, t.lsdyna_id);
+                                            } else {
+                                                fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, obj_mat, t.failure_strain, t.lsdyna_id);
+                                            }
+                                        }
+                                        for (const auto& b : beams) {
+                                            if (rebar_form == "AxialTruss1D") {
+                                                double a_eq = 0.25 * 3.141592653589793 * b.d * b.d;
+                                                fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, obj_mat, b.failure_strain, b.lsdyna_id);
+                                            } else {
+                                                fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, obj_mat, b.failure_strain, b.lsdyna_id);
+                                            }
+                                        }
+                                        char log_buf[256];
+                                        snprintf(log_buf, sizeof(log_buf), "LS-DYNA Ingested: %zu Nodes, %zu Solids, %zu Trusses, %zu Beams (Rebar Mode: %s)",
+                                                 nodes.size(), elements.size(), trusses.size(), beams.size(), rebar_form.c_str());
+                                        emit_kernel_log("INFO", log_buf, 0.0, "fem_3d", 0);
                                     } else {
                                         fem->addStructuredBoxMesh(nx, ny, nz, lx, ly, lz, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
                                     }
@@ -6596,6 +6833,8 @@ int main() {
                             } else if (msg.contains("k_file") && !msg["k_file"].get<std::string>().empty()) {
                                 std::vector<Blast::FEMNode3D<double>> nodes;
                                 std::vector<Blast::FEMElement3D<double>> elements;
+                                std::vector<Blast::FEMTrussElement3D<double>> trusses;
+                                std::vector<Blast::FEMBeam3DElement<double>> beams;
                                 double pos_x = get_json_double(msg, "pos_x", 0.0);
                                 double pos_y = get_json_double(msg, "pos_y", 0.0);
                                 double pos_z = get_json_double(msg, "pos_z", 0.0);
@@ -6606,8 +6845,29 @@ int main() {
                                 double scale_y = get_json_double(msg, "scale_y", get_json_double(msg, "scale_factor", 1.0));
                                 double scale_z = get_json_double(msg, "scale_z", get_json_double(msg, "scale_factor", 1.0));
                                 std::string bc_cond = msg.value("boundary_condition", "Free");
-                                loadAndTransformLSDynaMesh<double>(msg["k_file"].get<std::string>(), pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, def_mat, nodes, elements);
+                                loadAndTransformLSDynaMesh<double>(msg["k_file"].get<std::string>(), pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, def_mat, nodes, elements, &trusses, &beams);
                                 fem->setNodesAndElements(nodes, elements, def_mat);
+                                std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
+                                for (const auto& t : trusses) {
+                                    if (rebar_form == "TimoshenkoBeam3D") {
+                                        double d_eq = std::sqrt(4.0 * t.A / 3.141592653589793);
+                                        fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, def_mat, t.failure_strain, t.lsdyna_id);
+                                    } else {
+                                        fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, def_mat, t.failure_strain, t.lsdyna_id);
+                                    }
+                                }
+                                for (const auto& b : beams) {
+                                    if (rebar_form == "AxialTruss1D") {
+                                        double a_eq = 0.25 * 3.141592653589793 * b.d * b.d;
+                                        fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, def_mat, b.failure_strain, b.lsdyna_id);
+                                    } else {
+                                        fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, def_mat, b.failure_strain, b.lsdyna_id);
+                                    }
+                                }
+                                char log_buf[256];
+                                snprintf(log_buf, sizeof(log_buf), "LS-DYNA Ingested: %zu Nodes, %zu Solids, %zu Trusses, %zu Beams (Rebar Mode: %s)",
+                                         nodes.size(), elements.size(), trusses.size(), beams.size(), rebar_form.c_str());
+                                emit_kernel_log("INFO", log_buf, 0.0, "fem_3d", 0);
                             }
                             fem->setErosionCriteria(erosion);
                             global_fem_solvers_double[model_id] = std::move(fem);
@@ -6684,11 +6944,34 @@ int main() {
                                     } else if (mesh_src == "LS-DYNA Keyword File" || shape_type == "LS-DYNA File" || !k_file.empty()) {
                                         std::vector<Blast::FEMNode3D<float>> nodes;
                                         std::vector<Blast::FEMElement3D<float>> elements;
+                                        std::vector<Blast::FEMTrussElement3D<float>> trusses;
+                                        std::vector<Blast::FEMBeam3DElement<float>> beams;
                                         float scale_x = static_cast<float>(get_json_double(obj, "scale_x", get_json_double(obj, "scale_factor", 1.0)));
                                         float scale_y = static_cast<float>(get_json_double(obj, "scale_y", get_json_double(obj, "scale_factor", 1.0)));
                                         float scale_z = static_cast<float>(get_json_double(obj, "scale_z", get_json_double(obj, "scale_factor", 1.0)));
-                                        loadAndTransformLSDynaMesh<float>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements);
+                                        loadAndTransformLSDynaMesh<float>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams);
                                         fem->appendNodesAndElements(nodes, elements, obj_mat);
+                                        std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
+                                        for (const auto& t : trusses) {
+                                            if (rebar_form == "TimoshenkoBeam3D") {
+                                                float d_eq = std::sqrt(4.0f * t.A / 3.141592653589793f);
+                                                fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, obj_mat, t.failure_strain, t.lsdyna_id);
+                                            } else {
+                                                fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, obj_mat, t.failure_strain, t.lsdyna_id);
+                                            }
+                                        }
+                                        for (const auto& b : beams) {
+                                            if (rebar_form == "AxialTruss1D") {
+                                                float a_eq = 0.25f * 3.141592653589793f * b.d * b.d;
+                                                fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, obj_mat, b.failure_strain, b.lsdyna_id);
+                                            } else {
+                                                fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, obj_mat, b.failure_strain, b.lsdyna_id);
+                                            }
+                                        }
+                                        char log_buf[256];
+                                        snprintf(log_buf, sizeof(log_buf), "LS-DYNA Ingested: %zu Nodes, %zu Solids, %zu Trusses, %zu Beams (Rebar Mode: %s)",
+                                                 nodes.size(), elements.size(), trusses.size(), beams.size(), rebar_form.c_str());
+                                        emit_kernel_log("INFO", log_buf, 0.0, "fem_3d", 0);
                                     } else {
                                         fem->addStructuredBoxMesh(nx, ny, nz, lx, ly, lz, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
                                     }
@@ -6696,6 +6979,8 @@ int main() {
                             } else if (msg.contains("k_file") && !msg["k_file"].get<std::string>().empty()) {
                                 std::vector<Blast::FEMNode3D<float>> nodes;
                                 std::vector<Blast::FEMElement3D<float>> elements;
+                                std::vector<Blast::FEMTrussElement3D<float>> trusses;
+                                std::vector<Blast::FEMBeam3DElement<float>> beams;
                                 float pos_x = static_cast<float>(get_json_double(msg, "pos_x", 0.0));
                                 float pos_y = static_cast<float>(get_json_double(msg, "pos_y", 0.0));
                                 float pos_z = static_cast<float>(get_json_double(msg, "pos_z", 0.0));
@@ -6706,8 +6991,29 @@ int main() {
                                 float scale_y = static_cast<float>(get_json_double(msg, "scale_y", get_json_double(msg, "scale_factor", 1.0)));
                                 float scale_z = static_cast<float>(get_json_double(msg, "scale_z", get_json_double(msg, "scale_factor", 1.0)));
                                 std::string bc_cond = msg.value("boundary_condition", "Free");
-                                loadAndTransformLSDynaMesh<float>(msg["k_file"].get<std::string>(), pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, def_mat, nodes, elements);
+                                loadAndTransformLSDynaMesh<float>(msg["k_file"].get<std::string>(), pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, def_mat, nodes, elements, &trusses, &beams);
                                 fem->setNodesAndElements(nodes, elements, def_mat);
+                                std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
+                                for (const auto& t : trusses) {
+                                    if (rebar_form == "TimoshenkoBeam3D") {
+                                        float d_eq = std::sqrt(4.0f * t.A / 3.141592653589793f);
+                                        fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, def_mat, t.failure_strain, t.lsdyna_id);
+                                    } else {
+                                        fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, def_mat, t.failure_strain, t.lsdyna_id);
+                                    }
+                                }
+                                for (const auto& b : beams) {
+                                    if (rebar_form == "AxialTruss1D") {
+                                        float a_eq = 0.25f * 3.141592653589793f * b.d * b.d;
+                                        fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, def_mat, b.failure_strain, b.lsdyna_id);
+                                    } else {
+                                        fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, def_mat, b.failure_strain, b.lsdyna_id);
+                                    }
+                                }
+                                char log_buf[256];
+                                snprintf(log_buf, sizeof(log_buf), "LS-DYNA Ingested: %zu Nodes, %zu Solids, %zu Trusses, %zu Beams (Rebar Mode: %s)",
+                                         nodes.size(), elements.size(), trusses.size(), beams.size(), rebar_form.c_str());
+                                emit_kernel_log("INFO", log_buf, 0.0, "fem_3d", 0);
                             }
                             fem->setErosionCriteria(erosion);
                             global_fem_solvers_float[model_id] = std::move(fem);
@@ -7010,11 +7316,34 @@ int main() {
                                         } else if (mesh_src == "LS-DYNA Keyword File" || shape_type == "LS-DYNA File" || !k_file.empty()) {
                                             std::vector<Blast::FEMNode3D<double>> nodes;
                                             std::vector<Blast::FEMElement3D<double>> elements;
+                                            std::vector<Blast::FEMTrussElement3D<double>> trusses;
+                                            std::vector<Blast::FEMBeam3DElement<double>> beams;
                                             double scale_x = get_json_double(obj, "scale_x", get_json_double(obj, "scale_factor", 1.0));
                                             double scale_y = get_json_double(obj, "scale_y", get_json_double(obj, "scale_factor", 1.0));
                                             double scale_z = get_json_double(obj, "scale_z", get_json_double(obj, "scale_factor", 1.0));
-                                            loadAndTransformLSDynaMesh<double>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements);
+                                            loadAndTransformLSDynaMesh<double>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams);
                                             fem->setNodesAndElements(nodes, elements, obj_mat);
+                                            std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
+                                            for (const auto& t : trusses) {
+                                                if (rebar_form == "TimoshenkoBeam3D") {
+                                                    double d_eq = std::sqrt(4.0 * t.A / 3.141592653589793);
+                                                    fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, obj_mat, t.failure_strain, t.lsdyna_id);
+                                                } else {
+                                                    fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, obj_mat, t.failure_strain, t.lsdyna_id);
+                                                }
+                                            }
+                                            for (const auto& b : beams) {
+                                                if (rebar_form == "AxialTruss1D") {
+                                                    double a_eq = 0.25 * 3.141592653589793 * b.d * b.d;
+                                                    fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, obj_mat, b.failure_strain, b.lsdyna_id);
+                                                } else {
+                                                    fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, obj_mat, b.failure_strain, b.lsdyna_id);
+                                                }
+                                            }
+                                            char log_buf[256];
+                                            snprintf(log_buf, sizeof(log_buf), "LS-DYNA Ingested: %zu Nodes, %zu Solids, %zu Trusses, %zu Beams (Rebar Mode: %s)",
+                                                     nodes.size(), elements.size(), trusses.size(), beams.size(), rebar_form.c_str());
+                                            emit_kernel_log("INFO", log_buf, 0.0, "fem_3d", 0);
                                         } else {
                                             fem->addStructuredBoxMesh(nx_fem, ny_fem, nz_fem, lx, ly, lz, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
                                         }
@@ -7072,7 +7401,7 @@ int main() {
 
                                         if (mesh_src == "Cylinder Generator" || shape_type == "Cylinder") {
                                             float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
-                                            if (radius <= 0.0f) radius = static_cast<float>(get_json_double(obj, "size_x", 0.2) * 0.5);
+                                            if (radius <= 0.0f) radius = static_cast<float>(get_json_double(obj, "size_x", 0.2)) * 0.5;
                                             float inner_radius = static_cast<float>(get_json_double(obj, "inner_radius", 0.0));
                                             float height = static_cast<float>(get_json_double(obj, "height", 0.2));
                                             if (height <= 0.0f) height = static_cast<float>(get_json_double(obj, "size_z", 0.2));
@@ -7080,11 +7409,34 @@ int main() {
                                         } else if (mesh_src == "LS-DYNA Keyword File" || shape_type == "LS-DYNA File" || !k_file.empty()) {
                                             std::vector<Blast::FEMNode3D<float>> nodes;
                                             std::vector<Blast::FEMElement3D<float>> elements;
+                                            std::vector<Blast::FEMTrussElement3D<float>> trusses;
+                                            std::vector<Blast::FEMBeam3DElement<float>> beams;
                                             float scale_x = static_cast<float>(get_json_double(obj, "scale_x", get_json_double(obj, "scale_factor", 1.0)));
                                             float scale_y = static_cast<float>(get_json_double(obj, "scale_y", get_json_double(obj, "scale_factor", 1.0)));
                                             float scale_z = static_cast<float>(get_json_double(obj, "scale_z", get_json_double(obj, "scale_factor", 1.0)));
-                                            loadAndTransformLSDynaMesh<float>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements);
+                                            loadAndTransformLSDynaMesh<float>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams);
                                             fem->setNodesAndElements(nodes, elements, obj_mat);
+                                            std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
+                                            for (const auto& t : trusses) {
+                                                if (rebar_form == "TimoshenkoBeam3D") {
+                                                    float d_eq = std::sqrt(4.0f * t.A / 3.141592653589793f);
+                                                    fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, obj_mat, t.failure_strain, t.lsdyna_id);
+                                                } else {
+                                                    fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, obj_mat, t.failure_strain, t.lsdyna_id);
+                                                }
+                                            }
+                                            for (const auto& b : beams) {
+                                                if (rebar_form == "AxialTruss1D") {
+                                                    float a_eq = 0.25f * 3.141592653589793f * b.d * b.d;
+                                                    fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, obj_mat, b.failure_strain, b.lsdyna_id);
+                                                } else {
+                                                    fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, obj_mat, b.failure_strain, b.lsdyna_id);
+                                                }
+                                            }
+                                            char log_buf[256];
+                                            snprintf(log_buf, sizeof(log_buf), "LS-DYNA Ingested: %zu Nodes, %zu Solids, %zu Trusses, %zu Beams (Rebar Mode: %s)",
+                                                     nodes.size(), elements.size(), trusses.size(), beams.size(), rebar_form.c_str());
+                                            emit_kernel_log("INFO", log_buf, 0.0, "fem_3d", 0);
                                         } else {
                                             fem->addStructuredBoxMesh(nx_fem, ny_fem, nz_fem, lx, ly, lz, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
                                         }
@@ -7141,11 +7493,34 @@ int main() {
                                         } else if (mesh_src == "LS-DYNA Keyword File" || shape_type == "LS-DYNA File" || !k_file.empty()) {
                                             std::vector<Blast::FEMNode3D<double>> nodes;
                                             std::vector<Blast::FEMElement3D<double>> elements;
+                                            std::vector<Blast::FEMTrussElement3D<double>> trusses;
+                                            std::vector<Blast::FEMBeam3DElement<double>> beams;
                                             double scale_x = get_json_double(obj, "scale_x", get_json_double(obj, "scale_factor", 1.0));
                                             double scale_y = get_json_double(obj, "scale_y", get_json_double(obj, "scale_factor", 1.0));
                                             double scale_z = get_json_double(obj, "scale_z", get_json_double(obj, "scale_factor", 1.0));
-                                            loadAndTransformLSDynaMesh<double>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements);
+                                            loadAndTransformLSDynaMesh<double>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams);
                                             fem->setNodesAndElements(nodes, elements, obj_mat);
+                                            std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
+                                            for (const auto& t : trusses) {
+                                                if (rebar_form == "TimoshenkoBeam3D") {
+                                                    double d_eq = std::sqrt(4.0 * t.A / 3.141592653589793);
+                                                    fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, obj_mat, t.failure_strain, t.lsdyna_id);
+                                                } else {
+                                                    fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, obj_mat, t.failure_strain, t.lsdyna_id);
+                                                }
+                                            }
+                                            for (const auto& b : beams) {
+                                                if (rebar_form == "AxialTruss1D") {
+                                                    double a_eq = 0.25 * 3.141592653589793 * b.d * b.d;
+                                                    fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, obj_mat, b.failure_strain, b.lsdyna_id);
+                                                } else {
+                                                    fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, obj_mat, b.failure_strain, b.lsdyna_id);
+                                                }
+                                            }
+                                            char log_buf[256];
+                                            snprintf(log_buf, sizeof(log_buf), "LS-DYNA Ingested: %zu Nodes, %zu Solids, %zu Trusses, %zu Beams (Rebar Mode: %s)",
+                                                     nodes.size(), elements.size(), trusses.size(), beams.size(), rebar_form.c_str());
+                                            emit_kernel_log("INFO", log_buf, 0.0, "fem_3d", 0);
                                         } else {
                                             fem->addStructuredBoxMesh(nx_fem, ny_fem, nz_fem, lx, ly, lz, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
                                         }
@@ -7192,7 +7567,7 @@ int main() {
 
                                         if (mesh_src == "Cylinder Generator" || shape_type == "Cylinder") {
                                             float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
-                                            if (radius <= 0.0f) radius = static_cast<float>(get_json_double(obj, "size_x", 0.2) * 0.5);
+                                            if (radius <= 0.0f) radius = static_cast<float>(get_json_double(obj, "size_x", 0.2)) * 0.5;
                                             float inner_radius = static_cast<float>(get_json_double(obj, "inner_radius", 0.0));
                                             float height = static_cast<float>(get_json_double(obj, "height", 0.2));
                                             if (height <= 0.0f) height = static_cast<float>(get_json_double(obj, "size_z", 0.2));
@@ -7200,11 +7575,34 @@ int main() {
                                         } else if (mesh_src == "LS-DYNA Keyword File" || shape_type == "LS-DYNA File" || !k_file.empty()) {
                                             std::vector<Blast::FEMNode3D<float>> nodes;
                                             std::vector<Blast::FEMElement3D<float>> elements;
+                                            std::vector<Blast::FEMTrussElement3D<float>> trusses;
+                                            std::vector<Blast::FEMBeam3DElement<float>> beams;
                                             float scale_x = static_cast<float>(get_json_double(obj, "scale_x", get_json_double(obj, "scale_factor", 1.0)));
                                             float scale_y = static_cast<float>(get_json_double(obj, "scale_y", get_json_double(obj, "scale_factor", 1.0)));
                                             float scale_z = static_cast<float>(get_json_double(obj, "scale_z", get_json_double(obj, "scale_factor", 1.0)));
-                                            loadAndTransformLSDynaMesh<float>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements);
+                                            loadAndTransformLSDynaMesh<float>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams);
                                             fem->setNodesAndElements(nodes, elements, obj_mat);
+                                            std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
+                                            for (const auto& t : trusses) {
+                                                if (rebar_form == "TimoshenkoBeam3D") {
+                                                    float d_eq = std::sqrt(4.0f * t.A / 3.141592653589793f);
+                                                    fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, obj_mat, t.failure_strain, t.lsdyna_id);
+                                                } else {
+                                                    fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, obj_mat, t.failure_strain, t.lsdyna_id);
+                                                }
+                                            }
+                                            for (const auto& b : beams) {
+                                                if (rebar_form == "AxialTruss1D") {
+                                                    float a_eq = 0.25f * 3.141592653589793f * b.d * b.d;
+                                                    fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, obj_mat, b.failure_strain, b.lsdyna_id);
+                                                } else {
+                                                    fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, obj_mat, b.failure_strain, b.lsdyna_id);
+                                                }
+                                            }
+                                            char log_buf[256];
+                                            snprintf(log_buf, sizeof(log_buf), "LS-DYNA Ingested: %zu Nodes, %zu Solids, %zu Trusses, %zu Beams (Rebar Mode: %s)",
+                                                     nodes.size(), elements.size(), trusses.size(), beams.size(), rebar_form.c_str());
+                                            emit_kernel_log("INFO", log_buf, 0.0, "fem_3d", 0);
                                         } else {
                                             fem->addStructuredBoxMesh(nx_fem, ny_fem, nz_fem, lx, ly, lz, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
                                         }

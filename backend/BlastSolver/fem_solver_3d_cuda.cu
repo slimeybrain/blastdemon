@@ -2611,7 +2611,6 @@ void FEMSolver3DCUDA<T>::extractTelemetry(std::vector<float>& h_node_data, std::
     }
     m_last_v_max = static_cast<T>(max_v);
 
-    // Compute max stress and plastic strain from facet buffer
     float max_vm = 0.0f;
     float max_ep = 0.0f;
     for (size_t f = 0; f < num_facets; ++f) {
@@ -2619,6 +2618,40 @@ void FEMSolver3DCUDA<T>::extractTelemetry(std::vector<float>& h_node_data, std::
         float ep = h_facet_data[f * 8 + 5];
         if (vm > max_vm) max_vm = vm;
         if (ep > max_ep) max_ep = ep;
+    }
+
+    // Append 1D rebar trusses and beams for 3D viewport plotting
+    const auto& trusses = m_cpu_solver.getTrusses();
+    const auto& beams = m_cpu_solver.getBeams();
+    size_t n_trusses = trusses.size();
+    size_t n_beams = beams.size();
+    if (n_trusses > 0 || n_beams > 0) {
+        size_t prev_facets = num_facets;
+        h_facet_data.resize((prev_facets + n_trusses + n_beams) * 8);
+        for (size_t t = 0; t < n_trusses; ++t) {
+            const auto& tr = trusses[t];
+            h_facet_data[(prev_facets + t) * 8 + 0] = static_cast<float>(tr.node_ids[0]);
+            h_facet_data[(prev_facets + t) * 8 + 1] = static_cast<float>(tr.node_ids[1]);
+            h_facet_data[(prev_facets + t) * 8 + 2] = -1.0f;
+            h_facet_data[(prev_facets + t) * 8 + 3] = -1.0f;
+            h_facet_data[(prev_facets + t) * 8 + 4] = static_cast<float>(std::abs(tr.sigma));
+            h_facet_data[(prev_facets + t) * 8 + 5] = static_cast<float>(tr.ep_bar);
+            h_facet_data[(prev_facets + t) * 8 + 6] = 0.0f;
+            h_facet_data[(prev_facets + t) * 8 + 7] = tr.is_eroded ? 1.0f : 0.0f;
+        }
+        size_t beam_offset = prev_facets + n_trusses;
+        for (size_t b = 0; b < n_beams; ++b) {
+            const auto& bm = beams[b];
+            float sig = static_cast<float>(bm.ep_bar > 0.0f ? (500.0e6f + 2.0e9f * bm.ep_bar) : 0.0f);
+            h_facet_data[(beam_offset + b) * 8 + 0] = static_cast<float>(bm.node_ids[0]);
+            h_facet_data[(beam_offset + b) * 8 + 1] = static_cast<float>(bm.node_ids[1]);
+            h_facet_data[(beam_offset + b) * 8 + 2] = -1.0f;
+            h_facet_data[(beam_offset + b) * 8 + 3] = -1.0f;
+            h_facet_data[(beam_offset + b) * 8 + 4] = sig;
+            h_facet_data[(beam_offset + b) * 8 + 5] = static_cast<float>(bm.ep_bar);
+            h_facet_data[(beam_offset + b) * 8 + 6] = 0.0f;
+            h_facet_data[(beam_offset + b) * 8 + 7] = bm.is_eroded ? 1.0f : 0.0f;
+        }
     }
     m_last_vm_max = static_cast<T>(max_vm);
     m_last_ep_max = static_cast<T>(max_ep);

@@ -2931,6 +2931,11 @@ let femOpacity: number = 1.0;
 let femMinVal: number | undefined = undefined;
 let femMaxVal: number | undefined = undefined;
 
+let showRebar: boolean = true;
+let rebarSolid: boolean = true;
+let rebarWireframe: boolean = true;
+let rebarRadius: number = 0.008;
+
 function getFEMFacetQuantityValue(facetIdx: number, qty: string): number {
     if (!latestFEMFacetsData) return 0;
     const base = facetIdx * 8;
@@ -3052,7 +3057,7 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
         maxScalar = empiricalMax;
     }
 
-    const solidVertexData = new Float32Array(nFacets * 6 * 6);
+    const solidVertexData = new Float32Array(nFacets * 12 * 6);
     const wireframeVertexData = new Float32Array(nFacets * 8 * 5);
 
     let solidIdx = 0;
@@ -3064,14 +3069,18 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
         const n2 = Math.round(latestFEMFacetsData[f * 8 + 2]);
         const n3 = Math.round(latestFEMFacetsData[f * 8 + 3]);
 
-        if (n0 < 0 || n0 >= nNodes || n1 < 0 || n1 >= nNodes || n2 < 0 || n2 >= nNodes || n3 < 0 || n3 >= nNodes) {
+        if (n0 < 0 || n0 >= nNodes || n1 < 0 || n1 >= nNodes) {
+            continue;
+        }
+
+        const isLine = (n2 < 0 || n3 < 0);
+
+        if (!isLine && (n2 >= nNodes || n3 >= nNodes)) {
             continue;
         }
 
         const p0 = [latestFEMNodesData[n0 * 7 + 0] * sx + tx, latestFEMNodesData[n0 * 7 + 1] * sy + ty, latestFEMNodesData[n0 * 7 + 2] * sz + tz];
         const p1 = [latestFEMNodesData[n1 * 7 + 0] * sx + tx, latestFEMNodesData[n1 * 7 + 1] * sy + ty, latestFEMNodesData[n1 * 7 + 2] * sz + tz];
-        const p2 = [latestFEMNodesData[n2 * 7 + 0] * sx + tx, latestFEMNodesData[n2 * 7 + 1] * sy + ty, latestFEMNodesData[n2 * 7 + 2] * sz + tz];
-        const p3 = [latestFEMNodesData[n3 * 7 + 0] * sx + tx, latestFEMNodesData[n3 * 7 + 1] * sy + ty, latestFEMNodesData[n3 * 7 + 2] * sz + tz];
 
         const val = getFEMFacetQuantityValue(f, femQuantity);
         let normVal = 0.0;
@@ -3085,25 +3094,116 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
         }
         const [r, g, b] = sampleColormapRGB(normVal, femColormap);
 
-        const triVerts = [p0, p1, p2, p0, p2, p3];
-        for (let tv = 0; tv < 6; tv++) {
-            const pt = triVerts[tv];
-            solidVertexData[solidIdx++] = pt[0];
-            solidVertexData[solidIdx++] = pt[1];
-            solidVertexData[solidIdx++] = pt[2];
-            solidVertexData[solidIdx++] = r;
-            solidVertexData[solidIdx++] = g;
-            solidVertexData[solidIdx++] = b;
+        if (isLine) {
+            if (!showRebar) continue;
+            if (rebarWireframe || (femWireframe && rebarWireframe !== false)) {
+                // Wireframe: 2-vertex line
+                wireframeVertexData[wireIdx++] = p0[0];
+                wireframeVertexData[wireIdx++] = p0[1];
+                wireframeVertexData[wireIdx++] = p0[2];
+                wireframeVertexData[wireIdx++] = 0;
+                wireframeVertexData[wireIdx++] = 0;
+
+                wireframeVertexData[wireIdx++] = p1[0];
+                wireframeVertexData[wireIdx++] = p1[1];
+                wireframeVertexData[wireIdx++] = p1[2];
+                wireframeVertexData[wireIdx++] = 0;
+                wireframeVertexData[wireIdx++] = 0;
+            }
+
+            if (rebarSolid || (femSolid && rebarSolid !== false)) {
+                // Solid: 3D cross ribbons
+                const dx = p1[0] - p0[0];
+                const dy = p1[1] - p0[1];
+                const dz = p1[2] - p0[2];
+                const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+                const userRadius = (rebarRadius !== undefined && rebarRadius > 0) ? rebarRadius : 0.008;
+                const radius = Math.max(0.002, userRadius * sx);
+                if (len > 1e-6) {
+                    let nx_dir = 0, ny_dir = 0, nz_dir = 1;
+                    if (Math.abs(dz / len) > 0.9) {
+                        nx_dir = 1; ny_dir = 0; nz_dir = 0;
+                    }
+                    let ux = dy * nz_dir - dz * ny_dir;
+                    let uy = dz * nx_dir - dx * nz_dir;
+                    let uz = dx * ny_dir - dy * nx_dir;
+                    const uLen = Math.sqrt(ux * ux + uy * uy + uz * uz) || 1.0;
+                    ux = (ux / uLen) * radius;
+                    uy = (uy / uLen) * radius;
+                    uz = (uz / uLen) * radius;
+
+                    let vx = (dy * uz - dz * uy) / (radius || 1.0);
+                    let vy = (dz * ux - dx * uz) / (radius || 1.0);
+                    let vz = (dx * uy - dy * ux) / (radius || 1.0);
+                    const vLen = Math.sqrt(vx * vx + vy * vy + vz * vz) || 1.0;
+                    vx = (vx / vLen) * radius;
+                    vy = (vy / vLen) * radius;
+                    vz = (vz / vLen) * radius;
+
+                    const a0 = [p0[0] - ux, p0[1] - uy, p0[2] - uz];
+                    const a1 = [p0[0] + ux, p0[1] + uy, p0[2] + uz];
+                    const a2 = [p1[0] + ux, p1[1] + uy, p1[2] + uz];
+                    const a3 = [p1[0] - ux, p1[1] - uy, p1[2] - uz];
+
+                    const ribbon1Verts = [a0, a1, a2, a0, a2, a3];
+                    for (let tv = 0; tv < 6; tv++) {
+                        const pt = ribbon1Verts[tv];
+                        solidVertexData[solidIdx++] = pt[0];
+                        solidVertexData[solidIdx++] = pt[1];
+                        solidVertexData[solidIdx++] = pt[2];
+                        solidVertexData[solidIdx++] = r;
+                        solidVertexData[solidIdx++] = g;
+                        solidVertexData[solidIdx++] = b;
+                    }
+
+                    const b0 = [p0[0] - vx, p0[1] - vy, p0[2] - vz];
+                    const b1 = [p0[0] + vx, p0[1] + vy, p0[2] + vz];
+                    const b2 = [p1[0] + vx, p1[1] + vy, p1[2] + vz];
+                    const b3 = [p1[0] - vx, p1[1] - vy, p1[2] - vz];
+
+                    const ribbon2Verts = [b0, b1, b2, b0, b2, b3];
+                    for (let tv = 0; tv < 6; tv++) {
+                        const pt = ribbon2Verts[tv];
+                        solidVertexData[solidIdx++] = pt[0];
+                        solidVertexData[solidIdx++] = pt[1];
+                        solidVertexData[solidIdx++] = pt[2];
+                        solidVertexData[solidIdx++] = r;
+                        solidVertexData[solidIdx++] = g;
+                        solidVertexData[solidIdx++] = b;
+                    }
+                }
+            }
+            continue;
         }
 
-        const edgeVerts = [p0, p1, p1, p2, p2, p3, p3, p0];
-        for (let ev = 0; ev < 8; ev++) {
-            const pt = edgeVerts[ev];
-            wireframeVertexData[wireIdx++] = pt[0];
-            wireframeVertexData[wireIdx++] = pt[1];
-            wireframeVertexData[wireIdx++] = pt[2];
-            wireframeVertexData[wireIdx++] = 0;
-            wireframeVertexData[wireIdx++] = 0;
+        if (!showFEMMesh) continue;
+
+        const p2 = [latestFEMNodesData[n2 * 7 + 0] * sx + tx, latestFEMNodesData[n2 * 7 + 1] * sy + ty, latestFEMNodesData[n2 * 7 + 2] * sz + tz];
+        const p3 = [latestFEMNodesData[n3 * 7 + 0] * sx + tx, latestFEMNodesData[n3 * 7 + 1] * sy + ty, latestFEMNodesData[n3 * 7 + 2] * sz + tz];
+
+        if (femSolid) {
+            const triVerts = [p0, p1, p2, p0, p2, p3];
+            for (let tv = 0; tv < 6; tv++) {
+                const pt = triVerts[tv];
+                solidVertexData[solidIdx++] = pt[0];
+                solidVertexData[solidIdx++] = pt[1];
+                solidVertexData[solidIdx++] = pt[2];
+                solidVertexData[solidIdx++] = r;
+                solidVertexData[solidIdx++] = g;
+                solidVertexData[solidIdx++] = b;
+            }
+        }
+
+        if (femWireframe) {
+            const edgeVerts = [p0, p1, p1, p2, p2, p3, p3, p0];
+            for (let ev = 0; ev < 8; ev++) {
+                const pt = edgeVerts[ev];
+                wireframeVertexData[wireIdx++] = pt[0];
+                wireframeVertexData[wireIdx++] = pt[1];
+                wireframeVertexData[wireIdx++] = pt[2];
+                wireframeVertexData[wireIdx++] = 0;
+                wireframeVertexData[wireIdx++] = 0;
+            }
         }
     }
 
@@ -5580,7 +5680,7 @@ function render() {
         }
 
         // Draw 3D FEM Mesh in WebGPU
-        if (showFEMMesh) {
+        if (showFEMMesh || showRebar) {
             if (!gpuUniformBufferFEMSolid) {
                 gpuUniformBufferFEMSolid = gpuDevice.createBuffer({
                     size: 384,
@@ -6236,7 +6336,7 @@ function render() {
     }
 
     // Draw 3D FEM Mesh (Solid Surface & Wireframe Edges)
-    if (showFEMMesh) {
+    if (showFEMMesh || showRebar) {
         if (femSolid && femSolidBuffer && femSolidCount > 0) {
             gl.enable(gl.POLYGON_OFFSET_FILL);
             gl.polygonOffset(1.0, 1.0);
@@ -6575,10 +6675,14 @@ self.onmessage = async (e) => {
             if (data.gaugeOpacity !== undefined) gaugeOpacity = data.gaugeOpacity;
 
             let femChanged = false;
-            if (data.showFEMMesh !== undefined) showFEMMesh = data.showFEMMesh;
-            if (data.femSolid !== undefined) femSolid = data.femSolid;
-            if (data.femWireframe !== undefined) femWireframe = data.femWireframe;
+            if (data.showFEMMesh !== undefined) { showFEMMesh = data.showFEMMesh; femChanged = true; }
+            if (data.femSolid !== undefined) { femSolid = data.femSolid; femChanged = true; }
+            if (data.femWireframe !== undefined) { femWireframe = data.femWireframe; femChanged = true; }
             if (data.femResults !== undefined) femResults = data.femResults;
+            if (data.showRebar !== undefined) { showRebar = data.showRebar; femChanged = true; }
+            if (data.rebarSolid !== undefined) { rebarSolid = data.rebarSolid; femChanged = true; }
+            if (data.rebarWireframe !== undefined) { rebarWireframe = data.rebarWireframe; femChanged = true; }
+            if (data.rebarRadius !== undefined) { rebarRadius = data.rebarRadius; femChanged = true; }
             if (data.femQuantity !== undefined) {
                 if (femQuantity !== data.femQuantity) {
                     femQuantity = data.femQuantity;

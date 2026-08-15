@@ -591,6 +591,10 @@ template <typename T>
 void FEMSolver3D<T>::setNodesAndElements(const std::vector<FEMNode3D<T>>& nodes, const std::vector<FEMElement3D<T>>& elements, const MaterialTable3D& mat) {
     m_nodes.clear();
     m_elements.clear();
+    m_trusses.clear();
+    m_beams.clear();
+    m_rot_nodes.clear();
+    m_global_to_rot_node.clear();
     m_material_tables.clear();
     m_next_part_id = 1;
     appendNodesAndElements(nodes, elements, mat);
@@ -700,7 +704,12 @@ void FEMSolver3D<T>::addTruss(int n1, int n2, T area, const MaterialTable3D& mat
     truss.lsdyna_id = lsdyna_id;
 
     m_trusses.push_back(truss);
-    computeLumpedMasses();
+    T truss_density = (mat_id >= 0 && mat_id < static_cast<int>(m_material_tables.size()))
+                        ? static_cast<T>(m_material_tables[mat_id].density)
+                        : static_cast<T>(7850.0f);
+    T half_truss_mass = truss_density * truss.A * L0 * static_cast<T>(0.5f);
+    m_nodes[n1].m += half_truss_mass;
+    m_nodes[n2].m += half_truss_mass;
 }
 
 template <typename T>
@@ -736,13 +745,19 @@ void FEMSolver3D<T>::addBeam3D(int n1, int n2, T diameter, const MaterialTable3D
     if (L0 < static_cast<T>(1.0e-12f)) return;
 
     auto getOrCreateRotNode = [this](int global_node) -> int {
-        for (size_t i = 0; i < m_rot_nodes.size(); ++i) {
-            if (m_rot_nodes[i].global_node_id == global_node) return static_cast<int>(i);
+        if (global_node < 0 || global_node >= static_cast<int>(m_nodes.size())) return -1;
+        if (m_global_to_rot_node.size() < m_nodes.size()) {
+            m_global_to_rot_node.assign(m_nodes.size(), -1);
+        }
+        int existing = m_global_to_rot_node[global_node];
+        if (existing >= 0 && existing < static_cast<int>(m_rot_nodes.size())) {
+            return existing;
         }
         FEMNodeRotationalState3D<T> rnode{};
         rnode.global_node_id = global_node;
         int new_idx = static_cast<int>(m_rot_nodes.size());
         m_rot_nodes.push_back(rnode);
+        m_global_to_rot_node[global_node] = new_idx;
         return new_idx;
     };
 
@@ -792,7 +807,21 @@ void FEMSolver3D<T>::addBeam3D(int n1, int n2, T diameter, const MaterialTable3D
     beam.e2[2] = beam.e3[0] * e1[1] - beam.e3[1] * e1[0];
 
     m_beams.push_back(beam);
-    computeLumpedMasses();
+
+    T beam_density = (mat_id >= 0 && mat_id < static_cast<int>(m_material_tables.size()))
+                        ? static_cast<T>(m_material_tables[mat_id].density)
+                        : static_cast<T>(7850.0f);
+    T half_beam_mass = beam_density * beam.A * L0 * static_cast<T>(0.5f);
+    m_nodes[n1].m += half_beam_mass;
+    m_nodes[n2].m += half_beam_mass;
+
+    T I_rot_half = static_cast<T>(0.5f) * beam_density * ( (beam.A * beam.L0 * beam.L0 * beam.L0) / static_cast<T>(12.0f) + beam.I2 * beam.L0 );
+    if (rot1 >= 0 && rot1 < static_cast<int>(m_rot_nodes.size())) {
+        m_rot_nodes[rot1].I_rot += I_rot_half;
+    }
+    if (rot2 >= 0 && rot2 < static_cast<int>(m_rot_nodes.size())) {
+        m_rot_nodes[rot2].I_rot += I_rot_half;
+    }
 }
 
 template <typename T>

@@ -4007,6 +4007,209 @@ export class Telemetry3DViewport {
         parent.appendChild(tr);
     }
 
+    private buildRebarTableRow(parent: HTMLElement) {
+        const vpNode = this.getViewportNode();
+        const initShow = vpNode ? (vpNode.parameters.showRebar !== false) : true;
+        const initSol = vpNode ? (vpNode.parameters.rebarSolid !== false) : true;
+        const initWir = vpNode ? (vpNode.parameters.rebarWireframe !== false) : true;
+        const initRes = vpNode ? (vpNode.parameters.femResults !== false) : true;
+        const initQty = vpNode ? (vpNode.parameters.femQuantity || 'vonMises') : 'vonMises';
+        const initCmap = vpNode ? (vpNode.parameters.femColormap || 'plasma') : 'plasma';
+        const initRadius = vpNode ? (vpNode.parameters.rebarRadius ?? 0.008) : 0.008;
+
+        const tr = document.createElement('tr');
+        tr.style.borderBottom = '1px solid rgba(255,255,255,0.06)';
+
+        // Col 1: Vis Checkbox
+        const tdVis = document.createElement('td');
+        tdVis.style.padding = '3px 2px';
+        tdVis.style.textAlign = 'center';
+        const showCb = document.createElement('input');
+        showCb.type = 'checkbox';
+        showCb.id = this.getElId('viewport-rebar-mesh-cb');
+        showCb.checked = initShow;
+        showCb.onchange = () => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { showRebar: showCb.checked });
+                this.worker.postMessage({ type: 'setConfig', data: { showRebar: showCb.checked } });
+            }
+        };
+        this.bindEditingEvents(showCb);
+        tdVis.appendChild(showCb);
+        tr.appendChild(tdVis);
+
+        // Col 2: Layer Title
+        const tdLayer = document.createElement('td');
+        tdLayer.style.padding = '3px 4px';
+        const state = this.stateManager.getCurrentState();
+        let rebarCountText = '';
+        if (state) {
+            const femNodes = state.nodes.filter(n => n.type === 'FEMDomain3D' || n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D');
+            if (femNodes.length > 0) {
+                rebarCountText = `<span style="font-size: 8px; color: #ffaa00; font-weight: normal; margin-left: 4px;">(Beams & Trusses)</span>`;
+            }
+        }
+        tdLayer.innerHTML = `⛓️ <b>Rebar Mesh</b>${rebarCountText}`;
+        tr.appendChild(tdLayer);
+
+        // Col 3: SOL (Solid 3D Ribbons Toggle Button)
+        const tdSol = document.createElement('td');
+        tdSol.style.padding = '3px 2px';
+        tdSol.style.textAlign = 'center';
+        const solBtn = this.createToggleBtn('viewport-rebar-sol-btn', 'Sol', initSol, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { rebarSolid: v });
+                this.worker.postMessage({ type: 'setConfig', data: { rebarSolid: v } });
+                this.syncControls(true);
+            }
+        });
+        tdSol.appendChild(solBtn);
+        tr.appendChild(tdSol);
+
+        // Col 4: LINES (Wireframe Toggle Button)
+        const tdWir = document.createElement('td');
+        tdWir.style.padding = '3px 2px';
+        tdWir.style.textAlign = 'center';
+        const wirBtn = this.createToggleBtn('viewport-rebar-wir-btn', 'Wir', initWir, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { rebarWireframe: v });
+                this.worker.postMessage({ type: 'setConfig', data: { rebarWireframe: v } });
+                this.syncControls(true);
+            }
+        });
+        tdWir.appendChild(wirBtn);
+        tr.appendChild(tdWir);
+
+        // Col 5: RES (Results Toggle Button)
+        const tdRes = document.createElement('td');
+        tdRes.style.padding = '3px 2px';
+        tdRes.style.textAlign = 'center';
+        const resBtn = this.createToggleBtn('viewport-rebar-res-btn', 'Res', initRes, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { femResults: v });
+                this.worker.postMessage({ type: 'setConfig', data: { femResults: v } });
+                this.syncControls(true);
+            }
+        });
+        tdRes.appendChild(resBtn);
+        tr.appendChild(tdRes);
+
+        // Col 6: QTY (Quantity Selector Pill)
+        const tdQty = document.createElement('td');
+        tdQty.style.padding = '3px 4px';
+        const qtyPill = document.createElement('div');
+        qtyPill.id = this.getElId('viewport-rebar-qty-pill');
+        qtyPill.style.fontSize = '9px';
+        qtyPill.style.padding = '2px 4px';
+        qtyPill.style.borderRadius = '3px';
+        qtyPill.style.cursor = 'pointer';
+        qtyPill.style.background = 'rgba(255, 170, 0, 0.12)';
+        qtyPill.style.border = '1px solid rgba(255, 170, 0, 0.3)';
+        qtyPill.style.color = '#ffaa00';
+        qtyPill.style.fontWeight = '500';
+        qtyPill.textContent = initQty;
+        qtyPill.onclick = (e) => {
+            e.stopPropagation();
+            this.showQuantityPopover(qtyPill, initQty, 'fem', (newQ) => {
+                const vp = this.getViewportNode();
+                if (vp) {
+                    this.stateManager.updateNodeParametersInPlace(vp.id, { femQuantity: newQ, femAutoScale: true });
+                    this.worker.postMessage({ type: 'setConfig', data: { femQuantity: newQ, femAutoScale: true } });
+                    qtyPill.textContent = newQ;
+                }
+            });
+        };
+        tdQty.appendChild(qtyPill);
+        tr.appendChild(tdQty);
+
+        // Col 7: COLOR (Colormap Selector Pill)
+        const tdCmap = document.createElement('td');
+        tdCmap.style.padding = '3px 4px';
+        const cmapPill = document.createElement('div');
+        cmapPill.id = this.getElId('viewport-rebar-cmap-pill');
+        cmapPill.style.fontSize = '9px';
+        cmapPill.style.padding = '2px 4px';
+        cmapPill.style.borderRadius = '3px';
+        cmapPill.style.cursor = 'pointer';
+        cmapPill.style.background = 'rgba(255, 255, 255, 0.08)';
+        cmapPill.style.border = '1px solid rgba(255, 255, 255, 0.15)';
+        cmapPill.style.color = '#e0e0e0';
+        cmapPill.textContent = initCmap;
+        cmapPill.onclick = (e) => {
+            e.stopPropagation();
+            this.showColormapPopover(cmapPill, initCmap, (newC) => {
+                const vp = this.getViewportNode();
+                if (vp) {
+                    this.stateManager.updateNodeParametersInPlace(vp.id, { femColormap: newC });
+                    this.worker.postMessage({ type: 'setConfig', data: { femColormap: newC } });
+                    cmapPill.textContent = newC;
+                    this.syncControls(true);
+                }
+            });
+        };
+        tdCmap.appendChild(cmapPill);
+        tr.appendChild(tdCmap);
+
+        // Col 8: SCL / Auto-Scale
+        const tdScl = document.createElement('td');
+        tdScl.style.padding = '3px 2px';
+        tdScl.style.textAlign = 'center';
+        const initAuto = vpNode ? (vpNode.parameters.femAutoScale !== false) : true;
+        const autoBtn = this.createToggleBtn('viewport-rebar-auto-btn', 'A', initAuto, (v) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { femAutoScale: v });
+                this.worker.postMessage({ type: 'setConfig', data: { femAutoScale: v } });
+                this.syncControls(true);
+            }
+        });
+        tdScl.appendChild(autoBtn);
+        tr.appendChild(tdScl);
+
+        // Col 9: RADIUS / BAR DIAMETER
+        const tdRadius = document.createElement('td');
+        tdRadius.style.padding = '3px 4px';
+        tdRadius.style.textAlign = 'center';
+        const radSel = document.createElement('select');
+        radSel.id = this.getElId('viewport-rebar-radius-sel');
+        this.applySelectStyle(radSel);
+        radSel.style.width = '100%';
+        radSel.innerHTML = `
+            <option value="0.002">Ø4mm</option>
+            <option value="0.004">Ø8mm</option>
+            <option value="0.006">Ø12mm</option>
+            <option value="0.008">Ø16mm</option>
+            <option value="0.010">Ø20mm</option>
+            <option value="0.012">Ø24mm</option>
+            <option value="0.016">Ø32mm</option>
+            <option value="0.020">Ø40mm</option>
+        `;
+        this.selectOptionByNumericValue(radSel, initRadius);
+        this.bindEditingEvents(radSel, () => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                const val = Number(radSel.value);
+                this.stateManager.updateNodeParametersInPlace(vp.id, { rebarRadius: val });
+                this.worker.postMessage({ type: 'setConfig', data: { rebarRadius: val } });
+            }
+        });
+        tdRadius.appendChild(radSel);
+        tr.appendChild(tdRadius);
+
+        // Col 10: Delete / Empty
+        const tdDel = document.createElement('td');
+        tdDel.style.padding = '3px 2px';
+        tdDel.style.textAlign = 'center';
+        tdDel.innerHTML = '<span style="color:#555;">—</span>';
+        tr.appendChild(tdDel);
+
+        parent.appendChild(tr);
+    }
+
     private selectOptionByNumericValue(sel: HTMLSelectElement | null, val: number | string): void {
         if (!sel) return;
         const target = Number(val);
@@ -4450,8 +4653,10 @@ export class Telemetry3DViewport {
 
         const slicesEnabled = (vpNode.parameters.slices || []).some((s: any) => s.enabled !== false);
         const femVisible = vpNode.parameters.showFEMMesh !== false && (vpNode.parameters.femSolid !== false || vpNode.parameters.femWireframe !== false);
+        const rebarVisible = vpNode.parameters.showRebar !== false && (vpNode.parameters.rebarSolid !== false || vpNode.parameters.rebarWireframe !== false);
         updateChipStyle('slices', slicesEnabled);
         updateChipStyle('fem', femVisible);
+        updateChipStyle('rebar', rebarVisible);
         updateChipStyle('mpm', vpNode.parameters.showMPMParticles !== false);
         updateChipStyle('stl', vpNode.parameters.show_stl !== false);
         updateChipStyle('obstacles', vpNode.parameters.show_obstacles === true);
@@ -4869,6 +5074,10 @@ export class Telemetry3DViewport {
                     femSolid: vpNode.parameters.femSolid !== false,
                     femWireframe: vpNode.parameters.femWireframe !== false,
                     femResults: vpNode.parameters.femResults !== false,
+                    showRebar: vpNode.parameters.showRebar !== false,
+                    rebarSolid: vpNode.parameters.rebarSolid !== false,
+                    rebarWireframe: vpNode.parameters.rebarWireframe !== false,
+                    rebarRadius: vpNode.parameters.rebarRadius ?? 0.008,
                     femQuantity: vpNode.parameters.femQuantity || 'vonMises',
                     femColormap: vpNode.parameters.femColormap || 'plasma',
                     femAutoScale: vpNode.parameters.femAutoScale !== false,
@@ -4924,6 +5133,7 @@ export class Telemetry3DViewport {
             this.buildGaugeRow(this.staticListContainer);
             this.buildMPMParticlesTableRow(this.staticListContainer);
             this.buildFEMMeshTableRow(this.staticListContainer);
+            this.buildRebarTableRow(this.staticListContainer);
             this.buildLightingTableRow(this.staticListContainer);
         }
 
@@ -6547,6 +6757,20 @@ export class Telemetry3DViewport {
                 }
                 this.stateManager.updateNodeParametersInPlace(vp.id, updates);
                 this.worker.postMessage({ type: 'setConfig', data: { showFEMMesh: active, ...updates } });
+                this.syncControls(true);
+            }
+        }));
+
+        layerGroup.appendChild(createToggleChip('rebar', '⛓️ Rebar', 'Toggle Rebar / Beam Elements', (active) => {
+            const vp = this.getViewportNode();
+            if (vp) {
+                const updates: any = { showRebar: active };
+                if (active && vp.parameters.rebarSolid === false && vp.parameters.rebarWireframe === false) {
+                    updates.rebarSolid = true;
+                    updates.rebarWireframe = true;
+                }
+                this.stateManager.updateNodeParametersInPlace(vp.id, updates);
+                this.worker.postMessage({ type: 'setConfig', data: { showRebar: active, ...updates } });
                 this.syncControls(true);
             }
         }));

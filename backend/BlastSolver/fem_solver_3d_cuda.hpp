@@ -183,6 +183,20 @@ public:
         if (m_d_nodes) syncToDevice();
     }
 
+    void addTruss(int n1, int n2, T area, const MaterialTable3D& mat, T failure_strain = static_cast<T>(0.20f), int64_t lsdyna_id = -1) {
+        m_cpu_solver.addTruss(n1, n2, area, mat, failure_strain, lsdyna_id);
+    }
+
+    void addBeam3D(int n1, int n2, T diameter, const MaterialTable3D& mat, T failure_strain = static_cast<T>(0.20f), int64_t lsdyna_id = -1) {
+        m_cpu_solver.addBeam3D(n1, n2, diameter, mat, failure_strain, lsdyna_id);
+    }
+
+    std::vector<FEMTrussElement3D<T>>& getTrusses() { return m_cpu_solver.getTrusses(); }
+    const std::vector<FEMTrussElement3D<T>>& getTrusses() const { return m_cpu_solver.getTrusses(); }
+
+    std::vector<FEMBeam3DElement<T>>& getBeams() { return m_cpu_solver.getBeams(); }
+    const std::vector<FEMBeam3DElement<T>>& getBeams() const { return m_cpu_solver.getBeams(); }
+
     void syncToDevice();
     void syncToHost() const;
 
