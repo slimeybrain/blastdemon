@@ -9,14 +9,22 @@ set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 # Target the best available GPU architecture automatically
 set(CMAKE_CUDA_ARCHITECTURES native)
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --use_fast_math")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --use_fast_math --threads 0")
 
 
 # Apply strict compiler warnings and high optimizations
 if(MSVC)
     add_compile_options(/W4 /O2)
 else()
-    add_compile_options(-Wall -Wextra -O3 -lineinfo -g -march=native)
+    add_compile_options(
+        $<$<COMPILE_LANGUAGE:CXX>:-Wall>
+        $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
+        $<$<COMPILE_LANGUAGE:CXX>:-O3>
+        $<$<COMPILE_LANGUAGE:CXX>:-march=native>
+        $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+        $<$<COMPILE_LANGUAGE:CUDA>:-march=native>
+        $<$<COMPILE_LANGUAGE:CUDA>:--diag-suppress=177,550,20012>
+    )
 endif()
 
 # OpenMP for CPU solver parallelism
@@ -61,6 +69,7 @@ add_library(BlastSolverCore STATIC
     backend/BlastSolver/ls_dyna_reader_3d.cpp
     backend/BlastSolver/fem_contact_3d.cpp
     backend/BlastSolver/fem_fsi_coupler_3d.cpp
+    backend/BlastSolver/fem_fsi_coupler_3d_cuda.cu
     backend/BlastSolver/fem_solver_3d_cuda.cu
     # 2D CUDA solver
     backend/BlastSolver/cfd_solver_2d_cuda.cu
@@ -68,7 +77,10 @@ add_library(BlastSolverCore STATIC
     # 3D Solver
     backend/BlastSolver/ImmersedBoundary.cpp
     backend/BlastSolver/cfd_solver_3d.cpp
-    backend/BlastSolver/cfd_solver_3d_cuda.cu
+    backend/BlastSolver/cfd_solver_3d_cuda_f32_single.cu
+    backend/BlastSolver/cfd_solver_3d_cuda_f32_multi.cu
+    backend/BlastSolver/cfd_solver_3d_cuda_f64_single.cu
+    backend/BlastSolver/cfd_solver_3d_cuda_f64_multi.cu
     backend/BlastSolver/remapper_3d.cpp
     # VTK output writer
     backend/BlastSolver/VTKWriter.cpp
@@ -79,11 +91,10 @@ target_include_directories(BlastSolverCore PUBLIC
 )
 
 set_target_properties(BlastSolverCore PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
     POSITION_INDEPENDENT_CODE ON
 )
 target_compile_options(BlastSolverCore PRIVATE
-    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3 -lineinfo>
+    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3>
 )
 
 # OpenMP linkage for BlastSolverCore
@@ -108,7 +119,6 @@ endif()
 
 # Main Solver (Worker Executable)
 add_executable(BlastSolver backend/BlastSolver/main.cpp)
-set_target_properties(BlastSolver PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 target_link_libraries(BlastSolver PRIVATE BlastSolverCore)
 
 # Optional standalone test binaries (default: OFF, build with -DBUILD_TESTS=ON)
@@ -121,8 +131,7 @@ if(BUILD_TESTS)
     macro(add_test_executable_if_exists target_name source_file)
         if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${source_file}")
             add_executable(${target_name} ${source_file})
-            set_target_properties(${target_name} PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-            target_compile_options(${target_name} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3 -lineinfo>)
+            target_compile_options(${target_name} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3>)
             target_link_libraries(${target_name} PRIVATE BlastSolverCore)
         endif()
     endmacro()

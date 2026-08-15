@@ -24,12 +24,13 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'telemetry_channel', 'telemetry_interval_ms', 'vtk_step_interval',
         // 2D CFD keys
         'nr', 'nz', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
-        'charge_r', 'charge_z', 'charge_radius', 'charge_height',
+        'charge_r', 'charge_z', 'charge_radius', 'charge_height', 'charge_aspect_ratio',
         'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
         'ideal_gamma', 'ideal_rho_0', 'ideal_e_0', 'high_rho', 'ambient_rho', 'ambient_p',
         // 3D CFD keys
         'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
         'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
+        'charge_rot_x', 'charge_rot_y', 'charge_rot_z',
         'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
         'origin_x', 'origin_y', 'origin_z', 'dim_x', 'dim_y', 'dim_z', 'scale_factor',
         'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
@@ -50,7 +51,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
         // FEM keys
         'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
-        'femMinVal', 'femMaxVal', 'femOpacity',
+        'femMinVal', 'femMaxVal', 'femOpacity', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',
         // Concrete Core & Models (RHT, K&C, CSCM)
         'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
         'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
@@ -491,8 +492,12 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
 
         if (mass > 0) {
             if (flattenedParams['charge_shape'] === 'Cylinder') {
-                const height = flattenedParams['charge_height'] || 0.1;
-                flattenedParams['charge_radius'] = Math.sqrt(mass / (Math.PI * rho * height));
+                const ar = flattenedParams['charge_aspect_ratio'] || (flattenedParams['charge_height'] && flattenedParams['charge_radius'] ? flattenedParams['charge_height'] / (2.0 * flattenedParams['charge_radius']) : 1.0);
+                if (!flattenedParams['charge_radius'] || flattenedParams['charge_radius'] === 0.0) {
+                    flattenedParams['charge_radius'] = Math.cbrt(mass / (2.0 * Math.PI * rho * ar));
+                }
+                flattenedParams['charge_height'] = 2.0 * flattenedParams['charge_radius'] * ar;
+                flattenedParams['charge_aspect_ratio'] = ar;
             } else {
                 flattenedParams['charge_radius'] = Math.pow((3.0 * mass) / (4.0 * Math.PI * rho), 1.0/3.0);
             }
@@ -849,6 +854,239 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 flattenedParams['precision'] = solverNode3D.parameters.precision;
             }
         }
+    } else if (command === "INIT_FEM_FSI_3D") {
+        // 1. Serialize 3D CFD Solver part
+        const solverNode3D = state.nodes.find(n => n.type === 'CFDSolver3D');
+        if (solverNode3D) {
+            Object.entries(solverNode3D.parameters).forEach(([key, value]) => {
+                flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+            });
+            const stlConn = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'stl');
+            if (stlConn) {
+                const stlNode = state.nodes.find(n => n.id === stlConn.fromNode);
+                if (stlNode && stlNode.type === 'STLGeometry') {
+                    flattenedParams['stl_file'] = stlNode.parameters.stl_file || '';
+                    flattenedParams['geometry_hash'] = stlNode.parameters.geometry_hash || '';
+                    flattenedParams['voxelization_method'] = stlNode.parameters.voxelization_method || 'watertight_floodfill';
+                } else if (stlNode && stlNode.type === 'PrimitiveGeometry3D') {
+                    flattenedParams['primitives'] = stlNode.parameters.primitives || [];
+                    const primsStr = JSON.stringify(stlNode.parameters.primitives || []) + '_' + (stlNode.parameters.voxelization_method || 'watertight_floodfill');
+                    let hash = 5381;
+                    for (let i = 0; i < primsStr.length; i++) {
+                        hash = ((hash << 5) + hash) + primsStr.charCodeAt(i);
+                        hash = hash & hash;
+                    }
+                    flattenedParams['geometry_hash'] = 'prims_' + Math.abs(hash).toString(16);
+                    flattenedParams['voxelization_method'] = stlNode.parameters.voxelization_method || 'watertight_floodfill';
+                }
+            }
+            const meshConn3D = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'mesh');
+            if (meshConn3D) {
+                const rootDomainNode = state.nodes.find(n => n.id === meshConn3D.fromNode);
+                if (rootDomainNode && rootDomainNode.type === 'DomainMesh3D') {
+                    Object.entries(rootDomainNode.parameters).forEach(([key, value]) => {
+                        flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                    });
+                }
+            }
+            const airConn3D = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'air');
+            if (airConn3D) {
+                const airNode3D = state.nodes.find(n => n.id === airConn3D.fromNode);
+                if (airNode3D && airNode3D.type === 'Material' && airNode3D.parameters?.material_type === 'Air') {
+                    ['atm_pressure', 'atm_temperature', 'gamma'].forEach(key => {
+                        if (airNode3D.parameters[key] !== undefined) {
+                            flattenedParams[key] = numericKeys.includes(key) ? Number(airNode3D.parameters[key]) : airNode3D.parameters[key];
+                        }
+                    });
+                }
+            }
+            const chargeConn3D = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'charge');
+            if (chargeConn3D) {
+                const chargeNode3D = state.nodes.find(n => n.id === chargeConn3D.fromNode);
+                if (chargeNode3D) {
+                    Object.entries(chargeNode3D.parameters).forEach(([key, value]) => {
+                        flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                    });
+                    const matConn = state.connections.find(c => c.toNode === chargeNode3D.id && c.toPort === 'material');
+                    if (matConn) {
+                        const matNode = state.nodes.find(n => n.id === matConn.fromNode);
+                        if (matNode) {
+                            const matType = matNode.parameters?.material_type || 'Air';
+                            if (matType === 'JWL Charge') {
+                                flattenedParams['explosive_type'] = 'MaterialExplosive';
+                                ['composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'].forEach(key => {
+                                    if (matNode.parameters[key] !== undefined) {
+                                        flattenedParams[key] = numericKeys.includes(key) ? Number(matNode.parameters[key]) : matNode.parameters[key];
+                                    }
+                                });
+                            } else if (matType === 'Ideal Gas Charge') {
+                                flattenedParams['explosive_type'] = 'MaterialIdealGas';
+                                flattenedParams['gamma'] = Number(matNode.parameters?.ideal_gamma ?? 1.4);
+                                flattenedParams['rho'] = Number(matNode.parameters?.ideal_rho_0 ?? 1630.0);
+                                flattenedParams['detonation_energy'] = Number(matNode.parameters?.ideal_e_0 ?? 4290000);
+                            }
+                        }
+                    }
+                }
+            }
+            const detConn3D = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'detonator');
+            if (detConn3D) {
+                const detNode3D = state.nodes.find(n => n.id === detConn3D.fromNode);
+                if (detNode3D && detNode3D.type === 'DetonatorLocation3D') {
+                    Object.entries(detNode3D.parameters).forEach(([key, value]) => {
+                        flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                    });
+                }
+            }
+            const telemetryConns = state.connections.filter(c => c.fromNode === solverNode3D.id && c.fromPort === 'telemetry');
+            for (const conn of telemetryConns) {
+                const viewNode = state.nodes.find(n => n.id === conn.toNode);
+                if (viewNode && viewNode.type === 'Telemetry3DViewport') {
+                    if (viewNode.parameters.slices) {
+                        flattenedParams['slices'] = viewNode.parameters.slices;
+                    }
+                }
+            }
+        }
+
+        // 2. Serialize 3D FEM Domain part
+        const femDomain = state.nodes.find(n => n.type === 'FEMDomain3D');
+        if (femDomain) {
+            Object.entries(femDomain.parameters).forEach(([key, value]) => {
+                flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+            });
+
+            const femObjects: any[] = [];
+            const processedNodeIds = new Set<string>();
+
+            const processObjNode = (objNode: any) => {
+                if (!objNode || objNode.type !== 'FEMObject3D' || processedNodeIds.has(objNode.id)) return;
+                processedNodeIds.add(objNode.id);
+
+                const objParams: any = {};
+                Object.entries(objNode.parameters).forEach(([k, v]) => {
+                    objParams[k] = numericKeys.includes(k) ? Number(v) : v;
+                });
+                const impConn = state.connections.find(c => c.toNode === objNode.id && c.toPort === 'importer');
+                if (impConn) {
+                    const impNode = state.nodes.find(n => n.id === impConn.fromNode);
+                    if (impNode && impNode.type === 'LSDynaImporter3D') {
+                        objParams['k_file'] = impNode.parameters.k_file || '';
+                        objParams['mesh_source'] = 'LS-DYNA Keyword File';
+                        if (impNode.parameters.scale_factor !== undefined) {
+                            objParams['scale_factor'] = Number(impNode.parameters.scale_factor);
+                        }
+                    }
+                }
+                const matConn = state.connections.find(c => c.toNode === objNode.id && c.toPort === 'material');
+                if (matConn) {
+                    const matNode = state.nodes.find(n => n.id === matConn.fromNode);
+                    if (matNode) {
+                        Object.entries(matNode.parameters).forEach(([mk, mv]) => {
+                            objParams[mk] = numericKeys.includes(mk) ? Number(mv) : mv;
+                        });
+                    }
+                }
+                const meshSrc = objParams['mesh_source'] || 'Box Generator';
+                if (meshSrc === 'Cylinder Generator') {
+                    objParams['shape_type'] = 'Cylinder';
+                } else if (meshSrc === 'LS-DYNA Keyword File') {
+                    objParams['shape_type'] = 'LS-DYNA File';
+                } else {
+                    objParams['shape_type'] = 'Box';
+                }
+
+                if (objParams['failure_strain'] === undefined) objParams['failure_strain'] = 0.20;
+                if (objParams['tensile_failure_stress'] === undefined) objParams['tensile_failure_stress'] = 400.0e6;
+                femObjects.push(objParams);
+            };
+
+            const objConns = state.connections.filter(c => c.toNode === femDomain.id && c.toPort === 'objects');
+            for (const conn of objConns) {
+                const objNode = state.nodes.find(n => n.id === conn.fromNode);
+                processObjNode(objNode);
+            }
+
+            state.nodes.filter(n => n.type === 'FEMObject3D').forEach(processObjNode);
+            flattenedParams['fem_objects'] = femObjects;
+        }
+
+        // 3. Serialize FEMFSICoupler3D parameters
+        const couplerNode = state.nodes.find(n => n.type === 'FEMFSICoupler3D');
+        if (couplerNode) {
+            Object.entries(couplerNode.parameters).forEach(([key, value]) => {
+                flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+            });
+            const telemetryConns = state.connections.filter(c => c.fromNode === couplerNode.id && c.fromPort === 'telemetry');
+            for (const conn of telemetryConns) {
+                const viewNode = state.nodes.find(n => n.id === conn.toNode);
+                if (viewNode && viewNode.type === 'Telemetry3DViewport') {
+                    if (viewNode.parameters.slices) {
+                        flattenedParams['slices'] = viewNode.parameters.slices;
+                    }
+                    // Trace file output options and other view options
+                    Object.entries(viewNode.parameters).forEach(([key, value]) => {
+                        if (key !== 'slices' && key !== 'colormap' && key !== 'refresh_rate' && key !== 'log_scale' && key !== 'auto_scale' && key !== 'min_val' && key !== 'max_val' && key !== 'show_grid' && key !== 'interpolate') {
+                            flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                        }
+                    });
+                }
+            }
+        }
+
+        // Fallback: if slices not found from direct telemetry connections, search any Telemetry3DViewport in the model
+        if (!flattenedParams['slices']) {
+            const vpNode = state.nodes.find(n => n.type === 'Telemetry3DViewport');
+            if (vpNode && vpNode.parameters?.slices) {
+                flattenedParams['slices'] = vpNode.parameters.slices;
+            }
+        }
+
+        const cellSize = flattenedParams['cell_size'] || 0.01;
+        const xmin = flattenedParams['xmin'] !== undefined ? flattenedParams['xmin'] : (flattenedParams['x_min'] !== undefined ? flattenedParams['x_min'] : 0.0);
+        const xmax = flattenedParams['xmax'] !== undefined ? flattenedParams['xmax'] : (flattenedParams['x_max'] !== undefined ? flattenedParams['x_max'] : 1.0);
+        const ymin = flattenedParams['ymin'] !== undefined ? flattenedParams['ymin'] : (flattenedParams['y_min'] !== undefined ? flattenedParams['y_min'] : 0.0);
+        const ymax = flattenedParams['ymax'] !== undefined ? flattenedParams['ymax'] : (flattenedParams['y_max'] !== undefined ? flattenedParams['y_max'] : 1.0);
+        const zmin = flattenedParams['zmin'] !== undefined ? flattenedParams['zmin'] : (flattenedParams['z_min'] !== undefined ? flattenedParams['z_min'] : 0.0);
+        const zmax = flattenedParams['zmax'] !== undefined ? flattenedParams['zmax'] : (flattenedParams['z_max'] !== undefined ? flattenedParams['z_max'] : 1.0);
+        const dimX = xmax - xmin;
+        const dimY = ymax - ymin;
+        const dimZ = zmax - zmin;
+        flattenedParams['nx'] = Math.round(dimX / cellSize);
+        flattenedParams['ny'] = Math.round(dimY / cellSize);
+        flattenedParams['nz'] = Math.round(dimZ / cellSize);
+        flattenedParams['xmin'] = xmin;
+        flattenedParams['ymin'] = ymin;
+        flattenedParams['zmin'] = zmin;
+        flattenedParams['xmax'] = xmax;
+        flattenedParams['ymax'] = ymax;
+        flattenedParams['zmax'] = zmax;
+        flattenedParams['cell_size'] = cellSize;
+
+        const hasChargeConn3D = solverNode3D ? Boolean(state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'charge')) : false;
+        if (!hasChargeConn3D || flattenedParams['init_mode'] === 'Ideal Gas' || flattenedParams['explosive_type'] === 'MaterialIdealGas') {
+            flattenedParams['init_mode'] = 'Ideal Gas';
+            flattenedParams['is_ideal_gas'] = true;
+        }
+
+        if (!flattenedParams['gamma']) flattenedParams['gamma'] = 1.4;
+        const p = flattenedParams['atm_pressure'] || 101325.0;
+        const t = flattenedParams['atm_temperature'] || 288.0;
+        flattenedParams['ambient_rho'] = p / (287.058 * t);
+        if (!flattenedParams['device']) flattenedParams['device'] = 'cpu';
+
+        // 4. Ensure solver parameters from CFDSolver3D have precedence
+        if (solverNode3D) {
+            if (solverNode3D.parameters.device !== undefined) {
+                flattenedParams['device'] = solverNode3D.parameters.device;
+            }
+            if (solverNode3D.parameters.precision !== undefined) {
+                flattenedParams['precision'] = solverNode3D.parameters.precision;
+            }
+            if (solverNode3D.parameters.cfl !== undefined) {
+                flattenedParams['cfl'] = Number(solverNode3D.parameters.cfl);
+            }
+        }
     } else if (command === "INIT_MPM" || command === "INIT_2D_MPM") {
         const mpmDomain = state.nodes.find(n => n.type === 'MPMDomain2D');
         if (mpmDomain) {
@@ -1057,8 +1295,17 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
 
         const mass3D = flattenedParams['charge_mass'] !== undefined ? Number(flattenedParams['charge_mass']) : 0.0;
         const rho3D = flattenedParams['rho'] || 1630.0;
-        if (mass3D > 0 && (!flattenedParams['charge_radius'] || flattenedParams['charge_radius'] === 0.0)) {
-            flattenedParams['charge_radius'] = Math.pow((3.0 * mass3D) / (4.0 * Math.PI * rho3D), 1.0 / 3.0);
+        if (mass3D > 0) {
+            if (flattenedParams['charge_shape'] === 'Cylinder') {
+                const ar = flattenedParams['charge_aspect_ratio'] || (flattenedParams['charge_height'] && flattenedParams['charge_radius'] ? flattenedParams['charge_height'] / (2.0 * flattenedParams['charge_radius']) : 1.0);
+                if (!flattenedParams['charge_radius'] || flattenedParams['charge_radius'] === 0.0) {
+                    flattenedParams['charge_radius'] = Math.cbrt(mass3D / (2.0 * Math.PI * rho3D * ar));
+                }
+                flattenedParams['charge_height'] = 2.0 * flattenedParams['charge_radius'] * ar;
+                flattenedParams['charge_aspect_ratio'] = ar;
+            } else if (!flattenedParams['charge_radius'] || flattenedParams['charge_radius'] === 0.0) {
+                flattenedParams['charge_radius'] = Math.pow((3.0 * mass3D) / (4.0 * Math.PI * rho3D), 1.0 / 3.0);
+            }
         }
 
         if (!flattenedParams['gamma']) flattenedParams['gamma'] = 1.4;

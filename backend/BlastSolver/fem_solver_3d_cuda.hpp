@@ -178,6 +178,8 @@ public:
     size_t getSurfaceFacetCount() const { return m_num_surface_facets; }
     FEMFacet3D<T>* getSurfaceFacetsDevice() { return m_d_facets; }
     const FEMFacet3D<T>* getSurfaceFacetsDevice() const { return m_d_facets; }
+    FEMElement3D<T>* getElementsDevice() { return m_d_elements; }
+    const FEMElement3D<T>* getElementsDevice() const { return m_d_elements; }
     FEMNode3D<T>* getNodesDevice() { return m_d_nodes; }
     const FEMNode3D<T>* getNodesDevice() const { return m_d_nodes; }
 
@@ -190,6 +192,13 @@ public:
     T getMaxVelocity() const { return m_last_v_max; }
     T getMaxPlasticStrain() const { return m_last_ep_max; }
     T getMaxVonMisesStress() const { return m_last_vm_max; }
+
+    T computeStepSize(T cfl = static_cast<T>(0.3f));
+    T computeStableTimestep(T cfl = static_cast<T>(0.3f)) { return computeStepSize(cfl); }
+
+    void getMeshBoundingBox(T& min_x, T& max_x, T& min_y, T& max_y, T& min_z, T& max_z) const {
+        m_cpu_solver.getMeshBoundingBox(min_x, max_x, min_y, max_y, min_z, max_z);
+    }
 
     const FEMEnergyTracker<T>& getEnergyTracker() const { return m_energy_tracker; }
     FEMSolver3D<T>& getCpuSolver() { return m_cpu_solver; }
@@ -208,6 +217,7 @@ private:
     T* m_d_reduction_buffer{nullptr};
     int* m_d_node_active_count{nullptr};
     int* m_d_erosion_flag{nullptr};
+    int* m_h_erosion_flag_pinned{nullptr};
 
     // GPU Spatial Hash Grid for Contact
     int* m_d_cell_counts{nullptr};

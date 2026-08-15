@@ -243,12 +243,20 @@ document.addEventListener('click', async (e) => {
         const startPath = activeWs.activeModelId 
             ? (stateManager.getAllModels().find(m => m.id === activeWs.activeModelId)?.filename || "") 
             : "";
-        const browser = new HostFileBrowserModal(networkManager, 'open', '', (path) => {
-            networkManager.send({
-                command: "LOAD_MODEL_FILE",
-                modelId: activeWs.activeModelId || "default",
-                filePath: path
-            });
+        const browser = new HostFileBrowserModal(networkManager, {
+            title: 'Open Model File (Host)',
+            mode: 'open',
+            filters: [
+                { label: 'JSON Model Files (*.json)', extensions: ['.json'] },
+                { label: 'All Files (*.*)', extensions: ['*'] }
+            ],
+            onSelect: (path) => {
+                networkManager.send({
+                    command: "LOAD_MODEL_FILE",
+                    modelId: activeWs.activeModelId || "default",
+                    filePath: path
+                });
+            }
         });
         browser.open(startPath);
     }
@@ -274,13 +282,22 @@ document.addEventListener('click', async (e) => {
                     });
                 } else {
                     // Fall back to Save As
-                    const browser = new HostFileBrowserModal(networkManager, 'save', model.filename || `${model.name.toLowerCase().replace(/\s+/g, '_')}.json`, (path) => {
-                        networkManager.send({
-                            command: "SAVE_MODEL_FILE",
-                            modelId: model.id,
-                            filePath: path,
-                            fileContent: jsonString
-                        });
+                    const browser = new HostFileBrowserModal(networkManager, {
+                        title: 'Save Model As (Host)',
+                        mode: 'save',
+                        defaultFilename: model.filename || `${model.name.toLowerCase().replace(/\s+/g, '_')}.json`,
+                        filters: [
+                            { label: 'JSON Model Files (*.json)', extensions: ['.json'] },
+                            { label: 'All Files (*.*)', extensions: ['*'] }
+                        ],
+                        onSelect: (path) => {
+                            networkManager.send({
+                                command: "SAVE_MODEL_FILE",
+                                modelId: model.id,
+                                filePath: path,
+                                fileContent: jsonString
+                            });
+                        }
                     });
                     browser.open(model.filename || "");
                 }
@@ -301,13 +318,22 @@ document.addEventListener('click', async (e) => {
                     connections: model.connections
                 }, null, 2);
                 
-                const browser = new HostFileBrowserModal(networkManager, 'save', model.filename || `${model.name.toLowerCase().replace(/\s+/g, '_')}.json`, (path) => {
-                    networkManager.send({
-                        command: "SAVE_MODEL_FILE",
-                        modelId: model.id,
-                        filePath: path,
-                        fileContent: jsonString
-                    });
+                const browser = new HostFileBrowserModal(networkManager, {
+                    title: 'Save Model As (Host)',
+                    mode: 'save',
+                    defaultFilename: model.filename || `${model.name.toLowerCase().replace(/\s+/g, '_')}.json`,
+                    filters: [
+                        { label: 'JSON Model Files (*.json)', extensions: ['.json'] },
+                        { label: 'All Files (*.*)', extensions: ['*'] }
+                    ],
+                    onSelect: (path) => {
+                        networkManager.send({
+                            command: "SAVE_MODEL_FILE",
+                            modelId: model.id,
+                            filePath: path,
+                            fileContent: jsonString
+                        });
+                    }
                 });
                 browser.open(model.filename || "");
             }
@@ -453,64 +479,71 @@ document.addEventListener('click', async (e) => {
 
         const browser = new HostFileBrowserModal(
             networkManager,
-            'save',
-            `${activeWs.name.toLowerCase().replace(/\s+/g, '_')}_workspace.json`,
-            async (fullPath) => {
-                const lastSlash = fullPath.lastIndexOf('/');
-                const dirPath = lastSlash !== -1 ? fullPath.substring(0, lastSlash) : '.';
+            {
+                title: 'Save Workspace As (Host)',
+                mode: 'save',
+                defaultFilename: `${activeWs.name.toLowerCase().replace(/\s+/g, '_')}_workspace.json`,
+                filters: [
+                    { label: 'Workspace Files (*.json)', extensions: ['.json'] },
+                    { label: 'All Files (*.*)', extensions: ['*'] }
+                ],
+                onSelect: async (fullPath) => {
+                    const lastSlash = fullPath.lastIndexOf('/');
+                    const dirPath = lastSlash !== -1 ? fullPath.substring(0, lastSlash) : '.';
 
-                // 1. Create directory on host
-                networkManager.send({
-                    command: "CREATE_DIR",
-                    path: dirPath
-                });
+                    // 1. Create directory on host
+                    networkManager.send({
+                        command: "CREATE_DIR",
+                        path: dirPath
+                    });
 
-                // 2. Save each model referenced in this workspace to the directory
-                const models = stateManager.getWorkspaceModels();
-                models.forEach(model => {
-                    const modelFilename = `${model.name.toLowerCase().replace(/\s+/g, '_')}.json`;
-                    const modelPath = `${dirPath}/${modelFilename}`;
-                    const modelJson = JSON.stringify({
-                        name: model.name,
-                        nodes: model.nodes,
-                        connections: model.connections
+                    // 2. Save each model referenced in this workspace to the directory
+                    const models = stateManager.getWorkspaceModels();
+                    models.forEach(model => {
+                        const modelFilename = `${model.name.toLowerCase().replace(/\s+/g, '_')}.json`;
+                        const modelPath = `${dirPath}/${modelFilename}`;
+                        const modelJson = JSON.stringify({
+                            name: model.name,
+                            nodes: model.nodes,
+                            connections: model.connections
+                        }, null, 2);
+
+                        networkManager.send({
+                            command: "SAVE_MODEL_FILE",
+                            modelId: `ws-silent-${model.id}`,
+                            filePath: modelPath,
+                            fileContent: modelJson
+                        });
+                    });
+
+                    // 3. Save the self-contained workspace JSON
+                    const wsContent = JSON.stringify({
+                        type: "blast_workspace_file",
+                        version: 1,
+                        workspace: {
+                            id: activeWs.id,
+                            name: activeWs.name,
+                            layout: activeWs.layout,
+                            connections: activeWs.connections,
+                            modelIds: activeWs.modelIds,
+                            activeModelId: activeWs.activeModelId
+                        },
+                        models: models.map(m => ({
+                            id: m.id,
+                            name: m.name,
+                            filename: `${dirPath}/${m.name.toLowerCase().replace(/\s+/g, '_')}.json`,
+                            nodes: m.nodes,
+                            connections: m.connections
+                        }))
                     }, null, 2);
 
                     networkManager.send({
                         command: "SAVE_MODEL_FILE",
-                        modelId: `ws-silent-${model.id}`,
-                        filePath: modelPath,
-                        fileContent: modelJson
+                        modelId: "workspace",
+                        filePath: fullPath,
+                        fileContent: wsContent
                     });
-                });
-
-                // 3. Save the self-contained workspace JSON
-                const wsContent = JSON.stringify({
-                    type: "blast_workspace_file",
-                    version: 1,
-                    workspace: {
-                        id: activeWs.id,
-                        name: activeWs.name,
-                        layout: activeWs.layout,
-                        connections: activeWs.connections,
-                        modelIds: activeWs.modelIds,
-                        activeModelId: activeWs.activeModelId
-                    },
-                    models: models.map(m => ({
-                        id: m.id,
-                        name: m.name,
-                        filename: `${dirPath}/${m.name.toLowerCase().replace(/\s+/g, '_')}.json`,
-                        nodes: m.nodes,
-                        connections: m.connections
-                    }))
-                }, null, 2);
-
-                networkManager.send({
-                    command: "SAVE_MODEL_FILE",
-                    modelId: "workspace",
-                    filePath: fullPath,
-                    fileContent: wsContent
-                });
+                }
             }
         );
         browser.open(startPath);
@@ -524,14 +557,20 @@ document.addEventListener('click', async (e) => {
 
         const browser = new HostFileBrowserModal(
             networkManager,
-            'open',
-            '',
-            (path) => {
-                networkManager.send({
-                    command: "LOAD_MODEL_FILE",
-                    modelId: "workspace",
-                    filePath: path
-                });
+            {
+                title: 'Open Workspace File (Host)',
+                mode: 'open',
+                filters: [
+                    { label: 'Workspace Files (*.json)', extensions: ['.json'] },
+                    { label: 'All Files (*.*)', extensions: ['*'] }
+                ],
+                onSelect: (path) => {
+                    networkManager.send({
+                        command: "LOAD_MODEL_FILE",
+                        modelId: "workspace",
+                        filePath: path
+                    });
+                }
             }
         );
         browser.open(startPath);
@@ -689,8 +728,6 @@ function sendView3DConfig(targetId: string) {
     if (m) {
         const view3DNode = m.nodes.find(n => n.type === 'Telemetry3DViewport');
         if (view3DNode) {
-            const isConnected = m.connections.some(c => c.toNode === view3DNode.id || c.fromNode === view3DNode.id);
-            if (!isConnected) return;
             const showObstacles = view3DNode.parameters?.show_obstacles === true;
             const obstaclesQuantity = view3DNode.parameters?.obstacles_quantity || 'pressure';
             const showStl = view3DNode.parameters?.show_stl === true;
@@ -1769,6 +1806,10 @@ networkManager.onMessage(async (data) => {
             return;
         }
         let modelId = dataJson.modelId;
+        if (!modelId) {
+            const activeWs = stateManager.getActiveWorkspace();
+            modelId = activeWs?.activeModelId || stateManager.getAllModels()[0]?.id;
+        }
 
         if (dataJson.type === 'resource_pulse') {
             layoutManager.broadcastResourceData(dataJson);
@@ -1811,13 +1852,16 @@ networkManager.onMessage(async (data) => {
 
         if (dataJson.type === 'log') {
             if (modelId && model) {
+                if (dataJson.step !== undefined) {
+                    stateManager.setModelStep(modelId, dataJson.step);
+                }
                 const solverNodes = model.nodes.filter(n => n.type === targetType || n.type === 'FEMDomain3D' || n.type === 'FEMFSICoupler3D' || n.type === 'CFDSolver3D' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver' || n.type === 'MPMDomain3D' || n.type === 'MPMDomain2D' || n.type === 'FSICoupler3D' || n.type === 'FSICoupler2D');
-                solverNodes.forEach(sn => stateManager.pushTelemetry(sn.id, dataJson.message, modelId));
+                solverNodes.forEach(sn => stateManager.pushTelemetry(sn.id, dataJson, modelId));
                 if (dataJson.level === 'ERROR') {
                     stateManager.setModelStatus(modelId, 'ERROR');
                 }
             } else {
-                stateManager.pushTelemetry(dataJson.message);
+                stateManager.pushTelemetry(dataJson);
             }
             return;
         }
@@ -1826,6 +1870,9 @@ networkManager.onMessage(async (data) => {
             if (modelId) {
                 stateManager.setModelProgress(modelId, dataJson.percent);
                 stateManager.setModelSimTime(modelId, dataJson.sim_time);
+                if (dataJson.step !== undefined) {
+                    stateManager.setModelStep(modelId, dataJson.step);
+                }
                 
                 if (dataJson.percent === 100) {
                     const currentStatus = stateManager.getModelStatus(modelId);
@@ -1870,6 +1917,9 @@ networkManager.onMessage(async (data) => {
         if (dataJson.type === 'TELEMETRY' || dataJson.type === 'TELEMETRY_2D' || dataJson.type === 'TELEMETRY_3D' || dataJson.type === 'TELEMETRY_MPM_2D' || dataJson.type === 'TELEMETRY_FEM_3D') {
             if (modelId) {
                 stateManager.setModelSimTime(modelId, dataJson.time);
+                if (dataJson.step !== undefined) {
+                    stateManager.setModelStep(modelId, dataJson.step);
+                }
                 const currentStatus = stateManager.getModelStatus(modelId);
 
                 if (dataJson.time === 0 && currentStatus === 'UNINITIALIZED') {

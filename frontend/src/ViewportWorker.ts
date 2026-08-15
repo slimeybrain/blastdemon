@@ -2707,14 +2707,48 @@ function getSphereWireframeVertices(cx: number, cy: number, cz: number, rx: numb
     return verts;
 }
 
-function getCylinderVertices(cx: number, cy: number, cz: number, rx: number, ry: number, rz: number): number[] {
+function rotatePointEuler(u: number, v: number, w: number, ax: number, ay: number, az: number): [number, number, number] {
+    if (ax === 0 && ay === 0 && az === 0) return [u, v, w];
+    const cx = Math.cos(ax), sx = Math.sin(ax);
+    const cy = Math.cos(ay), sy = Math.sin(ay);
+    const cz = Math.cos(az), sz = Math.sin(az);
+
+    // Step 1: Rotate by +ax around X
+    const u1 = u;
+    const v1 = cx * v - sx * w;
+    const w1 = sx * v + cx * w;
+
+    // Step 2: Rotate by +ay around Y
+    const u2 = cy * u1 + sy * w1;
+    const v2 = v1;
+    const w2 = -sy * u1 + cy * w1;
+
+    // Step 3: Rotate by +az around Z
+    const u_rot = cz * u2 - sz * v2;
+    const v_rot = sz * u2 + cz * v2;
+    const w_rot = w2;
+
+    return [u_rot, v_rot, w_rot];
+}
+
+function getCylinderVertices(cx: number, cy: number, cz: number, r: number, h: number, ax: number, ay: number, az: number, dimX: number, dimY: number, dimZ: number): number[] {
     const verts: number[] = [];
     const segments = 24;
+    const halfH = h * 0.5;
 
     const addTri = (p1: number[], p2: number[], p3: number[]) => {
         verts.push(...p1, 0, 0, 0, 0);
         verts.push(...p2, 0, 0, 0, 0);
         verts.push(...p3, 0, 0, 0, 0);
+    };
+
+    const transformPoint = (u: number, v: number, w: number): number[] => {
+        const [ru, rv, rw] = rotatePointEuler(u, v, w, ax, ay, az);
+        return [
+            cx + ru / dimX,
+            cy + rv / dimY,
+            cz + rw / dimZ
+        ];
     };
 
     const topCircle: number[][] = [];
@@ -2724,8 +2758,8 @@ function getCylinderVertices(cx: number, cy: number, cz: number, rx: number, ry:
         const theta = (i * 2 * Math.PI) / segments;
         const cosT = Math.cos(theta);
         const sinT = Math.sin(theta);
-        topCircle.push([cx + rx * cosT, cy + ry * sinT, cz + rz]);
-        bottomCircle.push([cx + rx * cosT, cy + ry * sinT, cz - rz]);
+        topCircle.push(transformPoint(r * cosT, r * sinT, halfH));
+        bottomCircle.push(transformPoint(r * cosT, r * sinT, -halfH));
     }
 
     // Sides
@@ -2740,13 +2774,13 @@ function getCylinderVertices(cx: number, cy: number, cz: number, rx: number, ry:
     }
 
     // Top Cap
-    const topCenter = [cx, cy, cz + rz];
+    const topCenter = transformPoint(0, 0, halfH);
     for (let i = 0; i < segments; i++) {
         addTri(topCenter, topCircle[i], topCircle[i + 1]);
     }
 
     // Bottom Cap
-    const bottomCenter = [cx, cy, cz - rz];
+    const bottomCenter = transformPoint(0, 0, -halfH);
     for (let i = 0; i < segments; i++) {
         addTri(bottomCenter, bottomCircle[i + 1], bottomCircle[i]);
     }
@@ -2754,44 +2788,46 @@ function getCylinderVertices(cx: number, cy: number, cz: number, rx: number, ry:
     return verts;
 }
 
-function getCylinderWireframeVertices(cx: number, cy: number, cz: number, rx: number, ry: number, rz: number): number[] {
+function getCylinderWireframeVertices(cx: number, cy: number, cz: number, r: number, h: number, ax: number, ay: number, az: number, dimX: number, dimY: number, dimZ: number): number[] {
     const verts: number[] = [];
     const segments = 32;
+    const halfH = h * 0.5;
 
     const addLine = (p1: number[], p2: number[]) => {
         verts.push(...p1, 0, 0);
         verts.push(...p2, 0, 0);
     };
 
-    // Top Ring (at z = cz + rz)
+    const transformPoint = (u: number, v: number, w: number): number[] => {
+        const [ru, rv, rw] = rotatePointEuler(u, v, w, ax, ay, az);
+        return [
+            cx + ru / dimX,
+            cy + rv / dimY,
+            cz + rw / dimZ
+        ];
+    };
+
+    // Top & Bottom Rings
+    const topRing: number[][] = [];
+    const bottomRing: number[][] = [];
     for (let i = 0; i < segments; i++) {
-        const theta1 = (i * 2 * Math.PI) / segments;
-        const theta2 = ((i + 1) * 2 * Math.PI) / segments;
-        addLine(
-            [cx + rx * Math.cos(theta1), cy + ry * Math.sin(theta1), cz + rz],
-            [cx + rx * Math.cos(theta2), cy + ry * Math.sin(theta2), cz + rz]
-        );
+        const theta = (i * 2 * Math.PI) / segments;
+        topRing.push(transformPoint(r * Math.cos(theta), r * Math.sin(theta), halfH));
+        bottomRing.push(transformPoint(r * Math.cos(theta), r * Math.sin(theta), -halfH));
     }
 
-    // Bottom Ring (at z = cz - rz)
     for (let i = 0; i < segments; i++) {
-        const theta1 = (i * 2 * Math.PI) / segments;
-        const theta2 = ((i + 1) * 2 * Math.PI) / segments;
-        addLine(
-            [cx + rx * Math.cos(theta1), cy + ry * Math.sin(theta1), cz - rz],
-            [cx + rx * Math.cos(theta2), cy + ry * Math.sin(theta2), cz - rz]
-        );
+        const next = (i + 1) % segments;
+        addLine(topRing[i], topRing[next]);
+        addLine(bottomRing[i], bottomRing[next]);
     }
 
     // 4 Vertical Pillars connecting them
-    const angles = [0, Math.PI / 2, Math.PI, 3 * Math.PI / 2];
-    for (const angle of angles) {
-        const cosA = Math.cos(angle);
-        const sinA = Math.sin(angle);
-        addLine(
-            [cx + rx * cosA, cy + ry * sinA, cz - rz],
-            [cx + rx * cosA, cy + ry * sinA, cz + rz]
-        );
+    const pillarAngles = [0, Math.PI / 2, Math.PI, 3 * Math.PI / 2];
+    for (const angle of pillarAngles) {
+        const pBot = transformPoint(r * Math.cos(angle), r * Math.sin(angle), -halfH);
+        const pTop = transformPoint(r * Math.cos(angle), r * Math.sin(angle), halfH);
+        addLine(pBot, pTop);
     }
 
     return verts;
@@ -3263,7 +3299,7 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
     mpmParticlesCount = nParticles;
 }
 
-function getBoxVertices(x0: number, x1: number, y0: number, y1: number, z0: number, z1: number): number[] {
+function getRotatedBoxVertices(cx: number, cy: number, cz: number, lx: number, ly: number, lz: number, ax: number, ay: number, az: number, dimX: number, dimY: number, dimZ: number): number[] {
     const verts: number[] = [];
     const addTri = (p1: number[], p2: number[], p3: number[]) => {
         verts.push(...p1, 0, 0, 0, 0);
@@ -3271,9 +3307,21 @@ function getBoxVertices(x0: number, x1: number, y0: number, y1: number, z0: numb
         verts.push(...p3, 0, 0, 0, 0);
     };
 
+    const transformPoint = (u: number, v: number, w: number): number[] => {
+        const [ru, rv, rw] = rotatePointEuler(u, v, w, ax, ay, az);
+        return [
+            cx + ru / dimX,
+            cy + rv / dimY,
+            cz + rw / dimZ
+        ];
+    };
+
+    const hx = lx * 0.5, hy = ly * 0.5, hz = lz * 0.5;
     const c = [
-        [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],
-        [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]
+        transformPoint(-hx, -hy, -hz), transformPoint(+hx, -hy, -hz),
+        transformPoint(+hx, +hy, -hz), transformPoint(-hx, +hy, -hz),
+        transformPoint(-hx, -hy, +hz), transformPoint(+hx, -hy, +hz),
+        transformPoint(+hx, +hy, +hz), transformPoint(-hx, +hy, +hz)
     ];
 
     addTri(c[0], c[2], c[1]); addTri(c[0], c[3], c[2]);
@@ -3286,16 +3334,28 @@ function getBoxVertices(x0: number, x1: number, y0: number, y1: number, z0: numb
     return verts;
 }
 
-function getBoxWireframeVertices(x0: number, x1: number, y0: number, y1: number, z0: number, z1: number): number[] {
+function getRotatedBoxWireframeVertices(cx: number, cy: number, cz: number, lx: number, ly: number, lz: number, ax: number, ay: number, az: number, dimX: number, dimY: number, dimZ: number): number[] {
     const verts: number[] = [];
     const addLine = (p1: number[], p2: number[]) => {
         verts.push(...p1, 0, 0);
         verts.push(...p2, 0, 0);
     };
 
+    const transformPoint = (u: number, v: number, w: number): number[] => {
+        const [ru, rv, rw] = rotatePointEuler(u, v, w, ax, ay, az);
+        return [
+            cx + ru / dimX,
+            cy + rv / dimY,
+            cz + rw / dimZ
+        ];
+    };
+
+    const hx = lx * 0.5, hy = ly * 0.5, hz = lz * 0.5;
     const c = [
-        [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],
-        [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]
+        transformPoint(-hx, -hy, -hz), transformPoint(+hx, -hy, -hz),
+        transformPoint(+hx, +hy, -hz), transformPoint(-hx, +hy, -hz),
+        transformPoint(-hx, -hy, +hz), transformPoint(+hx, -hy, +hz),
+        transformPoint(+hx, +hy, +hz), transformPoint(-hx, +hy, +hz)
     ];
 
     addLine(c[0], c[1]); addLine(c[1], c[2]); addLine(c[2], c[3]); addLine(c[3], c[0]);
@@ -3304,6 +3364,7 @@ function getBoxWireframeVertices(x0: number, x1: number, y0: number, y1: number,
 
     return verts;
 }
+
 function updateChargeGeometry() {
     if (!chargeData) {
         chargeCount = 0;
@@ -3314,7 +3375,6 @@ function updateChargeGeometry() {
     const dimX = getDimX();
     const dimY = getDimY();
     const dimZ = getDimZ();
-    const maxSize = Math.max(dimX, dimY, dimZ);
 
     const cx = Number(chargeData.x ?? (xmin + dimX * 0.5));
     const cy = Number(chargeData.y ?? (ymin + dimY * 0.5));
@@ -3324,42 +3384,34 @@ function updateChargeGeometry() {
     const py = normY(cy);
     const pz = normZ(cz);
 
+    const deg2rad = Math.PI / 180.0;
+    const ax = Number(chargeData.rot_x ?? 0.0) * deg2rad;
+    const ay = Number(chargeData.rot_y ?? 0.0) * deg2rad;
+    const az = Number(chargeData.rot_z ?? 0.0) * deg2rad;
+
     const shape = chargeData.shape || 'Sphere';
     let solidVerts: number[] = [];
     let wireVerts: number[] = [];
 
-if (shape === 'Block') {
-    // Preserve original aspect ratios using per‑axis domain sizes
-    const lx = Number(chargeData.lx ?? 0.2);
-    const ly = Number(chargeData.ly ?? 0.2);
-    const lz = Number(chargeData.lz ?? 0.2);
-    const x0 = px - (lx * 0.5) / dimX;
-    const x1 = px + (lx * 0.5) / dimX;
-    const y0 = py - (ly * 0.5) / dimY;
-    const y1 = py + (ly * 0.5) / dimY;
-    const z0 = pz - (lz * 0.5) / dimZ;
-    const z1 = pz + (lz * 0.5) / dimZ;
-    solidVerts = getBoxVertices(x0, x1, y0, y1, z0, z1);
-    wireVerts = getBoxWireframeVertices(x0, x1, y0, y1, z0, z1);
-} else if (shape === 'Cylinder') {
-    const r = Number(chargeData.radius ?? 0.1);
-    const h = Number(chargeData.height ?? 0.2);
-    // Use per‑axis scaling for radius and height
-    const rx = r / dimX;
-    const ry = r / dimY;
-    const rz = (h * 0.5) / dimZ;
-    solidVerts = getCylinderVertices(px, py, pz, rx, ry, rz);
-    wireVerts = getCylinderWireframeVertices(px, py, pz, rx, ry, rz);
-} else {
-    // Sphere: scale radius per-axis so it renders as a true sphere in world space
-    // regardless of non-cubic domain aspect ratios
-    const r = Number(chargeData.radius ?? 0.1);
-    const rx = r / dimX;
-    const ry = r / dimY;
-    const rz = r / dimZ;
-    solidVerts = getSphereVertices(px, py, pz, rx, ry, rz);
-    wireVerts = getSphereWireframeVertices(px, py, pz, rx, ry, rz);
-}
+    if (shape === 'Block') {
+        const lx = Number(chargeData.lx ?? 0.2);
+        const ly = Number(chargeData.ly ?? 0.2);
+        const lz = Number(chargeData.lz ?? 0.2);
+        solidVerts = getRotatedBoxVertices(px, py, pz, lx, ly, lz, ax, ay, az, dimX, dimY, dimZ);
+        wireVerts = getRotatedBoxWireframeVertices(px, py, pz, lx, ly, lz, ax, ay, az, dimX, dimY, dimZ);
+    } else if (shape === 'Cylinder') {
+        const r = Number(chargeData.radius ?? 0.1);
+        const h = Number(chargeData.height ?? 0.2);
+        solidVerts = getCylinderVertices(px, py, pz, r, h, ax, ay, az, dimX, dimY, dimZ);
+        wireVerts = getCylinderWireframeVertices(px, py, pz, r, h, ax, ay, az, dimX, dimY, dimZ);
+    } else {
+        const r = Number(chargeData.radius ?? 0.1);
+        const rx = r / dimX;
+        const ry = r / dimY;
+        const rz = r / dimZ;
+        solidVerts = getSphereVertices(px, py, pz, rx, ry, rz);
+        wireVerts = getSphereWireframeVertices(px, py, pz, rx, ry, rz);
+    }
 
     if (gl) {
         if (!chargeBuffer) chargeBuffer = gl.createBuffer();
@@ -3980,9 +4032,15 @@ function handleFrame(buffer: ArrayBuffer) {
         let sliceMinY = minY;
         let sliceMaxY = maxY;
 
+        const isFraction = qty === 'species1' || qty === 'species2' || qty === 'species3' || qty === 'solid' || qty === 'plastic_strain' || qty === 'plasticStrain' || qty === 'damage' || qty === 'has_failed';
+        const defaultRange = config.min_val !== undefined && config.max_val !== undefined ? [config.min_val, config.max_val] : (quantityRanges[qty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0]);
+
         if (sliceAutoScale) {
             if (sliceMin < sliceMax) {
-                if (logVal && sliceMax > 0) {
+                if (isFraction && sliceMax <= 1e-4) {
+                    sliceMinY = defaultRange[0];
+                    sliceMaxY = defaultRange[1];
+                } else if (logVal && sliceMax > 0) {
                     const dynamicFloor = sliceMax / 1000000.0;
                     const effMin = (isFinite(slicePosMin) && slicePosMin > dynamicFloor) ? slicePosMin : dynamicFloor;
                     sliceMinY = effMin;
@@ -3991,18 +4049,13 @@ function handleFrame(buffer: ArrayBuffer) {
                     sliceMinY = sliceMin;
                     sliceMaxY = sliceMax;
                 }
-            } else if (isFinite(sliceMin)) {
-                sliceMinY = sliceMin > 0 ? sliceMin * 0.99 : sliceMin - 1.0;
-                sliceMaxY = sliceMin > 0 ? sliceMin * 1.01 : sliceMin + 1.0;
             } else {
-                const range = config.min_val !== undefined && config.max_val !== undefined ? [config.min_val, config.max_val] : (quantityRanges[qty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0]);
-                sliceMinY = range[0];
-                sliceMaxY = range[1];
+                sliceMinY = defaultRange[0];
+                sliceMaxY = defaultRange[1];
             }
         } else {
-            const range = config.min_val !== undefined && config.max_val !== undefined ? [config.min_val, config.max_val] : (quantityRanges[qty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0]);
-            sliceMinY = range[0];
-            sliceMaxY = range[1];
+            sliceMinY = defaultRange[0];
+            sliceMaxY = defaultRange[1];
         }
 
         slice.minY = sliceMinY;
@@ -4011,13 +4064,10 @@ function handleFrame(buffer: ArrayBuffer) {
         slice.useLogScale = logVal;
         slice.interpolate = interpVal;
 
-        if (sliceMin < sliceMax) {
+        if (sliceMin < sliceMax && (!isFraction || sliceMax > 1e-4)) {
             sliceRanges.push({ min: sliceMin, max: sliceMax });
-        } else if (isFinite(sliceMin)) {
-            sliceRanges.push({ min: sliceMin > 0 ? sliceMin * 0.99 : sliceMin - 1.0, max: sliceMin > 0 ? sliceMin * 1.01 : sliceMin + 1.0 });
         } else {
-            const range = config.min_val !== undefined && config.max_val !== undefined ? [config.min_val, config.max_val] : (quantityRanges[qty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0]);
-            sliceRanges.push({ min: range[0], max: range[1] });
+            sliceRanges.push({ min: defaultRange[0], max: defaultRange[1] });
         }
     }
 
@@ -4035,15 +4085,15 @@ function handleFrame(buffer: ArrayBuffer) {
                 if (v > sliceMax) sliceMax = v;
             }
         }
-        if (sliceMin < sliceMax) {
+        const focusedConfig = slicesConfig[focusedSliceIndex] || slicesConfig[0] || {};
+        const focusedQty = focusedConfig.quantities?.[0] || 'pressure';
+        const focusedIsFraction = focusedQty === 'species1' || focusedQty === 'species2' || focusedQty === 'species3' || focusedQty === 'solid' || focusedQty === 'plastic_strain' || focusedQty === 'plasticStrain' || focusedQty === 'damage' || focusedQty === 'has_failed';
+        const focusedDefaultRange = focusedConfig.min_val !== undefined && focusedConfig.max_val !== undefined ? [focusedConfig.min_val, focusedConfig.max_val] : (quantityRanges[focusedQty] || DEFAULT_QUANTITY_RANGES[focusedQty] || [0.0, 1.0]);
+
+        if (sliceMin < sliceMax && (!focusedIsFraction || sliceMax > 1e-4)) {
             self.postMessage({ type: 'currentRange', min: sliceMin, max: sliceMax });
-        } else if (isFinite(sliceMin)) {
-            self.postMessage({ type: 'currentRange', min: sliceMin > 0 ? sliceMin * 0.99 : sliceMin - 1.0, max: sliceMin > 0 ? sliceMin * 1.01 : sliceMin + 1.0 });
         } else {
-            const focusedConfig = slicesConfig[focusedSliceIndex] || slicesConfig[0] || {};
-            const focusedQty = focusedConfig.quantities?.[0] || 'pressure';
-            const range = focusedConfig.min_val !== undefined && focusedConfig.max_val !== undefined ? [focusedConfig.min_val, focusedConfig.max_val] : (quantityRanges[focusedQty] || DEFAULT_QUANTITY_RANGES[focusedQty] || [0.0, 1.0]);
-            self.postMessage({ type: 'currentRange', min: range[0], max: range[1] });
+            self.postMessage({ type: 'currentRange', min: focusedDefaultRange[0], max: focusedDefaultRange[1] });
         }
     }
 

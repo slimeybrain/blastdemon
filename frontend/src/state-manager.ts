@@ -57,6 +57,52 @@ export function syncFEMObjectParameters(node: Node, parameters: Record<string, a
     }
 }
 
+const HARDWARE_TARGET_NODE_TYPES = new Set([
+    'CFDSolver3D',
+    'FEMDomain3D',
+    'MPMDomain3D',
+    'HardwareConfig',
+    'CFDSolver2D',
+    'MPMDomain2D'
+]);
+
+export function syncCoupledHardwareParameters(model: Model, updatedNode: Node, updatedKey?: string): boolean {
+    if (!HARDWARE_TARGET_NODE_TYPES.has(updatedNode.type)) {
+        return false;
+    }
+    if (updatedKey !== 'device' && updatedKey !== 'precision' && updatedKey !== undefined) {
+        return false;
+    }
+
+    const deviceVal = updatedNode.parameters['device'];
+    const precVal = updatedNode.parameters['precision'];
+    let changed = false;
+
+    for (const node of model.nodes) {
+        if (node.id === updatedNode.id) continue;
+        if (HARDWARE_TARGET_NODE_TYPES.has(node.type)) {
+            if (deviceVal !== undefined && node.parameters['device'] !== undefined && node.parameters['device'] !== deviceVal) {
+                node.parameters['device'] = deviceVal;
+                changed = true;
+            }
+            if (precVal !== undefined && node.parameters['precision'] !== undefined && node.parameters['precision'] !== precVal) {
+                node.parameters['precision'] = precVal;
+                changed = true;
+            }
+        }
+    }
+    return changed;
+}
+
+
+export const NON_PHYSICAL_NODE_TYPES = new Set<NodeType>([
+    'TelemetryText',
+    'TelemetryGraph',
+    'TelemetryContour',
+    'Telemetry3DViewport',
+    'VirtualGauges',
+    'VTKOutput'
+]);
 
 const DISPLAY_ONLY_KEYS = new Set([
     'colormap', 'quantity_colormaps', 'quantity_ranges', 'slices', 'log_scale', 'auto_scale',
@@ -72,7 +118,15 @@ const DISPLAY_ONLY_KEYS = new Set([
     'obstacles_solid', 'obstacles_lighting', 'obstacles_opacity', 'obstacles_quantity',
     'obstacles_auto_scale', 'obstacles_log_scale', 'obstacles_show_colorbar',
     'obstacles_interpolate', 'obstacles_min_val', 'obstacles_max_val', 'focusedSliceIndex',
-    'color', 'x_axis_mode', 'plot_stride'
+    'color', 'x_axis_mode', 'plot_stride', 'refresh_rate',
+    'showFEMMesh', 'femSolid', 'femWireframe', 'femResults', 'femQuantity', 'femColormap',
+    'femOpacity', 'femLighting', 'femAutoScale', 'femLogScale', 'femShowColorbar',
+    'femMinVal', 'femMaxVal',
+    'show_charge', 'charge_solid', 'charge_wireframe', 'charge_lighting', 'charge_opacity',
+    'show_grid_user_enabled', 'show_grid_box_user_enabled',
+    'camera_pos', 'camera_target', 'camera_mode', 'persp_fov', 'ortho_scale',
+    'camera_fov', 'camera_pitch', 'camera_yaw', 'camera_distance',
+    'telemetry_channel', 'downsample_stride', 'show_gridlines', 'selected_probe_id', 'active_tab'
 ]);
 
 export class StateManager {
@@ -88,10 +142,10 @@ export class StateManager {
     public selectedNodeId: string | null = null;
     private selectionListeners: ((nodeId: string | null) => void)[] = [];
 
-    // Removed runTarget fields
     private modelStatuses: Map<string, SimulationStatus> = new Map();
     private modelProgresses: Map<string, number> = new Map();
     private modelSimTimes: Map<string, number> = new Map();
+    private modelSteps: Map<string, number> = new Map();
     private modelStatusListeners: ((modelId: string, status: SimulationStatus) => void)[] = [];
     private clipboardModel: Model | null = null;
 
@@ -150,6 +204,10 @@ export class StateManager {
             this.modelStatuses.set(modelId, status);
             this.modelStatusListeners.forEach(l => l(modelId, status));
             
+            if (status === 'UNINITIALIZED' || status === 'INITIALIZED') {
+                this.modelSteps.set(modelId, 0);
+            }
+
             if (status === 'PAUSED' && oldStatus === 'RUNNING') {
                 this.pushTelemetry('Simulation Interrupted/Paused', undefined, modelId);
             } else if (status === 'TERMINATED') {
@@ -185,6 +243,32 @@ export class StateManager {
 
     setModelSimTime(modelId: string, simTime: number): void {
         this.modelSimTimes.set(modelId, simTime);
+    }
+
+    getModelStep(modelId?: string): number {
+        if (!modelId) {
+            const activeWs = this.getActiveWorkspace();
+            modelId = activeWs?.activeModelId || Object.keys(this.appState.models)[0] || undefined;
+        }
+        if (modelId && this.modelSteps.has(modelId)) {
+            return this.modelSteps.get(modelId)!;
+        }
+        for (const val of this.modelSteps.values()) {
+            if (val > 0) return val;
+        }
+        return 0;
+    }
+
+    setModelStep(modelId: string, step: number): void {
+        if (step > 0) {
+            this.modelSteps.set(modelId, step);
+        } else if (step === 0) {
+            const current = this.modelSteps.get(modelId) ?? 0;
+            const status = this.getModelStatus(modelId);
+            if (status === 'UNINITIALIZED' || status === 'INITIALIZED' || current === 0) {
+                this.modelSteps.set(modelId, 0);
+            }
+        }
     }
 
     // Workspace management
@@ -830,12 +914,13 @@ export class StateManager {
             if (node) {
                 targetModelId = model.id;
                 const merged = { ...node.parameters, ...parameters };
-                const updatedKey = Object.keys(parameters).find(k => k === 'charge_mass' || k === 'preset') || Object.keys(parameters)[0];
+                const updatedKey = Object.keys(parameters).find(k => k === 'charge_mass' || k === 'preset' || k === 'device' || k === 'precision') || Object.keys(parameters)[0];
                 syncExplosiveParameters(node, merged, model, updatedKey);
                 syncMPMMaterialParameters(node, merged, updatedKey);
                 syncFEMObjectParameters(node, merged, updatedKey);
                 syncQuantityRanges(node, parameters, merged);
                 node.parameters = merged;
+                syncCoupledHardwareParameters(model, node, updatedKey);
                 console.log("[DEBUG] Node parameters updated in memory. New parameters:", node.parameters);
                 
                 if (node.type === 'Material') {
@@ -848,10 +933,12 @@ export class StateManager {
                     });
                 }
                 
-                for (const key of Object.keys(parameters)) {
-                    if (!DISPLAY_ONLY_KEYS.has(key)) {
-                        isPhysicalChange = true;
-                        break;
+                if (!NON_PHYSICAL_NODE_TYPES.has(node.type)) {
+                    for (const key of Object.keys(parameters)) {
+                        if (!DISPLAY_ONLY_KEYS.has(key)) {
+                            isPhysicalChange = true;
+                            break;
+                        }
                     }
                 }
                 
@@ -883,7 +970,7 @@ export class StateManager {
             if (node) {
                 targetModelId = model.id;
                 const merged = { ...node.parameters, ...parameters };
-                const updatedKey = Object.keys(parameters).find(k => k === 'charge_mass' || k === 'preset') || Object.keys(parameters)[0];
+                const updatedKey = Object.keys(parameters).find(k => k === 'charge_mass' || k === 'preset' || k === 'device' || k === 'precision') || Object.keys(parameters)[0];
                 syncExplosiveParameters(node, merged, model, updatedKey);
                 syncMPMMaterialParameters(node, merged, updatedKey);
                 syncFEMObjectParameters(node, merged, updatedKey);
@@ -893,10 +980,15 @@ export class StateManager {
                     if (node.parameters[key] !== value) {
                         node.parameters[key] = value;
                         changed = true;
-                        if (!DISPLAY_ONLY_KEYS.has(key)) {
+                        if (!NON_PHYSICAL_NODE_TYPES.has(node.type) && !DISPLAY_ONLY_KEYS.has(key)) {
                             isPhysicalChange = true;
                         }
                     }
+                }
+
+                if (syncCoupledHardwareParameters(model, node, updatedKey)) {
+                    changed = true;
+                    isPhysicalChange = true;
                 }
 
                 if (constrainAllSlices(model)) {
@@ -1052,48 +1144,69 @@ export class StateManager {
         this.telemetryListeners.forEach(listener => listener(nodeId, data));
     }
 
-    private formatTelemetry(data: any): string {
+    private formatTelemetry(data: any, modelId?: string): string {
         const timestamp = new Date().toLocaleTimeString();
 
         if (data instanceof ArrayBuffer) {
             return `[${timestamp}] [BINARY] ArrayBuffer(${data.byteLength})`;
         }
 
+        const currentStep = this.getModelStep(modelId);
+
         if (typeof data === 'string') {
             if (data.startsWith('{')) {
                 try {
                     const parsed = JSON.parse(data);
-                    return this.formatTelemetry(parsed);
+                    return this.formatTelemetry(parsed, modelId);
                 } catch (e) {
-                    return `[${timestamp}] [TEXT] ${data}`;
+                    // Fallthrough to string formatting
                 }
             }
-            return `[${timestamp}] [TEXT] ${data}`;
+            if (data.includes('Step ') || data.includes('step ') || data.includes('STEP ')) {
+                return `[${timestamp}] [TEXT] ${data}`;
+            }
+            return `[${timestamp}] [TEXT] [Step ${currentStep}] ${data}`;
         }
 
         if (typeof data === 'object' && data !== null) {
+            let step = data.step !== undefined ? data.step : (data.fem_step !== undefined ? data.fem_step : currentStep);
+            if (step <= 0 && currentStep > 0) {
+                step = currentStep;
+            }
+            if (step > 0 && modelId) {
+                this.setModelStep(modelId, step);
+            }
+
             if (data.type === 'progress' || data.type === 'progress_2d' || data.command === 'PROGRESS') {
                 const percent = data.percent !== undefined ? data.percent : (data.value || 0);
                 const wcStr = data.wallclock !== undefined ? `, Wallclock: ${Number(data.wallclock).toFixed(4)}s` : '';
-                return `[${timestamp}] [PROGRESS] ${percent}% complete${wcStr}`;
+                return `[${timestamp}] [PROGRESS] ${percent}% complete, Step: ${step}${wcStr}`;
             }
             if (data.type === 'TELEMETRY_MPM_2D') {
                 const wcStr = data.wallclock !== undefined ? `, Wallclock: ${Number(data.wallclock).toFixed(4)}s` : '';
                 const dtStr = data.dt !== undefined ? `, dt: ${Number(data.dt).toExponential(6)}s` : '';
-                return `[${timestamp}] [MPM] Time: ${data.time?.toExponential(6) || '0'}${dtStr}${wcStr}, Terminated: ${data.is_terminated || false}`;
+                return `[${timestamp}] [MPM] Time: ${data.time?.toExponential(6) || '0'}, Step: ${step}${dtStr}${wcStr}, Terminated: ${data.is_terminated || false}`;
             }
             if (data.type === 'TELEMETRY_FEM_3D') {
                 const wcStr = data.wallclock !== undefined ? `, Wallclock: ${Number(data.wallclock).toFixed(4)}s` : '';
                 const dtStr = data.dt !== undefined ? `, dt: ${Number(data.dt).toExponential(6)}s` : '';
-                const stepStr = data.step !== undefined ? `, Step: ${data.step}` : '';
-                return `[${timestamp}] [FEM 3D] Time: ${data.time?.toExponential(6) || '0'}${stepStr}${dtStr}${wcStr}, Terminated: ${data.is_terminated || false}`;
+                return `[${timestamp}] [FEM 3D] Time: ${data.time?.toExponential(6) || '0'}, Step: ${step}${dtStr}${wcStr}, Terminated: ${data.is_terminated || false}`;
             }
             if (data.type === 'TELEMETRY' || data.type === 'TELEMETRY_2D' || data.type === 'TELEMETRY_3D') {
                 const tag = data.type === 'TELEMETRY_2D' ? 'CFD' : (data.type === 'TELEMETRY_3D' ? '3D' : 'SOLVER');
                 const engineType = data.is_ideal_gas ? ' (IG)' : ' (MM)';
                 const wcStr = data.wallclock !== undefined ? `, Wallclock: ${Number(data.wallclock).toFixed(4)}s` : '';
                 const dtStr = data.dt !== undefined ? `, dt: ${Number(data.dt).toExponential(6)}s` : '';
-                return `[${timestamp}] [${tag}${engineType}] Time: ${data.time?.toExponential(6) || '0'}${dtStr}${wcStr}, Terminated: ${data.is_terminated || false}`;
+                return `[${timestamp}] [${tag}${engineType}] Time: ${data.time?.toExponential(6) || '0'}, Step: ${step}${dtStr}${wcStr}, Terminated: ${data.is_terminated || false}`;
+            }
+            if (data.type === 'log') {
+                const level = data.level || 'INFO';
+                const scope = data.scope ? ` [${data.scope}]` : '';
+                const msg = data.message || '';
+                const hasStepInMsg = msg.includes('Step ') || msg.includes('step ') || msg.includes('STEP ');
+                const stepStr = hasStepInMsg ? '' : ` [Step ${step}]`;
+                const timeStr = data.time !== undefined ? ` [t=${Number(data.time).toExponential(4)}s]` : '';
+                return `[${timestamp}] [${level}]${scope}${stepStr}${timeStr} ${msg}`;
             }
             if (data.type === 'resource_pulse') {
                 return `[${timestamp}] [RESOURCES] CPU: ${data.metrics?.cpu?.toFixed(1)}%, RAM: ${data.metrics?.ram?.toFixed(1)}%`;
@@ -1101,7 +1214,7 @@ export class StateManager {
             return `[${timestamp}] [JSON] ${JSON.stringify(data, null, 2)}`;
         }
 
-        return `[${timestamp}] [DATA] ${String(data)}`;
+        return `[${timestamp}] [DATA] [Step ${currentStep}] ${String(data)}`;
     }
 
     pushTelemetry(nodeIdOrData: any, optionalData?: any, modelId?: string): void {
@@ -1140,7 +1253,7 @@ export class StateManager {
             } else {
                 let log = this.telemetryStore.get(nodeId);
                 if (!Array.isArray(log)) log = [];
-                log.push(this.formatTelemetry(data));
+                log.push(this.formatTelemetry(data, modelId));
                 if (log.length > 100) log.shift();
                 telemetryToStore = log;
             }
@@ -1187,7 +1300,7 @@ export class StateManager {
                     let log = this.telemetryStore.get(connectedNode.id);
                     if (!Array.isArray(log)) log = [];
 
-                    const formattedMsg = this.formatTelemetry(data);
+                    const formattedMsg = this.formatTelemetry(data, modelId);
                     if (log.length > 0 && log[log.length - 1] === formattedMsg) return;
 
                     log.push(formattedMsg);
@@ -1647,6 +1760,7 @@ export class StateManager {
                 charge_mass: 0.853479,
                 charge_radius: 0.05,
                 charge_height: 0.1,
+                charge_aspect_ratio: 1.0,
                 charge_r: 0.0,
                 charge_z: 0.1
             },
@@ -1810,7 +1924,11 @@ export class StateManager {
                 charge_x: 0.5, charge_y: 0.5, charge_z: 0.5,
                 charge_radius: 0.1,
                 charge_height: 0.2,
-                charge_lx: 0.2, charge_ly: 0.2, charge_lz: 0.2
+                charge_aspect_ratio: 1.0,
+                charge_lx: 0.2, charge_ly: 0.2, charge_lz: 0.2,
+                charge_rot_x: 0.0,
+                charge_rot_y: 0.0,
+                charge_rot_z: 0.0
             },
             'CFDSolver3D': {
                 cfl: 0.4,
@@ -2046,9 +2164,14 @@ export class StateManager {
                 scale_factor: 1.0
             },
             'FEMFSICoupler3D': {
-                fsi_algorithm: 'CutCellPenalty',
-                coupling_frequency: 1,
-                pressure_substepping: true
+                cfl: 0.30,
+                steps: 100,
+                coupling_scheme: 'Two-Way Staggered',
+                pressure_integration: '2x2 Gauss Quadrature',
+                uncovering_method: 'Conservative IDW + Vacuum Cavity',
+                erosion_venting: true,
+                vacuum_density: 1.0e-6,
+                vacuum_pressure: 1.0e-2
             }
         };
 
@@ -2166,12 +2289,20 @@ export class StateManager {
                     const radius = Number(node.parameters['charge_radius'] !== undefined ? node.parameters['charge_radius'] : 0.1);
                     const height = Number(node.parameters['charge_height'] !== undefined ? node.parameters['charge_height'] : 0.2);
                     node.parameters['charge_mass'] = Math.PI * radius * radius * height * rho;
+                    if (node.parameters['charge_aspect_ratio'] === undefined && radius > 0) {
+                        node.parameters['charge_aspect_ratio'] = height / (2.0 * radius);
+                    }
                 } else if (shape === 'Block') {
                     const lx = Number(node.parameters['charge_lx'] !== undefined ? node.parameters['charge_lx'] : 0.2);
                     const ly = Number(node.parameters['charge_ly'] !== undefined ? node.parameters['charge_ly'] : 0.2);
                     const lz = Number(node.parameters['charge_lz'] !== undefined ? node.parameters['charge_lz'] : 0.2);
                     node.parameters['charge_mass'] = lx * ly * lz * rho;
                 }
+            }
+            if ((node.type === 'Charge2D' || node.type === 'Charge3D') && node.parameters['charge_aspect_ratio'] === undefined) {
+                const radius = Number(node.parameters['charge_radius'] !== undefined ? node.parameters['charge_radius'] : 0.1);
+                const height = Number(node.parameters['charge_height'] !== undefined ? node.parameters['charge_height'] : 0.2);
+                node.parameters['charge_aspect_ratio'] = (radius > 0 && height > 0) ? (height / (2.0 * radius)) : 1.0;
             }
             const nodeDefaults = defaults[node.type];
             if (nodeDefaults) {
@@ -2498,43 +2629,100 @@ function syncExplosiveParameters(node: Node, parameters: Record<string, any>, st
         }
     }
 
-    const height = Number(parameters['charge_height'] !== undefined ? parameters['charge_height'] : 0.2);
-    const radius = Number(parameters['charge_radius'] !== undefined ? parameters['charge_radius'] : 0.1);
-    const mass = Number(parameters['charge_mass'] !== undefined ? parameters['charge_mass'] : 0.0);
+    let height = Number(parameters['charge_height'] !== undefined ? parameters['charge_height'] : 0.2);
+    let radius = Number(parameters['charge_radius'] !== undefined ? parameters['charge_radius'] : 0.1);
+    let mass = Number(parameters['charge_mass'] !== undefined ? parameters['charge_mass'] : 0.0);
+    let ar = Number(parameters['charge_aspect_ratio'] !== undefined ? parameters['charge_aspect_ratio'] : (height > 0 && radius > 0 ? height / (2.0 * radius) : 1.0));
+    if (isNaN(ar) || ar <= 0) ar = 1.0;
+
     const lx = Number(parameters['charge_lx'] !== undefined ? parameters['charge_lx'] : 0.2);
     const ly = Number(parameters['charge_ly'] !== undefined ? parameters['charge_ly'] : 0.2);
     const lz = Number(parameters['charge_lz'] !== undefined ? parameters['charge_lz'] : 0.2);
 
-    if (updatedKey === 'charge_radius' || updatedKey === 'charge_height' || updatedKey === 'charge_lx' || updatedKey === 'charge_ly' || updatedKey === 'charge_lz') {
-        if (shape === 'Cylinder') {
-            parameters['charge_mass'] = Math.PI * radius * radius * height * rho;
-        } else if (shape === 'Block') {
+    if (shape === 'Cylinder') {
+        // Mass is dominant for Cylinder:
+        // Changing radius or aspect ratio does NOT change mass, but changes the complementary parameter.
+        if (updatedKey === 'charge_aspect_ratio') {
+            ar = Number(parameters['charge_aspect_ratio']);
+            if (ar > 0 && mass > 0 && rho > 0) {
+                // R = (M / (2 * pi * rho * AR))^(1/3)
+                radius = Math.cbrt(mass / (2.0 * Math.PI * rho * ar));
+                height = 2.0 * radius * ar;
+                parameters['charge_radius'] = radius;
+                parameters['charge_height'] = height;
+                parameters['charge_aspect_ratio'] = ar;
+            }
+        } else if (updatedKey === 'charge_radius') {
+            radius = Number(parameters['charge_radius']);
+            if (radius > 0 && mass > 0 && rho > 0) {
+                // H = M / (pi * rho * R^2)
+                height = mass / (Math.PI * rho * radius * radius);
+                ar = height / (2.0 * radius);
+                parameters['charge_height'] = height;
+                parameters['charge_aspect_ratio'] = ar;
+                parameters['charge_radius'] = radius;
+            }
+        } else if (updatedKey === 'charge_height') {
+            height = Number(parameters['charge_height']);
+            if (height > 0 && mass > 0 && rho > 0) {
+                // R = sqrt(M / (pi * rho * H))
+                radius = Math.sqrt(mass / (Math.PI * rho * height));
+                ar = height / (2.0 * radius);
+                parameters['charge_radius'] = radius;
+                parameters['charge_aspect_ratio'] = ar;
+                parameters['charge_height'] = height;
+            }
+        } else if (updatedKey === 'charge_mass') {
+            mass = Number(parameters['charge_mass']);
+            if (mass > 0 && rho > 0 && ar > 0) {
+                radius = Math.cbrt(mass / (2.0 * Math.PI * rho * ar));
+                height = 2.0 * radius * ar;
+                parameters['charge_radius'] = radius;
+                parameters['charge_height'] = height;
+                parameters['charge_aspect_ratio'] = ar;
+            }
+        } else {
+            // General sync (initial load, shape change, rho change, etc.)
+            if (mass > 0 && rho > 0) {
+                if (ar <= 0) ar = (height > 0 && radius > 0) ? height / (2.0 * radius) : 1.0;
+                radius = Math.cbrt(mass / (2.0 * Math.PI * rho * ar));
+                height = 2.0 * radius * ar;
+                parameters['charge_radius'] = radius;
+                parameters['charge_height'] = height;
+                parameters['charge_aspect_ratio'] = ar;
+            } else if (radius > 0 && height > 0) {
+                mass = Math.PI * radius * radius * height * rho;
+                ar = height / (2.0 * radius);
+                parameters['charge_mass'] = mass;
+                parameters['charge_aspect_ratio'] = ar;
+            }
+        }
+    } else if (shape === 'Block') {
+        if (updatedKey === 'charge_lx' || updatedKey === 'charge_ly' || updatedKey === 'charge_lz') {
             parameters['charge_mass'] = lx * ly * lz * rho;
         } else {
-            parameters['charge_mass'] = (4.0 / 3.0) * Math.PI * Math.pow(radius, 3.0) * rho;
-        }
-    } else {
-        if (mass > 0 && rho > 0) {
-            if (shape === 'Cylinder') {
-                if (height > 0) {
-                    parameters['charge_radius'] = Math.sqrt(mass / (Math.PI * rho * height));
-                }
-            } else if (shape === 'Block') {
+            if (mass > 0 && rho > 0) {
                 const currentVolume = lx * ly * lz;
                 if (currentVolume > 0) {
                     const targetVolume = mass / rho;
-                    const scaleFactor = Math.pow(targetVolume / currentVolume, 1.0 / 3.0);
+                    const scaleFactor = Math.cbrt(targetVolume / currentVolume);
                     parameters['charge_lx'] = lx * scaleFactor;
                     parameters['charge_ly'] = ly * scaleFactor;
                     parameters['charge_lz'] = lz * scaleFactor;
                 } else {
-                    const size = Math.pow(mass / rho, 1.0 / 3.0);
+                    const size = Math.cbrt(mass / rho);
                     parameters['charge_lx'] = size;
                     parameters['charge_ly'] = size;
                     parameters['charge_lz'] = size;
                 }
-            } else {
-                parameters['charge_radius'] = Math.pow((3.0 * mass) / (4.0 * Math.PI * rho), 1.0 / 3.0);
+            }
+        }
+    } else { // Sphere
+        if (updatedKey === 'charge_radius') {
+            parameters['charge_mass'] = (4.0 / 3.0) * Math.PI * Math.pow(radius, 3.0) * rho;
+        } else {
+            if (mass > 0 && rho > 0) {
+                parameters['charge_radius'] = Math.cbrt((3.0 * mass) / (4.0 * Math.PI * rho));
             }
         }
     }

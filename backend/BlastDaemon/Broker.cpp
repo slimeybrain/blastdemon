@@ -319,54 +319,137 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
         resp["type"] = "list_dir_response";
         resp["modelId"] = modelId;
 
-        try {
-            std::filesystem::path p(path_str);
-            if (path_str.empty() || path_str == "." || !std::filesystem::exists(p) || !std::filesystem::is_directory(p)) {
-                // Try parent path if it existed previously
-                if (!path_str.empty()) {
-                    p = std::filesystem::path(path_str).parent_path();
-                }
-                // Fall back to current path
-                if (p.empty() || !std::filesystem::exists(p) || !std::filesystem::is_directory(p)) {
-                    p = std::filesystem::current_path();
+        const char* home_env = std::getenv("HOME");
+        std::string home_dir = home_env ? home_env : "/home/chris";
+        std::string project_dir = "/home/chris/antigrav/blastdemon";
+        resp["homePath"] = home_dir;
+        resp["projectPath"] = project_dir;
+
+        std::error_code ec;
+        std::filesystem::path p;
+
+        if (path_str.empty() || path_str == "select_file" || path_str == "select_dir" || path_str == ".") {
+            std::filesystem::path proj_path(project_dir);
+            if (std::filesystem::exists(proj_path, ec) && std::filesystem::is_directory(proj_path, ec)) {
+                p = proj_path;
+            } else {
+                p = std::filesystem::current_path(ec);
+            }
+        } else {
+            p = std::filesystem::path(path_str);
+            // If path doesn't exist or is a regular file, navigate to parent directory
+            if (!std::filesystem::exists(p, ec) || !std::filesystem::is_directory(p, ec)) {
+                if (p.has_parent_path()) {
+                    std::filesystem::path parent = p.parent_path();
+                    if (std::filesystem::exists(parent, ec) && std::filesystem::is_directory(parent, ec)) {
+                        p = parent;
+                    }
                 }
             }
-            p = std::filesystem::absolute(p);
-            resp["currentPath"] = p.string();
-
-            nlohmann::json entries = nlohmann::json::array();
-            for (const auto& entry : std::filesystem::directory_iterator(p)) {
-                nlohmann::json ent;
-                ent["name"] = entry.path().filename().string();
-                ent["isDir"] = entry.is_directory();
-                try {
-                    ent["size"] = entry.is_regular_file() ? std::filesystem::file_size(entry) : 0;
-                } catch (...) {
-                    ent["size"] = 0;
+            // If still not a valid directory, fallback to project root or cwd
+            if (!std::filesystem::exists(p, ec) || !std::filesystem::is_directory(p, ec)) {
+                std::filesystem::path proj_path(project_dir);
+                if (std::filesystem::exists(proj_path, ec) && std::filesystem::is_directory(proj_path, ec)) {
+                    p = proj_path;
+                } else {
+                    p = std::filesystem::current_path(ec);
                 }
+            }
+        }
+
+        p = std::filesystem::absolute(p, ec).lexically_normal();
+        std::string current_path_str = p.string();
+        resp["currentPath"] = current_path_str;
+        resp["parentPath"] = (p.has_parent_path() && p != p.root_path()) ? p.parent_path().lexically_normal().string() : "";
+
+        nlohmann::json entries = nlohmann::json::array();
+        try {
+            for (const auto& entry : std::filesystem::directory_iterator(p, std::filesystem::directory_options::skip_permission_denied, ec)) {
+                if (ec) break;
+                std::string fname = entry.path().filename().string();
+                if (fname.empty()) continue;
+
+                std::error_code entry_ec;
+                bool is_dir = entry.is_directory(entry_ec);
+                bool is_symlink = entry.is_symlink(entry_ec);
+                uintmax_t file_size = 0;
+                if (!is_dir && entry.is_regular_file(entry_ec)) {
+                    file_size = entry.file_size(entry_ec);
+                    if (entry_ec) file_size = 0;
+                }
+
+                int64_t mtime_sec = 0;
+                auto lwt = entry.last_write_time(entry_ec);
+                if (!entry_ec) {
+                    try {
+                        auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+                            lwt - std::filesystem::file_time_type::clock::now() + std::chrono::system_clock::now()
+                        );
+                        mtime_sec = std::chrono::duration_cast<std::chrono::seconds>(sctp.time_since_epoch()).count();
+                    } catch (...) {
+                        mtime_sec = 0;
+                    }
+                }
+
+                std::string extension = entry.path().extension().string();
+                std::string ext_lower = extension;
+                std::transform(ext_lower.begin(), ext_lower.end(), ext_lower.begin(), [](unsigned char c){ return std::tolower(c); });
+
+                std::string type_desc = "File";
+                if (is_dir) {
+                    type_desc = "Folder";
+                } else if (ext_lower == ".json") {
+                    type_desc = "JSON Model";
+                } else if (ext_lower == ".k" || ext_lower == ".key" || ext_lower == ".dyn") {
+                    type_desc = "LS-DYNA Keyword";
+                } else if (ext_lower == ".stl") {
+                    type_desc = "STL 3D Geometry";
+                } else if (ext_lower == ".h5" || ext_lower == ".hdf5") {
+                    type_desc = "HDF5 Simulation Data";
+                } else if (ext_lower == ".xdmf" || ext_lower == ".xmf") {
+                    type_desc = "XDMF Heavy Grid";
+                } else if (ext_lower == ".cpp" || ext_lower == ".cxx" || ext_lower == ".cc" || ext_lower == ".c") {
+                    type_desc = "C/C++ Source";
+                } else if (ext_lower == ".cu" || ext_lower == ".cuh") {
+                    type_desc = "CUDA Source";
+                } else if (ext_lower == ".h" || ext_lower == ".hpp") {
+                    type_desc = "C/C++ Header";
+                } else if (ext_lower == ".py") {
+                    type_desc = "Python Script";
+                } else if (ext_lower == ".ts") {
+                    type_desc = "TypeScript";
+                } else if (ext_lower == ".js") {
+                    type_desc = "JavaScript";
+                } else if (ext_lower == ".txt") {
+                    type_desc = "Plain Text";
+                } else if (ext_lower == ".csv") {
+                    type_desc = "CSV Data";
+                } else if (ext_lower == ".dat") {
+                    type_desc = "Data File";
+                } else if (ext_lower == ".log") {
+                    type_desc = "Log File";
+                } else if (ext_lower == ".sh") {
+                    type_desc = "Shell Script";
+                } else if (ext_lower == ".md") {
+                    type_desc = "Markdown Document";
+                }
+
+                nlohmann::json ent;
+                ent["name"] = fname;
+                ent["isDir"] = is_dir;
+                ent["isSymlink"] = is_symlink;
+                ent["size"] = file_size;
+                ent["mtime"] = mtime_sec;
+                ent["ext"] = ext_lower;
+                ent["type"] = type_desc;
                 entries.push_back(ent);
             }
             resp["status"] = "success";
             resp["entries"] = entries;
         } catch (const std::exception& e) {
-            try {
-                std::filesystem::path fallback = std::filesystem::absolute(std::filesystem::current_path());
-                resp["currentPath"] = fallback.string();
-                nlohmann::json entries = nlohmann::json::array();
-                for (const auto& entry : std::filesystem::directory_iterator(fallback)) {
-                    nlohmann::json ent;
-                    ent["name"] = entry.path().filename().string();
-                    ent["isDir"] = entry.is_directory();
-                    ent["size"] = 0;
-                    entries.push_back(ent);
-                }
-                resp["status"] = "success";
-                resp["entries"] = entries;
-                resp["warning"] = e.what();
-            } catch (...) {
-                resp["status"] = "error";
-                resp["error"] = e.what();
-            }
+            resp["status"] = "error";
+            resp["error"] = e.what();
+            resp["entries"] = entries;
         }
 
         if (client) {

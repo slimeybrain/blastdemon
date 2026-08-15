@@ -149,6 +149,7 @@ public:
     std::vector<float> getCellValues(int i, int j, int k) const override;
     std::vector<float> extractPressureField() const override;
     void coupleFSIWithMPMGPU(void* mpm_solver_cuda) override;
+    void coupleFSIWithFEMGPU(void* fem_solver_cuda) override;
 
     void setGauges(const std::vector<Gauge3D>& gauges) override;
     void recordGaugesAsync(double t) override;

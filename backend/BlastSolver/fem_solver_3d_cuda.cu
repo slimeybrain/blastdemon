@@ -435,6 +435,9 @@ __global__ void fem_element_forces_kernel_3d_device(
                 T mu = (elem.V > static_cast<T>(1.0e-18f) && elem.V0 > static_cast<T>(1.0e-18f))
                      ? (elem.V0 / elem.V - static_cast<T>(1.0f))
                      : static_cast<T>(0.0f);
+                if (fabs(mu) < static_cast<T>(1.0e-6f)) {
+                    mu = static_cast<T>(0.0f);
+                }
                 T E_v = density * (mat.Cp > 0.0f ? mat.Cp : 477.0f) * (elem.temp_gp[g] - (mat.T_room > 0.0f ? mat.T_room : 293.0f));
                 if (mu > static_cast<T>(0.0f)) {
                     T denom = static_cast<T>(1.0f) - (s1 - static_cast<T>(1.0f)) * mu;
@@ -834,6 +837,9 @@ __global__ void fem_element_forces_kernel_3d_device(
         T mu = (elem.V > static_cast<T>(1.0e-18f) && elem.V0 > static_cast<T>(1.0e-18f))
              ? (elem.V0 / elem.V - static_cast<T>(1.0f))
              : static_cast<T>(0.0f);
+        if (fabs(mu) < static_cast<T>(1.0e-6f)) {
+            mu = static_cast<T>(0.0f);
+        }
         T E_v = density * (mat.Cp > 0.0f ? mat.Cp : 477.0f) * (elem.temperature - (mat.T_room > 0.0f ? mat.T_room : 293.0f));
         if (mu > static_cast<T>(0.0f)) {
             T denom = static_cast<T>(1.0f) - (s1 - static_cast<T>(1.0f)) * mu;
@@ -2335,10 +2341,13 @@ T launch_fem_compute_step_size_kernel_3d(
 template <typename T>
 FEMSolver3DCUDA<T>::FEMSolver3DCUDA() {
     cudaStreamCreateWithFlags(&m_cuda_stream, cudaStreamNonBlocking);
+    cudaMallocHost(&m_h_erosion_flag_pinned, sizeof(int));
+    if (m_h_erosion_flag_pinned) *m_h_erosion_flag_pinned = 0;
 }
 
 template <typename T>
 FEMSolver3DCUDA<T>::~FEMSolver3DCUDA() {
+    if (m_h_erosion_flag_pinned) { cudaFreeHost(m_h_erosion_flag_pinned); m_h_erosion_flag_pinned = nullptr; }
     if (m_d_nodes) { cudaFree(m_d_nodes); m_d_nodes = nullptr; }
     if (m_d_elements) { cudaFree(m_d_elements); m_d_elements = nullptr; }
     if (m_d_materials) { cudaFree(m_d_materials); m_d_materials = nullptr; }
@@ -2443,9 +2452,10 @@ void FEMSolver3DCUDA<T>::syncToDevice() {
     }
 
     m_num_surface_facets = facets.size();
-    if (m_num_surface_facets > m_allocated_facets) {
+    size_t target_facets_cap = std::max(facets.size() * 2, elements.size() * 3);
+    if (target_facets_cap > m_allocated_facets) {
         if (m_d_facets) cudaFree(m_d_facets);
-        m_allocated_facets = m_num_surface_facets + 1024;
+        m_allocated_facets = target_facets_cap + 4096;
         cudaMalloc(&m_d_facets, sizeof(FEMFacet3D<T>) * m_allocated_facets);
     }
     if (!facets.empty()) {
@@ -2476,9 +2486,10 @@ void FEMSolver3DCUDA<T>::syncToDevice() {
         }
     }
     m_num_surface_nodes = surf_nodes.size();
-    if (m_num_surface_nodes > m_allocated_surface_nodes) {
+    size_t target_nodes_cap = std::max(surf_nodes.size() * 2, nodes.size());
+    if (target_nodes_cap > m_allocated_surface_nodes) {
         if (m_d_surface_nodes) cudaFree(m_d_surface_nodes);
-        m_allocated_surface_nodes = m_num_surface_nodes + 1024;
+        m_allocated_surface_nodes = target_nodes_cap + 1024;
         cudaMalloc(&m_d_surface_nodes, sizeof(int) * m_allocated_surface_nodes);
     }
     if (!surf_nodes.empty()) {
@@ -2655,13 +2666,13 @@ void FEMSolver3DCUDA<T>::stepWithDt(T dt) {
         m_d_nodes, num_nodes, m_d_elements, num_elements, m_d_materials, m_cpu_solver.getErosionCriteria(), m_d_node_active_count, m_d_erosion_flag, m_cuda_stream
     );
 
-    int h_eroded = 0;
-    if (m_d_erosion_flag) {
-        cudaMemcpyAsync(&h_eroded, m_d_erosion_flag, sizeof(int), cudaMemcpyDeviceToHost, m_cuda_stream);
-        cudaStreamSynchronize(m_cuda_stream);
+    if (m_d_erosion_flag && m_h_erosion_flag_pinned) {
+        cudaMemcpyAsync(m_h_erosion_flag_pinned, m_d_erosion_flag, sizeof(int), cudaMemcpyDeviceToHost, m_cuda_stream);
     }
 
-    if (h_eroded != 0) {
+    if (m_h_erosion_flag_pinned && *m_h_erosion_flag_pinned != 0) {
+        cudaStreamSynchronize(m_cuda_stream);
+        *m_h_erosion_flag_pinned = 0;
         m_topology_dirty = true;
         // Sync element erosion state back to CPU and extract new interior boundary facets
         cudaMemcpyAsync(elements.data(), m_d_elements, sizeof(FEMElement3D<T>) * elements.size(), cudaMemcpyDeviceToHost, m_cuda_stream);
@@ -2672,7 +2683,7 @@ void FEMSolver3DCUDA<T>::stepWithDt(T dt) {
         m_num_surface_facets = new_facets.size();
         if (new_facets.size() > m_allocated_facets) {
             if (m_d_facets) cudaFree(m_d_facets);
-            m_allocated_facets = new_facets.size() + 1024;
+            m_allocated_facets = std::max(new_facets.size() * 2, m_allocated_facets * 2);
             cudaMalloc(&m_d_facets, sizeof(FEMFacet3D<T>) * m_allocated_facets);
         }
         if (!new_facets.empty()) {
@@ -2699,7 +2710,7 @@ void FEMSolver3DCUDA<T>::stepWithDt(T dt) {
         m_num_surface_nodes = surf_nodes.size();
         if (m_num_surface_nodes > m_allocated_surface_nodes) {
             if (m_d_surface_nodes) cudaFree(m_d_surface_nodes);
-            m_allocated_surface_nodes = m_num_surface_nodes + 1024;
+            m_allocated_surface_nodes = std::max(m_num_surface_nodes * 2, m_allocated_surface_nodes * 2);
             cudaMalloc(&m_d_surface_nodes, sizeof(int) * m_allocated_surface_nodes);
         }
         if (!surf_nodes.empty()) {
@@ -2712,15 +2723,20 @@ void FEMSolver3DCUDA<T>::stepWithDt(T dt) {
 }
 
 template <typename T>
-void FEMSolver3DCUDA<T>::step(T cfl) {
-    m_last_cfl = cfl;
+T FEMSolver3DCUDA<T>::computeStepSize(T cfl) {
     if (!m_d_nodes || !m_d_elements) {
         syncToDevice();
     }
-    T dt = launch_fem_compute_step_size_kernel_3d<T>(
+    return launch_fem_compute_step_size_kernel_3d<T>(
         m_d_nodes, m_d_elements, static_cast<int>(m_cpu_solver.getElements().size()),
         m_d_materials, cfl, m_d_reduction_buffer, m_cuda_stream
     );
+}
+
+template <typename T>
+void FEMSolver3DCUDA<T>::step(T cfl) {
+    m_last_cfl = cfl;
+    T dt = computeStepSize(cfl);
     stepWithDt(dt);
 }
 

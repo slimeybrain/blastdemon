@@ -52,15 +52,15 @@ export function isParameterRelevant(node: Node, key: string): boolean {
         }
     } else if (node.type === 'Charge2D') {
         const shape = node.parameters['charge_shape'] || 'Sphere';
-        if (shape === 'Sphere' && key === 'charge_height') return false;
+        if (shape === 'Sphere' && (key === 'charge_height' || key === 'charge_aspect_ratio')) return false;
     } else if (node.type === 'Charge3D') {
         const shape = node.parameters['charge_shape'] || 'Sphere';
         if (shape === 'Sphere') {
-            if (['charge_height', 'charge_lx', 'charge_ly', 'charge_lz'].includes(key)) return false;
+            if (['charge_height', 'charge_aspect_ratio', 'charge_lx', 'charge_ly', 'charge_lz', 'charge_rot_x', 'charge_rot_y', 'charge_rot_z'].includes(key)) return false;
         } else if (shape === 'Cylinder') {
             if (['charge_lx', 'charge_ly', 'charge_lz'].includes(key)) return false;
         } else if (shape === 'Block') {
-            if (['charge_radius', 'charge_height'].includes(key)) return false;
+            if (['charge_radius', 'charge_height', 'charge_aspect_ratio'].includes(key)) return false;
         }
     } else if (node.type === 'Material') {
         const matType = node.parameters['material_type'] || 'Air';
@@ -880,8 +880,14 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             if (isNaN(charge_radius) || charge_radius <= 0) {
                 addMessage(node.id, 'error', "Charge radius must be greater than 0.");
             }
-            if (shape === 'Cylinder' && (isNaN(charge_height) || charge_height <= 0)) {
-                addMessage(node.id, 'error', "Charge height must be greater than 0 for cylindrical charges.");
+            if (shape === 'Cylinder') {
+                const charge_aspect_ratio = Number(node.parameters?.charge_aspect_ratio ?? 1.0);
+                if (isNaN(charge_height) || charge_height <= 0) {
+                    addMessage(node.id, 'error', "Charge height must be greater than 0 for cylindrical charges.");
+                }
+                if (isNaN(charge_aspect_ratio) || charge_aspect_ratio <= 0) {
+                    addMessage(node.id, 'error', "Charge aspect ratio must be greater than 0 for cylindrical charges.");
+                }
             }
             if (isNaN(charge_mass) || charge_mass <= 0) {
                 addMessage(node.id, 'error', "Charge mass must be greater than 0.");
@@ -1040,8 +1046,15 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             const charge_lz = Number(node.parameters?.charge_lz ?? 0.2);
             const charge_mass = Number(node.parameters?.charge_mass ?? 0.0);
 
+            const rot_x = Number(node.parameters?.charge_rot_x ?? 0.0);
+            const rot_y = Number(node.parameters?.charge_rot_y ?? 0.0);
+            const rot_z = Number(node.parameters?.charge_rot_z ?? 0.0);
+
             if (isNaN(cx) || isNaN(cy) || isNaN(cz)) {
                 addMessage(node.id, 'error', "Charge coordinates must be numeric.");
+            }
+            if (isNaN(rot_x) || isNaN(rot_y) || isNaN(rot_z)) {
+                addMessage(node.id, 'error', "Charge rotation angles must be numeric.");
             }
             if (shape === 'Sphere' && (isNaN(charge_radius) || charge_radius <= 0)) {
                 addMessage(node.id, 'error', "Charge radius must be greater than 0 for spherical charges.");
@@ -1049,8 +1062,12 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             if (shape === 'Block' && (isNaN(charge_lx) || charge_lx <= 0 || isNaN(charge_ly) || charge_ly <= 0 || isNaN(charge_lz) || charge_lz <= 0)) {
                 addMessage(node.id, 'error', "Block dimensions LX, LY, LZ must be greater than 0.");
             }
-            if (shape === 'Cylinder' && (isNaN(charge_radius) || charge_radius <= 0 || isNaN(node.parameters?.charge_height) || Number(node.parameters.charge_height) <= 0)) {
-                addMessage(node.id, 'error', "Cylinder radius and height must be greater than 0.");
+            if (shape === 'Cylinder') {
+                const ch = Number(node.parameters?.charge_height);
+                const ar = Number(node.parameters?.charge_aspect_ratio ?? 1.0);
+                if (isNaN(charge_radius) || charge_radius <= 0 || isNaN(ch) || ch <= 0 || isNaN(ar) || ar <= 0) {
+                    addMessage(node.id, 'error', "Cylinder radius, height, and aspect ratio must be greater than 0.");
+                }
             }
             if (isNaN(charge_mass) || charge_mass <= 0) {
                 addMessage(node.id, 'error', "Charge mass must be greater than 0.");

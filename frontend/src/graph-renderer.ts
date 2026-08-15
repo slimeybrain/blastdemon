@@ -1493,6 +1493,7 @@ export class GraphRenderer {
                 charge_mass: 0.853479,
                 charge_radius: 0.05,
                 charge_height: 0.1,
+                charge_aspect_ratio: 1.0,
                 charge_r: 0.0,
                 charge_z: 0.1
             };
@@ -1649,7 +1650,11 @@ export class GraphRenderer {
                 charge_x: 0.5, charge_y: 0.5, charge_z: 0.5,
                 charge_radius: 0.1,
                 charge_height: 0.2,
-                charge_lx: 0.2, charge_ly: 0.2, charge_lz: 0.2
+                charge_aspect_ratio: 1.0,
+                charge_lx: 0.2, charge_ly: 0.2, charge_lz: 0.2,
+                charge_rot_x: 0.0,
+                charge_rot_y: 0.0,
+                charge_rot_z: 0.0
             };
             case 'CFDSolver3D': return {
                 cfl: 0.4,
@@ -1658,7 +1663,11 @@ export class GraphRenderer {
                 flux_scheme: 'AUSM+',
                 spatial_order: 2,
                 temporal_order: 2,
-                precision: 'single'
+                precision: 'single',
+                telemetry_mode: 'Enabled',
+                telemetry_interval_ms: 100,
+                enable_gauges: 'Enabled',
+                enable_vtk: 'Disabled'
             };
             case 'STLGeometry': return {
                 stl_file: '',
@@ -1877,7 +1886,16 @@ export class GraphRenderer {
             case 'LSDynaImporter3D': return {
                 k_file: ''
             };
-            case 'FEMFSICoupler3D': return {};
+            case 'FEMFSICoupler3D': return {
+                cfl: 0.30,
+                steps: 100,
+                coupling_scheme: 'Two-Way Staggered',
+                pressure_integration: '2x2 Gauss Quadrature',
+                uncovering_method: 'Conservative IDW + Vacuum Cavity',
+                erosion_venting: true,
+                vacuum_density: 1.0e-6,
+                vacuum_pressure: 1.0e-2
+            };
 
             case 'FSICoupler2D': return {};
             case 'FSICoupler3D': return {};
@@ -4238,15 +4256,19 @@ export class GraphRenderer {
 
                 const stsEl = form.querySelector('[data-key="space_time_scheme"]') as HTMLElement;
                 if (stsEl) {
-                    const so = node.parameters['spatial_order'] ?? 2;
-                    const to = node.parameters['temporal_order'] ?? 2;
                     let currentVal = 'RK2 (2nd-Order Space/Time)';
-                    if (so === 1 && to === 1) currentVal = 'Euler (1st-Order Space/Time)';
-                    else if (so === 2 && to === 2) currentVal = 'RK2 (2nd-Order Space/Time)';
-                    else if (so === 3 && to === 3) currentVal = 'RK3 (3rd-Order Space/Time)';
-                    else if (so === 2 && to === 4) currentVal = 'MUSCL-Hancock (2nd-Order Space/Time)';
-                    else if (so === 2 && to === 5) currentVal = 'ADER-2 (2nd-Order Space/Time)';
-                    else if (so === 3 && to === 6) currentVal = 'ADER-3 (3rd-Order Space/Time)';
+                    if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
+                        currentVal = node.parameters['space_time_scheme'] ?? 'RK2';
+                    } else {
+                        const so = node.parameters['spatial_order'] ?? 2;
+                        const to = node.parameters['temporal_order'] ?? 2;
+                        if (so === 1 && to === 1) currentVal = 'Euler (1st-Order Space/Time)';
+                        else if (so === 2 && to === 2) currentVal = 'RK2 (2nd-Order Space/Time)';
+                        else if (so === 3 && to === 3) currentVal = 'RK3 (3rd-Order Space/Time)';
+                        else if (so === 2 && to === 4) currentVal = 'MUSCL-Hancock (2nd-Order Space/Time)';
+                        else if (so === 2 && to === 5) currentVal = 'ADER-2 (2nd-Order Space/Time)';
+                        else if (so === 3 && to === 6) currentVal = 'ADER-3 (3rd-Order Space/Time)';
+                    }
                     
                     const trigger = stsEl.querySelector('.custom-select-trigger');
                     if (trigger) {
@@ -4411,9 +4433,19 @@ export class GraphRenderer {
                 return 0;
             });
         } else if (node.type === 'Charge1D' || node.type === 'Charge2D' || node.type === 'Charge3D') {
+            const chargeOrder = [
+                'charge_mass', 'charge_shape',
+                'charge_r', 'charge_z', 'charge_x', 'charge_y',
+                'charge_radius', 'charge_height', 'charge_aspect_ratio',
+                'charge_lx', 'charge_ly', 'charge_lz',
+                'charge_rot_x', 'charge_rot_y', 'charge_rot_z'
+            ];
             paramKeys.sort((a, b) => {
-                if (a === 'charge_mass') return -1;
-                if (b === 'charge_mass') return 1;
+                const idxA = chargeOrder.indexOf(a);
+                const idxB = chargeOrder.indexOf(b);
+                if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+                if (idxA !== -1) return -1;
+                if (idxB !== -1) return 1;
                 return 0;
             });
         }
@@ -4451,18 +4483,22 @@ export class GraphRenderer {
 
         for (const key of paramKeys) {
             let value = node.parameters[key];
-            if (value === undefined || value === null) continue;
             if (key === 'space_time_scheme') {
-                const so = node.parameters['spatial_order'] ?? 2;
-                const to = node.parameters['temporal_order'] ?? 2;
-                if (so === 1 && to === 1) value = 'Euler (1st-Order Space/Time)';
-                else if (so === 2 && to === 2) value = 'RK2 (2nd-Order Space/Time)';
-                else if (so === 3 && to === 3) value = 'RK3 (3rd-Order Space/Time)';
-                else if (so === 2 && to === 4) value = 'MUSCL-Hancock (2nd-Order Space/Time)';
-                else if (so === 2 && to === 5) value = 'ADER-2 (2nd-Order Space/Time)';
-                else if (so === 3 && to === 6) value = 'ADER-3 (3rd-Order Space/Time)';
-                else value = 'RK2 (2nd-Order Space/Time)';
+                if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
+                    value = node.parameters['space_time_scheme'] ?? 'RK2';
+                } else {
+                    const so = node.parameters['spatial_order'] ?? 2;
+                    const to = node.parameters['temporal_order'] ?? 2;
+                    if (so === 1 && to === 1) value = 'Euler (1st-Order Space/Time)';
+                    else if (so === 2 && to === 2) value = 'RK2 (2nd-Order Space/Time)';
+                    else if (so === 3 && to === 3) value = 'RK3 (3rd-Order Space/Time)';
+                    else if (so === 2 && to === 4) value = 'MUSCL-Hancock (2nd-Order Space/Time)';
+                    else if (so === 2 && to === 5) value = 'ADER-2 (2nd-Order Space/Time)';
+                    else if (so === 3 && to === 6) value = 'ADER-3 (3rd-Order Space/Time)';
+                    else value = 'RK2 (2nd-Order Space/Time)';
+                }
             }
+            if (value === undefined || value === null) continue;
             if (key === 'gauges' || key === 'slices' || key === 'primitives') continue;
             if (key === 'nr' || key === 'n_cells') continue;
             if (key === 'nz' && node.type === 'DomainMesh2D') continue;
@@ -4592,16 +4628,16 @@ export class GraphRenderer {
             }
             if (node.type === 'Charge2D' || node.type === 'Charge1D') {
                 const shape = node.parameters['charge_shape'] || 'Sphere';
-                if (key === 'charge_height' && shape !== 'Cylinder') continue;
+                if ((key === 'charge_height' || key === 'charge_aspect_ratio') && shape !== 'Cylinder') continue;
             }
             if (node.type === 'Charge3D') {
                 const shape = node.parameters['charge_shape'] || 'Sphere';
                 if (shape === 'Sphere') {
-                    if (key === 'charge_height' || key === 'charge_lx' || key === 'charge_ly' || key === 'charge_lz') continue;
+                    if (key === 'charge_height' || key === 'charge_aspect_ratio' || key === 'charge_lx' || key === 'charge_ly' || key === 'charge_lz' || key === 'charge_rot_x' || key === 'charge_rot_y' || key === 'charge_rot_z') continue;
                 } else if (shape === 'Cylinder') {
                     if (key === 'charge_lx' || key === 'charge_ly' || key === 'charge_lz') continue;
                 } else if (shape === 'Block') {
-                    if (key === 'charge_radius' || key === 'charge_height') continue;
+                    if (key === 'charge_radius' || key === 'charge_height' || key === 'charge_aspect_ratio') continue;
                 }
             }
 
@@ -4762,12 +4798,12 @@ export class GraphRenderer {
                             'telemetry_channel', 'telemetry_interval_ms', 'vtk_step_interval',
                             // 2D CFD keys
                             'nr', 'nz', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
-                            'charge_r', 'charge_z', 'charge_radius', 'charge_height',
+                            'charge_r', 'charge_z', 'charge_radius', 'charge_height', 'charge_aspect_ratio',
                             'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
                             'ideal_gamma', 'ideal_rho_0', 'ideal_e_0', 'high_rho', 'ambient_rho', 'ambient_p',
                             // 3D CFD keys
                             'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
-                            'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
+                            'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz', 'charge_aspect_ratio',
                             'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
                             'origin_x', 'origin_y', 'origin_z', 'dim_x', 'dim_y', 'dim_z', 'scale_factor',
                             'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
@@ -4788,7 +4824,7 @@ export class GraphRenderer {
                             'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
                             // FEM keys
                             'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
-                            'femMinVal', 'femMaxVal', 'femOpacity',
+                            'femMinVal', 'femMaxVal', 'femOpacity', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',
                             // Concrete Core & Models (RHT, K&C, CSCM)
                             'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
                             'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
@@ -5228,16 +5264,27 @@ export class GraphRenderer {
                         e.preventDefault();
                         e.stopPropagation();
                         const startPath = node.parameters[key] || '';
+                        const isK = key === 'k_file';
+                        const isStl = key === 'stl_file';
                         const browser = new HostFileBrowserModal(
                             (window as any).networkManager,
-                            'open',
-                            'select_file',
-                            (path: string) => {
-                                this.stateManager.updateNodeParameters(node.id, { [key]: path });
-                                const rand = Math.floor(Math.random() * 1000000);
-                                const prefix = key === 'k_file' ? 'k_' : 'stl_';
-                                const simpleHash = prefix + rand.toString(36);
-                                this.stateManager.updateNodeParameters(node.id, { geometry_hash: simpleHash });
+                            {
+                                title: isK ? 'Select LS-DYNA Keyword File (*.k, *.key)' : (isStl ? 'Select STL 3D Geometry (*.stl)' : 'Select File (Host)'),
+                                mode: 'open',
+                                filters: isK ? [
+                                    { label: 'LS-DYNA Keyword Files (*.k, *.key, *.dyn)', extensions: ['.k', '.key', '.dyn'] },
+                                    { label: 'All Files (*.*)', extensions: ['*'] }
+                                ] : (isStl ? [
+                                    { label: 'STL 3D Geometry (*.stl)', extensions: ['.stl'] },
+                                    { label: 'All Files (*.*)', extensions: ['*'] }
+                                ] : undefined),
+                                onSelect: (path: string) => {
+                                    this.stateManager.updateNodeParameters(node.id, { [key]: path });
+                                    const rand = Math.floor(Math.random() * 1000000);
+                                    const prefix = isK ? 'k_' : 'stl_';
+                                    const simpleHash = prefix + rand.toString(36);
+                                    this.stateManager.updateNodeParameters(node.id, { geometry_hash: simpleHash });
+                                }
                             }
                         );
                         browser.open(startPath);
@@ -7044,10 +7091,13 @@ export class GraphRenderer {
             browseBtn.onclick = () => {
                 const modal = new HostFileBrowserModal(
                     (window as any).networkManager,
-                    'save',
-                    '',
-                    (folderPath) => {
-                        this.stateManager.updateNodeParameters(node.id, { output_dir: folderPath });
+                    {
+                        title: 'Select Output Directory (Host)',
+                        mode: 'save',
+                        selectFolderOnly: true,
+                        onSelect: (folderPath) => {
+                            this.stateManager.updateNodeParameters(node.id, { output_dir: folderPath });
+                        }
                     }
                 );
                 modal.open(node.parameters?.output_dir || '');

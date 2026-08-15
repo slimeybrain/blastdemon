@@ -538,11 +538,28 @@ export class Telemetry3DViewport {
         this.buildBottomControlsDock();
     }
 
-    private formatRangeValue(val: number): string {
-        if (Math.abs(val) < 1e-3 || Math.abs(val) > 1e6) {
-            return val.toExponential(4);
+    private formatRangeValue(val: number, rangeSpan?: number): string {
+        if (val === 0 || Math.abs(val) < 1e-12) return '0';
+        const absVal = Math.abs(val);
+
+        if (absVal >= 1e5 || absVal < 0.01) {
+            const expStr = val.toExponential(2);
+            return expStr.replace(/\+0?/, '').replace(/e-0/, 'e-');
         }
-        return val.toFixed(1);
+
+        if (rangeSpan !== undefined && rangeSpan > 0) {
+            if (rangeSpan >= 100) return val.toFixed(0);
+            if (rangeSpan >= 10) return val.toFixed(1);
+            if (rangeSpan >= 1) return val.toFixed(2);
+            if (rangeSpan >= 0.1) return val.toFixed(3);
+            return val.toFixed(4);
+        }
+
+        if (absVal >= 100) return val.toFixed(0);
+        if (absVal >= 10) return val.toFixed(1);
+        if (absVal >= 1) return val.toFixed(2);
+        if (absVal >= 0.1) return val.toFixed(3);
+        return val.toFixed(4);
     }
 
     private applyButtonStyle(btn: HTMLElement) {
@@ -697,6 +714,7 @@ export class Telemetry3DViewport {
             <option value="1.0">1 FPS</option>
             <option value="2.0">0.5 FPS (Default)</option>
             <option value="5.0">0.2 FPS</option>
+            <option value="10.0">0.1 FPS</option>
         `;
         this.selectOptionByNumericValue(rateSel, vpNode ? (vpNode.parameters.refresh_rate ?? 2.0) : 2.0);
         this.bindEditingEvents(rateSel, () => {
@@ -2767,13 +2785,13 @@ export class Telemetry3DViewport {
         container.id = this.getElId('viewport-colorbars-container');
         container.className = 'viewport-colorbars-container';
         container.style.position = 'absolute';
-        container.style.top = '40px';
-        container.style.left = '12px';
+        container.style.top = '36px';
+        container.style.left = '10px';
         container.style.zIndex = '1000';
         container.style.display = 'flex';
         container.style.flexDirection = 'row';
         container.style.flexWrap = 'wrap';
-        container.style.gap = '12px';
+        container.style.gap = '8px';
         container.style.pointerEvents = 'none';
         this.colorbarContainer = container;
         this.container.appendChild(container);
@@ -2798,134 +2816,143 @@ export class Telemetry3DViewport {
         const card = document.createElement('div');
         card.id = this.getElId(`viewport-colorbar-card-${spec.id}`);
         card.className = 'viewport-colorbar-card';
-        card.style.background = 'rgba(16, 16, 19, 0.85)';
+        card.style.background = 'rgba(14, 15, 19, 0.88)';
         card.style.backdropFilter = 'blur(12px)';
-        card.style.border = '1px solid rgba(255, 255, 255, 0.15)';
-        card.style.borderRadius = '8px';
-        card.style.padding = '8px 10px';
+        card.style.border = '1px solid rgba(255, 255, 255, 0.14)';
+        card.style.borderRadius = '6px';
+        card.style.padding = '5px 6px';
         card.style.display = 'flex';
         card.style.flexDirection = 'column';
-        card.style.gap = '6px';
-        card.style.color = '#e0e0e0';
+        card.style.gap = '3px';
+        card.style.color = '#e2e8f0';
         card.style.fontFamily = 'system-ui, -apple-system, sans-serif';
-        card.style.fontSize = '10px';
-        card.style.boxShadow = '0 8px 24px rgba(0, 0, 0, 0.6)';
+        card.style.fontSize = '9px';
+        card.style.boxShadow = '0 4px 16px rgba(0, 0, 0, 0.55)';
         card.style.userSelect = 'none';
         card.style.boxSizing = 'border-box';
         card.style.pointerEvents = 'auto';
+        card.style.width = 'fit-content';
 
-        // 1. Header (Title + Badges + Close)
-        const header = document.createElement('div');
-        header.style.display = 'flex';
-        header.style.alignItems = 'center';
-        header.style.justifyContent = 'space-between';
-        header.style.gap = '6px';
+        // 1. Top Header Row (Title + Close Button)
+        const topRow = document.createElement('div');
+        topRow.style.display = 'flex';
+        topRow.style.alignItems = 'center';
+        topRow.style.justifyContent = 'space-between';
+        topRow.style.gap = '6px';
 
         const titleSpan = document.createElement('span');
-        titleSpan.style.fontWeight = 'bold';
-        titleSpan.style.color = '#00adff';
+        titleSpan.style.fontWeight = '700';
+        titleSpan.style.color = '#38bdf8';
         titleSpan.style.cursor = 'pointer';
-        titleSpan.style.fontSize = '9.5px';
-        titleSpan.style.letterSpacing = '0.5px';
-        titleSpan.style.textTransform = 'uppercase';
+        titleSpan.style.fontSize = '8.5px';
+        titleSpan.style.letterSpacing = '0.3px';
+        titleSpan.style.whiteSpace = 'nowrap';
         titleSpan.textContent = spec.title;
-        titleSpan.title = 'Click to change quantity';
+        titleSpan.title = `${spec.title} (Click to change quantity)`;
         titleSpan.onclick = (e) => {
             e.stopPropagation();
             spec.onSelectQuantity(titleSpan);
         };
-        header.appendChild(titleSpan);
+        topRow.appendChild(titleSpan);
 
-        const badgesWrap = document.createElement('div');
-        badgesWrap.style.display = 'flex';
-        badgesWrap.style.alignItems = 'center';
-        badgesWrap.style.gap = '4px';
+        const closeBtn = document.createElement('span');
+        closeBtn.style.fontSize = '9px';
+        closeBtn.style.fontWeight = 'bold';
+        closeBtn.style.color = '#94a3b8';
+        closeBtn.style.cursor = 'pointer';
+        closeBtn.style.padding = '0 2px';
+        closeBtn.style.lineHeight = '1';
+        closeBtn.style.flexShrink = '0';
+        closeBtn.textContent = '✕';
+        closeBtn.title = 'Close color bar';
+        closeBtn.onmouseenter = () => closeBtn.style.color = '#ef4444';
+        closeBtn.onmouseleave = () => closeBtn.style.color = '#94a3b8';
+        closeBtn.onclick = (e) => {
+            e.stopPropagation();
+            spec.onToggleOff();
+        };
+        topRow.appendChild(closeBtn);
+        card.appendChild(topRow);
+
+        // 2. Control Badges Row (Auto, Log, Colormap)
+        const badgesRow = document.createElement('div');
+        badgesRow.style.display = 'flex';
+        badgesRow.style.alignItems = 'center';
+        badgesRow.style.gap = '3px';
+        badgesRow.style.marginBottom = '1px';
 
         // Auto badge
         const autoBadge = document.createElement('span');
-        autoBadge.style.fontSize = '8px';
-        autoBadge.style.fontWeight = 'bold';
-        autoBadge.style.padding = '1px 4px';
-        autoBadge.style.borderRadius = '3px';
+        autoBadge.style.fontSize = '7.5px';
+        autoBadge.style.fontWeight = '700';
+        autoBadge.style.padding = '1px 3px';
+        autoBadge.style.borderRadius = '2px';
         autoBadge.style.cursor = 'pointer';
-        autoBadge.textContent = spec.autoScale ? 'AUTO' : 'MANUAL';
-        autoBadge.style.background = spec.autoScale ? 'rgba(0, 173, 255, 0.2)' : 'rgba(255, 170, 0, 0.2)';
-        autoBadge.style.color = spec.autoScale ? '#00adff' : '#ffaa00';
-        autoBadge.style.border = spec.autoScale ? '1px solid rgba(0, 173, 255, 0.4)' : '1px solid rgba(255, 170, 0, 0.4)';
+        autoBadge.style.lineHeight = '1.1';
+        autoBadge.textContent = spec.autoScale ? 'AUTO' : 'MAN';
+        autoBadge.style.background = spec.autoScale ? 'rgba(0, 173, 255, 0.2)' : 'rgba(245, 158, 11, 0.2)';
+        autoBadge.style.color = spec.autoScale ? '#38bdf8' : '#fbbf24';
+        autoBadge.style.border = spec.autoScale ? '1px solid rgba(56, 189, 248, 0.35)' : '1px solid rgba(245, 158, 11, 0.35)';
         autoBadge.title = 'Click to toggle Auto / Manual scale';
         autoBadge.onclick = (e) => {
             e.stopPropagation();
             spec.onToggleAuto();
         };
-        badgesWrap.appendChild(autoBadge);
+        badgesRow.appendChild(autoBadge);
 
         // Log badge
         const logBadge = document.createElement('span');
-        logBadge.style.fontSize = '8px';
-        logBadge.style.fontWeight = 'bold';
-        logBadge.style.padding = '1px 4px';
-        logBadge.style.borderRadius = '3px';
+        logBadge.style.fontSize = '7.5px';
+        logBadge.style.fontWeight = '700';
+        logBadge.style.padding = '1px 3px';
+        logBadge.style.borderRadius = '2px';
         logBadge.style.cursor = 'pointer';
+        logBadge.style.lineHeight = '1.1';
         logBadge.textContent = spec.logScale ? 'LOG' : 'LIN';
-        logBadge.style.background = spec.logScale ? 'rgba(170, 0, 255, 0.2)' : 'rgba(255, 255, 255, 0.1)';
-        logBadge.style.color = spec.logScale ? '#d080ff' : '#aaa';
-        logBadge.style.border = spec.logScale ? '1px solid rgba(170, 0, 255, 0.4)' : '1px solid rgba(255, 255, 255, 0.2)';
+        logBadge.style.background = spec.logScale ? 'rgba(168, 85, 247, 0.2)' : 'rgba(255, 255, 255, 0.08)';
+        logBadge.style.color = spec.logScale ? '#c084fc' : '#94a3b8';
+        logBadge.style.border = spec.logScale ? '1px solid rgba(168, 85, 247, 0.35)' : '1px solid rgba(255, 255, 255, 0.15)';
         logBadge.title = 'Click to toggle Linear / Logarithmic scale';
         logBadge.onclick = (e) => {
             e.stopPropagation();
             spec.onToggleLog();
         };
-        badgesWrap.appendChild(logBadge);
+        badgesRow.appendChild(logBadge);
 
         // Colormap badge
         const cmapBadge = document.createElement('span');
-        cmapBadge.style.fontSize = '8px';
-        cmapBadge.style.fontWeight = 'bold';
-        cmapBadge.style.padding = '1px 4px';
-        cmapBadge.style.borderRadius = '3px';
+        cmapBadge.style.fontSize = '7.5px';
+        cmapBadge.style.fontWeight = '700';
+        cmapBadge.style.padding = '1px 3px';
+        cmapBadge.style.borderRadius = '2px';
         cmapBadge.style.cursor = 'pointer';
-        cmapBadge.style.background = 'rgba(255, 255, 255, 0.1)';
-        cmapBadge.style.border = '1px solid rgba(255, 255, 255, 0.2)';
-        cmapBadge.style.color = '#fff';
+        cmapBadge.style.lineHeight = '1.1';
+        cmapBadge.style.background = 'rgba(255, 255, 255, 0.08)';
+        cmapBadge.style.border = '1px solid rgba(255, 255, 255, 0.15)';
+        cmapBadge.style.color = '#f1f5f9';
+        cmapBadge.style.whiteSpace = 'nowrap';
         cmapBadge.textContent = spec.colormap.toUpperCase();
-        cmapBadge.title = 'Click to change colormap';
+        cmapBadge.title = `Color Scheme: ${spec.colormap.toUpperCase()} (Click to change)`;
         cmapBadge.onclick = (e) => {
             e.stopPropagation();
             spec.onSelectColormap(cmapBadge);
         };
-        badgesWrap.appendChild(cmapBadge);
+        badgesRow.appendChild(cmapBadge);
+        card.appendChild(badgesRow);
 
-        // Close button
-        const closeBtn = document.createElement('span');
-        closeBtn.style.fontSize = '10px';
-        closeBtn.style.fontWeight = 'bold';
-        closeBtn.style.color = '#ff6666';
-        closeBtn.style.cursor = 'pointer';
-        closeBtn.style.marginLeft = '4px';
-        closeBtn.textContent = '✕';
-        closeBtn.title = 'Close color bar';
-        closeBtn.onclick = (e) => {
-            e.stopPropagation();
-            spec.onToggleOff();
-        };
-        badgesWrap.appendChild(closeBtn);
-
-        header.appendChild(badgesWrap);
-        card.appendChild(header);
-
-        // 2. Main Body (Gradient Bar + Ticks)
+        // 3. Main Body (Gradient Bar + Ticks)
         const bodyRow = document.createElement('div');
         bodyRow.style.display = 'flex';
         bodyRow.style.alignItems = 'stretch';
-        bodyRow.style.gap = '8px';
+        bodyRow.style.gap = '4px';
 
         // Gradient Bar using exact colormap defined for this object!
         const gradBar = document.createElement('div');
-        gradBar.style.width = '16px';
-        gradBar.style.height = '160px';
-        gradBar.style.borderRadius = '4px';
-        gradBar.style.border = '1px solid rgba(255, 255, 255, 0.25)';
-        gradBar.style.boxShadow = 'inset 0 0 4px rgba(0,0,0,0.5)';
+        gradBar.style.width = '10px';
+        gradBar.style.height = '120px';
+        gradBar.style.borderRadius = '2px';
+        gradBar.style.border = '1px solid rgba(255, 255, 255, 0.2)';
+        gradBar.style.boxShadow = 'inset 0 0 3px rgba(0,0,0,0.5)';
         gradBar.style.cursor = 'pointer';
         gradBar.style.background = this.getColormapCssGradient(spec.colormap, 'to top');
         gradBar.title = `Color Scheme: ${spec.colormap.toUpperCase()} (Click to change)`;
@@ -2940,15 +2967,15 @@ export class Telemetry3DViewport {
         ticksCol.style.display = 'flex';
         ticksCol.style.flexDirection = 'column';
         ticksCol.style.justifyContent = 'space-between';
-        ticksCol.style.height = '160px';
-        ticksCol.style.fontSize = '9px';
-        ticksCol.style.fontFamily = 'monospace';
-        ticksCol.style.color = '#ccc';
-        ticksCol.style.minWidth = '80px';
+        ticksCol.style.height = '120px';
+        ticksCol.style.minWidth = '0';
+        ticksCol.style.flex = '1';
 
         const numTicks = 5;
         const minVal = spec.minVal;
         const maxVal = spec.maxVal;
+        const rangeSpan = Math.abs(maxVal - minVal);
+
         for (let i = 0; i < numTicks; i++) {
             const t = (numTicks - 1 - i) / (numTicks - 1);
             let val = minVal + t * (maxVal - minVal);
@@ -2959,43 +2986,68 @@ export class Telemetry3DViewport {
             const tickRow = document.createElement('div');
             tickRow.style.display = 'flex';
             tickRow.style.alignItems = 'center';
-            tickRow.style.gap = '4px';
+            tickRow.style.gap = '2.5px';
+            tickRow.style.height = '14px';
 
             const tickLine = document.createElement('div');
-            tickLine.style.width = '5px';
+            tickLine.style.width = '3px';
             tickLine.style.height = '1px';
-            tickLine.style.background = 'rgba(255,255,255,0.4)';
+            tickLine.style.background = 'rgba(255,255,255,0.35)';
+            tickLine.style.flexShrink = '0';
             tickRow.appendChild(tickLine);
 
             if (i === 0 || i === numTicks - 1) {
                 const isMax = (i === 0);
                 const input = document.createElement('input');
-                input.type = 'number';
-                input.step = 'any';
-                input.value = String(val);
-                input.style.width = '68px';
-                input.style.background = 'rgba(0,0,0,0.5)';
-                input.style.border = '1px solid rgba(255,255,255,0.2)';
-                input.style.borderRadius = '3px';
-                input.style.color = '#00adff';
-                input.style.fontFamily = 'monospace';
-                input.style.fontSize = '9px';
-                input.style.padding = '1px 3px';
+                input.type = 'text';
+                input.className = 'viewport-colorbar-input';
+                input.value = this.formatRangeValue(val, rangeSpan);
+                input.style.width = '48px';
+                input.style.height = '13px';
+                input.style.background = 'rgba(0,0,0,0.45)';
+                input.style.border = '1px solid rgba(255,255,255,0.15)';
+                input.style.borderRadius = '2px';
+                input.style.color = '#38bdf8';
+                input.style.fontFamily = "'JetBrains Mono', monospace";
+                input.style.fontSize = '8px';
+                input.style.padding = '0 2px';
                 input.style.boxSizing = 'border-box';
-                input.title = isMax ? 'Edit Maximum Value' : 'Edit Minimum Value';
+                input.style.outline = 'none';
+                input.title = isMax ? 'Edit Maximum (Click to type)' : 'Edit Minimum (Click to type)';
 
-                this.bindEditingEvents(input, () => {
+                input.onfocus = () => {
+                    input.dataset.editing = 'true';
+                    input.value = String(val);
+                    input.select();
+                };
+                input.onblur = () => {
+                    delete input.dataset.editing;
                     const newV = Number(input.value);
-                    if (!isNaN(newV)) {
+                    if (!isNaN(newV) && input.value.trim() !== '') {
                         if (isMax) spec.onSetMinMax(minVal, newV);
                         else spec.onSetMinMax(newV, maxVal);
+                    } else {
+                        input.value = this.formatRangeValue(val, rangeSpan);
                     }
-                });
+                };
+                input.onkeydown = (e) => {
+                    if (e.key === 'Enter') {
+                        input.blur();
+                    } else if (e.key === 'Escape') {
+                        delete input.dataset.editing;
+                        input.value = this.formatRangeValue(val, rangeSpan);
+                        input.blur();
+                    }
+                };
                 tickRow.appendChild(input);
             } else {
                 const label = document.createElement('span');
-                label.textContent = this.formatRangeValue(val);
-                label.style.color = '#aaa';
+                label.textContent = this.formatRangeValue(val, rangeSpan);
+                label.style.fontSize = '8px';
+                label.style.fontFamily = "'JetBrains Mono', monospace";
+                label.style.color = '#94a3b8';
+                label.style.lineHeight = '13px';
+                label.style.whiteSpace = 'nowrap';
                 tickRow.appendChild(label);
             }
 
@@ -3015,6 +3067,13 @@ export class Telemetry3DViewport {
         if (!vpNode) vpNode = { parameters: {} };
         const params = vpNode.parameters || {};
 
+        if (this.colorbarContainer) {
+            const activeEl = document.activeElement;
+            if (activeEl && this.colorbarContainer.contains(activeEl) && activeEl.getAttribute('data-editing') === 'true') {
+                return;
+            }
+        }
+
         const unitMap: Record<string, string> = {
             pressure: 'Pa',
             density: 'kg/m³',
@@ -3031,6 +3090,30 @@ export class Telemetry3DViewport {
             damage: 'frac',
             has_failed: 'frac',
             object_id: 'ID'
+        };
+
+        const qtyDisplayMap: Record<string, string> = {
+            pressure: 'Pressure',
+            density: 'Density',
+            velocity: 'Speed',
+            energy: 'Energy',
+            species1: 'Reacted',
+            species2: 'Unreacted',
+            species3: 'Air',
+            peak_overpressure: 'Pk Press',
+            peak_impulse: 'Pk Impulse',
+            vonMises: 'Von Mises',
+            plasticStrain: 'Pl Strain',
+            plastic_strain: 'Pl Strain',
+            damage: 'Damage',
+            has_failed: 'Failure',
+            object_id: 'Obj ID'
+        };
+
+        const formatCbTitle = (source: string, qty: string) => {
+            const label = qtyDisplayMap[qty] || qty;
+            const unit = unitMap[qty] ? ` (${unitMap[qty]})` : '';
+            return `${source}: ${label}${unit}`;
         };
 
         const specs: Array<{
@@ -3064,10 +3147,9 @@ export class Telemetry3DViewport {
                     minVal = this.latestEmpiricalRange.min;
                     maxVal = this.latestEmpiricalRange.max;
                 }
-                const unitStr = unitMap[qty] ? ` (${unitMap[qty]})` : '';
                 specs.push({
                     id: `slice-${idx}`,
-                    title: `SLICE #${idx + 1}: ${qty.toUpperCase()}${unitStr}`,
+                    title: formatCbTitle(`Slice #${idx + 1}`, qty),
                     quantity: qty,
                     colormap: colormap,
                     autoScale: autoScale,
@@ -3114,10 +3196,9 @@ export class Telemetry3DViewport {
                 minVal = this.latestEmpiricalRange.min;
                 maxVal = this.latestEmpiricalRange.max;
             }
-            const unitStr = unitMap[qty] ? ` (${unitMap[qty]})` : '';
             specs.push({
                 id: 'obstacles',
-                title: `OBSTACLES: ${qty.toUpperCase()}${unitStr}`,
+                title: formatCbTitle('Obstacles', qty),
                 quantity: qty,
                 colormap: colormap,
                 autoScale: autoScale,
@@ -3168,10 +3249,9 @@ export class Telemetry3DViewport {
                 minVal = this.latestEmpiricalRange.min;
                 maxVal = this.latestEmpiricalRange.max;
             }
-            const unitStr = unitMap[qty] ? ` (${unitMap[qty]})` : '';
             specs.push({
                 id: 'stl',
-                title: `STL MESH: ${qty.toUpperCase()}${unitStr}`,
+                title: formatCbTitle('STL', qty),
                 quantity: qty,
                 colormap: colormap,
                 autoScale: autoScale,
@@ -3223,10 +3303,9 @@ export class Telemetry3DViewport {
                 minVal = r.min;
                 maxVal = r.max;
             }
-            const unitStr = unitMap[qty] ? ` (${unitMap[qty]})` : '';
             specs.push({
                 id: 'mpm',
-                title: `MPM: ${qty.toUpperCase()}${unitStr}`,
+                title: formatCbTitle('MPM', qty),
                 quantity: qty,
                 colormap: colormap,
                 autoScale: autoScale,
@@ -3279,10 +3358,9 @@ export class Telemetry3DViewport {
                 minVal = r.min;
                 maxVal = r.max;
             }
-            const unitStr = unitMap[qty] ? ` (${unitMap[qty]})` : '';
             specs.push({
                 id: 'fem',
-                title: `FEM MESH: ${qty.toUpperCase()}${unitStr}`,
+                title: formatCbTitle('FEM', qty),
                 quantity: qty,
                 colormap: colormap,
                 autoScale: autoScale,
@@ -4028,7 +4106,7 @@ export class Telemetry3DViewport {
         const nodes = state?.nodes || [];
         const hasFEM = nodes.some(n => n.type === 'FEMDomain3D' || n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D' || n.type === 'FEMFSICoupler3D');
         const hasMPM = nodes.some(n => n.type === 'MPMDomain3D' || n.type === 'MPMObject3D');
-        const hasCFD = nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'FSICoupler3D');
+        const hasCFD = nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'FSICoupler3D' || n.type === 'FEMFSICoupler3D');
         const slices = vpNode?.parameters?.slices || [];
         const anySliceEnabled = slices.some((s: any) => s.enabled !== false);
 
@@ -4215,7 +4293,7 @@ export class Telemetry3DViewport {
         if (connToViewport) {
             const connectedNode = targetModel.nodes.find((n: any) => n.id === connToViewport.fromNode);
             if (connectedNode) {
-                if (connectedNode.type === 'FSICoupler3D') {
+                if (connectedNode.type === 'FSICoupler3D' || connectedNode.type === 'FEMFSICoupler3D') {
                     const cfdConn = targetModel.connections.find((c: any) => c.toNode === connectedNode.id && c.toPort === 'cfd');
                     if (cfdConn) {
                         const cfdSolver = targetModel.nodes.find((n: any) => n.id === cfdConn.fromNode);
@@ -4726,6 +4804,9 @@ export class Telemetry3DViewport {
                 const lx = Number(chargeNode.parameters.charge_lx ?? 0.2);
                 const ly = Number(chargeNode.parameters.charge_ly ?? 0.2);
                 const lz = Number(chargeNode.parameters.charge_lz ?? 0.2);
+                const rot_x = Number(chargeNode.parameters.charge_rot_x ?? 0.0);
+                const rot_y = Number(chargeNode.parameters.charge_rot_y ?? 0.0);
+                const rot_z = Number(chargeNode.parameters.charge_rot_z ?? 0.0);
 
                 chargeParams = {
                     id: chargeNode.id,
@@ -4733,7 +4814,8 @@ export class Telemetry3DViewport {
                     shape: shape,
                     x: cx, y: cy, z: cz,
                     radius: radius, height: height,
-                    lx: lx, ly: ly, lz: lz
+                    lx: lx, ly: ly, lz: lz,
+                    rot_x: rot_x, rot_y: rot_y, rot_z: rot_z
                 };
             }
 
@@ -5402,16 +5484,26 @@ export class Telemetry3DViewport {
         if (modelId && this.getCurrentModelId() !== modelId) return;
         if (data && data.type === 'TELEMETRY_3D') {
             this.hasTelemetryGrid = true;
+            const xmin = data.xmin ?? 0.0;
+            const ymin = data.ymin ?? 0.0;
+            const zmin = data.zmin ?? 0.0;
+            const dx = data.dx ?? data.cell_size ?? 0.01;
+            const nx = data.nx ?? 64;
+            const ny = data.ny ?? 64;
+            const nz = data.nz ?? 64;
             this.worker.postMessage({
                 type: 'setConfig',
                 data: {
-                    xmin: data.xmin ?? 0.0,
-                    ymin: data.ymin ?? 0.0,
-                    zmin: data.zmin ?? 0.0,
-                    dx: data.dx ?? data.cell_size ?? 0.01,
-                    nx: data.nx ?? 64,
-                    ny: data.ny ?? 64,
-                    nz: data.nz ?? 64
+                    xmin,
+                    ymin,
+                    zmin,
+                    xmax: xmin + nx * dx,
+                    ymax: ymin + ny * dx,
+                    zmax: zmin + nz * dx,
+                    dx,
+                    nx,
+                    ny,
+                    nz
                 }
             });
         }
@@ -6641,10 +6733,17 @@ export class Telemetry3DViewport {
             <option value="0.0">Max FPS</option>
             <option value="0.016">60 FPS</option>
             <option value="0.033">30 FPS</option>
+            <option value="0.05">20 FPS</option>
             <option value="0.1">10 FPS</option>
+            <option value="0.2">5 FPS</option>
             <option value="0.5">2 FPS</option>
+            <option value="1.0">1 FPS</option>
             <option value="2.0">0.5 FPS</option>
+            <option value="5.0">0.2 FPS</option>
+            <option value="10.0">0.1 FPS</option>
         `;
+        const vpNode = this.getViewportNode();
+        this.selectOptionByNumericValue(rateSel, vpNode ? (vpNode.parameters.refresh_rate ?? 2.0) : 2.0);
         this.bindEditingEvents(rateSel, () => {
             const vp = this.getViewportNode();
             if (vp) {

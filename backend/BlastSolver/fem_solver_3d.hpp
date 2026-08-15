@@ -214,6 +214,26 @@ public:
 
     void computeGlobalEnergy();
 
+    void getMeshBoundingBox(T& min_x, T& max_x, T& min_y, T& max_y, T& min_z, T& max_z) const {
+        if (m_nodes.empty()) {
+            min_x = min_y = min_z = static_cast<T>(0);
+            max_x = max_y = max_z = static_cast<T>(0);
+            return;
+        }
+        min_x = max_x = m_nodes[0].x[0];
+        min_y = max_y = m_nodes[0].x[1];
+        min_z = max_z = m_nodes[0].x[2];
+        for (size_t i = 1; i < m_nodes.size(); ++i) {
+            const auto& n = m_nodes[i];
+            if (n.x[0] < min_x) min_x = n.x[0];
+            if (n.x[0] > max_x) max_x = n.x[0];
+            if (n.x[1] < min_y) min_y = n.x[1];
+            if (n.x[1] > max_y) max_y = n.x[1];
+            if (n.x[2] < min_z) min_z = n.x[2];
+            if (n.x[2] > max_z) max_z = n.x[2];
+        }
+    }
+
 private:
     void computeLumpedMasses();
     void computeElementForces(T dt);
@@ -222,6 +242,9 @@ private:
     void evaluateErosionCriteria();
     void updateNodeErosionStatus();
     void extractBoundaryFacets();
+    void buildFaceConnectivity();
+
+    std::vector<int> m_face_neighbors; // Size: m_elements.size() * 6. Stores neighbor element ID for each face (-1 if boundary).
 
     // Geometric Shape Function Derivatives for Hex8
     void computeHex8BMatrix(const T x_nodes[8][3], T B[6][24], T& detJ) const;

@@ -125,16 +125,20 @@ export class PropertyEditor {
 
             const stsEl = this.container.querySelector('[data-key="space_time_scheme"]') as HTMLSelectElement;
             if (stsEl && document.activeElement !== stsEl) {
-                const so = node.parameters['spatial_order'] ?? 2;
-                const to = node.parameters['temporal_order'] ?? 2;
-                let currentVal = 'RK2 (2nd-Order Space/Time)';
-                if (so === 1 && to === 1) currentVal = 'Euler (1st-Order Space/Time)';
-                else if (so === 2 && to === 2) currentVal = 'RK2 (2nd-Order Space/Time)';
-                else if (so === 3 && to === 3) currentVal = 'RK3 (3rd-Order Space/Time)';
-                else if (so === 2 && to === 4) currentVal = 'MUSCL-Hancock (2nd-Order Space/Time)';
-                else if (so === 2 && to === 5) currentVal = 'ADER-2 (2nd-Order Space/Time)';
-                else if (so === 3 && to === 6) currentVal = 'ADER-3 (3rd-Order Space/Time)';
-                stsEl.value = currentVal;
+                if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
+                    stsEl.value = node.parameters['space_time_scheme'] ?? 'RK2';
+                } else {
+                    const so = node.parameters['spatial_order'] ?? 2;
+                    const to = node.parameters['temporal_order'] ?? 2;
+                    let currentVal = 'RK2 (2nd-Order Space/Time)';
+                    if (so === 1 && to === 1) currentVal = 'Euler (1st-Order Space/Time)';
+                    else if (so === 2 && to === 2) currentVal = 'RK2 (2nd-Order Space/Time)';
+                    else if (so === 3 && to === 3) currentVal = 'RK3 (3rd-Order Space/Time)';
+                    else if (so === 2 && to === 4) currentVal = 'MUSCL-Hancock (2nd-Order Space/Time)';
+                    else if (so === 2 && to === 5) currentVal = 'ADER-2 (2nd-Order Space/Time)';
+                    else if (so === 3 && to === 6) currentVal = 'ADER-3 (3rd-Order Space/Time)';
+                    stsEl.value = currentVal;
+                }
             }
 
             const gridInfo = this.container.querySelector('#grid-info-display') as HTMLDivElement;
@@ -397,9 +401,19 @@ export class PropertyEditor {
                 return 0;
             });
         } else if (node.type === 'Charge1D' || node.type === 'Charge2D' || node.type === 'Charge3D') {
+            const chargeOrder = [
+                'charge_mass', 'charge_shape',
+                'charge_r', 'charge_z', 'charge_x', 'charge_y',
+                'charge_radius', 'charge_height', 'charge_aspect_ratio',
+                'charge_lx', 'charge_ly', 'charge_lz',
+                'charge_rot_x', 'charge_rot_y', 'charge_rot_z'
+            ];
             paramKeys.sort((a, b) => {
-                if (a === 'charge_mass') return -1;
-                if (b === 'charge_mass') return 1;
+                const idxA = chargeOrder.indexOf(a);
+                const idxB = chargeOrder.indexOf(b);
+                if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+                if (idxA !== -1) return -1;
+                if (idxB !== -1) return 1;
                 return 0;
             });
         }
@@ -428,15 +442,19 @@ export class PropertyEditor {
         for (const key of paramKeys) {
             let value = node.parameters[key];
             if (key === 'space_time_scheme') {
-                const so = node.parameters['spatial_order'] ?? 2;
-                const to = node.parameters['temporal_order'] ?? 2;
-                if (so === 1 && to === 1) value = 'Euler (1st-Order Space/Time)';
-                else if (so === 2 && to === 2) value = 'RK2 (2nd-Order Space/Time)';
-                else if (so === 3 && to === 3) value = 'RK3 (3rd-Order Space/Time)';
-                else if (so === 2 && to === 4) value = 'MUSCL-Hancock (2nd-Order Space/Time)';
-                else if (so === 2 && to === 5) value = 'ADER-2 (2nd-Order Space/Time)';
-                else if (so === 3 && to === 6) value = 'ADER-3 (3rd-Order Space/Time)';
-                else value = 'RK2 (2nd-Order Space/Time)';
+                if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
+                    value = node.parameters['space_time_scheme'] ?? 'RK2';
+                } else {
+                    const so = node.parameters['spatial_order'] ?? 2;
+                    const to = node.parameters['temporal_order'] ?? 2;
+                    if (so === 1 && to === 1) value = 'Euler (1st-Order Space/Time)';
+                    else if (so === 2 && to === 2) value = 'RK2 (2nd-Order Space/Time)';
+                    else if (so === 3 && to === 3) value = 'RK3 (3rd-Order Space/Time)';
+                    else if (so === 2 && to === 4) value = 'MUSCL-Hancock (2nd-Order Space/Time)';
+                    else if (so === 2 && to === 5) value = 'ADER-2 (2nd-Order Space/Time)';
+                    else if (so === 3 && to === 6) value = 'ADER-3 (3rd-Order Space/Time)';
+                    else value = 'RK2 (2nd-Order Space/Time)';
+                }
             }
             if (key === 'nr' || key === 'nz' || key === 'n_cells') continue;
             if (node.type === 'CFDSolver3D' && (key === 'mesh_type' || key === 'amr_max_levels' || key === 'amr_threshold' || key === 'amr_coarsen_ratio' || key === 'amr_tile_size')) continue;
@@ -493,7 +511,17 @@ export class PropertyEditor {
             }
             if (node.type === 'Charge2D') {
                 const shape = node.parameters['charge_shape'] || 'Sphere';
-                if (key === 'charge_height' && shape !== 'Cylinder') continue;
+                if ((key === 'charge_height' || key === 'charge_aspect_ratio') && shape !== 'Cylinder') continue;
+            }
+            if (node.type === 'Charge3D') {
+                const shape = node.parameters['charge_shape'] || 'Sphere';
+                if (shape === 'Sphere') {
+                    if (key === 'charge_height' || key === 'charge_aspect_ratio' || key === 'charge_lx' || key === 'charge_ly' || key === 'charge_lz' || key === 'charge_rot_x' || key === 'charge_rot_y' || key === 'charge_rot_z') continue;
+                } else if (shape === 'Cylinder') {
+                    if (key === 'charge_lx' || key === 'charge_ly' || key === 'charge_lz') continue;
+                } else if (shape === 'Block') {
+                    if (key === 'charge_radius' || key === 'charge_height' || key === 'charge_aspect_ratio') continue;
+                }
             }
             if (node.type === 'FEMDomain3D') {
                 const scheme = node.parameters['integration_scheme'] || 'OnePointFB';
@@ -552,7 +580,19 @@ export class PropertyEditor {
             else if (key === 'flip_blend') labelText = 'FLIP BLEND (% FLIP / % PIC)';
             label.textContent = labelText;
 
-            if (node.type === 'MPMMaterialSteel' && MPM_MATERIAL_PARAM_INFO[key]) {
+            if (key === 'device') {
+                label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
+                    `<span style="font-weight:600; color:#ddd;">TARGET DEVICE (COUPLED SHARED)</span>` +
+                    `<span style="font-size:10px; color:#4ec9b0; font-family:monospace; background:rgba(78,201,176,0.15); padding:1px 5px; border-radius:3px; border:1px solid rgba(78,201,176,0.3);">SHARED TARGET</span>` +
+                    `</div>` +
+                    `<div style="font-size:10px; color:#888; margin-top:2px; margin-bottom:3px;">Compute device for simulation (CPU / CUDA GPU). Coupled solvers automatically synchronize to this target.</div>`;
+            } else if (key === 'precision') {
+                label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
+                    `<span style="font-weight:600; color:#ddd;">NUMERIC PRECISION (COUPLED SHARED)</span>` +
+                    `<span style="font-size:10px; color:#4ec9b0; font-family:monospace; background:rgba(78,201,176,0.15); padding:1px 5px; border-radius:3px; border:1px solid rgba(78,201,176,0.3);">SHARED PRECISION</span>` +
+                    `</div>` +
+                    `<div style="font-size:10px; color:#888; margin-top:2px; margin-bottom:3px;">Single (FP32) or Double (FP64) precision across coupled solvers.</div>`;
+            } else if (node.type === 'MPMMaterialSteel' && MPM_MATERIAL_PARAM_INFO[key]) {
                 const info = MPM_MATERIAL_PARAM_INFO[key];
                 label.title = info.tooltip;
                 label.style.cursor = 'help';
@@ -585,12 +625,25 @@ export class PropertyEditor {
                 browseBtn.style.cursor = 'pointer';
                 browseBtn.onclick = () => {
                     const startPath = node.parameters[key] || '';
-                    const browser = new HostFileBrowserModal((window as any).networkManager, 'open', 'select_file', (path: string) => {
-                        this.updateParameter(key, path);
-                        const rand = Math.floor(Math.random() * 1000000);
-                        const prefix = key === 'k_file' ? 'k_' : 'stl_';
-                        const simpleHash = prefix + rand.toString(36);
-                        this.updateParameter('geometry_hash', simpleHash);
+                    const isK = key === 'k_file';
+                    const isStl = key === 'stl_file';
+                    const browser = new HostFileBrowserModal((window as any).networkManager, {
+                        title: isK ? 'Select LS-DYNA Keyword File (*.k, *.key)' : (isStl ? 'Select STL 3D Geometry (*.stl)' : 'Select File (Host)'),
+                        mode: 'open',
+                        filters: isK ? [
+                            { label: 'LS-DYNA Keyword Files (*.k, *.key, *.dyn)', extensions: ['.k', '.key', '.dyn'] },
+                            { label: 'All Files (*.*)', extensions: ['*'] }
+                        ] : (isStl ? [
+                            { label: 'STL 3D Geometry (*.stl)', extensions: ['.stl'] },
+                            { label: 'All Files (*.*)', extensions: ['*'] }
+                        ] : undefined),
+                        onSelect: (path: string) => {
+                            this.updateParameter(key, path);
+                            const rand = Math.floor(Math.random() * 1000000);
+                            const prefix = isK ? 'k_' : 'stl_';
+                            const simpleHash = prefix + rand.toString(36);
+                            this.updateParameter('geometry_hash', simpleHash);
+                        }
                     });
                     browser.open(startPath);
                 };
@@ -797,10 +850,13 @@ export class PropertyEditor {
                 browseBtn.style.cursor = 'pointer';
                 browseBtn.onclick = () => {
                     const startPath = node.parameters[key] || '';
-                    const browser = new HostFileBrowserModal((window as any).networkManager, 'save', 'select_dir', (path) => {
-                        const lastSlash = path.lastIndexOf('/');
-                        const dir = lastSlash !== -1 ? path.substring(0, lastSlash) : path;
-                        this.updateParameter(key, dir);
+                    const browser = new HostFileBrowserModal((window as any).networkManager, {
+                        title: 'Select Output Directory (Host)',
+                        mode: 'save',
+                        selectFolderOnly: true,
+                        onSelect: (dirPath: string) => {
+                            this.updateParameter(key, dirPath);
+                        }
                     });
                     browser.open(startPath);
                 };
@@ -838,16 +894,24 @@ export class PropertyEditor {
                 browseBtn.style.cursor = 'pointer';
                 browseBtn.onclick = () => {
                     const startPath = node.parameters[key] || '';
-                    const browser = new HostFileBrowserModal((window as any).networkManager, 'open', 'select_file', (path) => {
-                        this.updateParameter(key, path);
-                        const rand = Math.floor(Math.random() * 1000000);
-                        const simpleHash = 'stl_' + rand.toString(36);
-                        this.updateParameter('geometry_hash', simpleHash);
-                        const net = (window as any).networkManager;
-                        if (net && net.isConnected()) {
-                            const activeWs = this.stateManager.getActiveWorkspace();
-                            const modelId = activeWs?.activeModelId || 'default';
-                            net.send({ command: "LOAD_STL_GEOMETRY", filePath: path, modelId });
+                    const browser = new HostFileBrowserModal((window as any).networkManager, {
+                        title: 'Select STL 3D Geometry (*.stl)',
+                        mode: 'open',
+                        filters: [
+                            { label: 'STL 3D Geometry (*.stl)', extensions: ['.stl'] },
+                            { label: 'All Files (*.*)', extensions: ['*'] }
+                        ],
+                        onSelect: (path: string) => {
+                            this.updateParameter(key, path);
+                            const rand = Math.floor(Math.random() * 1000000);
+                            const simpleHash = 'stl_' + rand.toString(36);
+                            this.updateParameter('geometry_hash', simpleHash);
+                            const net = (window as any).networkManager;
+                            if (net && net.isConnected()) {
+                                const activeWs = this.stateManager.getActiveWorkspace();
+                                const modelId = activeWs?.activeModelId || 'default';
+                                net.send({ command: "LOAD_STL_GEOMETRY", filePath: path, modelId });
+                            }
                         }
                     });
                     browser.open(startPath);
@@ -1334,12 +1398,13 @@ export class PropertyEditor {
             'telemetry_channel', 'telemetry_interval_ms', 'vtk_step_interval',
             // 2D CFD keys
             'nr', 'nz', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
-            'charge_r', 'charge_z', 'charge_radius', 'charge_height',
+            'charge_r', 'charge_z', 'charge_radius', 'charge_height', 'charge_aspect_ratio',
             'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
             'ideal_gamma', 'ideal_rho_0', 'ideal_e_0', 'high_rho', 'ambient_rho', 'ambient_p',
             // 3D CFD keys
             'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
             'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
+            'charge_rot_x', 'charge_rot_y', 'charge_rot_z',
             'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
             'origin_x', 'origin_y', 'origin_z', 'dim_x', 'dim_y', 'dim_z', 'scale_factor',
             'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
@@ -1360,7 +1425,7 @@ export class PropertyEditor {
             'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
             // FEM keys
             'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
-            'femMinVal', 'femMaxVal', 'femOpacity',
+            'femMinVal', 'femMaxVal', 'femOpacity', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',
             // Concrete Core & Models (RHT, K&C, CSCM)
             'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
             'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
@@ -1376,6 +1441,9 @@ export class PropertyEditor {
             'mpmParticleColormap': ['plasma', 'viridis', 'coolwarm', 'rainbow', 'cividis', 'grayscale'],
             'femQuantity': ['vonMises', 'plasticStrain', 'pressure', 'velocity', 'damage'],
             'femColormap': ['plasma', 'viridis', 'coolwarm', 'rainbow', 'cividis', 'grayscale'],
+            'coupling_scheme': ['Two-Way Staggered', 'Sub-Cycling'],
+            'pressure_integration': ['2x2 Gauss Quadrature', '1-Point Centroid'],
+            'uncovering_method': ['Conservative IDW + Vacuum Cavity', 'Ghost-Fluid Standard'],
             'telemetry_mode': ['Enabled', 'Throttled (1 Hz)', 'Throttled (0.2 Hz)', 'Disabled'],
             'enable_gauges': ['Enabled', 'Disabled'],
             'enable_vtk': ['Disabled', 'Enabled'],
@@ -2821,7 +2889,17 @@ export class PropertyEditor {
             case 'MPMMaterialSteel':
                 return 'MPM Steel Material properties. Defines density, elastoplasticity (Young\'s modulus, Poisson\'s ratio), Von Mises yield stress, and strain hardening.';
             case 'FSICoupler2D':
-                return 'Two-Way Fluid-Structure Interaction (FSI) Coupler. Dynamically couples Eulerian CFD gas dynamics with Lagrangian MPM solid/fluid particles.';
+                return 'Two-Way Fluid-Structure Interaction (FSI) Coupler (2D). Dynamically couples Eulerian CFD gas dynamics with Lagrangian MPM particles.';
+            case 'FSICoupler3D':
+                return 'Two-Way Fluid-Structure Interaction (FSI) Coupler (3D MPM). Dynamically couples 3D Eulerian FV gas dynamics with 3D Lagrangian MPM particles on the shared compute device (CPU/GPU).';
+            case 'FEMFSICoupler3D':
+                return 'Two-Way Fluid-Structure Interaction (FSI) Coupler (3D FEM). High-fidelity conservative coupling between 3D Eulerian FV fluid grids and 3D Lagrangian FEM structural elements using SAT cut-cell aperture rasterization and 2x2 Gauss quadrature pressure integration on the shared compute device (CPU/GPU).';
+            case 'FEMDomain3D':
+                return '3D Finite Element Method (FEM) Structural Mechanics Domain. Configures explicit Lagrangian dynamics, Flanagan-Belytschko hourglass control, sliding contact, and erosion models on the shared compute target.';
+            case 'FEMObject3D':
+                return '3D FEM Structural Object. Defines structural geometry (Box, Cylinder, or LS-DYNA mesh), boundary constraints, and constitutive material bindings.';
+            case 'LSDynaImporter3D':
+                return 'LS-DYNA Keyword File Importer (*.k). Imports hexahedral/shell mesh topologies, section properties, and material definitions into the 3D FEM solver.';
             default:
                 return 'Simulation graph node.';
         }

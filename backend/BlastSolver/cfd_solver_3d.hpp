@@ -22,6 +22,7 @@ struct Charge3DParams {
     double radius;
     double height;
     double lx, ly, lz;
+    double rot_x = 0.0, rot_y = 0.0, rot_z = 0.0;
 };
 
 struct Gauge3D {
@@ -155,7 +156,8 @@ public:
     virtual std::vector<float> getCellValues(int i, int j, int k) const = 0;
     // Bulk pressure extraction for FSI coupling — one cudaMemcpy for the whole field, not per-cell
     virtual std::vector<float> extractPressureField() const { return {}; }
-    virtual void coupleFSIWithMPMGPU(void* mpm_solver_cuda) {}
+    virtual void coupleFSIWithMPMGPU(void* /*mpm_solver_cuda*/) {}
+    virtual void coupleFSIWithFEMGPU(void* /*fem_solver_cuda*/) {}
 
     virtual void setGauges(const std::vector<Gauge3D>&) {}
     virtual void recordGaugesAsync(double) {}

@@ -1266,6 +1266,9 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                     T mu = (elem.V > static_cast<T>(1.0e-18f) && elem.V0 > static_cast<T>(1.0e-18f))
                          ? (elem.V0 / elem.V - static_cast<T>(1.0f))
                          : static_cast<T>(0.0f);
+                    if (std::abs(mu) < static_cast<T>(1.0e-6f)) {
+                        mu = static_cast<T>(0.0f);
+                    }
                     T E_v = density * (mat.Cp > 0.0f ? mat.Cp : 477.0f) * (elem.temp_gp[g] - (mat.T_room > 0.0f ? mat.T_room : 293.0f));
                     if (mu > static_cast<T>(0.0f)) {
                         T denom = static_cast<T>(1.0f) - (s1 - static_cast<T>(1.0f)) * mu;
@@ -1671,6 +1674,9 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
             T mu = (elem.V > static_cast<T>(1.0e-18f) && elem.V0 > static_cast<T>(1.0e-18f))
                  ? (elem.V0 / elem.V - static_cast<T>(1.0f))
                  : static_cast<T>(0.0f);
+            if (std::abs(mu) < static_cast<T>(1.0e-6f)) {
+                mu = static_cast<T>(0.0f);
+            }
             T E_v = density * (mat.Cp > 0.0f ? mat.Cp : 477.0f) * (elem.temperature - (mat.T_room > 0.0f ? mat.T_room : 293.0f));
             if (mu > static_cast<T>(0.0f)) {
                 T denom = static_cast<T>(1.0f) - (s1 - static_cast<T>(1.0f)) * mu;
@@ -1926,9 +1932,8 @@ void FEMSolver3D<T>::updateNodeErosionStatus() {
 }
 
 template <typename T>
-void FEMSolver3D<T>::extractBoundaryFacets() {
-    if (!m_surface_facets_dirty && !m_surface_facets.empty()) return;
-    m_surface_facets.clear();
+void FEMSolver3D<T>::buildFaceConnectivity() {
+    m_face_neighbors.assign(m_elements.size() * 6, -1);
 
     struct QuadKey {
         int n[4];
@@ -1947,8 +1952,13 @@ void FEMSolver3D<T>::extractBoundaryFacets() {
         }
     };
 
-    std::unordered_map<QuadKey, int, QuadHasher> quad_counts;
-    quad_counts.reserve(m_elements.size() * 3);
+    struct FaceRef {
+        int elem_id;
+        int face_id;
+    };
+
+    std::unordered_map<QuadKey, FaceRef, QuadHasher> face_map;
+    face_map.reserve(m_elements.size() * 3);
 
     static const int HEX_FACES[6][4] = {
         {0, 3, 2, 1}, {4, 5, 6, 7}, {0, 1, 5, 4},
@@ -1957,27 +1967,47 @@ void FEMSolver3D<T>::extractBoundaryFacets() {
 
     for (int e = 0; e < static_cast<int>(m_elements.size()); ++e) {
         const auto& elem = m_elements[e];
-        if (elem.is_eroded) continue;
-
         for (int f = 0; f < 6; ++f) {
             QuadKey key;
             for (int k = 0; k < 4; ++k) key.n[k] = elem.node_ids[HEX_FACES[f][k]];
             std::sort(key.n, key.n + 4);
-            quad_counts[key]++;
+
+            auto it = face_map.find(key);
+            if (it != face_map.end()) {
+                int other_e = it->second.elem_id;
+                int other_f = it->second.face_id;
+                m_face_neighbors[e * 6 + f] = other_e;
+                m_face_neighbors[other_e * 6 + other_f] = e;
+            } else {
+                face_map[key] = {e, f};
+            }
         }
     }
+}
 
-    // Unique boundary faces (count == 1)
+template <typename T>
+void FEMSolver3D<T>::extractBoundaryFacets() {
+    if (!m_surface_facets_dirty && !m_surface_facets.empty()) return;
+    m_surface_facets.clear();
+
+    if (m_face_neighbors.size() != m_elements.size() * 6) {
+        buildFaceConnectivity();
+    }
+
+    static const int HEX_FACES[6][4] = {
+        {0, 3, 2, 1}, {4, 5, 6, 7}, {0, 1, 5, 4},
+        {1, 2, 6, 5}, {2, 3, 7, 6}, {3, 0, 4, 7}
+    };
+
+    m_surface_facets.reserve(m_elements.size());
+
     for (int e = 0; e < static_cast<int>(m_elements.size()); ++e) {
         const auto& elem = m_elements[e];
         if (elem.is_eroded) continue;
 
         for (int f = 0; f < 6; ++f) {
-            QuadKey key;
-            for (int k = 0; k < 4; ++k) key.n[k] = elem.node_ids[HEX_FACES[f][k]];
-            std::sort(key.n, key.n + 4);
-
-            if (quad_counts[key] == 1) {
+            int nbr = m_face_neighbors[e * 6 + f];
+            if (nbr < 0 || m_elements[nbr].is_eroded) {
                 FEMFacet3D<T> facet{};
                 for (int k = 0; k < 4; ++k) facet.node_ids[k] = elem.node_ids[HEX_FACES[f][k]];
                 facet.element_id = e;

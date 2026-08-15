@@ -85,6 +85,15 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setInitialCondition(const Charg
         }
     }
 
+    const double deg2rad = 3.14159265358979323846 / 180.0;
+    const double ax = charge.rot_x * deg2rad;
+    const double ay = charge.rot_y * deg2rad;
+    const double az = charge.rot_z * deg2rad;
+    const double cx_rot = std::cos(ax), sx_rot = std::sin(ax);
+    const double cy_rot = std::cos(ay), sy_rot = std::sin(ay);
+    const double cz_rot = std::cos(az), sz_rot = std::sin(az);
+    const bool has_rot = (charge.rot_x != 0.0 || charge.rot_y != 0.0 || charge.rot_z != 0.0);
+
     #pragma omp parallel for collapse(3)
     for (int tz = 0; tz < n_tiles_z; ++tz) {
         for (int ty = 0; ty < n_tiles_y; ++ty) {
@@ -119,15 +128,31 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setInitialCondition(const Charg
                                         double dx = px - charge.x;
                                         double dy = py - charge.y;
                                         double dz = pz - charge.z;
-                                        double dist_sq = dx*dx + dy*dy + dz*dz;
+                                        double x_loc = dx;
+                                        double y_loc = dy;
+                                        double z_loc = dz;
+                                        if (has_rot) {
+                                            double x1 = cz_rot * dx + sz_rot * dy;
+                                            double y1 = -sz_rot * dx + cz_rot * dy;
+                                            double z1 = dz;
+
+                                            double x2 = cy_rot * x1 - sy_rot * z1;
+                                            double y2 = y1;
+                                            double z2 = sy_rot * x1 + cy_rot * z1;
+
+                                            x_loc = x2;
+                                            y_loc = cx_rot * y2 + sx_rot * z2;
+                                            z_loc = -sx_rot * y2 + cx_rot * z2;
+                                        }
                                         bool inside = false;
                                         if (charge.shape_type == 0) { // Sphere
+                                            double dist_sq = dx*dx + dy*dy + dz*dz;
                                             if (dist_sq <= charge.radius * charge.radius) inside = true;
                                         } else if (charge.shape_type == 1) { // Block
-                                            if (std::abs(dx) <= charge.lx*0.5 && std::abs(dy) <= charge.ly*0.5 && std::abs(dz) <= charge.lz*0.5) inside = true;
+                                            if (std::abs(x_loc) <= charge.lx*0.5 && std::abs(y_loc) <= charge.ly*0.5 && std::abs(z_loc) <= charge.lz*0.5) inside = true;
                                         } else if (charge.shape_type == 2) { // Cylinder
-                                            double dr_sq = dx*dx + dy*dy;
-                                            if (dr_sq <= charge.radius*charge.radius && std::abs(dz) <= charge.height*0.5) inside = true;
+                                            double dr_sq = x_loc*x_loc + y_loc*y_loc;
+                                            if (dr_sq <= charge.radius*charge.radius && std::abs(z_loc) <= charge.height*0.5) inside = true;
                                         }
                                         if (inside) points_inside++;
                                     }

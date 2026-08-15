@@ -788,9 +788,19 @@ export class NodeViewer {
                 return 0;
             });
         } else if (node.type === 'Charge1D' || node.type === 'Charge2D' || node.type === 'Charge3D') {
+            const chargeOrder = [
+                'charge_mass', 'charge_shape',
+                'charge_r', 'charge_z', 'charge_x', 'charge_y',
+                'charge_radius', 'charge_height', 'charge_aspect_ratio',
+                'charge_lx', 'charge_ly', 'charge_lz',
+                'charge_rot_x', 'charge_rot_y', 'charge_rot_z'
+            ];
             paramKeys.sort((a, b) => {
-                if (a === 'charge_mass') return -1;
-                if (b === 'charge_mass') return 1;
+                const idxA = chargeOrder.indexOf(a);
+                const idxB = chargeOrder.indexOf(b);
+                if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+                if (idxA !== -1) return -1;
+                if (idxB !== -1) return 1;
                 return 0;
             });
         }
@@ -798,15 +808,19 @@ export class NodeViewer {
         for (const key of paramKeys) {
             let value = node.parameters[key];
             if (key === 'space_time_scheme') {
-                const so = node.parameters['spatial_order'] ?? 2;
-                const to = node.parameters['temporal_order'] ?? 2;
-                if (so === 1 && to === 1) value = 'Euler (1st-Order Space/Time)';
-                else if (so === 2 && to === 2) value = 'RK2 (2nd-Order Space/Time)';
-                else if (so === 3 && to === 3) value = 'RK3 (3rd-Order Space/Time)';
-                else if (so === 2 && to === 4) value = 'MUSCL-Hancock (2nd-Order Space/Time)';
-                else if (so === 2 && to === 5) value = 'ADER-2 (2nd-Order Space/Time)';
-                else if (so === 3 && to === 6) value = 'ADER-3 (3rd-Order Space/Time)';
-                else value = 'RK2 (2nd-Order Space/Time)';
+                if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
+                    value = node.parameters['space_time_scheme'] ?? 'RK2';
+                } else {
+                    const so = node.parameters['spatial_order'] ?? 2;
+                    const to = node.parameters['temporal_order'] ?? 2;
+                    if (so === 1 && to === 1) value = 'Euler (1st-Order Space/Time)';
+                    else if (so === 2 && to === 2) value = 'RK2 (2nd-Order Space/Time)';
+                    else if (so === 3 && to === 3) value = 'RK3 (3rd-Order Space/Time)';
+                    else if (so === 2 && to === 4) value = 'MUSCL-Hancock (2nd-Order Space/Time)';
+                    else if (so === 2 && to === 5) value = 'ADER-2 (2nd-Order Space/Time)';
+                    else if (so === 3 && to === 6) value = 'ADER-3 (3rd-Order Space/Time)';
+                    else value = 'RK2 (2nd-Order Space/Time)';
+                }
             }
             if (node.type === 'MPMMaterialSteel') {
                 const matModel = node.parameters['material_model'] || 'Hypoelastic';
@@ -839,16 +853,16 @@ export class NodeViewer {
             }
             if (node.type === 'Charge2D' || node.type === 'Charge1D') {
                 const shape = node.parameters['charge_shape'] || 'Sphere';
-                if (key === 'charge_height' && shape !== 'Cylinder') continue;
+                if ((key === 'charge_height' || key === 'charge_aspect_ratio') && shape !== 'Cylinder') continue;
             }
             if (node.type === 'Charge3D') {
                 const shape = node.parameters['charge_shape'] || 'Sphere';
                 if (shape === 'Sphere') {
-                    if (key === 'charge_height' || key === 'charge_lx' || key === 'charge_ly' || key === 'charge_lz') continue;
+                    if (key === 'charge_height' || key === 'charge_aspect_ratio' || key === 'charge_lx' || key === 'charge_ly' || key === 'charge_lz' || key === 'charge_rot_x' || key === 'charge_rot_y' || key === 'charge_rot_z') continue;
                 } else if (shape === 'Cylinder') {
                     if (key === 'charge_lx' || key === 'charge_ly' || key === 'charge_lz') continue;
                 } else if (shape === 'Block') {
-                    if (key === 'charge_radius' || key === 'charge_height') continue;
+                    if (key === 'charge_radius' || key === 'charge_height' || key === 'charge_aspect_ratio') continue;
                 }
             }
             // DetonatorLocation and DetonatorLocation3D are separate nodes now, showing correct properties
@@ -859,7 +873,19 @@ export class NodeViewer {
             label.style.fontSize = 'var(--font-sm)';
             label.style.color = '#888';
 
-            if (node.type === 'MPMMaterialSteel' && MPM_MATERIAL_PARAM_INFO[key]) {
+            if (key === 'device') {
+                label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
+                    `<span style="font-weight:600; color:#ccc;">TARGET DEVICE</span>` +
+                    `<span style="font-size:10px; color:#4ec9b0; font-family:monospace; background:rgba(78,201,176,0.15); padding:1px 4px; border-radius:3px; border:1px solid rgba(78,201,176,0.3);">SHARED</span>` +
+                    `</div>` +
+                    `<div style="font-size:10px; color:#777; margin-top:1px; margin-bottom:2px;">Coupled solver target device</div>`;
+            } else if (key === 'precision') {
+                label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
+                    `<span style="font-weight:600; color:#ccc;">PRECISION</span>` +
+                    `<span style="font-size:10px; color:#4ec9b0; font-family:monospace; background:rgba(78,201,176,0.15); padding:1px 4px; border-radius:3px; border:1px solid rgba(78,201,176,0.3);">SHARED</span>` +
+                    `</div>` +
+                    `<div style="font-size:10px; color:#777; margin-top:1px; margin-bottom:2px;">Coupled solver numeric precision</div>`;
+            } else if (node.type === 'MPMMaterialSteel' && MPM_MATERIAL_PARAM_INFO[key]) {
                 const info = MPM_MATERIAL_PARAM_INFO[key];
                 label.title = info.tooltip;
                 label.style.cursor = 'help';
@@ -1552,10 +1578,13 @@ export class NodeViewer {
                     browseBtn.style.cursor = 'pointer';
                     browseBtn.onclick = () => {
                         const startPath = node.parameters[key] || '';
-                        const browser = new HostFileBrowserModal((window as any).networkManager, 'save', 'select_dir', (path) => {
-                            const lastSlash = path.lastIndexOf('/');
-                            const dir = lastSlash !== -1 ? path.substring(0, lastSlash) : path;
-                            this.updateParameter(node, key, dir);
+                        const browser = new HostFileBrowserModal((window as any).networkManager, {
+                            title: 'Select Output Directory (Host)',
+                            mode: 'save',
+                            selectFolderOnly: true,
+                            onSelect: (dirPath) => {
+                                this.updateParameter(node, key, dirPath);
+                            }
                         });
                         browser.open(startPath);
                     };
@@ -2284,12 +2313,13 @@ export class NodeViewer {
             'telemetry_channel', 'telemetry_interval_ms', 'vtk_step_interval',
             // 2D CFD keys
             'nr', 'nz', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
-            'charge_r', 'charge_z', 'charge_radius', 'charge_height',
+            'charge_r', 'charge_z', 'charge_radius', 'charge_height', 'charge_aspect_ratio',
             'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
             'ideal_gamma', 'ideal_rho_0', 'ideal_e_0', 'high_rho', 'ambient_rho', 'ambient_p',
             // 3D CFD keys
             'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
             'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
+            'charge_rot_x', 'charge_rot_y', 'charge_rot_z',
             'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
             'origin_x', 'origin_y', 'origin_z', 'dim_x', 'dim_y', 'dim_z', 'scale_factor',
             'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
@@ -2310,7 +2340,7 @@ export class NodeViewer {
             'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
             // FEM keys
             'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
-            'femMinVal', 'femMaxVal', 'femOpacity',
+            'femMinVal', 'femMaxVal', 'femOpacity', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',
             // Concrete Core & Models (RHT, K&C, CSCM)
             'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
             'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
@@ -2323,6 +2353,9 @@ export class NodeViewer {
 
         const dropdowns: Record<string, string[]> = {
             'material_model': ['Hypoelastic', 'Johnson-Cook + Mie-Grüneisen', 'RHT Concrete', 'Karagozian & Case (K&C)', 'CSCM Concrete'],
+            'coupling_scheme': ['Two-Way Staggered', 'Sub-Cycling'],
+            'pressure_integration': ['2x2 Gauss Quadrature', '1-Point Centroid'],
+            'uncovering_method': ['Conservative IDW + Vacuum Cavity', 'Ghost-Fluid Standard'],
             'shape': ['box', 'sphere', 'cylinder'],
 
             'mesh_type': ['regular', 'amr'],
