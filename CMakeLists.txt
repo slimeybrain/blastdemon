@@ -162,6 +162,7 @@ if(BUILD_TESTS)
     add_test_executable_if_exists(test_fem_3d_ballistic_compare backend/BlastSolver/test_fem_3d_ballistic_compare.cu)
     add_test_executable_if_exists(test_concrete_single_element backend/BlastSolver/test_concrete_single_element.cpp)
     add_test_executable_if_exists(test_concrete_parity backend/BlastSolver/test_concrete_parity.cu)
+    add_test_executable_if_exists(test_fem_3d_rebar_elements backend/BlastSolver/test_fem_3d_rebar_elements.cpp)
 endif()
 
 

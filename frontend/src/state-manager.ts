@@ -2143,6 +2143,8 @@ export class StateManager {
                 contact_penalty_scale: 1.0,
                 friction_static: 0.3,
                 friction_kinetic: 0.2,
+                convert_failed_elements_to_mpm: false,
+                mpm_particles_per_failed_element: 8,
                 cfl: 0.4
             },
             'FEMObject3D': {

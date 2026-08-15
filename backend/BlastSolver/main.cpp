@@ -6536,6 +6536,14 @@ int main() {
                                 fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointFB);
                             }
 
+                            auto physics_params = fem->getPhysicsParams();
+                            physics_params.convert_failed_elements_to_mpm = msg.value("convert_failed_elements_to_mpm", false);
+                            physics_params.mpm_particles_per_failed_element = get_json_int(msg, "mpm_particles_per_failed_element", 8);
+                            fem->setPhysicsParams(physics_params);
+                            if (global_solver_mpm_3d) {
+                                fem->setMPMSolver(global_solver_mpm_3d.get());
+                            }
+
                             Blast::FEMErosionCriteria<double> erosion{};
                             erosion.enable_strain_erosion = false;
                             erosion.enable_timestep_erosion = false;
@@ -6626,6 +6634,14 @@ int main() {
                                 fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointKF);
                             } else {
                                 fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointFB);
+                            }
+
+                            auto physics_params = fem->getPhysicsParams();
+                            physics_params.convert_failed_elements_to_mpm = msg.value("convert_failed_elements_to_mpm", false);
+                            physics_params.mpm_particles_per_failed_element = get_json_int(msg, "mpm_particles_per_failed_element", 8);
+                            fem->setPhysicsParams(physics_params);
+                            if (global_solver_mpm_3d) {
+                                fem->setMPMSolver(global_solver_mpm_3d.get());
                             }
 
                             Blast::FEMErosionCriteria<float> erosion{};

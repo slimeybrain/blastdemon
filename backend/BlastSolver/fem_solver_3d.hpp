@@ -40,6 +40,8 @@ struct BlastPhysicsParams {
     T cowper_symonds_C{40.0f};     // Cowper-Symonds strain rate constant C (1/s)
     T cowper_symonds_P{5.0f};      // Cowper-Symonds strain rate exponent P
     T taylor_quinney_factor{0.9f}; // Fraction of plastic work converted to heat (0.9)
+    bool convert_failed_elements_to_mpm{false}; // Global conversion of failed FEM elements to MPM debris
+    int mpm_particles_per_failed_element{8};    // Particles generated per failed element (1, 8, or 27)
 };
 
 template <typename T>
@@ -99,6 +101,59 @@ struct alignas(32) FEMElement3D {
     int mat_id{0};       // Material Table ID
     int part_id{0};      // LS-DYNA Part ID
     int64_t lsdyna_id{-1}; // Original LS-DYNA element ID
+};
+
+enum class FEMBeamFormulation {
+    AxialTruss1D,     // Fast 1D axial tension/compression (3 DOFs/node, 0 rotational memory)
+    TimoshenkoBeam3D  // Full 3D Timoshenko structural beam (6 DOFs/node: axial, biaxial bending, shear, torsion, plastic hinges)
+};
+
+template <typename T>
+struct alignas(32) FEMTrussElement3D {
+    int node_ids[2];        // 8 bytes (2 node indices)
+    T A{0.0f};              // 4 bytes (Cross-sectional area)
+    T L0{0.0f};             // 4 bytes (Reference length at t=0)
+    T ep_bar{0.0f};         // 4 bytes (Accumulated equivalent plastic strain)
+    T sigma{0.0f};          // 4 bytes (Current axial Cauchy stress)
+    T failure_strain{0.20f};// 4 bytes (Plastic failure strain)
+    int mat_id{0};          // 2 bytes (Material table index)
+    int part_id{0};         // 2 bytes (Part ID)
+    bool is_eroded{false};  // 1 byte
+    int64_t lsdyna_id{-1};  // Original LS-DYNA element ID
+};
+
+template <typename T>
+struct alignas(64) FEMBeam3DElement {
+    int node_ids[2];            // 2 global translational node indices
+    int rot_node_ids[2];        // 2 indices into m_rot_nodes sparse table
+    T A{0.0f};                  // Cross-sectional area
+    T d{0.012f};                // Cross-section diameter (for circular rebar)
+    T I2{0.0f}, I3{0.0f};       // Area moments of inertia
+    T J{0.0f};                  // Torsional polar constant
+    T Zp{0.0f};                 // Plastic section modulus
+    T L0{0.0f};                 // Reference length at t=0
+    T e2[3]{0, 1, 0};           // Co-rotational cross-section triad axis 2
+    T e3[3]{0, 0, 1};           // Co-rotational cross-section triad axis 3
+    T kappa2{0.0f}, kappa3{0.0f};// Bending curvatures about e2 and e3
+    T gamma12{0.0f}, gamma13{0.0f}; // Transverse shear strains
+    T kappa_tor{0.0f};          // Torsional twist angle per unit length
+    T ep_bar{0.0f};             // Accumulated equivalent plastic strain
+    T failure_strain{0.20f};    // Plastic failure strain
+    bool is_eroded{false};      // Erosion flag
+    int mat_id{0};              // Material table index
+    int part_id{0};             // Part ID
+    int64_t lsdyna_id{-1};      // Original LS-DYNA element ID
+};
+
+template <typename T>
+struct alignas(32) FEMNodeRotationalState3D {
+    int global_node_id{-1};                // Index pointing back to global m_nodes array
+    T omega[3]{0.0f, 0.0f, 0.0f};          // Nodal angular velocity (rad/s)
+    T alpha[3]{0.0f, 0.0f, 0.0f};          // Nodal angular acceleration (rad/s^2)
+    T m_int[3]{0.0f, 0.0f, 0.0f};          // Internal bending/torsional moment (N*m)
+    T m_ext[3]{0.0f, 0.0f, 0.0f};          // External applied moment (N*m)
+    T I_rot{0.0f};                         // Lumped scalar rotational inertia
+    bool is_fixed[3]{false, false, false}; // Rotational SPC constraints (Rx, Ry, Rz)
 };
 
 template <typename T>
@@ -169,7 +224,9 @@ public:
     T getFrictionKinetic() const { return m_friction_kinetic; }
     T getContactDamping() const { return m_contact_damping; }
     const BlastPhysicsParams<T>& getPhysicsParams() const { return m_physics_params; }
+    BlastPhysicsParams<T>& getPhysicsParams() { return m_physics_params; }
     const FEMErosionCriteria<T>& getErosionCriteria() const { return m_erosion_criteria; }
+    FEMErosionCriteria<T>& getErosionCriteria() { return m_erosion_criteria; }
 
     // Mesh Builders (Structured Box & Cylinder Generators)
     void createStructuredBoxMesh(int nx, int ny, int nz, T lx, T ly, T lz, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, const std::string& boundary_condition = "Free");
@@ -178,8 +235,28 @@ public:
     void addStructuredCylinderMesh(int nr, int nz, T radius, T height, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, T vel_x = static_cast<T>(0), T vel_y = static_cast<T>(0), T vel_z = static_cast<T>(0), T inner_radius = static_cast<T>(0), const std::string& boundary_condition = "Free");
     
     // Mesh Direct Loaders
+    int addNode(T x, T y, T z, T mass = static_cast<T>(1.0f)) {
+        FEMNode3D<T> n{};
+        n.x[0] = x; n.x[1] = y; n.x[2] = z;
+        n.m = mass;
+        n.lsdyna_id = static_cast<int64_t>(m_nodes.size() + 1);
+        m_nodes.push_back(n);
+        return static_cast<int>(m_nodes.size() - 1);
+    }
+
     void setNodesAndElements(const std::vector<FEMNode3D<T>>& nodes, const std::vector<FEMElement3D<T>>& elements, const MaterialTable3D& mat);
     void appendNodesAndElements(const std::vector<FEMNode3D<T>>& nodes, const std::vector<FEMElement3D<T>>& elements, const MaterialTable3D& mat);
+
+    // Rebar Truss & 3D Beam Mesh Direct Loaders
+    void addTruss(int n1, int n2, T area, const MaterialTable3D& mat, T failure_strain = static_cast<T>(0.20f), int64_t lsdyna_id = -1);
+    void addBeam3D(int n1, int n2, T diameter, const MaterialTable3D& mat, T failure_strain = static_cast<T>(0.20f), int64_t lsdyna_id = -1);
+
+    // Explicit Solver Phases & Modular Evaluation
+    void computeTrussForces1D(T dt);
+    void computeBeamForces3D(T dt);
+    void updateNodeErosionStatus();
+    void computeLumpedMasses();
+    void evaluateErosionCriteria();
 
     // Dynamic Execution Control
     void step(T cfl = 0.3f);
@@ -196,6 +273,15 @@ public:
 
     std::vector<FEMElement3D<T>>& getElements() { return m_elements; }
     const std::vector<FEMElement3D<T>>& getElements() const { return m_elements; }
+
+    std::vector<FEMTrussElement3D<T>>& getTrusses() { return m_trusses; }
+    const std::vector<FEMTrussElement3D<T>>& getTrusses() const { return m_trusses; }
+
+    std::vector<FEMBeam3DElement<T>>& getBeams() { return m_beams; }
+    const std::vector<FEMBeam3DElement<T>>& getBeams() const { return m_beams; }
+
+    std::vector<FEMNodeRotationalState3D<T>>& getRotationalNodes() { return m_rot_nodes; }
+    const std::vector<FEMNodeRotationalState3D<T>>& getRotationalNodes() const { return m_rot_nodes; }
 
     std::vector<FEMGaussPointHistory3D<T>>& getGaussPointHistory() { return m_gp_history; }
     const std::vector<FEMGaussPointHistory3D<T>>& getGaussPointHistory() const { return m_gp_history; }
@@ -217,6 +303,12 @@ public:
     T getMaxVelocity() const;
     T getMaxPlasticStrain() const;
     T getMaxVonMisesStress() const;
+
+    // Multi-Physics Coupling & MPM Particle Conversion
+    void setMPMSolver(MPMSolver3D* mpm_solver) { m_mpm_solver = mpm_solver; }
+    void setMPMSolver(std::shared_ptr<MPMSolver3D> mpm_solver) { m_mpm_solver_ref = mpm_solver; m_mpm_solver = mpm_solver.get(); }
+    MPMSolver3D* getMPMSolver() const { return m_mpm_solver; }
+    void convertElementToMPMParticles(const FEMElement3D<T>& elem, std::vector<MPMParticle3D>& out_particles) const;
 
     // CUDA Stream Accessor
     void* getCudaStream() const { return m_cuda_stream; }
@@ -244,12 +336,10 @@ public:
     }
 
 private:
-    void computeLumpedMasses();
     void computeElementForces(T dt);
     void computeHourglassForcesFB(FEMElement3D<T>& elem, T dt, const T x_nodes[8][3], const T v_nodes[8][3], const T B[6][24], const T dN_dx[8][3], T detJ, T cd, T char_len);
     void updateKinematicsCentralDifference(T dt);
-    void evaluateErosionCriteria();
-    void updateNodeErosionStatus();
+    void updateRotationalKinematicsCentralDifference(T dt);
     void extractBoundaryFacets();
     void buildFaceConnectivity();
 
@@ -280,6 +370,9 @@ private:
     // Core Data Containers
     std::vector<FEMNode3D<T>> m_nodes;
     std::vector<FEMElement3D<T>> m_elements;
+    std::vector<FEMTrussElement3D<T>> m_trusses;
+    std::vector<FEMBeam3DElement<T>> m_beams;
+    std::vector<FEMNodeRotationalState3D<T>> m_rot_nodes;
     std::vector<FEMGaussPointHistory3D<T>> m_gp_history;
     std::vector<FEMFacet3D<T>> m_surface_facets;
     std::vector<MaterialTable3D> m_material_tables;
@@ -290,6 +383,10 @@ private:
     T m_last_dt{1.0e-6f};
     T m_last_cfl{0.3f};
     int m_step_count{0};
+
+    // Multi-Physics Solver References
+    MPMSolver3D* m_mpm_solver{nullptr};
+    std::shared_ptr<MPMSolver3D> m_mpm_solver_ref{nullptr};
 
     void* m_cuda_stream{nullptr};
 };

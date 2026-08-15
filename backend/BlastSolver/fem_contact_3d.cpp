@@ -515,6 +515,139 @@ void FEMContact3D<T>::solveContact(FEMSolver3D<T>& solver, T dt) {
     applyPenaltyForces(solver, dt);
 }
 
+template <typename T>
+void FEMContact3D<T>::solveMPMRebarContact(FEMSolver3D<T>& fem_solver, MPMSolver3D& mpm_solver, T dt) {
+    auto& nodes = fem_solver.getNodes();
+    const auto& trusses = fem_solver.getTrusses();
+    const auto& beams = fem_solver.getBeams();
+    auto& particles = mpm_solver.getParticles();
+
+    if (particles.empty() || (trusses.empty() && beams.empty())) return;
+
+    const auto& mat_tables = fem_solver.getMaterialTables();
+
+    // Line-to-sphere contact helper lambda
+    auto processSegmentContact = [&](int n1_id, int n2_id, T r_bar, int mat_id) {
+        if (n1_id < 0 || n1_id >= static_cast<int>(nodes.size()) ||
+            n2_id < 0 || n2_id >= static_cast<int>(nodes.size())) return;
+
+        auto& node1 = nodes[n1_id];
+        auto& node2 = nodes[n2_id];
+        if (node1.is_eroded && node2.is_eroded) return;
+
+        T s[3] = { node2.x[0] - node1.x[0], node2.x[1] - node1.x[1], node2.x[2] - node1.x[2] };
+        T L2 = s[0]*s[0] + s[1]*s[1] + s[2]*s[2];
+        if (L2 < static_cast<T>(1.0e-12f)) return;
+        T L = std::sqrt(L2);
+
+        // Segment bounding box with padding
+        T pad = r_bar + static_cast<T>(0.05f);
+        T min_seg[3] = { std::min(node1.x[0], node2.x[0]) - pad, std::min(node1.x[1], node2.x[1]) - pad, std::min(node1.x[2], node2.x[2]) - pad };
+        T max_seg[3] = { std::max(node1.x[0], node2.x[0]) + pad, std::max(node1.x[1], node2.x[1]) + pad, std::max(node1.x[2], node2.x[2]) + pad };
+
+        T E_mat = static_cast<T>(200.0e9f);
+        if (mat_id >= 0 && mat_id < static_cast<int>(mat_tables.size())) {
+            E_mat = static_cast<T>(mat_tables[mat_id].youngs_modulus > 0.0f ? mat_tables[mat_id].youngs_modulus : 200.0e9f);
+        }
+        T k_pen = (E_mat * static_cast<T>(3.14159265f) * r_bar * r_bar / L) * m_penalty_scale;
+        if (k_pen < static_cast<T>(1.0e6f)) k_pen = static_cast<T>(1.0e6f);
+
+        for (auto& p : particles) {
+            // Broad-phase AABB test
+            if (static_cast<T>(p.x[0]) < min_seg[0] || static_cast<T>(p.x[0]) > max_seg[0] ||
+                static_cast<T>(p.x[1]) < min_seg[1] || static_cast<T>(p.x[1]) > max_seg[1] ||
+                static_cast<T>(p.x[2]) < min_seg[2] || static_cast<T>(p.x[2]) > max_seg[2]) {
+                continue;
+            }
+
+            // Projection of particle center onto segment [x1, x2]
+            T xp_rel[3] = { static_cast<T>(p.x[0]) - node1.x[0], static_cast<T>(p.x[1]) - node1.x[1], static_cast<T>(p.x[2]) - node1.x[2] };
+            T t = (xp_rel[0]*s[0] + xp_rel[1]*s[1] + xp_rel[2]*s[2]) / L2;
+            T t_clamp = std::max(static_cast<T>(0.0f), std::min(static_cast<T>(1.0f), t));
+
+            T xc[3] = { node1.x[0] + t_clamp * s[0], node1.x[1] + t_clamp * s[1], node1.x[2] + t_clamp * s[2] };
+            T d[3] = { static_cast<T>(p.x[0]) - xc[0], static_cast<T>(p.x[1]) - xc[1], static_cast<T>(p.x[2]) - xc[2] };
+            T dist2 = d[0]*d[0] + d[1]*d[1] + d[2]*d[2];
+            T dist = std::sqrt(dist2);
+
+            T r_debris = static_cast<T>(p.lp[0] > 0.0f ? p.lp[0] : 0.005f);
+            T R_contact = r_bar + r_debris;
+
+            if (dist < R_contact) {
+                T delta = R_contact - dist;
+                T n[3];
+                if (dist > static_cast<T>(1.0e-8f)) {
+                    n[0] = d[0] / dist; n[1] = d[1] / dist; n[2] = d[2] / dist;
+                } else {
+                    n[0] = static_cast<T>(0.0f); n[1] = static_cast<T>(1.0f); n[2] = static_cast<T>(0.0f);
+                }
+
+                T f_norm_mag = k_pen * delta;
+
+                // Relative velocity
+                T v_seg[3] = {
+                    (static_cast<T>(1.0f) - t_clamp) * node1.v[0] + t_clamp * node2.v[0],
+                    (static_cast<T>(1.0f) - t_clamp) * node1.v[1] + t_clamp * node2.v[1],
+                    (static_cast<T>(1.0f) - t_clamp) * node1.v[2] + t_clamp * node2.v[2]
+                };
+                T v_rel[3] = { static_cast<T>(p.v[0]) - v_seg[0], static_cast<T>(p.v[1]) - v_seg[1], static_cast<T>(p.v[2]) - v_seg[2] };
+                T v_n = v_rel[0]*n[0] + v_rel[1]*n[1] + v_rel[2]*n[2];
+
+                T c_damp = static_cast<T>(2.0f) * m_contact_damping * std::sqrt(k_pen * static_cast<T>(p.m > 0.0f ? p.m : 0.1f));
+                T f_damp = c_damp * v_n;
+                f_norm_mag = std::max(static_cast<T>(0.0f), f_norm_mag - f_damp);
+
+                // Tangential friction
+                T v_t[3] = { v_rel[0] - v_n * n[0], v_rel[1] - v_n * n[1], v_rel[2] - v_n * n[2] };
+                T v_t_mag = std::sqrt(v_t[0]*v_t[0] + v_t[1]*v_t[1] + v_t[2]*v_t[2]);
+                T f_fric[3] = { static_cast<T>(0.0f), static_cast<T>(0.0f), static_cast<T>(0.0f) };
+                if (v_t_mag > static_cast<T>(1.0e-6f)) {
+                    T f_fric_mag = std::min(m_mu_kinetic * f_norm_mag, k_pen * v_t_mag * dt);
+                    f_fric[0] = -f_fric_mag * (v_t[0] / v_t_mag);
+                    f_fric[1] = -f_fric_mag * (v_t[1] / v_t_mag);
+                    f_fric[2] = -f_fric_mag * (v_t[2] / v_t_mag);
+                }
+
+                T f_tot[3] = {
+                    f_norm_mag * n[0] + f_fric[0],
+                    f_norm_mag * n[1] + f_fric[1],
+                    f_norm_mag * n[2] + f_fric[2]
+                };
+
+                // Apply contact force impulse on particle
+                if (p.m > 0.0f && dt > static_cast<T>(0.0f)) {
+                    p.v[0] += static_cast<float>((f_tot[0] * dt) / static_cast<T>(p.m));
+                    p.v[1] += static_cast<float>((f_tot[1] * dt) / static_cast<T>(p.m));
+                    p.v[2] += static_cast<float>((f_tot[2] * dt) / static_cast<T>(p.m));
+                }
+
+                // Apply equal and opposite reaction force on rebar nodes
+                node1.f_contact[0] -= (static_cast<T>(1.0f) - t_clamp) * f_tot[0];
+                node1.f_contact[1] -= (static_cast<T>(1.0f) - t_clamp) * f_tot[1];
+                node1.f_contact[2] -= (static_cast<T>(1.0f) - t_clamp) * f_tot[2];
+
+                node2.f_contact[0] -= t_clamp * f_tot[0];
+                node2.f_contact[1] -= t_clamp * f_tot[1];
+                node2.f_contact[2] -= t_clamp * f_tot[2];
+            }
+        }
+    };
+
+    // 1. Process 1D Trusses
+    for (const auto& truss : trusses) {
+        if (truss.is_eroded) continue;
+        T r_bar = std::sqrt(std::max(static_cast<T>(1.0e-8f), truss.A / static_cast<T>(3.14159265f)));
+        processSegmentContact(truss.node_ids[0], truss.node_ids[1], r_bar, truss.mat_id);
+    }
+
+    // 2. Process 3D Beams
+    for (const auto& beam : beams) {
+        if (beam.is_eroded) continue;
+        T r_bar = beam.d * static_cast<T>(0.5f);
+        processSegmentContact(beam.node_ids[0], beam.node_ids[1], r_bar, beam.mat_id);
+    }
+}
+
 // Explicit Instantiations
 template class FEMContact3D<float>;
 template class FEMContact3D<double>;

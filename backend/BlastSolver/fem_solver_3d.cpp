@@ -665,9 +665,434 @@ void FEMSolver3D<T>::appendNodesAndElements(const std::vector<FEMNode3D<T>>& nod
 }
 
 template <typename T>
+void FEMSolver3D<T>::addTruss(int n1, int n2, T area, const MaterialTable3D& mat, T failure_strain, int64_t lsdyna_id) {
+    if (n1 < 0 || n1 >= static_cast<int>(m_nodes.size()) || n2 < 0 || n2 >= static_cast<int>(m_nodes.size()) || n1 == n2) {
+        return;
+    }
+    int mat_id = -1;
+    for (size_t i = 0; i < m_material_tables.size(); ++i) {
+        if (std::abs(m_material_tables[i].density - mat.density) < 1.0f &&
+            std::abs(m_material_tables[i].youngs_modulus - mat.youngs_modulus) < 1.0e6f &&
+            std::abs(m_material_tables[i].yield_stress - mat.yield_stress) < 1.0e5f) {
+            mat_id = static_cast<int>(i);
+            break;
+        }
+    }
+    if (mat_id < 0) {
+        mat_id = static_cast<int>(m_material_tables.size());
+        m_material_tables.push_back(mat);
+    }
+    int part_id = m_next_part_id++;
+
+    T dx = m_nodes[n2].x[0] - m_nodes[n1].x[0];
+    T dy = m_nodes[n2].x[1] - m_nodes[n1].x[1];
+    T dz = m_nodes[n2].x[2] - m_nodes[n1].x[2];
+    T L0 = std::sqrt(dx*dx + dy*dy + dz*dz);
+
+    FEMTrussElement3D<T> truss{};
+    truss.node_ids[0] = n1;
+    truss.node_ids[1] = n2;
+    truss.A = area > static_cast<T>(0.0f) ? area : static_cast<T>(1.13097e-4f);
+    truss.L0 = L0;
+    truss.failure_strain = failure_strain > static_cast<T>(0.0f) ? failure_strain : static_cast<T>(0.20f);
+    truss.mat_id = mat_id;
+    truss.part_id = part_id;
+    truss.lsdyna_id = lsdyna_id;
+
+    m_trusses.push_back(truss);
+    computeLumpedMasses();
+}
+
+template <typename T>
+void FEMSolver3D<T>::addBeam3D(int n1, int n2, T diameter, const MaterialTable3D& mat, T failure_strain, int64_t lsdyna_id) {
+    if (n1 < 0 || n1 >= static_cast<int>(m_nodes.size()) || n2 < 0 || n2 >= static_cast<int>(m_nodes.size()) || n1 == n2) {
+        return;
+    }
+    int mat_id = -1;
+    for (size_t i = 0; i < m_material_tables.size(); ++i) {
+        if (std::abs(m_material_tables[i].density - mat.density) < 1.0f &&
+            std::abs(m_material_tables[i].youngs_modulus - mat.youngs_modulus) < 1.0e6f &&
+            std::abs(m_material_tables[i].yield_stress - mat.yield_stress) < 1.0e5f) {
+            mat_id = static_cast<int>(i);
+            break;
+        }
+    }
+    if (mat_id < 0) {
+        mat_id = static_cast<int>(m_material_tables.size());
+        m_material_tables.push_back(mat);
+    }
+    int part_id = m_next_part_id++;
+
+    T d = diameter > static_cast<T>(0.0f) ? diameter : static_cast<T>(0.012f);
+    T A = static_cast<T>(M_PI) * (d * d) * static_cast<T>(0.25f);
+    T I_val = static_cast<T>(M_PI) * (d * d * d * d) / static_cast<T>(64.0f);
+    T J_val = static_cast<T>(2.0f) * I_val;
+    T Zp_val = (d * d * d) / static_cast<T>(6.0f);
+
+    T dx = m_nodes[n2].x[0] - m_nodes[n1].x[0];
+    T dy = m_nodes[n2].x[1] - m_nodes[n1].x[1];
+    T dz = m_nodes[n2].x[2] - m_nodes[n1].x[2];
+    T L0 = std::sqrt(dx*dx + dy*dy + dz*dz);
+    if (L0 < static_cast<T>(1.0e-12f)) return;
+
+    auto getOrCreateRotNode = [this](int global_node) -> int {
+        for (size_t i = 0; i < m_rot_nodes.size(); ++i) {
+            if (m_rot_nodes[i].global_node_id == global_node) return static_cast<int>(i);
+        }
+        FEMNodeRotationalState3D<T> rnode{};
+        rnode.global_node_id = global_node;
+        int new_idx = static_cast<int>(m_rot_nodes.size());
+        m_rot_nodes.push_back(rnode);
+        return new_idx;
+    };
+
+    int rot1 = getOrCreateRotNode(n1);
+    int rot2 = getOrCreateRotNode(n2);
+
+    FEMBeam3DElement<T> beam{};
+    beam.node_ids[0] = n1;
+    beam.node_ids[1] = n2;
+    beam.rot_node_ids[0] = rot1;
+    beam.rot_node_ids[1] = rot2;
+    beam.d = d;
+    beam.A = A;
+    beam.I2 = I_val;
+    beam.I3 = I_val;
+    beam.J = J_val;
+    beam.Zp = Zp_val;
+    beam.L0 = L0;
+    beam.failure_strain = failure_strain > static_cast<T>(0.0f) ? failure_strain : static_cast<T>(0.20f);
+    beam.mat_id = mat_id;
+    beam.part_id = part_id;
+    beam.lsdyna_id = lsdyna_id;
+
+    T invL = static_cast<T>(1.0f) / L0;
+    T e1[3] = { dx * invL, dy * invL, dz * invL };
+
+    T v_ref[3] = { static_cast<T>(0.0f), static_cast<T>(1.0f), static_cast<T>(0.0f) };
+    if (std::abs(e1[1]) > static_cast<T>(0.90f)) {
+        v_ref[0] = static_cast<T>(1.0f);
+        v_ref[1] = static_cast<T>(0.0f);
+        v_ref[2] = static_cast<T>(0.0f);
+    }
+
+    T e3_raw[3] = {
+        e1[1] * v_ref[2] - e1[2] * v_ref[1],
+        e1[2] * v_ref[0] - e1[0] * v_ref[2],
+        e1[0] * v_ref[1] - e1[1] * v_ref[0]
+    };
+    T norm_e3 = std::sqrt(e3_raw[0]*e3_raw[0] + e3_raw[1]*e3_raw[1] + e3_raw[2]*e3_raw[2]);
+    if (norm_e3 < static_cast<T>(1.0e-12f)) norm_e3 = static_cast<T>(1.0f);
+    beam.e3[0] = e3_raw[0] / norm_e3;
+    beam.e3[1] = e3_raw[1] / norm_e3;
+    beam.e3[2] = e3_raw[2] / norm_e3;
+
+    beam.e2[0] = beam.e3[1] * e1[2] - beam.e3[2] * e1[1];
+    beam.e2[1] = beam.e3[2] * e1[0] - beam.e3[0] * e1[2];
+    beam.e2[2] = beam.e3[0] * e1[1] - beam.e3[1] * e1[0];
+
+    m_beams.push_back(beam);
+    computeLumpedMasses();
+}
+
+template <typename T>
+void FEMSolver3D<T>::computeTrussForces1D(T dt) {
+    (void)dt;
+    if (m_trusses.empty()) return;
+
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(static)
+#endif
+    for (int e = 0; e < static_cast<int>(m_trusses.size()); ++e) {
+        auto& truss = m_trusses[e];
+        if (truss.is_eroded || truss.L0 <= static_cast<T>(0.0f)) continue;
+
+        int n1 = truss.node_ids[0];
+        int n2 = truss.node_ids[1];
+
+        T dx = m_nodes[n2].x[0] - m_nodes[n1].x[0];
+        T dy = m_nodes[n2].x[1] - m_nodes[n1].x[1];
+        T dz = m_nodes[n2].x[2] - m_nodes[n1].x[2];
+        T L = std::sqrt(dx*dx + dy*dy + dz*dz);
+        if (L < static_cast<T>(1.0e-12f)) continue;
+
+        T invL = static_cast<T>(1.0f) / L;
+        T e1[3] = { dx * invL, dy * invL, dz * invL };
+
+        T eps = (L - truss.L0) / truss.L0;
+
+        const auto& mat = m_material_tables[truss.mat_id];
+        T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 200.0e9f);
+        T sigma_y0 = static_cast<T>(mat.yield_stress > 0.0f ? mat.yield_stress : 500.0e6f);
+        T Etan = static_cast<T>(mat.hardening_modulus > 0.0f ? mat.hardening_modulus : 2.0e9f);
+
+        T trial_stress = E * (eps - truss.ep_bar);
+        T abs_trial = std::abs(trial_stress);
+        T current_yield = sigma_y0 + Etan * truss.ep_bar;
+
+        T sigma = trial_stress;
+        if (abs_trial > current_yield) {
+            T dep = (abs_trial - current_yield) / (E + Etan);
+            truss.ep_bar += dep;
+            sigma = (trial_stress > static_cast<T>(0.0f) ? static_cast<T>(1.0f) : static_cast<T>(-1.0f)) * (current_yield + Etan * dep);
+        }
+        truss.sigma = sigma;
+
+        if (truss.ep_bar >= truss.failure_strain) {
+            truss.is_eroded = true;
+            continue;
+        }
+
+        T N = sigma * truss.A;
+        T fx = N * e1[0];
+        T fy = N * e1[1];
+        T fz = N * e1[2];
+
+#ifdef _OPENMP
+        #pragma omp atomic
+        m_nodes[n2].f_int[0] += fx;
+        #pragma omp atomic
+        m_nodes[n2].f_int[1] += fy;
+        #pragma omp atomic
+        m_nodes[n2].f_int[2] += fz;
+
+        #pragma omp atomic
+        m_nodes[n1].f_int[0] -= fx;
+        #pragma omp atomic
+        m_nodes[n1].f_int[1] -= fy;
+        #pragma omp atomic
+        m_nodes[n1].f_int[2] -= fz;
+#else
+        m_nodes[n2].f_int[0] += fx;
+        m_nodes[n2].f_int[1] += fy;
+        m_nodes[n2].f_int[2] += fz;
+
+        m_nodes[n1].f_int[0] -= fx;
+        m_nodes[n1].f_int[1] -= fy;
+        m_nodes[n1].f_int[2] -= fz;
+#endif
+    }
+}
+
+template <typename T>
+void FEMSolver3D<T>::computeBeamForces3D(T dt) {
+    if (m_beams.empty()) return;
+
+    for (auto& rnode : m_rot_nodes) {
+        rnode.m_int[0] = static_cast<T>(0.0f);
+        rnode.m_int[1] = static_cast<T>(0.0f);
+        rnode.m_int[2] = static_cast<T>(0.0f);
+    }
+
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(static)
+#endif
+    for (int e = 0; e < static_cast<int>(m_beams.size()); ++e) {
+        auto& beam = m_beams[e];
+        if (beam.is_eroded || beam.L0 <= static_cast<T>(0.0f)) continue;
+
+        int n1 = beam.node_ids[0];
+        int n2 = beam.node_ids[1];
+        int r1 = beam.rot_node_ids[0];
+        int r2 = beam.rot_node_ids[1];
+
+        T dx = m_nodes[n2].x[0] - m_nodes[n1].x[0];
+        T dy = m_nodes[n2].x[1] - m_nodes[n1].x[1];
+        T dz = m_nodes[n2].x[2] - m_nodes[n1].x[2];
+        T L = std::sqrt(dx*dx + dy*dy + dz*dz);
+        if (L < static_cast<T>(1.0e-12f)) continue;
+
+        T invL = static_cast<T>(1.0f) / L;
+        T e1[3] = { dx * invL, dy * invL, dz * invL };
+
+        T eps = (L - beam.L0) / beam.L0;
+
+        const auto& mat = m_material_tables[beam.mat_id];
+        T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 200.0e9f);
+        T nu = static_cast<T>(mat.poissons_ratio > 0.0f ? mat.poissons_ratio : 0.30f);
+        T G = E / (static_cast<T>(2.0f) * (static_cast<T>(1.0f) + nu));
+        T sigma_y0 = static_cast<T>(mat.yield_stress > 0.0f ? mat.yield_stress : 500.0e6f);
+        T Etan = static_cast<T>(mat.hardening_modulus > 0.0f ? mat.hardening_modulus : 2.0e9f);
+
+        T trial_stress = E * (eps - beam.ep_bar);
+        T abs_trial = std::abs(trial_stress);
+        T current_yield = sigma_y0 + Etan * beam.ep_bar;
+
+        T sigma = trial_stress;
+        if (abs_trial > current_yield) {
+            T dep = (abs_trial - current_yield) / (E + Etan);
+            beam.ep_bar += dep;
+            sigma = (trial_stress > static_cast<T>(0.0f) ? static_cast<T>(1.0f) : static_cast<T>(-1.0f)) * (current_yield + Etan * dep);
+        }
+        T N = sigma * beam.A;
+
+        T w1[3] = { static_cast<T>(0.0f), static_cast<T>(0.0f), static_cast<T>(0.0f) };
+        T w2[3] = { static_cast<T>(0.0f), static_cast<T>(0.0f), static_cast<T>(0.0f) };
+        if (r1 >= 0 && r1 < static_cast<int>(m_rot_nodes.size())) {
+            w1[0] = m_rot_nodes[r1].omega[0];
+            w1[1] = m_rot_nodes[r1].omega[1];
+            w1[2] = m_rot_nodes[r1].omega[2];
+        }
+        if (r2 >= 0 && r2 < static_cast<int>(m_rot_nodes.size())) {
+            w2[0] = m_rot_nodes[r2].omega[0];
+            w2[1] = m_rot_nodes[r2].omega[1];
+            w2[2] = m_rot_nodes[r2].omega[2];
+        }
+
+        T dw[3] = { w2[0] - w1[0], w2[1] - w1[1], w2[2] - w1[2] };
+        T dot_kappa2 = (dw[0]*beam.e2[0] + dw[1]*beam.e2[1] + dw[2]*beam.e2[2]) * invL;
+        T dot_kappa3 = (dw[0]*beam.e3[0] + dw[1]*beam.e3[1] + dw[2]*beam.e3[2]) * invL;
+        T dot_kappa_tor = (dw[0]*e1[0] + dw[1]*e1[1] + dw[2]*e1[2]) * invL;
+
+        beam.kappa2 += dot_kappa2 * dt;
+        beam.kappa3 += dot_kappa3 * dt;
+        beam.kappa_tor += dot_kappa_tor * dt;
+
+        T dv[3] = { m_nodes[n2].v[0] - m_nodes[n1].v[0], m_nodes[n2].v[1] - m_nodes[n1].v[1], m_nodes[n2].v[2] - m_nodes[n1].v[2] };
+        T omega_rigid[3] = {
+            (e1[1]*dv[2] - e1[2]*dv[1]) * invL,
+            (e1[2]*dv[0] - e1[0]*dv[2]) * invL,
+            (e1[0]*dv[1] - e1[1]*dv[0]) * invL
+        };
+        T w_avg[3] = {
+            static_cast<T>(0.5f) * (w1[0] + w2[0]),
+            static_cast<T>(0.5f) * (w1[1] + w2[1]),
+            static_cast<T>(0.5f) * (w1[2] + w2[2])
+        };
+        T w_rel[3] = { w_avg[0] - omega_rigid[0], w_avg[1] - omega_rigid[1], w_avg[2] - omega_rigid[2] };
+        T dot_gamma12 = w_rel[0]*beam.e3[0] + w_rel[1]*beam.e3[1] + w_rel[2]*beam.e3[2];
+        T dot_gamma13 = -(w_rel[0]*beam.e2[0] + w_rel[1]*beam.e2[1] + w_rel[2]*beam.e2[2]);
+
+        beam.gamma12 += dot_gamma12 * dt;
+        beam.gamma13 += dot_gamma13 * dt;
+
+        T M2 = E * beam.I2 * beam.kappa2;
+        T M3 = E * beam.I3 * beam.kappa3;
+        T M_res = std::sqrt(M2*M2 + M3*M3);
+        T Mp = beam.Zp * current_yield;
+        if (M_res > Mp && M_res > static_cast<T>(1.0e-12f)) {
+            T scale_m = Mp / M_res;
+            M2 *= scale_m;
+            M3 *= scale_m;
+        }
+
+        T kappa_shear = static_cast<T>(0.90f);
+        T V2 = kappa_shear * G * beam.A * beam.gamma12;
+        T V3 = kappa_shear * G * beam.A * beam.gamma13;
+
+        T T_tor = G * beam.J * beam.kappa_tor;
+
+        if (beam.ep_bar >= beam.failure_strain) {
+            beam.is_eroded = true;
+            continue;
+        }
+
+        T f2_x = N * e1[0] + V2 * beam.e2[0] + V3 * beam.e3[0];
+        T f2_y = N * e1[1] + V2 * beam.e2[1] + V3 * beam.e3[1];
+        T f2_z = N * e1[2] + V2 * beam.e2[2] + V3 * beam.e3[2];
+
+#ifdef _OPENMP
+        #pragma omp atomic
+        m_nodes[n2].f_int[0] += f2_x;
+        #pragma omp atomic
+        m_nodes[n2].f_int[1] += f2_y;
+        #pragma omp atomic
+        m_nodes[n2].f_int[2] += f2_z;
+
+        #pragma omp atomic
+        m_nodes[n1].f_int[0] -= f2_x;
+        #pragma omp atomic
+        m_nodes[n1].f_int[1] -= f2_y;
+        #pragma omp atomic
+        m_nodes[n1].f_int[2] -= f2_z;
+#else
+        m_nodes[n2].f_int[0] += f2_x;
+        m_nodes[n2].f_int[1] += f2_y;
+        m_nodes[n2].f_int[2] += f2_z;
+
+        m_nodes[n1].f_int[0] -= f2_x;
+        m_nodes[n1].f_int[1] -= f2_y;
+        m_nodes[n1].f_int[2] -= f2_z;
+#endif
+
+        T half_L = static_cast<T>(0.5f) * L;
+        T V_cross[3] = {
+            -V3 * beam.e2[0] + V2 * beam.e3[0],
+            -V3 * beam.e2[1] + V2 * beam.e3[1],
+            -V3 * beam.e2[2] + V2 * beam.e3[2]
+        };
+
+        T m2_x = T_tor * e1[0] + M2 * beam.e2[0] + M3 * beam.e3[0] + half_L * V_cross[0];
+        T m2_y = T_tor * e1[1] + M2 * beam.e2[1] + M3 * beam.e3[1] + half_L * V_cross[1];
+        T m2_z = T_tor * e1[2] + M2 * beam.e2[2] + M3 * beam.e3[2] + half_L * V_cross[2];
+
+        T m1_x = -T_tor * e1[0] - M2 * beam.e2[0] - M3 * beam.e3[0] + half_L * V_cross[0];
+        T m1_y = -T_tor * e1[1] - M2 * beam.e2[1] - M3 * beam.e3[1] + half_L * V_cross[1];
+        T m1_z = -T_tor * e1[2] - M2 * beam.e2[2] - M3 * beam.e3[2] + half_L * V_cross[2];
+
+        if (r2 >= 0 && r2 < static_cast<int>(m_rot_nodes.size())) {
+#ifdef _OPENMP
+            #pragma omp atomic
+            m_rot_nodes[r2].m_int[0] += m2_x;
+            #pragma omp atomic
+            m_rot_nodes[r2].m_int[1] += m2_y;
+            #pragma omp atomic
+            m_rot_nodes[r2].m_int[2] += m2_z;
+#else
+            m_rot_nodes[r2].m_int[0] += m2_x;
+            m_rot_nodes[r2].m_int[1] += m2_y;
+            m_rot_nodes[r2].m_int[2] += m2_z;
+#endif
+        }
+
+        if (r1 >= 0 && r1 < static_cast<int>(m_rot_nodes.size())) {
+#ifdef _OPENMP
+            #pragma omp atomic
+            m_rot_nodes[r1].m_int[0] += m1_x;
+            #pragma omp atomic
+            m_rot_nodes[r1].m_int[1] += m1_y;
+            #pragma omp atomic
+            m_rot_nodes[r1].m_int[2] += m1_z;
+#else
+            m_rot_nodes[r1].m_int[0] += m1_x;
+            m_rot_nodes[r1].m_int[1] += m1_y;
+            m_rot_nodes[r1].m_int[2] += m1_z;
+#endif
+        }
+    }
+}
+
+template <typename T>
+void FEMSolver3D<T>::updateRotationalKinematicsCentralDifference(T dt) {
+    if (m_rot_nodes.empty()) return;
+
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(static)
+#endif
+    for (int i = 0; i < static_cast<int>(m_rot_nodes.size()); ++i) {
+        auto& rnode = m_rot_nodes[i];
+        if (rnode.I_rot <= static_cast<T>(1.0e-12f)) continue;
+
+        for (int c = 0; c < 3; ++c) {
+            if (rnode.is_fixed[c]) {
+                rnode.omega[c] = static_cast<T>(0.0f);
+                rnode.alpha[c] = static_cast<T>(0.0f);
+                continue;
+            }
+            T m_net = rnode.m_ext[c] - rnode.m_int[c];
+            rnode.alpha[c] = m_net / rnode.I_rot;
+            rnode.omega[c] += rnode.alpha[c] * dt;
+        }
+    }
+}
+
+template <typename T>
 void FEMSolver3D<T>::computeLumpedMasses() {
     for (auto& node : m_nodes) {
         node.m = static_cast<T>(0.0f);
+    }
+    for (auto& rnode : m_rot_nodes) {
+        rnode.I_rot = static_cast<T>(0.0f);
     }
 
     for (const auto& elem : m_elements) {
@@ -681,6 +1106,36 @@ void FEMSolver3D<T>::computeLumpedMasses() {
         for (int n = 0; n < 8; ++n) {
             int nid = elem.node_ids[n];
             m_nodes[nid].m += node_mass;
+        }
+    }
+
+    for (const auto& truss : m_trusses) {
+        if (truss.is_eroded || truss.L0 <= static_cast<T>(0.0f)) continue;
+        T density = (truss.mat_id >= 0 && truss.mat_id < static_cast<int>(m_material_tables.size()))
+                    ? static_cast<T>(m_material_tables[truss.mat_id].density)
+                    : static_cast<T>(7850.0f);
+        T truss_mass = density * truss.A * truss.L0;
+        T half_mass = truss_mass * static_cast<T>(0.5f);
+        m_nodes[truss.node_ids[0]].m += half_mass;
+        m_nodes[truss.node_ids[1]].m += half_mass;
+    }
+
+    for (const auto& beam : m_beams) {
+        if (beam.is_eroded || beam.L0 <= static_cast<T>(0.0f)) continue;
+        T density = (beam.mat_id >= 0 && beam.mat_id < static_cast<int>(m_material_tables.size()))
+                    ? static_cast<T>(m_material_tables[beam.mat_id].density)
+                    : static_cast<T>(7850.0f);
+        T beam_mass = density * beam.A * beam.L0;
+        T half_mass = beam_mass * static_cast<T>(0.5f);
+        m_nodes[beam.node_ids[0]].m += half_mass;
+        m_nodes[beam.node_ids[1]].m += half_mass;
+
+        T I_rot_half = static_cast<T>(0.5f) * density * ( (beam.A * beam.L0 * beam.L0 * beam.L0) / static_cast<T>(12.0f) + beam.I2 * beam.L0 );
+        if (beam.rot_node_ids[0] >= 0 && beam.rot_node_ids[0] < static_cast<int>(m_rot_nodes.size())) {
+            m_rot_nodes[beam.rot_node_ids[0]].I_rot += I_rot_half;
+        }
+        if (beam.rot_node_ids[1] >= 0 && beam.rot_node_ids[1] < static_cast<int>(m_rot_nodes.size())) {
+            m_rot_nodes[beam.rot_node_ids[1]].I_rot += I_rot_half;
         }
     }
 }
@@ -1879,6 +2334,19 @@ void FEMSolver3D<T>::evaluateErosionCriteria() {
 
         if (newly_eroded) {
             elem.is_eroded = true;
+            if (m_physics_params.convert_failed_elements_to_mpm && m_mpm_solver) {
+                std::vector<MPMParticle3D> new_particles;
+                convertElementToMPMParticles(elem, new_particles);
+#ifdef _OPENMP
+                #pragma omp critical
+#endif
+                {
+                    if (m_mpm_solver->getMaterialTables().empty() && !m_material_tables.empty()) {
+                        m_mpm_solver->getMaterialTables() = m_material_tables;
+                    }
+                    m_mpm_solver->addParticlesDirect(new_particles);
+                }
+            }
             std::memset(elem.sigma, 0, sizeof(elem.sigma));
             std::memset(elem.s_dev, 0, sizeof(elem.s_dev));
             erosion_occurred = true;
@@ -1892,6 +2360,109 @@ void FEMSolver3D<T>::evaluateErosionCriteria() {
 }
 
 template <typename T>
+void FEMSolver3D<T>::convertElementToMPMParticles(const FEMElement3D<T>& elem, std::vector<MPMParticle3D>& out_particles) const {
+    const auto& mat = m_material_tables[elem.mat_id];
+    float density = mat.density > 0.0f ? mat.density : 2400.0f;
+    float V_elem = static_cast<float>(elem.V > static_cast<T>(1.0e-18f) ? elem.V : (elem.V0 > static_cast<T>(1.0e-18f) ? elem.V0 : static_cast<T>(1.0e-6f)));
+    if (V_elem <= 0.0f) V_elem = 1.0e-6f;
+
+    int np = m_physics_params.mpm_particles_per_failed_element;
+    if (np != 1 && np != 8 && np != 27) np = 8;
+
+    float p_mass = (density * V_elem) / static_cast<float>(np);
+    float p_vol = V_elem / static_cast<float>(np);
+    float h_p = std::cbrt(p_vol) * 0.5f;
+
+    // Gather nodal positions and velocities
+    T x_nodes[8][3], v_nodes[8][3];
+    for (int n = 0; n < 8; ++n) {
+        int nid = elem.node_ids[n];
+        for (int c = 0; c < 3; ++c) {
+            x_nodes[n][c] = m_nodes[nid].x[c];
+            v_nodes[n][c] = m_nodes[nid].v[c];
+        }
+    }
+
+    static const float HEX_NODES_LOCAL[8][3] = {
+        {-1,-1,-1}, { 1,-1,-1}, { 1, 1,-1}, {-1, 1,-1},
+        {-1,-1, 1}, { 1,-1, 1}, { 1, 1, 1}, {-1, 1, 1}
+    };
+
+    if (np == 1) {
+        MPMParticle3D p{};
+        float xp[3] = {0.0f, 0.0f, 0.0f};
+        float vp[3] = {0.0f, 0.0f, 0.0f};
+        for (int n = 0; n < 8; ++n) {
+            for (int c = 0; c < 3; ++c) {
+                xp[c] += static_cast<float>(x_nodes[n][c]) * 0.125f;
+                vp[c] += static_cast<float>(v_nodes[n][c]) * 0.125f;
+            }
+        }
+        p.x[0] = xp[0]; p.x[1] = xp[1]; p.x[2] = xp[2];
+        p.v[0] = vp[0]; p.v[1] = vp[1]; p.v[2] = vp[2];
+        p.m = p_mass;
+        p.V0 = p_vol;
+        p.V = p_vol;
+        p.lp[0] = h_p; p.lp[1] = h_p; p.lp[2] = h_p;
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                p.sigma[r][c] = static_cast<float>(elem.sigma[r][c]);
+                p.F[r][c] = static_cast<float>(elem.F[r][c]);
+                p.B[r][c] = 0.0f;
+                p.L_grad[r][c] = 0.0f;
+            }
+        }
+        p.ep_bar = static_cast<float>(elem.ep_bar);
+        p.damage = static_cast<float>(elem.damage);
+        p.temperature = static_cast<float>(elem.temperature);
+        p.object_id = elem.mat_id;
+        p.has_failed = true;
+        out_particles.push_back(p);
+    } else if (np == 8) {
+        const float g_coord = 0.577350269f;
+        for (int p_idx = 0; p_idx < 8; ++p_idx) {
+            float xi = HEX_NODES_LOCAL[p_idx][0] * g_coord;
+            float eta = HEX_NODES_LOCAL[p_idx][1] * g_coord;
+            float zeta = HEX_NODES_LOCAL[p_idx][2] * g_coord;
+
+            float xp[3] = {0.0f, 0.0f, 0.0f};
+            float vp[3] = {0.0f, 0.0f, 0.0f};
+            for (int a = 0; a < 8; ++a) {
+                float Na = 0.125f * (1.0f + xi * HEX_NODES_LOCAL[a][0]) *
+                                   (1.0f + eta * HEX_NODES_LOCAL[a][1]) *
+                                   (1.0f + zeta * HEX_NODES_LOCAL[a][2]);
+                for (int c = 0; c < 3; ++c) {
+                    xp[c] += static_cast<float>(x_nodes[a][c]) * Na;
+                    vp[c] += static_cast<float>(v_nodes[a][c]) * Na;
+                }
+            }
+
+            MPMParticle3D p{};
+            p.x[0] = xp[0]; p.x[1] = xp[1]; p.x[2] = xp[2];
+            p.v[0] = vp[0]; p.v[1] = vp[1]; p.v[2] = vp[2];
+            p.m = p_mass;
+            p.V0 = p_vol;
+            p.V = p_vol;
+            p.lp[0] = h_p; p.lp[1] = h_p; p.lp[2] = h_p;
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    p.sigma[r][c] = static_cast<float>(elem.sigma[r][c]);
+                    p.F[r][c] = static_cast<float>(elem.F[r][c]);
+                    p.B[r][c] = 0.0f;
+                    p.L_grad[r][c] = 0.0f;
+                }
+            }
+            p.ep_bar = static_cast<float>(elem.ep_bar);
+            p.damage = static_cast<float>(elem.damage);
+            p.temperature = static_cast<float>(elem.temperature);
+            p.object_id = elem.mat_id;
+            p.has_failed = true;
+            out_particles.push_back(p);
+        }
+    }
+}
+
+template <typename T>
 void FEMSolver3D<T>::updateNodeErosionStatus() {
     std::vector<int> active_elem_count(m_nodes.size(), 0);
 
@@ -1899,6 +2470,26 @@ void FEMSolver3D<T>::updateNodeErosionStatus() {
         if (elem.is_eroded) continue;
         for (int k = 0; k < 8; ++k) {
             int nid = elem.node_ids[k];
+            if (nid >= 0 && nid < static_cast<int>(m_nodes.size())) {
+                active_elem_count[nid]++;
+            }
+        }
+    }
+
+    for (const auto& truss : m_trusses) {
+        if (truss.is_eroded) continue;
+        for (int k = 0; k < 2; ++k) {
+            int nid = truss.node_ids[k];
+            if (nid >= 0 && nid < static_cast<int>(m_nodes.size())) {
+                active_elem_count[nid]++;
+            }
+        }
+    }
+
+    for (const auto& beam : m_beams) {
+        if (beam.is_eroded) continue;
+        for (int k = 0; k < 2; ++k) {
+            int nid = beam.node_ids[k];
             if (nid >= 0 && nid < static_cast<int>(m_nodes.size())) {
                 active_elem_count[nid]++;
             }
@@ -1986,8 +2577,11 @@ void FEMSolver3D<T>::buildFaceConnectivity() {
 
 template <typename T>
 void FEMSolver3D<T>::extractBoundaryFacets() {
-    if (!m_surface_facets_dirty && !m_surface_facets.empty()) return;
     m_surface_facets.clear();
+    if (m_elements.empty()) {
+        m_surface_facets_dirty = false;
+        return;
+    }
 
     if (m_face_neighbors.size() != m_elements.size() * 6) {
         buildFaceConnectivity();
@@ -1998,62 +2592,66 @@ void FEMSolver3D<T>::extractBoundaryFacets() {
         {1, 2, 6, 5}, {2, 3, 7, 6}, {3, 0, 4, 7}
     };
 
-    m_surface_facets.reserve(m_elements.size());
-
     for (int e = 0; e < static_cast<int>(m_elements.size()); ++e) {
         const auto& elem = m_elements[e];
         if (elem.is_eroded) continue;
 
         for (int f = 0; f < 6; ++f) {
-            int nbr = m_face_neighbors[e * 6 + f];
-            if (nbr < 0 || m_elements[nbr].is_eroded) {
+            int neighbor = m_face_neighbors[e * 6 + f];
+            bool is_boundary = (neighbor == -1 || m_elements[neighbor].is_eroded);
+
+            if (is_boundary) {
                 FEMFacet3D<T> facet{};
-                for (int k = 0; k < 4; ++k) facet.node_ids[k] = elem.node_ids[HEX_FACES[f][k]];
+                for (int k = 0; k < 4; ++k) {
+                    facet.node_ids[k] = elem.node_ids[HEX_FACES[f][k]];
+                }
                 facet.element_id = e;
                 facet.part_id = elem.part_id;
-                facet.is_eroded = false;
 
-                // Compute normal & area using unbiased diagonal cross product (v2 - v0) x (v3 - v1)
-                T v0[3] = {m_nodes[facet.node_ids[0]].x[0], m_nodes[facet.node_ids[0]].x[1], m_nodes[facet.node_ids[0]].x[2]};
-                T v1[3] = {m_nodes[facet.node_ids[1]].x[0], m_nodes[facet.node_ids[1]].x[1], m_nodes[facet.node_ids[1]].x[2]};
-                T v2[3] = {m_nodes[facet.node_ids[2]].x[0], m_nodes[facet.node_ids[2]].x[1], m_nodes[facet.node_ids[2]].x[2]};
-                T v3[3] = {m_nodes[facet.node_ids[3]].x[0], m_nodes[facet.node_ids[3]].x[1], m_nodes[facet.node_ids[3]].x[2]};
+                const auto& p0 = m_nodes[facet.node_ids[0]].x;
+                const auto& p1 = m_nodes[facet.node_ids[1]].x;
+                const auto& p2 = m_nodes[facet.node_ids[2]].x;
+                const auto& p3 = m_nodes[facet.node_ids[3]].x;
 
-                T min_fx = std::min({v0[0], v1[0], v2[0], v3[0]});
-                T max_fx = std::max({v0[0], v1[0], v2[0], v3[0]});
-                T min_fy = std::min({v0[1], v1[1], v2[1], v3[1]});
-                T max_fy = std::max({v0[1], v1[1], v2[1], v3[1]});
-                T min_fz = std::min({v0[2], v1[2], v2[2], v3[2]});
-                T max_fz = std::max({v0[2], v1[2], v2[2], v3[2]});
+                T v01[3] = {p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]};
+                T v03[3] = {p3[0]-p0[0], p3[1]-p0[1], p3[2]-p0[2]};
+                T n1[3] = {
+                    v01[1]*v03[2] - v01[2]*v03[1],
+                    v01[2]*v03[0] - v01[0]*v03[2],
+                    v01[0]*v03[1] - v01[1]*v03[0]
+                };
 
-                T d1[3] = {v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]};
-                T d2[3] = {v3[0] - v1[0], v3[1] - v1[1], v3[2] - v1[2]};
+                T v23[3] = {p3[0]-p2[0], p3[1]-p2[1], p3[2]-p2[2]};
+                T v21[3] = {p1[0]-p2[0], p1[1]-p2[1], p1[2]-p2[2]};
+                T n2[3] = {
+                    v23[1]*v21[2] - v23[2]*v21[1],
+                    v23[2]*v21[0] - v23[0]*v21[2],
+                    v23[0]*v21[1] - v23[1]*v21[0]
+                };
 
-                facet.normal[0] = d1[1]*d2[2] - d1[2]*d2[1];
-                facet.normal[1] = d1[2]*d2[0] - d1[0]*d2[2];
-                facet.normal[2] = d1[0]*d2[1] - d1[1]*d2[0];
-
-                T norm = std::sqrt(facet.normal[0]*facet.normal[0] + facet.normal[1]*facet.normal[1] + facet.normal[2]*facet.normal[2]);
-                if (norm > static_cast<T>(1.0e-12f)) {
-                    facet.normal[0] /= norm;
-                    facet.normal[1] /= norm;
-                    facet.normal[2] /= norm;
-                    facet.area = static_cast<T>(0.5f) * norm;
+                T n_sum[3] = {n1[0]+n2[0], n1[1]+n2[1], n1[2]+n2[2]};
+                T mag = std::sqrt(n_sum[0]*n_sum[0] + n_sum[1]*n_sum[1] + n_sum[2]*n_sum[2]);
+                if (mag > static_cast<T>(1.0e-12f)) {
+                    facet.normal[0] = n_sum[0] / mag;
+                    facet.normal[1] = n_sum[1] / mag;
+                    facet.normal[2] = n_sum[2] / mag;
+                    facet.area = static_cast<T>(0.5f) * mag;
+                } else {
+                    facet.normal[0] = 0.0f; facet.normal[1] = 0.0f; facet.normal[2] = 1.0f;
+                    facet.area = 0.0f;
                 }
 
-                T h_elem = std::sqrt(facet.area > static_cast<T>(1.0e-24f) ? facet.area : static_cast<T>(1.0e-24f));
-                T margin = static_cast<T>(0.8f) * h_elem;
-                facet.bbox_min[0] = min_fx - margin;
-                facet.bbox_min[1] = min_fy - margin;
-                facet.bbox_min[2] = min_fz - margin;
-                facet.bbox_max[0] = max_fx + margin;
-                facet.bbox_max[1] = max_fy + margin;
-                facet.bbox_max[2] = max_fz + margin;
+                T margin = static_cast<T>(0.05f) * std::sqrt(facet.area > static_cast<T>(0.0f) ? facet.area : static_cast<T>(1.0e-4f));
+                for (int c = 0; c < 3; ++c) {
+                    facet.bbox_min[c] = std::min({p0[c], p1[c], p2[c], p3[c]}) - margin;
+                    facet.bbox_max[c] = std::max({p0[c], p1[c], p2[c], p3[c]}) + margin;
+                }
 
                 m_surface_facets.push_back(facet);
             }
         }
     }
+
     m_surface_facets_dirty = false;
 }
 
@@ -2109,13 +2707,15 @@ void FEMSolver3D<T>::computeGlobalEnergy() {
         T G = E / (static_cast<T>(2.0f) * (static_cast<T>(1.0f) + nu));
         T K = E / (static_cast<T>(3.0f) * (static_cast<T>(1.0f) - static_cast<T>(2.0f) * nu));
 
-        T mean_s = (s00 + s11 + s22) / static_cast<T>(3.0f);
-        T dev00 = s00 - mean_s; T dev11 = s11 - mean_s; T dev22 = s22 - mean_s;
+        T s_dev00 = s00 - (s00+s11+s22)/3.0f;
+        T s_dev11 = s11 - (s00+s11+s22)/3.0f;
+        T s_dev22 = s22 - (s00+s11+s22)/3.0f;
+        T p = (s00+s11+s22)/3.0f;
 
-        T strain_e = (mean_s * mean_s) / (static_cast<T>(2.0f) * K) +
-                     (dev00*dev00 + dev11*dev11 + dev22*dev22 + static_cast<T>(2.0f)*(s01*s01 + s12*s12 + s20*s20)) / (static_cast<T>(4.0f) * G);
+        T w_dev = (s_dev00*s_dev00 + s_dev11*s_dev11 + s_dev22*s_dev22 + 2.0f*(s01*s01 + s12*s12 + s20*s20)) / (4.0f * G);
+        T w_vol = (p * p) / (2.0f * K);
 
-        e_int += strain_e * elem.V;
+        e_int += (w_dev + w_vol) * elem.V;
         e_visc += elem.q_visc * elem.V;
     }
 
@@ -2165,12 +2765,35 @@ T FEMSolver3D<T>::computeStepSize(T cfl) const {
         T G = E / (static_cast<T>(2.0f) * (static_cast<T>(1.0f) + nu));
         T K = E / (static_cast<T>(3.0f) * (static_cast<T>(1.0f) - static_cast<T>(2.0f) * nu));
         if (mat.material_model == MPMMaterialModel::RHTConcrete || mat.material_model == MPMMaterialModel::KCConcrete || mat.material_model == MPMMaterialModel::CSCMConcrete) {
-            K *= static_cast<T>(1.6f); // Account for compacted solid stiffness
+            K *= static_cast<T>(1.6f);
         }
         T cd = std::sqrt((K + static_cast<T>(4.0f)/static_cast<T>(3.0f) * G) / density);
 
         T dt_e = cfl * (h_min / (cd > static_cast<T>(1.0f) ? cd : static_cast<T>(5000.0f)));
         if (dt_e > static_cast<T>(0.0f) && dt_e < min_dt) min_dt = dt_e;
+    }
+
+    for (const auto& truss : m_trusses) {
+        if (truss.is_eroded || truss.L0 <= static_cast<T>(0.0f)) continue;
+        const auto& mat = m_material_tables[truss.mat_id];
+        T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 200.0e9f);
+        T density = static_cast<T>(mat.density > 0.0f ? mat.density : 7850.0f);
+        T cd = std::sqrt(E / density);
+        T dt_t = cfl * (truss.L0 / (cd > static_cast<T>(1.0f) ? cd : static_cast<T>(5000.0f)));
+        if (dt_t > static_cast<T>(0.0f) && dt_t < min_dt) min_dt = dt_t;
+    }
+
+    for (const auto& beam : m_beams) {
+        if (beam.is_eroded || beam.L0 <= static_cast<T>(0.0f)) continue;
+        const auto& mat = m_material_tables[beam.mat_id];
+        T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 200.0e9f);
+        T density = static_cast<T>(mat.density > 0.0f ? mat.density : 7850.0f);
+        T cd = std::sqrt(E / density);
+        T dt_axial = beam.L0 / (cd > static_cast<T>(1.0f) ? cd : static_cast<T>(5000.0f));
+        T d_val = beam.d > static_cast<T>(1e-6f) ? beam.d : static_cast<T>(0.012f);
+        T dt_bending = (beam.L0 * beam.L0) / (static_cast<T>(3.464f) * d_val * cd);
+        T dt_b = cfl * std::min(dt_axial, dt_bending);
+        if (dt_b > static_cast<T>(0.0f) && dt_b < min_dt) min_dt = dt_b;
     }
 
     return (min_dt < static_cast<T>(1.0e30f)) ? min_dt : (m_last_dt > static_cast<T>(0.0f) ? m_last_dt : static_cast<T>(1.0e-6f));
@@ -2204,7 +2827,7 @@ void FEMSolver3D<T>::stepWithDt(T dt) {
         }
     }
 
-    // 2. Internal Element Forces and Contact Penalty Assembly at new positions x^{n+1}
+    // 2. Internal Element Forces, Rebar Truss/Beam Forces, and Contact Penalty Assembly at new positions x^{n+1}
     if (m_contact_penalty_scale > static_cast<T>(0.0f) && !getSurfaceFacets().empty()) {
         FEMContact3D<T> contact_solver;
         contact_solver.setContactPenaltyScale(m_contact_penalty_scale);
@@ -2213,7 +2836,10 @@ void FEMSolver3D<T>::stepWithDt(T dt) {
     }
 
     computeElementForces(dt);
+    computeTrussForces1D(dt);
+    computeBeamForces3D(dt);
     updateKinematicsCentralDifference(dt);
+    updateRotationalKinematicsCentralDifference(dt);
 
     // 3. Complete 2nd-Order Full Velocity Update for step n+1
 #ifdef _OPENMP

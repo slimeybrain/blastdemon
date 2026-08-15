@@ -1861,13 +1861,15 @@ export class GraphRenderer {
             case 'FEMDomain3D': return {
                 device: 'cpu',
                 precision: 'single',
-                cfl: 0.4,
-                hourglass_coeff: 0.1,
+                integration_scheme: 'OnePointFB',
+                hourglass_model: 'FlanaganBelytschkoStiffness',
+                hourglass_coeff: 0.10,
                 contact_penalty_scale: 1.0,
                 friction_static: 0.3,
                 friction_kinetic: 0.2,
-                integration_scheme: 'OnePointFB',
-                hourglass_model: 'FlanaganBelytschkoStiffness'
+                convert_failed_elements_to_mpm: false,
+                mpm_particles_per_failed_element: 8,
+                cfl: 0.4
             };
             case 'FEMObject3D': return {
                 mesh_source: 'Box Generator',
@@ -1884,7 +1886,8 @@ export class GraphRenderer {
                 k_file: ''
             };
             case 'LSDynaImporter3D': return {
-                k_file: ''
+                k_file: '',
+                scale_factor: 1.0
             };
             case 'FEMFSICoupler3D': return {
                 cfl: 0.30,
@@ -4815,6 +4818,7 @@ export class GraphRenderer {
                             'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
                             // FEM keys
                             'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
+                            'convert_failed_elements_to_mpm', 'mpm_particles_per_failed_element', 'rebar_diameter', 'rebar_area',
                             'femMinVal', 'femMaxVal', 'femOpacity', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',
                             // Concrete Core & Models (RHT, K&C, CSCM)
                             'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',

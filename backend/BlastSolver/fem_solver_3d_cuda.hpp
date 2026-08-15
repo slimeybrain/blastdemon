@@ -36,6 +36,30 @@ void launch_fem_element_forces_kernel_3d(
 );
 
 template <typename T>
+void launch_fem_truss_forces_kernel_3d(
+    FEMNode3D<T>* d_nodes,
+    int num_nodes,
+    FEMTrussElement3D<T>* d_trusses,
+    int num_trusses,
+    const MaterialTable3D* d_materials,
+    T dt,
+    cudaStream_t stream
+);
+
+template <typename T>
+void launch_fem_beam_forces_kernel_3d(
+    FEMNode3D<T>* d_nodes,
+    int num_nodes,
+    FEMBeam3DElement<T>* d_beams,
+    int num_beams,
+    FEMNodeRotationalState3D<T>* d_rot_nodes,
+    int num_rot_nodes,
+    const MaterialTable3D* d_materials,
+    T dt,
+    cudaStream_t stream
+);
+
+template <typename T>
 void launch_fem_nodal_half_step_kernel_3d(
     FEMNode3D<T>* d_nodes,
     int num_nodes,

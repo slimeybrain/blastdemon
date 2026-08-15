@@ -201,6 +201,14 @@ public:
                       float yield_stress, float hardening, float failure_strain = 0.25f,
                       float tensile_failure_stress = 600.0e6f, int ppc = 8);
 
+    void addParticleDirect(const MPMParticle3D& particle) {
+        m_particles.push_back(particle);
+    }
+
+    void addParticlesDirect(const std::vector<MPMParticle3D>& particles) {
+        m_particles.insert(m_particles.end(), particles.begin(), particles.end());
+    }
+
     // Simulation Step
     void step(float cfl = 0.3f);
     void stepWithDt(float dt, bool run_p2g = true);

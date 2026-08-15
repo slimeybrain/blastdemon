@@ -2774,12 +2774,276 @@ void FEMSolver3DCUDA<T>::step(T cfl) {
     stepWithDt(dt);
 }
 
+template <typename T>
+__global__ void fem_truss_forces_kernel_3d_device(
+    FEMNode3D<T>* d_nodes,
+    int num_nodes,
+    FEMTrussElement3D<T>* d_trusses,
+    int num_trusses,
+    const MaterialTable3D* d_materials,
+    T dt
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_trusses) return;
+
+    FEMTrussElement3D<T>& truss = d_trusses[idx];
+    if (truss.is_eroded || truss.L0 <= static_cast<T>(0.0f)) return;
+
+    int n1 = truss.node_ids[0];
+    int n2 = truss.node_ids[1];
+    if (n1 < 0 || n1 >= num_nodes || n2 < 0 || n2 >= num_nodes) return;
+
+    T dx = d_nodes[n2].x[0] - d_nodes[n1].x[0];
+    T dy = d_nodes[n2].x[1] - d_nodes[n1].x[1];
+    T dz = d_nodes[n2].x[2] - d_nodes[n1].x[2];
+    T L = sqrt(dx*dx + dy*dy + dz*dz);
+    if (L < static_cast<T>(1.0e-12f)) return;
+
+    T invL = static_cast<T>(1.0f) / L;
+    T e1[3] = { dx * invL, dy * invL, dz * invL };
+
+    T eps = (L - truss.L0) / truss.L0;
+
+    const MaterialTable3D& mat = d_materials[truss.mat_id];
+    T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 200.0e9f);
+    T sigma_y0 = static_cast<T>(mat.yield_stress > 0.0f ? mat.yield_stress : 500.0e6f);
+    T Etan = static_cast<T>(mat.hardening_modulus > 0.0f ? mat.hardening_modulus : 2.0e9f);
+
+    T trial_stress = E * (eps - truss.ep_bar);
+    T abs_trial = fabs(trial_stress);
+    T current_yield = sigma_y0 + Etan * truss.ep_bar;
+
+    T sigma = trial_stress;
+    if (abs_trial > current_yield) {
+        T dep = (abs_trial - current_yield) / (E + Etan);
+        truss.ep_bar += dep;
+        sigma = (trial_stress > static_cast<T>(0.0f) ? static_cast<T>(1.0f) : static_cast<T>(-1.0f)) * (current_yield + Etan * dep);
+    }
+    truss.sigma = sigma;
+
+    if (truss.ep_bar >= truss.failure_strain) {
+        truss.is_eroded = true;
+        return;
+    }
+
+    T N = sigma * truss.A;
+    T fx = N * e1[0];
+    T fy = N * e1[1];
+    T fz = N * e1[2];
+
+    atomicAdd(&d_nodes[n2].f_int[0], fx);
+    atomicAdd(&d_nodes[n2].f_int[1], fy);
+    atomicAdd(&d_nodes[n2].f_int[2], fz);
+
+    atomicAdd(&d_nodes[n1].f_int[0], -fx);
+    atomicAdd(&d_nodes[n1].f_int[1], -fy);
+    atomicAdd(&d_nodes[n1].f_int[2], -fz);
+}
+
+template <typename T>
+void launch_fem_truss_forces_kernel_3d(
+    FEMNode3D<T>* d_nodes,
+    int num_nodes,
+    FEMTrussElement3D<T>* d_trusses,
+    int num_trusses,
+    const MaterialTable3D* d_materials,
+    T dt,
+    cudaStream_t stream
+) {
+    if (!d_nodes || !d_trusses || num_trusses <= 0) return;
+    int blockSize = 256;
+    int numBlocks = (num_trusses + blockSize - 1) / blockSize;
+    fem_truss_forces_kernel_3d_device<T><<<numBlocks, blockSize, 0, stream>>>(
+        d_nodes, num_nodes, d_trusses, num_trusses, d_materials, dt
+    );
+}
+
+template <typename T>
+__global__ void fem_beam_forces_kernel_3d_device(
+    FEMNode3D<T>* d_nodes,
+    int num_nodes,
+    FEMBeam3DElement<T>* d_beams,
+    int num_beams,
+    FEMNodeRotationalState3D<T>* d_rot_nodes,
+    int num_rot_nodes,
+    const MaterialTable3D* d_materials,
+    T dt
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_beams) return;
+
+    FEMBeam3DElement<T>& beam = d_beams[idx];
+    if (beam.is_eroded || beam.L0 <= static_cast<T>(0.0f)) return;
+
+    int n1 = beam.node_ids[0];
+    int n2 = beam.node_ids[1];
+    int r1 = beam.rot_node_ids[0];
+    int r2 = beam.rot_node_ids[1];
+    if (n1 < 0 || n1 >= num_nodes || n2 < 0 || n2 >= num_nodes) return;
+
+    T dx = d_nodes[n2].x[0] - d_nodes[n1].x[0];
+    T dy = d_nodes[n2].x[1] - d_nodes[n1].x[1];
+    T dz = d_nodes[n2].x[2] - d_nodes[n1].x[2];
+    T L = sqrt(dx*dx + dy*dy + dz*dz);
+    if (L < static_cast<T>(1.0e-12f)) return;
+
+    T invL = static_cast<T>(1.0f) / L;
+    T e1[3] = { dx * invL, dy * invL, dz * invL };
+
+    T eps = (L - beam.L0) / beam.L0;
+
+    const MaterialTable3D& mat = d_materials[beam.mat_id];
+    T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 200.0e9f);
+    T nu = static_cast<T>(mat.poissons_ratio > 0.0f ? mat.poissons_ratio : 0.30f);
+    T G = E / (static_cast<T>(2.0f) * (static_cast<T>(1.0f) + nu));
+    T sigma_y0 = static_cast<T>(mat.yield_stress > 0.0f ? mat.yield_stress : 500.0e6f);
+    T Etan = static_cast<T>(mat.hardening_modulus > 0.0f ? mat.hardening_modulus : 2.0e9f);
+
+    T trial_stress = E * (eps - beam.ep_bar);
+    T abs_trial = fabs(trial_stress);
+    T current_yield = sigma_y0 + Etan * beam.ep_bar;
+
+    T sigma = trial_stress;
+    if (abs_trial > current_yield) {
+        T dep = (abs_trial - current_yield) / (E + Etan);
+        beam.ep_bar += dep;
+        sigma = (trial_stress > static_cast<T>(0.0f) ? static_cast<T>(1.0f) : static_cast<T>(-1.0f)) * (current_yield + Etan * dep);
+    }
+    T N = sigma * beam.A;
+
+    T w1[3] = { static_cast<T>(0.0f), static_cast<T>(0.0f), static_cast<T>(0.0f) };
+    T w2[3] = { static_cast<T>(0.0f), static_cast<T>(0.0f), static_cast<T>(0.0f) };
+    if (d_rot_nodes && r1 >= 0 && r1 < num_rot_nodes) {
+        w1[0] = d_rot_nodes[r1].omega[0];
+        w1[1] = d_rot_nodes[r1].omega[1];
+        w1[2] = d_rot_nodes[r1].omega[2];
+    }
+    if (d_rot_nodes && r2 >= 0 && r2 < num_rot_nodes) {
+        w2[0] = d_rot_nodes[r2].omega[0];
+        w2[1] = d_rot_nodes[r2].omega[1];
+        w2[2] = d_rot_nodes[r2].omega[2];
+    }
+
+    T dw[3] = { w2[0] - w1[0], w2[1] - w1[1], w2[2] - w1[2] };
+    T dot_kappa2 = (dw[0]*beam.e2[0] + dw[1]*beam.e2[1] + dw[2]*beam.e2[2]) * invL;
+    T dot_kappa3 = (dw[0]*beam.e3[0] + dw[1]*beam.e3[1] + dw[2]*beam.e3[2]) * invL;
+    T dot_kappa_tor = (dw[0]*e1[0] + dw[1]*e1[1] + dw[2]*e1[2]) * invL;
+
+    beam.kappa2 += dot_kappa2 * dt;
+    beam.kappa3 += dot_kappa3 * dt;
+    beam.kappa_tor += dot_kappa_tor * dt;
+
+    T dv[3] = { d_nodes[n2].v[0] - d_nodes[n1].v[0], d_nodes[n2].v[1] - d_nodes[n1].v[1], d_nodes[n2].v[2] - d_nodes[n1].v[2] };
+    T omega_rigid[3] = {
+        (e1[1]*dv[2] - e1[2]*dv[1]) * invL,
+        (e1[2]*dv[0] - e1[0]*dv[2]) * invL,
+        (e1[0]*dv[1] - e1[1]*dv[0]) * invL
+    };
+    T w_avg[3] = {
+        static_cast<T>(0.5f) * (w1[0] + w2[0]),
+        static_cast<T>(0.5f) * (w1[1] + w2[1]),
+        static_cast<T>(0.5f) * (w1[2] + w2[2])
+    };
+    T w_rel[3] = { w_avg[0] - omega_rigid[0], w_avg[1] - omega_rigid[1], w_avg[2] - omega_rigid[2] };
+    T dot_gamma12 = w_rel[0]*beam.e3[0] + w_rel[1]*beam.e3[1] + w_rel[2]*beam.e3[2];
+    T dot_gamma13 = -(w_rel[0]*beam.e2[0] + w_rel[1]*beam.e2[1] + w_rel[2]*beam.e2[2]);
+
+    beam.gamma12 += dot_gamma12 * dt;
+    beam.gamma13 += dot_gamma13 * dt;
+
+    T M2 = E * beam.I2 * beam.kappa2;
+    T M3 = E * beam.I3 * beam.kappa3;
+    T M_res = sqrt(M2*M2 + M3*M3);
+    T Mp = beam.Zp * current_yield;
+    if (M_res > Mp && M_res > static_cast<T>(1.0e-12f)) {
+        T scale_m = Mp / M_res;
+        M2 *= scale_m;
+        M3 *= scale_m;
+    }
+
+    T kappa_shear = static_cast<T>(0.90f);
+    T V2 = kappa_shear * G * beam.A * beam.gamma12;
+    T V3 = kappa_shear * G * beam.A * beam.gamma13;
+    T T_tor = G * beam.J * beam.kappa_tor;
+
+    if (beam.ep_bar >= beam.failure_strain) {
+        beam.is_eroded = true;
+        return;
+    }
+
+    T f2_x = N * e1[0] + V2 * beam.e2[0] + V3 * beam.e3[0];
+    T f2_y = N * e1[1] + V2 * beam.e2[1] + V3 * beam.e3[1];
+    T f2_z = N * e1[2] + V2 * beam.e2[2] + V3 * beam.e3[2];
+
+    atomicAdd(&d_nodes[n2].f_int[0], f2_x);
+    atomicAdd(&d_nodes[n2].f_int[1], f2_y);
+    atomicAdd(&d_nodes[n2].f_int[2], f2_z);
+
+    atomicAdd(&d_nodes[n1].f_int[0], -f2_x);
+    atomicAdd(&d_nodes[n1].f_int[1], -f2_y);
+    atomicAdd(&d_nodes[n1].f_int[2], -f2_z);
+
+    if (d_rot_nodes) {
+        T half_L = static_cast<T>(0.5f) * L;
+        T V_cross[3] = {
+            -V3 * beam.e2[0] + V2 * beam.e3[0],
+            -V3 * beam.e2[1] + V2 * beam.e3[1],
+            -V3 * beam.e2[2] + V2 * beam.e3[2]
+        };
+
+        T m2_x = T_tor * e1[0] + M2 * beam.e2[0] + M3 * beam.e3[0] + half_L * V_cross[0];
+        T m2_y = T_tor * e1[1] + M2 * beam.e2[1] + M3 * beam.e3[1] + half_L * V_cross[1];
+        T m2_z = T_tor * e1[2] + M2 * beam.e2[2] + M3 * beam.e3[2] + half_L * V_cross[2];
+
+        T m1_x = -T_tor * e1[0] - M2 * beam.e2[0] - M3 * beam.e3[0] + half_L * V_cross[0];
+        T m1_y = -T_tor * e1[1] - M2 * beam.e2[1] - M3 * beam.e3[1] + half_L * V_cross[1];
+        T m1_z = -T_tor * e1[2] - M2 * beam.e2[2] - M3 * beam.e3[2] + half_L * V_cross[2];
+
+        if (r2 >= 0 && r2 < num_rot_nodes) {
+            atomicAdd(&d_rot_nodes[r2].m_int[0], m2_x);
+            atomicAdd(&d_rot_nodes[r2].m_int[1], m2_y);
+            atomicAdd(&d_rot_nodes[r2].m_int[2], m2_z);
+        }
+        if (r1 >= 0 && r1 < num_rot_nodes) {
+            atomicAdd(&d_rot_nodes[r1].m_int[0], m1_x);
+            atomicAdd(&d_rot_nodes[r1].m_int[1], m1_y);
+            atomicAdd(&d_rot_nodes[r1].m_int[2], m1_z);
+        }
+    }
+}
+
+template <typename T>
+void launch_fem_beam_forces_kernel_3d(
+    FEMNode3D<T>* d_nodes,
+    int num_nodes,
+    FEMBeam3DElement<T>* d_beams,
+    int num_beams,
+    FEMNodeRotationalState3D<T>* d_rot_nodes,
+    int num_rot_nodes,
+    const MaterialTable3D* d_materials,
+    T dt,
+    cudaStream_t stream
+) {
+    if (!d_nodes || !d_beams || num_beams <= 0) return;
+    int blockSize = 256;
+    int numBlocks = (num_beams + blockSize - 1) / blockSize;
+    fem_beam_forces_kernel_3d_device<T><<<numBlocks, blockSize, 0, stream>>>(
+        d_nodes, num_nodes, d_beams, num_beams, d_rot_nodes, num_rot_nodes, d_materials, dt
+    );
+}
+
 // Explicit Instantiations
 template void launch_fem_reset_nodal_forces_kernel_3d<float>(FEMNode3D<float>*, int, cudaStream_t);
 template void launch_fem_reset_nodal_forces_kernel_3d<double>(FEMNode3D<double>*, int, cudaStream_t);
 
 template void launch_fem_element_forces_kernel_3d<float>(FEMNode3D<float>*, int, FEMElement3D<float>*, int, FEMGaussPointHistory3D<float>*, const MaterialTable3D*, BlastPhysicsParams<float>, float, float, FEMHourglassModel, FEMIntegrationScheme, cudaStream_t);
 template void launch_fem_element_forces_kernel_3d<double>(FEMNode3D<double>*, int, FEMElement3D<double>*, int, FEMGaussPointHistory3D<double>*, const MaterialTable3D*, BlastPhysicsParams<double>, double, double, FEMHourglassModel, FEMIntegrationScheme, cudaStream_t);
+
+template void launch_fem_truss_forces_kernel_3d<float>(FEMNode3D<float>*, int, FEMTrussElement3D<float>*, int, const MaterialTable3D*, float, cudaStream_t);
+template void launch_fem_truss_forces_kernel_3d<double>(FEMNode3D<double>*, int, FEMTrussElement3D<double>*, int, const MaterialTable3D*, double, cudaStream_t);
+
+template void launch_fem_beam_forces_kernel_3d<float>(FEMNode3D<float>*, int, FEMBeam3DElement<float>*, int, FEMNodeRotationalState3D<float>*, int, const MaterialTable3D*, float, cudaStream_t);
+template void launch_fem_beam_forces_kernel_3d<double>(FEMNode3D<double>*, int, FEMBeam3DElement<double>*, int, FEMNodeRotationalState3D<double>*, int, const MaterialTable3D*, double, cudaStream_t);
 
 template void launch_fem_nodal_half_step_kernel_3d<float>(FEMNode3D<float>*, int, float, cudaStream_t);
 template void launch_fem_nodal_half_step_kernel_3d<double>(FEMNode3D<double>*, int, double, cudaStream_t);
