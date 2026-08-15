@@ -903,9 +903,15 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::updatePrimitiveFromConservative
 
             if (!geom_pool.empty() && geom_pool[t].cells[i].is_boundary) {
                 s.rho[i] = (RealType)ambient_rho;
-                s.ux[i] = 0.0;
-                s.uy[i] = 0.0;
-                s.uz[i] = 0.0;
+                if (!solid_vel_tiles.empty()) {
+                    s.ux[i] = (RealType)solid_vel_tiles[t].vx[i];
+                    s.uy[i] = (RealType)solid_vel_tiles[t].vy[i];
+                    s.uz[i] = (RealType)solid_vel_tiles[t].vz[i];
+                } else {
+                    s.ux[i] = 0.0;
+                    s.uy[i] = 0.0;
+                    s.uz[i] = 0.0;
+                }
                 s.p[i] = (RealType)ambient_p;
                 CellState3D<IsMultiMaterial> temp_s;
                 if constexpr (IsMultiMaterial) {

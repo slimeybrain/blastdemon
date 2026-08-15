@@ -660,13 +660,13 @@ vec3 getColormapColor(float t, int cmap) {
 float getT(float raw, float minVal, float maxVal, bool useLogScale) {
     float t;
     float denom = maxVal - minVal;
-    if (denom < 1e-5) denom = 1e-5;
+    if (denom < 1e-5) return 0.0;
     if (useLogScale) {
         float logMin = log(max(minVal, 1e-5));
         float logMax = log(max(maxVal, 1e-5));
         float logVal = log(max(raw, 1e-5));
         float logDenom = logMax - logMin;
-        if (logDenom < 1e-5) logDenom = 1e-5;
+        if (logDenom < 1e-5) return 0.0;
         t = clamp((logVal - logMin) / logDenom, 0.0, 1.0);
     } else {
         t = clamp((raw - minVal) / denom, 0.0, 1.0);
@@ -1078,17 +1078,17 @@ fn getColormapColor(t: f32, cmap: f32) -> vec3<f32> {
 
 fn getT(raw: f32, minVal: f32, maxVal: f32, useLogScale: f32) -> f32 {
     var t: f32 = 0.0;
-    var denom = maxVal - minVal;
+    let denom = maxVal - minVal;
     if (denom < 1e-5) {
-        denom = 1e-5;
+        return 0.0;
     }
     if (useLogScale > 0.5) {
         let logMin = log(max(minVal, 1e-5));
         let logMax = log(max(maxVal, 1e-5));
         let logVal = log(max(raw, 1e-5));
-        var logDenom = logMax - logMin;
+        let logDenom = logMax - logMin;
         if (logDenom < 1e-5) {
-            logDenom = 1e-5;
+            return 0.0;
         }
         t = clamp((logVal - logMin) / logDenom, 0.0, 1.0);
     } else {
@@ -4035,8 +4035,9 @@ function handleFrame(buffer: ArrayBuffer) {
         const isFraction = qty === 'species1' || qty === 'species2' || qty === 'species3' || qty === 'solid' || qty === 'plastic_strain' || qty === 'plasticStrain' || qty === 'damage' || qty === 'has_failed';
         const defaultRange = config.min_val !== undefined && config.max_val !== undefined ? [config.min_val, config.max_val] : (quantityRanges[qty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0]);
 
+        const hasDynamicRange = (sliceMax - sliceMin) > Math.max(1e-4 * Math.abs(sliceMax), 1e-4);
         if (sliceAutoScale) {
-            if (sliceMin < sliceMax) {
+            if (sliceMin < sliceMax && hasDynamicRange) {
                 if (isFraction && sliceMax <= 1e-4) {
                     sliceMinY = defaultRange[0];
                     sliceMaxY = defaultRange[1];
@@ -4064,17 +4065,17 @@ function handleFrame(buffer: ArrayBuffer) {
         slice.useLogScale = logVal;
         slice.interpolate = interpVal;
 
-        if (sliceMin < sliceMax && (!isFraction || sliceMax > 1e-4)) {
+        if (sliceMin < sliceMax && hasDynamicRange) {
             sliceRanges.push({ min: sliceMin, max: sliceMax });
         } else {
-            sliceRanges.push({ min: defaultRange[0], max: defaultRange[1] });
+            const range = config.min_val !== undefined && config.max_val !== undefined ? [config.min_val, config.max_val] : (quantityRanges[qty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0]);
+            sliceRanges.push({ min: range[0], max: range[1] });
         }
     }
 
     self.postMessage({ type: 'sliceRanges', ranges: sliceRanges });
 
-    // Send dynamic min/max range of the currently focused slice back to the main thread
-    const focusedSlice = getCachedSliceByParentIndex(focusedSliceIndex);
+    const focusedSlice = cachedSlices[focusedSliceIndex] || cachedSlices[0];
     if (focusedSlice) {
         let sliceMin = Infinity;
         let sliceMax = -Infinity;
@@ -4090,7 +4091,8 @@ function handleFrame(buffer: ArrayBuffer) {
         const focusedIsFraction = focusedQty === 'species1' || focusedQty === 'species2' || focusedQty === 'species3' || focusedQty === 'solid' || focusedQty === 'plastic_strain' || focusedQty === 'plasticStrain' || focusedQty === 'damage' || focusedQty === 'has_failed';
         const focusedDefaultRange = focusedConfig.min_val !== undefined && focusedConfig.max_val !== undefined ? [focusedConfig.min_val, focusedConfig.max_val] : (quantityRanges[focusedQty] || DEFAULT_QUANTITY_RANGES[focusedQty] || [0.0, 1.0]);
 
-        if (sliceMin < sliceMax && (!focusedIsFraction || sliceMax > 1e-4)) {
+        const focusedHasDynamicRange = (sliceMax - sliceMin) > Math.max(1e-4 * Math.abs(sliceMax), 1e-4);
+        if (sliceMin < sliceMax && focusedHasDynamicRange && (!focusedIsFraction || sliceMax > 1e-4)) {
             self.postMessage({ type: 'currentRange', min: sliceMin, max: sliceMax });
         } else {
             self.postMessage({ type: 'currentRange', min: focusedDefaultRange[0], max: focusedDefaultRange[1] });
@@ -7052,7 +7054,8 @@ self.onmessage = async (e) => {
                         activeSlicesWebGL[i].maxY = sliceMaxY;
                     }
 
-                    if (sliceMin < sliceMax) {
+                    const hasDynamicRange = (sliceMax - sliceMin) > Math.max(1e-4 * Math.abs(sliceMax), 1e-4);
+                    if (sliceMin < sliceMax && hasDynamicRange) {
                         sliceRanges.push({ min: sliceMin, max: sliceMax });
                     } else {
                         const range = config.min_val !== undefined && config.max_val !== undefined ? [config.min_val, config.max_val] : (quantityRanges[qty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0]);
@@ -7073,14 +7076,15 @@ self.onmessage = async (e) => {
                             if (v > sliceMax) sliceMax = v;
                         }
                     }
-                    if (sliceMin < sliceMax) {
+                    const focusedConfig = slicesConfig[focusedSliceIndex] || slicesConfig[0] || {};
+                    const focusedQty = focusedConfig.quantities?.[0] || 'pressure';
+                    const range = focusedConfig.min_val !== undefined && focusedConfig.max_val !== undefined ? [focusedConfig.min_val, focusedConfig.max_val] : (quantityRanges[focusedQty] || DEFAULT_QUANTITY_RANGES[focusedQty] || [0.0, 1.0]);
+                    const focusedHasDynamicRange = (sliceMax - sliceMin) > Math.max(1e-4 * Math.abs(sliceMax), 1e-4);
+                    if (sliceMin < sliceMax && focusedHasDynamicRange) {
                         minY = sliceMin;
                         maxY = sliceMax;
                         self.postMessage({ type: 'currentRange', min: sliceMin, max: sliceMax });
                     } else {
-                        const focusedConfig = slicesConfig[focusedSliceIndex] || slicesConfig[0] || {};
-                        const focusedQty = focusedConfig.quantities?.[0] || 'pressure';
-                        const range = focusedConfig.min_val !== undefined && focusedConfig.max_val !== undefined ? [focusedConfig.min_val, focusedConfig.max_val] : (quantityRanges[focusedQty] || DEFAULT_QUANTITY_RANGES[focusedQty] || [0.0, 1.0]);
                         minY = range[0];
                         maxY = range[1];
                         self.postMessage({ type: 'currentRange', min: range[0], max: range[1] });

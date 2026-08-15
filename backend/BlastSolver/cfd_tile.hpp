@@ -139,4 +139,11 @@ struct UncoveringMaskTile3D {
     uint64_t words[8]; // 512 bits per tile for 1-bit boundary state (64 bytes vs 2048 bytes)
 };
 
+// Structure of Arrays (SoA) for moving boundary solid velocities (Phase 4 optimization)
+struct SolidVelocityTile3D {
+    float vx[TILE_CELLS_3D];
+    float vy[TILE_CELLS_3D];
+    float vz[TILE_CELLS_3D];
+};
+
 #endif // CFD_TILE_HPP

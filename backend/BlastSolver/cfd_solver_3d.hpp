@@ -294,7 +294,7 @@ class CFDSolver3DImpl : public CFDSolver3DImplBase {
     std::vector<GeometryTile3D> geom_pool;
     std::vector<UncoveringMaskTile3D> prev_mask_pool;
     std::vector<ObstacleFace> obstacle_faces;
-    std::vector<double> solid_vel_vec;
+    std::vector<SolidVelocityTile3D> solid_vel_tiles;
 
     int n_tiles_x, n_tiles_y, n_tiles_z;
 
@@ -323,8 +323,22 @@ public:
     void uploadObstacleFaces(const std::vector<ObstacleFace>& faces) override;
     void setSolidMask(const uint8_t* mask) override;
     void setSolidVelocities(const double* v) override {
-        if (!v) { solid_vel_vec.clear(); return; }
-        solid_vel_vec.assign(v, v + 3 * static_cast<size_t>(nx) * ny * nz);
+        if (!v) { solid_vel_tiles.clear(); return; }
+        int total_tiles = n_tiles_x * n_tiles_y * n_tiles_z;
+        solid_vel_tiles.resize(total_tiles);
+        #pragma omp parallel for collapse(3) schedule(static)
+        for (int k = 0; k < nz; ++k) {
+            for (int j = 0; j < ny; ++j) {
+                for (int i = 0; i < nx; ++i) {
+                    int t_idx = (i >> 3) + (j >> 3) * n_tiles_x + (k >> 3) * n_tiles_x * n_tiles_y;
+                    int c_idx = (i & 7) + (j & 7) * 8 + (k & 7) * 64;
+                    size_t cfd_flat = static_cast<size_t>(i) + static_cast<size_t>(j) * nx + static_cast<size_t>(k) * nx * ny;
+                    solid_vel_tiles[t_idx].vx[c_idx] = static_cast<float>(v[3 * cfd_flat + 0]);
+                    solid_vel_tiles[t_idx].vy[c_idx] = static_cast<float>(v[3 * cfd_flat + 1]);
+                    solid_vel_tiles[t_idx].vz[c_idx] = static_cast<float>(v[3 * cfd_flat + 2]);
+                }
+            }
+        }
     }
     std::pair<double, double> getConservationTotals() const override;
 
@@ -607,12 +621,13 @@ public:
 
         // ALWAYS reflect velocity across the TRUE STL normal to ensure smooth slip flow
         double vw_x = 0.0, vw_y = 0.0, vw_z = 0.0;
-        if (!solid_vel_vec.empty()) {
-            size_t cfd_flat_idx = static_cast<size_t>(target_x) + static_cast<size_t>(target_y) * nx + static_cast<size_t>(target_z) * nx * ny;
-            if (3 * cfd_flat_idx + 2 < solid_vel_vec.size()) {
-                vw_x = solid_vel_vec[3 * cfd_flat_idx + 0];
-                vw_y = solid_vel_vec[3 * cfd_flat_idx + 1];
-                vw_z = solid_vel_vec[3 * cfd_flat_idx + 2];
+        if (!solid_vel_tiles.empty()) {
+            int t_idx = (target_x >> 3) + (target_y >> 3) * n_tiles_x + (target_z >> 3) * n_tiles_x * n_tiles_y;
+            int c_idx = (target_x & 7) + (target_y & 7) * 8 + (target_z & 7) * 64;
+            if (t_idx >= 0 && t_idx < (int)solid_vel_tiles.size()) {
+                vw_x = (double)solid_vel_tiles[t_idx].vx[c_idx];
+                vw_y = (double)solid_vel_tiles[t_idx].vy[c_idx];
+                vw_z = (double)solid_vel_tiles[t_idx].vz[c_idx];
             }
         }
         float u_rel_x = (float)s_ghost.ux - (float)vw_x;
@@ -822,12 +837,13 @@ public:
                     s_ghost.peak_impulse = peak_imp_i;
 
                     double vw_x = 0.0, vw_y = 0.0, vw_z = 0.0;
-                    if (!solid_vel_vec.empty()) {
-                        size_t cfd_flat_idx = static_cast<size_t>(clamped_gx) + static_cast<size_t>(clamped_gy) * nx + static_cast<size_t>(clamped_gz) * nx * ny;
-                        if (3 * cfd_flat_idx + 2 < solid_vel_vec.size()) {
-                            vw_x = solid_vel_vec[3 * cfd_flat_idx + 0];
-                            vw_y = solid_vel_vec[3 * cfd_flat_idx + 1];
-                            vw_z = solid_vel_vec[3 * cfd_flat_idx + 2];
+                    if (!solid_vel_tiles.empty()) {
+                        int t_idx = (clamped_gx >> 3) + (clamped_gy >> 3) * n_tiles_x + (clamped_gz >> 3) * n_tiles_x * n_tiles_y;
+                        int c_idx = (clamped_gx & 7) + (clamped_gy & 7) * 8 + (clamped_gz & 7) * 64;
+                        if (t_idx >= 0 && t_idx < (int)solid_vel_tiles.size()) {
+                            vw_x = (double)solid_vel_tiles[t_idx].vx[c_idx];
+                            vw_y = (double)solid_vel_tiles[t_idx].vy[c_idx];
+                            vw_z = (double)solid_vel_tiles[t_idx].vz[c_idx];
                         }
                     }
                     double u_rel_x = ux_i - vw_x;
@@ -906,12 +922,13 @@ public:
                     }
                 }
                 double vw_x = 0.0, vw_y = 0.0, vw_z = 0.0;
-                if (!solid_vel_vec.empty()) {
-                    size_t cfd_flat_idx = static_cast<size_t>(clamped_gx) + static_cast<size_t>(clamped_gy) * nx + static_cast<size_t>(clamped_gz) * nx * ny;
-                    if (3 * cfd_flat_idx + 2 < solid_vel_vec.size()) {
-                        vw_x = solid_vel_vec[3 * cfd_flat_idx + 0];
-                        vw_y = solid_vel_vec[3 * cfd_flat_idx + 1];
-                        vw_z = solid_vel_vec[3 * cfd_flat_idx + 2];
+                if (!solid_vel_tiles.empty()) {
+                    int t_idx = (clamped_gx >> 3) + (clamped_gy >> 3) * n_tiles_x + (clamped_gz >> 3) * n_tiles_x * n_tiles_y;
+                    int c_idx = (clamped_gx & 7) + (clamped_gy & 7) * 8 + (clamped_gz & 7) * 64;
+                    if (t_idx >= 0 && t_idx < (int)solid_vel_tiles.size()) {
+                        vw_x = (double)solid_vel_tiles[t_idx].vx[c_idx];
+                        vw_y = (double)solid_vel_tiles[t_idx].vy[c_idx];
+                        vw_z = (double)solid_vel_tiles[t_idx].vz[c_idx];
                     }
                 }
                 double u_rel_x = s_fluid.ux - vw_x;

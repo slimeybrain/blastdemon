@@ -27,7 +27,7 @@ __global__ void kernel_rasterize_fem_elements_to_geom_3d(
     const FEMElement3D<T>* __restrict__ d_elements,
     int num_elements,
     GeometryTile3D* d_geom,
-    float* d_solid_vel,
+    SolidVelocityTile3D* d_solid_vel,
     int nx, int ny, int nz,
     int ntx, int nty,
     float dx, float dy, float dz,
@@ -131,10 +131,9 @@ __global__ void kernel_rasterize_fem_elements_to_geom_3d(
                     d_geom[t_idx].cells[c_idx] = pack_geometry_payload(true, 0.0f, 0.0f, 0.0f, 1.0f);
 
                     if (d_solid_vel) {
-                        int cfd_flat = i + j * nx + k * nx * ny;
-                        d_solid_vel[3 * cfd_flat + 0] = avg_vx;
-                        d_solid_vel[3 * cfd_flat + 1] = avg_vy;
-                        d_solid_vel[3 * cfd_flat + 2] = avg_vz;
+                        d_solid_vel[t_idx].vx[c_idx] = avg_vx;
+                        d_solid_vel[t_idx].vy[c_idx] = avg_vy;
+                        d_solid_vel[t_idx].vz[c_idx] = avg_vz;
                     }
                 }
             }
@@ -149,7 +148,7 @@ __global__ void kernel_rasterize_fem_facets_to_geom_3d(
     const FEMFacet3D<T>* __restrict__ d_facets,
     int num_facets,
     GeometryTile3D* d_geom,
-    float* d_solid_vel,
+    SolidVelocityTile3D* d_solid_vel,
     int nx, int ny, int nz,
     int ntx, int nty,
     float dx, float dy, float dz,
@@ -202,10 +201,9 @@ __global__ void kernel_rasterize_fem_facets_to_geom_3d(
                     d_geom[t_idx].cells[c_idx] = pack_geometry_payload(true, fnx, fny, fnz, 1.0f);
 
                     if (d_solid_vel) {
-                        int cfd_flat = i + j * nx + k * nx * ny;
-                        d_solid_vel[3 * cfd_flat + 0] = avg_vx;
-                        d_solid_vel[3 * cfd_flat + 1] = avg_vy;
-                        d_solid_vel[3 * cfd_flat + 2] = avg_vz;
+                        d_solid_vel[t_idx].vx[c_idx] = avg_vx;
+                        d_solid_vel[t_idx].vy[c_idx] = avg_vy;
+                        d_solid_vel[t_idx].vz[c_idx] = avg_vz;
                     }
                 }
             }
@@ -395,7 +393,7 @@ void launch_rasterize_fem_elements_to_geom_3d(
     const FEMElement3D<T>* d_elements,
     int num_elements,
     GeometryTile3D* d_geom,
-    float* d_solid_vel,
+    SolidVelocityTile3D* d_solid_vel,
     int nx, int ny, int nz,
     int ntx, int nty,
     float dx, float dy, float dz,
@@ -417,7 +415,7 @@ void launch_rasterize_fem_facets_to_geom_3d(
     const FEMFacet3D<T>* d_facets,
     int num_facets,
     GeometryTile3D* d_geom,
-    float* d_solid_vel,
+    SolidVelocityTile3D* d_solid_vel,
     int nx, int ny, int nz,
     int ntx, int nty,
     float dx, float dy, float dz,
@@ -538,11 +536,11 @@ template class FEMFSICoupler3DCUDA<double>;
 template void launch_zero_fem_ext_forces_3d<float>(FEMNode3D<float>*, int, cudaStream_t);
 template void launch_zero_fem_ext_forces_3d<double>(FEMNode3D<double>*, int, cudaStream_t);
 
-template void launch_rasterize_fem_elements_to_geom_3d<float>(const FEMNode3D<float>*, const FEMElement3D<float>*, int, GeometryTile3D*, float*, int, int, int, int, int, float, float, float, float, float, float, cudaStream_t);
-template void launch_rasterize_fem_elements_to_geom_3d<double>(const FEMNode3D<double>*, const FEMElement3D<double>*, int, GeometryTile3D*, float*, int, int, int, int, int, float, float, float, float, float, float, cudaStream_t);
+template void launch_rasterize_fem_elements_to_geom_3d<float>(const FEMNode3D<float>*, const FEMElement3D<float>*, int, GeometryTile3D*, SolidVelocityTile3D*, int, int, int, int, int, float, float, float, float, float, float, cudaStream_t);
+template void launch_rasterize_fem_elements_to_geom_3d<double>(const FEMNode3D<double>*, const FEMElement3D<double>*, int, GeometryTile3D*, SolidVelocityTile3D*, int, int, int, int, int, float, float, float, float, float, float, cudaStream_t);
 
-template void launch_rasterize_fem_facets_to_geom_3d<float>(const FEMNode3D<float>*, const FEMFacet3D<float>*, int, GeometryTile3D*, float*, int, int, int, int, int, float, float, float, float, float, float, cudaStream_t);
-template void launch_rasterize_fem_facets_to_geom_3d<double>(const FEMNode3D<double>*, const FEMFacet3D<double>*, int, GeometryTile3D*, float*, int, int, int, int, int, float, float, float, float, float, float, cudaStream_t);
+template void launch_rasterize_fem_facets_to_geom_3d<float>(const FEMNode3D<float>*, const FEMFacet3D<float>*, int, GeometryTile3D*, SolidVelocityTile3D*, int, int, int, int, int, float, float, float, float, float, float, cudaStream_t);
+template void launch_rasterize_fem_facets_to_geom_3d<double>(const FEMNode3D<double>*, const FEMFacet3D<double>*, int, GeometryTile3D*, SolidVelocityTile3D*, int, int, int, int, int, float, float, float, float, float, float, cudaStream_t);
 
 template void launch_integrate_cfd_pressure_to_fem_nodes_3d<float, float, true>(const PrimitiveTile3D<float, true>*, const GeometryTile3D*, FEMNode3D<float>*, const FEMFacet3D<float>*, int, int, int, int, int, int, float, float, float, float, float, float, float, cudaStream_t);
 template void launch_integrate_cfd_pressure_to_fem_nodes_3d<float, float, false>(const PrimitiveTile3D<float, false>*, const GeometryTile3D*, FEMNode3D<float>*, const FEMFacet3D<float>*, int, int, int, int, int, int, float, float, float, float, float, float, float, cudaStream_t);

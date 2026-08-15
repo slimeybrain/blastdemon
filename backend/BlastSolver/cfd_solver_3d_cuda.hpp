@@ -35,7 +35,7 @@ private:
     mutable void* d_tile_is_near_boundary = nullptr;
     mutable void* d_solid_mask_fsi = nullptr;
     mutable size_t d_solid_mask_fsi_capacity = 0;
-    mutable void* d_solid_vel_fsi = nullptr;
+    mutable SolidVelocityTile3D* d_solid_vel_fsi = nullptr;
     mutable size_t d_solid_vel_fsi_capacity = 0;
     mutable void* d_tile_has_boundary_buf = nullptr;
     mutable size_t d_tile_has_boundary_capacity = 0;
@@ -92,7 +92,7 @@ private:
     mutable bool has_paged_solid_mask = false;
     mutable std::vector<uint8_t> paged_solid_mask;
     mutable bool has_paged_solid_vel = false;
-    mutable std::vector<float> paged_solid_vel;
+    mutable std::vector<SolidVelocityTile3D> paged_solid_vel;
     mutable bool has_paged_tile_boundary = false;
     mutable std::vector<uint8_t> paged_tile_boundary;
 

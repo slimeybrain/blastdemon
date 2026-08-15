@@ -3144,8 +3144,11 @@ export class Telemetry3DViewport {
                 let minVal = slice.min_val ?? 101325.0;
                 let maxVal = slice.max_val ?? 1013250.0;
                 if (autoScale && this.latestEmpiricalRange) {
-                    minVal = this.latestEmpiricalRange.min;
-                    maxVal = this.latestEmpiricalRange.max;
+                    const rangeSpan = this.latestEmpiricalRange.max - this.latestEmpiricalRange.min;
+                    if (rangeSpan > Math.max(1e-4 * Math.abs(this.latestEmpiricalRange.max), 1e-4)) {
+                        minVal = this.latestEmpiricalRange.min;
+                        maxVal = this.latestEmpiricalRange.max;
+                    }
                 }
                 specs.push({
                     id: `slice-${idx}`,

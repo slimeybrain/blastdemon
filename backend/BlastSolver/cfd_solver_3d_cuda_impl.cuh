@@ -1297,7 +1297,7 @@ __device__ __forceinline__ void convert_conservative_to_primitive_gpu(
     const GeometryTile3D* __restrict__ geom,
     int t_idx, int c_idx,
     RealType dt,
-    const float* d_solid_vel = nullptr
+    const SolidVelocityTile3D* d_solid_vel = nullptr
 );
 
 template <typename RealType, bool IsMultiMaterial, typename TileType = PrimitiveTile3D<RealType, IsMultiMaterial>>
@@ -1313,7 +1313,7 @@ __device__ __forceinline__ void apply_flux_update_gpu(
     const GeometryTile3D* geom = nullptr,
     bool perform_primitive_update = false,
     RealType dt_for_peaks = 0.0,
-    const float* d_solid_vel = nullptr
+    const SolidVelocityTile3D* d_solid_vel = nullptr
 ) {
     RealType du_rho   = (fR_x[0] - fL_x[0]) + (fR_y[0] - fL_y[0]) + (fR_z[0] - fL_z[0]);
     RealType du_rhoux = (fR_x[1] - fL_x[1]) + (fR_y[1] - fL_y[1]) + (fR_z[1] - fL_z[1]);
@@ -1387,7 +1387,7 @@ __device__ __forceinline__ void apply_flux_update_gpu_accumulated(
     const GeometryTile3D* geom = nullptr,
     bool perform_primitive_update = false,
     RealType dt_for_peaks = 0.0,
-    const float* d_solid_vel = nullptr
+    const SolidVelocityTile3D* d_solid_vel = nullptr
 ) {
     RealType du_rho   = du[0];
     RealType du_rhoux = du[1];
@@ -1462,7 +1462,7 @@ __global__ void __launch_bounds__(512) compute_flux_fused_3d(
     ConservativeTile3D<RealType, IsMultiMaterial>* __restrict__ U_prev = nullptr,
     bool perform_primitive_update = false,
     RealType dt_for_peaks = 0.0,
-    const float* d_solid_vel = nullptr
+    const SolidVelocityTile3D* d_solid_vel = nullptr
 ) {
 
     int t_idx = active_tile_indices[blockIdx.x];
@@ -1867,7 +1867,7 @@ __device__ __forceinline__ void convert_conservative_to_primitive_gpu(
     const GeometryTile3D* __restrict__ geom,
     int t_idx, int c_idx,
     RealType dt,
-    const float* d_solid_vel
+    const SolidVelocityTile3D* d_solid_vel
 ) {
     RealType u_rho = U[t_idx].rho[c_idx];
     RealType u_rhoux = U[t_idx].rhoux[c_idx];
@@ -2023,21 +2023,9 @@ __device__ __forceinline__ void convert_conservative_to_primitive_gpu(
         RealType sv_y = 0.0;
         RealType sv_z = 0.0;
         if (d_solid_vel) {
-            int tx = t_idx % d_ntx;
-            int ty = (t_idx / d_ntx) % d_nty;
-            int tz = t_idx / (d_ntx * d_nty);
-            int lx = c_idx % TILE_SIZE_3D;
-            int ly = (c_idx / TILE_SIZE_3D) % TILE_SIZE_3D;
-            int lz = c_idx / (TILE_SIZE_3D * TILE_SIZE_3D);
-            int gx = tx * TILE_SIZE_3D + lx;
-            int gy = ty * TILE_SIZE_3D + ly;
-            int gz = tz * TILE_SIZE_3D + lz;
-            if (gx < d_nx && gy < d_ny && gz < d_nz) {
-                int cfd_flat = gx + gy * d_nx + gz * d_nx * d_ny;
-                sv_x = (RealType)d_solid_vel[3 * cfd_flat + 0];
-                sv_y = (RealType)d_solid_vel[3 * cfd_flat + 1];
-                sv_z = (RealType)d_solid_vel[3 * cfd_flat + 2];
-            }
+            sv_x = (RealType)d_solid_vel[t_idx].vx[c_idx];
+            sv_y = (RealType)d_solid_vel[t_idx].vy[c_idx];
+            sv_z = (RealType)d_solid_vel[t_idx].vz[c_idx];
         }
         ux = sv_x;
         uy = sv_y;
@@ -2104,7 +2092,7 @@ __global__ void __launch_bounds__(512) update_primitive_kernel_3d(
     const int* __restrict__ active_tile_indices,
     const GeometryTile3D* __restrict__ geom,
     RealType dt = 0.0,
-    const float* d_solid_vel = nullptr
+    const SolidVelocityTile3D* d_solid_vel = nullptr
 ) {
     int t_idx = active_tile_indices[blockIdx.x];
     int tx = t_idx % d_ntx;
@@ -2896,9 +2884,9 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::ensure_paged_out() const {
         has_paged_solid_mask = false;
     }
 
-    size_t vel_bytes = static_cast<size_t>(nx) * ny * nz * 3 * sizeof(float);
     if (d_solid_vel_fsi) {
-        paged_solid_vel.resize(nx * ny * nz * 3);
+        size_t vel_bytes = total_tiles * sizeof(SolidVelocityTile3D);
+        paged_solid_vel.resize(total_tiles);
         CHECK_CUDA(cudaMemcpy(paged_solid_vel.data(), d_solid_vel_fsi, vel_bytes, cudaMemcpyDeviceToHost));
         has_paged_solid_vel = true;
     } else {
@@ -3014,7 +3002,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::ensure_paged_in() const {
         d_solid_mask_fsi_capacity = mask_bytes;
     }
     if (has_paged_solid_vel) {
-        size_t vel_bytes = static_cast<size_t>(nx) * ny * nz * 3 * sizeof(float);
+        size_t vel_bytes = total_tiles * sizeof(SolidVelocityTile3D);
         CHECK_CUDA(cudaMalloc(&d_solid_vel_fsi, vel_bytes));
         CHECK_CUDA(cudaMemcpy(d_solid_vel_fsi, paged_solid_vel.data(), vel_bytes, cudaMemcpyHostToDevice));
         d_solid_vel_fsi_capacity = vel_bytes;
@@ -3637,7 +3625,7 @@ template <typename RealType, bool IsMultiMaterial>
 __global__ void kernel_enforce_passive_velocities(
     PrimitiveTile3D<RealType, IsMultiMaterial>* states,
     const GeometryTile3D* geom,
-    const float* d_solid_vel,
+    const SolidVelocityTile3D* d_solid_vel,
     const int* active_tile_indices,
     int nx, int ny, int nz, int ntx, int nty, int n_active
 ) {
@@ -3649,22 +3637,9 @@ __global__ void kernel_enforce_passive_velocities(
     
     if (geom && d_solid_vel) {
         if (geom[t_idx].cells[c_idx].is_boundary) {
-            int tx = t_idx % ntx;
-            int ty = (t_idx / ntx) % nty;
-            int tz = t_idx / (ntx * nty);
-            int lx = c_idx % 8;
-            int ly = (c_idx / 8) % 8;
-            int lz = c_idx / 64;
-            int gx = tx * 8 + lx;
-            int gy = ty * 8 + ly;
-            int gz = tz * 8 + lz;
-            
-            if (gx < nx && gy < ny && gz < nz) {
-                int cfd_flat = gx + gy * nx + gz * nx * ny;
-                states[t_idx].ux[c_idx] = d_solid_vel[3*cfd_flat+0];
-                states[t_idx].uy[c_idx] = d_solid_vel[3*cfd_flat+1];
-                states[t_idx].uz[c_idx] = d_solid_vel[3*cfd_flat+2];
-            }
+            states[t_idx].ux[c_idx] = d_solid_vel[t_idx].vx[c_idx];
+            states[t_idx].uy[c_idx] = d_solid_vel[t_idx].vy[c_idx];
+            states[t_idx].uz[c_idx] = d_solid_vel[t_idx].vz[c_idx];
         }
     }
 }
@@ -3691,7 +3666,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
         kernel_enforce_passive_velocities<RealType, IsMultiMaterial><<<blocks_enf, threads_enf>>>(
             (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
             (const GeometryTile3D*)d_geom,
-            (const float*)d_solid_vel_fsi,
+            (const SolidVelocityTile3D*)d_solid_vel_fsi,
             (const int*)d_active_tile_indices,
             nx, ny, nz, ntx, nty, n_active
         );
@@ -3713,7 +3688,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
                 dt_r, stage,
                 (ConservativeTile3D<RealType, IsMultiMaterial>*)U_prev_ptr,
                 prim_upd, peak_dt,
-                (const float*)d_solid_vel_fsi
+                (const SolidVelocityTile3D*)d_solid_vel_fsi
             );
         } else if (spatialOrder == 2) {
             compute_flux_fused_3d<RealType, IsMultiMaterial, 2, TileT><<<n_active, threads>>>(
@@ -3725,7 +3700,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
                 dt_r, stage,
                 (ConservativeTile3D<RealType, IsMultiMaterial>*)U_prev_ptr,
                 prim_upd, peak_dt,
-                (const float*)d_solid_vel_fsi
+                (const SolidVelocityTile3D*)d_solid_vel_fsi
             );
         } else {
             compute_flux_fused_3d<RealType, IsMultiMaterial, 1, TileT><<<n_active, threads>>>(
@@ -3737,7 +3712,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
                 dt_r, stage,
                 (ConservativeTile3D<RealType, IsMultiMaterial>*)U_prev_ptr,
                 prim_upd, peak_dt,
-                (const float*)d_solid_vel_fsi
+                (const SolidVelocityTile3D*)d_solid_vel_fsi
             );
         }
     };
@@ -3833,7 +3808,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
             (const int*)d_active_tile_indices,
             (const GeometryTile3D*)d_geom,
             dt_r,
-            (const float*)d_solid_vel_fsi
+            (const SolidVelocityTile3D*)d_solid_vel_fsi
         );
 
     if (this->d_fsi_mpm_grid) {
@@ -5654,7 +5629,10 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setSolidMask(const uint8_t* mas
 
 template <typename RealType, bool IsMultiMaterial>
 void CFDSolver3DCuda<RealType, IsMultiMaterial>::setSolidVelocities(const double* v) {
-    if (!v) return;
+    if (!v) {
+        if (d_solid_vel_fsi) { cudaFree(d_solid_vel_fsi); d_solid_vel_fsi = nullptr; d_solid_vel_fsi_capacity = 0; }
+        return;
+    }
     int ntx = (nx + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
     int nty = (ny + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
     int ntz = (nz + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
@@ -5665,18 +5643,28 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setSolidVelocities(const double
         CHECK_CUDA(cudaMemset(d_geom, 0, total_tiles * sizeof(GeometryTile3D)));
     }
 
-    size_t vel_bytes = static_cast<size_t>(nx) * ny * nz * 3 * sizeof(float);
+    size_t vel_bytes = total_tiles * sizeof(SolidVelocityTile3D);
     if (!d_solid_vel_fsi || d_solid_vel_fsi_capacity < vel_bytes) {
         if (d_solid_vel_fsi) cudaFree(d_solid_vel_fsi);
         CHECK_CUDA(cudaMalloc(&d_solid_vel_fsi, vel_bytes));
         d_solid_vel_fsi_capacity = vel_bytes;
     }
 
-    std::vector<float> float_vel(static_cast<size_t>(nx) * ny * nz * 3);
-    for (size_t i = 0; i < float_vel.size(); ++i) {
-        float_vel[i] = static_cast<float>(v[i]);
+    std::vector<SolidVelocityTile3D> host_vel(total_tiles);
+    #pragma omp parallel for collapse(3) schedule(static)
+    for (int k = 0; k < nz; ++k) {
+        for (int j = 0; j < ny; ++j) {
+            for (int i = 0; i < nx; ++i) {
+                int t_idx = (i >> 3) + (j >> 3) * ntx + (k >> 3) * ntx * nty;
+                int c_idx = (i & 7) + (j & 7) * 8 + (k & 7) * 64;
+                size_t cfd_flat = static_cast<size_t>(i) + static_cast<size_t>(j) * nx + static_cast<size_t>(k) * nx * ny;
+                host_vel[t_idx].vx[c_idx] = static_cast<float>(v[3 * cfd_flat + 0]);
+                host_vel[t_idx].vy[c_idx] = static_cast<float>(v[3 * cfd_flat + 1]);
+                host_vel[t_idx].vz[c_idx] = static_cast<float>(v[3 * cfd_flat + 2]);
+            }
+        }
     }
-    CHECK_CUDA(cudaMemcpy(d_solid_vel_fsi, float_vel.data(), vel_bytes, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_solid_vel_fsi, host_vel.data(), vel_bytes, cudaMemcpyHostToDevice));
 }
 
 // Bulk pressure extraction for FSI — one cudaMemcpy per tile array, not per cell
@@ -5765,7 +5753,7 @@ static __global__ void kernel_fsi_couple_gpu(
     PrimitiveTile3D<RealType, IsMultiMaterial>* d_states,
     GeometryTile3D* d_geom,
     Blast::MPMGridNode3D* d_grid,
-    float* d_solid_vel,
+    SolidVelocityTile3D* d_solid_vel,
     int nx, int ny, int nz,
     int ntx, int nty,
     float dx, float dy, float dz
@@ -5787,11 +5775,10 @@ static __global__ void kernel_fsi_couple_gpu(
     float vy = is_solid ? (d_grid[mpm_idx].p[1] / mass) : 0.0f;
     float vz = is_solid ? (d_grid[mpm_idx].p[2] / mass) : 0.0f;
 
-    int cfd_flat_idx = gx + gy * nx + gz * nx * ny;
     if (d_solid_vel) {
-        d_solid_vel[3 * cfd_flat_idx + 0] = vx;
-        d_solid_vel[3 * cfd_flat_idx + 1] = vy;
-        d_solid_vel[3 * cfd_flat_idx + 2] = vz;
+        d_solid_vel[t_idx].vx[c_idx] = vx;
+        d_solid_vel[t_idx].vy[c_idx] = vy;
+        d_solid_vel[t_idx].vz[c_idx] = vz;
     }
 
     if (d_geom) {
@@ -5936,7 +5923,7 @@ static __global__ void kernel_fsi_couple_active_gpu(
     Blast::MPMGridNode3D* d_grid,
     const int* d_active_nodes,
     int num_active_nodes,
-    float* d_solid_vel,
+    SolidVelocityTile3D* d_solid_vel,
     int nx, int ny, int nz,
     int ntx, int nty,
     float dx, float dy, float dz
@@ -5959,11 +5946,10 @@ static __global__ void kernel_fsi_couple_active_gpu(
     float vy = is_solid ? (d_grid[mpm_idx].p[1] / mass) : 0.0f;
     float vz = is_solid ? (d_grid[mpm_idx].p[2] / mass) : 0.0f;
 
-    int cfd_flat_idx = gx + gy * nx + gz * nx * ny;
     if (d_solid_vel) {
-        d_solid_vel[3 * cfd_flat_idx + 0] = vx;
-        d_solid_vel[3 * cfd_flat_idx + 1] = vy;
-        d_solid_vel[3 * cfd_flat_idx + 2] = vz;
+        d_solid_vel[t_idx].vx[c_idx] = vx;
+        d_solid_vel[t_idx].vy[c_idx] = vy;
+        d_solid_vel[t_idx].vz[c_idx] = vz;
     }
 
     if (d_geom) {
@@ -6358,12 +6344,13 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithMPMGPU(void* mpm_s
         CHECK_CUDA(cudaMemset(d_tile_is_near_boundary, 1, total_tiles * sizeof(uint8_t)));
     }
 
-    size_t vel_bytes = static_cast<size_t>(nx) * ny * nz * 3 * sizeof(float);
+    size_t vel_bytes = total_tiles * sizeof(SolidVelocityTile3D);
     if (!d_solid_vel_fsi || d_solid_vel_fsi_capacity < vel_bytes) {
         if (d_solid_vel_fsi) cudaFree(d_solid_vel_fsi);
         CHECK_CUDA(cudaMalloc(&d_solid_vel_fsi, vel_bytes));
         d_solid_vel_fsi_capacity = vel_bytes;
     }
+    CHECK_CUDA(cudaMemsetAsync(d_solid_vel_fsi, 0, vel_bytes));
 
     int* d_active_nodes = mpm_solver->getDeviceActiveNodes();
     int num_active_nodes = mpm_solver->getNumActiveNodes();
@@ -6384,7 +6371,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithMPMGPU(void* mpm_s
             d_grid,
             d_active_nodes,
             num_active_nodes,
-            (float*)d_solid_vel_fsi,
+            (SolidVelocityTile3D*)d_solid_vel_fsi,
             nx, ny, nz,
             ntx, nty,
             mpm_dx, mpm_dy, mpm_dz
@@ -6431,7 +6418,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithMPMGPU(void* mpm_s
             (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
             (GeometryTile3D*)d_geom,
             d_grid,
-            (float*)d_solid_vel_fsi,
+            (SolidVelocityTile3D*)d_solid_vel_fsi,
             nx, ny, nz,
             ntx, nty,
             mpm_dx, mpm_dy, mpm_dz
@@ -6521,12 +6508,13 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithFEMGPU(void* fem_s
         CHECK_CUDA(cudaMemset(d_tile_is_near_boundary, 1, total_tiles * sizeof(uint8_t)));
     }
 
-    size_t vel_bytes = static_cast<size_t>(nx) * ny * nz * 3 * sizeof(float);
+    size_t vel_bytes = total_tiles * sizeof(SolidVelocityTile3D);
     if (!d_solid_vel_fsi || d_solid_vel_fsi_capacity < vel_bytes) {
         if (d_solid_vel_fsi) cudaFree(d_solid_vel_fsi);
         CHECK_CUDA(cudaMalloc(&d_solid_vel_fsi, vel_bytes));
         d_solid_vel_fsi_capacity = vel_bytes;
     }
+    CHECK_CUDA(cudaMemsetAsync(d_solid_vel_fsi, 0, vel_bytes));
 
     CHECK_CUDA(cudaMemsetAsync(d_geom, 0, total_tiles * sizeof(GeometryTile3D)));
 
@@ -6539,7 +6527,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithFEMGPU(void* fem_s
                 fem_double->getElementsDevice(),
                 num_elements,
                 (GeometryTile3D*)d_geom,
-                (float*)d_solid_vel_fsi,
+                (SolidVelocityTile3D*)d_solid_vel_fsi,
                 nx, ny, nz,
                 ntx, nty,
                 static_cast<float>(cellSize), static_cast<float>(cellSize), static_cast<float>(cellSize),
@@ -6555,7 +6543,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithFEMGPU(void* fem_s
                 fem_double->getSurfaceFacetsDevice(),
                 num_facets,
                 (GeometryTile3D*)d_geom,
-                (float*)d_solid_vel_fsi,
+                (SolidVelocityTile3D*)d_solid_vel_fsi,
                 nx, ny, nz,
                 ntx, nty,
                 static_cast<float>(cellSize), static_cast<float>(cellSize), static_cast<float>(cellSize),
@@ -6619,7 +6607,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithFEMGPU(void* fem_s
                 fem_float->getElementsDevice(),
                 num_elements,
                 (GeometryTile3D*)d_geom,
-                (float*)d_solid_vel_fsi,
+                (SolidVelocityTile3D*)d_solid_vel_fsi,
                 nx, ny, nz,
                 ntx, nty,
                 static_cast<float>(cellSize), static_cast<float>(cellSize), static_cast<float>(cellSize),
@@ -6635,7 +6623,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithFEMGPU(void* fem_s
                 fem_float->getSurfaceFacetsDevice(),
                 num_facets,
                 (GeometryTile3D*)d_geom,
-                (float*)d_solid_vel_fsi,
+                (SolidVelocityTile3D*)d_solid_vel_fsi,
                 nx, ny, nz,
                 ntx, nty,
                 static_cast<float>(cellSize), static_cast<float>(cellSize), static_cast<float>(cellSize),
