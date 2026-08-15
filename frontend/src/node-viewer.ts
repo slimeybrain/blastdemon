@@ -747,6 +747,40 @@ export class NodeViewer {
                     'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
                     'mg_gamma0', 'mg_c0', 'mg_s'
                 ];
+            } else if (matModel === 'RHT Concrete') {
+                paramKeys = [
+                    'material_model', 'preset',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
+                    'failure_strain', 'tensile_failure_stress',
+                    'enable_strain_erosion', 'erosion_strain',
+                    'enable_stress_erosion', 'erosion_stress',
+                    'enable_timestep_erosion', 'timestep_erosion_factor',
+                    'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
+                    'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat'
+                ];
+            } else if (matModel === 'Karagozian & Case (K&C)') {
+                paramKeys = [
+                    'material_model', 'preset',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
+                    'failure_strain', 'tensile_failure_stress',
+                    'enable_strain_erosion', 'erosion_strain',
+                    'enable_stress_erosion', 'erosion_stress',
+                    'enable_timestep_erosion', 'timestep_erosion_factor',
+                    'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega'
+                ];
+            } else if (matModel === 'CSCM Concrete') {
+                paramKeys = [
+                    'material_model', 'preset',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
+                    'failure_strain', 'tensile_failure_stress',
+                    'enable_strain_erosion', 'erosion_strain',
+                    'enable_stress_erosion', 'erosion_stress',
+                    'enable_timestep_erosion', 'timestep_erosion_factor',
+                    'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2'
+                ];
             } else {
                 paramKeys = [
                     'material_model', 'preset',
@@ -760,14 +794,14 @@ export class NodeViewer {
             }
         } else if (node.type === 'MPMDomain2D') {
             const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
-            paramKeys = ['transfer_scheme', 'velocity_scheme', 'space_time_scheme', 'smooth_plastic_strain'];
+            paramKeys = ['precision', 'transfer_scheme', 'velocity_scheme', 'space_time_scheme', 'smooth_plastic_strain'];
             if (hasFLIP) {
                 paramKeys.push('flip_blend');
             }
             paramKeys.push('ppc', 'cfl');
         } else if (node.type === 'MPMDomain3D') {
             const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
-            paramKeys = ['device', 'transfer_scheme', 'velocity_scheme', 'space_time_scheme', 'smooth_plastic_strain'];
+            paramKeys = ['device', 'precision', 'transfer_scheme', 'velocity_scheme', 'space_time_scheme', 'smooth_plastic_strain'];
             if (hasFLIP) {
                 paramKeys.push('flip_blend');
             }
@@ -780,6 +814,28 @@ export class NodeViewer {
             } else {
                 paramKeys.push('space_time_scheme');
             }
+        } else if (node.type === 'FEMDomain3D') {
+            paramKeys = [
+                'device', 'precision', 'cfl',
+                'rebar_formulation', 'convert_failed_elements_to_mpm', 'mpm_particles_per_failed_element',
+                'hourglass_coeff', 'contact_penalty_scale', 'friction_static', 'friction_kinetic',
+                'integration_scheme', 'hourglass_model'
+            ];
+        } else if (node.type === 'FEMObject3D') {
+            paramKeys = [
+                'mesh_source', 'shape_type', 'boundary_condition',
+                'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z',
+                'radius', 'inner_radius', 'height', 'nx', 'ny', 'nz',
+                'vel_x', 'vel_y', 'vel_z', 'bulk_viscosity_b1', 'bulk_viscosity_b2',
+                'timestep_erosion_factor', 'k_file'
+            ];
+        } else if (node.type === 'FEMFSICoupler3D') {
+            paramKeys = [
+                'cfl', 'steps', 'coupling_scheme', 'pressure_integration',
+                'uncovering_method', 'erosion_venting', 'vacuum_density', 'vacuum_pressure'
+            ];
+        } else if (node.type === 'LSDynaImporter3D') {
+            paramKeys = ['k_file', 'scale_factor'];
         }
         if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D') {
             paramKeys.sort((a, b) => {
@@ -2433,6 +2489,9 @@ export class NodeViewer {
             select.style.padding = '4px';
             select.style.fontSize = 'var(--font-sm)';
 
+            const strVal = String(value ?? '');
+            let selectedMatched = false;
+
             if (key === 'preset') {
                 MPM_MATERIAL_CATEGORIES.forEach(group => {
                     const optgroup = document.createElement('optgroup');
@@ -2441,7 +2500,10 @@ export class NodeViewer {
                         const option = document.createElement('option');
                         option.value = opt;
                         option.text = opt;
-                        if (opt === value.toString()) option.selected = true;
+                        if (strVal && (opt.toLowerCase() === strVal.toLowerCase() || opt === strVal)) {
+                            option.selected = true;
+                            selectedMatched = true;
+                        }
                         optgroup.appendChild(option);
                     });
                     select.appendChild(optgroup);
@@ -2456,9 +2518,20 @@ export class NodeViewer {
                         else if (opt === 'cuda') text = 'CUDA GPU';
                     }
                     option.text = text;
-                    if (opt === value.toString()) option.selected = true;
+                    if (strVal && (
+                        opt.toLowerCase() === strVal.toLowerCase() ||
+                        opt === strVal ||
+                        (!isNaN(Number(opt)) && !isNaN(Number(strVal)) && Math.abs(Number(opt) - Number(strVal)) < 0.001)
+                    )) {
+                        option.selected = true;
+                        selectedMatched = true;
+                    }
                     select.appendChild(option);
                 });
+            }
+
+            if (!selectedMatched && select.options.length > 0) {
+                select.options[0].selected = true;
             }
 
             select.addEventListener('change', () => {

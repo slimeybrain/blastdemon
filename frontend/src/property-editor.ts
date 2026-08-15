@@ -114,11 +114,29 @@ export class PropertyEditor {
             for (const [key, value] of Object.entries(node.parameters)) {
                 const el = this.container.querySelector(`[data-key="${key}"]`) as HTMLInputElement | HTMLSelectElement;
                 if (el && document.activeElement !== el) {
-                    // FIX 8: Handle checkbox type — setting .value does nothing for checkboxes
                     if ((el as HTMLInputElement).type === 'checkbox') {
                         (el as HTMLInputElement).checked = !!value;
+                    } else if (el.tagName === 'SELECT') {
+                        const sel = el as HTMLSelectElement;
+                        const strVal = String(value ?? '');
+                        let found = false;
+                        for (let i = 0; i < sel.options.length; i++) {
+                            const optVal = sel.options[i].value;
+                            if (strVal && (
+                                optVal.toLowerCase() === strVal.toLowerCase() ||
+                                optVal === strVal ||
+                                (!isNaN(Number(optVal)) && !isNaN(Number(strVal)) && Math.abs(Number(optVal) - Number(strVal)) < 0.001)
+                            )) {
+                                sel.selectedIndex = i;
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found && sel.options.length > 0 && sel.selectedIndex < 0) {
+                            sel.selectedIndex = 0;
+                        }
                     } else {
-                        el.value = value.toString();
+                        el.value = value !== undefined && value !== null ? value.toString() : '';
                     }
                 }
             }
@@ -352,6 +370,40 @@ export class PropertyEditor {
                     'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
                     'mg_gamma0', 'mg_c0', 'mg_s'
                 ];
+            } else if (matModel === 'RHT Concrete') {
+                paramKeys = [
+                    'material_model', 'preset',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
+                    'failure_strain', 'tensile_failure_stress',
+                    'enable_strain_erosion', 'erosion_strain',
+                    'enable_stress_erosion', 'erosion_stress',
+                    'enable_timestep_erosion', 'timestep_erosion_factor',
+                    'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
+                    'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat'
+                ];
+            } else if (matModel === 'Karagozian & Case (K&C)') {
+                paramKeys = [
+                    'material_model', 'preset',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
+                    'failure_strain', 'tensile_failure_stress',
+                    'enable_strain_erosion', 'erosion_strain',
+                    'enable_stress_erosion', 'erosion_stress',
+                    'enable_timestep_erosion', 'timestep_erosion_factor',
+                    'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega'
+                ];
+            } else if (matModel === 'CSCM Concrete') {
+                paramKeys = [
+                    'material_model', 'preset',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
+                    'failure_strain', 'tensile_failure_stress',
+                    'enable_strain_erosion', 'erosion_strain',
+                    'enable_stress_erosion', 'erosion_stress',
+                    'enable_timestep_erosion', 'timestep_erosion_factor',
+                    'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2'
+                ];
             } else {
                 paramKeys = [
                     'material_model', 'preset',
@@ -386,9 +438,27 @@ export class PropertyEditor {
                 paramKeys.push('space_time_scheme');
             }
         } else if (node.type === 'FEMDomain3D') {
-            paramKeys = ['device', 'precision', 'cfl', 'hourglass_coeff', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'integration_scheme', 'hourglass_model'];
+            paramKeys = [
+                'device', 'precision', 'cfl',
+                'rebar_formulation', 'convert_failed_elements_to_mpm', 'mpm_particles_per_failed_element',
+                'hourglass_coeff', 'contact_penalty_scale', 'friction_static', 'friction_kinetic',
+                'integration_scheme', 'hourglass_model'
+            ];
         } else if (node.type === 'FEMObject3D') {
-            paramKeys = ['mesh_source', 'shape_type', 'boundary_condition', 'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'nx', 'ny', 'nz', 'vel_x', 'vel_y', 'vel_z', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'k_file'];
+            paramKeys = [
+                'mesh_source', 'shape_type', 'boundary_condition',
+                'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z',
+                'radius', 'inner_radius', 'height', 'nx', 'ny', 'nz',
+                'vel_x', 'vel_y', 'vel_z', 'bulk_viscosity_b1', 'bulk_viscosity_b2',
+                'timestep_erosion_factor', 'k_file'
+            ];
+        } else if (node.type === 'FEMFSICoupler3D') {
+            paramKeys = [
+                'cfl', 'steps', 'coupling_scheme', 'pressure_integration',
+                'uncovering_method', 'erosion_venting', 'vacuum_density', 'vacuum_pressure'
+            ];
+        } else if (node.type === 'LSDynaImporter3D') {
+            paramKeys = ['k_file', 'scale_factor'];
         }
 
         if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D') {
@@ -466,10 +536,14 @@ export class PropertyEditor {
                 let sectionTitle: string | null = null;
                 if (key === 'density') sectionTitle = 'ELASTICITY & MASS';
                 else if (key === 'yield_stress') sectionTitle = 'PLASTIC YIELD & HARDENING';
+                else if (key === 'fc') sectionTitle = 'CONCRETE CORE STRENGTH';
                 else if (key === 'failure_strain') sectionTitle = 'CONSTITUTIVE FAILURE & SPALL';
                 else if (key === 'enable_strain_erosion') sectionTitle = 'ELEMENT EROSION & DELETION';
                 else if (key === 'jc_A') sectionTitle = 'JOHNSON-COOK VISCOPLASTICITY';
                 else if (key === 'mg_gamma0') sectionTitle = 'MIE-GRÜNEISEN SHOCK EOS';
+                else if (key === 'rht_A') sectionTitle = 'RHT CONCRETE PARAMETERS';
+                else if (key === 'kc_a0') sectionTitle = 'K&C CONCRETE PARAMETERS';
+                else if (key === 'cscm_alpha') sectionTitle = 'CSCM CONCRETE PARAMETERS';
 
                 if (sectionTitle) {
                     const secHeader = document.createElement('div');
@@ -1506,6 +1580,9 @@ export class PropertyEditor {
             select.style.border = '1px solid #444';
             select.style.padding = '4px';
 
+            const strVal = String(value ?? '');
+            let selectedMatched = false;
+
             if (key === 'preset') {
                 MPM_MATERIAL_CATEGORIES.forEach(group => {
                     const optgroup = document.createElement('optgroup');
@@ -1514,7 +1591,10 @@ export class PropertyEditor {
                         const option = document.createElement('option');
                         option.value = opt;
                         option.textContent = opt;
-                        if (opt === String(value ?? '')) option.selected = true;
+                        if (strVal && (opt.toLowerCase() === strVal.toLowerCase() || opt === strVal)) {
+                            option.selected = true;
+                            selectedMatched = true;
+                        }
                         optgroup.appendChild(option);
                     });
                     select.appendChild(optgroup);
@@ -1540,11 +1620,22 @@ export class PropertyEditor {
                         else if (opt === '5.0') text = '0.2 FPS (5.0s)';
                         else if (opt === '10.0') text = '0.1 FPS (10.0s)';
                     }
-                    if (Math.abs(Number(opt) - Number(value)) < 0.001 || opt === String(value ?? '')) option.selected = true;
+                    option.textContent = text;
+                    if (strVal && (
+                        opt.toLowerCase() === strVal.toLowerCase() ||
+                        opt === strVal ||
+                        (!isNaN(Number(opt)) && !isNaN(Number(strVal)) && Math.abs(Number(opt) - Number(strVal)) < 0.001)
+                    )) {
+                        option.selected = true;
+                        selectedMatched = true;
+                    }
                     select.appendChild(option);
                 });
             }
-            select.value = String(value ?? dropdowns[key][0]);
+
+            if (!selectedMatched && select.options.length > 0) {
+                select.options[0].selected = true;
+            }
 
 
             select.addEventListener('change', () => {

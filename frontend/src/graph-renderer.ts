@@ -4422,9 +4422,27 @@ export class GraphRenderer {
                 paramKeys.push('space_time_scheme');
             }
         } else if (node.type === 'FEMDomain3D') {
-            paramKeys = ['device', 'precision', 'cfl', 'hourglass_coeff', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'integration_scheme', 'hourglass_model'];
+            paramKeys = [
+                'device', 'precision', 'cfl',
+                'rebar_formulation', 'convert_failed_elements_to_mpm', 'mpm_particles_per_failed_element',
+                'hourglass_coeff', 'contact_penalty_scale', 'friction_static', 'friction_kinetic',
+                'integration_scheme', 'hourglass_model'
+            ];
         } else if (node.type === 'FEMObject3D') {
-            paramKeys = ['mesh_source', 'shape_type', 'boundary_condition', 'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'nx', 'ny', 'nz', 'vel_x', 'vel_y', 'vel_z', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'k_file'];
+            paramKeys = [
+                'mesh_source', 'shape_type', 'boundary_condition',
+                'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z',
+                'radius', 'inner_radius', 'height', 'nx', 'ny', 'nz',
+                'vel_x', 'vel_y', 'vel_z', 'bulk_viscosity_b1', 'bulk_viscosity_b2',
+                'timestep_erosion_factor', 'k_file'
+            ];
+        } else if (node.type === 'FEMFSICoupler3D') {
+            paramKeys = [
+                'cfl', 'steps', 'coupling_scheme', 'pressure_integration',
+                'uncovering_method', 'erosion_venting', 'vacuum_density', 'vacuum_pressure'
+            ];
+        } else if (node.type === 'LSDynaImporter3D') {
+            paramKeys = ['k_file', 'scale_factor'];
         }
         if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D' || node.type === 'RefinementMesh3D') {
             paramKeys.sort((a, b) => {
@@ -4668,6 +4686,10 @@ export class GraphRenderer {
             const dropdowns: Record<string, string[]> = {
                 'preset': [...MPM_MATERIAL_PRESET_NAMES],
                 'material_model': ['Hypoelastic', 'Johnson-Cook + Mie-Grüneisen', 'RHT Concrete', 'Karagozian & Case (K&C)', 'CSCM Concrete'],
+                'rebar_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
+                'coupling_scheme': ['Two-Way Staggered', 'Sub-Cycling'],
+                'pressure_integration': ['2x2 Gauss Quadrature', '1-Point Centroid'],
+                'uncovering_method': ['Conservative IDW + Vacuum Cavity', 'Ghost-Fluid Standard'],
                 'mesh_type': ['regular', 'amr'],
 
                 'dimension': ['1D', '2D', '3D'],
@@ -4761,9 +4783,10 @@ export class GraphRenderer {
                         return { value: opt, label: label };
                     });
                 }
+                const selectedVal = String(value ?? (dropdowns[key] ? dropdowns[key][0] : ''));
                 inputEl = this.createCustomDropdown(
                     options,
-                    value.toString(),
+                    selectedVal,
                     (newVal) => {
                         console.log("[DEBUG] Custom Dropdown onChange triggered:", key, newVal, "for node:", node.id);
                         if (key === 'space_time_scheme') {
