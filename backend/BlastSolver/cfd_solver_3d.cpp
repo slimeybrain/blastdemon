@@ -1500,7 +1500,21 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
             // Copy midpoint structure to states_int in parallel
             #pragma omp parallel for schedule(static)
             for (int t = 0; t < total_tiles; ++t) {
-                states_int[t] = states_pred[t];
+                const auto& sp = states_pred[t];
+                auto& si = states_int[t];
+                for (int c = 0; c < TILE_CELLS_3D; ++c) {
+                    si.rho[c] = sp.rho[c];
+                    si.ux[c]  = sp.ux[c];
+                    si.uy[c]  = sp.uy[c];
+                    si.uz[c]  = sp.uz[c];
+                    si.p[c]   = sp.p[c];
+                    if constexpr (IsMultiMaterial) {
+                        si.alpha1[c] = sp.alpha1[c];
+                        si.alpha2[c] = sp.alpha2[c];
+                        si.arho1[c]  = sp.arho1[c];
+                        si.arho2[c]  = sp.arho2[c];
+                    }
+                }
             }
             
             #pragma omp parallel for schedule(guided)
@@ -1613,7 +1627,24 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
             }
             
             // Copy integrated states to states_pred so local states_int destruction does not leave dangling pointers
-            states_pred = states_int;
+            #pragma omp parallel for schedule(static)
+            for (int t = 0; t < total_tiles; ++t) {
+                const auto& si = states_int[t];
+                auto& sp = states_pred[t];
+                for (int c = 0; c < TILE_CELLS_3D; ++c) {
+                    sp.rho[c] = si.rho[c];
+                    sp.ux[c]  = si.ux[c];
+                    sp.uy[c]  = si.uy[c];
+                    sp.uz[c]  = si.uz[c];
+                    sp.p[c]   = si.p[c];
+                    if constexpr (IsMultiMaterial) {
+                        sp.alpha1[c] = si.alpha1[c];
+                        sp.alpha2[c] = si.alpha2[c];
+                        sp.arho1[c]  = si.arho1[c];
+                        sp.arho2[c]  = si.arho2[c];
+                    }
+                }
+            }
         }
         
         std::swap(states_pool, states_pred);

@@ -98,6 +98,31 @@ struct PrimitiveTile3D<RealType, true> {
     RealType peak_impulse[TILE_CELLS_3D];
 };
 
+template <typename RealType, bool IsMultiMaterial>
+struct PrimitivePredictorTile3D;
+
+template <typename RealType>
+struct PrimitivePredictorTile3D<RealType, false> {
+    RealType rho[TILE_CELLS_3D];
+    RealType ux[TILE_CELLS_3D];
+    RealType uy[TILE_CELLS_3D];
+    RealType uz[TILE_CELLS_3D];
+    RealType p[TILE_CELLS_3D];
+};
+
+template <typename RealType>
+struct PrimitivePredictorTile3D<RealType, true> {
+    RealType rho[TILE_CELLS_3D];
+    RealType ux[TILE_CELLS_3D];
+    RealType uy[TILE_CELLS_3D];
+    RealType uz[TILE_CELLS_3D];
+    RealType p[TILE_CELLS_3D];
+    RealType alpha1[TILE_CELLS_3D];
+    RealType alpha2[TILE_CELLS_3D];
+    RealType arho1[TILE_CELLS_3D];
+    RealType arho2[TILE_CELLS_3D];
+};
+
 struct GeometryPayload {
     int8_t nx;
     int8_t ny;

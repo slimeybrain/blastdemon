@@ -287,8 +287,8 @@ class CFDSolver3DImpl : public CFDSolver3DImplBase {
     std::vector<ConservativeTile3D<RealType, IsMultiMaterial>> U_pool;
     std::vector<ConservativeTile3D<RealType, IsMultiMaterial>> dU_pool;
     std::vector<PrimitiveTile3D<RealType, IsMultiMaterial>> states_pred;
-    std::vector<PrimitiveTile3D<RealType, IsMultiMaterial>> dW_dt_pool;
-    std::vector<PrimitiveTile3D<RealType, IsMultiMaterial>> states_int;
+    std::vector<PrimitivePredictorTile3D<RealType, IsMultiMaterial>> dW_dt_pool;
+    std::vector<PrimitivePredictorTile3D<RealType, IsMultiMaterial>> states_int;
     std::vector<uint8_t> active_tiles;
     std::vector<int> active_tile_indices;
     std::vector<uint8_t> tile_is_fully_interior;
