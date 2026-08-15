@@ -1445,7 +1445,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         }
         if (!flattenedParams['flux_scheme']) flattenedParams['flux_scheme'] = 'AUSM+';
         if (flattenedParams['spatial_order'] === undefined) flattenedParams['spatial_order'] = 2;
-        if (flattenedParams['temporal_order'] === undefined) flattenedParams['temporal_order'] = 2;
+        if (flattenedParams['temporal_order'] === undefined) flattenedParams['temporal_order'] = 4;
         if (!flattenedParams['precision']) flattenedParams['precision'] = 'single';
     }
 

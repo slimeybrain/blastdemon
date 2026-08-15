@@ -129,14 +129,11 @@ export class PropertyEditor {
                     stsEl.value = node.parameters['space_time_scheme'] ?? 'RK2';
                 } else {
                     const so = node.parameters['spatial_order'] ?? 2;
-                    const to = node.parameters['temporal_order'] ?? 2;
-                    let currentVal = 'RK2 (2nd-Order Space/Time)';
-                    if (so === 1 && to === 1) currentVal = 'Euler (1st-Order Space/Time)';
-                    else if (so === 2 && to === 2) currentVal = 'RK2 (2nd-Order Space/Time)';
-                    else if (so === 3 && to === 3) currentVal = 'RK3 (3rd-Order Space/Time)';
-                    else if (so === 2 && to === 4) currentVal = 'MUSCL-Hancock (2nd-Order Space/Time)';
-                    else if (so === 2 && to === 5) currentVal = 'ADER-2 (2nd-Order Space/Time)';
+                    const to = node.parameters['temporal_order'] ?? 4;
+                    let currentVal = 'MUSCL-Hancock (2nd-Order Space/Time)';
+                    if (so === 2 && to === 5) currentVal = 'ADER-2 (2nd-Order Space/Time)';
                     else if (so === 3 && to === 6) currentVal = 'ADER-3 (3rd-Order Space/Time)';
+                    else currentVal = 'MUSCL-Hancock (2nd-Order Space/Time)';
                     stsEl.value = currentVal;
                 }
             }
@@ -446,14 +443,10 @@ export class PropertyEditor {
                     value = node.parameters['space_time_scheme'] ?? 'RK2';
                 } else {
                     const so = node.parameters['spatial_order'] ?? 2;
-                    const to = node.parameters['temporal_order'] ?? 2;
-                    if (so === 1 && to === 1) value = 'Euler (1st-Order Space/Time)';
-                    else if (so === 2 && to === 2) value = 'RK2 (2nd-Order Space/Time)';
-                    else if (so === 3 && to === 3) value = 'RK3 (3rd-Order Space/Time)';
-                    else if (so === 2 && to === 4) value = 'MUSCL-Hancock (2nd-Order Space/Time)';
-                    else if (so === 2 && to === 5) value = 'ADER-2 (2nd-Order Space/Time)';
+                    const to = node.parameters['temporal_order'] ?? 4;
+                    if (so === 2 && to === 5) value = 'ADER-2 (2nd-Order Space/Time)';
                     else if (so === 3 && to === 6) value = 'ADER-3 (3rd-Order Space/Time)';
-                    else value = 'RK2 (2nd-Order Space/Time)';
+                    else value = 'MUSCL-Hancock (2nd-Order Space/Time)';
                 }
             }
             if (key === 'nr' || key === 'nz' || key === 'n_cells') continue;
@@ -1500,7 +1493,7 @@ export class PropertyEditor {
             'shape_type': node.type === 'FEMObject3D' ? ['Box', 'Cylinder', 'LS-DYNA File'] : (node.type === 'MPMObject3D' ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle']),
             'space_time_scheme': (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') ? 
                 ['USL', 'USF', 'RK2'] : 
-                ['Euler (1st-Order Space/Time)', 'RK2 (2nd-Order Space/Time)', 'RK3 (3rd-Order Space/Time)', 'MUSCL-Hancock (2nd-Order Space/Time)', 'ADER-2 (2nd-Order Space/Time)', 'ADER-3 (3rd-Order Space/Time)']
+                ['MUSCL-Hancock (2nd-Order Space/Time)', 'ADER-2 (2nd-Order Space/Time)', 'ADER-3 (3rd-Order Space/Time)']
         };
 
         if (dropdowns[key]) {
@@ -1559,13 +1552,10 @@ export class PropertyEditor {
                         this.updateParameter(key, val);
                     } else {
                         let s_order = 2;
-                        let t_order = 2;
-                        if (val === 'Euler (1st-Order Space/Time)') { s_order = 1; t_order = 1; }
-                        else if (val === 'RK2 (2nd-Order Space/Time)') { s_order = 2; t_order = 2; }
-                        else if (val === 'RK3 (3rd-Order Space/Time)') { s_order = 3; t_order = 3; }
-                        else if (val === 'MUSCL-Hancock (2nd-Order Space/Time)') { s_order = 2; t_order = 4; }
-                        else if (val === 'ADER-2 (2nd-Order Space/Time)') { s_order = 2; t_order = 5; }
+                        let t_order = 4;
+                        if (val === 'ADER-2 (2nd-Order Space/Time)') { s_order = 2; t_order = 5; }
                         else if (val === 'ADER-3 (3rd-Order Space/Time)') { s_order = 3; t_order = 6; }
+                        else { s_order = 2; t_order = 4; }
                         
                         if (this.currentNodeId) {
                             this.stateManager.updateNodeParameters(this.currentNodeId, {

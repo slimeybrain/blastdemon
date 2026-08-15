@@ -1535,7 +1535,7 @@ void init_3d_thread_func(nlohmann::json msg) {
 
         std::string flux_scheme = msg.value("flux_scheme", "AUSM+");
         int spatial_order = msg.value("spatial_order", 2);
-        int temporal_order = msg.value("temporal_order", 2);
+        int temporal_order = msg.value("temporal_order", 4);
 
         local_solver_3d->setFluxScheme(flux_scheme);
         local_solver_3d->setSpatialOrder(spatial_order);
@@ -6077,7 +6077,7 @@ int main() {
 
                     global_solver_3d->setFluxScheme(msg.value("flux_scheme", "AUSM+"));
                     global_solver_3d->setSpatialOrder(get_json_int(msg, "spatial_order", 2));
-                    global_solver_3d->setTemporalOrder(get_json_int(msg, "temporal_order", 2));
+                    global_solver_3d->setTemporalOrder(get_json_int(msg, "temporal_order", 4));
 
                     Charge3DParams cp;
                     std::string shape_str = msg.value("charge_shape", "Sphere");
@@ -6892,7 +6892,7 @@ int main() {
 
                         global_solver_3d->setFluxScheme(msg.value("flux_scheme", "AUSM+"));
                         global_solver_3d->setSpatialOrder(get_json_int(msg, "spatial_order", 2));
-                        global_solver_3d->setTemporalOrder(get_json_int(msg, "temporal_order", 2));
+                        global_solver_3d->setTemporalOrder(get_json_int(msg, "temporal_order", 4));
 
                         Charge3DParams cp;
                         std::string shape_str = msg.value("charge_shape", "Sphere");

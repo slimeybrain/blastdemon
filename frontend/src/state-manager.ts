@@ -1791,7 +1791,7 @@ export class StateManager {
                 cfl: 0.4,
                 flux_scheme: 'AUSM+',
                 spatial_order: 2,
-                temporal_order: 2,
+                temporal_order: 4,
                 precision: 'single'
             },
             'TelemetryGraph': {
@@ -1873,7 +1873,7 @@ export class StateManager {
                 cfl: 0.35,
                 flux_scheme: 'AUSM+',
                 spatial_order: 2,
-                temporal_order: 2,
+                temporal_order: 4,
                 mesh_type: 'regular',
                 amr_max_levels: 3,
                 amr_threshold: 0.05,
@@ -1936,7 +1936,7 @@ export class StateManager {
                 init_mode: 'From1D',
                 flux_scheme: 'AUSM+',
                 spatial_order: 2,
-                temporal_order: 2,
+                temporal_order: 4,
                 precision: 'single',
                 telemetry_mode: 'Enabled',
                 telemetry_interval_ms: 100,

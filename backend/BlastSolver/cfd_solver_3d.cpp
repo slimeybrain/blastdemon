@@ -1032,16 +1032,9 @@ void computeTimeDerivative(
 template <typename RealType, bool IsMultiMaterial>
 void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
     int total_tiles = n_tiles_x * n_tiles_y * n_tiles_z;
-    if (temporalOrder >= 2) {
-        if (dU_pool.size() != (size_t)total_tiles) {
-            dU_pool.resize(total_tiles);
-        }
-    }
-    if (temporalOrder == 4) {
-        if (states_pred.size() != (size_t)total_tiles) states_pred.resize(total_tiles);
-        if (dW_dt_pool.size() != (size_t)total_tiles) dW_dt_pool.resize(total_tiles);
-        if (states_int.size() != (size_t)total_tiles) states_int.resize(total_tiles);
-    }
+    if (states_pred.size() != (size_t)total_tiles) states_pred.resize(total_tiles);
+    if (dW_dt_pool.size() != (size_t)total_tiles) dW_dt_pool.resize(total_tiles);
+    if (temporalOrder == 6 && states_int.size() != (size_t)total_tiles) states_int.resize(total_tiles);
 
     auto copy_primitive_to_U = [&]() {
         int n_active = (int)active_tile_indices.size();
@@ -1071,101 +1064,9 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
         }
     };
 
-    auto average_U = [&](const std::vector<ConservativeTile3D<RealType, IsMultiMaterial>>& U0, double w0, double w1) {
-        RealType w0_r = (RealType)w0;
-        RealType w1_r = (RealType)w1;
-        int n_active = (int)active_tile_indices.size();
-        #pragma omp parallel for schedule(guided)
-        for (int a = 0; a < n_active; ++a) {
-            int t = active_tile_indices[a];
-            auto& u = U_pool[t];
-            const auto& u0 = U0[t];
-            for (int i = 0; i < TILE_CELLS_3D; ++i) {
-                u.rho[i] = w0_r * u0.rho[i] + w1_r * u.rho[i];
-                u.rhoux[i] = w0_r * u0.rhoux[i] + w1_r * u.rhoux[i];
-                u.rhouy[i] = w0_r * u0.rhouy[i] + w1_r * u.rhouy[i];
-                u.rhouz[i] = w0_r * u0.rhouz[i] + w1_r * u.rhouz[i];
-                u.E[i] = w0_r * u0.E[i] + w1_r * u.E[i];
-                if constexpr (IsMultiMaterial) {
-                    u.alpha1[i] = w0_r * u0.alpha1[i] + w1_r * u.alpha1[i];
-                    u.alpha2[i] = w0_r * u0.alpha2[i] + w1_r * u.alpha2[i];
-                    u.arho1[i] = w0_r * u0.arho1[i] + w1_r * u.arho1[i];
-                    u.arho2[i] = w0_r * u0.arho2[i] + w1_r * u.arho2[i];
-                }
-            }
-        }
-    };
-
     copy_primitive_to_U();
 
-    if (temporalOrder == 1) {
-        computeFluxes(dt, U_pool);
-    } else if (temporalOrder == 2) {
-        int n_active = (int)active_tile_indices.size();
-        #pragma omp parallel for schedule(guided)
-        for (int a = 0; a < n_active; ++a) {
-            int t = active_tile_indices[a];
-            dU_pool[t] = U_pool[t];
-        }
-        computeFluxes(dt, U_pool);
-        updatePrimitiveFromConservative();
-        applyBC();
-        
-        computeFluxes(dt, U_pool);
-        average_U(dU_pool, 0.5, 0.5);
-    } else if (temporalOrder == 3) { // Williamson Low-Storage RK3
-        const RealType A[3] = { (RealType)0.0, (RealType)(-5.0/9.0), (RealType)(-153.0/128.0) };
-        const RealType B[3] = { (RealType)(1.0/3.0), (RealType)(15.0/16.0), (RealType)(8.0/15.0) };
-
-        for (int stage = 0; stage < 3; ++stage) {
-            int n_active = (int)active_tile_indices.size();
-            #pragma omp parallel for schedule(guided)
-            for (int a = 0; a < n_active; ++a) {
-                int t = active_tile_indices[a];
-                auto& du = dU_pool[t];
-                RealType a_val = A[stage];
-                for (int i = 0; i < TILE_CELLS_3D; ++i) {
-                    du.rho[i] = a_val * du.rho[i];
-                    du.rhoux[i] = a_val * du.rhoux[i];
-                    du.rhouy[i] = a_val * du.rhouy[i];
-                    du.rhouz[i] = a_val * du.rhouz[i];
-                    du.E[i] = a_val * du.E[i];
-                    if constexpr (IsMultiMaterial) {
-                        du.alpha1[i] = a_val * du.alpha1[i];
-                        du.alpha2[i] = a_val * du.alpha2[i];
-                        du.arho1[i] = a_val * du.arho1[i];
-                        du.arho2[i] = a_val * du.arho2[i];
-                    }
-                }
-            }
-
-            computeFluxes(dt, dU_pool);
-
-            #pragma omp parallel for schedule(guided)
-            for (int a = 0; a < n_active; ++a) {
-                int t = active_tile_indices[a];
-                auto& u = U_pool[t];
-                const auto& du = dU_pool[t];
-                RealType b_val = B[stage];
-                for (int i = 0; i < TILE_CELLS_3D; ++i) {
-                    u.rho[i] += b_val * du.rho[i];
-                    u.rhoux[i] += b_val * du.rhoux[i];
-                    u.rhouy[i] += b_val * du.rhouy[i];
-                    u.rhouz[i] += b_val * du.rhouz[i];
-                    u.E[i] += b_val * du.E[i];
-                    if constexpr (IsMultiMaterial) {
-                        u.alpha1[i] += b_val * du.alpha1[i];
-                        u.alpha2[i] += b_val * du.alpha2[i];
-                        u.arho1[i] += b_val * du.arho1[i];
-                        u.arho2[i] += b_val * du.arho2[i];
-                    }
-                }
-            }
-
-            updatePrimitiveFromConservative();
-            applyBC();
-        }
-    } else if (temporalOrder == 4) { // MUSCL-Hancock (2nd order)
+    if (temporalOrder == 4 || temporalOrder <= 3) { // MUSCL-Hancock (2nd order default)
         int total_tiles = n_tiles_x * n_tiles_y * n_tiles_z;
         #pragma omp parallel for schedule(static)
         for (int t = 0; t < total_tiles; ++t) {

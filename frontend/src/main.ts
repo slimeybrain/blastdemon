@@ -112,7 +112,7 @@ const initialState: SimulationState = {
             id: 'node-solver', type: 'CFDSolver', x: 550, y: 200, displayMode: 'expanded',
             inputs: [{ id: 'in', label: 'Initial State' }],
             outputs: [{ id: 'telemetry', label: 'Telemetry' }],
-            parameters: { init_mode: 'Multi-Material JWL', cfl: 0.4, flux_scheme: 'AUSM+', spatial_order: 2, temporal_order: 2 }
+            parameters: { init_mode: 'Multi-Material JWL', cfl: 0.4, flux_scheme: 'AUSM+', spatial_order: 2, temporal_order: 4 }
         }
     ],
     connections: [

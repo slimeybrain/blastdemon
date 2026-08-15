@@ -57,9 +57,6 @@ def test_temporal_order(device="cuda", precision="double", temporal_order=4):
 
 if __name__ == "__main__":
     orders = [
-        (1, "Euler-1"),
-        (2, "RK-2"),
-        (3, "RK-3"),
         (4, "MUSCL-Hancock"),
         (5, "ADER-2"),
         (6, "ADER-3")

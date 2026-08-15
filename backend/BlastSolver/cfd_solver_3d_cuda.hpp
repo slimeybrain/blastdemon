@@ -15,7 +15,6 @@ class CFDSolver3DCuda : public CFDSolver3DImplBase {
     mutable void* d_states = nullptr;
 
     mutable void* d_U = nullptr;
-    mutable void* d_dU = nullptr;
     mutable void* d_geom = nullptr;
     mutable void* d_states_pred = nullptr;
     mutable void* d_dW_dt = nullptr;
@@ -79,8 +78,6 @@ private:
     mutable bool is_paged_out = false;
     mutable std::vector<PrimitiveTile3D<RealType, IsMultiMaterial>> paged_states;
     mutable std::vector<ConservativeTile3D<RealType, IsMultiMaterial>> paged_U;
-    mutable std::vector<ConservativeTile3D<RealType, IsMultiMaterial>> paged_dU;
-    mutable bool has_paged_dU = false;
     mutable std::vector<GeometryTile3D> paged_geom;
     mutable bool has_paged_geom = false;
     mutable std::vector<uint8_t> paged_active_tiles;

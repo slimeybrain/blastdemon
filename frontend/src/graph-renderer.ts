@@ -1527,7 +1527,7 @@ export class GraphRenderer {
                 cfl: 0.4,
                 flux_scheme: 'AUSM+',
                 spatial_order: 2,
-                temporal_order: 2,
+                temporal_order: 4,
                 precision: 'single'
             };
             case 'TelemetryGraph': return {
@@ -1592,7 +1592,7 @@ export class GraphRenderer {
                 cfl: 0.35,
                 flux_scheme: 'AUSM+',
                 spatial_order: 2,
-                temporal_order: 2,
+                temporal_order: 4,
                 mesh_type: 'regular',
                 amr_max_levels: 3,
                 amr_threshold: 0.05,
@@ -1662,7 +1662,7 @@ export class GraphRenderer {
                 init_mode: 'From1D',
                 flux_scheme: 'AUSM+',
                 spatial_order: 2,
-                temporal_order: 2,
+                temporal_order: 4,
                 precision: 'single',
                 telemetry_mode: 'Enabled',
                 telemetry_interval_ms: 100,
@@ -4261,13 +4261,10 @@ export class GraphRenderer {
                         currentVal = node.parameters['space_time_scheme'] ?? 'RK2';
                     } else {
                         const so = node.parameters['spatial_order'] ?? 2;
-                        const to = node.parameters['temporal_order'] ?? 2;
-                        if (so === 1 && to === 1) currentVal = 'Euler (1st-Order Space/Time)';
-                        else if (so === 2 && to === 2) currentVal = 'RK2 (2nd-Order Space/Time)';
-                        else if (so === 3 && to === 3) currentVal = 'RK3 (3rd-Order Space/Time)';
-                        else if (so === 2 && to === 4) currentVal = 'MUSCL-Hancock (2nd-Order Space/Time)';
-                        else if (so === 2 && to === 5) currentVal = 'ADER-2 (2nd-Order Space/Time)';
+                        const to = node.parameters['temporal_order'] ?? 4;
+                        if (so === 2 && to === 5) currentVal = 'ADER-2 (2nd-Order Space/Time)';
                         else if (so === 3 && to === 6) currentVal = 'ADER-3 (3rd-Order Space/Time)';
+                        else currentVal = 'MUSCL-Hancock (2nd-Order Space/Time)';
                     }
                     
                     const trigger = stsEl.querySelector('.custom-select-trigger');
@@ -4721,9 +4718,6 @@ export class GraphRenderer {
                 'space_time_scheme': (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') ? 
                     ['USL', 'USF', 'RK2'] : 
                     [
-                        'Euler (1st-Order Space/Time)',
-                        'RK2 (2nd-Order Space/Time)',
-                        'RK3 (3rd-Order Space/Time)',
                         'MUSCL-Hancock (2nd-Order Space/Time)',
                         'ADER-2 (2nd-Order Space/Time)',
                         'ADER-3 (3rd-Order Space/Time)'
@@ -4774,13 +4768,10 @@ export class GraphRenderer {
                                 this.stateManager.updateNodeParameters(node.id, { [key]: newVal });
                             } else {
                                 let s_order = 2;
-                                let t_order = 2;
-                                if (newVal === 'Euler (1st-Order Space/Time)') { s_order = 1; t_order = 1; }
-                                else if (newVal === 'RK2 (2nd-Order Space/Time)') { s_order = 2; t_order = 2; }
-                                else if (newVal === 'RK3 (3rd-Order Space/Time)') { s_order = 3; t_order = 3; }
-                                else if (newVal === 'MUSCL-Hancock (2nd-Order Space/Time)') { s_order = 2; t_order = 4; }
-                                else if (newVal === 'ADER-2 (2nd-Order Space/Time)') { s_order = 2; t_order = 5; }
+                                let t_order = 4;
+                                if (newVal === 'ADER-2 (2nd-Order Space/Time)') { s_order = 2; t_order = 5; }
                                 else if (newVal === 'ADER-3 (3rd-Order Space/Time)') { s_order = 3; t_order = 6; }
+                                else { s_order = 2; t_order = 4; }
                                 
                                 this.stateManager.updateNodeParameters(node.id, {
                                     spatial_order: s_order,

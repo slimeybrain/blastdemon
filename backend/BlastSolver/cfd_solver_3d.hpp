@@ -285,7 +285,6 @@ template <typename RealType, bool IsMultiMaterial>
 class CFDSolver3DImpl : public CFDSolver3DImplBase {
     std::vector<PrimitiveTile3D<RealType, IsMultiMaterial>> states_pool;
     std::vector<ConservativeTile3D<RealType, IsMultiMaterial>> U_pool;
-    std::vector<ConservativeTile3D<RealType, IsMultiMaterial>> dU_pool;
     std::vector<PrimitiveTile3D<RealType, IsMultiMaterial>> states_pred;
     std::vector<PrimitivePredictorTile3D<RealType, IsMultiMaterial>> dW_dt_pool;
     std::vector<PrimitivePredictorTile3D<RealType, IsMultiMaterial>> states_int;
