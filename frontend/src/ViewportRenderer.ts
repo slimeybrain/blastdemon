@@ -839,7 +839,7 @@ function handleFrame(buffer: ArrayBuffer) {
         const sliceAutoScale = config.auto_scale !== false;
         const colormapVal = config.colormap || 'plasma';
         const logVal = config.log_scale === true;
-        const interpVal = config.interpolate !== false;
+        const interpVal = config.interpolate === true;
 
         let sliceMin = Infinity;
         let sliceMax = -Infinity;
@@ -1316,7 +1316,7 @@ function render() {
                         activeSlices[i].opacity = config.opacity !== undefined ? config.opacity : 1.0;
                         activeSlices[i].colormap = config.colormap || 'plasma';
                         activeSlices[i].useLogScale = config.log_scale === true;
-                        activeSlices[i].interpolate = config.interpolate !== false;
+                        activeSlices[i].interpolate = config.interpolate === true;
                         activeSlices[i].minY = config.min_val;
                         activeSlices[i].maxY = config.max_val;
                     }

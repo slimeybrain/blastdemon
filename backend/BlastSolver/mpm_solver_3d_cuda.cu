@@ -564,6 +564,10 @@ __global__ void kernel_g2p_3d(MPMParticle3DSoA soa, int num_particles,
 
     if (weight_sum <= 1.0e-7f) {
         v_pic_x = v_prev_x; v_pic_y = v_prev_y; v_pic_z = v_prev_z;
+    } else {
+        v_pic_x /= weight_sum;
+        v_pic_y /= weight_sum;
+        v_pic_z /= weight_sum;
     }
 
     float target_vx = v_pic_x;

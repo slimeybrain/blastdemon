@@ -1970,7 +1970,7 @@ export class StateManager {
                     impulse: [0.0, 10000.0]
                 },
                 refresh_rate: 2.0,
-                slices: [{ axis: 'xy', offset: 0.5, quantities: ['pressure'], stride: 1, opacity: 1.0, colormap: 'plasma', auto_scale: true, log_scale: false, interpolate: true, min_val: 101325.0, max_val: 101325.0 * 10.0, enabled: true, show_colorbar: false }],
+                slices: [{ axis: 'xy', offset: 0.5, quantities: ['pressure'], stride: 1, opacity: 1.0, colormap: 'plasma', auto_scale: true, log_scale: false, interpolate: false, min_val: 101325.0, max_val: 101325.0 * 10.0, enabled: true, show_colorbar: false }],
                 log_scale: false,
                 auto_scale: true,
                 min_val: 101325.0,
@@ -2012,7 +2012,18 @@ export class StateManager {
                 femShowColorbar: false,
                 femOpacity: 1.0,
                 femMinVal: 0.0,
-                femMaxVal: 500000000.0,
+                // Beams & 1D Elements Defaults
+                showBeams: true,
+                beamSolid: true,
+                beamWireframe: true,
+                beamRadius: 0.008,
+                beamQuantity: 'plasticStrain',
+                beamColormap: 'plasma',
+                beamAutoScale: true,
+                beamLogScale: false,
+                beamShowColorbar: false,
+                beamMinVal: 0.0,
+                beamMaxVal: 0.05,
                 // Rebar Mesh Defaults
                 showRebar: true,
                 rebarSolid: true,
@@ -2063,7 +2074,7 @@ export class StateManager {
                 obstacles_auto_scale: true,
                 obstacles_log_scale: false,
                 obstacles_show_colorbar: false,
-                obstacles_interpolate: true,
+                obstacles_interpolate: false,
                 obstacles_min_val: 101325.0,
                 obstacles_max_val: 101325.0 * 10.0
             },

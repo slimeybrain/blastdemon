@@ -5924,27 +5924,47 @@ static __global__ void kernel_fsi_couple_active_gpu(
     const int* d_active_nodes,
     int num_active_nodes,
     SolidVelocityTile3D* d_solid_vel,
-    int nx, int ny, int nz,
+    int nx_cfd, int ny_cfd, int nz_cfd,
     int ntx, int nty,
-    float dx, float dy, float dz
+    float dx_cfd, float dy_cfd, float dz_cfd,
+    float xmin_cfd, float ymin_cfd, float zmin_cfd,
+    int nx_mpm, int ny_mpm, int nz_mpm,
+    float dx_mpm, float dy_mpm, float dz_mpm,
+    float xmin_mpm, float ymin_mpm, float zmin_mpm
 ) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= num_active_nodes) return;
 
     int mpm_idx = d_active_nodes[tid];
     float mass = d_grid[mpm_idx].m;
+    bool is_solid = (mass > 1.0e-8f);
+    if (!is_solid) {
+        d_grid[mpm_idx].f_ext[0] = 0.0f;
+        d_grid[mpm_idx].f_ext[1] = 0.0f;
+        d_grid[mpm_idx].f_ext[2] = 0.0f;
+        return;
+    }
 
-    int gx = mpm_idx / (ny * nz);
-    int gy = (mpm_idx / nz) % ny;
-    int gz = mpm_idx % nz;
+    int k_mpm = mpm_idx % nz_mpm;
+    int j_mpm = (mpm_idx / nz_mpm) % ny_mpm;
+    int i_mpm = mpm_idx / (ny_mpm * nz_mpm);
+
+    float x_node = xmin_mpm + (static_cast<float>(i_mpm) + 0.5f) * dx_mpm;
+    float y_node = ymin_mpm + (static_cast<float>(j_mpm) + 0.5f) * dy_mpm;
+    float z_node = zmin_mpm + (static_cast<float>(k_mpm) + 0.5f) * dz_mpm;
+
+    int gx = static_cast<int>(floorf((x_node - xmin_cfd) / dx_cfd));
+    int gy = static_cast<int>(floorf((y_node - ymin_cfd) / dy_cfd));
+    int gz = static_cast<int>(floorf((z_node - zmin_cfd) / dz_cfd));
+
+    if (gx < 0 || gx >= nx_cfd || gy < 0 || gy >= ny_cfd || gz < 0 || gz >= nz_cfd) return;
 
     int t_idx = (gx >> 3) + (gy >> 3) * ntx + (gz >> 3) * ntx * nty;
     int c_idx = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
 
-    bool is_solid = (mass > 1.0e-8f);
-    float vx = is_solid ? (d_grid[mpm_idx].p[0] / mass) : 0.0f;
-    float vy = is_solid ? (d_grid[mpm_idx].p[1] / mass) : 0.0f;
-    float vz = is_solid ? (d_grid[mpm_idx].p[2] / mass) : 0.0f;
+    float vx = d_grid[mpm_idx].p[0] / mass;
+    float vy = d_grid[mpm_idx].p[1] / mass;
+    float vz = d_grid[mpm_idx].p[2] / mass;
 
     if (d_solid_vel) {
         d_solid_vel[t_idx].vx[c_idx] = vx;
@@ -5953,137 +5973,127 @@ static __global__ void kernel_fsi_couple_active_gpu(
     }
 
     if (d_geom) {
-        if (is_solid) {
-            float m_L = get_mpm_mass_at(d_grid, gx - 1, gy, gz, nx, ny, nz);
-            float m_R = get_mpm_mass_at(d_grid, gx + 1, gy, gz, nx, ny, nz);
-            float m_B = get_mpm_mass_at(d_grid, gx, gy - 1, gz, nx, ny, nz);
-            float m_T = get_mpm_mass_at(d_grid, gx, gy + 1, gz, nx, ny, nz);
-            float m_D = get_mpm_mass_at(d_grid, gx, gy, gz - 1, nx, ny, nz);
-            float m_U = get_mpm_mass_at(d_grid, gx, gy, gz + 1, nx, ny, nz);
+        float m_L = get_mpm_mass_at(d_grid, i_mpm - 1, j_mpm, k_mpm, nx_mpm, ny_mpm, nz_mpm);
+        float m_R = get_mpm_mass_at(d_grid, i_mpm + 1, j_mpm, k_mpm, nx_mpm, ny_mpm, nz_mpm);
+        float m_B = get_mpm_mass_at(d_grid, i_mpm, j_mpm - 1, k_mpm, nx_mpm, ny_mpm, nz_mpm);
+        float m_T = get_mpm_mass_at(d_grid, i_mpm, j_mpm + 1, k_mpm, nx_mpm, ny_mpm, nz_mpm);
+        float m_D = get_mpm_mass_at(d_grid, i_mpm, j_mpm, k_mpm - 1, nx_mpm, ny_mpm, nz_mpm);
+        float m_U = get_mpm_mass_at(d_grid, i_mpm, j_mpm, k_mpm + 1, nx_mpm, ny_mpm, nz_mpm);
 
-            float grad_x = m_R - m_L;
-            float grad_y = m_T - m_B;
-            float grad_z = m_U - m_D;
-            float grad_mag = sqrtf(grad_x * grad_x + grad_y * grad_y + grad_z * grad_z);
+        float grad_x = m_R - m_L;
+        float grad_y = m_T - m_B;
+        float grad_z = m_U - m_D;
+        float grad_mag = sqrtf(grad_x * grad_x + grad_y * grad_y + grad_z * grad_z);
 
-            float nx_normal = 0.0f, ny_normal = 0.0f, nz_normal = 0.0f;
-            if (grad_mag > 1.0e-8f) {
-                nx_normal = -grad_x / grad_mag;
-                ny_normal = -grad_y / grad_mag;
-                nz_normal = -grad_z / grad_mag;
+        float nx_normal = 0.0f, ny_normal = 0.0f, nz_normal = 0.0f;
+        if (grad_mag > 1.0e-8f) {
+            nx_normal = -grad_x / grad_mag;
+            ny_normal = -grad_y / grad_mag;
+            nz_normal = -grad_z / grad_mag;
+        }
+        d_geom[t_idx].cells[c_idx] = pack_geometry_payload(true, nx_normal, ny_normal, nz_normal, 1.0f);
+    }
+
+    float f_x = 0.0f;
+    float f_y = 0.0f;
+    float f_z = 0.0f;
+
+    if (is_fsi_fluid_cell(d_grid, i_mpm - 1, j_mpm, k_mpm, nx_mpm, ny_mpm, nz_mpm)) {
+        f_x += get_fsi_pressure_at<RealType, IsMultiMaterial>(d_states, gx - 1, gy, gz, nx_cfd, ny_cfd, nz_cfd, ntx, nty);
+    }
+    if (is_fsi_fluid_cell(d_grid, i_mpm + 1, j_mpm, k_mpm, nx_mpm, ny_mpm, nz_mpm)) {
+        f_x -= get_fsi_pressure_at<RealType, IsMultiMaterial>(d_states, gx + 1, gy, gz, nx_cfd, ny_cfd, nz_cfd, ntx, nty);
+    }
+
+    if (is_fsi_fluid_cell(d_grid, i_mpm, j_mpm - 1, k_mpm, nx_mpm, ny_mpm, nz_mpm)) {
+        f_y += get_fsi_pressure_at<RealType, IsMultiMaterial>(d_states, gx, gy - 1, gz, nx_cfd, ny_cfd, nz_cfd, ntx, nty);
+    }
+    if (is_fsi_fluid_cell(d_grid, i_mpm, j_mpm + 1, k_mpm, nx_mpm, ny_mpm, nz_mpm)) {
+        f_y -= get_fsi_pressure_at<RealType, IsMultiMaterial>(d_states, gx, gy + 1, gz, nx_cfd, ny_cfd, nz_cfd, ntx, nty);
+    }
+
+    if (is_fsi_fluid_cell(d_grid, i_mpm, j_mpm, k_mpm - 1, nx_mpm, ny_mpm, nz_mpm)) {
+        f_z += get_fsi_pressure_at<RealType, IsMultiMaterial>(d_states, gx, gy, gz - 1, nx_cfd, ny_cfd, nz_cfd, ntx, nty);
+    }
+    if (is_fsi_fluid_cell(d_grid, i_mpm, j_mpm, k_mpm + 1, nx_mpm, ny_mpm, nz_mpm)) {
+        f_z -= get_fsi_pressure_at<RealType, IsMultiMaterial>(d_states, gx, gy, gz + 1, nx_cfd, ny_cfd, nz_cfd, ntx, nty);
+    }
+
+    float F_x = f_x * dy_cfd * dz_cfd;
+    float F_y = f_y * dx_cfd * dz_cfd;
+    float F_z = f_z * dx_cfd * dy_cfd;
+
+    // Mass-weighted volumetric distribution across local solid column stencil to eliminate G2P velocity damping
+    if (fabsf(F_z) > 1.0e-12f) {
+        float mass_z_stencil = 0.0f;
+        for (int dk = -2; dk <= 2; ++dk) {
+            int k_c = k_mpm + dk;
+            if (k_c >= 0 && k_c < nz_mpm) {
+                int k_idx = (i_mpm * ny_mpm + j_mpm) * nz_mpm + k_c;
+                if (d_grid[k_idx].m > 1.0e-8f) mass_z_stencil += d_grid[k_idx].m;
             }
-            d_geom[t_idx].cells[c_idx] = pack_geometry_payload(true, nx_normal, ny_normal, nz_normal, 1.0f);
+        }
+        if (mass_z_stencil > 1.0e-12f) {
+            for (int dk = -2; dk <= 2; ++dk) {
+                int k_c = k_mpm + dk;
+                if (k_c >= 0 && k_c < nz_mpm) {
+                    int k_idx = (i_mpm * ny_mpm + j_mpm) * nz_mpm + k_c;
+                    if (d_grid[k_idx].m > 1.0e-8f) {
+                        atomicAdd(&d_grid[k_idx].f_ext[2], F_z * (d_grid[k_idx].m / mass_z_stencil));
+                    }
+                }
+            }
         } else {
-            d_geom[t_idx].cells[c_idx] = pack_geometry_payload(false, 0.0f, 0.0f, 0.0f, 0.0f);
+            atomicAdd(&d_grid[mpm_idx].f_ext[2], F_z);
         }
     }
 
-    if (is_solid) {
-        float f_x = 0.0f;
-        float f_y = 0.0f;
-        float f_z = 0.0f;
-
-        if (is_fsi_fluid_cell(d_grid, gx - 1, gy, gz, nx, ny, nz)) {
-            f_x += get_fsi_pressure_at<RealType, IsMultiMaterial>(d_states, gx - 1, gy, gz, nx, ny, nz, ntx, nty);
-        }
-        if (is_fsi_fluid_cell(d_grid, gx + 1, gy, gz, nx, ny, nz)) {
-            f_x -= get_fsi_pressure_at<RealType, IsMultiMaterial>(d_states, gx + 1, gy, gz, nx, ny, nz, ntx, nty);
-        }
-
-        if (is_fsi_fluid_cell(d_grid, gx, gy - 1, gz, nx, ny, nz)) {
-            f_y += get_fsi_pressure_at<RealType, IsMultiMaterial>(d_states, gx, gy - 1, gz, nx, ny, nz, ntx, nty);
-        }
-        if (is_fsi_fluid_cell(d_grid, gx, gy + 1, gz, nx, ny, nz)) {
-            f_y -= get_fsi_pressure_at<RealType, IsMultiMaterial>(d_states, gx, gy + 1, gz, nx, ny, nz, ntx, nty);
-        }
-
-        if (is_fsi_fluid_cell(d_grid, gx, gy, gz - 1, nx, ny, nz)) {
-            f_z += get_fsi_pressure_at<RealType, IsMultiMaterial>(d_states, gx, gy, gz - 1, nx, ny, nz, ntx, nty);
-        }
-        if (is_fsi_fluid_cell(d_grid, gx, gy, gz + 1, nx, ny, nz)) {
-            f_z -= get_fsi_pressure_at<RealType, IsMultiMaterial>(d_states, gx, gy, gz + 1, nx, ny, nz, ntx, nty);
-        }
-
-        float F_x = f_x * dy * dz;
-        float F_y = f_y * dx * dz;
-        float F_z = f_z * dx * dy;
-
-        // Mass-weighted volumetric distribution across local solid column stencil to eliminate G2P velocity damping
-        if (fabsf(F_z) > 1.0e-12f) {
-            float mass_z_stencil = 0.0f;
-            for (int dk = -2; dk <= 2; ++dk) {
-                int k_c = gz + dk;
-                if (k_c >= 0 && k_c < nz) {
-                    int k_idx = (gx * ny + gy) * nz + k_c;
-                    if (d_grid[k_idx].m > 1.0e-8f) mass_z_stencil += d_grid[k_idx].m;
-                }
-            }
-            if (mass_z_stencil > 1.0e-12f) {
-                for (int dk = -2; dk <= 2; ++dk) {
-                    int k_c = gz + dk;
-                    if (k_c >= 0 && k_c < nz) {
-                        int k_idx = (gx * ny + gy) * nz + k_c;
-                        if (d_grid[k_idx].m > 1.0e-8f) {
-                            atomicAdd(&d_grid[k_idx].f_ext[2], F_z * (d_grid[k_idx].m / mass_z_stencil));
-                        }
-                    }
-                }
-            } else {
-                atomicAdd(&d_grid[mpm_idx].f_ext[2], F_z);
+    if (fabsf(F_x) > 1.0e-12f) {
+        float mass_x_stencil = 0.0f;
+        for (int di = -2; di <= 2; ++di) {
+            int i_c = i_mpm + di;
+            if (i_c >= 0 && i_c < nx_mpm) {
+                int i_idx = (i_c * ny_mpm + j_mpm) * nz_mpm + k_mpm;
+                if (d_grid[i_idx].m > 1.0e-8f) mass_x_stencil += d_grid[i_idx].m;
             }
         }
-
-        if (fabsf(F_x) > 1.0e-12f) {
-            float mass_x_stencil = 0.0f;
+        if (mass_x_stencil > 1.0e-12f) {
             for (int di = -2; di <= 2; ++di) {
-                int i_c = gx + di;
-                if (i_c >= 0 && i_c < nx) {
-                    int i_idx = (i_c * ny + gy) * nz + gz;
-                    if (d_grid[i_idx].m > 1.0e-8f) mass_x_stencil += d_grid[i_idx].m;
-                }
-            }
-            if (mass_x_stencil > 1.0e-12f) {
-                for (int di = -2; di <= 2; ++di) {
-                    int i_c = gx + di;
-                    if (i_c >= 0 && i_c < nx) {
-                        int i_idx = (i_c * ny + gy) * nz + gz;
-                        if (d_grid[i_idx].m > 1.0e-8f) {
-                            atomicAdd(&d_grid[i_idx].f_ext[0], F_x * (d_grid[i_idx].m / mass_x_stencil));
-                        }
+                int i_c = i_mpm + di;
+                if (i_c >= 0 && i_c < nx_mpm) {
+                    int i_idx = (i_c * ny_mpm + j_mpm) * nz_mpm + k_mpm;
+                    if (d_grid[i_idx].m > 1.0e-8f) {
+                        atomicAdd(&d_grid[i_idx].f_ext[0], F_x * (d_grid[i_idx].m / mass_x_stencil));
                     }
                 }
-            } else {
-                atomicAdd(&d_grid[mpm_idx].f_ext[0], F_x);
             }
+        } else {
+            atomicAdd(&d_grid[mpm_idx].f_ext[0], F_x);
         }
+    }
 
-        if (fabsf(F_y) > 1.0e-12f) {
-            float mass_y_stencil = 0.0f;
-            for (int dj = -2; dj <= 2; ++dj) {
-                int j_c = gy + dj;
-                if (j_c >= 0 && j_c < ny) {
-                    int j_idx = (gx * ny + j_c) * nz + gz;
-                    if (d_grid[j_idx].m > 1.0e-8f) mass_y_stencil += d_grid[j_idx].m;
-                }
-            }
-            if (mass_y_stencil > 1.0e-12f) {
-                for (int dj = -2; dj <= 2; ++dj) {
-                    int j_c = gy + dj;
-                    if (j_c >= 0 && j_c < ny) {
-                        int j_idx = (gx * ny + j_c) * nz + gz;
-                        if (d_grid[j_idx].m > 1.0e-8f) {
-                            atomicAdd(&d_grid[j_idx].f_ext[1], F_y * (d_grid[j_idx].m / mass_y_stencil));
-                        }
-                    }
-                }
-            } else {
-                atomicAdd(&d_grid[mpm_idx].f_ext[1], F_y);
+    if (fabsf(F_y) > 1.0e-12f) {
+        float mass_y_stencil = 0.0f;
+        for (int dj = -2; dj <= 2; ++dj) {
+            int j_c = j_mpm + dj;
+            if (j_c >= 0 && j_c < ny_mpm) {
+                int j_idx = (i_mpm * ny_mpm + j_c) * nz_mpm + k_mpm;
+                if (d_grid[j_idx].m > 1.0e-8f) mass_y_stencil += d_grid[j_idx].m;
             }
         }
-    } else {
-        d_grid[mpm_idx].f_ext[0] = 0.0f;
-        d_grid[mpm_idx].f_ext[1] = 0.0f;
-        d_grid[mpm_idx].f_ext[2] = 0.0f;
+        if (mass_y_stencil > 1.0e-12f) {
+            for (int dj = -2; dj <= 2; ++dj) {
+                int j_c = j_mpm + dj;
+                if (j_c >= 0 && j_c < ny_mpm) {
+                    int j_idx = (i_mpm * ny_mpm + j_c) * nz_mpm + k_mpm;
+                    if (d_grid[j_idx].m > 1.0e-8f) {
+                        atomicAdd(&d_grid[j_idx].f_ext[1], F_y * (d_grid[j_idx].m / mass_y_stencil));
+                    }
+                }
+            }
+        } else {
+            atomicAdd(&d_grid[mpm_idx].f_ext[1], F_y);
+        }
     }
 }
 
@@ -6374,7 +6384,11 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithMPMGPU(void* mpm_s
             (SolidVelocityTile3D*)d_solid_vel_fsi,
             nx, ny, nz,
             ntx, nty,
-            mpm_dx, mpm_dy, mpm_dz
+            (float)cellSize, (float)cellSize, (float)cellSize,
+            (float)xmin, (float)ymin, (float)zmin,
+            mpm_solver->getNx(), mpm_solver->getNy(), mpm_solver->getNz(),
+            mpm_solver->getDx(), mpm_solver->getDy(), mpm_solver->getDz(),
+            mpm_solver->getXMin(), mpm_solver->getYMin(), mpm_solver->getZMin()
         );
         CHECK_CUDA(cudaGetLastError());
 
@@ -6675,6 +6689,45 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithFEMGPU(void* fem_s
                 static_cast<float>(cellSize), static_cast<float>(cellSize), static_cast<float>(cellSize),
                 static_cast<float>(xmin), static_cast<float>(ymin), static_cast<float>(zmin),
                 static_cast<float>(this->ambient_p)
+            );
+        }
+    }
+
+    // Couple MPM debris particles with CFD grid as well (solid obstacle rasterization + FSI forces)
+    Blast::MPMSolver3DCUDA* mpm_cuda = nullptr;
+    if constexpr (std::is_same_v<RealType, double>) {
+        Blast::FEMSolver3DCUDA<double>* fem_double = reinterpret_cast<Blast::FEMSolver3DCUDA<double>*>(fem_solver_void);
+        mpm_cuda = fem_double->getCUDAMPMSolver();
+    } else {
+        Blast::FEMSolver3DCUDA<float>* fem_float = reinterpret_cast<Blast::FEMSolver3DCUDA<float>*>(fem_solver_void);
+        mpm_cuda = fem_float->getCUDAMPMSolver();
+    }
+
+    if (mpm_cuda && mpm_cuda->getParticleCount() > 0) {
+        Blast::MPMGridNode3D* d_grid = mpm_cuda->getDeviceGrid();
+        int* d_active_nodes = mpm_cuda->getDeviceActiveNodes();
+        int num_active_nodes = mpm_cuda->getNumActiveNodes();
+        if (d_grid && num_active_nodes > 0 && d_active_nodes) {
+            int threads_active = 256;
+            int blocks_active = (num_active_nodes + threads_active - 1) / threads_active;
+
+            kernel_zero_fsi_grid_ext_forces<<<blocks_active, threads_active>>>(d_grid, d_active_nodes, num_active_nodes);
+            CHECK_CUDA(cudaGetLastError());
+
+            kernel_fsi_couple_active_gpu<RealType, IsMultiMaterial><<<blocks_active, threads_active>>>(
+                (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+                (GeometryTile3D*)d_geom,
+                d_grid,
+                d_active_nodes,
+                num_active_nodes,
+                (SolidVelocityTile3D*)d_solid_vel_fsi,
+                nx, ny, nz,
+                ntx, nty,
+                (float)cellSize, (float)cellSize, (float)cellSize,
+                (float)xmin, (float)ymin, (float)zmin,
+                mpm_cuda->getNx(), mpm_cuda->getNy(), mpm_cuda->getNz(),
+                mpm_cuda->getDx(), mpm_cuda->getDy(), mpm_cuda->getDz(),
+                mpm_cuda->getXMin(), mpm_cuda->getYMin(), mpm_cuda->getZMin()
             );
             CHECK_CUDA(cudaGetLastError());
         }

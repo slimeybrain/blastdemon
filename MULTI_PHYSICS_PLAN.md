@@ -226,11 +226,15 @@ By locking `MPMDomain3D` to the `CFDSolver3D` grid via a single `DomainMesh3D` n
 - [ ] Add `*ELEMENT_BEAM` and `*SECTION_BEAM` (`ELFORM=3` for truss, `ELFORM=1/2/11` for beam) parsing to `ls_dyna_reader_3d.cpp`.
 - [ ] Write unit test: `test_fem_3d_beam_element.cpp`.
 
-### Phase 2: Adaptive Conversion of Failed Elements to MPM Debris
+### Phase 2: Adaptive Conversion of Failed Elements to MPM Debris & Generalized 1D Element Plotting
 - [ ] Implement `convertErodedElementsToMPM()` in `fem_solver_3d.cpp` and GPU conversion kernel in `fem_solver_3d_cuda.cu`.
 - [ ] Pre-allocate unified particle capacity pool in `mpm_solver_3d.hpp` and `main.cpp`.
 - [ ] Ensure dynamic uncovering of internal boundary facets for continued FSI pressure loading and contact.
-- [ ] Implement 1D Line-to-Sphere contact mechanics in `fem_contact_3d.cpp` (debris vs. rebar).
+- [ ] Implement 1D Line-to-Sphere contact mechanics in `fem_contact_3d.cpp` (debris vs. 1D structural line elements).
+- [ ] Generalized 1D Line Element Plotting & Architecture:
+  - Universal terminology: Treat all line elements as generalized **Beams & 1D Elements** (trusses, beams, stiffeners, anchor rods, cables, rebar).
+  - Scalar Field Visualization: Support full plotting of sensible 1D quantities including Plastic Strain ($\bar{\varepsilon}_p$), Axial / Effective Stress ($\sigma$), Bending Moment ($M$) / Axial Force ($N$), Velocity ($|\mathbf{v}|$), and Damage/Erosion.
+  - Independent Viewport Controls: Dedicated 1D layer toggles (Solid 3D ribbons vs. wireframe lines), colormaps, auto/manual range scaling, section thickness/radius selectors, and standalone interactive color bar overlays.
 - [ ] Write unit test: `test_fem_to_mpm_conversion.cpp` (verifying exact mass and momentum conservation).
 
 ### Phase 3: Shared-Grid FV-MPM Coupling Kernel

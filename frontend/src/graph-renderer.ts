@@ -1709,11 +1709,11 @@ export class GraphRenderer {
                 grid_meshlines: true,
                 show_grid_box: true,
                 grid_opacity: 1.0,
-                interpolate: true,
+                interpolate: false,
                 min_val: 101325.0,
                 max_val: 101325.0 * 10.0,
                 slices: [
-                    { axis: 'xy', offset: 0.5, stride: 1, quantities: ['pressure'], opacity: 1.0, colormap: 'plasma', auto_scale: true, log_scale: false, interpolate: true, min_val: 101325.0, max_val: 101325.0 * 10.0, enabled: true, show_colorbar: false }
+                    { axis: 'xy', offset: 0.5, stride: 1, quantities: ['pressure'], opacity: 1.0, colormap: 'plasma', auto_scale: true, log_scale: false, interpolate: false, min_val: 101325.0, max_val: 101325.0 * 10.0, enabled: true, show_colorbar: false }
                 ],
                 lightingEnabled: true,
                 aoEnabled: true,
@@ -1741,6 +1741,18 @@ export class GraphRenderer {
                 femOpacity: 1.0,
                 femMinVal: 0.0,
                 femMaxVal: 500000000.0,
+                // Beams & 1D Elements Defaults
+                showBeams: true,
+                beamSolid: true,
+                beamWireframe: true,
+                beamRadius: 0.008,
+                beamQuantity: 'plasticStrain',
+                beamColormap: 'plasma',
+                beamAutoScale: true,
+                beamLogScale: false,
+                beamShowColorbar: false,
+                beamMinVal: 0.0,
+                beamMaxVal: 0.05,
                 // Rebar Mesh Defaults
                 showRebar: true,
                 rebarSolid: true,
@@ -1789,7 +1801,7 @@ export class GraphRenderer {
                 obstacles_auto_scale: true,
                 obstacles_log_scale: false,
                 obstacles_show_colorbar: false,
-                obstacles_interpolate: true,
+                obstacles_interpolate: false,
                 obstacles_min_val: 101325.0,
                 obstacles_max_val: 101325.0 * 10.0
             };
@@ -4846,7 +4858,7 @@ export class GraphRenderer {
                             'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
                             // FEM keys
                             'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
-                            'convert_failed_elements_to_mpm', 'mpm_particles_per_failed_element', 'rebar_diameter', 'rebar_area', 'rebarRadius', 'rebar_radius',
+                            'mpm_particles_per_failed_element', 'rebar_diameter', 'rebar_area', 'rebarRadius', 'rebar_radius', 'beamRadius', 'beam_radius', 'beam_diameter', 'beam_area', 'beamMinVal', 'beamMaxVal',
                             'femMinVal', 'femMaxVal', 'femOpacity', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',
                             // Concrete Core & Models (RHT, K&C, CSCM)
                             'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',

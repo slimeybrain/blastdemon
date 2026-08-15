@@ -1,6 +1,7 @@
 #include "fem_fsi_coupler_3d_cuda.hpp"
 #include "cfd_solver_3d_cuda.hpp"
 #include "ImmersedBoundary.hpp"
+#include "mpm_solver_3d_cuda.hpp"
 #include <device_launch_parameters.h>
 #include <cmath>
 #include <iostream>
@@ -496,12 +497,22 @@ void FEMFSICoupler3DCUDA<T>::executeGPUCoupling(T dt) {
     FEMNode3D<T>* d_nodes = m_fem_solver->getNodesDevice();
     FEMFacet3D<T>* d_facets = m_fem_solver->getSurfaceFacetsDevice();
 
-    if (!d_nodes || !d_facets || num_facets == 0) return;
+    auto* mpm_cuda = m_fem_solver->getCUDAMPMSolver();
+    bool has_mpm = (mpm_cuda && mpm_cuda->getParticleCount() > 0);
+
+    if (!d_nodes && !has_mpm) return;
 
     // 1. Reset external forces on FEM nodes
-    launch_zero_fem_ext_forces_3d<T>(d_nodes, num_nodes, m_stream);
+    if (d_nodes && num_nodes > 0) {
+        launch_zero_fem_ext_forces_3d<T>(d_nodes, num_nodes, m_stream);
+    }
 
-    // 2. Rasterize moving boundary facets into CFD geometry tiles and integrate fluid pressure
+    // 2. If MPM debris solver is active, run P2G scatter before CFD coupling
+    if (has_mpm) {
+        mpm_cuda->particleToGridDeviceOnly();
+    }
+
+    // 3. Rasterize moving boundary facets and MPM debris into CFD geometry tiles and integrate fluid pressure
     m_fv_solver->coupleFSIWithFEMGPU(m_fem_solver);
 }
 
@@ -513,13 +524,19 @@ void FEMFSICoupler3DCUDA<T>::stepWithDt(T dt) {
     m_step_count++;
     m_last_dt = dt;
 
-    // 1. Device-to-device coupling step (Facet rasterization, uncovering, pressure sampling)
+    // 1. Device-to-device coupling step (Facet rasterization, uncovering, pressure sampling, MPM debris coupling)
     executeGPUCoupling(dt);
 
     // 2. Advance FEM structural solver by dt on GPU
     m_fem_solver->stepWithDt(dt);
 
-    // 3. Advance FV gas dynamics solver by dt on GPU
+    // 3. Advance MPM debris solver by dt on GPU (with FSI forces from step 1)
+    auto* mpm_cuda = m_fem_solver->getCUDAMPMSolver();
+    if (mpm_cuda && mpm_cuda->getParticleCount() > 0) {
+        mpm_cuda->stepWithDt(static_cast<float>(dt), false);
+    }
+
+    // 4. Advance FV gas dynamics solver by dt on GPU
     m_fv_solver->step(static_cast<double>(dt));
 }
 

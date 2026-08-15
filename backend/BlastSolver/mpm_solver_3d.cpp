@@ -806,6 +806,10 @@ void MPMSolver3D::gridToParticle(float dt) {
 
         if (weight_sum <= 1.0e-7f) {
             v_pic_x = p.v[0]; v_pic_y = p.v[1]; v_pic_z = p.v[2];
+        } else {
+            v_pic_x /= weight_sum;
+            v_pic_y /= weight_sum;
+            v_pic_z /= weight_sum;
         }
 
         // Pass 2: APIC 3x3 affine velocity matrix B_p and spatial gradient L_grad calculation

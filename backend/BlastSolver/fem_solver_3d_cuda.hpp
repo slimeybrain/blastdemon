@@ -12,6 +12,8 @@ typedef struct CUstream_st* cudaStream_t;
 
 namespace Blast {
 
+class MPMSolver3DCUDA;
+
 template <typename T>
 void launch_fem_reset_nodal_forces_kernel_3d(
     FEMNode3D<T>* d_nodes,
@@ -82,6 +84,10 @@ void launch_fem_initial_timestep_erosion_kernel_3d(
     int num_nodes,
     FEMElement3D<T>* d_elements,
     int num_elements,
+    const FEMTrussElement3D<T>* d_trusses,
+    int num_trusses,
+    const FEMBeam3DElement<T>* d_beams,
+    int num_beams,
     const MaterialTable3D* d_materials,
     FEMErosionCriteria<T> erosion_criteria,
     int* d_node_active_count,
@@ -148,6 +154,12 @@ public:
     void setHourglassModel(FEMHourglassModel model) { m_cpu_solver.setHourglassModel(model); }
     void setIntegrationScheme(FEMIntegrationScheme scheme) { m_cpu_solver.setIntegrationScheme(scheme); }
     void setPhysicsParams(const BlastPhysicsParams<T>& params) { m_cpu_solver.setPhysicsParams(params); }
+    const BlastPhysicsParams<T>& getPhysicsParams() const { return m_cpu_solver.getPhysicsParams(); }
+    BlastPhysicsParams<T>& getPhysicsParams() { return m_cpu_solver.getPhysicsParams(); }
+    void setMPMSolver(MPMSolver3D* mpm) { m_cpu_solver.setMPMSolver(mpm); }
+    MPMSolver3D* getMPMSolver() const { return m_cpu_solver.getMPMSolver(); }
+    void setCUDAMPMSolver(MPMSolver3DCUDA* mpm) { m_cuda_mpm_solver = mpm; }
+    MPMSolver3DCUDA* getCUDAMPMSolver() const { return m_cuda_mpm_solver; }
     void setErosionCriteria(const FEMErosionCriteria<T>& criteria);
     void setContactPenaltyScale(T scale) { m_cpu_solver.setContactPenaltyScale(scale); }
     void setContactDamping(T damping) { m_cpu_solver.setContactDamping(damping); }
@@ -259,6 +271,12 @@ private:
     T* m_d_node_normals{nullptr};
     T* m_d_reduction_buffer{nullptr};
     int* m_d_node_active_count{nullptr};
+    FEMTrussElement3D<T>* m_d_trusses{nullptr};
+    size_t m_allocated_trusses{0};
+    FEMBeam3DElement<T>* m_d_beams{nullptr};
+    size_t m_allocated_beams{0};
+    FEMNodeRotationalState3D<T>* m_d_rot_nodes{nullptr};
+    size_t m_allocated_rot_nodes{0};
     int* m_d_erosion_flag{nullptr};
     int* m_h_erosion_flag_pinned{nullptr};
 
@@ -296,6 +314,7 @@ private:
     mutable T m_last_vm_max{0.0f};
     mutable T m_last_ep_max{0.0f};
     mutable FEMEnergyTracker<T> m_energy_tracker{};
+    MPMSolver3DCUDA* m_cuda_mpm_solver{nullptr};
 };
 
 } // namespace Blast

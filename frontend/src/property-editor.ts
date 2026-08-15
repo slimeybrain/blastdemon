@@ -1289,7 +1289,7 @@ export class PropertyEditor {
             cbGridObs.appendChild(createCheckboxField('obstacles_lighting', node.parameters['obstacles_lighting'] !== false, 'Obstacles Lighting'));
             cbGridObs.appendChild(createCheckboxField('obstacles_auto_scale', node.parameters['obstacles_auto_scale'] !== false, 'Obstacles Auto Scale'));
             cbGridObs.appendChild(createCheckboxField('obstacles_log_scale', !!node.parameters['obstacles_log_scale'], 'Obstacles Log Scale'));
-            cbGridObs.appendChild(createCheckboxField('obstacles_interpolate', node.parameters['obstacles_interpolate'] !== false, 'Obstacles Interpolate'));
+            cbGridObs.appendChild(createCheckboxField('obstacles_interpolate', !!node.parameters['obstacles_interpolate'], 'Obstacles Interpolate'));
             panels[0].appendChild(cbGridObs);
 
             const obsQtyEl = this.createInputElement(node, 'obstacles_quantity', node.parameters['obstacles_quantity'] ?? 'pressure');
@@ -1492,7 +1492,7 @@ export class PropertyEditor {
             'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
             // FEM keys
             'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
-            'convert_failed_elements_to_mpm', 'mpm_particles_per_failed_element', 'rebar_diameter', 'rebar_area', 'rebarRadius', 'rebar_radius',
+            'mpm_particles_per_failed_element', 'rebar_diameter', 'rebar_area', 'rebarRadius', 'rebar_radius', 'beamRadius', 'beam_radius', 'beam_diameter', 'beam_area', 'beamMinVal', 'beamMaxVal',
             'femMinVal', 'femMaxVal', 'femOpacity', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',
             // Concrete Core & Models (RHT, K&C, CSCM)
             'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
@@ -1506,6 +1506,9 @@ export class PropertyEditor {
             'preset': [...MPM_MATERIAL_PRESET_NAMES],
             'material_model': ['Hypoelastic', 'Johnson-Cook + Mie-Grüneisen', 'RHT Concrete', 'Karagozian & Case (K&C)', 'CSCM Concrete'],
             'rebar_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
+            'beam_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
+            'beamQuantity': ['plasticStrain', 'vonMises', 'momentOrForce', 'velocity', 'damage'],
+            'beamColormap': ['plasma', 'viridis', 'coolwarm', 'rainbow', 'cividis', 'grayscale'],
             'mpmParticleQuantity': ['vonMises', 'pressure', 'velocity', 'density', 'plastic_strain', 'damage', 'has_failed', 'object_id'],
             'mpmParticleColormap': ['plasma', 'viridis', 'coolwarm', 'rainbow', 'cividis', 'grayscale'],
             'femQuantity': ['vonMises', 'plasticStrain', 'pressure', 'velocity', 'damage'],
@@ -2314,7 +2317,7 @@ export class PropertyEditor {
                 colormap: 'plasma',
                 auto_scale: true,
                 log_scale: false,
-                interpolate: true,
+                interpolate: false,
                 min_val: 101325.0,
                 max_val: 101325.0 * 10.0,
                 enabled: true

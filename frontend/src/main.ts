@@ -1155,6 +1155,12 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
         stateManager.setModelProgress(modelId, 0);
         stateManager.setModelSimTime(modelId, 0.0);
 
+        layoutManager.components.forEach(comp => {
+            if (comp.type === 'TELEMETRY_3D' && comp.instance) {
+                comp.instance.resetSimulationData(modelId);
+            }
+        });
+
         if (hasFEMFSI3D) {
             const state = stateManager.getSimulationState(modelId);
             if (state) {

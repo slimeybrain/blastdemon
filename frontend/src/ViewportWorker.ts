@@ -1526,7 +1526,7 @@ let obstaclesQuantity = 'pressure';
 let obstaclesColormap = 'plasma';
 let obstaclesAutoScale = true;
 let obstaclesLogScale = false;
-let obstaclesInterpolate = true;
+let obstaclesInterpolate = false;
 let obstaclesMinVal = 101325.0;
 let obstaclesMaxVal = 1013250.0;
 
@@ -2936,6 +2936,18 @@ let rebarSolid: boolean = true;
 let rebarWireframe: boolean = true;
 let rebarRadius: number = 0.008;
 
+let showBeams: boolean = true;
+let beamSolid: boolean = true;
+let beamWireframe: boolean = true;
+let beamRadius: number = 0.008;
+let beamQuantity: string = 'plasticStrain';
+let beamColormap: string = 'plasma';
+let beamAutoScale: boolean = true;
+let beamMinVal: number | undefined = undefined;
+let beamMaxVal: number | undefined = undefined;
+let beamLogScale: boolean = false;
+let beamOpacity: number = 1.0;
+
 function getFEMFacetQuantityValue(facetIdx: number, qty: string): number {
     if (!latestFEMFacetsData) return 0;
     const base = facetIdx * 8;
@@ -2957,6 +2969,25 @@ function getFEMFacetQuantityValue(facetIdx: number, qty: string): number {
         return (v0 + v1 + v2 + v3) * 0.25;
     }
     return latestFEMFacetsData[base + 4];
+}
+
+function getBeamQuantityValue(facetIdx: number, qty: string): number {
+    if (!latestFEMFacetsData) return 0;
+    const base = facetIdx * 8;
+    if (qty === 'plasticStrain') return latestFEMFacetsData[base + 5];
+    if (qty === 'vonMises' || qty === 'stress' || qty === 'axialStress') return latestFEMFacetsData[base + 4];
+    if (qty === 'momentOrForce' || qty === 'bendingMoment' || qty === 'axialForce' || qty === 'pressure') return latestFEMFacetsData[base + 6];
+    if (qty === 'damage' || qty === 'erosion') return latestFEMFacetsData[base + 7];
+    if (qty === 'velocity') {
+        if (!latestFEMNodesData) return 0;
+        const n0 = Math.round(latestFEMFacetsData[base + 0]);
+        const n1 = Math.round(latestFEMFacetsData[base + 1]);
+        const nTotal = Math.floor(latestFEMNodesData.length / 7);
+        const v0 = (n0 >= 0 && n0 < nTotal) ? latestFEMNodesData[n0 * 7 + 6] : 0;
+        const v1 = (n1 >= 0 && n1 < nTotal) ? latestFEMNodesData[n1 * 7 + 6] : 0;
+        return (v0 + v1) * 0.5;
+    }
+    return latestFEMFacetsData[base + 5];
 }
 
 function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
@@ -3035,26 +3066,54 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
 
     let empiricalMin = Infinity;
     let empiricalMax = -Infinity;
+    let beamEmpiricalMin = Infinity;
+    let beamEmpiricalMax = -Infinity;
 
     for (let f = 0; f < nFacets; f++) {
-        const val = getFEMFacetQuantityValue(f, femQuantity);
-        if (isFinite(val)) {
-            if (val < empiricalMin) empiricalMin = val;
-            if (val > empiricalMax) empiricalMax = val;
+        const n2 = Math.round(latestFEMFacetsData[f * 8 + 2]);
+        const n3 = Math.round(latestFEMFacetsData[f * 8 + 3]);
+        const isLine = (n2 < 0 || n3 < 0);
+        if (isLine) {
+            const isEroded = (latestFEMFacetsData[f * 8 + 7] > 0.5);
+            if (isEroded) continue;
+
+            const val = getBeamQuantityValue(f, beamQuantity);
+            if (isFinite(val)) {
+                if (val < beamEmpiricalMin) beamEmpiricalMin = val;
+                if (val > beamEmpiricalMax) beamEmpiricalMax = val;
+            }
+        } else {
+            const val = getFEMFacetQuantityValue(f, femQuantity);
+            if (isFinite(val)) {
+                if (val < empiricalMin) empiricalMin = val;
+                if (val > empiricalMax) empiricalMax = val;
+            }
         }
     }
     if (!isFinite(empiricalMin) || !isFinite(empiricalMax) || empiricalMax <= empiricalMin) {
         empiricalMin = 0.0;
         empiricalMax = 1.0;
     }
+    if (!isFinite(beamEmpiricalMin) || !isFinite(beamEmpiricalMax) || beamEmpiricalMax <= beamEmpiricalMin) {
+        beamEmpiricalMin = 0.0;
+        beamEmpiricalMax = (beamQuantity === 'plasticStrain') ? 0.05 : 1.0;
+    }
 
     self.postMessage({ type: 'femRangeUpdated', min: empiricalMin, max: empiricalMax });
+    self.postMessage({ type: 'beamRangeUpdated', min: beamEmpiricalMin, max: beamEmpiricalMax });
 
     let minScalar = femMinVal;
     let maxScalar = femMaxVal;
     if (femAutoScale || minScalar === undefined || maxScalar === undefined) {
         minScalar = empiricalMin;
         maxScalar = empiricalMax;
+    }
+
+    let minBeamScalar = beamMinVal;
+    let maxBeamScalar = beamMaxVal;
+    if (beamAutoScale || minBeamScalar === undefined || maxBeamScalar === undefined) {
+        minBeamScalar = beamEmpiricalMin;
+        maxBeamScalar = beamEmpiricalMax;
     }
 
     const solidVertexData = new Float32Array(nFacets * 12 * 6);
@@ -3079,24 +3138,35 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
             continue;
         }
 
+        if (isLine) {
+            const isEroded = (latestFEMFacetsData[f * 8 + 7] > 0.5);
+            if (isEroded) continue;
+        }
+
         const p0 = [latestFEMNodesData[n0 * 7 + 0] * sx + tx, latestFEMNodesData[n0 * 7 + 1] * sy + ty, latestFEMNodesData[n0 * 7 + 2] * sz + tz];
         const p1 = [latestFEMNodesData[n1 * 7 + 0] * sx + tx, latestFEMNodesData[n1 * 7 + 1] * sy + ty, latestFEMNodesData[n1 * 7 + 2] * sz + tz];
 
-        const val = getFEMFacetQuantityValue(f, femQuantity);
-        let normVal = 0.0;
-        if (femLogScale) {
-            const logMin = Math.log(Math.max(minScalar, 1e-5));
-            const logMax = Math.log(Math.max(maxScalar, 1e-5));
-            const logVal = Math.log(Math.max(val, 1e-5));
-            normVal = (logVal - logMin) / (Math.max(1e-9, logMax - logMin));
-        } else {
-            normVal = (val - minScalar) / (Math.max(1e-9, maxScalar - minScalar));
-        }
-        const [r, g, b] = sampleColormapRGB(normVal, femColormap);
-
         if (isLine) {
-            if (!showRebar) continue;
-            if (rebarWireframe || (femWireframe && rebarWireframe !== false)) {
+            const isVisible = (showBeams !== false && showRebar !== false);
+            if (!isVisible) continue;
+
+            const isSolid = (beamSolid !== false && rebarSolid !== false);
+            const isWire = (beamWireframe !== false && rebarWireframe !== false);
+
+            const val = getBeamQuantityValue(f, beamQuantity);
+            let normVal = 0.0;
+            if (beamLogScale) {
+                const logMin = Math.log(Math.max(minBeamScalar, 1e-5));
+                const logMax = Math.log(Math.max(maxBeamScalar, 1e-5));
+                const logVal = Math.log(Math.max(val, 1e-5));
+                normVal = (logVal - logMin) / (Math.max(1e-9, logMax - logMin));
+            } else {
+                normVal = (val - minBeamScalar) / (Math.max(1e-9, maxBeamScalar - minBeamScalar));
+            }
+            normVal = Math.max(0.0, Math.min(1.0, normVal));
+            const [r, g, b] = sampleColormapRGB(normVal, beamColormap);
+
+            if (isWire) {
                 // Wireframe: 2-vertex line
                 wireframeVertexData[wireIdx++] = p0[0];
                 wireframeVertexData[wireIdx++] = p0[1];
@@ -3111,13 +3181,13 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
                 wireframeVertexData[wireIdx++] = 0;
             }
 
-            if (rebarSolid || (femSolid && rebarSolid !== false)) {
+            if (isSolid) {
                 // Solid: 3D cross ribbons
                 const dx = p1[0] - p0[0];
                 const dy = p1[1] - p0[1];
                 const dz = p1[2] - p0[2];
                 const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
-                const userRadius = (rebarRadius !== undefined && rebarRadius > 0) ? rebarRadius : 0.008;
+                const userRadius = (beamRadius !== undefined && beamRadius > 0) ? beamRadius : ((rebarRadius !== undefined && rebarRadius > 0) ? rebarRadius : 0.008);
                 const radius = Math.max(0.002, userRadius * sx);
                 if (len > 1e-6) {
                     let nx_dir = 0, ny_dir = 0, nz_dir = 1;
@@ -3177,6 +3247,19 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
         }
 
         if (!showFEMMesh) continue;
+
+        const val = getFEMFacetQuantityValue(f, femQuantity);
+        let normVal = 0.0;
+        if (femLogScale) {
+            const logMin = Math.log(Math.max(minScalar, 1e-5));
+            const logMax = Math.log(Math.max(maxScalar, 1e-5));
+            const logVal = Math.log(Math.max(val, 1e-5));
+            normVal = (logVal - logMin) / (Math.max(1e-9, logMax - logMin));
+        } else {
+            normVal = (val - minScalar) / (Math.max(1e-9, maxScalar - minScalar));
+        }
+        normVal = Math.max(0.0, Math.min(1.0, normVal));
+        const [r, g, b] = sampleColormapRGB(normVal, femColormap);
 
         const p2 = [latestFEMNodesData[n2 * 7 + 0] * sx + tx, latestFEMNodesData[n2 * 7 + 1] * sy + ty, latestFEMNodesData[n2 * 7 + 2] * sz + tz];
         const p3 = [latestFEMNodesData[n3 * 7 + 0] * sx + tx, latestFEMNodesData[n3 * 7 + 1] * sy + ty, latestFEMNodesData[n3 * 7 + 2] * sz + tz];
@@ -4016,6 +4099,16 @@ function handleFrame(buffer: ArrayBuffer) {
 
     if (magic === 0x4d504d33) { // "MPM3"
         const numParticles = view.getUint32(8, true);
+        if (numParticles === 0) {
+            latestMPMParticlesData = null;
+            mpmParticlesCount = 0;
+            if (gl && mpmParticlesBuffer) {
+                gl.bindBuffer(gl.ARRAY_BUFFER, mpmParticlesBuffer);
+                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(0), gl.DYNAMIC_DRAW);
+            }
+            render();
+            return;
+        }
         const floatsPerParticle = view.getUint32(12, true);
         const particleDataStart = 16;
         const totalFloats = numParticles * floatsPerParticle;
@@ -4114,7 +4207,7 @@ function handleFrame(buffer: ArrayBuffer) {
         const qty = config.quantities?.[0] || 'pressure';
         const sliceAutoScale = config.auto_scale !== false;
         const colormapVal = quantityColormaps[qty] || config.colormap || 'plasma';
-        const interpVal = config.interpolate !== false;
+        const interpVal = config.interpolate === true;
         
         let sliceMin = Infinity;
         let sliceMax = -Infinity;
@@ -5680,7 +5773,7 @@ function render() {
         }
 
         // Draw 3D FEM Mesh in WebGPU
-        if (showFEMMesh || showRebar) {
+        if (showFEMMesh || showRebar || showBeams) {
             if (!gpuUniformBufferFEMSolid) {
                 gpuUniformBufferFEMSolid = gpuDevice.createBuffer({
                     size: 384,
@@ -5695,7 +5788,7 @@ function render() {
             }
             const dummyTexView = Object.values(activeSlicesWebGPU)[0]?.gpuTextureView || gpuDummyTextureView;
 
-            if (femSolid && gpuFEMSolidBuffer && femSolidCount > 0 && gpuPipeline) {
+            if ((femSolid || beamSolid || rebarSolid) && gpuFEMSolidBuffer && femSolidCount > 0 && gpuPipeline) {
                 const uSolid = new Float32Array(uniformData);
                 uSolid[48] = femOpacity;
                 uSolid[53] = 14.0; // FEM Solid colored by facet quantity
@@ -5717,7 +5810,7 @@ function render() {
                 passEncoder.draw(femSolidCount);
             }
 
-            if (femWireframe && gpuFEMWireframeBuffer && femWireframeCount > 0 && gpuLinePipeline) {
+            if ((femWireframe || beamWireframe || rebarWireframe) && gpuFEMWireframeBuffer && femWireframeCount > 0 && gpuLinePipeline) {
                 const uWire = new Float32Array(uniformData);
                 uWire[48] = 1.0;
                 uWire[53] = 15.0; // FEM Wireframe (Always Solid Black)
@@ -6336,8 +6429,8 @@ function render() {
     }
 
     // Draw 3D FEM Mesh (Solid Surface & Wireframe Edges)
-    if (showFEMMesh || showRebar) {
-        if (femSolid && femSolidBuffer && femSolidCount > 0) {
+    if (showFEMMesh || showRebar || showBeams) {
+        if ((femSolid || beamSolid || rebarSolid) && femSolidBuffer && femSolidCount > 0) {
             gl.enable(gl.POLYGON_OFFSET_FILL);
             gl.polygonOffset(1.0, 1.0);
             gl.uniform1i(uIsWF, 14);
@@ -6352,7 +6445,7 @@ function render() {
             gl.drawArrays(gl.TRIANGLES, 0, femSolidCount);
             gl.disable(gl.POLYGON_OFFSET_FILL);
         }
-        if (femWireframe && femWireframeBuffer && femWireframeCount > 0) {
+        if ((femWireframe || beamWireframe || rebarWireframe) && femWireframeBuffer && femWireframeCount > 0) {
             gl.uniform1i(uIsWF, 15);
             gl.uniform1f(uAlpha, 1.0);
             gl.bindBuffer(gl.ARRAY_BUFFER, femWireframeBuffer);
@@ -6573,6 +6666,29 @@ self.onmessage = async (e) => {
             if (data.targetZ !== undefined) targetZ = data.targetZ;
             
             updateMatrices(canvasWidth(), canvasHeight());
+        } else if (type === "resetSimulationData") {
+            latestMPMParticlesData = null;
+            mpmParticlesCount = 0;
+            latestFEMNodesData = null;
+            latestFEMFacetsData = null;
+            femSolidCount = 0;
+            femWireframeCount = 0;
+            cachedSlices = [];
+            femBoundsInitialized = false;
+            if (gl) {
+                if (femSolidBuffer) {
+                    gl.bindBuffer(gl.ARRAY_BUFFER, femSolidBuffer);
+                    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(0), gl.DYNAMIC_DRAW);
+                }
+                if (femWireframeBuffer) {
+                    gl.bindBuffer(gl.ARRAY_BUFFER, femWireframeBuffer);
+                    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(0), gl.DYNAMIC_DRAW);
+                }
+                if (mpmParticlesBuffer) {
+                    gl.bindBuffer(gl.ARRAY_BUFFER, mpmParticlesBuffer);
+                    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(0), gl.DYNAMIC_DRAW);
+                }
+            }
             render();
         } else if (type === "frame") {
             handleFrame(data.buffer);
@@ -6683,6 +6799,42 @@ self.onmessage = async (e) => {
             if (data.rebarSolid !== undefined) { rebarSolid = data.rebarSolid; femChanged = true; }
             if (data.rebarWireframe !== undefined) { rebarWireframe = data.rebarWireframe; femChanged = true; }
             if (data.rebarRadius !== undefined) { rebarRadius = data.rebarRadius; femChanged = true; }
+
+            if (data.showBeams !== undefined) { showBeams = data.showBeams; femChanged = true; }
+            if (data.beamSolid !== undefined) { beamSolid = data.beamSolid; femChanged = true; }
+            if (data.beamWireframe !== undefined) { beamWireframe = data.beamWireframe; femChanged = true; }
+            if (data.beamRadius !== undefined) { beamRadius = data.beamRadius; femChanged = true; }
+            if (data.beamQuantity !== undefined) {
+                if (beamQuantity !== data.beamQuantity) {
+                    beamQuantity = data.beamQuantity;
+                    beamAutoScale = true;
+                }
+                femChanged = true;
+            }
+            if (data.beamColormap !== undefined) {
+                beamColormap = data.beamColormap;
+                femChanged = true;
+            }
+            if (data.beamAutoScale !== undefined) {
+                beamAutoScale = data.beamAutoScale;
+                femChanged = true;
+            }
+            if (data.beamLogScale !== undefined) {
+                beamLogScale = data.beamLogScale;
+                femChanged = true;
+            }
+            if (data.beamMinVal !== undefined) {
+                beamMinVal = data.beamMinVal;
+                femChanged = true;
+            }
+            if (data.beamMaxVal !== undefined) {
+                beamMaxVal = data.beamMaxVal;
+                femChanged = true;
+            }
+            if (data.beamOpacity !== undefined) {
+                beamOpacity = data.beamOpacity;
+            }
+
             if (data.femQuantity !== undefined) {
                 if (femQuantity !== data.femQuantity) {
                     femQuantity = data.femQuantity;
@@ -6819,7 +6971,7 @@ self.onmessage = async (e) => {
                             maxY: config.max_val ?? 1013250.0,
                             colormap: config.colormap || 'plasma',
                             useLogScale: config.log_scale === true,
-                            interpolate: config.interpolate !== false
+                            interpolate: config.interpolate === true
                         });
                     }
 
@@ -6858,7 +7010,7 @@ self.onmessage = async (e) => {
                     sliceObj.maxY = config.max_val ?? sliceObj.maxY;
                     sliceObj.colormap = config.colormap || 'plasma';
                     sliceObj.useLogScale = config.log_scale === true;
-                    sliceObj.interpolate = config.interpolate !== false;
+                    sliceObj.interpolate = config.interpolate === true;
                 });
 
                 // Update active slices (WebGL / WebGPU) immediately so they are in sync!

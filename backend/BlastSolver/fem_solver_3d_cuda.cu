@@ -1,6 +1,7 @@
 #include "fem_solver_3d_cuda.hpp"
 #include "fem_contact_3d.hpp"
 #include "constitutive_concrete_models.hpp"
+#include "mpm_solver_3d_cuda.hpp"
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 #include <cmath>
@@ -1222,6 +1223,41 @@ __global__ void fem_count_active_node_elements_kernel_device(
     }
 }
 
+// CUDA Kernel: Count active 1D trusses and 3D beams attached to each node
+template <typename T>
+__global__ void fem_count_active_node_trusses_and_beams_kernel_device(
+    const FEMTrussElement3D<T>* d_trusses,
+    int num_trusses,
+    const FEMBeam3DElement<T>* d_beams,
+    int num_beams,
+    int* d_node_active_count,
+    int num_nodes
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (d_trusses && idx < num_trusses) {
+        const auto& tr = d_trusses[idx];
+        if (!tr.is_eroded && tr.L0 > static_cast<T>(0.0f)) {
+            for (int k = 0; k < 2; ++k) {
+                int nid = tr.node_ids[k];
+                if (nid >= 0 && nid < num_nodes) {
+                    ::atomicAdd(&d_node_active_count[nid], 1);
+                }
+            }
+        }
+    }
+    if (d_beams && idx < num_beams) {
+        const auto& bm = d_beams[idx];
+        if (!bm.is_eroded && bm.L0 > static_cast<T>(0.0f)) {
+            for (int k = 0; k < 2; ++k) {
+                int nid = bm.node_ids[k];
+                if (nid >= 0 && nid < num_nodes) {
+                    ::atomicAdd(&d_node_active_count[nid], 1);
+                }
+            }
+        }
+    }
+}
+
 // CUDA Kernel: Neutralize orphan nodes whose connected elements have all eroded (matching CPU updateNodeErosionStatus)
 template <typename T>
 __global__ void fem_update_orphan_nodes_erosion_kernel_device(
@@ -2208,6 +2244,10 @@ void launch_fem_initial_timestep_erosion_kernel_3d(
     int num_nodes,
     FEMElement3D<T>* d_elements,
     int num_elements,
+    const FEMTrussElement3D<T>* d_trusses,
+    int num_trusses,
+    const FEMBeam3DElement<T>* d_beams,
+    int num_beams,
     const MaterialTable3D* d_materials,
     FEMErosionCriteria<T> erosion_criteria,
     int* d_node_active_count,
@@ -2229,6 +2269,13 @@ void launch_fem_initial_timestep_erosion_kernel_3d(
         fem_count_active_node_elements_kernel_device<T><<<grid_size, block_size, 0, stream>>>(
             d_elements, num_elements, d_node_active_count, num_nodes
         );
+        if ((d_trusses && num_trusses > 0) || (d_beams && num_beams > 0)) {
+            int max_tb = std::max(num_trusses, num_beams);
+            int tb_grid_size = (max_tb + block_size - 1) / block_size;
+            fem_count_active_node_trusses_and_beams_kernel_device<T><<<tb_grid_size, block_size, 0, stream>>>(
+                d_trusses, num_trusses, d_beams, num_beams, d_node_active_count, num_nodes
+            );
+        }
         int node_grid_size = (num_nodes + block_size - 1) / block_size;
         fem_update_orphan_nodes_erosion_kernel_device<T><<<node_grid_size, block_size, 0, stream>>>(
             d_nodes, num_nodes, d_node_active_count
@@ -2374,6 +2421,9 @@ FEMSolver3DCUDA<T>::~FEMSolver3DCUDA() {
     if (m_d_erosion_flag) { cudaFree(m_d_erosion_flag); m_d_erosion_flag = nullptr; }
     if (m_d_cell_counts) { cudaFree(m_d_cell_counts); m_d_cell_counts = nullptr; }
     if (m_d_cell_facet_ids) { cudaFree(m_d_cell_facet_ids); m_d_cell_facet_ids = nullptr; }
+    if (m_d_trusses) { cudaFree(m_d_trusses); m_d_trusses = nullptr; }
+    if (m_d_beams) { cudaFree(m_d_beams); m_d_beams = nullptr; }
+    if (m_d_rot_nodes) { cudaFree(m_d_rot_nodes); m_d_rot_nodes = nullptr; }
     if (m_d_telemetry_nodes) { cudaFree(m_d_telemetry_nodes); m_d_telemetry_nodes = nullptr; }
     if (m_d_telemetry_facets) { cudaFree(m_d_telemetry_facets); m_d_telemetry_facets = nullptr; }
     if (m_cuda_stream) { cudaStreamDestroy(m_cuda_stream); m_cuda_stream = nullptr; }
@@ -2479,6 +2529,37 @@ void FEMSolver3DCUDA<T>::syncToDevice() {
         cudaMemcpyAsync(m_d_materials, materials.data(), sizeof(MaterialTable3D) * materials.size(), cudaMemcpyHostToDevice, m_cuda_stream);
     }
 
+    // Allocate and copy 1D trusses and 3D beams to GPU
+    const auto& trusses = m_cpu_solver.getTrusses();
+    if (trusses.size() > m_allocated_trusses) {
+        if (m_d_trusses) cudaFree(m_d_trusses);
+        m_allocated_trusses = trusses.size() + 128;
+        cudaMalloc(&m_d_trusses, sizeof(FEMTrussElement3D<T>) * m_allocated_trusses);
+    }
+    if (!trusses.empty()) {
+        cudaMemcpyAsync(m_d_trusses, trusses.data(), sizeof(FEMTrussElement3D<T>) * trusses.size(), cudaMemcpyHostToDevice, m_cuda_stream);
+    }
+
+    const auto& beams = m_cpu_solver.getBeams();
+    if (beams.size() > m_allocated_beams) {
+        if (m_d_beams) cudaFree(m_d_beams);
+        m_allocated_beams = beams.size() + 128;
+        cudaMalloc(&m_d_beams, sizeof(FEMBeam3DElement<T>) * m_allocated_beams);
+    }
+    if (!beams.empty()) {
+        cudaMemcpyAsync(m_d_beams, beams.data(), sizeof(FEMBeam3DElement<T>) * beams.size(), cudaMemcpyHostToDevice, m_cuda_stream);
+    }
+
+    const auto& rot_nodes = m_cpu_solver.getRotationalNodes();
+    if (rot_nodes.size() > m_allocated_rot_nodes) {
+        if (m_d_rot_nodes) cudaFree(m_d_rot_nodes);
+        m_allocated_rot_nodes = rot_nodes.size() + 128;
+        cudaMalloc(&m_d_rot_nodes, sizeof(FEMNodeRotationalState3D<T>) * m_allocated_rot_nodes);
+    }
+    if (!rot_nodes.empty()) {
+        cudaMemcpyAsync(m_d_rot_nodes, rot_nodes.data(), sizeof(FEMNodeRotationalState3D<T>) * rot_nodes.size(), cudaMemcpyHostToDevice, m_cuda_stream);
+    }
+
     m_num_surface_facets = facets.size();
     size_t target_facets_cap = std::max(facets.size() * 2, elements.size() * 3);
     if (target_facets_cap > m_allocated_facets) {
@@ -2565,7 +2646,23 @@ void FEMSolver3DCUDA<T>::extractTelemetry(std::vector<float>& h_node_data, std::
     size_t num_facets = m_num_surface_facets;
     size_t num_elements = m_cpu_solver.getElements().size();
 
-    if (num_nodes == 0 || !m_d_nodes) return;
+    if (num_nodes == 0) {
+        h_node_data.clear();
+        h_facet_data.clear();
+        return;
+    }
+
+    if (!m_d_nodes) {
+        const_cast<FEMSolver3DCUDA<T>*>(this)->syncToDevice();
+        num_facets = m_num_surface_facets;
+        num_elements = m_cpu_solver.getElements().size();
+    }
+
+    if (!m_d_nodes) {
+        h_node_data.clear();
+        h_facet_data.clear();
+        return;
+    }
 
     if (num_nodes > m_allocated_telemetry_nodes) {
         if (m_d_telemetry_nodes) cudaFree(m_d_telemetry_nodes);
@@ -2625,6 +2722,19 @@ void FEMSolver3DCUDA<T>::extractTelemetry(std::vector<float>& h_node_data, std::
     const auto& beams = m_cpu_solver.getBeams();
     size_t n_trusses = trusses.size();
     size_t n_beams = beams.size();
+
+    if (m_d_trusses && n_trusses > 0) {
+        auto& trusses_mut = const_cast<std::vector<FEMTrussElement3D<T>>&>(m_cpu_solver.getTrusses());
+        cudaMemcpyAsync(trusses_mut.data(), m_d_trusses, sizeof(FEMTrussElement3D<T>) * n_trusses, cudaMemcpyDeviceToHost, m_cuda_stream);
+    }
+    if (m_d_beams && n_beams > 0) {
+        auto& beams_mut = const_cast<std::vector<FEMBeam3DElement<T>>&>(m_cpu_solver.getBeams());
+        cudaMemcpyAsync(beams_mut.data(), m_d_beams, sizeof(FEMBeam3DElement<T>) * n_beams, cudaMemcpyDeviceToHost, m_cuda_stream);
+    }
+    if (n_trusses > 0 || n_beams > 0) {
+        cudaStreamSynchronize(m_cuda_stream);
+    }
+
     if (n_trusses > 0 || n_beams > 0) {
         size_t prev_facets = num_facets;
         h_facet_data.resize((prev_facets + n_trusses + n_beams) * 8);
@@ -2636,20 +2746,22 @@ void FEMSolver3DCUDA<T>::extractTelemetry(std::vector<float>& h_node_data, std::
             h_facet_data[(prev_facets + t) * 8 + 3] = -1.0f;
             h_facet_data[(prev_facets + t) * 8 + 4] = static_cast<float>(std::abs(tr.sigma));
             h_facet_data[(prev_facets + t) * 8 + 5] = static_cast<float>(tr.ep_bar);
-            h_facet_data[(prev_facets + t) * 8 + 6] = 0.0f;
+            h_facet_data[(prev_facets + t) * 8 + 6] = static_cast<float>(std::abs(tr.sigma * tr.A));
             h_facet_data[(prev_facets + t) * 8 + 7] = tr.is_eroded ? 1.0f : 0.0f;
         }
         size_t beam_offset = prev_facets + n_trusses;
         for (size_t b = 0; b < n_beams; ++b) {
             const auto& bm = beams[b];
             float sig = static_cast<float>(bm.ep_bar > 0.0f ? (500.0e6f + 2.0e9f * bm.ep_bar) : 0.0f);
+            float moment = static_cast<float>(bm.kappa2 * bm.kappa2 + bm.kappa3 * bm.kappa3);
+            if (moment > 0.0f) moment = std::sqrt(moment);
             h_facet_data[(beam_offset + b) * 8 + 0] = static_cast<float>(bm.node_ids[0]);
             h_facet_data[(beam_offset + b) * 8 + 1] = static_cast<float>(bm.node_ids[1]);
             h_facet_data[(beam_offset + b) * 8 + 2] = -1.0f;
             h_facet_data[(beam_offset + b) * 8 + 3] = -1.0f;
             h_facet_data[(beam_offset + b) * 8 + 4] = sig;
             h_facet_data[(beam_offset + b) * 8 + 5] = static_cast<float>(bm.ep_bar);
-            h_facet_data[(beam_offset + b) * 8 + 6] = 0.0f;
+            h_facet_data[(beam_offset + b) * 8 + 6] = moment;
             h_facet_data[(beam_offset + b) * 8 + 7] = bm.is_eroded ? 1.0f : 0.0f;
         }
     }
@@ -2673,6 +2785,9 @@ void FEMSolver3DCUDA<T>::stepWithDt(T dt) {
 
     int num_nodes = static_cast<int>(nodes.size());
     int num_elements = static_cast<int>(elements.size());
+    int num_trusses = static_cast<int>(m_cpu_solver.getTrusses().size());
+    int num_beams = static_cast<int>(m_cpu_solver.getBeams().size());
+    int num_rot_nodes = static_cast<int>(m_cpu_solver.getRotationalNodes().size());
 
     // 1. Half-Step Velocity & Nodal Position Update on GPU (2nd-Order Velocity-Verlet)
     launch_fem_nodal_half_step_kernel_3d<T>(m_d_nodes, num_nodes, dt, m_cuda_stream);
@@ -2725,25 +2840,50 @@ void FEMSolver3DCUDA<T>::stepWithDt(T dt) {
         m_cpu_solver.getHourglassModel(), m_cpu_solver.getIntegrationScheme(), m_cuda_stream
     );
 
+    // 4b. Compute 1D Rebar Truss and Beam Forces on GPU
+    if (m_d_trusses && num_trusses > 0) {
+        launch_fem_truss_forces_kernel_3d<T>(
+            m_d_nodes, num_nodes, m_d_trusses, num_trusses, m_d_materials, dt, m_cuda_stream
+        );
+    }
+    if (m_d_beams && num_beams > 0) {
+        launch_fem_beam_forces_kernel_3d<T>(
+            m_d_nodes, num_nodes, m_d_beams, num_beams, m_d_rot_nodes, num_rot_nodes, m_d_materials, dt, m_cuda_stream
+        );
+    }
+
     // 5. Central Difference Kinematic Acceleration & Full Velocity Update on GPU
     launch_fem_nodal_full_step_kernel_3d<T>(m_d_nodes, num_nodes, dt, m_cuda_stream);
 
     // 6. Erosion Evaluation on GPU
     launch_fem_initial_timestep_erosion_kernel_3d<T>(
-        m_d_nodes, num_nodes, m_d_elements, num_elements, m_d_materials, m_cpu_solver.getErosionCriteria(), m_d_node_active_count, m_d_erosion_flag, m_cuda_stream
+        m_d_nodes, num_nodes, m_d_elements, num_elements,
+        m_d_trusses, num_trusses, m_d_beams, num_beams,
+        m_d_materials, m_cpu_solver.getErosionCriteria(), m_d_node_active_count, m_d_erosion_flag, m_cuda_stream
     );
 
     if (m_d_erosion_flag && m_h_erosion_flag_pinned) {
         cudaMemcpyAsync(m_h_erosion_flag_pinned, m_d_erosion_flag, sizeof(int), cudaMemcpyDeviceToHost, m_cuda_stream);
+        cudaStreamSynchronize(m_cuda_stream);
     }
 
     if (m_h_erosion_flag_pinned && *m_h_erosion_flag_pinned != 0) {
-        cudaStreamSynchronize(m_cuda_stream);
         *m_h_erosion_flag_pinned = 0;
         m_topology_dirty = true;
-        // Sync element erosion state back to CPU and extract new interior boundary facets
+        // Sync element erosion state and node kinematic states back to CPU for accurate MPM debris transfer and boundary facets
         cudaMemcpyAsync(elements.data(), m_d_elements, sizeof(FEMElement3D<T>) * elements.size(), cudaMemcpyDeviceToHost, m_cuda_stream);
+        cudaMemcpyAsync(nodes.data(), m_d_nodes, sizeof(FEMNode3D<T>) * nodes.size(), cudaMemcpyDeviceToHost, m_cuda_stream);
         cudaStreamSynchronize(m_cuda_stream);
+        m_cpu_solver.processErodedElementsToMPM();
+        cudaMemcpyAsync(m_d_elements, elements.data(), sizeof(FEMElement3D<T>) * elements.size(), cudaMemcpyHostToDevice, m_cuda_stream);
+        if (m_cuda_mpm_solver && m_cpu_solver.getMPMSolver()) {
+            const auto& cpu_particles = m_cpu_solver.getMPMSolver()->getParticles();
+            if (cpu_particles.size() > m_cuda_mpm_solver->getParticleCount()) {
+                std::vector<MPMParticle3D> new_pts(cpu_particles.begin() + m_cuda_mpm_solver->getParticleCount(), cpu_particles.end());
+                m_cuda_mpm_solver->getMaterialTables() = m_cpu_solver.getMaterialTables();
+                m_cuda_mpm_solver->addParticlesDirect(new_pts);
+            }
+        }
         m_cpu_solver.invalidateSurfaceFacets();
         const auto& new_facets = m_cpu_solver.getSurfaceFacets();
 
@@ -2842,15 +2982,17 @@ __global__ void fem_truss_forces_kernel_3d_device(
     T sigma_y0 = static_cast<T>(mat.yield_stress > 0.0f ? mat.yield_stress : 500.0e6f);
     T Etan = static_cast<T>(mat.hardening_modulus > 0.0f ? mat.hardening_modulus : 2.0e9f);
 
-    T trial_stress = E * (eps - truss.ep_bar);
+    T trial_stress = E * (eps - truss.eps_p);
     T abs_trial = fabs(trial_stress);
     T current_yield = sigma_y0 + Etan * truss.ep_bar;
 
     T sigma = trial_stress;
     if (abs_trial > current_yield) {
         T dep = (abs_trial - current_yield) / (E + Etan);
+        T sign_trial = (trial_stress > static_cast<T>(0.0f) ? static_cast<T>(1.0f) : static_cast<T>(-1.0f));
+        truss.eps_p += sign_trial * dep;
         truss.ep_bar += dep;
-        sigma = (trial_stress > static_cast<T>(0.0f) ? static_cast<T>(1.0f) : static_cast<T>(-1.0f)) * (current_yield + Etan * dep);
+        sigma = sign_trial * (current_yield + Etan * dep);
     }
     truss.sigma = sigma;
 
@@ -2932,15 +3074,17 @@ __global__ void fem_beam_forces_kernel_3d_device(
     T sigma_y0 = static_cast<T>(mat.yield_stress > 0.0f ? mat.yield_stress : 500.0e6f);
     T Etan = static_cast<T>(mat.hardening_modulus > 0.0f ? mat.hardening_modulus : 2.0e9f);
 
-    T trial_stress = E * (eps - beam.ep_bar);
+    T trial_stress = E * (eps - beam.eps_p);
     T abs_trial = fabs(trial_stress);
     T current_yield = sigma_y0 + Etan * beam.ep_bar;
 
     T sigma = trial_stress;
     if (abs_trial > current_yield) {
         T dep = (abs_trial - current_yield) / (E + Etan);
+        T sign_trial = (trial_stress > static_cast<T>(0.0f) ? static_cast<T>(1.0f) : static_cast<T>(-1.0f));
+        beam.eps_p += sign_trial * dep;
         beam.ep_bar += dep;
-        sigma = (trial_stress > static_cast<T>(0.0f) ? static_cast<T>(1.0f) : static_cast<T>(-1.0f)) * (current_yield + Etan * dep);
+        sigma = sign_trial * (current_yield + Etan * dep);
     }
     T N = sigma * beam.A;
 
@@ -2977,12 +3121,24 @@ __global__ void fem_beam_forces_kernel_3d_device(
         static_cast<T>(0.5f) * (w1[1] + w2[1]),
         static_cast<T>(0.5f) * (w1[2] + w2[2])
     };
-    T w_rel[3] = { w_avg[0] - omega_rigid[0], w_avg[1] - omega_rigid[1], w_avg[2] - omega_rigid[2] };
-    T dot_gamma12 = w_rel[0]*beam.e3[0] + w_rel[1]*beam.e3[1] + w_rel[2]*beam.e3[2];
-    T dot_gamma13 = -(w_rel[0]*beam.e2[0] + w_rel[1]*beam.e2[1] + w_rel[2]*beam.e2[2]);
+    T dot_gamma12 = 0.0f;
+    T dot_gamma13 = 0.0f;
+    T V2 = 0.0f;
+    T V3 = 0.0f;
 
-    beam.gamma12 += dot_gamma12 * dt;
-    beam.gamma13 += dot_gamma13 * dt;
+    if (d_rot_nodes && r1 >= 0 && r1 < num_rot_nodes && r2 >= 0 && r2 < num_rot_nodes) {
+        T w_mag_sq = w1[0]*w1[0] + w1[1]*w1[1] + w1[2]*w1[2] + w2[0]*w2[0] + w2[1]*w2[1] + w2[2]*w2[2];
+        if (w_mag_sq > static_cast<T>(1.0e-12f)) {
+            T w_rel[3] = { w_avg[0] - omega_rigid[0], w_avg[1] - omega_rigid[1], w_avg[2] - omega_rigid[2] };
+            dot_gamma12 = w_rel[0]*beam.e3[0] + w_rel[1]*beam.e3[1] + w_rel[2]*beam.e3[2];
+            dot_gamma13 = -(w_rel[0]*beam.e2[0] + w_rel[1]*beam.e2[1] + w_rel[2]*beam.e2[2]);
+            beam.gamma12 += dot_gamma12 * dt;
+            beam.gamma13 += dot_gamma13 * dt;
+            T kappa_shear = static_cast<T>(0.90f);
+            V2 = kappa_shear * G * beam.A * beam.gamma12;
+            V3 = kappa_shear * G * beam.A * beam.gamma13;
+        }
+    }
 
     T M2 = E * beam.I2 * beam.kappa2;
     T M3 = E * beam.I3 * beam.kappa3;
@@ -2994,9 +3150,6 @@ __global__ void fem_beam_forces_kernel_3d_device(
         M3 *= scale_m;
     }
 
-    T kappa_shear = static_cast<T>(0.90f);
-    T V2 = kappa_shear * G * beam.A * beam.gamma12;
-    T V3 = kappa_shear * G * beam.A * beam.gamma13;
     T T_tor = G * beam.J * beam.kappa_tor;
 
     if (beam.ep_bar >= beam.failure_strain) {
@@ -3004,9 +3157,9 @@ __global__ void fem_beam_forces_kernel_3d_device(
         return;
     }
 
-    T f2_x = N * e1[0] + V2 * beam.e2[0] + V3 * beam.e3[0];
-    T f2_y = N * e1[1] + V2 * beam.e2[1] + V3 * beam.e3[1];
-    T f2_z = N * e1[2] + V2 * beam.e2[2] + V3 * beam.e3[2];
+    T f2_x = N * e1[0];
+    T f2_y = N * e1[1];
+    T f2_z = N * e1[2];
 
     atomicAdd(&d_nodes[n2].f_int[0], f2_x);
     atomicAdd(&d_nodes[n2].f_int[1], f2_y);
@@ -3084,8 +3237,8 @@ template void launch_fem_nodal_half_step_kernel_3d<double>(FEMNode3D<double>*, i
 template void launch_fem_nodal_full_step_kernel_3d<float>(FEMNode3D<float>*, int, float, cudaStream_t);
 template void launch_fem_nodal_full_step_kernel_3d<double>(FEMNode3D<double>*, int, double, cudaStream_t);
 
-template void launch_fem_initial_timestep_erosion_kernel_3d<float>(FEMNode3D<float>*, int, FEMElement3D<float>*, int, const MaterialTable3D*, FEMErosionCriteria<float>, int*, int*, cudaStream_t);
-template void launch_fem_initial_timestep_erosion_kernel_3d<double>(FEMNode3D<double>*, int, FEMElement3D<double>*, int, const MaterialTable3D*, FEMErosionCriteria<double>, int*, int*, cudaStream_t);
+template void launch_fem_initial_timestep_erosion_kernel_3d<float>(FEMNode3D<float>*, int, FEMElement3D<float>*, int, const FEMTrussElement3D<float>*, int, const FEMBeam3DElement<float>*, int, const MaterialTable3D*, FEMErosionCriteria<float>, int*, int*, cudaStream_t);
+template void launch_fem_initial_timestep_erosion_kernel_3d<double>(FEMNode3D<double>*, int, FEMElement3D<double>*, int, const FEMTrussElement3D<double>*, int, const FEMBeam3DElement<double>*, int, const MaterialTable3D*, FEMErosionCriteria<double>, int*, int*, cudaStream_t);
 
 template void launch_fem_update_surface_facets_kernel_3d<float>(FEMNode3D<float>*, int, const FEMElement3D<float>*, int, FEMFacet3D<float>*, int, float*, cudaStream_t);
 template void launch_fem_update_surface_facets_kernel_3d<double>(FEMNode3D<double>*, int, const FEMElement3D<double>*, int, FEMFacet3D<double>*, int, double*, cudaStream_t);

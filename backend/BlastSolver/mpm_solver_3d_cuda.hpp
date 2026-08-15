@@ -81,6 +81,16 @@ public:
                       float yield_stress, float hardening, float failure_strain = 0.25f,
                       float tensile_failure_stress = 600.0e6f, int ppc = 8);
 
+    void addParticlesDirect(const std::vector<MPMParticle3D>& particles) {
+        if (particles.empty()) return;
+        if (!m_host_particles.empty() && d_soa_buffer && !m_device_dirty) {
+            syncParticlesToHost();
+        }
+        m_host_particles.insert(m_host_particles.end(), particles.begin(), particles.end());
+        m_device_dirty = true;
+        syncToDevice();
+    }
+
     void step(float cfl = 0.3f);
     void stepWithDt(float dt, bool run_p2g = true);
     float computeStepSize(float cfl = 0.3f);

@@ -98,6 +98,7 @@ struct alignas(32) FEMElement3D {
     T lambda{0.0f};      // Modified damage scaling parameter (K&C / CSCM cap)
     T q_visc{0.0f};      // Artificial bulk viscosity pressure
     bool is_eroded{false};
+    bool mpm_converted{false}; // Converted to MPM debris particles
     int mat_id{0};       // Material Table ID
     int part_id{0};      // LS-DYNA Part ID
     int64_t lsdyna_id{-1}; // Original LS-DYNA element ID
@@ -113,6 +114,7 @@ struct alignas(32) FEMTrussElement3D {
     int node_ids[2];        // 8 bytes (2 node indices)
     T A{0.0f};              // 4 bytes (Cross-sectional area)
     T L0{0.0f};             // 4 bytes (Reference length at t=0)
+    T eps_p{0.0f};          // 4 bytes (Signed axial plastic strain)
     T ep_bar{0.0f};         // 4 bytes (Accumulated equivalent plastic strain)
     T sigma{0.0f};          // 4 bytes (Current axial Cauchy stress)
     T failure_strain{0.20f};// 4 bytes (Plastic failure strain)
@@ -137,6 +139,7 @@ struct alignas(64) FEMBeam3DElement {
     T kappa2{0.0f}, kappa3{0.0f};// Bending curvatures about e2 and e3
     T gamma12{0.0f}, gamma13{0.0f}; // Transverse shear strains
     T kappa_tor{0.0f};          // Torsional twist angle per unit length
+    T eps_p{0.0f};              // Signed axial plastic strain
     T ep_bar{0.0f};             // Accumulated equivalent plastic strain
     T failure_strain{0.20f};    // Plastic failure strain
     bool is_eroded{false};      // Erosion flag
@@ -207,9 +210,26 @@ public:
     void setErosionCriteria(const FEMErosionCriteria<T>& criteria) {
         m_erosion_criteria = criteria;
         for (auto& mat : m_material_tables) {
-            if (criteria.enable_strain_erosion) mat.enable_strain_erosion = true;
-            if (criteria.enable_stress_erosion) mat.enable_stress_erosion = true;
-            if (criteria.enable_timestep_erosion) mat.enable_timestep_erosion = true;
+            if (criteria.enable_strain_erosion) {
+                mat.enable_strain_erosion = true;
+                if (criteria.failure_strain > static_cast<T>(0.0f)) {
+                    mat.erosion_strain = static_cast<float>(criteria.failure_strain);
+                    mat.failure_strain = static_cast<float>(criteria.failure_strain);
+                }
+            }
+            if (criteria.enable_stress_erosion) {
+                mat.enable_stress_erosion = true;
+                if (criteria.tensile_failure_stress > static_cast<T>(0.0f)) {
+                    mat.erosion_stress = static_cast<float>(criteria.tensile_failure_stress);
+                    mat.tensile_failure_stress = static_cast<float>(criteria.tensile_failure_stress);
+                }
+            }
+            if (criteria.enable_timestep_erosion) {
+                mat.enable_timestep_erosion = true;
+                if (criteria.timestep_erosion_factor > static_cast<T>(0.0f)) {
+                    mat.timestep_erosion_factor = static_cast<float>(criteria.timestep_erosion_factor);
+                }
+            }
         }
     }
     void setContactPenaltyScale(T scale) { m_contact_penalty_scale = scale; }
@@ -257,6 +277,7 @@ public:
     void updateNodeErosionStatus();
     void computeLumpedMasses();
     void evaluateErosionCriteria();
+    void processErodedElementsToMPM();
 
     // Dynamic Execution Control
     void step(T cfl = 0.3f);

@@ -125,15 +125,8 @@ void FEMFSICoupler3D<T>::rasterizeFEMFacetsToFVGrid() {
         int kmax = std::clamp(static_cast<int>(std::ceil((max_z - zmin) / dz)), 0, nz - 1);
 
         for (int k = kmin; k <= kmax; ++k) {
-            double cz = zmin + (k + 0.5) * dz;
-            if (cz < min_z || cz > max_z) continue;
             for (int j = jmin; j <= jmax; ++j) {
-                double cy = ymin + (j + 0.5) * dy;
-                if (cy < min_y || cy > max_y) continue;
                 for (int i = imin; i <= imax; ++i) {
-                    double cx = xmin + (i + 0.5) * dx;
-                    if (cx < min_x || cx > max_x) continue;
-
                     size_t cfd_idx = static_cast<size_t>(i) + static_cast<size_t>(j) * nx + static_cast<size_t>(k) * nx * ny;
                     m_solid_mask[cfd_idx] = 1;
                     m_solid_vel[3 * cfd_idx + 0] = avg_vx;
@@ -141,6 +134,22 @@ void FEMFSICoupler3D<T>::rasterizeFEMFacetsToFVGrid() {
                     m_solid_vel[3 * cfd_idx + 2] = avg_vz;
                 }
             }
+        }
+    }
+
+    // 3. Rasterize active MPM debris particles into Cartesian FV grid as moving solid obstacles
+    auto* mpm_cpu = m_fem_solver->getMPMSolver();
+    if (mpm_cpu && !mpm_cpu->getParticles().empty()) {
+        const auto& particles = mpm_cpu->getParticles();
+        for (const auto& p : particles) {
+            int i = std::clamp(static_cast<int>(std::floor((p.x[0] - xmin) / dx)), 0, nx - 1);
+            int j = std::clamp(static_cast<int>(std::floor((p.x[1] - ymin) / dy)), 0, ny - 1);
+            int k = std::clamp(static_cast<int>(std::floor((p.x[2] - zmin) / dz)), 0, nz - 1);
+            size_t cfd_idx = static_cast<size_t>(i) + static_cast<size_t>(j) * nx + static_cast<size_t>(k) * nx * ny;
+            m_solid_mask[cfd_idx] = 1;
+            m_solid_vel[3 * cfd_idx + 0] = p.v[0];
+            m_solid_vel[3 * cfd_idx + 1] = p.v[1];
+            m_solid_vel[3 * cfd_idx + 2] = p.v[2];
         }
     }
 
@@ -346,6 +355,35 @@ void FEMFSICoupler3D<T>::applyFluidPressureToStructure(T dt) {
             }
         }
     }
+
+    // Apply fluid pressure gradient acceleration to active MPM debris particles
+    auto* mpm_cpu = m_fem_solver->getMPMSolver();
+    if (mpm_cpu && !mpm_cpu->getParticles().empty()) {
+        auto& particles = mpm_cpu->getParticles();
+        for (auto& p : particles) {
+            int i = std::clamp(static_cast<int>(std::floor((p.x[0] - xmin) / dx)), 0, nx - 1);
+            int j = std::clamp(static_cast<int>(std::floor((p.x[1] - ymin) / dy)), 0, ny - 1);
+            int k = std::clamp(static_cast<int>(std::floor((p.x[2] - zmin) / dz)), 0, nz - 1);
+
+            T p_L = (i > 0) ? sample_p_at(xmin + (i - 0.5) * dx, p.x[1], p.x[2]) : static_cast<T>(101325.0f);
+            T p_R = (i < nx - 1) ? sample_p_at(xmin + (i + 1.5) * dx, p.x[1], p.x[2]) : static_cast<T>(101325.0f);
+            T p_B = (j > 0) ? sample_p_at(p.x[0], ymin + (j - 0.5) * dy, p.x[2]) : static_cast<T>(101325.0f);
+            T p_T = (j < ny - 1) ? sample_p_at(p.x[0], ymin + (j + 1.5) * dy, p.x[2]) : static_cast<T>(101325.0f);
+            T p_D = (k > 0) ? sample_p_at(p.x[0], p.x[1], zmin + (k - 0.5) * dz) : static_cast<T>(101325.0f);
+            T p_U = (k < nz - 1) ? sample_p_at(p.x[0], p.x[1], zmin + (k + 1.5) * dz) : static_cast<T>(101325.0f);
+
+            float r_p = std::max(0.001f, p.lp[0]);
+            float A_p = 3.14159f * r_p * r_p;
+            float F_x = static_cast<float>(p_L - p_R) * A_p;
+            float F_y = static_cast<float>(p_B - p_T) * A_p;
+            float F_z = static_cast<float>(p_D - p_U) * A_p;
+
+            float m_p = std::max(1.0e-6f, p.m);
+            p.v[0] += (F_x / m_p) * static_cast<float>(dt);
+            p.v[1] += (F_y / m_p) * static_cast<float>(dt);
+            p.v[2] += (F_z / m_p) * static_cast<float>(dt);
+        }
+    }
 }
 
 template <typename T>
@@ -362,13 +400,18 @@ void FEMFSICoupler3D<T>::stepWithDt(T dt) {
     // 2. Handle cell uncovering and isolated vacuum cavity genesis
     handleCellTransitions();
 
-    // 3. Apply fluid pressure to structural nodes via 2x2 Gauss quadrature
+    // 3. Apply fluid pressure to structural nodes via 2x2 Gauss quadrature & MPM debris particles
     applyFluidPressureToStructure(dt);
 
     // 4. Advance FEM structural solver by dt
     m_fem_solver->stepWithDt(dt);
 
-    // 5. Advance 3D FV Eulerian gas dynamics solver by dt
+    // 5. Advance MPM debris solver by dt
+    if (m_fem_solver->getMPMSolver() && !m_fem_solver->getMPMSolver()->getParticles().empty()) {
+        m_fem_solver->getMPMSolver()->stepWithDt(static_cast<float>(dt));
+    }
+
+    // 6. Advance 3D FV Eulerian gas dynamics solver by dt
     m_fv_solver->step(static_cast<double>(dt));
 }
 

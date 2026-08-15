@@ -2392,7 +2392,7 @@ export class NodeViewer {
             'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
             // FEM keys
             'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
-            'convert_failed_elements_to_mpm', 'mpm_particles_per_failed_element', 'rebar_diameter', 'rebar_area', 'rebarRadius', 'rebar_radius',
+            'mpm_particles_per_failed_element', 'rebar_diameter', 'rebar_area', 'rebarRadius', 'rebar_radius', 'beamRadius', 'beam_radius', 'beam_diameter', 'beam_area', 'beamMinVal', 'beamMaxVal',
             'femMinVal', 'femMaxVal', 'femOpacity', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',
             // Concrete Core & Models (RHT, K&C, CSCM)
             'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
@@ -2407,6 +2407,9 @@ export class NodeViewer {
         const dropdowns: Record<string, string[]> = {
             'material_model': ['Hypoelastic', 'Johnson-Cook + Mie-Grüneisen', 'RHT Concrete', 'Karagozian & Case (K&C)', 'CSCM Concrete'],
             'rebar_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
+            'beam_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
+            'beamQuantity': ['plasticStrain', 'vonMises', 'momentOrForce', 'velocity', 'damage'],
+            'beamColormap': ['plasma', 'viridis', 'coolwarm', 'rainbow', 'cividis', 'grayscale'],
             'coupling_scheme': ['Two-Way Staggered', 'Sub-Cycling'],
             'pressure_integration': ['2x2 Gauss Quadrature', '1-Point Centroid'],
             'uncovering_method': ['Conservative IDW + Vacuum Cavity', 'Ghost-Fluid Standard'],
