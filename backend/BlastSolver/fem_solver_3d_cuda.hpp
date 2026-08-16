@@ -144,6 +144,31 @@ void launch_fem_contact_forces_kernel_3d(
     cudaStream_t stream
 );
 
+struct MPMParticle3DSoA;
+
+template <typename T>
+void launch_fem_mpm_debris_contact_kernel_3d(
+    MPMParticle3DSoA soa,
+    int num_particles,
+    FEMNode3D<T>* d_nodes,
+    int num_nodes,
+    const FEMElement3D<T>* d_elements,
+    int num_elements,
+    const FEMFacet3D<T>* d_facets,
+    int num_facets,
+    const FEMTrussElement3D<T>* d_trusses,
+    int num_trusses,
+    const FEMBeam3DElement<T>* d_beams,
+    int num_beams,
+    const MaterialTable3D* d_materials,
+    T contact_penalty_scale,
+    T mu_static,
+    T mu_kinetic,
+    T contact_damping,
+    T dt,
+    cudaStream_t stream
+);
+
 template <typename T>
 T launch_fem_compute_step_size_kernel_3d(
     const FEMNode3D<T>* d_nodes,

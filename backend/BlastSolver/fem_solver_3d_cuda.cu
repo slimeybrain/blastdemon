@@ -1777,6 +1777,302 @@ __global__ void fem_contact_forces_direct_kernel_3d_device(
     }
 }
 
+// CUDA Kernel: Penalty Contact between MPM Debris Particles and Intact FEM Facets & Rebars
+template <typename T>
+__global__ void fem_contact_mpm_debris_kernel_3d_device(
+    MPMParticle3DSoA soa,
+    int num_particles,
+    FEMNode3D<T>* d_nodes,
+    int num_nodes,
+    const FEMElement3D<T>* d_elements,
+    int num_elements,
+    const FEMFacet3D<T>* d_facets,
+    int num_facets,
+    const FEMTrussElement3D<T>* d_trusses,
+    int num_trusses,
+    const FEMBeam3DElement<T>* d_beams,
+    int num_beams,
+    const MaterialTable3D* d_materials,
+    T contact_penalty_scale,
+    T mu_static,
+    T mu_kinetic,
+    T contact_damping,
+    T dt
+) {
+    int p_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (p_idx >= num_particles) return;
+
+    float px = soa.x[0][p_idx];
+    float py = soa.x[1][p_idx];
+    float pz = soa.x[2][p_idx];
+    float pm = soa.m[p_idx];
+    if (pm <= 0.0f) return;
+
+    float r_debris = soa.lp[0][p_idx] > 0.0f ? soa.lp[0][p_idx] : 0.002f;
+
+    T best_f_total = static_cast<T>(0.0f);
+    T best_nx = static_cast<T>(0.0f), best_ny = static_cast<T>(0.0f), best_nz = static_cast<T>(0.0f);
+    int best_fid = -1;
+    T best_N[4] = {0, 0, 0, 0};
+    T best_m_pair = static_cast<T>(0.0f);
+
+    // 1. Facet Contact Evaluation (Solid Hex boundary facets)
+    for (int f = 0; f < num_facets; ++f) {
+        const FEMFacet3D<T>& facet = d_facets[f];
+        if (facet.is_eroded) continue;
+
+        if (px < facet.bbox_min[0] - r_debris || px > facet.bbox_max[0] + r_debris ||
+            py < facet.bbox_min[1] - r_debris || py > facet.bbox_max[1] + r_debris ||
+            pz < facet.bbox_min[2] - r_debris || pz > facet.bbox_max[2] + r_debris) continue;
+
+        const auto& n0 = d_nodes[facet.node_ids[0]];
+        const auto& n1 = d_nodes[facet.node_ids[1]];
+        const auto& n2 = d_nodes[facet.node_ids[2]];
+        const auto& n3 = d_nodes[facet.node_ids[3]];
+
+        T e1[3] = {n1.x[0] - n0.x[0], n1.x[1] - n0.x[1], n1.x[2] - n0.x[2]};
+        T e3[3] = {n3.x[0] - n0.x[0], n3.x[1] - n0.x[1], n3.x[2] - n0.x[2]};
+        T dx_v0[3] = {static_cast<T>(px) - n0.x[0], static_cast<T>(py) - n0.x[1], static_cast<T>(pz) - n0.x[2]};
+
+        T len1_sq = e1[0]*e1[0] + e1[1]*e1[1] + e1[2]*e1[2];
+        T len3_sq = e3[0]*e3[0] + e3[1]*e3[1] + e3[2]*e3[2];
+        T dot_e1_e3 = e1[0]*e3[0] + e1[1]*e3[1] + e1[2]*e3[2];
+
+        T det_tangent = len1_sq * len3_sq - dot_e1_e3 * dot_e1_e3;
+        T u_param = static_cast<T>(0.5f), v_param = static_cast<T>(0.5f);
+
+        if (fabs(det_tangent) > static_cast<T>(1.0e-12f)) {
+            T proj1 = dx_v0[0]*e1[0] + dx_v0[1]*e1[1] + dx_v0[2]*e1[2];
+            T proj3 = dx_v0[0]*e3[0] + dx_v0[1]*e3[1] + dx_v0[2]*e3[2];
+            T inv_det = static_cast<T>(1.0f) / det_tangent;
+            u_param = (proj1 * len3_sq - proj3 * dot_e1_e3) * inv_det;
+            v_param = (proj3 * len1_sq - proj1 * dot_e1_e3) * inv_det;
+        } else {
+            u_param = (len1_sq > static_cast<T>(1.0e-12f)) ? ((dx_v0[0]*e1[0] + dx_v0[1]*e1[1] + dx_v0[2]*e1[2]) / len1_sq) : static_cast<T>(0.5f);
+            v_param = (len3_sq > static_cast<T>(1.0e-12f)) ? ((dx_v0[0]*e3[0] + dx_v0[1]*e3[1] + dx_v0[2]*e3[2]) / len3_sq) : static_cast<T>(0.5f);
+        }
+
+        if (u_param < static_cast<T>(-0.05f) || u_param > static_cast<T>(1.05f) ||
+            v_param < static_cast<T>(-0.05f) || v_param > static_cast<T>(1.05f)) continue;
+
+        T u_clamped = u_param < static_cast<T>(0.0f) ? static_cast<T>(0.0f) : (u_param > static_cast<T>(1.0f) ? static_cast<T>(1.0f) : u_param);
+        T v_clamped = v_param < static_cast<T>(0.0f) ? static_cast<T>(0.0f) : (v_param > static_cast<T>(1.0f) ? static_cast<T>(1.0f) : v_param);
+
+        T N_shape[4] = {
+            (static_cast<T>(1.0f) - u_clamped) * (static_cast<T>(1.0f) - v_clamped),
+            u_clamped * (static_cast<T>(1.0f) - v_clamped),
+            u_clamped * v_clamped,
+            (static_cast<T>(1.0f) - u_clamped) * v_clamped
+        };
+
+        T x_surf[3] = {
+            N_shape[0]*n0.x[0] + N_shape[1]*n1.x[0] + N_shape[2]*n2.x[0] + N_shape[3]*n3.x[0],
+            N_shape[0]*n0.x[1] + N_shape[1]*n1.x[1] + N_shape[2]*n2.x[1] + N_shape[3]*n3.x[1],
+            N_shape[0]*n0.x[2] + N_shape[1]*n1.x[2] + N_shape[2]*n2.x[2] + N_shape[3]*n3.x[2]
+        };
+
+        T contact_normal[3] = {facet.normal[0], facet.normal[1], facet.normal[2]};
+        T dx_surf[3] = {static_cast<T>(px) - x_surf[0], static_cast<T>(py) - x_surf[1], static_cast<T>(pz) - x_surf[2]};
+        T dist_n = dx_surf[0]*contact_normal[0] + dx_surf[1]*contact_normal[1] + dx_surf[2]*contact_normal[2];
+
+        T h_elem = sqrt(facet.area > static_cast<T>(1.0e-24f) ? facet.area : static_cast<T>(1.0e-24f));
+        if (facet.element_id >= 0 && facet.element_id < num_elements) {
+            T elem_V = d_elements[facet.element_id].V;
+            if (elem_V > static_cast<T>(1.0e-30f) && facet.area > static_cast<T>(1.0e-24f)) {
+                h_elem = elem_V / facet.area;
+            }
+        }
+
+        T dx_t0 = dx_surf[0] - dist_n * contact_normal[0];
+        T dx_t1 = dx_surf[1] - dist_n * contact_normal[1];
+        T dx_t2 = dx_surf[2] - dist_n * contact_normal[2];
+        T d_tangent_sq = dx_t0*dx_t0 + dx_t1*dx_t1 + dx_t2*dx_t2;
+        if (d_tangent_sq > static_cast<T>(0.04f) * h_elem * h_elem) continue;
+
+        if (dist_n < static_cast<T>(r_debris) && dist_n > -static_cast<T>(0.35f) * h_elem) {
+            T penetration = static_cast<T>(r_debris) - dist_n;
+            T eff_penetration = (penetration < static_cast<T>(0.30f) * h_elem) ? penetration : static_cast<T>(0.30f) * h_elem;
+
+            T K_master = static_cast<T>(160.0e9f);
+            if (facet.element_id >= 0 && facet.element_id < num_elements && d_materials) {
+                int mid = d_elements[facet.element_id].mat_id;
+                const MaterialTable3D& mat = d_materials[mid];
+                T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 210.0e9f);
+                T nu = static_cast<T>(mat.poissons_ratio);
+                T denom = static_cast<T>(1.0f) - static_cast<T>(2.0f) * nu;
+                if (fabs(denom) > static_cast<T>(1.0e-4f)) {
+                    K_master = E / (static_cast<T>(3.0f) * denom);
+                }
+            }
+
+            T k_stiff = contact_penalty_scale * (static_cast<T>(0.01f) * K_master) * h_elem;
+            T f_spring = k_stiff * eff_penetration;
+
+            T m_facet_avg = static_cast<T>(0.25f) * (n0.m + n1.m + n2.m + n3.m);
+            T p_m = static_cast<T>(pm);
+            T m_sum = p_m + m_facet_avg;
+            T m_pair = (m_sum > static_cast<T>(1.0e-30f)) ? (p_m * m_facet_avg / m_sum) : static_cast<T>(1.0e-30f);
+
+            T vf0 = N_shape[0]*n0.v[0] + N_shape[1]*n1.v[0] + N_shape[2]*n2.v[0] + N_shape[3]*n3.v[0];
+            T vf1 = N_shape[0]*n0.v[1] + N_shape[1]*n1.v[1] + N_shape[2]*n2.v[1] + N_shape[3]*n3.v[1];
+            T vf2 = N_shape[0]*n0.v[2] + N_shape[1]*n1.v[2] + N_shape[2]*n2.v[2] + N_shape[3]*n3.v[2];
+            T v_rel_n = (static_cast<T>(soa.v[0][p_idx]) - vf0)*contact_normal[0] +
+                        (static_cast<T>(soa.v[1][p_idx]) - vf1)*contact_normal[1] +
+                        (static_cast<T>(soa.v[2][p_idx]) - vf2)*contact_normal[2];
+
+            T f_damp = static_cast<T>(0.0f);
+            if (v_rel_n < static_cast<T>(0.0f)) {
+                T c = static_cast<T>(2.0f) * contact_damping * sqrt(k_stiff * m_pair);
+                f_damp = -c * v_rel_n;
+            }
+
+            T f_total = f_spring + f_damp;
+            T v_limit = (static_cast<T>(2.0f) * fabs(v_rel_n) > static_cast<T>(5.0f)) ? static_cast<T>(2.0f) * fabs(v_rel_n) : static_cast<T>(5.0f);
+            T f_max = m_pair * v_limit / (dt > static_cast<T>(1.0e-12f) ? dt : static_cast<T>(1.0e-12f));
+            if (f_total > f_max) f_total = f_max;
+
+            if (f_total > best_f_total) {
+                best_f_total = f_total;
+                best_nx = contact_normal[0];
+                best_ny = contact_normal[1];
+                best_nz = contact_normal[2];
+                best_fid = f;
+                best_N[0] = N_shape[0];
+                best_N[1] = N_shape[1];
+                best_N[2] = N_shape[2];
+                best_N[3] = N_shape[3];
+                best_m_pair = m_pair;
+            }
+        }
+    }
+
+    if (best_fid >= 0 && best_f_total > static_cast<T>(0.0f)) {
+        const FEMFacet3D<T>& facet = d_facets[best_fid];
+        const auto& n0 = d_nodes[facet.node_ids[0]];
+        const auto& n1 = d_nodes[facet.node_ids[1]];
+        const auto& n2 = d_nodes[facet.node_ids[2]];
+        const auto& n3 = d_nodes[facet.node_ids[3]];
+
+        T vf0 = best_N[0]*n0.v[0] + best_N[1]*n1.v[0] + best_N[2]*n2.v[0] + best_N[3]*n3.v[0];
+        T vf1 = best_N[0]*n0.v[1] + best_N[1]*n1.v[1] + best_N[2]*n2.v[1] + best_N[3]*n3.v[1];
+        T vf2 = best_N[0]*n0.v[2] + best_N[1]*n1.v[2] + best_N[2]*n2.v[2] + best_N[3]*n3.v[2];
+
+        T v_rel[3] = {static_cast<T>(soa.v[0][p_idx]) - vf0, static_cast<T>(soa.v[1][p_idx]) - vf1, static_cast<T>(soa.v[2][p_idx]) - vf2};
+        T v_rel_n = v_rel[0]*best_nx + v_rel[1]*best_ny + v_rel[2]*best_nz;
+
+        T v_rel_t[3] = {
+            v_rel[0] - v_rel_n * best_nx,
+            v_rel[1] - v_rel_n * best_ny,
+            v_rel[2] - v_rel_n * best_nz
+        };
+        T vt_mag = sqrt(v_rel_t[0]*v_rel_t[0] + v_rel_t[1]*v_rel_t[1] + v_rel_t[2]*v_rel_t[2]);
+
+        T f_fric[3] = {static_cast<T>(0), static_cast<T>(0), static_cast<T>(0)};
+        if (vt_mag > static_cast<T>(1.0e-6f) && (mu_static > static_cast<T>(0.0f) || mu_kinetic > static_cast<T>(0.0f))) {
+            T t_dir[3] = {v_rel_t[0] / vt_mag, v_rel_t[1] / vt_mag, v_rel_t[2] / vt_mag};
+            T mu_eff = mu_kinetic + (mu_static - mu_kinetic) * exp(-static_cast<T>(10.0f) * vt_mag);
+            T f_fric_mag = mu_eff * best_f_total;
+            T f_stick_max = best_m_pair * vt_mag / (dt > static_cast<T>(1.0e-12f) ? dt : static_cast<T>(1.0e-12f));
+            if (f_fric_mag > f_stick_max) f_fric_mag = f_stick_max;
+
+            f_fric[0] = -f_fric_mag * t_dir[0];
+            f_fric[1] = -f_fric_mag * t_dir[1];
+            f_fric[2] = -f_fric_mag * t_dir[2];
+        }
+
+        T f_tot[3] = {
+            best_f_total * best_nx + f_fric[0],
+            best_f_total * best_ny + f_fric[1],
+            best_f_total * best_nz + f_fric[2]
+        };
+
+        soa.v[0][p_idx] += static_cast<float>((f_tot[0] * dt) / pm);
+        soa.v[1][p_idx] += static_cast<float>((f_tot[1] * dt) / pm);
+        soa.v[2][p_idx] += static_cast<float>((f_tot[2] * dt) / pm);
+
+        #pragma unroll
+        for (int k = 0; k < 4; ++k) {
+            int fnid = facet.node_ids[k];
+            T N_k = best_N[k];
+            atomicAdd(&d_nodes[fnid].f_contact[0], -N_k * f_tot[0]);
+            atomicAdd(&d_nodes[fnid].f_contact[1], -N_k * f_tot[1]);
+            atomicAdd(&d_nodes[fnid].f_contact[2], -N_k * f_tot[2]);
+        }
+    }
+
+    // 2. Rebar Truss Contact Evaluation (if trusses present)
+    if (d_trusses && num_trusses > 0) {
+        for (int tr = 0; tr < num_trusses; ++tr) {
+            const FEMTrussElement3D<T>& truss = d_trusses[tr];
+            if (truss.is_eroded) continue;
+
+            const auto& n1 = d_nodes[truss.node_ids[0]];
+            const auto& n2 = d_nodes[truss.node_ids[1]];
+
+            T r_rebar = sqrt(truss.A > static_cast<T>(1.0e-12f) ? (truss.A / static_cast<T>(3.1415926535f)) : static_cast<T>(0.0001f));
+            T R_contact = r_rebar + static_cast<T>(r_debris);
+
+            T ab[3] = {n2.x[0] - n1.x[0], n2.x[1] - n1.x[1], n2.x[2] - n1.x[2]};
+            T ap[3] = {static_cast<T>(px) - n1.x[0], static_cast<T>(py) - n1.x[1], static_cast<T>(pz) - n1.x[2]};
+            T ab_len_sq = ab[0]*ab[0] + ab[1]*ab[1] + ab[2]*ab[2];
+            if (ab_len_sq <= static_cast<T>(1.0e-16f)) continue;
+
+            T t_proj = (ap[0]*ab[0] + ap[1]*ab[1] + ap[2]*ab[2]) / ab_len_sq;
+            t_proj = t_proj < static_cast<T>(0.0f) ? static_cast<T>(0.0f) : (t_proj > static_cast<T>(1.0f) ? static_cast<T>(1.0f) : t_proj);
+
+            T x_seg[3] = {
+                n1.x[0] + t_proj * ab[0],
+                n1.x[1] + t_proj * ab[1],
+                n1.x[2] + t_proj * ab[2]
+            };
+
+            T d_vec[3] = {static_cast<T>(px) - x_seg[0], static_cast<T>(py) - x_seg[1], static_cast<T>(pz) - x_seg[2]};
+            T dist_sq = d_vec[0]*d_vec[0] + d_vec[1]*d_vec[1] + d_vec[2]*d_vec[2];
+
+            if (dist_sq < R_contact * R_contact) {
+                T dist = sqrt(dist_sq > static_cast<T>(1.0e-20f) ? dist_sq : static_cast<T>(1.0e-20f));
+                T delta = R_contact - dist;
+                T n_dir[3] = {d_vec[0] / dist, d_vec[1] / dist, d_vec[2] / dist};
+
+                T K_steel = static_cast<T>(200.0e9f);
+                T k_pen = contact_penalty_scale * (static_cast<T>(0.01f) * K_steel) * r_rebar;
+                T f_norm_mag = k_pen * delta;
+
+                T v_seg[3] = {
+                    (static_cast<T>(1.0f) - t_proj) * n1.v[0] + t_proj * n2.v[0],
+                    (static_cast<T>(1.0f) - t_proj) * n1.v[1] + t_proj * n2.v[1],
+                    (static_cast<T>(1.0f) - t_proj) * n1.v[2] + t_proj * n2.v[2]
+                };
+                T v_rel[3] = {static_cast<T>(soa.v[0][p_idx]) - v_seg[0], static_cast<T>(soa.v[1][p_idx]) - v_seg[1], static_cast<T>(soa.v[2][p_idx]) - v_seg[2]};
+                T v_n = v_rel[0]*n_dir[0] + v_rel[1]*n_dir[1] + v_rel[2]*n_dir[2];
+
+                T m_pair = static_cast<T>(pm);
+                if (v_n < static_cast<T>(0.0f)) {
+                    T c_damp = static_cast<T>(2.0f) * contact_damping * sqrt(k_pen * m_pair);
+                    f_norm_mag -= c_damp * v_n;
+                }
+
+                T v_limit = (static_cast<T>(2.0f) * fabs(v_n) > static_cast<T>(20.0f)) ? static_cast<T>(2.0f) * fabs(v_n) : static_cast<T>(20.0f);
+                T f_max = m_pair * v_limit / (dt > static_cast<T>(1.0e-12f) ? dt : static_cast<T>(1.0e-12f));
+                if (f_norm_mag > f_max) f_norm_mag = f_max;
+                if (f_norm_mag < static_cast<T>(0.0f)) f_norm_mag = static_cast<T>(0.0f);
+
+                soa.v[0][p_idx] += static_cast<float>((f_norm_mag * n_dir[0] * dt) / pm);
+                soa.v[1][p_idx] += static_cast<float>((f_norm_mag * n_dir[1] * dt) / pm);
+                soa.v[2][p_idx] += static_cast<float>((f_norm_mag * n_dir[2] * dt) / pm);
+
+                atomicAdd(&d_nodes[truss.node_ids[0]].f_contact[0], -(static_cast<T>(1.0f) - t_proj) * f_norm_mag * n_dir[0]);
+                atomicAdd(&d_nodes[truss.node_ids[0]].f_contact[1], -(static_cast<T>(1.0f) - t_proj) * f_norm_mag * n_dir[1]);
+                atomicAdd(&d_nodes[truss.node_ids[0]].f_contact[2], -(static_cast<T>(1.0f) - t_proj) * f_norm_mag * n_dir[2]);
+
+                atomicAdd(&d_nodes[truss.node_ids[1]].f_contact[0], -t_proj * f_norm_mag * n_dir[0]);
+                atomicAdd(&d_nodes[truss.node_ids[1]].f_contact[1], -t_proj * f_norm_mag * n_dir[1]);
+                atomicAdd(&d_nodes[truss.node_ids[1]].f_contact[2], -t_proj * f_norm_mag * n_dir[2]);
+            }
+        }
+    }
+}
+
 // CUDA Kernel: Penalty Surface Contact and Coulomb Friction using GPU Spatial Hash Grid (O(1) lookups)
 template <typename T>
 __global__ void fem_contact_forces_spatial_grid_kernel_3d_device(
@@ -2379,6 +2675,38 @@ void launch_fem_contact_forces_kernel_3d(
 }
 
 template <typename T>
+void launch_fem_mpm_debris_contact_kernel_3d(
+    MPMParticle3DSoA soa,
+    int num_particles,
+    FEMNode3D<T>* d_nodes,
+    int num_nodes,
+    const FEMElement3D<T>* d_elements,
+    int num_elements,
+    const FEMFacet3D<T>* d_facets,
+    int num_facets,
+    const FEMTrussElement3D<T>* d_trusses,
+    int num_trusses,
+    const FEMBeam3DElement<T>* d_beams,
+    int num_beams,
+    const MaterialTable3D* d_materials,
+    T contact_penalty_scale,
+    T mu_static,
+    T mu_kinetic,
+    T contact_damping,
+    T dt,
+    cudaStream_t stream
+) {
+    if (num_particles <= 0 || (num_facets <= 0 && num_trusses <= 0)) return;
+    int block_size = 256;
+    int grid_size = (num_particles + block_size - 1) / block_size;
+    fem_contact_mpm_debris_kernel_3d_device<T><<<grid_size, block_size, 0, stream>>>(
+        soa, num_particles, d_nodes, num_nodes, d_elements, num_elements,
+        d_facets, num_facets, d_trusses, num_trusses, d_beams, num_beams,
+        d_materials, contact_penalty_scale, mu_static, mu_kinetic, contact_damping, dt
+    );
+}
+
+template <typename T>
 T launch_fem_compute_step_size_kernel_3d(
     const FEMNode3D<T>* d_nodes,
     const FEMElement3D<T>* d_elements,
@@ -2847,6 +3175,26 @@ void FEMSolver3DCUDA<T>::stepWithDt(T dt) {
             dt,
             m_cuda_stream
         );
+
+        // 2b. Penalty MPM Debris-to-FEM Facet & Rebar Contact on GPU
+        if (m_cuda_mpm_solver && m_cuda_mpm_solver->getParticleCount() > 0) {
+            launch_fem_mpm_debris_contact_kernel_3d<T>(
+                m_cuda_mpm_solver->getDeviceParticlesSoA(),
+                static_cast<int>(m_cuda_mpm_solver->getParticleCount()),
+                m_d_nodes, num_nodes,
+                m_d_elements, num_elements,
+                m_d_facets, static_cast<int>(m_num_surface_facets),
+                m_d_trusses, num_trusses,
+                m_d_beams, num_beams,
+                m_d_materials,
+                m_cpu_solver.getContactPenaltyScale(),
+                m_cpu_solver.getFrictionStatic(),
+                m_cpu_solver.getFrictionKinetic(),
+                m_cpu_solver.getContactDamping(),
+                dt,
+                m_cuda_stream
+            );
+        }
     } else {
         int block_size = 256;
         int grid_size = (num_nodes + block_size - 1) / block_size;
@@ -3279,6 +3627,9 @@ template void launch_fem_update_surface_facets_kernel_3d<double>(FEMNode3D<doubl
 
 template void launch_fem_contact_forces_kernel_3d<float>(FEMNode3D<float>*, int, const FEMElement3D<float>*, int, const FEMFacet3D<float>*, int, const int*, int, const int*, const int*, int, const float*, const MaterialTable3D*, int*, int*, uint32_t, float, float, float, float, float, float, cudaStream_t);
 template void launch_fem_contact_forces_kernel_3d<double>(FEMNode3D<double>*, int, const FEMElement3D<double>*, int, const FEMFacet3D<double>*, int, const int*, int, const int*, const int*, int, const double*, const MaterialTable3D*, int*, int*, uint32_t, double, double, double, double, double, double, cudaStream_t);
+
+template void launch_fem_mpm_debris_contact_kernel_3d<float>(MPMParticle3DSoA, int, FEMNode3D<float>*, int, const FEMElement3D<float>*, int, const FEMFacet3D<float>*, int, const FEMTrussElement3D<float>*, int, const FEMBeam3DElement<float>*, int, const MaterialTable3D*, float, float, float, float, float, cudaStream_t);
+template void launch_fem_mpm_debris_contact_kernel_3d<double>(MPMParticle3DSoA, int, FEMNode3D<double>*, int, const FEMElement3D<double>*, int, const FEMFacet3D<double>*, int, const FEMTrussElement3D<double>*, int, const FEMBeam3DElement<double>*, int, const MaterialTable3D*, double, double, double, double, double, cudaStream_t);
 
 template float launch_fem_compute_step_size_kernel_3d<float>(const FEMNode3D<float>*, const FEMElement3D<float>*, int, const MaterialTable3D*, float, float*, cudaStream_t);
 template double launch_fem_compute_step_size_kernel_3d<double>(const FEMNode3D<double>*, const FEMElement3D<double>*, int, const MaterialTable3D*, double, double*, cudaStream_t);

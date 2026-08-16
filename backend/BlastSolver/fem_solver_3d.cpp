@@ -2467,17 +2467,31 @@ void FEMSolver3D<T>::convertElementToMPMParticles(const FEMElement3D<T>& elem, s
 
     float p_mass = (density * V_elem) / static_cast<float>(np);
     float p_vol = V_elem / static_cast<float>(np);
-    float h_p = std::cbrt(p_vol) * 0.5f;
+    // Clearance-aware geometric contact radius sizing to guarantee zero initial overlap with adjacent element faces at birth.
+    // For np == 8 (Gauss points at +/-0.577), distance to face is 0.211 * dx. Setting h_p = 0.35 * cbrt(p_vol) = 0.175 * dx < 0.211 * dx.
+    // For np == 27 (Gauss points at +/-0.775), distance to face is 0.113 * dx. Setting h_p = 0.30 * cbrt(p_vol) = 0.100 * dx < 0.113 * dx.
+    // For np == 1 (Centroid), distance to face is 0.500 * dx. Setting h_p = 0.35 * cbrt(p_vol) = 0.350 * dx < 0.500 * dx.
+    float clearance_factor = (np == 27) ? 0.30f : 0.35f;
+    float h_p = std::cbrt(p_vol) * clearance_factor;
 
     // Gather nodal positions and velocities
     T x_nodes[8][3], v_nodes[8][3];
+    float v_elem_com[3] = {0.0f, 0.0f, 0.0f};
     for (int n = 0; n < 8; ++n) {
         int nid = elem.node_ids[n];
         for (int c = 0; c < 3; ++c) {
             x_nodes[n][c] = m_nodes[nid].x[c];
             v_nodes[n][c] = m_nodes[nid].v[c];
+            v_elem_com[c] += static_cast<float>(m_nodes[nid].v[c]) * 0.125f;
         }
     }
+
+    // Material-aware acoustic / Gurney velocity physical ceiling (supports high-velocity steel & concrete fragment ejection)
+    float E_mat = mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 30.0e9f;
+    float rho_mat = mat.density > 0.0f ? mat.density : 2400.0f;
+    float c_bulk = std::sqrt(E_mat / (rho_mat > 1.0e-6f ? rho_mat : 2400.0f));
+    float v_max_birth = std::clamp(c_bulk * 0.85f, 2000.0f, 3500.0f);
+    float max_dev = 0.6f * v_max_birth;
 
     static const float HEX_NODES_LOCAL[8][3] = {
         {-1,-1,-1}, { 1,-1,-1}, { 1, 1,-1}, {-1, 1,-1},
@@ -2493,6 +2507,11 @@ void FEMSolver3D<T>::convertElementToMPMParticles(const FEMElement3D<T>& elem, s
                 xp[c] += static_cast<float>(x_nodes[n][c]) * 0.125f;
                 vp[c] += static_cast<float>(v_nodes[n][c]) * 0.125f;
             }
+        }
+        float v_mag_sq = vp[0]*vp[0] + vp[1]*vp[1] + vp[2]*vp[2];
+        if (v_mag_sq > v_max_birth * v_max_birth) {
+            float scale = v_max_birth / std::sqrt(v_mag_sq);
+            vp[0] *= scale; vp[1] *= scale; vp[2] *= scale;
         }
         p.x[0] = xp[0]; p.x[1] = xp[1]; p.x[2] = xp[2];
         p.v[0] = vp[0]; p.v[1] = vp[1]; p.v[2] = vp[2];
@@ -2531,6 +2550,24 @@ void FEMSolver3D<T>::convertElementToMPMParticles(const FEMElement3D<T>& elem, s
                     xp[c] += static_cast<float>(x_nodes[a][c]) * Na;
                     vp[c] += static_cast<float>(v_nodes[a][c]) * Na;
                 }
+            }
+
+            // Filter out single-node hourglassing / rupture singularities by bounding deviation from element COM
+            float diff_x = vp[0] - v_elem_com[0];
+            float diff_y = vp[1] - v_elem_com[1];
+            float diff_z = vp[2] - v_elem_com[2];
+            float diff_sq = diff_x*diff_x + diff_y*diff_y + diff_z*diff_z;
+            if (diff_sq > max_dev * max_dev) {
+                float scale = max_dev / std::sqrt(diff_sq);
+                vp[0] = v_elem_com[0] + diff_x * scale;
+                vp[1] = v_elem_com[1] + diff_y * scale;
+                vp[2] = v_elem_com[2] + diff_z * scale;
+            }
+
+            float v_mag_sq = vp[0]*vp[0] + vp[1]*vp[1] + vp[2]*vp[2];
+            if (v_mag_sq > v_max_birth * v_max_birth) {
+                float scale = v_max_birth / std::sqrt(v_mag_sq);
+                vp[0] *= scale; vp[1] *= scale; vp[2] *= scale;
             }
 
             MPMParticle3D p{};

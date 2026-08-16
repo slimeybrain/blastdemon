@@ -549,8 +549,8 @@ void FEMContact3D<T>::solveMPMRebarContact(FEMSolver3D<T>& fem_solver, MPMSolver
         if (mat_id >= 0 && mat_id < static_cast<int>(mat_tables.size())) {
             E_mat = static_cast<T>(mat_tables[mat_id].youngs_modulus > 0.0f ? mat_tables[mat_id].youngs_modulus : 200.0e9f);
         }
-        T k_pen = (E_mat * static_cast<T>(3.14159265f) * r_bar * r_bar / L) * m_penalty_scale;
-        if (k_pen < static_cast<T>(1.0e6f)) k_pen = static_cast<T>(1.0e6f);
+        T k_pen = (E_mat * static_cast<T>(3.14159265f) * r_bar * r_bar / L) * m_penalty_scale * static_cast<T>(0.01f);
+        if (k_pen < static_cast<T>(1.0e5f)) k_pen = static_cast<T>(1.0e5f);
 
         for (auto& p : particles) {
             // Broad-phase AABB test
@@ -785,8 +785,8 @@ void FEMContact3D<T>::solveMPMFacetContact(FEMSolver3D<T>& fem_solver, MPMSolver
                                 }
                             }
 
-                            T k_stiff = m_penalty_scale * K_master * h_elem;
-                            if (k_stiff < static_cast<T>(1.0e6f)) k_stiff = static_cast<T>(1.0e6f);
+                            T k_stiff = m_penalty_scale * (static_cast<T>(0.01f) * K_master) * h_elem;
+                            if (k_stiff < static_cast<T>(1.0e5f)) k_stiff = static_cast<T>(1.0e5f);
                             T f_spring = k_stiff * eff_penetration;
 
                             T m_facet_avg = static_cast<T>(0.25f) * (nodes[facet.node_ids[0]].m + nodes[facet.node_ids[1]].m
@@ -809,7 +809,7 @@ void FEMContact3D<T>::solveMPMFacetContact(FEMSolver3D<T>& fem_solver, MPMSolver
                             }
 
                             T f_total = f_spring + f_damp;
-                            T v_limit = std::max(static_cast<T>(2.0f) * std::abs(v_rel_n), static_cast<T>(20.0f));
+                            T v_limit = std::max(static_cast<T>(2.0f) * std::abs(v_rel_n), static_cast<T>(5.0f));
                             T f_max = m_pair * v_limit / (dt > static_cast<T>(1.0e-12f) ? dt : static_cast<T>(1.0e-12f));
                             f_total = std::min(f_total, f_max);
 
