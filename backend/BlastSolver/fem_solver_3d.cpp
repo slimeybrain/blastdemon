@@ -2450,40 +2450,19 @@ void FEMSolver3D<T>::processErodedElementsToMPM() {
         buildFaceConnectivity();
     }
 
-    std::vector<MPMParticle3D> new_particles;
+    // Step 1: Identify newly eroded elements that qualify for conversion (exposure / tensile gating)
+    std::vector<size_t> ready_elements;
+    ready_elements.reserve(m_elements.size() / 16);
+
     for (size_t e = 0; e < m_elements.size(); ++e) {
         if (m_elements[e].is_eroded && !m_elements[e].mpm_converted) {
-            // Count exposed faces and compute neighborhood cluster COM velocity for smoothing
             int num_exposed = 0;
-            float v_cluster[3] = {0.0f, 0.0f, 0.0f};
-            int cluster_count = 0;
             for (int f = 0; f < 6; ++f) {
                 int neighbor = m_face_neighbors[e * 6 + f];
                 if (neighbor == -1 || m_elements[neighbor].is_eroded) {
                     num_exposed++;
                 }
-                if (neighbor >= 0 && neighbor < static_cast<int>(m_elements.size()) && m_elements[neighbor].is_eroded) {
-                    for (int n = 0; n < 8; ++n) {
-                        int nid = m_elements[neighbor].node_ids[n];
-                        for (int c = 0; c < 3; ++c) {
-                            v_cluster[c] += static_cast<float>(m_nodes[nid].v[c]) * 0.125f;
-                        }
-                    }
-                    cluster_count++;
-                }
             }
-
-            const float* p_cluster_com = nullptr;
-            if (cluster_count > 0) {
-                float inv_c = 1.0f / static_cast<float>(cluster_count);
-                v_cluster[0] *= inv_c;
-                v_cluster[1] *= inv_c;
-                v_cluster[2] *= inv_c;
-                p_cluster_com = v_cluster;
-            }
-
-            // Gating rule: Convert if failed under tension (J >= 0.98 or positive mean stress)
-            // OR if it has at least 2 exposed faces (crater rim / open boundary).
             T V_elem = m_elements[e].V > static_cast<T>(0) ? m_elements[e].V : m_elements[e].V0;
             T V0_elem = m_elements[e].V0 > static_cast<T>(0) ? m_elements[e].V0 : static_cast<T>(1.0e-6f);
             T J_vol = V_elem / V0_elem;
@@ -2493,11 +2472,126 @@ void FEMSolver3D<T>::processErodedElementsToMPM() {
             bool is_sufficiently_exposed = (num_exposed >= 2);
 
             if (is_tensile_failure || is_sufficiently_exposed) {
-                m_elements[e].mpm_converted = true;
-                convertElementToMPMParticles(m_elements[e], new_particles, p_cluster_com);
+                ready_elements.push_back(e);
             }
         }
     }
+
+    if (ready_elements.empty()) return;
+
+    std::vector<MPMParticle3D> new_particles;
+    new_particles.reserve(ready_elements.size() * static_cast<size_t>(m_physics_params.mpm_particles_per_failed_element));
+
+    float clumping = std::clamp(static_cast<float>(m_physics_params.debris_clumping), 0.0f, 1.0f);
+    int max_clump = std::clamp(m_physics_params.debris_max_clump_size, 1, 64);
+    uint32_t user_seed = static_cast<uint32_t>(m_physics_params.random_seed) * 2654435761u;
+
+    if (clumping > 0.001f && max_clump > 1) {
+        // Multi-element aggregate clumping across ready elements
+        std::unordered_map<size_t, int> elem_to_clump;
+        elem_to_clump.reserve(ready_elements.size());
+        std::vector<std::vector<size_t>> clumps;
+        clumps.reserve(ready_elements.size());
+
+        for (size_t e : ready_elements) {
+            if (elem_to_clump.find(e) != elem_to_clump.end()) continue;
+
+            // Start new clump with element e
+            std::vector<size_t> current_clump;
+            current_clump.push_back(e);
+            elem_to_clump[e] = static_cast<int>(clumps.size());
+
+            // BFS expansion across shared faces
+            std::vector<size_t> queue;
+            queue.push_back(e);
+            size_t head = 0;
+
+            while (head < queue.size() && static_cast<int>(current_clump.size()) < max_clump) {
+                size_t curr = queue[head++];
+                for (int f = 0; f < 6; ++f) {
+                    int neighbor = m_face_neighbors[curr * 6 + f];
+                    if (neighbor < 0 || neighbor >= static_cast<int>(m_elements.size())) continue;
+                    size_t nb_idx = static_cast<size_t>(neighbor);
+
+                    if (m_elements[nb_idx].is_eroded && !m_elements[nb_idx].mpm_converted &&
+                        elem_to_clump.find(nb_idx) == elem_to_clump.end()) {
+                        // Check stochastic bond retention probability
+                        uint32_t bond_seed = user_seed ^ (static_cast<uint32_t>(std::min(curr, nb_idx)) * 73856093u) ^ (static_cast<uint32_t>(std::max(curr, nb_idx)) * 19349663u);
+                        bond_seed = (bond_seed ^ 61u) ^ (bond_seed >> 16);
+                        bond_seed *= 9u;
+                        bond_seed = bond_seed ^ (bond_seed >> 4);
+                        bond_seed *= 0x27d4eb2du;
+                        bond_seed = bond_seed ^ (bond_seed >> 15);
+                        float bond_draw = static_cast<float>(bond_seed & 0xFFFFu) / 65535.0f;
+
+                        if (bond_draw <= clumping) {
+                            elem_to_clump[nb_idx] = static_cast<int>(clumps.size());
+                            current_clump.push_back(nb_idx);
+                            queue.push_back(nb_idx);
+                            if (static_cast<int>(current_clump.size()) >= max_clump) break;
+                        }
+                    }
+                }
+            }
+            clumps.push_back(std::move(current_clump));
+        }
+
+        // Process each clump: compute clump COM velocity and convert elements
+        for (const auto& clump : clumps) {
+            float v_clump_com[3] = {0.0f, 0.0f, 0.0f};
+            float total_m = 0.0f;
+            for (size_t elem_idx : clump) {
+                const auto& elem = m_elements[elem_idx];
+                float rho_mat = (elem.mat_id >= 0 && elem.mat_id < static_cast<int>(m_material_tables.size())) ? static_cast<float>(m_material_tables[elem.mat_id].density) : 2400.0f;
+                float m_elem = static_cast<float>(elem.V0) * rho_mat;
+                if (m_elem <= 0.0f) m_elem = 1.0f;
+                total_m += m_elem;
+                for (int n = 0; n < 8; ++n) {
+                    int nid = elem.node_ids[n];
+                    for (int c = 0; c < 3; ++c) {
+                        v_clump_com[c] += static_cast<float>(m_nodes[nid].v[c]) * (0.125f * m_elem);
+                    }
+                }
+            }
+            if (total_m > 0.0f) {
+                float inv_m = 1.0f / total_m;
+                v_clump_com[0] *= inv_m;
+                v_clump_com[1] *= inv_m;
+                v_clump_com[2] *= inv_m;
+            }
+            for (size_t elem_idx : clump) {
+                m_elements[elem_idx].mpm_converted = true;
+                convertElementToMPMParticles(m_elements[elem_idx], new_particles, v_clump_com);
+            }
+        }
+    } else {
+        // Un-clumped granular / fluid / individual mode (soil, water, sand, or debris_clumping == 0)
+        for (size_t e : ready_elements) {
+            float v_local[3] = {0.0f, 0.0f, 0.0f};
+            int count = 0;
+            for (int f = 0; f < 6; ++f) {
+                int neighbor = m_face_neighbors[e * 6 + f];
+                if (neighbor >= 0 && neighbor < static_cast<int>(m_elements.size()) && m_elements[neighbor].is_eroded) {
+                    for (int n = 0; n < 8; ++n) {
+                        int nid = m_elements[neighbor].node_ids[n];
+                        for (int c = 0; c < 3; ++c) {
+                            v_local[c] += static_cast<float>(m_nodes[nid].v[c]) * 0.125f;
+                        }
+                    }
+                    count++;
+                }
+            }
+            const float* p_local = nullptr;
+            if (count > 0) {
+                float inv_c = 1.0f / static_cast<float>(count);
+                v_local[0] *= inv_c; v_local[1] *= inv_c; v_local[2] *= inv_c;
+                p_local = v_local;
+            }
+            m_elements[e].mpm_converted = true;
+            convertElementToMPMParticles(m_elements[e], new_particles, p_local);
+        }
+    }
+
     if (!new_particles.empty()) {
         if (m_mpm_solver->getMaterialTables().empty() && !m_material_tables.empty()) {
             m_mpm_solver->getMaterialTables() = m_material_tables;
@@ -2696,9 +2790,9 @@ void FEMSolver3D<T>::convertElementToMPMParticles(const FEMElement3D<T>& elem, s
             vp[1] += v_spin_y;
             vp[2] += v_spin_z;
 
-            // Inter-element cluster velocity smoothing to eliminate sharp boundary tears between adjacent element rows
-            if (v_cluster_com != nullptr && m_physics_params.debris_velocity_smoothing > static_cast<T>(1.0e-5f)) {
-                float alpha_s = std::clamp(static_cast<float>(m_physics_params.debris_velocity_smoothing), 0.0f, 0.75f);
+            // Inter-element cluster / clump velocity smoothing to eliminate sharp boundary tears between adjacent elements
+            if (v_cluster_com != nullptr && (m_physics_params.debris_clumping > static_cast<T>(1.0e-5f) || m_physics_params.debris_velocity_smoothing > static_cast<T>(1.0e-5f))) {
+                float alpha_s = std::clamp(static_cast<float>(std::max(m_physics_params.debris_clumping, m_physics_params.debris_velocity_smoothing)), 0.0f, 0.90f);
                 vp[0] = (1.0f - alpha_s) * vp[0] + alpha_s * v_cluster_com[0];
                 vp[1] = (1.0f - alpha_s) * vp[1] + alpha_s * v_cluster_com[1];
                 vp[2] = (1.0f - alpha_s) * vp[2] + alpha_s * v_cluster_com[2];

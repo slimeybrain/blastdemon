@@ -44,6 +44,8 @@ struct BlastPhysicsParams {
     int mpm_particles_per_failed_element{8};    // Particles generated per failed element (1, 8, or 27)
     T material_heterogeneity{0.08f};            // Spatial Weibull material strength variance (0.0 to 0.30)
     T debris_velocity_smoothing{0.25f};         // Inter-element debris birth velocity smoothing factor (0.0 to 1.0)
+    T debris_clumping{0.40f};                   // Multi-element aggregate clumping cohesion (0.0 for soil/water, 0.4 concrete, 0.8+ steel)
+    int debris_max_clump_size{8};               // Maximum adjacent elements fused into a single fragment boulder/shred (1 to 64)
     int random_seed{42};                        // Persistent random seed for exact deterministic repeatability
 };
 

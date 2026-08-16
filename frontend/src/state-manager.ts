@@ -2189,6 +2189,8 @@ export class StateManager {
                 mpm_particles_per_failed_element: 8,
                 material_heterogeneity: 0.08,
                 debris_velocity_smoothing: 0.25,
+                debris_clumping: 0.40,
+                debris_max_clump_size: 8,
                 random_seed: 42,
                 cfl: 0.4
             },
