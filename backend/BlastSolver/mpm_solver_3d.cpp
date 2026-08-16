@@ -1034,7 +1034,9 @@ void MPMSolver3D::updateStressState(float dt) {
                 const float nu       = mat.poissons_ratio;
                 const float K_intact = E_mod / (3.0f * std::max(1.0e-4f, 1.0f - 2.0f * nu));
                 const float K_debris = 0.10f * K_intact; // 10% intact bulk modulus
-                p_comp = K_debris * (1.0f - J) / J;
+                p_comp = K_debris * (1.0f - J) / std::max(0.01f, J);
+                float p_crush_max = std::max(100.0e6f, (mat.fc > 0.0f ? 5.0f * mat.fc : 2.0f * mat.yield_stress));
+                if (p_comp > p_crush_max) p_comp = p_crush_max;
             }
 
             // 2. Frictional Shear Resistance (Mohr-Coulomb / Drucker-Prager cone limit: q <= M * p_comp)

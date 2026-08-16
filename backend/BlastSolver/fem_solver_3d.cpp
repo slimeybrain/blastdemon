@@ -2410,27 +2410,14 @@ void FEMSolver3D<T>::evaluateErosionCriteria() {
 
         if (newly_eroded) {
             elem.is_eroded = true;
-            elem.mpm_converted = true;
-            if (m_physics_params.convert_failed_elements_to_mpm && m_mpm_solver) {
-                std::vector<MPMParticle3D> new_particles;
-                convertElementToMPMParticles(elem, new_particles);
-#ifdef _OPENMP
-                #pragma omp critical
-#endif
-                {
-                    if (m_mpm_solver->getMaterialTables().empty() && !m_material_tables.empty()) {
-                        m_mpm_solver->getMaterialTables() = m_material_tables;
-                    }
-                    m_mpm_solver->addParticlesDirect(new_particles);
-                }
-            }
+            elem.mpm_converted = false;
             std::memset(elem.sigma, 0, sizeof(elem.sigma));
             std::memset(elem.s_dev, 0, sizeof(elem.s_dev));
             erosion_occurred = true;
         }
     }
 
-    if (erosion_occurred) {
+    if (erosion_occurred || m_surface_facets_dirty) {
         m_surface_facets_dirty = true;
         processErodedElementsToMPM();
     }
@@ -2440,11 +2427,37 @@ void FEMSolver3D<T>::evaluateErosionCriteria() {
 template <typename T>
 void FEMSolver3D<T>::processErodedElementsToMPM() {
     if (!m_physics_params.convert_failed_elements_to_mpm || !m_mpm_solver) return;
+
+    if (m_face_neighbors.size() != m_elements.size() * 6) {
+        buildFaceConnectivity();
+    }
+
     std::vector<MPMParticle3D> new_particles;
     for (size_t e = 0; e < m_elements.size(); ++e) {
         if (m_elements[e].is_eroded && !m_elements[e].mpm_converted) {
-            m_elements[e].mpm_converted = true;
-            convertElementToMPMParticles(m_elements[e], new_particles);
+            // Count exposed faces
+            int num_exposed = 0;
+            for (int f = 0; f < 6; ++f) {
+                int neighbor = m_face_neighbors[e * 6 + f];
+                if (neighbor == -1 || m_elements[neighbor].is_eroded) {
+                    num_exposed++;
+                }
+            }
+
+            // Gating rule: Convert if failed under tension (J >= 0.98 or positive mean stress)
+            // OR if it has at least 2 exposed faces (crater rim / open boundary).
+            T V_elem = m_elements[e].V > static_cast<T>(0) ? m_elements[e].V : m_elements[e].V0;
+            T V0_elem = m_elements[e].V0 > static_cast<T>(0) ? m_elements[e].V0 : static_cast<T>(1.0e-6f);
+            T J_vol = V_elem / V0_elem;
+            T mean_s = (m_elements[e].sigma[0][0] + m_elements[e].sigma[1][1] + m_elements[e].sigma[2][2]) / static_cast<T>(3.0f);
+
+            bool is_tensile_failure = (J_vol >= static_cast<T>(0.98f)) || (mean_s >= static_cast<T>(0.0f));
+            bool is_sufficiently_exposed = (num_exposed >= 2);
+
+            if (is_tensile_failure || is_sufficiently_exposed) {
+                m_elements[e].mpm_converted = true;
+                convertElementToMPMParticles(m_elements[e], new_particles);
+            }
         }
     }
     if (!new_particles.empty()) {

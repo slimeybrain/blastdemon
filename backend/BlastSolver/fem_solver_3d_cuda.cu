@@ -1986,9 +1986,26 @@ __global__ void fem_contact_mpm_debris_kernel_3d_device(
             best_f_total * best_nz + f_fric[2]
         };
 
-        soa.v[0][p_idx] += static_cast<float>((f_tot[0] * dt) / pm);
-        soa.v[1][p_idx] += static_cast<float>((f_tot[1] * dt) / pm);
-        soa.v[2][p_idx] += static_cast<float>((f_tot[2] * dt) / pm);
+        T v_post[3] = {
+            static_cast<T>(soa.v[0][p_idx]) + (f_tot[0] * dt) / pm,
+            static_cast<T>(soa.v[1][p_idx]) + (f_tot[1] * dt) / pm,
+            static_cast<T>(soa.v[2][p_idx]) + (f_tot[2] * dt) / pm
+        };
+
+        // Kinematic non-penetration cap: The normal velocity imparted by a solid facet
+        // can never exceed the moving facet's own normal velocity plus allowable physical restitution.
+        T v_post_rel_n = (v_post[0] - vf0)*best_nx + (v_post[1] - vf1)*best_ny + (v_post[2] - vf2)*best_nz;
+        T max_outbound_vn = (fabs(v_rel_n) > static_cast<T>(5.0f)) ? static_cast<T>(0.5f) * fabs(v_rel_n) : static_cast<T>(5.0f);
+        if (v_post_rel_n > max_outbound_vn) {
+            T excess_vn = v_post_rel_n - max_outbound_vn;
+            v_post[0] -= excess_vn * best_nx;
+            v_post[1] -= excess_vn * best_ny;
+            v_post[2] -= excess_vn * best_nz;
+        }
+
+        soa.v[0][p_idx] = static_cast<float>(v_post[0]);
+        soa.v[1][p_idx] = static_cast<float>(v_post[1]);
+        soa.v[2][p_idx] = static_cast<float>(v_post[2]);
 
         #pragma unroll
         for (int k = 0; k < 4; ++k) {

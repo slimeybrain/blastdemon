@@ -859,11 +859,32 @@ void FEMContact3D<T>::solveMPMFacetContact(FEMSolver3D<T>& fem_solver, MPMSolver
                 best_f_total * best_norm[2] + best_fric[2]
             };
 
-            // Apply contact force impulse on particle
+            // Apply contact force impulse on particle with kinematic non-penetration velocity cap
             if (p.m > 0.0f && dt > static_cast<T>(0.0f)) {
-                p.v[0] += static_cast<float>((f_tot[0] * dt) / static_cast<T>(p.m));
-                p.v[1] += static_cast<float>((f_tot[1] * dt) / static_cast<T>(p.m));
-                p.v[2] += static_cast<float>((f_tot[2] * dt) / static_cast<T>(p.m));
+                T vf0 = best_N[0]*nodes[facet.node_ids[0]].v[0] + best_N[1]*nodes[facet.node_ids[1]].v[0] + best_N[2]*nodes[facet.node_ids[2]].v[0] + best_N[3]*nodes[facet.node_ids[3]].v[0];
+                T vf1 = best_N[0]*nodes[facet.node_ids[0]].v[1] + best_N[1]*nodes[facet.node_ids[1]].v[1] + best_N[2]*nodes[facet.node_ids[2]].v[1] + best_N[3]*nodes[facet.node_ids[3]].v[1];
+                T vf2 = best_N[0]*nodes[facet.node_ids[0]].v[2] + best_N[1]*nodes[facet.node_ids[1]].v[2] + best_N[2]*nodes[facet.node_ids[2]].v[2] + best_N[3]*nodes[facet.node_ids[3]].v[2];
+
+                T v_rel_n_before = (static_cast<T>(p.v[0]) - vf0)*best_norm[0] + (static_cast<T>(p.v[1]) - vf1)*best_norm[1] + (static_cast<T>(p.v[2]) - vf2)*best_norm[2];
+
+                T v_post[3] = {
+                    static_cast<T>(p.v[0]) + (f_tot[0] * dt) / static_cast<T>(p.m),
+                    static_cast<T>(p.v[1]) + (f_tot[1] * dt) / static_cast<T>(p.m),
+                    static_cast<T>(p.v[2]) + (f_tot[2] * dt) / static_cast<T>(p.m)
+                };
+
+                T v_post_rel_n = (v_post[0] - vf0)*best_norm[0] + (v_post[1] - vf1)*best_norm[1] + (v_post[2] - vf2)*best_norm[2];
+                T max_outbound_vn = (std::abs(v_rel_n_before) > static_cast<T>(5.0f)) ? static_cast<T>(0.5f) * std::abs(v_rel_n_before) : static_cast<T>(5.0f);
+                if (v_post_rel_n > max_outbound_vn) {
+                    T excess_vn = v_post_rel_n - max_outbound_vn;
+                    v_post[0] -= excess_vn * best_norm[0];
+                    v_post[1] -= excess_vn * best_norm[1];
+                    v_post[2] -= excess_vn * best_norm[2];
+                }
+
+                p.v[0] = static_cast<float>(v_post[0]);
+                p.v[1] = static_cast<float>(v_post[1]);
+                p.v[2] = static_cast<float>(v_post[2]);
             }
 
             // Distribute equal and opposite reaction force to facet's 4 corner nodes
