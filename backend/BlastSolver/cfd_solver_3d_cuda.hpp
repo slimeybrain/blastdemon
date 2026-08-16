@@ -147,6 +147,7 @@ public:
     std::vector<float> extractPressureField() const override;
     void coupleFSIWithMPMGPU(void* mpm_solver_cuda) override;
     void coupleFSIWithFEMGPU(void* fem_solver_cuda) override;
+    void invalidateTileCache() const override { last_cached_tile_idx = -1; }
 
     void setGauges(const std::vector<Gauge3D>& gauges) override;
     void recordGaugesAsync(double t) override;

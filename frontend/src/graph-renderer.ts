@@ -81,6 +81,7 @@ export class GraphRenderer {
 
     private expandedSliceIndices = new Set<string>(); // "nodeId-sliceIdx"
     private collapsedMaterialSections: Set<string> = new Set(); // "nodeId:sectionTitle"
+    private initializedVTKSections: Set<string> = new Set();
     private gaugesPanelOpen: Map<string, boolean> = new Map();
     private focusedPrimitiveIndexMap: Map<string, number> = new Map();
     private gaugesActiveTab: Map<string, 'list' | 'settings'> = new Map();
@@ -843,7 +844,7 @@ export class GraphRenderer {
             case 'TelemetryContour':
                 return fromType === 'CFDSolver2D' || fromType === 'MPMDomain2D' || fromType === 'FSICoupler2D';
             case 'VTKOutput':
-                if (toPortId === 'in') return fromType === 'CFDSolver' || fromType === 'CFDSolver2D' || fromType === 'CFDSolver3D' || fromType === 'MPMDomain3D' || fromType === 'FEMDomain3D';
+                if (toPortId === 'in') return fromType === 'CFDSolver' || fromType === 'CFDSolver2D' || fromType === 'CFDSolver3D' || fromType === 'MPMDomain3D' || fromType === 'FEMDomain3D' || fromType === 'FSICoupler3D' || fromType === 'FEMFSICoupler3D';
                 return false;
             default:
                 return false;
@@ -1609,12 +1610,16 @@ export class GraphRenderer {
                 refresh_rate: 0.0
             };
             case 'VTKOutput': return {
+                trigger_type: 'Step Interval',
                 vtk_dir: './vtk_output',
                 export_slices: true,
                 export_volumes: false,
+                export_fem: true,
+                export_mpm: true,
+                export_pvd: true,
                 custom_filename: 'vtk_output',
                 step_interval: 10,
-                time_interval: 0.0,
+                time_interval: 0.0001,
                 vtk_format: 'Binary',
                 qty_pressure: true,
                 qty_density: true,
@@ -1624,7 +1629,29 @@ export class GraphRenderer {
                 qty_unreacted: true,
                 qty_air: true,
                 qty_overpressure: true,
-                qty_impulse: true
+                qty_impulse: true,
+                qty_fem_stress: true,
+                qty_fem_strain: true,
+                qty_fem_pressure: true,
+                qty_fem_temp: true,
+                qty_fem_damage: true,
+                qty_fem_vel: true,
+                qty_fem_disp: true,
+                qty_mpm_stress: true,
+                qty_mpm_strain: true,
+                qty_mpm_damage: true,
+                qty_mpm_temp: true,
+                qty_mpm_vel: true,
+                qty_mpm_disp: true,
+                roi_enabled: false,
+                roi_xmin: 0.0,
+                roi_xmax: 1.0,
+                roi_ymin: 0.0,
+                roi_ymax: 1.0,
+                roi_zmin: 0.0,
+                roi_zmax: 1.0,
+                volume_stride: 1,
+                slice_stride: 1
             };
             case 'DomainMesh3D': return {
                 xmin: 0.0, xmax: 1.0,
@@ -1809,7 +1836,7 @@ export class GraphRenderer {
                 precision: 'single',
                 transfer_scheme: 'BSpline',
                 velocity_scheme: 'APIC',
-                space_time_scheme: 'RK2',
+                space_time_scheme: 'Leapfrog',
                 flip_blend: 0.95,
                 smooth_plastic_strain: true,
                 ppc: 4,
@@ -1820,7 +1847,7 @@ export class GraphRenderer {
                 precision: 'single',
                 transfer_scheme: 'BSpline',
                 velocity_scheme: 'APIC',
-                space_time_scheme: 'RK2',
+                space_time_scheme: 'Leapfrog',
                 flip_blend: 0.95,
                 smooth_plastic_strain: true,
                 ppc: 8,
@@ -4276,9 +4303,9 @@ export class GraphRenderer {
 
                 const stsEl = form.querySelector('[data-key="space_time_scheme"]') as HTMLElement;
                 if (stsEl) {
-                    let currentVal = 'RK2 (2nd-Order Space/Time)';
+                    let currentVal = 'Leapfrog (2nd-Order Space/Time)';
                     if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
-                        currentVal = node.parameters['space_time_scheme'] ?? 'RK2';
+                        currentVal = node.parameters['space_time_scheme'] ?? 'Leapfrog';
                     } else {
                         const so = node.parameters['spatial_order'] ?? 2;
                         const to = node.parameters['temporal_order'] ?? 4;
@@ -4483,6 +4510,29 @@ export class GraphRenderer {
                 if (idxB !== -1) return 1;
                 return 0;
             });
+        } else if (node.type === 'VTKOutput') {
+            const vtkOrder = [
+                // General
+                'trigger_type', 'step_interval', 'time_interval', 'vtk_format', 'custom_filename', 'vtk_dir',
+                // Targets
+                'export_slices', 'export_volumes', 'export_fem', 'export_mpm', 'export_pvd',
+                // CFD
+                'qty_pressure', 'qty_density', 'qty_velocity', 'qty_energy', 'qty_reacted', 'qty_unreacted', 'qty_air', 'qty_overpressure', 'qty_impulse',
+                // FEM
+                'qty_fem_stress', 'qty_fem_strain', 'qty_fem_pressure', 'qty_fem_temp', 'qty_fem_damage', 'qty_fem_vel', 'qty_fem_disp',
+                // MPM
+                'qty_mpm_stress', 'qty_mpm_strain', 'qty_mpm_damage', 'qty_mpm_temp', 'qty_mpm_vel', 'qty_mpm_disp',
+                // ROI & Strides
+                'roi_enabled', 'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride'
+            ];
+            paramKeys.sort((a, b) => {
+                const idxA = vtkOrder.indexOf(a);
+                const idxB = vtkOrder.indexOf(b);
+                if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+                if (idxA !== -1) return -1;
+                if (idxB !== -1) return 1;
+                return 0;
+            });
         }
         
         let gridInfoDiv: HTMLDivElement | null = null;
@@ -4511,8 +4561,8 @@ export class GraphRenderer {
         const conn = state?.connections.find(c => c.toNode === node.id);
         const sourceNode = conn ? state?.nodes.find(n => n.id === conn.fromNode) : null;
         const is3D = sourceNode 
-            ? (sourceNode.type === 'CFDSolver3D') 
-            : (state?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'DomainMesh3D') ?? false);
+            ? (sourceNode.type === 'CFDSolver3D' || sourceNode.type === 'FEMDomain3D' || sourceNode.type === 'MPMDomain3D' || sourceNode.type === 'FSICoupler3D' || sourceNode.type === 'FEMFSICoupler3D') 
+            : (state?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'DomainMesh3D' || n.type === 'FEMDomain3D' || n.type === 'MPMDomain3D') ?? false);
 
         let currentGridDiv: HTMLDivElement | null = null;
 
@@ -4520,25 +4570,33 @@ export class GraphRenderer {
             let value = node.parameters[key];
             if (key === 'space_time_scheme') {
                 if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
-                    value = node.parameters['space_time_scheme'] ?? 'RK2';
+                    value = node.parameters['space_time_scheme'] ?? 'Leapfrog';
                 } else {
                     const so = node.parameters['spatial_order'] ?? 2;
-                    const to = node.parameters['temporal_order'] ?? 2;
+                    const to = node.parameters['temporal_order'] ?? 4;
                     if (so === 1 && to === 1) value = 'Euler (1st-Order Space/Time)';
                     else if (so === 2 && to === 2) value = 'RK2 (2nd-Order Space/Time)';
                     else if (so === 3 && to === 3) value = 'RK3 (3rd-Order Space/Time)';
                     else if (so === 2 && to === 4) value = 'MUSCL-Hancock (2nd-Order Space/Time)';
                     else if (so === 2 && to === 5) value = 'ADER-2 (2nd-Order Space/Time)';
                     else if (so === 3 && to === 6) value = 'ADER-3 (3rd-Order Space/Time)';
-                    else value = 'RK2 (2nd-Order Space/Time)';
+                    else value = 'MUSCL-Hancock (2nd-Order Space/Time)';
                 }
             }
             if (value === undefined || value === null) continue;
             if (key === 'gauges' || key === 'slices' || key === 'primitives') continue;
             if (key === 'nr' || key === 'n_cells') continue;
             if (key === 'nz' && node.type === 'DomainMesh2D') continue;
-            if (node.type === 'CFDSolver3D' && (key === 'mesh_type' || key === 'amr_max_levels' || key === 'amr_threshold' || key === 'amr_coarsen_ratio' || key === 'amr_tile_size')) continue;
-            if (node.type === 'VTKOutput' && !is3D && (key === 'export_slices' || key === 'export_volumes')) continue;
+            if (node.type === 'VTKOutput') {
+                const triggerType = node.parameters['trigger_type'] || 'Step Interval';
+                if ((triggerType === 'Step Interval' || triggerType === 'step') && key === 'time_interval') continue;
+                if ((triggerType === 'Time Interval' || triggerType === 'time') && key === 'step_interval') continue;
+            }
+            if (node.type === 'VTKOutput' && !is3D && (
+                key === 'export_slices' || key === 'export_volumes' || key === 'export_fem' || key === 'export_mpm' ||
+                key.startsWith('qty_fem_') || key.startsWith('qty_mpm_') ||
+                key.startsWith('roi_') || key === 'volume_stride' || key === 'slice_stride'
+            )) continue;
             if (node.type === 'VirtualGauges' && key === 'telemetry_channel') continue;
             // DetonatorLocation and DetonatorLocation3D are separate nodes now, showing correct properties
             if (node.type === 'DomainMesh') {
@@ -4559,6 +4617,74 @@ export class GraphRenderer {
                     if (['radius', 'inner_radius', 'height', 'length', 'k_file', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) continue;
                 } else if (source === 'LS-DYNA Keyword File') {
                     if (['size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'length', 'nx', 'ny', 'nz', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) continue;
+                }
+            }
+            if (node.type === 'VTKOutput') {
+                let sectionTitle: string | null = null;
+                if (key === 'export_slices') sectionTitle = 'DOMAINS & TARGETS';
+                else if (key === 'qty_pressure') sectionTitle = 'CFD EULERIAN FIELDS';
+                else if (key === 'qty_fem_stress') sectionTitle = 'SOLID FEM FIELDS';
+                else if (key === 'qty_mpm_stress') sectionTitle = 'SOLID MPM FIELDS';
+                else if (key === 'roi_enabled') sectionTitle = 'ROI BOUNDS & STRIDES';
+
+                if (sectionTitle) {
+                    const sectionKey = `${node.id}:${sectionTitle}`;
+                    if (!this.collapsedMaterialSections.has(sectionKey) && !this.initializedVTKSections.has(sectionKey)) {
+                        this.collapsedMaterialSections.add(sectionKey);
+                        this.initializedVTKSections.add(sectionKey);
+                    }
+                    const isCollapsed = this.collapsedMaterialSections.has(sectionKey);
+
+                    const secHeader = document.createElement('div');
+                    secHeader.style.display = 'flex';
+                    secHeader.style.alignItems = 'center';
+                    secHeader.style.justifyContent = 'space-between';
+                    secHeader.style.fontWeight = 'bold';
+                    secHeader.style.fontSize = '9px';
+                    secHeader.style.color = '#00e5ff';
+                    secHeader.style.letterSpacing = '0.5px';
+                    secHeader.style.marginTop = '6px';
+                    secHeader.style.marginBottom = '2px';
+                    secHeader.style.padding = '2px 4px';
+                    secHeader.style.background = 'rgba(0, 229, 255, 0.08)';
+                    secHeader.style.borderRadius = '3px';
+                    secHeader.style.border = '1px solid rgba(0, 229, 255, 0.2)';
+                    secHeader.style.cursor = 'pointer';
+                    secHeader.style.userSelect = 'none';
+
+                    const titleSpan = document.createElement('span');
+                    titleSpan.textContent = sectionTitle;
+
+                    const arrowSpan = document.createElement('span');
+                    arrowSpan.textContent = isCollapsed ? '▶' : '▼';
+                    arrowSpan.style.fontSize = '8px';
+                    arrowSpan.style.opacity = '0.8';
+
+                    secHeader.appendChild(titleSpan);
+                    secHeader.appendChild(arrowSpan);
+                    form.appendChild(secHeader);
+
+                    const gridDiv = document.createElement('div');
+                    gridDiv.style.display = isCollapsed ? 'none' : 'grid';
+                    gridDiv.style.gridTemplateColumns = '1fr 1fr';
+                    gridDiv.style.gap = '3px 5px';
+                    gridDiv.style.marginBottom = '4px';
+                    form.appendChild(gridDiv);
+
+                    secHeader.onclick = (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (this.collapsedMaterialSections.has(sectionKey)) {
+                            this.collapsedMaterialSections.delete(sectionKey);
+                            gridDiv.style.display = 'grid';
+                            arrowSpan.textContent = '▼';
+                        } else {
+                            this.collapsedMaterialSections.add(sectionKey);
+                            gridDiv.style.display = 'none';
+                            arrowSpan.textContent = '▶';
+                        }
+                    };
+                    currentGridDiv = gridDiv;
                 }
             }
             if (node.type === 'MPMMaterialSteel') {
@@ -4677,7 +4803,7 @@ export class GraphRenderer {
             }
 
             const row = document.createElement('div');
-            row.style.marginBottom = node.type === 'MPMMaterialSteel' && currentGridDiv ? '0px' : '4px';
+            row.style.marginBottom = (node.type === 'MPMMaterialSteel' || node.type === 'VTKOutput') && currentGridDiv ? '0px' : '4px';
             row.style.display = 'flex';
             row.style.flexDirection = 'column';
 
@@ -4686,6 +4812,53 @@ export class GraphRenderer {
             label.style.color = '#888';
             let labelText = key.replace(/_/g, ' ').toUpperCase();
             if (key === 'flip_blend') labelText = 'FLIP BLEND (% FLIP / % PIC)';
+            if (node.type === 'VTKOutput') {
+                const vtkLabels: Record<string, string> = {
+                    'trigger_type': 'TRIGGER TYPE',
+                    'vtk_format': 'FORMAT',
+                    'step_interval': 'STEP INTV',
+                    'time_interval': 'TIME INTV (S)',
+                    'custom_filename': 'FILENAME',
+                    'vtk_dir': 'OUTPUT DIR',
+                    'export_slices': '2D SLICES',
+                    'export_volumes': '3D VOLUMES',
+                    'export_fem': 'FEM MESH',
+                    'export_mpm': 'MPM PARTICLES',
+                    'export_pvd': 'PVD INDEX',
+                    'qty_pressure': 'PRESSURE',
+                    'qty_density': 'DENSITY',
+                    'qty_velocity': 'VELOCITY',
+                    'qty_energy': 'ENERGY',
+                    'qty_reacted': 'REACTED FRAC',
+                    'qty_unreacted': 'UNREACTED',
+                    'qty_air': 'AIR FRAC',
+                    'qty_overpressure': 'PEAK OVERP',
+                    'qty_impulse': 'PEAK IMPULSE',
+                    'qty_fem_stress': 'STRESS TENSOR',
+                    'qty_fem_strain': 'PLASTIC STRAIN',
+                    'qty_fem_pressure': 'PRESSURE',
+                    'qty_fem_temp': 'TEMPERATURE',
+                    'qty_fem_damage': 'DAMAGE',
+                    'qty_fem_vel': 'VELOCITY',
+                    'qty_fem_disp': 'DISPLACEMENT',
+                    'qty_mpm_stress': 'STRESS TENSOR',
+                    'qty_mpm_strain': 'PLASTIC STRAIN',
+                    'qty_mpm_damage': 'DAMAGE',
+                    'qty_mpm_temp': 'TEMPERATURE',
+                    'qty_mpm_vel': 'VELOCITY',
+                    'qty_mpm_disp': 'DISPLACEMENT',
+                    'roi_enabled': 'CROP ROI',
+                    'roi_xmin': 'X MIN (M)',
+                    'roi_xmax': 'X MAX (M)',
+                    'roi_ymin': 'Y MIN (M)',
+                    'roi_ymax': 'Y MAX (M)',
+                    'roi_zmin': 'Z MIN (M)',
+                    'roi_zmax': 'Z MAX (M)',
+                    'volume_stride': 'VOL STRIDE',
+                    'slice_stride': 'SLICE STRIDE'
+                };
+                if (vtkLabels[key]) labelText = vtkLabels[key];
+            }
             label.textContent = labelText;
 
             if (node.type === 'MPMMaterialSteel' && MPM_MATERIAL_PARAM_INFO[key]) {
@@ -4736,7 +4909,7 @@ export class GraphRenderer {
                 'hourglass_model': ['FlanaganBelytschkoStiffness', 'FlanaganBelytschkoViscous', 'KosloffFrazier'],
                 'mesh_source': ['Box Generator', 'Cylinder Generator', 'LS-DYNA Keyword File'],
                 'fsi_algorithm': ['CutCellPenalty', 'ImmersedBoundary', 'DirectMassCoupled'],
-                'trigger_type': ['end', 'time', 'step'],
+                'trigger_type': node.type === 'VTKOutput' ? ['Step Interval', 'Time Interval'] : ['end', 'time', 'step'],
                 // Explosive composition — JWL parameter sets (Ideal Gas uses its own node)
                 'composition': ['Aluminized ANFO', 'Ammonal', 'ANFO', 'Baratol', 'C-4', 'Composition A-3', 'Composition B', 'Composition C-3', 'Cyclotol', 'Heavy ANFO', 'HMX', 'LX-04', 'LX-07', 'LX-10', 'LX-14', 'LX-17', 'Mining Emulsion', 'Octol', 'PBX 9404', 'PBX 9501', 'PBX 9502', 'PE-10', 'PE-12', 'PE-4', 'PE-8', 'Pentolite', 'PETN', 'RDX', 'TATB', 'Tetryl', 'TNT', 'Water Gel', 'Custom'],
                 'init_mode': node.type === 'CFDSolver3D' ? ['From1D', 'From2D', 'Multi-Material JWL', 'Ideal Gas'] : ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
@@ -4758,7 +4931,7 @@ export class GraphRenderer {
                 'shape_type': node.type === 'FEMObject3D' ? ['Box', 'Cylinder', 'LS-DYNA File'] : (node.type === 'MPMObject3D' ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle']),
                 'colorbar_source': ['slice', 'mpm', 'obstacles', 'stl'],
                 'space_time_scheme': (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') ? 
-                    ['USL', 'USF', 'RK2'] : 
+                    ['Leapfrog', 'RK2', 'USL', 'USF'] : 
                     [
                         'MUSCL-Hancock (2nd-Order Space/Time)',
                         'ADER-2 (2nd-Order Space/Time)',
@@ -4865,7 +5038,9 @@ export class GraphRenderer {
                             'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
                             'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
                             'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
-                            'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2'
+                            'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
+                            // VTK ROI & Strides
+                            'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride'
                         ];
 
                         let castValue: any = newVal;
@@ -5333,7 +5508,7 @@ export class GraphRenderer {
 
             inputEl.addEventListener('mousedown', (e) => e.stopPropagation());
             row.appendChild(inputEl);
-            if (node.type === 'MPMMaterialSteel' && currentGridDiv) {
+            if ((node.type === 'MPMMaterialSteel' || node.type === 'VTKOutput') && currentGridDiv) {
                 currentGridDiv.appendChild(row);
             } else {
                 form.appendChild(row);

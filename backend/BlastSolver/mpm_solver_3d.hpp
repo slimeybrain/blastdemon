@@ -134,12 +134,6 @@ struct alignas(32) MPMGridNode3D {
     float v(int i) const { return m > MIN_MASS ? p[i] / m : 0.0f; }
 };
 
-enum class MPMTimeIntegrationScheme {
-    USL, // Update Stress Last (Symplectic Euler)
-    USF, // Update Stress First
-    RK2  // Midpoint RK2
-};
-
 enum class MPMBoundaryCondition3D {
     Sticky,     // No-slip (v = 0)
     FreeSlip,   // Normal velocity v_n = 0, tangential free
@@ -268,7 +262,7 @@ private:
 
     MPMTransferScheme m_transfer_scheme{MPMTransferScheme::GIMP};
     MPMVelocityScheme m_velocity_scheme{MPMVelocityScheme::APIC};
-    MPMTimeIntegrationScheme m_time_scheme{MPMTimeIntegrationScheme::USL};
+    MPMTimeIntegrationScheme m_time_scheme{MPMTimeIntegrationScheme::Leapfrog};
     float m_flip_blend{0.95f};
     bool m_smooth_plastic_strain{true};
 

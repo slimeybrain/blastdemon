@@ -98,6 +98,13 @@ enum class MPMVelocityScheme {
     FLIP
 };
 
+enum class MPMTimeIntegrationScheme {
+    Leapfrog, // 2nd-Order Symplectic Staggered Leapfrog (Default)
+    USL,      // Update Stress Last
+    USF,      // Update Stress First
+    RK2       // Midpoint RK2
+};
+
 class MPMSolver2D {
 public:
     MPMSolver2D();
@@ -107,6 +114,7 @@ public:
     void initializeGrid(int nx, int ny, float dx, float dy);
     void setTransferScheme(MPMTransferScheme scheme) { m_transfer_scheme = scheme; }
     void setVelocityScheme(MPMVelocityScheme scheme) { m_velocity_scheme = scheme; }
+    void setTimeScheme(MPMTimeIntegrationScheme scheme) { m_time_scheme = scheme; }
     void setSmoothPlasticStrain(bool smooth) { m_smooth_plastic_strain = smooth; }
     bool getSmoothPlasticStrain() const { return m_smooth_plastic_strain; }
     void setFlipBlend(float blend) { m_flip_blend = std::clamp(blend, 0.0f, 1.0f); }
@@ -165,6 +173,7 @@ private:
 
     MPMTransferScheme m_transfer_scheme{MPMTransferScheme::GIMP};
     MPMVelocityScheme m_velocity_scheme{MPMVelocityScheme::APIC};
+    MPMTimeIntegrationScheme m_time_scheme{MPMTimeIntegrationScheme::Leapfrog};
     float m_flip_blend{0.95f};
     bool m_smooth_plastic_strain{true};
 

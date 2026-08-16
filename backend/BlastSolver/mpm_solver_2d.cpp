@@ -853,12 +853,28 @@ void MPMSolver2D::stepWithDt(float dt, bool run_p2g) {
     m_sim_time += static_cast<double>(dt);
     m_step_count++;
 
-    if (run_p2g) {
+    if (m_time_scheme == MPMTimeIntegrationScheme::RK2) {
+        // --- 2nd-Order Midpoint RK2 ---
+        if (run_p2g) {
+            particleToGrid();
+        }
+        updateGridKinematics(0.5f * dt);
+        gridToParticle(0.5f * dt);
+        updateStressState(0.5f * dt);
+
         particleToGrid();
+        updateGridKinematics(dt);
+        gridToParticle(dt * 0.5f);
+        updateStressState(dt * 0.5f);
+    } else {
+        // Default: 2nd-Order Symplectic Staggered Leapfrog / USL (Single-pass)
+        if (run_p2g) {
+            particleToGrid();
+        }
+        updateGridKinematics(dt);
+        gridToParticle(dt);
+        updateStressState(dt);
     }
-    updateGridKinematics(dt);
-    gridToParticle(dt);
-    updateStressState(dt);
 }
 
 void MPMSolver2D::step(float cfl) {

@@ -158,6 +158,7 @@ public:
     virtual std::vector<float> extractPressureField() const { return {}; }
     virtual void coupleFSIWithMPMGPU(void* /*mpm_solver_cuda*/) {}
     virtual void coupleFSIWithFEMGPU(void* /*fem_solver_cuda*/) {}
+    virtual void invalidateTileCache() const {}
 
     virtual void setGauges(const std::vector<Gauge3D>&) {}
     virtual void recordGaugesAsync(double) {}

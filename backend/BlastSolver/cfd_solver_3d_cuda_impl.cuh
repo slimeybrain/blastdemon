@@ -3172,6 +3172,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setInitialCondition(const Charg
     );
     CHECK_CUDA(cudaDeviceSynchronize());
     updateActiveRegions();
+    last_cached_tile_idx = -1;
 }
 
 
@@ -3828,6 +3829,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
 
     currentTime += dt;
     updateActiveRegions();
+    last_cached_tile_idx = -1;
 }
 
 template <typename RealType, bool IsMultiMaterial>
@@ -4551,6 +4553,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::initializeFrom1D(const std::vec
         currentMaterials.products, currentMaterials.unreacted
     );
     CHECK_CUDA(cudaDeviceSynchronize());
+    last_cached_tile_idx = -1;
 }
 
 template <typename RealType, bool IsMultiMaterial>
@@ -4677,6 +4680,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::initializeFrom2D(int nr, int nz
             currentMaterials.products, currentMaterials.unreacted
         );
         CHECK_CUDA(cudaDeviceSynchronize());
+        last_cached_tile_idx = -1;
     }
 }
 
@@ -5837,6 +5841,58 @@ static __global__ void kernel_fsi_couple_gpu(
         float F_y = f_y * dx * dz;
         float F_z = f_z * dx * dy;
 
+        // Sample surrounding fluid velocity and density to evaluate sub-grid aerodynamic drag on exposed debris
+        float u_f_sum = 0.0f, v_f_sum = 0.0f, w_f_sum = 0.0f, rho_f_sum = 0.0f;
+        int n_fluid_neighbors = 0;
+
+        auto sample_fsi_fluid_state = [&](int n_gx, int n_gy, int n_gz) {
+            if (n_gx >= 0 && n_gx < nx && n_gy >= 0 && n_gy < ny && n_gz >= 0 && n_gz < nz) {
+                int n_t = (n_gx >> 3) + (n_gy >> 3) * ntx + (n_gz >> 3) * ntx * nty;
+                int n_c = (n_gx & 7) + (n_gy & 7) * 8 + (n_gz & 7) * 64;
+                if (!d_geom || !d_geom[n_t].cells[n_c].is_boundary) {
+                    u_f_sum += static_cast<float>(d_states[n_t].ux[n_c]);
+                    v_f_sum += static_cast<float>(d_states[n_t].uy[n_c]);
+                    w_f_sum += static_cast<float>(d_states[n_t].uz[n_c]);
+                    rho_f_sum += static_cast<float>(d_states[n_t].rho[n_c]);
+                    n_fluid_neighbors++;
+                }
+            }
+        };
+
+        sample_fsi_fluid_state(gx - 1, gy, gz);
+        sample_fsi_fluid_state(gx + 1, gy, gz);
+        sample_fsi_fluid_state(gx, gy - 1, gz);
+        sample_fsi_fluid_state(gx, gy + 1, gz);
+        sample_fsi_fluid_state(gx, gy, gz - 1);
+        sample_fsi_fluid_state(gx, gy, gz + 1);
+
+        if (n_fluid_neighbors > 0) {
+            float inv_n = 1.0f / static_cast<float>(n_fluid_neighbors);
+            float u_f = u_f_sum * inv_n;
+            float v_f = v_f_sum * inv_n;
+            float w_f = w_f_sum * inv_n;
+            float rho_f = rho_f_sum * inv_n;
+
+            float rel_vx = u_f - vx;
+            float rel_vy = v_f - vy;
+            float rel_vz = w_f - vz;
+            float rel_v_mag = sqrtf(rel_vx * rel_vx + rel_vy * rel_vy + rel_vz * rel_vz);
+
+            float exposure = static_cast<float>(n_fluid_neighbors) / 6.0f;
+            float Cd = 1.0f; // Aerodynamic drag coefficient for rough/irregular solid debris fragments
+            float A_x = dy * dz;
+            float A_y = dx * dz;
+            float A_z = dx * dy;
+
+            float F_drag_x = 0.5f * Cd * rho_f * A_x * rel_v_mag * rel_vx * exposure;
+            float F_drag_y = 0.5f * Cd * rho_f * A_y * rel_v_mag * rel_vy * exposure;
+            float F_drag_z = 0.5f * Cd * rho_f * A_z * rel_v_mag * rel_vz * exposure;
+
+            F_x += F_drag_x;
+            F_y += F_drag_y;
+            F_z += F_drag_z;
+        }
+
         // Mass-weighted volumetric distribution across local solid column stencil to eliminate G2P velocity damping
         if (fabsf(F_z) > 1.0e-12f) {
             float mass_z_stencil = 0.0f;
@@ -6022,6 +6078,58 @@ static __global__ void kernel_fsi_couple_active_gpu(
     float F_x = f_x * dy_cfd * dz_cfd;
     float F_y = f_y * dx_cfd * dz_cfd;
     float F_z = f_z * dx_cfd * dy_cfd;
+
+    // Sample surrounding fluid velocity and density to evaluate sub-grid aerodynamic drag on exposed debris
+    float u_f_sum = 0.0f, v_f_sum = 0.0f, w_f_sum = 0.0f, rho_f_sum = 0.0f;
+    int n_fluid_neighbors = 0;
+
+    auto sample_fsi_fluid_state = [&](int n_gx, int n_gy, int n_gz) {
+        if (n_gx >= 0 && n_gx < nx_cfd && n_gy >= 0 && n_gy < ny_cfd && n_gz >= 0 && n_gz < nz_cfd) {
+            int n_t = (n_gx >> 3) + (n_gy >> 3) * ntx + (n_gz >> 3) * ntx * nty;
+            int n_c = (n_gx & 7) + (n_gy & 7) * 8 + (n_gz & 7) * 64;
+            if (!d_geom || !d_geom[n_t].cells[n_c].is_boundary) {
+                u_f_sum += static_cast<float>(d_states[n_t].ux[n_c]);
+                v_f_sum += static_cast<float>(d_states[n_t].uy[n_c]);
+                w_f_sum += static_cast<float>(d_states[n_t].uz[n_c]);
+                rho_f_sum += static_cast<float>(d_states[n_t].rho[n_c]);
+                n_fluid_neighbors++;
+            }
+        }
+    };
+
+    sample_fsi_fluid_state(gx - 1, gy, gz);
+    sample_fsi_fluid_state(gx + 1, gy, gz);
+    sample_fsi_fluid_state(gx, gy - 1, gz);
+    sample_fsi_fluid_state(gx, gy + 1, gz);
+    sample_fsi_fluid_state(gx, gy, gz - 1);
+    sample_fsi_fluid_state(gx, gy, gz + 1);
+
+    if (n_fluid_neighbors > 0) {
+        float inv_n = 1.0f / static_cast<float>(n_fluid_neighbors);
+        float u_f = u_f_sum * inv_n;
+        float v_f = v_f_sum * inv_n;
+        float w_f = w_f_sum * inv_n;
+        float rho_f = rho_f_sum * inv_n;
+
+        float rel_vx = u_f - vx;
+        float rel_vy = v_f - vy;
+        float rel_vz = w_f - vz;
+        float rel_v_mag = sqrtf(rel_vx * rel_vx + rel_vy * rel_vy + rel_vz * rel_vz);
+
+        float exposure = static_cast<float>(n_fluid_neighbors) / 6.0f;
+        float Cd = 1.0f; // Aerodynamic drag coefficient for rough/irregular solid debris fragments
+        float A_x = dy_cfd * dz_cfd;
+        float A_y = dx_cfd * dz_cfd;
+        float A_z = dx_cfd * dy_cfd;
+
+        float F_drag_x = 0.5f * Cd * rho_f * A_x * rel_v_mag * rel_vx * exposure;
+        float F_drag_y = 0.5f * Cd * rho_f * A_y * rel_v_mag * rel_vy * exposure;
+        float F_drag_z = 0.5f * Cd * rho_f * A_z * rel_v_mag * rel_vz * exposure;
+
+        F_x += F_drag_x;
+        F_y += F_drag_y;
+        F_z += F_drag_z;
+    }
 
     // Mass-weighted volumetric distribution across local solid column stencil to eliminate G2P velocity damping
     if (fabsf(F_z) > 1.0e-12f) {
@@ -6755,4 +6863,5 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithFEMGPU(void* fem_s
         ntx, nty, ntz
     );
     CHECK_CUDA(cudaGetLastError());
+    last_cached_tile_idx = -1;
 }

@@ -17,6 +17,7 @@ These rules are absolute and enforced at the repository level:
 | **No Browser Agents** | The `browser_subagent` tool must never be invoked. All verification is via static analysis, code review, or manual inspection. |
 | **SSOT Node Graph** | The UI state is an immutable DAG of `Node` and `Connection` objects, synchronized across all panels. |
 | **Separation of I/O** | Lightweight telemetry streams over WebSockets. Heavy simulation data is written directly to disk by the Worker using XDMF + HDF5 or VTK. |
+| **Minimum 2nd-Order Time Integration** | 1st-order temporal schemes are prohibited as defaults. Lagrangian solvers (FEM/MPM) default to 2nd-order Symplectic Staggered Leapfrog; Eulerian CFD defaults to 2nd-order ADER-2 (or ADER-3). |
 
 ---
 

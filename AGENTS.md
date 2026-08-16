@@ -71,3 +71,10 @@
 - **Minimal Per-Entity State Variables:** Keep per-element and per-particle state history minimal and strictly packed. Do not store redundant or easily recomputable tensors in persistent memory.
 - **Fast Closed-Form Invariant & Return-Mapping Math:** Prefer analytical, branch-minimized, and closed-form implementations for yield evaluations, tensor invariants, and return mapping over costly iterative root-finders where possible.
 
+## 14. Mandatory Minimum 2nd-Order Temporal Accuracy Directive (ABSOLUTE RULE)
+- **Prohibition of 1st-Order Defaults:** 1st-order time integration schemes (such as Forward Euler or 1st-order un-staggered steps) are STRICTLY PROHIBITED from being the default anywhere in the framework.
+- **Lagrangian & Particle Solvers (FEM and MPM):** Must default to **2nd-Order Symplectic Central Difference / Staggered Leapfrog** integration. This guarantees second-order trajectory accuracy ($\mathcal{O}(\Delta t^2)$) and exact Hamiltonian phase/energy preservation with single-pass GPU performance and zero multi-stage memory overhead.
+- **Eulerian Fluid Solvers (CFD):** Must default to **2nd-Order ADER-2** (single-stage Cauchy-Kowalevski space-time predictor) or **2nd-Order TVD/SSP-RK2** with slope limiters. ADER-3 is supported for 3rd-order spatial-temporal accuracy.
+- **FSI Coupling Solvers:** Must preserve at least 2nd-order accuracy across fluid-structure coupling substeps.
+
+

@@ -96,6 +96,20 @@ void launch_fem_initial_timestep_erosion_kernel_3d(
 );
 
 template <typename T>
+void launch_fem_update_orphan_nodes_erosion_kernel_3d(
+    FEMNode3D<T>* d_nodes,
+    int num_nodes,
+    const FEMElement3D<T>* d_elements,
+    int num_elements,
+    const FEMTrussElement3D<T>* d_trusses,
+    int num_trusses,
+    const FEMBeam3DElement<T>* d_beams,
+    int num_beams,
+    int* d_node_active_count,
+    cudaStream_t stream
+);
+
+template <typename T>
 void launch_fem_update_surface_facets_kernel_3d(
     FEMNode3D<T>* d_nodes,
     int num_nodes,

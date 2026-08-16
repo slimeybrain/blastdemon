@@ -144,7 +144,7 @@ export class PropertyEditor {
             const stsEl = this.container.querySelector('[data-key="space_time_scheme"]') as HTMLSelectElement;
             if (stsEl && document.activeElement !== stsEl) {
                 if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
-                    stsEl.value = node.parameters['space_time_scheme'] ?? 'RK2';
+                    stsEl.value = node.parameters['space_time_scheme'] ?? 'Leapfrog';
                 } else {
                     const so = node.parameters['spatial_order'] ?? 2;
                     const to = node.parameters['temporal_order'] ?? 4;
@@ -510,7 +510,7 @@ export class PropertyEditor {
             let value = node.parameters[key];
             if (key === 'space_time_scheme') {
                 if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
-                    value = node.parameters['space_time_scheme'] ?? 'RK2';
+                    value = node.parameters['space_time_scheme'] ?? 'Leapfrog';
                 } else {
                     const so = node.parameters['spatial_order'] ?? 2;
                     const to = node.parameters['temporal_order'] ?? 4;
@@ -803,7 +803,9 @@ export class PropertyEditor {
         form.style.padding = '10px';
         form.onsubmit = (e) => e.preventDefault();
 
-        const tabs = node.type === 'Telemetry3DViewport' ? ['VIEWPORT', 'SLICES', 'EXPORTS', 'QUANTITIES'] : ['FORMATS', 'CONFIG', 'QUANTITIES'];
+        const tabs = node.type === 'Telemetry3DViewport' 
+            ? ['VIEWPORT', 'SLICES', 'EXPORTS', 'QUANTITIES'] 
+            : (node.type === 'VTKOutput' ? ['FORMATS & FILES', 'DOMAINS & STRIDES', 'PHYSICS FIELDS'] : ['FORMATS', 'CONFIG', 'QUANTITIES']);
         const activeTabIdx = this.activeTabIdx;
 
         // Create Tab Bar
@@ -1021,41 +1023,238 @@ export class PropertyEditor {
             panels[1].appendChild(createCheckboxField('include_header', !!node.parameters['include_header'], 'Include Header'));
 
         } else if (node.type === 'VTKOutput') {
-            // FORMATS/TRIGGERS Tab
-            const formatEl = this.createInputElement(node, 'vtk_format', node.parameters['vtk_format'] ?? 'Binary');
-            addRowToPanel('vtk_format', 'VTK FORMAT', formatEl, 0);
-
-            const stepEl = this.createInputElement(node, 'step_interval', node.parameters['step_interval'] ?? 10);
-            addRowToPanel('step_interval', 'STEP INTERVAL', stepEl, 0);
-
-            const timeEl = this.createInputElement(node, 'time_interval', node.parameters['time_interval'] ?? 0.0);
-            addRowToPanel('time_interval', 'TIME INTERVAL', timeEl, 0);
-
             const state = this.stateManager.getCurrentState();
             const conn = state?.connections.find(c => c.toNode === node.id);
             const sourceNode = conn ? state?.nodes.find(n => n.id === conn.fromNode) : null;
             const is3D = sourceNode 
-                ? (sourceNode.type === 'CFDSolver3D') 
-                : (state?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'DomainMesh3D') ?? false);
+                ? (sourceNode.type === 'CFDSolver3D' || sourceNode.type === 'FEMDomain3D' || sourceNode.type === 'MPMDomain3D' || sourceNode.type === 'FSICoupler3D' || sourceNode.type === 'FEMFSICoupler3D') 
+                : (state?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'DomainMesh3D' || n.type === 'FEMDomain3D' || n.type === 'MPMDomain3D') ?? false);
 
-            if (is3D) {
-                const triggersGrid = document.createElement('div');
-                triggersGrid.style.display = 'grid';
-                triggersGrid.style.gridTemplateColumns = 'repeat(2, 1fr)';
-                triggersGrid.style.gap = '8px';
-                triggersGrid.style.marginTop = '8px';
+            // ==========================================
+            // TAB 0: FORMATS & FILES
+            // ==========================================
+            const triggerType = node.parameters['trigger_type'] || 'Step Interval';
+            const triggerEl = this.createInputElement(node, 'trigger_type', triggerType);
+            addRowToPanel('trigger_type', 'OUTPUT TRIGGER', triggerEl, 0);
 
-                triggersGrid.appendChild(createCheckboxField('export_slices', !!node.parameters['export_slices'], 'Export Slices'));
-                triggersGrid.appendChild(createCheckboxField('export_volumes', !!node.parameters['export_volumes'], 'Export Volumes'));
-                panels[0].appendChild(triggersGrid);
+            if (triggerType === 'Step Interval' || triggerType === 'step') {
+                const stepEl = this.createInputElement(node, 'step_interval', node.parameters['step_interval'] ?? 10);
+                addRowToPanel('step_interval', 'STEP INTERVAL (STEPS)', stepEl, 0);
+            } else {
+                const timeEl = this.createInputElement(node, 'time_interval', node.parameters['time_interval'] ?? 0.0001);
+                addRowToPanel('time_interval', 'TIME INTERVAL (SECONDS)', timeEl, 0);
             }
 
-            // FILES/CONFIG Tab
-            const fileEl = this.createInputElement(node, 'custom_filename', node.parameters['custom_filename'] ?? 'vtk_output');
-            addRowToPanel('custom_filename', 'CUSTOM FILENAME', fileEl, 1);
+            const formatEl = this.createInputElement(node, 'vtk_format', node.parameters['vtk_format'] ?? 'Binary');
+            addRowToPanel('vtk_format', 'VTK FORMAT (BINARY / ASCII)', formatEl, 0);
 
-            const dirEl = this.createInputElement(node, 'vtk_dir', node.parameters['vtk_dir'] ?? '');
-            addRowToPanel('vtk_dir', 'VTK DIR', dirEl, 1);
+            const fileEl = this.createInputElement(node, 'custom_filename', node.parameters['custom_filename'] ?? 'vtk_output');
+            addRowToPanel('custom_filename', 'CUSTOM FILENAME PREFIX', fileEl, 0);
+
+            const dirEl = this.createInputElement(node, 'vtk_dir', node.parameters['vtk_dir'] ?? './vtk_output');
+            addRowToPanel('vtk_dir', 'OUTPUT DIRECTORY (HOST PATH)', dirEl, 0);
+
+            panels[0].appendChild(createCheckboxField('export_pvd', node.parameters['export_pvd'] !== false, 'Generate Master ParaView Index (.pvd)'));
+
+            // ==========================================
+            // TAB 1: DOMAINS & STRIDES
+            // ==========================================
+            if (is3D) {
+                // CFD Section
+                const cfdHeader = document.createElement('div');
+                cfdHeader.style.fontSize = '11px';
+                cfdHeader.style.fontWeight = 'bold';
+                cfdHeader.style.color = '#00e5ff';
+                cfdHeader.style.marginTop = '4px';
+                cfdHeader.style.marginBottom = '6px';
+                cfdHeader.textContent = 'CFD EULERIAN GRID EXPORTS';
+                panels[1].appendChild(cfdHeader);
+
+                const cfdToggles = document.createElement('div');
+                cfdToggles.style.display = 'grid';
+                cfdToggles.style.gridTemplateColumns = '1fr 1fr';
+                cfdToggles.style.gap = '8px';
+                cfdToggles.style.marginBottom = '8px';
+                cfdToggles.appendChild(createCheckboxField('export_slices', !!node.parameters['export_slices'], 'Export 2D Slices'));
+                cfdToggles.appendChild(createCheckboxField('export_volumes', !!node.parameters['export_volumes'], 'Export 3D Volumes'));
+                panels[1].appendChild(cfdToggles);
+
+                const stridesGrid = document.createElement('div');
+                stridesGrid.style.display = 'grid';
+                stridesGrid.style.gridTemplateColumns = '1fr 1fr';
+                stridesGrid.style.gap = '8px';
+                stridesGrid.style.marginBottom = '12px';
+
+                const sStrideEl = this.createInputElement(node, 'slice_stride', node.parameters['slice_stride'] ?? 1);
+                const sRow = document.createElement('div');
+                const sLabel = document.createElement('label');
+                sLabel.style.display = 'block';
+                sLabel.style.fontSize = 'var(--font-xs)';
+                sLabel.style.color = '#888';
+                sLabel.style.marginBottom = '2px';
+                sLabel.textContent = 'SLICE STRIDE';
+                sRow.appendChild(sLabel);
+                sRow.appendChild(sStrideEl);
+                stridesGrid.appendChild(sRow);
+
+                const vStrideEl = this.createInputElement(node, 'volume_stride', node.parameters['volume_stride'] ?? 1);
+                const vRow = document.createElement('div');
+                const vLabel = document.createElement('label');
+                vLabel.style.display = 'block';
+                vLabel.style.fontSize = 'var(--font-xs)';
+                vLabel.style.color = '#888';
+                vLabel.style.marginBottom = '2px';
+                vLabel.textContent = 'VOLUME STRIDE';
+                vRow.appendChild(vLabel);
+                vRow.appendChild(vStrideEl);
+                stridesGrid.appendChild(vRow);
+                panels[1].appendChild(stridesGrid);
+
+                // ROI Bounding Box Box
+                const roiBox = document.createElement('div');
+                roiBox.style.padding = '8px';
+                roiBox.style.background = 'rgba(0, 229, 255, 0.04)';
+                roiBox.style.border = '1px solid rgba(0, 229, 255, 0.2)';
+                roiBox.style.borderRadius = '4px';
+                roiBox.style.marginBottom = '14px';
+
+                roiBox.appendChild(createCheckboxField('roi_enabled', !!node.parameters['roi_enabled'], 'Crop Volume to Bounding Box (ROI)'));
+
+                const roiGrid = document.createElement('div');
+                roiGrid.style.display = 'grid';
+                roiGrid.style.gridTemplateColumns = '1fr 1fr';
+                roiGrid.style.gap = '6px';
+                roiGrid.style.marginTop = '6px';
+
+                const roiKeys = [
+                    { k: 'roi_xmin', l: 'X MIN (M)' }, { k: 'roi_xmax', l: 'X MAX (M)' },
+                    { k: 'roi_ymin', l: 'Y MIN (M)' }, { k: 'roi_ymax', l: 'Y MAX (M)' },
+                    { k: 'roi_zmin', l: 'Z MIN (M)' }, { k: 'roi_zmax', l: 'Z MAX (M)' }
+                ];
+                roiKeys.forEach(({ k, l }) => {
+                    const el = this.createInputElement(node, k, node.parameters[k] ?? 0.0);
+                    const r = document.createElement('div');
+                    const lbl = document.createElement('label');
+                    lbl.style.display = 'block';
+                    lbl.style.fontSize = '8px';
+                    lbl.style.color = '#888';
+                    lbl.textContent = l;
+                    r.appendChild(lbl);
+                    r.appendChild(el);
+                    roiGrid.appendChild(r);
+                });
+                roiBox.appendChild(roiGrid);
+                panels[1].appendChild(roiBox);
+
+                // Lagrangian Domains Section
+                const solidHeader = document.createElement('div');
+                solidHeader.style.fontSize = '11px';
+                solidHeader.style.fontWeight = 'bold';
+                solidHeader.style.color = '#ff79c6';
+                solidHeader.style.marginBottom = '6px';
+                solidHeader.textContent = 'LAGRANGIAN SOLID EXPORTS';
+                panels[1].appendChild(solidHeader);
+
+                const solidToggles = document.createElement('div');
+                solidToggles.style.display = 'grid';
+                solidToggles.style.gridTemplateColumns = '1fr 1fr';
+                solidToggles.style.gap = '8px';
+                solidToggles.appendChild(createCheckboxField('export_fem', node.parameters['export_fem'] !== false, 'Export FEM Mesh'));
+                solidToggles.appendChild(createCheckboxField('export_mpm', node.parameters['export_mpm'] !== false, 'Export MPM Particles'));
+                panels[1].appendChild(solidToggles);
+            } else {
+                const note = document.createElement('div');
+                note.style.color = '#888';
+                note.style.fontSize = '11px';
+                note.style.padding = '8px';
+                note.textContent = '2D simulations export full axisymmetric field meshes directly.';
+                panels[1].appendChild(note);
+            }
+
+            // ==========================================
+            // TAB 2: PHYSICS FIELDS
+            // ==========================================
+            const makeSectionHeader = (title: string, color: string) => {
+                const h = document.createElement('div');
+                h.style.fontSize = '10px';
+                h.style.fontWeight = 'bold';
+                h.style.color = color;
+                h.style.letterSpacing = '0.5px';
+                h.style.marginTop = '8px';
+                h.style.marginBottom = '4px';
+                h.style.borderBottom = `1px solid ${color}33`;
+                h.style.paddingBottom = '2px';
+                h.textContent = title;
+                return h;
+            };
+
+            // CFD Quantities
+            panels[2].appendChild(makeSectionHeader('CFD EULERIAN FLUID FIELDS', '#00e5ff'));
+            const cfdGrid = document.createElement('div');
+            cfdGrid.style.display = 'grid';
+            cfdGrid.style.gridTemplateColumns = '1fr 1fr';
+            cfdGrid.style.gap = '4px 8px';
+            cfdGrid.style.marginBottom = '10px';
+
+            const cfdFieldKeys = [
+                { k: 'qty_pressure', l: 'Pressure' },
+                { k: 'qty_density', l: 'Density' },
+                { k: 'qty_velocity', l: 'Velocity' },
+                { k: 'qty_energy', l: 'Specific Energy' },
+                { k: 'qty_reacted', l: 'Reacted Fraction' },
+                { k: 'qty_unreacted', l: 'Unreacted Fraction' },
+                { k: 'qty_air', l: 'Air Fraction' },
+                { k: 'qty_overpressure', l: 'Peak Overpressure' },
+                { k: 'qty_impulse', l: 'Peak Impulse' }
+            ];
+            cfdFieldKeys.forEach(({ k, l }) => {
+                cfdGrid.appendChild(createCheckboxField(k, node.parameters[k] !== false, l));
+            });
+            panels[2].appendChild(cfdGrid);
+
+            if (is3D) {
+                // FEM Quantities
+                panels[2].appendChild(makeSectionHeader('SOLID FEM STRUCTURAL FIELDS', '#ff79c6'));
+                const femGrid = document.createElement('div');
+                femGrid.style.display = 'grid';
+                femGrid.style.gridTemplateColumns = '1fr 1fr';
+                femGrid.style.gap = '4px 8px';
+                femGrid.style.marginBottom = '10px';
+
+                const femFieldKeys = [
+                    { k: 'qty_fem_stress', l: 'Cauchy Stress & VM' },
+                    { k: 'qty_fem_strain', l: 'Plastic Strain' },
+                    { k: 'qty_fem_pressure', l: 'Hydrostatic Pressure' },
+                    { k: 'qty_fem_temp', l: 'Temperature' },
+                    { k: 'qty_fem_damage', l: 'Damage / Failure' },
+                    { k: 'qty_fem_vel', l: 'Velocity Vector' },
+                    { k: 'qty_fem_disp', l: 'Displacement Vector' }
+                ];
+                femFieldKeys.forEach(({ k, l }) => {
+                    femGrid.appendChild(createCheckboxField(k, node.parameters[k] !== false, l));
+                });
+                panels[2].appendChild(femGrid);
+
+                // MPM Quantities
+                panels[2].appendChild(makeSectionHeader('SOLID MPM PARTICLE FIELDS', '#50fa7b'));
+                const mpmGrid = document.createElement('div');
+                mpmGrid.style.display = 'grid';
+                mpmGrid.style.gridTemplateColumns = '1fr 1fr';
+                mpmGrid.style.gap = '4px 8px';
+
+                const mpmFieldKeys = [
+                    { k: 'qty_mpm_stress', l: 'Cauchy Stress & VM' },
+                    { k: 'qty_mpm_strain', l: 'Plastic Strain' },
+                    { k: 'qty_mpm_damage', l: 'Damage / Failure' },
+                    { k: 'qty_mpm_temp', l: 'Temperature' },
+                    { k: 'qty_mpm_vel', l: 'Velocity Vector' },
+                    { k: 'qty_mpm_disp', l: 'Displacement Vector' }
+                ];
+                mpmFieldKeys.forEach(({ k, l }) => {
+                    mpmGrid.appendChild(createCheckboxField(k, node.parameters[k] !== false, l));
+                });
+                panels[2].appendChild(mpmGrid);
+            }
         } else if (node.type === 'Telemetry3DViewport') {
             // VIEWPORT Tab
             const cmapEl = this.createInputElement(node, 'colormap', node.parameters['colormap'] ?? 'plasma');
@@ -1499,7 +1698,9 @@ export class PropertyEditor {
             'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
             'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
             'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
-            'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2'
+            'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
+            // VTK ROI & Strides
+            'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride'
         ];
 
         const dropdowns: Record<string, string[]> = {
@@ -1545,7 +1746,7 @@ export class PropertyEditor {
             'integration_scheme': ['OnePointFB', 'OnePointKF', 'FullGauss8', 'SelectiveReduced'],
             'hourglass_model': ['FlanaganBelytschkoStiffness', 'FlanaganBelytschkoViscous', 'KosloffFrazier'],
             'mesh_source': ['Box Generator', 'Cylinder Generator', 'LS-DYNA Keyword File'],
-            'trigger_type': ['end', 'time', 'step'],
+            'trigger_type': node.type === 'VTKOutput' ? ['Step Interval', 'Time Interval'] : ['end', 'time', 'step'],
             'composition': ['Aluminized ANFO', 'Ammonal', 'ANFO', 'Baratol', 'C-4', 'Composition A-3', 'Composition B', 'Composition C-3', 'Cyclotol', 'Heavy ANFO', 'HMX', 'LX-04', 'LX-07', 'LX-10', 'LX-14', 'LX-17', 'Mining Emulsion', 'Octol', 'PBX 9404', 'PBX 9501', 'PBX 9502', 'PE-10', 'PE-12', 'PE-4', 'PE-8', 'Pentolite', 'PETN', 'RDX', 'TATB', 'Tetryl', 'TNT', 'Water Gel', 'Custom'],
             'init_mode': node.type === 'CFDSolver3D' ? ['From1D', 'From2D', 'Multi-Material JWL', 'Ideal Gas'] : ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
             'flux_scheme': ['AUSM+', 'Rusanov'],
@@ -1571,7 +1772,7 @@ export class PropertyEditor {
             'boundary_condition': ['Free', 'Fixed Base', 'Fixed Entire'],
             'shape_type': node.type === 'FEMObject3D' ? ['Box', 'Cylinder', 'LS-DYNA File'] : (node.type === 'MPMObject3D' ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle']),
             'space_time_scheme': (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') ? 
-                ['USL', 'USF', 'RK2'] : 
+                ['Leapfrog', 'RK2', 'USL', 'USF'] : 
                 ['MUSCL-Hancock (2nd-Order Space/Time)', 'ADER-2 (2nd-Order Space/Time)', 'ADER-3 (3rd-Order Space/Time)']
         };
 

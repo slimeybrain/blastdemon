@@ -2432,6 +2432,7 @@ void FEMSolver3D<T>::evaluateErosionCriteria() {
 
     if (erosion_occurred) {
         m_surface_facets_dirty = true;
+        processErodedElementsToMPM();
     }
     updateNodeErosionStatus();
 }
@@ -2923,11 +2924,16 @@ void FEMSolver3D<T>::stepWithDt(T dt) {
     }
 
     // 2. Internal Element Forces, Rebar Truss/Beam Forces, and Contact Penalty Assembly at new positions x^{n+1}
-    if (m_contact_penalty_scale > static_cast<T>(0.0f) && !getSurfaceFacets().empty()) {
+    if (m_contact_penalty_scale > static_cast<T>(0.0f)) {
         FEMContact3D<T> contact_solver;
         contact_solver.setContactPenaltyScale(m_contact_penalty_scale);
         contact_solver.setFrictionCoefficients(m_friction_static, m_friction_kinetic);
-        contact_solver.solveContact(*this, dt);
+        if (!getSurfaceFacets().empty()) {
+            contact_solver.solveContact(*this, dt);
+        }
+        if (m_mpm_solver && !m_mpm_solver->getParticles().empty()) {
+            contact_solver.solveMPMContact(*this, *m_mpm_solver, dt);
+        }
     }
 
     computeElementForces(dt);

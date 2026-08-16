@@ -528,12 +528,14 @@ void FEMFSICoupler3DCUDA<T>::stepWithDt(T dt) {
     executeGPUCoupling(dt);
 
     // 2. Advance FEM structural solver by dt on GPU
+    auto* mpm_cuda = m_fem_solver->getCUDAMPMSolver();
+    size_t prev_mpm_count = mpm_cuda ? mpm_cuda->getParticleCount() : 0;
     m_fem_solver->stepWithDt(dt);
 
     // 3. Advance MPM debris solver by dt on GPU (with FSI forces from step 1)
-    auto* mpm_cuda = m_fem_solver->getCUDAMPMSolver();
     if (mpm_cuda && mpm_cuda->getParticleCount() > 0) {
-        mpm_cuda->stepWithDt(static_cast<float>(dt), false);
+        bool newly_added = (mpm_cuda->getParticleCount() > prev_mpm_count);
+        mpm_cuda->stepWithDt(static_cast<float>(dt), newly_added);
     }
 
     // 4. Advance FV gas dynamics solver by dt on GPU

@@ -2263,24 +2263,41 @@ void launch_fem_initial_timestep_erosion_kernel_3d(
     fem_initial_timestep_erosion_kernel_3d_device<T><<<grid_size, block_size, 0, stream>>>(
         d_nodes, d_elements, num_elements, d_materials, erosion_criteria, d_erosion_flag
     );
+}
 
-    if (num_nodes > 0 && d_node_active_count) {
-        cudaMemsetAsync(d_node_active_count, 0, sizeof(int) * num_nodes, stream);
+template <typename T>
+void launch_fem_update_orphan_nodes_erosion_kernel_3d(
+    FEMNode3D<T>* d_nodes,
+    int num_nodes,
+    const FEMElement3D<T>* d_elements,
+    int num_elements,
+    const FEMTrussElement3D<T>* d_trusses,
+    int num_trusses,
+    const FEMBeam3DElement<T>* d_beams,
+    int num_beams,
+    int* d_node_active_count,
+    cudaStream_t stream
+) {
+    if (num_nodes <= 0 || !d_node_active_count) return;
+    int block_size = 256;
+    cudaMemsetAsync(d_node_active_count, 0, sizeof(int) * num_nodes, stream);
+    if (num_elements > 0) {
+        int grid_size = (num_elements + block_size - 1) / block_size;
         fem_count_active_node_elements_kernel_device<T><<<grid_size, block_size, 0, stream>>>(
             d_elements, num_elements, d_node_active_count, num_nodes
         );
-        if ((d_trusses && num_trusses > 0) || (d_beams && num_beams > 0)) {
-            int max_tb = std::max(num_trusses, num_beams);
-            int tb_grid_size = (max_tb + block_size - 1) / block_size;
-            fem_count_active_node_trusses_and_beams_kernel_device<T><<<tb_grid_size, block_size, 0, stream>>>(
-                d_trusses, num_trusses, d_beams, num_beams, d_node_active_count, num_nodes
-            );
-        }
-        int node_grid_size = (num_nodes + block_size - 1) / block_size;
-        fem_update_orphan_nodes_erosion_kernel_device<T><<<node_grid_size, block_size, 0, stream>>>(
-            d_nodes, num_nodes, d_node_active_count
+    }
+    if ((d_trusses && num_trusses > 0) || (d_beams && num_beams > 0)) {
+        int max_tb = std::max(num_trusses, num_beams);
+        int tb_grid_size = (max_tb + block_size - 1) / block_size;
+        fem_count_active_node_trusses_and_beams_kernel_device<T><<<tb_grid_size, block_size, 0, stream>>>(
+            d_trusses, num_trusses, d_beams, num_beams, d_node_active_count, num_nodes
         );
     }
+    int node_grid_size = (num_nodes + block_size - 1) / block_size;
+    fem_update_orphan_nodes_erosion_kernel_device<T><<<node_grid_size, block_size, 0, stream>>>(
+        d_nodes, num_nodes, d_node_active_count
+    );
 }
 
 template <typename T>
@@ -2767,6 +2784,14 @@ void FEMSolver3DCUDA<T>::extractTelemetry(std::vector<float>& h_node_data, std::
     }
     m_last_vm_max = static_cast<T>(max_vm);
     m_last_ep_max = static_cast<T>(max_ep);
+
+    // Sync MPM debris particles from GPU to CPU if active
+    if (m_cuda_mpm_solver && m_cuda_mpm_solver->getParticleCount() > 0) {
+        m_cuda_mpm_solver->syncParticlesToHost();
+        if (m_cpu_solver.getMPMSolver()) {
+            m_cpu_solver.getMPMSolver()->getParticles() = m_cuda_mpm_solver->getParticles();
+        }
+    }
 }
 
 template <typename T>
@@ -2884,6 +2909,12 @@ void FEMSolver3DCUDA<T>::stepWithDt(T dt) {
                 m_cuda_mpm_solver->addParticlesDirect(new_pts);
             }
         }
+        // Neutralize orphan nodes on GPU after MPM debris conversion has inherited true kinetic velocities
+        launch_fem_update_orphan_nodes_erosion_kernel_3d<T>(
+            m_d_nodes, num_nodes, m_d_elements, num_elements,
+            m_d_trusses, num_trusses, m_d_beams, num_beams,
+            m_d_node_active_count, m_cuda_stream
+        );
         m_cpu_solver.invalidateSurfaceFacets();
         const auto& new_facets = m_cpu_solver.getSurfaceFacets();
 
@@ -3239,6 +3270,9 @@ template void launch_fem_nodal_full_step_kernel_3d<double>(FEMNode3D<double>*, i
 
 template void launch_fem_initial_timestep_erosion_kernel_3d<float>(FEMNode3D<float>*, int, FEMElement3D<float>*, int, const FEMTrussElement3D<float>*, int, const FEMBeam3DElement<float>*, int, const MaterialTable3D*, FEMErosionCriteria<float>, int*, int*, cudaStream_t);
 template void launch_fem_initial_timestep_erosion_kernel_3d<double>(FEMNode3D<double>*, int, FEMElement3D<double>*, int, const FEMTrussElement3D<double>*, int, const FEMBeam3DElement<double>*, int, const MaterialTable3D*, FEMErosionCriteria<double>, int*, int*, cudaStream_t);
+
+template void launch_fem_update_orphan_nodes_erosion_kernel_3d<float>(FEMNode3D<float>*, int, const FEMElement3D<float>*, int, const FEMTrussElement3D<float>*, int, const FEMBeam3DElement<float>*, int, int*, cudaStream_t);
+template void launch_fem_update_orphan_nodes_erosion_kernel_3d<double>(FEMNode3D<double>*, int, const FEMElement3D<double>*, int, const FEMTrussElement3D<double>*, int, const FEMBeam3DElement<double>*, int, int*, cudaStream_t);
 
 template void launch_fem_update_surface_facets_kernel_3d<float>(FEMNode3D<float>*, int, const FEMElement3D<float>*, int, FEMFacet3D<float>*, int, float*, cudaStream_t);
 template void launch_fem_update_surface_facets_kernel_3d<double>(FEMNode3D<double>*, int, const FEMElement3D<double>*, int, FEMFacet3D<double>*, int, double*, cudaStream_t);

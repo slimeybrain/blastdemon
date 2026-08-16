@@ -22,6 +22,7 @@
 #include <nlohmann/json.hpp>
 #include "PrimitiveGeometry.hpp"
 #include "ImmersedBoundary.hpp"
+#include <set>
 #include <unordered_map>
 #include <filesystem>
 #include "cfd_solver.hpp"
@@ -34,6 +35,7 @@
 #include "HDF5Writer.hpp"
 #include "XDMFWriter.hpp"
 #include "VTKWriter.hpp"
+#include "AsyncVTKWriter.hpp"
 #include "mpm_solver_2d.hpp"
 #include "mpm_solver_3d.hpp"
 #include "mpm_solver_3d_cuda.hpp"
@@ -371,13 +373,18 @@ struct GaugeOutputConfig {
 } global_gauge_config;
 
 struct VTKOutputConfig {
+    std::string trigger_type = "Step Interval";
     std::string vtk_dir = "";
     bool export_slices = true;
     bool export_volumes = false;
+    bool export_fem = true;
+    bool export_mpm = true;
+    bool export_pvd = true;
     std::string custom_filename = "vtk_output";
     int step_interval = 10;
-    double time_interval = 0.0;
+    double time_interval = 0.0001;
     std::string vtk_format = "Binary";
+    // FV CFD Quantities
     bool qty_pressure = true;
     bool qty_density = true;
     bool qty_velocity = true;
@@ -387,7 +394,40 @@ struct VTKOutputConfig {
     bool qty_air = true;
     bool qty_overpressure = true;
     bool qty_impulse = true;
+    // Solid FEM Quantities
+    bool qty_fem_stress = true;
+    bool qty_fem_strain = true;
+    bool qty_fem_pressure = true;
+    bool qty_fem_temp = true;
+    bool qty_fem_damage = true;
+    bool qty_fem_vel = true;
+    bool qty_fem_disp = true;
+    // Solid MPM Quantities
+    bool qty_mpm_stress = true;
+    bool qty_mpm_strain = true;
+    bool qty_mpm_damage = true;
+    bool qty_mpm_temp = true;
+    bool qty_mpm_vel = true;
+    bool qty_mpm_disp = true;
+    // Spatial ROI & Strides
+    bool roi_enabled = false;
+    double roi_xmin = 0.0;
+    double roi_xmax = 1.0;
+    double roi_ymin = 0.0;
+    double roi_ymax = 1.0;
+    double roi_zmin = 0.0;
+    double roi_zmax = 1.0;
+    int volume_stride = 1;
+    int slice_stride = 1;
 } global_vtk_config;
+
+inline bool should_write_vtk(int step_count, double sim_time, double last_vtk_time) {
+    if (global_vtk_config.trigger_type == "time" || global_vtk_config.trigger_type == "Time Interval") {
+        return (global_vtk_config.time_interval > 0.0 && (sim_time - last_vtk_time >= global_vtk_config.time_interval || last_vtk_time < 0.0));
+    } else {
+        return (global_vtk_config.step_interval > 0 && (step_count % global_vtk_config.step_interval == 0));
+    }
+}
 
 std::string global_model_filename = "";
 std::string global_model_id = "";
@@ -569,7 +609,6 @@ void write_gauge_files() {
 }
 
 void write_vtk_outputs(int step, double time) {
-    (void)time;
     std::string default_dir = ".";
     try {
         if (std::filesystem::current_path().filename() == "build") {
@@ -593,6 +632,7 @@ void write_vtk_outputs(int step, double time) {
         std::cerr << "[ERROR] Failed to create directory: " << out_dir << " - " << e.what() << std::endl;
     }
 
+    // 1. CFD 3D Domain
     if (global_solver_3d) {
         bool has_p = global_vtk_config.qty_pressure;
         bool has_rho = global_vtk_config.qty_density;
@@ -604,34 +644,262 @@ void write_vtk_outputs(int step, double time) {
         bool has_overpressure = global_vtk_config.qty_overpressure;
         bool has_impulse = global_vtk_config.qty_impulse;
 
-        // 1. Slices
+        // 1A. Slices
         if (global_vtk_config.export_slices) {
             for (size_t i = 0; i < global_slices_3d.size(); ++i) {
-                std::string filename = out_dir + "/" + global_vtk_config.custom_filename + "_slice_" + global_slices_3d[i].axis + "_" + std::to_string(i) + "_" + std::to_string(step) + ".vtu";
-                export_vtu_slice_3d(filename, *global_solver_3d, global_slices_3d[i], global_vtk_config.vtk_format,
-                                    has_p, has_rho, has_vel, has_E, has_reacted, has_unreacted, has_air,
-                                    true, has_overpressure, has_impulse);
+                std::string rel_filename = global_vtk_config.custom_filename + "_slice_" + global_slices_3d[i].axis + "_" + std::to_string(i) + "_" + std::to_string(step) + ".vtu";
+                std::string filename = out_dir + "/" + rel_filename;
+                std::string pvd_filename = out_dir + "/" + global_vtk_config.custom_filename + "_cfd_slice_" + std::to_string(i) + ".pvd";
+                bool export_pvd = global_vtk_config.export_pvd;
+                std::string format = global_vtk_config.vtk_format;
+
+                CFDSliceSnapshot3D snap;
+                snap.axis = global_slices_3d[i].axis;
+                snap.offset = global_slices_3d[i].offset;
+                snap.stride = (global_vtk_config.slice_stride > 0) ? global_vtk_config.slice_stride : (global_slices_3d[i].stride > 0 ? global_slices_3d[i].stride : 1);
+                snap.nx = global_solver_3d->getNx();
+                snap.ny = global_solver_3d->getNy();
+                snap.nz = global_solver_3d->getNz();
+                snap.dx = global_solver_3d->getCellSize();
+                snap.xmin = global_solver_3d->getXMin();
+                snap.ymin = global_solver_3d->getYMin();
+                snap.zmin = global_solver_3d->getZMin();
+
+                snap.has_p = has_p;
+                snap.has_rho = has_rho;
+                snap.has_vel = has_vel;
+                snap.has_E = has_E;
+                snap.has_reacted = has_reacted;
+                snap.has_unreacted = has_unreacted;
+                snap.has_air = has_air;
+                snap.has_solid = true;
+                snap.has_overpressure = has_overpressure;
+                snap.has_impulse = has_impulse;
+
+                Slice3D slice_query = global_slices_3d[i];
+                slice_query.stride = snap.stride;
+
+                if (has_rho) { slice_query.quantities = { "density" }; snap.rho = global_solver_3d->extractSlice(slice_query); }
+                if (has_p) { slice_query.quantities = { "pressure" }; snap.p = global_solver_3d->extractSlice(slice_query); }
+                if (has_vel) { slice_query.quantities = { "velocity" }; snap.vel = global_solver_3d->extractSlice(slice_query); }
+                if (has_E) { slice_query.quantities = { "energy" }; snap.E = global_solver_3d->extractSlice(slice_query); }
+                if (has_reacted) { slice_query.quantities = { "species1" }; snap.reacted = global_solver_3d->extractSlice(slice_query); }
+                if (has_unreacted) { slice_query.quantities = { "species2" }; snap.unreacted = global_solver_3d->extractSlice(slice_query); }
+                if (has_air) { slice_query.quantities = { "species3" }; snap.air = global_solver_3d->extractSlice(slice_query); }
+                if (snap.has_solid) { slice_query.quantities = { "solid" }; snap.solid = global_solver_3d->extractSlice(slice_query); }
+                if (has_overpressure) { slice_query.quantities = { "overpressure" }; snap.overpressure = global_solver_3d->extractSlice(slice_query); }
+                if (has_impulse) { slice_query.quantities = { "impulse" }; snap.impulse = global_solver_3d->extractSlice(slice_query); }
+
+                Blast::AsyncVTKWriter::getInstance().enqueue([filename, snap = std::move(snap), format, export_pvd, pvd_filename, time, rel_filename]() {
+                    export_vtu_slice_3d_snapshot(filename, snap, format);
+                    if (export_pvd) {
+                        append_pvd_timestep(pvd_filename, time, rel_filename);
+                    }
+                });
             }
         }
 
-        // 2. Volumes
+        // 1B. Volumes
         if (global_vtk_config.export_volumes) {
-            std::string filename = out_dir + "/" + global_vtk_config.custom_filename + "_volume_" + std::to_string(step) + ".vtu";
-            export_vtu_volume_3d(filename, *global_solver_3d, global_vtk_config.vtk_format,
-                                 has_p, has_rho, has_vel, has_E, has_reacted, has_unreacted, has_air,
-                                 true, has_overpressure, has_impulse);
+            std::string rel_filename = global_vtk_config.custom_filename + "_volume_" + std::to_string(step) + ".vtu";
+            std::string filename = out_dir + "/" + rel_filename;
+            std::string pvd_filename = out_dir + "/" + global_vtk_config.custom_filename + "_cfd_volume.pvd";
+            bool export_pvd = global_vtk_config.export_pvd;
+            std::string format = global_vtk_config.vtk_format;
+
+            CFDVolumeSnapshot3D snap;
+            snap.nx = global_solver_3d->getNx();
+            snap.ny = global_solver_3d->getNy();
+            snap.nz = global_solver_3d->getNz();
+            snap.cellSize = global_solver_3d->getCellSize();
+            snap.xmin = global_solver_3d->getXMin();
+            snap.ymin = global_solver_3d->getYMin();
+            snap.zmin = global_solver_3d->getZMin();
+            snap.stride = std::max(1, global_vtk_config.volume_stride);
+            snap.roi_enabled = global_vtk_config.roi_enabled;
+            snap.roi_xmin = global_vtk_config.roi_xmin; snap.roi_xmax = global_vtk_config.roi_xmax;
+            snap.roi_ymin = global_vtk_config.roi_ymin; snap.roi_ymax = global_vtk_config.roi_ymax;
+            snap.roi_zmin = global_vtk_config.roi_zmin; snap.roi_zmax = global_vtk_config.roi_zmax;
+
+            snap.has_p = has_p;
+            snap.has_rho = has_rho;
+            snap.has_vel = has_vel;
+            snap.has_E = has_E;
+            snap.has_reacted = has_reacted;
+            snap.has_unreacted = has_unreacted;
+            snap.has_air = has_air;
+            snap.has_solid = true;
+            snap.has_overpressure = has_overpressure;
+            snap.has_impulse = has_impulse;
+
+            if (!snap.roi_enabled) {
+                Slice3D vol_query;
+                vol_query.axis = "volume";
+                vol_query.stride = snap.stride;
+                if (has_rho) { vol_query.quantities = { "density" }; snap.rho = global_solver_3d->extractSlice(vol_query); }
+                if (has_p) { vol_query.quantities = { "pressure" }; snap.p = global_solver_3d->extractSlice(vol_query); }
+                if (has_vel) { vol_query.quantities = { "velocity" }; snap.vel = global_solver_3d->extractSlice(vol_query); }
+                if (has_E) { vol_query.quantities = { "energy" }; snap.E = global_solver_3d->extractSlice(vol_query); }
+                if (has_reacted) { vol_query.quantities = { "species1" }; snap.reacted = global_solver_3d->extractSlice(vol_query); }
+                if (has_unreacted) { vol_query.quantities = { "species2" }; snap.unreacted = global_solver_3d->extractSlice(vol_query); }
+                if (has_air) { vol_query.quantities = { "species3" }; snap.air = global_solver_3d->extractSlice(vol_query); }
+                if (snap.has_solid) { vol_query.quantities = { "solid" }; snap.solid = global_solver_3d->extractSlice(vol_query); }
+                if (has_overpressure) { vol_query.quantities = { "overpressure" }; snap.overpressure = global_solver_3d->extractSlice(vol_query); }
+                if (has_impulse) { vol_query.quantities = { "impulse" }; snap.impulse = global_solver_3d->extractSlice(vol_query); }
+            } else {
+                int i_start = std::clamp(static_cast<int>(std::floor((snap.roi_xmin - snap.xmin) / snap.cellSize)), 0, snap.nx - 1);
+                int i_end   = std::clamp(static_cast<int>(std::ceil((snap.roi_xmax - snap.xmin) / snap.cellSize)), i_start + 1, snap.nx);
+                int j_start = std::clamp(static_cast<int>(std::floor((snap.roi_ymin - snap.ymin) / snap.cellSize)), 0, snap.ny - 1);
+                int j_end   = std::clamp(static_cast<int>(std::ceil((snap.roi_ymax - snap.ymin) / snap.cellSize)), j_start + 1, snap.ny);
+                int k_start = std::clamp(static_cast<int>(std::floor((snap.roi_zmin - snap.zmin) / snap.cellSize)), 0, snap.nz - 1);
+                int k_end   = std::clamp(static_cast<int>(std::ceil((snap.roi_zmax - snap.zmin) / snap.cellSize)), k_start + 1, snap.nz);
+
+                snap.i_start = i_start; snap.i_end = i_end;
+                snap.j_start = j_start; snap.j_end = j_end;
+                snap.k_start = k_start; snap.k_end = k_end;
+                snap.nx_sub = (i_end - i_start + snap.stride - 1) / snap.stride;
+                snap.ny_sub = (j_end - j_start + snap.stride - 1) / snap.stride;
+                snap.nz_sub = (k_end - k_start + snap.stride - 1) / snap.stride;
+                int num_cells = snap.nx_sub * snap.ny_sub * snap.nz_sub;
+
+                if (has_p) snap.p.resize(num_cells);
+                if (has_rho) snap.rho.resize(num_cells);
+                if (has_vel) snap.vel.resize(num_cells);
+                if (has_E) snap.E.resize(num_cells);
+                if (has_reacted) snap.reacted.resize(num_cells);
+                if (has_unreacted) snap.unreacted.resize(num_cells);
+                if (has_air) snap.air.resize(num_cells);
+                if (snap.has_solid) snap.solid.resize(num_cells);
+                if (has_overpressure) snap.overpressure.resize(num_cells);
+                if (has_impulse) snap.impulse.resize(num_cells);
+
+                for (int k = 0; k < snap.nz_sub; ++k) {
+                    for (int j = 0; j < snap.ny_sub; ++j) {
+                        for (int i = 0; i < snap.nx_sub; ++i) {
+                            int c_idx = i + j * snap.nx_sub + k * snap.nx_sub * snap.ny_sub;
+                            int gx = std::min(snap.nx - 1, i_start + i * snap.stride);
+                            int gy = std::min(snap.ny - 1, j_start + j * snap.stride);
+                            int gz = std::min(snap.nz - 1, k_start + k * snap.stride);
+                            auto vals = global_solver_3d->getCellValues(gx, gy, gz);
+                            if (has_p && vals.size() > 0) snap.p[c_idx] = vals[0];
+                            if (has_rho && vals.size() > 1) snap.rho[c_idx] = vals[1];
+                            if (has_vel && vals.size() > 2) snap.vel[c_idx] = vals[2];
+                            if (has_E && vals.size() > 3) snap.E[c_idx] = vals[3];
+                            if (has_reacted && vals.size() > 4) snap.reacted[c_idx] = vals[4];
+                            if (has_unreacted && vals.size() > 5) snap.unreacted[c_idx] = vals[5];
+                            if (has_air && vals.size() > 6) snap.air[c_idx] = vals[6];
+                            if (snap.has_solid && vals.size() > 7) snap.solid[c_idx] = vals[7];
+                            if (has_overpressure && vals.size() > 8) snap.overpressure[c_idx] = vals[8];
+                            if (has_impulse && vals.size() > 9) snap.impulse[c_idx] = vals[9];
+                        }
+                    }
+                }
+            }
+
+            Blast::AsyncVTKWriter::getInstance().enqueue([filename, snap = std::move(snap), format, export_pvd, pvd_filename, time, rel_filename]() {
+                export_vtu_volume_3d_snapshot(filename, snap, format);
+                if (export_pvd) {
+                    append_pvd_timestep(pvd_filename, time, rel_filename);
+                }
+            });
         }
-    } else if (global_solver_2d_cuda || global_solver_2d) {
+    }
+
+    // 2. FEM 3D Solid Domain
+    if (global_vtk_config.export_fem) {
+        auto export_fem_instance = [&](const std::string& key, auto* fem_ptr) {
+            if (!fem_ptr) return;
+            std::string rel_filename = global_vtk_config.custom_filename + "_fem_" + key + "_" + std::to_string(step) + ".vtu";
+            std::string filename = out_dir + "/" + rel_filename;
+            std::string pvd_filename = out_dir + "/" + global_vtk_config.custom_filename + "_fem_" + key + ".pvd";
+            bool export_pvd = global_vtk_config.export_pvd;
+            std::string format = global_vtk_config.vtk_format;
+            auto vtk_cfg = global_vtk_config;
+
+            auto fem_snap = std::make_shared<std::decay_t<decltype(*fem_ptr)>>(*fem_ptr);
+
+            Blast::AsyncVTKWriter::getInstance().enqueue([filename, fem_snap, format, vtk_cfg, export_pvd, pvd_filename, time, rel_filename]() {
+                export_vtu_fem_3d(filename, *fem_snap, format,
+                                  vtk_cfg.qty_fem_stress, vtk_cfg.qty_fem_strain,
+                                  vtk_cfg.qty_fem_pressure, vtk_cfg.qty_fem_temp,
+                                  vtk_cfg.qty_fem_damage, vtk_cfg.qty_fem_vel,
+                                  vtk_cfg.qty_fem_disp);
+                if (export_pvd) {
+                    append_pvd_timestep(pvd_filename, time, rel_filename);
+                }
+            });
+        };
+
+        for (const auto& [k, v] : global_fem_solvers_cuda_float) {
+            if (v) {
+                v->syncToHost();
+                export_fem_instance(k, &(v->getCpuSolver()));
+            }
+        }
+        for (const auto& [k, v] : global_fem_solvers_cuda_double) {
+            if (v) {
+                v->syncToHost();
+                export_fem_instance(k, &(v->getCpuSolver()));
+            }
+        }
+        for (const auto& [k, v] : global_fem_solvers_float) {
+            if (v) export_fem_instance(k, v.get());
+        }
+        for (const auto& [k, v] : global_fem_solvers_double) {
+            if (v) export_fem_instance(k, v.get());
+        }
+    }
+
+    // 3. MPM 3D Particle & Debris Domain
+    if (global_vtk_config.export_mpm) {
+        static const std::vector<Blast::MPMParticle3D> empty_particles;
+        bool mpm_exported = false;
+
+        auto enqueue_mpm = [&](std::vector<Blast::MPMParticle3D> particles_copy) {
+            std::string rel_filename = global_vtk_config.custom_filename + "_mpm_" + std::to_string(step) + ".vtu";
+            std::string filename = out_dir + "/" + rel_filename;
+            std::string pvd_filename = out_dir + "/" + global_vtk_config.custom_filename + "_mpm.pvd";
+            bool export_pvd = global_vtk_config.export_pvd;
+            std::string format = global_vtk_config.vtk_format;
+            auto vtk_cfg = global_vtk_config;
+
+            Blast::AsyncVTKWriter::getInstance().enqueue([filename, particles = std::move(particles_copy), format, vtk_cfg, export_pvd, pvd_filename, time, rel_filename]() {
+                export_vtu_mpm_3d(filename, particles, format,
+                                  vtk_cfg.qty_mpm_vel, vtk_cfg.qty_mpm_disp,
+                                  vtk_cfg.qty_mpm_stress, vtk_cfg.qty_mpm_strain,
+                                  vtk_cfg.qty_mpm_damage, vtk_cfg.qty_mpm_temp);
+                if (export_pvd) {
+                    append_pvd_timestep(pvd_filename, time, rel_filename);
+                }
+            });
+        };
+
+        if (global_solver_mpm_3d_cuda) {
+            global_solver_mpm_3d_cuda->syncParticlesToHost();
+            enqueue_mpm(global_solver_mpm_3d_cuda->getParticles());
+            mpm_exported = true;
+        } else if (global_solver_mpm_3d) {
+            enqueue_mpm(global_solver_mpm_3d->getParticles());
+            mpm_exported = true;
+        }
+
+        // If no explicit MPM solver is active but export_mpm is enabled in a 3D model, output empty frame for sync
+        if (!mpm_exported && global_solver_3d) {
+            enqueue_mpm(empty_particles);
+        }
+    }
+
+    // 4. 2D Domain
+    if (global_solver_2d_cuda || global_solver_2d) {
         std::string filename = out_dir + "/" + global_vtk_config.custom_filename + "_" + std::to_string(step) + ".vtu";
         if (global_solver_2d_cuda) {
             global_solver_2d_cuda->exportVTK(filename);
         } else if (global_solver_2d) {
             global_solver_2d->exportVTK(filename);
         }
-    } else if (global_solver) {
-        // Do not output VTU files for 1D models
     }
 }
+
 
 void init_gauges(const nlohmann::json& msg) {
     std::lock_guard<std::mutex> lock(global_gauges_mutex);
@@ -697,13 +965,18 @@ void init_gauges(const nlohmann::json& msg) {
             } else if (type == "VTKOutput") {
                 if (node.contains("parameters")) {
                     const auto& params = node["parameters"];
+                    global_vtk_config.trigger_type = params.value("trigger_type", "Step Interval");
                     global_vtk_config.vtk_dir = params.value("vtk_dir", "");
                     global_vtk_config.export_slices = params.value("export_slices", true);
                     global_vtk_config.export_volumes = params.value("export_volumes", false);
+                    global_vtk_config.export_fem = params.value("export_fem", true);
+                    global_vtk_config.export_mpm = params.value("export_mpm", true);
+                    global_vtk_config.export_pvd = params.value("export_pvd", true);
                     global_vtk_config.custom_filename = params.value("custom_filename", "vtk_output");
                     global_vtk_config.step_interval = params.value("step_interval", 10);
-                    global_vtk_config.time_interval = params.value("time_interval", 0.0);
+                    global_vtk_config.time_interval = params.value("time_interval", 0.0001);
                     global_vtk_config.vtk_format = params.value("vtk_format", "Binary");
+                    // CFD Fields
                     global_vtk_config.qty_pressure = params.value("qty_pressure", true);
                     global_vtk_config.qty_density = params.value("qty_density", true);
                     global_vtk_config.qty_velocity = params.value("qty_velocity", true);
@@ -713,10 +986,54 @@ void init_gauges(const nlohmann::json& msg) {
                     global_vtk_config.qty_air = params.value("qty_air", true);
                     global_vtk_config.qty_overpressure = params.value("qty_overpressure", true);
                     global_vtk_config.qty_impulse = params.value("qty_impulse", true);
+                    // FEM Fields
+                    global_vtk_config.qty_fem_stress = params.value("qty_fem_stress", true);
+                    global_vtk_config.qty_fem_strain = params.value("qty_fem_strain", true);
+                    global_vtk_config.qty_fem_pressure = params.value("qty_fem_pressure", true);
+                    global_vtk_config.qty_fem_temp = params.value("qty_fem_temp", true);
+                    global_vtk_config.qty_fem_damage = params.value("qty_fem_damage", true);
+                    global_vtk_config.qty_fem_vel = params.value("qty_fem_vel", true);
+                    global_vtk_config.qty_fem_disp = params.value("qty_fem_disp", true);
+                    // MPM Fields
+                    global_vtk_config.qty_mpm_stress = params.value("qty_mpm_stress", true);
+                    global_vtk_config.qty_mpm_strain = params.value("qty_mpm_strain", true);
+                    global_vtk_config.qty_mpm_damage = params.value("qty_mpm_damage", true);
+                    global_vtk_config.qty_mpm_temp = params.value("qty_mpm_temp", true);
+                    global_vtk_config.qty_mpm_vel = params.value("qty_mpm_vel", true);
+                    global_vtk_config.qty_mpm_disp = params.value("qty_mpm_disp", true);
+                    // Spatial ROI & Strides
+                    global_vtk_config.roi_enabled = params.value("roi_enabled", false);
+                    global_vtk_config.roi_xmin = params.value("roi_xmin", 0.0);
+                    global_vtk_config.roi_xmax = params.value("roi_xmax", 1.0);
+                    global_vtk_config.roi_ymin = params.value("roi_ymin", 0.0);
+                    global_vtk_config.roi_ymax = params.value("roi_ymax", 1.0);
+                    global_vtk_config.roi_zmin = params.value("roi_zmin", 0.0);
+                    global_vtk_config.roi_zmax = params.value("roi_zmax", 1.0);
+                    global_vtk_config.volume_stride = params.value("volume_stride", 1);
+                    global_vtk_config.slice_stride = params.value("slice_stride", 1);
                 }
             }
         }
     }
+
+    if (msg.contains("parameters")) {
+        const auto& params = msg["parameters"];
+        if (params.contains("trigger_type")) global_vtk_config.trigger_type = params.value("trigger_type", global_vtk_config.trigger_type);
+        if (params.contains("vtk_dir")) global_vtk_config.vtk_dir = params.value("vtk_dir", global_vtk_config.vtk_dir);
+        if (params.contains("export_slices")) global_vtk_config.export_slices = params.value("export_slices", global_vtk_config.export_slices);
+        if (params.contains("export_volumes")) global_vtk_config.export_volumes = params.value("export_volumes", global_vtk_config.export_volumes);
+        if (params.contains("export_fem")) global_vtk_config.export_fem = params.value("export_fem", global_vtk_config.export_fem);
+        if (params.contains("export_mpm")) global_vtk_config.export_mpm = params.value("export_mpm", global_vtk_config.export_mpm);
+        if (params.contains("export_pvd")) global_vtk_config.export_pvd = params.value("export_pvd", global_vtk_config.export_pvd);
+        if (params.contains("custom_filename")) global_vtk_config.custom_filename = params.value("custom_filename", global_vtk_config.custom_filename);
+        if (params.contains("step_interval")) global_vtk_config.step_interval = params.value("step_interval", global_vtk_config.step_interval);
+        if (params.contains("time_interval")) global_vtk_config.time_interval = params.value("time_interval", global_vtk_config.time_interval);
+        if (params.contains("vtk_format")) global_vtk_config.vtk_format = params.value("vtk_format", global_vtk_config.vtk_format);
+        if (params.contains("roi_enabled")) global_vtk_config.roi_enabled = params.value("roi_enabled", global_vtk_config.roi_enabled);
+        if (params.contains("volume_stride")) global_vtk_config.volume_stride = params.value("volume_stride", global_vtk_config.volume_stride);
+        if (params.contains("slice_stride")) global_vtk_config.slice_stride = params.value("slice_stride", global_vtk_config.slice_stride);
+    }
+
 
     std::string default_dir = ".";
     try {
@@ -757,6 +1074,26 @@ void init_gauges(const nlohmann::json& msg) {
             g2d.push_back({ g.id, g.r, g.z });
         }
         global_solver_2d->setGauges(g2d);
+    }
+
+    bool has_vtk = false;
+    if (msg.contains("nodes")) {
+        for (const auto& node : msg["nodes"]) {
+            if (node.value("type", "") == "VTKOutput") {
+                has_vtk = true;
+                break;
+            }
+        }
+    }
+    if (!has_vtk && msg.contains("parameters")) {
+        const auto& params = msg["parameters"];
+        if (params.contains("vtk_format") || params.contains("custom_filename") || params.contains("export_slices") || params.contains("export_fem") || params.contains("export_mpm") || params.contains("trigger_type")) {
+            has_vtk = true;
+        }
+    }
+    if (has_vtk) {
+        global_enable_vtk = true;
+        write_vtk_outputs(0, 0.0);
     }
 }
 
@@ -981,16 +1318,9 @@ void worker_thread_func() {
         record_gauges_1d(global_t);
 
         {
-            bool trigger_vtk = false;
-            if (global_vtk_config.step_interval > 0 && (step_count % global_vtk_config.step_interval == 0)) {
-                trigger_vtk = true;
-            }
-            if (global_vtk_config.time_interval > 0.0 && (global_t - last_vtk_time >= global_vtk_config.time_interval)) {
-                trigger_vtk = true;
-                last_vtk_time = global_t;
-            }
-            if (trigger_vtk) {
+            if (should_write_vtk(step_count, global_t, last_vtk_time)) {
                 write_vtk_outputs(step_count, global_t);
+                last_vtk_time = global_t;
             }
         }
 
@@ -1740,16 +2070,9 @@ void worker_3d_thread_func() {
         }
 
         if (global_enable_vtk.load()) {
-            bool trigger_vtk = false;
-            if (global_vtk_config.step_interval > 0 && (step_count % global_vtk_config.step_interval == 0)) {
-                trigger_vtk = true;
-            }
-            if (global_vtk_config.time_interval > 0.0 && (global_t3d - last_vtk_time >= global_vtk_config.time_interval)) {
-                trigger_vtk = true;
-                last_vtk_time = global_t3d;
-            }
-            if (trigger_vtk) {
+            if (should_write_vtk(step_count, global_t3d, last_vtk_time)) {
                 write_vtk_outputs(step_count, global_t3d);
+                last_vtk_time = global_t3d;
             }
         }
 
@@ -1914,16 +2237,9 @@ void worker_2d_thread_func() {
         record_gauges_2d(global_t2d);
 
         {
-            bool trigger_vtk = false;
-            if (global_vtk_config.step_interval > 0 && (step_count % global_vtk_config.step_interval == 0)) {
-                trigger_vtk = true;
-            }
-            if (global_vtk_config.time_interval > 0.0 && (global_t2d - last_vtk_time >= global_vtk_config.time_interval)) {
-                trigger_vtk = true;
-                last_vtk_time = global_t2d;
-            }
-            if (trigger_vtk) {
+            if (should_write_vtk(step_count, global_t2d, last_vtk_time)) {
                 write_vtk_outputs(step_count, global_t2d);
+                last_vtk_time = global_t2d;
             }
         }
 
@@ -2136,6 +2452,7 @@ void worker_mpm_3d_thread_func() {
     double start_time = 0.0;
     if (global_solver_mpm_3d_cuda) start_time = global_solver_mpm_3d_cuda->getSimTime();
     else if (global_solver_mpm_3d) start_time = global_solver_mpm_3d->getSimTime();
+    double last_vtk_time = start_time;
 
     emit_kernel_log("INFO", "3D MPM asynchronous worker thread started.", start_time, "mpm_3d");
 
@@ -2159,6 +2476,13 @@ void worker_mpm_3d_thread_func() {
             global_solver_mpm_3d_cuda->step(cfl);
             step_count++;
 
+            double sim_time = global_solver_mpm_3d_cuda->getSimTime();
+            int current_step = global_solver_mpm_3d_cuda->getStepCount();
+            if (should_write_vtk(step_count, sim_time, last_vtk_time)) {
+                write_vtk_outputs(current_step, sim_time);
+                last_vtk_time = sim_time;
+            }
+
             if (!global_exec_until_end_mpm_3d.load()) {
                 global_target_steps_mpm_3d--;
             }
@@ -2169,9 +2493,6 @@ void worker_mpm_3d_thread_func() {
             bool should_emit = (target_interval_ms > 0) ? (elapsed_ms >= target_interval_ms) : true;
 
             if (should_emit || done) {
-                double sim_time = global_solver_mpm_3d_cuda->getSimTime();
-                int current_step = global_solver_mpm_3d_cuda->getStepCount();
-
                 emit_telemetry_mpm_3d(sim_time, false, current_step);
                 last_telemetry_time = now;
 
@@ -2218,6 +2539,14 @@ void worker_mpm_3d_thread_func() {
             global_solver_mpm_3d->step(cfl);
             step_count++;
 
+            double sim_time = global_solver_mpm_3d->getSimTime();
+            int current_step = global_solver_mpm_3d->getStepCount();
+
+            if (should_write_vtk(step_count, sim_time, last_vtk_time)) {
+                write_vtk_outputs(current_step, sim_time);
+                last_vtk_time = sim_time;
+            }
+
             if (!global_exec_until_end_mpm_3d.load()) {
                 global_target_steps_mpm_3d--;
             }
@@ -2228,9 +2557,6 @@ void worker_mpm_3d_thread_func() {
             bool should_emit = (target_interval_ms > 0) ? (elapsed_ms >= target_interval_ms) : true;
 
             if (should_emit || done) {
-                double sim_time = global_solver_mpm_3d->getSimTime();
-                int current_step = global_solver_mpm_3d->getStepCount();
-
                 emit_telemetry_mpm_3d(sim_time, false, current_step);
                 last_telemetry_time = now;
 
@@ -2282,7 +2608,9 @@ void worker_mpm_3d_thread_func() {
     else if (global_solver_mpm_3d) final_sim_time = global_solver_mpm_3d->getSimTime();
 
     int final_step = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getStepCount() : (global_solver_mpm_3d ? global_solver_mpm_3d->getStepCount() : 0);
+    write_vtk_outputs(final_step, final_sim_time);
     emit_telemetry_mpm_3d(final_sim_time, false, final_step);
+
 
     nlohmann::json progress_msg;
     progress_msg["type"] = "progress";
@@ -2317,6 +2645,7 @@ void worker_fem_3d_thread_func() {
         int step_count = 0;
         int initial_steps = global_target_steps_fem_3d.load();
         auto last_telemetry_time = std::chrono::steady_clock::now();
+        double last_vtk_time = 0.0;
         emit_kernel_log("INFO", "3D FEM asynchronous worker thread started.", 0.0, "fem_3d");
 
         while (sim_fem_3d_running.load()) {
@@ -2397,6 +2726,30 @@ void worker_fem_3d_thread_func() {
             }
 
             step_count++;
+
+            if (global_fem_solvers_cuda_float.count(m_id) && global_fem_solvers_cuda_float[m_id]) {
+                current_step = global_fem_solvers_cuda_float[m_id]->getStepCount();
+            } else if (global_fem_solvers_cuda_double.count(m_id) && global_fem_solvers_cuda_double[m_id]) {
+                current_step = global_fem_solvers_cuda_double[m_id]->getStepCount();
+            } else if (global_fem_solvers_float.count(m_id) && global_fem_solvers_float[m_id]) {
+                current_step = global_fem_solvers_float[m_id]->getStepCount();
+            } else if (global_fem_solvers_double.count(m_id) && global_fem_solvers_double[m_id]) {
+                current_step = global_fem_solvers_double[m_id]->getStepCount();
+            } else if (!global_fem_solvers_cuda_float.empty()) {
+                current_step = global_fem_solvers_cuda_float.begin()->second->getStepCount();
+            } else if (!global_fem_solvers_cuda_double.empty()) {
+                current_step = global_fem_solvers_cuda_double.begin()->second->getStepCount();
+            } else if (!global_fem_solvers_float.empty()) {
+                current_step = global_fem_solvers_float.begin()->second->getStepCount();
+            } else if (!global_fem_solvers_double.empty()) {
+                current_step = global_fem_solvers_double.begin()->second->getStepCount();
+            }
+
+            if (should_write_vtk(step_count, sim_time, last_vtk_time)) {
+                write_vtk_outputs(current_step, sim_time);
+                last_vtk_time = sim_time;
+            }
+
             if (!global_exec_until_end_fem_3d.load()) {
                 global_target_steps_fem_3d--;
             }
@@ -2549,7 +2902,9 @@ void worker_fem_3d_thread_func() {
             final_sim_time = global_fem_solvers_double.begin()->second->getSimTime();
         }
 
+        write_vtk_outputs(final_step, final_sim_time);
         emit_telemetry_fem_3d(final_sim_time, false, final_step);
+
 
         emit_kernel_log("INFO", "3D FEM worker thread execution cycle ended.", final_sim_time, "fem_3d", final_step);
 
@@ -2845,6 +3200,7 @@ void worker_fsi_3d_thread_func() {
         int initial_steps = 0;
         auto last_telemetry_time = std::chrono::steady_clock::now();
         double last_dt = 1.0e-7;
+        double last_vtk_time = global_t3d;
 
     while (!sim_fsi_3d_terminate.load()) {
         if (sim_fsi_3d_paused.load()) {
@@ -3030,6 +3386,11 @@ void worker_fsi_3d_thread_func() {
             global_step_3d++;
             step_count++;
 
+            if (should_write_vtk(step_count, global_t3d, last_vtk_time)) {
+                write_vtk_outputs(global_step_fsi_3d.load(), global_t3d);
+                last_vtk_time = global_t3d;
+            }
+
             if (!global_exec_until_end_fsi_3d.load()) {
                 global_target_steps_fsi_3d--;
             }
@@ -3074,6 +3435,7 @@ void worker_fsi_3d_thread_func() {
     }
 
     double final_sim_time = global_t3d;
+    write_vtk_outputs(global_step_fsi_3d.load(), final_sim_time);
     if (global_solver_3d) emit_telemetry_3d(global_t3d, true, global_step_fsi_3d.load());
 
     nlohmann::json progress_msg;
@@ -3117,6 +3479,7 @@ void worker_fem_fsi_3d_thread_func() {
         int initial_steps = 0;
         auto last_telemetry_time = std::chrono::steady_clock::now();
         double last_dt = 1.0e-7;
+        double last_vtk_time = global_t3d;
 
         std::string m_id = global_model_id.empty() ? "default_fem" : global_model_id;
 
@@ -3195,6 +3558,31 @@ void worker_fem_fsi_3d_thread_func() {
             global_step_fem_fsi_3d++;
             global_step_3d++;
             step_count++;
+
+            int current_step = global_step_fem_fsi_3d.load();
+            if (global_fem_fsi_couplers_cuda_float.count(m_id) && global_fem_fsi_couplers_cuda_float[m_id]) {
+                current_step = std::max(current_step, global_fem_fsi_couplers_cuda_float[m_id]->getStepCount());
+            } else if (!global_fem_fsi_couplers_cuda_float.empty()) {
+                current_step = std::max(current_step, global_fem_fsi_couplers_cuda_float.begin()->second->getStepCount());
+            } else if (global_fem_fsi_couplers_cuda_double.count(m_id) && global_fem_fsi_couplers_cuda_double[m_id]) {
+                current_step = std::max(current_step, global_fem_fsi_couplers_cuda_double[m_id]->getStepCount());
+            } else if (!global_fem_fsi_couplers_cuda_double.empty()) {
+                current_step = std::max(current_step, global_fem_fsi_couplers_cuda_double.begin()->second->getStepCount());
+            } else if (global_fem_fsi_couplers_float.count(m_id) && global_fem_fsi_couplers_float[m_id]) {
+                current_step = std::max(current_step, global_fem_fsi_couplers_float[m_id]->getStepCount());
+            } else if (!global_fem_fsi_couplers_float.empty()) {
+                current_step = std::max(current_step, global_fem_fsi_couplers_float.begin()->second->getStepCount());
+            } else if (global_fem_fsi_couplers_double.count(m_id) && global_fem_fsi_couplers_double[m_id]) {
+                current_step = std::max(current_step, global_fem_fsi_couplers_double[m_id]->getStepCount());
+            } else if (!global_fem_fsi_couplers_double.empty()) {
+                current_step = std::max(current_step, global_fem_fsi_couplers_double.begin()->second->getStepCount());
+            }
+
+            if (should_write_vtk(step_count, global_t3d, last_vtk_time)) {
+                write_vtk_outputs(current_step, global_t3d);
+                last_vtk_time = global_t3d;
+            }
+
             if (!global_exec_until_end_fem_fsi_3d.load()) {
                 global_target_steps_fem_fsi_3d.fetch_sub(1);
             }
@@ -3205,24 +3593,6 @@ void worker_fem_fsi_3d_thread_func() {
             bool should_emit = (target_interval_ms > 0) ? (elapsed_ms >= target_interval_ms) : true;
             if (should_emit || (global_target_steps_fem_fsi_3d.load() == 0 && !global_exec_until_end_fem_fsi_3d.load())) {
                 last_telemetry_time = now;
-                int current_step = global_step_fem_fsi_3d.load();
-                if (global_fem_fsi_couplers_cuda_float.count(m_id) && global_fem_fsi_couplers_cuda_float[m_id]) {
-                    current_step = std::max(current_step, global_fem_fsi_couplers_cuda_float[m_id]->getStepCount());
-                } else if (!global_fem_fsi_couplers_cuda_float.empty()) {
-                    current_step = std::max(current_step, global_fem_fsi_couplers_cuda_float.begin()->second->getStepCount());
-                } else if (global_fem_fsi_couplers_cuda_double.count(m_id) && global_fem_fsi_couplers_cuda_double[m_id]) {
-                    current_step = std::max(current_step, global_fem_fsi_couplers_cuda_double[m_id]->getStepCount());
-                } else if (!global_fem_fsi_couplers_cuda_double.empty()) {
-                    current_step = std::max(current_step, global_fem_fsi_couplers_cuda_double.begin()->second->getStepCount());
-                } else if (global_fem_fsi_couplers_float.count(m_id) && global_fem_fsi_couplers_float[m_id]) {
-                    current_step = std::max(current_step, global_fem_fsi_couplers_float[m_id]->getStepCount());
-                } else if (!global_fem_fsi_couplers_float.empty()) {
-                    current_step = std::max(current_step, global_fem_fsi_couplers_float.begin()->second->getStepCount());
-                } else if (global_fem_fsi_couplers_double.count(m_id) && global_fem_fsi_couplers_double[m_id]) {
-                    current_step = std::max(current_step, global_fem_fsi_couplers_double[m_id]->getStepCount());
-                } else if (!global_fem_fsi_couplers_double.empty()) {
-                    current_step = std::max(current_step, global_fem_fsi_couplers_double.begin()->second->getStepCount());
-                }
                 if (global_solver_3d) emit_telemetry_3d(global_t3d, false, current_step);
 
                 nlohmann::json progress_msg;
@@ -3268,7 +3638,9 @@ void worker_fem_fsi_3d_thread_func() {
         } else if (!global_fem_fsi_couplers_double.empty()) {
             final_step = std::max(final_step, global_fem_fsi_couplers_double.begin()->second->getStepCount());
         }
+        write_vtk_outputs(final_step, final_sim_time);
         if (global_solver_3d) emit_telemetry_3d(global_t3d, true, final_step);
+
 
         nlohmann::json progress_msg;
         progress_msg["type"] = "progress";
@@ -5723,10 +6095,16 @@ int main() {
 
                     std::string transfer_scheme = msg.value("transfer_scheme", "BSpline");
                     std::string velocity_scheme = msg.value("velocity_scheme", "APIC");
+                    std::string space_time_scheme = msg.value("space_time_scheme", "Leapfrog");
                     bool smooth_ps = msg.value("smooth_plastic_strain", true);
 
                     global_solver_mpm_2d->setTransferScheme(parseTransferScheme(transfer_scheme));
                     global_solver_mpm_2d->setSmoothPlasticStrain(smooth_ps);
+
+                    auto st_2d = (space_time_scheme == "RK2") ? Blast::MPMTimeIntegrationScheme::RK2 :
+                                 ((space_time_scheme == "USF") ? Blast::MPMTimeIntegrationScheme::USF :
+                                 ((space_time_scheme == "USL") ? Blast::MPMTimeIntegrationScheme::USL : Blast::MPMTimeIntegrationScheme::Leapfrog));
+                    global_solver_mpm_2d->setTimeScheme(st_2d);
 
                     if (velocity_scheme == "PIC") {
                         global_solver_mpm_2d->setVelocityScheme(Blast::MPMVelocityScheme::PIC);
@@ -5906,14 +6284,15 @@ int main() {
 
                     std::string transfer_scheme = msg.value("transfer_scheme", "BSpline");
                     std::string velocity_scheme = msg.value("velocity_scheme", "APIC");
-                    std::string space_time_scheme = msg.value("space_time_scheme", "RK2");
+                    std::string space_time_scheme = msg.value("space_time_scheme", "Leapfrog");
 
                     auto ts = parseTransferScheme(transfer_scheme);
                     auto vs = (velocity_scheme == "PIC") ? Blast::MPMVelocityScheme::PIC :
                               ((velocity_scheme == "FLIP") ? Blast::MPMVelocityScheme::FLIP : Blast::MPMVelocityScheme::APIC);
                     float flip_blend = static_cast<float>(get_json_double(msg, "flip_blend", 0.95));
-                    auto st = (space_time_scheme == "USL") ? Blast::MPMTimeIntegrationScheme::USL :
-                              ((space_time_scheme == "USF") ? Blast::MPMTimeIntegrationScheme::USF : Blast::MPMTimeIntegrationScheme::RK2);
+                    auto st = (space_time_scheme == "RK2") ? Blast::MPMTimeIntegrationScheme::RK2 :
+                              ((space_time_scheme == "USF") ? Blast::MPMTimeIntegrationScheme::USF :
+                              ((space_time_scheme == "USL") ? Blast::MPMTimeIntegrationScheme::USL : Blast::MPMTimeIntegrationScheme::Leapfrog));
 
                     bool smooth_ps = msg.value("smooth_plastic_strain", true);
 
@@ -6076,6 +6455,7 @@ int main() {
                         global_solver_mpm_3d->particleToGrid();
                     }
 
+                    init_gauges(msg);
                     emit_telemetry_mpm_3d(0.0, false);
                     size_t n_p = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles().size() : global_solver_mpm_3d->getParticles().size();
                     std::string init_log = "3D MPM Solver Initialized (" + std::to_string(n_p) + " particles, PPC=" + std::to_string(domain_ppc) + ", Device=" + (is_cuda_device(device) ? "CUDA GPU" : "CPU") + ")";
@@ -6202,7 +6582,12 @@ int main() {
 
                     std::string transfer_scheme = msg.value("transfer_scheme", "BSpline");
                     std::string velocity_scheme = msg.value("velocity_scheme", "APIC");
+                    std::string space_time_scheme = msg.value("space_time_scheme", "Leapfrog");
                     global_solver_mpm_2d->setTransferScheme(parseTransferScheme(transfer_scheme));
+                    auto st_2d_fsi = (space_time_scheme == "RK2") ? Blast::MPMTimeIntegrationScheme::RK2 :
+                                     ((space_time_scheme == "USF") ? Blast::MPMTimeIntegrationScheme::USF :
+                                     ((space_time_scheme == "USL") ? Blast::MPMTimeIntegrationScheme::USL : Blast::MPMTimeIntegrationScheme::Leapfrog));
+                    global_solver_mpm_2d->setTimeScheme(st_2d_fsi);
                     if (velocity_scheme == "PIC") {
                         global_solver_mpm_2d->setVelocityScheme(Blast::MPMVelocityScheme::PIC);
                     } else if (velocity_scheme == "FLIP") {
@@ -6447,13 +6832,14 @@ int main() {
 
                     std::string transfer_scheme = msg.value("transfer_scheme", "BSpline");
                     std::string velocity_scheme = msg.value("velocity_scheme", "APIC");
-                    std::string space_time_scheme = msg.value("space_time_scheme", "RK2");
+                    std::string space_time_scheme = msg.value("space_time_scheme", "Leapfrog");
                     auto ts = parseTransferScheme(transfer_scheme);
                     auto vs = (velocity_scheme == "PIC") ? Blast::MPMVelocityScheme::PIC :
                               ((velocity_scheme == "FLIP") ? Blast::MPMVelocityScheme::FLIP : Blast::MPMVelocityScheme::APIC);
                     float flip_blend = static_cast<float>(get_json_double(msg, "flip_blend", 0.95));
-                    auto st = (space_time_scheme == "USL") ? Blast::MPMTimeIntegrationScheme::USL :
-                              ((space_time_scheme == "USF") ? Blast::MPMTimeIntegrationScheme::USF : Blast::MPMTimeIntegrationScheme::RK2);
+                    auto st = (space_time_scheme == "RK2") ? Blast::MPMTimeIntegrationScheme::RK2 :
+                              ((space_time_scheme == "USF") ? Blast::MPMTimeIntegrationScheme::USF :
+                              ((space_time_scheme == "USL") ? Blast::MPMTimeIntegrationScheme::USL : Blast::MPMTimeIntegrationScheme::Leapfrog));
                     bool smooth_ps = msg.value("smooth_plastic_strain", true);
 
                     if (global_solver_mpm_3d_cuda) {
@@ -7245,6 +7631,7 @@ int main() {
                             global_fem_solvers_float[model_id] = std::move(fem);
                         }
                     }
+                    init_gauges(msg);
                     emit_kernel_log("SYSTEM", "3D Hexahedral Explicit FEM Solver Initialized for model " + model_id, 0.0, "3d");
                     emit_telemetry_fem_3d(0.0, false);
                 } else if (command == "STEP_FEM_3D") {
@@ -7894,6 +8281,7 @@ int main() {
                             }
                         }
 
+                        init_gauges(msg);
                         emit_kernel_log("SYSTEM", "3D Coupled FV-FEM Solver Initialized", 0.0, "3d");
                         emit_telemetry_3d(0.0, false);
 

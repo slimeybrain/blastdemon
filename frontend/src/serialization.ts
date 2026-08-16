@@ -58,7 +58,9 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
         'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
         'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
-        'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2'
+        'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
+        // VTK ROI & Strides
+        'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride'
     ];
 
 
@@ -299,6 +301,18 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     if (key !== 'slices' && key !== 'colormap' && key !== 'refresh_rate' && key !== 'log_scale' && key !== 'auto_scale' && key !== 'min_val' && key !== 'max_val' && key !== 'show_grid' && key !== 'interpolate') {
                         flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
                     }
+                });
+            }
+        }
+
+        // Trace VTKOutput connected to CFDSolver3D
+        const vtkConns3D = state.connections.filter(c => c.fromNode === solverNode3D.id || c.toNode === solverNode3D.id);
+        for (const conn of vtkConns3D) {
+            const otherId = conn.fromNode === solverNode3D.id ? conn.toNode : conn.fromNode;
+            const vtkNode = state.nodes.find(n => n.id === otherId);
+            if (vtkNode && vtkNode.type === 'VTKOutput') {
+                Object.entries(vtkNode.parameters).forEach(([key, value]) => {
+                    flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
                 });
             }
         }
@@ -818,6 +832,18 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     });
                 }
             }
+
+            // Trace VTKOutput connected to FSICoupler3D
+            const vtkConns = state.connections.filter(c => c.fromNode === couplerNode.id || c.toNode === couplerNode.id);
+            for (const conn of vtkConns) {
+                const otherId = conn.fromNode === couplerNode.id ? conn.toNode : conn.fromNode;
+                const vtkNode = state.nodes.find(n => n.id === otherId);
+                if (vtkNode && vtkNode.type === 'VTKOutput') {
+                    Object.entries(vtkNode.parameters).forEach(([key, value]) => {
+                        flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                    });
+                }
+            }
         }
 
         const cellSize = flattenedParams['cell_size'] || 0.01;
@@ -1033,6 +1059,18 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     });
                 }
             }
+
+            // Trace VTKOutput connected to FEMFSICoupler3D
+            const vtkConns = state.connections.filter(c => c.fromNode === couplerNode.id || c.toNode === couplerNode.id);
+            for (const conn of vtkConns) {
+                const otherId = conn.fromNode === couplerNode.id ? conn.toNode : conn.fromNode;
+                const vtkNode = state.nodes.find(n => n.id === otherId);
+                if (vtkNode && vtkNode.type === 'VTKOutput') {
+                    Object.entries(vtkNode.parameters).forEach(([key, value]) => {
+                        flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                    });
+                }
+            }
         }
 
         // Fallback: if slices not found from direct telemetry connections, search any Telemetry3DViewport in the model
@@ -1205,6 +1243,18 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 }
             }
             flattenedParams['mpm_objects'] = mpmObjects;
+
+            // Trace VTKOutput connected to MPMDomain3D
+            const vtkConns = state.connections.filter(c => c.fromNode === mpmDomain.id || c.toNode === mpmDomain.id);
+            for (const conn of vtkConns) {
+                const otherId = conn.fromNode === mpmDomain.id ? conn.toNode : conn.fromNode;
+                const vtkNode = state.nodes.find(n => n.id === otherId);
+                if (vtkNode && vtkNode.type === 'VTKOutput') {
+                    Object.entries(vtkNode.parameters).forEach(([key, value]) => {
+                        flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                    });
+                }
+            }
         }
     } else if (command === "INIT_FEM_3D" || command === "INIT_3D_FEM") {
         const femDomain = state.nodes.find(n => n.type === 'FEMDomain3D');
@@ -1267,6 +1317,18 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             state.nodes.filter(n => n.type === 'FEMObject3D').forEach(processObjNode);
 
             flattenedParams['fem_objects'] = femObjects;
+
+            // Trace VTKOutput connected to FEMDomain3D
+            const vtkConns = state.connections.filter(c => c.fromNode === femDomain.id || c.toNode === femDomain.id);
+            for (const conn of vtkConns) {
+                const otherId = conn.fromNode === femDomain.id ? conn.toNode : conn.fromNode;
+                const vtkNode = state.nodes.find(n => n.id === otherId);
+                if (vtkNode && vtkNode.type === 'VTKOutput') {
+                    Object.entries(vtkNode.parameters).forEach(([key, value]) => {
+                        flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                    });
+                }
+            }
         }
     } else if (command === "INIT_3D") {
         const cellSize = flattenedParams['cell_size'] || 0.01;

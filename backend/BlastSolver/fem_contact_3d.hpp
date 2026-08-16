@@ -35,6 +35,8 @@ public:
 
     void solveContact(FEMSolver3D<T>& solver, T dt);
     void solveMPMRebarContact(FEMSolver3D<T>& fem_solver, MPMSolver3D& mpm_solver, T dt);
+    void solveMPMFacetContact(FEMSolver3D<T>& fem_solver, MPMSolver3D& mpm_solver, T dt);
+    void solveMPMContact(FEMSolver3D<T>& fem_solver, MPMSolver3D& mpm_solver, T dt);
 
 private:
     void updateDynamicSurfaceNormals(FEMSolver3D<T>& solver);

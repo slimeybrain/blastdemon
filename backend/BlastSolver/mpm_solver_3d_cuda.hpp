@@ -172,7 +172,7 @@ private:
 
     MPMTransferScheme m_transfer_scheme{MPMTransferScheme::GIMP};
     MPMVelocityScheme m_velocity_scheme{MPMVelocityScheme::APIC};
-    MPMTimeIntegrationScheme m_time_scheme{MPMTimeIntegrationScheme::USL};
+    MPMTimeIntegrationScheme m_time_scheme{MPMTimeIntegrationScheme::Leapfrog};
     float m_flip_blend{0.95f};
     bool m_smooth_plastic_strain{true};
 

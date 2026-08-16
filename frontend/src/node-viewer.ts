@@ -865,7 +865,7 @@ export class NodeViewer {
             let value = node.parameters[key];
             if (key === 'space_time_scheme') {
                 if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
-                    value = node.parameters['space_time_scheme'] ?? 'RK2';
+                    value = node.parameters['space_time_scheme'] ?? 'Leapfrog';
                 } else {
                     const so = node.parameters['spatial_order'] ?? 2;
                     const to = node.parameters['temporal_order'] ?? 4;
@@ -2399,7 +2399,9 @@ export class NodeViewer {
             'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
             'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
             'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
-            'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2'
+            'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
+            // VTK ROI & Strides
+            'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride'
         ];
 
         const chargeShapeOptions = node.type === 'Charge3D' ? ['Sphere', 'Cylinder', 'Block'] : ['Sphere', 'Cylinder'];
@@ -2440,7 +2442,7 @@ export class NodeViewer {
             'hourglass_model': ['FlanaganBelytschkoStiffness', 'FlanaganBelytschkoViscous', 'KosloffFrazier'],
             'mesh_source': ['Box Generator', 'Cylinder Generator', 'LS-DYNA Keyword File'],
             'preset': [...MPM_MATERIAL_PRESET_NAMES],
-            'trigger_type': ['end', 'time', 'step'],
+            'trigger_type': node.type === 'VTKOutput' ? ['Step Interval', 'Time Interval'] : ['end', 'time', 'step'],
             'composition': ['Aluminized ANFO', 'Ammonal', 'ANFO', 'Baratol', 'C-4', 'Composition A-3', 'Composition B', 'Composition C-3', 'Cyclotol', 'Heavy ANFO', 'HMX', 'LX-04', 'LX-07', 'LX-10', 'LX-14', 'LX-17', 'Mining Emulsion', 'Octol', 'PBX 9404', 'PBX 9501', 'PBX 9502', 'PE-10', 'PE-12', 'PE-4', 'PE-8', 'Pentolite', 'PETN', 'RDX', 'TATB', 'Tetryl', 'TNT', 'Water Gel', 'Custom'],
             'init_mode': node.type === 'CFDSolver3D' ? ['From1D', 'From2D', 'Multi-Material JWL', 'Ideal Gas'] : ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
             'flux_scheme': ['AUSM+', 'Rusanov'],
@@ -2456,7 +2458,7 @@ export class NodeViewer {
             'contour_quantity': ['von_mises', 'plastic_strain', 'density', 'velocity', 'pressure'],
             'color_map': ['viridis', 'plasma', 'jet', 'coolwarm'],
             'space_time_scheme': (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') ? 
-                ['USL', 'USF', 'RK2'] : 
+                ['Leapfrog', 'RK2', 'USL', 'USF'] : 
                 ['MUSCL-Hancock (2nd-Order Space/Time)', 'ADER-2 (2nd-Order Space/Time)', 'ADER-3 (3rd-Order Space/Time)']
         };
 
