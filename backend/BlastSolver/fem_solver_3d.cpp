@@ -2502,14 +2502,14 @@ void FEMSolver3D<T>::convertElementToMPMParticles(const FEMElement3D<T>& elem, s
         p.lp[0] = h_p; p.lp[1] = h_p; p.lp[2] = h_p;
         for (int r = 0; r < 3; ++r) {
             for (int c = 0; c < 3; ++c) {
-                p.sigma[r][c] = static_cast<float>(elem.sigma[r][c]);
-                p.F[r][c] = static_cast<float>(elem.F[r][c]);
+                p.sigma[r][c] = 0.0f;
+                p.F[r][c] = (r == c) ? 1.0f : 0.0f;
                 p.B[r][c] = 0.0f;
                 p.L_grad[r][c] = 0.0f;
             }
         }
         p.ep_bar = static_cast<float>(elem.ep_bar);
-        p.damage = static_cast<float>(elem.damage);
+        p.damage = 1.0f;
         p.temperature = static_cast<float>(elem.temperature);
         p.object_id = elem.mat_id;
         p.has_failed = true;
@@ -2542,14 +2542,14 @@ void FEMSolver3D<T>::convertElementToMPMParticles(const FEMElement3D<T>& elem, s
             p.lp[0] = h_p; p.lp[1] = h_p; p.lp[2] = h_p;
             for (int r = 0; r < 3; ++r) {
                 for (int c = 0; c < 3; ++c) {
-                    p.sigma[r][c] = static_cast<float>(elem.sigma[r][c]);
-                    p.F[r][c] = static_cast<float>(elem.F[r][c]);
+                    p.sigma[r][c] = 0.0f;
+                    p.F[r][c] = (r == c) ? 1.0f : 0.0f;
                     p.B[r][c] = 0.0f;
                     p.L_grad[r][c] = 0.0f;
                 }
             }
             p.ep_bar = static_cast<float>(elem.ep_bar);
-            p.damage = static_cast<float>(elem.damage);
+            p.damage = 1.0f;
             p.temperature = static_cast<float>(elem.temperature);
             p.object_id = elem.mat_id;
             p.has_failed = true;

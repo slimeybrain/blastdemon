@@ -532,10 +532,15 @@ void FEMFSICoupler3DCUDA<T>::stepWithDt(T dt) {
     size_t prev_mpm_count = mpm_cuda ? mpm_cuda->getParticleCount() : 0;
     m_fem_solver->stepWithDt(dt);
 
-    // 3. Advance MPM debris solver by dt on GPU (with FSI forces from step 1)
+    // 3. If new debris particles were spawned during FEM erosion, scatter to grid
+    bool newly_added = (mpm_cuda && mpm_cuda->getParticleCount() > prev_mpm_count);
+    if (newly_added) {
+        mpm_cuda->particleToGridDeviceOnly();
+    }
+
+    // 4. Advance MPM debris solver by dt on GPU (with full FSI forces preserved)
     if (mpm_cuda && mpm_cuda->getParticleCount() > 0) {
-        bool newly_added = (mpm_cuda->getParticleCount() > prev_mpm_count);
-        mpm_cuda->stepWithDt(static_cast<float>(dt), newly_added);
+        mpm_cuda->stepWithDt(static_cast<float>(dt), false);
     }
 
     // 4. Advance FV gas dynamics solver by dt on GPU

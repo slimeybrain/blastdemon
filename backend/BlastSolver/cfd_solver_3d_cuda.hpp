@@ -144,6 +144,7 @@ public:
     void getSliceDimensions(const Slice3D& slice, int& w, int& h, int& depth) const override;
     using CFDSolver3D::getSliceDimensions;
     std::vector<float> getCellValues(int i, int j, int k) const override;
+    bool getFluidVelocity(int i, int j, int k, float& u, float& v, float& w, float& rho, float& p) const override;
     std::vector<float> extractPressureField() const override;
     void coupleFSIWithMPMGPU(void* mpm_solver_cuda) override;
     void coupleFSIWithFEMGPU(void* fem_solver_cuda) override;

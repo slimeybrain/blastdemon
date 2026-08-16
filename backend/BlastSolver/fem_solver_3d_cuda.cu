@@ -3283,6 +3283,20 @@ template void launch_fem_contact_forces_kernel_3d<double>(FEMNode3D<double>*, in
 template float launch_fem_compute_step_size_kernel_3d<float>(const FEMNode3D<float>*, const FEMElement3D<float>*, int, const MaterialTable3D*, float, float*, cudaStream_t);
 template double launch_fem_compute_step_size_kernel_3d<double>(const FEMNode3D<double>*, const FEMElement3D<double>*, int, const MaterialTable3D*, double, double*, cudaStream_t);
 
+template <typename T>
+void FEMSolver3DCUDA<T>::evaluateErosionCriteria() {
+    m_cpu_solver.evaluateErosionCriteria();
+    syncToDevice();
+    if (m_cuda_mpm_solver && m_cpu_solver.getMPMSolver()) {
+        const auto& cpu_particles = m_cpu_solver.getMPMSolver()->getParticles();
+        if (cpu_particles.size() > m_cuda_mpm_solver->getParticleCount()) {
+            std::vector<MPMParticle3D> new_pts(cpu_particles.begin() + m_cuda_mpm_solver->getParticleCount(), cpu_particles.end());
+            m_cuda_mpm_solver->getMaterialTables() = m_cpu_solver.getMaterialTables();
+            m_cuda_mpm_solver->addParticlesDirect(new_pts);
+        }
+    }
+}
+
 template class FEMSolver3DCUDA<float>;
 template class FEMSolver3DCUDA<double>;
 

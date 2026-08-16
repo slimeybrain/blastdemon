@@ -356,7 +356,7 @@ void FEMFSICoupler3D<T>::applyFluidPressureToStructure(T dt) {
         }
     }
 
-    // Apply fluid pressure gradient acceleration to active MPM debris particles
+    // Apply fluid pressure gradient and blast aerodynamic drag to active MPM debris particles
     auto* mpm_cpu = m_fem_solver->getMPMSolver();
     if (mpm_cpu && !mpm_cpu->getParticles().empty()) {
         auto& particles = mpm_cpu->getParticles();
@@ -374,9 +374,35 @@ void FEMFSICoupler3D<T>::applyFluidPressureToStructure(T dt) {
 
             float r_p = std::max(0.001f, p.lp[0]);
             float A_p = 3.14159f * r_p * r_p;
-            float F_x = static_cast<float>(p_L - p_R) * A_p;
-            float F_y = static_cast<float>(p_B - p_T) * A_p;
-            float F_z = static_cast<float>(p_D - p_U) * A_p;
+            float V_p = (p.V > 0.0f) ? p.V : ((4.0f / 3.0f) * 3.14159f * r_p * r_p * r_p);
+
+            // Pressure gradient force: F_grad = -V_p * grad(p)
+            float grad_px = static_cast<float>(p_R - p_L) / static_cast<float>(2.0 * dx);
+            float grad_py = static_cast<float>(p_T - p_B) / static_cast<float>(2.0 * dy);
+            float grad_pz = static_cast<float>(p_U - p_D) / static_cast<float>(2.0 * dz);
+
+            float F_x = -V_p * grad_px;
+            float F_y = -V_p * grad_py;
+            float F_z = -V_p * grad_pz;
+
+            // Sample surrounding fluid velocity, density, and pressure for supersonic blast aerodynamic drag
+            float u_f = 0.0f, v_f = 0.0f, w_f = 0.0f, rho_f = 1.2f, p_f = 101325.0f;
+            if (m_fv_solver->getFluidVelocity(i, j, k, u_f, v_f, w_f, rho_f, p_f)) {
+                float rel_vx = u_f - p.v[0];
+                float rel_vy = v_f - p.v[1];
+                float rel_vz = w_f - p.v[2];
+                float rel_v = std::sqrt(rel_vx * rel_vx + rel_vy * rel_vy + rel_vz * rel_vz);
+
+                float gamma = 1.4f;
+                float c_s = std::sqrt(std::max(100.0f, gamma * std::max(101325.0f, p_f) / std::max(0.1f, rho_f)));
+                float M_rel = rel_v / c_s;
+                float Cd = (M_rel > 1.0f) ? std::min(1.8f, 1.2f + 0.4f * (M_rel - 1.0f)) : 1.0f;
+
+                float F_drag_mag = 0.5f * Cd * rho_f * A_p * rel_v;
+                F_x += F_drag_mag * rel_vx;
+                F_y += F_drag_mag * rel_vy;
+                F_z += F_drag_mag * rel_vz;
+            }
 
             float m_p = std::max(1.0e-6f, p.m);
             p.v[0] += (F_x / m_p) * static_cast<float>(dt);
@@ -404,14 +430,17 @@ void FEMFSICoupler3D<T>::stepWithDt(T dt) {
     applyFluidPressureToStructure(dt);
 
     // 4. Advance FEM structural solver by dt
+    auto* mpm_cpu = m_fem_solver->getMPMSolver();
     m_fem_solver->stepWithDt(dt);
 
-    // 5. Advance MPM debris solver by dt
-    if (m_fem_solver->getMPMSolver() && !m_fem_solver->getMPMSolver()->getParticles().empty()) {
-        m_fem_solver->getMPMSolver()->stepWithDt(static_cast<float>(dt));
+    // 5. Newly spawned debris particles will be coupled in the next regular timestep
+
+    // 6. Advance MPM debris solver by dt
+    if (mpm_cpu && !mpm_cpu->getParticles().empty()) {
+        mpm_cpu->stepWithDt(static_cast<float>(dt));
     }
 
-    // 6. Advance 3D FV Eulerian gas dynamics solver by dt
+    // 7. Advance 3D FV Eulerian gas dynamics solver by dt
     m_fv_solver->step(static_cast<double>(dt));
 }
 

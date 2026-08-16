@@ -165,6 +165,7 @@ if(BUILD_TESTS)
     add_test_executable_if_exists(test_fem_3d_rebar_elements backend/BlastSolver/test_fem_3d_rebar_elements.cpp)
     add_test_executable_if_exists(test_rc_box_internal_blast backend/BlastSolver/test_rc_box_internal_blast.cpp)
     add_test_executable_if_exists(test_fem_3d_mpm_hex_contact backend/BlastSolver/test_fem_3d_mpm_hex_contact.cpp)
+    add_test_executable_if_exists(test_fem_3d_mpm_debris_blast_accel backend/BlastSolver/test_fem_3d_mpm_debris_blast_accel.cu)
 endif()
 
 

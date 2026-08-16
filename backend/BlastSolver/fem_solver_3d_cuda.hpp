@@ -271,6 +271,8 @@ public:
     FEMSolver3D<T>& getCpuSolver() { return m_cpu_solver; }
     cudaStream_t getStream() const { return m_cuda_stream; }
 
+    void evaluateErosionCriteria();
+
 private:
     FEMSolver3D<T> m_cpu_solver;
     FEMNode3D<T>* m_d_nodes{nullptr};

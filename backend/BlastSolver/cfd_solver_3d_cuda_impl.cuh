@@ -4122,6 +4122,30 @@ std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::getCellValues(int
 }
 
 template <typename RealType, bool IsMultiMaterial>
+bool CFDSolver3DCuda<RealType, IsMultiMaterial>::getFluidVelocity(int gx, int gy, int gz, float& u, float& v, float& w, float& rho, float& p) const {
+    ensure_paged_in();
+    bind_constants();
+    if (gx < 0 || gx >= nx || gy < 0 || gy >= ny || gz < 0 || gz >= nz) return false;
+
+    int tx = gx / TILE_SIZE_3D, ty = gy / TILE_SIZE_3D, tz = gz / TILE_SIZE_3D;
+    int t_idx = tx + ty * ((nx+7)/8) + tz * ((nx+7)/8) * ((ny+7)/8);
+    int lx = gx % TILE_SIZE_3D, ly = gy % TILE_SIZE_3D, lz = gz % TILE_SIZE_3D;
+    int c_idx = lx + ly * 8 + lz * 64;
+
+    if (t_idx != last_cached_tile_idx) {
+        CHECK_CUDA(cudaMemcpy(&cached_tile, (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states + t_idx, sizeof(PrimitiveTile3D<RealType, IsMultiMaterial>), cudaMemcpyDeviceToHost));
+        last_cached_tile_idx = t_idx;
+    }
+
+    p = static_cast<float>(cached_tile.p[c_idx]);
+    rho = static_cast<float>(cached_tile.rho[c_idx]);
+    u = static_cast<float>(cached_tile.ux[c_idx]);
+    v = static_cast<float>(cached_tile.uy[c_idx]);
+    w = static_cast<float>(cached_tile.uz[c_idx]);
+    return true;
+}
+
+template <typename RealType, bool IsMultiMaterial>
 std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::extractSlice(const Slice3D& slice) const {
     ensure_paged_in();
     bind_constants();
@@ -6028,19 +6052,29 @@ static __global__ void kernel_fsi_couple_active_gpu(
         d_solid_vel[t_idx].vz[c_idx] = vz;
     }
 
-    if (d_geom) {
-        float m_L = get_mpm_mass_at(d_grid, i_mpm - 1, j_mpm, k_mpm, nx_mpm, ny_mpm, nz_mpm);
-        float m_R = get_mpm_mass_at(d_grid, i_mpm + 1, j_mpm, k_mpm, nx_mpm, ny_mpm, nz_mpm);
-        float m_B = get_mpm_mass_at(d_grid, i_mpm, j_mpm - 1, k_mpm, nx_mpm, ny_mpm, nz_mpm);
-        float m_T = get_mpm_mass_at(d_grid, i_mpm, j_mpm + 1, k_mpm, nx_mpm, ny_mpm, nz_mpm);
-        float m_D = get_mpm_mass_at(d_grid, i_mpm, j_mpm, k_mpm - 1, nx_mpm, ny_mpm, nz_mpm);
-        float m_U = get_mpm_mass_at(d_grid, i_mpm, j_mpm, k_mpm + 1, nx_mpm, ny_mpm, nz_mpm);
+    float m_L = get_mpm_mass_at(d_grid, i_mpm - 1, j_mpm, k_mpm, nx_mpm, ny_mpm, nz_mpm);
+    float m_R = get_mpm_mass_at(d_grid, i_mpm + 1, j_mpm, k_mpm, nx_mpm, ny_mpm, nz_mpm);
+    float m_B = get_mpm_mass_at(d_grid, i_mpm, j_mpm - 1, k_mpm, nx_mpm, ny_mpm, nz_mpm);
+    float m_T = get_mpm_mass_at(d_grid, i_mpm, j_mpm + 1, k_mpm, nx_mpm, ny_mpm, nz_mpm);
+    float m_D = get_mpm_mass_at(d_grid, i_mpm, j_mpm, k_mpm - 1, nx_mpm, ny_mpm, nz_mpm);
+    float m_U = get_mpm_mass_at(d_grid, i_mpm, j_mpm, k_mpm + 1, nx_mpm, ny_mpm, nz_mpm);
 
-        float grad_x = m_R - m_L;
-        float grad_y = m_T - m_B;
-        float grad_z = m_U - m_D;
-        float grad_mag = sqrtf(grad_x * grad_x + grad_y * grad_y + grad_z * grad_z);
+    float grad_x = m_R - m_L;
+    float grad_y = m_T - m_B;
+    float grad_z = m_U - m_D;
+    float grad_mag = sqrtf(grad_x * grad_x + grad_y * grad_y + grad_z * grad_z);
 
+    int n_solid_neighbors = 0;
+    if (m_L > 1.0e-8f) n_solid_neighbors++;
+    if (m_R > 1.0e-8f) n_solid_neighbors++;
+    if (m_B > 1.0e-8f) n_solid_neighbors++;
+    if (m_T > 1.0e-8f) n_solid_neighbors++;
+    if (m_D > 1.0e-8f) n_solid_neighbors++;
+    if (m_U > 1.0e-8f) n_solid_neighbors++;
+
+    // Only continuum solid bodies mark impermeable wall boundaries in CFD;
+    // eroded sub-grid debris fragments allow gas to flow past with full aerodynamic drag and pressure gradients
+    if (d_geom && n_solid_neighbors >= 4) {
         float nx_normal = 0.0f, ny_normal = 0.0f, nz_normal = 0.0f;
         if (grad_mag > 1.0e-8f) {
             nx_normal = -grad_x / grad_mag;
@@ -6075,12 +6109,30 @@ static __global__ void kernel_fsi_couple_active_gpu(
         f_z -= get_fsi_pressure_at<RealType, IsMultiMaterial>(d_states, gx, gy, gz + 1, nx_cfd, ny_cfd, nz_cfd, ntx, nty);
     }
 
-    float F_x = f_x * dy_cfd * dz_cfd;
-    float F_y = f_y * dx_cfd * dz_cfd;
-    float F_z = f_z * dx_cfd * dy_cfd;
+    float cell_vol_mpm = dx_mpm * dy_mpm * dz_mpm;
+    float solid_vol = mass / 2400.0f; // Typical solid concrete density
+    float phi_solid = fminf(1.0f, fmaxf(0.001f, solid_vol / fmaxf(1.0e-12f, cell_vol_mpm)));
 
-    // Sample surrounding fluid velocity and density to evaluate sub-grid aerodynamic drag on exposed debris
-    float u_f_sum = 0.0f, v_f_sum = 0.0f, w_f_sum = 0.0f, rho_f_sum = 0.0f;
+    float F_x = 0.0f, F_y = 0.0f, F_z = 0.0f;
+
+    if (n_solid_neighbors >= 4) {
+        // Continuum solid boundary: full macroscopic cell face pressure
+        F_x = f_x * dy_cfd * dz_cfd;
+        F_y = f_y * dx_cfd * dz_cfd;
+        F_z = f_z * dx_cfd * dy_cfd;
+    } else {
+        // Sub-grid / eroded debris particles: volumetric pressure gradient force F = -V_s * grad(P)
+        float V_debris = fminf(cell_vol_mpm, solid_vol);
+        float grad_px = f_x / (2.0f * dx_cfd);
+        float grad_py = f_y / (2.0f * dy_cfd);
+        float grad_pz = f_z / (2.0f * dz_cfd);
+        F_x = grad_px * V_debris;
+        F_y = grad_py * V_debris;
+        F_z = grad_pz * V_debris;
+    }
+
+    // Sample surrounding fluid velocity, density and pressure to evaluate aerodynamic drag and pressure forces
+    float u_f_sum = 0.0f, v_f_sum = 0.0f, w_f_sum = 0.0f, rho_f_sum = 0.0f, p_f_sum = 0.0f;
     int n_fluid_neighbors = 0;
 
     auto sample_fsi_fluid_state = [&](int n_gx, int n_gy, int n_gz) {
@@ -6092,6 +6144,7 @@ static __global__ void kernel_fsi_couple_active_gpu(
                 v_f_sum += static_cast<float>(d_states[n_t].uy[n_c]);
                 w_f_sum += static_cast<float>(d_states[n_t].uz[n_c]);
                 rho_f_sum += static_cast<float>(d_states[n_t].rho[n_c]);
+                p_f_sum += static_cast<float>(d_states[n_t].p[n_c]);
                 n_fluid_neighbors++;
             }
         }
@@ -6110,17 +6163,30 @@ static __global__ void kernel_fsi_couple_active_gpu(
         float v_f = v_f_sum * inv_n;
         float w_f = w_f_sum * inv_n;
         float rho_f = rho_f_sum * inv_n;
+        float p_f = p_f_sum * inv_n;
 
         float rel_vx = u_f - vx;
         float rel_vy = v_f - vy;
         float rel_vz = w_f - vz;
         float rel_v_mag = sqrtf(rel_vx * rel_vx + rel_vy * rel_vy + rel_vz * rel_vz);
 
-        float exposure = static_cast<float>(n_fluid_neighbors) / 6.0f;
-        float Cd = 1.0f; // Aerodynamic drag coefficient for rough/irregular solid debris fragments
+        float exposure = fmaxf(0.5f, static_cast<float>(n_fluid_neighbors) / 6.0f);
+        float gamma = 1.4f;
+        float c_s = sqrtf(fmaxf(100.0f, gamma * fmaxf(101325.0f, p_f) / fmaxf(0.1f, rho_f)));
+        float M_rel = rel_v_mag / c_s;
+        float Cd = (M_rel > 1.0f) ? fminf(1.8f, 1.2f + 0.4f * (M_rel - 1.0f)) : 1.0f;
+
         float A_x = dy_cfd * dz_cfd;
         float A_y = dx_cfd * dz_cfd;
         float A_z = dx_cfd * dy_cfd;
+
+        if (n_solid_neighbors < 4) {
+            // Projected debris cross-sectional area scaling: A_proj ~ 1.21 * V^(2/3)
+            float A_proj = 1.21f * powf(fmaxf(1.0e-12f, solid_vol), 0.6666667f);
+            A_x = fminf(A_x, A_proj);
+            A_y = fminf(A_y, A_proj);
+            A_z = fminf(A_z, A_proj);
+        }
 
         float F_drag_x = 0.5f * Cd * rho_f * A_x * rel_v_mag * rel_vx * exposure;
         float F_drag_y = 0.5f * Cd * rho_f * A_y * rel_v_mag * rel_vy * exposure;
@@ -6131,76 +6197,94 @@ static __global__ void kernel_fsi_couple_active_gpu(
         F_z += F_drag_z;
     }
 
-    // Mass-weighted volumetric distribution across local solid column stencil to eliminate G2P velocity damping
-    if (fabsf(F_z) > 1.0e-12f) {
-        float mass_z_stencil = 0.0f;
-        for (int dk = -2; dk <= 2; ++dk) {
-            int k_c = k_mpm + dk;
-            if (k_c >= 0 && k_c < nz_mpm) {
-                int k_idx = (i_mpm * ny_mpm + j_mpm) * nz_mpm + k_c;
-                if (d_grid[k_idx].m > 1.0e-8f) mass_z_stencil += d_grid[k_idx].m;
-            }
+    // Physical acceleration limiter: prevent divide-by-small-mass numerical runaway on debris
+    if (mass > 1.0e-8f && n_solid_neighbors < 4) {
+        float max_a = 500000.0f; // 500,000 m/s^2 upper physical bound (e.g., 5 m/s per 10us step)
+        float a_mag = sqrtf((F_x * F_x + F_y * F_y + F_z * F_z) / (mass * mass));
+        if (a_mag > max_a) {
+            float scale_a = max_a / a_mag;
+            F_x *= scale_a;
+            F_y *= scale_a;
+            F_z *= scale_a;
         }
-        if (mass_z_stencil > 1.0e-12f) {
+    }
+
+    // Direct force application for exposed debris fragments; mass-weighted stencil for deep continuous solids
+    if (n_fluid_neighbors >= 2) {
+        if (fabsf(F_x) > 1.0e-12f) atomicAdd(&d_grid[mpm_idx].f_ext[0], F_x);
+        if (fabsf(F_y) > 1.0e-12f) atomicAdd(&d_grid[mpm_idx].f_ext[1], F_y);
+        if (fabsf(F_z) > 1.0e-12f) atomicAdd(&d_grid[mpm_idx].f_ext[2], F_z);
+    } else {
+        if (fabsf(F_z) > 1.0e-12f) {
+            float mass_z_stencil = 0.0f;
             for (int dk = -2; dk <= 2; ++dk) {
                 int k_c = k_mpm + dk;
                 if (k_c >= 0 && k_c < nz_mpm) {
                     int k_idx = (i_mpm * ny_mpm + j_mpm) * nz_mpm + k_c;
-                    if (d_grid[k_idx].m > 1.0e-8f) {
-                        atomicAdd(&d_grid[k_idx].f_ext[2], F_z * (d_grid[k_idx].m / mass_z_stencil));
-                    }
+                    if (d_grid[k_idx].m > 1.0e-8f) mass_z_stencil += d_grid[k_idx].m;
                 }
             }
-        } else {
-            atomicAdd(&d_grid[mpm_idx].f_ext[2], F_z);
-        }
-    }
-
-    if (fabsf(F_x) > 1.0e-12f) {
-        float mass_x_stencil = 0.0f;
-        for (int di = -2; di <= 2; ++di) {
-            int i_c = i_mpm + di;
-            if (i_c >= 0 && i_c < nx_mpm) {
-                int i_idx = (i_c * ny_mpm + j_mpm) * nz_mpm + k_mpm;
-                if (d_grid[i_idx].m > 1.0e-8f) mass_x_stencil += d_grid[i_idx].m;
+            if (mass_z_stencil > 1.0e-12f) {
+                for (int dk = -2; dk <= 2; ++dk) {
+                    int k_c = k_mpm + dk;
+                    if (k_c >= 0 && k_c < nz_mpm) {
+                        int k_idx = (i_mpm * ny_mpm + j_mpm) * nz_mpm + k_c;
+                        if (d_grid[k_idx].m > 1.0e-8f) {
+                            atomicAdd(&d_grid[k_idx].f_ext[2], F_z * (d_grid[k_idx].m / mass_z_stencil));
+                        }
+                    }
+                }
+            } else {
+                atomicAdd(&d_grid[mpm_idx].f_ext[2], F_z);
             }
         }
-        if (mass_x_stencil > 1.0e-12f) {
+
+        if (fabsf(F_x) > 1.0e-12f) {
+            float mass_x_stencil = 0.0f;
             for (int di = -2; di <= 2; ++di) {
                 int i_c = i_mpm + di;
                 if (i_c >= 0 && i_c < nx_mpm) {
                     int i_idx = (i_c * ny_mpm + j_mpm) * nz_mpm + k_mpm;
-                    if (d_grid[i_idx].m > 1.0e-8f) {
-                        atomicAdd(&d_grid[i_idx].f_ext[0], F_x * (d_grid[i_idx].m / mass_x_stencil));
-                    }
+                    if (d_grid[i_idx].m > 1.0e-8f) mass_x_stencil += d_grid[i_idx].m;
                 }
             }
-        } else {
-            atomicAdd(&d_grid[mpm_idx].f_ext[0], F_x);
-        }
-    }
-
-    if (fabsf(F_y) > 1.0e-12f) {
-        float mass_y_stencil = 0.0f;
-        for (int dj = -2; dj <= 2; ++dj) {
-            int j_c = j_mpm + dj;
-            if (j_c >= 0 && j_c < ny_mpm) {
-                int j_idx = (i_mpm * ny_mpm + j_c) * nz_mpm + k_mpm;
-                if (d_grid[j_idx].m > 1.0e-8f) mass_y_stencil += d_grid[j_idx].m;
+            if (mass_x_stencil > 1.0e-12f) {
+                for (int di = -2; di <= 2; ++di) {
+                    int i_c = i_mpm + di;
+                    if (i_c >= 0 && i_c < nx_mpm) {
+                        int i_idx = (i_c * ny_mpm + j_mpm) * nz_mpm + k_mpm;
+                        if (d_grid[i_idx].m > 1.0e-8f) {
+                            atomicAdd(&d_grid[i_idx].f_ext[0], F_x * (d_grid[i_idx].m / mass_x_stencil));
+                        }
+                    }
+                }
+            } else {
+                atomicAdd(&d_grid[mpm_idx].f_ext[0], F_x);
             }
         }
-        if (mass_y_stencil > 1.0e-12f) {
+
+        if (fabsf(F_y) > 1.0e-12f) {
+            float mass_y_stencil = 0.0f;
             for (int dj = -2; dj <= 2; ++dj) {
                 int j_c = j_mpm + dj;
                 if (j_c >= 0 && j_c < ny_mpm) {
                     int j_idx = (i_mpm * ny_mpm + j_c) * nz_mpm + k_mpm;
-                    if (d_grid[j_idx].m > 1.0e-8f) {
-                        atomicAdd(&d_grid[j_idx].f_ext[1], F_y * (d_grid[j_idx].m / mass_y_stencil));
-                    }
+                    if (d_grid[j_idx].m > 1.0e-8f) mass_y_stencil += d_grid[j_idx].m;
                 }
             }
-        } else {
-            atomicAdd(&d_grid[mpm_idx].f_ext[1], F_y);
+            if (mass_y_stencil > 1.0e-12f) {
+                for (int dj = -2; dj <= 2; ++dj) {
+                    int j_c = j_mpm + dj;
+                    if (j_c >= 0 && j_c < ny_mpm) {
+                        int j_idx = (i_mpm * ny_mpm + j_c) * nz_mpm + k_mpm;
+                        if (d_grid[j_idx].m > 1.0e-8f) {
+                            atomicAdd(&d_grid[j_idx].f_ext[1], F_y * (d_grid[j_idx].m / mass_y_stencil));
+                        }
+                    }
+                }
+            } else {
+                atomicAdd(&d_grid[mpm_idx].f_ext[1], F_y);
+            }
         }
     }
 }
@@ -6838,6 +6922,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithFEMGPU(void* fem_s
                 mpm_cuda->getXMin(), mpm_cuda->getYMin(), mpm_cuda->getZMin()
             );
             CHECK_CUDA(cudaGetLastError());
+            mpm_cuda->storeFSIForces();
         }
     }
 

@@ -154,6 +154,14 @@ public:
         getSliceDimensions(slice, w, h, d);
     }
     virtual std::vector<float> getCellValues(int i, int j, int k) const = 0;
+    virtual bool getFluidVelocity(int i, int j, int k, float& u, float& v, float& w, float& rho, float& p) const {
+        auto vals = getCellValues(i, j, k);
+        if (vals.size() < 2) return false;
+        p = vals[0];
+        rho = vals[1];
+        u = 0.0f; v = 0.0f; w = 0.0f;
+        return true;
+    }
     // Bulk pressure extraction for FSI coupling — one cudaMemcpy for the whole field, not per-cell
     virtual std::vector<float> extractPressureField() const { return {}; }
     virtual void coupleFSIWithMPMGPU(void* /*mpm_solver_cuda*/) {}
@@ -349,6 +357,17 @@ public:
     void getSliceDimensions(const Slice3D& slice, int& w, int& h, int& depth) const override;
     using CFDSolver3D::getSliceDimensions;
     std::vector<float> getCellValues(int i, int j, int k) const override;
+    bool getFluidVelocity(int i, int j, int k, float& u, float& v, float& w, float& rho, float& p) const override {
+        if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz || states_pool.empty()) return false;
+        int t_idx = (i >> 3) + (j >> 3) * n_tiles_x + (k >> 3) * n_tiles_x * n_tiles_y;
+        int c_idx = (i & 7) + (j & 7) * 8 + (k & 7) * 64;
+        p = static_cast<float>(states_pool[t_idx].p[c_idx]);
+        rho = static_cast<float>(states_pool[t_idx].rho[c_idx]);
+        u = static_cast<float>(states_pool[t_idx].ux[c_idx]);
+        v = static_cast<float>(states_pool[t_idx].uy[c_idx]);
+        w = static_cast<float>(states_pool[t_idx].uz[c_idx]);
+        return true;
+    }
     std::vector<float> extractPressureField() const override {
         std::vector<float> pfield(static_cast<size_t>(nx) * ny * nz);
         for (int i = 0; i < nx; ++i) {
