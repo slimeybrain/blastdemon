@@ -96,6 +96,10 @@ struct MaterialTable3D {
     bool enable_stress_erosion{false};
     float erosion_stress{600.0e6f};       // Tensile hydrostatic stress threshold (Pa)
     bool enable_timestep_erosion{false};
+
+    // Directional Crack Band & Non-Local Damage Regularization
+    bool directional_crack_band{true};   // Bažant crack band angle normalization against mesh bias
+    float nonlocal_radius{0.05f};         // Non-local damage interaction radius (m) (0.05m for concrete, 0.0 for metals)
 };
 
 struct MPMParticle3D {

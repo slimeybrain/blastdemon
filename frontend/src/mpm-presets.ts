@@ -23,6 +23,9 @@ export interface MPMMaterialParams {
     mg_gamma0: number;
     mg_c0: number;
     mg_s: number;
+    // Directional Crack Band & Non-Local Damage
+    directional_crack_band?: boolean;
+    nonlocal_radius?: number;
     // Concrete Core Properties
     fc?: number;
     ft?: number;
@@ -606,6 +609,21 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         unit: 'dim',
         section: 'cscm',
         tooltip: 'CSCM ductile damage accumulation parameter D2.'
+    },
+    'directional_crack_band': {
+        key: 'directional_crack_band',
+        label: 'Directional Crack Band',
+        shortDesc: 'Bažant crack angle projection',
+        section: 'failure',
+        tooltip: 'Scales fracture energy based on principal tensile stress angle, eliminating the 41% energy penalty on 45° diagonal cracks in structured hex meshes.'
+    },
+    'nonlocal_radius': {
+        key: 'nonlocal_radius',
+        label: 'Non-Local Damage Radius (Rc)',
+        shortDesc: 'Fracture process zone width',
+        unit: 'm',
+        section: 'failure',
+        tooltip: 'Averages damage across elements within physical radius Rc (e.g. 0.05m = 50mm for concrete aggregate, 0.0m for steel). Prevents 1-element grid-aligned razor cuts and enables natural branching cracks.'
     }
 };
 

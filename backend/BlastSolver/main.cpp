@@ -197,6 +197,12 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
     mat.cscm_D1 = static_cast<float>(get_json_double(obj, "cscm_D1", 2.5e-9));
     mat.cscm_D2 = static_cast<float>(get_json_double(obj, "cscm_D2", 1.0));
 
+    bool is_concrete = (mat.material_model == Blast::MPMMaterialModel::RHTConcrete || 
+                        mat.material_model == Blast::MPMMaterialModel::KCConcrete || 
+                        mat.material_model == Blast::MPMMaterialModel::CSCMConcrete);
+    mat.directional_crack_band = get_json_bool(obj, "directional_crack_band", is_concrete);
+    mat.nonlocal_radius = static_cast<float>(get_json_double(obj, "nonlocal_radius", is_concrete ? 0.05 : 0.0));
+
     return mat;
 }
 
@@ -7067,6 +7073,8 @@ int main() {
                             physics_params.debris_clumping = get_json_double(msg, "debris_clumping", 0.40);
                             physics_params.debris_max_clump_size = get_json_int(msg, "debris_max_clump_size", 8);
                             physics_params.random_seed = get_json_int(msg, "random_seed", 42);
+                            physics_params.enable_directional_crack_band = get_json_bool(msg, "enable_directional_crack_band", true);
+                            physics_params.enable_nonlocal_damage = get_json_bool(msg, "enable_nonlocal_damage", true);
                             fem->setPhysicsParams(physics_params);
                             if (physics_params.convert_failed_elements_to_mpm) {
                                 ensure_mpm_debris_solver(msg, true);
@@ -7224,6 +7232,8 @@ int main() {
                             physics_params.debris_clumping = static_cast<float>(get_json_double(msg, "debris_clumping", 0.40));
                             physics_params.debris_max_clump_size = get_json_int(msg, "debris_max_clump_size", 8);
                             physics_params.random_seed = get_json_int(msg, "random_seed", 42);
+                            physics_params.enable_directional_crack_band = get_json_bool(msg, "enable_directional_crack_band", true);
+                            physics_params.enable_nonlocal_damage = get_json_bool(msg, "enable_nonlocal_damage", true);
                             fem->setPhysicsParams(physics_params);
                             if (physics_params.convert_failed_elements_to_mpm) {
                                 ensure_mpm_debris_solver(msg, true);
@@ -7384,6 +7394,8 @@ int main() {
                             physics_params.debris_clumping = get_json_double(msg, "debris_clumping", 0.40);
                             physics_params.debris_max_clump_size = get_json_int(msg, "debris_max_clump_size", 8);
                             physics_params.random_seed = get_json_int(msg, "random_seed", 42);
+                            physics_params.enable_directional_crack_band = get_json_bool(msg, "enable_directional_crack_band", true);
+                            physics_params.enable_nonlocal_damage = get_json_bool(msg, "enable_nonlocal_damage", true);
                             fem->setPhysicsParams(physics_params);
                             if (physics_params.convert_failed_elements_to_mpm) {
                                 ensure_mpm_debris_solver(msg);
@@ -7538,6 +7550,8 @@ int main() {
                             physics_params.debris_clumping = static_cast<float>(get_json_double(msg, "debris_clumping", 0.40));
                             physics_params.debris_max_clump_size = get_json_int(msg, "debris_max_clump_size", 8);
                             physics_params.random_seed = get_json_int(msg, "random_seed", 42);
+                            physics_params.enable_directional_crack_band = get_json_bool(msg, "enable_directional_crack_band", true);
+                            physics_params.enable_nonlocal_damage = get_json_bool(msg, "enable_nonlocal_damage", true);
                             fem->setPhysicsParams(physics_params);
                             if (physics_params.convert_failed_elements_to_mpm) {
                                 ensure_mpm_debris_solver(msg);
@@ -7931,6 +7945,8 @@ int main() {
                                 physics_params.debris_clumping = get_json_double(msg, "debris_clumping", 0.40);
                                 physics_params.debris_max_clump_size = get_json_int(msg, "debris_max_clump_size", 8);
                                 physics_params.random_seed = get_json_int(msg, "random_seed", 42);
+                                physics_params.enable_directional_crack_band = get_json_bool(msg, "enable_directional_crack_band", true);
+                                physics_params.enable_nonlocal_damage = get_json_bool(msg, "enable_nonlocal_damage", true);
                                 fem->setPhysicsParams(physics_params);
                                 if (physics_params.convert_failed_elements_to_mpm) {
                                     ensure_mpm_debris_solver(msg, true);
@@ -8043,6 +8059,8 @@ int main() {
                                 physics_params.debris_clumping = static_cast<float>(get_json_double(msg, "debris_clumping", 0.40));
                                 physics_params.debris_max_clump_size = get_json_int(msg, "debris_max_clump_size", 8);
                                 physics_params.random_seed = get_json_int(msg, "random_seed", 42);
+                                physics_params.enable_directional_crack_band = get_json_bool(msg, "enable_directional_crack_band", true);
+                                physics_params.enable_nonlocal_damage = get_json_bool(msg, "enable_nonlocal_damage", true);
                                 fem->setPhysicsParams(physics_params);
                                 if (physics_params.convert_failed_elements_to_mpm) {
                                     ensure_mpm_debris_solver(msg, true);
@@ -8147,6 +8165,8 @@ int main() {
                                 physics_params.debris_clumping = get_json_double(msg, "debris_clumping", 0.40);
                                 physics_params.debris_max_clump_size = get_json_int(msg, "debris_max_clump_size", 8);
                                 physics_params.random_seed = get_json_int(msg, "random_seed", 42);
+                                physics_params.enable_directional_crack_band = get_json_bool(msg, "enable_directional_crack_band", true);
+                                physics_params.enable_nonlocal_damage = get_json_bool(msg, "enable_nonlocal_damage", true);
                                 fem->setPhysicsParams(physics_params);
                                 if (physics_params.convert_failed_elements_to_mpm) {
                                     ensure_mpm_debris_solver(msg, false);
@@ -8245,6 +8265,8 @@ int main() {
                                 physics_params.debris_clumping = static_cast<float>(get_json_double(msg, "debris_clumping", 0.40));
                                 physics_params.debris_max_clump_size = get_json_int(msg, "debris_max_clump_size", 8);
                                 physics_params.random_seed = get_json_int(msg, "random_seed", 42);
+                                physics_params.enable_directional_crack_band = get_json_bool(msg, "enable_directional_crack_band", true);
+                                physics_params.enable_nonlocal_damage = get_json_bool(msg, "enable_nonlocal_damage", true);
                                 fem->setPhysicsParams(physics_params);
                                 if (physics_params.convert_failed_elements_to_mpm) {
                                     ensure_mpm_debris_solver(msg);

@@ -47,6 +47,8 @@ struct BlastPhysicsParams {
     T debris_clumping{0.40f};                   // Multi-element aggregate clumping cohesion (0.0 for soil/water, 0.4 concrete, 0.8+ steel)
     int debris_max_clump_size{8};               // Maximum adjacent elements fused into a single fragment boulder/shred (1 to 64)
     int random_seed{42};                        // Persistent random seed for exact deterministic repeatability
+    bool enable_directional_crack_band{true};   // Global toggle for Bažant directional crack band angle normalization
+    bool enable_nonlocal_damage{true};          // Global toggle for spatial non-local damage regularization
 };
 
 template <typename T>

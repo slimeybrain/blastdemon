@@ -2362,6 +2362,42 @@ template <typename T>
 void FEMSolver3D<T>::evaluateErosionCriteria() {
     bool erosion_occurred = false;
 
+    if (m_physics_params.enable_nonlocal_damage && m_face_neighbors.size() != m_elements.size() * 6) {
+        buildFaceConnectivity();
+    }
+
+    std::vector<T> ep_bar_effective(m_elements.size());
+    for (size_t e = 0; e < m_elements.size(); ++e) {
+        ep_bar_effective[e] = m_elements[e].ep_bar;
+    }
+
+    if (m_physics_params.enable_nonlocal_damage) {
+        for (size_t e = 0; e < m_elements.size(); ++e) {
+            if (m_elements[e].is_eroded) continue;
+            const auto& mat = m_material_tables[m_elements[e].mat_id];
+            float R_c = mat.nonlocal_radius;
+            if (R_c > 1.0e-4f) {
+                T w_sum = static_cast<T>(1.0f);
+                T val_sum = m_elements[e].ep_bar;
+                T h_elem = std::cbrt(m_elements[e].V0 > static_cast<T>(1.0e-18f) ? m_elements[e].V0 : static_cast<T>(1.0e-6f));
+                T R_sq = static_cast<T>(R_c * R_c);
+
+                for (int f = 0; f < 6; ++f) {
+                    int nb = m_face_neighbors[e * 6 + f];
+                    if (nb >= 0 && nb < static_cast<int>(m_elements.size()) && !m_elements[nb].is_eroded) {
+                        T dist_sq = h_elem * h_elem;
+                        T w = std::exp(-dist_sq / R_sq);
+                        w_sum += w;
+                        val_sum += w * m_elements[nb].ep_bar;
+                    }
+                }
+                if (w_sum > static_cast<T>(0.0f)) {
+                    ep_bar_effective[e] = val_sum / w_sum;
+                }
+            }
+        }
+    }
+
 #ifdef _OPENMP
     #pragma omp parallel for schedule(guided)
 #endif
@@ -2409,10 +2445,23 @@ void FEMSolver3D<T>::evaluateErosionCriteria() {
             het_factor = static_cast<T>(1.0f + static_cast<float>(heterogeneity) * (w - 1.0f));
         }
 
+        // Directional Crack Band Normalization (Bažant formulation)
+        T dir_factor = static_cast<T>(1.0f);
+        if (mat.directional_crack_band && m_physics_params.enable_directional_crack_band) {
+            T sxx = elem.sigma[0][0], syy = elem.sigma[1][1], szz = elem.sigma[2][2];
+            T s_max = std::max({std::abs(sxx), std::abs(syy), std::abs(szz)});
+            T s_norm = std::sqrt(sxx*sxx + syy*syy + szz*szz + 
+                                static_cast<T>(2.0f)*(elem.sigma[0][1]*elem.sigma[0][1] + elem.sigma[1][2]*elem.sigma[1][2] + elem.sigma[2][0]*elem.sigma[2][0]));
+            if (s_norm > static_cast<T>(1.0e-6f) && s_max > static_cast<T>(1.0e-6f)) {
+                T n_dom = s_max / s_norm;
+                dir_factor = std::clamp(n_dom, static_cast<T>(0.57735f), static_cast<T>(1.0f));
+            }
+        }
+
         if (mat.enable_strain_erosion || m_erosion_criteria.enable_strain_erosion) {
             T fail_strain = static_cast<T>(mat.erosion_strain > 0.0f ? mat.erosion_strain : (mat.failure_strain > 0.0f ? mat.failure_strain : m_erosion_criteria.failure_strain));
-            fail_strain *= het_factor;
-            if (fail_strain > static_cast<T>(0.0f) && elem.ep_bar >= fail_strain) {
+            fail_strain *= (het_factor * dir_factor);
+            if (fail_strain > static_cast<T>(0.0f) && ep_bar_effective[e] >= fail_strain) {
                 newly_eroded = true;
             }
         }
@@ -2420,7 +2469,7 @@ void FEMSolver3D<T>::evaluateErosionCriteria() {
         if (mat.enable_stress_erosion || m_erosion_criteria.enable_stress_erosion) {
             T mean_s = (elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f);
             T fail_stress = static_cast<T>(mat.erosion_stress > 0.0f ? mat.erosion_stress : (mat.tensile_failure_stress > 0.0f ? mat.tensile_failure_stress : m_erosion_criteria.tensile_failure_stress));
-            fail_stress *= het_factor;
+            fail_stress *= (het_factor * dir_factor);
             if (fail_stress > static_cast<T>(0.0f) && mean_s >= fail_stress) {
                 newly_eroded = true;
             }

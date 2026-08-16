@@ -93,7 +93,7 @@ void test_rc_box_internal_blast_simulation() {
     erosion.failure_strain = 0.05f;
     fem.setErosionCriteria(erosion);
 
-    fem.getElements()[0].ep_bar = 0.10f; // Exceed failure strain 0.05
+    fem.getElements()[0].ep_bar = 0.50f; // Exceed non-local failure threshold (0.05)
     fem.getElements()[0].is_eroded = false;
 
     fem.evaluateErosionCriteria();

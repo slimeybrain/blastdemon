@@ -375,6 +375,7 @@ export class PropertyEditor {
                     'material_model', 'preset',
                     'density', 'youngs_modulus', 'poissons_ratio',
                     'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
+                    'directional_crack_band', 'nonlocal_radius',
                     'failure_strain', 'tensile_failure_stress',
                     'enable_strain_erosion', 'erosion_strain',
                     'enable_stress_erosion', 'erosion_stress',
@@ -387,6 +388,7 @@ export class PropertyEditor {
                     'material_model', 'preset',
                     'density', 'youngs_modulus', 'poissons_ratio',
                     'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
+                    'directional_crack_band', 'nonlocal_radius',
                     'failure_strain', 'tensile_failure_stress',
                     'enable_strain_erosion', 'erosion_strain',
                     'enable_stress_erosion', 'erosion_stress',
@@ -398,6 +400,7 @@ export class PropertyEditor {
                     'material_model', 'preset',
                     'density', 'youngs_modulus', 'poissons_ratio',
                     'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
+                    'directional_crack_band', 'nonlocal_radius',
                     'failure_strain', 'tensile_failure_stress',
                     'enable_strain_erosion', 'erosion_strain',
                     'enable_stress_erosion', 'erosion_stress',
@@ -409,6 +412,7 @@ export class PropertyEditor {
                     'material_model', 'preset',
                     'density', 'youngs_modulus', 'poissons_ratio',
                     'yield_stress', 'hardening_modulus',
+                    'directional_crack_band', 'nonlocal_radius',
                     'failure_strain', 'tensile_failure_stress',
                     'enable_strain_erosion', 'erosion_strain',
                     'enable_stress_erosion', 'erosion_stress',
@@ -440,8 +444,9 @@ export class PropertyEditor {
         } else if (node.type === 'FEMDomain3D') {
             paramKeys = [
                 'device', 'precision', 'cfl',
-                'rebar_formulation', 'convert_failed_elements_to_mpm', 'mpm_particles_per_failed_element',
+                'enable_directional_crack_band', 'enable_nonlocal_damage',
                 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed',
+                'rebar_formulation', 'convert_failed_elements_to_mpm', 'mpm_particles_per_failed_element',
                 'hourglass_coeff', 'contact_penalty_scale', 'friction_static', 'friction_kinetic',
                 'integration_scheme', 'hourglass_model'
             ];
@@ -669,6 +674,54 @@ export class PropertyEditor {
                     (info.unit && info.unit !== 'dim' ? `<span style="font-size:10px; color:#569cd6; font-family:monospace; background:rgba(86,156,214,0.1); padding:1px 4px; border-radius:3px;">${info.unit}</span>` : '') +
                     `</div>` +
                     `<div style="font-size:10px; color:#888; margin-top:1px; margin-bottom:2px;">${info.shortDesc}</div>`;
+            } else if (node.type === 'FEMDomain3D' && key === 'enable_directional_crack_band') {
+                label.title = 'Bažant crack band angle normalization. Removes the 41% artificial energy penalty on diagonal 45° cracking in structured hex meshes.';
+                label.style.cursor = 'help';
+                label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
+                    `<span style="font-weight:600; color:#ddd;">DIRECTIONAL CRACK BAND</span>` +
+                    `<span style="font-size:10px; color:#569cd6; font-family:monospace; background:rgba(86,156,214,0.1); padding:1px 4px; border-radius:3px;">BAŽANT PROJECTION</span>` +
+                    `</div>` +
+                    `<div style="font-size:10px; color:#888; margin-top:1px; margin-bottom:2px;">Removes the 41% energy penalty on 45° diagonal fracture lines in hex meshes.</div>`;
+            } else if (node.type === 'FEMDomain3D' && key === 'enable_nonlocal_damage') {
+                label.title = 'Averages damage across elements within physical radius Rc (e.g. 50mm for concrete). Prevents 1-element grid-aligned razor cuts and enables natural branching cracks.';
+                label.style.cursor = 'help';
+                label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
+                    `<span style="font-weight:600; color:#ddd;">NON-LOCAL DAMAGE SMOOTHING</span>` +
+                    `<span style="font-size:10px; color:#4ec9b0; font-family:monospace; background:rgba(78,201,176,0.15); padding:1px 4px; border-radius:3px;">SPATIAL REGULARIZATION</span>` +
+                    `</div>` +
+                    `<div style="font-size:10px; color:#888; margin-top:1px; margin-bottom:2px;">Diffuses damage across neighboring elements to eliminate Cartesian grid locking.</div>`;
+            } else if (node.type === 'FEMDomain3D' && key === 'material_heterogeneity') {
+                label.title = 'Weibull material strength heterogeneity (0.0 to 0.30). Seeds pseudo-random microstructural failure flaws to produce natural, asymmetric fracture branching.';
+                label.style.cursor = 'help';
+                label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
+                    `<span style="font-weight:600; color:#ddd;">MATERIAL HETEROGENEITY</span>` +
+                    `<span style="font-size:10px; color:#ce9178; font-family:monospace; background:rgba(206,145,120,0.1); padding:1px 4px; border-radius:3px;">WEIBULL FRACTURE</span>` +
+                    `</div>` +
+                    `<div style="font-size:10px; color:#888; margin-top:1px; margin-bottom:2px;">Seeds random micro-flaws (0.0 = uniform, 0.08 = standard concrete, 0.20 = high variance).</div>`;
+            } else if (node.type === 'FEMDomain3D' && key === 'debris_clumping') {
+                label.title = 'Multi-Element Aggregate Clumping (0.0 for soil/water, 0.40 for concrete, 0.80+ for steel). Fuses adjacent eroding elements into cohesive macro boulders/chunks.';
+                label.style.cursor = 'help';
+                label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
+                    `<span style="font-weight:600; color:#ddd;">DEBRIS CLUMPING</span>` +
+                    `<span style="font-size:10px; color:#4ec9b0; font-family:monospace; background:rgba(78,201,176,0.15); padding:1px 4px; border-radius:3px;">COHESION</span>` +
+                    `</div>` +
+                    `<div style="font-size:10px; color:#888; margin-top:1px; margin-bottom:2px;">Fuses adjacent eroding elements into macro boulders (0.0 = soil/sand, 0.4 = concrete, 0.8+ = steel).</div>`;
+            } else if (node.type === 'FEMDomain3D' && key === 'debris_max_clump_size') {
+                label.title = 'Maximum Fragment Size (1 to 64 elements). Maximum number of adjacent elements fused into a single fragment chunk.';
+                label.style.cursor = 'help';
+                label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
+                    `<span style="font-weight:600; color:#ddd;">MAX CLUMP SIZE</span>` +
+                    `<span style="font-size:10px; color:#569cd6; font-family:monospace; background:rgba(86,156,214,0.1); padding:1px 4px; border-radius:3px;">ELEMENTS</span>` +
+                    `</div>` +
+                    `<div style="font-size:10px; color:#888; margin-top:1px; margin-bottom:2px;">Maximum elements per cohesive boulder fragment.</div>`;
+            } else if (node.type === 'FEMDomain3D' && key === 'random_seed') {
+                label.title = 'Deterministic Random Seed. Ensures 100% bitwise exact reproducible fracture patterns across simulation runs.';
+                label.style.cursor = 'help';
+                label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
+                    `<span style="font-weight:600; color:#ddd;">RANDOM SEED</span>` +
+                    `<span style="font-size:10px; color:#dcdcaa; font-family:monospace; background:rgba(220,220,170,0.1); padding:1px 4px; border-radius:3px;">DETERMINISM</span>` +
+                    `</div>` +
+                    `<div style="font-size:10px; color:#888; margin-top:1px; margin-bottom:2px;">Persistent seed for exact simulation repeatability.</div>`;
             }
             row.appendChild(label);
 
@@ -1701,7 +1754,8 @@ export class PropertyEditor {
             'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
             'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
             // VTK ROI & Strides
-            'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride'
+            'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride',
+            'nonlocal_radius'
         ];
 
         const dropdowns: Record<string, string[]> = {

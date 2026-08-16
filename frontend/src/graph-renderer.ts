@@ -1899,7 +1899,9 @@ export class GraphRenderer {
                 Cp: 486.0,
                 mg_gamma0: 1.81,
                 mg_c0: 4570.0,
-                mg_s: 1.49
+                mg_s: 1.49,
+                directional_crack_band: false,
+                nonlocal_radius: 0.0
             };
 
             case 'FEMDomain3D': return {
@@ -1918,6 +1920,8 @@ export class GraphRenderer {
                 debris_clumping: 0.40,
                 debris_max_clump_size: 8,
                 random_seed: 42,
+                enable_directional_crack_band: true,
+                enable_nonlocal_damage: true,
                 cfl: 0.4
             };
             case 'FEMObject3D': return {
@@ -4411,6 +4415,7 @@ export class GraphRenderer {
                     'material_model', 'preset',
                     'density', 'youngs_modulus', 'poissons_ratio',
                     'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
+                    'directional_crack_band', 'nonlocal_radius',
                     'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
                     'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
                     'enable_strain_erosion', 'erosion_strain',
@@ -4422,6 +4427,7 @@ export class GraphRenderer {
                     'material_model', 'preset',
                     'density', 'youngs_modulus', 'poissons_ratio',
                     'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
+                    'directional_crack_band', 'nonlocal_radius',
                     'kc_auto_generate', 'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
                     'enable_strain_erosion', 'erosion_strain',
                     'enable_stress_erosion', 'erosion_stress',
@@ -4432,6 +4438,7 @@ export class GraphRenderer {
                     'material_model', 'preset',
                     'density', 'youngs_modulus', 'poissons_ratio',
                     'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
+                    'directional_crack_band', 'nonlocal_radius',
                     'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
                     'enable_strain_erosion', 'erosion_strain',
                     'enable_stress_erosion', 'erosion_stress',
@@ -4442,6 +4449,7 @@ export class GraphRenderer {
                     'material_model', 'preset',
                     'density', 'youngs_modulus', 'poissons_ratio',
                     'yield_stress', 'hardening_modulus',
+                    'directional_crack_band', 'nonlocal_radius',
                     'failure_strain', 'tensile_failure_stress',
                     'enable_strain_erosion', 'erosion_strain',
                     'enable_stress_erosion', 'erosion_stress',
@@ -4473,8 +4481,9 @@ export class GraphRenderer {
         } else if (node.type === 'FEMDomain3D') {
             paramKeys = [
                 'device', 'precision', 'cfl',
-                'rebar_formulation', 'convert_failed_elements_to_mpm', 'mpm_particles_per_failed_element',
+                'enable_directional_crack_band', 'enable_nonlocal_damage',
                 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed',
+                'rebar_formulation', 'convert_failed_elements_to_mpm', 'mpm_particles_per_failed_element',
                 'hourglass_coeff', 'contact_penalty_scale', 'friction_static', 'friction_kinetic',
                 'integration_scheme', 'hourglass_model'
             ];
@@ -5046,7 +5055,8 @@ export class GraphRenderer {
                             'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
                             'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
                             // VTK ROI & Strides
-                            'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride'
+                            'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride',
+                            'nonlocal_radius'
                         ];
 
                         let castValue: any = newVal;

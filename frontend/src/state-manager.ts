@@ -29,7 +29,8 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
             'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
             'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
             'kc_auto_generate', 'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
-            'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2'
+            'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
+            'directional_crack_band', 'nonlocal_radius'
         ];
         if (updatedKey && materialKeys.includes(updatedKey)) {
             parameters['preset'] = 'Custom';
@@ -2171,7 +2172,9 @@ export class StateManager {
                 Cp: 486.0,
                 mg_gamma0: 1.81,
                 mg_c0: 4570.0,
-                mg_s: 1.49
+                mg_s: 1.49,
+                directional_crack_band: false,
+                nonlocal_radius: 0.0
             },
 
             'FSICoupler2D': {},
@@ -2192,6 +2195,8 @@ export class StateManager {
                 debris_clumping: 0.40,
                 debris_max_clump_size: 8,
                 random_seed: 42,
+                enable_directional_crack_band: true,
+                enable_nonlocal_damage: true,
                 cfl: 0.4
             },
             'FEMObject3D': {
