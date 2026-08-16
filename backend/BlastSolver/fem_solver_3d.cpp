@@ -2489,12 +2489,14 @@ void FEMSolver3D<T>::convertElementToMPMParticles(const FEMElement3D<T>& elem, s
 
     // Gather nodal positions and velocities
     T x_nodes[8][3], v_nodes[8][3];
+    float x_elem_com[3] = {0.0f, 0.0f, 0.0f};
     float v_elem_com[3] = {0.0f, 0.0f, 0.0f};
     for (int n = 0; n < 8; ++n) {
         int nid = elem.node_ids[n];
         for (int c = 0; c < 3; ++c) {
             x_nodes[n][c] = m_nodes[nid].x[c];
             v_nodes[n][c] = m_nodes[nid].v[c];
+            x_elem_com[c] += static_cast<float>(m_nodes[nid].x[c]) * 0.125f;
             v_elem_com[c] += static_cast<float>(m_nodes[nid].v[c]) * 0.125f;
         }
     }
@@ -2510,6 +2512,68 @@ void FEMSolver3D<T>::convertElementToMPMParticles(const FEMElement3D<T>& elem, s
         {-1,-1,-1}, { 1,-1,-1}, { 1, 1,-1}, {-1, 1,-1},
         {-1,-1, 1}, { 1,-1, 1}, { 1, 1, 1}, {-1, 1, 1}
     };
+
+    // Compute element center Jacobian and spin tensor W_ij for physical vorticity micro-mixing
+    float W_spin[3][3] = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
+    {
+        float J0[3][3] = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
+        for (int a = 0; a < 8; ++a) {
+            float dN_dxi[3] = {
+                0.125f * HEX_NODES_LOCAL[a][0],
+                0.125f * HEX_NODES_LOCAL[a][1],
+                0.125f * HEX_NODES_LOCAL[a][2]
+            };
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    J0[r][c] += static_cast<float>(x_nodes[a][r]) * dN_dxi[c];
+                }
+            }
+        }
+        float detJ = J0[0][0]*(J0[1][1]*J0[2][2] - J0[1][2]*J0[2][1])
+                   - J0[0][1]*(J0[1][0]*J0[2][2] - J0[1][2]*J0[2][0])
+                   + J0[0][2]*(J0[1][0]*J0[2][1] - J0[1][1]*J0[2][0]);
+        if (std::abs(detJ) > 1.0e-12f) {
+            float inv_det = 1.0f / detJ;
+            float invJ[3][3] = {
+                { (J0[1][1]*J0[2][2] - J0[1][2]*J0[2][1]) * inv_det, -(J0[0][1]*J0[2][2] - J0[0][2]*J0[2][1]) * inv_det,  (J0[0][1]*J0[1][2] - J0[0][2]*J0[1][1]) * inv_det},
+                {-(J0[1][0]*J0[2][2] - J0[1][2]*J0[2][0]) * inv_det,  (J0[0][0]*J0[2][2] - J0[0][2]*J0[2][0]) * inv_det, -(J0[0][0]*J0[1][2] - J0[0][2]*J0[1][0]) * inv_det},
+                { (J0[1][0]*J0[2][1] - J0[1][1]*J0[2][0]) * inv_det, -(J0[0][0]*J0[2][1] - J0[0][1]*J0[2][0]) * inv_det,  (J0[0][0]*J0[1][1] - J0[0][1]*J0[1][0]) * inv_det}
+            };
+            float L_grad[3][3] = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
+            for (int a = 0; a < 8; ++a) {
+                float dN_dxi[3] = {
+                    0.125f * HEX_NODES_LOCAL[a][0],
+                    0.125f * HEX_NODES_LOCAL[a][1],
+                    0.125f * HEX_NODES_LOCAL[a][2]
+                };
+                float dN_dx[3] = {
+                    invJ[0][0]*dN_dxi[0] + invJ[0][1]*dN_dxi[1] + invJ[0][2]*dN_dxi[2],
+                    invJ[1][0]*dN_dxi[0] + invJ[1][1]*dN_dxi[1] + invJ[1][2]*dN_dxi[2],
+                    invJ[2][0]*dN_dxi[0] + invJ[2][1]*dN_dxi[1] + invJ[2][2]*dN_dxi[2]
+                };
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) {
+                        L_grad[r][c] += static_cast<float>(v_nodes[a][r]) * dN_dx[c];
+                    }
+                }
+            }
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    W_spin[r][c] = 0.5f * (L_grad[r][c] - L_grad[c][r]);
+                }
+            }
+        }
+    }
+
+    auto hash_jitter = [](uint32_t seed) -> float {
+        seed = (seed ^ 61u) ^ (seed >> 16);
+        seed *= 9u;
+        seed = seed ^ (seed >> 4);
+        seed *= 0x27d4eb2du;
+        seed = seed ^ (seed >> 15);
+        return (static_cast<float>(seed & 0xFFFFu) / 32767.5f) - 1.0f;
+    };
+    uint32_t base_seed = static_cast<uint32_t>(elem.node_ids[0]) * 73856093u ^ static_cast<uint32_t>(elem.node_ids[6]) * 19349663u;
 
     if (np == 1) {
         MPMParticle3D p{};
@@ -2549,9 +2613,14 @@ void FEMSolver3D<T>::convertElementToMPMParticles(const FEMElement3D<T>& elem, s
     } else if (np == 8) {
         const float g_coord = 0.577350269f;
         for (int p_idx = 0; p_idx < 8; ++p_idx) {
-            float xi = HEX_NODES_LOCAL[p_idx][0] * g_coord;
-            float eta = HEX_NODES_LOCAL[p_idx][1] * g_coord;
-            float zeta = HEX_NODES_LOCAL[p_idx][2] * g_coord;
+            // Stochastic position jitter to break artificial Cartesian lattice planes
+            float jx = 0.15f * hash_jitter(base_seed ^ (static_cast<uint32_t>(p_idx) * 7919u + 1u));
+            float jy = 0.15f * hash_jitter(base_seed ^ (static_cast<uint32_t>(p_idx) * 7919u + 2u));
+            float jz = 0.15f * hash_jitter(base_seed ^ (static_cast<uint32_t>(p_idx) * 7919u + 3u));
+
+            float xi = (HEX_NODES_LOCAL[p_idx][0] + jx) * g_coord;
+            float eta = (HEX_NODES_LOCAL[p_idx][1] + jy) * g_coord;
+            float zeta = (HEX_NODES_LOCAL[p_idx][2] + jz) * g_coord;
 
             float xp[3] = {0.0f, 0.0f, 0.0f};
             float vp[3] = {0.0f, 0.0f, 0.0f};
@@ -2564,6 +2633,29 @@ void FEMSolver3D<T>::convertElementToMPMParticles(const FEMElement3D<T>& elem, s
                     vp[c] += static_cast<float>(v_nodes[a][c]) * Na;
                 }
             }
+
+            // Natural rotational spin (vorticity micro-mixing) from element shearing/tearing
+            float offset_x = xp[0] - x_elem_com[0];
+            float offset_y = xp[1] - x_elem_com[1];
+            float offset_z = xp[2] - x_elem_com[2];
+
+            float v_spin_x = W_spin[0][0]*offset_x + W_spin[0][1]*offset_y + W_spin[0][2]*offset_z;
+            float v_spin_y = W_spin[1][0]*offset_x + W_spin[1][1]*offset_y + W_spin[1][2]*offset_z;
+            float v_spin_z = W_spin[2][0]*offset_x + W_spin[2][1]*offset_y + W_spin[2][2]*offset_z;
+
+            float spin_mag = std::sqrt(v_spin_x*v_spin_x + v_spin_y*v_spin_y + v_spin_z*v_spin_z);
+            float v_com_speed = std::sqrt(v_elem_com[0]*v_elem_com[0] + v_elem_com[1]*v_elem_com[1] + v_elem_com[2]*v_elem_com[2]);
+            float max_spin = std::max(5.0f, 0.15f * v_com_speed);
+            if (spin_mag > max_spin) {
+                float scale = max_spin / spin_mag;
+                v_spin_x *= scale;
+                v_spin_y *= scale;
+                v_spin_z *= scale;
+            }
+
+            vp[0] += v_spin_x;
+            vp[1] += v_spin_y;
+            vp[2] += v_spin_z;
 
             // Filter out single-node hourglassing / rupture singularities by bounding deviation from element COM
             float diff_x = vp[0] - v_elem_com[0];
