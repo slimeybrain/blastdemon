@@ -42,6 +42,9 @@ struct BlastPhysicsParams {
     T taylor_quinney_factor{0.9f}; // Fraction of plastic work converted to heat (0.9)
     bool convert_failed_elements_to_mpm{false}; // Global conversion of failed FEM elements to MPM debris
     int mpm_particles_per_failed_element{8};    // Particles generated per failed element (1, 8, or 27)
+    T material_heterogeneity{0.08f};            // Spatial Weibull material strength variance (0.0 to 0.30)
+    T debris_velocity_smoothing{0.25f};         // Inter-element debris birth velocity smoothing factor (0.0 to 1.0)
+    int random_seed{42};                        // Persistent random seed for exact deterministic repeatability
 };
 
 template <typename T>
@@ -329,7 +332,7 @@ public:
     void setMPMSolver(MPMSolver3D* mpm_solver) { m_mpm_solver = mpm_solver; }
     void setMPMSolver(std::shared_ptr<MPMSolver3D> mpm_solver) { m_mpm_solver_ref = mpm_solver; m_mpm_solver = mpm_solver.get(); }
     MPMSolver3D* getMPMSolver() const { return m_mpm_solver; }
-    void convertElementToMPMParticles(const FEMElement3D<T>& elem, std::vector<MPMParticle3D>& out_particles) const;
+    void convertElementToMPMParticles(const FEMElement3D<T>& elem, std::vector<MPMParticle3D>& out_particles, const float* v_cluster_com = nullptr) const;
 
     // CUDA Stream Accessor
     void* getCudaStream() const { return m_cuda_stream; }

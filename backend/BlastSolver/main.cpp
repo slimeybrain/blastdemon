@@ -7062,6 +7062,9 @@ int main() {
                             auto physics_params = fem->getPhysicsParams();
                             physics_params.convert_failed_elements_to_mpm = get_json_bool(msg, "convert_failed_elements_to_mpm", false);
                             physics_params.mpm_particles_per_failed_element = get_json_int(msg, "mpm_particles_per_failed_element", 8);
+                            physics_params.material_heterogeneity = get_json_double(msg, "material_heterogeneity", 0.08);
+                            physics_params.debris_velocity_smoothing = get_json_double(msg, "debris_velocity_smoothing", 0.25);
+                            physics_params.random_seed = get_json_int(msg, "random_seed", 42);
                             fem->setPhysicsParams(physics_params);
                             if (physics_params.convert_failed_elements_to_mpm) {
                                 ensure_mpm_debris_solver(msg, true);
@@ -7214,6 +7217,9 @@ int main() {
                             auto physics_params = fem->getPhysicsParams();
                             physics_params.convert_failed_elements_to_mpm = get_json_bool(msg, "convert_failed_elements_to_mpm", false);
                             physics_params.mpm_particles_per_failed_element = get_json_int(msg, "mpm_particles_per_failed_element", 8);
+                            physics_params.material_heterogeneity = static_cast<float>(get_json_double(msg, "material_heterogeneity", 0.08));
+                            physics_params.debris_velocity_smoothing = static_cast<float>(get_json_double(msg, "debris_velocity_smoothing", 0.25));
+                            physics_params.random_seed = get_json_int(msg, "random_seed", 42);
                             fem->setPhysicsParams(physics_params);
                             if (physics_params.convert_failed_elements_to_mpm) {
                                 ensure_mpm_debris_solver(msg, true);
@@ -7369,6 +7375,9 @@ int main() {
                             auto physics_params = fem->getPhysicsParams();
                             physics_params.convert_failed_elements_to_mpm = get_json_bool(msg, "convert_failed_elements_to_mpm", false);
                             physics_params.mpm_particles_per_failed_element = get_json_int(msg, "mpm_particles_per_failed_element", 8);
+                            physics_params.material_heterogeneity = get_json_double(msg, "material_heterogeneity", 0.08);
+                            physics_params.debris_velocity_smoothing = get_json_double(msg, "debris_velocity_smoothing", 0.25);
+                            physics_params.random_seed = get_json_int(msg, "random_seed", 42);
                             fem->setPhysicsParams(physics_params);
                             if (physics_params.convert_failed_elements_to_mpm) {
                                 ensure_mpm_debris_solver(msg);
@@ -7518,6 +7527,9 @@ int main() {
                             auto physics_params = fem->getPhysicsParams();
                             physics_params.convert_failed_elements_to_mpm = get_json_bool(msg, "convert_failed_elements_to_mpm", false);
                             physics_params.mpm_particles_per_failed_element = get_json_int(msg, "mpm_particles_per_failed_element", 8);
+                            physics_params.material_heterogeneity = static_cast<float>(get_json_double(msg, "material_heterogeneity", 0.08));
+                            physics_params.debris_velocity_smoothing = static_cast<float>(get_json_double(msg, "debris_velocity_smoothing", 0.25));
+                            physics_params.random_seed = get_json_int(msg, "random_seed", 42);
                             fem->setPhysicsParams(physics_params);
                             if (physics_params.convert_failed_elements_to_mpm) {
                                 ensure_mpm_debris_solver(msg);
@@ -7906,6 +7918,9 @@ int main() {
                                 auto physics_params = fem->getPhysicsParams();
                                 physics_params.convert_failed_elements_to_mpm = get_json_bool(msg, "convert_failed_elements_to_mpm", false);
                                 physics_params.mpm_particles_per_failed_element = get_json_int(msg, "mpm_particles_per_failed_element", 8);
+                                physics_params.material_heterogeneity = get_json_double(msg, "material_heterogeneity", 0.08);
+                                physics_params.debris_velocity_smoothing = get_json_double(msg, "debris_velocity_smoothing", 0.25);
+                                physics_params.random_seed = get_json_int(msg, "random_seed", 42);
                                 fem->setPhysicsParams(physics_params);
                                 if (physics_params.convert_failed_elements_to_mpm) {
                                     ensure_mpm_debris_solver(msg, true);
@@ -8013,6 +8028,9 @@ int main() {
                                 auto physics_params = fem->getPhysicsParams();
                                 physics_params.convert_failed_elements_to_mpm = get_json_bool(msg, "convert_failed_elements_to_mpm", false);
                                 physics_params.mpm_particles_per_failed_element = get_json_int(msg, "mpm_particles_per_failed_element", 8);
+                                physics_params.material_heterogeneity = static_cast<float>(get_json_double(msg, "material_heterogeneity", 0.08));
+                                physics_params.debris_velocity_smoothing = static_cast<float>(get_json_double(msg, "debris_velocity_smoothing", 0.25));
+                                physics_params.random_seed = get_json_int(msg, "random_seed", 42);
                                 fem->setPhysicsParams(physics_params);
                                 if (physics_params.convert_failed_elements_to_mpm) {
                                     ensure_mpm_debris_solver(msg, true);
@@ -8112,6 +8130,9 @@ int main() {
                                 auto physics_params = fem->getPhysicsParams();
                                 physics_params.convert_failed_elements_to_mpm = get_json_bool(msg, "convert_failed_elements_to_mpm", false);
                                 physics_params.mpm_particles_per_failed_element = get_json_int(msg, "mpm_particles_per_failed_element", 8);
+                                physics_params.material_heterogeneity = get_json_double(msg, "material_heterogeneity", 0.08);
+                                physics_params.debris_velocity_smoothing = get_json_double(msg, "debris_velocity_smoothing", 0.25);
+                                physics_params.random_seed = get_json_int(msg, "random_seed", 42);
                                 fem->setPhysicsParams(physics_params);
                                 if (physics_params.convert_failed_elements_to_mpm) {
                                     ensure_mpm_debris_solver(msg, false);
@@ -8205,6 +8226,9 @@ int main() {
                                 auto physics_params = fem->getPhysicsParams();
                                 physics_params.convert_failed_elements_to_mpm = get_json_bool(msg, "convert_failed_elements_to_mpm", false);
                                 physics_params.mpm_particles_per_failed_element = get_json_int(msg, "mpm_particles_per_failed_element", 8);
+                                physics_params.material_heterogeneity = static_cast<float>(get_json_double(msg, "material_heterogeneity", 0.08));
+                                physics_params.debris_velocity_smoothing = static_cast<float>(get_json_double(msg, "debris_velocity_smoothing", 0.25));
+                                physics_params.random_seed = get_json_int(msg, "random_seed", 42);
                                 fem->setPhysicsParams(physics_params);
                                 if (physics_params.convert_failed_elements_to_mpm) {
                                     ensure_mpm_debris_solver(msg);

@@ -2187,6 +2187,9 @@ export class StateManager {
                 friction_kinetic: 0.2,
                 convert_failed_elements_to_mpm: false,
                 mpm_particles_per_failed_element: 8,
+                material_heterogeneity: 0.08,
+                debris_velocity_smoothing: 0.25,
+                random_seed: 42,
                 cfl: 0.4
             },
             'FEMObject3D': {

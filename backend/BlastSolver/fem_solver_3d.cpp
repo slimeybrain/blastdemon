@@ -2393,8 +2393,25 @@ void FEMSolver3D<T>::evaluateErosionCriteria() {
             }
         }
 
+        T heterogeneity = m_physics_params.material_heterogeneity;
+        T het_factor = static_cast<T>(1.0f);
+        if (heterogeneity > static_cast<T>(1.0e-5f)) {
+            uint32_t user_seed = static_cast<uint32_t>(m_physics_params.random_seed) * 2654435761u;
+            uint32_t seed = user_seed ^ (static_cast<uint32_t>(elem.node_ids[0]) * 73856093u) ^ (static_cast<uint32_t>(elem.node_ids[6]) * 19349663u) ^ (static_cast<uint32_t>(e) * 83492791u);
+            seed = (seed ^ 61u) ^ (seed >> 16);
+            seed *= 9u;
+            seed = seed ^ (seed >> 4);
+            seed *= 0x27d4eb2du;
+            seed = seed ^ (seed >> 15);
+            float u = std::clamp(static_cast<float>(seed & 0xFFFFu) / 65535.0f, 0.001f, 0.999f);
+            // Weibull modulus m = 8 (standard empirical model for rock/concrete fracture heterogeneity)
+            float w = std::pow(-std::log(1.0f - u), 0.125f);
+            het_factor = static_cast<T>(1.0f + static_cast<float>(heterogeneity) * (w - 1.0f));
+        }
+
         if (mat.enable_strain_erosion || m_erosion_criteria.enable_strain_erosion) {
             T fail_strain = static_cast<T>(mat.erosion_strain > 0.0f ? mat.erosion_strain : (mat.failure_strain > 0.0f ? mat.failure_strain : m_erosion_criteria.failure_strain));
+            fail_strain *= het_factor;
             if (fail_strain > static_cast<T>(0.0f) && elem.ep_bar >= fail_strain) {
                 newly_eroded = true;
             }
@@ -2403,6 +2420,7 @@ void FEMSolver3D<T>::evaluateErosionCriteria() {
         if (mat.enable_stress_erosion || m_erosion_criteria.enable_stress_erosion) {
             T mean_s = (elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f);
             T fail_stress = static_cast<T>(mat.erosion_stress > 0.0f ? mat.erosion_stress : (mat.tensile_failure_stress > 0.0f ? mat.tensile_failure_stress : m_erosion_criteria.tensile_failure_stress));
+            fail_stress *= het_factor;
             if (fail_stress > static_cast<T>(0.0f) && mean_s >= fail_stress) {
                 newly_eroded = true;
             }
@@ -2435,13 +2453,33 @@ void FEMSolver3D<T>::processErodedElementsToMPM() {
     std::vector<MPMParticle3D> new_particles;
     for (size_t e = 0; e < m_elements.size(); ++e) {
         if (m_elements[e].is_eroded && !m_elements[e].mpm_converted) {
-            // Count exposed faces
+            // Count exposed faces and compute neighborhood cluster COM velocity for smoothing
             int num_exposed = 0;
+            float v_cluster[3] = {0.0f, 0.0f, 0.0f};
+            int cluster_count = 0;
             for (int f = 0; f < 6; ++f) {
                 int neighbor = m_face_neighbors[e * 6 + f];
                 if (neighbor == -1 || m_elements[neighbor].is_eroded) {
                     num_exposed++;
                 }
+                if (neighbor >= 0 && neighbor < static_cast<int>(m_elements.size()) && m_elements[neighbor].is_eroded) {
+                    for (int n = 0; n < 8; ++n) {
+                        int nid = m_elements[neighbor].node_ids[n];
+                        for (int c = 0; c < 3; ++c) {
+                            v_cluster[c] += static_cast<float>(m_nodes[nid].v[c]) * 0.125f;
+                        }
+                    }
+                    cluster_count++;
+                }
+            }
+
+            const float* p_cluster_com = nullptr;
+            if (cluster_count > 0) {
+                float inv_c = 1.0f / static_cast<float>(cluster_count);
+                v_cluster[0] *= inv_c;
+                v_cluster[1] *= inv_c;
+                v_cluster[2] *= inv_c;
+                p_cluster_com = v_cluster;
             }
 
             // Gating rule: Convert if failed under tension (J >= 0.98 or positive mean stress)
@@ -2456,7 +2494,7 @@ void FEMSolver3D<T>::processErodedElementsToMPM() {
 
             if (is_tensile_failure || is_sufficiently_exposed) {
                 m_elements[e].mpm_converted = true;
-                convertElementToMPMParticles(m_elements[e], new_particles);
+                convertElementToMPMParticles(m_elements[e], new_particles, p_cluster_com);
             }
         }
     }
@@ -2469,7 +2507,7 @@ void FEMSolver3D<T>::processErodedElementsToMPM() {
 }
 
 template <typename T>
-void FEMSolver3D<T>::convertElementToMPMParticles(const FEMElement3D<T>& elem, std::vector<MPMParticle3D>& out_particles) const {
+void FEMSolver3D<T>::convertElementToMPMParticles(const FEMElement3D<T>& elem, std::vector<MPMParticle3D>& out_particles, const float* v_cluster_com) const {
     const auto& mat = m_material_tables[elem.mat_id];
     float density = mat.density > 0.0f ? mat.density : 2400.0f;
     float V_elem = static_cast<float>(elem.V > static_cast<T>(1.0e-18f) ? elem.V : (elem.V0 > static_cast<T>(1.0e-18f) ? elem.V0 : static_cast<T>(1.0e-6f)));
@@ -2573,7 +2611,8 @@ void FEMSolver3D<T>::convertElementToMPMParticles(const FEMElement3D<T>& elem, s
         seed = seed ^ (seed >> 15);
         return (static_cast<float>(seed & 0xFFFFu) / 32767.5f) - 1.0f;
     };
-    uint32_t base_seed = static_cast<uint32_t>(elem.node_ids[0]) * 73856093u ^ static_cast<uint32_t>(elem.node_ids[6]) * 19349663u;
+    uint32_t user_seed = static_cast<uint32_t>(m_physics_params.random_seed) * 2654435761u;
+    uint32_t base_seed = user_seed ^ (static_cast<uint32_t>(elem.node_ids[0]) * 73856093u) ^ (static_cast<uint32_t>(elem.node_ids[6]) * 19349663u);
 
     if (np == 1) {
         MPMParticle3D p{};
@@ -2656,6 +2695,14 @@ void FEMSolver3D<T>::convertElementToMPMParticles(const FEMElement3D<T>& elem, s
             vp[0] += v_spin_x;
             vp[1] += v_spin_y;
             vp[2] += v_spin_z;
+
+            // Inter-element cluster velocity smoothing to eliminate sharp boundary tears between adjacent element rows
+            if (v_cluster_com != nullptr && m_physics_params.debris_velocity_smoothing > static_cast<T>(1.0e-5f)) {
+                float alpha_s = std::clamp(static_cast<float>(m_physics_params.debris_velocity_smoothing), 0.0f, 0.75f);
+                vp[0] = (1.0f - alpha_s) * vp[0] + alpha_s * v_cluster_com[0];
+                vp[1] = (1.0f - alpha_s) * vp[1] + alpha_s * v_cluster_com[1];
+                vp[2] = (1.0f - alpha_s) * vp[2] + alpha_s * v_cluster_com[2];
+            }
 
             // Filter out single-node hourglassing / rupture singularities by bounding deviation from element COM
             float diff_x = vp[0] - v_elem_com[0];
