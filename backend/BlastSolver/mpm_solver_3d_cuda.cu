@@ -570,12 +570,15 @@ __global__ void kernel_g2p_3d(MPMParticle3DSoA soa, int num_particles,
         v_pic_z /= weight_sum;
     }
 
+    bool has_failed_p = (soa.has_failed[p_idx] != 0);
+
     float target_vx = v_pic_x;
     float target_vy = v_pic_y;
     float target_vz = v_pic_z;
 
-    if (velocity_scheme == 2) { // FLIP
-        float alpha = fminf(fmaxf(flip_blend, 0.0f), 1.0f);
+    // Use FLIP (95% FLIP / 5% PIC) if globally selected or if particle is failed/eroded debris
+    if (velocity_scheme == 2 || has_failed_p) {
+        float alpha = (velocity_scheme == 2) ? fminf(fmaxf(flip_blend, 0.0f), 1.0f) : 0.95f;
         float v_flip_x = v_prev_x + (v_pic_x - v_prev_x);
         float v_flip_y = v_prev_y + (v_pic_y - v_prev_y);
         float v_flip_z = v_prev_z + (v_pic_z - v_prev_z);
@@ -592,10 +595,10 @@ __global__ void kernel_g2p_3d(MPMParticle3DSoA soa, int num_particles,
     soa.v[1][p_idx] = final_vy;
     soa.v[2][p_idx] = final_vz;
 
-    // Store particle velocity gradient B_p = grad(v) for constitutive stress update
+    // Store particle velocity gradient B_p = grad(v) for constitutive stress update (only for intact APIC particles)
     for (int r = 0; r < 3; ++r) {
         for (int c = 0; c < 3; ++c) {
-            soa.B[r][c][p_idx] = (velocity_scheme == 1) ? fminf(fmaxf(B_new[r][c], -max_B), max_B) : 0.0f;
+            soa.B[r][c][p_idx] = (!has_failed_p && velocity_scheme == 1) ? fminf(fmaxf(B_new[r][c], -max_B), max_B) : 0.0f;
             soa.L_grad[r][c][p_idx] = fminf(fmaxf(L_new[r][c], -max_B), max_B);
         }
     }
@@ -703,12 +706,12 @@ __global__ void kernel_stress_update_3d(MPMParticle3DSoA soa, int num_particles,
             p_comp = K_debris * (1.0f - J) / J;
         }
 
-        const float M_friction = 1.0f;
+        const float M_friction = 0.30f;
         const float q_max = M_friction * p_comp;
 
         const float E_mod = mat.youngs_modulus;
         const float nu = mat.poissons_ratio;
-        const float mu_debris = 0.05f * (E_mod / (2.0f * (1.0f + nu)));
+        const float mu_debris = 0.005f * (E_mod / (2.0f * (1.0f + nu)));
 
         float deps_dev[3][3];
         for (int r = 0; r < 3; ++r)

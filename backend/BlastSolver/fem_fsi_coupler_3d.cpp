@@ -365,22 +365,53 @@ void FEMFSICoupler3D<T>::applyFluidPressureToStructure(T dt) {
             int j = std::clamp(static_cast<int>(std::floor((p.x[1] - ymin) / dy)), 0, ny - 1);
             int k = std::clamp(static_cast<int>(std::floor((p.x[2] - zmin) / dz)), 0, nz - 1);
 
-            T p_L = (i > 0) ? sample_p_at(xmin + (i - 0.5) * dx, p.x[1], p.x[2]) : static_cast<T>(101325.0f);
-            T p_R = (i < nx - 1) ? sample_p_at(xmin + (i + 1.5) * dx, p.x[1], p.x[2]) : static_cast<T>(101325.0f);
-            T p_B = (j > 0) ? sample_p_at(p.x[0], ymin + (j - 0.5) * dy, p.x[2]) : static_cast<T>(101325.0f);
-            T p_T = (j < ny - 1) ? sample_p_at(p.x[0], ymin + (j + 1.5) * dy, p.x[2]) : static_cast<T>(101325.0f);
-            T p_D = (k > 0) ? sample_p_at(p.x[0], p.x[1], zmin + (k - 0.5) * dz) : static_cast<T>(101325.0f);
-            T p_U = (k < nz - 1) ? sample_p_at(p.x[0], p.x[1], zmin + (k + 1.5) * dz) : static_cast<T>(101325.0f);
+            auto is_solid = [&](int ci, int cj, int ck) -> bool {
+                if (ci < 0 || ci >= nx || cj < 0 || cj >= ny || ck < 0 || ck >= nz) return true;
+                size_t c_idx = static_cast<size_t>(ci) + static_cast<size_t>(cj) * nx + static_cast<size_t>(ck) * nx * ny;
+                return (c_idx < m_solid_mask.size() && m_solid_mask[c_idx] != 0);
+            };
 
-            float r_p = std::max(0.001f, p.lp[0]);
-            float A_p = 3.14159f * r_p * r_p;
-            float V_p = (p.V > 0.0f) ? p.V : ((4.0f / 3.0f) * 3.14159f * r_p * r_p * r_p);
+            T p_C = sample_p_at(p.x[0], p.x[1], p.x[2]);
+
+            // Robust, scale-invariant one-sided gradient evaluation that never bridges across solid walls
+            float grad_px = 0.0f;
+            bool solid_L = (i <= 0) || is_solid(i - 1, j, k);
+            bool solid_R = (i >= nx - 1) || is_solid(i + 1, j, k);
+            if (!solid_L && !solid_R) {
+                grad_px = static_cast<float>(sample_p_at(xmin + (i + 1.5) * dx, p.x[1], p.x[2]) - sample_p_at(xmin + (i - 0.5) * dx, p.x[1], p.x[2])) / static_cast<float>(2.0 * dx);
+            } else if (!solid_R) {
+                grad_px = static_cast<float>(sample_p_at(xmin + (i + 1.5) * dx, p.x[1], p.x[2]) - p_C) / static_cast<float>(dx);
+            } else if (!solid_L) {
+                grad_px = static_cast<float>(p_C - sample_p_at(xmin + (i - 0.5) * dx, p.x[1], p.x[2])) / static_cast<float>(dx);
+            }
+
+            float grad_py = 0.0f;
+            bool solid_B = (j <= 0) || is_solid(i, j - 1, k);
+            bool solid_T = (j >= ny - 1) || is_solid(i, j + 1, k);
+            if (!solid_B && !solid_T) {
+                grad_py = static_cast<float>(sample_p_at(p.x[0], ymin + (j + 1.5) * dy, p.x[2]) - sample_p_at(p.x[0], ymin + (j - 0.5) * dy, p.x[2])) / static_cast<float>(2.0 * dy);
+            } else if (!solid_T) {
+                grad_py = static_cast<float>(sample_p_at(p.x[0], ymin + (j + 1.5) * dy, p.x[2]) - p_C) / static_cast<float>(dy);
+            } else if (!solid_B) {
+                grad_py = static_cast<float>(p_C - sample_p_at(p.x[0], ymin + (j - 0.5) * dy, p.x[2])) / static_cast<float>(dy);
+            }
+
+            float grad_pz = 0.0f;
+            bool solid_D = (k <= 0) || is_solid(i, j, k - 1);
+            bool solid_U = (k >= nz - 1) || is_solid(i, j, k + 1);
+            if (!solid_D && !solid_U) {
+                grad_pz = static_cast<float>(sample_p_at(p.x[0], p.x[1], zmin + (k + 1.5) * dz) - sample_p_at(p.x[0], p.x[1], zmin + (k - 0.5) * dz)) / static_cast<float>(2.0 * dz);
+            } else if (!solid_U) {
+                grad_pz = static_cast<float>(sample_p_at(p.x[0], p.x[1], zmin + (k + 1.5) * dz) - p_C) / static_cast<float>(dz);
+            } else if (!solid_D) {
+                grad_pz = static_cast<float>(p_C - sample_p_at(p.x[0], p.x[1], zmin + (k - 0.5) * dz)) / static_cast<float>(dz);
+            }
+
+            float r_p = (p.lp[0] > 0.0f) ? p.lp[0] : (0.5f * std::cbrt(std::max(1.0e-30f, p.V)));
+            float A_p = 3.14159265f * r_p * r_p;
+            float V_p = (p.V > 0.0f) ? p.V : ((4.0f / 3.0f) * 3.14159265f * r_p * r_p * r_p);
 
             // Pressure gradient force: F_grad = -V_p * grad(p)
-            float grad_px = static_cast<float>(p_R - p_L) / static_cast<float>(2.0 * dx);
-            float grad_py = static_cast<float>(p_T - p_B) / static_cast<float>(2.0 * dy);
-            float grad_pz = static_cast<float>(p_U - p_D) / static_cast<float>(2.0 * dz);
-
             float F_x = -V_p * grad_px;
             float F_y = -V_p * grad_py;
             float F_z = -V_p * grad_pz;
@@ -394,7 +425,7 @@ void FEMFSICoupler3D<T>::applyFluidPressureToStructure(T dt) {
                 float rel_v = std::sqrt(rel_vx * rel_vx + rel_vy * rel_vy + rel_vz * rel_vz);
 
                 float gamma = 1.4f;
-                float c_s = std::sqrt(std::max(100.0f, gamma * std::max(101325.0f, p_f) / std::max(0.1f, rho_f)));
+                float c_s = std::sqrt(std::max(10.0f, gamma * std::max(10.0f, p_f) / std::max(1.0e-4f, rho_f)));
                 float M_rel = rel_v / c_s;
                 float Cd = (M_rel > 1.0f) ? std::min(1.8f, 1.2f + 0.4f * (M_rel - 1.0f)) : 1.0f;
 
@@ -404,7 +435,7 @@ void FEMFSICoupler3D<T>::applyFluidPressureToStructure(T dt) {
                 F_z += F_drag_mag * rel_vz;
             }
 
-            float m_p = std::max(1.0e-6f, p.m);
+            float m_p = std::max(1.0e-12f, p.m);
             p.v[0] += (F_x / m_p) * static_cast<float>(dt);
             p.v[1] += (F_y / m_p) * static_cast<float>(dt);
             p.v[2] += (F_z / m_p) * static_cast<float>(dt);

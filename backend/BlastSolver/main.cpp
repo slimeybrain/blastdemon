@@ -5440,11 +5440,21 @@ static void ensure_mpm_debris_solver(const nlohmann::json& msg_obj, bool use_gpu
         if (!global_solver_mpm_3d) {
             global_solver_mpm_3d = std::make_unique<Blast::MPMSolver3D>();
             global_solver_mpm_3d->initializeGrid(nx, ny, nz, cs, cs, cs, xmin_d, ymin_d, zmin_d);
+            global_solver_mpm_3d->setBoundaryConditions(
+                Blast::MPMBoundaryCondition3D::Terminate, Blast::MPMBoundaryCondition3D::Terminate,
+                Blast::MPMBoundaryCondition3D::Terminate, Blast::MPMBoundaryCondition3D::Terminate,
+                Blast::MPMBoundaryCondition3D::Terminate, Blast::MPMBoundaryCondition3D::Terminate
+            );
         }
 
         if (use_gpu && !global_solver_mpm_3d_cuda) {
             global_solver_mpm_3d_cuda = std::make_unique<Blast::MPMSolver3DCUDA>();
             global_solver_mpm_3d_cuda->initializeGrid(nx, ny, nz, cs, cs, cs, xmin_d, ymin_d, zmin_d);
+            global_solver_mpm_3d_cuda->setBoundaryConditions(
+                Blast::MPMBoundaryCondition3D::Terminate, Blast::MPMBoundaryCondition3D::Terminate,
+                Blast::MPMBoundaryCondition3D::Terminate, Blast::MPMBoundaryCondition3D::Terminate,
+                Blast::MPMBoundaryCondition3D::Terminate, Blast::MPMBoundaryCondition3D::Terminate
+            );
             emit_kernel_log("INFO", "Auto-initialized background GPU CUDA MPM debris solver for failed FEM conversion.", 0.0, "fem_3d", 0);
         } else if (!use_gpu) {
             emit_kernel_log("INFO", "Auto-initialized background CPU MPM debris solver for failed FEM conversion.", 0.0, "fem_3d", 0);

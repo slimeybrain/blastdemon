@@ -917,8 +917,8 @@ void MPMSolver3D::gridToParticle(float dt) {
         float target_vy = v_pic_y;
         float target_vz = v_pic_z;
 
-        if (m_velocity_scheme == MPMVelocityScheme::FLIP) {
-            float alpha = std::clamp(m_flip_blend, 0.0f, 1.0f);
+        if (m_velocity_scheme == MPMVelocityScheme::FLIP || p.has_failed) {
+            float alpha = (m_velocity_scheme == MPMVelocityScheme::FLIP) ? std::clamp(m_flip_blend, 0.0f, 1.0f) : 0.95f;
             target_vx = alpha * v_flip_x + (1.0f - alpha) * v_pic_x;
             target_vy = alpha * v_flip_y + (1.0f - alpha) * v_pic_y;
             target_vz = alpha * v_flip_z + (1.0f - alpha) * v_pic_z;
@@ -930,7 +930,7 @@ void MPMSolver3D::gridToParticle(float dt) {
 
         for (int r = 0; r < 3; ++r) {
             for (int c = 0; c < 3; ++c) {
-                p.B[r][c] = (m_velocity_scheme == MPMVelocityScheme::APIC) ? std::clamp(B_new[r][c], -max_B, max_B) : 0.0f;
+                p.B[r][c] = (!p.has_failed && m_velocity_scheme == MPMVelocityScheme::APIC) ? std::clamp(B_new[r][c], -max_B, max_B) : 0.0f;
                 p.L_grad[r][c] = std::clamp(L_new[r][c], -max_B, max_B);
             }
         }
@@ -1023,12 +1023,12 @@ void MPMSolver3D::updateStressState(float dt) {
             }
 
             // 2. Frictional Shear Resistance (Mohr-Coulomb / Drucker-Prager cone limit: q <= M * p_comp)
-            const float M_friction = 1.0f; // tan(phi) ~ 1.0 for phi ~ 30 deg
+            const float M_friction = 0.30f;
             const float q_max = M_friction * p_comp;
 
             const float E_mod = mat.youngs_modulus;
             const float nu = mat.poissons_ratio;
-            const float mu_debris = 0.05f * (E_mod / (2.0f * (1.0f + nu)));
+            const float mu_debris = 0.005f * (E_mod / (2.0f * (1.0f + nu)));
 
             float deps_dev[3][3];
             for (int r = 0; r < 3; ++r)
