@@ -438,6 +438,7 @@ __global__ void kernel_g2p_3d(MPMParticle3DSoA soa, int num_particles,
     float v_prev_z = soa.v[2][p_idx];
 
     float v_pic_x = 0.0f; float v_pic_y = 0.0f; float v_pic_z = 0.0f;
+    float delta_v_grid_x = 0.0f; float delta_v_grid_y = 0.0f; float delta_v_grid_z = 0.0f;
     float weight_sum = 0.0f;
     float ep_grid_sum = 0.0f;
 
@@ -515,13 +516,23 @@ __global__ void kernel_g2p_3d(MPMParticle3DSoA soa, int num_particles,
                 const MPMGridNode3D& node = grid[node_idx];
 
                 if (node.m > 1.0e-11f) {
-                    float n_vx = node.p[0] / node.m;
-                    float n_vy = node.p[1] / node.m;
-                    float n_vz = node.p[2] / node.m;
+                    float inv_m = 1.0f / node.m;
+                    float n_vx = node.p[0] * inv_m;
+                    float n_vy = node.p[1] * inv_m;
+                    float n_vz = node.p[2] * inv_m;
 
                     v_pic_x += weight * n_vx;
                     v_pic_y += weight * n_vy;
                     v_pic_z += weight * n_vz;
+
+                    float delta_vx = dt * (node.f_ext[0] + node.f_int[0]) * inv_m;
+                    float delta_vy = dt * (node.f_ext[1] + node.f_int[1]) * inv_m;
+                    float delta_vz = dt * (node.f_ext[2] + node.f_int[2]) * inv_m;
+
+                    delta_v_grid_x += weight * delta_vx;
+                    delta_v_grid_y += weight * delta_vy;
+                    delta_v_grid_z += weight * delta_vz;
+
                     ep_grid_sum += weight * node.plastic_strain;
                     weight_sum += weight;
 
@@ -564,10 +575,15 @@ __global__ void kernel_g2p_3d(MPMParticle3DSoA soa, int num_particles,
 
     if (weight_sum <= 1.0e-7f) {
         v_pic_x = v_prev_x; v_pic_y = v_prev_y; v_pic_z = v_prev_z;
+        delta_v_grid_x = 0.0f; delta_v_grid_y = 0.0f; delta_v_grid_z = 0.0f;
     } else {
-        v_pic_x /= weight_sum;
-        v_pic_y /= weight_sum;
-        v_pic_z /= weight_sum;
+        float inv_w = 1.0f / weight_sum;
+        v_pic_x *= inv_w;
+        v_pic_y *= inv_w;
+        v_pic_z *= inv_w;
+        delta_v_grid_x *= inv_w;
+        delta_v_grid_y *= inv_w;
+        delta_v_grid_z *= inv_w;
     }
 
     bool has_failed_p = (soa.has_failed[p_idx] != 0);
@@ -576,12 +592,12 @@ __global__ void kernel_g2p_3d(MPMParticle3DSoA soa, int num_particles,
     float target_vy = v_pic_y;
     float target_vz = v_pic_z;
 
-    // Use FLIP (95% FLIP / 5% PIC) if globally selected or if particle is failed/eroded debris
+    // True FLIP velocity update with exact acceleration increment from physical forces
     if (velocity_scheme == 2 || has_failed_p) {
         float alpha = (velocity_scheme == 2) ? fminf(fmaxf(flip_blend, 0.0f), 1.0f) : 0.95f;
-        float v_flip_x = v_prev_x + (v_pic_x - v_prev_x);
-        float v_flip_y = v_prev_y + (v_pic_y - v_prev_y);
-        float v_flip_z = v_prev_z + (v_pic_z - v_prev_z);
+        float v_flip_x = v_prev_x + delta_v_grid_x;
+        float v_flip_y = v_prev_y + delta_v_grid_y;
+        float v_flip_z = v_prev_z + delta_v_grid_z;
         target_vx = alpha * v_flip_x + (1.0f - alpha) * v_pic_x;
         target_vy = alpha * v_flip_y + (1.0f - alpha) * v_pic_y;
         target_vz = alpha * v_flip_z + (1.0f - alpha) * v_pic_z;

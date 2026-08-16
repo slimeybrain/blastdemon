@@ -730,11 +730,11 @@ void MPMSolver3D::gridToParticle(float dt) {
         int base_k = static_cast<int>(std::floor(pz / m_dz));
 
         float v_pic_x = 0.0f; float v_pic_y = 0.0f; float v_pic_z = 0.0f;
-        float v_flip_x = p.v[0]; float v_flip_y = p.v[1]; float v_flip_z = p.v[2];
+        float delta_v_grid_x = 0.0f; float delta_v_grid_y = 0.0f; float delta_v_grid_z = 0.0f;
         float weight_sum = 0.0f;
         float ep_grid_sum = 0.0f;
 
-        // Pass 1: Interpolate PIC velocity & smoothed plastic strain
+        // Pass 1: Interpolate PIC velocity, true FLIP acceleration increment & smoothed plastic strain
         for (int offset_i = -1; offset_i <= 2; ++offset_i) {
             int i = base_i + offset_i;
             if (i < 0 || i >= m_nx) continue;
@@ -791,12 +791,19 @@ void MPMSolver3D::gridToParticle(float dt) {
                     const auto& node = m_grid[node_idx];
 
                     if (node.m > MPMGridNode3D::MIN_MASS) {
+                        float inv_m = 1.0f / node.m;
                         v_pic_x += weight * node.v(0);
                         v_pic_y += weight * node.v(1);
                         v_pic_z += weight * node.v(2);
-                        v_flip_x += weight * node.v(0);
-                        v_flip_y += weight * node.v(1);
-                        v_flip_z += weight * node.v(2);
+
+                        float delta_vx = dt * (node.f_ext[0] + node.f_int[0]) * inv_m;
+                        float delta_vy = dt * (node.f_ext[1] + node.f_int[1]) * inv_m;
+                        float delta_vz = dt * (node.f_ext[2] + node.f_int[2]) * inv_m;
+
+                        delta_v_grid_x += weight * delta_vx;
+                        delta_v_grid_y += weight * delta_vy;
+                        delta_v_grid_z += weight * delta_vz;
+
                         ep_grid_sum += weight * node.plastic_strain;
                         weight_sum += weight;
                     }
@@ -806,10 +813,15 @@ void MPMSolver3D::gridToParticle(float dt) {
 
         if (weight_sum <= 1.0e-7f) {
             v_pic_x = p.v[0]; v_pic_y = p.v[1]; v_pic_z = p.v[2];
+            delta_v_grid_x = 0.0f; delta_v_grid_y = 0.0f; delta_v_grid_z = 0.0f;
         } else {
-            v_pic_x /= weight_sum;
-            v_pic_y /= weight_sum;
-            v_pic_z /= weight_sum;
+            float inv_w = 1.0f / weight_sum;
+            v_pic_x *= inv_w;
+            v_pic_y *= inv_w;
+            v_pic_z *= inv_w;
+            delta_v_grid_x *= inv_w;
+            delta_v_grid_y *= inv_w;
+            delta_v_grid_z *= inv_w;
         }
 
         // Pass 2: APIC 3x3 affine velocity matrix B_p and spatial gradient L_grad calculation
@@ -919,6 +931,9 @@ void MPMSolver3D::gridToParticle(float dt) {
 
         if (m_velocity_scheme == MPMVelocityScheme::FLIP || p.has_failed) {
             float alpha = (m_velocity_scheme == MPMVelocityScheme::FLIP) ? std::clamp(m_flip_blend, 0.0f, 1.0f) : 0.95f;
+            float v_flip_x = p.v[0] + delta_v_grid_x;
+            float v_flip_y = p.v[1] + delta_v_grid_y;
+            float v_flip_z = p.v[2] + delta_v_grid_z;
             target_vx = alpha * v_flip_x + (1.0f - alpha) * v_pic_x;
             target_vy = alpha * v_flip_y + (1.0f - alpha) * v_pic_y;
             target_vz = alpha * v_flip_z + (1.0f - alpha) * v_pic_z;
