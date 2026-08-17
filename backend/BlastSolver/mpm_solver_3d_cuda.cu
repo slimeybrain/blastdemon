@@ -718,9 +718,9 @@ __global__ void kernel_stress_update_3d(MPMParticle3DSoA soa, int num_particles,
             const float E_mod    = mat.youngs_modulus;
             const float nu       = mat.poissons_ratio;
             const float K_intact = E_mod / (3.0f * fmaxf(1.0e-4f, 1.0f - 2.0f * nu));
-            const float K_debris = 0.10f * K_intact;
+            const float K_debris = fminf(0.005f * K_intact, 100.0e6f);
             p_comp = K_debris * (1.0f - J) / fmaxf(0.01f, J);
-            float p_crush_max = fmaxf(100.0e6f, (mat.fc > 0.0f ? 5.0f * mat.fc : 2.0f * mat.yield_stress));
+            float p_crush_max = fminf(50.0e6f, (mat.fc > 0.0f ? 2.0f * mat.fc : 1.0f * mat.yield_stress));
             if (p_comp > p_crush_max) p_comp = p_crush_max;
         }
 

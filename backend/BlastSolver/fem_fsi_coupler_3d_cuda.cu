@@ -477,13 +477,9 @@ void FEMFSICoupler3DCUDA<T>::attachSolvers(CFDSolver3D* fv_solver, FEMSolver3DCU
 
 template <typename T>
 T FEMFSICoupler3DCUDA<T>::computeCoupledDt(T cfl) const {
-    if (m_cfl_subcycle_counter <= 0 || m_step_count == 0) {
-        T dt_fem = m_fem_solver ? m_fem_solver->computeStepSize(cfl) : static_cast<T>(1.0e-5f);
-        T dt_fv = m_fv_solver ? static_cast<T>(m_fv_solver->computeStepSize(static_cast<double>(cfl))) : static_cast<T>(1.0e-5f);
-        m_cached_dt = std::min(dt_fem, dt_fv);
-        m_cfl_subcycle_counter = CFL_SUBCYCLE_INTERVAL;
-    }
-    m_cfl_subcycle_counter--;
+    T dt_fem = m_fem_solver ? m_fem_solver->computeStepSize(cfl) : static_cast<T>(1.0e-5f);
+    T dt_fv = m_fv_solver ? static_cast<T>(m_fv_solver->computeStepSize(static_cast<double>(cfl))) : static_cast<T>(1.0e-5f);
+    m_cached_dt = std::min(dt_fem, dt_fv);
     return m_cached_dt;
 }
 

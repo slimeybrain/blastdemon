@@ -396,18 +396,27 @@ void FEMContact3D<T>::applyPenaltyForces(FEMSolver3D<T>& solver, T dt) {
             // Harmonic mean interface bulk modulus for general dissimilar materials
             T K_interface = (static_cast<T>(2.0f) * K_master * K_slave) / (K_master + K_slave + static_cast<T>(1.0e-30f));
 
-            T k_stiff = m_penalty_scale * K_interface * h_elem;
-            T f_spring = k_stiff * eff_penetration;
-
             T m_facet_avg = static_cast<T>(0.25f) * (nodes[facet.node_ids[0]].m + nodes[facet.node_ids[1]].m
                                                      + nodes[facet.node_ids[2]].m + nodes[facet.node_ids[3]].m);
             T m_sum = node.m + m_facet_avg;
             T m_pair = (m_sum > static_cast<T>(1.0e-30f)) ? (node.m * m_facet_avg / m_sum) : static_cast<T>(1.0e-30f);
 
+            T dt_safe = (dt > static_cast<T>(1.0e-12f)) ? dt : static_cast<T>(1.0e-12f);
+            T k_dyn = static_cast<T>(0.50f) * m_pair / (dt_safe * dt_safe);
+            T k_geom = (static_cast<T>(0.10f) * K_interface) * h_elem;
+            T k_base = (k_geom < k_dyn) ? k_geom : k_dyn;
+            T k_stiff = m_penalty_scale * k_base;
+            if (k_stiff < static_cast<T>(1.0e5f)) k_stiff = static_cast<T>(1.0e5f);
+            T f_spring = k_stiff * eff_penetration;
+
             T vf0 = static_cast<T>(0.25f) * (nodes[facet.node_ids[0]].v[0] + nodes[facet.node_ids[1]].v[0] + nodes[facet.node_ids[2]].v[0] + nodes[facet.node_ids[3]].v[0]);
             T vf1 = static_cast<T>(0.25f) * (nodes[facet.node_ids[0]].v[1] + nodes[facet.node_ids[1]].v[1] + nodes[facet.node_ids[2]].v[1] + nodes[facet.node_ids[3]].v[1]);
             T vf2 = static_cast<T>(0.25f) * (nodes[facet.node_ids[0]].v[2] + nodes[facet.node_ids[1]].v[2] + nodes[facet.node_ids[2]].v[2] + nodes[facet.node_ids[3]].v[2]);
             T v_rel_n = (node.v[0] - vf0)*contact_normal[0] + (node.v[1] - vf1)*contact_normal[1] + (node.v[2] - vf2)*contact_normal[2];
+
+            if (v_rel_n >= static_cast<T>(0.0f)) {
+                f_spring *= static_cast<T>(0.10f);
+            }
 
             T f_damp = static_cast<T>(0.0f);
             if (v_rel_n < static_cast<T>(0.0f)) {
@@ -416,8 +425,16 @@ void FEMContact3D<T>::applyPenaltyForces(FEMSolver3D<T>& solver, T dt) {
             }
 
             T f_total = f_spring + f_damp;
-            T v_limit = std::max(static_cast<T>(2.0f) * std::abs(v_rel_n), static_cast<T>(20.0f));
-            T f_max = m_pair * v_limit / (dt > static_cast<T>(1.0e-12f) ? dt : static_cast<T>(1.0e-12f));
+            T v_limit = std::max(static_cast<T>(1.5f) * std::abs(v_rel_n), static_cast<T>(1.0f));
+            T f_max = m_pair * v_limit / dt_safe;
+            if (facet.element_id >= 0 && facet.element_id < static_cast<int>(elements.size())) {
+                const auto& elem = elements[facet.element_id];
+                if (elem.mat_id >= 0 && elem.mat_id < static_cast<int>(materials.size())) {
+                    T sigma_y = static_cast<T>(materials[elem.mat_id].yield_stress > 0.0f ? materials[elem.mat_id].yield_stress : 400.0e6f);
+                    T f_mat_cap = static_cast<T>(1.5f) * sigma_y * facet.area;
+                    if (f_max > f_mat_cap && f_mat_cap > static_cast<T>(1.0e3f)) f_max = f_mat_cap;
+                }
+            }
             f_total = std::min(f_total, f_max);
 
 
@@ -540,23 +557,25 @@ void FEMContact3D<T>::solveMPMRebarContact(FEMSolver3D<T>& fem_solver, MPMSolver
         if (L2 < static_cast<T>(1.0e-12f)) return;
         T L = std::sqrt(L2);
 
-        // Segment bounding box with padding
-        T pad = r_bar + static_cast<T>(0.05f);
-        T min_seg[3] = { std::min(node1.x[0], node2.x[0]) - pad, std::min(node1.x[1], node2.x[1]) - pad, std::min(node1.x[2], node2.x[2]) - pad };
-        T max_seg[3] = { std::max(node1.x[0], node2.x[0]) + pad, std::max(node1.x[1], node2.x[1]) + pad, std::max(node1.x[2], node2.x[2]) + pad };
-
+        T dt_safe = (dt > static_cast<T>(1.0e-12f)) ? dt : static_cast<T>(1.0e-12f);
         T E_mat = static_cast<T>(200.0e9f);
         if (mat_id >= 0 && mat_id < static_cast<int>(mat_tables.size())) {
             E_mat = static_cast<T>(mat_tables[mat_id].youngs_modulus > 0.0f ? mat_tables[mat_id].youngs_modulus : 200.0e9f);
         }
-        T k_pen = (E_mat * static_cast<T>(3.14159265f) * r_bar * r_bar / L) * m_penalty_scale * static_cast<T>(0.01f);
-        if (k_pen < static_cast<T>(1.0e5f)) k_pen = static_cast<T>(1.0e5f);
+        T k_geom = (E_mat * static_cast<T>(3.14159265f) * r_bar * r_bar / L) * static_cast<T>(0.10f);
 
         for (auto& p : particles) {
-            // Broad-phase AABB test
-            if (static_cast<T>(p.x[0]) < min_seg[0] || static_cast<T>(p.x[0]) > max_seg[0] ||
-                static_cast<T>(p.x[1]) < min_seg[1] || static_cast<T>(p.x[1]) > max_seg[1] ||
-                static_cast<T>(p.x[2]) < min_seg[2] || static_cast<T>(p.x[2]) > max_seg[2]) {
+            if (p.m <= 0.0f) continue;
+            T r_debris = static_cast<T>(p.lp[0] > 0.0f ? p.lp[0] : 0.005f);
+            T v_pad = (std::abs(p.v[0]) + std::abs(p.v[1]) + std::abs(p.v[2])) * dt_safe;
+            T pad = r_bar + r_debris + v_pad + static_cast<T>(0.01f);
+            T min_seg_p[3] = { std::min(node1.x[0], node2.x[0]) - pad, std::min(node1.x[1], node2.x[1]) - pad, std::min(node1.x[2], node2.x[2]) - pad };
+            T max_seg_p[3] = { std::max(node1.x[0], node2.x[0]) + pad, std::max(node1.x[1], node2.x[1]) + pad, std::max(node1.x[2], node2.x[2]) + pad };
+
+            // Broad-phase AABB test with velocity padding
+            if (static_cast<T>(p.x[0]) < min_seg_p[0] || static_cast<T>(p.x[0]) > max_seg_p[0] ||
+                static_cast<T>(p.x[1]) < min_seg_p[1] || static_cast<T>(p.x[1]) > max_seg_p[1] ||
+                static_cast<T>(p.x[2]) < min_seg_p[2] || static_cast<T>(p.x[2]) > max_seg_p[2]) {
                 continue;
             }
 
@@ -568,83 +587,106 @@ void FEMContact3D<T>::solveMPMRebarContact(FEMSolver3D<T>& fem_solver, MPMSolver
             T xc[3] = { node1.x[0] + t_clamp * s[0], node1.x[1] + t_clamp * s[1], node1.x[2] + t_clamp * s[2] };
             T d[3] = { static_cast<T>(p.x[0]) - xc[0], static_cast<T>(p.x[1]) - xc[1], static_cast<T>(p.x[2]) - xc[2] };
             T dist2 = d[0]*d[0] + d[1]*d[1] + d[2]*d[2];
-            T dist = std::sqrt(dist2);
+            T dist = std::sqrt(dist2 > static_cast<T>(1.0e-20f) ? dist2 : static_cast<T>(1.0e-20f));
 
-            T r_debris = static_cast<T>(p.lp[0] > 0.0f ? p.lp[0] : 0.005f);
             T R_contact = r_bar + r_debris;
 
-            if (dist < R_contact) {
+            // Relative velocity
+            T v_seg[3] = {
+                (static_cast<T>(1.0f) - t_clamp) * node1.v[0] + t_clamp * node2.v[0],
+                (static_cast<T>(1.0f) - t_clamp) * node1.v[1] + t_clamp * node2.v[1],
+                (static_cast<T>(1.0f) - t_clamp) * node1.v[2] + t_clamp * node2.v[2]
+            };
+            T v_rel[3] = { static_cast<T>(p.v[0]) - v_seg[0], static_cast<T>(p.v[1]) - v_seg[1], static_cast<T>(p.v[2]) - v_seg[2] };
+
+            T n[3];
+            if (dist > static_cast<T>(1.0e-8f)) {
+                n[0] = d[0] / dist; n[1] = d[1] / dist; n[2] = d[2] / dist;
+            } else {
+                n[0] = static_cast<T>(0.0f); n[1] = static_cast<T>(1.0f); n[2] = static_cast<T>(0.0f);
+            }
+            T v_n = v_rel[0]*n[0] + v_rel[1]*n[1] + v_rel[2]*n[2];
+
+            // Velocity-aware continuous capture threshold
+            T capture_depth = std::max(R_contact, static_cast<T>(1.5f) * std::abs(v_n) * dt_safe);
+
+            if (dist < capture_depth) {
                 T delta = R_contact - dist;
-                T n[3];
-                if (dist > static_cast<T>(1.0e-8f)) {
-                    n[0] = d[0] / dist; n[1] = d[1] / dist; n[2] = d[2] / dist;
-                } else {
-                    n[0] = static_cast<T>(0.0f); n[1] = static_cast<T>(1.0f); n[2] = static_cast<T>(0.0f);
+                if (delta <= static_cast<T>(0.0f) && v_n < static_cast<T>(0.0f)) delta = -v_n * dt_safe * static_cast<T>(0.5f);
+                if (delta > static_cast<T>(0.0f)) {
+                    T p_m = static_cast<T>(p.m > 0.0f ? p.m : 0.01f);
+                    T k_dyn = static_cast<T>(0.50f) * p_m / (dt_safe * dt_safe);
+                    T k_base = std::min(k_geom, k_dyn);
+                    T k_pen = m_penalty_scale * k_base;
+                    if (k_pen < static_cast<T>(1.0e5f)) k_pen = static_cast<T>(1.0e5f);
+
+                    T f_norm_mag = k_pen * delta;
+                    if (v_n >= static_cast<T>(0.0f)) {
+                        f_norm_mag *= static_cast<T>(0.10f);
+                    }
+
+                    T c_damp = static_cast<T>(2.0f) * m_contact_damping * std::sqrt(k_pen * p_m);
+                    T f_damp = c_damp * v_n;
+                    f_norm_mag = std::max(static_cast<T>(0.0f), f_norm_mag - f_damp);
+
+                    T v_limit = std::max(static_cast<T>(1.5f) * std::abs(v_n), static_cast<T>(1.0f));
+                    T f_max = p_m * v_limit / dt_safe;
+                    f_norm_mag = std::min(f_norm_mag, f_max);
+
+                    // Tangential friction
+                    T v_t[3] = { v_rel[0] - v_n * n[0], v_rel[1] - v_n * n[1], v_rel[2] - v_n * n[2] };
+                    T v_t_mag = std::sqrt(v_t[0]*v_t[0] + v_t[1]*v_t[1] + v_t[2]*v_t[2]);
+                    T f_fric[3] = { static_cast<T>(0.0f), static_cast<T>(0.0f), static_cast<T>(0.0f) };
+                    if (v_t_mag > static_cast<T>(1.0e-6f)) {
+                        T f_fric_mag = std::min(m_mu_kinetic * f_norm_mag, k_pen * v_t_mag * dt_safe);
+                        f_fric[0] = -f_fric_mag * (v_t[0] / v_t_mag);
+                        f_fric[1] = -f_fric_mag * (v_t[1] / v_t_mag);
+                        f_fric[2] = -f_fric_mag * (v_t[2] / v_t_mag);
+                    }
+
+                    T f_tot[3] = {
+                        f_norm_mag * n[0] + f_fric[0],
+                        f_norm_mag * n[1] + f_fric[1],
+                        f_norm_mag * n[2] + f_fric[2]
+                    };
+
+                    // Apply contact force impulse on particle
+                    if (p.m > 0.0f && dt_safe > static_cast<T>(0.0f)) {
+                        p.v[0] += static_cast<float>((f_tot[0] * dt_safe) / static_cast<T>(p.m));
+                        p.v[1] += static_cast<float>((f_tot[1] * dt_safe) / static_cast<T>(p.m));
+                        p.v[2] += static_cast<float>((f_tot[2] * dt_safe) / static_cast<T>(p.m));
+                    }
+
+                    // Apply equal and opposite reaction force on rebar nodes
+                    node1.f_contact[0] -= (static_cast<T>(1.0f) - t_clamp) * f_tot[0];
+                    node1.f_contact[1] -= (static_cast<T>(1.0f) - t_clamp) * f_tot[1];
+                    node1.f_contact[2] -= (static_cast<T>(1.0f) - t_clamp) * f_tot[2];
+
+                    node2.f_contact[0] -= t_clamp * f_tot[0];
+                    node2.f_contact[1] -= t_clamp * f_tot[1];
+                    node2.f_contact[2] -= t_clamp * f_tot[2];
                 }
-
-                T f_norm_mag = k_pen * delta;
-
-                // Relative velocity
-                T v_seg[3] = {
-                    (static_cast<T>(1.0f) - t_clamp) * node1.v[0] + t_clamp * node2.v[0],
-                    (static_cast<T>(1.0f) - t_clamp) * node1.v[1] + t_clamp * node2.v[1],
-                    (static_cast<T>(1.0f) - t_clamp) * node1.v[2] + t_clamp * node2.v[2]
-                };
-                T v_rel[3] = { static_cast<T>(p.v[0]) - v_seg[0], static_cast<T>(p.v[1]) - v_seg[1], static_cast<T>(p.v[2]) - v_seg[2] };
-                T v_n = v_rel[0]*n[0] + v_rel[1]*n[1] + v_rel[2]*n[2];
-
-                T c_damp = static_cast<T>(2.0f) * m_contact_damping * std::sqrt(k_pen * static_cast<T>(p.m > 0.0f ? p.m : 0.1f));
-                T f_damp = c_damp * v_n;
-                f_norm_mag = std::max(static_cast<T>(0.0f), f_norm_mag - f_damp);
-
-                // Tangential friction
-                T v_t[3] = { v_rel[0] - v_n * n[0], v_rel[1] - v_n * n[1], v_rel[2] - v_n * n[2] };
-                T v_t_mag = std::sqrt(v_t[0]*v_t[0] + v_t[1]*v_t[1] + v_t[2]*v_t[2]);
-                T f_fric[3] = { static_cast<T>(0.0f), static_cast<T>(0.0f), static_cast<T>(0.0f) };
-                if (v_t_mag > static_cast<T>(1.0e-6f)) {
-                    T f_fric_mag = std::min(m_mu_kinetic * f_norm_mag, k_pen * v_t_mag * dt);
-                    f_fric[0] = -f_fric_mag * (v_t[0] / v_t_mag);
-                    f_fric[1] = -f_fric_mag * (v_t[1] / v_t_mag);
-                    f_fric[2] = -f_fric_mag * (v_t[2] / v_t_mag);
-                }
-
-                T f_tot[3] = {
-                    f_norm_mag * n[0] + f_fric[0],
-                    f_norm_mag * n[1] + f_fric[1],
-                    f_norm_mag * n[2] + f_fric[2]
-                };
-
-                // Apply contact force impulse on particle
-                if (p.m > 0.0f && dt > static_cast<T>(0.0f)) {
-                    p.v[0] += static_cast<float>((f_tot[0] * dt) / static_cast<T>(p.m));
-                    p.v[1] += static_cast<float>((f_tot[1] * dt) / static_cast<T>(p.m));
-                    p.v[2] += static_cast<float>((f_tot[2] * dt) / static_cast<T>(p.m));
-                }
-
-                // Apply equal and opposite reaction force on rebar nodes
-                node1.f_contact[0] -= (static_cast<T>(1.0f) - t_clamp) * f_tot[0];
-                node1.f_contact[1] -= (static_cast<T>(1.0f) - t_clamp) * f_tot[1];
-                node1.f_contact[2] -= (static_cast<T>(1.0f) - t_clamp) * f_tot[2];
-
-                node2.f_contact[0] -= t_clamp * f_tot[0];
-                node2.f_contact[1] -= t_clamp * f_tot[1];
-                node2.f_contact[2] -= t_clamp * f_tot[2];
             }
         }
     };
 
-    // 1. Process 1D Trusses
-    for (const auto& truss : trusses) {
-        if (truss.is_eroded) continue;
-        T r_bar = std::sqrt(std::max(static_cast<T>(1.0e-8f), truss.A / static_cast<T>(3.14159265f)));
-        processSegmentContact(truss.node_ids[0], truss.node_ids[1], r_bar, truss.mat_id);
+    int num_trusses = static_cast<int>(trusses.size());
+    int num_beams = static_cast<int>(beams.size());
+
+    if (num_trusses > 0) {
+        for (const auto& truss : trusses) {
+            if (truss.is_eroded || truss.node_ids[0] < 0 || truss.node_ids[1] < 0) continue;
+            T r_rebar = std::sqrt(truss.A > static_cast<T>(1.0e-12f) ? (truss.A / static_cast<T>(3.1415926535f)) : static_cast<T>(0.0001f));
+            processSegmentContact(truss.node_ids[0], truss.node_ids[1], r_rebar, truss.mat_id);
+        }
     }
 
-    // 2. Process 3D Beams
-    for (const auto& beam : beams) {
-        if (beam.is_eroded) continue;
-        T r_bar = beam.d * static_cast<T>(0.5f);
-        processSegmentContact(beam.node_ids[0], beam.node_ids[1], r_bar, beam.mat_id);
+    if (num_beams > 0) {
+        for (const auto& beam : beams) {
+            if (beam.is_eroded || beam.node_ids[0] < 0 || beam.node_ids[1] < 0) continue;
+            T r_rebar = std::sqrt(beam.A > static_cast<T>(1.0e-12f) ? (beam.A / static_cast<T>(3.1415926535f)) : static_cast<T>(0.0001f));
+            processSegmentContact(beam.node_ids[0], beam.node_ids[1], r_rebar, beam.mat_id);
+        }
     }
 }
 
@@ -662,6 +704,7 @@ void FEMContact3D<T>::solveMPMFacetContact(FEMSolver3D<T>& fem_solver, MPMSolver
     buildSpatialHash(fem_solver);
 
     T inv_cell = static_cast<T>(1.0f) / m_cell_size;
+    T dt_safe = (dt > static_cast<T>(1.0e-12f)) ? dt : static_cast<T>(1.0e-12f);
 
     for (auto& p : particles) {
         if (p.m <= 0.0f) continue;
@@ -681,6 +724,9 @@ void FEMContact3D<T>::solveMPMFacetContact(FEMSolver3D<T>& fem_solver, MPMSolver
         int best_fid = -1;
         T best_N[4] = { static_cast<T>(0.0f), static_cast<T>(0.0f), static_cast<T>(0.0f), static_cast<T>(0.0f) };
 
+        T v_pad = (std::abs(p.v[0]) + std::abs(p.v[1]) + std::abs(p.v[2])) * dt_safe;
+        T total_pad = r_debris + v_pad + static_cast<T>(0.005f);
+
         for (int dx = -1; dx <= 1; ++dx) {
             for (int dy = -1; dy <= 1; ++dy) {
                 for (int dz = -1; dz <= 1; ++dz) {
@@ -692,10 +738,10 @@ void FEMContact3D<T>::solveMPMFacetContact(FEMSolver3D<T>& fem_solver, MPMSolver
                         const auto& facet = facets[f_idx];
                         if (facet.is_eroded) continue;
 
-                        // Broad-phase AABB test with particle radius padding
-                        if (px < facet.bbox_min[0] - r_debris || px > facet.bbox_max[0] + r_debris ||
-                            py < facet.bbox_min[1] - r_debris || py > facet.bbox_max[1] + r_debris ||
-                            pz < facet.bbox_min[2] - r_debris || pz > facet.bbox_max[2] + r_debris) {
+                        // Broad-phase AABB test with velocity-aware padding
+                        if (px < facet.bbox_min[0] - total_pad || px > facet.bbox_max[0] + total_pad ||
+                            py < facet.bbox_min[1] - total_pad || py > facet.bbox_max[1] + total_pad ||
+                            pz < facet.bbox_min[2] - total_pad || pz > facet.bbox_max[2] + total_pad) {
                             continue;
                         }
 
@@ -727,8 +773,8 @@ void FEMContact3D<T>::solveMPMFacetContact(FEMSolver3D<T>& fem_solver, MPMSolver
                             v_param = (len3_sq > static_cast<T>(1.0e-12f)) ? ((dx_v0[0]*e3[0] + dx_v0[1]*e3[1] + dx_v0[2]*e3[2]) / len3_sq) : static_cast<T>(0.5f);
                         }
 
-                        if (u_param < static_cast<T>(-0.05f) || u_param > static_cast<T>(1.05f) ||
-                            v_param < static_cast<T>(-0.05f) || v_param > static_cast<T>(1.05f)) continue;
+                        if (u_param < static_cast<T>(-0.08f) || u_param > static_cast<T>(1.08f) ||
+                            v_param < static_cast<T>(-0.08f) || v_param > static_cast<T>(1.08f)) continue;
 
                         T u_clamped = std::max(static_cast<T>(0.0f), std::min(static_cast<T>(1.0f), u_param));
                         T v_clamped = std::max(static_cast<T>(0.0f), std::min(static_cast<T>(1.0f), v_param));
@@ -760,16 +806,27 @@ void FEMContact3D<T>::solveMPMFacetContact(FEMSolver3D<T>& fem_solver, MPMSolver
                             }
                         }
 
-                        // Tangential offset check
+                        // Tangential offset check with mesh-adaptive and particle radius tolerance
                         T dx_t0 = dx_surf[0] - dist_n * contact_normal[0];
                         T dx_t1 = dx_surf[1] - dist_n * contact_normal[1];
                         T dx_t2 = dx_surf[2] - dist_n * contact_normal[2];
                         T d_tangent_sq = dx_t0*dx_t0 + dx_t1*dx_t1 + dx_t2*dx_t2;
-                        if (d_tangent_sq > static_cast<T>(0.04f) * h_elem * h_elem) continue;
+                        T d_tan_tol_sq = std::max(static_cast<T>(0.25f) * h_elem * h_elem, static_cast<T>(2.0f) * r_debris * r_debris);
+                        if (d_tangent_sq > d_tan_tol_sq) continue;
 
-                        if (dist_n < r_debris && dist_n > -static_cast<T>(0.35f) * h_elem) {
+                        T vf0 = N_shape[0]*nodes[facet.node_ids[0]].v[0] + N_shape[1]*nodes[facet.node_ids[1]].v[0] + N_shape[2]*nodes[facet.node_ids[2]].v[0] + N_shape[3]*nodes[facet.node_ids[3]].v[0];
+                        T vf1 = N_shape[0]*nodes[facet.node_ids[0]].v[1] + N_shape[1]*nodes[facet.node_ids[1]].v[1] + N_shape[2]*nodes[facet.node_ids[2]].v[1] + N_shape[3]*nodes[facet.node_ids[3]].v[1];
+                        T vf2 = N_shape[0]*nodes[facet.node_ids[0]].v[2] + N_shape[1]*nodes[facet.node_ids[1]].v[2] + N_shape[2]*nodes[facet.node_ids[2]].v[2] + N_shape[3]*nodes[facet.node_ids[3]].v[2];
+
+                        T v_rel[3] = { static_cast<T>(p.v[0]) - vf0, static_cast<T>(p.v[1]) - vf1, static_cast<T>(p.v[2]) - vf2 };
+                        T v_rel_n = v_rel[0]*contact_normal[0] + v_rel[1]*contact_normal[1] + v_rel[2]*contact_normal[2];
+
+                        // Velocity-aware continuous capture threshold: prevents high-speed particles from skipping over contact zone
+                        T capture_depth = std::max(static_cast<T>(0.50f) * h_elem, std::max(static_cast<T>(2.0f) * r_debris, static_cast<T>(1.5f) * std::abs(v_rel_n) * dt_safe));
+
+                        if (dist_n < r_debris && dist_n > -capture_depth) {
                             T penetration = r_debris - dist_n;
-                            T eff_penetration = std::min(penetration, static_cast<T>(0.30f) * h_elem);
+                            T eff_penetration = std::min(penetration, capture_depth);
 
                             T K_master = static_cast<T>(160.0e9f);
                             if (facet.element_id >= 0 && facet.element_id < static_cast<int>(elements.size())) {
@@ -785,22 +842,22 @@ void FEMContact3D<T>::solveMPMFacetContact(FEMSolver3D<T>& fem_solver, MPMSolver
                                 }
                             }
 
-                            T k_stiff = m_penalty_scale * (static_cast<T>(0.01f) * K_master) * h_elem;
-                            if (k_stiff < static_cast<T>(1.0e5f)) k_stiff = static_cast<T>(1.0e5f);
-                            T f_spring = k_stiff * eff_penetration;
-
                             T m_facet_avg = static_cast<T>(0.25f) * (nodes[facet.node_ids[0]].m + nodes[facet.node_ids[1]].m
                                                                      + nodes[facet.node_ids[2]].m + nodes[facet.node_ids[3]].m);
                             T p_m = static_cast<T>(p.m > 0.0f ? p.m : 0.01f);
                             T m_sum = p_m + m_facet_avg;
                             T m_pair = (m_sum > static_cast<T>(1.0e-30f)) ? (p_m * m_facet_avg / m_sum) : static_cast<T>(1.0e-30f);
 
-                            T vf0 = N_shape[0]*nodes[facet.node_ids[0]].v[0] + N_shape[1]*nodes[facet.node_ids[1]].v[0] + N_shape[2]*nodes[facet.node_ids[2]].v[0] + N_shape[3]*nodes[facet.node_ids[3]].v[0];
-                            T vf1 = N_shape[0]*nodes[facet.node_ids[0]].v[1] + N_shape[1]*nodes[facet.node_ids[1]].v[1] + N_shape[2]*nodes[facet.node_ids[2]].v[1] + N_shape[3]*nodes[facet.node_ids[3]].v[1];
-                            T vf2 = N_shape[0]*nodes[facet.node_ids[0]].v[2] + N_shape[1]*nodes[facet.node_ids[1]].v[2] + N_shape[2]*nodes[facet.node_ids[2]].v[2] + N_shape[3]*nodes[facet.node_ids[3]].v[2];
-
-                            T v_rel[3] = { static_cast<T>(p.v[0]) - vf0, static_cast<T>(p.v[1]) - vf1, static_cast<T>(p.v[2]) - vf2 };
-                            T v_rel_n = v_rel[0]*contact_normal[0] + v_rel[1]*contact_normal[1] + v_rel[2]*contact_normal[2];
+                            // Self-adaptive dynamic mass-time matched stiffness + bulk modulus stiffness (Dimensionless scale)
+                            T k_dyn = static_cast<T>(0.50f) * m_pair / (dt_safe * dt_safe);
+                            T k_geom = (static_cast<T>(0.10f) * K_master) * h_elem;
+                            T k_base = std::min(k_geom, k_dyn);
+                            T k_stiff = m_penalty_scale * k_base;
+                            if (k_stiff < static_cast<T>(1.0e5f)) k_stiff = static_cast<T>(1.0e5f);
+                            T f_spring = k_stiff * eff_penetration;
+                            if (v_rel_n >= static_cast<T>(0.0f)) {
+                                f_spring *= static_cast<T>(0.10f);
+                            }
 
                             T f_damp = static_cast<T>(0.0f);
                             if (v_rel_n < static_cast<T>(0.0f)) {
@@ -809,8 +866,16 @@ void FEMContact3D<T>::solveMPMFacetContact(FEMSolver3D<T>& fem_solver, MPMSolver
                             }
 
                             T f_total = f_spring + f_damp;
-                            T v_limit = std::max(static_cast<T>(2.0f) * std::abs(v_rel_n), static_cast<T>(5.0f));
-                            T f_max = m_pair * v_limit / (dt > static_cast<T>(1.0e-12f) ? dt : static_cast<T>(1.0e-12f));
+                            T v_limit = std::max(static_cast<T>(1.5f) * std::abs(v_rel_n), static_cast<T>(1.0f));
+                            T f_max = m_pair * v_limit / dt_safe;
+                            if (facet.element_id >= 0 && facet.element_id < static_cast<int>(elements.size())) {
+                                const auto& elem = elements[facet.element_id];
+                                if (elem.mat_id >= 0 && elem.mat_id < static_cast<int>(materials.size())) {
+                                    T sigma_y = static_cast<T>(materials[elem.mat_id].yield_stress > 0.0f ? materials[elem.mat_id].yield_stress : 400.0e6f);
+                                    T f_mat_cap = static_cast<T>(1.5f) * sigma_y * facet.area;
+                                    if (f_max > f_mat_cap && f_mat_cap > static_cast<T>(1.0e3f)) f_max = f_mat_cap;
+                                }
+                            }
                             f_total = std::min(f_total, f_max);
 
                             // Tangential friction
@@ -825,7 +890,7 @@ void FEMContact3D<T>::solveMPMFacetContact(FEMSolver3D<T>& fem_solver, MPMSolver
                                 if (v_tan_len > static_cast<T>(1.0e-6f)) {
                                     T mu = m_mu_kinetic + (m_mu_static - m_mu_kinetic) * std::exp(-static_cast<T>(10.0f) * v_tan_len);
                                     T f_fric_limit = mu * f_total;
-                                    T f_stick = m_pair * v_tan_len / (dt > static_cast<T>(1.0e-12f) ? dt : static_cast<T>(1.0e-12f));
+                                    T f_stick = m_pair * v_tan_len / dt_safe;
                                     T f_tan_mag = std::min(f_fric_limit, f_stick);
                                     T inv_v_tan = static_cast<T>(1.0f) / v_tan_len;
                                     f_tangential[0] = -f_tan_mag * (v_tan[0] * inv_v_tan);

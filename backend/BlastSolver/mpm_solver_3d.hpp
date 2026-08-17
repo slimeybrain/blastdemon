@@ -208,9 +208,9 @@ public:
     }
 
     // Simulation Step
-    void step(float cfl = 0.3f);
+    void step(float cfl = 0.6f);
     void stepWithDt(float dt, bool run_p2g = true);
-    float computeStepSize(float cfl = 0.3f) const;
+    float computeStepSize(float cfl = 0.6f) const;
 
     // Getters & Telemetry
     std::vector<MPMParticle3D>& getParticles() { return m_particles; }

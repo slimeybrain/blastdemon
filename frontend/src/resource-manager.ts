@@ -219,32 +219,10 @@ export class ResourceManager {
             const ny = Math.max(1, Math.round((ymax - ymin) / dx));
             const nz = Math.max(1, Math.round((zmax - zmin) / dx));
             const rootCells = nx * ny * nz;
-            let total = rootCells;
-            let effectiveCellUpdatesPerStep = rootCells;
-
-            const refMeshes = model.nodes.filter((n: any) => n.type === 'RefinementMesh3D');
-            let subgridCells = 0;
-            for (const refNode of refMeshes) {
-                const sx = Number(refNode?.parameters?.submesh_size_x ?? 0.5);
-                const sy = Number(refNode?.parameters?.submesh_size_y ?? 0.5);
-                const sz = Number(refNode?.parameters?.submesh_size_z ?? 0.5);
-                const lvl = Number(refNode?.parameters?.refinement_level ?? 1);
-                const refinedDx = dx / Math.pow(2, lvl);
-                const snx = Math.max(1, Math.round(sx / refinedDx));
-                const sny = Math.max(1, Math.round(sy / refinedDx));
-                const snz = Math.max(1, Math.round(sz / refinedDx));
-                const cellCount = snx * sny * snz;
-                subgridCells += cellCount;
-
-                // Subcycling factor: each subgrid level takes 2^lvl sub-steps per parent step
-                const subcyclingFactor = Math.pow(2, lvl);
-                effectiveCellUpdatesPerStep += cellCount * subcyclingFactor;
-            }
-            total += subgridCells;
+            const total = rootCells;
+            const effectiveCellUpdatesPerStep = rootCells;
             const formatted = total >= 1e6 ? `${(total / 1e6).toFixed(2)}M` : (total >= 1e3 ? `${(total / 1e3).toFixed(1)}k` : `${total}`);
-            const label = refMeshes.length > 0
-                ? `3D ${nx}×${ny}×${nz} + ${refMeshes.length} Subgrid${refMeshes.length > 1 ? 's' : ''} (${formatted} cells)`
-                : `3D ${nx}×${ny}×${nz} (${formatted} cells)`;
+            const label = `3D ${nx}×${ny}×${nz} (${formatted} cells)`;
             return { totalCells: total, effectiveCellUpdatesPerStep, label };
         }
 

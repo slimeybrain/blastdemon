@@ -26,7 +26,7 @@ public:
 
     virtual void step(double dt) = 0;
     virtual void run(double duration) = 0;
-    virtual double computeStepSize(double cfl = 0.4) const = 0;
+    virtual double computeStepSize(double cfl = 0.6) const = 0;
 
     virtual int getNumCells() const = 0;
     virtual int getActiveIndex() const = 0;
@@ -73,7 +73,7 @@ public:
 
     void step(double dt) override;
     void run(double duration) override;
-    double computeStepSize(double cfl = 0.4) const override;
+    double computeStepSize(double cfl = 0.6) const override;
 
     int getNumCells() const override { return n_cells; }
     int getActiveIndex() const override { return active_r_idx; }

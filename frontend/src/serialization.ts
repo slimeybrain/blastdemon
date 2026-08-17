@@ -32,12 +32,11 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
         'charge_rot_x', 'charge_rot_y', 'charge_rot_z',
         'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
-        'origin_x', 'origin_y', 'origin_z', 'dim_x', 'dim_y', 'dim_z', 'scale_factor',
+        'scale_factor',
         'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
-        'refinement_opacity', 'charge_opacity',
+        'charge_opacity',
         'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio', 'amr_tile_size',
-        'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'length', 'refinement_level',
-        'submesh_x', 'submesh_y', 'submesh_z', 'submesh_size_x', 'submesh_size_y', 'submesh_size_z',
+        'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'length',
         'offset', 'stride',
         // MPM keys
         'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'radius', 'inner_radius',
@@ -51,7 +50,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
         // FEM keys
         'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
-        'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_diameter', 'rebar_area', 'rebarRadius', 'rebar_radius', 'beamRadius', 'beam_radius', 'beam_diameter', 'beam_area', 'beamMinVal', 'beamMaxVal',
+        'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_area', 'beamRadius', 'beam_radius', 'beam_area', 'beamMinVal', 'beamMaxVal',
         'femMinVal', 'femMaxVal', 'femOpacity', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',
         // Concrete Core & Models (RHT, K&C, CSCM)
         'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
@@ -1115,7 +1114,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         flattenedParams['ambient_rho'] = p / (287.058 * t);
         if (!flattenedParams['device']) flattenedParams['device'] = 'cpu';
 
-        // 4. Ensure solver parameters from CFDSolver3D have precedence
+        // 4. Ensure solver parameters from CFDSolver3D have precedence for hardware device/precision
         if (solverNode3D) {
             if (solverNode3D.parameters.device !== undefined) {
                 flattenedParams['device'] = solverNode3D.parameters.device;
@@ -1123,8 +1122,13 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             if (solverNode3D.parameters.precision !== undefined) {
                 flattenedParams['precision'] = solverNode3D.parameters.precision;
             }
-            if (solverNode3D.parameters.cfl !== undefined) {
-                flattenedParams['cfl'] = Number(solverNode3D.parameters.cfl);
+            const cflCandidates = [
+                solverNode3D.parameters.cfl !== undefined ? Number(solverNode3D.parameters.cfl) : undefined,
+                femDomain?.parameters?.cfl !== undefined ? Number(femDomain.parameters.cfl) : undefined,
+                couplerNode?.parameters?.cfl !== undefined ? Number(couplerNode.parameters.cfl) : undefined
+            ].filter((v): v is number => v !== undefined && !isNaN(v) && v > 0);
+            if (cflCandidates.length > 0) {
+                flattenedParams['cfl'] = Math.min(...cflCandidates);
             }
         }
     } else if (command === "INIT_MPM" || command === "INIT_2D_MPM") {

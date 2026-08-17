@@ -173,7 +173,7 @@ public:
 
     virtual void step(double dt) override;
     virtual void run(double duration) override;
-    virtual double computeStepSize(double cfl = 0.35) const override;
+    virtual double computeStepSize(double cfl = 0.6) const override;
     virtual std::vector<double> getLocalTimesteps(double cfl) const override;
 
     virtual int getNr() const override { return level0_nr; }

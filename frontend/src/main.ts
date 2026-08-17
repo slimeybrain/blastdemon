@@ -188,8 +188,31 @@ const layoutManager = new LayoutManager('app-container', stateManager);
 
 function getCflFromSolver(modelId: string): number {
     const model = stateManager.getAllModels().find(m => m.id === modelId);
+    if (!model || !model.nodes) return 0.6;
+
+    // Single Source of Truth: In coupled simulations, the Coupler node owns the authoritative CFL
+    const coupler = model.nodes.find(n => n.type === 'FEMFSICoupler3D' || n.type === 'FSICoupler3D' || n.type === 'FSICoupler2D');
+    if (coupler?.parameters?.cfl !== undefined && !isNaN(Number(coupler.parameters.cfl)) && Number(coupler.parameters.cfl) > 0) {
+        return Number(coupler.parameters.cfl);
+    }
+
+    // Standalone / uncoupled domains
+    const fem = model.nodes.find(n => n.type === 'FEMDomain3D');
+    if (fem?.parameters?.cfl !== undefined && !isNaN(Number(fem.parameters.cfl)) && Number(fem.parameters.cfl) > 0) {
+        return Number(fem.parameters.cfl);
+    }
+
+    const mpm = model.nodes.find(n => n.type === 'MPMDomain3D' || n.type === 'MPMDomain2D');
+    if (mpm?.parameters?.cfl !== undefined && !isNaN(Number(mpm.parameters.cfl)) && Number(mpm.parameters.cfl) > 0) {
+        return Number(mpm.parameters.cfl);
+    }
+
     const solver = model?.nodes?.find(n => n.type === 'CFDSolver3D' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver');
-    return solver?.parameters?.cfl !== undefined ? Number(solver.parameters.cfl) : 0.4;
+    if (solver?.parameters?.cfl !== undefined && !isNaN(Number(solver.parameters.cfl)) && Number(solver.parameters.cfl) > 0) {
+        return Number(solver.parameters.cfl);
+    }
+
+    return 0.6;
 }
 
 (window as any).stateManager = stateManager;

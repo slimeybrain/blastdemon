@@ -980,7 +980,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     // 3. Concrete & Masonry Strength Grades
     // ---------------------------------------------------------
     'Normal-Strength Concrete C20/25 (20 MPa)': {
-        density: 2300.0, youngs_modulus: 30.0e9, poissons_ratio: 0.20, yield_stress: 20.0e6, hardening_modulus: 200.0e6, failure_strain: 0.0035, tensile_failure_stress: 2.2e6,
+        density: 2300.0, youngs_modulus: 30.0e9, poissons_ratio: 0.20, yield_stress: 20.0e6, hardening_modulus: 200.0e6, failure_strain: 0.85, erosion_strain: 0.85, tensile_failure_stress: 2.2e6,
         fc: 20.0e6, ft: 2.2e6, G_f: 75.0, moisture_content: 0.04, dif_cap_compression: 2.5, dif_cap_tension: 5.0,
         rht_A: 1.60, rht_N: 0.61, rht_B: 0.70, rht_M: 0.80, rht_Q0: 0.68, rht_BQ: 0.0105, rht_D1: 0.04, rht_D2: 1.0, rht_p_crush: 6.67e6, rht_p_lock: 6.0e9, rht_alpha0: 1.28, rht_n_comp: 3.0, rht_betac: 0.032, rht_deltat: 0.036,
         kc_auto_generate: true, kc_a0: 6.67e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 5.33e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.60, kc_omega: 0.50,
@@ -989,7 +989,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         category: 'Concrete & Masonry Strength Grades', reference: 'Eurocode 2 EN 1992-1-1 / Riedel-Hiermaier-Thoma (RHT) Model'
     },
     'Standard Structural Concrete C30/37 (30 MPa)': {
-        density: 2350.0, youngs_modulus: 33.0e9, poissons_ratio: 0.20, yield_stress: 30.0e6, hardening_modulus: 250.0e6, failure_strain: 0.0035, tensile_failure_stress: 2.9e6,
+        density: 2350.0, youngs_modulus: 33.0e9, poissons_ratio: 0.20, yield_stress: 30.0e6, hardening_modulus: 250.0e6, failure_strain: 0.85, erosion_strain: 0.85, tensile_failure_stress: 2.9e6,
         fc: 30.0e6, ft: 2.9e6, G_f: 90.0, moisture_content: 0.04, dif_cap_compression: 2.5, dif_cap_tension: 5.0,
         rht_A: 1.60, rht_N: 0.61, rht_B: 0.70, rht_M: 0.80, rht_Q0: 0.68, rht_BQ: 0.0105, rht_D1: 0.04, rht_D2: 1.0, rht_p_crush: 10.0e6, rht_p_lock: 6.0e9, rht_alpha0: 1.25, rht_n_comp: 3.0, rht_betac: 0.032, rht_deltat: 0.036,
         kc_auto_generate: true, kc_a0: 10.0e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 8.0e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.60, kc_omega: 0.50,
@@ -998,7 +998,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         category: 'Concrete & Masonry Strength Grades', reference: 'Eurocode 2 C30/37 Standard / RHT Benchmark'
     },
     'High-Strength Concrete C50/60 (50 MPa)': {
-        density: 2400.0, youngs_modulus: 37.0e9, poissons_ratio: 0.20, yield_stress: 50.0e6, hardening_modulus: 350.0e6, failure_strain: 0.0030, tensile_failure_stress: 4.1e6,
+        density: 2400.0, youngs_modulus: 37.0e9, poissons_ratio: 0.20, yield_stress: 50.0e6, hardening_modulus: 350.0e6, failure_strain: 0.85, erosion_strain: 0.85, tensile_failure_stress: 4.1e6,
         fc: 50.0e6, ft: 4.1e6, G_f: 120.0, moisture_content: 0.04, dif_cap_compression: 2.5, dif_cap_tension: 5.0,
         rht_A: 1.60, rht_N: 0.61, rht_B: 0.70, rht_M: 0.80, rht_Q0: 0.68, rht_BQ: 0.0105, rht_D1: 0.04, rht_D2: 1.0, rht_p_crush: 16.67e6, rht_p_lock: 6.0e9, rht_alpha0: 1.20, rht_n_comp: 3.0, rht_betac: 0.032, rht_deltat: 0.036,
         kc_auto_generate: true, kc_a0: 16.67e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 13.33e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.60, kc_omega: 0.50,
@@ -1007,7 +1007,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         category: 'Concrete & Masonry Strength Grades', reference: 'Riedel et al., Int. J. Impact Eng. (1999)'
     },
     'Ultra-High Performance Concrete C100/115 (100 MPa)': {
-        density: 2500.0, youngs_modulus: 45.0e9, poissons_ratio: 0.20, yield_stress: 100.0e6, hardening_modulus: 500.0e6, failure_strain: 0.0035, tensile_failure_stress: 7.0e6,
+        density: 2500.0, youngs_modulus: 45.0e9, poissons_ratio: 0.20, yield_stress: 100.0e6, hardening_modulus: 500.0e6, failure_strain: 0.85, erosion_strain: 0.85, tensile_failure_stress: 7.0e6,
         fc: 100.0e6, ft: 7.0e6, G_f: 180.0, moisture_content: 0.02, dif_cap_compression: 2.5, dif_cap_tension: 5.0,
         rht_A: 1.65, rht_N: 0.60, rht_B: 0.75, rht_M: 0.80, rht_Q0: 0.70, rht_BQ: 0.0105, rht_D1: 0.035, rht_D2: 1.0, rht_p_crush: 33.33e6, rht_p_lock: 7.0e9, rht_alpha0: 1.12, rht_n_comp: 3.0, rht_betac: 0.030, rht_deltat: 0.034,
         kc_auto_generate: true, kc_a0: 33.33e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 26.67e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.60, kc_omega: 0.50,
@@ -1016,7 +1016,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         category: 'Concrete & Masonry Strength Grades', reference: 'Forquin et al., Int. J. Impact Eng. (2010)'
     },
     'UHPC / Ductal (150 MPa)': {
-        density: 2550.0, youngs_modulus: 55.0e9, poissons_ratio: 0.21, yield_stress: 150.0e6, hardening_modulus: 700.0e6, failure_strain: 0.0050, tensile_failure_stress: 12.0e6,
+        density: 2550.0, youngs_modulus: 55.0e9, poissons_ratio: 0.21, yield_stress: 150.0e6, hardening_modulus: 700.0e6, failure_strain: 0.85, erosion_strain: 0.85, tensile_failure_stress: 12.0e6,
         fc: 150.0e6, ft: 12.0e6, G_f: 300.0, moisture_content: 0.01, dif_cap_compression: 2.5, dif_cap_tension: 5.0,
         rht_A: 1.70, rht_N: 0.58, rht_B: 0.80, rht_M: 0.80, rht_Q0: 0.72, rht_BQ: 0.0105, rht_D1: 0.030, rht_D2: 1.0, rht_p_crush: 50.0e6, rht_p_lock: 8.0e9, rht_alpha0: 1.08, rht_n_comp: 3.0, rht_betac: 0.028, rht_deltat: 0.032,
         kc_auto_generate: true, kc_a0: 50.0e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 40.0e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.60, kc_omega: 0.50,
@@ -1025,7 +1025,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         category: 'Concrete & Masonry Strength Grades', reference: 'Lafarge Holcim Ductal Technical Manual'
     },
     'Fiber-Reinforced Concrete (FRC 60 MPa)': {
-        density: 2450.0, youngs_modulus: 39.0e9, poissons_ratio: 0.20, yield_stress: 60.0e6, hardening_modulus: 450.0e6, failure_strain: 0.0080, tensile_failure_stress: 8.5e6,
+        density: 2450.0, youngs_modulus: 39.0e9, poissons_ratio: 0.20, yield_stress: 60.0e6, hardening_modulus: 450.0e6, failure_strain: 0.85, erosion_strain: 0.85, tensile_failure_stress: 8.5e6,
         fc: 60.0e6, ft: 8.5e6, G_f: 500.0, moisture_content: 0.03, dif_cap_compression: 2.5, dif_cap_tension: 5.0,
         rht_A: 1.62, rht_N: 0.61, rht_B: 0.72, rht_M: 0.80, rht_Q0: 0.68, rht_BQ: 0.0105, rht_D1: 0.04, rht_D2: 1.0, rht_p_crush: 20.0e6, rht_p_lock: 6.0e9, rht_alpha0: 1.18, rht_n_comp: 3.0, rht_betac: 0.032, rht_deltat: 0.036,
         kc_auto_generate: true, kc_a0: 20.0e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 16.0e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.40, kc_omega: 0.50,
@@ -1034,7 +1034,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         category: 'Concrete & Masonry Strength Grades', reference: 'Nold, ACI Materials Journal (2012)'
     },
     'Clay Brick Masonry': {
-        density: 1800.0, youngs_modulus: 10.0e9, poissons_ratio: 0.18, yield_stress: 12.0e6, hardening_modulus: 80.0e6, failure_strain: 0.0020, tensile_failure_stress: 1.2e6,
+        density: 1800.0, youngs_modulus: 10.0e9, poissons_ratio: 0.18, yield_stress: 12.0e6, hardening_modulus: 80.0e6, failure_strain: 0.85, erosion_strain: 0.85, tensile_failure_stress: 1.2e6,
         fc: 12.0e6, ft: 1.2e6, G_f: 40.0, moisture_content: 0.05, dif_cap_compression: 2.0, dif_cap_tension: 4.0,
         rht_A: 1.50, rht_N: 0.65, rht_B: 0.65, rht_M: 0.80, rht_Q0: 0.65, rht_BQ: 0.0105, rht_D1: 0.05, rht_D2: 1.0, rht_p_crush: 4.0e6, rht_p_lock: 4.0e9, rht_alpha0: 1.35, rht_n_comp: 3.0, rht_betac: 0.035, rht_deltat: 0.040,
         kc_auto_generate: true, kc_a0: 4.0e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 3.2e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.80, kc_omega: 0.50,
@@ -1043,7 +1043,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         category: 'Concrete & Masonry Strength Grades', reference: 'Lourenco, PhD Thesis TU Delft'
     },
     'Aerated Autoclaved Concrete (AAC)': {
-        density: 600.0, youngs_modulus: 2.0e9, poissons_ratio: 0.15, yield_stress: 4.0e6, hardening_modulus: 20.0e6, failure_strain: 0.0050, tensile_failure_stress: 0.5e6,
+        density: 600.0, youngs_modulus: 2.0e9, poissons_ratio: 0.15, yield_stress: 4.0e6, hardening_modulus: 20.0e6, failure_strain: 0.85, erosion_strain: 0.85, tensile_failure_stress: 0.5e6,
         fc: 4.0e6, ft: 0.5e6, G_f: 15.0, moisture_content: 0.06, dif_cap_compression: 2.0, dif_cap_tension: 4.0,
         rht_A: 1.40, rht_N: 0.70, rht_B: 0.60, rht_M: 0.80, rht_Q0: 0.60, rht_BQ: 0.0105, rht_D1: 0.06, rht_D2: 1.0, rht_p_crush: 1.33e6, rht_p_lock: 2.0e9, rht_alpha0: 1.50, rht_n_comp: 3.0, rht_betac: 0.040, rht_deltat: 0.045,
         kc_auto_generate: true, kc_a0: 1.33e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 1.07e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 2.00, kc_omega: 0.50,

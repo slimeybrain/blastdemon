@@ -44,10 +44,10 @@ public:
     void setVacuumState(T rho_vac, T p_vac) { m_rho_vac = rho_vac; m_p_vac = p_vac; }
 
     // Dynamic Step execution
-    void step(T cfl = static_cast<T>(0.3f));
+    void step(T cfl = static_cast<T>(0.6f));
     void stepWithDt(T dt);
 
-    T computeCoupledDt(T cfl = static_cast<T>(0.3f)) const;
+    T computeCoupledDt(T cfl = static_cast<T>(0.6f)) const;
 
     // Energy & Work tracking
     T getSimTime() const { return m_sim_time; }

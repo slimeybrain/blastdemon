@@ -16,10 +16,10 @@ public:
     void attachSolvers(CFDSolver3D* cfd_solver, MPMSolver3D* mpm_solver);
 
     // Perform two-way coupled FSI step
-    void step(float cfl = 0.3f);
+    void step(float cfl = 0.6f);
     void stepWithDt(float dt);
 
-    float computeCoupledDt(float cfl = 0.3f) const;
+    float computeCoupledDt(float cfl = 0.6f) const;
 
     double getSimTime() const { return m_sim_time; }
     int getStepCount() const { return m_step_count; }

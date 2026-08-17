@@ -131,9 +131,9 @@ public:
                          float tensile_failure_stress = 600.0e6f, int ppc = 4);
 
     // Simulation Step: Run 1 step at dt = cfl * dt_critical
-    void step(float cfl = 0.3f);
+    void step(float cfl = 0.6f);
     void stepWithDt(float dt, bool run_p2g = true);
-    float computeStepSize(float cfl = 0.3f) const;
+    float computeStepSize(float cfl = 0.6f) const;
 
     // Getters & Telemetry
     std::vector<MPMParticle2D>& getParticles() { return m_particles; }

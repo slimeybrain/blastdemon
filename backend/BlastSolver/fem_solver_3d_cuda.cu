@@ -130,7 +130,7 @@ __global__ void fem_element_forces_kernel_3d_device(
         dN_dxi[i][2] = 0.125f * HEX8_XI_CUDA[i][2];
     }
 
-    T min_vol_r = static_cast<T>(mat.timestep_erosion_factor > 0.0f ? mat.timestep_erosion_factor : 0.05f);
+    T min_vol_r = static_cast<T>(0.02f);
     T cs_C = physics_params.cowper_symonds_C;
     T cs_P = physics_params.cowper_symonds_P;
     T b1 = static_cast<T>(mat.bulk_viscosity_b1 > 0.0f ? mat.bulk_viscosity_b1 : physics_params.bulk_viscosity_b1);
@@ -171,7 +171,9 @@ __global__ void fem_element_forces_kernel_3d_device(
                       + J_center[0][2] * (J_center[1][0]*J_center[2][1] - J_center[1][1]*J_center[2][0]);
 
         if (detJ_center <= static_cast<T>(1.0e-15f) || (elem.V0 > static_cast<T>(1.0e-18f) && (detJ_center * static_cast<T>(8.0f) / elem.V0) <= min_vol_r)) {
-            elem.is_eroded = true;
+            if (elem.damage > static_cast<T>(0.70f) || elem.ep_bar > static_cast<T>(0.15f)) {
+                elem.is_eroded = true;
+            }
             return;
         }
         elem.V = detJ_center * static_cast<T>(8.0f);
@@ -241,7 +243,9 @@ __global__ void fem_element_forces_kernel_3d_device(
                      + J_g[0][2] * (J_g[1][0]*J_g[2][1] - J_g[1][1]*J_g[2][0]);
 
             if (detJ_g <= static_cast<T>(1.0e-15f)) {
-                elem.is_eroded = true;
+                if (elem.damage > static_cast<T>(0.70f) || elem.ep_bar > static_cast<T>(0.15f)) {
+                    elem.is_eroded = true;
+                }
                 return;
             }
             V_sum += detJ_g;
@@ -640,7 +644,9 @@ __global__ void fem_element_forces_kernel_3d_device(
 
     min_vol_r = static_cast<T>(0.02f);
     if (detJ <= static_cast<T>(1.0e-15f) || (elem.V0 > static_cast<T>(1.0e-18f) && (detJ * static_cast<T>(8.0f) / elem.V0) <= min_vol_r)) {
-        elem.is_eroded = true;
+        if (elem.damage > static_cast<T>(0.70f) || elem.ep_bar > static_cast<T>(0.15f)) {
+            elem.is_eroded = true;
+        }
         return; // Skip force generation for inverted or severely crushed elements
     }
 
@@ -1152,15 +1158,18 @@ __global__ void fem_initial_timestep_erosion_kernel_3d_device(
     if (elem.is_eroded) return;
 
     const MaterialTable3D& mat = d_materials[elem.mat_id];
-    T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 210.0e9f);
-    T nu = static_cast<T>(mat.poissons_ratio);
-    T density = static_cast<T>(mat.density > 0.0f ? mat.density : 7850.0f);
-    T G = E / (static_cast<T>(2.0f) * (static_cast<T>(1.0f) + nu));
-    T K = E / (static_cast<T>(3.0f) * (static_cast<T>(1.0f) - static_cast<T>(2.0f) * nu));
-    T cd = sqrt((K + static_cast<T>(4.0f)/static_cast<T>(3.0f) * G) / density);
+    T cd = computeDilatationalWaveSpeed<T>(mat);
 
-    T char_len = cbrt(elem.V > static_cast<T>(1.0e-18f) ? elem.V : static_cast<T>(1.0e-18f));
-    T current_dt = char_len / (cd > static_cast<T>(1.0f) ? cd : static_cast<T>(5000.0f));
+    T x_curr[8][3];
+    for (int n = 0; n < 8; ++n) {
+        int nid = elem.node_ids[n];
+        x_curr[n][0] = d_nodes[nid].x[0];
+        x_curr[n][1] = d_nodes[nid].x[1];
+        x_curr[n][2] = d_nodes[nid].x[2];
+    }
+    T V_cur = elem.V > static_cast<T>(0.0f) ? elem.V : elem.V0;
+    T L_e = computeHex8CharacteristicLength(x_curr, V_cur);
+    T current_dt = L_e / cd;
 
     bool newly_eroded = false;
     T min_vol_r = erosion_criteria.min_volume_ratio > static_cast<T>(0.0f) ? erosion_criteria.min_volume_ratio : static_cast<T>(0.02f);
@@ -1168,21 +1177,34 @@ __global__ void fem_initial_timestep_erosion_kernel_3d_device(
         newly_eroded = true;
     }
 
-    if (mat.enable_timestep_erosion && mat.timestep_erosion_factor > static_cast<T>(1.0e-5f)) {
-        T eta = static_cast<T>(mat.timestep_erosion_factor > 0.0f ? mat.timestep_erosion_factor : erosion_criteria.timestep_erosion_factor);
-        if (current_dt <= eta * elem.dt0) {
+    bool check_dt = (mat.enable_timestep_erosion || erosion_criteria.enable_timestep_erosion);
+    T eta = (mat.timestep_erosion_factor > static_cast<T>(1.0e-5f)) ? static_cast<T>(mat.timestep_erosion_factor) : erosion_criteria.timestep_erosion_factor;
+    if (check_dt && eta > static_cast<T>(1.0e-5f)) {
+        T dt0_eff = elem.dt0;
+        if (dt0_eff <= static_cast<T>(1.0e-12f) || dt0_eff >= static_cast<T>(1.0e20f)) {
+            T x_0[8][3];
+            for (int n = 0; n < 8; ++n) {
+                int nid = elem.node_ids[n];
+                x_0[n][0] = d_nodes[nid].x0[0];
+                x_0[n][1] = d_nodes[nid].x0[1];
+                x_0[n][2] = d_nodes[nid].x0[2];
+            }
+            T L_e0 = computeHex8CharacteristicLength(x_0, elem.V0);
+            dt0_eff = L_e0 / cd;
+        }
+        if (current_dt <= eta * dt0_eff) {
             newly_eroded = true;
         }
     }
 
-    if (mat.enable_strain_erosion) {
+    if (mat.enable_strain_erosion || erosion_criteria.enable_strain_erosion) {
         T fail_strain = static_cast<T>(mat.erosion_strain > 0.0f ? mat.erosion_strain : (mat.failure_strain > 0.0f ? mat.failure_strain : erosion_criteria.failure_strain));
         if (fail_strain > static_cast<T>(0.0f) && elem.ep_bar >= fail_strain) {
             newly_eroded = true;
         }
     }
 
-    if (mat.enable_stress_erosion) {
+    if (mat.enable_stress_erosion || erosion_criteria.enable_stress_erosion) {
         T mean_s = (elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f);
         T fail_stress = static_cast<T>(mat.erosion_stress > 0.0f ? mat.erosion_stress : (mat.tensile_failure_stress > 0.0f ? mat.tensile_failure_stress : erosion_criteria.tensile_failure_stress));
         if (fail_stress > static_cast<T>(0.0f) && mean_s >= fail_stress) {
@@ -1684,12 +1706,18 @@ __global__ void fem_contact_forces_direct_kernel_3d_device(
 
             T K_slave = K_slave_node;
             T K_interface = (static_cast<T>(2.0f) * K_master * K_slave) / (K_master + K_slave + static_cast<T>(1.0e-30f));
-            T k_stiff = contact_penalty_scale * K_interface * h_elem;
-            T f_spring = k_stiff * eff_penetration;
 
             T m_facet_avg = static_cast<T>(0.25f) * (n0.m + n1.m + n2.m + n3.m);
             T m_sum = node.m + m_facet_avg;
             T m_pair = (m_sum > static_cast<T>(1.0e-30f)) ? (node.m * m_facet_avg / m_sum) : static_cast<T>(1.0e-30f);
+
+            T dt_safe = (dt > static_cast<T>(1.0e-12f)) ? dt : static_cast<T>(1.0e-12f);
+            T k_dyn = static_cast<T>(0.50f) * m_pair / (dt_safe * dt_safe);
+            T k_geom = (static_cast<T>(0.10f) * K_interface) * h_elem;
+            T k_base = (k_geom < k_dyn) ? k_geom : k_dyn;
+            T k_stiff = contact_penalty_scale * k_base;
+            if (k_stiff < static_cast<T>(1.0e5f)) k_stiff = static_cast<T>(1.0e5f);
+            T f_spring = k_stiff * eff_penetration;
 
             T vf0 = N_shape[0]*n0.v[0] + N_shape[1]*n1.v[0] + N_shape[2]*n2.v[0] + N_shape[3]*n3.v[0];
             T vf1 = N_shape[0]*n0.v[1] + N_shape[1]*n1.v[1] + N_shape[2]*n2.v[1] + N_shape[3]*n3.v[1];
@@ -1703,8 +1731,14 @@ __global__ void fem_contact_forces_direct_kernel_3d_device(
             }
 
             T f_total = f_spring + f_damp;
-            T v_limit = (static_cast<T>(2.0f) * fabs(v_rel_n) > static_cast<T>(20.0f)) ? static_cast<T>(2.0f) * fabs(v_rel_n) : static_cast<T>(20.0f);
-            T f_max = m_pair * v_limit / (dt > static_cast<T>(1.0e-12f) ? dt : static_cast<T>(1.0e-12f));
+            T v_limit = (static_cast<T>(1.5f) * fabs(v_rel_n) > static_cast<T>(1.0f)) ? static_cast<T>(1.5f) * fabs(v_rel_n) : static_cast<T>(1.0f);
+            T f_max = m_pair * v_limit / dt_safe;
+            if (facet.element_id >= 0 && facet.element_id < num_elements && d_materials) {
+                int mid = d_elements[facet.element_id].mat_id;
+                T sigma_y = static_cast<T>(d_materials[mid].yield_stress > 0.0f ? d_materials[mid].yield_stress : 400.0e6f);
+                T f_mat_cap = static_cast<T>(1.5f) * sigma_y * facet.area;
+                if (f_max > f_mat_cap && f_mat_cap > static_cast<T>(1.0e3f)) f_max = f_mat_cap;
+            }
             if (f_total > f_max) f_total = f_max;
 
             if (f_total > best_f_total) {
@@ -1809,6 +1843,9 @@ __global__ void fem_contact_mpm_debris_kernel_3d_device(
     if (pm <= 0.0f) return;
 
     float r_debris = soa.lp[0][p_idx] > 0.0f ? soa.lp[0][p_idx] : 0.002f;
+    T dt_safe = (dt > static_cast<T>(1.0e-12f)) ? dt : static_cast<T>(1.0e-12f);
+    T v_pad = (fabs(soa.v[0][p_idx]) + fabs(soa.v[1][p_idx]) + fabs(soa.v[2][p_idx])) * dt_safe;
+    T total_pad = static_cast<T>(r_debris) + v_pad + static_cast<T>(0.005f);
 
     T best_f_total = static_cast<T>(0.0f);
     T best_nx = static_cast<T>(0.0f), best_ny = static_cast<T>(0.0f), best_nz = static_cast<T>(0.0f);
@@ -1821,9 +1858,10 @@ __global__ void fem_contact_mpm_debris_kernel_3d_device(
         const FEMFacet3D<T>& facet = d_facets[f];
         if (facet.is_eroded) continue;
 
-        if (px < facet.bbox_min[0] - r_debris || px > facet.bbox_max[0] + r_debris ||
-            py < facet.bbox_min[1] - r_debris || py > facet.bbox_max[1] + r_debris ||
-            pz < facet.bbox_min[2] - r_debris || pz > facet.bbox_max[2] + r_debris) continue;
+        // Broad-phase AABB test with velocity-aware padding
+        if (px < facet.bbox_min[0] - total_pad || px > facet.bbox_max[0] + total_pad ||
+            py < facet.bbox_min[1] - total_pad || py > facet.bbox_max[1] + total_pad ||
+            pz < facet.bbox_min[2] - total_pad || pz > facet.bbox_max[2] + total_pad) continue;
 
         const auto& n0 = d_nodes[facet.node_ids[0]];
         const auto& n1 = d_nodes[facet.node_ids[1]];
@@ -1852,8 +1890,8 @@ __global__ void fem_contact_mpm_debris_kernel_3d_device(
             v_param = (len3_sq > static_cast<T>(1.0e-12f)) ? ((dx_v0[0]*e3[0] + dx_v0[1]*e3[1] + dx_v0[2]*e3[2]) / len3_sq) : static_cast<T>(0.5f);
         }
 
-        if (u_param < static_cast<T>(-0.05f) || u_param > static_cast<T>(1.05f) ||
-            v_param < static_cast<T>(-0.05f) || v_param > static_cast<T>(1.05f)) continue;
+        if (u_param < static_cast<T>(-0.08f) || u_param > static_cast<T>(1.08f) ||
+            v_param < static_cast<T>(-0.08f) || v_param > static_cast<T>(1.08f)) continue;
 
         T u_clamped = u_param < static_cast<T>(0.0f) ? static_cast<T>(0.0f) : (u_param > static_cast<T>(1.0f) ? static_cast<T>(1.0f) : u_param);
         T v_clamped = v_param < static_cast<T>(0.0f) ? static_cast<T>(0.0f) : (v_param > static_cast<T>(1.0f) ? static_cast<T>(1.0f) : v_param);
@@ -1883,15 +1921,32 @@ __global__ void fem_contact_mpm_debris_kernel_3d_device(
             }
         }
 
+        // Tangential offset check with mesh-adaptive and particle radius tolerance
         T dx_t0 = dx_surf[0] - dist_n * contact_normal[0];
         T dx_t1 = dx_surf[1] - dist_n * contact_normal[1];
         T dx_t2 = dx_surf[2] - dist_n * contact_normal[2];
         T d_tangent_sq = dx_t0*dx_t0 + dx_t1*dx_t1 + dx_t2*dx_t2;
-        if (d_tangent_sq > static_cast<T>(0.04f) * h_elem * h_elem) continue;
+        T d_tan_tol_sq = (static_cast<T>(0.25f) * h_elem * h_elem > static_cast<T>(2.0f) * static_cast<T>(r_debris) * static_cast<T>(r_debris))
+                       ? static_cast<T>(0.25f) * h_elem * h_elem : static_cast<T>(2.0f) * static_cast<T>(r_debris) * static_cast<T>(r_debris);
+        if (d_tangent_sq > d_tan_tol_sq) continue;
 
-        if (dist_n < static_cast<T>(r_debris) && dist_n > -static_cast<T>(0.35f) * h_elem) {
+        T vf0 = N_shape[0]*n0.v[0] + N_shape[1]*n1.v[0] + N_shape[2]*n2.v[0] + N_shape[3]*n3.v[0];
+        T vf1 = N_shape[0]*n0.v[1] + N_shape[1]*n1.v[1] + N_shape[2]*n2.v[1] + N_shape[3]*n3.v[1];
+        T vf2 = N_shape[0]*n0.v[2] + N_shape[1]*n1.v[2] + N_shape[2]*n2.v[2] + N_shape[3]*n3.v[2];
+        T v_rel_n = (static_cast<T>(soa.v[0][p_idx]) - vf0)*contact_normal[0] +
+                    (static_cast<T>(soa.v[1][p_idx]) - vf1)*contact_normal[1] +
+                    (static_cast<T>(soa.v[2][p_idx]) - vf2)*contact_normal[2];
+
+        // Velocity-aware continuous capture threshold: prevents high-speed particles from skipping over contact zone
+        T capture_depth = static_cast<T>(0.50f) * h_elem;
+        T v_sweep = static_cast<T>(1.5f) * fabs(v_rel_n) * dt_safe;
+        if (v_sweep > capture_depth) capture_depth = v_sweep;
+        T r_floor = static_cast<T>(2.0f) * static_cast<T>(r_debris);
+        if (r_floor > capture_depth) capture_depth = r_floor;
+
+        if (dist_n < static_cast<T>(r_debris) && dist_n > -capture_depth) {
             T penetration = static_cast<T>(r_debris) - dist_n;
-            T eff_penetration = (penetration < static_cast<T>(0.30f) * h_elem) ? penetration : static_cast<T>(0.30f) * h_elem;
+            T eff_penetration = (penetration < capture_depth) ? penetration : capture_depth;
 
             T K_master = static_cast<T>(160.0e9f);
             if (facet.element_id >= 0 && facet.element_id < num_elements && d_materials) {
@@ -1905,20 +1960,21 @@ __global__ void fem_contact_mpm_debris_kernel_3d_device(
                 }
             }
 
-            T k_stiff = contact_penalty_scale * (static_cast<T>(0.01f) * K_master) * h_elem;
-            T f_spring = k_stiff * eff_penetration;
-
             T m_facet_avg = static_cast<T>(0.25f) * (n0.m + n1.m + n2.m + n3.m);
             T p_m = static_cast<T>(pm);
             T m_sum = p_m + m_facet_avg;
             T m_pair = (m_sum > static_cast<T>(1.0e-30f)) ? (p_m * m_facet_avg / m_sum) : static_cast<T>(1.0e-30f);
 
-            T vf0 = N_shape[0]*n0.v[0] + N_shape[1]*n1.v[0] + N_shape[2]*n2.v[0] + N_shape[3]*n3.v[0];
-            T vf1 = N_shape[0]*n0.v[1] + N_shape[1]*n1.v[1] + N_shape[2]*n2.v[1] + N_shape[3]*n3.v[1];
-            T vf2 = N_shape[0]*n0.v[2] + N_shape[1]*n1.v[2] + N_shape[2]*n2.v[2] + N_shape[3]*n3.v[2];
-            T v_rel_n = (static_cast<T>(soa.v[0][p_idx]) - vf0)*contact_normal[0] +
-                        (static_cast<T>(soa.v[1][p_idx]) - vf1)*contact_normal[1] +
-                        (static_cast<T>(soa.v[2][p_idx]) - vf2)*contact_normal[2];
+            // Self-adaptive dynamic mass-time matched stiffness + bulk modulus stiffness (Dimensionless scale)
+            T k_dyn = static_cast<T>(0.50f) * m_pair / (dt_safe * dt_safe);
+            T k_geom = (static_cast<T>(0.10f) * K_master) * h_elem;
+            T k_base = (k_geom < k_dyn) ? k_geom : k_dyn;
+            T k_stiff = contact_penalty_scale * k_base;
+            if (k_stiff < static_cast<T>(1.0e5f)) k_stiff = static_cast<T>(1.0e5f);
+            T f_spring = k_stiff * eff_penetration;
+            if (v_rel_n >= static_cast<T>(0.0f)) {
+                f_spring *= static_cast<T>(0.10f); // Suppress static spring push on separating/resting particles
+            }
 
             T f_damp = static_cast<T>(0.0f);
             if (v_rel_n < static_cast<T>(0.0f)) {
@@ -1927,8 +1983,14 @@ __global__ void fem_contact_mpm_debris_kernel_3d_device(
             }
 
             T f_total = f_spring + f_damp;
-            T v_limit = (static_cast<T>(2.0f) * fabs(v_rel_n) > static_cast<T>(5.0f)) ? static_cast<T>(2.0f) * fabs(v_rel_n) : static_cast<T>(5.0f);
-            T f_max = m_pair * v_limit / (dt > static_cast<T>(1.0e-12f) ? dt : static_cast<T>(1.0e-12f));
+            T v_limit = (static_cast<T>(1.5f) * fabs(v_rel_n) > static_cast<T>(1.0f)) ? static_cast<T>(1.5f) * fabs(v_rel_n) : static_cast<T>(1.0f);
+            T f_max = m_pair * v_limit / dt_safe;
+            if (facet.element_id >= 0 && facet.element_id < num_elements && d_materials) {
+                int mid = d_elements[facet.element_id].mat_id;
+                T sigma_y = static_cast<T>(d_materials[mid].yield_stress > 0.0f ? d_materials[mid].yield_stress : 400.0e6f);
+                T f_mat_cap = static_cast<T>(1.5f) * sigma_y * facet.area;
+                if (f_max > f_mat_cap && f_mat_cap > static_cast<T>(1.0e3f)) f_max = f_mat_cap;
+            }
             if (f_total > f_max) f_total = f_max;
 
             if (f_total > best_f_total) {
@@ -1972,7 +2034,7 @@ __global__ void fem_contact_mpm_debris_kernel_3d_device(
             T t_dir[3] = {v_rel_t[0] / vt_mag, v_rel_t[1] / vt_mag, v_rel_t[2] / vt_mag};
             T mu_eff = mu_kinetic + (mu_static - mu_kinetic) * exp(-static_cast<T>(10.0f) * vt_mag);
             T f_fric_mag = mu_eff * best_f_total;
-            T f_stick_max = best_m_pair * vt_mag / (dt > static_cast<T>(1.0e-12f) ? dt : static_cast<T>(1.0e-12f));
+            T f_stick_max = best_m_pair * vt_mag / dt_safe;
             if (f_fric_mag > f_stick_max) f_fric_mag = f_stick_max;
 
             f_fric[0] = -f_fric_mag * t_dir[0];
@@ -1987,9 +2049,9 @@ __global__ void fem_contact_mpm_debris_kernel_3d_device(
         };
 
         T v_post[3] = {
-            static_cast<T>(soa.v[0][p_idx]) + (f_tot[0] * dt) / pm,
-            static_cast<T>(soa.v[1][p_idx]) + (f_tot[1] * dt) / pm,
-            static_cast<T>(soa.v[2][p_idx]) + (f_tot[2] * dt) / pm
+            static_cast<T>(soa.v[0][p_idx]) + (f_tot[0] * dt_safe) / pm,
+            static_cast<T>(soa.v[1][p_idx]) + (f_tot[1] * dt_safe) / pm,
+            static_cast<T>(soa.v[2][p_idx]) + (f_tot[2] * dt_safe) / pm
         };
 
         // Kinematic non-penetration cap: The normal velocity imparted by a solid facet
@@ -2046,45 +2108,63 @@ __global__ void fem_contact_mpm_debris_kernel_3d_device(
             T d_vec[3] = {static_cast<T>(px) - x_seg[0], static_cast<T>(py) - x_seg[1], static_cast<T>(pz) - x_seg[2]};
             T dist_sq = d_vec[0]*d_vec[0] + d_vec[1]*d_vec[1] + d_vec[2]*d_vec[2];
 
-            if (dist_sq < R_contact * R_contact) {
-                T dist = sqrt(dist_sq > static_cast<T>(1.0e-20f) ? dist_sq : static_cast<T>(1.0e-20f));
+            T v_seg[3] = {
+                (static_cast<T>(1.0f) - t_proj) * n1.v[0] + t_proj * n2.v[0],
+                (static_cast<T>(1.0f) - t_proj) * n1.v[1] + t_proj * n2.v[1],
+                (static_cast<T>(1.0f) - t_proj) * n1.v[2] + t_proj * n2.v[2]
+            };
+            T v_rel[3] = {static_cast<T>(soa.v[0][p_idx]) - v_seg[0], static_cast<T>(soa.v[1][p_idx]) - v_seg[1], static_cast<T>(soa.v[2][p_idx]) - v_seg[2]};
+
+            T dist = sqrt(dist_sq > static_cast<T>(1.0e-20f) ? dist_sq : static_cast<T>(1.0e-20f));
+            T n_dir[3] = {
+                dist > static_cast<T>(1.0e-8f) ? (d_vec[0] / dist) : static_cast<T>(0.0f),
+                dist > static_cast<T>(1.0e-8f) ? (d_vec[1] / dist) : static_cast<T>(1.0f),
+                dist > static_cast<T>(1.0e-8f) ? (d_vec[2] / dist) : static_cast<T>(0.0f)
+            };
+            T v_n = v_rel[0]*n_dir[0] + v_rel[1]*n_dir[1] + v_rel[2]*n_dir[2];
+
+            T capture_depth = R_contact;
+            T v_sweep = static_cast<T>(1.5f) * fabs(v_n) * dt_safe;
+            if (v_sweep > capture_depth) capture_depth = v_sweep;
+
+            if (dist < capture_depth) {
                 T delta = R_contact - dist;
-                T n_dir[3] = {d_vec[0] / dist, d_vec[1] / dist, d_vec[2] / dist};
+                if (delta <= static_cast<T>(0.0f) && v_n < static_cast<T>(0.0f)) delta = -v_n * dt_safe * static_cast<T>(0.5f);
+                if (delta > static_cast<T>(0.0f)) {
+                    T K_steel = static_cast<T>(200.0e9f);
+                    T m_pair = static_cast<T>(pm);
 
-                T K_steel = static_cast<T>(200.0e9f);
-                T k_pen = contact_penalty_scale * (static_cast<T>(0.01f) * K_steel) * r_rebar;
-                T f_norm_mag = k_pen * delta;
+                    // Self-adaptive dynamic mass-time matched stiffness
+                    T k_dyn = static_cast<T>(0.50f) * m_pair / (dt_safe * dt_safe);
+                    T k_geom = (static_cast<T>(0.10f) * K_steel) * r_rebar;
+                    T k_base = (k_geom < k_dyn) ? k_geom : k_dyn;
+                    T k_pen = contact_penalty_scale * k_base;
+                    if (k_pen < static_cast<T>(1.0e5f)) k_pen = static_cast<T>(1.0e5f);
 
-                T v_seg[3] = {
-                    (static_cast<T>(1.0f) - t_proj) * n1.v[0] + t_proj * n2.v[0],
-                    (static_cast<T>(1.0f) - t_proj) * n1.v[1] + t_proj * n2.v[1],
-                    (static_cast<T>(1.0f) - t_proj) * n1.v[2] + t_proj * n2.v[2]
-                };
-                T v_rel[3] = {static_cast<T>(soa.v[0][p_idx]) - v_seg[0], static_cast<T>(soa.v[1][p_idx]) - v_seg[1], static_cast<T>(soa.v[2][p_idx]) - v_seg[2]};
-                T v_n = v_rel[0]*n_dir[0] + v_rel[1]*n_dir[1] + v_rel[2]*n_dir[2];
+                    T f_norm_mag = k_pen * delta;
 
-                T m_pair = static_cast<T>(pm);
-                if (v_n < static_cast<T>(0.0f)) {
-                    T c_damp = static_cast<T>(2.0f) * contact_damping * sqrt(k_pen * m_pair);
-                    f_norm_mag -= c_damp * v_n;
+                    if (v_n < static_cast<T>(0.0f)) {
+                        T c_damp = static_cast<T>(2.0f) * contact_damping * sqrt(k_pen * m_pair);
+                        f_norm_mag -= c_damp * v_n;
+                    }
+
+                    T v_limit = (static_cast<T>(1.5f) * fabs(v_n) > static_cast<T>(1.0f)) ? static_cast<T>(1.5f) * fabs(v_n) : static_cast<T>(1.0f);
+                    T f_max = m_pair * v_limit / dt_safe;
+                    if (f_norm_mag > f_max) f_norm_mag = f_max;
+                    if (f_norm_mag < static_cast<T>(0.0f)) f_norm_mag = static_cast<T>(0.0f);
+
+                    soa.v[0][p_idx] += static_cast<float>((f_norm_mag * n_dir[0] * dt_safe) / pm);
+                    soa.v[1][p_idx] += static_cast<float>((f_norm_mag * n_dir[1] * dt_safe) / pm);
+                    soa.v[2][p_idx] += static_cast<float>((f_norm_mag * n_dir[2] * dt_safe) / pm);
+
+                    atomicAdd(&d_nodes[truss.node_ids[0]].f_contact[0], -(static_cast<T>(1.0f) - t_proj) * f_norm_mag * n_dir[0]);
+                    atomicAdd(&d_nodes[truss.node_ids[0]].f_contact[1], -(static_cast<T>(1.0f) - t_proj) * f_norm_mag * n_dir[1]);
+                    atomicAdd(&d_nodes[truss.node_ids[0]].f_contact[2], -(static_cast<T>(1.0f) - t_proj) * f_norm_mag * n_dir[2]);
+
+                    atomicAdd(&d_nodes[truss.node_ids[1]].f_contact[0], -t_proj * f_norm_mag * n_dir[0]);
+                    atomicAdd(&d_nodes[truss.node_ids[1]].f_contact[1], -t_proj * f_norm_mag * n_dir[1]);
+                    atomicAdd(&d_nodes[truss.node_ids[1]].f_contact[2], -t_proj * f_norm_mag * n_dir[2]);
                 }
-
-                T v_limit = (static_cast<T>(2.0f) * fabs(v_n) > static_cast<T>(20.0f)) ? static_cast<T>(2.0f) * fabs(v_n) : static_cast<T>(20.0f);
-                T f_max = m_pair * v_limit / (dt > static_cast<T>(1.0e-12f) ? dt : static_cast<T>(1.0e-12f));
-                if (f_norm_mag > f_max) f_norm_mag = f_max;
-                if (f_norm_mag < static_cast<T>(0.0f)) f_norm_mag = static_cast<T>(0.0f);
-
-                soa.v[0][p_idx] += static_cast<float>((f_norm_mag * n_dir[0] * dt) / pm);
-                soa.v[1][p_idx] += static_cast<float>((f_norm_mag * n_dir[1] * dt) / pm);
-                soa.v[2][p_idx] += static_cast<float>((f_norm_mag * n_dir[2] * dt) / pm);
-
-                atomicAdd(&d_nodes[truss.node_ids[0]].f_contact[0], -(static_cast<T>(1.0f) - t_proj) * f_norm_mag * n_dir[0]);
-                atomicAdd(&d_nodes[truss.node_ids[0]].f_contact[1], -(static_cast<T>(1.0f) - t_proj) * f_norm_mag * n_dir[1]);
-                atomicAdd(&d_nodes[truss.node_ids[0]].f_contact[2], -(static_cast<T>(1.0f) - t_proj) * f_norm_mag * n_dir[2]);
-
-                atomicAdd(&d_nodes[truss.node_ids[1]].f_contact[0], -t_proj * f_norm_mag * n_dir[0]);
-                atomicAdd(&d_nodes[truss.node_ids[1]].f_contact[1], -t_proj * f_norm_mag * n_dir[1]);
-                atomicAdd(&d_nodes[truss.node_ids[1]].f_contact[2], -t_proj * f_norm_mag * n_dir[2]);
             }
         }
     }
@@ -2284,17 +2364,27 @@ __global__ void fem_contact_forces_spatial_grid_kernel_3d_device(
 
                         T K_slave = K_slave_node;
                         T K_interface = (static_cast<T>(2.0f) * K_master * K_slave) / (K_master + K_slave + static_cast<T>(1.0e-30f));
-                        T k_stiff = contact_penalty_scale * K_interface * h_elem;
-                        T f_spring = k_stiff * eff_penetration;
 
                         T m_facet_avg = static_cast<T>(0.25f) * (n0.m + n1.m + n2.m + n3.m);
                         T m_sum = node.m + m_facet_avg;
                         T m_pair = (m_sum > static_cast<T>(1.0e-30f)) ? (node.m * m_facet_avg / m_sum) : static_cast<T>(1.0e-30f);
 
+                        T dt_safe = (dt > static_cast<T>(1.0e-12f)) ? dt : static_cast<T>(1.0e-12f);
+                        T k_dyn = static_cast<T>(0.50f) * m_pair / (dt_safe * dt_safe);
+                        T k_geom = (static_cast<T>(0.10f) * K_interface) * h_elem;
+                        T k_base = (k_geom < k_dyn) ? k_geom : k_dyn;
+                        T k_stiff = contact_penalty_scale * k_base;
+                        if (k_stiff < static_cast<T>(1.0e5f)) k_stiff = static_cast<T>(1.0e5f);
+
                         T vf0 = N_shape[0]*n0.v[0] + N_shape[1]*n1.v[0] + N_shape[2]*n2.v[0] + N_shape[3]*n3.v[0];
                         T vf1 = N_shape[0]*n0.v[1] + N_shape[1]*n1.v[1] + N_shape[2]*n2.v[1] + N_shape[3]*n3.v[1];
                         T vf2 = N_shape[0]*n0.v[2] + N_shape[1]*n1.v[2] + N_shape[2]*n2.v[2] + N_shape[3]*n3.v[2];
                         T v_rel_n = (node.v[0] - vf0)*contact_normal[0] + (node.v[1] - vf1)*contact_normal[1] + (node.v[2] - vf2)*contact_normal[2];
+
+                        T f_spring = k_stiff * eff_penetration;
+                        if (v_rel_n >= static_cast<T>(0.0f)) {
+                            f_spring *= static_cast<T>(0.10f); // Suppress static spring push on separating faces
+                        }
 
                         T f_damp = static_cast<T>(0.0f);
                         if (v_rel_n < static_cast<T>(0.0f)) {
@@ -2303,8 +2393,14 @@ __global__ void fem_contact_forces_spatial_grid_kernel_3d_device(
                         }
 
                         T f_total = f_spring + f_damp;
-                        T v_limit = (static_cast<T>(2.0f) * fabs(v_rel_n) > static_cast<T>(20.0f)) ? static_cast<T>(2.0f) * fabs(v_rel_n) : static_cast<T>(20.0f);
-                        T f_max = m_pair * v_limit / (dt > static_cast<T>(1.0e-12f) ? dt : static_cast<T>(1.0e-12f));
+                        T v_limit = (static_cast<T>(1.5f) * fabs(v_rel_n) > static_cast<T>(1.0f)) ? static_cast<T>(1.5f) * fabs(v_rel_n) : static_cast<T>(1.0f);
+                        T f_max = m_pair * v_limit / dt_safe;
+                        if (facet.element_id >= 0 && facet.element_id < num_elements && d_materials) {
+                            int mid = d_elements[facet.element_id].mat_id;
+                            T sigma_y = static_cast<T>(d_materials[mid].yield_stress > 0.0f ? d_materials[mid].yield_stress : 400.0e6f);
+                            T f_mat_cap = static_cast<T>(1.5f) * sigma_y * facet.area;
+                            if (f_max > f_mat_cap && f_mat_cap > static_cast<T>(1.0e3f)) f_max = f_mat_cap;
+                        }
                         if (f_total > f_max) f_total = f_max;
 
                         if (f_total > best_f_total) {
@@ -2401,37 +2497,21 @@ __global__ void fem_compute_step_size_kernel_3d_device(
     if (e < num_elements) {
         const FEMElement3D<T>& elem = d_elements[e];
         if (!elem.is_eroded) {
-            static const int HEX8_EDGES_DEV[12][2] = {
-                {0,1}, {1,2}, {2,3}, {3,0},
-                {4,5}, {5,6}, {6,7}, {7,4},
-                {0,4}, {1,5}, {2,6}, {3,7}
-            };
-            T h_min_sq = static_cast<T>(1.0e30f);
-            #pragma unroll
-            for (int edge = 0; edge < 12; ++edge) {
-                int n1 = elem.node_ids[HEX8_EDGES_DEV[edge][0]];
-                int n2 = elem.node_ids[HEX8_EDGES_DEV[edge][1]];
-                T edx = d_nodes[n1].x[0] - d_nodes[n2].x[0];
-                T edy = d_nodes[n1].x[1] - d_nodes[n2].x[1];
-                T edz = d_nodes[n1].x[2] - d_nodes[n2].x[2];
-                T len_sq = edx*edx + edy*edy + edz*edz;
-                if (len_sq < h_min_sq) h_min_sq = len_sq;
+            T x_curr[8][3];
+            for (int n = 0; n < 8; ++n) {
+                int nid = elem.node_ids[n];
+                x_curr[n][0] = d_nodes[nid].x[0];
+                x_curr[n][1] = d_nodes[nid].x[1];
+                x_curr[n][2] = d_nodes[nid].x[2];
             }
-            T h_min = sqrt(h_min_sq);
+            T V_cur = elem.V > static_cast<T>(0.0f) ? elem.V : elem.V0;
+            T L_e = computeHex8CharacteristicLength(x_curr, V_cur);
 
             const MaterialTable3D& mat = d_materials[elem.mat_id];
-            T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 210.0e9f);
-            T nu = static_cast<T>(mat.poissons_ratio);
-            T density = static_cast<T>(mat.density > 0.0f ? mat.density : 7850.0f);
-            T G = E / (static_cast<T>(2.0f) * (static_cast<T>(1.0f) + nu));
-            T K = E / (static_cast<T>(3.0f) * (static_cast<T>(1.0f) - static_cast<T>(2.0f) * nu));
-            if (mat.material_model == MPMMaterialModel::RHTConcrete || mat.material_model == MPMMaterialModel::KCConcrete || mat.material_model == MPMMaterialModel::CSCMConcrete) {
-                K *= static_cast<T>(1.6f);
-            }
-            T cd = sqrt((K + static_cast<T>(4.0f) / static_cast<T>(3.0f) * G) / density);
+            T cd = computeDilatationalWaveSpeed<T>(mat);
 
             if (cd > static_cast<T>(1.0e-6f)) {
-                dt_elem = cfl * (h_min / cd);
+                dt_elem = cfl * (L_e / cd);
             }
         }
     }

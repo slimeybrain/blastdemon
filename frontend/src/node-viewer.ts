@@ -4,6 +4,7 @@ import { PropertyEditor } from './property-editor.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
 import { Telemetry3DViewport } from './telemetry-3d-viewport.js';
 import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_CATEGORIES, MPM_MATERIAL_PARAM_INFO } from './mpm-presets.js';
+import { getParameterInfo, getNodeDefinition, getNodeDescription, showParameterPopover, showNodeDetailsModal } from './parameter-definitions.js';
 
 export class NodeViewer {
     private container: HTMLElement;
@@ -713,17 +714,38 @@ export class NodeViewer {
         this.container.style.padding = '10px';
         this.container.style.overflowY = 'auto';
 
+        const titleContainer = document.createElement('div');
+        titleContainer.style.display = 'flex';
+        titleContainer.style.justifyContent = 'space-between';
+        titleContainer.style.alignItems = 'center';
+        titleContainer.style.borderBottom = '1px solid #444';
+        titleContainer.style.paddingBottom = '5px';
+        titleContainer.style.marginBottom = '15px';
+
         const title = document.createElement('h3');
         title.textContent = `CONFIG: ${node.type} (${node.id})`;
-        title.style.margin = '0 0 15px 0';
+        title.style.margin = '0';
         title.style.fontSize = 'var(--font-md)';
-        title.style.borderBottom = '1px solid #444';
-        title.style.paddingBottom = '5px';
-        this.container.appendChild(title);
+        titleContainer.appendChild(title);
+
+        const infoModalBtn = document.createElement('button');
+        infoModalBtn.type = 'button';
+        infoModalBtn.textContent = 'Documentation';
+        infoModalBtn.className = 'header-button secondary';
+        infoModalBtn.style.padding = '2px 8px';
+        infoModalBtn.style.fontSize = '10px';
+        infoModalBtn.style.color = '#00e5ff';
+        infoModalBtn.style.borderColor = 'rgba(0, 229, 255, 0.4)';
+        infoModalBtn.style.cursor = 'pointer';
+        infoModalBtn.title = 'View in-depth physics formulations, equations, and parameter guide for ' + node.type;
+        infoModalBtn.onclick = () => showNodeDetailsModal(node.type);
+        titleContainer.appendChild(infoModalBtn);
+
+        this.container.appendChild(titleContainer);
 
         const grid = document.createElement('div');
         grid.style.display = 'grid';
-        grid.style.gridTemplateColumns = '120px 1fr';
+        grid.style.gridTemplateColumns = '140px 1fr';
         grid.style.gap = '10px';
         grid.style.alignItems = 'center';
 
@@ -925,40 +947,40 @@ export class NodeViewer {
             }
             // DetonatorLocation and DetonatorLocation3D are separate nodes now, showing correct properties
 
+            const paramInfo = getParameterInfo(key, node.type);
             const label = document.createElement('label');
-            let labelText = key.replace(/_/g, ' ').toUpperCase();
-            label.textContent = labelText;
             label.style.fontSize = 'var(--font-sm)';
             label.style.color = '#888';
+            label.style.cursor = 'help';
+            label.title = `${paramInfo.label} (${paramInfo.unit}): ${paramInfo.shortDesc} — ${paramInfo.detailedDesc}`;
 
-            if (key === 'device') {
-                label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
-                    `<span style="font-weight:600; color:#ccc;">TARGET DEVICE</span>` +
-                    `<span style="font-size:10px; color:#4ec9b0; font-family:monospace; background:rgba(78,201,176,0.15); padding:1px 4px; border-radius:3px; border:1px solid rgba(78,201,176,0.3);">SHARED</span>` +
-                    `</div>` +
-                    `<div style="font-size:10px; color:#777; margin-top:1px; margin-bottom:2px;">Coupled solver target device</div>`;
-            } else if (key === 'precision') {
-                label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
-                    `<span style="font-weight:600; color:#ccc;">PRECISION</span>` +
-                    `<span style="font-size:10px; color:#4ec9b0; font-family:monospace; background:rgba(78,201,176,0.15); padding:1px 4px; border-radius:3px; border:1px solid rgba(78,201,176,0.3);">SHARED</span>` +
-                    `</div>` +
-                    `<div style="font-size:10px; color:#777; margin-top:1px; margin-bottom:2px;">Coupled solver numeric precision</div>`;
-            } else if (node.type === 'MPMMaterialSteel' && MPM_MATERIAL_PARAM_INFO[key]) {
-                const info = MPM_MATERIAL_PARAM_INFO[key];
-                label.title = info.tooltip;
-                label.style.cursor = 'help';
-                label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
-                    `<span style="font-weight:600; color:#ccc;">${info.label.toUpperCase()}</span>` +
-                    (info.unit && info.unit !== 'dim' ? `<span style="font-size:10px; color:#569cd6; font-family:monospace; background:rgba(86,156,214,0.1); padding:1px 4px; border-radius:3px;">${info.unit}</span>` : '') +
-                    `</div>` +
-                    `<div style="font-size:10px; color:#777; margin-top:1px; margin-bottom:2px;">${info.shortDesc}</div>`;
+            const unitBadge = (paramInfo.unit && paramInfo.unit !== 'dim') 
+                ? `<span style="font-size:9px; color:#00e5ff; font-family:monospace; background:rgba(0,229,255,0.12); padding:1px 4px; border-radius:3px; border:1px solid rgba(0,229,255,0.25);">${paramInfo.unit}</span>` 
+                : '';
+
+            label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
+                `<span style="font-weight:600; color:#ddd; display:inline-flex; align-items:center;">` +
+                `${paramInfo.label.toUpperCase()}` +
+                `<span class="param-info-btn" data-param-key="${key}" title="Click or hover for physics & math details">?</span>` +
+                `</span>` +
+                unitBadge +
+                `</div>` +
+                `<div style="font-size:10px; color:#777; margin-top:1px; margin-bottom:2px;">${paramInfo.shortDesc}</div>`;
+
+            const infoBtn = label.querySelector('.param-info-btn') as HTMLElement;
+            if (infoBtn) {
+                infoBtn.addEventListener('mouseenter', (e) => {
+                    showParameterPopover(infoBtn, key, node.type, e);
+                });
+                infoBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    showParameterPopover(infoBtn, key, node.type, e);
+                });
             }
             grid.appendChild(label);
 
             const input = this.createInputElement(node, key, value);
-            if (node.type === 'MPMMaterialSteel' && MPM_MATERIAL_PARAM_INFO[key]) {
-                input.title = MPM_MATERIAL_PARAM_INFO[key].tooltip;
-            }
+            input.title = `${paramInfo.shortDesc} — ${paramInfo.detailedDesc}`;
             grid.appendChild(input);
         }
 
@@ -2379,12 +2401,11 @@ export class NodeViewer {
             'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
             'charge_rot_x', 'charge_rot_y', 'charge_rot_z',
             'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
-            'origin_x', 'origin_y', 'origin_z', 'dim_x', 'dim_y', 'dim_z', 'scale_factor',
+            'scale_factor',
             'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
-            'refinement_opacity', 'charge_opacity',
+            'charge_opacity',
             'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio', 'amr_tile_size',
-            'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'length', 'refinement_level',
-            'submesh_x', 'submesh_y', 'submesh_z', 'submesh_size_x', 'submesh_size_y', 'submesh_size_z',
+            'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'length',
             'offset', 'stride',
             // MPM keys
             'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'radius', 'inner_radius',
@@ -2398,7 +2419,7 @@ export class NodeViewer {
             'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
             // FEM keys
             'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
-            'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_diameter', 'rebar_area', 'rebarRadius', 'rebar_radius', 'beamRadius', 'beam_radius', 'beam_diameter', 'beam_area', 'beamMinVal', 'beamMaxVal',
+            'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_area', 'beamRadius', 'beam_radius', 'beam_area', 'beamMinVal', 'beamMaxVal',
             'femMinVal', 'femMaxVal', 'femOpacity', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',
             // Concrete Core & Models (RHT, K&C, CSCM)
             'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
@@ -2447,7 +2468,6 @@ export class NodeViewer {
             'precision': ['double', 'single'],
             'integration_scheme': ['OnePointFB', 'OnePointKF', 'FullGauss8', 'SelectiveReduced'],
             'hourglass_model': ['FlanaganBelytschkoStiffness', 'FlanaganBelytschkoViscous', 'KosloffFrazier'],
-            'mesh_source': ['Box Generator', 'Cylinder Generator', 'LS-DYNA Keyword File'],
             'preset': [...MPM_MATERIAL_PRESET_NAMES],
             'trigger_type': node.type === 'VTKOutput' ? ['Step Interval', 'Time Interval'] : ['end', 'time', 'step'],
             'composition': ['Aluminized ANFO', 'Ammonal', 'ANFO', 'Baratol', 'C-4', 'Composition A-3', 'Composition B', 'Composition C-3', 'Cyclotol', 'Heavy ANFO', 'HMX', 'LX-04', 'LX-07', 'LX-10', 'LX-14', 'LX-17', 'Mining Emulsion', 'Octol', 'PBX 9404', 'PBX 9501', 'PBX 9502', 'PE-10', 'PE-12', 'PE-4', 'PE-8', 'Pentolite', 'PETN', 'RDX', 'TATB', 'Tetryl', 'TNT', 'Water Gel', 'Custom'],

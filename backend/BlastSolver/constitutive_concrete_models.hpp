@@ -260,17 +260,21 @@ HD_CONC_FUNC void updateRHTStress(
         }
 
         // 6. Fracture Energy Regularized Damage Accumulation
-        // Failure strain epsilon_p_f(P*)
-        T ep_f = rht_D1 * std::pow(P_eff > static_cast<T>(1.0e-4) ? P_eff : static_cast<T>(1.0e-4), rht_D2);
-        if (ep_f < static_cast<T>(0.0001)) ep_f = static_cast<T>(0.0001);
+        // Hydrodynamic pressure-dependent failure plastic strain epsilon_p_f(P*)
+        T ep_f_comp = rht_D1 * std::pow(P_eff > static_cast<T>(1.0e-4) ? P_eff : static_cast<T>(1.0e-4), rht_D2);
+        if (ep_f_comp < static_cast<T>(0.0001)) ep_f_comp = static_cast<T>(0.0001);
 
-        // Fracture energy regularization using element/particle characteristic length h
+        // Fracture energy regularization for tensile softening (Bažant crack-band formulation)
         T h = (char_len > static_cast<T>(1.0e-6)) ? char_len : static_cast<T>(0.01);
-        T ep_f_reg = (G_f > static_cast<T>(0.0) && ft > static_cast<T>(0.0)) ? (G_f / (ft * h)) : ep_f;
-        if (ep_f_reg < static_cast<T>(1.0e-5)) ep_f_reg = static_cast<T>(1.0e-5);
-        if (ep_f_reg > static_cast<T>(1.0)) ep_f_reg = static_cast<T>(1.0);
+        T ep_f_tensile = (G_f > static_cast<T>(0.0) && ft > static_cast<T>(0.0)) ? (G_f / (ft * h)) : ep_f_comp;
+        if (ep_f_tensile < static_cast<T>(1.0e-5)) ep_f_tensile = static_cast<T>(1.0e-5);
+        if (ep_f_tensile > static_cast<T>(1.0)) ep_f_tensile = static_cast<T>(1.0);
 
-        T d_D = d_ep / ep_f_reg;
+        // Under tension/spall (P_star < 0), crack-band tensile regularization governs.
+        // Under compression/shear (P_star >= 0), RHT pressure-hardening law governs with tensile lower bound.
+        T ep_f_eff = (P_star < static_cast<T>(0.0)) ? ep_f_tensile : (ep_f_comp > ep_f_tensile ? ep_f_comp : ep_f_tensile);
+
+        T d_D = d_ep / ep_f_eff;
         state.damage += d_D;
         if (state.damage > static_cast<T>(1.0)) state.damage = static_cast<T>(1.0);
     }
@@ -394,12 +398,11 @@ HD_CONC_FUNC void updateKCStress(
         // Modified effective plastic strain lambda evolution
         T r_p = (p_calc > static_cast<T>(0.0)) ? (static_cast<T>(1.0) + p_calc / fc) : static_cast<T>(1.0);
         state.lambda += d_ep / r_p;
-
         // Damage Softening beyond peak (lambda > lambda_m)
         if (state.lambda > lambda_m) {
             T h = (char_len > static_cast<T>(1.0e-6)) ? char_len : static_cast<T>(0.01);
-            T lambda_f = (G_f > static_cast<T>(0.0) && ft > static_cast<T>(0.0)) ? (G_f / (ft * h)) : static_cast<T>(0.005);
-            if (lambda_f < static_cast<T>(1.0e-5)) lambda_f = static_cast<T>(1.0e-5);
+            T lambda_f = (G_f > static_cast<T>(0.0) && ft > static_cast<T>(0.0)) ? (static_cast<T>(2.0) * G_f / (ft * h)) : static_cast<T>(0.005);
+            if (lambda_f < static_cast<T>(0.005)) lambda_f = static_cast<T>(0.005);
             T d_D = d_ep / (lambda_f * r_p);
             state.damage += d_D;
             if (state.damage > static_cast<T>(1.0)) state.damage = static_cast<T>(1.0);
@@ -413,91 +416,91 @@ HD_CONC_FUNC void updateKCStress(
 
 template <typename T>
 struct CSCMStateVariables {
-    T damage{0.0};          // Total scalar damage d = max(d_brittle, d_ductile)
-    T damage_brittle{0.0};  // Brittle tensile damage
-    T damage_ductile{0.0};  // Ductile shear damage
-    T kappa{0.0};           // Cap hardening parameter (initial: X0)
-    T ep_bar{0.0};          // Equivalent plastic strain
-    T p_hydro{0.0};         // Hydrostatic pressure
-    T K_tangent{30.0e9};    // Tangent bulk modulus
+    T damage{static_cast<T>(0.0)};
+    T damage_brittle{static_cast<T>(0.0)};
+    T damage_ductile{static_cast<T>(0.0)};
+    T kappa{static_cast<T>(0.0)};
+    T ep_bar{static_cast<T>(0.0)};
+    T p_hydro{static_cast<T>(0.0)};
+    T K_tangent{static_cast<T>(30.0e9)};
 };
 
 template <typename T>
 HD_CONC_FUNC void updateCSCMStress(
     T s_trial[3][3],
-    T p_trial,
+    T& p_trial,
     T vol_strain,
     T dt,
     T char_len,
     T strain_rate,
-    // Material parameters
     T fc,
     T ft,
     T G_shear,
     T K_bulk,
     T G_f,
-    T cscm_alpha,
-    T cscm_theta,
-    T cscm_lambda,
-    T cscm_beta,
-    T cscm_R,
-    T cscm_X0,
-    T cscm_W,
-    T cscm_D1,
-    T cscm_D2,
+    T alpha,
+    T theta,
+    T lambda_c,
+    T beta,
+    T R_ratio,
+    T X0,
+    T W,
+    T D1,
+    T D2,
     T dif_cap_c,
     T dif_cap_t,
-    // State history
     CSCMStateVariables<T>& state
 ) {
     if (fc < static_cast<T>(1.0e5)) fc = static_cast<T>(30.0e6);
     if (ft < static_cast<T>(1.0e4)) ft = static_cast<T>(0.1) * fc;
 
     // Default CSCM parameters calibrated to fc if uninitialized
-    if (cscm_alpha <= static_cast<T>(0.0)) {
-        cscm_alpha = static_cast<T>(0.40) * fc;
-        cscm_theta = static_cast<T>(0.87);
-        cscm_lambda = static_cast<T>(0.30) * fc;
-        cscm_beta = static_cast<T>(0.10) / fc;
-        cscm_R = static_cast<T>(5.0);
-        cscm_X0 = static_cast<T>(2.5) * fc;
-        cscm_W = static_cast<T>(0.05);
-        cscm_D1 = static_cast<T>(2.5e-9);
-        cscm_D2 = static_cast<T>(3.0e-17);
+    if (alpha <= static_cast<T>(0.0)) {
+        alpha = static_cast<T>(0.40) * fc;
+        theta = static_cast<T>(0.87);
+        lambda_c = static_cast<T>(0.30) * fc;
+        beta = static_cast<T>(0.10) / fc;
+        R_ratio = static_cast<T>(5.0);
+        X0 = static_cast<T>(2.5) * fc;
+        W = static_cast<T>(0.05);
+        D1 = static_cast<T>(2.5e-9);
+        D2 = static_cast<T>(1.0);
     }
 
-    T J1 = static_cast<T>(3.0) * p_trial; // First invariant J1 = 3 * p
-    state.p_hydro = p_trial;
-    state.K_tangent = K_bulk;
+    // 1. Dynamic Rate Effects
+    T dif_c, dif_t;
+    computeDIF(strain_rate, static_cast<T>(0.032), static_cast<T>(0.036), dif_cap_c, dif_cap_t, dif_c, dif_t);
 
-    // 1. Continuous Shear Failure Envelope F_f(J1)
-    T F_f = cscm_alpha - cscm_lambda * std::exp(-cscm_beta * J1) + cscm_theta * J1;
-    if (F_f < static_cast<T>(1.0e4)) F_f = static_cast<T>(1.0e4);
-
-    // 2. Cap Hardening Envelope F_c(J1, kappa)
-    T L_kappa = (state.kappa > cscm_X0) ? state.kappa : cscm_X0;
-    T X_kappa = L_kappa + cscm_R * F_f;
-
-    T F_c = static_cast<T>(1.0);
-    if (J1 > L_kappa && X_kappa > L_kappa) {
-        T cap_ratio = (J1 - L_kappa) / (X_kappa - L_kappa);
-        if (cap_ratio > static_cast<T>(1.0)) cap_ratio = static_cast<T>(1.0);
-        F_c = static_cast<T>(1.0) - cap_ratio * cap_ratio;
-        if (F_c < static_cast<T>(0.0)) F_c = static_cast<T>(0.0);
-    }
-
-    T yield_envelope = std::sqrt(F_f * F_f * F_c);
-
-    // 3. Radial Return Mapping
+    // 2. Stress Invariants
     T J2, J3, q_vm, lode_theta;
     computeStressInvariants(s_trial, J2, J3, q_vm, lode_theta);
+    T J1 = static_cast<T>(3.0) * p_trial;
 
-    if (q_vm > yield_envelope && q_vm > static_cast<T>(1.0e-6)) {
-        T d_sigma = q_vm - yield_envelope;
-        T scale = yield_envelope / q_vm;
+    // 3. Shear Failure Surface F_s(J1)
+    T F_s = alpha - lambda_c * std::exp(-beta * J1) + theta * J1;
+    if (F_s < ft * dif_t) F_s = ft * dif_t;
+
+    // Cap Surface F_c(J1, kappa)
+    T X_kappa = X0 + state.kappa;
+    T L_kappa = (X_kappa > static_cast<T>(0.0)) ? X_kappa : static_cast<T>(0.0);
+    T F_c = static_cast<T>(1.0);
+    if (J1 > L_kappa && X_kappa > L_kappa) {
+        T r_cap = (J1 - L_kappa) / (X_kappa - L_kappa);
+        if (r_cap < static_cast<T>(1.0)) {
+            F_c = static_cast<T>(1.0) - r_cap * r_cap;
+        } else {
+            F_c = static_cast<T>(0.0);
+        }
+    }
+
+    T Y_limit = F_s * std::sqrt(F_c > static_cast<T>(0.0) ? F_c : static_cast<T>(0.0)) * dif_c;
+    if (Y_limit < static_cast<T>(1.0e4)) Y_limit = static_cast<T>(1.0e4);
+
+    if (q_vm > Y_limit) {
+        T d_sigma = q_vm - Y_limit;
+        T scale = Y_limit / q_vm;
 
         T d_ep = d_sigma / (static_cast<T>(3.0) * G_shear + static_cast<T>(1.0e7));
-        state.ep_bar += d_ep;
 
         for (int r = 0; r < 3; ++r) {
             for (int c = 0; c < 3; ++c) {
@@ -507,8 +510,8 @@ HD_CONC_FUNC void updateCSCMStress(
 
         // 4. Cap evolution & Damage Softening with G_f
         T h = (char_len > static_cast<T>(1.0e-6)) ? char_len : static_cast<T>(0.01);
-        T g_reg = (G_f > static_cast<T>(0.0) && ft > static_cast<T>(0.0)) ? (G_f / (ft * h)) : static_cast<T>(0.005);
-        if (g_reg < static_cast<T>(1.0e-5)) g_reg = static_cast<T>(1.0e-5);
+        T g_reg = (G_f > static_cast<T>(0.0) && ft > static_cast<T>(0.0)) ? (static_cast<T>(2.0) * G_f / (ft * h)) : static_cast<T>(0.005);
+        if (g_reg < static_cast<T>(0.005)) g_reg = static_cast<T>(0.005);
         if (J1 > L_kappa) {
             state.kappa += d_ep * (K_bulk * static_cast<T>(0.1));
             T d_ductile = d_ep / (static_cast<T>(2.0) * g_reg);

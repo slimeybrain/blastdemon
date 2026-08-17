@@ -208,8 +208,19 @@ bool LSDynaReader3D<T>::parseStream(
             // Card 1: MID, EXFAIL, MXEPS, EPSTH, SIGP1, SIGVM, ...
             T exf = parseFieldVal(line, 1, 0.0f);
             T sigp1 = parseFieldVal(line, 4, 0.0f);
-            if (exf > 0.0f) out_default_mat.failure_strain = static_cast<float>(exf);
-            if (sigp1 > 0.0f) out_default_mat.tensile_failure_stress = static_cast<float>(sigp1);
+            if (exf > 0.0f && out_default_mat.failure_strain <= 0.0f) out_default_mat.failure_strain = static_cast<float>(exf);
+            if (sigp1 > 0.0f && out_default_mat.tensile_failure_stress <= 0.0f) out_default_mat.tensile_failure_stress = static_cast<float>(sigp1);
+        } else if (current_keyword.rfind("*CONTROL_TIMESTEP", 0) == 0) {
+            // Card 1: DTINIT, TSSFAC, ISDO, TSLIMT, DTMS, LCTM, ERODE, MS1ST
+            // Note: Explicit UI material settings take strict precedence over .k card defaults (Rule 11)
+            T tslimt = parseFieldVal(line, 3, 0.0f);
+            int erode = static_cast<int>(parseFieldVal(line, 6, 0.0f));
+            if (erode == 1 && !out_default_mat.enable_timestep_erosion) {
+                // UI disabled timestep erosion has precedence; record factor if valid
+                if (tslimt > 0.0f && tslimt <= 1.0f) {
+                    out_default_mat.timestep_erosion_factor = static_cast<float>(tslimt);
+                }
+            }
         } else if (current_keyword.rfind("*INITIAL_VELOCITY", 0) == 0) {
             int64_t node_id = static_cast<int64_t>(parseFieldVal(line, 0, 0.0f));
             T vx = parseFieldVal(line, 1, 0.0f);

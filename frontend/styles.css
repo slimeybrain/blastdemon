@@ -1052,42 +1052,238 @@ canvas {
 }
 .node-info-overlay {
     position: absolute;
-    max-width: 200px;
-    background: #1a1a22;
-    border: 1px solid #555;
-    border-radius: 5px;
-    padding: 10px 12px;
+    width: 440px;
+    max-width: 90vw;
+    max-height: 75vh;
+    overflow-y: auto;
+    background: #141720ee;
+    backdrop-filter: blur(12px);
+    border: 1px solid #00e5ff88;
+    border-radius: 8px;
+    padding: 14px 16px;
     z-index: 9999;
-    box-shadow: 0 4px 20px rgba(0,0,0,0.9);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.9), 0 0 15px rgba(0, 229, 255, 0.15);
     font-family: var(--font-ui);
-    color: #ccc;
+    color: #e0e0e0;
     pointer-events: auto;
     white-space: normal;
-    min-width: 140px;
 }
 .node-info-overlay-title {
     font-weight: 700;
-    font-size: var(--font-md);
-    color: #fff;
-    margin-bottom: 6px;
-    padding-bottom: 5px;
-    border-bottom: 1px solid #444;
-    letter-spacing: 0.03em;
+    font-size: 13px;
+    color: #00f0ff;
+    margin-bottom: 8px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid rgba(0, 240, 255, 0.25);
+    letter-spacing: 0.04em;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
 }
 .node-info-overlay-body {
-    font-size: var(--font-sm);
-    line-height: 1.5;
+    font-size: 11px;
+    line-height: 1.55;
+    color: #ccc;
+}
+
+/* Parameter Popovers */
+.param-popover {
+    background: #151822fa;
+    backdrop-filter: blur(14px);
+    border: 1px solid #00e5ff99;
+    border-radius: 7px;
+    padding: 10px 12px;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.9), 0 0 12px rgba(0,229,255,0.2);
+    font-family: var(--font-ui);
+    color: #ddd;
+    max-width: 350px;
+    min-width: 230px;
+    pointer-events: auto;
+    animation: popoverFadeIn 0.15s ease-out;
+}
+
+@keyframes popoverFadeIn {
+    from { opacity: 0; transform: scale(0.96) translateY(-2px); }
+    to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.param-popover-header {
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    padding-bottom: 6px;
+    margin-bottom: 6px;
+}
+.param-popover-title-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+}
+.param-popover-title {
+    font-weight: 700;
+    font-size: 12px;
+    color: #fff;
+}
+.param-popover-unit {
+    font-size: 9px;
+    color: #00e5ff;
+    font-family: var(--font-mono);
+    background: rgba(0, 229, 255, 0.12);
+    padding: 1px 5px;
+    border-radius: 3px;
+    border: 1px solid rgba(0, 229, 255, 0.25);
+    flex-shrink: 0;
+}
+.param-popover-category {
+    font-size: 9px;
+    color: #bd93f9;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-top: 2px;
+}
+.param-popover-body {
+    font-size: 10.5px;
+    line-height: 1.45;
+}
+.param-popover-short {
+    color: #569cd6;
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+.param-popover-details {
     color: #bbb;
 }
-.infr-icon {
-    color: #00f0ff;
-    margin-left: 4px;
+
+.param-info-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 13px;
+    height: 13px;
+    font-size: 8.5px;
+    font-weight: 700;
+    color: #666;
+    border: 1px solid #444;
+    border-radius: 50%;
     cursor: help;
-    font-size: var(--font-xs);
-    font-weight: 800;
-    border: 1px solid #00f0ff;
-    border-radius: 2px;
-    padding: 0px 2px;
+    margin-left: 4px;
+    transition: all 0.15s ease;
+    user-select: none;
+    line-height: 1;
+    background: rgba(255, 255, 255, 0.03);
+    flex-shrink: 0;
+}
+.param-info-btn:hover {
+    color: #00f0ff;
+    border-color: #00f0ff;
+    background: rgba(0, 240, 255, 0.12);
+    box-shadow: 0 0 6px rgba(0, 240, 255, 0.3);
+}
+
+/* Documentation Modals */
+.node-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.75);
+    backdrop-filter: blur(4px);
+    z-index: 999999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: popoverFadeIn 0.15s ease-out;
+}
+.node-modal-dialog {
+    background: #181c26;
+    border: 1px solid #00adff;
+    border-radius: 8px;
+    width: 580px;
+    max-width: 92vw;
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.9), 0 0 24px rgba(0, 173, 255, 0.2);
+    color: #ddd;
+    font-family: var(--font-ui);
+}
+.node-modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 16px;
+    background: #141720;
+    border-bottom: 1px solid #333;
+    border-top-left-radius: 7px;
+    border-top-right-radius: 7px;
+}
+.node-modal-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: #fff;
+}
+.node-modal-category {
+    font-size: 10px;
+    color: #00e5ff;
+    margin-top: 2px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.node-modal-close {
+    background: transparent;
+    border: none;
+    color: #888;
+    font-size: 16px;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+    transition: all 0.15s;
+}
+.node-modal-close:hover {
+    color: #ff5555;
+    background: rgba(255, 85, 85, 0.15);
+}
+.node-modal-body {
+    padding: 16px;
+    overflow-y: auto;
+    font-size: 12px;
+    line-height: 1.6;
+}
+.node-doc-section {
+    margin-bottom: 16px;
+}
+.node-doc-heading {
+    font-size: 11px;
+    font-weight: 700;
+    color: #50fa7b;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    margin-bottom: 6px;
+    border-bottom: 1px solid rgba(80, 250, 123, 0.2);
+    padding-bottom: 3px;
+}
+.node-doc-code {
+    background: #0d1017;
+    border: 1px solid #282f3d;
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-family: var(--font-mono);
+    color: #f1fa8c;
+    font-size: 11px;
+    margin: 6px 0;
+    overflow-x: auto;
+}
+.node-doc-section ul {
+    margin: 6px 0 6px 18px;
+    padding: 0;
+}
+.node-doc-section li {
+    margin-bottom: 4px;
+}
+.node-doc-section code {
+    background: rgba(255, 255, 255, 0.08);
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-family: var(--font-mono);
+    color: #8be9fd;
+    font-size: 11px;
 }
 
 /* Telemetry Graph — channel selector bar */

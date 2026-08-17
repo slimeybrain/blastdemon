@@ -109,7 +109,7 @@ public:
     virtual void setProgressRef(std::atomic<int>* ref) = 0;
 
     virtual void step(double dt) = 0;
-    virtual double computeStepSize(double cfl = 0.4) const = 0;
+    virtual double computeStepSize(double cfl = 0.6) const = 0;
     virtual void pause() {}
     virtual void resume() {}
     virtual bool is_terminated() const = 0;
@@ -319,7 +319,7 @@ public:
     void setTemporalOrder(int order) override;
 
     void step(double dt) override;
-    double computeStepSize(double cfl = 0.4) const override;
+    double computeStepSize(double cfl = 0.6) const override;
     void setGeometry(const std::string& stl_filepath, const std::string& geometry_hash, const std::string& voxelization_method,
                      const std::atomic<bool>* terminate_flag = nullptr,
                      std::function<void(double)> progress_callback = nullptr) override;

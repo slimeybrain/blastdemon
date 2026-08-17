@@ -207,7 +207,7 @@ void testTensileSofteningAndFractureEnergy() {
         float ep = 0.0f, D = 0.0f;
         float max_tensile = 0.0f;
         float de_lat = -mat.poissons_ratio * d_eps;
-        for (int step = 0; step < 1000; ++step) {
+        for (int step = 0; step < 2500; ++step) {
             sig[1] = 0; sig[2] = 0; sig[3] = 0; sig[4] = 0; sig[5] = 0;
             float de[6] = { d_eps, de_lat, de_lat, 0, 0, 0 };
             ConcreteModels::updateRHTStress<float>(sig, de, ep, D, mat, dt, h1);
@@ -225,7 +225,7 @@ void testTensileSofteningAndFractureEnergy() {
         float ep = 0.0f, D = 0.0f;
         float max_tensile = 0.0f;
         float de_lat = -mat.poissons_ratio * d_eps;
-        for (int step = 0; step < 1000; ++step) {
+        for (int step = 0; step < 2500; ++step) {
             sig[1] = 0; sig[2] = 0; sig[3] = 0; sig[4] = 0; sig[5] = 0;
             float de[6] = { d_eps, de_lat, de_lat, 0, 0, 0 };
             ConcreteModels::updateRHTStress<float>(sig, de, ep, D, mat, dt, h2);

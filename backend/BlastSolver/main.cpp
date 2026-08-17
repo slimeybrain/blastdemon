@@ -268,7 +268,7 @@ std::atomic<int> step_progress{0};
 std::atomic<int> global_num_cells{0};
 std::atomic<int> global_target_steps{0};
 std::atomic<bool> global_exec_until_end{false};
-std::atomic<double> global_cfl{0.4};
+std::atomic<double> global_cfl{0.6};
 std::atomic<double> global_wallclock_1d{0.0};
 std::atomic<double> global_wallclock_2d{0.0};
 std::mutex cout_mutex;
@@ -287,7 +287,7 @@ std::atomic<bool> solver2d_initialized{false};
 std::atomic<int> step_progress_2d{0};
 std::atomic<int> global_target_steps_2d{0};
 std::atomic<bool> global_exec_until_end_2d{false};
-std::atomic<double> global_cfl_2d{0.35};
+std::atomic<double> global_cfl_2d{0.6};
 
 std::unique_ptr<CFDSolver2D> global_solver_2d = nullptr;
 std::unique_ptr<CFDSolver2DCuda> global_solver_2d_cuda = nullptr;
@@ -308,7 +308,7 @@ double global_dt_3d = 0.0;
 std::atomic<int> step_progress_3d{0};
 std::atomic<int> global_target_steps_3d{0};
 std::atomic<bool> global_exec_until_end_3d{false};
-std::atomic<double> global_cfl_3d{0.4};
+std::atomic<double> global_cfl_3d{0.6};
 std::atomic<double> global_wallclock_3d{0.0};
 std::atomic<bool> global_enable_gauges{true};
 std::atomic<bool> global_enable_vtk{false};
@@ -319,7 +319,7 @@ std::atomic<bool> sim_mpm_3d_paused{false};
 std::atomic<bool> sim_mpm_3d_terminate{false};
 std::atomic<bool> global_exec_until_end_mpm_3d{false};
 std::atomic<int> global_target_steps_mpm_3d{0};
-std::atomic<float> global_cfl_mpm_3d{0.3f};
+std::atomic<float> global_cfl_mpm_3d{0.6f};
 std::atomic<double> global_refresh_rate_mpm_3d{0.033};
 
 std::atomic<bool> sim_fem_3d_running{false};
@@ -327,7 +327,7 @@ std::atomic<bool> sim_fem_3d_paused{false};
 std::atomic<bool> sim_fem_3d_terminate{false};
 std::atomic<bool> global_exec_until_end_fem_3d{false};
 std::atomic<int> global_target_steps_fem_3d{0};
-std::atomic<float> global_cfl_fem_3d{0.3f};
+std::atomic<float> global_cfl_fem_3d{0.6f};
 std::atomic<double> global_refresh_rate_fem_3d{0.033};
 
 std::atomic<int> global_step_1d{0};
@@ -2328,7 +2328,7 @@ std::atomic<bool> sim_mpm_paused{false};
 std::atomic<bool> sim_mpm_terminate{false};
 std::atomic<bool> global_exec_until_end_mpm{false};
 std::atomic<int> global_target_steps_mpm{0};
-std::atomic<float> global_cfl_mpm{0.3f};
+std::atomic<float> global_cfl_mpm{0.6f};
 std::atomic<double> global_refresh_rate_mpm{0.0};
 
 void worker_mpm_2d_thread_func() {
@@ -2945,14 +2945,14 @@ std::atomic<bool> sim_fsi_paused{false};
 std::atomic<bool> sim_fsi_terminate{false};
 std::atomic<bool> global_exec_until_end_fsi{false};
 std::atomic<int> global_target_steps_fsi{0};
-std::atomic<float> global_cfl_fsi{0.35f};
+std::atomic<float> global_cfl_fsi{0.6f};
 
 std::atomic<bool> sim_fsi_3d_running{false};
 std::atomic<bool> sim_fsi_3d_paused{false};
 std::atomic<bool> sim_fsi_3d_terminate{false};
 std::atomic<bool> global_exec_until_end_fsi_3d{false};
 std::atomic<int> global_target_steps_fsi_3d{0};
-std::atomic<float> global_cfl_fsi_3d{0.35f};
+std::atomic<float> global_cfl_fsi_3d{0.6f};
 
 void worker_fsi_2d_thread_func() {
     try {
@@ -3371,9 +3371,9 @@ void worker_fsi_3d_thread_func() {
             if (step_count == 0) {
                 dt_common = std::min(dt_common, 1.0e-7);
             } else {
-                dt_common = std::min(dt_common, 1.05 * last_dt);
+                dt_common = std::min(dt_common, 1.25 * last_dt);
             }
-            dt_common = std::clamp(dt_common, 1.0e-11, 1.0e-4);
+            dt_common = std::max(dt_common, 1.0e-11);
             last_dt = dt_common;
             global_dt_3d = dt_common; // Ensure telemetry reports the correct timestep
 
@@ -3477,7 +3477,7 @@ std::atomic<bool> sim_fem_fsi_3d_paused{false};
 std::atomic<bool> sim_fem_fsi_3d_terminate{false};
 std::atomic<bool> global_exec_until_end_fem_fsi_3d{false};
 std::atomic<int> global_target_steps_fem_fsi_3d{0};
-std::atomic<float> global_cfl_fem_fsi_3d{0.30f};
+std::atomic<float> global_cfl_fem_fsi_3d{0.6f};
 
 void worker_fem_fsi_3d_thread_func() {
     try {
@@ -5674,7 +5674,7 @@ int main() {
                 } else if (command == "STEP") {
                     if (!global_solver) continue;
                     int steps = msg.at("steps").get<int>();
-                    global_cfl = msg.value("cfl", 0.4);
+                    global_cfl = msg.value("cfl", 0.6);
                     global_exec_until_end = false;
                     if (!sim_running) {
                         global_target_steps = steps;
@@ -5688,7 +5688,7 @@ int main() {
                     }
                 } else if (command == "EXEC_ALL" || command == "EXEC_END") {
                     if (!global_solver) continue;
-                    global_cfl = msg.value("cfl", 0.4);
+                    global_cfl = msg.value("cfl", 0.6);
                     global_exec_until_end = true;
                     if (!sim_running) {
                         sim_running = true;
@@ -5856,7 +5856,7 @@ int main() {
                     double max_z = msg.value("max_z", 1.0);
                     std::string device = msg.value("device", "cpu");
                     double gamma = msg.value("gamma", 1.4);
-                    double cfl = msg.value("cfl", 0.35);
+                    double cfl = msg.value("cfl", 0.6);
                     global_cfl_2d = cfl;
                     
                     std::string flux_scheme = msg.value("flux_scheme", "AUSM+");
@@ -6056,7 +6056,7 @@ int main() {
                 } else if (command == "STEP_2D") {
                     if (!has_solver_2d()) continue;
                     int steps = msg.at("steps").get<int>();
-                    global_cfl_2d = msg.value("cfl", 0.35);
+                    global_cfl_2d = msg.value("cfl", 0.6);
                     global_exec_until_end_2d = false;
                     if (!sim2d_running) {
                         global_target_steps_2d = steps;
@@ -6070,7 +6070,7 @@ int main() {
                     }
                 } else if (command == "EXEC_ALL_2D") {
                     if (!has_solver_2d()) continue;
-                    global_cfl_2d = msg.value("cfl", 0.35);
+                    global_cfl_2d = msg.value("cfl", 0.6);
                     global_exec_until_end_2d = true;
                     if (!sim2d_running) {
                         sim2d_running = true;
@@ -6211,7 +6211,7 @@ int main() {
                 } else if (command == "STEP_MPM" || command == "STEP_2D_MPM") {
                     if (!global_solver_mpm_2d) continue;
                     int steps = get_json_int(msg, "steps", 1);
-                    global_cfl_mpm = static_cast<float>(get_json_double(msg, "cfl", 0.3));
+                    global_cfl_mpm = static_cast<float>(get_json_double(msg, "cfl", 0.6));
                     global_exec_until_end_mpm = false;
                     if (!sim_mpm_running) {
                         global_target_steps_mpm = steps;
@@ -6225,7 +6225,7 @@ int main() {
                     }
                 } else if (command == "EXEC_ALL_MPM") {
                     if (!global_solver_mpm_2d) continue;
-                    global_cfl_mpm = static_cast<float>(get_json_double(msg, "cfl", 0.3));
+                    global_cfl_mpm = static_cast<float>(get_json_double(msg, "cfl", 0.6));
                     global_exec_until_end_mpm = true;
                     if (!sim_mpm_running) {
                         sim_mpm_running = true;
@@ -6480,7 +6480,7 @@ int main() {
                 } else if (command == "STEP_MPM_3D" || command == "STEP_3D_MPM") {
                     if (!global_solver_mpm_3d && !global_solver_mpm_3d_cuda) continue;
                     int steps = get_json_int(msg, "steps", 1);
-                    global_cfl_mpm_3d = static_cast<float>(get_json_double(msg, "cfl", 0.3));
+                    global_cfl_mpm_3d = static_cast<float>(get_json_double(msg, "cfl", 0.6));
                     global_exec_until_end_mpm_3d = false;
                     if (!sim_mpm_3d_running) {
                         global_target_steps_mpm_3d = steps;
@@ -6495,7 +6495,7 @@ int main() {
 
                 } else if (command == "EXEC_ALL_MPM_3D") {
                     if (!global_solver_mpm_3d && !global_solver_mpm_3d_cuda) continue;
-                    global_cfl_mpm_3d = static_cast<float>(get_json_double(msg, "cfl", 0.3));
+                    global_cfl_mpm_3d = static_cast<float>(get_json_double(msg, "cfl", 0.6));
                     global_exec_until_end_mpm_3d = true;
                     if (!sim_mpm_3d_running) {
                         sim_mpm_3d_running = true;
@@ -6661,7 +6661,7 @@ int main() {
                     }
                 } else if (command == "STEP_FSI_2D" || command == "STEP_FSI") {
                     int steps = get_json_int(msg, "steps", 1);
-                    global_cfl_fsi = static_cast<float>(get_json_double(msg, "cfl", 0.35));
+                    global_cfl_fsi = static_cast<float>(get_json_double(msg, "cfl", 0.6));
                     global_exec_until_end_fsi = false;
                     if (!sim_fsi_running) {
                         global_target_steps_fsi = steps;
@@ -6674,7 +6674,7 @@ int main() {
                         sim_fsi_paused = false;
                     }
                 } else if (command == "EXEC_ALL_FSI_2D" || command == "EXEC_ALL_FSI") {
-                    global_cfl_fsi = static_cast<float>(get_json_double(msg, "cfl", 0.35));
+                    global_cfl_fsi = static_cast<float>(get_json_double(msg, "cfl", 0.6));
                     global_exec_until_end_fsi = true;
                     if (!sim_fsi_running) {
                         sim_fsi_running = true;
@@ -7132,6 +7132,12 @@ int main() {
                                         double scale_y = get_json_double(obj, "scale_y", get_json_double(obj, "scale_factor", 1.0));
                                         double scale_z = get_json_double(obj, "scale_z", get_json_double(obj, "scale_factor", 1.0));
                                         loadAndTransformLSDynaMesh<double>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams);
+                                        if (obj.contains("enable_strain_erosion")) obj_mat.enable_strain_erosion = get_json_bool(obj, "enable_strain_erosion", false);
+                                        if (obj.contains("enable_stress_erosion")) obj_mat.enable_stress_erosion = get_json_bool(obj, "enable_stress_erosion", false);
+                                        if (obj.contains("enable_timestep_erosion")) obj_mat.enable_timestep_erosion = get_json_bool(obj, "enable_timestep_erosion", false);
+                                        if (obj.contains("erosion_strain")) obj_mat.erosion_strain = static_cast<float>(get_json_double(obj, "erosion_strain", obj_mat.erosion_strain));
+                                        if (obj.contains("erosion_stress")) obj_mat.erosion_stress = static_cast<float>(get_json_double(obj, "erosion_stress", obj_mat.erosion_stress));
+                                        if (obj.contains("timestep_erosion_factor")) obj_mat.timestep_erosion_factor = static_cast<float>(get_json_double(obj, "timestep_erosion_factor", obj_mat.timestep_erosion_factor));
                                         fem->appendNodesAndElements(nodes, elements, obj_mat);
                                         std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
                                         for (const auto& t : trusses) {
@@ -7291,6 +7297,12 @@ int main() {
                                         float scale_y = static_cast<float>(get_json_double(obj, "scale_y", get_json_double(obj, "scale_factor", 1.0)));
                                         float scale_z = static_cast<float>(get_json_double(obj, "scale_z", get_json_double(obj, "scale_factor", 1.0)));
                                         loadAndTransformLSDynaMesh<float>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams);
+                                        if (obj.contains("enable_strain_erosion")) obj_mat.enable_strain_erosion = get_json_bool(obj, "enable_strain_erosion", false);
+                                        if (obj.contains("enable_stress_erosion")) obj_mat.enable_stress_erosion = get_json_bool(obj, "enable_stress_erosion", false);
+                                        if (obj.contains("enable_timestep_erosion")) obj_mat.enable_timestep_erosion = get_json_bool(obj, "enable_timestep_erosion", false);
+                                        if (obj.contains("erosion_strain")) obj_mat.erosion_strain = static_cast<float>(get_json_double(obj, "erosion_strain", obj_mat.erosion_strain));
+                                        if (obj.contains("erosion_stress")) obj_mat.erosion_stress = static_cast<float>(get_json_double(obj, "erosion_stress", obj_mat.erosion_stress));
+                                        if (obj.contains("timestep_erosion_factor")) obj_mat.timestep_erosion_factor = static_cast<float>(get_json_double(obj, "timestep_erosion_factor", obj_mat.timestep_erosion_factor));
                                         fem->appendNodesAndElements(nodes, elements, obj_mat);
                                         std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
                                         for (const auto& t : trusses) {
@@ -7450,6 +7462,12 @@ int main() {
                                         double scale_y = get_json_double(obj, "scale_y", get_json_double(obj, "scale_factor", 1.0));
                                         double scale_z = get_json_double(obj, "scale_z", get_json_double(obj, "scale_factor", 1.0));
                                         loadAndTransformLSDynaMesh<double>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams);
+                                        if (obj.contains("enable_strain_erosion")) obj_mat.enable_strain_erosion = get_json_bool(obj, "enable_strain_erosion", false);
+                                        if (obj.contains("enable_stress_erosion")) obj_mat.enable_stress_erosion = get_json_bool(obj, "enable_stress_erosion", false);
+                                        if (obj.contains("enable_timestep_erosion")) obj_mat.enable_timestep_erosion = get_json_bool(obj, "enable_timestep_erosion", false);
+                                        if (obj.contains("erosion_strain")) obj_mat.erosion_strain = static_cast<float>(get_json_double(obj, "erosion_strain", obj_mat.erosion_strain));
+                                        if (obj.contains("erosion_stress")) obj_mat.erosion_stress = static_cast<float>(get_json_double(obj, "erosion_stress", obj_mat.erosion_stress));
+                                        if (obj.contains("timestep_erosion_factor")) obj_mat.timestep_erosion_factor = static_cast<float>(get_json_double(obj, "timestep_erosion_factor", obj_mat.timestep_erosion_factor));
                                         fem->appendNodesAndElements(nodes, elements, obj_mat);
                                         std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
                                         for (const auto& t : trusses) {
@@ -7682,7 +7700,7 @@ int main() {
                     if (msg.contains("modelId")) global_model_id = msg["modelId"].get<std::string>();
                     else if (msg.contains("model_id")) global_model_id = msg["model_id"].get<std::string>();
                     int steps = get_json_int(msg, "steps", 1);
-                    global_cfl_fem_3d = static_cast<float>(get_json_double(msg, "cfl", 0.3));
+                    global_cfl_fem_3d = static_cast<float>(get_json_double(msg, "cfl", 0.6));
                     if (msg.contains("refresh_rate")) {
                         global_refresh_rate_fem_3d = get_json_double(msg, "refresh_rate", 0.033);
                     }
@@ -7701,7 +7719,7 @@ int main() {
                 } else if (command == "EXEC_ALL_FEM_3D") {
                     if (msg.contains("modelId")) global_model_id = msg["modelId"].get<std::string>();
                     else if (msg.contains("model_id")) global_model_id = msg["model_id"].get<std::string>();
-                    global_cfl_fem_3d = static_cast<float>(get_json_double(msg, "cfl", 0.3));
+                    global_cfl_fem_3d = static_cast<float>(get_json_double(msg, "cfl", 0.6));
                     if (msg.contains("refresh_rate")) {
                         global_refresh_rate_fem_3d = get_json_double(msg, "refresh_rate", 0.033);
                     }
@@ -7730,7 +7748,7 @@ int main() {
                     global_fem_solvers_cuda_double.clear();
                 } else if (command == "STEP_FSI_3D") {
                     int steps = get_json_int(msg, "steps", 1);
-                    global_cfl_fsi_3d = static_cast<float>(get_json_double(msg, "cfl", 0.35));
+                    global_cfl_fsi_3d = static_cast<float>(get_json_double(msg, "cfl", 0.6));
                     global_exec_until_end_fsi_3d = false;
                     if (!sim_fsi_3d_running) {
                         global_target_steps_fsi_3d = steps;
@@ -7744,7 +7762,7 @@ int main() {
                     }
 
                 } else if (command == "EXEC_ALL_FSI_3D") {
-                    global_cfl_fsi_3d = static_cast<float>(get_json_double(msg, "cfl", 0.35));
+                    global_cfl_fsi_3d = static_cast<float>(get_json_double(msg, "cfl", 0.6));
                     global_exec_until_end_fsi_3d = true;
                     if (!sim_fsi_3d_running) {
                         sim_fsi_3d_running = true;
@@ -7926,6 +7944,15 @@ int main() {
                                 fem->setContactDamping(static_cast<double>(get_json_double(msg, "contact_damping", 0.20)));
                                 fem->setFrictionCoefficients(static_cast<double>(get_json_double(msg, "friction_static", 0.3)), static_cast<double>(get_json_double(msg, "friction_kinetic", 0.2)));
 
+                                std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoStiffness");
+                                if (hg_model_str == "FlanaganBelytschkoViscous") {
+                                    fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoViscous);
+                                } else if (hg_model_str == "KosloffFrazier") {
+                                    fem->setHourglassModel(Blast::FEMHourglassModel::KosloffFrazier);
+                                } else {
+                                    fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoStiffness);
+                                }
+
                                 std::string scheme_str = msg.value("integration_scheme", "OnePointFB");
                                 if (scheme_str == "FullGauss8" || scheme_str == "FullIntegration8Pt") {
                                     fem->setIntegrationScheme(Blast::FEMIntegrationScheme::FullGauss8);
@@ -8039,6 +8066,15 @@ int main() {
                                 fem->setContactPenaltyScale(static_cast<float>(get_json_double(msg, "contact_penalty_scale", 1.0)));
                                 fem->setContactDamping(static_cast<float>(get_json_double(msg, "contact_damping", 0.20)));
                                 fem->setFrictionCoefficients(static_cast<float>(get_json_double(msg, "friction_static", 0.3)), static_cast<float>(get_json_double(msg, "friction_kinetic", 0.2)));
+
+                                std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoStiffness");
+                                if (hg_model_str == "FlanaganBelytschkoViscous") {
+                                    fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoViscous);
+                                } else if (hg_model_str == "KosloffFrazier") {
+                                    fem->setHourglassModel(Blast::FEMHourglassModel::KosloffFrazier);
+                                } else {
+                                    fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoStiffness);
+                                }
 
                                 std::string scheme_str = msg.value("integration_scheme", "OnePointFB");
                                 if (scheme_str == "FullGauss8" || scheme_str == "FullIntegration8Pt") {
@@ -8157,6 +8193,26 @@ int main() {
                                 fem->setContactDamping(static_cast<double>(get_json_double(msg, "contact_damping", 0.20)));
                                 fem->setFrictionCoefficients(static_cast<double>(get_json_double(msg, "friction_static", 0.3)), static_cast<double>(get_json_double(msg, "friction_kinetic", 0.2)));
 
+                                std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoStiffness");
+                                if (hg_model_str == "FlanaganBelytschkoViscous") {
+                                    fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoViscous);
+                                } else if (hg_model_str == "KosloffFrazier") {
+                                    fem->setHourglassModel(Blast::FEMHourglassModel::KosloffFrazier);
+                                } else {
+                                    fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoStiffness);
+                                }
+
+                                std::string scheme_str = msg.value("integration_scheme", "OnePointFB");
+                                if (scheme_str == "FullGauss8" || scheme_str == "FullIntegration8Pt") {
+                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::FullGauss8);
+                                } else if (scheme_str == "SelectiveReduced") {
+                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::SelectiveReduced);
+                                } else if (scheme_str == "OnePointKF") {
+                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointKF);
+                                } else {
+                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointFB);
+                                }
+
                                 auto physics_params = fem->getPhysicsParams();
                                 physics_params.convert_failed_elements_to_mpm = get_json_bool(msg, "convert_failed_elements_to_mpm", false);
                                 physics_params.mpm_particles_per_failed_element = get_json_int(msg, "mpm_particles_per_failed_element", 8);
@@ -8256,6 +8312,26 @@ int main() {
                                 fem->setContactPenaltyScale(static_cast<float>(get_json_double(msg, "contact_penalty_scale", 1.0)));
                                 fem->setContactDamping(static_cast<float>(get_json_double(msg, "contact_damping", 0.20)));
                                 fem->setFrictionCoefficients(static_cast<float>(get_json_double(msg, "friction_static", 0.3)), static_cast<float>(get_json_double(msg, "friction_kinetic", 0.2)));
+
+                                std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoStiffness");
+                                if (hg_model_str == "FlanaganBelytschkoViscous") {
+                                    fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoViscous);
+                                } else if (hg_model_str == "KosloffFrazier") {
+                                    fem->setHourglassModel(Blast::FEMHourglassModel::KosloffFrazier);
+                                } else {
+                                    fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoStiffness);
+                                }
+
+                                std::string scheme_str = msg.value("integration_scheme", "OnePointFB");
+                                if (scheme_str == "FullGauss8" || scheme_str == "FullIntegration8Pt") {
+                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::FullGauss8);
+                                } else if (scheme_str == "SelectiveReduced") {
+                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::SelectiveReduced);
+                                } else if (scheme_str == "OnePointKF") {
+                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointKF);
+                                } else {
+                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointFB);
+                                }
 
                                 auto physics_params = fem->getPhysicsParams();
                                 physics_params.convert_failed_elements_to_mpm = get_json_bool(msg, "convert_failed_elements_to_mpm", false);
@@ -8377,7 +8453,7 @@ int main() {
                     }
                 } else if (command == "STEP_FEM_FSI_3D") {
                     int steps = get_json_int(msg, "steps", 1);
-                    global_cfl_fem_fsi_3d = static_cast<float>(get_json_double(msg, "cfl", 0.30));
+                    global_cfl_fem_fsi_3d = static_cast<float>(get_json_double(msg, "cfl", 0.6));
                     global_exec_until_end_fem_fsi_3d = false;
                     if (!sim_fem_fsi_3d_running) {
                         global_target_steps_fem_fsi_3d = steps;
@@ -8390,7 +8466,7 @@ int main() {
                         sim_fem_fsi_3d_paused = false;
                     }
                 } else if (command == "EXEC_ALL_FEM_FSI_3D") {
-                    global_cfl_fem_fsi_3d = static_cast<float>(get_json_double(msg, "cfl", 0.30));
+                    global_cfl_fem_fsi_3d = static_cast<float>(get_json_double(msg, "cfl", 0.6));
                     global_exec_until_end_fem_fsi_3d = true;
                     if (!sim_fem_fsi_3d_running) {
                         sim_fem_fsi_3d_running = true;
@@ -8460,7 +8536,7 @@ int main() {
                     }
                     if (!global_solver_3d) continue;
                     int steps = msg.at("steps").get<int>();
-                    global_cfl_3d = msg.value("cfl", 0.4);
+                    global_cfl_3d = msg.value("cfl", 0.6);
                     global_exec_until_end_3d = false;
                     if (!sim3d_running) {
                         global_target_steps_3d = steps;
@@ -8478,7 +8554,7 @@ int main() {
                         continue;
                     }
                     if (!global_solver_3d) continue;
-                    global_cfl_3d = msg.value("cfl", 0.4);
+                    global_cfl_3d = msg.value("cfl", 0.6);
                     global_exec_until_end_3d = true;
                     if (!sim3d_running) {
                         sim3d_running = true;
@@ -8544,13 +8620,16 @@ int main() {
                     std::thread(init_3d_thread_func, msg).detach();
 
                 } else if (command == "UPDATE_CFL") {
-                    double cfl = msg.value("cfl", 0.4);
+                    double cfl = msg.value("cfl", 0.6);
                     global_cfl = cfl;
                     global_cfl_2d = cfl;
                     global_cfl_3d = cfl;
                     global_cfl_mpm = static_cast<float>(cfl);
                     global_cfl_mpm_3d = static_cast<float>(cfl);
+                    global_cfl_fem_3d = static_cast<float>(cfl);
                     global_cfl_fsi = static_cast<float>(cfl);
+                    global_cfl_fsi_3d = static_cast<float>(cfl);
+                    global_cfl_fem_fsi_3d = static_cast<float>(cfl);
                     std::string scope = msg.value("scope", "3d");
                     emit_kernel_log("SYSTEM", "CFL updated to " + std::to_string(cfl), 0.0, scope);
 

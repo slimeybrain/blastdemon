@@ -4,12 +4,14 @@ build/
 *.o
 *.a
 
-# ─── Simulation output data ───────────────────────────────────────────────────
+# ─── Simulation output & mesh data ──────────────────────────────────────────────
 *.h5
 *.xmf
 *.vtu
 *.vtp
 *.vtk
+*.k
+*.key
 
 # ─── Frontend artifacts ───────────────────────────────────────────────────────
 frontend/dist/

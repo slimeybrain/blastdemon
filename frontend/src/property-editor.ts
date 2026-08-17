@@ -3,6 +3,7 @@ import { Node } from './types.js';
 import { validateSimulationState } from './validation.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
 import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_PRESETS, MPM_MATERIAL_CATEGORIES, MPM_MATERIAL_PARAM_INFO } from './mpm-presets.js';
+import { getParameterInfo, getNodeDefinition, getNodeDescription as getMasterNodeDescription, showParameterPopover, showNodeDetailsModal } from './parameter-definitions.js';
 
 export class PropertyEditor {
     public container: HTMLElement;
@@ -240,6 +241,10 @@ export class PropertyEditor {
         descBlock.style.color = '#aaa';
         descBlock.style.background = '#252526';
         descBlock.style.borderBottom = '1px solid #333';
+        descBlock.style.display = 'flex';
+        descBlock.style.justifyContent = 'space-between';
+        descBlock.style.alignItems = 'center';
+        descBlock.style.gap = '8px';
         
         let descText = this.getNodeDescription(node.type);
         if (node.type === 'Material') {
@@ -290,7 +295,29 @@ export class PropertyEditor {
             const ref = presetData?.reference || 'N/A';
             descText += ` | Preset: ${presetName} (Reference: ${ref})`;
         }
-        descBlock.textContent = descText;
+
+        const textSpan = document.createElement('span');
+        textSpan.style.flex = '1';
+        textSpan.textContent = descText;
+        descBlock.appendChild(textSpan);
+
+        const infoModalBtn = document.createElement('button');
+        infoModalBtn.type = 'button';
+        infoModalBtn.textContent = 'Documentation';
+        infoModalBtn.className = 'header-button secondary';
+        infoModalBtn.style.padding = '2px 8px';
+        infoModalBtn.style.fontSize = '10px';
+        infoModalBtn.style.flexShrink = '0';
+        infoModalBtn.style.color = '#00e5ff';
+        infoModalBtn.style.borderColor = 'rgba(0, 229, 255, 0.4)';
+        infoModalBtn.style.cursor = 'pointer';
+        infoModalBtn.title = 'View in-depth physics formulations, equations, and parameter guide for ' + node.type;
+        infoModalBtn.onclick = (e) => {
+            e.preventDefault();
+            showNodeDetailsModal(node.type);
+        };
+        descBlock.appendChild(infoModalBtn);
+
         this.container.appendChild(descBlock);
 
         // Validation warnings banner
@@ -463,8 +490,24 @@ export class PropertyEditor {
                 'cfl', 'steps', 'coupling_scheme', 'pressure_integration',
                 'uncovering_method', 'erosion_venting', 'vacuum_density', 'vacuum_pressure'
             ];
+        } else if (node.type === 'FSICoupler2D' || node.type === 'FSICoupler3D') {
+            paramKeys = ['cfl'];
         } else if (node.type === 'LSDynaImporter3D') {
             paramKeys = ['k_file', 'scale_factor'];
+        }
+
+        // In coupled simulations, the Coupler node is the single source of truth for CFL.
+        // Suppress redundant CFL fields on sub-domain nodes.
+        let isCoupledModel = false;
+        const allModels = this.stateManager.getAppState().models;
+        for (const m of Object.values(allModels)) {
+            if (m.nodes.some(n => n.id === node.id)) {
+                isCoupledModel = m.nodes.some(n => n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D' || n.type === 'FEMFSICoupler3D');
+                break;
+            }
+        }
+        if (isCoupledModel && (node.type === 'CFDSolver' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver3D' || node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D' || node.type === 'FEMDomain3D')) {
+            paramKeys = paramKeys.filter(k => k !== 'cfl');
         }
 
         if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D') {
@@ -601,14 +644,13 @@ export class PropertyEditor {
                 if ((scheme === 'FullGauss8' || scheme === 'SelectiveReduced') && (key === 'hourglass_model' || key === 'hourglass_coeff')) continue;
             }
             if (node.type === 'FEMObject3D') {
-                if (key === 'shape_type') continue;
-                const source = node.parameters['mesh_source'] || 'Box Generator';
-                if (source === 'Cylinder Generator') {
-                    if (['size_x', 'size_y', 'size_z', 'length', 'ny', 'k_file', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) continue;
-                } else if (source === 'Box Generator') {
-                    if (['radius', 'inner_radius', 'height', 'length', 'k_file', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) continue;
-                } else if (source === 'LS-DYNA Keyword File') {
-                    if (['size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'length', 'nx', 'ny', 'nz', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) continue;
+                const shape = node.parameters['shape_type'] || 'Box';
+                if (shape === 'Cylinder') {
+                    if (['size_x', 'size_y', 'size_z', 'ny', 'k_file', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) continue;
+                } else if (shape === 'Box') {
+                    if (['radius', 'inner_radius', 'height', 'k_file', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) continue;
+                } else if (shape === 'LS-DYNA File') {
+                    if (['size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'nx', 'ny', 'nz', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) continue;
                 }
             } else if (node.type === 'MPMObject3D') {
                 const shape = node.parameters['shape_type'] || 'Box';
@@ -647,81 +689,32 @@ export class PropertyEditor {
             label.style.color = '#888';
             label.style.marginBottom = '4px';
             
-            let labelText = key.replace(/_/g, ' ').toUpperCase();
-            if (key === 'qty_reacted') labelText = 'Reacted Explosive (Alpha1)';
-            else if (key === 'qty_unreacted') labelText = 'Unreacted Explosive (Alpha2)';
-            else if (key === 'flip_blend') labelText = 'FLIP BLEND (% FLIP / % PIC)';
-            label.textContent = labelText;
+            const paramInfo = getParameterInfo(key, node.type);
+            label.title = `${paramInfo.label} (${paramInfo.unit}): ${paramInfo.shortDesc} — ${paramInfo.detailedDesc}`;
+            label.style.cursor = 'help';
 
-            if (key === 'device') {
-                label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
-                    `<span style="font-weight:600; color:#ddd;">TARGET DEVICE (COUPLED SHARED)</span>` +
-                    `<span style="font-size:10px; color:#4ec9b0; font-family:monospace; background:rgba(78,201,176,0.15); padding:1px 5px; border-radius:3px; border:1px solid rgba(78,201,176,0.3);">SHARED TARGET</span>` +
-                    `</div>` +
-                    `<div style="font-size:10px; color:#888; margin-top:2px; margin-bottom:3px;">Compute device for simulation (CPU / CUDA GPU). Coupled solvers automatically synchronize to this target.</div>`;
-            } else if (key === 'precision') {
-                label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
-                    `<span style="font-weight:600; color:#ddd;">NUMERIC PRECISION (COUPLED SHARED)</span>` +
-                    `<span style="font-size:10px; color:#4ec9b0; font-family:monospace; background:rgba(78,201,176,0.15); padding:1px 5px; border-radius:3px; border:1px solid rgba(78,201,176,0.3);">SHARED PRECISION</span>` +
-                    `</div>` +
-                    `<div style="font-size:10px; color:#888; margin-top:2px; margin-bottom:3px;">Single (FP32) or Double (FP64) precision across coupled solvers.</div>`;
-            } else if (node.type === 'MPMMaterialSteel' && MPM_MATERIAL_PARAM_INFO[key]) {
-                const info = MPM_MATERIAL_PARAM_INFO[key];
-                label.title = info.tooltip;
-                label.style.cursor = 'help';
-                label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
-                    `<span style="font-weight:600; color:#ddd;">${info.label.toUpperCase()}</span>` +
-                    (info.unit && info.unit !== 'dim' ? `<span style="font-size:10px; color:#569cd6; font-family:monospace; background:rgba(86,156,214,0.1); padding:1px 4px; border-radius:3px;">${info.unit}</span>` : '') +
-                    `</div>` +
-                    `<div style="font-size:10px; color:#888; margin-top:1px; margin-bottom:2px;">${info.shortDesc}</div>`;
-            } else if (node.type === 'FEMDomain3D' && key === 'enable_directional_crack_band') {
-                label.title = 'Bažant crack band angle normalization. Removes the 41% artificial energy penalty on diagonal 45° cracking in structured hex meshes.';
-                label.style.cursor = 'help';
-                label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
-                    `<span style="font-weight:600; color:#ddd;">DIRECTIONAL CRACK BAND</span>` +
-                    `<span style="font-size:10px; color:#569cd6; font-family:monospace; background:rgba(86,156,214,0.1); padding:1px 4px; border-radius:3px;">BAŽANT PROJECTION</span>` +
-                    `</div>` +
-                    `<div style="font-size:10px; color:#888; margin-top:1px; margin-bottom:2px;">Removes the 41% energy penalty on 45° diagonal fracture lines in hex meshes.</div>`;
-            } else if (node.type === 'FEMDomain3D' && key === 'enable_nonlocal_damage') {
-                label.title = 'Averages damage across elements within physical radius Rc (e.g. 50mm for concrete). Prevents 1-element grid-aligned razor cuts and enables natural branching cracks.';
-                label.style.cursor = 'help';
-                label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
-                    `<span style="font-weight:600; color:#ddd;">NON-LOCAL DAMAGE SMOOTHING</span>` +
-                    `<span style="font-size:10px; color:#4ec9b0; font-family:monospace; background:rgba(78,201,176,0.15); padding:1px 4px; border-radius:3px;">SPATIAL REGULARIZATION</span>` +
-                    `</div>` +
-                    `<div style="font-size:10px; color:#888; margin-top:1px; margin-bottom:2px;">Diffuses damage across neighboring elements to eliminate Cartesian grid locking.</div>`;
-            } else if (node.type === 'FEMDomain3D' && key === 'material_heterogeneity') {
-                label.title = 'Weibull material strength heterogeneity (0.0 to 0.30). Seeds pseudo-random microstructural failure flaws to produce natural, asymmetric fracture branching.';
-                label.style.cursor = 'help';
-                label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
-                    `<span style="font-weight:600; color:#ddd;">MATERIAL HETEROGENEITY</span>` +
-                    `<span style="font-size:10px; color:#ce9178; font-family:monospace; background:rgba(206,145,120,0.1); padding:1px 4px; border-radius:3px;">WEIBULL FRACTURE</span>` +
-                    `</div>` +
-                    `<div style="font-size:10px; color:#888; margin-top:1px; margin-bottom:2px;">Seeds random micro-flaws (0.0 = uniform, 0.08 = standard concrete, 0.20 = high variance).</div>`;
-            } else if (node.type === 'FEMDomain3D' && key === 'debris_clumping') {
-                label.title = 'Multi-Element Aggregate Clumping (0.0 for soil/water, 0.40 for concrete, 0.80+ for steel). Fuses adjacent eroding elements into cohesive macro boulders/chunks.';
-                label.style.cursor = 'help';
-                label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
-                    `<span style="font-weight:600; color:#ddd;">DEBRIS CLUMPING</span>` +
-                    `<span style="font-size:10px; color:#4ec9b0; font-family:monospace; background:rgba(78,201,176,0.15); padding:1px 4px; border-radius:3px;">COHESION</span>` +
-                    `</div>` +
-                    `<div style="font-size:10px; color:#888; margin-top:1px; margin-bottom:2px;">Fuses adjacent eroding elements into macro boulders (0.0 = soil/sand, 0.4 = concrete, 0.8+ = steel).</div>`;
-            } else if (node.type === 'FEMDomain3D' && key === 'debris_max_clump_size') {
-                label.title = 'Maximum Fragment Size (1 to 64 elements). Maximum number of adjacent elements fused into a single fragment chunk.';
-                label.style.cursor = 'help';
-                label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
-                    `<span style="font-weight:600; color:#ddd;">MAX CLUMP SIZE</span>` +
-                    `<span style="font-size:10px; color:#569cd6; font-family:monospace; background:rgba(86,156,214,0.1); padding:1px 4px; border-radius:3px;">ELEMENTS</span>` +
-                    `</div>` +
-                    `<div style="font-size:10px; color:#888; margin-top:1px; margin-bottom:2px;">Maximum elements per cohesive boulder fragment.</div>`;
-            } else if (node.type === 'FEMDomain3D' && key === 'random_seed') {
-                label.title = 'Deterministic Random Seed. Ensures 100% bitwise exact reproducible fracture patterns across simulation runs.';
-                label.style.cursor = 'help';
-                label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
-                    `<span style="font-weight:600; color:#ddd;">RANDOM SEED</span>` +
-                    `<span style="font-size:10px; color:#dcdcaa; font-family:monospace; background:rgba(220,220,170,0.1); padding:1px 4px; border-radius:3px;">DETERMINISM</span>` +
-                    `</div>` +
-                    `<div style="font-size:10px; color:#888; margin-top:1px; margin-bottom:2px;">Persistent seed for exact simulation repeatability.</div>`;
+            const unitBadge = (paramInfo.unit && paramInfo.unit !== 'dim') 
+                ? `<span style="font-size:10px; color:#00e5ff; font-family:monospace; background:rgba(0,229,255,0.12); padding:1px 5px; border-radius:3px; border:1px solid rgba(0,229,255,0.25);">${paramInfo.unit}</span>` 
+                : '';
+
+            label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
+                `<span style="font-weight:600; color:#ddd; display:inline-flex; align-items:center;">` +
+                `${paramInfo.label.toUpperCase()}` +
+                `<span class="param-info-btn" data-param-key="${key}" title="Click or hover for physics & math details">?</span>` +
+                `</span>` +
+                unitBadge +
+                `</div>` +
+                `<div style="font-size:10px; color:#888; margin-top:1px; margin-bottom:2px;">${paramInfo.shortDesc}</div>`;
+
+            const infoBtn = label.querySelector('.param-info-btn') as HTMLElement;
+            if (infoBtn) {
+                infoBtn.addEventListener('mouseenter', (e) => {
+                    showParameterPopover(infoBtn, key, node.type, e);
+                });
+                infoBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    showParameterPopover(infoBtn, key, node.type, e);
+                });
             }
             row.appendChild(label);
 
@@ -914,6 +907,9 @@ export class PropertyEditor {
             row.style.gap = '8px';
             row.style.marginBottom = '8px';
 
+            const paramInfo = getParameterInfo(key, node.type);
+            row.title = `${paramInfo.label} (${paramInfo.unit}): ${paramInfo.shortDesc} — ${paramInfo.detailedDesc}`;
+
             const cb = document.createElement('input');
             cb.type = 'checkbox';
             cb.checked = value;
@@ -935,8 +931,21 @@ export class PropertyEditor {
                 cb.dispatchEvent(new Event('change'));
             };
 
+            const infoBtn = document.createElement('span');
+            infoBtn.className = 'param-info-btn';
+            infoBtn.textContent = '?';
+            infoBtn.title = 'Click or hover for physics details';
+            infoBtn.addEventListener('mouseenter', (e) => {
+                showParameterPopover(infoBtn, key, node.type, e);
+            });
+            infoBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                showParameterPopover(infoBtn, key, node.type, e);
+            });
+
             row.appendChild(cb);
             row.appendChild(span);
+            row.appendChild(infoBtn);
             return row;
         };
 
@@ -944,12 +953,38 @@ export class PropertyEditor {
             const row = document.createElement('div');
             row.style.marginBottom = '10px';
 
+            const paramInfo = getParameterInfo(key, node.type);
             const label = document.createElement('label');
             label.style.display = 'block';
             label.style.fontSize = 'var(--font-sm)';
             label.style.color = '#888';
             label.style.marginBottom = '4px';
-            label.textContent = labelText;
+            label.title = `${paramInfo.label} (${paramInfo.unit}): ${paramInfo.shortDesc} — ${paramInfo.detailedDesc}`;
+            label.style.cursor = 'help';
+
+            const unitBadge = (paramInfo.unit && paramInfo.unit !== 'dim') 
+                ? `<span style="font-size:10px; color:#00e5ff; font-family:monospace; background:rgba(0,229,255,0.12); padding:1px 5px; border-radius:3px; border:1px solid rgba(0,229,255,0.25);">${paramInfo.unit}</span>` 
+                : '';
+
+            label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
+                `<span style="font-weight:600; color:#ddd; display:inline-flex; align-items:center;">` +
+                `${labelText}` +
+                `<span class="param-info-btn" data-param-key="${key}" title="Click or hover for physics details">?</span>` +
+                `</span>` +
+                unitBadge +
+                `</div>` +
+                `<div style="font-size:10px; color:#888; margin-top:1px; margin-bottom:2px;">${paramInfo.shortDesc}</div>`;
+
+            const infoBtn = label.querySelector('.param-info-btn') as HTMLElement;
+            if (infoBtn) {
+                infoBtn.addEventListener('mouseenter', (e) => {
+                    showParameterPopover(infoBtn, key, node.type, e);
+                });
+                infoBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    showParameterPopover(infoBtn, key, node.type, e);
+                });
+            }
             row.appendChild(label);
 
             inputEl.dataset.key = key;
@@ -1726,12 +1761,11 @@ export class PropertyEditor {
             'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
             'charge_rot_x', 'charge_rot_y', 'charge_rot_z',
             'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
-            'origin_x', 'origin_y', 'origin_z', 'dim_x', 'dim_y', 'dim_z', 'scale_factor',
+            'scale_factor',
             'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
-            'refinement_opacity', 'charge_opacity',
+            'charge_opacity',
             'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio', 'amr_tile_size',
-            'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'length', 'refinement_level',
-            'submesh_x', 'submesh_y', 'submesh_z', 'submesh_size_x', 'submesh_size_y', 'submesh_size_z',
+            'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'length',
             'offset', 'stride',
             // MPM keys
             'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'radius', 'inner_radius',
@@ -1745,7 +1779,7 @@ export class PropertyEditor {
             'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
             // FEM keys
             'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
-            'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_diameter', 'rebar_area', 'rebarRadius', 'rebar_radius', 'beamRadius', 'beam_radius', 'beam_diameter', 'beam_area', 'beamMinVal', 'beamMaxVal',
+            'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_area', 'beamRadius', 'beam_radius', 'beam_area', 'beamMinVal', 'beamMaxVal',
             'femMinVal', 'femMaxVal', 'femOpacity', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',
             // Concrete Core & Models (RHT, K&C, CSCM)
             'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
@@ -1800,7 +1834,6 @@ export class PropertyEditor {
             'precision': ['double', 'single'],
             'integration_scheme': ['OnePointFB', 'OnePointKF', 'FullGauss8', 'SelectiveReduced'],
             'hourglass_model': ['FlanaganBelytschkoStiffness', 'FlanaganBelytschkoViscous', 'KosloffFrazier'],
-            'mesh_source': ['Box Generator', 'Cylinder Generator', 'LS-DYNA Keyword File'],
             'trigger_type': node.type === 'VTKOutput' ? ['Step Interval', 'Time Interval'] : ['end', 'time', 'step'],
             'composition': ['Aluminized ANFO', 'Ammonal', 'ANFO', 'Baratol', 'C-4', 'Composition A-3', 'Composition B', 'Composition C-3', 'Cyclotol', 'Heavy ANFO', 'HMX', 'LX-04', 'LX-07', 'LX-10', 'LX-14', 'LX-17', 'Mining Emulsion', 'Octol', 'PBX 9404', 'PBX 9501', 'PBX 9502', 'PE-10', 'PE-12', 'PE-4', 'PE-8', 'Pentolite', 'PETN', 'RDX', 'TATB', 'Tetryl', 'TNT', 'Water Gel', 'Custom'],
             'init_mode': node.type === 'CFDSolver3D' ? ['From1D', 'From2D', 'Multi-Material JWL', 'Ideal Gas'] : ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
@@ -3055,7 +3088,7 @@ export class PropertyEditor {
             'show_obstacles', 'obstacles_gridlines', 'obstacles_lighting', 'obstacles_opacity', 'obstacles_quantity', 'obstacles_colormap'
         ];
 
-        const isDynamicCfl = (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver') && key === 'cfl';
+        const isDynamicCfl = (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver' || node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D' || node.type === 'FEMDomain3D' || node.type === 'FSICoupler2D' || node.type === 'FSICoupler3D' || node.type === 'FEMFSICoupler3D') && key === 'cfl';
 
         if ((node.type === 'Telemetry3DViewport' && visualKeys.includes(key)) || isDynamicCfl) {
             this.stateManager.updateNodeParametersInPlace(this.currentNodeId, updates);
@@ -3080,8 +3113,8 @@ export class PropertyEditor {
                     }
                 }
                 let scope = "1d";
-                if (node.type === 'CFDSolver3D') scope = "3d";
-                else if (node.type === 'CFDSolver2D') scope = "2d";
+                if (node.type === 'CFDSolver3D' || node.type === 'MPMDomain3D' || node.type === 'FEMDomain3D' || node.type === 'FSICoupler3D' || node.type === 'FEMFSICoupler3D') scope = "3d";
+                else if (node.type === 'CFDSolver2D' || node.type === 'MPMDomain2D' || node.type === 'FSICoupler2D') scope = "2d";
                 net.send({
                     command: "UPDATE_CFL",
                     modelId: targetModelId,
@@ -3160,90 +3193,6 @@ export class PropertyEditor {
     }
 
     private getNodeDescription(type: string): string {
-        switch (type) {
-            case 'DomainMesh':
-                return 'Cartesian grid with structured uniform mesh. Defines the spatial domain boundary conditions and discretization sizing.';
-            case 'Material':
-                return 'Material properties. Defines Air, JWL explosive, or Ideal Gas explosive equations of state.';
-            case 'Charge1D':
-                return '1D Charge configuration.';
-            case 'Charge2D':
-                return '2D Charge configuration.';
-            case 'ThePainter':
-                return 'Initial conditions painter. Maps mesh cells to physical material states for the simulation starting phase.';
-            case 'CFDSolver':
-                return 'High-order CFD solver. Set init_mode to Multi-Material JWL for JWL detonation products + unreacted explosive, or Ideal Gas for a simpler single-material hot-gas burst.';
-            case 'TelemetryText':
-                return 'Live text stream telemetry logger. Outputs simulator event timelines, iteration milestones, and system states.';
-            case 'TelemetryGraph':
-                return 'Real-time chart telemetry viewer. Plots grid spatial properties, cell pressure profiles, and simulation telemetry histories.';
-            case 'DomainMesh2D':
-                return '2D Axisymmetric mesh. Discretizes the r-z coordinates and defines boundary conditions for r_min, r_max, z_min, z_max.';
-            case 'DetonatorLocation':
-                return 'Detonator position and size. Defines where detonation starts in the 2D r-z space.';
-            case 'DetonatorLocation3D':
-                return 'Detonator position. Defines where detonation starts in the 3D Cartesian space.';
-            case 'RemapNode':
-            case 'Remap1DTo2DNode':
-                return 'Remapper node (1D -> 2D). Integrates the 1D physical state onto the 2D r-z mesh at the specified origin and trigger condition.';
-            case 'Remap1DTo3DNode':
-                return 'Remapper node (1D -> 3D). Integrates the 1D physical state onto the 3D Cartesian mesh at the specified origin and trigger condition.';
-            case 'Remap2DTo3DNode':
-                return 'Remapper node (2D -> 3D). Integrates and revolves the 2D physical state onto the 3D Cartesian mesh at the specified origin and trigger condition.';
-            case 'HardwareConfig':
-                return 'Hardware settings. Choose execution device: CPU (utilizes OpenMP threads) or GPU (utilizes CUDA math kernels).';
-            case 'CFDSolver2D':
-                return '2D axisymmetric CFD solver. Connects 2D domain mesh, detonators, remapper, hardware settings, and charge materials.';
-            case 'TelemetryContour':
-                return 'Real-time 2D contour plot (heatmap) telemetry viewer. Renders dynamic physical fields (pressure, density, speed, mass fractions).';
-            case 'VTKOutput':
-                return 'Controls saving simulation state snapshots in standard VTK XML Unstructured Grid (.vtu) format for external visualizers like Paraview.';
-            case 'VirtualGauges':
-                return 'Virtual gauges. Records and tracks simulation variables (pressure, density, velocity, species) at discrete coordinates over time.';
-            case 'STLGeometry':
-                return 'STL Geometry boundary. Specifies the STL file path for Immersed Boundary Method solid obstacles in 3D.';
-            case 'PrimitiveGeometry3D':
-                return 'Primitive Geometry boundary. Specifies analytic cuboids, cylinders, or wedges for Immersed Boundary Method solid obstacles in 3D.';
-            case 'MPMDomain2D':
-                return `<strong>Material Point Method (MPM) 2D Domain</strong> solver settings.<br/><br/>` +
-                       `<strong>1. Transfer Schemes:</strong><br/>` +
-                       `• <i>Standard:</i> Dirac-delta interpolation. Fast but suffers from high grid-crossing noise.<br/>` +
-                       `• <i>GIMP:</i> Generalized Interpolation Material Point. Uses particle domains to completely eliminate grid-crossing noise, though slightly more expensive.<br/><br/>` +
-                       `<strong>2. Velocity Schemes:</strong><br/>` +
-                       `• <i>PIC:</i> Highly stable but extremely dissipative (damps kinetic energy rapidly).<br/>` +
-                       `• <i>FLIP:</i> Low dissipation but prone to noise accumulation. Blended with APIC (APIC-FLIP) via <i>flip_blend</i> (default 0.95).<br/>` +
-                       `• <i>APIC:</i> Conserves angular momentum and suppresses noise without damping energy. Recommended default.`;
-            case 'MPMDomain3D':
-                return `<strong>Material Point Method (MPM) 3D Domain</strong> solver settings.<br/><br/>` +
-                       `<strong>1. Transfer Schemes:</strong><br/>` +
-                       `• <i>Standard:</i> Dirac-delta interpolation. Fast but suffers from high grid-crossing noise.<br/>` +
-                       `• <i>GIMP:</i> Generalized Interpolation Material Point. Eliminates grid-crossing noise using a contiguous particle domain.<br/><br/>` +
-                       `<strong>2. Velocity Schemes:</strong><br/>` +
-                       `• <i>PIC:</i> Highly stable but extremely dissipative (damps energy quickly).<br/>` +
-                       `• <i>FLIP:</i> Low dissipation but prone to high-frequency noise. Blended with APIC (APIC-FLIP) via <i>flip_blend</i>.<br/>` +
-                       `• <i>APIC:</i> Affine Particle-in-Cell. Conserves angular momentum and suppresses noise. Recommended default.<br/><br/>` +
-                       `<strong>3. Space-Time Integration:</strong><br/>` +
-                       `• <i>USL:</i> Update Stress Last. 1st-order symplectic Euler, energy-conserving on average.<br/>` +
-                       `• <i>USF:</i> Update Stress First. 1st-order alternative, updates stress prior to grid velocities.<br/>` +
-                       `• <i>RK2:</i> 2nd-Order Midpoint Predictor-Corrector. 2nd-order space/time accurate, energy-conserving, highly stable, and objective with CFL changes.`;
-            case 'MPMObject2D':
-                return '2D MPM Primitive Object. Defines shape geometry, initial position, translation/rotation velocities, and material binding.';
-            case 'MPMMaterialSteel':
-                return 'MPM Steel Material properties. Defines density, elastoplasticity (Young\'s modulus, Poisson\'s ratio), Von Mises yield stress, and strain hardening.';
-            case 'FSICoupler2D':
-                return 'Two-Way Fluid-Structure Interaction (FSI) Coupler (2D). Dynamically couples Eulerian CFD gas dynamics with Lagrangian MPM particles.';
-            case 'FSICoupler3D':
-                return 'Two-Way Fluid-Structure Interaction (FSI) Coupler (3D MPM). Dynamically couples 3D Eulerian FV gas dynamics with 3D Lagrangian MPM particles on the shared compute device (CPU/GPU).';
-            case 'FEMFSICoupler3D':
-                return 'Two-Way Fluid-Structure Interaction (FSI) Coupler (3D FEM). High-fidelity conservative coupling between 3D Eulerian FV fluid grids and 3D Lagrangian FEM structural elements using SAT cut-cell aperture rasterization and 2x2 Gauss quadrature pressure integration on the shared compute device (CPU/GPU).';
-            case 'FEMDomain3D':
-                return '3D Finite Element Method (FEM) Structural Mechanics Domain. Configures explicit Lagrangian dynamics, Flanagan-Belytschko hourglass control, sliding contact, and erosion models on the shared compute target.';
-            case 'FEMObject3D':
-                return '3D FEM Structural Object. Defines structural geometry (Box, Cylinder, or LS-DYNA mesh), boundary constraints, and constitutive material bindings.';
-            case 'LSDynaImporter3D':
-                return 'LS-DYNA Keyword File Importer (*.k). Imports hexahedral/shell mesh topologies, section properties, and material definitions into the 3D FEM solver.';
-            default:
-                return 'Simulation graph node.';
-        }
+        return getMasterNodeDescription(type);
     }
 }

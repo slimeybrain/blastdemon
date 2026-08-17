@@ -76,5 +76,9 @@
 - **Lagrangian & Particle Solvers (FEM and MPM):** Must default to **2nd-Order Symplectic Central Difference / Staggered Leapfrog** integration. This guarantees second-order trajectory accuracy ($\mathcal{O}(\Delta t^2)$) and exact Hamiltonian phase/energy preservation with single-pass GPU performance and zero multi-stage memory overhead.
 - **Eulerian Fluid Solvers (CFD):** Must default to **2nd-Order ADER-2** (single-stage Cauchy-Kowalevski space-time predictor) or **2nd-Order TVD/SSP-RK2** with slope limiters. ADER-3 is supported for 3rd-order spatial-temporal accuracy.
 - **FSI Coupling Solvers:** Must preserve at least 2nd-order accuracy across fluid-structure coupling substeps.
-
+## 15. Mandatory UI Parameter & Node Type Documentation Directive (ABSOLUTE RULE)
+- **Zero Undocumented UI Elements:** Whenever a new node type or new configuration parameter is added, renamed, or modified in the UI or backend:
+  - It MUST be registered in `frontend/src/parameter-definitions.ts` with complete engineering documentation (label, physical unit, concise summary, and detailed physics/mathematical formulation/stability implications).
+  - New node types MUST have a complete multi-section documentation definition in `frontend/src/parameter-definitions.ts` (including Overview & Role, Governing Physics & Formulations, Inputs & Upstream Connections, Outputs & Telemetry, and Key Parameter Tuning Guide).
+  - Parameter popovers, native tooltips, and node info overlays across `property-editor.ts`, `graph-renderer.ts`, and `node-viewer.ts` must stay synchronized with this master single-source-of-truth definitions registry.
 

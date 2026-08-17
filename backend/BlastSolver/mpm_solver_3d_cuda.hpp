@@ -91,9 +91,9 @@ public:
         syncToDevice();
     }
 
-    void step(float cfl = 0.3f);
+    void step(float cfl = 0.6f);
     void stepWithDt(float dt, bool run_p2g = true);
-    float computeStepSize(float cfl = 0.3f);
+    float computeStepSize(float cfl = 0.6f);
 
     // Synchronize host vectors from device memory
     void syncToHost();

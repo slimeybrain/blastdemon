@@ -251,7 +251,7 @@ public:
     void syncToDevice();
     void syncToHost() const;
 
-    void step(T cfl = 0.3f);
+    void step(T cfl = 0.6f);
     void stepWithDt(T dt);
 
     std::vector<FEMNode3D<T>>& getNodes() { syncToHost(); return m_cpu_solver.getNodes(); }
@@ -285,8 +285,8 @@ public:
     T getMaxPlasticStrain() const { return m_last_ep_max; }
     T getMaxVonMisesStress() const { return m_last_vm_max; }
 
-    T computeStepSize(T cfl = static_cast<T>(0.3f));
-    T computeStableTimestep(T cfl = static_cast<T>(0.3f)) { return computeStepSize(cfl); }
+    T computeStepSize(T cfl = static_cast<T>(0.6f));
+    T computeStableTimestep(T cfl = static_cast<T>(0.6f)) { return computeStepSize(cfl); }
 
     void getMeshBoundingBox(T& min_x, T& max_x, T& min_y, T& max_y, T& min_z, T& max_z) const {
         m_cpu_solver.getMeshBoundingBox(min_x, max_x, min_y, max_y, min_z, max_z);

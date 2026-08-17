@@ -123,7 +123,7 @@ public:
     void resume() override;
 
     void step(double dt) override;
-    double computeStepSize(double cfl = 0.4) const override;
+    double computeStepSize(double cfl = 0.6) const override;
     void setGeometry(const std::string& stl_filepath, const std::string& geometry_hash, const std::string& voxelization_method,
                      const std::atomic<bool>* terminate_flag = nullptr,
                      std::function<void(double)> progress_callback = nullptr) override;

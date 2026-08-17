@@ -5,6 +5,7 @@ import { validateSimulationState } from './validation.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
 import { CustomDialog } from './custom-dialog.js';
 import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_CATEGORIES, MPM_MATERIAL_PARAM_INFO } from './mpm-presets.js';
+import { getParameterInfo, getNodeDefinition, getNodeDescription as getMasterNodeDescription, showParameterPopover } from './parameter-definitions.js';
 
 const DEFAULT_QUANTITY_RANGES: Record<string, [number, number]> = {
     pressure: [101325.0, 101325.0 * 100.0],
@@ -1214,7 +1215,6 @@ export class GraphRenderer {
                 name: '3D Simulation',
                 items: [
                     { label: 'Domain Mesh 3D', type: 'DomainMesh3D' },
-                    { label: 'Refinement Mesh 3D (Submesh)', type: 'RefinementMesh3D' },
                     { label: 'Detonator Location 3D', type: 'DetonatorLocation3D' },
                     { label: 'Remapper (1D -> 3D)', type: 'Remap1DTo3DNode' },
                     { label: 'Remapper (2D -> 3D)', type: 'Remap2DTo3DNode' },
@@ -1454,15 +1454,10 @@ export class GraphRenderer {
     private getDefaultParameters(type: NodeType): any {
         switch (type) {
             case 'DomainMesh': return {
-                dimension: '1D',
                 domain_radius: 1.0,
                 cell_size: 0.001,
                 left_bc: 'Transmitting',
-                right_bc: 'Transmitting',
-                y_min_bc: 'Reflecting',
-                y_max_bc: 'Reflecting',
-                z_min_bc: 'Reflecting',
-                z_max_bc: 'Reflecting'
+                right_bc: 'Transmitting'
             };
             case 'Material': return {
                 material_type: 'Air',
@@ -1502,6 +1497,7 @@ export class GraphRenderer {
                 const state = this.stateManager.getCurrentState();
                 const is3D = state?.nodes.some(n => n.type === 'DomainMesh3D' || n.type === 'CFDSolver3D') || false;
                 return {
+                    enable_gauges: 'Enabled',
                     gauges: is3D ? [{ id: 'G1', name: 'G1', x: 0.6, y: 0.5, z: 0.5 }] : [],
                     telemetry_channel: 0,
                     export_ascii: false,
@@ -1525,7 +1521,7 @@ export class GraphRenderer {
             }
             case 'CFDSolver': return {
                 init_mode: 'Multi-Material JWL',
-                cfl: 0.4,
+                cfl: 0.6,
                 flux_scheme: 'AUSM+',
                 spatial_order: 2,
                 temporal_order: 4,
@@ -1572,7 +1568,7 @@ export class GraphRenderer {
                 explosive_x: 0.5,
                 explosive_y: 0.5,
                 explosive_z: 0.5,
-                remap_radius: 0.5,
+                remap_radius: 0.0,
                 trigger_type: 'end',
                 trigger_val: 0.0
             };
@@ -1590,7 +1586,7 @@ export class GraphRenderer {
             };
             case 'CFDSolver2D': return {
                 init_mode: 'From1D',
-                cfl: 0.35,
+                cfl: 0.6,
                 flux_scheme: 'AUSM+',
                 spatial_order: 2,
                 temporal_order: 4,
@@ -1662,15 +1658,6 @@ export class GraphRenderer {
                 bc_y_min: 'Reflecting', bc_y_max: 'Transmitting',
                 bc_z_min: 'Reflecting', bc_z_max: 'Transmitting'
             };
-            case 'RefinementMesh3D': return {
-                submesh_x: 0.25,
-                submesh_y: 0.25,
-                submesh_z: 0.25,
-                submesh_size_x: 0.5,
-                submesh_size_y: 0.5,
-                submesh_size_z: 0.5,
-                refinement_level: 1
-            };
             case 'Charge3D': return {
                 charge_shape: 'Sphere',
                 charge_mass: 6.8277,
@@ -1684,7 +1671,7 @@ export class GraphRenderer {
                 charge_rot_z: 0.0
             };
             case 'CFDSolver3D': return {
-                cfl: 0.4,
+                cfl: 0.6,
                 device: 'cpu',
                 init_mode: 'From1D',
                 flux_scheme: 'AUSM+',
@@ -1780,27 +1767,6 @@ export class GraphRenderer {
                 beamShowColorbar: false,
                 beamMinVal: 0.0,
                 beamMaxVal: 0.05,
-                // Rebar Mesh Defaults
-                showRebar: true,
-                rebarSolid: true,
-                rebarWireframe: true,
-                rebarRadius: 0.008,
-                vtk_format: 'Binary',
-                step_interval: 10,
-                time_interval: 0.0,
-                custom_filename: 'vtk_output',
-                vtk_dir: './vtk_output',
-                export_slices: true,
-                export_volumes: false,
-                qty_pressure: true,
-                qty_density: true,
-                qty_velocity: true,
-                qty_energy: true,
-                qty_reacted: true,
-                qty_unreacted: true,
-                qty_air: true,
-                qty_overpressure: true,
-                qty_impulse: true,
                 show_stl: true,
                 stl_colormap: 'plasma',
                 stl_wireframe: false,
@@ -1840,7 +1806,7 @@ export class GraphRenderer {
                 flip_blend: 0.95,
                 smooth_plastic_strain: true,
                 ppc: 4,
-                cfl: 0.3
+                cfl: 0.6
             };
             case 'MPMDomain3D': return {
                 device: 'cpu',
@@ -1851,7 +1817,7 @@ export class GraphRenderer {
                 flip_blend: 0.95,
                 smooth_plastic_strain: true,
                 ppc: 8,
-                cfl: 0.3
+                cfl: 0.6
             };
             case 'MPMObject2D': return {
                 shape_type: 'Rectangle',
@@ -1910,32 +1876,28 @@ export class GraphRenderer {
                 integration_scheme: 'OnePointFB',
                 hourglass_model: 'FlanaganBelytschkoStiffness',
                 hourglass_coeff: 0.10,
-                contact_penalty_scale: 1.0,
+                contact_penalty_scale: 0.1,
                 friction_static: 0.3,
                 friction_kinetic: 0.2,
                 convert_failed_elements_to_mpm: false,
                 mpm_particles_per_failed_element: 8,
                 material_heterogeneity: 0.08,
-                debris_velocity_smoothing: 0.25,
-                debris_clumping: 0.40,
+                debris_velocity_smoothing: 0.50,
+                debris_clumping: 0.60,
                 debris_max_clump_size: 8,
                 random_seed: 42,
                 enable_directional_crack_band: true,
                 enable_nonlocal_damage: true,
-                cfl: 0.4
+                cfl: 0.6
             };
             case 'FEMObject3D': return {
-                mesh_source: 'Box Generator',
                 shape_type: 'Box',
                 boundary_condition: 'Free',
                 pos_x: 0.0, pos_y: 0.0, pos_z: 0.0,
                 size_x: 1.0, size_y: 1.0, size_z: 1.0,
-                radius: 0.1, inner_radius: 0.0, length: 0.2, height: 0.2,
+                radius: 0.1, inner_radius: 0.0, height: 0.2,
                 nx: 10, ny: 10, nz: 10,
                 vel_x: 0.0, vel_y: 0.0, vel_z: 0.0,
-                bulk_viscosity_b1: 0.06,
-                bulk_viscosity_b2: 1.20,
-                timestep_erosion_factor: 0.10,
                 k_file: ''
             };
             case 'LSDynaImporter3D': return {
@@ -1943,8 +1905,7 @@ export class GraphRenderer {
                 scale_factor: 1.0
             };
             case 'FEMFSICoupler3D': return {
-                cfl: 0.30,
-                steps: 100,
+                cfl: 0.6,
                 coupling_scheme: 'Two-Way Staggered',
                 pressure_integration: '2x2 Gauss Quadrature',
                 uncovering_method: 'Conservative IDW + Vacuum Cavity',
@@ -1953,8 +1914,12 @@ export class GraphRenderer {
                 vacuum_pressure: 1.0e-2
             };
 
-            case 'FSICoupler2D': return {};
-            case 'FSICoupler3D': return {};
+            case 'FSICoupler2D': return {
+                cfl: 0.6
+            };
+            case 'FSICoupler3D': return {
+                cfl: 0.6
+            };
 
             default: return {};
         }
@@ -2301,55 +2266,23 @@ export class GraphRenderer {
                         infoOverlay.className = 'node-info-overlay';
                         infoOverlay.dataset.nodeId = node.id;
                         
-                        let bodyContent = this.getNodeDescription(node.type);
-                        if (node.type === 'Material') {
-                            const matType = node.parameters?.material_type || 'Air';
-                            if (matType === 'JWL Charge') {
-                                const comp = node.parameters?.composition || 'TNT';
-                                 const EXPLOSIVE_REFS: Record<string, string> = {
-                                    'Aluminized ANFO': 'Sanchidrián et al., Central European Journal of Energetic Materials (2015)',
-                                    'Ammonal': 'Lee et al., LLNL JWL Database (UCRL-50422, 1968)',
-                                    'ANFO': 'Lee et al., LLNL JWL Database (UCRL-50422, 1968)',
-                                    'Baratol': 'Lee et al., LLNL JWL Database (UCRL-50422, 1968)',
-                                    'C-4': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                                    'Composition A-3': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                                    'Composition B': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                                    'Composition C-3': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                                    'Cyclotol': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                                    'Heavy ANFO': 'Sanchidrián et al., Central European Journal of Energetic Materials (2015)',
-                                    'HMX': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                                    'LX-04': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                                    'LX-07': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                                    'LX-10': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                                    'LX-14': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                                    'LX-17': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                                    'Mining Emulsion': 'Castedo et al., Int. Journal of Rock Mechanics & Mining Sciences (2018)',
-                                    'Octol': 'Lee et al., LLNL JWL Database (UCRL-50422, 1968)',
-                                    'PBX 9404': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                                    'PBX 9501': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                                    'PBX 9502': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                                    'PE-10': 'Chemring / STV Group Demolition Range Datasheets (Estimated)',
-                                    'PE-12': 'Chemring / STV Group Demolition Range Datasheets (Estimated)',
-                                    'PE-4': 'Dobratz & Crawford, LLNL Explosives Handbook (1985) / PE-4 Cylinder Test Fit',
-                                    'PE-8': 'Chemring / STV Group Demolition Range Datasheets (Estimated)',
-                                    'Pentolite': 'Lee et al., LLNL JWL Database (UCRL-50422, 1968)',
-                                    'PETN': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                                    'RDX': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                                    'TATB': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                                    'Tetryl': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                                    'TNT': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                                    'Water Gel': 'Sanchidrián et al., Central European Journal of Energetic Materials (2015)',
-                                    'Custom': 'N/A'
-                                };
-                                const ref = EXPLOSIVE_REFS[comp] || 'N/A';
-                                bodyContent += `<br/><br/><strong>Composition:</strong> ${comp}<br/><strong>Reference Source:</strong> ${ref}`;
-                            }
+                        const def = getNodeDefinition(node.type);
+                        infoOverlay.innerHTML = `
+                            <div class="node-info-overlay-title">
+                                <span>${def.title}</span>
+                                <button class="node-modal-close" style="padding:0 4px; font-size:14px; cursor:pointer;" title="Close">✕</button>
+                            </div>
+                            <div style="font-size:10px; color:#00e5ff; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:8px;">${def.category}</div>
+                            <div class="node-info-overlay-body">${def.fullDescHtml}</div>
+                        `;
+                        const closeBtn = infoOverlay.querySelector('.node-modal-close');
+                        if (closeBtn) {
+                            closeBtn.addEventListener('click', (ev) => {
+                                ev.stopPropagation();
+                                infoOverlay.remove();
+                            });
                         }
 
-                        infoOverlay.innerHTML = `
-                            <div class="node-info-overlay-title">${node.type} Info</div>
-                            <div class="node-info-overlay-body">${bodyContent}</div>
-                        `;
                         // Convert client coords → world coords so overlay scales with canvas
                         const rect = this.viewport.getBoundingClientRect();
                         const OFFSET = 12;
@@ -2357,10 +2290,7 @@ export class GraphRenderer {
                         const worldY = (e.clientY - rect.top  - this.panY) / this.zoom + OFFSET;
                         infoOverlay.style.left = `${worldX}px`;
                         infoOverlay.style.top  = `${worldY}px`;
-                        infoOverlay.addEventListener('click', (ev) => {
-                            ev.stopPropagation();
-                            infoOverlay.remove();
-                        });
+                        infoOverlay.addEventListener('mousedown', (ev) => ev.stopPropagation());
                         // Append to world-space container so it zooms/pans with the graph
                         this.container.appendChild(infoOverlay);
                     });
@@ -4500,8 +4430,24 @@ export class GraphRenderer {
                 'cfl', 'steps', 'coupling_scheme', 'pressure_integration',
                 'uncovering_method', 'erosion_venting', 'vacuum_density', 'vacuum_pressure'
             ];
+        } else if (node.type === 'FSICoupler2D' || node.type === 'FSICoupler3D') {
+            paramKeys = ['cfl'];
         } else if (node.type === 'LSDynaImporter3D') {
             paramKeys = ['k_file', 'scale_factor'];
+        }
+
+        // In coupled simulations, the Coupler node is the single source of truth for CFL.
+        // Suppress redundant CFL fields on sub-domain nodes.
+        let isCoupledModel = false;
+        const allModels = this.stateManager.getAppState().models;
+        for (const m of Object.values(allModels)) {
+            if (m.nodes.some(n => n.id === node.id)) {
+                isCoupledModel = m.nodes.some(n => n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D' || n.type === 'FEMFSICoupler3D');
+                break;
+            }
+        }
+        if (isCoupledModel && (node.type === 'CFDSolver' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver3D' || node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D' || node.type === 'FEMDomain3D')) {
+            paramKeys = paramKeys.filter(k => k !== 'cfl');
         }
         if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D' || node.type === 'RefinementMesh3D') {
             paramKeys.sort((a, b) => {
@@ -4822,11 +4768,15 @@ export class GraphRenderer {
             row.style.display = 'flex';
             row.style.flexDirection = 'column';
 
+            const paramInfo = getParameterInfo(key, node.type);
             const label = document.createElement('label');
             label.style.fontSize = 'var(--font-xs)';
             label.style.color = '#888';
-            let labelText = key.replace(/_/g, ' ').toUpperCase();
-            if (key === 'flip_blend') labelText = 'FLIP BLEND (% FLIP / % PIC)';
+            label.style.cursor = 'help';
+            label.style.marginBottom = '1px';
+            label.title = `${paramInfo.label} (${paramInfo.unit}): ${paramInfo.shortDesc} — ${paramInfo.detailedDesc}`;
+
+            let labelText = paramInfo.label.toUpperCase();
             if (node.type === 'VTKOutput') {
                 const vtkLabels: Record<string, string> = {
                     'trigger_type': 'TRIGGER TYPE',
@@ -4874,17 +4824,28 @@ export class GraphRenderer {
                 };
                 if (vtkLabels[key]) labelText = vtkLabels[key];
             }
-            label.textContent = labelText;
 
-            if (node.type === 'MPMMaterialSteel' && MPM_MATERIAL_PARAM_INFO[key]) {
-                const info = MPM_MATERIAL_PARAM_INFO[key];
-                label.title = info.tooltip;
-                label.style.cursor = 'help';
-                label.style.marginBottom = '1px';
-                label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline; overflow:hidden;">` +
-                    `<span style="font-weight:600; color:#ccc; font-size:9px; white-space:nowrap; text-overflow:ellipsis; overflow:hidden;">${info.label.split(':')[0].trim().toUpperCase()}</span>` +
-                    (info.unit && info.unit !== 'dim' ? `<span style="font-size:8px; color:#569cd6; font-family:monospace; background:rgba(86,156,214,0.12); padding:0px 2px; border-radius:2px; margin-left:2px; flex-shrink:0;">${info.unit}</span>` : '') +
-                    `</div>`;
+            const unitBadge = (paramInfo.unit && paramInfo.unit !== 'dim') 
+                ? `<span style="font-size:8px; color:#00e5ff; font-family:monospace; background:rgba(0,229,255,0.12); padding:0px 3px; border-radius:2px; margin-left:2px; flex-shrink:0;">${paramInfo.unit}</span>` 
+                : '';
+
+            label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline; overflow:hidden;">` +
+                `<span style="font-weight:600; color:#ccc; font-size:9px; white-space:nowrap; text-overflow:ellipsis; overflow:hidden; display:inline-flex; align-items:center;">` +
+                `${labelText}` +
+                `<span class="param-info-btn" data-param-key="${key}" title="Click or hover for physics details" style="width:11px; height:11px; font-size:7.5px; margin-left:3px;">?</span>` +
+                `</span>` +
+                unitBadge +
+                `</div>`;
+
+            const infoBtn = label.querySelector('.param-info-btn') as HTMLElement;
+            if (infoBtn) {
+                infoBtn.addEventListener('mouseenter', (e) => {
+                    showParameterPopover(infoBtn, key, node.type, e);
+                });
+                infoBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    showParameterPopover(infoBtn, key, node.type, e);
+                });
             }
             row.appendChild(label);
 
@@ -5025,14 +4986,14 @@ export class GraphRenderer {
                             'ideal_gamma', 'ideal_rho_0', 'ideal_e_0', 'high_rho', 'ambient_rho', 'ambient_p',
                             // 3D CFD keys
                             'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
-                            'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz', 'charge_aspect_ratio',
+                            'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
+                            'charge_rot_x', 'charge_rot_y', 'charge_rot_z',
                             'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
-                            'origin_x', 'origin_y', 'origin_z', 'dim_x', 'dim_y', 'dim_z', 'scale_factor',
+                            'scale_factor',
                             'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
-                            'refinement_opacity', 'charge_opacity',
+                            'charge_opacity',
                             'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio', 'amr_tile_size',
-                            'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'length', 'refinement_level',
-                            'submesh_x', 'submesh_y', 'submesh_z', 'submesh_size_x', 'submesh_size_y', 'submesh_size_z',
+                            'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'length',
                             'offset', 'stride',
                             // MPM keys
                             'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'radius', 'inner_radius',
@@ -5046,7 +5007,7 @@ export class GraphRenderer {
                             'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
                             // FEM keys
                             'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
-                            'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_diameter', 'rebar_area', 'rebarRadius', 'rebar_radius', 'beamRadius', 'beam_radius', 'beam_diameter', 'beam_area', 'beamMinVal', 'beamMaxVal',
+                            'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_area', 'beamRadius', 'beam_radius', 'beam_area', 'beamMinVal', 'beamMaxVal',
                             'femMinVal', 'femMaxVal', 'femOpacity', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',
                             // Concrete Core & Models (RHT, K&C, CSCM)
                             'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
@@ -5439,7 +5400,7 @@ export class GraphRenderer {
                         updates['composition'] = 'Custom';
                     }
                     
-                    const isDynamicCfl = (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver') && key === 'cfl';
+                    const isDynamicCfl = (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver' || node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D' || node.type === 'FEMDomain3D' || node.type === 'FSICoupler2D' || node.type === 'FSICoupler3D' || node.type === 'FEMFSICoupler3D') && key === 'cfl';
                     if (isDynamicCfl) {
                         this.stateManager.updateNodeParametersInPlace(node.id, updates);
                         const net = (window as any).networkManager;
@@ -5453,8 +5414,8 @@ export class GraphRenderer {
                                 }
                             }
                             let scope = "1d";
-                            if (node.type === 'CFDSolver3D') scope = "3d";
-                            else if (node.type === 'CFDSolver2D') scope = "2d";
+                            if (node.type === 'CFDSolver3D' || node.type === 'MPMDomain3D' || node.type === 'FEMDomain3D' || node.type === 'FSICoupler3D' || node.type === 'FEMFSICoupler3D') scope = "3d";
+                            else if (node.type === 'CFDSolver2D' || node.type === 'MPMDomain2D' || node.type === 'FSICoupler2D') scope = "2d";
                             net.send({
                                 command: "UPDATE_CFL",
                                 modelId: targetModelId,
@@ -5623,74 +5584,9 @@ export class GraphRenderer {
     }
 
     private getNodeDescription(type: string): string {
-        switch (type) {
-            case 'DomainMesh':
-                return 'Cartesian grid with structured uniform mesh. Defines the spatial domain boundary conditions and discretization sizing.';
-            case 'Material':
-                return 'Material properties. Defines Air, JWL explosive, or Ideal Gas explosive equations of state.';
-            case 'Charge1D':
-                return '1D Charge configuration.';
-            case 'Charge2D':
-                return '2D Charge configuration.';
-            case 'ThePainter':
-                return 'Initial conditions painter. Maps mesh cells to physical material states for the simulation starting phase.';
-            case 'CFDSolver':
-                return 'High-order CFD simulation engine. Solves Euler equations using high-resolution reconstruction and flux splitting schemes. Set init_mode to select between a single-material Ideal Gas run or a full Multi-Material JWL detonation simulation.';
-            case 'TelemetryText':
-                return 'Live text stream telemetry logger. Outputs simulator event timelines, iteration milestones, and system states.';
-            case 'TelemetryGraph':
-                return 'Real-time chart telemetry viewer. Plots grid spatial properties, cell pressure profiles, and simulation telemetry histories.';
-            case 'DomainMesh2D':
-                return '2D Axisymmetric mesh. Discretizes the r-z coordinate space and defines boundary conditions for r_min, r_max, z_min, and z_max faces. Feeds the 2D CFD Solver.';
-            case 'DetonatorLocation':
-                return 'Detonator position node. Specifies where the detonation point source is placed in the 2D r-z domain. explosive_z and explosive_r set the axial and radial coordinates (m); explosive_radius sets the initial hot-spot radius (m). Required by the 2D CFD Solver for all detonation modes.';
-            case 'DetonatorLocation3D':
-                return 'Detonator position node (3D). Specifies where the detonation point source is placed in the 3D Cartesian domain. detonator_x, detonator_y, and detonator_z set the coordinates (m). Required by the 3D CFD Solver.';
-            case 'RemapNode':
-            case 'Remap1DTo2DNode':
-                return 'Remapper (1D → 2D). Reads the converged 1D spherical-symmetric solution and maps its conserved variables onto the 2D axisymmetric mesh, centered at the specified explosive_z / explosive_r origin. Triggers at "end" of the 1D run, or at a specific time or step count.';
-            case 'Remap1DTo3DNode':
-                return 'Remapper (1D → 3D). Reads the converged 1D spherical-symmetric solution and maps its conserved variables onto the 3D Cartesian mesh, centered at the specified explosive_x / explosive_y / explosive_z origin.';
-            case 'Remap2DTo3DNode':
-                return 'Remapper (2D → 3D). Reads the converged 2D axisymmetric or Cartesian solution and revolves/maps its conserved variables onto the 3D Cartesian mesh, centered at the specified explosive_x / explosive_y / explosive_z origin.';
-            case 'HardwareConfig':
-                return 'Hardware configuration node. Selects the execution device (CPU with OpenMP, or GPU with CUDA) and the floating-point precision (double / single). Applied to both 1D and 2D solvers in the model.';
-            case 'CFDSolver2D':
-                return '2D axisymmetric CFD solver. Solves the Euler equations on the r-z mesh using high-order MUSCL reconstruction and AUSM+/Rusanov flux splitting. Accepts a domain mesh, detonator location, remapper, hardware config, and charge materials. init_mode selects From1D (remap a finished 1D run), Multi-Material JWL, or Ideal Gas.';
-            case 'TelemetryContour':
-                return 'Real-time 2D contour heatmap telemetry viewer. Renders dynamic physical fields — pressure, density, velocity magnitude, and multi-material mass fractions — streamed live from the 2D solver at every output step.';
-            case 'VTKOutput':
-                return 'VTK output controls. Saves simulation snapshots in VTK XML Unstructured Grid (.vtu) format to the specified directory. Files are compatible with ParaView, VisIt, and other VTK-based post-processors.';
-            case 'VirtualGauges':
-                return 'Virtual gauges. Records and tracks simulation variables (pressure, density, velocity, species) at discrete coordinates over time.';
-            case 'STLGeometry':
-                return 'STL Geometry configuration. Defines the path to the STL file representing the solid boundary mesh for Immersed Boundary method, and a unique hash representing it.';
-            case 'MPMDomain2D':
-                return `<strong>Material Point Method (MPM) 2D Domain</strong> solver settings.<br/><br/>` +
-                       `<strong>1. Transfer Schemes:</strong><br/>` +
-                       `• <i>Standard:</i> Dirac-delta interpolation. Fast but suffers from high grid-crossing noise.<br/>` +
-                       `• <i>GIMP:</i> Generalized Interpolation Material Point. Uses particle domains to completely eliminate grid-crossing noise, though slightly more expensive.<br/><br/>` +
-                       `<strong>2. Velocity Schemes:</strong><br/>` +
-                       `• <i>PIC:</i> Highly stable but extremely dissipative (damps kinetic energy rapidly).<br/>` +
-                       `• <i>FLIP:</i> Low dissipation but prone to noise accumulation. Blended with APIC (APIC-FLIP) via <i>flip_blend</i> (default 0.95).<br/>` +
-                       `• <i>APIC:</i> Conserves angular momentum and suppresses noise without damping energy. Recommended default.`;
-            case 'MPMDomain3D':
-                return `<strong>Material Point Method (MPM) 3D Domain</strong> solver settings.<br/><br/>` +
-                       `<strong>1. Transfer Schemes:</strong><br/>` +
-                       `• <i>Standard:</i> Dirac-delta interpolation. Fast but suffers from high grid-crossing noise.<br/>` +
-                       `• <i>GIMP:</i> Generalized Interpolation Material Point. Eliminates grid-crossing noise using a contiguous particle domain.<br/><br/>` +
-                       `<strong>2. Velocity Schemes:</strong><br/>` +
-                       `• <i>PIC:</i> Highly stable but extremely dissipative (damps energy quickly).<br/>` +
-                       `• <i>FLIP:</i> Low dissipation but prone to high-frequency noise. Blended with APIC (APIC-FLIP) via <i>flip_blend</i>.<br/>` +
-                       `• <i>APIC:</i> Affine Particle-in-Cell. Conserves angular momentum and suppresses noise. Recommended default.<br/><br/>` +
-                       `<strong>3. Space-Time Integration:</strong><br/>` +
-                       `• <i>USL:</i> Update Stress Last. 1st-order symplectic Euler, energy-conserving on average.<br/>` +
-                       `• <i>USF:</i> Update Stress First. 1st-order alternative, updates stress prior to grid velocities.<br/>` +
-                       `• <i>RK2:</i> 2nd-Order Midpoint Predictor-Corrector. 2nd-order space/time accurate, energy-conserving, highly stable, and objective with CFL changes.`;
-            default:
-                return 'Simulation graph node.';
-        }
+        return getMasterNodeDescription(type);
     }
+
 
     public autoArrange(): void {
         const state = this.stateManager.getCurrentState();

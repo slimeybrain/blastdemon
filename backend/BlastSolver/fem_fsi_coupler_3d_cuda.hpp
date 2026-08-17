@@ -23,10 +23,10 @@ public:
     // Attach GPU Eulerian FV solver and GPU Lagrangian FEM solver
     void attachSolvers(CFDSolver3D* fv_solver, FEMSolver3DCUDA<T>* fem_solver);
 
-    void step(T cfl = static_cast<T>(0.3f));
+    void step(T cfl = static_cast<T>(0.6f));
     void stepWithDt(T dt);
 
-    T computeCoupledDt(T cfl = static_cast<T>(0.3f)) const;
+    T computeCoupledDt(T cfl = static_cast<T>(0.6f)) const;
 
     T getSimTime() const { return m_sim_time; }
     int getStepCount() const { return m_step_count; }

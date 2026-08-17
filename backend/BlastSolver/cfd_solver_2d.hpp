@@ -49,7 +49,7 @@ public:
 
     virtual void step(double dt) = 0;
     virtual void run(double duration) = 0;
-    virtual double computeStepSize(double cfl = 0.35) const = 0;
+    virtual double computeStepSize(double cfl = 0.6) const = 0;
     virtual std::vector<double> getLocalTimesteps(double cfl) const = 0;
 
     virtual int getNr() const = 0;
@@ -126,7 +126,7 @@ public:
 
     void step(double dt) override;
     void run(double duration) override;
-    double computeStepSize(double cfl = 0.35) const override;
+    double computeStepSize(double cfl = 0.6) const override;
     std::vector<double> getLocalTimesteps(double cfl) const override;
 
     int getNr() const override { return nr_cells; }

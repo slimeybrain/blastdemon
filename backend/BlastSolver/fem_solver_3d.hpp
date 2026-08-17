@@ -106,6 +106,7 @@ struct alignas(32) FEMElement3D {
     T q_visc{0.0f};      // Artificial bulk viscosity pressure
     bool is_eroded{false};
     bool mpm_converted{false}; // Converted to MPM debris particles
+    int decay_step{0};   // Multi-step cohesive traction decay counter for soft stress release
     int mat_id{0};       // Material Table ID
     int part_id{0};      // LS-DYNA Part ID
     int64_t lsdyna_id{-1}; // Original LS-DYNA element ID
@@ -200,6 +201,94 @@ struct SpatialHashBucket3D {
 };
 
 template <typename T>
+HD_FEM_FUNC inline T computeDilatationalWaveSpeed(const MaterialTable3D& mat) {
+    T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 210.0e9f);
+    T nu = static_cast<T>(mat.poissons_ratio);
+    T density = static_cast<T>(mat.density > 0.0f ? mat.density : 7850.0f);
+    T G = E / (static_cast<T>(2.0f) * (static_cast<T>(1.0f) + nu));
+    T K = E / (static_cast<T>(3.0f) * (static_cast<T>(1.0f) - static_cast<T>(2.0f) * nu));
+    if (mat.material_model == MPMMaterialModel::RHTConcrete || 
+        mat.material_model == MPMMaterialModel::KCConcrete || 
+        mat.material_model == MPMMaterialModel::CSCMConcrete) {
+        K *= static_cast<T>(1.6f);
+    }
+    T cd = sqrt((K + static_cast<T>(4.0f) / static_cast<T>(3.0f) * G) / density);
+    return (cd > static_cast<T>(1.0f)) ? cd : static_cast<T>(5000.0f);
+}
+
+// Characteristic element length for Hex8 3D solid elements: L_e = V_e / max(A_1 ... A_6)
+// Follows standard LS-DYNA / FEA formulation for Courant acoustic timestep and geometric distortion erosion.
+template <typename T>
+HD_FEM_FUNC inline T computeHex8CharacteristicLength(const T x_nodes[8][3], T V_elem) {
+    // 6 quadrilateral faces of Hex8: (diagonal vertex pairs)
+    // Face 0 (-Z): (2-0) x (3-1)
+    // Face 1 (+Z): (6-4) x (7-5)
+    // Face 2 (-Y): (5-0) x (4-1)
+    // Face 3 (+Y): (6-3) x (7-2)
+    // Face 4 (-X): (7-0) x (4-3)
+    // Face 5 (+X): (6-1) x (5-2)
+    static const int HEX8_FACE_DIAGS[6][4] = {
+        {2, 0, 3, 1},
+        {6, 4, 7, 5},
+        {5, 0, 4, 1},
+        {6, 3, 7, 2},
+        {7, 0, 4, 3},
+        {6, 1, 5, 2}
+    };
+
+    T max_area = static_cast<T>(0.0f);
+#if defined(__CUDA_ARCH__) || defined(__NVCC__)
+    #pragma unroll
+#endif
+    for (int f = 0; f < 6; ++f) {
+        int a1 = HEX8_FACE_DIAGS[f][0];
+        int a2 = HEX8_FACE_DIAGS[f][1];
+        int b1 = HEX8_FACE_DIAGS[f][2];
+        int b2 = HEX8_FACE_DIAGS[f][3];
+
+        T d1x = x_nodes[a1][0] - x_nodes[a2][0];
+        T d1y = x_nodes[a1][1] - x_nodes[a2][1];
+        T d1z = x_nodes[a1][2] - x_nodes[a2][2];
+
+        T d2x = x_nodes[b1][0] - x_nodes[b2][0];
+        T d2y = x_nodes[b1][1] - x_nodes[b2][1];
+        T d2z = x_nodes[b1][2] - x_nodes[b2][2];
+
+        T cx = d1y * d2z - d1z * d2y;
+        T cy = d1z * d2x - d1x * d2z;
+        T cz = d1x * d2y - d1y * d2x;
+
+        T area = static_cast<T>(0.5f) * sqrt(cx*cx + cy*cy + cz*cz);
+        if (area > max_area) max_area = area;
+    }
+
+    if (max_area > static_cast<T>(1.0e-12f) && V_elem > static_cast<T>(1.0e-18f)) {
+        return V_elem / max_area;
+    }
+
+    // Fallback: minimum of 12 edges if degenerate or volume <= 0
+    static const int HEX8_EDGES_LOCAL[12][2] = {
+        {0,1}, {1,2}, {2,3}, {3,0},
+        {4,5}, {5,6}, {6,7}, {7,4},
+        {0,4}, {1,5}, {2,6}, {3,7}
+    };
+    T h_min_sq = static_cast<T>(1.0e30f);
+#if defined(__CUDA_ARCH__) || defined(__NVCC__)
+    #pragma unroll
+#endif
+    for (int e_edge = 0; e_edge < 12; ++e_edge) {
+        int n1 = HEX8_EDGES_LOCAL[e_edge][0];
+        int n2 = HEX8_EDGES_LOCAL[e_edge][1];
+        T edx = x_nodes[n1][0] - x_nodes[n2][0];
+        T edy = x_nodes[n1][1] - x_nodes[n2][1];
+        T edz = x_nodes[n1][2] - x_nodes[n2][2];
+        T len_sq = edx*edx + edy*edy + edz*edz;
+        if (len_sq < h_min_sq) h_min_sq = len_sq;
+    }
+    return sqrt(h_min_sq);
+}
+
+template <typename T>
 class FEMSolver3D {
 public:
     FEMSolver3D();
@@ -287,9 +376,9 @@ public:
     void processErodedElementsToMPM();
 
     // Dynamic Execution Control
-    void step(T cfl = 0.3f);
+    void step(T cfl = 0.6f);
     void stepWithDt(T dt);
-    T computeStepSize(T cfl = 0.3f) const;
+    T computeStepSize(T cfl = 0.6f) const;
 
     // Boundary Conditions & Rigid Bodies
     void setNodeFixed(int node_idx, bool fix_x, bool fix_y, bool fix_z);

@@ -10,13 +10,13 @@
 
 using namespace Blast;
 
-void test_rc_box_internal_blast_simulation() {
+void test_rc_box_internal_blast_simulation(int argc, char** argv) {
     std::cout << "======================================================" << std::endl;
     std::cout << "=== RC BOX INTERNAL BLAST INTEGRATION TEST ===" << std::endl;
     std::cout << "======================================================" << std::endl;
 
     // 1. Ingest LS-DYNA RC Box
-    std::string k_filepath = "../hollow_concrete_box_2m_30mpa.k";
+    std::string k_filepath = (argc > 1) ? argv[1] : "hollow_concrete_box_2m_30mpa.k";
     std::vector<FEMNode3D<float>> nodes;
     std::vector<FEMElement3D<float>> elements;
     std::vector<FEMTrussElement3D<float>> trusses;
@@ -130,7 +130,7 @@ void test_rc_box_internal_blast_simulation() {
     std::cout << "======================================================" << std::endl;
 }
 
-int main() {
-    test_rc_box_internal_blast_simulation();
+int main(int argc, char** argv) {
+    test_rc_box_internal_blast_simulation(argc, argv);
     return 0;
 }

@@ -1721,15 +1721,10 @@ export class StateManager {
 
         const defaults: Record<string, Record<string, any>> = {
             'DomainMesh': {
-                dimension: '1D',
                 domain_radius: 1.0,
                 cell_size: 0.001,
                 left_bc: 'Transmitting',
-                right_bc: 'Transmitting',
-                y_min_bc: 'Reflecting',
-                y_max_bc: 'Reflecting',
-                z_min_bc: 'Reflecting',
-                z_max_bc: 'Reflecting'
+                right_bc: 'Transmitting'
             },
             'Material': {
                 material_type: 'Air',
@@ -1789,7 +1784,7 @@ export class StateManager {
             },
             'CFDSolver': {
                 init_mode: 'Multi-Material JWL',
-                cfl: 0.4,
+                cfl: 0.6,
                 flux_scheme: 'AUSM+',
                 spatial_order: 2,
                 temporal_order: 4,
@@ -1834,10 +1829,8 @@ export class StateManager {
                 voxelization_method: 'watertight_floodfill'
             },
             'RemapNode': {
-                explosive_x: 0.0,
-                explosive_y: 0.0,
-                explosive_z: 0.1,
                 explosive_r: 0.0,
+                explosive_z: 0.1,
                 remap_radius: 0.5,
                 trigger_type: 'end',
                 trigger_val: 0.0
@@ -1871,7 +1864,7 @@ export class StateManager {
             },
             'CFDSolver2D': {
                 init_mode: 'From1D',
-                cfl: 0.35,
+                cfl: 0.6,
                 flux_scheme: 'AUSM+',
                 spatial_order: 2,
                 temporal_order: 4,
@@ -1958,7 +1951,7 @@ export class StateManager {
                 charge_rot_z: 0.0
             },
             'CFDSolver3D': {
-                cfl: 0.4,
+                cfl: 0.6,
                 device: 'cpu',
                 init_mode: 'From1D',
                 flux_scheme: 'AUSM+',
@@ -2051,28 +2044,6 @@ export class StateManager {
                 beamShowColorbar: false,
                 beamMinVal: 0.0,
                 beamMaxVal: 0.05,
-                // Rebar Mesh Defaults
-                showRebar: true,
-                rebarSolid: true,
-                rebarWireframe: true,
-                rebarRadius: 0.008,
-                // VTK / File outputs
-                vtk_dir: '',
-                export_slices: true,
-                export_volumes: false,
-                custom_filename: 'vtk_output',
-                step_interval: 10,
-                time_interval: 0.0,
-                vtk_format: 'Binary',
-                qty_pressure: true,
-                qty_density: true,
-                qty_velocity: true,
-                qty_energy: true,
-                qty_reacted: true,
-                qty_unreacted: true,
-                qty_air: true,
-                qty_overpressure: true,
-                qty_impulse: true,
                 show_stl: true,
                 stl_colormap: 'plasma',
                 stl_wireframe: false,
@@ -2113,7 +2084,7 @@ export class StateManager {
                 flip_blend: 0.95,
                 smooth_plastic_strain: true,
                 ppc: 4,
-                cfl: 0.3
+                cfl: 0.6
             },
             'MPMDomain3D': {
                 device: 'cpu',
@@ -2124,7 +2095,7 @@ export class StateManager {
                 flip_blend: 0.95,
                 smooth_plastic_strain: true,
                 ppc: 8,
-                cfl: 0.3
+                cfl: 0.6
             },
             'MPMObject2D': {
                 shape_type: 'Rectangle',
@@ -2177,40 +2148,40 @@ export class StateManager {
                 nonlocal_radius: 0.0
             },
 
-            'FSICoupler2D': {},
-            'FSICoupler3D': {},
+            'FSICoupler2D': {
+                cfl: 0.6
+            },
+            'FSICoupler3D': {
+                cfl: 0.6
+            },
             'FEMDomain3D': {
                 device: 'cpu',
                 precision: 'single',
                 integration_scheme: 'OnePointFB',
                 hourglass_model: 'FlanaganBelytschkoStiffness',
                 hourglass_coeff: 0.10,
-                contact_penalty_scale: 1.0,
+                contact_penalty_scale: 0.1,
                 friction_static: 0.3,
                 friction_kinetic: 0.2,
                 convert_failed_elements_to_mpm: false,
                 mpm_particles_per_failed_element: 8,
                 material_heterogeneity: 0.08,
-                debris_velocity_smoothing: 0.25,
-                debris_clumping: 0.40,
+                debris_velocity_smoothing: 0.50,
+                debris_clumping: 0.60,
                 debris_max_clump_size: 8,
                 random_seed: 42,
                 enable_directional_crack_band: true,
                 enable_nonlocal_damage: true,
-                cfl: 0.4
+                cfl: 0.6
             },
             'FEMObject3D': {
-                mesh_source: 'Box Generator',
                 shape_type: 'Box',
                 boundary_condition: 'Free',
                 pos_x: 0.0, pos_y: 0.0, pos_z: 0.0,
                 size_x: 1.0, size_y: 1.0, size_z: 1.0,
-                radius: 0.1, inner_radius: 0.0, length: 0.2, height: 0.2,
+                radius: 0.1, inner_radius: 0.0, height: 0.2,
                 nx: 10, ny: 10, nz: 10,
                 vel_x: 0.0, vel_y: 0.0, vel_z: 0.0,
-                bulk_viscosity_b1: 0.06,
-                bulk_viscosity_b2: 1.20,
-                timestep_erosion_factor: 0.10,
                 k_file: ''
             },
             'LSDynaImporter3D': {
@@ -2218,8 +2189,7 @@ export class StateManager {
                 scale_factor: 1.0
             },
             'FEMFSICoupler3D': {
-                cfl: 0.30,
-                steps: 100,
+                cfl: 0.6,
                 coupling_scheme: 'Two-Way Staggered',
                 pressure_integration: '2x2 Gauss Quadrature',
                 uncovering_method: 'Conservative IDW + Vacuum Cavity',
@@ -2228,6 +2198,13 @@ export class StateManager {
                 vacuum_pressure: 1.0e-2
             }
         };
+
+        // Auto-heal RemapNode -> Remap1DTo2DNode
+        nodes.forEach(node => {
+            if (node.type === 'RemapNode') {
+                node.type = 'Remap1DTo2DNode';
+            }
+        });
 
         nodes.forEach(node => {
             if (!node.parameters) {
@@ -2271,13 +2248,33 @@ export class StateManager {
                 delete node.parameters['timestep_erosion_factor'];
                 delete node.parameters['contact_stiffness'];
             }
+            if (node.type === 'FEMFSICoupler3D') {
+                delete node.parameters['steps'];
+            }
             if (node.type === 'FEMObject3D') {
                 delete node.parameters['failure_strain'];
                 delete node.parameters['tensile_failure_stress'];
+                delete node.parameters['bulk_viscosity_b1'];
+                delete node.parameters['bulk_viscosity_b2'];
+                delete node.parameters['timestep_erosion_factor'];
+                delete node.parameters['length'];
+
+                // Migrate mesh_source -> shape_type
+                if (node.parameters['mesh_source']) {
+                    const src = node.parameters['mesh_source'];
+                    if (src === 'LS-DYNA Keyword File') node.parameters['shape_type'] = 'LS-DYNA File';
+                    else if (src === 'Cylinder Generator') node.parameters['shape_type'] = 'Cylinder';
+                    else if (src === 'Box Generator') node.parameters['shape_type'] = 'Box';
+                    delete node.parameters['mesh_source'];
+                }
                 if (!node.parameters['shape_type']) node.parameters['shape_type'] = 'Box';
-                if (!node.parameters['mesh_source']) node.parameters['mesh_source'] = 'Box Generator';
             }
             if (node.type === 'DomainMesh') {
+                delete node.parameters['dimension'];
+                delete node.parameters['y_min_bc'];
+                delete node.parameters['y_max_bc'];
+                delete node.parameters['z_min_bc'];
+                delete node.parameters['z_max_bc'];
                 if (node.parameters['x_min_bc'] !== undefined) {
                     node.parameters['left_bc'] = node.parameters['x_min_bc'];
                     delete node.parameters['x_min_bc'];
@@ -2313,11 +2310,44 @@ export class StateManager {
                 delete node.parameters['origin_y'];
                 delete node.parameters['origin_z'];
             }
+            if (node.type === 'Telemetry3DViewport') {
+                if (node.parameters['rebarRadius'] !== undefined && node.parameters['beamRadius'] === undefined) {
+                    node.parameters['beamRadius'] = node.parameters['rebarRadius'];
+                }
+                if (node.parameters['rebarSolid'] !== undefined && node.parameters['beamSolid'] === undefined) {
+                    node.parameters['beamSolid'] = node.parameters['rebarSolid'];
+                }
+                if (node.parameters['rebarWireframe'] !== undefined && node.parameters['beamWireframe'] === undefined) {
+                    node.parameters['beamWireframe'] = node.parameters['rebarWireframe'];
+                }
+                delete node.parameters['rebarRadius'];
+                delete node.parameters['rebarSolid'];
+                delete node.parameters['rebarWireframe'];
+                delete node.parameters['vtk_dir'];
+                delete node.parameters['export_slices'];
+                delete node.parameters['export_volumes'];
+                delete node.parameters['custom_filename'];
+                delete node.parameters['step_interval'];
+                delete node.parameters['time_interval'];
+                delete node.parameters['vtk_format'];
+            }
+
+            // Clean residual submesh keys
+            delete node.parameters['submesh_x'];
+            delete node.parameters['submesh_y'];
+            delete node.parameters['submesh_z'];
+            delete node.parameters['submesh_size_x'];
+            delete node.parameters['submesh_size_y'];
+            delete node.parameters['submesh_size_z'];
+            delete node.parameters['refinement_level'];
+            delete node.parameters['refinement_opacity'];
+
             if (!node.displayMode) {
                 node.displayMode = 'expanded';
             }
-            // Self-healing: if charge_radius/lx/ly/lz exists but charge_mass is missing, calculate charge_mass first so it doesn't get overwritten by defaults
-            if ((node.type === 'Charge1D' || node.type === 'Charge2D' || node.type === 'Charge3D') && node.parameters['charge_mass'] === undefined) {
+            // Self-healing: Mass always dominates charge definition.
+            // If charge_mass is missing or <= 0, compute charge_mass from geometry and density.
+            if (node.type === 'Charge1D' || node.type === 'Charge2D' || node.type === 'Charge3D') {
                 let rho = 1630.0;
                 let model: { nodes: Node[], connections: Connection[] } | null = stateObj || null;
                 if (!model) {
@@ -2336,21 +2366,24 @@ export class StateManager {
                     }
                 }
                 const shape = node.parameters['charge_shape'] || 'Sphere';
-                if (shape === 'Sphere') {
-                    const radius = Number(node.parameters['charge_radius'] !== undefined ? node.parameters['charge_radius'] : 0.1);
-                    node.parameters['charge_mass'] = (4.0 / 3.0) * Math.PI * Math.pow(radius, 3.0) * rho;
-                } else if (shape === 'Cylinder') {
-                    const radius = Number(node.parameters['charge_radius'] !== undefined ? node.parameters['charge_radius'] : 0.1);
-                    const height = Number(node.parameters['charge_height'] !== undefined ? node.parameters['charge_height'] : 0.2);
-                    node.parameters['charge_mass'] = Math.PI * radius * radius * height * rho;
-                    if (node.parameters['charge_aspect_ratio'] === undefined && radius > 0) {
-                        node.parameters['charge_aspect_ratio'] = height / (2.0 * radius);
+                const currentMass = Number(node.parameters['charge_mass']);
+                if (isNaN(currentMass) || currentMass <= 0) {
+                    if (shape === 'Sphere') {
+                        const radius = Number(node.parameters['charge_radius'] !== undefined ? node.parameters['charge_radius'] : 0.1);
+                        node.parameters['charge_mass'] = (4.0 / 3.0) * Math.PI * Math.pow(radius, 3.0) * rho;
+                    } else if (shape === 'Cylinder') {
+                        const radius = Number(node.parameters['charge_radius'] !== undefined ? node.parameters['charge_radius'] : 0.1);
+                        const height = Number(node.parameters['charge_height'] !== undefined ? node.parameters['charge_height'] : 0.2);
+                        node.parameters['charge_mass'] = Math.PI * radius * radius * height * rho;
+                        if (node.parameters['charge_aspect_ratio'] === undefined && radius > 0) {
+                            node.parameters['charge_aspect_ratio'] = height / (2.0 * radius);
+                        }
+                    } else if (shape === 'Block') {
+                        const lx = Number(node.parameters['charge_lx'] !== undefined ? node.parameters['charge_lx'] : 0.2);
+                        const ly = Number(node.parameters['charge_ly'] !== undefined ? node.parameters['charge_ly'] : 0.2);
+                        const lz = Number(node.parameters['charge_lz'] !== undefined ? node.parameters['charge_lz'] : 0.2);
+                        node.parameters['charge_mass'] = lx * ly * lz * rho;
                     }
-                } else if (shape === 'Block') {
-                    const lx = Number(node.parameters['charge_lx'] !== undefined ? node.parameters['charge_lx'] : 0.2);
-                    const ly = Number(node.parameters['charge_ly'] !== undefined ? node.parameters['charge_ly'] : 0.2);
-                    const lz = Number(node.parameters['charge_lz'] !== undefined ? node.parameters['charge_lz'] : 0.2);
-                    node.parameters['charge_mass'] = lx * ly * lz * rho;
                 }
             }
             if ((node.type === 'Charge2D' || node.type === 'Charge3D') && node.parameters['charge_aspect_ratio'] === undefined) {
@@ -2782,136 +2815,14 @@ function syncExplosiveParameters(node: Node, parameters: Record<string, any>, st
     }
 }
 
-function getConnectedRefinementNodes(rootNodeId: string, state: SimulationState): Node[] {
-    const connected: Node[] = [];
-    const visited = new Set<string>();
-
-    const traverse = (parentId: string) => {
-        if (visited.has(parentId)) return;
-        visited.add(parentId);
-
-        const conns = state.connections.filter(c => c.fromNode === parentId);
-        for (const conn of conns) {
-            const childNode = state.nodes.find(n => n.id === conn.toNode);
-            if (childNode && childNode.type === 'RefinementMesh3D' && !visited.has(childNode.id)) {
-                connected.push(childNode);
-                traverse(childNode.id);
-            }
-        }
-    };
-
-    traverse(rootNodeId);
-    return connected;
-}
-
-export function calculateRefinementMeshInfo(node: Node, state: SimulationState) {
-    const rawSx = Number(node.parameters['submesh_size_x'] ?? 0.5);
-    const rawSy = Number(node.parameters['submesh_size_y'] ?? 0.5);
-    const rawSz = Number(node.parameters['submesh_size_z'] ?? 0.5);
-    const rawX = Number(node.parameters['submesh_x'] ?? 0.25);
-    const rawY = Number(node.parameters['submesh_y'] ?? 0.25);
-    const rawZ = Number(node.parameters['submesh_z'] ?? 0.25);
-    const lvl = Number(node.parameters['refinement_level'] ?? 1);
-
-    let rootMeshNode: Node | null = null;
-    let currNode: Node | undefined = node;
-    let depth = 0;
-    while (currNode && depth < 20) {
-        const parentConn = state.connections.find(c => c.toNode === currNode!.id && c.toPort === 'parent_mesh');
-        if (!parentConn) break;
-        currNode = state.nodes.find(n => n.id === parentConn.fromNode);
-        if (currNode && currNode.type === 'DomainMesh3D') {
-            rootMeshNode = currNode;
-            break;
-        }
-    }
-
-    if (!rootMeshNode) {
-        rootMeshNode = state.nodes.find(n => n.type === 'DomainMesh3D') || null;
-    }
-
-    const parentCellSize = Number(rootMeshNode?.parameters['cell_size'] ?? 0.01);
-    
-    let parentNx = 100, parentNy = 100, parentNz = 100;
-    let rootXMin = 0.0, rootYMin = 0.0, rootZMin = 0.0;
-    if (rootMeshNode) {
-        rootXMin = Number(rootMeshNode.parameters['xmin'] ?? rootMeshNode.parameters['origin_x'] ?? 0.0);
-        const xmax = Number(rootMeshNode.parameters['xmax'] ?? (rootXMin + (rootMeshNode.parameters['dim_x'] ?? 1.0)));
-        rootYMin = Number(rootMeshNode.parameters['ymin'] ?? rootMeshNode.parameters['origin_y'] ?? 0.0);
-        const ymax = Number(rootMeshNode.parameters['ymax'] ?? (rootYMin + (rootMeshNode.parameters['dim_y'] ?? 1.0)));
-        rootZMin = Number(rootMeshNode.parameters['zmin'] ?? rootMeshNode.parameters['origin_z'] ?? 0.0);
-        const zmax = Number(rootMeshNode.parameters['zmax'] ?? (rootZMin + (rootMeshNode.parameters['dim_z'] ?? 1.0)));
-        const dim_x = xmax - rootXMin;
-        const dim_y = ymax - rootYMin;
-        const dim_z = zmax - rootZMin;
-        parentNx = Math.max(1, Math.round(dim_x / parentCellSize));
-        parentNy = Math.max(1, Math.round(dim_y / parentCellSize));
-        parentNz = Math.max(1, Math.round(dim_z / parentCellSize));
-    }
-    const parentTotalCells = parentNx * parentNy * parentNz;
-
-    const ix0 = Math.round((rawX - rootXMin) / parentCellSize);
-    const ix1 = Math.round((rawX + rawSx - rootXMin) / parentCellSize);
-    const sx = Math.max(parentCellSize, (Math.max(ix0 + 1, ix1) - ix0) * parentCellSize);
-
-    const jy0 = Math.round((rawY - rootYMin) / parentCellSize);
-    const jy1 = Math.round((rawY + rawSy - rootYMin) / parentCellSize);
-    const sy = Math.max(parentCellSize, (Math.max(jy0 + 1, jy1) - jy0) * parentCellSize);
-
-    const kz0 = Math.round((rawZ - rootZMin) / parentCellSize);
-    const kz1 = Math.round((rawZ + rawSz - rootZMin) / parentCellSize);
-    const sz = Math.max(parentCellSize, (Math.max(kz0 + 1, kz1) - kz0) * parentCellSize);
-
-    const refinedCellSize = parentCellSize / Math.pow(2, lvl);
-    const subNx = Math.max(1, Math.round(sx / refinedCellSize));
-    const subNy = Math.max(1, Math.round(sy / refinedCellSize));
-    const subNz = Math.max(1, Math.round(sz / refinedCellSize));
-    const subTotalCells = subNx * subNy * subNz;
-
-    // Sum all subgrids attached in this simulation model / domain tree
-    let allSubgridCells = 0;
-    if (rootMeshNode) {
-        const refNodes = getConnectedRefinementNodes(rootMeshNode.id, state);
-        for (const refNode of refNodes) {
-            const rsx_raw = Number(refNode.parameters['submesh_size_x'] ?? 0.5);
-            const rsy_raw = Number(refNode.parameters['submesh_size_y'] ?? 0.5);
-            const rsz_raw = Number(refNode.parameters['submesh_size_z'] ?? 0.5);
-            const rx_raw = Number(refNode.parameters['submesh_x'] ?? 0.25);
-            const ry_raw = Number(refNode.parameters['submesh_y'] ?? 0.25);
-            const rz_raw = Number(refNode.parameters['submesh_z'] ?? 0.25);
-            const rlvl = Number(refNode.parameters['refinement_level'] ?? 1);
-
-            const rix0 = Math.round((rx_raw - rootXMin) / parentCellSize);
-            const rix1 = Math.round((rx_raw + rsx_raw - rootXMin) / parentCellSize);
-            const rsx = Math.max(parentCellSize, (Math.max(rix0 + 1, rix1) - rix0) * parentCellSize);
-
-            const rjy0 = Math.round((ry_raw - rootYMin) / parentCellSize);
-            const rjy1 = Math.round((ry_raw + rsy_raw - rootYMin) / parentCellSize);
-            const rsy = Math.max(parentCellSize, (Math.max(rjy0 + 1, rjy1) - rjy0) * parentCellSize);
-
-            const rkz0 = Math.round((rz_raw - rootZMin) / parentCellSize);
-            const rkz1 = Math.round((rz_raw + rsz_raw - rootZMin) / parentCellSize);
-            const rsz = Math.max(parentCellSize, (Math.max(rkz0 + 1, rkz1) - rkz0) * parentCellSize);
-
-            const rCellSize = parentCellSize / Math.pow(2, rlvl);
-            const rNx = Math.max(1, Math.round(rsx / rCellSize));
-            const rNy = Math.max(1, Math.round(rsy / rCellSize));
-            const rNz = Math.max(1, Math.round(rsz / rCellSize));
-            allSubgridCells += (rNx * rNy * rNz);
-        }
-    } else {
-        allSubgridCells = subTotalCells;
-    }
-
-    const newTotalCells = parentTotalCells + allSubgridCells;
-
+export function calculateRefinementMeshInfo(_node?: Node, _state?: SimulationState) {
     return {
-        subNx, subNy, subNz,
-        subTotalCells,
-        parentTotalCells,
-        allSubgridCells,
-        newTotalCells,
-        hasParent: !!rootMeshNode
+        subNx: 0, subNy: 0, subNz: 0,
+        subTotalCells: 0,
+        parentTotalCells: 0,
+        allSubgridCells: 0,
+        newTotalCells: 0,
+        hasParent: false
     };
 }
 
@@ -2928,45 +2839,22 @@ export function getMeshDisplayHTML(node: Node, state?: SimulationState): string 
         const nz = Math.round(max_z / cellSize);
         return `<div>Calculated Grid: ${nr} x ${nz} cells (Total: ${(nr * nz).toLocaleString()})</div>`;
     } else if (node.type === 'DomainMesh3D') {
-        const xmin = Number(node.parameters['xmin'] ?? node.parameters['origin_x'] ?? 0.0);
-        const xmax = Number(node.parameters['xmax'] ?? (xmin + (node.parameters['dim_x'] ?? 1.0)));
-        const ymin = Number(node.parameters['ymin'] ?? node.parameters['origin_y'] ?? 0.0);
-        const ymax = Number(node.parameters['ymax'] ?? (ymin + (node.parameters['dim_y'] ?? 1.0)));
-        const zmin = Number(node.parameters['zmin'] ?? node.parameters['origin_z'] ?? 0.0);
-        const zmax = Number(node.parameters['zmax'] ?? (zmin + (node.parameters['dim_z'] ?? 1.0)));
+        const xmin = Number(node.parameters['xmin'] ?? 0.0);
+        const xmax = Number(node.parameters['xmax'] ?? 1.0);
+        const ymin = Number(node.parameters['ymin'] ?? 0.0);
+        const ymax = Number(node.parameters['ymax'] ?? 1.0);
+        const zmin = Number(node.parameters['zmin'] ?? 0.0);
+        const zmax = Number(node.parameters['zmax'] ?? 1.0);
 
-        const dim_x = xmax - xmin;
-        const dim_y = ymax - ymin;
-        const dim_z = zmax - zmin;
+        const dim_x = Math.max(0.0001, xmax - xmin);
+        const dim_y = Math.max(0.0001, ymax - ymin);
+        const dim_z = Math.max(0.0001, zmax - zmin);
         const nx = Math.round(dim_x / cellSize);
         const ny = Math.round(dim_y / cellSize);
         const nz = Math.round(dim_z / cellSize);
         const currentCells = nx * ny * nz;
 
-        let totalSubgridCells = 0;
-        if (state) {
-            const refNodes = getConnectedRefinementNodes(node.id, state);
-            for (const refNode of refNodes) {
-                const stats = calculateRefinementMeshInfo(refNode, state);
-                totalSubgridCells += stats.subTotalCells;
-            }
-        }
-
-        if (totalSubgridCells > 0) {
-            return `<div>Calculated Grid: ${nx} x ${ny} x ${nz} (${currentCells.toLocaleString()} cells)</div><div>Total Grid (w/ Subgrids): ${(currentCells + totalSubgridCells).toLocaleString()} cells</div>`;
-        } else {
-            return `<div>Calculated Grid: ${nx} x ${ny} x ${nz} cells (Total: ${currentCells.toLocaleString()})</div>`;
-        }
-    } else if (node.type === 'RefinementMesh3D') {
-        if (state) {
-            const stats = calculateRefinementMeshInfo(node, state);
-            return `<div>Refined Region: ${stats.subNx} x ${stats.subNy} x ${stats.subNz} (${stats.subTotalCells.toLocaleString()} cells)</div><div>Total Grid (w/ Parent): ${stats.newTotalCells.toLocaleString()} cells</div>`;
-        } else {
-            const sx = Number(node.parameters['submesh_size_x'] ?? 0.5);
-            const sy = Number(node.parameters['submesh_size_y'] ?? 0.5);
-            const sz = Number(node.parameters['submesh_size_z'] ?? 0.5);
-            return `<div>SubMesh (${sx}m x ${sy}m x ${sz}m)</div>`;
-        }
+        return `<div>Calculated Grid: ${nx} x ${ny} x ${nz} cells (Total: ${currentCells.toLocaleString()})</div>`;
     }
     return '';
 }
