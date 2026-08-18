@@ -137,3 +137,340 @@ The following parameters are designated for integration into `FEMDomain3D` and `
 
 ### 2.3 Non-Reflecting Perfectly Matched Layers (PML) for 3D Elastic Substrates
 * Second-order absorbing boundary conditions for semi-infinite geotechnical soil domains to prevent unphysical acoustic wave reflection during underground blasts.
+
+---
+
+## 3. Large-Scale Model Decomposition & Distributed Architecture Roadmap
+
+### 3.1 Problem Statement & Scaling Objectives
+As simulation models grow to high resolutions (e.g. hundreds of millions of Eulerian CFD cells, fine-scale 3D structural FEM shells, and dense MPM debris fields), global model state requirements can exceed the VRAM capacity of a single discrete GPU (16–24 GB consumer, 48–80 GB datacenter). 
+
+To support arbitrarily large blast models while adhering to BlastDemon's **Zero-Dependency Mandate** (pure C++20 standard library, raw POSIX sockets, raw CUDA, and HDF5 C API), the framework must support a multi-tiered scaling strategy.
+
+```
++----------------------------------------------------------------------------------------------------+
+|                                 BLASTDEMON SCALING PARADIGMS                                       |
++------------------------------------+-----------------------------------+---------------------------+
+| 1. Out-of-Core Host Streaming      | 2. Single-Node Multi-GPU          | 3. Distributed Clusters   |
+| (1 GPU, Model in Host RAM)         | (2-8 GPUs, Direct NVLink/P2P)     | (Multi-Node GPU / CPU)    |
+| - Brick decomposition              | - Zero-host-bounce P2P halos      | - Raw POSIX network sync  |
+| - Double-buffered async streams    | - 1D slab or 3D block partition   | - Interior/halo overlap   |
+| - Space-time skewing for PCIe      | - Unified P2P event sync          | - Multi-TB aggregate RAM  |
++------------------------------------+-----------------------------------+---------------------------+
+| 4. Heterogeneous Execution: GPU Shock Hydrodynamics + CPU Structural FEM / Non-linear Contact     |
++----------------------------------------------------------------------------------------------------+
+```
+
+---
+
+### 3.2 Single-GPU Out-of-Core Execution (Host RAM Streaming)
+
+* **Architecture:** Global simulation domain resides in host system RAM (128 GB to 1+ TB). GPU VRAM is utilized as an active compute cache executing over sub-blocks/tiles.
+* **Eulerian CFD Tiling:**
+  - Decompose 3D domain into uniform bricks (`Nx × Ny × Nz`) with a ghost cell halo (2 cells for 2nd-order MUSCL/ADER-2, 3 cells for ADER-3).
+  - Use dual CUDA streams with double-buffering: Stream 1 executes compute kernels on Tile `K`, while Stream 2 asynchronously transfers updated Tile `K-1` back to host (`D2H`) and streams Tile `K+1` with ghost padding to device (`H2D`).
+  - **Space-Time Tiling (Time-Skewing):** To overcome PCIe memory bandwidth bottlenecks (~31.5 GB/s on PCIe 4.0 vs ~1 TB/s VRAM), each tile is advanced by `M` time steps per streaming pass using an expanded ghost halo of width `M × stencil_radius`, amortizing host-device transfer latencies.
+* **Lagrangian FEM & MPM:**
+  - FEM: Sub-mesh graph partitioning (METIS-style or spatial bounding); element internal forces computed per chunk and accumulated into global host node buffers.
+  - MPM: Host-side spatial binning/sorting of material points before streaming sub-grid blocks and local particles to device.
+
+---
+
+### 3.3 Single-Node Multi-GPU Parallelism (NVLink / Direct P2P)
+
+* **Architecture:** Distribute the simulation across 2 to 8 local GPUs within a single workstation or server node.
+* **Direct Peer-to-Peer Halo Exchanges:**
+  - Eliminate Host RAM bouncing by establishing direct GPU-to-GPU peer transfers via `cudaDeviceEnablePeerAccess` and `cudaMemcpyPeerAsync`.
+  - Zero external communications libraries required (no NCCL/MPI dependency), fully compliant with Master Directives.
+* **Domain Decomposition Strategy:**
+  - **1D Slab (Z-Slicing):** Memory-contiguous slices across GPUs for 2–4 card configurations.
+  - **3D Brick Decomposition:** Minimizes surface-to-volume communication ratios for 4–8+ GPU setups.
+* **Execution Pipeline per Time Step:**
+  1. Launch asynchronous interior domain update kernels on GPU stream 0.
+  2. Asynchronously pack and stream halo boundary slices directly to adjacent peer GPUs via stream 1.
+  3. Synchronize halo boundaries and compute interface flux reconstructions.
+  4. Perform 2nd-order temporal updates (ADER-2 / SSP-RK2 / symplectic leapfrog).
+
+---
+
+### 3.4 Multi-Node Distributed Systems (Multi-GPU & Pure CPU)
+
+* **Multi-Node Multi-GPU Clusters:**
+  - Combines on-node multi-GPU P2P streams with inter-node network communications.
+  - **Zero-Dependency Inter-Node Messaging:** Uses non-blocking POSIX sockets (`<sys/socket.h>`) with pre-pinned page-locked halo buffers, or an optional isolated MPI backend wrapper.
+  - **Communication-Computation Overlap:** Global interior cells (~85–90% of workload) advance concurrently while asynchronous non-blocking network calls exchange subdomain boundary faces.
+* **Multi-Node Pure CPU:**
+  - Uses C++20 `std::jthread` thread pools and SIMD vectorization (AVX-512 / AVX2) across multi-socket CPU nodes.
+  - Enables execution of massive models constrained only by cluster system RAM (terabytes to tens of terabytes) without VRAM limits or PCIe transfer bottlenecks.
+
+---
+
+### 3.5 Heterogeneous Hardware Partitioning (GPU + CPU Co-Processing)
+
+* **Multi-Physics Separation (FSI Coupling):**
+  - **GPU:** Dedicated to the high-order Eulerian Cartesian shock hydrodynamics grid and active MPM debris field (maximizing SIMD warp throughput and memory bandwidth).
+  - **CPU:** Dedicated to irregular Lagrangian FEM structural elements, non-linear shell contact search trees, failure erosion logic, and rebar debonding.
+  - **Coupling Boundary:** Only fluid-structure interface surface loads and immersed boundary velocity points are exchanged across the host-device boundary during FSI sub-cycling.
+* **Asynchronous Telemetry & Disk I/O:**
+  - CPU worker threads manage telemetry packaging, probe interpolation, and heavy XDMF + HDF5 volumetric disk writes concurrently in the background, preventing GPU pipeline stalls.
+
+---
+
+## 4. Multi-Scale Explosive Detonation & High-Expansion Hydrocode Strategy
+
+### 4.1 Problem Statement & Background
+When modeling high-energy explosive detonations (such as TNT, PETN, or RDX governed by the Jones-Wilkins-Lee (JWL) Equation of State), the material undergoes extreme physical state transitions:
+1. **Initial High-Density Condensed Phase:** Solid explosive density rho_0 ~ 1500 to 1800 kg/m^3 under Chapman-Jouguet detonation pressures (P_CJ ~ 20 to 40 GPa).
+2. **Intermediate Rapid Expansion:** High-pressure gas products expand rapidly, reducing density by 10x to 50x (rho ~ 30 to 150 kg/m^3) while accelerating casing metal or surrounding concrete structures.
+3. **Deep Far-Field Gaseous Phase:** Detonation products disperse across multiple orders of magnitude of volume into ambient air (rho < 30 kg/m^3 down to rho_air ~ 1.2 kg/m^3).
+
+In standard Material Point Method (MPM), treating expanding materials with single point-mass particles or fixed-size kernels leads to severe numerical failure modes:
+* **Particle Starvation & Grid-Crossing Voids:** As particles move apart, cells become empty, breaking continuum stress gradients and generating artificial numerical cavitation.
+* **Stencil Explosion from Over-Sized Domains:** Letting single particle domains stretch across dozens of grid cells degrades spatial resolution and severely degrades GPU neighbor-search performance.
+* **Particle Count Explosion:** Splitting particles endlessly into the far-field gas phase causes exponential particle count growth, exhausting GPU VRAM.
+
+---
+
+### 4.2 The Tri-Phase Multi-Scale Architecture
+
+To simulate the entire physical lifecycle accurately and efficiently, the framework adopts a unified tri-phase progression combining **Convected Particle Domain Interpolation (CPDI)**, **Adaptive Octree Particle Splitting**, and **Lagrangian-to-Eulerian Fluid Hand-off**:
+
+```
+[ Phase 1: Detonation & Early Expansion ]
+- Density: ~1500 down to ~400 kg/m^3 (J = 1.0 to ~4.0)
+- Mechanism: CPDI / Deforming Particle Domains
+- Action: Track continuous volumetric expansion with deformation gradient F_p.
+          Zero grid-crossing noise, continuous domain contact, no artificial cavitation.
+
+                     │  (Particle radius exceeds ~1.2 * cell_size dx_g)
+                     ▼
+
+[ Phase 2: Intermediate Expansion & Casing Acceleration ]
+- Density: ~400 down to ~30 kg/m^3 (J = ~4.0 to ~50.0)
+- Mechanism: Adaptive Octree Particle Splitting
+- Action: Parent particle splits into 8 child particles (3D) or 4 child particles (2D).
+          Strict conservation of mass, momentum, internal energy, and stress state.
+          Maintains 4 to 16 Particles-Per-Cell (PPC) for sharp pressure gradient capture.
+
+                     │  (Density drops below rho_handoff, e.g., < 30 kg/m^3)
+                     ▼
+
+[ Phase 3: Far-Field Blast Wave & Atmospheric Dispersion ]
+- Density: < 30 kg/m^3 down to ambient air density ~1.2 kg/m^3 (J > 50.0)
+- Mechanism: Lagrangian-to-Eulerian Fluid Hand-off
+- Action: Conservative deposition of particle mass, momentum, and JWL energy into Eulerian CFD grid.
+          Particles are pruned/recycled into pre-allocated memory pools.
+          High-order shock-capturing CFD (ADER-2 / TVD) propagates long-range atmospheric blast waves.
+```
+
+---
+
+### 4.3 Heterogeneous & Material-Selective Transfer Schemes
+
+To maximize GPU performance and avoid numerical instabilities, transfer schemes are assigned **per-material table / object** rather than globally:
+
+* **Mathematical Validity (Partition of Unity):** Because particle-to-grid (P2G) and grid-to-particle (G2P) mappings are evaluated independently per particle p, any combination of CPDI, GIMP, and B-Spline particles can coexist on the same background grid while guaranteeing exact global conservation of mass, linear momentum, and angular momentum:
+  ```
+  sum_i N_ip = 1.0  (for all nodes i surrounding particle p)
+  ```
+* **Targeted Compute Efficiency:** CPDI carries higher arithmetic and memory bandwidth cost (~2.5x to 4x baseline) due to polyhedron vertex convection and gradient volume integrals. Applying CPDI strictly to the expanding explosive (5-15% of total particles) while using ultra-fast B-Splines / GIMP for structural solids (85-95% of particles) yields full anti-cavitation benefits with minimal computational overhead.
+* **Elimination of Shear Domain Tangling in Solids:** Under severe plastic shear localization or brittle fracture, CPDI polyhedron corners in solid metals or concrete can distort into needle-like or self-intersecting geometries. Using B-Splines or standard GIMP for solid structures prevents domain tangling while CPDI cleanly handles pure volumetric gas expansion.
+
+#### Material Transfer Scheme Selection Matrix
+
+| Material Type | Primary Deformation Mode | Recommended Transfer Scheme | Engineering Rationale |
+| :--- | :--- | :--- | :--- |
+| **Explosives (JWL / High-P Gas)** | Extreme Volumetric Expansion | **CPDI** (+ Adaptive Splitting) | Keeps expanding gaseous core continuous; prevents artificial cavitation voids. |
+| **Metals (Johnson-Cook / Steel)** | High Shear, Moderate Dilatation | **Quadratic B-Splines** or **GIMP** | High-speed throughput, robust against shear distortion, zero grid-crossing noise. |
+| **Concrete / Brittle Rocks (RHT, K&C)** | Shear Failure, Tensile Cracking | **Quadratic B-Splines** | Smooth gradient evaluation for crack-band damage models without mesh bias. |
+| **Eroded Debris / Granular Gravel** | Bulk Flow, Sliding, Separation | **Standard APIC / GIMP** | Prevents artificial numerical tensile cohesion between separated gravel grains. |
+
+---
+
+### 4.4 Technical Formulations & Conservation Rules
+
+#### A. CPDI Deforming Polyhedron Kinematics
+* In 3D, each particle domain is represented by an 8-node hexahedron whose corner vertices r_c(t) track the continuous continuum deformation:
+  ```
+  r_c(t) = x_p(t) + F_p * r_c(0)
+  ```
+* Volume and density evolve consistently:
+  ```
+  V_p = det(F_p) * V_p0
+  rho_p = rho_p0 / det(F_p)
+  ```
+* Stress divergence forces are integrated over the deforming polyhedron domain before projecting to background grid nodes, guaranteeing smooth C1-like nodal force transitions.
+
+#### B. Octree Particle Splitting & Conservation
+* **Trigger Threshold:** Evaluated after the grid-to-particle stage:
+  ```
+  effective_radius = (V_p)^(1/3) > alpha_split * dx_grid  (typically alpha_split = 1.0 to 1.25)
+  ```
+* **Octree Child Properties (3D):**
+  * Mass & Volume: `m_child = m_parent / 8`, `V0_child = V0_parent / 8`, `lp_child = lp_parent / 2`
+  * Spatial Positioning: Children are placed at the 8 sub-octant centroids of the parent deforming domain.
+  * Velocity & APIC Tensor: `v_child = v_parent + B_parent * delta_x_child`
+  * State History: Children inherit specific internal energy `e_int`, temperature, plastic strain, and deformation gradient `F_p`, preserving total kinetic and internal energy.
+
+#### C. Conservative Eulerian CFD Hand-off
+* **Trigger Threshold:**
+  ```
+  rho_p < rho_handoff_threshold  (e.g., 30.0 kg/m^3)  OR  det(F_p) > J_handoff_threshold (e.g., 50.0)
+  ```
+* **Deposition Pipeline:**
+  * Deposit particle mass, momentum, and JWL total energy into overlapping Eulerian CFD cells using standard shape weights `N_cell(x_p)`.
+  * Update multi-material gas volume fractions and fluid conservative variables (`rho`, `rho * u`, `E_total`).
+  * Remove converted particles from the active MPM particle buffer and return indices to a pre-allocated GPU free-slot stack, capping peak VRAM consumption.
+
+---
+
+### 4.5 Planned UI & Parameter Integration
+
+The following parameters are designated for integration into the `MPMDomain3D`, `MaterialTable3D`, and `FSICoupler3D` node schemas:
+
+| Parameter Key | UI Label | Type / Default | Engineering Purpose |
+| :--- | :--- | :--- | :--- |
+| `transfer_scheme` | Particle Transfer Scheme | Enum (`BSpline`, `GIMP`, `CPDI`, `Standard`) | Sets per-material interpolation and domain tracking kernel. |
+| `enable_particle_splitting` | Adaptive Particle Splitting | Boolean (`true`) | Enables dynamic octree refinement when particle volume exceeds grid size. |
+| `split_size_ratio` | Splitting Size Threshold | Number / Float (`1.20`) | Ratio of particle effective radius to grid cell size `dx` triggering a split. |
+| `max_split_generations` | Max Splitting Generations | Integer (`2`) | Caps maximum refinement depth per initial particle to prevent VRAM overflow. |
+| `enable_cfd_handoff` | Eulerian CFD Hand-off | Boolean (`true`) | Automatically transitions over-expanded gas particles into Eulerian CFD cells. |
+| `handoff_density_cutoff` | Hand-off Density Cutoff | Number / Float (`30.0 kg/m^3`) | Density threshold below which particles are converted to Eulerian fluid. |
+| `handoff_j_cutoff` | Hand-off Volume Ratio (J) | Number / Float (`50.0`) | Volumetric expansion ratio triggering immediate transfer to Eulerian CFD. |
+
+---
+
+## 5. Debris & Fragment Aerodynamics in Void / Low-Density Cavities (Anti-Flicker Strategy)
+
+### 5.1 Problem Statement & Numerical Mechanisms
+When high-velocity FEM structural fragments and eroded MPM debris fly through low-pressure, low-density, or void/cavity regions (such as post-detonation expansion zones, structural breach voids, or interior vacuum pockets), a severe visual and physical flickering of the surrounding Eulerian pressure field is observed. 
+
+This numerical artifact stems from four interrelated physical and algorithmic mechanisms:
+
+```
++---------------------------------------------------------------------------------------------------------+
+|                        Debris & Fragment Flight in Low-Density / Cavity Regions                         |
++---------------------------------------------------------------------------------------------------------+
+       |                                |                               |                        |
+       v                                v                               v                        v
++------------------+     +-------------------------------+     +--------------------+   +--------------------+
+| 1. Voxelization  |     | 2. Rarefaction Wake Clamping  |     | 3. EOS Sensitivity |   | 4. IBM Stencil     |
+|    Shocks        |     |    - Severe suction wake      |     |    in Near-Vacuum  |   |    Starvation      |
+| - Binary mask    |     |    - p drops below zero       |     | - p = (γ-1)(E-KE)  |   | - Donor clipping   |
+|   jumping        |     |    - Floor clamp oscillation  |     | - Δp / p >> 100%   |   |   near walls/voids |
++------------------+     +-------------------------------+     +--------------------+   +--------------------+
+```
+
+1. **Binary Staircase Grid-Crossing Transients (Voxelization Shocks):**
+   * Solid boundaries are currently rasterized onto the Cartesian finite-volume grid using a binary occupancy mask (`solid_mask = 1` or `0`).
+   * As fragments travel across the mesh at velocity `v`, cells transition discontinuously between 100% fluid and 100% solid at the grid-crossing frequency `f_cross = v / Δx`.
+   * Covering abruptly blocks Eulerian fluxes; uncovering triggers instantaneous Inverse Distance Weighting (IDW) extrapolation from neighbors. In low-density void regions with minimal acoustic damping, these step discontinuities radiate spurious high-frequency acoustic wavelets.
+
+2. **Extreme Rarefaction Wakes & Pressure Floor Bouncing:**
+   * High-speed projectile motion through a cavity induces an extreme expansion/suction fan in the trailing wake.
+   * In low-density pockets where ambient pressure `p_ambient` is already near zero, the Eulerian expansion flux attempts to drive cell pressure below zero.
+   * The solver clips pressure to the numerical floor (`p_floor = 1e-7 Pa`). In subsequent substeps, numerical diffusion or neighbor IDW extrapolation injects minute amounts of energy, lifting `p` above the floor before the next expansion step drops it back. This limit-cycle alternation manifests as a stroboscopic checkerboard flicker in the wake.
+
+3. **Hyper-Sensitivity of the Conservative Equation of State in Low-Density Media:**
+   * Primitive pressure is derived from total conservative energy `E` and momentum `ρ·u`:
+     ```text
+     p = (γ - 1) · [ E - 0.5 · ρ · (ux² + uy² + uz²) ]
+     ```
+   * When `ρ → 0`, both `E` and kinetic energy `0.5 · ρ · |u|²` are extremely small numbers.
+   * A trivial truncation error (e.g. `10⁻⁵ J/m³`) that is utterly negligible in ambient air produces a relative pressure fluctuation `Δp / p >> 100%` in near-vacuum zones, visually dominating dynamic pressure colormaps.
+
+4. **Immersed Boundary (IBM) Stencil Starvation & Half-Space Switching:**
+   * Ghost-cell velocity reflections (`u_refl = vw + u_rel - 2·(u_rel·n)·n`) and pressure reconstructions require sampling fluid donor cells in the outward surface normal direction `n`.
+   * In tight cavities, structural breaches, or dense debris swarms, neighboring solid bodies clip donor sample points. As the fragment moves, available donor sets alternate abruptly between 1, 2, or 3 cells, feeding oscillating reflective wall fluxes back into the fluid.
+
+#### Comparison of Mechanisms & Symptoms
+
+| Mechanism | Primary Trigger Condition | Numerical Consequence | Visual & Physical Manifestation |
+| :--- | :--- | :--- | :--- |
+| **Voxelization Shocks** | Fast fragment crossing grid lines `Δx` | Discontinuous boundary state insertion | High-frequency halo flickering around fragments |
+| **Rarefaction Clamping** | Supersonic suction wake in void cavity | Alternation between `p_floor` and neighbor diffusion | Stroboscopic flashing in trailing wake |
+| **Conservative EOS Error** | Low fluid density (`ρ < 10⁻³ kg/m³`) | Magnified relative pressure errors (`Δp / p`) | High-contrast noise in near-vacuum zones |
+| **Stencil Starvation** | Proximity to structural walls/debris | Jumps in IDW donor cell availability | Asymmetric, erratic pressure bursts on surfaces |
+
+---
+
+### 5.2 Proposed Architecture & Anti-Flicker Pipeline
+
+```
++----------------------------------------------------------------------------------------------------+
+|                                    Anti-Flicker FSI Pipeline                                       |
++----------------------------------------------------------------------------------------------------+
+                                                   |
+                                                   v
++----------------------------------------------------------------------------------------------------+
+| 1. Scale-Aware Entity Classification                                                               |
+|    - If Fragment Size < 1.0 Δx  --> Sub-Grid PIC / Drag Source Coupling (Zero Cell Masking)        |
+|    - If Fragment Size >= 1.0 Δx --> Continuous Cut-Cell Immersed Boundary (Volume Fraction α_f)    |
++----------------------------------------------------------------------------------------------------+
+                                                   |
+                                                   v
++----------------------------------------------------------------------------------------------------+
+| 2. Dual-Energy / Internal-Energy Equation in Low-Density Regimes                                   |
+|    - If ρ < ρ_vacuum_thresh --> Solve de/dt = -p/ρ (∇·u) directly (Bypasses E - KE subtraction)   |
+|    - Guaranteed monotonic, non-oscillatory positive pressure evaluation                            |
++----------------------------------------------------------------------------------------------------+
+                                                   |
+                                                   v
++----------------------------------------------------------------------------------------------------+
+| 3. Temporal Relaxation on Uncovered Cell Genesis                                                   |
+|    - Smooth exponential blend over N_relax substeps: U(t+Δt) = (1-β)·U_extrap + β·U_prev           |
+|    - Eliminates impulse pressure shocks during cell uncovering                                     |
++----------------------------------------------------------------------------------------------------+
+```
+
+---
+
+### 5.3 Key Technical Components & Formulations
+
+#### A. Continuous Cut-Cell Fluid Volume Fractions (Smooth IBM)
+* Replace binary integer masking (`solid_mask ∈ {0, 1}`) with a continuous volume-of-fluid fraction `α_fluid ∈ [0.0, 1.0]`.
+* Numerical fluxes at cell interfaces scale proportionally with the open fluid aperture area fraction `A_face`:
+  ```text
+  Flux_effective = A_face · Flux_fluid + (1 - A_face) · Flux_wall_reflection
+  ```
+* As a fragment enters or leaves a cell, `α_fluid` evolves smoothly over time, replacing abrupt step discontinuities with continuous C0/C1 flux ramps.
+
+#### B. Sub-Grid Momentum Source Exchange for MPM Debris Particles
+* Sub-grid debris particles (effective diameter `< Δx`) should **not** block Eulerian fluid cells or trigger solid wall reflections.
+* Instead, couple sub-grid debris via two-way Particle-In-Cell (PIC) momentum/drag source terms:
+  ```text
+  F_drag = 0.5 · Cd · ρ_fluid · A_proj · |u_fluid - v_particle| · (u_fluid - v_particle)
+  ```
+* Distribute `-F_drag` to adjacent Eulerian CFD cell momentum buffers and `+F_drag` to the MPM particle velocity. Eulerian cells remain 100% fluid, completely eliminating covering/uncovering transients for small flying fragments.
+
+#### C. Dual-Energy / Internal Energy Formulation in Near-Vacuum Regimes
+* To prevent catastrophic loss of significance in low-density cells (`ρ < ρ_dual_thresh`, e.g. `10⁻² kg/m³`), maintain an auxiliary internal energy density `e_int`:
+  ```text
+  ∂(ρ e_int)/∂t + ∇·(ρ e_int u) = -p (∇·u)
+  ```
+* In void and expansion cells, compute pressure directly from internal energy:
+  ```text
+  p = (γ - 1) · ρ · e_int
+  ```
+  This eliminates total energy subtraction noise (`E - 0.5 ρ |u|²`) and guarantees strictly positive, flicker-free pressure even in deep rarefaction wakes.
+
+#### D. Multi-Step Temporal Hysteresis for Uncovered Cell Genesis
+* When a cell transitions from solid to fluid (`α_fluid` increases), initialize the newly exposed fluid state through exponential relaxation over `N_relax` substeps rather than an instantaneous single-step IDW overwrite:
+  ```text
+  U_cell(t + Δt) = (1 - β) · U_extrapolated + β · U_cell(t)
+  ```
+  where `β = exp(-Δt / τ_relax)` and `τ_relax ~ 3 · Δt`. This dissipates acoustic initialization spikes and eliminates halo flickering.
+
+---
+
+### 5.4 Planned UI & Parameter Integration
+
+The following parameters are designated for integration into the `CFDSolver3D` and `FSICoupler3D` node configuration schemas:
+
+| Parameter Key | UI Label | Type / Default | Engineering Purpose |
+| :--- | :--- | :--- | :--- |
+| `fsi_coupling_mode` | FSI Immersed Boundary Mode | Enum (`SmoothCutCell`, `BinaryMask`, `SubGridDragOnly`) | Selects between continuous volume fraction aperture and legacy binary masking. |
+| `subgrid_debris_cutoff` | Sub-Grid Debris Size Ratio | Number / Float (`1.0`) | Particles with `diameter < ratio * dx` use point-drag coupling instead of cell masking. |
+| `enable_dual_energy` | Vacuum Dual-Energy Formulation | Boolean (`true`) | Activates direct internal energy tracking in low-density zones to prevent EOS noise. |
+| `vacuum_density_threshold` | Vacuum Density Threshold | Number / Float (`0.01 kg/m^3`) | Fluid density threshold below which the dual-energy pressure formulation is engaged. |
+| `uncovering_relaxation_steps`| Cell Uncovering Relaxation Steps | Integer (`4`) | Number of temporal substeps over which freshly uncovered fluid cells blend to equilibrium. |

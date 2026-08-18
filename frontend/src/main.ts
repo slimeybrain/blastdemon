@@ -1310,7 +1310,7 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
             const femNode = model?.nodes.find(n => n.type === 'FEMDomain3D');
             const vpNode = model?.nodes.find(n => n.type === 'Telemetry3DViewport');
             const femCfl = Number(femNode?.parameters?.cfl ?? 0.3);
-            const refreshRate = Number(vpNode?.parameters?.refresh_rate ?? 0.033);
+            const refreshRate = Number(vpNode?.parameters?.refresh_rate ?? 0.5);
             networkManager.send({ command: "STEP_FEM_3D", modelId: modelId, steps, cfl: femCfl, refresh_rate: refreshRate });
         } else if (hasFSI3D) {
             sendView3DConfig(modelId);
@@ -1365,7 +1365,7 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
                     const femNode = state.nodes.find(n => n.type === 'FEMDomain3D');
                     const vpNode = state.nodes.find(n => n.type === 'Telemetry3DViewport');
                     const femCfl = Number(femNode?.parameters?.cfl ?? 0.3);
-                    const refreshRate = Number(vpNode?.parameters?.refresh_rate ?? 0.033);
+                    const refreshRate = Number(vpNode?.parameters?.refresh_rate ?? 0.5);
                     networkManager.send({ command: "EXEC_ALL_FEM_3D", modelId: modelId, cfl: femCfl, refresh_rate: refreshRate });
                     stateManager.setModelStatus(modelId, 'RUNNING');
                 }
@@ -1469,7 +1469,7 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
                 const femNode = model?.nodes.find(n => n.type === 'FEMDomain3D');
                 const vpNode = model?.nodes.find(n => n.type === 'Telemetry3DViewport');
                 const femCfl = Number(femNode?.parameters?.cfl ?? 0.3);
-                const refreshRate = Number(vpNode?.parameters?.refresh_rate ?? 0.033);
+                const refreshRate = Number(vpNode?.parameters?.refresh_rate ?? 0.5);
                 networkManager.send({ command: "EXEC_ALL_FEM_3D", modelId: modelId, cfl: femCfl, refresh_rate: refreshRate });
             } else if (hasFSI3D) {
                 sendView3DConfig(modelId);
@@ -1657,12 +1657,11 @@ networkManager.onMessage(async (data) => {
         if (solverNodes.length > 0) {
             solverNodes.forEach(solverNode => {
                 stateManager.pushTelemetry(solverNode.id, payloadBuffer, modelId);
-                stateManager.pushTelemetry(solverNode.id + "-binary", payloadBuffer, modelId);
             });
             if (model?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'MPMDomain3D' || n.type === 'FSICoupler3D' || n.type === 'FEMDomain3D' || n.type === 'FEMFSICoupler3D')) {
                 layoutManager.components.forEach(comp => {
-                    if (comp.type === 'TELEMETRY_3D') comp.instance.pushFrame(payloadBuffer.slice(0), modelId);
-                    if (comp.type === 'NODE_VIEWER' && comp.instance) comp.instance.pushFrame(payloadBuffer.slice(0), modelId);
+                    if (comp.type === 'TELEMETRY_3D' && comp.instance) comp.instance.pushFrame(payloadBuffer, modelId);
+                    if (comp.type === 'NODE_VIEWER' && comp.instance) comp.instance.pushFrame(payloadBuffer, modelId);
                 });
             }
         }

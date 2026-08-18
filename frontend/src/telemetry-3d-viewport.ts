@@ -71,6 +71,8 @@ export class Telemetry3DViewport {
     // Colorbar Overlay Container
     private colorbarContainer: HTMLElement | null = null;
     private usePerspective: boolean = true;
+    private isWorkerBusy: boolean = false;
+    private pendingFrame: { buffer: ArrayBuffer, modelId?: string } | null = null;
 
     private viewTypeSuffix: string;
     private viewportNodeId: string | null = null;
@@ -147,9 +149,17 @@ export class Telemetry3DViewport {
 
         this.worker.onmessage = (e) => {
             const { type, renderer, min, max } = e.data;
-            if (type === 'renderFrame') {
-                this.latestFrameData = e.data.data;
-                this.drawTicks();
+            if (type === 'renderFrame' || type === 'frameComplete') {
+                this.isWorkerBusy = false;
+                if (type === 'renderFrame') {
+                    this.latestFrameData = e.data.data;
+                    this.drawTicks();
+                }
+                if (this.pendingFrame) {
+                    const next = this.pendingFrame;
+                    this.pendingFrame = null;
+                    this.pushFrame(next.buffer, next.modelId);
+                }
             } else if (type === 'rendererInfo') {
                 const badge = document.getElementById(this.getElId('viewport-renderer-badge'));
                 if (badge) {
@@ -715,13 +725,13 @@ export class Telemetry3DViewport {
             <option value="0.05">20 FPS</option>
             <option value="0.1">10 FPS</option>
             <option value="0.2">5 FPS</option>
-            <option value="0.5">2 FPS</option>
+            <option value="0.5">2 FPS (Default)</option>
             <option value="1.0">1 FPS</option>
-            <option value="2.0">0.5 FPS (Default)</option>
+            <option value="2.0">0.5 FPS</option>
             <option value="5.0">0.2 FPS</option>
             <option value="10.0">0.1 FPS</option>
         `;
-        this.selectOptionByNumericValue(rateSel, vpNode ? (vpNode.parameters.refresh_rate ?? 2.0) : 2.0);
+        this.selectOptionByNumericValue(rateSel, vpNode ? (vpNode.parameters.refresh_rate ?? 0.5) : 0.5);
         this.bindEditingEvents(rateSel, () => {
             const vp = this.getViewportNode();
             if (vp) {
@@ -4392,7 +4402,7 @@ export class Telemetry3DViewport {
                         stl_opacity: 0.5,
                         show_obstacles: true,
                         obstacles_opacity: 1.0,
-                        refresh_rate: 2.0
+                        refresh_rate: 0.5
                     }
                 };
             }
@@ -5804,7 +5814,12 @@ export class Telemetry3DViewport {
 
     public pushFrame(buffer: ArrayBuffer, modelId?: string) {
         if (modelId && this.getCurrentModelId() !== modelId) return;
-        this.worker.postMessage({ type: 'frame', data: { buffer } }, [buffer]);
+        if (this.isWorkerBusy) {
+            this.pendingFrame = { buffer, modelId };
+            return;
+        }
+        this.isWorkerBusy = true;
+        this.worker.postMessage({ type: 'frame', data: { buffer } });
     }
 
     public resetSimulationData(modelId?: string) {
@@ -6030,7 +6045,7 @@ export class Telemetry3DViewport {
                         command: "VIEW3D_CONFIG",
                         modelId: targetModelId,
                         slices: slices,
-                        refresh_rate: Number(vp.parameters.refresh_rate ?? 2.0)
+                        refresh_rate: Number(vp.parameters.refresh_rate ?? 0.5)
                     });
                 }
                 this.syncControls(true);
@@ -6135,7 +6150,7 @@ export class Telemetry3DViewport {
                         command: "VIEW3D_CONFIG",
                         modelId: targetModelId,
                         slices: slices,
-                        refresh_rate: Number(vp.parameters.refresh_rate ?? 2.0)
+                        refresh_rate: Number(vp.parameters.refresh_rate ?? 0.5)
                     });
                 }
                 this.syncControls(true);
@@ -7084,14 +7099,14 @@ export class Telemetry3DViewport {
             <option value="0.05">20 FPS</option>
             <option value="0.1">10 FPS</option>
             <option value="0.2">5 FPS</option>
-            <option value="0.5">2 FPS</option>
+            <option value="0.5">2 FPS (Default)</option>
             <option value="1.0">1 FPS</option>
             <option value="2.0">0.5 FPS</option>
             <option value="5.0">0.2 FPS</option>
             <option value="10.0">0.1 FPS</option>
         `;
         const vpNode = this.getViewportNode();
-        this.selectOptionByNumericValue(rateSel, vpNode ? (vpNode.parameters.refresh_rate ?? 2.0) : 2.0);
+        this.selectOptionByNumericValue(rateSel, vpNode ? (vpNode.parameters.refresh_rate ?? 0.5) : 0.5);
         this.bindEditingEvents(rateSel, () => {
             const vp = this.getViewportNode();
             if (vp) {

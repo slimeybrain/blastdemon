@@ -320,7 +320,7 @@ std::atomic<bool> sim_mpm_3d_terminate{false};
 std::atomic<bool> global_exec_until_end_mpm_3d{false};
 std::atomic<int> global_target_steps_mpm_3d{0};
 std::atomic<float> global_cfl_mpm_3d{0.6f};
-std::atomic<double> global_refresh_rate_mpm_3d{0.033};
+std::atomic<double> global_refresh_rate_mpm_3d{0.5};
 
 std::atomic<bool> sim_fem_3d_running{false};
 std::atomic<bool> sim_fem_3d_paused{false};
@@ -328,7 +328,7 @@ std::atomic<bool> sim_fem_3d_terminate{false};
 std::atomic<bool> global_exec_until_end_fem_3d{false};
 std::atomic<int> global_target_steps_fem_3d{0};
 std::atomic<float> global_cfl_fem_3d{0.6f};
-std::atomic<double> global_refresh_rate_fem_3d{0.033};
+std::atomic<double> global_refresh_rate_fem_3d{0.5};
 
 std::atomic<int> global_step_1d{0};
 std::atomic<int> global_step_2d{0};
@@ -7702,7 +7702,7 @@ int main() {
                     int steps = get_json_int(msg, "steps", 1);
                     global_cfl_fem_3d = static_cast<float>(get_json_double(msg, "cfl", 0.6));
                     if (msg.contains("refresh_rate")) {
-                        global_refresh_rate_fem_3d = get_json_double(msg, "refresh_rate", 0.033);
+                        global_refresh_rate_fem_3d = get_json_double(msg, "refresh_rate", 0.5);
                     }
                     global_exec_until_end_fem_3d = false;
                     if (!sim_fem_3d_running) {
@@ -7721,7 +7721,7 @@ int main() {
                     else if (msg.contains("model_id")) global_model_id = msg["model_id"].get<std::string>();
                     global_cfl_fem_3d = static_cast<float>(get_json_double(msg, "cfl", 0.6));
                     if (msg.contains("refresh_rate")) {
-                        global_refresh_rate_fem_3d = get_json_double(msg, "refresh_rate", 0.033);
+                        global_refresh_rate_fem_3d = get_json_double(msg, "refresh_rate", 0.5);
                     }
                     global_exec_until_end_fem_3d = true;
                     if (!sim_fem_3d_running) {

@@ -1349,7 +1349,7 @@ export class PropertyEditor {
             const cmapEl = this.createInputElement(node, 'colormap', node.parameters['colormap'] ?? 'plasma');
             addRowToPanel('colormap', 'COLORMAP', cmapEl, 0);
 
-            const rateEl = this.createInputElement(node, 'refresh_rate', node.parameters['refresh_rate'] ?? 2.0);
+            const rateEl = this.createInputElement(node, 'refresh_rate', node.parameters['refresh_rate'] ?? 0.5);
             addRowToPanel('refresh_rate', 'REFRESH RATE (SECONDS)', rateEl, 0);
 
             const minEl = this.createInputElement(node, 'min_val', node.parameters['min_val'] ?? 101325.0);
@@ -1906,9 +1906,9 @@ export class PropertyEditor {
                         else if (opt === '0.05') text = '20 FPS (0.05s)';
                         else if (opt === '0.1') text = '10 FPS (0.1s)';
                         else if (opt === '0.2') text = '5 FPS (0.2s)';
-                        else if (opt === '0.5') text = '2 FPS (0.5s)';
+                        else if (opt === '0.5') text = '2 FPS (0.5s / Default)';
                         else if (opt === '1.0') text = '1 FPS (1.0s)';
-                        else if (opt === '2.0') text = '0.5 FPS (2.0s / Default)';
+                        else if (opt === '2.0') text = '0.5 FPS (2.0s)';
                         else if (opt === '5.0') text = '0.2 FPS (5.0s)';
                         else if (opt === '10.0') text = '0.1 FPS (10.0s)';
                     }
@@ -2710,7 +2710,7 @@ export class PropertyEditor {
                 command: "VIEW3D_CONFIG",
                 modelId: targetModelId,
                 slices: fullSlices,
-                refresh_rate: Number(node.parameters.refresh_rate ?? 2.0)
+                refresh_rate: Number(node.parameters.refresh_rate ?? 0.5)
             });
         }
     }
@@ -3183,7 +3183,7 @@ export class PropertyEditor {
                     command: "VIEW3D_CONFIG",
                     modelId: targetModelId,
                     slices: slices,
-                    refresh_rate: key === 'refresh_rate' ? Number(value) : Number(node.parameters.refresh_rate ?? 2.0)
+                    refresh_rate: key === 'refresh_rate' ? Number(value) : Number(node.parameters.refresh_rate ?? 0.5)
                 });
             }
         }

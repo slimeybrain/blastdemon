@@ -502,7 +502,7 @@ export class GraphRenderer {
             const vp = this.viewport3Ds.get(node.id);
             if (vp) {
                 if (data instanceof ArrayBuffer) {
-                    vp.pushFrame(data.slice(0));
+                    vp.pushFrame(data);
                 } else {
                     vp.updateTelemetry(data);
                 }
@@ -1603,7 +1603,7 @@ export class GraphRenderer {
                 min_y: 0,
                 max_y: 1,
                 downsample_stride: 1,
-                refresh_rate: 0.0
+                refresh_rate: 0.5
             };
             case 'VTKOutput': return {
                 trigger_type: 'Step Interval',
@@ -1778,7 +1778,7 @@ export class GraphRenderer {
                 stl_auto_scale: true,
                 stl_log_scale: false,
                 stl_show_colorbar: false,
-                refresh_rate: 2.0,
+                refresh_rate: 0.5,
                 show_gauges: true,
                 gauge_size: 1.0,
                 gauge_opacity: 1.0,

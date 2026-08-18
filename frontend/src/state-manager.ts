@@ -775,7 +775,11 @@ export class StateManager {
         }
 
         this.history.push(stateCopy);
-        this.currentIndex++;
+        if (this.history.length > 50) {
+            this.history.shift();
+        } else {
+            this.currentIndex++;
+        }
         this.appState = stateCopy;
 
         this.notifyListeners();
@@ -1881,7 +1885,7 @@ export class StateManager {
                 min_y: 0,
                 max_y: 1,
                 downsample_stride: 1,
-                refresh_rate: 0.0,
+                refresh_rate: 0.5,
                 interpolate: true
             },
             'VTKOutput': {
@@ -1989,7 +1993,7 @@ export class StateManager {
                     overpressure: [0.0, 101325.0 * 99.0],
                     impulse: [0.0, 10000.0]
                 },
-                refresh_rate: 2.0,
+                refresh_rate: 0.5,
                 slices: [{ axis: 'xy', offset: 0.5, quantities: ['pressure'], stride: 1, opacity: 1.0, colormap: 'plasma', auto_scale: true, log_scale: false, interpolate: false, min_val: 101325.0, max_val: 101325.0 * 10.0, enabled: true, show_colorbar: false }],
                 log_scale: false,
                 auto_scale: true,

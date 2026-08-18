@@ -1401,6 +1401,8 @@ let gpuLinePipeline: any = null;
 let gpuSTLLinePipeline: any = null;
 let gpuPointPipeline: any = null;
 let gpuMPMParticlesBuffer: any = null;
+let gpuMPMParticlesBufferSize: number = 0;
+let cachedMPMVertexData: Float32Array | null = null;
 let gpuUniformBufferMPM: any = null;
 let gpuSampler: any = null;
 let gpuSamplerLinear: any = null;
@@ -1426,10 +1428,12 @@ let bboxBuffer: WebGLBuffer | null = null;
 let amrTilesBuffer: WebGLBuffer | null = null;
 let amrTilesCount = 0;
 let gpuAMRTilesBuffer: any = null;
+let gpuAMRTilesBufferSize: number = 0;
 
 let sliceGridlinesBuffer: WebGLBuffer | null = null;
 let sliceGridlinesCount = 0;
 let gpuSliceGridlinesBuffer: any = null;
+let gpuSliceGridlinesBufferSize: number = 0;
 
 let amrLeafTilesCache: any[] = [];
 let slicesConfigCache: any[] = [];
@@ -2917,7 +2921,11 @@ let femSolidCount: number = 0;
 let femWireframeBuffer: WebGLBuffer | null = null;
 let femWireframeCount: number = 0;
 let gpuFEMSolidBuffer: any = null;
+let gpuFEMSolidBufferSize: number = 0;
 let gpuFEMWireframeBuffer: any = null;
+let gpuFEMWireframeBufferSize: number = 0;
+let cachedFEMSolidVertexData: Float32Array | null = null;
+let cachedFEMWireframeVertexData: Float32Array | null = null;
 
 let showFEMMesh: boolean = true;
 let femSolid: boolean = true;
@@ -3116,8 +3124,18 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
         maxBeamScalar = beamEmpiricalMax;
     }
 
-    const solidVertexData = new Float32Array(nFacets * 12 * 6);
-    const wireframeVertexData = new Float32Array(nFacets * 8 * 5);
+    const neededSolidFloats = nFacets * 12 * 6;
+    const neededWireFloats = nFacets * 8 * 5;
+
+    if (!cachedFEMSolidVertexData || cachedFEMSolidVertexData.length < neededSolidFloats) {
+        cachedFEMSolidVertexData = new Float32Array(Math.max(neededSolidFloats, Math.floor(neededSolidFloats * 1.25)));
+    }
+    if (!cachedFEMWireframeVertexData || cachedFEMWireframeVertexData.length < neededWireFloats) {
+        cachedFEMWireframeVertexData = new Float32Array(Math.max(neededWireFloats, Math.floor(neededWireFloats * 1.25)));
+    }
+
+    const solidVertexData = cachedFEMSolidVertexData;
+    const wireframeVertexData = cachedFEMWireframeVertexData;
 
     let solidIdx = 0;
     let wireIdx = 0;
@@ -3303,24 +3321,33 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
         gl.bufferData(gl.ARRAY_BUFFER, wireframeVertexData.subarray(0, wireIdx), gl.DYNAMIC_DRAW);
     }
     if (isWebGPU && gpuDevice) {
-        if (gpuFEMSolidBuffer) gpuFEMSolidBuffer.destroy();
-        gpuFEMSolidBuffer = gpuDevice.createBuffer({
-            size: solidVertexData.subarray(0, solidIdx).byteLength,
-            usage: 32 | 8,
-            mappedAtCreation: true
-        });
-        new Float32Array(gpuFEMSolidBuffer.getMappedRange()).set(solidVertexData.subarray(0, solidIdx));
-        gpuFEMSolidBuffer.unmap();
+        const solidBytes = solidIdx * 4;
+        if (!gpuFEMSolidBuffer || gpuFEMSolidBufferSize < solidBytes) {
+            if (gpuFEMSolidBuffer) gpuFEMSolidBuffer.destroy();
+            gpuFEMSolidBufferSize = Math.max(solidBytes, Math.floor(solidBytes * 1.25));
+            gpuFEMSolidBuffer = gpuDevice.createBuffer({
+                size: gpuFEMSolidBufferSize,
+                usage: 32 | 8 // GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
+            });
+        }
+        if (solidBytes > 0) {
+            gpuDevice.queue.writeBuffer(gpuFEMSolidBuffer, 0, solidVertexData.buffer, solidVertexData.byteOffset, solidBytes);
+        }
 
-        if (gpuFEMWireframeBuffer) gpuFEMWireframeBuffer.destroy();
-        gpuFEMWireframeBuffer = gpuDevice.createBuffer({
-            size: wireframeVertexData.subarray(0, wireIdx).byteLength,
-            usage: 32 | 8,
-            mappedAtCreation: true
-        });
-        new Float32Array(gpuFEMWireframeBuffer.getMappedRange()).set(wireframeVertexData.subarray(0, wireIdx));
-        gpuFEMWireframeBuffer.unmap();
+        const wireBytes = wireIdx * 4;
+        if (!gpuFEMWireframeBuffer || gpuFEMWireframeBufferSize < wireBytes) {
+            if (gpuFEMWireframeBuffer) gpuFEMWireframeBuffer.destroy();
+            gpuFEMWireframeBufferSize = Math.max(wireBytes, Math.floor(wireBytes * 1.25));
+            gpuFEMWireframeBuffer = gpuDevice.createBuffer({
+                size: gpuFEMWireframeBufferSize,
+                usage: 32 | 8 // GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
+            });
+        }
+        if (wireBytes > 0) {
+            gpuDevice.queue.writeBuffer(gpuFEMWireframeBuffer, 0, wireframeVertexData.buffer, wireframeVertexData.byteOffset, wireBytes);
+        }
     }
+    render();
 }
 
 function sampleColormapRGB(v: number, cmapName: string): [number, number, number] {
@@ -3432,7 +3459,11 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
         maxScalar = empiricalMax;
     }
 
-    const vertexData = new Float32Array(nParticles * 6);
+    const neededFloats = nParticles * 6;
+    if (!cachedMPMVertexData || cachedMPMVertexData.length < neededFloats) {
+        cachedMPMVertexData = new Float32Array(Math.max(neededFloats, Math.floor(neededFloats * 1.25)));
+    }
+    const vertexData = cachedMPMVertexData;
 
     for (let i = 0; i < nParticles; i++) {
         const px = latestMPMParticlesData[i * 13 + 0];
@@ -3464,22 +3495,27 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
         vertexData[vIdx + 5] = b;
     }
 
+    const particleBytes = nParticles * 6 * 4;
     if (gl) {
         if (!mpmParticlesBuffer) mpmParticlesBuffer = gl.createBuffer();
         gl.bindBuffer(gl.ARRAY_BUFFER, mpmParticlesBuffer);
-        gl.bufferData(gl.ARRAY_BUFFER, vertexData, gl.DYNAMIC_DRAW);
+        gl.bufferData(gl.ARRAY_BUFFER, vertexData.subarray(0, nParticles * 6), gl.DYNAMIC_DRAW);
     }
     if (isWebGPU && gpuDevice) {
-        if (gpuMPMParticlesBuffer) gpuMPMParticlesBuffer.destroy();
-        gpuMPMParticlesBuffer = gpuDevice.createBuffer({
-            size: vertexData.byteLength,
-            usage: 32 | 8, // VERTEX | COPY_DST
-            mappedAtCreation: true
-        });
-        new Float32Array(gpuMPMParticlesBuffer.getMappedRange()).set(vertexData);
-        gpuMPMParticlesBuffer.unmap();
+        if (!gpuMPMParticlesBuffer || gpuMPMParticlesBufferSize < particleBytes) {
+            if (gpuMPMParticlesBuffer) gpuMPMParticlesBuffer.destroy();
+            gpuMPMParticlesBufferSize = Math.max(particleBytes, Math.floor(particleBytes * 1.25));
+            gpuMPMParticlesBuffer = gpuDevice.createBuffer({
+                size: gpuMPMParticlesBufferSize,
+                usage: 32 | 8 // VERTEX | COPY_DST
+            });
+        }
+        if (particleBytes > 0) {
+            gpuDevice.queue.writeBuffer(gpuMPMParticlesBuffer, 0, vertexData.buffer, vertexData.byteOffset, particleBytes);
+        }
     }
     mpmParticlesCount = nParticles;
+    render();
 }
 
 function getRotatedBoxVertices(cx: number, cy: number, cz: number, lx: number, ly: number, lz: number, ax: number, ay: number, az: number, dimX: number, dimY: number, dimZ: number): number[] {
@@ -3663,14 +3699,18 @@ function updateAMRTilesGeometry(tiles: any[]) {
         gl.bufferData(gl.ARRAY_BUFFER, floatArray, gl.DYNAMIC_DRAW);
     }
     if (gpuDevice) {
-        if (gpuAMRTilesBuffer) gpuAMRTilesBuffer.destroy();
-        gpuAMRTilesBuffer = gpuDevice.createBuffer({
-            size: floatArray.byteLength,
-            usage: 0x20 | 0x08, // GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
-            mappedAtCreation: true
-        });
-        new Float32Array(gpuAMRTilesBuffer.getMappedRange()).set(floatArray);
-        gpuAMRTilesBuffer.unmap();
+        const bytes = floatArray.byteLength;
+        if (!gpuAMRTilesBuffer || gpuAMRTilesBufferSize < bytes) {
+            if (gpuAMRTilesBuffer) gpuAMRTilesBuffer.destroy();
+            gpuAMRTilesBufferSize = Math.max(bytes, Math.floor(bytes * 1.25));
+            gpuAMRTilesBuffer = gpuDevice.createBuffer({
+                size: gpuAMRTilesBufferSize,
+                usage: 0x20 | 0x08 // GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
+            });
+        }
+        if (bytes > 0) {
+            gpuDevice.queue.writeBuffer(gpuAMRTilesBuffer, 0, floatArray.buffer, floatArray.byteOffset, bytes);
+        }
     }
 }
 
@@ -3785,14 +3825,18 @@ function updateSliceAMRGridlinesGeometry() {
         gl.bufferData(gl.ARRAY_BUFFER, floatArray, gl.DYNAMIC_DRAW);
     }
     if (gpuDevice) {
-        if (gpuSliceGridlinesBuffer) gpuSliceGridlinesBuffer.destroy();
-        gpuSliceGridlinesBuffer = gpuDevice.createBuffer({
-            size: floatArray.byteLength,
-            usage: 0x20 | 0x08,
-            mappedAtCreation: true
-        });
-        new Float32Array(gpuSliceGridlinesBuffer.getMappedRange()).set(floatArray);
-        gpuSliceGridlinesBuffer.unmap();
+        const bytes = floatArray.byteLength;
+        if (!gpuSliceGridlinesBuffer || gpuSliceGridlinesBufferSize < bytes) {
+            if (gpuSliceGridlinesBuffer) gpuSliceGridlinesBuffer.destroy();
+            gpuSliceGridlinesBufferSize = Math.max(bytes, Math.floor(bytes * 1.25));
+            gpuSliceGridlinesBuffer = gpuDevice.createBuffer({
+                size: gpuSliceGridlinesBufferSize,
+                usage: 0x20 | 0x08 // GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
+            });
+        }
+        if (bytes > 0) {
+            gpuDevice.queue.writeBuffer(gpuSliceGridlinesBuffer, 0, floatArray.buffer, floatArray.byteOffset, bytes);
+        }
     }
 }
 

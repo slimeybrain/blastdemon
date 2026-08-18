@@ -40,7 +40,12 @@
 - **Dropdown and Widget Uniformity:** When a node parameter has discrete options (like an enum or fixed choice list), ensure it is styled and rendered as a dropdown selector or other appropriate widget *both* in the sidebar property editor (`frontend/src/property-editor.ts`) and on the node canvas representation (`frontend/src/graph-renderer.ts`). Never leave it as a plain text input when options are pre-defined.
 
 ## 7. Chat Response & Formatting Rule (ABSOLUTE RULE)
-- **No Unrendered Markup / Raw Formatting:** All chat responses MUST be formatted directly as clean, rendered, human-readable text. Do NOT emit raw, escaped, or unrendered markdown markup (such as double-escaped LaTeX brackets, raw syntax delimiters, or unparsed markdown blocks that force manual translation).
+- **Rich Markdown Formatting:** Structure all chat responses and documentation using clean, expressive GitHub-Flavored Markdown. Leverage clear headings, organized bulleted/numbered lists, emphasis/bold highlights, structured comparison tables, blockquotes, and fenced code blocks to maximize readability and visual clarity.
+- **Strict Prohibition of Raw LaTeX Math:** NEVER emit raw LaTeX delimiters or commands (such as `$`, `$$`, `\(`, `\)`, `\[`, `\]`, `\frac`, `\Delta`, `\mathcal`, `\sum`, `\text`, `\times`, etc.) in chat responses or documentation under any circumstances.
+- **Clean Math & Equation Presentation:** Write all mathematical expressions, formulas, physics equations, and variables using:
+  - Inline code formatting (e.g. `Nx × Ny × Nz`, `O(dt^2)`, `dt`, `dx`, `M × stencil_radius`, `sigma_y = sigma_0 * (1 + (eps / eps_0)^n)`).
+  - Standard Unicode math characters (e.g. `Δt`, `ρ`, `σ`, `γ`, `∇·u`, `√`).
+  - Fenced code blocks (`text` or language specific) for multi-line derivations, matrix/tensor equations, or system dynamics.
 - **Mandatory Directives Read:** AI assistants MUST always inspect and strictly adhere to `AGENTS.md` directives prior to generating code, making edits, or responding to user requests.
 
 ## 8. Automatic Broker Management Directive (ABSOLUTE RULE)
@@ -73,7 +78,7 @@
 
 ## 14. Mandatory Minimum 2nd-Order Temporal Accuracy Directive (ABSOLUTE RULE)
 - **Prohibition of 1st-Order Defaults:** 1st-order time integration schemes (such as Forward Euler or 1st-order un-staggered steps) are STRICTLY PROHIBITED from being the default anywhere in the framework.
-- **Lagrangian & Particle Solvers (FEM and MPM):** Must default to **2nd-Order Symplectic Central Difference / Staggered Leapfrog** integration. This guarantees second-order trajectory accuracy ($\mathcal{O}(\Delta t^2)$) and exact Hamiltonian phase/energy preservation with single-pass GPU performance and zero multi-stage memory overhead.
+- **Lagrangian & Particle Solvers (FEM and MPM):** Must default to **2nd-Order Symplectic Central Difference / Staggered Leapfrog** integration. This guarantees second-order trajectory accuracy (O(dt^2)) and exact Hamiltonian phase/energy preservation with single-pass GPU performance and zero multi-stage memory overhead.
 - **Eulerian Fluid Solvers (CFD):** Must default to **2nd-Order ADER-2** (single-stage Cauchy-Kowalevski space-time predictor) or **2nd-Order TVD/SSP-RK2** with slope limiters. ADER-3 is supported for 3rd-order spatial-temporal accuracy.
 - **FSI Coupling Solvers:** Must preserve at least 2nd-order accuracy across fluid-structure coupling substeps.
 ## 15. Mandatory UI Parameter & Node Type Documentation Directive (ABSOLUTE RULE)
