@@ -1,5 +1,26 @@
 import { SimulationState } from './types.js';
 
+function isAirMaterialNode(node: any): boolean {
+    if (!node || (node.type !== 'Material' && node.type !== 'MPMMaterialSteel')) return false;
+    const model = node.parameters?.material_model;
+    const type = node.parameters?.material_type;
+    return model === 'Ideal Gas' || type === 'Air';
+}
+
+function isJWLMaterialNode(node: any): boolean {
+    if (!node || (node.type !== 'Material' && node.type !== 'MPMMaterialSteel')) return false;
+    const model = node.parameters?.material_model;
+    const type = node.parameters?.material_type;
+    return model === 'JWL Detonation Gas' || type === 'JWL Charge';
+}
+
+function isIdealGasMaterialNode(node: any): boolean {
+    if (!node || (node.type !== 'Material' && node.type !== 'MPMMaterialSteel')) return false;
+    const model = node.parameters?.material_model;
+    const type = node.parameters?.material_type;
+    return model === 'Ideal Gas' || type === 'Ideal Gas Charge' || type === 'Air';
+}
+
 export function serializeSimulationState(state: SimulationState): string {
     const strippedNodes = state.nodes.map(({ x, y, ...rest }) => rest);
     const dag = {
@@ -95,7 +116,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 const airConn = state.connections.find(c => c.toNode === painterNode.id && c.toPort === 'air');
                 if (airConn) {
                     const airNode = state.nodes.find(n => n.id === airConn.fromNode);
-                    if (airNode && airNode.type === 'Material' && airNode.parameters?.material_type === 'Air') {
+                    if (airNode && isAirMaterialNode(airNode)) {
                         const airKeys = ['atm_pressure', 'atm_temperature', 'gamma'];
                         airKeys.forEach(key => {
                             if (airNode.parameters[key] !== undefined) {
@@ -122,21 +143,28 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                         const matConn = state.connections.find(c => c.toNode === chargeNode.id && c.toPort === 'material');
                         if (matConn) {
                             const matNode = state.nodes.find(n => n.id === matConn.fromNode);
-                            if (matNode && matNode.type === 'Material') {
-                                const matType = matNode.parameters?.material_type || 'Air';
-                                if (matType === 'JWL Charge') {
+                            if (matNode) {
+                                if (isJWLMaterialNode(matNode)) {
                                     flattenedParams['explosive_type'] = 'MaterialExplosive';
+                                    flattenedParams['material_type'] = 'JWL Charge';
                                     const jwlKeys = ['composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
                                     jwlKeys.forEach(key => {
                                         if (matNode.parameters[key] !== undefined) {
                                             flattenedParams[key] = numericKeys.includes(key) ? Number(matNode.parameters[key]) : matNode.parameters[key];
                                         }
                                     });
-                                } else if (matType === 'Ideal Gas Charge') {
+                                    if (flattenedParams['rho'] === undefined && matNode.parameters['density'] !== undefined) {
+                                        flattenedParams['rho'] = Number(matNode.parameters['density']);
+                                    }
+                                } else if (isIdealGasMaterialNode(matNode)) {
                                     flattenedParams['explosive_type'] = 'MaterialIdealGas';
-                                    flattenedParams['gamma'] = Number(matNode.parameters?.ideal_gamma ?? 1.4);
-                                    flattenedParams['rho'] = Number(matNode.parameters?.ideal_rho_0 ?? 1630.0);
-                                    flattenedParams['detonation_energy'] = Number(matNode.parameters?.ideal_e_0 ?? 4290000);
+                                    flattenedParams['material_type'] = 'Ideal Gas Charge';
+                                    flattenedParams['gamma'] = Number(matNode.parameters?.gamma ?? matNode.parameters?.ideal_gamma ?? 1.4);
+                                    flattenedParams['rho'] = Number(matNode.parameters?.density ?? matNode.parameters?.ideal_rho_0 ?? 1630.0);
+                                    flattenedParams['detonation_energy'] = Number(matNode.parameters?.detonation_energy ?? matNode.parameters?.ideal_e_0 ?? 4290000);
+                                    flattenedParams['ideal_gamma'] = Number(matNode.parameters?.gamma ?? matNode.parameters?.ideal_gamma ?? 1.4);
+                                    flattenedParams['ideal_rho_0'] = Number(matNode.parameters?.density ?? matNode.parameters?.ideal_rho_0 ?? 1630.0);
+                                    flattenedParams['ideal_e_0'] = Number(matNode.parameters?.detonation_energy ?? matNode.parameters?.ideal_e_0 ?? 4290000);
                                     if (matNode.parameters?.composition !== undefined) {
                                         flattenedParams['composition'] = matNode.parameters.composition;
                                     }
@@ -208,7 +236,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         const airConn3D = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'air');
         if (airConn3D) {
             const airNode3D = state.nodes.find(n => n.id === airConn3D.fromNode);
-            if (airNode3D && airNode3D.type === 'Material' && airNode3D.parameters?.material_type === 'Air') {
+            if (airNode3D && isAirMaterialNode(airNode3D)) {
                 const airKeys = ['atm_pressure', 'atm_temperature', 'gamma'];
                 airKeys.forEach(key => {
                     if (airNode3D.parameters[key] !== undefined) {
@@ -232,20 +260,27 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 if (matConn) {
                     const matNode = state.nodes.find(n => n.id === matConn.fromNode);
                     if (matNode) {
-                        const matType = matNode.parameters?.material_type || 'Air';
-                        if (matType === 'JWL Charge') {
+                        if (isJWLMaterialNode(matNode)) {
                             flattenedParams['explosive_type'] = 'MaterialExplosive';
+                            flattenedParams['material_type'] = 'JWL Charge';
                             const jwlKeys = ['composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
                             jwlKeys.forEach(key => {
                                 if (matNode.parameters[key] !== undefined) {
                                     flattenedParams[key] = numericKeys.includes(key) ? Number(matNode.parameters[key]) : matNode.parameters[key];
                                 }
                             });
-                        } else if (matType === 'Ideal Gas Charge') {
+                            if (flattenedParams['rho'] === undefined && matNode.parameters['density'] !== undefined) {
+                                flattenedParams['rho'] = Number(matNode.parameters['density']);
+                            }
+                        } else if (isIdealGasMaterialNode(matNode)) {
                             flattenedParams['explosive_type'] = 'MaterialIdealGas';
-                            flattenedParams['gamma'] = Number(matNode.parameters?.ideal_gamma ?? 1.4);
-                            flattenedParams['rho'] = Number(matNode.parameters?.ideal_rho_0 ?? 1630.0);
-                            flattenedParams['detonation_energy'] = Number(matNode.parameters?.ideal_e_0 ?? 4290000);
+                            flattenedParams['material_type'] = 'Ideal Gas Charge';
+                            flattenedParams['gamma'] = Number(matNode.parameters?.gamma ?? matNode.parameters?.ideal_gamma ?? 1.4);
+                            flattenedParams['rho'] = Number(matNode.parameters?.density ?? matNode.parameters?.ideal_rho_0 ?? 1630.0);
+                            flattenedParams['detonation_energy'] = Number(matNode.parameters?.detonation_energy ?? matNode.parameters?.ideal_e_0 ?? 4290000);
+                            flattenedParams['ideal_gamma'] = Number(matNode.parameters?.gamma ?? matNode.parameters?.ideal_gamma ?? 1.4);
+                            flattenedParams['ideal_rho_0'] = Number(matNode.parameters?.density ?? matNode.parameters?.ideal_rho_0 ?? 1630.0);
+                            flattenedParams['ideal_e_0'] = Number(matNode.parameters?.detonation_energy ?? matNode.parameters?.ideal_e_0 ?? 4290000);
                             if (matNode.parameters?.composition !== undefined) {
                                 flattenedParams['composition'] = matNode.parameters.composition;
                             }
@@ -381,7 +416,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         const airConn2D = state.connections.find(c => c.toNode === solverNode2D.id && c.toPort === 'air');
         if (airConn2D) {
             const airNode = state.nodes.find(n => n.id === airConn2D.fromNode);
-            if (airNode && airNode.type === 'Material' && airNode.parameters?.material_type === 'Air') {
+            if (airNode && isAirMaterialNode(airNode)) {
                 const airKeys = ['atm_pressure', 'atm_temperature', 'gamma'];
                 airKeys.forEach(key => {
                     if (airNode.parameters[key] !== undefined) {
@@ -408,21 +443,28 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 const matConn = state.connections.find(c => c.toNode === chargeNode.id && c.toPort === 'material');
                 if (matConn) {
                     const matNode = state.nodes.find(n => n.id === matConn.fromNode);
-                    if (matNode && matNode.type === 'Material') {
-                        const matType = matNode.parameters?.material_type ?? 'JWL Charge';
-                        if (matType === 'JWL Charge') {
+                    if (matNode) {
+                        if (isJWLMaterialNode(matNode)) {
                             flattenedParams['explosive_type'] = 'MaterialExplosive';
+                            flattenedParams['material_type'] = 'JWL Charge';
                             const jwlKeys = ['composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
                             jwlKeys.forEach(key => {
                                 if (matNode.parameters[key] !== undefined) {
                                     flattenedParams[key] = numericKeys.includes(key) ? Number(matNode.parameters[key]) : matNode.parameters[key];
                                 }
                             });
-                        } else if (matType === 'Ideal Gas Charge') {
+                            if (flattenedParams['rho'] === undefined && matNode.parameters['density'] !== undefined) {
+                                flattenedParams['rho'] = Number(matNode.parameters['density']);
+                            }
+                        } else if (isIdealGasMaterialNode(matNode)) {
                             flattenedParams['explosive_type'] = 'MaterialIdealGas';
-                            flattenedParams['gamma'] = Number(matNode.parameters?.ideal_gamma ?? 1.4);
-                            flattenedParams['rho'] = Number(matNode.parameters?.ideal_rho_0 ?? 1630.0);
-                            flattenedParams['detonation_energy'] = Number(matNode.parameters?.ideal_e_0 ?? 4290000);
+                            flattenedParams['material_type'] = 'Ideal Gas Charge';
+                            flattenedParams['gamma'] = Number(matNode.parameters?.gamma ?? matNode.parameters?.ideal_gamma ?? 1.4);
+                            flattenedParams['rho'] = Number(matNode.parameters?.density ?? matNode.parameters?.ideal_rho_0 ?? 1630.0);
+                            flattenedParams['detonation_energy'] = Number(matNode.parameters?.detonation_energy ?? matNode.parameters?.ideal_e_0 ?? 4290000);
+                            flattenedParams['ideal_gamma'] = Number(matNode.parameters?.gamma ?? matNode.parameters?.ideal_gamma ?? 1.4);
+                            flattenedParams['ideal_rho_0'] = Number(matNode.parameters?.density ?? matNode.parameters?.ideal_rho_0 ?? 1630.0);
+                            flattenedParams['ideal_e_0'] = Number(matNode.parameters?.detonation_energy ?? matNode.parameters?.ideal_e_0 ?? 4290000);
                             if (matNode.parameters?.composition !== undefined) {
                                 flattenedParams['composition'] = matNode.parameters.composition;
                             }
@@ -572,7 +614,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             const airConn2D = state.connections.find(c => c.toNode === solverNode2D.id && c.toPort === 'air');
             if (airConn2D) {
                 const airNode = state.nodes.find(n => n.id === airConn2D.fromNode);
-                if (airNode && airNode.type === 'Material' && airNode.parameters?.material_type === 'Air') {
+                if (airNode && isAirMaterialNode(airNode)) {
                     ['atm_pressure', 'atm_temperature', 'gamma'].forEach(key => {
                         if (airNode.parameters[key] !== undefined) {
                             flattenedParams[key] = numericKeys.includes(key) ? Number(airNode.parameters[key]) : airNode.parameters[key];
@@ -590,20 +632,27 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     const matConn = state.connections.find(c => c.toNode === chargeNode.id && c.toPort === 'material');
                     if (matConn) {
                         const matNode = state.nodes.find(n => n.id === matConn.fromNode);
-                        if (matNode && matNode.type === 'Material') {
-                            const matType = matNode.parameters?.material_type ?? 'JWL Charge';
-                            if (matType === 'JWL Charge') {
+                        if (matNode) {
+                            if (isJWLMaterialNode(matNode)) {
                                 flattenedParams['explosive_type'] = 'MaterialExplosive';
+                                flattenedParams['material_type'] = 'JWL Charge';
                                 ['composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'].forEach(key => {
                                     if (matNode.parameters[key] !== undefined) {
                                         flattenedParams[key] = numericKeys.includes(key) ? Number(matNode.parameters[key]) : matNode.parameters[key];
                                     }
                                 });
-                            } else if (matType === 'Ideal Gas Charge') {
+                                if (flattenedParams['rho'] === undefined && matNode.parameters['density'] !== undefined) {
+                                    flattenedParams['rho'] = Number(matNode.parameters['density']);
+                                }
+                            } else if (isIdealGasMaterialNode(matNode)) {
                                 flattenedParams['explosive_type'] = 'MaterialIdealGas';
-                                flattenedParams['gamma'] = Number(matNode.parameters?.ideal_gamma ?? 1.4);
-                                flattenedParams['rho'] = Number(matNode.parameters?.ideal_rho_0 ?? 1630.0);
-                                flattenedParams['detonation_energy'] = Number(matNode.parameters?.ideal_e_0 ?? 4290000);
+                                flattenedParams['material_type'] = 'Ideal Gas Charge';
+                                flattenedParams['gamma'] = Number(matNode.parameters?.gamma ?? matNode.parameters?.ideal_gamma ?? 1.4);
+                                flattenedParams['rho'] = Number(matNode.parameters?.density ?? matNode.parameters?.ideal_rho_0 ?? 1630.0);
+                                flattenedParams['detonation_energy'] = Number(matNode.parameters?.detonation_energy ?? matNode.parameters?.ideal_e_0 ?? 4290000);
+                                flattenedParams['ideal_gamma'] = Number(matNode.parameters?.gamma ?? matNode.parameters?.ideal_gamma ?? 1.4);
+                                flattenedParams['ideal_rho_0'] = Number(matNode.parameters?.density ?? matNode.parameters?.ideal_rho_0 ?? 1630.0);
+                                flattenedParams['ideal_e_0'] = Number(matNode.parameters?.detonation_energy ?? matNode.parameters?.ideal_e_0 ?? 4290000);
                             }
                         }
                     }
@@ -704,7 +753,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             const airConn3D = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'air');
             if (airConn3D) {
                 const airNode3D = state.nodes.find(n => n.id === airConn3D.fromNode);
-                if (airNode3D && airNode3D.type === 'Material' && airNode3D.parameters?.material_type === 'Air') {
+                if (airNode3D && isAirMaterialNode(airNode3D)) {
                     ['atm_pressure', 'atm_temperature', 'gamma'].forEach(key => {
                         if (airNode3D.parameters[key] !== undefined) {
                             flattenedParams[key] = numericKeys.includes(key) ? Number(airNode3D.parameters[key]) : airNode3D.parameters[key];
@@ -723,19 +772,26 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     if (matConn) {
                         const matNode = state.nodes.find(n => n.id === matConn.fromNode);
                         if (matNode) {
-                            const matType = matNode.parameters?.material_type || 'Air';
-                            if (matType === 'JWL Charge') {
+                            if (isJWLMaterialNode(matNode)) {
                                 flattenedParams['explosive_type'] = 'MaterialExplosive';
+                                flattenedParams['material_type'] = 'JWL Charge';
                                 ['composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'].forEach(key => {
                                     if (matNode.parameters[key] !== undefined) {
                                         flattenedParams[key] = numericKeys.includes(key) ? Number(matNode.parameters[key]) : matNode.parameters[key];
                                     }
                                 });
-                            } else if (matType === 'Ideal Gas Charge') {
+                                if (flattenedParams['rho'] === undefined && matNode.parameters['density'] !== undefined) {
+                                    flattenedParams['rho'] = Number(matNode.parameters['density']);
+                                }
+                            } else if (isIdealGasMaterialNode(matNode)) {
                                 flattenedParams['explosive_type'] = 'MaterialIdealGas';
-                                flattenedParams['gamma'] = Number(matNode.parameters?.ideal_gamma ?? 1.4);
-                                flattenedParams['rho'] = Number(matNode.parameters?.ideal_rho_0 ?? 1630.0);
-                                flattenedParams['detonation_energy'] = Number(matNode.parameters?.ideal_e_0 ?? 4290000);
+                                flattenedParams['material_type'] = 'Ideal Gas Charge';
+                                flattenedParams['gamma'] = Number(matNode.parameters?.gamma ?? matNode.parameters?.ideal_gamma ?? 1.4);
+                                flattenedParams['rho'] = Number(matNode.parameters?.density ?? matNode.parameters?.ideal_rho_0 ?? 1630.0);
+                                flattenedParams['detonation_energy'] = Number(matNode.parameters?.detonation_energy ?? matNode.parameters?.ideal_e_0 ?? 4290000);
+                                flattenedParams['ideal_gamma'] = Number(matNode.parameters?.gamma ?? matNode.parameters?.ideal_gamma ?? 1.4);
+                                flattenedParams['ideal_rho_0'] = Number(matNode.parameters?.density ?? matNode.parameters?.ideal_rho_0 ?? 1630.0);
+                                flattenedParams['ideal_e_0'] = Number(matNode.parameters?.detonation_energy ?? matNode.parameters?.ideal_e_0 ?? 4290000);
                             }
                         }
                     }
@@ -924,7 +980,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             const airConn3D = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'air');
             if (airConn3D) {
                 const airNode3D = state.nodes.find(n => n.id === airConn3D.fromNode);
-                if (airNode3D && airNode3D.type === 'Material' && airNode3D.parameters?.material_type === 'Air') {
+                if (airNode3D && isAirMaterialNode(airNode3D)) {
                     ['atm_pressure', 'atm_temperature', 'gamma'].forEach(key => {
                         if (airNode3D.parameters[key] !== undefined) {
                             flattenedParams[key] = numericKeys.includes(key) ? Number(airNode3D.parameters[key]) : airNode3D.parameters[key];
@@ -943,19 +999,26 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     if (matConn) {
                         const matNode = state.nodes.find(n => n.id === matConn.fromNode);
                         if (matNode) {
-                            const matType = matNode.parameters?.material_type || 'Air';
-                            if (matType === 'JWL Charge') {
+                            if (isJWLMaterialNode(matNode)) {
                                 flattenedParams['explosive_type'] = 'MaterialExplosive';
+                                flattenedParams['material_type'] = 'JWL Charge';
                                 ['composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'].forEach(key => {
                                     if (matNode.parameters[key] !== undefined) {
                                         flattenedParams[key] = numericKeys.includes(key) ? Number(matNode.parameters[key]) : matNode.parameters[key];
                                     }
                                 });
-                            } else if (matType === 'Ideal Gas Charge') {
+                                if (flattenedParams['rho'] === undefined && matNode.parameters['density'] !== undefined) {
+                                    flattenedParams['rho'] = Number(matNode.parameters['density']);
+                                }
+                            } else if (isIdealGasMaterialNode(matNode)) {
                                 flattenedParams['explosive_type'] = 'MaterialIdealGas';
-                                flattenedParams['gamma'] = Number(matNode.parameters?.ideal_gamma ?? 1.4);
-                                flattenedParams['rho'] = Number(matNode.parameters?.ideal_rho_0 ?? 1630.0);
-                                flattenedParams['detonation_energy'] = Number(matNode.parameters?.ideal_e_0 ?? 4290000);
+                                flattenedParams['material_type'] = 'Ideal Gas Charge';
+                                flattenedParams['gamma'] = Number(matNode.parameters?.gamma ?? matNode.parameters?.ideal_gamma ?? 1.4);
+                                flattenedParams['rho'] = Number(matNode.parameters?.density ?? matNode.parameters?.ideal_rho_0 ?? 1630.0);
+                                flattenedParams['detonation_energy'] = Number(matNode.parameters?.detonation_energy ?? matNode.parameters?.ideal_e_0 ?? 4290000);
+                                flattenedParams['ideal_gamma'] = Number(matNode.parameters?.gamma ?? matNode.parameters?.ideal_gamma ?? 1.4);
+                                flattenedParams['ideal_rho_0'] = Number(matNode.parameters?.density ?? matNode.parameters?.ideal_rho_0 ?? 1630.0);
+                                flattenedParams['ideal_e_0'] = Number(matNode.parameters?.detonation_energy ?? matNode.parameters?.ideal_e_0 ?? 4290000);
                             }
                         }
                     }
@@ -1187,6 +1250,17 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     mpmObjects.push(objParams);
                 }
             }
+
+            const detConn = state.connections.find(c => c.toNode === mpmDomain.id && c.toPort === 'detonator');
+            if (detConn) {
+                const detNode = state.nodes.find(n => n.id === detConn.fromNode);
+                if (detNode && detNode.type === 'DetonatorLocation') {
+                    Object.entries(detNode.parameters).forEach(([key, value]) => {
+                        flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                    });
+                }
+            }
+
             flattenedParams['mpm_objects'] = mpmObjects;
         }
     } else if (command === "INIT_MPM_3D" || command === "INIT_3D_MPM") {
@@ -1252,6 +1326,17 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     mpmObjects.push(objParams);
                 }
             }
+
+            const detConn = state.connections.find(c => c.toNode === mpmDomain.id && c.toPort === 'detonator');
+            if (detConn) {
+                const detNode = state.nodes.find(n => n.id === detConn.fromNode);
+                if (detNode && detNode.type === 'DetonatorLocation3D') {
+                    Object.entries(detNode.parameters).forEach(([key, value]) => {
+                        flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                    });
+                }
+            }
+
             flattenedParams['mpm_objects'] = mpmObjects;
 
             // Trace VTKOutput connected to MPMDomain3D
@@ -1391,14 +1476,13 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         // Check if there is a Material node connected locally in the 3D model
         const localMatNode = state.nodes.find(n => n.type === 'Material');
         if (localMatNode && localMatNode.parameters) {
-            const localMatType = localMatNode.parameters.material_type || 'JWL Charge';
-            if (localMatType === 'Ideal Gas Charge' || localMatType === 'Ideal Gas') {
+            if (isIdealGasMaterialNode(localMatNode)) {
                 flattenedParams['explosive_type'] = 'MaterialIdealGas';
                 flattenedParams['material_type'] = 'Ideal Gas Charge';
                 flattenedParams['is_ideal_gas'] = true;
-                flattenedParams['gamma'] = Number(localMatNode.parameters.ideal_gamma ?? 1.4);
-                flattenedParams['rho'] = Number(localMatNode.parameters.ideal_rho_0 ?? 1630.0);
-                flattenedParams['detonation_energy'] = Number(localMatNode.parameters.ideal_e_0 ?? 4290000);
+                flattenedParams['gamma'] = Number(localMatNode.parameters.gamma ?? localMatNode.parameters.ideal_gamma ?? 1.4);
+                flattenedParams['rho'] = Number(localMatNode.parameters.density ?? localMatNode.parameters.ideal_rho_0 ?? 1630.0);
+                flattenedParams['detonation_energy'] = Number(localMatNode.parameters.detonation_energy ?? localMatNode.parameters.ideal_e_0 ?? 4290000);
             }
         }
 
@@ -1462,18 +1546,17 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
 
             // Copy over material parameters from source material node if present
             if (sourceMatNode && sourceMatNode.parameters) {
-                const matType = sourceMatNode.parameters.material_type || 'JWL Charge';
-                if (matType === 'Ideal Gas Charge' || matType === 'Ideal Gas') {
+                if (isIdealGasMaterialNode(sourceMatNode)) {
                     flattenedParams['explosive_type'] = 'MaterialIdealGas';
                     flattenedParams['material_type'] = 'Ideal Gas Charge';
                     flattenedParams['is_ideal_gas'] = true;
-                    flattenedParams['gamma'] = Number(sourceMatNode.parameters.ideal_gamma ?? 1.4);
-                    flattenedParams['rho'] = Number(sourceMatNode.parameters.ideal_rho_0 ?? 1630.0);
-                    flattenedParams['detonation_energy'] = Number(sourceMatNode.parameters.ideal_e_0 ?? 4290000);
+                    flattenedParams['gamma'] = Number(sourceMatNode.parameters.gamma ?? sourceMatNode.parameters.ideal_gamma ?? 1.4);
+                    flattenedParams['rho'] = Number(sourceMatNode.parameters.density ?? sourceMatNode.parameters.ideal_rho_0 ?? 1630.0);
+                    flattenedParams['detonation_energy'] = Number(sourceMatNode.parameters.detonation_energy ?? sourceMatNode.parameters.ideal_e_0 ?? 4290000);
                     if (sourceMatNode.parameters.composition !== undefined) {
                         flattenedParams['composition'] = sourceMatNode.parameters.composition;
                     }
-                } else if (matType === 'JWL Charge') {
+                } else if (isJWLMaterialNode(sourceMatNode)) {
                     flattenedParams['explosive_type'] = 'MaterialExplosive';
                     flattenedParams['material_type'] = 'JWL Charge';
                     flattenedParams['is_ideal_gas'] = false;
@@ -1483,6 +1566,9 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                             flattenedParams[key] = numericKeys.includes(key) ? Number(sourceMatNode.parameters[key]) : sourceMatNode.parameters[key];
                         }
                     });
+                    if (flattenedParams['rho'] === undefined && sourceMatNode.parameters['density'] !== undefined) {
+                        flattenedParams['rho'] = Number(sourceMatNode.parameters['density']);
+                    }
                 }
             }
 

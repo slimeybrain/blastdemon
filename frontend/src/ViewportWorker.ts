@@ -6983,7 +6983,34 @@ self.onmessage = async (e) => {
                 slicesConfig = data.slices;
                 
                 // Ensure cachedSlices length matches slicesConfig length if we have at least one valid slice
-                if (cachedSlices.length > 0) {
+                if (cachedSlices.length === 0 && slicesConfig.length > 0) {
+                    for (let i = 0; i < slicesConfig.length; i++) {
+                        const config = slicesConfig[i];
+                        const w = 64;
+                        const h = 64;
+                        const dummyData = new Float32Array(w * h);
+                        cachedSlices.push({
+                            axis: config.axis === 'xy' ? 0 : config.axis === 'xz' ? 1 : 2,
+                            offset: Number(config.offset ?? 0.5),
+                            w,
+                            h,
+                            xmin: xmin,
+                            xmax: xmin + getDimX(),
+                            ymin: ymin,
+                            ymax: ymin + getDimY(),
+                            zmin: zmin,
+                            zmax: zmin + getDimZ(),
+                            level: 0,
+                            is_submesh: false,
+                            data: dummyData,
+                            minY: config.min_val ?? 101325.0,
+                            maxY: config.max_val ?? 1013250.0,
+                            colormap: config.colormap || 'plasma',
+                            useLogScale: config.log_scale === true,
+                            interpolate: config.interpolate === true
+                        });
+                    }
+                } else if (cachedSlices.length > 0) {
                     const parentSlices = cachedSlices.filter(s => !s.is_submesh);
                     const submeshSlices = cachedSlices.filter(s => s.is_submesh);
 
@@ -6999,7 +7026,7 @@ self.onmessage = async (e) => {
                         }
                         parentSlices.push({
                             axis: config.axis === 'xy' ? 0 : config.axis === 'xz' ? 1 : 2,
-                            offset: config.offset,
+                            offset: Number(config.offset ?? 0.5),
                             w,
                             h,
                             xmin: xmin,
@@ -7042,14 +7069,13 @@ self.onmessage = async (e) => {
                     cachedSlices = [...parentSlices, ...submeshSlices];
                 }
                 
-                // Now, update cachedSlices configurations in-place
+                // Now, update cachedSlices configurations in-place (including axis and offset)
                 cachedSlices.forEach((sliceObj, i) => {
                     const config = getSliceConfig(i);
                     if (!config) return;
                     const targetAxis = config.axis === 'xy' ? 0 : config.axis === 'xz' ? 1 : 2;
-                    if (targetAxis === sliceObj.axis) {
-                        sliceObj.offset = config.offset;
-                    }
+                    sliceObj.axis = targetAxis;
+                    sliceObj.offset = Number(config.offset ?? sliceObj.offset);
                     sliceObj.minY = config.min_val ?? sliceObj.minY;
                     sliceObj.maxY = config.max_val ?? sliceObj.maxY;
                     sliceObj.colormap = config.colormap || 'plasma';

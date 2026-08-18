@@ -2544,6 +2544,132 @@ export class PropertyEditor {
             inputsRow.appendChild(strideDiv);
 
             row.appendChild(inputsRow);
+
+            // Row 2: Colormap, Opacity, Smooth Interpolation, Colorbar
+            const row2 = document.createElement('div');
+            row2.style.display = 'flex';
+            row2.style.gap = '8px';
+            row2.style.alignItems = 'center';
+            row2.style.marginTop = '4px';
+
+            // Colormap select
+            const cmapDiv = document.createElement('div');
+            cmapDiv.style.flex = '1';
+            const cmapLabel = document.createElement('label');
+            cmapLabel.style.fontSize = '10px';
+            cmapLabel.style.color = '#888';
+            cmapLabel.textContent = 'COLORMAP';
+            cmapDiv.appendChild(cmapLabel);
+
+            const cmapSelect = document.createElement('select');
+            cmapSelect.style.width = '100%';
+            cmapSelect.style.background = '#252526';
+            cmapSelect.style.color = '#ccc';
+            cmapSelect.style.border = '1px solid #444';
+            cmapSelect.style.fontSize = 'var(--font-xs)';
+            cmapSelect.style.padding = '2px';
+
+            const COLORMAPS = ['plasma', 'viridis', 'rainbow', 'coolwarm', 'cividis', 'grayscale'];
+            const curCmap = slice.colormap || 'plasma';
+            COLORMAPS.forEach(c => {
+                const opt = document.createElement('option');
+                opt.value = c;
+                opt.text = c.charAt(0).toUpperCase() + c.slice(1);
+                if (c === curCmap) opt.selected = true;
+                cmapSelect.appendChild(opt);
+            });
+            cmapSelect.onchange = () => {
+                const updated = [...slices];
+                updated[idx] = { ...slice, colormap: cmapSelect.value };
+                this.updateSlicesInPlace(updated);
+            };
+            cmapDiv.appendChild(cmapSelect);
+            row2.appendChild(cmapDiv);
+
+            // Opacity slider
+            const opacDiv = document.createElement('div');
+            opacDiv.style.flex = '1';
+            const opacHeader = document.createElement('div');
+            opacHeader.style.display = 'flex';
+            opacHeader.style.justifyContent = 'space-between';
+            const opacLabel = document.createElement('label');
+            opacLabel.style.fontSize = '10px';
+            opacLabel.style.color = '#888';
+            opacLabel.textContent = 'OPACITY';
+            const opacVal = document.createElement('span');
+            opacVal.style.fontSize = '10px';
+            opacVal.style.color = '#569cd6';
+            const curOpac = slice.opacity !== undefined ? Number(slice.opacity) : 1.0;
+            opacVal.textContent = `${Math.round(curOpac * 100)}%`;
+            opacHeader.appendChild(opacLabel);
+            opacHeader.appendChild(opacVal);
+            opacDiv.appendChild(opacHeader);
+
+            const opacSlider = document.createElement('input');
+            opacSlider.type = 'range';
+            opacSlider.min = '0';
+            opacSlider.max = '1';
+            opacSlider.step = '0.05';
+            opacSlider.value = String(curOpac);
+            opacSlider.style.width = '100%';
+            opacSlider.style.accentColor = '#00adff';
+            opacSlider.oninput = () => {
+                const v = Number(opacSlider.value);
+                opacVal.textContent = `${Math.round(v * 100)}%`;
+                const updated = [...slices];
+                updated[idx] = { ...slice, opacity: v };
+                this.updateSlicesInPlace(updated);
+            };
+            opacDiv.appendChild(opacSlider);
+            row2.appendChild(opacDiv);
+
+            // Toggles: Interpolate & Show Colorbar
+            const togglesDiv = document.createElement('div');
+            togglesDiv.style.display = 'flex';
+            togglesDiv.style.gap = '8px';
+            togglesDiv.style.alignItems = 'center';
+            togglesDiv.style.paddingTop = '12px';
+
+            const interpLbl = document.createElement('label');
+            interpLbl.style.display = 'flex';
+            interpLbl.style.alignItems = 'center';
+            interpLbl.style.gap = '3px';
+            interpLbl.style.fontSize = '10px';
+            interpLbl.style.color = '#ccc';
+            interpLbl.style.cursor = 'pointer';
+            const interpCb = document.createElement('input');
+            interpCb.type = 'checkbox';
+            interpCb.checked = slice.interpolate === true;
+            interpCb.onchange = () => {
+                const updated = [...slices];
+                updated[idx] = { ...slice, interpolate: interpCb.checked };
+                this.updateSlicesInPlace(updated);
+            };
+            interpLbl.appendChild(interpCb);
+            interpLbl.appendChild(document.createTextNode('Smooth'));
+            togglesDiv.appendChild(interpLbl);
+
+            const cbLbl = document.createElement('label');
+            cbLbl.style.display = 'flex';
+            cbLbl.style.alignItems = 'center';
+            cbLbl.style.gap = '3px';
+            cbLbl.style.fontSize = '10px';
+            cbLbl.style.color = '#ccc';
+            cbLbl.style.cursor = 'pointer';
+            const cbInput = document.createElement('input');
+            cbInput.type = 'checkbox';
+            cbInput.checked = slice.show_colorbar === true;
+            cbInput.onchange = () => {
+                const updated = [...slices];
+                updated[idx] = { ...slice, show_colorbar: cbInput.checked };
+                this.updateSlicesInPlace(updated);
+            };
+            cbLbl.appendChild(cbInput);
+            cbLbl.appendChild(document.createTextNode('Colorbar'));
+            togglesDiv.appendChild(cbLbl);
+
+            row2.appendChild(togglesDiv);
+            row.appendChild(row2);
             listContainer.appendChild(row);
         });
 
@@ -3077,7 +3203,7 @@ export class PropertyEditor {
             this.stateManager.updateNodeParameters(this.currentNodeId, updates);
         }
 
-        if (key === 'material_model' || key === 'material_type' || key === 'charge_shape' || key === 'shape_type') {
+        if (key === 'material_model' || key === 'material_type' || key === 'preset' || key === 'composition' || key === 'charge_shape' || key === 'shape_type') {
             this.render(true);
         }
 

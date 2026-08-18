@@ -948,7 +948,7 @@ export class StateManager {
             if (node) {
                 targetModelId = model.id;
                 const merged = { ...node.parameters, ...parameters };
-                const updatedKey = Object.keys(parameters).find(k => k === 'charge_mass' || k === 'preset' || k === 'device' || k === 'precision') || Object.keys(parameters)[0];
+                const updatedKey = Object.keys(parameters).find(k => k === 'material_model' || k === 'preset' || k === 'composition' || k === 'charge_mass' || k === 'device' || k === 'precision') || Object.keys(parameters)[0];
                 syncExplosiveParameters(node, merged, model, updatedKey);
                 syncMPMMaterialParameters(node, merged, updatedKey);
                 syncFEMObjectParameters(node, merged, updatedKey);
@@ -1004,7 +1004,7 @@ export class StateManager {
             if (node) {
                 targetModelId = model.id;
                 const merged = { ...node.parameters, ...parameters };
-                const updatedKey = Object.keys(parameters).find(k => k === 'charge_mass' || k === 'preset' || k === 'device' || k === 'precision') || Object.keys(parameters)[0];
+                const updatedKey = Object.keys(parameters).find(k => k === 'material_model' || k === 'preset' || k === 'composition' || k === 'charge_mass' || k === 'device' || k === 'precision') || Object.keys(parameters)[0];
                 syncExplosiveParameters(node, merged, model, updatedKey);
                 syncMPMMaterialParameters(node, merged, updatedKey);
                 syncFEMObjectParameters(node, merged, updatedKey);
@@ -1808,8 +1808,8 @@ export class StateManager {
                 crest_c2: 0.50,
                 crest_c3: 0.67,
                 crest_m2: 1.5,
-                crest_s0: 100.0,
-                crest_s_threshold: 45.0,
+                crest_s0: 15.0,
+                crest_s_threshold: 2.0,
                 // Concrete Base
                 fc: 35.0e6,
                 ft: 3.2e6,
@@ -1944,7 +1944,8 @@ export class StateManager {
             'DetonatorLocation3D': {
                 detonator_x: 0.5,
                 detonator_y: 0.5,
-                detonator_z: 0.5
+                detonator_z: 0.5,
+                detonator_radius: 0.01
             },
             'STLGeometry': {
                 stl_file: '',
@@ -2293,8 +2294,8 @@ export class StateManager {
                 crest_c2: 0.50,
                 crest_c3: 0.67,
                 crest_m2: 1.5,
-                crest_s0: 100.0,
-                crest_s_threshold: 45.0,
+                crest_s0: 15.0,
+                crest_s_threshold: 2.0,
                 // Concrete Base
                 fc: 35.0e6,
                 ft: 3.2e6,
@@ -2682,8 +2683,8 @@ export class StateManager {
             case 'RefinementMesh3D': return [{ id: 'parent_mesh', label: 'Parent Mesh' }];
             case 'Charge3D': return [{ id: 'material', label: 'Material' }];
             case 'Telemetry3DViewport': return [{ id: 'in', label: 'Data Stream' }];
-            case 'MPMDomain2D': return [{ id: 'mesh', label: 'Grid' }, { id: 'objects', label: 'MPM Objects' }];
-            case 'MPMDomain3D': return [{ id: 'mesh', label: 'Grid' }, { id: 'objects', label: 'MPM Objects' }];
+            case 'MPMDomain2D': return [{ id: 'mesh', label: 'Grid' }, { id: 'detonator', label: 'Detonator' }, { id: 'objects', label: 'MPM Objects' }];
+            case 'MPMDomain3D': return [{ id: 'mesh', label: 'Grid' }, { id: 'detonator', label: 'Detonator' }, { id: 'objects', label: 'MPM Objects' }];
             case 'MPMObject2D': return [{ id: 'material', label: 'Material' }];
             case 'MPMObject3D': return [{ id: 'material', label: 'Material' }, { id: 'stl', label: 'STL Geometry' }];
             case 'FSICoupler2D': return [{ id: 'cfd', label: 'CFD Solver' }, { id: 'mpm', label: 'MPM Solver' }];

@@ -1547,7 +1547,7 @@ export class Telemetry3DViewport {
 
     private showSlicePositionPopover(targetEl: HTMLElement, sliceIndex: number, slice: any, meshNode: any) {
         this.showPopover(targetEl, (popover) => {
-            popover.style.width = '240px';
+            popover.style.width = '250px';
 
             const title = document.createElement('div');
             title.style.fontWeight = 'bold';
@@ -1577,7 +1577,8 @@ export class Telemetry3DViewport {
                 { id: 'yz', label: 'YZ (X-Norm)' }
             ];
 
-            const currentAxis = slice.axis || 'xy';
+            let currentAxis = slice.axis || 'xy';
+            const planeBtns: Record<string, HTMLButtonElement> = {};
 
             planes.forEach(p => {
                 const btn = document.createElement('button');
@@ -1591,18 +1592,14 @@ export class Telemetry3DViewport {
                     btn.style.borderColor = '#00adff';
                     btn.style.color = '#fff';
                 }
-                btn.onclick = (e) => {
-                    e.stopPropagation();
-                    this.updateSliceProperty(sliceIndex, { axis: p.id });
-                    this.closePopover();
-                };
+                planeBtns[p.id] = btn;
                 planeRow.appendChild(btn);
             });
             popover.appendChild(planeRow);
 
             // 2. Position Slider & Live Reading
-            const bounds = getSliceBounds(currentAxis, meshNode);
-            const curOffset = Number(slice.offset ?? (bounds.min + bounds.max) / 2.0);
+            let bounds = getSliceBounds(currentAxis, meshNode);
+            let curOffset = Number(slice.offset ?? (bounds.min + bounds.max) / 2.0);
 
             const posHeader = document.createElement('div');
             posHeader.style.display = 'flex';
@@ -1635,17 +1632,78 @@ export class Telemetry3DViewport {
             slider.style.marginBottom = '8px';
 
             let numInp: HTMLInputElement | null = null;
+            const presetBtns: HTMLButtonElement[] = [];
 
-            const updatePos = (v: number) => {
+            const updatePresetHighlights = (v: number) => {
+                const span = bounds.max - bounds.min;
+                const presets = [0.00, 0.25, 0.50, 0.75, 1.00];
+                presetBtns.forEach((btn, pIdx) => {
+                    const pVal = bounds.min + presets[pIdx] * span;
+                    if (Math.abs(v - pVal) < Math.max(span * 0.02, 1e-4)) {
+                        btn.style.background = '#007acc';
+                        btn.style.borderColor = '#00adff';
+                        btn.style.color = '#fff';
+                    } else {
+                        btn.style.background = '#25252a';
+                        btn.style.borderColor = 'rgba(255, 255, 255, 0.12)';
+                        btn.style.color = '#ffffff';
+                    }
+                });
+            };
+
+            const updatePos = (v: number, immediateNetwork: boolean = false) => {
+                curOffset = v;
                 posValSpan.textContent = `${v.toFixed(3)} m`;
-                if (numInp) numInp.value = v.toFixed(3);
-                this.updateSliceProperty(sliceIndex, { offset: v });
+                if (numInp && document.activeElement !== numInp) {
+                    numInp.value = v.toFixed(3);
+                }
+                updatePresetHighlights(v);
+                this.updateSliceProperty(sliceIndex, { offset: v }, immediateNetwork);
             };
 
             slider.oninput = () => {
-                updatePos(Number(slider.value));
+                updatePos(Number(slider.value), false);
+            };
+            slider.onchange = () => {
+                updatePos(Number(slider.value), true);
             };
             popover.appendChild(slider);
+
+            // Plane button click event (updates in-place without closing popover)
+            planes.forEach(p => {
+                const btn = planeBtns[p.id];
+                btn.onclick = (e) => {
+                    e.stopPropagation();
+                    if (currentAxis === p.id) return;
+                    currentAxis = p.id;
+                    planes.forEach(otherP => {
+                        const otherBtn = planeBtns[otherP.id];
+                        if (otherP.id === currentAxis) {
+                            otherBtn.style.background = '#007acc';
+                            otherBtn.style.borderColor = '#00adff';
+                            otherBtn.style.color = '#fff';
+                        } else {
+                            otherBtn.style.background = '#25252a';
+                            otherBtn.style.borderColor = 'rgba(255, 255, 255, 0.12)';
+                            otherBtn.style.color = '#ffffff';
+                        }
+                    });
+
+                    bounds = getSliceBounds(currentAxis, meshNode);
+                    const newOffset = (bounds.min + bounds.max) / 2.0;
+                    slider.min = bounds.min.toString();
+                    slider.max = bounds.max.toString();
+                    slider.step = Math.max(0.0001, (bounds.max - bounds.min) / 200).toString();
+                    slider.value = String(newOffset);
+                    if (numInp) {
+                        numInp.min = bounds.min.toString();
+                        numInp.max = bounds.max.toString();
+                        numInp.value = newOffset.toFixed(3);
+                    }
+                    updatePos(newOffset, true);
+                    this.updateSliceProperty(sliceIndex, { axis: currentAxis, offset: newOffset }, true);
+                };
+            });
 
             // 3. Quick Preset Percentages
             const presetRow = document.createElement('div');
@@ -1662,24 +1720,23 @@ export class Telemetry3DViewport {
             ];
 
             presets.forEach(pr => {
-                const pVal = bounds.min + pr.frac * (bounds.max - bounds.min);
                 const btn = document.createElement('button');
                 btn.textContent = pr.label;
                 this.applyButtonStyle(btn);
                 btn.style.flex = '1';
                 btn.style.fontSize = '8.5px';
                 btn.style.padding = '2px 0';
-                if (Math.abs(curOffset - pVal) < (bounds.max - bounds.min) * 0.02) {
-                    btn.style.background = '#007acc';
-                    btn.style.borderColor = '#00adff';
-                }
+                presetBtns.push(btn);
+
                 btn.onclick = (e) => {
                     e.stopPropagation();
+                    const pVal = bounds.min + pr.frac * (bounds.max - bounds.min);
                     slider.value = String(pVal);
-                    updatePos(pVal);
+                    updatePos(pVal, true);
                 };
                 presetRow.appendChild(btn);
             });
+            updatePresetHighlights(curOffset);
             popover.appendChild(presetRow);
 
             // 4. Exact Value Entry
@@ -1708,8 +1765,18 @@ export class Telemetry3DViewport {
                     if (!isNaN(v)) {
                         const clamped = Math.max(bounds.min, Math.min(bounds.max, v));
                         slider.value = String(clamped);
-                        posValSpan.textContent = `${clamped.toFixed(3)} m`;
-                        this.updateSliceProperty(sliceIndex, { offset: clamped });
+                        updatePos(clamped, false);
+                    }
+                }
+            };
+            numInp.onchange = () => {
+                const valStr = numInp!.value.trim();
+                if (valStr !== '') {
+                    const v = Number(valStr);
+                    if (!isNaN(v)) {
+                        const clamped = Math.max(bounds.min, Math.min(bounds.max, v));
+                        slider.value = String(clamped);
+                        updatePos(clamped, true);
                     }
                 }
             };
@@ -1719,7 +1786,7 @@ export class Telemetry3DViewport {
                     let v = Number(numInp!.value);
                     if (!isNaN(v)) {
                         v = Math.max(bounds.min, Math.min(bounds.max, v));
-                        this.updateSliceProperty(sliceIndex, { offset: v });
+                        updatePos(v, true);
                     }
                     this.closePopover();
                 }
@@ -4467,69 +4534,101 @@ export class Telemetry3DViewport {
 
 
 
-    public sendView3DConfig(): void {
+    private _sendConfigTimeout: any = null;
+    private _lastSendConfigTime: number = 0;
+
+    public sendView3DConfig(immediate: boolean = true): void {
         const vpNode = this.getViewportNode();
         if (!vpNode) return;
         const net = (window as any).networkManager;
         if (!net || !net.isConnected()) return;
 
-        let targetModelId = this.getCurrentModelId() || vpNode.id;
+        const doSend = () => {
+            let targetModelId = this.getCurrentModelId() || vpNode.id;
 
-        const showObstacles = vpNode.parameters.show_obstacles === true;
-        const obstaclesQuantity = vpNode.parameters.obstacles_quantity || 'pressure';
-        const showSTL = vpNode.parameters.show_stl !== false;
-        const stlShowResults = vpNode.parameters.stl_show_results !== false;
-        const stlQuantity = vpNode.parameters.stl_quantity || 'pressure';
+            const showObstacles = vpNode.parameters.show_obstacles === true;
+            const obstaclesQuantity = vpNode.parameters.obstacles_quantity || 'pressure';
+            const showSTL = vpNode.parameters.show_stl !== false;
+            const stlShowResults = vpNode.parameters.stl_show_results !== false;
+            const stlQuantity = vpNode.parameters.stl_quantity || 'pressure';
 
-        const userSlices = (vpNode.parameters.slices ? [...vpNode.parameters.slices] : []);
-        const fullSlices = [...userSlices];
+            const userSlices = (vpNode.parameters.slices ? [...vpNode.parameters.slices] : []);
+            const fullSlices = [...userSlices];
 
-        if (showObstacles) {
-            fullSlices.push({
-                axis: 'obstacles',
-                offset: 0.0,
-                quantities: [obstaclesQuantity],
-                stride: 1
-            });
-        }
-        if (showSTL && stlShowResults) {
-            let volStride = 1;
-            const meshNode = this.getMeshNode();
-            if (meshNode) {
-                const cellSize = Number(meshNode.parameters.cell_size ?? 0.05);
-                const xmin = Number(meshNode.parameters.xmin ?? 0.0);
-                const xmax = Number(meshNode.parameters.xmax ?? 1.0);
-                const ymin = Number(meshNode.parameters.ymin ?? 0.0);
-                const ymax = Number(meshNode.parameters.ymax ?? 1.0);
-                const zmin = Number(meshNode.parameters.zmin ?? 0.0);
-                const zmax = Number(meshNode.parameters.zmax ?? 1.0);
-                const nx = Math.max(1, Math.round((xmax - xmin) / cellSize));
-                const ny = Math.max(1, Math.round((ymax - ymin) / cellSize));
-                const nz = Math.max(1, Math.round((zmax - zmin) / cellSize));
-                const totalCells = nx * ny * nz;
-                if (totalCells > 1000000) {
-                    volStride = 4;
-                } else if (totalCells > 200000) {
-                    volStride = 2;
-                }
+            if (showObstacles) {
+                fullSlices.push({
+                    axis: 'obstacles',
+                    offset: 0.0,
+                    quantities: [obstaclesQuantity],
+                    stride: 1
+                });
             }
-            fullSlices.push({
-                axis: 'volume',
-                offset: 0.0,
-                quantities: [stlQuantity],
-                stride: volStride
+            if (showSTL && stlShowResults) {
+                let volStride = 1;
+                const meshNode = this.getMeshNode();
+                if (meshNode) {
+                    const cellSize = Number(meshNode.parameters.cell_size ?? 0.05);
+                    const xmin = Number(meshNode.parameters.xmin ?? 0.0);
+                    const xmax = Number(meshNode.parameters.xmax ?? 1.0);
+                    const ymin = Number(meshNode.parameters.ymin ?? 0.0);
+                    const ymax = Number(meshNode.parameters.ymax ?? 1.0);
+                    const zmin = Number(meshNode.parameters.zmin ?? 0.0);
+                    const zmax = Number(meshNode.parameters.zmax ?? 1.0);
+                    const nx = Math.max(1, Math.round((xmax - xmin) / cellSize));
+                    const ny = Math.max(1, Math.round((ymax - ymin) / cellSize));
+                    const nz = Math.max(1, Math.round((zmax - zmin) / cellSize));
+                    const totalCells = nx * ny * nz;
+                    if (totalCells > 1000000) {
+                        volStride = 4;
+                    } else if (totalCells > 200000) {
+                        volStride = 2;
+                    }
+                }
+                fullSlices.push({
+                    axis: 'volume',
+                    offset: 0.0,
+                    quantities: [stlQuantity],
+                    stride: volStride
+                });
+            }
+
+            net.send({
+                command: "VIEW3D_CONFIG",
+                modelId: targetModelId,
+                refresh_rate: Number(vpNode.parameters.refresh_rate ?? 2.0),
+                slices: fullSlices
             });
+        };
+
+        if (!immediate) {
+            const now = Date.now();
+            const elapsed = now - this._lastSendConfigTime;
+            if (elapsed >= 100) {
+                this._lastSendConfigTime = now;
+                if (this._sendConfigTimeout) {
+                    clearTimeout(this._sendConfigTimeout);
+                    this._sendConfigTimeout = null;
+                }
+                doSend();
+            } else if (!this._sendConfigTimeout) {
+                this._sendConfigTimeout = setTimeout(() => {
+                    this._sendConfigTimeout = null;
+                    this._lastSendConfigTime = Date.now();
+                    doSend();
+                }, 100 - elapsed);
+            }
+            return;
         }
 
-        net.send({
-            command: "VIEW3D_CONFIG",
-            modelId: targetModelId,
-            refresh_rate: Number(vpNode.parameters.refresh_rate ?? 2.0),
-            slices: fullSlices
-        });
+        if (this._sendConfigTimeout) {
+            clearTimeout(this._sendConfigTimeout);
+            this._sendConfigTimeout = null;
+        }
+        this._lastSendConfigTime = Date.now();
+        doSend();
     }
 
-    private updateSlices(slices: any[]) {
+    private updateSlices(slices: any[], immediateNetwork: boolean = true) {
         const vpNode = this.getViewportNode();
         if (!vpNode) return;
         this.stateManager.updateNodeParametersInPlace(vpNode.id, { slices });
@@ -4545,7 +4644,7 @@ export class Telemetry3DViewport {
             }
         });
 
-        this.sendView3DConfig();
+        this.sendView3DConfig(immediateNetwork);
     }
 
     private getMeshNode() {
@@ -4697,7 +4796,7 @@ export class Telemetry3DViewport {
         }
     }
 
-    private updateSliceProperty(index: number, updates: any) {
+    private updateSliceProperty(index: number, updates: any, immediateNetwork: boolean = true) {
         const vpNode = this.getViewportNode();
         if (!vpNode) return;
         const slices = vpNode.parameters.slices ? [...vpNode.parameters.slices] : [];
@@ -4737,7 +4836,7 @@ export class Telemetry3DViewport {
             }
 
             this.propagateSliceQuantitySettings(slices, index, updates);
-            this.updateSlices(slices);
+            this.updateSlices(slices, immediateNetwork);
         }
     }
 

@@ -810,10 +810,12 @@ export class GraphRenderer {
             case 'MPMDomain2D':
                 if (toPortId === 'mesh') return fromType === 'DomainMesh2D';
                 if (toPortId === 'objects') return fromType === 'MPMObject2D';
+                if (toPortId === 'detonator') return fromType === 'DetonatorLocation';
                 return false;
             case 'MPMDomain3D':
                 if (toPortId === 'mesh') return fromType === 'DomainMesh3D';
                 if (toPortId === 'objects') return fromType === 'MPMObject3D';
+                if (toPortId === 'detonator') return fromType === 'DetonatorLocation3D';
                 return false;
             case 'MPMObject2D':
                 if (toPortId === 'material') return fromType === 'MPMMaterialSteel' || fromType === 'Material';
@@ -1184,15 +1186,7 @@ export class GraphRenderer {
             {
                 name: 'Material',
                 items: [
-                    { label: 'Universal Material (Linear Elastic)', type: 'Material', defaultParams: { material_model: 'Linear Elastic' } },
-                    { label: 'CREST-Davis High Explosive (MPM)', type: 'Material', defaultParams: { material_model: 'CREST Reactive Burn', preset: 'PBX 9502 (95% TATB, 5% Kel-F)' } },
-                    { label: 'Solid Structural Material (Hypoelastic)', type: 'Material', defaultParams: { material_model: 'Hypoelastic', preset: 'Structural Steel (A36)' } },
-                    { label: 'Solid Structural Material (Johnson-Cook EOS)', type: 'Material', defaultParams: { material_model: 'Johnson-Cook + Mie-Grüneisen', preset: 'High-Strength Armor Steel (4340)' } },
-                    { label: 'Concrete Material (RHT Model)', type: 'Material', defaultParams: { material_model: 'RHT Concrete', preset: 'Standard Structural Concrete C30/37 (30 MPa)' } },
-                    { label: 'Concrete Material (K&C Model)', type: 'Material', defaultParams: { material_model: 'Karagozian & Case (K&C)', preset: 'Standard Structural Concrete C30/37 (30 MPa)' } },
-                    { label: 'Concrete Material (CSCM Model)', type: 'Material', defaultParams: { material_model: 'CSCM Concrete', preset: 'Standard Structural Concrete C30/37 (30 MPa)' } },
-                    { label: 'Ideal Gas Fluid (Air / Gas)', type: 'Material', defaultParams: { material_model: 'Ideal Gas', preset: 'Air (STP, gamma=1.4)' } },
-                    { label: 'JWL Detonation Gas (CFD)', type: 'Material', defaultParams: { material_model: 'JWL Detonation Gas', preset: 'TNT' } }
+                    { label: 'Material', type: 'Material' }
                 ]
             },
             {
@@ -1231,9 +1225,8 @@ export class GraphRenderer {
                 name: 'MPM Simulation (2D)',
                 items: [
                     { label: 'MPM Domain 2D', type: 'MPMDomain2D' },
+                    { label: 'Detonator Location', type: 'DetonatorLocation' },
                     { label: 'MPM Object 2D (Primitive)', type: 'MPMObject2D' },
-                    { label: 'Solid Material (Hypoelastic)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Hypoelastic' } },
-                    { label: 'Solid Material (Johnson-Cook EOS)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Johnson-Cook + Mie-Grüneisen' } },
                     { label: 'FSI Coupler 2D', type: 'FSICoupler2D' }
                 ]
             },
@@ -1241,12 +1234,11 @@ export class GraphRenderer {
                 name: 'MPM Simulation (3D)',
                 items: [
                     { label: 'MPM Domain 3D', type: 'MPMDomain3D' },
+                    { label: 'Detonator Location 3D', type: 'DetonatorLocation3D' },
                     { label: 'MPM Object 3D (Box)', type: 'MPMObject3D', defaultParams: { shape_type: 'Box' } },
                     { label: 'MPM Object 3D (Sphere)', type: 'MPMObject3D', defaultParams: { shape_type: 'Sphere' } },
                     { label: 'MPM Object 3D (Cylinder)', type: 'MPMObject3D', defaultParams: { shape_type: 'Cylinder' } },
                     { label: 'MPM Object 3D (STL Geometry)', type: 'MPMObject3D', defaultParams: { shape_type: 'STL' } },
-                    { label: 'Solid Material (Hypoelastic)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Hypoelastic' } },
-                    { label: 'Solid Material (Johnson-Cook EOS)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Johnson-Cook + Mie-Grüneisen' } },
                     { label: 'FSI Coupler 3D', type: 'FSICoupler3D' }
                 ]
             },
@@ -1255,8 +1247,6 @@ export class GraphRenderer {
                 items: [
                     { label: 'FEM Domain 3D (Hex8 Explicit)', type: 'FEMDomain3D' },
                     { label: 'FEM Object 3D (Box Mesh)', type: 'FEMObject3D', defaultParams: { mesh_source: 'Box Generator' } },
-                    { label: 'Solid Material (Hypoelastic)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Hypoelastic' } },
-                    { label: 'Solid Material (Johnson-Cook EOS)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Johnson-Cook + Mie-Grüneisen' } },
                     { label: 'LS-DYNA Importer (.k / .key)', type: 'LSDynaImporter3D' },
                     { label: 'FEM-CFD FSI Coupler 3D', type: 'FEMFSICoupler3D' }
                 ]
@@ -1511,8 +1501,8 @@ export class GraphRenderer {
                 crest_c2: 0.50,
                 crest_c3: 0.67,
                 crest_m2: 1.5,
-                crest_s0: 100.0,
-                crest_s_threshold: 45.0,
+                crest_s0: 15.0,
+                crest_s_threshold: 2.0,
                 // Concrete Base
                 fc: 35.0e6,
                 ft: 3.2e6,
@@ -1651,7 +1641,8 @@ export class GraphRenderer {
             case 'DetonatorLocation3D': return {
                 detonator_x: 0.5,
                 detonator_y: 0.5,
-                detonator_z: 0.5
+                detonator_z: 0.5,
+                detonator_radius: 0.01
             };
             case 'RemapNode':
             case 'Remap1DTo2DNode': return {
@@ -1985,8 +1976,8 @@ export class GraphRenderer {
                 crest_c2: 0.50,
                 crest_c3: 0.67,
                 crest_m2: 1.5,
-                crest_s0: 100.0,
-                crest_s_threshold: 45.0,
+                crest_s0: 15.0,
+                crest_s_threshold: 2.0,
                 // Concrete Base
                 fc: 35.0e6,
                 ft: 3.2e6,
@@ -4357,16 +4348,15 @@ export class GraphRenderer {
                     needsRebuild = true;
                 }
             }
-            if (node.type === 'Material') {
+            if (node.type === 'Material' || node.type === 'MPMMaterialSteel') {
                 const comp = node.parameters['composition'] || 'TNT';
                 const matType = node.parameters['material_type'] || 'Air';
-                if (form.dataset.renderedComposition !== comp.toString() || form.dataset.renderedMaterialType !== matType.toString()) {
-                    needsRebuild = true;
-                }
-            }
-            if (node.type === 'MPMMaterialSteel') {
-                const matModel = node.parameters['material_model'] || 'Hypoelastic';
-                if (form.dataset.renderedMaterialModel !== matModel.toString()) {
+                const matModel = node.parameters['material_model'] || 'Linear Elastic';
+                const preset = node.parameters['preset'] || 'Structural Steel (A36)';
+                if (form.dataset.renderedComposition !== comp.toString() ||
+                    form.dataset.renderedMaterialType !== matType.toString() ||
+                    form.dataset.renderedMaterialModel !== matModel.toString() ||
+                    form.dataset.renderedPreset !== preset.toString()) {
                     needsRebuild = true;
                 }
             }

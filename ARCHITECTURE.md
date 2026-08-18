@@ -1,23 +1,29 @@
-# BlastDaemon Enterprise CFD Framework — Architecture
+# BlastDaemon Enterprise CFD & Multi-Physics Framework — Architecture
 
-This document is the primary technical reference for the BlastDaemon codebase. It describes every layer of the system in precise detail: build system, backend processes, solver mathematics, IPC protocol, frontend state graph, panel subsystems, and development lifecycle. It is auto-maintained and should be updated whenever significant changes are made.
+This document is the master technical reference for the BlastDaemon codebase. It describes every layer of the system: core architectural mandates, build system, backend process isolation, multi-physics solver mathematics (Eulerian CFD, Lagrangian MPM, and Lagrangian Hexahedral FEM), two-way Fluid-Structure Interaction (FSI) couplers, IPC and networking protocols, frontend Directed Acyclic Graph (DAG) state management, UI panel subsystems, and the development lifecycle.
 
 ---
 
-## 1. Core Mandates (AGENTS.md)
+## 1. Core Mandates & Master Directives ([AGENTS.md](file:///home/chris/antigrav/blastdemon/AGENTS.md))
 
-These rules are absolute and enforced at the repository level:
+These architectural rules are absolute, immutable, and strictly enforced across the framework:
 
-| Rule | Detail |
+| Rule / Directive | Description & Enforcement |
 |---|---|
-| **Zero-Dependency Frontend** | Pure Vanilla TypeScript, HTML, CSS. No React, Vue, Webpack, etc. ES6 modules via `tsc`. Vite is permitted strictly as a local dev/bundler tool. |
-| **Zero-Dependency Broker** | Pure C++17 standard library. No Boost, no gRPC, no external JSON library linkage. The `nlohmann/json.hpp` header is included directly as a single-file header in `backend/BlastSolver/include/`. |
-| **Zero-Dependency Visuals** | Native HTML5 `<canvas>` and raw WebGPU. No Three.js, Babylon.js, or any 3D library. |
-| **ONE Exception** | HDF5 (C API) for heavy volumetric disk I/O. Linked **only** to `BlastSolver`. |
-| **No Browser Agents** | The `browser_subagent` tool must never be invoked. All verification is via static analysis, code review, or manual inspection. |
-| **SSOT Node Graph** | The UI state is an immutable DAG of `Node` and `Connection` objects, synchronized across all panels. |
-| **Separation of I/O** | Lightweight telemetry streams over WebSockets. Heavy simulation data is written directly to disk by the Worker using XDMF + HDF5 or VTK. |
-| **Minimum 2nd-Order Time Integration** | 1st-order temporal schemes are prohibited as defaults. Lagrangian solvers (FEM/MPM) default to 2nd-order Symplectic Staggered Leapfrog; Eulerian CFD defaults to 2nd-order ADER-2 (or ADER-3). |
+| **Zero-Dependency Frontend** | Pure Vanilla TypeScript, native HTML5 DOM APIs, and CSS. No React, Vue, Webpack, or external UI component libraries. Native ES6 modules compiled via `tsc`. Vite is utilized strictly as a zero-runtime local development server and bundler. |
+| **Zero-Dependency Broker** | Pure C++17 standard library. No Boost, no gRPC, no external JSON linkage. The `nlohmann/json.hpp` single-file header is embedded in `backend/BlastSolver/include/`. Networking uses raw OS sockets (`<sys/socket.h>`) with a self-contained RFC 6455 WebSocket implementation. |
+| **Zero-Dependency Visuals** | Native HTML5 `<canvas>` and raw WebGPU / WebGL2 APIs. No Three.js, Babylon.js, or external 3D visualization libraries. |
+| **The Permitted Exception** | HDF5 (C API) is permitted strictly for heavy volumetric simulation disk I/O. It may **only** be linked to the `BlastSolver` worker executable. The `Broker` daemon remains 100% zero-dependency. |
+| **Process Isolation (Broker/Worker)** | Broker and Worker run as separate operating system processes communicating exclusively via OS standard I/O pipes (`stdin`/`stdout`). The Broker manages network clients, WebSockets, and process orchestration; the Worker executes the multi-physics mathematics and CUDA kernels. |
+| **Single Source of Truth (SSOT)** | The UI state is an immutable Directed Acyclic Graph (DAG) of `Node` and `Connection` objects synchronized across the Visual Node Graph, Tree Outliner, Property Inspector, and Telemetry Viewers. |
+| **Mandatory State Invalidation** | Modifying any physical solver parameter (dimensions, cell size, charge mass, material EOS, detonator location, boundary conditions, CFL, flux scheme, solver order, hardware device/precision, MPM properties, FEM properties, FSI coupling parameters) MUST explicitly invalidate the model status via `setModelStatus(modelId, 'UNINITIALIZED')`. |
+| **Mandatory Minimum 2nd-Order Temporal Accuracy** | 1st-order time integration schemes (Forward Euler or 1st-order un-staggered steps) are **strictly prohibited** as defaults. Lagrangian solvers (FEM and MPM) default to **2nd-Order Symplectic Central Difference / Staggered Leapfrog** (`O(dt^2)` trajectory accuracy and exact Hamiltonian phase/energy preservation). Eulerian CFD fluid solvers default to **2nd-Order ADER-2** or **2nd-Order TVD/SSP-RK2**. |
+| **3D Uniform Grid Only (Purge of 3D AMR/Subgrids)** | Dynamic 3D AMR, nested 3D subgrids, submeshes, restriction, and prolongated ghost fills have been completely purged from the 3D solver and UI. 3D CFD executes strictly on single-block uniform Cartesian grids (`DomainMesh3D`). 1D and 2D solvers retain their existing AMR/subgrid features as-is. |
+| **Node Parameter Alignment & Unified Casting** | Every numeric parameter key defined on a node MUST be registered in all 4 `numericKeys` lists: [serialization.ts](file:///home/chris/antigrav/blastdemon/frontend/src/serialization.ts), [property-editor.ts](file:///home/chris/antigrav/blastdemon/frontend/src/property-editor.ts), [node-viewer.ts](file:///home/chris/antigrav/blastdemon/frontend/src/node-viewer.ts), and [graph-renderer.ts](file:///home/chris/antigrav/blastdemon/frontend/src/graph-renderer.ts). Default parameter values must be identical between [state-manager.ts](file:///home/chris/antigrav/blastdemon/frontend/src/state-manager.ts) and [graph-renderer.ts](file:///home/chris/antigrav/blastdemon/frontend/src/graph-renderer.ts). |
+| **Master Parameter & Node Type Documentation** | All node types (38 types) and physical parameters (250+ properties) must be documented in [parameter-definitions.ts](file:///home/chris/antigrav/blastdemon/frontend/src/parameter-definitions.ts) with complete engineering descriptions, physical units, governing equations, and stability criteria. |
+| **Strict Prohibition of Raw LaTeX Math** | NEVER emit raw LaTeX delimiters (`$`, `$$`, `\(`, `\)`, `\[`, `\]`, `\frac`, etc.) in documentation or chat responses. All mathematical formulas must use inline code, standard Unicode math symbols (`Δt`, `ρ`, `σ`, `γ`, `∇·u`, `√`), or fenced code blocks. |
+| **Browser Agent Prohibition** | The `browser_subagent` tool must never be invoked. UI layout, visual changes, and state logic are verified via static analysis, code reviews, and manual inspection. |
+| **Automatic Broker Management Directive** | AI assistants must **never** automatically launch or restart `./Broker` in the background; the user manages the Broker process manually in their own terminal. |
 
 ---
 
@@ -26,921 +32,601 @@ These rules are absolute and enforced at the repository level:
 ```
 blastdemon/
 ├── backend/
-│   ├── BlastDaemon/              # The Broker (WebSocket daemon)
-│   │   ├── Broker.cpp            # Single-file Broker implementation (645 lines, C++17)
-│   │   └── ProcessManager.hpp    # RAII child-process management
-│   └── BlastSolver/              # The Worker (CFD math engine)
-│       ├── main.cpp              # Entry point, command dispatch loop (1774 lines)
-│       ├── cfd_solver.hpp/cpp    # 1D solver interface & implementation stub
-│       ├── cfd_solver_step.cpp   # 1D time-stepping kernel
-│       ├── cfd_solver_fluxes.cpp # 1D flux calculations
-│       ├── cfd_solver_init.cpp   # 1D initial condition setup
-│       ├── cfd_solver_2d.hpp     # 2D CPU solver interface
-│       ├── cfd_solver_2d_init.cpp
-│       ├── cfd_solver_2d_step.cpp
-│       ├── cfd_solver_2d_fluxes.cpp
-│       ├── cfd_solver_2d_cuda.hpp/.cu  # 2D GPU CUDA solver
-│       ├── cfd_solver_3d.hpp/.cpp      # 3D CPU solver
-│       ├── cfd_solver_3d_cuda.hpp/.cu  # 3D GPU CUDA solver
-│       ├── remapper_3d.cpp             # 1D→3D state remap
-│       ├── cfd_states.hpp       # All primitive/conservative state structs
-│       ├── cfd_tile.hpp         # Tile SoA layout definitions
-│       ├── ImmersedBoundary.hpp/.cpp   # STL reader, voxelizer & immersed boundary conditions
-│       ├── materials.hpp        # EOS functions, JWL params, programmed burn
-│       ├── HDF5Writer.hpp/.cpp  # HDF5 volumetric output
-│       ├── XDMFWriter.hpp/.cpp  # XDMF metadata wrapper
-│       └── VTKWriter.hpp/.cpp   # VTK unstructured grid export (ZLIB-compressed)
+│   ├── BlastDaemon/                          # The Broker (WebSocket & Process Management Daemon)
+│   │   ├── Broker.cpp                        # Zero-dependency C++17 WebSocket server & process multiplexer
+│   │   └── ProcessManager.hpp                # RAII child-process management (pipes, fork/execv)
+│   └── BlastSolver/                          # The Worker (Multi-Physics Math Engine)
+│       ├── main.cpp                          # Command dispatch loop & worker thread orchestration (8,700+ lines)
+│       ├── cfd_states.hpp                    # Conservative & primitive CFD state structs (1D/2D/3D)
+│       ├── cfd_tile.hpp                      # Structure of Arrays (SoA) tile memory layout definitions
+│       ├── cfd_solver.hpp/.cpp               # 1D High-Order Compressible Euler Solver (Spherical/Planar)
+│       ├── cfd_solver_init.cpp               # 1D Initial conditions & JWL/Ideal Gas setup
+│       ├── cfd_solver_step.cpp               # 1D Temporal integration (RK2/RK3/RK4, ADER)
+│       ├── cfd_solver_fluxes.cpp             # 1D Numerical fluxes (AUSM+, Rusanov, MUSCL/WENO)
+│       ├── cfd_solver_2d.hpp                 # 2D Axisymmetric & Cartesian CFD CPU Solver
+│       ├── cfd_solver_2d_init.cpp            # 2D Initial conditions & charge positioning
+│       ├── cfd_solver_2d_step.cpp            # 2D Low-Storage Runge-Kutta & ADER time-stepping
+│       ├── cfd_solver_2d_fluxes.cpp          # 2D Numerical flux splitting & ghost cell boundary stencils
+│       ├── cfd_solver_2d_cuda.hpp/.cu        # 2D GPU CUDA Solver (tiled SoA execution)
+│       ├── cfd_solver_2d_amr.hpp/.cpp        # 2D Block-Structured Adaptive Mesh Refinement (CPU)
+│       ├── cfd_solver_2d_amr_cuda.hpp/.cu    # 2D Block-Structured AMR (CUDA GPU)
+│       ├── cfd_solver_3d.hpp/.cpp            # 3D Uniform Cartesian CFD CPU Solver (Single/Multi-Mat templates)
+│       ├── cfd_solver_3d_cuda.hpp            # 3D GPU CUDA Solver Interface
+│       ├── cfd_solver_3d_cuda_impl.cuh       # 3D GPU CUDA Solver Kernels (ADER-2/3, TVD, AUSM+, Rusanov)
+│       ├── cfd_solver_3d_cuda_f32_single.cu  # 3D CUDA FP32 Single-Material compilation unit
+│       ├── cfd_solver_3d_cuda_f32_multi.cu   # 3D CUDA FP32 Multi-Material compilation unit
+│       ├── cfd_solver_3d_cuda_f64_single.cu  # 3D CUDA FP64 Single-Material compilation unit
+│       ├── cfd_solver_3d_cuda_f64_multi.cu   # 3D CUDA FP64 Multi-Material compilation unit
+│       ├── ImmersedBoundary.hpp/.cpp         # STL reader, OpenMP/CUDA voxelizer, slip wall ghost cell reflection
+│       ├── remapper_3d.cpp                   # 1D->2D, 1D->3D, and 2D->3D conservative state remap kernels
+│       ├── mpm_solver_2d.hpp/.cpp            # 2D Lagrangian Material Point Method (MPM) Solver
+│       ├── mpm_solver_3d.hpp/.cpp            # 3D Lagrangian MPM CPU Solver (PIC/FLIP, APIC, GIMP, B-Spline)
+│       ├── mpm_solver_3d_cuda.hpp/.cu        # 3D Lagrangian MPM CUDA GPU Solver
+│       ├── fem_solver_3d.hpp/.cpp            # 3D Hexahedral Solid FEM Solver (1-pt reduced + Hourglass control)
+│       ├── fem_solver_3d_cuda.hpp/.cu        # 3D Hexahedral Solid FEM CUDA GPU Solver
+│       ├── ls_dyna_reader_3d.hpp/.cpp        # LS-DYNA (*.k, *.key) Keyword deck parser & mesh importer
+│       ├── fem_contact_3d.hpp/.cpp           # 3D FEM Contact Mechanics (Segment penalty, sliding, Coulomb friction)
+│       ├── fsi_coupler_3d.hpp/.cpp           # 3D MPM Fluid-Structure Interaction Coupler
+│       ├── fem_fsi_coupler_3d.hpp/.cpp       # 3D FEM Fluid-Structure Coupler (SAT cut-cell aperture, Gauss quadrature)
+│       ├── fem_fsi_coupler_3d_cuda.hpp/.cu   # 3D FEM Fluid-Structure Coupler (CUDA GPU)
+│       ├── materials.hpp                     # Fluid EOS, JWL parameters, Baer-Nunziato mixture, Programmed Burn
+│       ├── constitutive_concrete_models.hpp  # Advanced Concrete Models (RHT, HJC, CSCM / Mat 159, K&C / Mat 72R3)
+│       ├── constitutive_crest_davis.hpp      # CREST Reactive Burn & Davis Solid/Product EOS for High Explosives
+│       ├── HDF5Writer.hpp/.cpp               # HDF5 heavy volumetric disk output
+│       ├── XDMFWriter.hpp/.cpp               # XDMF XML metadata wrapper for ParaView
+│       ├── VTKWriter.hpp/.cpp                # VTK XML Unstructured Grid (.vtu / .pvd) writer with ZLIB compression
+│       └── AsyncVTKWriter.hpp                # Asynchronous background VTK disk streaming
 ├── frontend/
-│   ├── index.html               # App shell; imports dist/main.js
-│   ├── styles.css               # ~38 KB global CSS; all design tokens
-│   ├── package.json             # Dev deps: typescript@5, vite@5 only
-│   ├── tsconfig.json
+│   ├── index.html                            # App entry shell
+│   ├── styles.css                            # Comprehensive CSS styling & design tokens (~38 KB)
+│   ├── package.json                          # Dev dependencies: typescript@5, vite@5 only
+│   ├── tsconfig.json                         # Strict TypeScript configuration
 │   └── src/
-│       ├── main.ts              # Entry point; wires all subsystems (~1041 lines)
-│       ├── types.ts             # All TypeScript interfaces: Node, Connection, AppState, etc.
-│       ├── state-manager.ts     # Global SSOT store with history/undo/redo (~1540 lines)
-│       ├── serialization.ts     # DAG→JSON for solver payloads; binary .blst format
-│       ├── NetworkManager.ts    # WebSocket client with reconnect logic
-│       ├── layout-manager.ts    # Recursive split-pane renderer (~77 KB)
-│       ├── graph-renderer.ts    # Visual node graph canvas (~274 KB)
-│       ├── node-viewer.ts       # Per-node detailed panel (~76 KB)
-│       ├── property-editor.ts   # Node property inspector (~45 KB)
-│       ├── canvas-renderer.ts   # Shared 2D canvas utility
-│       ├── resource-manager.ts  # System metrics display (~19 KB)
-│       ├── validation.ts        # DAG validation rules (~51 KB)
-│       ├── ViewportRenderer.ts  # 3D viewport canvas renderer (~21 KB)
-│       ├── ViewportWorker.ts    # Off-thread 3D viewport (~58 KB)
-│       ├── ChartWorker.ts       # Off-thread telemetry graph renderer (~13 KB)
-│       └── ContourWorker.ts     # Off-thread 2D contour renderer (~18 KB)
-├── CMakeLists.txt               # CMake build: Broker (C++17), BlastSolver (C++20+CUDA)
-└── AGENTS.md                    # Absolute dev rules (enforced)
+│       ├── main.ts                           # Application bootstrap, WebSocket dispatch, command routing
+│       ├── types.ts                          # TypeScript interfaces (Node, Connection, AppState, LayoutNode)
+│       ├── state-manager.ts                  # Global SSOT state store with undo/redo & model isolation
+│       ├── serialization.ts                  # DAG traversal, parameter casting, solver JSON compilation, .blst binary
+│       ├── NetworkManager.ts                 # WebSocket client with reconnection logic and binary dispatch
+│       ├── layout-manager.ts                 # Recursive split-pane dockable layout system
+│       ├── graph-renderer.ts                 # Visual Node Graph infinite SVG/DOM canvas editor
+│       ├── property-editor.ts                # Dynamic Property Inspector with parameter popovers & validation
+│       ├── node-viewer.ts                    # Per-node specialized viewers and parameter inspectors
+│       ├── parameter-definitions.ts          # Master SSOT Parameter & Node Definitions Registry (118 KB)
+│       ├── mpm-presets.ts                    # Solid material & constitutive parameter presets library (131 KB)
+│       ├── host-file-browser.ts              # Interactive host filesystem browser (STL, LS-DYNA, VTK, .blst)
+│       ├── resource-manager.ts               # Hardware telemetry monitor (CPU, RAM, GPU NVML)
+│       ├── validation.ts                     # Deep DAG validation & graph topology rules
+│       ├── ViewportRenderer.ts               # Main-thread 3D viewport canvas bridge
+│       ├── ViewportWorker.ts                 # Off-thread WebGPU/WebGL2 3D interactive viewport renderer (314 KB)
+│       ├── ChartWorker.ts                    # Off-thread 1D spatial profile & gauge chart renderer
+│       ├── ContourWorker.ts                  # Off-thread 2D contour heatmap renderer
+│       ├── mpm-renderer-2d.ts                # 2D MPM particle canvas visualization helper
+│       └── mpm-renderer-3d.ts                # 3D MPM particle viewport binding helper
+├── CMakeLists.txt                            # CMake build definition (Broker C++17, BlastSolver C++20+CUDA)
+├── AGENTS.md                                 # Master Agent Directives (Enforced)
+└── ARCHITECTURE.md                           # Master Architecture Reference Document (This file)
 ```
 
 ---
 
-## 3. Build System
+## 3. Build System & Compilation
 
-### CMake Targets
+### 3.1 Target Matrix
 
-| Target | Language | C++ Std | Key Deps | Purpose |
-|---|---|---|---|---|
-| `Broker` | C++17 | 17 (forced) | `nlohmann/json.hpp` (header-only, in `include/`) | WebSocket daemon |
-| `BlastSolver` | C++20 + CUDA 17 | 20 | OpenMP, ZLIB, HDF5 (optional), NVML (dlopen) | CFD solver worker |
-| `test_cuda_solver` | C++20 + CUDA 17 | 20 | Same as BlastSolver | Standalone GPU solver test harness |
+| Target | Type | C++ Standard | CUDA Standard | Dependencies | Purpose |
+|---|---|---|---|---|---|
+| `Broker` | Executable | C++17 (Forced) | N/A | POSIX sockets, `nlohmann/json.hpp` (header-only) | WebSocket broker & process manager |
+| `BlastSolverCore` | Static Library | C++20 | CUDA 17 (`native`) | OpenMP, ZLIB, HDF5 (C API, optional), NVML (`dlopen`) | Unified multi-physics engine library |
+| `BlastSolver` | Executable | C++20 | CUDA 17 (`native`) | Links `BlastSolverCore` | Worker simulation executable |
+| `test_cuda_solver` | Test Executable | C++20 | CUDA 17 (`native`) | Links `BlastSolverCore` | Standalone GPU CFD test harness |
+| `test_fem_3d_...` | Test Executables | C++20 | CUDA 17 (`native`) | Links `BlastSolverCore` | Standalone FEM/FSI/MPM test suite |
 
-### Compiler Flags
+### 3.2 Compiler Optimization Flags
 
-- **C++**: `-Wall -Wextra -O3 -march=native`
-- **CUDA**: `--expt-relaxed-constexpr -O3`, `CUDA_SEPARABLE_COMPILATION ON`
-- **GPU Architecture**: `CMAKE_CUDA_ARCHITECTURES native` (auto-detects the installed GPU)
-- **HDF5**: Conditional — if not found, `NO_HDF5` preprocessor macro is defined and HDF5Writer becomes a no-op stub.
+- **C++ Compilation Flags:** `-Wall -Wextra -O3 -march=native -fopenmp`
+- **CUDA Compilation Flags:** `--expt-relaxed-constexpr -O3 --use_fast_math --threads 0 -march=native`, `CMAKE_CUDA_ARCHITECTURES native`, `CUDA_SEPARABLE_COMPILATION ON`
+- **Conditional HDF5:** If HDF5 C libraries are present on the host system, `HDF5Writer` compiles natively. If missing, `NO_HDF5` is defined and `HDF5Writer` reverts to a safe no-op stub while VTK XML export remains fully functional.
 
-### Build Commands
+### 3.3 Build Commands
 
 ```bash
-# From project root
-mkdir build && cd build
-cmake ..
-make Broker          # Fast (~1s)
-make BlastSolver     # Full solver including CUDA compilation
-make test_cuda_solver
+# Build backend targets from project root
+mkdir -p build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release ..
+make -j$(nproc) Broker BlastSolver
 
-# Frontend dev server (Vite on :5173)
-cd frontend && npm run dev
+# Optional: Build full verification test suite
+cmake -DBUILD_TESTS=ON ..
+make -j$(nproc)
+
+# Frontend development server (Vite on http://localhost:5173)
+cd ../frontend && npm run dev
+
+# Frontend production compilation (TypeScript type-check + bundle)
+cd ../frontend && npm run build
 ```
 
 ---
 
-## 4. Process Architecture — Broker & Worker
+## 4. Process Architecture — Broker & Worker (IPC & Networking)
 
-The application runs as **two separate OS processes** that communicate exclusively through stdin/stdout pipes. No shared memory, no TCP loopback between them.
+The architecture strictly enforces **process isolation**. The Broker and Worker run as independent OS processes communicating over standard OS pipes.
 
 ```
-Browser (ws://localhost:8080)
+Browser Client (ws://localhost:8080)
         │
-        │  WebSocket frames (RFC 6455)
+        │  WebSocket RFC 6455 Frames (Text JSON & Binary Streams)
         ▼
-┌────────────────────────────────────────────┐
-│  Broker  (Broker.cpp, port 8080)           │
-│  C++17, single-file, zero-dependency       │
-│  Accepts N clients, each gets its own      │
-│  std::thread via std::thread(handle_client)│
-└──────────┬─────────────────────────────────┘
-           │  stdin (JSON lines "command\n\n")
-           │  stdout (hybrid stream: JSON + BIN_FRAME)
+┌─────────────────────────────────────────────────────────────┐
+│  Broker (backend/BlastDaemon/Broker.cpp)                     │
+│  - C++17 single-file daemon, raw POSIX sockets              │
+│  - Self-contained RFC 6455 handshake (built-in SHA-1/Base64)│
+│  - Process lifecycle manager keyed by modelId               │
+│  - Multi-client thread-safe WebSocket frame multiplexing    │
+│  - Host filesystem browser protocol (HOST_FILE_*)           │
+└──────────┬──────────────────────────────────────────────────┘
+           │  stdin: JSON commands ("{...}\n\n")
+           │  stdout: Hybrid stream (JSON lines + BIN_* frames)
            ▼
-┌────────────────────────────────────────────┐
-│  BlastSolver  (main.cpp)                   │
-│  C++20 + CUDA, manages 1D/2D/3D solvers   │
-│  Runs simulation loops on detached threads │
-└────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│  BlastSolver (backend/BlastSolver/main.cpp)                 │
+│  - C++20 + CUDA 17 worker engine                            │
+│  - Manages concurrent 1D, 2D, and 3D simulation loops       │
+│  - Solvers: Eulerian CFD, Lagrangian MPM, Hex8 Solid FEM    │
+│  - Couplers: 2D/3D MPM-FSI, 3D FEM-FSI (SAT cut-cell)       │
+│  - Telemetry: 30 Hz JSON + high-speed binary frame packets   │
+│  - Disk I/O: Async VTK XML (.vtu/.pvd) & XDMF+HDF5          │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-### 4.1 Broker (`backend/BlastDaemon/Broker.cpp`)
+### 4.1 The Broker (`backend/BlastDaemon/Broker.cpp`)
 
-#### Startup & Socket Setup
-- Binds `AF_INET SOCK_STREAM` on `0.0.0.0:8080` with `SO_REUSEADDR`.
-- Sets `FD_CLOEXEC` on all sockets (Linux).
-- Globally ignores `SIGPIPE` (`signal(SIGPIPE, SIG_IGN)`) so dead clients yield `EPIPE` from `send()` rather than killing the daemon.
-- Each accepted client socket is dispatched to `std::thread(handle_client, client_fd).detach()`.
+- **Socket Binding & Options:** Binds `0.0.0.0:8080` with `SO_REUSEADDR` and sets `FD_CLOEXEC` on all sockets to prevent handle leakage into spawned worker processes.
+- **Signal Handling:** Globally ignores `SIGPIPE` (`signal(SIGPIPE, SIG_IGN)`). Broken client connections yield standard `EPIPE` return codes from `send()` without aborting the daemon.
+- **Zero-Dependency RFC 6455 Handshake:** Computes `Sec-WebSocket-Accept` using an in-tree SHA-1 and Base64 implementation without linking OpenSSL.
+- **Per-Model Process Isolation:** Manages a map of `std::shared_ptr<Process>` keyed by `modelId`. Re-uses worker instances across multi-stage pipelines (e.g. 1D detonation feeding 2D ground reflection in the same model) while isolating distinct models into separate processes.
+- **Host File Browser Protocol:** Handles host filesystem inspection over WebSocket:
+  - `HOST_FILE_LIST`: Scans server directories and returns file metadata (size, modification time, file type).
+  - `HOST_FILE_READ`: Streams raw text or binary file contents (e.g. LS-DYNA `.k` decks, STL meshes).
+  - `LOAD_STL_GEOMETRY`: Parses ASCII/Binary STL surface meshes on the server and returns vertex arrays directly to the client.
+- **Hardware Telemetry Relay (Resource Pulse):** Reads CPU utilization (`/proc/stat`), RAM usage (`/proc/self/statm` and `/proc/meminfo`), and queries GPU VRAM, compute utilization, and temperatures via dynamically loaded NVML (`dlopen("libnvidia-ml.so.1")`). Emitted to connected clients at 30 Hz.
 
-#### WebSocket Implementation (Self-Contained)
-- Implements the full RFC 6455 handshake: reads the HTTP `Upgrade` request, extracts `Sec-WebSocket-Key`, computes `SHA-1(key + magic_uuid)`, Base64-encodes the result, and sends the `101 Switching Protocols` response.
-- SHA-1 and Base64 are implemented from scratch inside `namespace sha1` — no OpenSSL dependency.
-- Frame parsing supports all three payload length encodings (7-bit, 16-bit, 64-bit) and correctly unmasks client frames by XOR-ing with the 4-byte masking key.
-- Multi-fragment messages are accumulated in `ws_message_accumulator` until the `FIN` bit is set.
+### 4.2 Standard I/O Hybrid Protocol
 
-#### Per-Client State (`struct ClientConnection`)
-- Wraps the socket FD and a `std::mutex send_mutex` to make `send_websocket_frame()` thread-safe (the telemetry relay thread writes on the socket concurrently with the main receive loop).
-- `send_websocket_binary()` sends opcode `0x02`; `send_websocket_text()` sends opcode `0x01`.
+The Worker emits a hybrid stream on `stdout`:
+1. **JSON Control Lines:** UTF-8 JSON lines representing solver milestones, step progress, virtual gauge histories, and diagnostics.
+2. **Binary Frame Stream:** Formatted with custom binary frame headers followed by raw float arrays:
 
-#### Process Lifecycle Management
-- `active_processes` is a `std::map<std::string, std::shared_ptr<Process>>` keyed by **modelId**.
-- Each modelId owns exactly one `BlastSolver` child process for its entire lifetime (both 1D and 2D phases share a single process). Cross-model contamination was a known historical bug, now fixed.
-- On `INIT` / `INIT_2D` / `INIT_3D`:
-  1. If an existing process for the modelId is alive, route the command to it (20 retry attempts × 10ms).
-  2. If the process has died, spawn a fresh `BlastSolver` (searched at `./BlastSolver` or `./build/BlastSolver`).
-  3. Attach a detached telemetry relay thread.
-- On `TERMINATE` / `TERMINATE_2D` / `TERMINATE_3D`: erases **all** map entries pointing to the same `shared_ptr<Process>` (handles the shared 1D/2D process case).
-- On client disconnect: calls `terminate()` on all active processes to prevent zombie workers.
-
-#### Telemetry Relay Loop
-The relay thread reads from the Worker's stdout into a `std::vector<uint8_t> accumulator` and dispatches:
-
-| Marker prefix | Handling |
+| Stream Header Marker | Payload Content & Memory Layout |
 |---|---|
-| `BIN_FRAME_3D_SLICES <size>\n` | Reads `size` raw bytes, prepends modelId + `\0`, sends as WebSocket binary |
-| `BIN2D_FRAME <size>\n` or `BIN_FRAME_2D <size>\n` | Same as above |
-| `BIN_FRAME <size>\n` | Same as above (1D telemetry) |
-| Any JSON line | Parses with nlohmann, injects `modelId` field, forwards as WebSocket text |
-| Unparseable line | Wraps in `{type: "log", modelId, message}` envelope |
+| `BIN_FRAME <size>\n` | 1D CFD: `uint32 n_cells` + `uint32 n_channels (7)` + `float32[n_cells * 7]` (`p, rho, u, E, alpha1, alpha2, alpha_air`). |
+| `BIN2D_FRAME <size>\n` | 2D CFD: `uint32 nr` + `uint32 nz` + `uint32 n_channels` + `float32[nr * nz * n_channels]` (`p, rho, ur, uz, E, alpha1, alpha2`). |
+| `BIN_FRAME_3D_SLICES <size>\n` | 3D CFD: Structured binary slice packets (orthogonal XY, YZ, XZ planes and cut-planes) extracted by `extractSlice()`. |
+| `BIN_FRAME_MPM <size>\n` | 2D/3D MPM: `uint32 n_particles` + `uint32 stride` + `float32` particle cloud (`x, y, z, vx, vy, vz, mass, volume, stress_tensor, damage, temperature`). |
+| `BIN_FRAME_FEM <size>\n` | 3D FEM: `uint32 n_nodes` + `uint32 n_elements` + deformed nodal coordinates + element stress/strain/damage arrays. |
 
-The `try/catch` around `std::stoul` prevents crashes on malformed frame headers; the corrupted header is skipped by scanning to the next newline.
-
-### 4.2 ProcessManager (`backend/BlastDaemon/ProcessManager.hpp`)
-
-RAII wrapper around `fork()`+`execv()` / `CreateProcess()` (Windows), exposing:
-- `start(path)`: spawns the child, sets up `stdin`/`stdout` pipes.
-- `writeStdin(str)`: writes to the child's stdin with error detection.
-- `readStdout(buf, len)`: blocking read from the child's stdout.
-- `terminate()`: sends `SIGTERM` (Linux) or `TerminateProcess()` (Windows).
-- `isRunning()`: checks if the child is still alive (via `waitpid(WNOHANG)` or `GetExitCodeProcess()`).
+Before transmission to the browser over WebSocket binary frames (Opcode `0x02`), the Broker prepends the `modelId` as a null-terminated UTF-8 string:
+```
+[modelId string] [0x00 delimiter] [Raw Worker Binary Payload]
+```
 
 ---
 
-## 5. BlastSolver — Command Dispatch (`main.cpp`)
+## 5. BlastSolver — Command Dispatch & State Machine (`main.cpp`)
 
-The Worker reads newline-delimited JSON from stdin (double `\n\n` terminates each message). The main loop uses `poll()` to avoid blocking indefinitely.
+The Worker reads double-newline terminated JSON commands (`"{...}\n\n"`) from `stdin`. The dispatch loop routes commands to the appropriate solver subsystem:
 
-### 5.1 Global Atomic State
-
-Three independent simulation contexts run concurrently and are managed by atomic flags:
-
-```cpp
-// 1D
-std::atomic<bool> sim_running, sim_paused, sim_terminate;
-std::atomic<int>  step_progress, global_target_steps;
-std::atomic<bool> global_exec_until_end;
-std::atomic<double> global_cfl{0.4};
-
-// 2D
-std::atomic<bool> sim2d_running, sim2d_paused, sim2d_terminate;
-std::atomic<bool> solver2d_initialized;
-std::atomic<double> global_cfl_2d{0.35};
-
-// 3D
-std::atomic<bool> sim3d_running, sim3d_paused, sim3d_terminate;
-std::atomic<double> global_cfl_3d{0.4};
+```
+                                    +-----------------------+
+                                    |  JSON Command Stream  |
+                                    +-----------------------+
+                                                |
+                 +------------------------------+------------------------------+
+                 |                              |                              |
+                 v                              v                              v
+      +--------------------+         +--------------------+         +--------------------+
+      | Eulerian CFD (1D)  |         | Eulerian CFD (2D)  |         | Eulerian CFD (3D)  |
+      | - INIT / STEP      |         | - INIT_2D / STEP_2D|         | - INIT_3D / STEP_3D|
+      | - EXEC_ALL / PAUSE |         | - EXEC_ALL_2D      |         | - EXEC_ALL_3D      |
+      +--------------------+         +--------------------+         +--------------------+
+                 |                              |                              |
+                 +------------------------------+------------------------------+
+                 |                              |                              |
+                 v                              v                              v
+      +--------------------+         +--------------------+         +--------------------+
+      | Lagrangian MPM     |         | Hex8 Solid FEM     |         | FSI Couplers       |
+      | - INIT_MPM (2D)    |         | - INIT_FEM_3D      |         | - INIT_FSI_2D      |
+      | - INIT_MPM_3D (3D) |         | - STEP_FEM_3D      |         | - INIT_FSI_3D (MPM)|
+      | - STEP_MPM / EXEC  |         | - EXEC_ALL_FEM_3D  |         | - INIT_FEM_FSI_3D  |
+      +--------------------+         +--------------------+         +--------------------+
 ```
 
-### 5.2 Supported Commands
+### 5.1 Supported Command Set
 
-| Command | Scope | Effect |
-|---|---|---|
-| `INIT` | 1D | Creates `CFDSolverImpl<double, true/false>`. Reads: `n_cells`, `domain_radius`, `gamma`, `explosive_radius`, `rho`, `init_mode`, `composition`, flux/temporal/spatial order, JWL params. |
-| `STEP` | 1D | Launches `worker_thread_func()` for N steps |
-| `EXEC_ALL` | 1D | Launches `worker_thread_func()` until `is_terminated()` |
-| `PAUSE` / `RESUME` | 1D | Sets `sim_paused` atomic |
-| `TERMINATE` | 1D | Sets `sim_terminate` atomic |
-| `INIT_2D` | 2D | Creates `CFDSolver2DImpl<float>` (CPU) or `CFDSolver2DCudaImpl<float>` (GPU) |
-| `REMAP` | 2D/3D | Directly injects 1D state array into the 2D/3D solver via `setInitialConditionFrom1D()` |
-| `STEP_2D` / `EXEC_ALL_2D` / `PAUSE_2D` / `RESUME_2D` / `TERMINATE_2D` | 2D | Equivalent 2D thread management |
-| `INIT_3D` | 3D | Creates `CFDSolver3DImpl<float, true/false>` (CPU) or `CFDSolver3DCuda<float, true/false>` (GPU) |
-| `STEP_3D` / `EXEC_ALL_3D` / `PAUSE_3D` / `RESUME_3D` / `TERMINATE_3D` | 3D | Equivalent 3D thread management |
-| `WRITE_VTK` | 1D/2D | Exports current state to `.vtu` file via `VTKWriter` |
-| `CONTOUR_CONFIG` | 2D | Sets `global_telemetry_stride` and `global_telemetry_interval_ms` |
-| `VIEW3D_CONFIG` | 3D | Updates `global_slices_3d` for next telemetry emission |
-| `SET_DEVICE` | 2D/3D | Switches between `cpu` and `cuda` solver backends at runtime |
+- **1D CFD Gas Dynamics:** `INIT`, `STEP`, `EXEC_ALL`, `PAUSE`, `RESUME`, `TERMINATE`.
+- **2D CFD Gas Dynamics:** `INIT_2D`, `STEP_2D`, `EXEC_ALL_2D`, `PAUSE_2D`, `RESUME_2D`, `TERMINATE_2D`.
+- **3D CFD Gas Dynamics:** `INIT_3D`, `STEP_3D`, `EXEC_ALL_3D`, `PAUSE_3D`, `RESUME_3D`, `TERMINATE_3D`.
+- **2D Lagrangian MPM:** `INIT_MPM`, `STEP_MPM`, `EXEC_ALL_MPM`, `PAUSE_MPM`, `RESUME_MPM`, `TERMINATE_MPM`.
+- **3D Lagrangian MPM:** `INIT_MPM_3D`, `STEP_MPM_3D`, `EXEC_ALL_MPM_3D`, `PAUSE_MPM_3D`, `RESUME_MPM_3D`, `TERMINATE_MPM_3D`.
+- **3D Hexahedral FEM:** `INIT_FEM_3D`, `STEP_FEM_3D`, `EXEC_ALL_FEM_3D`, `PAUSE_FEM_3D`, `RESUME_FEM_3D`, `TERMINATE_FEM_3D`.
+- **Fluid-Structure Interaction (FSI):**
+  - `INIT_FSI_2D`, `STEP_FSI_2D`, `EXEC_ALL_FSI_2D`, `PAUSE_FSI_2D`, `TERMINATE_FSI_2D` (CFD + 2D MPM).
+  - `INIT_FSI_3D`, `STEP_FSI_3D`, `EXEC_ALL_FSI_3D`, `PAUSE_FSI_3D`, `TERMINATE_FSI_3D` (CFD + 3D MPM).
+  - `INIT_FEM_FSI_3D`, `STEP_FEM_FSI_3D`, `EXEC_ALL_FEM_FSI_3D`, `PAUSE_FEM_FSI_3D`, `TERMINATE_FEM_FSI_3D` (CFD + 3D FEM).
+- **Multi-Stage Remapping:** `REMAP` (1D->2D or 1D->3D), `REMAP_2D` (2D->3D).
+- **Configuration & Diagnostics:** `UPDATE_CFL`, `CONTOUR_CONFIG`, `VIEW3D_CONFIG`, `WRITE_VTK`.
 
-### 5.3 Worker Thread Functions
+### 5.2 Virtual Sensor Gauges
 
-Three detached threads, one per simulation dimension:
-
-**`worker_thread_func()` (1D)**
-- Loops while `sim_running && !sim_terminate && !sim_paused`.
-- Calls `computeStepSize(cfl)` then `step(dt)`.
-- Throttles telemetry to 33ms intervals (≈30Hz).
-- Tracks wall-clock time in `global_wallclock_1d`.
-- Emits a final 100% progress packet on exit.
-
-**`worker_2d_thread_func()` (2D)**
-- For CUDA solver: calls `getMaxWaveSpeed()` → computes CFL-limited `dt` manually.
-- For CPU solver: calls `computeStepSize(cfl)`.
-- Termination condition: `checkTerminationCondition()` (shock reaches outflow boundary).
-- Telemetry interval configurable via `CONTOUR_CONFIG`.
-
-**`worker_3d_thread_func()` (3D)**
-- Same structure as 2D; uses `global_solver_3d->computeStepSize()`.
-- Termination: `global_solver_3d->is_terminated()`.
-- Emits slice data via `BIN_FRAME_3D_SLICES` marker.
-
-### 5.4 Telemetry Emission
-
-**1D — `emit_telemetry()`**
-```
-JSON:  {"type":"TELEMETRY","time":...,"is_terminated":...,"wallclock":...,"gauges_history":{...}}
-BINARY: "BIN_FRAME <N>\n" + uint32(n_cells) + uint32(n_channels=7) + float32[n_cells * 7]
-```
-The 7 channels (indexed) are: `[p, rho, u, E_specific, alpha1, alpha2, alpha_air]`. For Ideal Gas mode, channels 5 and 6 are zeroed.
-
-**2D — `emit_telemetry_2d()`**
-```
-JSON:   {"type":"TELEMETRY_2D","time":...,"nr":...,"nz":...,"is_terminated":...}
-BINARY: "BIN2D_FRAME <N>\n" + uint32(nr) + uint32(nz) + uint32(n_channels) + float32[...]
-```
-The contour frame channels: `[p, rho, ur, uz, E_int, alpha1, alpha2]` (7 for multi-material, 5 for ideal gas). The downsampled grid is computed by `getTelemetry2D(stride)`.
-
-**3D — `emit_telemetry_3d()`**
-```
-JSON:   {"type":"TELEMETRY_3D","time":...,"slices":[...]}
-BINARY: "BIN_FRAME_3D_SLICES <N>\n" + binary slice payload from extractSlice()
-```
-Each requested slice (xy/yz/xz plane at offset) is extracted and appended.
-
-### 5.5 Resource Pulse (`emit_resource_pulse()`)
-
-Emitted at 30Hz during simulation runs:
-- **CPU**: `CLOCK_PROCESS_CPUTIME_ID` vs `CLOCK_MONOTONIC` delta, normalized by core count.
-- **RAM**: `/proc/self/statm` (resident pages × page size) and `/proc/meminfo` (MemTotal, MemAvailable).
-- **GPU**: CUDA VRAM via `get_cuda_vram_info()` (CUDA runtime call), and GPU utilization/temperature via NVML loaded dynamically with `dlopen("libnvidia-ml.so.1")`. If NVML is unavailable, mock values are emitted based on whether a simulation is running.
-
-### 5.6 Virtual Gauges
-
-`GaugeDef` structs hold `{id, r, z}` coordinates. During simulation:
-- `record_gauges_1d(t)`: samples `getCellValues(i)` at cell `i = clamp(r/dx, 0, n-1)`.
-- `record_gauges_2d(t)`: samples `getCellValues(i,j)` at 2D grid position.
-- `record_gauges_3d(t)`: samples `sampleGauge({id, x=r, y=0, z=z})` via 3D solver.
-
-All 7 channels are recorded per gauge per timestep. The complete history is emitted in every TELEMETRY JSON frame under `gauges_history`.
+Numerical sensor probes placed at spatial coordinates `(x, y, z)` sample high-frequency time-histories across all 7 physical channels (`p, rho, u, E, alpha1, alpha2, alpha_air`). Gauge histories are accumulated in-memory and streamed in every `TELEMETRY` JSON frame under `gauges_history`, enabling real-time pressure-time and impulse curve rendering in the frontend.
 
 ---
 
-## 6. CFD Solver Library
+## 6. Eulerian CFD Solver Library
 
-### 6.1 Type System & State Structs (`cfd_states.hpp`)
+### 6.1 State Structs & Structure of Arrays (SoA) Tile Memory
 
-Templates parameterized on `<RealType, IsMultiMaterial>`:
+To achieve high memory bandwidth and SIMD/GPU warp memory coalescing, fluid states are organized into Structure of Arrays (SoA) tiles:
 
 ```cpp
-// Primitive (1D)
-IdealGasStateT<RealType>        { rho, u, p, E, floor_status }
-MultiMaterialStateT<RealType>   { rho, u, p, E, alpha1, alpha2, arho1, arho2, floor_status }
-
-// Conservative (1D)
-IdealGasConservativeStateT      { rho, rhou, E }
-MultiMaterialConservativeStateT { rho, rhou, E, alpha1, alpha2, arho1, arho2 }
-
-// 2D
-State2D          { rho, ur, uz, p, E, alpha1, alpha2, arho1, arho2, floor_status }
-ConservativeState2D { rho, rhour, rhouz, E, alpha1, alpha2, arho1, arho2 }
-
-// 3D
-State3D          { rho, ux, uy, uz, p, E, alpha1, alpha2, arho1, arho2, floor_status }
-ConservativeState3D { rho, rhoux, rhouy, rhouz, E, alpha1, alpha2, arho1, arho2 }
-```
-
-**Field semantics:**
-- `alpha1`: volume fraction of JWL detonation **products** (Material 1)
-- `alpha2`: volume fraction of unreacted **explosive** solid (Material 2)
-- `alpha0 = 1 - alpha1 - alpha2`: volume fraction of ambient **air** (Material 0)
-- `arho1 = alpha1 * rho_mat1`: partial density of products
-- `arho2 = alpha2 * rho_mat2`: partial density of unreacted explosive
-
-### 6.2 Tile Memory Layout (`cfd_tile.hpp`)
-
-Both 2D and 3D solvers use **Structure of Arrays (SoA) tiled layouts** for cache efficiency:
-
-**2D Tiles** (`TILE_SIZE = 16`):
-```cpp
-template<RealType>
+// 2D Tiles (16x16 = 256 cells per tile)
+template<typename RealType>
 struct PrimitiveTileT {
     RealType rho[256], ur[256], uz[256], p[256], E[256];
     RealType alpha1[256], alpha2[256], arho1[256], arho2[256];
     int floor_status[256];
 };
-```
-Each tile covers a 16×16 block of cells (256 cells total). Active tiles are tracked via a `tile_map` array (`-1` = inactive) and a `states_pool` dynamic vector.
 
-**3D Tiles** (`TILE_SIZE_3D = 8`, `TILE_CELLS_3D = 512`):
-```cpp
-// Multi-material 3D tile
-template<RealType>
-struct PrimitiveTile3D<RealType, true> {
+// 3D Tiles (8x8x8 = 512 cells per tile)
+template<typename RealType, bool IsMultiMaterial>
+struct PrimitiveTile3D {
     RealType rho[512], ux[512], uy[512], uz[512], p[512], E[512];
     RealType alpha1[512], alpha2[512], arho1[512], arho2[512];
     RealType arrival_time[512];
     int floor_status[512];
 };
 ```
-3D tile index: `t_idx = (gx>>3) + (gy>>3)*n_tiles_x + (gz>>3)*n_tiles_x*n_tiles_y`. Cell index within tile: `c_idx = (gx&7) + (gy&7)*8 + (gz&7)*64`.
 
-### 6.3 1D Solver (`CFDSolverImpl<RealType, IsMultiMaterial>`)
+Active tiles are indexed via a fast spatial lookup map. Ambient and unreached tiles are marked inactive and bypassed during flux and time-stepping evaluations.
 
-**Domain**: 1D spherical/radial `[0, radius]` with `n_cells` cells of size `dr = radius/n_cells`.
+### 6.2 1D Compressible Euler Solver (`cfd_solver.hpp/.cpp`)
 
-**Geometry**: Cell volumes `geom_V[i]` and interface areas `geom_A[i]` are computed once in the constructor for spherical geometry.
+- **Domain:** Spherically symmetric or planar 1D domain `[0, R_max]` with uniform cell width `dr = R_max / n_cells`.
+- **Governing Equation:**
+  ```
+  ∂U/∂t + ∂F(U)/∂r = -α/r · S_geom(U) + S_det(U)
+  ```
+  where `α = 2` for spherical coordinates and `α = 0` for planar 1D shock tubes.
+- **Numerical Fluxes:** Rusanov (Local Lax-Friedrichs) and AUSM+ (Advection Upstream Splitting Method).
+- **Spatial Reconstruction:** 1st-order piecewise constant, 2nd-order MUSCL with Minmod / Superbee limiters, and 3rd-order WENO3.
+- **Time Integration:** 2nd-order Runge-Kutta (midpoint), 2nd-order ADER-2 space-time predictor, SSP-RK3, and RK4.
 
-**Initial Conditions** (set by `INIT` command):
-- `setInitialConditionTNT()`: Multi-material JWL; explosive sphere initialised with `alpha2=1`, `alpha1=0`, at reference density. Cells outside explosive radius: pure air.
-- `setInitialConditionIdealGas()`: Single-material; explosive sphere with high pressure from `detonation_energy`. No volume fractions tracked.
-- `setInitialConditionRoseTNT()`: Hybrid: programmed-burn with detonator arrival times pre-computed.
+### 6.3 2D Axisymmetric & Cartesian CFD Solver (`cfd_solver_2d.hpp/.cpp`, `cfd_solver_2d_cuda.cu`)
 
-**Flux Schemes** (selectable per run):
-- **Rusanov** (Lax-Friedrichs): `getFluxRusanov()` — robust, dissipative.
-- **AUSM+** (Advection Upstream Splitting Method): `getFluxAUSMPlus()` — sharper, less diffusive.
+- **Domain:** Cylindrical axisymmetric `(r, z)` or Cartesian `(x, y)` grid with `nr × nz` cells.
+- **Axisymmetric Geometric Sources:** Cylindrical volume metrics `2πr dr dz` with radial momentum source terms `p/r` integrated analytically at cell centers to preserve radial balance.
+- **2D Dynamic Block-Structured AMR (`cfd_solver_2d_amr.hpp`, `cfd_solver_2d_amr_cuda.cu`):** Adaptive mesh refinement using hierarchical block nesting with gradient-based shock sensors, conservative prolongation, and restriction operators.
+- **Time-Stepping:** Low-Storage Runge-Kutta 3 (LSRK3) and 2nd-order ADER space-time integration.
+- **Boundary Conditions:** Reflective (symmetry wall `u_n = 0`), Transmissive (zero-gradient outflow), and `OUTFLOW_RIEMANN` (characteristic non-reflecting boundary condition).
 
-**Spatial Reconstruction** (`reconstruct()`):
-- Order 1: piecewise-constant (no reconstruction)
-- Order 2: linear with Minmod limiter
-- Order 3: 3rd-order MUSCL with Minmod
+### 6.4 3D Uniform Cartesian CFD Solver (`cfd_solver_3d.hpp/.cpp`, `cfd_solver_3d_cuda_impl.cuh`)
 
-**Temporal Integration** (`step(dt)`):
-- Order 1: Forward Euler
-- Order 2: 2nd-order Runge-Kutta (midpoint)
-- Order 3: 3rd-order Runge-Kutta (SSP-RK3)
-- Order 4: Classical 4th-order Runge-Kutta
+- **Uniform Domain Architecture:** Executed exclusively on single-block uniform Cartesian grids (`DomainMesh3D`), with all 3D AMR and submesh hierarchy code completely purged per Directive 9.
+- **Precision & Material Templates:** Supports 4 compiled variants across CPU OpenMP and CUDA GPU:
+  - `CFDSolver3D<float, false>`: FP32 Single-Material Ideal Gas (extreme throughput).
+  - `CFDSolver3D<float, true>`: FP32 Multi-Material JWL + Air.
+  - `CFDSolver3D<double, false>`: FP64 Single-Material Ideal Gas.
+  - `CFDSolver3D<double, true>`: FP64 Multi-Material JWL + Air.
+- **Time-Stepping:** Defaults to **2nd-Order ADER-2** (single-stage Cauchy-Kowalevski space-time predictor) or **2nd-Order TVD/SSP-RK2** with slope limiters. ADER-3 is available for 3rd-order spatial-temporal accuracy.
+- **6-Face Independent Boundaries:** Each domain boundary (`X_min, X_max, Y_min, Y_max, Z_min, Z_max`) is independently configured as `REFLECTIVE`, `TRANSMISSIVE`, or `OUTFLOW_RIEMANN`.
 
-**Active Region**: Tracks `active_r_idx` (the leftmost cell index where physics is essentially ambient). `is_terminated()` returns `active_r_idx >= n_cells`. Steps are computed up to `active_r_idx + buffer`.
+### 6.5 Immersed Boundary Method & STL Voxelization (`ImmersedBoundary.hpp/.cpp`)
 
-**Boundary Conditions**:
-- Left (centre): `REFLECTIVE` (symmetry, `u=0` at r=0)
-- Right (far field): `TRANSMISSIVE` (extrapolation)
+Arbitrary 3D solid CAD obstacles (buildings, blast walls, terrain) are imported via STL files and rasterized onto the Cartesian grid:
 
-### 6.4 2D CPU Solver (`CFDSolver2DImpl<RealType>`)
+1. **Voxelization Algorithm:**
+   - Evaluates triangle-box intersections in parallel using OpenMP on CPU and CUDA kernel `voxelize_triangles_kernel` on GPU.
+   - Computes perpendicular distance `d_perp = (P - V0) · n_unit` and barycentric coordinates for cell centers within proximity `0.8 · dx`.
+   - Accumulates surface normal vectors: `N_accum = sum(T_k.normal)`, normalized to obtain unit boundary normal `n_b = N_accum / ||N_accum||`.
+   - Classifies watertight interior solid cells using Möller-Trumbore ray-triangle intersection casting along the X-axis.
+2. **Dynamic Slip Wall Ghost-Cell Boundary Condition:**
+   - When the CFD stencil encounters a boundary cell (`is_boundary == true`), it samples the nearest exterior fluid neighbor cell in the direction maximizing `n_b · d_fluid`.
+   - Thermodynamic variables (`p, rho, E, alpha`) are copied directly from the fluid neighbor.
+   - Velocity is reflected across the surface normal `n_b` to enforce zero-through-flow:
+     ```
+     u_dot_n = u_fluid · n_b
+     u_ghost = u_fluid - 2 * u_dot_n * n_b
+     ```
 
-**Domain**: 2D axisymmetric (r-z) or Cartesian (x-y). `nr_cells × nz_cells`, cell size `dr × dz`.
+### 6.6 Solution Remap Pipelines (`remapper_3d.cpp`)
 
-**Boundary Conditions** (per-face): `REFLECTIVE`, `TRANSMISSIVE`, `OUTFLOW_RIEMANN`.
-
-**Coordinate System**: Configurable via `setCoordinateSystemCartesian(bool)`.
-
-**Detonator**: Location `(det_x, det_z)` for programmed burn; set by `REMAP` or `INIT_2D` payload.
-
-**Initial Conditions**:
-- `setInitialConditionTNT()`: Spherical JWL explosive in 2D.
-- `setInitialConditionTNTCylinder()`: Cylindrical charge geometry.
-- `setInitialConditionIdealGas()`: Ideal gas high-pressure sphere.
-- `setInitialConditionFrom1D()`: Remap from 1D radial solution. Uses K=5 sub-cell averaging; clamps `d_sub <= r_1d.back()` to prevent flat-extrapolation into corners.
-
-**Time Integration**: Low-Storage Runge-Kutta 3 (LSRK3) via `applyLSRK3Step(stage, dt)`.
-
-**Tile Management**: `num_tiles_r × num_tiles_z` tile map. Inactive tiles (pure ambient) are not computed. `updateActiveRegion()` expands the active tile set as the shock propagates.
-
-**Solid Boundaries**: `setSolidVelocities()` and `setSolidMask()` allow embedding solid objects (future feature).
-
-**Termination**: `checkTerminationCondition()` — returns true when the shock reaches within a threshold of the outflow boundary.
-
-### 6.5 2D CUDA Solver (`CFDSolver2DCudaImpl<RealType>`)
-
-**GPU Memory Layout**: All tile pools (`d_states_pool`, `d_U_pool`, `d_dU_pool`) are device pointers to `PrimitiveTileT<RealType>` / `ConservativeTileT<RealType>` arrays.
-
-**Pinned Memory**: Host mirrors (`host_states_pool`, `host_U_pool`) are used during initialization and active-region sync.
-
-**Dynamic Tile Pool Growth**: `growTilePool(new_max_tiles)` — reallocates device arrays via `cudaMalloc` + `cudaFree` when the shock expands beyond the pre-allocated tile count.
-
-**Active Region Update**: `updateActiveRegionHost()` runs every N steps (throttled via `step_count`). Copies active tile flags back to host, expands active region on CPU, pushes updated `d_tile_map` to device.
-
-**Wave Speed Reduction**: `d_wave_speeds` and `d_block_maxes` are used for parallel max-reduction to compute `getMaxWaveSpeed()` without a CPU round-trip per step.
-
-**VRAM Accounting**: `getAllocatedVRAM()` returns the total bytes allocated on device (computed from pool sizes × sizeof(tile)).
-
-**Telemetry**: `getTelemetry2D(stride)` performs a device-to-host copy of the active region at the requested stride, producing a flat `float` array for the BIN2D_FRAME.
-
-### 6.6 3D CPU Solver (`CFDSolver3DImpl<RealType, IsMultiMaterial>`)
-
-**Domain**: Cartesian 3D box `[xmin, xmin+nx*dx] × [ymin...] × [zmin...]`.
-
-**Tile Pool**: `states_pool` (primitive), `U_pool` and `U_prev_pool` (conservative), `active_tiles` (uint8 bitmask per tile).
-
-**Charge Shapes** (`Charge3DParams`):
-- `shape_type=0`: Sphere (radius)
-- `shape_type=1`: Block (lx, ly, lz dimensions)
-- `shape_type=2`: Cylinder (radius, height)
-
-**Boundary Conditions**: Per-face, 6 independent settings: `REFLECTIVE`, `TRANSMISSIVE`, `OUTFLOW_RIEMANN`.
-
-**Ghost Cell Sampling**: `sampleStateInternal(gx, gy, gz)` applies BC logic (reflection for velocity sign) and clamps indices, enabling uniform stencil access at boundaries.
-
-**Gauges**: `sampleGauge(Gauge3D)` trilinearly interpolates from the tile pool at arbitrary (x,y,z).
-
-**Slices**: `extractSlice(Slice3D)` iterates over a 2D plane at a given axis/offset and extracts requested quantities (`p`, `rho`, `u`, `E`, `alpha1`, `alpha2`) at a given stride.
-
-**1D Remap**: `initializeFrom1D()` maps 1D radial states onto the 3D grid using distance from the `(x_expl, y_expl, z_expl)` detonation point, within `R_remap`.
-
-**Programmed Burn**: `applyProgrammedBurn(dt)` calls `MultiMat::computeProgrammedBurn()` per active cell.
-
-**Active Region Update**: `updateActiveRegions()` — scans tiles for non-ambient conditions; marks tiles as active/inactive. Solver steps only compute active tiles.
-
-### 6.7 3D CUDA Solver (`CFDSolver3DCuda<RealType, IsMultiMaterial>`)
-
-GPU version of the 3D solver. Uses:
-- `d_states`: device pointer to `PrimitiveTile3D` pool
-- `d_U`, `d_U_prev`: device conservative tile pools
-- `d_active_tiles`: device active tile bitmask
-- `d_max_s_buf`: wave speed reduction buffer
-- `d_slice_buf`: temporary slice extraction buffer
-- `temp_h_states`, `temp_h_active`: host-side mirrors for the 1D remap phase
-
-#### Complete Purge of 3D AMR and 3D Subgrids
-- **3D Uniform Grid Pure Architecture:** All dynamic 3D AMR (adaptive mesh refinement), 3D static nested subgrids, submesh data structures (`SubMesh3D`, `GPUSubMeshBuffer3D`), restriction, prolongated ghost fills, and multi-mesh 3D hierarchy functions have been completely purged from the backend solver and frontend UI.
-- **Single-Block Uniform Domain:** All 3D simulation models execute exclusively on standard single-block uniform Cartesian grids (`DomainMesh3D`).
-- **1D / 2D Independence:** 1D and 2D solvers retain their existing AMR/subgrid features as-is.
-
-### 6.8 Immersed Boundary Method & STL Voxelization (STL-Fluid Interaction)
-
-The system supports complex solid boundary definitions via STL (Stereolithography) geometry files imported into the 3D solver. This is handled using an Immersed Boundary Method (IBM) with a slip boundary condition on a voxelized Cartesian grid, implemented across [ImmersedBoundary.hpp](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/ImmersedBoundary.hpp) and [ImmersedBoundary.cpp](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/ImmersedBoundary.cpp).
-
-#### 6.8.1 Geometry Loading & Pipeline
-1. **Frontend Selection**: The user places an `STLGeometry` node in the node graph and enters the file path. The node’s output connects to the `stl` port of the `CFDSolver3D` node.
-2. **WebSocket STL Request**: In the 3D telemetry panel, a change in path triggers the client to send a `LOAD_STL_GEOMETRY` text command with the absolute `filePath` to the Broker.
-3. **Broker Parsing**: The Broker ([Broker.cpp](file:///home/chris/antigrav/blastdemon/backend/BlastDaemon/Broker.cpp)) parses the STL file from disk:
-   - It distinguishes binary vs. ASCII STL formats dynamically.
-   - For binary, it reads the 80-byte header, the 32-bit triangle count, and loops to extract 48-byte records (12 floats for normals and 3 vertices per triangle).
-   - For ASCII, it parses the coordinates from `"vertex"` block statements.
-   - The Broker returns the coordinates as a flat array of floats inside a `load_stl_response` JSON message. The client loads these vertices and transfers them to the WebGPU/WebGL2 viewport worker ([ViewportWorker.ts](file:///home/chris/antigrav/blastdemon/frontend/src/ViewportWorker.ts)) for rendering.
-4. **Solver Setup**: When the simulation starts, the connected `STLGeometry` node parameters (`stl_file` and `geometry_hash`) are serialized via [serialization.ts](file:///home/chris/antigrav/blastdemon/frontend/src/serialization.ts) into the `INIT_3D` command payload sent to the solver process.
-
-#### 6.8.2 Voxelization Algorithm ([voxelize_stl](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/ImmersedBoundary.cpp#L151))
-When the 3D Solver is initialized, it calls `voxelize_stl()` to convert the triangulated boundary mesh into a discretized Cartesian representation of `GeometryTile3D` blocks containing [GeometryPayload](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/cfd_tile.hpp#L95) cells:
-- **Geometry Cache**: Voxelization is computationally expensive. The solver caches the resulting voxelized grid (`global_geometry_tiles`) in memory, keyed on a composite cache key: the STL path, size, modification time (mtime), grid size, cell size, and grid offsets (`xmin`, `ymin`, `zmin`). If the parameters match the cache, it bypasses the parsing and voxelization entirely.
-- **OpenMP / CUDA Parallelism**: Voxelization runs in parallel. On the CPU, it uses OpenMP `#pragma omp parallel for` loop parallelization. On the GPU, the CUDA kernel [voxelize_triangles_kernel](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/cfd_solver_3d_cuda.cu#L110) handles the triangle-box intersections in parallel.
-- **Boundary Cell Intersections**:
-  - The cell is flagged as a boundary cell if its center $P = (x_c, y_c, z_c)$ lies within a proximity threshold of $0.8 \cdot \Delta x$ from a triangle (checked in [is_cell_intersected](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/ImmersedBoundary.cpp#L103) / [is_cell_intersected_gpu](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/cfd_solver_3d_cuda.cu#L73)):
-    1. Distance to the plane containing the triangle is calculated: $d_{\text{perp}} = (P - V_0) \cdot N_{\text{unit}}$. If $|d_{\text{perp}}| > \text{threshold}$, the cell does not intersect.
-    2. The projection $P_{\text{proj}} = P - d_{\text{perp}} \cdot N_{\text{unit}}$ is checked using barycentric coordinates to verify if it lies inside the triangle boundary.
-    3. If outside, the shortest distance from $P$ to the three triangle edge segments is calculated and clamped. If it is within the threshold, the cell intersects.
-  - Normal vectors for all intersecting triangles are accumulated at the cell's index. They are normalized at the end to obtain the average local boundary normal vector:
-    $$N_{\text{accum}} = \sum T_k.normal \quad \Longrightarrow \quad n_b = \frac{N_{\text{accum}}}{\|N_{\text{accum}}\|_2}$$
-- **Watertight Interior Ray-Casting**:
-  - To classify pure solid cells inside a closed (watertight) STL, the voxelizer shoots rays along the X-axis for every row of cells $(gy, gz)$ from $(xmin - \Delta x)$ to $xmax$.
-  - Intersections of the ray with candidate triangles (whose bounding boxes overlap with the ray's $Y$-$Z$ coordinate) are computed using the Möller-Trumbore ray-triangle intersection algorithm ([ray_triangle_intersect](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/ImmersedBoundary.hpp#L92)).
-  - The intersections are sorted along X. Any grid cell center $x_c$ that has an odd number of intersection points to its left is marked as `is_inside = true`.
-- **Payload Packing**:
-  - Cells intersected by the mesh boundary are marked with `is_boundary = true` and the normalized boundary normal $(nx_b, ny_b, nz_b)$ is packed.
-  - Cells entirely inside the solid geometry (but not on the boundary) are packed with `is_boundary = true` and $(0, 0, 0)$ normals (pure solid cell).
-  - Ambient fluid cells are packed with `is_boundary = false`.
-
-#### 6.8.3 Immersed Boundary Condition Enforcements
-To enforce a solid slip wall boundary condition at the fluid-geometry interface, the solver utilizes a dynamic **Ghost-Cell Method** during spatial reconstruction and stencil sampling:
-- **Mirroring Stencil**: When the solver reconstructs primitive variables at cell faces, it samples cell values from a stencil. If a cell is marked as a boundary/solid cell (`is_boundary == true`), it calls [sampleStateWithMirror](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/cfd_solver_3d.hpp#L339) (CPU) or [sample_gpu](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/cfd_solver_3d_cuda.cu#L258) (GPU).
-- **Fluid Neighbor Selection**:
-  1. The solver reads the surface normal vector $n_b = (nx_b, ny_b, nz_b)$ for the solid cell.
-  2. It inspects the 6 orthogonal neighbors: $(+1, 0, 0), (-1, 0, 0), (0, +1, 0), (0, -1, 0), (0, 0, +1), (0, 0, -1)$.
-  3. It filters out any neighbors that are also solid/boundary cells.
-  4. Among the remaining fluid cells, it selects the fluid neighbor cell in the direction that maximizes the dot product with $n_b$ (pointing outwards into the fluid domain).
-- **Ghost State Reflection**:
-  - The ghost cell copies all thermodynamic quantities (density, pressure, energy, and material volume fractions) from the selected fluid neighbor:
-    $$State_{\text{ghost}} = State_{\text{fluid}}$$
-  - The velocity vector is reflected across the surface normal $n_b$ to enforce zero-through-flow:
-    $$u_{\text{dot\_n}} = u_{\text{fluid}} \cdot n_b = u_{\text{fluid},x} \cdot nx_b + u_{\text{fluid},y} \cdot ny_b + u_{\text{fluid},z} \cdot nz_b$$
-    $$u_{\text{ghost}} = u_{\text{fluid}} - 2 \cdot u_{\text{dot\_n}} \cdot n_b$$
-  - This dynamically populates the ghost cell with reflected velocities, producing a slip boundary condition at the physical solid boundary and preventing any fluid from crossing into the solid domain.
+Allows multi-stage blast workflows to transfer converged shock waves across dimensions:
+- **1D Spherical -> 2D Axisymmetric (`Remap1DTo2DNode`):** Sub-cell volume-weighted interpolation mapping 1D radial profiles onto 2D `(r, z)` grids.
+- **1D Spherical -> 3D Cartesian (`Remap1DTo3DNode`):** Radial 3D interpolation mapping 1D spherical blast states around an arbitrary charge origin `(x, y, z)`.
+- **2D Axisymmetric -> 3D Cartesian (`Remap2DTo3DNode`):** Reconstructs 2D axisymmetric blast fields (including ground Mach reflections) into full 3D Cartesian volumes via vertical axis revolution.
 
 ---
 
-## 7. Materials & EOS (`materials.hpp`)
+## 7. Lagrangian Material Point Method (MPM) Solver Library
 
-All functions are `inline` and tagged `__host__ __device__` for use on both CPU and CUDA kernels.
+The framework includes 2D and 3D Material Point Method (MPM) solvers ([mpm_solver_2d.hpp](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/mpm_solver_2d.hpp), [mpm_solver_3d.hpp](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/mpm_solver_3d.hpp), [mpm_solver_3d_cuda.cu](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/mpm_solver_3d_cuda.cu)) designed for extreme solid deformation, fracture, fragmentation, and hyper-velocity penetration without mesh tangling.
 
-### 7.1 Built-In Material Presets
-
-| Name | ρ₀ (kg/m³) | D_CJ (m/s) | E_det (J/kg) | Notes |
-|---|---|---|---|---|
-| `TNT` | 1630 | 6930 | 4.29 × 10⁶ | Default; JWL A=373.77 GPa |
-| `PETN` | 1770 | 8300 | 5.80 × 10⁶ | JWL A=613.4 GPa |
-| `RDX` | 1806 | 8750 | 5.30 × 10⁶ | JWL A=524.2 GPa |
-
-### 7.2 Equation of State Functions
-
-**Ideal Gas**: `getEnergy_IdealGas(p, rho, gamma)` → `p / ((γ-1)·ρ)`
-
-**JWL** (`getEnergy_JWL(p, rho, jwl)`):
 ```
-V = ρ₀/ρ
-f = A(1 - ω/(R₁V))·e^(-R₁V) + B(1 - ω/(R₂V))·e^(-R₂V)
-e = (p - f) / (ω·ρ)
+                          +------------------------------------------+
+                          |   1. Particle-to-Grid Transfer (P2G)     |
+                          |   Mass, Momentum, Internal Forces (GIMP) |
+                          +------------------------------------------+
+                                               |
+                                               v
+                          +------------------------------------------+
+                          |   2. Background Grid Nodal Update        |
+                          |   Boundary Constraints, Nodal Accel/Vel  |
+                          +------------------------------------------+
+                                               |
+                                               v
+                          +------------------------------------------+
+                          |   3. Grid-to-Particle Transfer (G2P)     |
+                          |   Symplectic Leapfrog Position/Velocity  |
+                          +------------------------------------------+
+                                               |
+                                               v
+                          +------------------------------------------+
+                          |   4. Constitutive Stress Integration     |
+                          |   Hypoelastic / JC / Concrete / CREST    |
+                          +------------------------------------------+
 ```
 
-**Mixture Pressure** (`getMixturePressure`): Baer-Nunziato-type mixing:
-```
-p = (E_internal + Σ αᵢ·Sᵢ·fᵢ(V)/ωᵢ) / (Σ αᵢ/ωᵢ)
-```
-- Air (material 0): Ideal gas, `ω₀ = γ-1`
-- Products (material 1): Full JWL with density-dependent cold-curve `f₁(V₁)`
-- Unreacted solid (material 2): Stiffened-gas approximation, `V₂ = 1.0` (reference volume), `f₂ clamped ≥ 0` to prevent negative interface cell pressures
-- Smooth ramp factors `S₁ = min(1, α₁/0.01)` and `S₂ = min(1, α₂/0.01)` prevent discontinuous EOS switching
+### 7.1 Transfer Schemes & Interpolation Kernels
 
-`getMixtureEnergy()` and `getMixturePressure()` are **exact inverses** — they use identical `S₁/S₂` ramps and `f(V)` terms.
+- **Supported Transfer Schemes:** Standard PIC/FLIP, APIC (Affine Particle-in-Cell preserving angular momentum), GIMP (Generalized Interpolation Material Point), and Quadratic/Cubic B-Splines.
+- **Time Integration:** **2nd-Order Symplectic Staggered Leapfrog / Central Difference** integration:
+  ```
+  v_p^{n+1/2} = v_p^{n-1/2} + Δt * a_p^n
+  x_p^{n+1}   = x_p^n + Δt * v_p^{n+1/2}
+  ```
+  This preserves Hamiltonian phase space and guarantees second-order trajectory accuracy with single-pass GPU performance.
 
-**Mixture Sound Speed** (`getMixtureSoundSpeed`): Volume-fraction–weighted acoustic impedance formula with per-material sound speeds clamped to physical minima.
+### 7.2 Granular Debris & Fragment Mechanics
 
-### 7.3 Programmed Burn (`computeProgrammedBurn`)
+To prevent artificial clustering and numerical surface tension in failed particle debris swarms:
+- **Heterogeneous Fragment Size Distribution:** Particles receive masses and radii governed by the Rosin-Rammler / Weibull fragmentation distribution:
+  ```
+  P(d) = 1 - exp(-(d / d_50)^n)
+  ```
+- **Stochastic Strain-Energy Ejection Dispersion (Birth Jitter):** Stored elastic strain energy density `U_e = 0.5 * (σ : ε)` is converted into radial kinetic ejection velocity:
+  ```
+  v_ejection = jitter_factor * sqrt(2.0 * U_e / rho)
+  v_p = v_elem_com + v_ejection * n_outward
+  ```
+- **Sub-Grid Pairwise DEM-Lite Repulsion:** Short-range anti-blobbing contact repulsion prevents particles sharing the same background cell from collapsing into singular points:
+  ```
+  f_repulsion = k_grain * max(0, r_contact - r) * r_hat - gamma_grain * v_rel
+  ```
+- **Debris Material Regimes:** Configurable regimes including Cohesionless Dry Gravel (`φ = 38°–48°`, `K_debris = 1–3 GPa`, Reynolds dilatancy), Cohesive Spall Rubble (`c_residual > 0`), Fine Aerodynamic Dust, and Viscous Slurry.
 
-Implements a smooth linear burn front over `N_BURN_CELLS = 4` cells:
-```
-t_arr = det_start_time + r/D_CJ    (arrival time at cell centre)
-τ     = 4·dx / D_CJ               (transit time across burn width)
-F_pb(t) = clamp((t - t_arr)/τ, 0, 1)
-```
-The function computes `F_target` and then incrementally updates `alpha1`, `alpha2`, `arho1`, `arho2` by the difference `ΔF = F_target - F_current`, conserving total explosive density `ρ_expl = arho1 + arho2`.
+### 7.3 High Explosive Detonation in MPM (CREST Reactive Burn)
+
+MPM supports direct explosive detonation and shock-to-detonation transition (SDT) via the CREST reactive burn model ([constitutive_crest_davis.hpp](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/constitutive_crest_davis.hpp)). Connecting a `DetonatorLocation3D` node to `MPMDomain3D` provides point-source hot-spot ignition, seeding initial shock entropy (`s_shock >= 1.5 * s_threshold`), setting full reaction progress (`λ = 1.0`), and releasing chemical detonation energy (`e_int = q_det`).
 
 ---
 
-## 8. Disk I/O
+## 8. Lagrangian 3D Hexahedral Finite Element (FEM) Solver Library
 
-### HDF5 Writer (`HDF5Writer.hpp/.cpp`)
-- Writes volumetric simulation snapshots to `.h5` files using the HDF5 C API.
-- Conditionally compiled: `#ifndef NO_HDF5`.
-- Used for XDMF+HDF5 pattern (heavy data in HDF5, XML metadata in XDMF).
+The 3D FEM structural solver ([fem_solver_3d.hpp](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/fem_solver_3d.hpp), [fem_solver_3d.cpp](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/fem_solver_3d.cpp), [fem_solver_3d_cuda.cu](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/fem_solver_3d_cuda.cu)) provides explicit dynamic structural mechanics for reinforced concrete and steel structures under blast impact.
 
-### XDMF Writer (`XDMFWriter.hpp/.cpp`)
-- Generates the XML metadata wrapper referencing the HDF5 datasets.
-- Readable by ParaView, VisIt, and similar post-processing tools.
+### 8.1 Element Formulations
 
-### VTK Writer (`VTKWriter.hpp/.cpp`)
-- Exports 1D and 2D solutions to VTU (VTK Unstructured Grid XML) format.
-- Uses `ZLIB` for binary data compression (required, hence `find_package(ZLIB REQUIRED)`).
-- Exports fields: `rho`, `u` / `(ur, uz)`, `p`, `E`, `alpha1`, `alpha2`.
-- Also supports particle VTK export (`export_vtk_particles()`).
-- Triggered by the `WRITE_VTK` command.
+- **8-Node Hexahedral Solid Elements:** 1-point under-integrated Gauss quadrature with Flanagan-Belytschko stiffness and viscous hourglass stabilization to prevent zero-energy spurious modes.
+- **Embedded 1D Rebar Truss/Beam Elements:** 2-node rebar elements embedded inside parent concrete hexahedra with either perfect kinematic bonding or non-linear bond-slip traction laws.
+- **Corotational Large-Deformation Kinematics:** Hughes-Liu Jaumann stress rate and Green-Naghdi corotational coordinate frames ensuring objectivity under finite rotations and large strains.
 
----
+### 8.2 Contact Mechanics & Progressive Erosion
 
-## 9. IPC Protocol Reference
+- **Contact Algorithms (`fem_contact_3d.hpp/.cpp`):** Segment-based penalty contact, node-to-segment contact, self-contact, and Coulomb friction sliding.
+- **Erosion & Progressive Failure:** Elements fail when equivalent plastic strain, maximum principal tensile strain, or damage exceeds critical thresholds.
+- **FEM-to-MPM Debris Conversion:** Failed/eroded FEM elements are automatically converted into Lagrangian MPM debris particles in real-time, preserving exact mass, momentum, and remaining internal energy while transferring kinematics to the MPM solver.
 
-### 9.1 Browser → Broker (WebSocket Text)
+### 8.3 LS-DYNA Keyword Deck Reader (`ls_dyna_reader_3d.hpp/.cpp`)
 
-Commands are JSON strings. All carry a `modelId` field.
-
-| Command | Key Fields |
-|---|---|
-| `INIT` | `n_cells`, `domain_radius`, `gamma`, `explosive_radius`, `rho`, `init_mode`, `composition`, `flux_scheme`, `spatial_order`, `temporal_order`, JWL params |
-| `INIT_2D` | `nr`, `nz`, `max_r`, `max_z`, `gamma`, `init_mode`, `device`, `charge_shape`, `charge_r/z/radius/height`, `detonator_r/z`, `remap_radius` |
-| `INIT_3D` | `nx`, `ny`, `nz`, `dim_x/y/z`, `xmin/ymin/zmin`, `device`, `init_mode`, `precision`, `slices[]`, `gauges[]` |
-| `STEP` | `steps`, `cfl` |
-| `EXEC_ALL` | `cfl` |
-| `PAUSE` | *(none)* |
-| `TERMINATE` | *(none)* |
-| `REMAP` | `r_1d[]`, `states_1d[]`, `explosive_x/y/z`, `remap_radius`, `ambient_rho`, `ambient_p`, `is_ideal_gas`, all JWL params |
-| `CONTOUR_CONFIG` | `stride`, `refresh_rate` |
-| `VIEW3D_CONFIG` | `slices[]`, `refresh_rate` |
-| `WRITE_VTK` | `filename` |
-| `STOP` | *(none)* — terminates the process for this modelId |
-
-### 9.2 Worker → Broker (stdout Hybrid Stream)
-
-```
-JSON line      \n          → forwarded as WS text
-BIN_FRAME <N> \n [N bytes] → forwarded as WS binary
-BIN2D_FRAME <N> \n [N bytes]
-BIN_FRAME_3D_SLICES <N> \n [N bytes]
-```
-
-### 9.3 Binary Frame Layout
-
-**1D Binary** (`BIN_FRAME`):
-```
-[uint32 n_cells] [uint32 n_channels=7] [float32 × n_cells × 7]
-```
-Channels (column-major): `p, rho, u, E_specific, alpha1, alpha2, alpha_air`
-
-**2D Binary** (`BIN2D_FRAME`):
-```
-[uint32 nr_ds] [uint32 nz_ds] [uint32 n_channels] [float32 × nr_ds × nz_ds × n_channels]
-```
-
-**3D Slices** (`BIN_FRAME_3D_SLICES`): raw binary payload from `extractSlice()`, structured by the slice definitions sent in `VIEW3D_CONFIG`.
-
-### 9.4 Broker → Browser Binary Framing
-
-All binary frames are prefixed with the `modelId` as a null-terminated UTF-8 string before the raw float payload:
-```
-[modelId bytes][0x00][raw binary payload]
-```
+Directly parses standard LS-DYNA input files (`*.k`, `*.key`, `*.dyn`):
+- Supported cards: `*NODE`, `*ELEMENT_SOLID`, `*ELEMENT_BEAM`, `*SECTION_SOLID`, `*SECTION_BEAM`, `*MAT_024` (Piecewise Linear Plasticity), `*MAT_015` (Johnson-Cook), `*MAT_072R3` (K&C Concrete), `*MAT_084` (Winfrith Concrete), `*MAT_159` (CSCM Concrete), `*SET_NODE_LIST`, `*BOUNDARY_SPC_NODE`.
+- Includes translation, 3-axis Euler rotation, and uniform scaling transforms.
 
 ---
 
-## 10. Frontend Architecture
+## 9. Fluid-Structure Interaction (FSI) Coupling Architecture
 
-### 10.1 TypeScript Type System (`types.ts`)
+BlastDaemon provides three two-way explicit Fluid-Structure Interaction (FSI) couplers:
 
-```typescript
-type NodeType = 'DomainMesh' | 'Material' | 'Charge1D' | 'Charge2D' |
-    'ThePainter' | 'CFDSolver' | 'TelemetryText' | 'TelemetryGraph' |
-    'DomainMesh2D' | 'DetonatorLocation' | 'DetonatorLocation3D' |
-    'RemapNode' | 'HardwareConfig' | 'CFDSolver2D' | 'TelemetryContour' |
-    'VTKOutput' | 'VirtualGauges' | 'DomainMesh3D' | 'Charge3D' |
-    'CFDSolver3D' | 'Telemetry3DViewport' | 'VirtualGauges3D';
-
-interface Node {
-    id: string; type: NodeType; x: number; y: number;
-    width?: number; height?: number;
-    displayMode?: 'compact' | 'normal' | 'expanded' | 'full-panel';
-    parameters: Record<string, any>;
-    inputs: Port[]; outputs: Port[];
-    orientation?: 'HORIZ' | 'VERT';
-}
-
-interface Connection { fromNode: string; fromPort: string; toNode: string; toPort: string; }
-
-type SimulationStatus = 'UNINITIALIZED' | 'INITIALIZED' | 'RUNNING' | 'PAUSED' | 'TERMINATED';
+```
+                            +------------------------------------+
+                            | 3D Eulerian CFD Fluid Solver (Gas) |
+                            +------------------------------------+
+                                       ▲              │
+        Moving Boundary Slip Velocity  │              │ Hydrodynamic Pressure & Drag
+        (Ghost-Cell Reconstruction)    │              │ (2x2 Gauss Quadrature / SAT)
+                                       │              ▼
+                            +------------------------------------+
+                            | 3D Lagrangian Structural Solver    |
+                            | - 3D MPM Particles (FSICoupler3D)  |
+                            | - 3D Hex8 Solid FEM (FEMFSICoupler)|
+                            +------------------------------------+
 ```
 
-**AppState** (the true global state):
-```typescript
-interface AppState {
-    models: Record<string, Model>;  // All models in the project
-    workspaces: Workspace[];        // All open workspaces (tab-like)
-    activeWorkspaceId: string;
-    workspaceCounter: number;
-}
+### 9.1 2D FSI Coupler (`FSICoupler2D`)
+Couples 2D Eulerian axisymmetric CFD gas dynamics with 2D Lagrangian MPM particles. Fluid pressures apply external body forces onto solid particles, while moving particle surfaces compress fluid cells.
+
+### 9.2 3D MPM FSI Coupler (`FSICoupler3D`, `fsi_coupler_3d.hpp/.cpp`)
+Couples 3D Eulerian finite-volume CFD grids with 3D Lagrangian MPM particles on CPU and CUDA GPU. Implements immersed boundary velocity penalties and conservative momentum transfer.
+
+### 9.3 3D FEM FSI Coupler (`FEMFSICoupler3D`, `fem_fsi_coupler_3d.hpp/.cpp`, `fem_fsi_coupler_3d_cuda.cu`)
+High-fidelity conservative two-way coupling between 3D Eulerian CFD and 3D Hexahedral FEM solid meshes:
+- **Separating Axis Theorem (SAT) Cut-Cell Aperture Rasterization:** Evaluates geometric polygon clipping between fluid cell boundaries and moving structural element facets.
+- **2x2 Gauss Quadrature Pressure Integration:** Hydrodynamic fluid pressures and viscous shear stresses are integrated over structural surface facets and mapped directly to FEM boundary nodes as external nodal forces.
+- **Moving Immersed Boundary Velocity Enforcement:** Structural nodal velocities are interpolated back onto fluid boundary ghost cells to enforce zero relative normal velocity (`(u_fluid - u_solid) · n = 0`).
+- **Dynamic Cell Uncovering / Filling:** When solid elements move away, newly uncovered fluid cells are initialized using mass-conserving neighborhood state reconstruction.
+- **Fracture Erosion Venting:** When structural FEM elements erode and fail, the boundary aperture opens automatically, allowing blast shock waves to vent through ruptured structural walls.
+
+### 9.4 Unified Coupled Timestep Synchronization
+Coupled models enforce strict stability synchronization:
 ```
-
-**Workspace** → contains a set of `modelIds`, an `activeModelId`, a recursive `LayoutNode` tree, and cross-model `connections[]`.
-
-**Model** → contains `nodes[]` and `connections[]` — a self-contained simulation graph.
-
-**LayoutNode** → union of `SplitNode` (binary split with `ratio` and `direction`) and `PanelNode` (leaf with `panelType`).
-
-**Panel Types**: `MENU_BAR`, `OUTLINER`, `NODE_GRAPH`, `PROPERTIES`, `TELEMETRY_GRAPH`, `TELEMETRY_TEXT`, `NODE_VIEWER`, `EXECUTION_MANAGER`, `RESOURCE_MANAGER`, `TELEMETRY_CONTOUR`, `TELEMETRY_3D`.
-
-### 10.2 State Manager (`state-manager.ts`)
-
-The global SSOT for the entire frontend. Manages:
-
-- **AppState history** with unlimited undo/redo (`pushAppState`, `undo`, `redo`).
-- **Model CRUD**: `createModel`, `copyModelToClipboard`, `pasteModelFromClipboard` (deep-copies nodes with remapped IDs).
-- **Workspace CRUD**: `createWorkspace`, `deleteWorkspace`, `renameWorkspace`, `duplicateWorkspaceLayout`.
-- **Node parameter updates**: `updateNodeParameters` (pushes history) and `updateNodeParametersInPlace` (silent, no history entry).
-- **Explosive parameter sync**: `syncExplosiveParameters()` — when `charge_mass` changes, automatically recomputes `charge_radius = (3m/4πρ)^(1/3)`. When `rho` changes, recomputes radii for all connected `Charge1D`/`Charge2D` nodes.
-- **Telemetry store**: `Map<string, any>` keyed by `nodeId`. `pushTelemetry(modelId, msg)` routes to the correct `TelemetryText` node.
-- **Per-model status**: `Map<string, SimulationStatus>` and `Map<string, number>` for progress.
-- **Persistence**: `saveWorkspace()` / `loadWorkspace()` via `localStorage` key `blast_workspace`. Auto-saves on every state mutation.
-- **Selection**: `selectedNodeId` with listener callbacks.
-- **Layout healing**: `ensureMenuBar(layout)` injects a MENU_BAR panel if the root layout lacks one.
-
-### 10.3 Serialization (`serialization.ts`)
-
-**`serializeForSolver(state, command, modelId)`**: Traces the DAG from the relevant solver node (1D/2D/3D) and compiles a flat JSON payload:
-
-1. For `INIT` (1D): traces `CFDSolver → ThePainter → {DomainMesh, MaterialAir, Charge1D → MaterialExplosive}`. Computes `n_cells = round(radius/dx)`, `explosive_radius` from mass/density, `ambient_rho` from ideal gas law.
-2. For `INIT_2D`: traces `CFDSolver2D → {DomainMesh2D, MaterialAir, Charge2D → Material, DetonatorLocation, RemapNode, HardwareConfig}`. Heals missing detonator/charge fields with safe defaults.
-3. For `INIT_3D`: traces `CFDSolver3D → {DomainMesh3D, MaterialAir, Charge3D → Material, DetonatorLocation3D, RemapNode, VirtualGauges3D, Telemetry3DViewport}`.
-
-**`serializeToBinary(state)` / `deserializeFromBinary(buffer)`**: Custom `.blst` binary format:
+dt_coupled = min(dt_fluid, dt_solid) * cfl_coupled
 ```
-Magic: 'BLST' (4 bytes)
-Version: 1 (1 byte)
-Flags: 0 (1 byte)
-JSON Length (4 bytes, big-endian)
-JSON payload (variable)
-Checksum: sum of JSON bytes mod 2^32 (4 bytes, big-endian)
-```
-
-### 10.4 Remap Pipeline Detection (`main.ts`)
-
-`findRemapPipeline(modelId)` scans `ws.connections` (cross-model connections) for:
-1. A connection whose destination is a `RemapNode` in the 2D model.
-2. Whose source lives in a model containing a `CFDSolver` (1D).
-
-Returns `{model1dId, model2dId, processId: model2dId}` or `null`. The `processId` is always the 2D model ID, ensuring the Broker routes both INIT and INIT_2D to the same BlastSolver process.
-
-`executeModelCommand()` uses the pipeline descriptor to:
-- Send `INIT_2D` first (to initialize the 2D solver).
-- Then send `REMAP` (parsed from the last 1D binary telemetry stored in `stateManager.telemetryStore`).
-
-### 10.5 WebSocket Client (`NetworkManager.ts`)
-
-- Connects to `ws://localhost:8080`.
-- `binaryType = "arraybuffer"` set immediately on socket creation.
-- Auto-reconnects after 3s on disconnect.
-- `send(message)`: serializes to string if object; logs `[DEBUG] RAW INIT PAYLOAD` for INIT commands.
-- Binary frames bypass the JSON parse branch in `onmessage`.
-
-### 10.6 Node Parameter Alignment and Unified Casting
-
-To prevent parameter drift and mismatched data types (such as numbers being mapped as strings) between the user interface properties and backend C++ solver parsing:
-
-1. **Unified Casting Lists**: Any numeric node parameter MUST be registered in the `numericKeys` lists in:
-   - `serialization.ts` (so that it gets cast to a number when generating JSON solver payloads)
-   - `property-editor.ts` (so that property inputs cast values before updating state parameters)
-   - `node-viewer.ts` (so that custom panel overlays parse values correctly)
-   - `graph-renderer.ts` (so that inline dropdown handlers cast option selections correctly)
-2. **Synchronized Defaults**: Default parameters for any node type must remain identical between `state-manager.ts` (`defaults` map) and `graph-renderer.ts` (`getDefaultParameters` method) to ensure consistency when creating or healing nodes.
+The FSI coupler node acts as the authoritative single source of truth for the coupled CFL number.
 
 ---
 
-## 11. UI Panel Components
-
-### 11.1 GraphRenderer (`graph-renderer.ts`, ~274 KB)
-
-The infinite-canvas visual node editor.
-
-**Canvas Layers**:
-1. `SVG` layer for Bezier wire paths (cubic, control points at 40% of node distance).
-2. `div` layer for node HTML elements (positioned with `transform: translate()`).
-
-**Viewport Transform**: Scale starts at `1.25`. Pan/zoom via mouse wheel + middle-drag. `updateTransform()` applies CSS transform to the canvas-container.
-
-**Port Styling by Data Type**:
-- Domain: `#2563eb` (blue)
-- Material: `#64748b` (slate)
-- Explosive: `#dc2626` (red)
-- Telemetry: `#16a34a` (green)
-
-**Wire Snapping**: 15px magnetic snap radius; glowing cyan `#00f0ff` ring on hover.
-
-**Stability**: Wire anchor points recomputed from `.port-bullet` `getBoundingClientRect()` every animation frame. `ResizeObserver` triggers redraws on layout shifts.
-
-**Context Menu**: Right-click → create any node type.
-
-**Layout Direction**: Horizontal or vertical; toggle in panel header. Adjusts cubic Bezier control vectors.
-
-**Auto-Arrange / Fit-to-View**: Available via panel header buttons.
-
-**Node Header Controls**: Orient and collapse buttons positioned at `justify-content: flex-start` with `gap: 8px`.
-
-### 11.2 ChartWorker (`ChartWorker.ts`)
-
-Runs on `OffscreenCanvas` in a dedicated `Worker`.
-
-**Resolution Sync**: Main thread calls `getBoundingClientRect()` and posts `{width, height}` to the worker BEFORE `transferControlToOffscreen()`.
-
-**Plot Channels**: `p`, `rho`, `u`, `E`, `alpha1`, `alpha2` — selected via UI control.
-
-**Plot Stride**: Configurable (1, 2, 5, 10, 20, 50, 100 frames) to throttle redraws.
-
-**Drawing**: 40px padding margin, `#475569` baseline axes, `ctx.beginPath()/stroke()` per channel.
-
-**Auto-Scaling**: `minY`/`maxY` computed from visible data; posted back to main thread via `postMessage({type: 'bounds', minY, maxY})`.
-
-### 11.3 ContourWorker (`ContourWorker.ts`)
-
-Renders the 2D contour field from binary frames on `OffscreenCanvas`.
-
-**Data Decoding**: Parses the BIN2D_FRAME binary layout; maps float values to HSL colormap.
-
-**Stride-Based Subsampling**: Respects `downsample_stride` set via `CONTOUR_CONFIG`.
-
-### 11.4 ViewportWorker / ViewportRenderer (3D)
-
-`ViewportWorker.ts` (~58 KB) runs on a `Worker` with `OffscreenCanvas` for the 3D slice visualiser.
-
-`ViewportRenderer.ts` handles the main-thread `Telemetry3DViewport` node panel, bridging between the node graph and the worker.
-
-### 11.5 NodeViewer (`node-viewer.ts`, ~76 KB)
-
-**Absolute Canvas Trick**: Inner canvas uses `position: absolute; inset: 0` inside a `position: relative` wrapper to decouple from Flexbox layout. Resolution is synced via `setTimeout(..., 0)` microtask.
-
-**Sub-Selector**: Dropdown listing all selectable nodes; clicking switches the displayed node.
-
-**Live Binding**: Native `<input>` fields generated for parameters; mutations call `stateManager.updateNodeParameters()`.
-
-**Dynamic Bounds Display**: `viewer-min-y-${nodeId}` and `viewer-max-y-${nodeId}` header elements receive bounds from the ChartWorker.
-
-### 11.6 PropertyEditor (`property-editor.ts`, ~45 KB)
-
-**Properties Panel**: Displays the selected node's parameters and I/O connections.
-
-**I/O Connections Sector**: Driven strictly from `state.connections`; highlights missing required connections (CFDSolver, DomainMesh, MaterialAir, explosive) with descriptive validation warnings.
-
-### 11.7 ResourceManager (`resource-manager.ts`)
-
-**Metrics Bars**: GPU UTILIZATION, VRAM ALLOCATION, CORE TEMPERATURE.
-
-**Namespace Safety**: All element IDs prefixed with `panelId` (e.g., `${panelId}-gpu-bar`) to prevent collisions in split-pane layouts.
-
-**Direct DOM Updates**: `updateMetrics()` scopes to the panel's root element and sets bar widths and text directly without `innerHTML` re-renders.
-
-**Fast Path**: `resource_pulse` messages bypass StateManager entirely; they are routed directly from the WS handler via `layoutManager.broadcastResourceData()`.
-
-### 11.8 ExecutionManager
-
-**Controls**: Initialize, Step (N steps), Exec All, Pause, Terminate per model.
-
-**Progress Bar**: Neon-cyan solver progress bar driven by `progress` JSON packets.
-
-**Reset Utility**: 'Reset Workspace' → `window.confirm()` → `localStorage.clear()` → `window.location.reload()`.
-
-### 11.9 LayoutManager (`layout-manager.ts`, ~77 KB)
-
-Recursively renders the `LayoutNode` tree (binary splits) as nested `div` elements with absolute positioning.
-
-**Component Cache**: `components: Map<panelId, {type, instance}>` — preserves component state across layout changes.
-
-**Split Panels**: Draggable dividers update the `ratio` in the state and trigger a full layout re-render.
-
-**Panel Type Header**: Each panel includes a compact header with a panel-type selector dropdown, allowing any panel to be switched to any type at runtime.
-
-### 11.10 Outliner
-
-Renders the DAG as nested `<ul>/<li>` starting from root nodes (nodes with 0 incoming connections). Shows hierarchy via indented tree.
-
----
-
-## 12. CSS Architecture (`frontend/styles.css`, ~38 KB)
-
-**Nuclear Overrides** for layout stability:
-```css
-.panel-container { min-width: 0 !important; min-height: 0 !important; }
-canvas { max-width: 100% !important; }
-```
-
-**Panel Containment**: `.panel-content` uses:
-```css
-position: relative; flex: 1; overflow: hidden; display: flex; flex-direction: column;
-```
-
-**Terminal Text**: `position: absolute; inset: 0; word-break: break-all; white-space: pre-wrap; overflow-y: auto;`
-
-**Design Tokens**: Dark background (`#0f1117`), panel surfaces (`#1a1d27`), accent neon cyan (`#00f0ff`), JWL red (`#dc2626`), solver green (`#16a34a`).
-
----
-
-## 13. Default Node Graph (Startup State)
-
-On first launch (no `localStorage`), the app initialises with a 1D multi-material JWL pipeline:
-
-```
-DomainMesh (1D, radius=1.0m, dx=0.001m)  ──mesh──┐
-Material (Air, γ=1.4, p₀=101325 Pa) ──────air───▶ ThePainter ──▶ CFDSolver (AUSM+, RK2, order 2)
-Material (JWL TNT, ρ=1630 kg/m³) ──▶ Charge1D ──explosive──┘
-```
-
-Connections:
-- `node-mesh → node-painter (mesh)`
-- `node-air → node-painter (air)`
-- `node-material-explosive → node-explosive (material)`
-- `node-explosive → node-painter (explosive)`
-- `node-painter → node-solver (in)`
-
----
-
-## 14. Development Lifecycle
-
-### Port Map
-
-| Service | Port | Protocol |
+## 10. Materials, Constitutive Models & Equations of State
+
+All constitutive updates and Equations of State (EOS) are implemented as `__host__ __device__` inline functions across CPU and CUDA kernels:
+
+### 10.1 Fluid Equations of State (`materials.hpp`)
+
+- **Ideal Gas:** `p = (γ - 1) * rho * e`
+- **JWL (Jones-Wilkins-Lee) EOS:**
+  ```
+  V = rho_0 / rho
+  f(V) = A * (1 - ω / (R1 * V)) * exp(-R1 * V) + B * (1 - ω / (R2 * V)) * exp(-R2 * V)
+  p = f(V) + ω * rho * e
+  ```
+- **Baer-Nunziato Multi-Material Mixture Model:**
+  ```
+  p_mix = (E_internal + sum(alpha_i * S_i * f_i(V_i) / omega_i)) / sum(alpha_i / omega_i)
+  ```
+  Smooth linear ramps `S_i = min(1.0, alpha_i / 0.01)` prevent discontinuous EOS switching at vacuum and material interfaces. `getMixturePressure()` and `getMixtureEnergy()` are exact analytical inverses.
+- **Programmed Burn:** Multi-cell linear burn front over 4 cells based on Chapman-Jouguet detonation velocity `D_CJ` and detonator arrival time.
+
+### 10.2 Solid Constitutive Models
+
+| Constitutive Model | Subsystem | Mathematical Formulation & Capabilities |
 |---|---|---|
-| Vite dev server (frontend) | 5173 | HTTP |
-| Broker (backend) | 8080 | WebSocket (RFC 6455) |
+| **Linear Isotropic Elasticity** | MPM / FEM | Hookean elasticity: `σ = K * tr(ε) * I + 2G * dev(ε)`. |
+| **Hypoelastic J2 Plasticity** | MPM / FEM | Jaumann rate-integrated elasticity with von Mises yield surface, isotropic linear/power hardening, and radial return mapping. |
+| **Johnson-Cook Viscoplasticity** | MPM / FEM | Strain-rate sensitivity, thermal softening, and progressive damage accumulation coupled with Mie-Grüneisen shock Hugoniot EOS: `σ_y = (A + B * ε_p^n) * (1 + C * ln(ε_dot^*)) * (1 - T^{*m})`. |
+| **Drucker-Prager Geomaterial** | MPM | Pressure-dependent frictional shear yield with non-associated dilation for soil, sand, and rock. |
+| **RHT Concrete Model** | MPM / FEM | Riedel-Hiermaier-Thoma model: 3-invariant compressive, tensile, and shear yield surfaces with Rubin/Willam-Warnke Lode angle scaling, porous P-alpha compaction EOS, strain-rate enhancement (DIF), and fracture energy regularization (`G_f / char_len`). |
+| **HJC Concrete Model** | MPM / FEM | Holmquist-Johnson-Cook model: Tri-linear/polynomial EOS, pressure-dependent shear yield, strain-rate hardening, and damage accumulation. |
+| **CSCM Concrete (Mat 159)** | MPM / FEM | Continuous Surface Cap Model: Smooth continuous yield surface with cap hardening, shear dilation, and isotropic damage softening. |
+| **Karagozian & Case (K&C / Mat 72R3)** | MPM / FEM | 3-surface concrete plasticity model with independent maximum, yield, and residual failure envelopes. |
+| **CREST & Davis Reactive Burn** | MPM | Autonomous shock-to-detonation transition (SDT) for high explosives: Davis solid reactant EOS + Davis product gas EOS with shock entropy jump calculation `s_s = cv * ln(T_H / T0)` and stiff sub-cycled reaction rate kinetics. |
 
-### Active Runtime (current session)
-- `./Broker` running from `build/` (4h46m+)
-- `npm run dev` in `frontend/` (62h4m+ and 5h39m+)
+---
 
-### Build Flow
+## 11. Disk I/O & Post-Processing Export
+
+- **XDMF + HDF5 Writer (`HDF5Writer.hpp/.cpp`, `XDMFWriter.hpp/.cpp`):** Streams heavy volumetric 3D datasets into compressed `.h5` containers accompanied by XML `.xmf` metadata readable by ParaView and VisIt.
+- **VTK XML Unstructured Grid Writer (`VTKWriter.hpp/.cpp`, `AsyncVTKWriter.hpp`):**
+  - Exports CFD fluid grids, FEM solid meshes, and MPM particle swarms into standard `.vtu` (Unstructured Grid) and `.pvd` (ParaView Collection) XML files.
+  - Utilizes `ZLIB` compression for high I/O throughput and reduced disk footprint.
+  - Supports Region-of-Interest (ROI) spatial bounding-box cropping and stride decimation.
+  - Asynchronous background worker threads prevent I/O blocking during high-speed solver execution.
+- **Sensor Gauge History Exporter:** Dumps discrete probe time-histories in CSV, ASCII, and Binary formats.
+
+---
+
+## 12. Frontend Architecture & Subsystems
+
+The frontend is written in **Pure Vanilla TypeScript** with native DOM APIs, custom CSS design tokens, and Web Workers.
+
+```
+                              +------------------------------------------+
+                              |   Global AppState SSOT (state-manager)   |
+                              |   - Models DAG, Workspaces, Undo/Redo    |
+                              |   - Mandatory setModelStatus Invalidation|
+                              +------------------------------------------+
+                                                   │
+        +------------------+-----------------------+---------------------+-------------------+
+        │                  │                       │                     │                   │
+        v                  v                       v                     v                   v
++----------------+ +----------------+    +-------------------+ +-------------------+ +---------------+
+| GraphRenderer  | | PropertyEditor |    | Parameter Registry| | Telemetry Viewers | | Host Browser  |
+| - SVG/DOM      | | - Dynamic Form |    | - SSOT Docs/Units | | - ViewportWorker  | | - Disk files  |
+| - Bezier Wires | | - Popover SSOT |    | - 38 Node Types   | | - ChartWorker     | | - STL / .k    |
+| - Mag Snapping | | - Validations  |    | - 250+ Parameters | | - ContourWorker   | | - .blst IO    |
++----------------+ +----------------+    +-------------------+ +-------------------+ +---------------+
+```
+
+### 12.1 State Manager (`state-manager.ts`)
+- **Single Source of Truth (SSOT):** Manages the global `AppState` containing models, workspaces, connections, layout trees, and undo/redo history stacks.
+- **Mandatory State Invalidation:** Every physical parameter edit calls `setModelStatus(modelId, 'UNINITIALIZED')` targeting the specific model, ensuring the solver re-initializes before stepping.
+- **Explosive Geometry Synchronization:** Automatically recalculates `charge_radius = (3m / (4πρ))^(1/3)` when mass or density changes.
+- **Persistence:** Serializes to `localStorage` under `blast_workspace` on every state mutation.
+
+### 12.2 Visual Node Graph Editor (`graph-renderer.ts`, ~380 KB)
+- Infinite 2D panning and zooming canvas using CSS transforms and SVG cubic Bezier paths.
+- Magnetic wire snapping (15px radius) with port type color coding (Domain: `#2563eb`, Material: `#64748b`, Explosive: `#dc2626`, Telemetry: `#16a34a`, Solid: `#d97706`).
+- Interactive collapsible node cards with embedded dropdowns, orientation toggles, and contextual menus.
+
+### 12.3 Property Inspector (`property-editor.ts`, ~160 KB)
+- Dynamically renders parameter input widgets, dropdowns, sliders, and toggle switches.
+- Renders rich hover popovers and documentation tooltips fetched directly from `parameter-definitions.ts`.
+- Highlights missing or invalid upstream I/O connections with contextual warnings.
+
+### 12.4 Master Parameter & Node Definitions Registry (`parameter-definitions.ts`, ~118 KB)
+Single source of truth for UI documentation across all 38 node types and 250+ parameters:
+- Complete engineering descriptions, physical units, governing equations, category tags, and tuning guidelines.
+
+### 12.5 Host File Browser (`host-file-browser.ts`)
+Modal file browser communicating with the Broker via `HOST_FILE_LIST` and `HOST_FILE_READ` to allow direct host disk selection of STL geometry, LS-DYNA decks, and `.blst` workspace files.
+
+### 12.6 Off-Thread Workers & Visualizers
+- **`ViewportWorker.ts` (~314 KB):** Dedicated Web Worker running raw WebGPU and WebGL2 on `OffscreenCanvas`. Renders interactive 3D orthogonal CFD slices, CAD STL obstacles, deformed FEM meshes, and MPM particle clouds with PBR lighting and SSAO.
+- **`ChartWorker.ts` (~19 KB):** OffscreenCanvas renderer for live 60 FPS 1D spatial profile plots and gauge time-histories.
+- **`ContourWorker.ts` (~43 KB):** OffscreenCanvas renderer for 2D color contour heatmaps.
+- **`resource-manager.ts` (~33 KB):** Real-time 30 Hz hardware telemetry bar graphs (CPU, RAM, GPU VRAM, NVML temperature and utilization).
+
+---
+
+## 13. Complete Node Ecosystem (38 Node Types)
+
+| Subsystem Category | Node Types | Purpose & Role |
+|---|---|---|
+| **1D CFD Gas Dynamics** | `DomainMesh`, `Charge1D`, `ThePainter`, `CFDSolver` | 1D Spherical & planar high-explosive detonation and shock wave propagation. |
+| **2D Axisymmetric CFD** | `DomainMesh2D`, `Charge2D`, `DetonatorLocation`, `CFDSolver2D` | 2D Axisymmetric `(r, z)` blast simulation, ground reflection, and Mach stem formation. |
+| **3D Multi-Material CFD** | `DomainMesh3D`, `Charge3D`, `CFDSolver3D` | 3D Cartesian uniform multi-material blast dynamics with JWL and Ideal Gas EOS. |
+| **Lagrangian Solid MPM** | `MPMDomain2D`, `MPMObject2D`, `MPMDomain3D`, `MPMObject3D`, `MPMMaterialSteel` | 2D/3D Material Point Method for extreme deformation, fracture, and fragmentation. |
+| **Lagrangian Solid FEM** | `FEMDomain3D`, `FEMObject3D`, `LSDynaImporter3D` | 3D Hexahedral solid structural dynamics with embedded rebar and LS-DYNA import. |
+| **Fluid-Structure Interaction**| `FSICoupler2D`, `FSICoupler3D`, `FEMFSICoupler3D` | Two-way dynamic coupling between Eulerian CFD and Lagrangian MPM / FEM solids. |
+| **Material & EOS Models** | `Material` | Universal material node (Elastic, Johnson-Cook, Concrete, CREST, Ideal Gas, JWL). |
+| **Boundary & CAD Geometry** | `STLGeometry`, `PrimitiveGeometry3D` | Imports STL surface meshes and analytic CSG primitives for Immersed Boundary CFD. |
+| **Point Detonator / Ignition** | `DetonatorLocation3D` | 3D Cartesian initiation point for CFD blast and MPM CREST reactive burn hot-spots. |
+| **Remap & State Interpolation**| `RemapNode`, `Remap1DTo2DNode`, `Remap1DTo3DNode`, `Remap2DTo3DNode` | Multi-stage conservative solution transfer across 1D, 2D, and 3D solvers. |
+| **Telemetry & Diagnostics** | `TelemetryText`, `TelemetryGraph`, `TelemetryContour`, `Telemetry3DViewport`, `VirtualGauges`, `VirtualGauges3D` | Real-time terminal logs, 1D charts, 2D heatmaps, 3D WebGPU viewports, and sensor probes. |
+| **Hardware & Output** | `HardwareConfig`, `VTKOutput` | Compute device/precision selection and VTK XML (`.vtu`/`.pvd`) disk streaming. |
+
+---
+
+## 14. Development Lifecycle & Operational Reference
+
+### 14.1 Network Ports
+
+| Service | Port | Protocol | Description |
+|---|---|---|---|
+| **Vite Dev Server** | `5173` | HTTP | Frontend development server (HMR enabled) |
+| **Broker Daemon** | `8080` | WebSocket (RFC 6455) | Backend WebSocket communication daemon |
+
+### 14.2 Build & Test Verification
 
 ```bash
-# Backend
-mkdir build && cd build && cmake .. && make -j$(nproc)
+# Build backend
+mkdir -p build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON ..
+make -j$(nproc)
 
-# Frontend
-cd frontend && npm run dev       # Dev (Vite HMR)
-cd frontend && npm run build     # Production (tsc + vite build)
+# Run verification tests
+./test_cuda_solver
+./test_crest_davis_mpm
+./test_fem_3d_element_math
+./test_concrete_parity
+
+# Run frontend typecheck
+cd ../frontend && npx tsc --noEmit
 ```
 
-### Verification
+### 14.3 Known Architectural Invariants & Gotchas
 
-Integration test: verify Broker on :8080 and frontend on :5173 are responding.
-
-### Source Control Exclusions
-
-`.gitignore` must exclude: `build/`, `*.log`, `node_modules/`, `dist/`, `*.o`, `test_out*.txt`, `my_test_out.txt`.
-
----
-
-## 15. Known Architectural Details & Gotchas
-
-| Issue | Detail |
-|---|---|
-| **Per-model process isolation** | INIT and INIT_2D for the same `modelId` share one `BlastSolver` process. The historical "reuse any running process" heuristic caused cross-model parameter contamination and has been removed. |
-| **Telemetry binary cloning** | `data.slice(0)` clones the `ArrayBuffer` before passing to a Web Worker `postMessage`, preventing buffer neutering when multiple panels display the same data stream. |
-| **Ideal Gas channel count** | The 1D solver emits `is_ideal_gas` in the TELEMETRY JSON; the frontend omits `alpha1`/`alpha2` display for 5-channel frames. The 2D/CUDA solver uses the same 7-channel layout but zeroes the alpha fields. |
-| **JWL cold-curve clamping** | For unreacted solid (Material 2), `f2 = max(0, f2)` prevents the negative TNT cold curve from driving interface cells to ~194 MJ/m³ reference energy. |
-| **S₁/S₂ ramps** | Smooth linear ramps `min(1, α/0.01)` prevent discontinuous EOS switching near near-vacuum material edges. Must be identical in `getMixturePressure`, `getMixtureEnergy`, and `getMixtureSoundSpeed`. |
-| **NVML dynamic loading** | `dlopen("libnvidia-ml.so.1")` is used instead of linking NVML at build time to keep the solver binary runnable on machines without an NVIDIA driver. |
-| **`FD_CLOEXEC`** | Set on both server socket and client socket on Linux to prevent inadvertent inheritance by child BlastSolver processes. |
-| **`SIGPIPE` suppression** | The Broker globally ignores SIGPIPE. All send errors yield `EPIPE` and are handled gracefully. |
-| **2D BC default** | `bcRmax` and `bcZmax` default to `OUTFLOW_RIEMANN` (not `TRANSMISSIVE`) in the 2D solvers for better shock handling at outflow faces. |
-| **3D LSRK vs RK** | The 3D solver defaults to `spatialOrder=2, temporalOrder=2` (unlike the 1D solver which defaults to `1,1`). |
+1. **Broker Management:** Never auto-start or kill `./Broker` via automated agents; the user manages the Broker process in their own shell.
+2. **Per-Model Process Lifetime:** `INIT`, `INIT_2D`, `INIT_3D`, `INIT_MPM_3D`, and `INIT_FEM_3D` within the same model share a single isolated `BlastSolver` child process. Erasing a process on `TERMINATE` cleans up all associated references.
+3. **ArrayBuffer Cloning for Web Workers:** Before passing telemetry `ArrayBuffer` payloads to Web Workers via `postMessage()`, call `data.slice(0)` to prevent neutering when multiple panels view the same data stream.
+4. **Exact Inverse Mixture EOS:** `getMixturePressure()` and `getMixtureEnergy()` in `materials.hpp` use identical `S1/S2` linear ramps and `f(V)` terms to prevent artificial energy drift at material interfaces.
+5. **No LaTeX in Documentation:** All mathematical formulations must strictly use inline code or standard Unicode characters. Raw LaTeX delimiters (`$`, `$$`, `\frac`) are prohibited repository-wide.

@@ -909,17 +909,17 @@ void MPMSolver3D::gridToParticle(float dt) {
                         B_new[2][1] += w_apic * weight * diff_vz * dist_y * D_inv_y;
                         B_new[2][2] += w_apic * weight * diff_vz * dist_z * D_inv_z;
 
-                        L_new[0][0] += diff_vx * dN_dx;
-                        L_new[0][1] += diff_vx * dN_dy;
-                        L_new[0][2] += diff_vx * dN_dz;
+                        L_new[0][0] += node.v(0) * dN_dx;
+                        L_new[0][1] += node.v(0) * dN_dy;
+                        L_new[0][2] += node.v(0) * dN_dz;
 
-                        L_new[1][0] += diff_vy * dN_dx;
-                        L_new[1][1] += diff_vy * dN_dy;
-                        L_new[1][2] += diff_vy * dN_dz;
+                        L_new[1][0] += node.v(1) * dN_dx;
+                        L_new[1][1] += node.v(1) * dN_dy;
+                        L_new[1][2] += node.v(1) * dN_dz;
 
-                        L_new[2][0] += diff_vz * dN_dx;
-                        L_new[2][1] += diff_vz * dN_dy;
-                        L_new[2][2] += diff_vz * dN_dz;
+                        L_new[2][0] += node.v(2) * dN_dx;
+                        L_new[2][1] += node.v(2) * dN_dy;
+                        L_new[2][2] += node.v(2) * dN_dz;
                     }
                 }
             }
@@ -1137,22 +1137,47 @@ void MPMSolver3D::updateStressState(float dt) {
 
         // --- CREST Reactive Burn Model with Davis Reactant & Product EOS ---
         if (mat.material_model == MPMMaterialModel::CRESTReactiveBurn) {
-            p.V = std::clamp(p.V * (1.0f + tr_deps), 0.05f * p.V0, 50.0f * p.V0);
             const float v_rel = p.V / (p.V0 > 1.0e-20f ? p.V0 : 1.0e-20f);
             p.v_min = std::min(p.v_min, v_rel);
 
-            // 1. Peak Shock Entropy Latching
+            // 1. Peak Shock Entropy Latching (Kinematic Volume, Cauchy Pressure, Reactant Pressure & Temperature)
             float s_calc = CrestDavis::computeDavisShockEntropy(p.v_min, mat.davis_c0, mat.davis_s1, mat.davis_gamma0, mat.davis_cv, mat.davis_t0, mat.davis_rho0);
             p.s_shock = std::max(p.s_shock, s_calc);
 
-            // 2. CREST Reaction Kinetics ODE Advance
-            p.lambda = CrestDavis::advanceCRESTProgress(dt, p.s_shock, p.lambda, mat.crest_b1, mat.crest_c1, mat.crest_m1, mat.crest_b2, mat.crest_c2, mat.crest_c3, mat.crest_m2, mat.crest_s0, mat.crest_s_threshold);
+            float p_curr_comp = -(p.sigma[0][0] + p.sigma[1][1] + p.sigma[2][2]) / 3.0f;
+            float p_react_trial = CrestDavis::computeDavisReactantPressure(v_rel, p.e_int, mat.davis_c0, mat.davis_s1, mat.davis_gamma0, mat.davis_cv, mat.davis_t0, mat.davis_rho0);
+            float p_eff_comp = std::max(p_curr_comp, p_react_trial);
+            if (p_eff_comp > 1.0e6f) {
+                float s_p = CrestDavis::computeDavisShockEntropyFromPressure(p_eff_comp, mat.davis_c0, mat.davis_s1, mat.davis_cv, mat.davis_t0, mat.davis_rho0);
+                p.s_shock = std::max(p.s_shock, s_p);
+            }
 
-            // 3. Davis Reactant & Product Two-Phase Pressures
+            if (p.temperature > mat.davis_t0) {
+                float s_therm = mat.davis_cv * std::log(p.temperature / mat.davis_t0);
+                p.s_shock = std::max(p.s_shock, s_therm);
+            }
+
+            // 2. CREST Reaction Kinetics ODE Advance
+            float lam_curr = p.lambda;
+            p.lambda = CrestDavis::advanceCRESTProgress(dt, p.s_shock, p.lambda, mat.crest_b1, mat.crest_c1, mat.crest_m1, mat.crest_b2, mat.crest_c2, mat.crest_c3, mat.crest_m2, mat.crest_s0, mat.crest_s_threshold);
+            float d_lam = std::max(0.0f, p.lambda - lam_curr);
+
+            // 3. Two-Phase Pressures
             float p_react = CrestDavis::computeDavisReactantPressure(v_rel, p.e_int, mat.davis_c0, mat.davis_s1, mat.davis_gamma0, mat.davis_cv, mat.davis_t0, mat.davis_rho0);
             float p_prod  = CrestDavis::computeDavisProductPressure(v_rel, p.e_int + mat.davis_q_det, mat.davis_a, mat.davis_b, mat.davis_k, mat.davis_vc, mat.davis_pc, mat.davis_q_det, mat.davis_rho0);
             float p_mix   = (1.0f - p.lambda) * p_react + p.lambda * p_prod;
             if (p_mix < 1.0e-6f) p_mix = 1.0e-6f;
+
+            // 4. Energy Conservation: Shock Work & Chemical Heat Release
+            float rho_eff = (mat.density > 10.0f) ? mat.density : 1895.0f;
+            float de_comp = (tr_deps < 0.0f) ? -(p_mix / rho_eff) * tr_deps : 0.0f;
+            float de_chem = d_lam * mat.davis_q_det;
+            p.e_int += de_comp + de_chem;
+            p.temperature = mat.davis_t0 + p.e_int / (mat.davis_cv > 1.0f ? mat.davis_cv : 1000.0f);
+            if (p.temperature > mat.davis_t0) {
+                float s_therm = mat.davis_cv * std::log(p.temperature / mat.davis_t0);
+                p.s_shock = std::max(p.s_shock, s_therm);
+            }
 
             // 4. Solid Shear Stress Relaxation as lambda -> 1
             float W_sig[3][3] = {}, sig_W[3][3] = {};
@@ -1187,6 +1212,20 @@ void MPMSolver3D::updateStressState(float dt) {
             float p_s = -(s_trial[0][0] + s_trial[1][1] + s_trial[2][2]) / 3.0f;
             for (int r = 0; r < 3; ++r)
                 s_trial[r][r] += p_s;
+
+            // Radial return plasticity for solid phase
+            float s_mag_sq = 0.0f;
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    s_mag_sq += s_trial[r][c] * s_trial[r][c];
+            float q_trial = std::sqrt(1.5f * s_mag_sq);
+            float q_yield = (1.0f - p.lambda) * (mat.yield_stress > 1.0e5f ? mat.yield_stress : 100.0e6f);
+            if (q_trial > q_yield && q_trial > 1.0e-6f) {
+                float scale = q_yield / q_trial;
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c)
+                        s_trial[r][c] *= scale;
+            }
 
             for (int r = 0; r < 3; ++r)
                 for (int c = 0; c < 3; ++c)
@@ -1544,7 +1583,9 @@ float MPMSolver3D::computeStepSize(float cfl) const {
             c_s = std::sqrt(C0 * C0 + (2.0f / 3.0f) * E / (rho * (1.0f + nu)));
         } else if (mat.material_model == MPMMaterialModel::CRESTReactiveBurn) {
             float C0 = mat.davis_c0;
-            c_s = std::sqrt(C0 * C0 + (2.0f / 3.0f) * E / (rho * (1.0f + nu)));
+            float c_solid = std::sqrt(C0 * C0 + (2.0f / 3.0f) * E / (rho * (1.0f + nu)));
+            float c_det = (mat.davis_pc > 1.0e6f) ? 7500.0f : 6000.0f;
+            c_s = std::max(c_solid, c_det);
         } else if (mat.material_model == MPMMaterialModel::RHTConcrete || mat.material_model == MPMMaterialModel::KCConcrete || mat.material_model == MPMMaterialModel::CSCMConcrete) {
             float G = E / (2.0f * (1.0f + nu));
             float K = 1.6f * (E / (3.0f * std::max(0.02f, 1.0f - 2.0f * nu)));

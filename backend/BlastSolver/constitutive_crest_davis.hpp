@@ -86,6 +86,40 @@ HD_CREST_FUNC T computeDavisShockEntropy(
     return s_shock;
 }
 
+// Compute peak shock entropy along unreacted solid Hugoniot directly from compressive shock pressure
+template <typename T>
+HD_CREST_FUNC T computeDavisShockEntropyFromPressure(
+    T p_shock,          // Compressive shock pressure (Pa)
+    T c0,               // Bulk sound speed (m/s)
+    T s1,               // Hugoniot slope
+    T cv,               // Specific heat (J/(kg K))
+    T t0,               // Reference temperature (K)
+    T rho0              // Reference density (kg/m^3)
+) {
+    if (p_shock <= static_cast<T>(1.0e6)) return static_cast<T>(0.0);
+    T rho_c0 = rho0 * c0;
+    T discr = rho_c0 * rho_c0 + static_cast<T>(4.0) * s1 * rho0 * p_shock;
+    if (discr <= static_cast<T>(0.0)) return static_cast<T>(0.0);
+
+    T Up = (std::sqrt(discr) - rho_c0) / (static_cast<T>(2.0) * s1 * rho0);
+    if (Up <= static_cast<T>(0.0)) return static_cast<T>(0.0);
+
+    T Us = c0 + s1 * Up;
+    T mu = Up / (Us > static_cast<T>(1.0) ? Us : static_cast<T>(1.0));
+    if (mu <= static_cast<T>(0.0)) return static_cast<T>(0.0);
+    if (mu > static_cast<T>(0.90)) mu = static_cast<T>(0.90);
+
+    T e_H = static_cast<T>(0.5) * p_shock * mu / rho0;
+    T T_H = t0 + (e_H / (cv > static_cast<T>(1.0) ? cv : static_cast<T>(1000.0)));
+    if (T_H <= t0) return static_cast<T>(0.0);
+
+    T ratio = T_H / (t0 > static_cast<T>(1.0) ? t0 : static_cast<T>(293.0));
+    if (ratio < static_cast<T>(1.0)) ratio = static_cast<T>(1.0);
+
+    T s_shock = cv * std::log(ratio);
+    return s_shock;
+}
+
 // ============================================================================
 // Davis Product Equation of State (Detonation Gas Phase)
 // ============================================================================

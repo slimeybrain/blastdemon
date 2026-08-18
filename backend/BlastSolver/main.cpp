@@ -6478,7 +6478,7 @@ int main() {
                             float det_x = static_cast<float>(get_json_double(msg, "detonator_x", 0.5));
                             float det_y = static_cast<float>(get_json_double(msg, "detonator_y", 0.5));
                             float det_z = static_cast<float>(get_json_double(msg, "detonator_z", 0.5));
-                            float init_rad = static_cast<float>(get_json_double(msg, "initiation_radius", 0.02));
+                            float init_rad = static_cast<float>(get_json_double(msg, "detonator_radius", get_json_double(msg, "initiation_radius", 0.02)));
 
                             auto& particles_ref = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles() : global_solver_mpm_3d->getParticles();
                             for (auto& p : particles_ref) {
@@ -6494,11 +6494,19 @@ int main() {
                                         float d_y = p.x[1] - det_y;
                                         float d_z = p.x[2] - det_z;
                                         float dist = std::sqrt(d_x * d_x + d_y * d_y + d_z * d_z);
-                                        if (dist <= init_rad) {
+                                        float effective_init_rad = std::max(init_rad, 2.5f * dx);
+                                        if (dist <= effective_init_rad) {
                                             p.s_shock = 1.5f * parsed_mat.crest_s_threshold;
                                             p.lambda = 1.0f;
                                             p.e_int = parsed_mat.davis_q_det;
                                             p.v_min = 0.70f;
+                                            p.V = 0.70f * p.V0;
+                                            float p_init = (parsed_mat.davis_pc > 1.0e6f) ? parsed_mat.davis_pc : 15.0e9f;
+                                            for (int r = 0; r < 3; ++r) {
+                                                for (int c = 0; c < 3; ++c) {
+                                                    p.sigma[r][c] = (r == c) ? -p_init : 0.0f;
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -7033,7 +7041,7 @@ int main() {
                             float det_x = static_cast<float>(get_json_double(msg, "detonator_x", 0.5));
                             float det_y = static_cast<float>(get_json_double(msg, "detonator_y", 0.5));
                             float det_z = static_cast<float>(get_json_double(msg, "detonator_z", 0.5));
-                            float init_rad = static_cast<float>(get_json_double(msg, "initiation_radius", 0.02));
+                            float init_rad = static_cast<float>(get_json_double(msg, "detonator_radius", get_json_double(msg, "initiation_radius", 0.02)));
 
                             auto& particles_ref = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles() : global_solver_mpm_3d->getParticles();
                             for (auto& p : particles_ref) {
@@ -7049,11 +7057,19 @@ int main() {
                                         float d_y = p.x[1] - det_y;
                                         float d_z = p.x[2] - det_z;
                                         float dist = std::sqrt(d_x * d_x + d_y * d_y + d_z * d_z);
-                                        if (dist <= init_rad) {
+                                        float effective_init_rad = std::max(init_rad, 2.5f * dx);
+                                        if (dist <= effective_init_rad) {
                                             p.s_shock = 1.5f * parsed_mat.crest_s_threshold;
                                             p.lambda = 1.0f;
                                             p.e_int = parsed_mat.davis_q_det;
                                             p.v_min = 0.70f;
+                                            p.V = 0.70f * p.V0;
+                                            float p_init = (parsed_mat.davis_pc > 1.0e6f) ? parsed_mat.davis_pc : 15.0e9f;
+                                            for (int r = 0; r < 3; ++r) {
+                                                for (int c = 0; c < 3; ++c) {
+                                                    p.sigma[r][c] = (r == c) ? -p_init : 0.0f;
+                                                }
+                                            }
                                         }
                                     }
                                 }

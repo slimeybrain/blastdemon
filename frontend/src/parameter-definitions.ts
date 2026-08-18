@@ -1902,12 +1902,26 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
     'DetonatorLocation3D': {
         type: 'DetonatorLocation3D',
         title: '3D Detonation Point Location',
-        category: '3D Multi-Material CFD',
-        shortDesc: 'Specifies 3D Cartesian coordinates (x,y,z) for point source explosive detonation initiation.',
+        category: 'Point Detonator & Ignition',
+        shortDesc: 'Specifies 3D Cartesian coordinates (x,y,z) and hotspot radius for explosive initiation in CFD and MPM solvers.',
         fullDescHtml: `
             <div class="node-doc-section">
                 <div class="node-doc-heading">Overview & Role</div>
-                <p>The <strong>DetonatorLocation3D</strong> node defines the exact 3D Cartesian point (x, y, z) where high-explosive detonation is initiated in 3D CFD simulations.</p>
+                <p>The <strong>DetonatorLocation3D</strong> node defines the exact 3D Cartesian point (x, y, z) and initiation radius for point-source explosive initiation across both Eulerian CFD and Lagrangian MPM simulation pipelines:</p>
+                <ul>
+                    <li><strong>3D CFD Solvers (Eulerian):</strong> Seeds initial high-temperature, high-pressure CJ detonation gas kernels in multi-material JWL or ideal gas blast hydrodynamics.</li>
+                    <li><strong>3D MPM Solvers (Lagrangian):</strong> Provides hot-spot point ignition for energetic solid materials configured with the <strong>CREST Reactive Burn + Davis EOS</strong> constitutive model. Particles falling within the detonator initiation radius receive shock entropy seeding (s_shock &ge; 1.5 &times; s_threshold), full reaction progress (&lambda; = 1.0), and specific internal energy (e_int = q_det), initiating self-propagating detonation waves across the particle cloud.</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Inputs & Upstream Connections</div>
+                <p>This node is a standalone spatial source node and does not require upstream inputs.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Outputs & Downstream Connections</div>
+                <ul>
+                    <li><strong>Detonator Spec (detonator):</strong> Connects to the <code>detonator</code> input port of <code>CFDSolver3D</code> (for Eulerian blast simulations) or <code>MPMDomain3D</code> (for pure MPM CREST reactive burn simulations).</li>
+                </ul>
             </div>
         `
     },
@@ -2115,7 +2129,22 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
         fullDescHtml: `
             <div class="node-doc-section">
                 <div class="node-doc-heading">Overview & Role</div>
-                <p>The <strong>MPMDomain3D</strong> node executes 3D Material Point Method continuum particle dynamics. Seamlessly models hyper-velocity impact, ductile tearing, ceramic shattering, and explosive soil cratering on CPU or CUDA GPU backends.</p>
+                <p>The <strong>MPMDomain3D</strong> node executes 3D Material Point Method continuum particle dynamics. Seamlessly models hyper-velocity impact, ductile tearing, ceramic shattering, and explosive detonation on CPU or CUDA GPU backends.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Inputs & Upstream Connections</div>
+                <ul>
+                    <li><strong>Grid (mesh):</strong> Connects from <code>DomainMesh3D</code> to specify the background Cartesian grid dimensions, cell size, and boundary conditions.</li>
+                    <li><strong>MPM Objects (objects):</strong> Connects from one or more <code>MPMObject3D</code> nodes representing solid bodies, projectiles, or explosive charges.</li>
+                    <li><strong>Detonator (detonator, optional):</strong> Connects from a <code>DetonatorLocation3D</code> node to provide point-source hot-spot ignition for energetic materials utilizing the <strong>CREST Reactive Burn + Davis EOS</strong> model.</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Outputs & Downstream Connections</div>
+                <ul>
+                    <li><strong>Telemetry (telemetry):</strong> Streams particle states, stresses, and field variables to <code>Telemetry3DViewport</code> or <code>TelemetryText</code>.</li>
+                    <li><strong>MPM State (mpm_out):</strong> Connects to <code>FSICoupler3D</code> for coupled fluid-structure interaction simulations.</li>
+                </ul>
             </div>
         `
     },

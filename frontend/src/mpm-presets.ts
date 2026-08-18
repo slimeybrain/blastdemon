@@ -1086,6 +1086,62 @@ export const MPM_MATERIAL_CATEGORIES: MPMCategoryGroup[] = [
         ]
     },
     {
+        category: 'Ideal Gas Presets (Eulerian CFD)',
+        presets: [
+            'Air (Standard STP, gamma=1.4)',
+            'Air (Dry Sea-Level STP)',
+            'Air (Stratosphere 20km)',
+            'Air (High-Temperature Shock 1000K)',
+            'Nitrogen (N2, gamma=1.40)',
+            'Oxygen (O2, gamma=1.40)',
+            'Helium (Noble, gamma=1.667)',
+            'Argon (Noble, gamma=1.667)',
+            'Neon (Noble, gamma=1.667)',
+            'Krypton (Noble, gamma=1.667)',
+            'Xenon (Noble, gamma=1.667)',
+            'Hydrogen (H2, gamma=1.41)',
+            'Methane (CH4, gamma=1.32)',
+            'Propane (C3H8, gamma=1.13)',
+            'Ethylene (C2H4, gamma=1.24)',
+            'Acetylene (C2H2, gamma=1.23)',
+            'Carbon Monoxide (CO, gamma=1.40)',
+            'Carbon Dioxide (CO2, gamma=1.30)',
+            'Sulfur Hexafluoride (SF6, gamma=1.09)',
+            'Ammonia (NH3, gamma=1.31)',
+            'Nitrous Oxide (N2O, gamma=1.30)',
+            'Water Vapor / Steam (H2O, gamma=1.33)',
+            'Chlorine (Cl2, gamma=1.34)'
+        ]
+    },
+    {
+        category: 'JWL Detonation Gas Presets (Eulerian CFD)',
+        presets: [
+            'TNT (Trinitrotoluene)',
+            'C-4 (Composition 4)',
+            'Composition B (Comp B)',
+            'PETN (Pentaerythritol Tetranitrate)',
+            'HMX (Octogen / EDC37)',
+            'RDX (Hexogen / Cyclonite)',
+            'PBX 9501',
+            'PBX 9502',
+            'LX-04',
+            'LX-07',
+            'LX-10',
+            'LX-14',
+            'LX-17',
+            'ANFO (Ammonium Nitrate / Fuel Oil)',
+            'Aluminized ANFO',
+            'Heavy ANFO',
+            'Ammonal',
+            'Tritonal (80% TNT / 20% Al)',
+            'Pentolite 50/50',
+            'Semtex 1A',
+            'Tetryl',
+            'Mining Emulsion',
+            'Water Gel'
+        ]
+    },
+    {
         category: 'Custom Settings',
         presets: [
             'Custom'
@@ -1708,7 +1764,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         jc_A: 50.0e6, jc_B: 100.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 623.0, T_room: 293.0, Cp: 1000.0, mg_gamma0: 0.65, mg_c0: 2050.0, mg_s: 2.12,
         davis_c0: 2050.0, davis_s1: 2.12, davis_gamma0: 0.65, davis_cv: 1000.0, davis_t0: 293.0, davis_rho0: 1895.0,
         davis_a: 2.85, davis_b: 1.10, davis_k: 1.35, davis_vc: 0.65, davis_pc: 12.5e9, davis_q_det: 3.90e6,
-        crest_b1: 1.2e7, crest_c1: 0.67, crest_m1: 2.5, crest_b2: 3.5e6, crest_c2: 0.50, crest_c3: 0.67, crest_m2: 1.5, crest_s0: 100.0, crest_s_threshold: 45.0,
+        crest_b1: 1.2e7, crest_c1: 0.67, crest_m1: 2.5, crest_b2: 3.5e6, crest_c2: 0.50, crest_c3: 0.67, crest_m2: 1.5, crest_s0: 15.0, crest_s_threshold: 2.0,
         category: 'CREST Reactive Burn Presets', reference: 'Handley, C. A. (2007) CREST reactive burn model for PBX 9502; Davis (1998)'
     },
     'EDC37 (HMX/NC/K10 91/1/8) - CREST Davis': {
@@ -1716,7 +1772,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         jc_A: 40.0e6, jc_B: 80.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 550.0, T_room: 293.0, Cp: 1100.0, mg_gamma0: 0.70, mg_c0: 2750.0, mg_s: 1.85,
         davis_c0: 2750.0, davis_s1: 1.85, davis_gamma0: 0.70, davis_cv: 1100.0, davis_t0: 293.0, davis_rho0: 1841.0,
         davis_a: 3.10, davis_b: 1.25, davis_k: 1.30, davis_vc: 0.60, davis_pc: 14.2e9, davis_q_det: 5.20e6,
-        crest_b1: 2.5e7, crest_c1: 0.67, crest_m1: 2.0, crest_b2: 6.8e6, crest_c2: 0.50, crest_c3: 0.67, crest_m2: 1.2, crest_s0: 95.0, crest_s_threshold: 38.0,
+        crest_b1: 2.5e7, crest_c1: 0.67, crest_m1: 2.0, crest_b2: 6.8e6, crest_c2: 0.50, crest_c3: 0.67, crest_m2: 1.2, crest_s0: 14.0, crest_s_threshold: 1.5,
         category: 'CREST Reactive Burn Presets', reference: 'Whitworth, N. J. (2008) CREST modeling of EDC37 shock initiation'
     },
     'PBX 9501 (HMX/Estane 95/5) - CREST Davis': {
@@ -1724,7 +1780,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         jc_A: 45.0e6, jc_B: 90.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 550.0, T_room: 293.0, Cp: 1080.0, mg_gamma0: 0.68, mg_c0: 2600.0, mg_s: 1.90,
         davis_c0: 2600.0, davis_s1: 1.90, davis_gamma0: 0.68, davis_cv: 1080.0, davis_t0: 293.0, davis_rho0: 1830.0,
         davis_a: 3.00, davis_b: 1.20, davis_k: 1.32, davis_vc: 0.62, davis_pc: 13.8e9, davis_q_det: 5.00e6,
-        crest_b1: 2.0e7, crest_c1: 0.67, crest_m1: 2.2, crest_b2: 5.5e6, crest_c2: 0.50, crest_c3: 0.67, crest_m2: 1.3, crest_s0: 98.0, crest_s_threshold: 40.0,
+        crest_b1: 2.0e7, crest_c1: 0.67, crest_m1: 2.2, crest_b2: 5.5e6, crest_c2: 0.50, crest_c3: 0.67, crest_m2: 1.3, crest_s0: 14.0, crest_s_threshold: 2.0,
         category: 'CREST Reactive Burn Presets', reference: 'Gibbs & Popolato (1980) LASL Explosive Property Data / Davis EOS'
     },
     'Composition B (RDX/TNT 60/40) - CREST Davis': {
@@ -1732,7 +1788,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         jc_A: 35.0e6, jc_B: 70.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 354.0, T_room: 293.0, Cp: 1050.0, mg_gamma0: 0.72, mg_c0: 2450.0, mg_s: 1.95,
         davis_c0: 2450.0, davis_s1: 1.95, davis_gamma0: 0.72, davis_cv: 1050.0, davis_t0: 293.0, davis_rho0: 1717.0,
         davis_a: 2.70, davis_b: 1.15, davis_k: 1.36, davis_vc: 0.66, davis_pc: 11.8e9, davis_q_det: 4.60e6,
-        crest_b1: 1.8e7, crest_c1: 0.67, crest_m1: 2.3, crest_b2: 4.5e6, crest_c2: 0.50, crest_c3: 0.67, crest_m2: 1.4, crest_s0: 102.0, crest_s_threshold: 42.0,
+        crest_b1: 1.8e7, crest_c1: 0.67, crest_m1: 2.3, crest_b2: 4.5e6, crest_c2: 0.50, crest_c3: 0.67, crest_m2: 1.4, crest_s0: 15.0, crest_s_threshold: 1.5,
         category: 'CREST Reactive Burn Presets', reference: 'Urtiew et al. (1998) Shock initiation of Comp B / Davis EOS parameters'
     },
     'LX-17 (TATB/Kel-F 92.5/7.5) - CREST Davis': {
@@ -1740,7 +1796,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         jc_A: 52.0e6, jc_B: 105.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 623.0, T_room: 293.0, Cp: 990.0, mg_gamma0: 0.64, mg_c0: 2020.0, mg_s: 2.15,
         davis_c0: 2020.0, davis_s1: 2.15, davis_gamma0: 0.64, davis_cv: 990.0, davis_t0: 293.0, davis_rho0: 1905.0,
         davis_a: 2.80, davis_b: 1.08, davis_k: 1.35, davis_vc: 0.65, davis_pc: 12.2e9, davis_q_det: 3.80e6,
-        crest_b1: 1.1e7, crest_c1: 0.67, crest_m1: 2.5, crest_b2: 3.2e6, crest_c2: 0.50, crest_c3: 0.67, crest_m2: 1.5, crest_s0: 100.0, crest_s_threshold: 46.0,
+        crest_b1: 1.1e7, crest_c1: 0.67, crest_m1: 2.5, crest_b2: 3.2e6, crest_c2: 0.50, crest_c3: 0.67, crest_m2: 1.5, crest_s0: 15.0, crest_s_threshold: 3.0,
         category: 'CREST Reactive Burn Presets', reference: 'LLNL Explosives Handbook / CREST Parameters for Insensitive HE'
     },
 
@@ -1879,6 +1935,36 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         atm_pressure: 101325.0, atm_temperature: 288.15, gamma: 1.40,
         category: 'Ideal Gas Presets', reference: 'Standard Atmosphere (ISO 2533 / NASA)'
     },
+    'Air (Dry Sea-Level STP)': {
+        density: 1.204, youngs_modulus: 1.42e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 1006.0, mg_gamma0: 0.40, mg_c0: 343.2, mg_s: 1.00,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.40,
+        category: 'Ideal Gas Presets', reference: 'ISO Standard Atmosphere Sea-Level 20°C'
+    },
+    'Air (Stratosphere 20km)': {
+        density: 0.0889, youngs_modulus: 7.74e3, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 216.65, Cp: 1005.0, mg_gamma0: 0.40, mg_c0: 295.0, mg_s: 1.00,
+        atm_pressure: 5529.0, atm_temperature: 216.65, gamma: 1.40,
+        category: 'Ideal Gas Presets', reference: 'US Standard Atmosphere 1976 (20 km altitude)'
+    },
+    'Air (High-Temperature Shock 1000K)': {
+        density: 0.352, youngs_modulus: 1.37e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.0, Cp: 1142.0, mg_gamma0: 0.35, mg_c0: 624.0, mg_s: 1.00,
+        atm_pressure: 101325.0, atm_temperature: 1000.0, gamma: 1.35,
+        category: 'Ideal Gas Presets', reference: 'NIST High-Temperature Air Tables (1000 K)'
+    },
+    'Nitrogen (N2, gamma=1.40)': {
+        density: 1.165, youngs_modulus: 1.42e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 1040.0, mg_gamma0: 0.40, mg_c0: 349.0, mg_s: 1.00,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.40,
+        category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Nitrogen Gas)'
+    },
+    'Oxygen (O2, gamma=1.40)': {
+        density: 1.331, youngs_modulus: 1.42e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 918.0, mg_gamma0: 0.40, mg_c0: 326.0, mg_s: 1.00,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.40,
+        category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Oxygen Gas)'
+    },
     'Helium (Noble, gamma=1.667)': {
         density: 0.1786, youngs_modulus: 1.69e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
         jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 288.15, Cp: 5193.0, mg_gamma0: 0.667, mg_c0: 1007.0, mg_s: 1.00,
@@ -1891,11 +1977,29 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         atm_pressure: 101325.0, atm_temperature: 288.15, gamma: 1.667,
         category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Argon Thermophysical Properties)'
     },
-    'Carbon Dioxide (CO2, gamma=1.30)': {
-        density: 1.977, youngs_modulus: 1.32e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
-        jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 288.15, Cp: 844.0, mg_gamma0: 0.30, mg_c0: 258.0, mg_s: 1.00,
-        atm_pressure: 101325.0, atm_temperature: 288.15, gamma: 1.30,
-        category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Carbon Dioxide Properties)'
+    'Neon (Noble, gamma=1.667)': {
+        density: 0.838, youngs_modulus: 1.69e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 1030.0, mg_gamma0: 0.667, mg_c0: 449.0, mg_s: 1.00,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.667,
+        category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Neon Gas)'
+    },
+    'Krypton (Noble, gamma=1.667)': {
+        density: 3.486, youngs_modulus: 1.69e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 248.0, mg_gamma0: 0.667, mg_c0: 221.0, mg_s: 1.00,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.667,
+        category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Krypton Gas)'
+    },
+    'Xenon (Noble, gamma=1.667)': {
+        density: 5.464, youngs_modulus: 1.69e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 158.0, mg_gamma0: 0.667, mg_c0: 176.0, mg_s: 1.00,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.667,
+        category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Xenon Gas)'
+    },
+    'Hydrogen (H2, gamma=1.41)': {
+        density: 0.0899, youngs_modulus: 1.43e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 288.15, Cp: 14300.0, mg_gamma0: 0.41, mg_c0: 1290.0, mg_s: 1.00,
+        atm_pressure: 101325.0, atm_temperature: 288.15, gamma: 1.41,
+        category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Hydrogen Properties)'
     },
     'Methane (CH4, gamma=1.32)': {
         density: 0.717, youngs_modulus: 1.34e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
@@ -1903,11 +2007,65 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         atm_pressure: 101325.0, atm_temperature: 288.15, gamma: 1.32,
         category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Methane Properties)'
     },
-    'Hydrogen (H2, gamma=1.41)': {
-        density: 0.0899, youngs_modulus: 1.43e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
-        jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 288.15, Cp: 14300.0, mg_gamma0: 0.41, mg_c0: 1290.0, mg_s: 1.00,
-        atm_pressure: 101325.0, atm_temperature: 288.15, gamma: 1.41,
-        category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Hydrogen Properties)'
+    'Propane (C3H8, gamma=1.13)': {
+        density: 1.868, youngs_modulus: 1.14e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 1670.0, mg_gamma0: 0.13, mg_c0: 247.0, mg_s: 1.00,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.13,
+        category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Propane Gas)'
+    },
+    'Ethylene (C2H4, gamma=1.24)': {
+        density: 1.178, youngs_modulus: 1.26e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 1540.0, mg_gamma0: 0.24, mg_c0: 327.0, mg_s: 1.00,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.24,
+        category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Ethylene Gas)'
+    },
+    'Acetylene (C2H2, gamma=1.23)': {
+        density: 1.097, youngs_modulus: 1.25e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 1690.0, mg_gamma0: 0.23, mg_c0: 340.0, mg_s: 1.00,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.23,
+        category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Acetylene Gas)'
+    },
+    'Carbon Monoxide (CO, gamma=1.40)': {
+        density: 1.165, youngs_modulus: 1.42e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 1040.0, mg_gamma0: 0.40, mg_c0: 349.0, mg_s: 1.00,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.40,
+        category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Carbon Monoxide)'
+    },
+    'Carbon Dioxide (CO2, gamma=1.30)': {
+        density: 1.977, youngs_modulus: 1.32e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 288.15, Cp: 844.0, mg_gamma0: 0.30, mg_c0: 258.0, mg_s: 1.00,
+        atm_pressure: 101325.0, atm_temperature: 288.15, gamma: 1.30,
+        category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Carbon Dioxide Properties)'
+    },
+    'Sulfur Hexafluoride (SF6, gamma=1.09)': {
+        density: 6.130, youngs_modulus: 1.10e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 665.0, mg_gamma0: 0.09, mg_c0: 152.0, mg_s: 1.00,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.09,
+        category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Sulfur Hexafluoride)'
+    },
+    'Ammonia (NH3, gamma=1.31)': {
+        density: 0.730, youngs_modulus: 1.33e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 2170.0, mg_gamma0: 0.31, mg_c0: 430.0, mg_s: 1.00,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.31,
+        category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Ammonia Gas)'
+    },
+    'Nitrous Oxide (N2O, gamma=1.30)': {
+        density: 1.870, youngs_modulus: 1.32e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 880.0, mg_gamma0: 0.30, mg_c0: 263.0, mg_s: 1.00,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.30,
+        category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Nitrous Oxide)'
+    },
+    'Water Vapor / Steam (H2O, gamma=1.33)': {
+        density: 0.598, youngs_modulus: 1.35e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 373.15, Cp: 2080.0, mg_gamma0: 0.33, mg_c0: 478.0, mg_s: 1.00,
+        atm_pressure: 101325.0, atm_temperature: 373.15, gamma: 1.33,
+        category: 'Ideal Gas Presets', reference: 'IAPWS-IF97 Steam Tables (100°C saturated vapor)'
+    },
+    'Chlorine (Cl2, gamma=1.34)': {
+        density: 2.980, youngs_modulus: 1.36e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 480.0, mg_gamma0: 0.34, mg_c0: 215.0, mg_s: 1.00,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.34,
+        category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Chlorine Gas)'
     },
 
     // ---------------------------------------------------------
@@ -1969,6 +2127,27 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         ideal_gamma: 1.40, ideal_rho_0: 1895.0, ideal_e_0: 4.20e6,
         category: 'JWL Detonation Gas Presets', reference: 'LLNL Explosives Handbook UCRL-52997'
     },
+    'LX-04': {
+        density: 1860.0, youngs_modulus: 8.5e9, poissons_ratio: 0.35, yield_stress: 40.0e6, hardening_modulus: 85.0e6, failure_strain: 0.10, tensile_failure_stress: 48.0e6,
+        jc_A: 40.0e6, jc_B: 85.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 550.0, T_room: 293.0, Cp: 1060.0, mg_gamma0: 0.70, mg_c0: 2580.0, mg_s: 1.88,
+        composition: 'LX-04', rho: 1860.0, detonation_energy: 5.30e6, det_vel: 8400.0, jwl_A: 742.0e9, jwl_B: 11.20e9, jwl_R1: 4.40, jwl_R2: 1.20, jwl_omega: 0.30,
+        ideal_gamma: 1.40, ideal_rho_0: 1860.0, ideal_e_0: 5.30e6,
+        category: 'JWL Detonation Gas Presets', reference: 'LLNL Explosives Handbook'
+    },
+    'LX-07': {
+        density: 1860.0, youngs_modulus: 8.6e9, poissons_ratio: 0.35, yield_stress: 42.0e6, hardening_modulus: 86.0e6, failure_strain: 0.10, tensile_failure_stress: 50.0e6,
+        jc_A: 42.0e6, jc_B: 86.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 550.0, T_room: 293.0, Cp: 1060.0, mg_gamma0: 0.70, mg_c0: 2600.0, mg_s: 1.88,
+        composition: 'LX-07', rho: 1860.0, detonation_energy: 5.50e6, det_vel: 8600.0, jwl_A: 785.0e9, jwl_B: 12.50e9, jwl_R1: 4.45, jwl_R2: 1.15, jwl_omega: 0.32,
+        ideal_gamma: 1.40, ideal_rho_0: 1860.0, ideal_e_0: 5.50e6,
+        category: 'JWL Detonation Gas Presets', reference: 'LLNL Explosives Handbook'
+    },
+    'LX-10': {
+        density: 1860.0, youngs_modulus: 8.8e9, poissons_ratio: 0.35, yield_stress: 43.0e6, hardening_modulus: 88.0e6, failure_strain: 0.10, tensile_failure_stress: 51.0e6,
+        jc_A: 43.0e6, jc_B: 88.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 550.0, T_room: 293.0, Cp: 1060.0, mg_gamma0: 0.70, mg_c0: 2610.0, mg_s: 1.88,
+        composition: 'LX-10', rho: 1860.0, detonation_energy: 5.80e6, det_vel: 8820.0, jwl_A: 830.0e9, jwl_B: 15.00e9, jwl_R1: 4.50, jwl_R2: 1.10, jwl_omega: 0.38,
+        ideal_gamma: 1.40, ideal_rho_0: 1860.0, ideal_e_0: 5.80e6,
+        category: 'JWL Detonation Gas Presets', reference: 'LLNL Explosives Handbook'
+    },
     'LX-14': {
         density: 1830.0, youngs_modulus: 8.8e9, poissons_ratio: 0.35, yield_stress: 44.0e6, hardening_modulus: 88.0e6, failure_strain: 0.10, tensile_failure_stress: 52.0e6,
         jc_A: 44.0e6, jc_B: 88.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 550.0, T_room: 293.0, Cp: 1060.0, mg_gamma0: 0.70, mg_c0: 2620.0, mg_s: 1.88,
@@ -1990,6 +2169,27 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         ideal_gamma: 1.40, ideal_rho_0: 880.0, ideal_e_0: 3.70e6,
         category: 'JWL Detonation Gas Presets', reference: 'Commercial Mining Explosives Data'
     },
+    'Aluminized ANFO': {
+        density: 1050.0, youngs_modulus: 2.0e9, poissons_ratio: 0.38, yield_stress: 3.0e6, hardening_modulus: 15.0e6, failure_strain: 0.20, tensile_failure_stress: 1.0e6,
+        jc_A: 3.0e6, jc_B: 10.0e6, jc_n: 0.40, jc_C: 0.020, jc_m: 1.00, T_melt: 442.0, T_room: 293.0, Cp: 1550.0, mg_gamma0: 0.55, mg_c0: 1650.0, mg_s: 1.45,
+        composition: 'Aluminized ANFO', rho: 1050.0, detonation_energy: 4.10e6, det_vel: 4900.0, jwl_A: 76.5e9, jwl_B: 1.85e9, jwl_R1: 4.15, jwl_R2: 1.15, jwl_omega: 0.30,
+        ideal_gamma: 1.40, ideal_rho_0: 1050.0, ideal_e_0: 4.10e6,
+        category: 'JWL Detonation Gas Presets', reference: 'Commercial Mining Explosives Data'
+    },
+    'Heavy ANFO': {
+        density: 1250.0, youngs_modulus: 2.5e9, poissons_ratio: 0.38, yield_stress: 4.0e6, hardening_modulus: 20.0e6, failure_strain: 0.18, tensile_failure_stress: 1.5e6,
+        jc_A: 4.0e6, jc_B: 12.0e6, jc_n: 0.40, jc_C: 0.020, jc_m: 1.00, T_melt: 442.0, T_room: 293.0, Cp: 1500.0, mg_gamma0: 0.52, mg_c0: 1700.0, mg_s: 1.45,
+        composition: 'Heavy ANFO', rho: 1250.0, detonation_energy: 3.50e6, det_vel: 5000.0, jwl_A: 198.0e9, jwl_B: 1.45e9, jwl_R1: 4.30, jwl_R2: 1.00, jwl_omega: 0.20,
+        ideal_gamma: 1.40, ideal_rho_0: 1250.0, ideal_e_0: 3.50e6,
+        category: 'JWL Detonation Gas Presets', reference: 'Commercial Mining Explosives Data'
+    },
+    'Ammonal': {
+        density: 1600.0, youngs_modulus: 4.0e9, poissons_ratio: 0.36, yield_stress: 10.0e6, hardening_modulus: 40.0e6, failure_strain: 0.15, tensile_failure_stress: 3.0e6,
+        jc_A: 10.0e6, jc_B: 30.0e6, jc_n: 0.35, jc_C: 0.015, jc_m: 1.00, T_melt: 442.0, T_room: 293.0, Cp: 1400.0, mg_gamma0: 0.60, mg_c0: 2000.0, mg_s: 1.50,
+        composition: 'Ammonal', rho: 1600.0, detonation_energy: 4.40e6, det_vel: 5400.0, jwl_A: 125.0e9, jwl_B: 2.50e9, jwl_R1: 4.00, jwl_R2: 1.00, jwl_omega: 0.25,
+        ideal_gamma: 1.40, ideal_rho_0: 1600.0, ideal_e_0: 4.40e6,
+        category: 'JWL Detonation Gas Presets', reference: 'Demolition Range Reference'
+    },
     'Tritonal (80% TNT / 20% Al)': {
         density: 1720.0, youngs_modulus: 8.0e9, poissons_ratio: 0.33, yield_stress: 25.0e6, hardening_modulus: 150.0e6, failure_strain: 0.08, tensile_failure_stress: 6.0e6,
         jc_A: 25.0e6, jc_B: 80.0e6, jc_n: 0.35, jc_C: 0.010, jc_m: 1.00, T_melt: 354.0, T_room: 293.0, Cp: 1180.0, mg_gamma0: 0.95, mg_c0: 2550.0, mg_s: 1.62,
@@ -2010,6 +2210,27 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         composition: 'Semtex 1A', rho: 1540.0, detonation_energy: 5.40e6, det_vel: 7900.0, jwl_A: 510.0e9, jwl_B: 11.50e9, jwl_R1: 4.40, jwl_R2: 1.30, jwl_omega: 0.32,
         ideal_gamma: 1.40, ideal_rho_0: 1540.0, ideal_e_0: 5.40e6,
         category: 'JWL Detonation Gas Presets', reference: 'Explosia a.s. Technical Data'
+    },
+    'Tetryl': {
+        density: 1730.0, youngs_modulus: 11.0e9, poissons_ratio: 0.31, yield_stress: 32.0e6, hardening_modulus: 180.0e6, failure_strain: 0.05, tensile_failure_stress: 8.0e6,
+        jc_A: 32.0e6, jc_B: 95.0e6, jc_n: 0.32, jc_C: 0.010, jc_m: 1.00, T_melt: 402.0, T_room: 293.0, Cp: 1150.0, mg_gamma0: 0.95, mg_c0: 2700.0, mg_s: 1.65,
+        composition: 'Tetryl', rho: 1730.0, detonation_energy: 4.23e6, det_vel: 7570.0, jwl_A: 510.9e9, jwl_B: 8.44e9, jwl_R1: 4.50, jwl_R2: 1.40, jwl_omega: 0.25,
+        ideal_gamma: 1.40, ideal_rho_0: 1730.0, ideal_e_0: 4.23e6,
+        category: 'JWL Detonation Gas Presets', reference: 'LLNL Explosives Handbook UCRL-52997'
+    },
+    'Mining Emulsion': {
+        density: 1150.0, youngs_modulus: 2.2e9, poissons_ratio: 0.38, yield_stress: 3.5e6, hardening_modulus: 18.0e6, failure_strain: 0.20, tensile_failure_stress: 1.2e6,
+        jc_A: 3.5e6, jc_B: 11.0e6, jc_n: 0.40, jc_C: 0.020, jc_m: 1.00, T_melt: 360.0, T_room: 293.0, Cp: 1550.0, mg_gamma0: 0.54, mg_c0: 1600.0, mg_s: 1.45,
+        composition: 'Mining Emulsion', rho: 1150.0, detonation_energy: 3.20e6, det_vel: 5300.0, jwl_A: 215.0e9, jwl_B: 1.76e9, jwl_R1: 4.45, jwl_R2: 1.05, jwl_omega: 0.15,
+        ideal_gamma: 1.40, ideal_rho_0: 1150.0, ideal_e_0: 3.20e6,
+        category: 'JWL Detonation Gas Presets', reference: 'Commercial Mining Explosives Data'
+    },
+    'Water Gel': {
+        density: 1200.0, youngs_modulus: 2.4e9, poissons_ratio: 0.38, yield_stress: 3.8e6, hardening_modulus: 19.0e6, failure_strain: 0.19, tensile_failure_stress: 1.4e6,
+        jc_A: 3.8e6, jc_B: 11.5e6, jc_n: 0.40, jc_C: 0.020, jc_m: 1.00, T_melt: 360.0, T_room: 293.0, Cp: 1580.0, mg_gamma0: 0.53, mg_c0: 1650.0, mg_s: 1.45,
+        composition: 'Water Gel', rho: 1200.0, detonation_energy: 3.40e6, det_vel: 4800.0, jwl_A: 154.0e9, jwl_B: 2.15e9, jwl_R1: 4.30, jwl_R2: 1.10, jwl_omega: 0.25,
+        ideal_gamma: 1.40, ideal_rho_0: 1200.0, ideal_e_0: 3.40e6,
+        category: 'JWL Detonation Gas Presets', reference: 'Commercial Mining Explosives Data'
     }
 };
 
@@ -2032,10 +2253,73 @@ export function getPresetsForConstitutiveModel(modelName: string): string[] {
         case 'Linear Elastic':
             return [
                 'Structural Steel (A36)',
+                'Steel S275',
+                'Steel S355',
                 'Aluminum 6061-T6 (Elastic)',
                 'Titanium Ti-6Al-4V (Elastic)',
                 'Structural Concrete C30 (Elastic)',
                 'Tempered Glass (Elastic)',
+                'Soda-Lime Glass',
+                'Fused Silica Glass',
+                'Polycarbonate (Lexan)',
+                'Nylon 6-6',
+                'Custom'
+            ];
+        case 'Hypoelastic':
+            return [
+                'Structural Steel (A36)',
+                'Steel S275',
+                'Steel S355',
+                'Steel S460',
+                'Steel 1006',
+                'Steel 1020',
+                'Steel 4340',
+                'Q1N (HY-80 Naval Steel)',
+                'HY-100 Steel',
+                'RHA (Rolled Homogeneous Armor)',
+                'Armox 500T',
+                'Armox 600T',
+                'Weldox 700E',
+                'Weldox 900E',
+                'Stainless Steel 304',
+                'Stainless Steel 316L',
+                'Aluminum 6061-T6',
+                'Aluminum 7075-T6',
+                'Aluminum 2024-T3',
+                'Copper (OFHC)',
+                'Brass 260 (Cartridge Brass)',
+                'Titanium Ti-6Al-4V',
+                'Lead (Pure)',
+                'Custom'
+            ];
+        case 'Johnson-Cook + Mie-Grüneisen':
+            return [
+                'High-Strength Armor Steel (4340)',
+                'Steel 4340',
+                'Steel 1006',
+                'Steel 1020',
+                'Armox 500T',
+                'Armox 600T',
+                'Weldox 700E',
+                'Weldox 900E',
+                'Stainless Steel 304',
+                'Stainless Steel 316L',
+                'Tool Steel D2',
+                'Aluminum 6061-T6',
+                'Aluminum 7075-T6',
+                'Aluminum 2024-T3',
+                'Aluminum 1100-O',
+                'Aluminum 5083-H116',
+                'Copper (OFHC)',
+                'Copper (C11000)',
+                'Brass 260 (Cartridge Brass)',
+                'Titanium Ti-6Al-4V',
+                'Titanium CP (Grade 2)',
+                'Tungsten Heavy Alloy (W-90NiFe)',
+                'Tantalum (Pure)',
+                'Nickel 200',
+                'Inconel 718',
+                'Magnesium AZ31B',
                 'Custom'
             ];
         case 'CREST Reactive Burn':
@@ -2045,12 +2329,16 @@ export function getPresetsForConstitutiveModel(modelName: string): string[] {
                 'PBX 9501 (HMX/Estane 95/5) - CREST Davis',
                 'Composition B (RDX/TNT 60/40) - CREST Davis',
                 'LX-17 (TATB/Kel-F 92.5/7.5) - CREST Davis',
+                'HMX (Unreacted)',
+                'RDX (Unreacted)',
+                'PETN (Unreacted)',
+                'TNT (Unreacted)',
                 'Custom'
             ];
         case 'RHT Concrete':
             return [
-                'Normal-Strength Concrete C35/45 (RHT Default)',
                 'Standard Structural Concrete C30/37 (RHT)',
+                'Normal-Strength Concrete C35/45 (RHT Default)',
                 'High-Strength Concrete C60/75 (RHT)',
                 'High-Performance Concrete C80/95 (RHT)',
                 'Ultra-High Performance Concrete UHPC 140 (RHT)',
@@ -2059,8 +2347,8 @@ export function getPresetsForConstitutiveModel(modelName: string): string[] {
             ];
         case 'Karagozian & Case (K&C)':
             return [
-                'Normal-Strength Concrete C35/45 (K&C Auto MAT_072R3)',
                 'Standard Structural Concrete C30/37 (K&C Auto)',
+                'Normal-Strength Concrete C35/45 (K&C Auto MAT_072R3)',
                 'High-Strength Concrete C60/75 (K&C Auto)',
                 'High-Performance Concrete C80/95 (K&C Auto)',
                 'Ultra-High Performance Concrete UHPC 140 (K&C Auto)',
@@ -2068,8 +2356,8 @@ export function getPresetsForConstitutiveModel(modelName: string): string[] {
             ];
         case 'CSCM Concrete':
             return [
-                'Normal-Strength Concrete C35/45 (CSCM MAT_159 Standard)',
                 'Standard Structural Concrete C30/37 (CSCM)',
+                'Normal-Strength Concrete C35/45 (CSCM MAT_159 Standard)',
                 'High-Strength Concrete C60/75 (CSCM)',
                 'High-Performance Concrete C80/95 (CSCM)',
                 'Ultra-High Performance Concrete UHPC 140 (CSCM)',
@@ -2078,11 +2366,28 @@ export function getPresetsForConstitutiveModel(modelName: string): string[] {
         case 'Ideal Gas':
             return [
                 'Air (Standard STP, gamma=1.4)',
+                'Air (Dry Sea-Level STP)',
+                'Air (Stratosphere 20km)',
+                'Air (High-Temperature Shock 1000K)',
+                'Nitrogen (N2, gamma=1.40)',
+                'Oxygen (O2, gamma=1.40)',
                 'Helium (Noble, gamma=1.667)',
                 'Argon (Noble, gamma=1.667)',
-                'Carbon Dioxide (CO2, gamma=1.30)',
-                'Methane (CH4, gamma=1.32)',
+                'Neon (Noble, gamma=1.667)',
+                'Krypton (Noble, gamma=1.667)',
+                'Xenon (Noble, gamma=1.667)',
                 'Hydrogen (H2, gamma=1.41)',
+                'Methane (CH4, gamma=1.32)',
+                'Propane (C3H8, gamma=1.13)',
+                'Ethylene (C2H4, gamma=1.24)',
+                'Acetylene (C2H2, gamma=1.23)',
+                'Carbon Monoxide (CO, gamma=1.40)',
+                'Carbon Dioxide (CO2, gamma=1.30)',
+                'Sulfur Hexafluoride (SF6, gamma=1.09)',
+                'Ammonia (NH3, gamma=1.31)',
+                'Nitrous Oxide (N2O, gamma=1.30)',
+                'Water Vapor / Steam (H2O, gamma=1.33)',
+                'Chlorine (Cl2, gamma=1.34)',
                 'Custom'
             ];
         case 'JWL Detonation Gas':
@@ -2095,25 +2400,25 @@ export function getPresetsForConstitutiveModel(modelName: string): string[] {
                 'RDX (Hexogen / Cyclonite)',
                 'PBX 9501',
                 'PBX 9502',
+                'LX-04',
+                'LX-07',
+                'LX-10',
                 'LX-14',
                 'LX-17',
                 'ANFO (Ammonium Nitrate / Fuel Oil)',
+                'Aluminized ANFO',
+                'Heavy ANFO',
+                'Ammonal',
                 'Tritonal (80% TNT / 20% Al)',
                 'Pentolite 50/50',
                 'Semtex 1A',
+                'Tetryl',
+                'Mining Emulsion',
+                'Water Gel',
                 'Custom'
             ];
-        case 'Hypoelastic':
-        case 'Johnson-Cook + Mie-Grüneisen':
         default:
-            return MPM_MATERIAL_PRESET_NAMES.filter(name =>
-                !name.includes('CREST') &&
-                !name.includes('(RHT') &&
-                !name.includes('(K&C') &&
-                !name.includes('(CSCM') &&
-                !name.includes('gamma=') &&
-                !['TNT (Trinitrotoluene)', 'C-4 (Composition 4)', 'PETN (Pentaerythritol Tetranitrate)', 'LX-14', 'ANFO (Ammonium Nitrate / Fuel Oil)', 'Tritonal (80% TNT / 20% Al)', 'Pentolite 50/50', 'Semtex 1A'].includes(name)
-            ).concat(['Custom']);
+            return ['Custom'];
     }
 }
 

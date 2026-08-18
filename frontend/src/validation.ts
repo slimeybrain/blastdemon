@@ -11,6 +11,27 @@ export interface ValidationResult {
     globalWarnings: string[];
 }
 
+export function isAirMaterial(node: Node | undefined): boolean {
+    if (!node || (node.type !== 'Material' && node.type !== 'MPMMaterialSteel')) return false;
+    const model = node.parameters?.material_model;
+    const type = node.parameters?.material_type;
+    return model === 'Ideal Gas' || type === 'Air';
+}
+
+export function isJWLMaterial(node: Node | undefined): boolean {
+    if (!node || (node.type !== 'Material' && node.type !== 'MPMMaterialSteel')) return false;
+    const model = node.parameters?.material_model;
+    const type = node.parameters?.material_type;
+    return model === 'JWL Detonation Gas' || type === 'JWL Charge';
+}
+
+export function isIdealGasChargeMaterial(node: Node | undefined): boolean {
+    if (!node || (node.type !== 'Material' && node.type !== 'MPMMaterialSteel')) return false;
+    const model = node.parameters?.material_model;
+    const type = node.parameters?.material_type;
+    return model === 'Ideal Gas' || type === 'Ideal Gas Charge';
+}
+
 export function isParameterRelevant(node: Node, key: string): boolean {
     if (!node || !node.parameters) return true;
 
@@ -62,33 +83,35 @@ export function isParameterRelevant(node: Node, key: string): boolean {
         } else if (shape === 'Block') {
             if (['charge_radius', 'charge_height', 'charge_aspect_ratio'].includes(key)) return false;
         }
-    } else if (node.type === 'Material') {
-        const matType = node.parameters['material_type'] || 'Air';
+    } else if (node.type === 'Material' || node.type === 'MPMMaterialSteel') {
+        const matModel = node.parameters['material_model'] || 'Linear Elastic';
         const airKeys = ['gamma', 'atm_pressure', 'atm_temperature'];
-        const jwlKeys = ['composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
-        const igKeys = ['ideal_gamma', 'ideal_rho_0', 'ideal_e_0'];
-
-        if (matType === 'Air' && (jwlKeys.includes(key) || igKeys.includes(key))) return false;
-        if (matType === 'JWL Charge' && (airKeys.includes(key) || igKeys.includes(key))) return false;
-        if (matType === 'Ideal Gas Charge' && (airKeys.includes(key) || jwlKeys.includes(key))) return false;
-    } else if (node.type === 'MPMMaterialSteel') {
-        const matModel = node.parameters['material_model'] || 'Hypoelastic';
+        const jwlKeys = ['composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega', 'ideal_gamma', 'ideal_rho_0', 'ideal_e_0'];
         const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
         const concreteBaseKeys = ['fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension'];
         const rhtKeys = ['rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2', 'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat'];
         const kcKeys = ['kc_auto_generate', 'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega'];
         const cscmKeys = ['cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2'];
+        const crestKeys = ['davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0', 'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det', 'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold'];
 
-        if (matModel === 'Hypoelastic') {
-            if (jcKeys.includes(key) || concreteBaseKeys.includes(key) || rhtKeys.includes(key) || kcKeys.includes(key) || cscmKeys.includes(key)) return false;
+        if (matModel === 'Ideal Gas') {
+            if (['youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus', 'failure_strain', 'tensile_failure_stress'].includes(key) || jwlKeys.includes(key) || jcKeys.includes(key) || concreteBaseKeys.includes(key) || rhtKeys.includes(key) || kcKeys.includes(key) || cscmKeys.includes(key) || crestKeys.includes(key)) return false;
+        } else if (matModel === 'JWL Detonation Gas') {
+            if (airKeys.includes(key) || jcKeys.includes(key) || concreteBaseKeys.includes(key) || rhtKeys.includes(key) || kcKeys.includes(key) || cscmKeys.includes(key) || crestKeys.includes(key)) return false;
+        } else if (matModel === 'Linear Elastic') {
+            if (['yield_stress', 'hardening_modulus'].includes(key) || airKeys.includes(key) || jwlKeys.includes(key) || jcKeys.includes(key) || concreteBaseKeys.includes(key) || rhtKeys.includes(key) || kcKeys.includes(key) || cscmKeys.includes(key) || crestKeys.includes(key)) return false;
+        } else if (matModel === 'Hypoelastic') {
+            if (airKeys.includes(key) || jwlKeys.includes(key) || jcKeys.includes(key) || concreteBaseKeys.includes(key) || rhtKeys.includes(key) || kcKeys.includes(key) || cscmKeys.includes(key) || crestKeys.includes(key)) return false;
         } else if (matModel === 'Johnson-Cook + Mie-Grüneisen') {
-            if (['yield_stress', 'hardening_modulus'].includes(key) || concreteBaseKeys.includes(key) || rhtKeys.includes(key) || kcKeys.includes(key) || cscmKeys.includes(key)) return false;
+            if (airKeys.includes(key) || jwlKeys.includes(key) || ['yield_stress', 'hardening_modulus'].includes(key) || concreteBaseKeys.includes(key) || rhtKeys.includes(key) || kcKeys.includes(key) || cscmKeys.includes(key) || crestKeys.includes(key)) return false;
         } else if (matModel === 'RHT Concrete') {
-            if (jcKeys.includes(key) || ['yield_stress', 'hardening_modulus'].includes(key) || kcKeys.includes(key) || cscmKeys.includes(key)) return false;
+            if (airKeys.includes(key) || jwlKeys.includes(key) || jcKeys.includes(key) || ['yield_stress', 'hardening_modulus'].includes(key) || kcKeys.includes(key) || cscmKeys.includes(key) || crestKeys.includes(key)) return false;
         } else if (matModel === 'Karagozian & Case (K&C)' || matModel === 'Karagozian & Case') {
-            if (jcKeys.includes(key) || ['yield_stress', 'hardening_modulus'].includes(key) || rhtKeys.includes(key) || cscmKeys.includes(key)) return false;
+            if (airKeys.includes(key) || jwlKeys.includes(key) || jcKeys.includes(key) || ['yield_stress', 'hardening_modulus'].includes(key) || rhtKeys.includes(key) || cscmKeys.includes(key) || crestKeys.includes(key)) return false;
         } else if (matModel === 'CSCM Concrete') {
-            if (jcKeys.includes(key) || ['yield_stress', 'hardening_modulus'].includes(key) || rhtKeys.includes(key) || kcKeys.includes(key)) return false;
+            if (airKeys.includes(key) || jwlKeys.includes(key) || jcKeys.includes(key) || ['yield_stress', 'hardening_modulus'].includes(key) || rhtKeys.includes(key) || kcKeys.includes(key) || crestKeys.includes(key)) return false;
+        } else if (matModel === 'CREST Reactive Burn') {
+            if (airKeys.includes(key) || jwlKeys.includes(key) || jcKeys.includes(key) || concreteBaseKeys.includes(key) || rhtKeys.includes(key) || kcKeys.includes(key) || cscmKeys.includes(key)) return false;
         }
     } else if (node.type === 'DomainMesh') {
         const dim = node.parameters['dimension'] || '1D';
@@ -173,13 +196,13 @@ export function validateSimulationState(state: SimulationState): ValidationResul
         // Air connection check
         const airConn = state.connections.find(c => c.toNode === painterNode.id && c.toPort === 'air');
         if (!airConn) {
-            addMessage(painterNode.id, 'error', "No Air node connected to Initializer. A Material node (configured as Air) is required.");
+            addMessage(painterNode.id, 'error', "No Air node connected to Initializer. A Material node (configured as Air / Ideal Gas) is required.");
         } else {
             const fromNode = state.nodes.find(n => n.id === airConn.fromNode);
-            if (!fromNode || fromNode.type !== 'Material' || fromNode.parameters?.material_type !== 'Air') {
+            if (!fromNode || !isAirMaterial(fromNode)) {
                 const connKey = `${airConn.fromNode}:${airConn.fromPort}->${airConn.toNode}:${airConn.toPort}`;
-                flawedConnections.set(connKey, "Only a Material node configured as Air can be connected to the Air input.");
-                addMessage(painterNode.id, 'error', "Only a Material node configured as Air can be connected to the Air input.");
+                flawedConnections.set(connKey, "Only a Material node configured as Air (Ideal Gas) can be connected to the Air input.");
+                addMessage(painterNode.id, 'error', "Only a Material node configured as Air (Ideal Gas) can be connected to the Air input.");
             }
         }
 
@@ -201,16 +224,15 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                         addMessage(expNode.id, 'error', "No Material connected to Charge 1D.");
                     } else {
                         const matNode = state.nodes.find(n => n.id === matConn.fromNode);
-                        if (!matNode || matNode.type !== 'Material') {
+                        if (!matNode || (matNode.type !== 'Material' && matNode.type !== 'MPMMaterialSteel')) {
                             const connKey = `${matConn.fromNode}:${matConn.fromPort}->${matConn.toNode}:${matConn.toPort}`;
                             flawedConnections.set(connKey, "Only Material node can be connected to the Material input of Charge 1D.");
                             addMessage(expNode.id, 'error', "Only Material node can be connected to the Material input of Charge 1D.");
                         } else {
-                            const matType = matNode.parameters?.material_type || 'Air';
-                            if (initMode === 'Ideal Gas' && matType === 'JWL Charge') {
-                                addMessage(expNode.id, 'warning', "Solver physics is set to 'Ideal Gas' (1-material air), but explosive input is a 'JWL Charge'. Connect an 'Ideal Gas Charge' instead.");
-                            } else if (initMode === 'Multi-Material JWL' && matType === 'Ideal Gas Charge') {
-                                addMessage(expNode.id, 'warning', "Solver physics is set to 'Multi-Material JWL', but explosive input is an 'Ideal Gas Charge'. Connect a 'JWL Charge' instead.");
+                            if (initMode === 'Ideal Gas' && isJWLMaterial(matNode)) {
+                                addMessage(expNode.id, 'warning', "Solver physics is set to 'Ideal Gas' (1-material air), but explosive input is a 'JWL Detonation Gas'. Connect an 'Ideal Gas' material instead.");
+                            } else if (initMode === 'Multi-Material JWL' && isIdealGasChargeMaterial(matNode)) {
+                                addMessage(expNode.id, 'warning', "Solver physics is set to 'Multi-Material JWL', but explosive input is an 'Ideal Gas'. Connect a 'JWL Detonation Gas' material instead.");
                             }
                         }
                     }
@@ -300,7 +322,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                 addMessage(solver2D.id, 'error', "No Air node connected to CFD Solver 2D. A Material node configured as Air is required.");
             } else {
                 const airNode = state.nodes.find(n => n.id === airConn.fromNode);
-                if (!airNode || airNode.type !== 'Material' || airNode.parameters?.material_type !== 'Air') {
+                if (!airNode || !isAirMaterial(airNode)) {
                     const connKey = `${airConn.fromNode}:${airConn.fromPort}->${airConn.toNode}:${airConn.toPort}`;
                     flawedConnections.set(connKey, "Only a Material node configured as Air can be connected to the Air input of CFD Solver 2D.");
                     addMessage(solver2D.id, 'error', "Only a Material node configured as Air can be connected to the Air input of CFD Solver 2D.");
@@ -327,14 +349,13 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                         addMessage(expNode.id, 'error', "No Material connected to Charge.");
                     } else {
                         const matNode = state.nodes.find(n => n.id === matConn.fromNode);
-                        if (!matNode || matNode.type !== 'Material') {
+                        if (!matNode || (matNode.type !== 'Material' && matNode.type !== 'MPMMaterialSteel')) {
                             const connKey = `${matConn.fromNode}:${matConn.fromPort}->${matConn.toNode}:${matConn.toPort}`;
                             flawedConnections.set(connKey, "Only Material node can be connected to the Material input of Charge.");
                             addMessage(expNode.id, 'error', "Only Material node can be connected to the Material input of Charge.");
                         } else {
-                            const matType = matNode.parameters?.material_type || 'Air';
-                            if (matType !== 'JWL Charge') {
-                                addMessage(expNode.id, 'error', "CFD Solver 2D in JWL mode requires a 'JWL Charge' material type connected to the Charge node.");
+                            if (!isJWLMaterial(matNode)) {
+                                addMessage(expNode.id, 'error', "CFD Solver 2D in JWL mode requires a 'JWL Detonation Gas' material connected to the Charge node.");
                             }
                         }
                     }
@@ -374,7 +395,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                 addMessage(solver2D.id, 'error', "No Air node connected to CFD Solver 2D. A Material node configured as Air is required.");
             } else {
                 const airNode = state.nodes.find(n => n.id === airConn.fromNode);
-                if (!airNode || airNode.type !== 'Material' || airNode.parameters?.material_type !== 'Air') {
+                if (!airNode || !isAirMaterial(airNode)) {
                     const connKey = `${airConn.fromNode}:${airConn.fromPort}->${airConn.toNode}:${airConn.toPort}`;
                     flawedConnections.set(connKey, "Only a Material node configured as Air can be connected to the Air input of CFD Solver 2D.");
                     addMessage(solver2D.id, 'error', "Only a Material node configured as Air can be connected to the Air input of CFD Solver 2D.");
@@ -401,14 +422,13 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                         addMessage(igNode.id, 'error', "No Material connected to Charge.");
                     } else {
                         const matNode = state.nodes.find(n => n.id === matConn.fromNode);
-                        if (!matNode || matNode.type !== 'Material') {
+                        if (!matNode || (matNode.type !== 'Material' && matNode.type !== 'MPMMaterialSteel')) {
                             const connKey = `${matConn.fromNode}:${matConn.fromPort}->${matConn.toNode}:${matConn.toPort}`;
                             flawedConnections.set(connKey, "Only Material node can be connected to the Material input of Charge.");
                             addMessage(igNode.id, 'error', "Only Material node can be connected to the Material input of Charge.");
                         } else {
-                            const matType = matNode.parameters?.material_type || 'Air';
-                            if (matType !== 'Ideal Gas Charge') {
-                                addMessage(igNode.id, 'error', "CFD Solver 2D in Ideal Gas mode requires an 'Ideal Gas Charge' material type connected to the Charge node.");
+                            if (!isIdealGasChargeMaterial(matNode)) {
+                                addMessage(igNode.id, 'error', "CFD Solver 2D in Ideal Gas mode requires an 'Ideal Gas' material connected to the Charge node.");
                             }
                         }
                     }
@@ -471,7 +491,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             addMessage(solver3D.id, 'error', "No Air node connected to CFD Solver 3D. A Material node (configured as Air) is required.");
         } else {
             const fromNode = state.nodes.find(n => n.id === airConn3D.fromNode);
-            if (!fromNode || fromNode.type !== 'Material' || fromNode.parameters?.material_type !== 'Air') {
+            if (!fromNode || !isAirMaterial(fromNode)) {
                 const connKey = `${airConn3D.fromNode}:${airConn3D.fromPort}->${airConn3D.toNode}:${airConn3D.toPort}`;
                 flawedConnections.set(connKey, "Only a Material node configured as Air can be connected to the Air input of CFD Solver 3D.");
                 addMessage(solver3D.id, 'error', "Only a Material node configured as Air can be connected to the Air input of CFD Solver 3D.");
@@ -551,14 +571,13 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                         addMessage(chargeNode3D.id, 'error', "No Material connected to Charge 3D.");
                     } else {
                         const matNode = state.nodes.find(n => n.id === matConn.fromNode);
-                        if (!matNode || matNode.type !== 'Material') {
+                        if (!matNode || (matNode.type !== 'Material' && matNode.type !== 'MPMMaterialSteel')) {
                             const connKey = `${matConn.fromNode}:${matConn.fromPort}->${matConn.toNode}:${matConn.toPort}`;
                             flawedConnections.set(connKey, "Only Material node can be connected to the Material input of Charge 3D.");
                             addMessage(chargeNode3D.id, 'error', "Only Material node can be connected to the Material input of Charge 3D.");
                         } else {
-                            const matType = matNode.parameters?.material_type || 'Air';
-                            if (matType !== 'JWL Charge') {
-                                addMessage(chargeNode3D.id, 'error', "CFD Solver 3D in JWL mode requires a 'JWL Charge' material type connected to the Charge node.");
+                            if (!isJWLMaterial(matNode)) {
+                                addMessage(chargeNode3D.id, 'error', "CFD Solver 3D in JWL mode requires a 'JWL Detonation Gas' material connected to the Charge node.");
                             }
                         }
                     }
@@ -608,14 +627,13 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                         addMessage(chargeNode3D.id, 'error', "No Material connected to Charge 3D.");
                     } else {
                         const matNode = state.nodes.find(n => n.id === matConn.fromNode);
-                        if (!matNode || matNode.type !== 'Material') {
+                        if (!matNode || (matNode.type !== 'Material' && matNode.type !== 'MPMMaterialSteel')) {
                             const connKey = `${matConn.fromNode}:${matConn.fromPort}->${matConn.toNode}:${matConn.toPort}`;
                             flawedConnections.set(connKey, "Only Material node can be connected to the Material input of Charge 3D.");
                             addMessage(chargeNode3D.id, 'error', "Only Material node can be connected to the Material input of Charge 3D.");
                         } else {
-                            const matType = matNode.parameters?.material_type || 'Air';
-                            if (matType !== 'Ideal Gas Charge') {
-                                addMessage(chargeNode3D.id, 'error', "CFD Solver 3D in Ideal Gas mode requires an 'Ideal Gas Charge' material type connected to the Charge node.");
+                            if (!isIdealGasChargeMaterial(matNode)) {
+                                addMessage(chargeNode3D.id, 'error', "CFD Solver 3D in Ideal Gas mode requires an 'Ideal Gas' material connected to the Charge node.");
                             }
                         }
                     }
@@ -696,6 +714,15 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             if (!objConn) {
                 addMessage(node.id, 'error', "No MPM Object 2D connected to MPM Domain 2D. At least one MPM Object node is required.");
             }
+            const detConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'detonator');
+            if (detConn) {
+                const detNode = state.nodes.find(n => n.id === detConn.fromNode);
+                if (!detNode || detNode.type !== 'DetonatorLocation') {
+                    const connKey = `${detConn.fromNode}:${detConn.fromPort}->${detConn.toNode}:${detConn.toPort}`;
+                    flawedConnections.set(connKey, "Only DetonatorLocation node can be connected to the Detonator input of MPM Domain 2D.");
+                    addMessage(node.id, 'error', "Only DetonatorLocation node can be connected to the Detonator input of MPM Domain 2D.");
+                }
+            }
         }
 
         if (node.type === 'MPMDomain3D') {
@@ -706,6 +733,15 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             const objConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'objects');
             if (!objConn) {
                 addMessage(node.id, 'error', "No MPM Object 3D connected to MPM Domain 3D. At least one MPM Object node is required.");
+            }
+            const detConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'detonator');
+            if (detConn) {
+                const detNode = state.nodes.find(n => n.id === detConn.fromNode);
+                if (!detNode || detNode.type !== 'DetonatorLocation3D') {
+                    const connKey = `${detConn.fromNode}:${detConn.fromPort}->${detConn.toNode}:${detConn.toPort}`;
+                    flawedConnections.set(connKey, "Only DetonatorLocation3D node can be connected to the Detonator input of MPM Domain 3D.");
+                    addMessage(node.id, 'error', "Only DetonatorLocation3D node can be connected to the Detonator input of MPM Domain 3D.");
+                }
             }
         }
 
@@ -822,24 +858,25 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             }
         }
 
-        if (node.type === 'Material') {
-            const matType = node.parameters?.material_type || 'Air';
-            if (matType === 'Air') {
+        if (node.type === 'Material' || node.type === 'MPMMaterialSteel') {
+            const matModel = node.parameters?.material_model;
+            const matType = node.parameters?.material_type;
+            if (matModel === 'Ideal Gas' || matType === 'Air') {
                 const gamma = Number(node.parameters?.gamma ?? 1.4);
                 const atm_pressure = Number(node.parameters?.atm_pressure ?? 101325);
                 const atm_temperature = Number(node.parameters?.atm_temperature ?? 288.0);
 
                 if (isNaN(gamma) || gamma <= 1.0) {
-                    addMessage(node.id, 'error', "Air adiabatic index (gamma) must be greater than 1.0.");
+                    addMessage(node.id, 'error', "Gas adiabatic index (gamma) must be greater than 1.0.");
                 }
                 if (isNaN(atm_pressure) || atm_pressure <= 0) {
-                    addMessage(node.id, 'error', "Atmospheric Pressure must be greater than 0.");
+                    addMessage(node.id, 'error', "Atmospheric / Static Pressure must be greater than 0.");
                 }
                 if (isNaN(atm_temperature) || atm_temperature <= 0) {
-                    addMessage(node.id, 'error', "Atmospheric Temperature (Kelvin) must be greater than 0.");
+                    addMessage(node.id, 'error', "Atmospheric / Static Temperature (Kelvin) must be greater than 0.");
                 }
-            } else if (matType === 'JWL Charge') {
-                const rho = Number(node.parameters?.rho ?? 1630);
+            } else if (matModel === 'JWL Detonation Gas' || matType === 'JWL Charge') {
+                const rho = Number(node.parameters?.rho ?? node.parameters?.density ?? 1630);
                 const detonation_energy = Number(node.parameters?.detonation_energy ?? 4290000);
                 if (isNaN(rho) || rho <= 0) {
                     addMessage(node.id, 'error', "Explosive density (rho) must be greater than 0.");
@@ -859,6 +896,22 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                 }
                 if (isNaN(ideal_e_0) || ideal_e_0 <= 0) {
                     addMessage(node.id, 'error', "Ideal Gas Charge specific energy must be greater than 0.");
+                }
+            } else {
+                // Solid mechanics models (Linear Elastic, Hypoelastic, Johnson-Cook, Concrete models, CREST)
+                const density = Number(node.parameters?.density ?? 7850);
+                if (isNaN(density) || density <= 0) {
+                    addMessage(node.id, 'error', "Material density must be greater than 0.");
+                }
+                if (matModel !== 'CREST Reactive Burn' && matModel !== 'RHT Concrete' && matModel !== 'Karagozian & Case (K&C)' && matModel !== 'CSCM Concrete') {
+                    const E = Number(node.parameters?.youngs_modulus ?? 200e9);
+                    const nu = Number(node.parameters?.poissons_ratio ?? 0.3);
+                    if (isNaN(E) || E <= 0) {
+                        addMessage(node.id, 'error', "Young's modulus must be greater than 0.");
+                    }
+                    if (isNaN(nu) || nu < 0 || nu >= 0.5) {
+                        addMessage(node.id, 'error', "Poisson's ratio must be in the range [0.0, 0.5).");
+                    }
                 }
             }
         }
@@ -918,7 +971,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             // Cross-validation with connected mesh
             if (detConn) {
                 const connectedSolver = state.nodes.find(n => n.id === detConn.toNode);
-                if (connectedSolver && connectedSolver.type === 'CFDSolver2D') {
+                if (connectedSolver && (connectedSolver.type === 'CFDSolver2D' || connectedSolver.type === 'MPMDomain2D')) {
                     const meshConn2D = state.connections.find(c => c.toNode === connectedSolver.id && c.toPort === 'mesh');
                     if (meshConn2D) {
                         const meshNode = state.nodes.find(n => n.id === meshConn2D.fromNode);
@@ -950,7 +1003,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             // Cross-validation with connected mesh
             if (detConn) {
                 const connectedSolver = state.nodes.find(n => n.id === detConn.toNode);
-                if (connectedSolver && connectedSolver.type === 'CFDSolver3D') {
+                if (connectedSolver && (connectedSolver.type === 'CFDSolver3D' || connectedSolver.type === 'MPMDomain3D')) {
                     const meshConn3D = state.connections.find(c => c.toNode === connectedSolver.id && c.toPort === 'mesh');
                     if (meshConn3D) {
                         const meshNode = state.nodes.find(n => n.id === meshConn3D.fromNode);
