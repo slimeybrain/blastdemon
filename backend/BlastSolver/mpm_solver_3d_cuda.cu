@@ -162,6 +162,8 @@ __global__ void kernel_pack_aos_to_soa(const MPMParticle3D* aos, MPMParticle3DSo
     soa.ep_bar[idx] = p.ep_bar;
     soa.damage[idx] = p.damage;
     if (soa.lambda) soa.lambda[idx] = p.lambda;
+    if (soa.v_min) soa.v_min[idx] = p.v_min;
+    if (soa.s_shock) soa.s_shock[idx] = p.s_shock;
     soa.has_failed[idx] = p.has_failed ? 1 : 0;
     soa.object_id[idx] = p.object_id;
 }
@@ -191,6 +193,8 @@ __global__ void kernel_unpack_soa_to_aos(MPMParticle3D* aos, MPMParticle3DSoA so
     p.ep_bar = soa.ep_bar[idx];
     p.damage = soa.damage[idx];
     if (soa.lambda) p.lambda = soa.lambda[idx];
+    if (soa.v_min) p.v_min = soa.v_min[idx];
+    if (soa.s_shock) p.s_shock = soa.s_shock[idx];
     p.has_failed = (soa.has_failed[idx] != 0);
     p.object_id = soa.object_id[idx];
 }
@@ -770,6 +774,117 @@ __global__ void kernel_stress_update_3d(MPMParticle3DSoA soa, int num_particles,
         return;
     }
 
+    // --- Linear Elastic Model (Hooke's Law with Jaumann Rotation) ---
+    if (mat.material_model == MPMMaterialModel::LinearElastic) {
+        const float J = V_p / (V0_p > 1.0e-20f ? V0_p : 1.0e-20f);
+
+        float W_sig[3][3] = {}, sig_W[3][3] = {};
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                for (int k = 0; k < 3; ++k) {
+                    W_sig[r][c] += W[r][k] * sigma_p[k][c];
+                    sig_W[r][c] += sigma_p[r][k] * W[k][c];
+                }
+
+        float sig_base[3][3];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                sig_base[r][c] = sigma_p[r][c] + (W_sig[r][c] - sig_W[r][c]) * dt;
+
+        const float E_mod    = mat.youngs_modulus;
+        const float nu_val   = mat.poissons_ratio;
+        const float mu_shear = E_mod / (2.0f * (1.0f + nu_val));
+        const float K_bulk   = E_mod / (3.0f * fmaxf(0.01f, 1.0f - 2.0f * nu_val));
+
+        float deps_dev[3][3];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) {
+                deps_dev[r][c] = deps[r][c];
+                if (r == c) deps_dev[r][c] -= tr_deps / 3.0f;
+            }
+
+        float s_trial[3][3];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                s_trial[r][c] = sig_base[r][c] + 2.0f * mu_shear * deps_dev[r][c];
+
+        float p_s = -(s_trial[0][0] + s_trial[1][1] + s_trial[2][2]) / 3.0f;
+        for (int r = 0; r < 3; ++r)
+            s_trial[r][r] += p_s;
+
+        float p_hydro = K_bulk * (1.0f - J) / fmaxf(0.01f, J);
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                soa.sigma[r][c][p_idx] = s_trial[r][c] - (r == c ? p_hydro : 0.0f);
+
+        return;
+    }
+
+    // --- CREST Reactive Burn Model with Davis Reactant & Product EOS ---
+    if (mat.material_model == MPMMaterialModel::CRESTReactiveBurn) {
+        const float v_rel = fminf(fmaxf(V_p / (V0_p > 1.0e-20f ? V0_p : 1.0e-20f), 0.05f), 50.0f);
+        float v_min_val = soa.v_min ? soa.v_min[p_idx] : 1.0f;
+        v_min_val = fminf(v_min_val, v_rel);
+        if (soa.v_min) soa.v_min[p_idx] = v_min_val;
+
+        // 1. Peak Shock Entropy Latching
+        float s_calc = CrestDavis::computeDavisShockEntropy(v_min_val, mat.davis_c0, mat.davis_s1, mat.davis_gamma0, mat.davis_cv, mat.davis_t0, mat.davis_rho0);
+        float s_shock_val = soa.s_shock ? soa.s_shock[p_idx] : 0.0f;
+        s_shock_val = fmaxf(s_shock_val, s_calc);
+        if (soa.s_shock) soa.s_shock[p_idx] = s_shock_val;
+
+        // 2. CREST Kinetics ODE Advance
+        float lam_curr = soa.lambda ? soa.lambda[p_idx] : 0.0f;
+        float lam_new = CrestDavis::advanceCRESTProgress(dt, s_shock_val, lam_curr, mat.crest_b1, mat.crest_c1, mat.crest_m1, mat.crest_b2, mat.crest_c2, mat.crest_c3, mat.crest_m2, mat.crest_s0, mat.crest_s_threshold);
+        if (soa.lambda) soa.lambda[p_idx] = lam_new;
+
+        // 3. Two-Phase Pressures
+        float p_react = CrestDavis::computeDavisReactantPressure(v_rel, e_int_p, mat.davis_c0, mat.davis_s1, mat.davis_gamma0, mat.davis_cv, mat.davis_t0, mat.davis_rho0);
+        float p_prod  = CrestDavis::computeDavisProductPressure(v_rel, e_int_p + mat.davis_q_det, mat.davis_a, mat.davis_b, mat.davis_k, mat.davis_vc, mat.davis_pc, mat.davis_q_det, mat.davis_rho0);
+        float p_mix   = (1.0f - lam_new) * p_react + lam_new * p_prod;
+        if (p_mix < 1.0e-6f) p_mix = 1.0e-6f;
+
+        // 4. Solid Shear Stress Relaxation as lambda -> 1
+        float W_sig[3][3] = {}, sig_W[3][3] = {};
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                for (int k = 0; k < 3; ++k) {
+                    W_sig[r][c] += W[r][k] * sigma_p[k][c];
+                    sig_W[r][c] += sigma_p[r][k] * W[k][c];
+                }
+
+        float sig_base[3][3];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                sig_base[r][c] = sigma_p[r][c] + (W_sig[r][c] - sig_W[r][c]) * dt;
+
+        const float E_mod    = mat.youngs_modulus;
+        const float nu_val   = mat.poissons_ratio;
+        const float mu_shear = (1.0f - lam_new) * (E_mod / (2.0f * (1.0f + nu_val)));
+
+        float deps_dev[3][3];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) {
+                deps_dev[r][c] = deps[r][c];
+                if (r == c) deps_dev[r][c] -= tr_deps / 3.0f;
+            }
+
+        float s_trial[3][3];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                s_trial[r][c] = (1.0f - lam_new) * (sig_base[r][c] + 2.0f * mu_shear * deps_dev[r][c]);
+
+        float p_s = -(s_trial[0][0] + s_trial[1][1] + s_trial[2][2]) / 3.0f;
+        for (int r = 0; r < 3; ++r)
+            s_trial[r][r] += p_s;
+
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                soa.sigma[r][c][p_idx] = s_trial[r][c] - (r == c ? p_mix : 0.0f);
+
+        return;
+    }
+
     // --- Johnson-Cook Plasticity + Mie-Grüneisen Shock EOS Model ---
     if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen) {
         const float J = V_p / (V0_p > 1.0e-20f ? V0_p : 1.0e-20f);
@@ -1112,6 +1227,9 @@ __global__ void kernel_compute_max_speed(MPMParticle3DSoA soa, int num_particles
         if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen) {
             float C0 = mat.mg_c0;
             c_s = sqrtf(C0 * C0 + (2.0f / 3.0f) * E / (rho * (1.0f + nu)));
+        } else if (mat.material_model == MPMMaterialModel::CRESTReactiveBurn) {
+            float C0 = mat.davis_c0;
+            c_s = sqrtf(C0 * C0 + (2.0f / 3.0f) * E / (rho * (1.0f + nu)));
         } else if (mat.material_model == MPMMaterialModel::RHTConcrete || mat.material_model == MPMMaterialModel::KCConcrete || mat.material_model == MPMMaterialModel::CSCMConcrete) {
             float G = E / (2.0f * (1.0f + nu));
             float K = 1.6f * (E / (3.0f * fmaxf(0.02f, 1.0f - 2.0f * nu)));
@@ -1154,7 +1272,7 @@ MPMSolver3DCUDA::~MPMSolver3DCUDA() {
 }
 
 void MPMSolver3DCUDA::allocateSoABuffer(size_t count) {
-    size_t required_bytes = count * (44 * sizeof(float) + 2 * sizeof(int));
+    size_t required_bytes = count * (46 * sizeof(float) + 2 * sizeof(int));
     if (required_bytes > m_allocated_soa_bytes) {
         if (d_soa_buffer) cudaFree(d_soa_buffer);
         cudaMalloc(&d_soa_buffer, required_bytes);
@@ -1197,6 +1315,8 @@ void MPMSolver3DCUDA::allocateSoABuffer(size_t count) {
     d_soa.ep_bar = fptr; fptr += count;
     d_soa.damage = fptr; fptr += count;
     d_soa.lambda = fptr; fptr += count;
+    d_soa.v_min = fptr; fptr += count;
+    d_soa.s_shock = fptr; fptr += count;
 
     int* iptr = reinterpret_cast<int*>(fptr);
     d_soa.has_failed = iptr; iptr += count;

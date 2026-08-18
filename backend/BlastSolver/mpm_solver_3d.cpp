@@ -1086,6 +1086,115 @@ void MPMSolver3D::updateStressState(float dt) {
             continue;
         }
 
+        // --- Linear Elastic Model (Hooke's Law with Jaumann Rotation) ---
+        if (mat.material_model == MPMMaterialModel::LinearElastic) {
+            p.V = std::clamp(p.V * (1.0f + tr_deps), 0.1f * p.V0, 10.0f * p.V0);
+            const float J = p.V / (p.V0 > 1.0e-20f ? p.V0 : 1.0e-20f);
+
+            // 1. Jaumann Stress Rotation
+            float W_sig[3][3] = {}, sig_W[3][3] = {};
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    for (int k = 0; k < 3; ++k) {
+                        W_sig[r][c] += W[r][k] * p.sigma[k][c];
+                        sig_W[r][c] += p.sigma[r][k] * W[k][c];
+                    }
+
+            float sig_base[3][3];
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    sig_base[r][c] = p.sigma[r][c] + (W_sig[r][c] - sig_W[r][c]) * dt;
+
+            const float E_mod    = mat.youngs_modulus;
+            const float nu_val   = mat.poissons_ratio;
+            const float mu_shear = E_mod / (2.0f * (1.0f + nu_val));
+            const float K_bulk   = E_mod / (3.0f * std::max(0.01f, 1.0f - 2.0f * nu_val));
+
+            float deps_dev[3][3];
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c) {
+                    deps_dev[r][c] = deps[r][c];
+                    if (r == c) deps_dev[r][c] -= tr_deps / 3.0f;
+                }
+
+            float s_trial[3][3];
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    s_trial[r][c] = sig_base[r][c] + 2.0f * mu_shear * deps_dev[r][c];
+
+            float p_s = -(s_trial[0][0] + s_trial[1][1] + s_trial[2][2]) / 3.0f;
+            for (int r = 0; r < 3; ++r)
+                s_trial[r][r] += p_s;
+
+            // Hydrostatic elastic pressure
+            float p_hydro = K_bulk * (1.0f - J) / std::max(0.01f, J);
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    p.sigma[r][c] = s_trial[r][c] - (r == c ? p_hydro : 0.0f);
+
+            continue;
+        }
+
+        // --- CREST Reactive Burn Model with Davis Reactant & Product EOS ---
+        if (mat.material_model == MPMMaterialModel::CRESTReactiveBurn) {
+            p.V = std::clamp(p.V * (1.0f + tr_deps), 0.05f * p.V0, 50.0f * p.V0);
+            const float v_rel = p.V / (p.V0 > 1.0e-20f ? p.V0 : 1.0e-20f);
+            p.v_min = std::min(p.v_min, v_rel);
+
+            // 1. Peak Shock Entropy Latching
+            float s_calc = CrestDavis::computeDavisShockEntropy(p.v_min, mat.davis_c0, mat.davis_s1, mat.davis_gamma0, mat.davis_cv, mat.davis_t0, mat.davis_rho0);
+            p.s_shock = std::max(p.s_shock, s_calc);
+
+            // 2. CREST Reaction Kinetics ODE Advance
+            p.lambda = CrestDavis::advanceCRESTProgress(dt, p.s_shock, p.lambda, mat.crest_b1, mat.crest_c1, mat.crest_m1, mat.crest_b2, mat.crest_c2, mat.crest_c3, mat.crest_m2, mat.crest_s0, mat.crest_s_threshold);
+
+            // 3. Davis Reactant & Product Two-Phase Pressures
+            float p_react = CrestDavis::computeDavisReactantPressure(v_rel, p.e_int, mat.davis_c0, mat.davis_s1, mat.davis_gamma0, mat.davis_cv, mat.davis_t0, mat.davis_rho0);
+            float p_prod  = CrestDavis::computeDavisProductPressure(v_rel, p.e_int + mat.davis_q_det, mat.davis_a, mat.davis_b, mat.davis_k, mat.davis_vc, mat.davis_pc, mat.davis_q_det, mat.davis_rho0);
+            float p_mix   = (1.0f - p.lambda) * p_react + p.lambda * p_prod;
+            if (p_mix < 1.0e-6f) p_mix = 1.0e-6f;
+
+            // 4. Solid Shear Stress Relaxation as lambda -> 1
+            float W_sig[3][3] = {}, sig_W[3][3] = {};
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    for (int k = 0; k < 3; ++k) {
+                        W_sig[r][c] += W[r][k] * p.sigma[k][c];
+                        sig_W[r][c] += p.sigma[r][k] * W[k][c];
+                    }
+
+            float sig_base[3][3];
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    sig_base[r][c] = p.sigma[r][c] + (W_sig[r][c] - sig_W[r][c]) * dt;
+
+            const float E_mod    = mat.youngs_modulus;
+            const float nu_val   = mat.poissons_ratio;
+            const float mu_shear = (1.0f - p.lambda) * (E_mod / (2.0f * (1.0f + nu_val)));
+
+            float deps_dev[3][3];
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c) {
+                    deps_dev[r][c] = deps[r][c];
+                    if (r == c) deps_dev[r][c] -= tr_deps / 3.0f;
+                }
+
+            float s_trial[3][3];
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    s_trial[r][c] = (1.0f - p.lambda) * (sig_base[r][c] + 2.0f * mu_shear * deps_dev[r][c]);
+
+            float p_s = -(s_trial[0][0] + s_trial[1][1] + s_trial[2][2]) / 3.0f;
+            for (int r = 0; r < 3; ++r)
+                s_trial[r][r] += p_s;
+
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    p.sigma[r][c] = s_trial[r][c] - (r == c ? p_mix : 0.0f);
+
+            continue;
+        }
+
         // --- Johnson-Cook Plasticity + Mie-Grüneisen Shock EOS Model ---
         if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen) {
             p.V = std::clamp(p.V * (1.0f + tr_deps), 0.1f * p.V0, 10.0f * p.V0);
@@ -1432,6 +1541,9 @@ float MPMSolver3D::computeStepSize(float cfl) const {
         float c_s = 0.0f;
         if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen) {
             float C0 = mat.mg_c0;
+            c_s = std::sqrt(C0 * C0 + (2.0f / 3.0f) * E / (rho * (1.0f + nu)));
+        } else if (mat.material_model == MPMMaterialModel::CRESTReactiveBurn) {
+            float C0 = mat.davis_c0;
             c_s = std::sqrt(C0 * C0 + (2.0f / 3.0f) * E / (rho * (1.0f + nu)));
         } else if (mat.material_model == MPMMaterialModel::RHTConcrete || mat.material_model == MPMMaterialModel::KCConcrete || mat.material_model == MPMMaterialModel::CSCMConcrete) {
             float G = E / (2.0f * (1.0f + nu));

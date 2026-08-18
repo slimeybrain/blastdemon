@@ -1083,6 +1083,196 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         detailedDesc: 'Dimensionless slope s of the linear shock Hugoniot: U_s = c_0 + s·u_p. Reflects shock compressibility under intense blast loading.'
     },
 
+    // --- Davis Solid Reactant EOS ---
+    'davis_c0': {
+        key: 'davis_c0',
+        label: 'Davis Reactant Sound Speed (c₀)',
+        unit: 'm/s',
+        category: 'Davis Solid Reactant EOS',
+        shortDesc: 'Unshocked acoustic bulk sound speed of solid explosive reactant',
+        detailedDesc: 'Bulk sound speed c0 (m/s) in the solid unreacted explosive Hugoniot: U_s = c₀ + s₁(1 - V)u_p.'
+    },
+    'davis_s1': {
+        key: 'davis_s1',
+        label: 'Davis Reactant Hugoniot Slope (s₁)',
+        unit: 'dim',
+        category: 'Davis Solid Reactant EOS',
+        shortDesc: 'First-order Hugoniot slope coefficient for unreacted solid',
+        detailedDesc: 'Dimensionless slope coefficient s₁ governing nonlinear shock compression in the Davis solid reactant equation of state.'
+    },
+    'davis_gamma0': {
+        key: 'davis_gamma0',
+        label: 'Davis Reactant Grüneisen (Γ₀)',
+        unit: 'dim',
+        category: 'Davis Solid Reactant EOS',
+        shortDesc: 'Grüneisen coefficient of unreacted solid explosive',
+        detailedDesc: 'Dimensionless Grüneisen parameter Γ₀ coupling thermal energy to pressure in shock-compressed unreacted explosive reactant.'
+    },
+    'davis_cv': {
+        key: 'davis_cv',
+        label: 'Davis Reactant Specific Heat (C_v)',
+        unit: 'J/(kg·K)',
+        category: 'Davis Solid Reactant EOS',
+        shortDesc: 'Isochoric specific heat capacity of unreacted solid',
+        detailedDesc: 'Specific heat capacity at constant volume Cv [J/(kg·K)] for unreacted solid explosive.'
+    },
+    'davis_t0': {
+        key: 'davis_t0',
+        label: 'Davis Reactant Reference Temp (T₀)',
+        unit: 'K',
+        category: 'Davis Solid Reactant EOS',
+        shortDesc: 'Reference initial temperature for unreacted explosive',
+        detailedDesc: 'Ambient initial temperature T₀ (K) for unreacted explosive thermodynamics (typically 293.15 K).'
+    },
+    'davis_rho0': {
+        key: 'davis_rho0',
+        label: 'Davis Reactant Density (ρ₀)',
+        unit: 'kg/m³',
+        category: 'Davis Solid Reactant EOS',
+        shortDesc: 'Uncompressed density of solid explosive reactant',
+        detailedDesc: 'Initial unshocked solid mass density ρ₀ (kg/m³) for unreacted explosive.'
+    },
+
+    // --- Davis Product EOS ---
+    'davis_a': {
+        key: 'davis_a',
+        label: 'Davis Product Parameter (a)',
+        unit: 'dim',
+        category: 'Davis Product Gas EOS',
+        shortDesc: 'High-density asymptotic Grüneisen exponent',
+        detailedDesc: 'Dimensionless product gas parameter a defining variable Grüneisen coefficient: Γ(v) = k - 1 + (1 - b) / (1 + a·(v/v_c)^(1/2)).'
+    },
+    'davis_b': {
+        key: 'davis_b',
+        label: 'Davis Product Parameter (b)',
+        unit: 'dim',
+        category: 'Davis Product Gas EOS',
+        shortDesc: 'Low-density asymptotic Grüneisen parameter',
+        detailedDesc: 'Dimensionless product gas parameter b governing Grüneisen transition across high-to-low expansion regimes.'
+    },
+    'davis_k': {
+        key: 'davis_k',
+        label: 'Davis Product Ratio of Specific Heats (k)',
+        unit: 'dim',
+        category: 'Davis Product Gas EOS',
+        shortDesc: 'Asymptotic product gas gamma parameter (k = Cp / Cv)',
+        detailedDesc: 'Dimensionless adiabatic index k governing expansion thermodynamics of fully reacted detonation product gases.'
+    },
+    'davis_vc': {
+        key: 'davis_vc',
+        label: 'Davis Product Characteristic Vol (v_c)',
+        unit: 'dim',
+        category: 'Davis Product Gas EOS',
+        shortDesc: 'Characteristic relative volume scaling factor',
+        detailedDesc: 'Dimensionless characteristic relative volume v_c = V / V_0 normalizing expansion along the principal isentrope.'
+    },
+    'davis_pc': {
+        key: 'davis_pc',
+        label: 'Davis Product Characteristic Pressure (p_c)',
+        unit: 'Pa',
+        category: 'Davis Product Gas EOS',
+        shortDesc: 'Characteristic pressure scaling parameter',
+        detailedDesc: 'Characteristic scaling pressure p_c (Pa) for the Davis detonation product gas isentrope.'
+    },
+    'davis_q_det': {
+        key: 'davis_q_det',
+        label: 'Davis Heat of Detonation (Q_det)',
+        unit: 'J/kg',
+        category: 'Davis Product Gas EOS',
+        shortDesc: 'Chemical energy release per unit mass',
+        detailedDesc: 'Total chemical detonation energy release Q_det (J/kg) available to drive high-pressure gas expansion upon full conversion (λ = 1.0).'
+    },
+
+    // --- CREST Kinetics ---
+    'crest_b1': {
+        key: 'crest_b1',
+        label: 'CREST Ignition Rate (b₁)',
+        unit: '1/s',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Hot-spot ignition rate multiplier',
+        detailedDesc: 'Ignition rate constant b₁ (1/s) in CREST model: dλ_ign/dt = b₁·(1 - λ)·(1 - v)^c1·exp(-s₀ / max(0, s - s_th))^m1.'
+    },
+    'crest_c1': {
+        key: 'crest_c1',
+        label: 'CREST Ignition Compression Exponent (c₁)',
+        unit: 'dim',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Volumetric compression sensitivity exponent for hot-spot ignition',
+        detailedDesc: 'Dimensionless exponent c₁ scaling volumetric strain (1 - v) in the CREST ignition rate.'
+    },
+    'crest_m1': {
+        key: 'crest_m1',
+        label: 'CREST Ignition Entropy Exponent (m₁)',
+        unit: 'dim',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Entropy sensitivity exponent for hot-spot ignition',
+        detailedDesc: 'Dimensionless exponent m₁ scaling the shock entropy activation barrier in hot-spot ignition.'
+    },
+    'crest_b2': {
+        key: 'crest_b2',
+        label: 'CREST Reaction Growth Rate (b₂)',
+        unit: '1/s',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Reaction growth rate multiplier',
+        detailedDesc: 'Reaction growth rate constant b₂ (1/s) governing deflagration/growth transition: dλ_grow/dt = b₂·(1 - λ)·λ^c2·(1 - v)^c3·(s / s₀)^m2.'
+    },
+    'crest_c2': {
+        key: 'crest_c2',
+        label: 'CREST Progress Exponent (c₂)',
+        unit: 'dim',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Reaction progress surface area exponent',
+        detailedDesc: 'Dimensionless exponent c₂ scaling reaction progress λ in the grain burning/growth rate.'
+    },
+    'crest_c3': {
+        key: 'crest_c3',
+        label: 'CREST Growth Compression Exponent (c₃)',
+        unit: 'dim',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Volumetric compression sensitivity exponent for reaction growth',
+        detailedDesc: 'Dimensionless exponent c₃ scaling volumetric compression (1 - v) in reaction growth kinetics.'
+    },
+    'crest_m2': {
+        key: 'crest_m2',
+        label: 'CREST Growth Entropy Exponent (m₂)',
+        unit: 'dim',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Shock entropy sensitivity exponent for reaction growth',
+        detailedDesc: 'Dimensionless exponent m₂ scaling shock entropy in the reaction growth regime.'
+    },
+    'crest_s0': {
+        key: 'crest_s0',
+        label: 'CREST Reference Entropy (s₀)',
+        unit: 'J/(kg·K)',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Reference specific shock entropy scale',
+        detailedDesc: 'Characteristic shock entropy scale s₀ [J/(kg·K)] normalizing entropy accumulation in CREST kinetics.'
+    },
+    'crest_s_threshold': {
+        key: 'crest_s_threshold',
+        label: 'CREST Entropy Threshold (s_th)',
+        unit: 'J/(kg·K)',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Critical shock entropy threshold for ignition onset',
+        detailedDesc: 'Specific shock entropy threshold s_th [J/(kg·K)] below which hot-spot ignition rate is strictly zero, preventing premature deflagration from acoustic waves.'
+    },
+    'initiation_radius': {
+        key: 'initiation_radius',
+        label: 'Detonator Hot-Spot Booster Radius',
+        unit: 'm',
+        category: 'Detonator & Initiation',
+        shortDesc: 'Seed radius for detonator booster hot-spot initiation',
+        detailedDesc: 'Radius (m) around detonator seed point where explosive material receives initial entropy/overpressure booster seed to trigger autonomous shock-to-detonation transition (SDT).'
+    },
+    'booster_overpressure': {
+        key: 'booster_overpressure',
+        label: 'Detonator Booster Overpressure',
+        unit: 'Pa',
+        category: 'Detonator & Initiation',
+        shortDesc: 'Initial overpressure for detonator booster seed zone',
+        detailedDesc: 'Initial shock overpressure (Pa) applied inside initiation radius to seed hot-spots for CREST reactive burn.'
+    },
+
     // --- Concrete Models (RHT, K&C, CSCM) ---
     'fc': {
         key: 'fc',
@@ -1528,26 +1718,32 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
 
     'Material': {
         type: 'Material',
-        title: 'Fluid & Explosive Material EOS',
+        title: 'Universal Material & Constitutive Model',
         category: 'Material & Thermodynamic Equations of State',
-        shortDesc: 'Defines thermodynamic equations of state (Air Gamma-Law, JWL High Explosive, or Ideal Gas).',
+        shortDesc: 'Universal material node supporting Linear Elastic, Hypoelastic, Johnson-Cook, CREST-Davis Reactive Burn, Concrete (RHT/K&C/CSCM), Ideal Gas, and JWL Detonation Gas models across all solvers.',
         fullDescHtml: `
             <div class="node-doc-section">
                 <div class="node-doc-heading">Overview & Role</div>
-                <p>The <strong>Material</strong> node configures the thermodynamic Equation of State (EOS) for fluid media and explosive charges. It supports ambient atmospheric air, full Jones-Wilkins-Lee (JWL) high-explosive detonation products, and ideal gas burst models.</p>
+                <p>The <strong>Material</strong> node is the universal constitutive and Equation of State (EOS) specification node for all solvers (CFD, MPM, and FEM). Selecting a constitutive model dynamically filters the available material presets and configures appropriate physical parameters.</p>
             </div>
             <div class="node-doc-section">
-                <div class="node-doc-heading">Governing Physics & Formulations</div>
-                <p><strong>1. Ideal Gas Law (Air):</strong></p>
-                <div class="node-doc-code">p = (γ - 1) · ρ · e</div>
-                <p><strong>2. JWL Equation of State (Explosives):</strong></p>
-                <div class="node-doc-code">p = A · (1 - ω / (R₁V)) · e^(-R₁V) + B · (1 - ω / (R₂V)) · e^(-R₂V) + (ω · e / V)</div>
-                <p>where <em>V = ρ₀ / ρ</em> is relative volume, <em>A, B, R₁, R₂, ω</em> are empirical constants calibrated via standard cylinder expansion tests.</p>
+                <div class="node-doc-heading">Supported Constitutive & EOS Models</div>
+                <ul>
+                    <li><strong>Linear Elastic (Baseline):</strong> Hookean isotropic elasticity for structural solids (Steel, Aluminum, Titanium, Glass, Concrete).</li>
+                    <li><strong>CREST Reactive Burn (MPM):</strong> Davis solid reactant + Davis product gas EOS with shock entropy-driven hot-spot ignition and grain growth reaction kinetics for autonomous shock-to-detonation transition (SDT).</li>
+                    <li><strong>Hypoelastic (Solid):</strong> Jaumann rate-integrated linear elasticity with von Mises J2 plastic yield and isotropic linear hardening.</li>
+                    <li><strong>Johnson-Cook + Mie-Grüneisen:</strong> Viscoplastic strain-rate and thermal softening yield model coupled with Mie-Grüneisen shock Hugoniot EOS for armor metals and hypervelocity penetration.</li>
+                    <li><strong>RHT Concrete:</strong> Riedel-Hiermaier-Thoma 3-invariant compressive, tensile, and shear yield envelopes with porous P-alpha compaction and shear damage softening.</li>
+                    <li><strong>Karagozian & Case (K&C):</strong> 3-surface plasticity model with damage evolution, shear dilation, and tensile softening for concrete structures under blast loading.</li>
+                    <li><strong>CSCM Concrete:</strong> Continuous Smooth Cap Model with invariant yield surface and damage softening.</li>
+                    <li><strong>Ideal Gas (CFD):</strong> Gamma-law equation of state for ambient air and blast propagation.</li>
+                    <li><strong>JWL Detonation Gas (CFD):</strong> Jones-Wilkins-Lee expansion equation of state for programmed burn high explosives.</li>
+                </ul>
             </div>
             <div class="node-doc-section">
                 <div class="node-doc-heading">Inputs & Upstream Connections</div>
                 <ul>
-                    <li>Connects to <strong>ThePainter</strong>, <strong>Charge1D</strong>, <strong>Charge2D</strong>, <strong>Charge3D</strong>, and CFD Solvers as the primary EOS provider.</li>
+                    <li>Connects to <strong>ThePainter</strong>, <strong>Charge1D</strong>, <strong>Charge2D</strong>, <strong>Charge3D</strong>, <strong>MPMObject2D</strong>, <strong>MPMObject3D</strong>, <strong>FEMObject3D</strong>, and Solvers as the single source of truth for material physics.</li>
                 </ul>
             </div>
         `

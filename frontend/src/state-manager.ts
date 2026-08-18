@@ -1,13 +1,36 @@
 import { SimulationState, SimulationStatus, LayoutNode, PanelNode, SplitNode, LayoutDirection, PanelType, Model, Workspace, AppState, Node, Connection, NodeType, Port } from './types.js';
-import { MPM_MATERIAL_PRESETS } from './mpm-presets.js';
+import { MPM_MATERIAL_PRESETS, getPresetsForConstitutiveModel, getDefaultPresetForModel } from './mpm-presets.js';
 
 export function syncMPMMaterialParameters(node: Node, parameters: Record<string, any>, updatedKey?: string): void {
-    if (node.type !== 'MPMMaterialSteel') {
+    if (node.type !== 'MPMMaterialSteel' && node.type !== 'Material') {
+        return;
+    }
+
+    if (parameters['material_model'] === undefined) {
+        parameters['material_model'] = 'Linear Elastic';
+    }
+
+    const modelName = parameters['material_model'];
+    const validPresets = getPresetsForConstitutiveModel(modelName);
+
+    if (updatedKey === 'material_model') {
+        if (!parameters['preset'] || !validPresets.includes(parameters['preset'])) {
+            parameters['preset'] = getDefaultPresetForModel(modelName);
+        }
+        const presetName = parameters['preset'];
+        if (presetName !== 'Custom' && MPM_MATERIAL_PRESETS[presetName]) {
+            const presetData = MPM_MATERIAL_PRESETS[presetName];
+            for (const [k, v] of Object.entries(presetData)) {
+                if (k !== 'reference' && k !== 'category') {
+                    parameters[k] = v;
+                }
+            }
+        }
         return;
     }
 
     if (parameters['preset'] === undefined) {
-        parameters['preset'] = 'Structural Steel (A36)';
+        parameters['preset'] = getDefaultPresetForModel(modelName);
     }
 
     const presetName = parameters['preset'];
@@ -30,6 +53,12 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
             'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
             'kc_auto_generate', 'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
             'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
+            'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
+            'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
+            'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold',
+            'atm_pressure', 'atm_temperature', 'gamma',
+            'composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega',
+            'ideal_gamma', 'ideal_rho_0', 'ideal_e_0',
             'directional_crack_band', 'nonlocal_radius'
         ];
         if (updatedKey && materialKeys.includes(updatedKey)) {
@@ -1731,12 +1760,107 @@ export class StateManager {
                 right_bc: 'Transmitting'
             },
             'Material': {
-                material_type: 'Air',
-                // Air params
+                material_model: 'Linear Elastic',
+                preset: 'Structural Steel (A36)',
+                density: 7850.0,
+                youngs_modulus: 200.0e9,
+                poissons_ratio: 0.29,
+                yield_stress: 250.0e6,
+                hardening_modulus: 1.0e9,
+                failure_strain: 0.20,
+                tensile_failure_stress: 400.0e6,
+                enable_strain_erosion: false,
+                erosion_strain: 0.20,
+                enable_stress_erosion: false,
+                erosion_stress: 400.0e6,
+                enable_timestep_erosion: false,
+                timestep_erosion_factor: 0.10,
+                jc_A: 250.0e6,
+                jc_B: 510.0e6,
+                jc_n: 0.26,
+                jc_C: 0.014,
+                jc_m: 1.03,
+                T_melt: 1793.0,
+                T_room: 293.0,
+                Cp: 486.0,
+                mg_gamma0: 1.81,
+                mg_c0: 4570.0,
+                mg_s: 1.49,
+                // Davis Solid Reactant
+                davis_c0: 2050.0,
+                davis_s1: 2.12,
+                davis_gamma0: 0.65,
+                davis_cv: 1000.0,
+                davis_t0: 293.0,
+                davis_rho0: 1895.0,
+                // Davis Product Gas
+                davis_a: 2.85,
+                davis_b: 1.10,
+                davis_k: 1.35,
+                davis_vc: 0.65,
+                davis_pc: 12.5e9,
+                davis_q_det: 3.90e6,
+                // CREST Kinetics
+                crest_b1: 1.2e7,
+                crest_c1: 0.67,
+                crest_m1: 2.5,
+                crest_b2: 3.5e6,
+                crest_c2: 0.50,
+                crest_c3: 0.67,
+                crest_m2: 1.5,
+                crest_s0: 100.0,
+                crest_s_threshold: 45.0,
+                // Concrete Base
+                fc: 35.0e6,
+                ft: 3.2e6,
+                G_f: 150.0,
+                moisture_content: 0.0,
+                dif_cap_compression: 2.5,
+                dif_cap_tension: 8.0,
+                // RHT
+                rht_A: 1.60,
+                rht_N: 0.61,
+                rht_B: 0.70,
+                rht_M: 0.80,
+                rht_Q0: 0.680,
+                rht_BQ: 0.0105,
+                rht_D1: 0.04,
+                rht_D2: 1.0,
+                rht_p_crush: 17.0e6,
+                rht_p_lock: 600.0e6,
+                rht_alpha0: 1.22,
+                rht_n_comp: 3.0,
+                rht_betac: 0.032,
+                rht_deltat: 0.036,
+                // K&C
+                kc_auto_generate: true,
+                kc_a0: 11.6e6,
+                kc_a1: 0.45,
+                kc_a2: 4.28e-9,
+                kc_a0y: 5.2e6,
+                kc_a1y: 0.45,
+                kc_a2y: 4.28e-9,
+                kc_a1r: 0.75,
+                kc_a2r: 5.71e-9,
+                kc_b1: 1.60,
+                kc_omega: 0.50,
+                // CSCM
+                cscm_alpha: 14.0e6,
+                cscm_theta: 0.15,
+                cscm_lambda: 10.5e6,
+                cscm_beta: 2.85e-9,
+                cscm_R: 5.0,
+                cscm_X0: 87.5e6,
+                cscm_W: 0.05,
+                cscm_D1: 2.5e-9,
+                cscm_D2: 3.0e-17,
+                directional_crack_band: false,
+                nonlocal_radius: 0.0,
+                // Ideal Gas CFD
                 atm_pressure: 101325.0,
-                atm_temperature: 288.0,
+                atm_temperature: 288.15,
                 gamma: 1.4,
-                // JWL params
+                // JWL CFD
                 composition: 'TNT',
                 rho: 1630,
                 detonation_energy: 4290000,
@@ -1746,7 +1870,6 @@ export class StateManager {
                 jwl_R1: 4.15,
                 jwl_R2: 0.90,
                 jwl_omega: 0.35,
-                // Ideal Gas Charge params
                 ideal_gamma: 1.4,
                 ideal_rho_0: 1630,
                 ideal_e_0: 4290000
@@ -2122,11 +2245,11 @@ export class StateManager {
                 angular_vel_x: 0.0, angular_vel_y: 0.0, angular_vel_z: 0.0
             },
             'MPMMaterialSteel': {
-                material_model: 'Hypoelastic',
+                material_model: 'Linear Elastic',
                 preset: 'Structural Steel (A36)',
                 density: 7850.0,
                 youngs_modulus: 200.0e9,
-                poissons_ratio: 0.26,
+                poissons_ratio: 0.29,
                 yield_stress: 250.0e6,
                 hardening_modulus: 1.0e9,
                 failure_strain: 0.20,
@@ -2148,8 +2271,93 @@ export class StateManager {
                 mg_gamma0: 1.81,
                 mg_c0: 4570.0,
                 mg_s: 1.49,
+                // Davis Solid Reactant
+                davis_c0: 2050.0,
+                davis_s1: 2.12,
+                davis_gamma0: 0.65,
+                davis_cv: 1000.0,
+                davis_t0: 293.0,
+                davis_rho0: 1895.0,
+                // Davis Product Gas
+                davis_a: 2.85,
+                davis_b: 1.10,
+                davis_k: 1.35,
+                davis_vc: 0.65,
+                davis_pc: 12.5e9,
+                davis_q_det: 3.90e6,
+                // CREST Kinetics
+                crest_b1: 1.2e7,
+                crest_c1: 0.67,
+                crest_m1: 2.5,
+                crest_b2: 3.5e6,
+                crest_c2: 0.50,
+                crest_c3: 0.67,
+                crest_m2: 1.5,
+                crest_s0: 100.0,
+                crest_s_threshold: 45.0,
+                // Concrete Base
+                fc: 35.0e6,
+                ft: 3.2e6,
+                G_f: 150.0,
+                moisture_content: 0.0,
+                dif_cap_compression: 2.5,
+                dif_cap_tension: 8.0,
+                // RHT
+                rht_A: 1.60,
+                rht_N: 0.61,
+                rht_B: 0.70,
+                rht_M: 0.80,
+                rht_Q0: 0.680,
+                rht_BQ: 0.0105,
+                rht_D1: 0.04,
+                rht_D2: 1.0,
+                rht_p_crush: 17.0e6,
+                rht_p_lock: 600.0e6,
+                rht_alpha0: 1.22,
+                rht_n_comp: 3.0,
+                rht_betac: 0.032,
+                rht_deltat: 0.036,
+                // K&C
+                kc_auto_generate: true,
+                kc_a0: 11.6e6,
+                kc_a1: 0.45,
+                kc_a2: 4.28e-9,
+                kc_a0y: 5.2e6,
+                kc_a1y: 0.45,
+                kc_a2y: 4.28e-9,
+                kc_a1r: 0.75,
+                kc_a2r: 5.71e-9,
+                kc_b1: 1.60,
+                kc_omega: 0.50,
+                // CSCM
+                cscm_alpha: 14.0e6,
+                cscm_theta: 0.15,
+                cscm_lambda: 10.5e6,
+                cscm_beta: 2.85e-9,
+                cscm_R: 5.0,
+                cscm_X0: 87.5e6,
+                cscm_W: 0.05,
+                cscm_D1: 2.5e-9,
+                cscm_D2: 3.0e-17,
                 directional_crack_band: false,
-                nonlocal_radius: 0.0
+                nonlocal_radius: 0.0,
+                // Ideal Gas CFD
+                atm_pressure: 101325.0,
+                atm_temperature: 288.15,
+                gamma: 1.4,
+                // JWL CFD
+                composition: 'TNT',
+                rho: 1630,
+                detonation_energy: 4290000,
+                det_vel: 6930,
+                jwl_A: 373.77e9,
+                jwl_B: 3.747e9,
+                jwl_R1: 4.15,
+                jwl_R2: 0.90,
+                jwl_omega: 0.35,
+                ideal_gamma: 1.4,
+                ideal_rho_0: 1630,
+                ideal_e_0: 4290000
             },
 
             'FSICoupler2D': {

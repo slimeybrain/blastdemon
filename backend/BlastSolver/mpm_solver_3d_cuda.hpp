@@ -20,6 +20,8 @@ struct MPMParticle3DSoA {
     float* ep_bar{nullptr};
     float* damage{nullptr};
     float* lambda{nullptr};
+    float* v_min{nullptr};
+    float* s_shock{nullptr};
     int* has_failed{nullptr};
     int* object_id{nullptr};
 };

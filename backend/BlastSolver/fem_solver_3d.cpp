@@ -1850,6 +1850,8 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                     gp_hist.lambda_gp[g] = cscm_state.kappa;
                     gp_hist.ep_bar_gp[g] = cscm_state.ep_bar;
                     p_hydro_g = cscm_state.p_hydro;
+                } else if (mat.material_model == MPMMaterialModel::LinearElastic) {
+                    // Pure Hookean linear elasticity - no plastic yielding
                 } else {
                     T s_norm_g = std::sqrt(
                         gp_hist.s_dev_gp[g][0][0]*gp_hist.s_dev_gp[g][0][0] + gp_hist.s_dev_gp[g][1][1]*gp_hist.s_dev_gp[g][1][1] + gp_hist.s_dev_gp[g][2][2]*gp_hist.s_dev_gp[g][2][2] +
@@ -2259,6 +2261,8 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
             elem.lambda = cscm_state.kappa;
             elem.ep_bar = cscm_state.ep_bar;
             p_hydro = cscm_state.p_hydro;
+        } else if (mat.material_model == MPMMaterialModel::LinearElastic) {
+            // Pure Hookean linear elasticity - no plastic yielding
         } else {
             T s_norm = std::sqrt(
                 elem.s_dev[0][0]*elem.s_dev[0][0] + elem.s_dev[1][1]*elem.s_dev[1][1] + elem.s_dev[2][2]*elem.s_dev[2][2] +

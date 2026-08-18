@@ -2,7 +2,7 @@ import { StateManager, calculateRefinementMeshInfo, getMeshDisplayHTML, getMPMDi
 import { Node } from './types.js';
 import { validateSimulationState } from './validation.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
-import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_PRESETS, MPM_MATERIAL_CATEGORIES, MPM_MATERIAL_PARAM_INFO } from './mpm-presets.js';
+import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_PRESETS, MPM_MATERIAL_CATEGORIES, MPM_MATERIAL_PARAM_INFO, getConstitutiveModels, getPresetsForConstitutiveModel, getDefaultPresetForModel } from './mpm-presets.js';
 import { getParameterInfo, getNodeDefinition, getNodeDescription as getMasterNodeDescription, showParameterPopover, showNodeDetailsModal } from './parameter-definitions.js';
 
 export class PropertyEditor {
@@ -247,53 +247,12 @@ export class PropertyEditor {
         descBlock.style.gap = '8px';
         
         let descText = this.getNodeDescription(node.type);
-        if (node.type === 'Material') {
-            const matType = node.parameters['material_type'] || 'Air';
-            if (matType === 'JWL Charge') {
-                const comp = node.parameters['composition'] || 'TNT';
-                const EXPLOSIVE_REFS: Record<string, string> = {
-                    'Aluminized ANFO': 'Sanchidrián et al., Central European Journal of Energetic Materials (2015)',
-                    'Ammonal': 'Lee et al., LLNL JWL Database (UCRL-50422, 1968)',
-                    'ANFO': 'Lee et al., LLNL JWL Database (UCRL-50422, 1968)',
-                    'Baratol': 'Lee et al., LLNL JWL Database (UCRL-50422, 1968)',
-                    'C-4': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                    'Composition A-3': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                    'Composition B': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                    'Composition C-3': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                    'Cyclotol': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                    'Heavy ANFO': 'Sanchidrián et al., Central European Journal of Energetic Materials (2015)',
-                    'HMX': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                    'LX-04': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                    'LX-07': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                    'LX-10': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                    'LX-14': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                    'LX-17': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                    'Mining Emulsion': 'Castedo et al., Int. Journal of Rock Mechanics & Mining Sciences (2018)',
-                    'Octol': 'Lee et al., LLNL JWL Database (UCRL-50422, 1968)',
-                    'PBX 9404': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                    'PBX 9501': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                    'PBX 9502': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                    'PE-10': 'Chemring / STV Group Demolition Range Datasheets (Estimated)',
-                    'PE-12': 'Chemring / STV Group Demolition Range Datasheets (Estimated)',
-                    'PE-4': 'Dobratz & Crawford, LLNL Explosives Handbook (1985) / PE-4 Cylinder Test Fit',
-                    'PE-8': 'Chemring / STV Group Demolition Range Datasheets (Estimated)',
-                    'Pentolite': 'Lee et al., LLNL JWL Database (UCRL-50422, 1968)',
-                    'PETN': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                    'RDX': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                    'TATB': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                    'Tetryl': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                    'TNT': 'Dobratz & Crawford, LLNL Explosives Handbook (1985)',
-                    'Water Gel': 'Sanchidrián et al., Central European Journal of Energetic Materials (2015)',
-                    'Custom': 'N/A'
-                };
-                const ref = EXPLOSIVE_REFS[comp] || 'N/A';
-                descText += ` | Composition: ${comp} (Reference: ${ref})`;
-            }
-        } else if (node.type === 'MPMMaterialSteel') {
+        if (node.type === 'MPMMaterialSteel' || node.type === 'Material') {
             const presetName = node.parameters['preset'] || 'Structural Steel (A36)';
             const presetData = MPM_MATERIAL_PRESETS[presetName];
             const ref = presetData?.reference || 'N/A';
-            descText += ` | Preset: ${presetName} (Reference: ${ref})`;
+            const modelName = node.parameters['material_model'] || 'Linear Elastic';
+            descText += ` | Model: ${modelName} | Preset: ${presetName} (Reference: ${ref})`;
         }
 
         const textSpan = document.createElement('span');
@@ -378,15 +337,21 @@ export class PropertyEditor {
         form.onsubmit = (e) => e.preventDefault();
 
         let paramKeys = Object.keys(node.parameters);
-        if (node.type === 'MPMMaterialSteel') {
+        if (node.type === 'MPMMaterialSteel' || node.type === 'Material') {
             if (!node.parameters['material_model']) {
-                node.parameters['material_model'] = 'Hypoelastic';
+                node.parameters['material_model'] = 'Linear Elastic';
             }
             if (!node.parameters['preset']) {
-                node.parameters['preset'] = 'Structural Steel (A36)';
+                node.parameters['preset'] = getDefaultPresetForModel(node.parameters['material_model']);
             }
             const matModel = node.parameters['material_model'];
-            if (matModel === 'Johnson-Cook + Mie-Grüneisen') {
+            if (matModel === 'Linear Elastic') {
+                paramKeys = [
+                    'material_model', 'preset',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'tensile_failure_stress'
+                ];
+            } else if (matModel === 'Johnson-Cook + Mie-Grüneisen') {
                 paramKeys = [
                     'material_model', 'preset',
                     'density', 'youngs_modulus', 'poissons_ratio',
@@ -396,6 +361,16 @@ export class PropertyEditor {
                     'enable_timestep_erosion', 'timestep_erosion_factor',
                     'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
                     'mg_gamma0', 'mg_c0', 'mg_s'
+                ];
+            } else if (matModel === 'CREST Reactive Burn') {
+                paramKeys = [
+                    'material_model', 'preset',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'yield_stress', 'hardening_modulus',
+                    'failure_strain', 'tensile_failure_stress',
+                    'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
+                    'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
+                    'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold'
                 ];
             } else if (matModel === 'RHT Concrete') {
                 paramKeys = [
@@ -420,7 +395,7 @@ export class PropertyEditor {
                     'enable_strain_erosion', 'erosion_strain',
                     'enable_stress_erosion', 'erosion_stress',
                     'enable_timestep_erosion', 'timestep_erosion_factor',
-                    'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega'
+                    'kc_auto_generate', 'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega'
                 ];
             } else if (matModel === 'CSCM Concrete') {
                 paramKeys = [
@@ -434,7 +409,20 @@ export class PropertyEditor {
                     'enable_timestep_erosion', 'timestep_erosion_factor',
                     'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2'
                 ];
+            } else if (matModel === 'Ideal Gas') {
+                paramKeys = [
+                    'material_model', 'preset',
+                    'density', 'atm_pressure', 'atm_temperature', 'gamma'
+                ];
+            } else if (matModel === 'JWL Detonation Gas') {
+                paramKeys = [
+                    'material_model', 'preset',
+                    'composition', 'rho', 'detonation_energy', 'det_vel',
+                    'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega',
+                    'ideal_gamma', 'ideal_rho_0', 'ideal_e_0'
+                ];
             } else {
+                // Hypoelastic
                 paramKeys = [
                     'material_model', 'preset',
                     'density', 'youngs_modulus', 'poissons_ratio',
@@ -576,12 +564,7 @@ export class PropertyEditor {
                 if ((key === 'y_min_bc' || key === 'y_max_bc') && dim === '1D') continue;
                 if ((key === 'z_min_bc' || key === 'z_max_bc') && (dim === '1D' || dim === '2D')) continue;
             }
-            if (node.type === 'MPMMaterialSteel') {
-                const matModel = node.parameters['material_model'] || 'Hypoelastic';
-                const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
-                if (matModel === 'Hypoelastic' && jcKeys.includes(key)) continue;
-                if (matModel === 'Johnson-Cook + Mie-Grüneisen' && (key === 'yield_stress' || key === 'hardening_modulus')) continue;
-
+            if (node.type === 'MPMMaterialSteel' || node.type === 'Material') {
                 let sectionTitle: string | null = null;
                 if (key === 'density') sectionTitle = 'ELASTICITY & MASS';
                 else if (key === 'yield_stress') sectionTitle = 'PLASTIC YIELD & HARDENING';
@@ -590,9 +573,14 @@ export class PropertyEditor {
                 else if (key === 'enable_strain_erosion') sectionTitle = 'ELEMENT EROSION & DELETION';
                 else if (key === 'jc_A') sectionTitle = 'JOHNSON-COOK VISCOPLASTICITY';
                 else if (key === 'mg_gamma0') sectionTitle = 'MIE-GRÜNEISEN SHOCK EOS';
+                else if (key === 'davis_c0') sectionTitle = 'DAVIS SOLID REACTANT EOS';
+                else if (key === 'davis_a') sectionTitle = 'DAVIS DETONATION PRODUCT EOS';
+                else if (key === 'crest_b1') sectionTitle = 'CREST REACTION KINETICS';
                 else if (key === 'rht_A') sectionTitle = 'RHT CONCRETE PARAMETERS';
-                else if (key === 'kc_a0') sectionTitle = 'K&C CONCRETE PARAMETERS';
+                else if (key === 'kc_auto_generate' || key === 'kc_a0') sectionTitle = 'K&C CONCRETE PARAMETERS';
                 else if (key === 'cscm_alpha') sectionTitle = 'CSCM CONCRETE PARAMETERS';
+                else if (key === 'atm_pressure') sectionTitle = 'IDEAL GAS AMBIENT PROPERTIES';
+                else if (key === 'composition') sectionTitle = 'JWL DETONATION PARAMETERS';
 
                 if (sectionTitle) {
                     const secHeader = document.createElement('div');
@@ -606,23 +594,6 @@ export class PropertyEditor {
                     secHeader.style.borderBottom = '1px solid rgba(255, 121, 198, 0.25)';
                     secHeader.textContent = sectionTitle;
                     form.appendChild(secHeader);
-                }
-            }
-            if (node.type === 'Material') {
-
-                const matType = node.parameters['material_type'] || 'Air';
-                const airKeys = ['gamma', 'atm_pressure', 'atm_temperature'];
-                const jwlKeys = ['composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
-                const customKeys = ['det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
-                const igKeys = ['ideal_gamma', 'ideal_rho_0', 'ideal_e_0'];
-
-                if (matType === 'Air' && (jwlKeys.includes(key) || igKeys.includes(key))) continue;
-                if (matType === 'JWL Charge') {
-                    if (airKeys.includes(key) || igKeys.includes(key)) continue;
-                }
-                if (matType === 'Ideal Gas Charge') {
-                    const igKeys = ['composition', 'ideal_rho_0', 'ideal_e_0'];
-                    if (!igKeys.includes(key)) continue;
                 }
             }
             if (node.type === 'Charge2D') {
@@ -1787,14 +1758,24 @@ export class PropertyEditor {
             'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
             'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
             'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
+            // Davis & CREST Reactive Burn
+            'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
+            'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
+            'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold',
+            'initiation_radius', 'booster_overpressure',
             // VTK ROI & Strides
             'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride',
             'nonlocal_radius'
         ];
 
+        const currentMatModel = node.parameters['material_model'] || 'Linear Elastic';
+        const dynamicPresets = (node.type === 'MPMMaterialSteel' || node.type === 'Material') 
+            ? getPresetsForConstitutiveModel(currentMatModel) 
+            : [...MPM_MATERIAL_PRESET_NAMES];
+
         const dropdowns: Record<string, string[]> = {
-            'preset': [...MPM_MATERIAL_PRESET_NAMES],
-            'material_model': ['Hypoelastic', 'Johnson-Cook + Mie-Grüneisen', 'RHT Concrete', 'Karagozian & Case (K&C)', 'CSCM Concrete'],
+            'preset': dynamicPresets,
+            'material_model': getConstitutiveModels(),
             'rebar_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
             'beam_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
             'beamQuantity': ['plasticStrain', 'vonMises', 'momentOrForce', 'velocity', 'damage'],

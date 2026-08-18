@@ -3,13 +3,14 @@
 
 #include "mpm_solver_2d.hpp"
 #include "constitutive_concrete_models.hpp"
+#include "constitutive_crest_davis.hpp"
 #include <vector>
 #include <array>
 
 namespace Blast {
 
 struct MaterialTable3D {
-    MPMMaterialModel material_model{MPMMaterialModel::Hypoelastic};
+    MPMMaterialModel material_model{MPMMaterialModel::LinearElastic};
 
     // Baseline Material Properties
     float density{7850.0f};               // kg/m^3
@@ -85,6 +86,33 @@ struct MaterialTable3D {
     float mg_c0{4570.0f};        // Bulk sound speed (m/s)
     float mg_s{1.49f};           // Hugoniot Us-Up slope
 
+    // Davis Solid Reactant EOS Parameters
+    float davis_c0{2050.0f};             // Bulk sound speed (m/s)
+    float davis_s1{2.12f};               // Hugoniot Us-Up slope
+    float davis_gamma0{0.65f};           // Grüneisen gamma
+    float davis_cv{1000.0f};             // Specific heat capacity (J/(kg K))
+    float davis_t0{293.0f};              // Reference room temperature (K)
+    float davis_rho0{1895.0f};           // Unreacted solid reference density (kg/m^3)
+
+    // Davis Product Gas EOS Parameters
+    float davis_a{2.85f};                // High-density exponent parameter
+    float davis_b{1.10f};                // Transition curvature exponent
+    float davis_k{1.35f};                // Low-density adiabatic exponent
+    float davis_vc{0.65f};               // Characteristic relative transition volume
+    float davis_pc{12.5e9f};             // Characteristic transition pressure (Pa)
+    float davis_q_det{3.90e6f};          // Specific heat of reaction / detonation energy (J/kg)
+
+    // CREST Reaction Kinetics Rate Law Parameters
+    float crest_b1{1.2e7f};              // Hot-spot ignition rate constant (1/s)
+    float crest_c1{0.67f};               // Hot-spot unreacted power exponent
+    float crest_m1{2.5f};                // Hot-spot entropy power exponent
+    float crest_b2{3.5e6f};              // Main grain-growth rate constant (1/s)
+    float crest_c2{0.50f};               // Growth reacted power exponent
+    float crest_c3{0.67f};               // Growth unreacted power exponent
+    float crest_m2{1.5f};                // Growth entropy power exponent
+    float crest_s0{100.0f};              // Reference entropy scale (J/(kg K))
+    float crest_s_threshold{45.0f};      // Shock entropy ignition threshold (J/(kg K))
+
     // Artificial Bulk Viscosity & Timestep Erosion Parameters
     float bulk_viscosity_b1{0.06f};       // Linear artificial bulk viscosity coefficient
     float bulk_viscosity_b2{1.20f};       // Quadratic artificial bulk viscosity coefficient
@@ -122,7 +150,9 @@ struct MPMParticle3D {
     float sigma[3][3];           // Cauchy stress tensor (3x3 symmetric)
     float ep_bar{0.0f};          // Equivalent plastic strain
     float damage{0.0f};          // Scalar damage D in [0, 1]
-    float lambda{0.0f};          // Modified damage scaling parameter (K&C / CSCM cap)
+    float lambda{0.0f};          // Modified damage scaling parameter (K&C / CSCM cap) / CREST reaction progress [0, 1]
+    float v_min{1.0f};           // Minimum relative volume reached (V_min / V0)
+    float s_shock{0.0f};         // Latched peak shock entropy (J/(kg K))
     bool has_failed{false};      // Total failure status flag
     int object_id{0};            // Object / Material Table ID
 };

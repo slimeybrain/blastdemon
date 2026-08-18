@@ -3,7 +3,7 @@ import { Node, NodeType } from './types.js';
 import { PropertyEditor } from './property-editor.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
 import { Telemetry3DViewport } from './telemetry-3d-viewport.js';
-import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_CATEGORIES, MPM_MATERIAL_PARAM_INFO } from './mpm-presets.js';
+import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_CATEGORIES, MPM_MATERIAL_PARAM_INFO, getConstitutiveModels, getPresetsForConstitutiveModel, getDefaultPresetForModel } from './mpm-presets.js';
 import { getParameterInfo, getNodeDefinition, getNodeDescription, showParameterPopover, showNodeDetailsModal } from './parameter-definitions.js';
 
 export class NodeViewer {
@@ -750,15 +750,21 @@ export class NodeViewer {
         grid.style.alignItems = 'center';
 
         let paramKeys = Object.keys(node.parameters);
-        if (node.type === 'MPMMaterialSteel') {
+        if (node.type === 'MPMMaterialSteel' || node.type === 'Material') {
             if (!node.parameters['material_model']) {
-                node.parameters['material_model'] = 'Hypoelastic';
+                node.parameters['material_model'] = 'Linear Elastic';
             }
             if (!node.parameters['preset']) {
-                node.parameters['preset'] = 'Structural Steel (A36)';
+                node.parameters['preset'] = getDefaultPresetForModel(node.parameters['material_model']);
             }
             const matModel = node.parameters['material_model'];
-            if (matModel === 'Johnson-Cook + Mie-Grüneisen') {
+            if (matModel === 'Linear Elastic') {
+                paramKeys = [
+                    'material_model', 'preset',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'tensile_failure_stress'
+                ];
+            } else if (matModel === 'Johnson-Cook + Mie-Grüneisen') {
                 paramKeys = [
                     'material_model', 'preset',
                     'density', 'youngs_modulus', 'poissons_ratio',
@@ -768,6 +774,16 @@ export class NodeViewer {
                     'enable_timestep_erosion', 'timestep_erosion_factor',
                     'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
                     'mg_gamma0', 'mg_c0', 'mg_s'
+                ];
+            } else if (matModel === 'CREST Reactive Burn') {
+                paramKeys = [
+                    'material_model', 'preset',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'yield_stress', 'hardening_modulus',
+                    'failure_strain', 'tensile_failure_stress',
+                    'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
+                    'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
+                    'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold'
                 ];
             } else if (matModel === 'RHT Concrete') {
                 paramKeys = [
@@ -792,7 +808,7 @@ export class NodeViewer {
                     'enable_strain_erosion', 'erosion_strain',
                     'enable_stress_erosion', 'erosion_stress',
                     'enable_timestep_erosion', 'timestep_erosion_factor',
-                    'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega'
+                    'kc_auto_generate', 'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega'
                 ];
             } else if (matModel === 'CSCM Concrete') {
                 paramKeys = [
@@ -805,6 +821,18 @@ export class NodeViewer {
                     'enable_stress_erosion', 'erosion_stress',
                     'enable_timestep_erosion', 'timestep_erosion_factor',
                     'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2'
+                ];
+            } else if (matModel === 'Ideal Gas') {
+                paramKeys = [
+                    'material_model', 'preset',
+                    'density', 'atm_pressure', 'atm_temperature', 'gamma'
+                ];
+            } else if (matModel === 'JWL Detonation Gas') {
+                paramKeys = [
+                    'material_model', 'preset',
+                    'composition', 'rho', 'detonation_energy', 'det_vel',
+                    'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega',
+                    'ideal_gamma', 'ideal_rho_0', 'ideal_e_0'
                 ];
             } else {
                 paramKeys = [
@@ -902,34 +930,8 @@ export class NodeViewer {
                     else value = 'MUSCL-Hancock (2nd-Order Space/Time)';
                 }
             }
-            if (node.type === 'MPMMaterialSteel') {
-                const matModel = node.parameters['material_model'] || 'Hypoelastic';
-                const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
-                if (matModel === 'Hypoelastic' && jcKeys.includes(key)) continue;
-                if (matModel === 'Johnson-Cook + Mie-Grüneisen' && (key === 'yield_stress' || key === 'hardening_modulus')) continue;
-            }
-            if (node.type === 'DomainMesh') {
-
-                const dim = node.parameters['dimension'] || '1D';
-                if ((key === 'y_min_bc' || key === 'y_max_bc') && dim === '1D') continue;
-                if ((key === 'z_min_bc' || key === 'z_max_bc') && (dim === '1D' || dim === '2D')) continue;
-            }
-            if (node.type === 'FEMDomain3D') {
-                const scheme = node.parameters['integration_scheme'] || 'OnePointFB';
-                if ((scheme === 'FullGauss8' || scheme === 'SelectiveReduced') && (key === 'hourglass_model' || key === 'hourglass_coeff')) continue;
-            }
-            if (node.type === 'Material') {
-                const matType = node.parameters['material_type'] || 'Air';
-                if (matType === 'Air') {
-                    const airKeys = ['material_type', 'atm_pressure', 'atm_temperature', 'gamma'];
-                    if (!airKeys.includes(key)) continue;
-                } else if (matType === 'JWL Charge') {
-                    const jwlKeys = ['material_type', 'composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
-                    if (!jwlKeys.includes(key)) continue;
-                } else if (matType === 'Ideal Gas Charge') {
-                    const igKeys = ['material_type', 'composition', 'ideal_gamma', 'ideal_rho_0', 'ideal_e_0'];
-                    if (!igKeys.includes(key)) continue;
-                }
+            if (node.type === 'MPMMaterialSteel' || node.type === 'Material') {
+                // All keys displayed are explicitly governed by paramKeys
             }
             if (node.type === 'Charge2D' || node.type === 'Charge1D') {
                 const shape = node.parameters['charge_shape'] || 'Sphere';
@@ -2427,6 +2429,11 @@ export class NodeViewer {
             'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
             'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
             'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
+            // Davis & CREST Reactive Burn
+            'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
+            'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
+            'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold',
+            'initiation_radius', 'booster_overpressure',
             // VTK ROI & Strides
             'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride',
             'nonlocal_radius'
@@ -2434,8 +2441,14 @@ export class NodeViewer {
 
         const chargeShapeOptions = node.type === 'Charge3D' ? ['Sphere', 'Cylinder', 'Block'] : ['Sphere', 'Cylinder'];
 
+        const currentMatModel = node.parameters['material_model'] || 'Linear Elastic';
+        const dynamicPresets = (node.type === 'MPMMaterialSteel' || node.type === 'Material')
+            ? getPresetsForConstitutiveModel(currentMatModel)
+            : [...MPM_MATERIAL_PRESET_NAMES];
+
         const dropdowns: Record<string, string[]> = {
-            'material_model': ['Hypoelastic', 'Johnson-Cook + Mie-Grüneisen', 'RHT Concrete', 'Karagozian & Case (K&C)', 'CSCM Concrete'],
+            'material_model': getConstitutiveModels(),
+            'preset': dynamicPresets,
             'rebar_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
             'beam_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
             'beamQuantity': ['plasticStrain', 'vonMises', 'momentOrForce', 'velocity', 'damage'],
@@ -2468,7 +2481,6 @@ export class NodeViewer {
             'precision': ['double', 'single'],
             'integration_scheme': ['OnePointFB', 'OnePointKF', 'FullGauss8', 'SelectiveReduced'],
             'hourglass_model': ['FlanaganBelytschkoStiffness', 'FlanaganBelytschkoViscous', 'KosloffFrazier'],
-            'preset': [...MPM_MATERIAL_PRESET_NAMES],
             'trigger_type': node.type === 'VTKOutput' ? ['Step Interval', 'Time Interval'] : ['end', 'time', 'step'],
             'composition': ['Aluminized ANFO', 'Ammonal', 'ANFO', 'Baratol', 'C-4', 'Composition A-3', 'Composition B', 'Composition C-3', 'Cyclotol', 'Heavy ANFO', 'HMX', 'LX-04', 'LX-07', 'LX-10', 'LX-14', 'LX-17', 'Mining Emulsion', 'Octol', 'PBX 9404', 'PBX 9501', 'PBX 9502', 'PE-10', 'PE-12', 'PE-4', 'PE-8', 'Pentolite', 'PETN', 'RDX', 'TATB', 'Tetryl', 'TNT', 'Water Gel', 'Custom'],
             'init_mode': node.type === 'CFDSolver3D' ? ['From1D', 'From2D', 'Multi-Material JWL', 'Ideal Gas'] : ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
@@ -2525,20 +2537,17 @@ export class NodeViewer {
             let selectedMatched = false;
 
             if (key === 'preset') {
-                MPM_MATERIAL_CATEGORIES.forEach(group => {
-                    const optgroup = document.createElement('optgroup');
-                    optgroup.label = group.category;
-                    group.presets.forEach(opt => {
-                        const option = document.createElement('option');
-                        option.value = opt;
-                        option.text = opt;
-                        if (strVal && (opt.toLowerCase() === strVal.toLowerCase() || opt === strVal)) {
-                            option.selected = true;
-                            selectedMatched = true;
-                        }
-                        optgroup.appendChild(option);
-                    });
-                    select.appendChild(optgroup);
+                const modelName = node.parameters['material_model'] || 'Linear Elastic';
+                const validPresets = getPresetsForConstitutiveModel(modelName);
+                validPresets.forEach(opt => {
+                    const option = document.createElement('option');
+                    option.value = opt;
+                    option.text = opt;
+                    if (strVal && (opt.toLowerCase() === strVal.toLowerCase() || opt === strVal)) {
+                        option.selected = true;
+                        selectedMatched = true;
+                    }
+                    select.appendChild(option);
                 });
             } else {
                 dropdowns[key].forEach(opt => {

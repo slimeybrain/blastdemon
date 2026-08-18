@@ -70,6 +70,47 @@ export interface MPMMaterialParams {
     cscm_W?: number;
     cscm_D1?: number;
     cscm_D2?: number;
+    // Davis Solid Reactant
+    davis_c0?: number;
+    davis_s1?: number;
+    davis_gamma0?: number;
+    davis_cv?: number;
+    davis_t0?: number;
+    davis_rho0?: number;
+    // Davis Product Gas
+    davis_a?: number;
+    davis_b?: number;
+    davis_k?: number;
+    davis_vc?: number;
+    davis_pc?: number;
+    davis_q_det?: number;
+    // CREST Reaction Kinetics
+    crest_b1?: number;
+    crest_c1?: number;
+    crest_m1?: number;
+    crest_b2?: number;
+    crest_c2?: number;
+    crest_c3?: number;
+    crest_m2?: number;
+    crest_s0?: number;
+    crest_s_threshold?: number;
+    // Ideal Gas CFD
+    atm_pressure?: number;
+    atm_temperature?: number;
+    gamma?: number;
+    // JWL CFD
+    composition?: string;
+    rho?: number;
+    detonation_energy?: number;
+    det_vel?: number;
+    jwl_A?: number;
+    jwl_B?: number;
+    jwl_R1?: number;
+    jwl_R2?: number;
+    jwl_omega?: number;
+    ideal_gamma?: number;
+    ideal_rho_0?: number;
+    ideal_e_0?: number;
     reference: string;
     category: string;
 }
@@ -79,7 +120,7 @@ export interface MPMMaterialParamInfo {
     label: string;
     shortDesc: string;
     unit?: string;
-    section: 'model' | 'elasticity' | 'plasticity' | 'failure' | 'erosion' | 'johnson_cook' | 'mie_gruneisen' | 'concrete_base' | 'rht' | 'kc' | 'cscm';
+    section: 'model' | 'elasticity' | 'plasticity' | 'failure' | 'erosion' | 'johnson_cook' | 'mie_gruneisen' | 'davis_reactant' | 'davis_product' | 'crest_kinetics' | 'concrete_base' | 'rht' | 'kc' | 'cscm' | 'ideal_gas' | 'jwl';
     tooltip: string;
 }
 
@@ -624,6 +665,274 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         unit: 'm',
         section: 'failure',
         tooltip: 'Averages damage across elements within physical radius Rc (e.g. 0.05m = 50mm for concrete aggregate, 0.0m for steel). Prevents 1-element grid-aligned razor cuts and enables natural branching cracks.'
+    },
+    // Davis Solid Reactant
+    'davis_c0': {
+        key: 'davis_c0',
+        label: 'Davis C₀: Reactant Sound Speed',
+        shortDesc: 'Solid HE bulk sound speed',
+        unit: 'm/s',
+        section: 'davis_reactant',
+        tooltip: 'Unreacted solid high-explosive bulk acoustic sound speed c0 (m/s).'
+    },
+    'davis_s1': {
+        key: 'davis_s1',
+        label: 'Davis s₁: Reactant Hugoniot Slope',
+        shortDesc: 'Us-Up linear slope for reactant',
+        unit: 'dim',
+        section: 'davis_reactant',
+        tooltip: 'Hugoniot linear shock-particle velocity slope s1 for the unreacted solid phase.'
+    },
+    'davis_gamma0': {
+        key: 'davis_gamma0',
+        label: 'Davis Γ₀: Reactant Grüneisen',
+        shortDesc: 'Solid thermal pressure coupling',
+        unit: 'dim',
+        section: 'davis_reactant',
+        tooltip: 'Reference Grüneisen ratio gamma0 for unreacted solid explosive.'
+    },
+    'davis_cv': {
+        key: 'davis_cv',
+        label: 'Davis Cv: Specific Heat',
+        shortDesc: 'Solid specific heat capacity',
+        unit: 'J/(kg·K)',
+        section: 'davis_reactant',
+        tooltip: 'Specific heat capacity at constant volume for unreacted solid HE (J/(kg·K)).'
+    },
+    'davis_t0': {
+        key: 'davis_t0',
+        label: 'Davis T₀: Reference Temp',
+        shortDesc: 'Solid initial temperature',
+        unit: 'K',
+        section: 'davis_reactant',
+        tooltip: 'Reference ambient initial temperature T0 (K) for unreacted explosive.'
+    },
+    'davis_rho0': {
+        key: 'davis_rho0',
+        label: 'Davis ρ₀: Solid Density',
+        shortDesc: 'Unreacted reference density',
+        unit: 'kg/m³',
+        section: 'davis_reactant',
+        tooltip: 'Reference solid explosive mass density rho0 (kg/m³).'
+    },
+    // Davis Product Gas
+    'davis_a': {
+        key: 'davis_a',
+        label: 'Davis a: Dense Gas Exponent',
+        shortDesc: 'High-density isentrope exponent',
+        unit: 'dim',
+        section: 'davis_product',
+        tooltip: 'High-density non-ideal gas isentrope exponent parameter (a).'
+    },
+    'davis_b': {
+        key: 'davis_b',
+        label: 'Davis b: Curvature Exponent',
+        shortDesc: 'Transition curvature exponent',
+        unit: 'dim',
+        section: 'davis_product',
+        tooltip: 'Transition curvature exponent parameter (b) connecting dense fluid to ideal gas.'
+    },
+    'davis_k': {
+        key: 'davis_k',
+        label: 'Davis k: Dilute Adiabatic Exponent',
+        shortDesc: 'Low-density adiabatic exponent (k)',
+        unit: 'dim',
+        section: 'davis_product',
+        tooltip: 'Low-density asymptotic adiabatic gas exponent (k = Cp/Cv ≈ 1.30–1.40).'
+    },
+    'davis_vc': {
+        key: 'davis_vc',
+        label: 'Davis Vc: Transition Volume',
+        shortDesc: 'Characteristic transition relative volume',
+        unit: 'dim',
+        section: 'davis_product',
+        tooltip: 'Characteristic relative volume Vc marking the transition between dense and expanded product states.'
+    },
+    'davis_pc': {
+        key: 'davis_pc',
+        label: 'Davis Pc: Transition Pressure',
+        shortDesc: 'Characteristic transition pressure',
+        unit: 'Pa',
+        section: 'davis_product',
+        tooltip: 'Characteristic transition pressure Pc (Pa) at volume Vc.'
+    },
+    'davis_q_det': {
+        key: 'davis_q_det',
+        label: 'Davis Q: Detonation Energy',
+        shortDesc: 'Specific chemical heat of reaction',
+        unit: 'J/kg',
+        section: 'davis_product',
+        tooltip: 'Specific chemical detonation energy release Q (J/kg) converted into product enthalpy.'
+    },
+    // CREST Reaction Kinetics
+    'crest_b1': {
+        key: 'crest_b1',
+        label: 'CREST b₁: Ignition Rate Coeff',
+        shortDesc: 'Hot-spot ignition rate constant',
+        unit: '1/s',
+        section: 'crest_kinetics',
+        tooltip: 'CREST hot-spot ignition rate multiplier b1 (1/s).'
+    },
+    'crest_c1': {
+        key: 'crest_c1',
+        label: 'CREST c₁: Ignition Unreacted Power',
+        shortDesc: 'Ignition reactant fraction exponent',
+        unit: 'dim',
+        section: 'crest_kinetics',
+        tooltip: 'Exponent c1 on the unreacted solid fraction (1 - λ) in the ignition channel.'
+    },
+    'crest_m1': {
+        key: 'crest_m1',
+        label: 'CREST m₁: Ignition Entropy Power',
+        shortDesc: 'Ignition shock entropy exponent',
+        unit: 'dim',
+        section: 'crest_kinetics',
+        tooltip: 'Entropy sensitivity exponent m1 for the hot-spot ignition channel.'
+    },
+    'crest_b2': {
+        key: 'crest_b2',
+        label: 'CREST b₂: Growth Rate Coeff',
+        shortDesc: 'Main grain-burning rate constant',
+        unit: '1/s',
+        section: 'crest_kinetics',
+        tooltip: 'CREST grain-growth burning rate multiplier b2 (1/s).'
+    },
+    'crest_c2': {
+        key: 'crest_c2',
+        label: 'CREST c₂: Growth Reacted Power',
+        shortDesc: 'Grain-growth product fraction exponent',
+        unit: 'dim',
+        section: 'crest_kinetics',
+        tooltip: 'Exponent c2 on the reacted fraction (λ) representing growing flame surface area.'
+    },
+    'crest_c3': {
+        key: 'crest_c3',
+        label: 'CREST c₃: Growth Unreacted Power',
+        shortDesc: 'Grain-growth reactant fraction exponent',
+        unit: 'dim',
+        section: 'crest_kinetics',
+        tooltip: 'Exponent c3 on the unreacted fraction (1 - λ) in the growth channel.'
+    },
+    'crest_m2': {
+        key: 'crest_m2',
+        label: 'CREST m₂: Growth Entropy Power',
+        shortDesc: 'Grain-growth shock entropy exponent',
+        unit: 'dim',
+        section: 'crest_kinetics',
+        tooltip: 'Entropy sensitivity exponent m2 for the grain-growth channel.'
+    },
+    'crest_s0': {
+        key: 'crest_s0',
+        label: 'CREST s₀: Entropy Scale',
+        shortDesc: 'Reference normalization entropy',
+        unit: 'J/(kg·K)',
+        section: 'crest_kinetics',
+        tooltip: 'Reference shock entropy scale s0 (J/(kg·K)) used to non-dimensionalize effective shock entropy.'
+    },
+    'crest_s_threshold': {
+        key: 'crest_s_threshold',
+        label: 'CREST s_th: Ignition Threshold',
+        shortDesc: 'Minimum shock entropy to ignite',
+        unit: 'J/(kg·K)',
+        section: 'crest_kinetics',
+        tooltip: 'Minimum shock entropy threshold below which no ignition or reaction progress occurs.'
+    },
+    // Ideal Gas CFD
+    'atm_pressure': {
+        key: 'atm_pressure',
+        label: 'Ambient Pressure',
+        shortDesc: 'Background static pressure',
+        unit: 'Pa',
+        section: 'ideal_gas',
+        tooltip: 'Background atmospheric/fluid static pressure (Pa).'
+    },
+    'atm_temperature': {
+        key: 'atm_temperature',
+        label: 'Ambient Temperature',
+        shortDesc: 'Background static temperature',
+        unit: 'K',
+        section: 'ideal_gas',
+        tooltip: 'Background ambient temperature (K).'
+    },
+    'gamma': {
+        key: 'gamma',
+        label: 'Specific Heat Ratio (γ)',
+        shortDesc: 'Ratio of specific heats Cp/Cv',
+        unit: 'dim',
+        section: 'ideal_gas',
+        tooltip: 'Specific heat ratio gamma = Cp / Cv (1.40 for diatomic air, 1.667 for noble gases).'
+    },
+    // JWL CFD
+    'composition': {
+        key: 'composition',
+        label: 'Explosive Composition',
+        shortDesc: 'Chemical composition name',
+        section: 'jwl',
+        tooltip: 'High explosive chemical formulation identifier.'
+    },
+    'rho': {
+        key: 'rho',
+        label: 'Solid Density (ρ)',
+        shortDesc: 'Unreacted solid density',
+        unit: 'kg/m³',
+        section: 'jwl',
+        tooltip: 'Unreacted solid explosive density (kg/m³).'
+    },
+    'detonation_energy': {
+        key: 'detonation_energy',
+        label: 'Detonation Energy (E₀)',
+        shortDesc: 'Specific chemical energy release',
+        unit: 'J/kg',
+        section: 'jwl',
+        tooltip: 'Volumetric chemical detonation energy release E0 (J/kg).'
+    },
+    'det_vel': {
+        key: 'det_vel',
+        label: 'Detonation Velocity (D)',
+        shortDesc: 'Chapman-Jouguet detonation wave speed',
+        unit: 'm/s',
+        section: 'jwl',
+        tooltip: 'Chapman-Jouguet steady detonation wave speed D (m/s).'
+    },
+    'jwl_A': {
+        key: 'jwl_A',
+        label: 'JWL A: High-Pressure Coeff',
+        shortDesc: 'JWL high-pressure expansion term',
+        unit: 'Pa',
+        section: 'jwl',
+        tooltip: 'JWL high-pressure expansion coefficient A (Pa).'
+    },
+    'jwl_B': {
+        key: 'jwl_B',
+        label: 'JWL B: Mid-Pressure Coeff',
+        shortDesc: 'JWL mid-pressure expansion term',
+        unit: 'Pa',
+        section: 'jwl',
+        tooltip: 'JWL mid-pressure expansion coefficient B (Pa).'
+    },
+    'jwl_R1': {
+        key: 'jwl_R1',
+        label: 'JWL R₁: High-Pressure Decay',
+        shortDesc: 'JWL exponential decay rate 1',
+        unit: 'dim',
+        section: 'jwl',
+        tooltip: 'Non-dimensional high-pressure exponential decay rate R1.'
+    },
+    'jwl_R2': {
+        key: 'jwl_R2',
+        label: 'JWL R₂: Mid-Pressure Decay',
+        shortDesc: 'JWL exponential decay rate 2',
+        unit: 'dim',
+        section: 'jwl',
+        tooltip: 'Non-dimensional mid-pressure exponential decay rate R2.'
+    },
+    'jwl_omega': {
+        key: 'jwl_omega',
+        label: 'JWL ω: Grüneisen Parameter',
+        shortDesc: 'JWL fractional Grüneisen ratio',
+        unit: 'dim',
+        section: 'jwl',
+        tooltip: 'Fractional Grüneisen ratio omega = Cp/Cv - 1 for product gas.'
     }
 };
 
@@ -1365,5 +1674,450 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         density: 3000.0, youngs_modulus: 110.0e9, poissons_ratio: 0.30, yield_stress: 450.0e6, hardening_modulus: 800.0e6, failure_strain: 0.08, tensile_failure_stress: 520.0e6,
         jc_A: 450.0e6, jc_B: 500.0e6, jc_n: 0.35, jc_C: 0.005, jc_m: 1.20, T_melt: 925.0, T_room: 293.0, Cp: 880.0, mg_gamma0: 1.60, mg_c0: 5600.0, mg_s: 1.35,
         category: 'Soft Materials, Bio-Surrogates & Composites', reference: 'Lloyd, Int. Mater. Rev. (1994) Metal Matrix Composites'
+    },
+
+    // ---------------------------------------------------------
+    // 9. Linear Elastic Presets
+    // ---------------------------------------------------------
+    'Aluminum 6061-T6 (Elastic)': {
+        density: 2700.0, youngs_modulus: 68.9e9, poissons_ratio: 0.33, yield_stress: 276.0e6, hardening_modulus: 500.0e6, failure_strain: 0.12, tensile_failure_stress: 310.0e6,
+        jc_A: 276.0e6, jc_B: 500.0e6, jc_n: 0.30, jc_C: 0.002, jc_m: 1.00, T_melt: 925.0, T_room: 293.0, Cp: 896.0, mg_gamma0: 1.97, mg_c0: 5240.0, mg_s: 1.40,
+        category: 'Linear Elastic Presets', reference: 'MIL-HDBK-5J Metallic Materials Data'
+    },
+    'Titanium Ti-6Al-4V (Elastic)': {
+        density: 4430.0, youngs_modulus: 113.8e9, poissons_ratio: 0.342, yield_stress: 880.0e6, hardening_modulus: 1.0e9, failure_strain: 0.14, tensile_failure_stress: 950.0e6,
+        jc_A: 880.0e6, jc_B: 700.0e6, jc_n: 0.40, jc_C: 0.014, jc_m: 0.90, T_melt: 1878.0, T_room: 293.0, Cp: 526.0, mg_gamma0: 1.23, mg_c0: 5020.0, mg_s: 1.03,
+        category: 'Linear Elastic Presets', reference: 'Aerospace Structural Metals Handbook'
+    },
+    'Structural Concrete C30 (Elastic)': {
+        density: 2400.0, youngs_modulus: 32.0e9, poissons_ratio: 0.18, yield_stress: 30.0e6, hardening_modulus: 0.0, failure_strain: 0.0035, tensile_failure_stress: 3.0e6,
+        jc_A: 30.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 880.0, mg_gamma0: 0.85, mg_c0: 2500.0, mg_s: 1.25,
+        category: 'Linear Elastic Presets', reference: 'Eurocode 2: Design of Concrete Structures'
+    },
+    'Tempered Glass (Elastic)': {
+        density: 2500.0, youngs_modulus: 70.0e9, poissons_ratio: 0.22, yield_stress: 2.0e9, hardening_modulus: 0.0, failure_strain: 0.005, tensile_failure_stress: 80.0e6,
+        jc_A: 2.0e9, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1473.0, T_room: 293.0, Cp: 840.0, mg_gamma0: 0.40, mg_c0: 3860.0, mg_s: 1.40,
+        category: 'Linear Elastic Presets', reference: 'Pilkington Technical Glass Data'
+    },
+
+    // ---------------------------------------------------------
+    // 10. CREST Reactive Burn Presets (Davis Reactant + Product EOS)
+    // ---------------------------------------------------------
+    'PBX 9502 (TATB/Kel-F 95/5) - CREST Davis': {
+        density: 1895.0, youngs_modulus: 10.0e9, poissons_ratio: 0.35, yield_stress: 50.0e6, hardening_modulus: 100.0e6, failure_strain: 0.10, tensile_failure_stress: 60.0e6,
+        jc_A: 50.0e6, jc_B: 100.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 623.0, T_room: 293.0, Cp: 1000.0, mg_gamma0: 0.65, mg_c0: 2050.0, mg_s: 2.12,
+        davis_c0: 2050.0, davis_s1: 2.12, davis_gamma0: 0.65, davis_cv: 1000.0, davis_t0: 293.0, davis_rho0: 1895.0,
+        davis_a: 2.85, davis_b: 1.10, davis_k: 1.35, davis_vc: 0.65, davis_pc: 12.5e9, davis_q_det: 3.90e6,
+        crest_b1: 1.2e7, crest_c1: 0.67, crest_m1: 2.5, crest_b2: 3.5e6, crest_c2: 0.50, crest_c3: 0.67, crest_m2: 1.5, crest_s0: 100.0, crest_s_threshold: 45.0,
+        category: 'CREST Reactive Burn Presets', reference: 'Handley, C. A. (2007) CREST reactive burn model for PBX 9502; Davis (1998)'
+    },
+    'EDC37 (HMX/NC/K10 91/1/8) - CREST Davis': {
+        density: 1841.0, youngs_modulus: 8.5e9, poissons_ratio: 0.36, yield_stress: 40.0e6, hardening_modulus: 80.0e6, failure_strain: 0.12, tensile_failure_stress: 50.0e6,
+        jc_A: 40.0e6, jc_B: 80.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 550.0, T_room: 293.0, Cp: 1100.0, mg_gamma0: 0.70, mg_c0: 2750.0, mg_s: 1.85,
+        davis_c0: 2750.0, davis_s1: 1.85, davis_gamma0: 0.70, davis_cv: 1100.0, davis_t0: 293.0, davis_rho0: 1841.0,
+        davis_a: 3.10, davis_b: 1.25, davis_k: 1.30, davis_vc: 0.60, davis_pc: 14.2e9, davis_q_det: 5.20e6,
+        crest_b1: 2.5e7, crest_c1: 0.67, crest_m1: 2.0, crest_b2: 6.8e6, crest_c2: 0.50, crest_c3: 0.67, crest_m2: 1.2, crest_s0: 95.0, crest_s_threshold: 38.0,
+        category: 'CREST Reactive Burn Presets', reference: 'Whitworth, N. J. (2008) CREST modeling of EDC37 shock initiation'
+    },
+    'PBX 9501 (HMX/Estane 95/5) - CREST Davis': {
+        density: 1830.0, youngs_modulus: 9.0e9, poissons_ratio: 0.35, yield_stress: 45.0e6, hardening_modulus: 90.0e6, failure_strain: 0.10, tensile_failure_stress: 55.0e6,
+        jc_A: 45.0e6, jc_B: 90.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 550.0, T_room: 293.0, Cp: 1080.0, mg_gamma0: 0.68, mg_c0: 2600.0, mg_s: 1.90,
+        davis_c0: 2600.0, davis_s1: 1.90, davis_gamma0: 0.68, davis_cv: 1080.0, davis_t0: 293.0, davis_rho0: 1830.0,
+        davis_a: 3.00, davis_b: 1.20, davis_k: 1.32, davis_vc: 0.62, davis_pc: 13.8e9, davis_q_det: 5.00e6,
+        crest_b1: 2.0e7, crest_c1: 0.67, crest_m1: 2.2, crest_b2: 5.5e6, crest_c2: 0.50, crest_c3: 0.67, crest_m2: 1.3, crest_s0: 98.0, crest_s_threshold: 40.0,
+        category: 'CREST Reactive Burn Presets', reference: 'Gibbs & Popolato (1980) LASL Explosive Property Data / Davis EOS'
+    },
+    'Composition B (RDX/TNT 60/40) - CREST Davis': {
+        density: 1717.0, youngs_modulus: 7.2e9, poissons_ratio: 0.34, yield_stress: 35.0e6, hardening_modulus: 70.0e6, failure_strain: 0.15, tensile_failure_stress: 40.0e6,
+        jc_A: 35.0e6, jc_B: 70.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 354.0, T_room: 293.0, Cp: 1050.0, mg_gamma0: 0.72, mg_c0: 2450.0, mg_s: 1.95,
+        davis_c0: 2450.0, davis_s1: 1.95, davis_gamma0: 0.72, davis_cv: 1050.0, davis_t0: 293.0, davis_rho0: 1717.0,
+        davis_a: 2.70, davis_b: 1.15, davis_k: 1.36, davis_vc: 0.66, davis_pc: 11.8e9, davis_q_det: 4.60e6,
+        crest_b1: 1.8e7, crest_c1: 0.67, crest_m1: 2.3, crest_b2: 4.5e6, crest_c2: 0.50, crest_c3: 0.67, crest_m2: 1.4, crest_s0: 102.0, crest_s_threshold: 42.0,
+        category: 'CREST Reactive Burn Presets', reference: 'Urtiew et al. (1998) Shock initiation of Comp B / Davis EOS parameters'
+    },
+    'LX-17 (TATB/Kel-F 92.5/7.5) - CREST Davis': {
+        density: 1905.0, youngs_modulus: 10.5e9, poissons_ratio: 0.35, yield_stress: 52.0e6, hardening_modulus: 105.0e6, failure_strain: 0.10, tensile_failure_stress: 62.0e6,
+        jc_A: 52.0e6, jc_B: 105.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 623.0, T_room: 293.0, Cp: 990.0, mg_gamma0: 0.64, mg_c0: 2020.0, mg_s: 2.15,
+        davis_c0: 2020.0, davis_s1: 2.15, davis_gamma0: 0.64, davis_cv: 990.0, davis_t0: 293.0, davis_rho0: 1905.0,
+        davis_a: 2.80, davis_b: 1.08, davis_k: 1.35, davis_vc: 0.65, davis_pc: 12.2e9, davis_q_det: 3.80e6,
+        crest_b1: 1.1e7, crest_c1: 0.67, crest_m1: 2.5, crest_b2: 3.2e6, crest_c2: 0.50, crest_c3: 0.67, crest_m2: 1.5, crest_s0: 100.0, crest_s_threshold: 46.0,
+        category: 'CREST Reactive Burn Presets', reference: 'LLNL Explosives Handbook / CREST Parameters for Insensitive HE'
+    },
+
+    // ---------------------------------------------------------
+    // 11. Concrete Damage Models (RHT, K&C, CSCM)
+    // ---------------------------------------------------------
+    'Normal-Strength Concrete C35/45 (RHT Default)': {
+        density: 2400.0, youngs_modulus: 34.0e9, poissons_ratio: 0.18, yield_stress: 35.0e6, hardening_modulus: 0.0, failure_strain: 0.0035, tensile_failure_stress: 3.2e6,
+        jc_A: 35.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 880.0, mg_gamma0: 0.85, mg_c0: 2500.0, mg_s: 1.25,
+        fc: 35.0e6, ft: 3.2e6, G_f: 150.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
+        rht_A: 1.60, rht_N: 0.61, rht_B: 0.70, rht_M: 0.80, rht_Q0: 0.680, rht_BQ: 0.0105, rht_D1: 0.04, rht_D2: 1.0,
+        rht_p_crush: 17.0e6, rht_p_lock: 600.0e6, rht_alpha0: 1.22, rht_n_comp: 3.0, rht_betac: 0.032, rht_deltat: 0.036,
+        category: 'Concrete & Geomaterial Formulations', reference: 'Riedel, Hiermaier, Thoma (1999) Int. J. Impact Eng.'
+    },
+    'Standard Structural Concrete C30/37 (RHT)': {
+        density: 2380.0, youngs_modulus: 32.0e9, poissons_ratio: 0.18, yield_stress: 30.0e6, hardening_modulus: 0.0, failure_strain: 0.0035, tensile_failure_stress: 2.8e6,
+        jc_A: 30.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 880.0, mg_gamma0: 0.85, mg_c0: 2450.0, mg_s: 1.25,
+        fc: 30.0e6, ft: 2.8e6, G_f: 140.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
+        rht_A: 1.60, rht_N: 0.61, rht_B: 0.70, rht_M: 0.80, rht_Q0: 0.680, rht_BQ: 0.0105, rht_D1: 0.04, rht_D2: 1.0,
+        rht_p_crush: 15.0e6, rht_p_lock: 550.0e6, rht_alpha0: 1.25, rht_n_comp: 3.0, rht_betac: 0.032, rht_deltat: 0.036,
+        category: 'Concrete & Geomaterial Formulations', reference: 'Riedel (2000) Shock Wave Physics in Concrete'
+    },
+    'High-Strength Concrete C60/75 (RHT)': {
+        density: 2450.0, youngs_modulus: 39.0e9, poissons_ratio: 0.19, yield_stress: 60.0e6, hardening_modulus: 0.0, failure_strain: 0.0030, tensile_failure_stress: 4.4e6,
+        jc_A: 60.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 900.0, mg_gamma0: 0.90, mg_c0: 2600.0, mg_s: 1.28,
+        fc: 60.0e6, ft: 4.4e6, G_f: 180.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
+        rht_A: 1.55, rht_N: 0.63, rht_B: 0.72, rht_M: 0.78, rht_Q0: 0.700, rht_BQ: 0.0100, rht_D1: 0.035, rht_D2: 1.0,
+        rht_p_crush: 30.0e6, rht_p_lock: 800.0e6, rht_alpha0: 1.18, rht_n_comp: 3.0, rht_betac: 0.030, rht_deltat: 0.034,
+        category: 'Concrete & Geomaterial Formulations', reference: 'Riedel et al. (2009) High-Strength Armor Concrete'
+    },
+    'High-Performance Concrete C80/95 (RHT)': {
+        density: 2500.0, youngs_modulus: 44.0e9, poissons_ratio: 0.20, yield_stress: 80.0e6, hardening_modulus: 0.0, failure_strain: 0.0028, tensile_failure_stress: 5.2e6,
+        jc_A: 80.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 920.0, mg_gamma0: 0.95, mg_c0: 2700.0, mg_s: 1.30,
+        fc: 80.0e6, ft: 5.2e6, G_f: 210.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
+        rht_A: 1.50, rht_N: 0.65, rht_B: 0.75, rht_M: 0.75, rht_Q0: 0.720, rht_BQ: 0.0095, rht_D1: 0.030, rht_D2: 1.0,
+        rht_p_crush: 40.0e6, rht_p_lock: 1000.0e6, rht_alpha0: 1.15, rht_n_comp: 3.0, rht_betac: 0.028, rht_deltat: 0.032,
+        category: 'Concrete & Geomaterial Formulations', reference: 'Tu & Lu (2010) High Performance Concrete'
+    },
+    'Ultra-High Performance Concrete UHPC 140 (RHT)': {
+        density: 2550.0, youngs_modulus: 52.0e9, poissons_ratio: 0.21, yield_stress: 140.0e6, hardening_modulus: 0.0, failure_strain: 0.0040, tensile_failure_stress: 9.5e6,
+        jc_A: 140.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 950.0, mg_gamma0: 1.00, mg_c0: 2850.0, mg_s: 1.32,
+        fc: 140.0e6, ft: 9.5e6, G_f: 350.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
+        rht_A: 1.45, rht_N: 0.68, rht_B: 0.80, rht_M: 0.72, rht_Q0: 0.750, rht_BQ: 0.0090, rht_D1: 0.020, rht_D2: 1.0,
+        rht_p_crush: 70.0e6, rht_p_lock: 1500.0e6, rht_alpha0: 1.10, rht_n_comp: 3.0, rht_betac: 0.025, rht_deltat: 0.028,
+        category: 'Concrete & Geomaterial Formulations', reference: 'Ductal UHPC Penetration Studies'
+    },
+    'Low-Strength Blast Berm Concrete C20/25 (RHT)': {
+        density: 2300.0, youngs_modulus: 28.0e9, poissons_ratio: 0.17, yield_stress: 20.0e6, hardening_modulus: 0.0, failure_strain: 0.0040, tensile_failure_stress: 2.0e6,
+        jc_A: 20.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 850.0, mg_gamma0: 0.80, mg_c0: 2350.0, mg_s: 1.22,
+        fc: 20.0e6, ft: 2.0e6, G_f: 120.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
+        rht_A: 1.65, rht_N: 0.60, rht_B: 0.68, rht_M: 0.82, rht_Q0: 0.660, rht_BQ: 0.0110, rht_D1: 0.05, rht_D2: 1.0,
+        rht_p_crush: 10.0e6, rht_p_lock: 450.0e6, rht_alpha0: 1.30, rht_n_comp: 3.0, rht_betac: 0.035, rht_deltat: 0.040,
+        category: 'Concrete & Geomaterial Formulations', reference: 'Low-Strength Concrete Blast Berm Calibration'
+    },
+
+    // K&C Concrete Models
+    'Normal-Strength Concrete C35/45 (K&C Auto MAT_072R3)': {
+        density: 2400.0, youngs_modulus: 34.0e9, poissons_ratio: 0.18, yield_stress: 35.0e6, hardening_modulus: 0.0, failure_strain: 0.0035, tensile_failure_stress: 3.2e6,
+        jc_A: 35.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 880.0, mg_gamma0: 0.85, mg_c0: 2500.0, mg_s: 1.25,
+        fc: 35.0e6, ft: 3.2e6, G_f: 150.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
+        kc_auto_generate: true, kc_a0: 11.6e6, kc_a1: 0.45, kc_a2: 4.28e-9, kc_a0y: 5.2e6, kc_a1y: 0.45, kc_a2y: 4.28e-9, kc_a1r: 0.75, kc_a2r: 5.71e-9, kc_b1: 1.60, kc_omega: 0.50,
+        category: 'Concrete & Geomaterial Formulations', reference: 'Malvar et al., Karagozian & Case Concrete Model (MAT_072R3)'
+    },
+    'Standard Structural Concrete C30/37 (K&C Auto)': {
+        density: 2380.0, youngs_modulus: 32.0e9, poissons_ratio: 0.18, yield_stress: 30.0e6, hardening_modulus: 0.0, failure_strain: 0.0035, tensile_failure_stress: 2.8e6,
+        jc_A: 30.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 880.0, mg_gamma0: 0.85, mg_c0: 2450.0, mg_s: 1.25,
+        fc: 30.0e6, ft: 2.8e6, G_f: 140.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
+        kc_auto_generate: true, kc_a0: 10.0e6, kc_a1: 0.45, kc_a2: 4.28e-9, kc_a0y: 4.5e6, kc_a1y: 0.45, kc_a2y: 4.28e-9, kc_a1r: 0.75, kc_a2r: 5.71e-9, kc_b1: 1.60, kc_omega: 0.50,
+        category: 'Concrete & Geomaterial Formulations', reference: 'K&C MAT_072R3 Standard Concrete'
+    },
+    'High-Strength Concrete C60/75 (K&C Auto)': {
+        density: 2450.0, youngs_modulus: 39.0e9, poissons_ratio: 0.19, yield_stress: 60.0e6, hardening_modulus: 0.0, failure_strain: 0.0030, tensile_failure_stress: 4.4e6,
+        jc_A: 60.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 900.0, mg_gamma0: 0.90, mg_c0: 2600.0, mg_s: 1.28,
+        fc: 60.0e6, ft: 4.4e6, G_f: 180.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
+        kc_auto_generate: true, kc_a0: 20.0e6, kc_a1: 0.43, kc_a2: 4.00e-9, kc_a0y: 9.0e6, kc_a1y: 0.43, kc_a2y: 4.00e-9, kc_a1r: 0.72, kc_a2r: 5.50e-9, kc_b1: 1.55, kc_omega: 0.50,
+        category: 'Concrete & Geomaterial Formulations', reference: 'K&C MAT_072R3 High Strength Concrete'
+    },
+    'High-Performance Concrete C80/95 (K&C Auto)': {
+        density: 2500.0, youngs_modulus: 44.0e9, poissons_ratio: 0.20, yield_stress: 80.0e6, hardening_modulus: 0.0, failure_strain: 0.0028, tensile_failure_stress: 5.2e6,
+        jc_A: 80.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 920.0, mg_gamma0: 0.95, mg_c0: 2700.0, mg_s: 1.30,
+        fc: 80.0e6, ft: 5.2e6, G_f: 210.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
+        kc_auto_generate: true, kc_a0: 26.5e6, kc_a1: 0.42, kc_a2: 3.80e-9, kc_a0y: 12.0e6, kc_a1y: 0.42, kc_a2y: 3.80e-9, kc_a1r: 0.70, kc_a2r: 5.20e-9, kc_b1: 1.50, kc_omega: 0.50,
+        category: 'Concrete & Geomaterial Formulations', reference: 'K&C MAT_072R3 High Performance Concrete'
+    },
+    'Ultra-High Performance Concrete UHPC 140 (K&C Auto)': {
+        density: 2550.0, youngs_modulus: 52.0e9, poissons_ratio: 0.21, yield_stress: 140.0e6, hardening_modulus: 0.0, failure_strain: 0.0040, tensile_failure_stress: 9.5e6,
+        jc_A: 140.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 950.0, mg_gamma0: 1.00, mg_c0: 2850.0, mg_s: 1.32,
+        fc: 140.0e6, ft: 9.5e6, G_f: 350.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
+        kc_auto_generate: true, kc_a0: 46.0e6, kc_a1: 0.40, kc_a2: 3.50e-9, kc_a0y: 21.0e6, kc_a1y: 0.40, kc_a2y: 3.50e-9, kc_a1r: 0.68, kc_a2r: 4.80e-9, kc_b1: 1.40, kc_omega: 0.50,
+        category: 'Concrete & Geomaterial Formulations', reference: 'K&C MAT_072R3 UHPC Calibration'
+    },
+
+    // CSCM Concrete Models
+    'Normal-Strength Concrete C35/45 (CSCM MAT_159 Standard)': {
+        density: 2400.0, youngs_modulus: 34.0e9, poissons_ratio: 0.18, yield_stress: 35.0e6, hardening_modulus: 0.0, failure_strain: 0.0035, tensile_failure_stress: 3.2e6,
+        jc_A: 35.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 880.0, mg_gamma0: 0.85, mg_c0: 2500.0, mg_s: 1.25,
+        fc: 35.0e6, ft: 3.2e6, G_f: 150.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
+        cscm_alpha: 14.0e6, cscm_theta: 0.15, cscm_lambda: 10.5e6, cscm_beta: 2.85e-9, cscm_R: 5.0, cscm_X0: 87.5e6, cscm_W: 0.05, cscm_D1: 2.5e-9, cscm_D2: 3.0e-17,
+        category: 'Concrete & Geomaterial Formulations', reference: 'Murray, Y. D. (2007) Users Manual for LS-DYNA Concrete Model MAT_159'
+    },
+    'Standard Structural Concrete C30/37 (CSCM)': {
+        density: 2380.0, youngs_modulus: 32.0e9, poissons_ratio: 0.18, yield_stress: 30.0e6, hardening_modulus: 0.0, failure_strain: 0.0035, tensile_failure_stress: 2.8e6,
+        jc_A: 30.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 880.0, mg_gamma0: 0.85, mg_c0: 2450.0, mg_s: 1.25,
+        fc: 30.0e6, ft: 2.8e6, G_f: 140.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
+        cscm_alpha: 12.0e6, cscm_theta: 0.15, cscm_lambda: 9.0e6, cscm_beta: 2.85e-9, cscm_R: 5.0, cscm_X0: 75.0e6, cscm_W: 0.05, cscm_D1: 2.5e-9, cscm_D2: 3.0e-17,
+        category: 'Concrete & Geomaterial Formulations', reference: 'FHWA-HRT-05-062 CSCM Concrete Calibration'
+    },
+    'High-Strength Concrete C60/75 (CSCM)': {
+        density: 2450.0, youngs_modulus: 39.0e9, poissons_ratio: 0.19, yield_stress: 60.0e6, hardening_modulus: 0.0, failure_strain: 0.0030, tensile_failure_stress: 4.4e6,
+        jc_A: 60.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 900.0, mg_gamma0: 0.90, mg_c0: 2600.0, mg_s: 1.28,
+        fc: 60.0e6, ft: 4.4e6, G_f: 180.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
+        cscm_alpha: 24.0e6, cscm_theta: 0.14, cscm_lambda: 18.0e6, cscm_beta: 2.70e-9, cscm_R: 5.0, cscm_X0: 150.0e6, cscm_W: 0.045, cscm_D1: 2.2e-9, cscm_D2: 3.0e-17,
+        category: 'Concrete & Geomaterial Formulations', reference: 'CSCM High-Strength Concrete Testing'
+    },
+    'High-Performance Concrete C80/95 (CSCM)': {
+        density: 2500.0, youngs_modulus: 44.0e9, poissons_ratio: 0.20, yield_stress: 80.0e6, hardening_modulus: 0.0, failure_strain: 0.0028, tensile_failure_stress: 5.2e6,
+        jc_A: 80.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 920.0, mg_gamma0: 0.95, mg_c0: 2700.0, mg_s: 1.30,
+        fc: 80.0e6, ft: 5.2e6, G_f: 210.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
+        cscm_alpha: 32.0e6, cscm_theta: 0.13, cscm_lambda: 24.0e6, cscm_beta: 2.60e-9, cscm_R: 5.0, cscm_X0: 200.0e6, cscm_W: 0.040, cscm_D1: 2.0e-9, cscm_D2: 3.0e-17,
+        category: 'Concrete & Geomaterial Formulations', reference: 'CSCM High Performance Concrete Parameters'
+    },
+    'Ultra-High Performance Concrete UHPC 140 (CSCM)': {
+        density: 2550.0, youngs_modulus: 52.0e9, poissons_ratio: 0.21, yield_stress: 140.0e6, hardening_modulus: 0.0, failure_strain: 0.0040, tensile_failure_stress: 9.5e6,
+        jc_A: 140.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 950.0, mg_gamma0: 1.00, mg_c0: 2850.0, mg_s: 1.32,
+        fc: 140.0e6, ft: 9.5e6, G_f: 350.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
+        cscm_alpha: 56.0e6, cscm_theta: 0.12, cscm_lambda: 42.0e6, cscm_beta: 2.50e-9, cscm_R: 5.0, cscm_X0: 350.0e6, cscm_W: 0.035, cscm_D1: 1.8e-9, cscm_D2: 3.0e-17,
+        category: 'Concrete & Geomaterial Formulations', reference: 'CSCM UHPC Calibration'
+    },
+
+    // ---------------------------------------------------------
+    // 12. Ideal Gas Presets (Eulerian CFD)
+    // ---------------------------------------------------------
+    'Air (Standard STP, gamma=1.4)': {
+        density: 1.225, youngs_modulus: 1.42e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 288.15, Cp: 1005.0, mg_gamma0: 0.40, mg_c0: 340.0, mg_s: 1.00,
+        atm_pressure: 101325.0, atm_temperature: 288.15, gamma: 1.40,
+        category: 'Ideal Gas Presets', reference: 'Standard Atmosphere (ISO 2533 / NASA)'
+    },
+    'Helium (Noble, gamma=1.667)': {
+        density: 0.1786, youngs_modulus: 1.69e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 288.15, Cp: 5193.0, mg_gamma0: 0.667, mg_c0: 1007.0, mg_s: 1.00,
+        atm_pressure: 101325.0, atm_temperature: 288.15, gamma: 1.667,
+        category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Helium Thermophysical Properties)'
+    },
+    'Argon (Noble, gamma=1.667)': {
+        density: 1.784, youngs_modulus: 1.69e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 288.15, Cp: 520.0, mg_gamma0: 0.667, mg_c0: 319.0, mg_s: 1.00,
+        atm_pressure: 101325.0, atm_temperature: 288.15, gamma: 1.667,
+        category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Argon Thermophysical Properties)'
+    },
+    'Carbon Dioxide (CO2, gamma=1.30)': {
+        density: 1.977, youngs_modulus: 1.32e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 288.15, Cp: 844.0, mg_gamma0: 0.30, mg_c0: 258.0, mg_s: 1.00,
+        atm_pressure: 101325.0, atm_temperature: 288.15, gamma: 1.30,
+        category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Carbon Dioxide Properties)'
+    },
+    'Methane (CH4, gamma=1.32)': {
+        density: 0.717, youngs_modulus: 1.34e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 288.15, Cp: 2220.0, mg_gamma0: 0.32, mg_c0: 430.0, mg_s: 1.00,
+        atm_pressure: 101325.0, atm_temperature: 288.15, gamma: 1.32,
+        category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Methane Properties)'
+    },
+    'Hydrogen (H2, gamma=1.41)': {
+        density: 0.0899, youngs_modulus: 1.43e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 288.15, Cp: 14300.0, mg_gamma0: 0.41, mg_c0: 1290.0, mg_s: 1.00,
+        atm_pressure: 101325.0, atm_temperature: 288.15, gamma: 1.41,
+        category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Hydrogen Properties)'
+    },
+
+    // ---------------------------------------------------------
+    // 13. JWL Detonation Gas Presets (Eulerian CFD)
+    // ---------------------------------------------------------
+    'TNT (Trinitrotoluene)': {
+        density: 1630.0, youngs_modulus: 6.0e9, poissons_ratio: 0.35, yield_stress: 20.0e6, hardening_modulus: 120.0e6, failure_strain: 0.07, tensile_failure_stress: 5.0e6,
+        jc_A: 20.0e6, jc_B: 60.0e6, jc_n: 0.38, jc_C: 0.010, jc_m: 1.00, T_melt: 354.0, T_room: 293.0, Cp: 1260.0, mg_gamma0: 0.92, mg_c0: 2470.0, mg_s: 1.59,
+        composition: 'TNT', rho: 1630.0, detonation_energy: 4.29e6, det_vel: 6930.0, jwl_A: 373.77e9, jwl_B: 3.747e9, jwl_R1: 4.15, jwl_R2: 0.90, jwl_omega: 0.35,
+        ideal_gamma: 1.40, ideal_rho_0: 1630.0, ideal_e_0: 4.29e6,
+        category: 'JWL Detonation Gas Presets', reference: 'Dobratz, B. M. LLNL Explosives Handbook UCRL-52997'
+    },
+    'C-4 (Composition 4)': {
+        density: 1601.0, youngs_modulus: 5.5e9, poissons_ratio: 0.36, yield_stress: 15.0e6, hardening_modulus: 80.0e6, failure_strain: 0.10, tensile_failure_stress: 4.0e6,
+        jc_A: 15.0e6, jc_B: 50.0e6, jc_n: 0.35, jc_C: 0.010, jc_m: 1.00, T_melt: 450.0, T_room: 293.0, Cp: 1300.0, mg_gamma0: 0.90, mg_c0: 2500.0, mg_s: 1.60,
+        composition: 'C-4', rho: 1601.0, detonation_energy: 5.60e6, det_vel: 8193.0, jwl_A: 596.22e9, jwl_B: 13.75e9, jwl_R1: 4.50, jwl_R2: 1.50, jwl_omega: 0.32,
+        ideal_gamma: 1.40, ideal_rho_0: 1601.0, ideal_e_0: 5.60e6,
+        category: 'JWL Detonation Gas Presets', reference: 'Lee et al., JWL Equation of State Parameters for High Explosives'
+    },
+    'Composition B (Comp B)': {
+        density: 1717.0, youngs_modulus: 7.2e9, poissons_ratio: 0.34, yield_stress: 35.0e6, hardening_modulus: 70.0e6, failure_strain: 0.15, tensile_failure_stress: 40.0e6,
+        jc_A: 35.0e6, jc_B: 70.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 354.0, T_room: 293.0, Cp: 1050.0, mg_gamma0: 0.72, mg_c0: 2450.0, mg_s: 1.95,
+        composition: 'Comp B', rho: 1717.0, detonation_energy: 5.19e6, det_vel: 7980.0, jwl_A: 524.23e9, jwl_B: 7.678e9, jwl_R1: 4.20, jwl_R2: 1.10, jwl_omega: 0.34,
+        ideal_gamma: 1.40, ideal_rho_0: 1717.0, ideal_e_0: 5.19e6,
+        category: 'JWL Detonation Gas Presets', reference: 'LLNL Explosives Handbook UCRL-52997'
+    },
+    'PETN (Pentaerythritol Tetranitrate)': {
+        density: 1770.0, youngs_modulus: 13.5e9, poissons_ratio: 0.30, yield_stress: 38.0e6, hardening_modulus: 240.0e6, failure_strain: 0.04, tensile_failure_stress: 9.0e6,
+        jc_A: 38.0e6, jc_B: 110.0e6, jc_n: 0.32, jc_C: 0.010, jc_m: 1.00, T_melt: 414.0, T_room: 293.0, Cp: 1120.0, mg_gamma0: 1.05, mg_c0: 2800.0, mg_s: 1.65,
+        composition: 'PETN', rho: 1770.0, detonation_energy: 6.00e6, det_vel: 8300.0, jwl_A: 625.3e9, jwl_B: 23.29e9, jwl_R1: 5.25, jwl_R2: 1.60, jwl_omega: 0.28,
+        ideal_gamma: 1.40, ideal_rho_0: 1770.0, ideal_e_0: 6.00e6,
+        category: 'JWL Detonation Gas Presets', reference: 'LLNL Explosives Handbook UCRL-52997'
+    },
+    'HMX (Octogen / EDC37)': {
+        density: 1890.0, youngs_modulus: 18.0e9, poissons_ratio: 0.28, yield_stress: 55.0e6, hardening_modulus: 380.0e6, failure_strain: 0.03, tensile_failure_stress: 14.0e6,
+        jc_A: 55.0e6, jc_B: 160.0e6, jc_n: 0.28, jc_C: 0.010, jc_m: 1.00, T_melt: 550.0, T_room: 293.0, Cp: 1020.0, mg_gamma0: 1.15, mg_c0: 3000.0, mg_s: 1.70,
+        composition: 'HMX', rho: 1890.0, detonation_energy: 6.20e6, det_vel: 9110.0, jwl_A: 778.3e9, jwl_B: 7.071e9, jwl_R1: 4.20, jwl_R2: 1.00, jwl_omega: 0.30,
+        ideal_gamma: 1.40, ideal_rho_0: 1890.0, ideal_e_0: 6.20e6,
+        category: 'JWL Detonation Gas Presets', reference: 'LASL Explosive Property Data'
+    },
+    'RDX (Hexogen / Cyclonite)': {
+        density: 1800.0, youngs_modulus: 15.0e9, poissons_ratio: 0.29, yield_stress: 42.0e6, hardening_modulus: 270.0e6, failure_strain: 0.03, tensile_failure_stress: 10.5e6,
+        jc_A: 42.0e6, jc_B: 130.0e6, jc_n: 0.31, jc_C: 0.010, jc_m: 1.00, T_melt: 477.0, T_room: 293.0, Cp: 1070.0, mg_gamma0: 1.10, mg_c0: 2840.0, mg_s: 1.67,
+        composition: 'RDX', rho: 1800.0, detonation_energy: 5.80e6, det_vel: 8750.0, jwl_A: 611.3e9, jwl_B: 10.65e9, jwl_R1: 4.40, jwl_R2: 1.20, jwl_omega: 0.32,
+        ideal_gamma: 1.40, ideal_rho_0: 1800.0, ideal_e_0: 5.80e6,
+        category: 'JWL Detonation Gas Presets', reference: 'LLNL Explosives Handbook UCRL-52997'
+    },
+    'PBX 9501': {
+        density: 1830.0, youngs_modulus: 9.0e9, poissons_ratio: 0.35, yield_stress: 45.0e6, hardening_modulus: 90.0e6, failure_strain: 0.10, tensile_failure_stress: 55.0e6,
+        jc_A: 45.0e6, jc_B: 90.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 550.0, T_room: 293.0, Cp: 1080.0, mg_gamma0: 0.68, mg_c0: 2600.0, mg_s: 1.90,
+        composition: 'PBX 9501', rho: 1830.0, detonation_energy: 5.50e6, det_vel: 8800.0, jwl_A: 852.4e9, jwl_B: 18.02e9, jwl_R1: 4.55, jwl_R2: 1.30, jwl_omega: 0.38,
+        ideal_gamma: 1.40, ideal_rho_0: 1830.0, ideal_e_0: 5.50e6,
+        category: 'JWL Detonation Gas Presets', reference: 'LASL Explosive Property Data'
+    },
+    'PBX 9502': {
+        density: 1895.0, youngs_modulus: 10.0e9, poissons_ratio: 0.35, yield_stress: 50.0e6, hardening_modulus: 100.0e6, failure_strain: 0.10, tensile_failure_stress: 60.0e6,
+        jc_A: 50.0e6, jc_B: 100.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 623.0, T_room: 293.0, Cp: 1000.0, mg_gamma0: 0.65, mg_c0: 2050.0, mg_s: 2.12,
+        composition: 'PBX 9502', rho: 1895.0, detonation_energy: 4.20e6, det_vel: 7720.0, jwl_A: 559.0e9, jwl_B: 8.44e9, jwl_R1: 4.40, jwl_R2: 1.20, jwl_omega: 0.30,
+        ideal_gamma: 1.40, ideal_rho_0: 1895.0, ideal_e_0: 4.20e6,
+        category: 'JWL Detonation Gas Presets', reference: 'LLNL Explosives Handbook UCRL-52997'
+    },
+    'LX-14': {
+        density: 1830.0, youngs_modulus: 8.8e9, poissons_ratio: 0.35, yield_stress: 44.0e6, hardening_modulus: 88.0e6, failure_strain: 0.10, tensile_failure_stress: 52.0e6,
+        jc_A: 44.0e6, jc_B: 88.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 550.0, T_room: 293.0, Cp: 1060.0, mg_gamma0: 0.70, mg_c0: 2620.0, mg_s: 1.88,
+        composition: 'LX-14', rho: 1830.0, detonation_energy: 5.95e6, det_vel: 8830.0, jwl_A: 826.1e9, jwl_B: 17.24e9, jwl_R1: 4.55, jwl_R2: 1.32, jwl_omega: 0.38,
+        ideal_gamma: 1.40, ideal_rho_0: 1830.0, ideal_e_0: 5.95e6,
+        category: 'JWL Detonation Gas Presets', reference: 'LLNL Explosives Handbook'
+    },
+    'LX-17': {
+        density: 1905.0, youngs_modulus: 10.5e9, poissons_ratio: 0.35, yield_stress: 52.0e6, hardening_modulus: 105.0e6, failure_strain: 0.10, tensile_failure_stress: 62.0e6,
+        jc_A: 52.0e6, jc_B: 105.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 623.0, T_room: 293.0, Cp: 990.0, mg_gamma0: 0.64, mg_c0: 2020.0, mg_s: 2.15,
+        composition: 'LX-17', rho: 1905.0, detonation_energy: 4.10e6, det_vel: 7630.0, jwl_A: 535.0e9, jwl_B: 8.00e9, jwl_R1: 4.40, jwl_R2: 1.20, jwl_omega: 0.30,
+        ideal_gamma: 1.40, ideal_rho_0: 1905.0, ideal_e_0: 4.10e6,
+        category: 'JWL Detonation Gas Presets', reference: 'LLNL Explosives Handbook'
+    },
+    'ANFO (Ammonium Nitrate / Fuel Oil)': {
+        density: 880.0, youngs_modulus: 1.5e9, poissons_ratio: 0.40, yield_stress: 2.0e6, hardening_modulus: 10.0e6, failure_strain: 0.25, tensile_failure_stress: 0.5e6,
+        jc_A: 2.0e6, jc_B: 8.0e6, jc_n: 0.45, jc_C: 0.020, jc_m: 1.00, T_melt: 442.0, T_room: 293.0, Cp: 1600.0, mg_gamma0: 0.50, mg_c0: 1500.0, mg_s: 1.40,
+        composition: 'ANFO', rho: 880.0, detonation_energy: 3.70e6, det_vel: 4560.0, jwl_A: 49.46e9, jwl_B: 1.891e9, jwl_R1: 3.90, jwl_R2: 1.10, jwl_omega: 0.33,
+        ideal_gamma: 1.40, ideal_rho_0: 880.0, ideal_e_0: 3.70e6,
+        category: 'JWL Detonation Gas Presets', reference: 'Commercial Mining Explosives Data'
+    },
+    'Tritonal (80% TNT / 20% Al)': {
+        density: 1720.0, youngs_modulus: 8.0e9, poissons_ratio: 0.33, yield_stress: 25.0e6, hardening_modulus: 150.0e6, failure_strain: 0.08, tensile_failure_stress: 6.0e6,
+        jc_A: 25.0e6, jc_B: 80.0e6, jc_n: 0.35, jc_C: 0.010, jc_m: 1.00, T_melt: 354.0, T_room: 293.0, Cp: 1180.0, mg_gamma0: 0.95, mg_c0: 2550.0, mg_s: 1.62,
+        composition: 'Tritonal', rho: 1720.0, detonation_energy: 5.40e6, det_vel: 6700.0, jwl_A: 400.0e9, jwl_B: 4.50e9, jwl_R1: 4.10, jwl_R2: 0.95, jwl_omega: 0.32,
+        ideal_gamma: 1.40, ideal_rho_0: 1720.0, ideal_e_0: 5.40e6,
+        category: 'JWL Detonation Gas Presets', reference: 'Air Force Armament Laboratory Tritonal Data'
+    },
+    'Pentolite 50/50': {
+        density: 1650.0, youngs_modulus: 9.0e9, poissons_ratio: 0.32, yield_stress: 28.0e6, hardening_modulus: 160.0e6, failure_strain: 0.06, tensile_failure_stress: 7.0e6,
+        jc_A: 28.0e6, jc_B: 85.0e6, jc_n: 0.33, jc_C: 0.010, jc_m: 1.00, T_melt: 373.0, T_room: 293.0, Cp: 1200.0, mg_gamma0: 0.98, mg_c0: 2600.0, mg_s: 1.60,
+        composition: 'Pentolite 50/50', rho: 1650.0, detonation_energy: 5.10e6, det_vel: 7470.0, jwl_A: 540.0e9, jwl_B: 9.20e9, jwl_R1: 4.50, jwl_R2: 1.40, jwl_omega: 0.35,
+        ideal_gamma: 1.40, ideal_rho_0: 1650.0, ideal_e_0: 5.10e6,
+        category: 'JWL Detonation Gas Presets', reference: 'LASL Explosive Property Data'
+    },
+    'Semtex 1A': {
+        density: 1540.0, youngs_modulus: 4.5e9, poissons_ratio: 0.38, yield_stress: 12.0e6, hardening_modulus: 60.0e6, failure_strain: 0.12, tensile_failure_stress: 3.5e6,
+        jc_A: 12.0e6, jc_B: 40.0e6, jc_n: 0.36, jc_C: 0.015, jc_m: 1.00, T_melt: 414.0, T_room: 293.0, Cp: 1350.0, mg_gamma0: 0.88, mg_c0: 2380.0, mg_s: 1.64,
+        composition: 'Semtex 1A', rho: 1540.0, detonation_energy: 5.40e6, det_vel: 7900.0, jwl_A: 510.0e9, jwl_B: 11.50e9, jwl_R1: 4.40, jwl_R2: 1.30, jwl_omega: 0.32,
+        ideal_gamma: 1.40, ideal_rho_0: 1540.0, ideal_e_0: 5.40e6,
+        category: 'JWL Detonation Gas Presets', reference: 'Explosia a.s. Technical Data'
     }
 };
+
+export function getConstitutiveModels(): string[] {
+    return [
+        'Linear Elastic',
+        'Hypoelastic',
+        'Johnson-Cook + Mie-Grüneisen',
+        'CREST Reactive Burn',
+        'RHT Concrete',
+        'Karagozian & Case (K&C)',
+        'CSCM Concrete',
+        'Ideal Gas',
+        'JWL Detonation Gas'
+    ];
+}
+
+export function getPresetsForConstitutiveModel(modelName: string): string[] {
+    switch (modelName) {
+        case 'Linear Elastic':
+            return [
+                'Structural Steel (A36)',
+                'Aluminum 6061-T6 (Elastic)',
+                'Titanium Ti-6Al-4V (Elastic)',
+                'Structural Concrete C30 (Elastic)',
+                'Tempered Glass (Elastic)',
+                'Custom'
+            ];
+        case 'CREST Reactive Burn':
+            return [
+                'PBX 9502 (TATB/Kel-F 95/5) - CREST Davis',
+                'EDC37 (HMX/NC/K10 91/1/8) - CREST Davis',
+                'PBX 9501 (HMX/Estane 95/5) - CREST Davis',
+                'Composition B (RDX/TNT 60/40) - CREST Davis',
+                'LX-17 (TATB/Kel-F 92.5/7.5) - CREST Davis',
+                'Custom'
+            ];
+        case 'RHT Concrete':
+            return [
+                'Normal-Strength Concrete C35/45 (RHT Default)',
+                'Standard Structural Concrete C30/37 (RHT)',
+                'High-Strength Concrete C60/75 (RHT)',
+                'High-Performance Concrete C80/95 (RHT)',
+                'Ultra-High Performance Concrete UHPC 140 (RHT)',
+                'Low-Strength Blast Berm Concrete C20/25 (RHT)',
+                'Custom'
+            ];
+        case 'Karagozian & Case (K&C)':
+            return [
+                'Normal-Strength Concrete C35/45 (K&C Auto MAT_072R3)',
+                'Standard Structural Concrete C30/37 (K&C Auto)',
+                'High-Strength Concrete C60/75 (K&C Auto)',
+                'High-Performance Concrete C80/95 (K&C Auto)',
+                'Ultra-High Performance Concrete UHPC 140 (K&C Auto)',
+                'Custom'
+            ];
+        case 'CSCM Concrete':
+            return [
+                'Normal-Strength Concrete C35/45 (CSCM MAT_159 Standard)',
+                'Standard Structural Concrete C30/37 (CSCM)',
+                'High-Strength Concrete C60/75 (CSCM)',
+                'High-Performance Concrete C80/95 (CSCM)',
+                'Ultra-High Performance Concrete UHPC 140 (CSCM)',
+                'Custom'
+            ];
+        case 'Ideal Gas':
+            return [
+                'Air (Standard STP, gamma=1.4)',
+                'Helium (Noble, gamma=1.667)',
+                'Argon (Noble, gamma=1.667)',
+                'Carbon Dioxide (CO2, gamma=1.30)',
+                'Methane (CH4, gamma=1.32)',
+                'Hydrogen (H2, gamma=1.41)',
+                'Custom'
+            ];
+        case 'JWL Detonation Gas':
+            return [
+                'TNT (Trinitrotoluene)',
+                'C-4 (Composition 4)',
+                'Composition B (Comp B)',
+                'PETN (Pentaerythritol Tetranitrate)',
+                'HMX (Octogen / EDC37)',
+                'RDX (Hexogen / Cyclonite)',
+                'PBX 9501',
+                'PBX 9502',
+                'LX-14',
+                'LX-17',
+                'ANFO (Ammonium Nitrate / Fuel Oil)',
+                'Tritonal (80% TNT / 20% Al)',
+                'Pentolite 50/50',
+                'Semtex 1A',
+                'Custom'
+            ];
+        case 'Hypoelastic':
+        case 'Johnson-Cook + Mie-Grüneisen':
+        default:
+            return MPM_MATERIAL_PRESET_NAMES.filter(name =>
+                !name.includes('CREST') &&
+                !name.includes('(RHT') &&
+                !name.includes('(K&C') &&
+                !name.includes('(CSCM') &&
+                !name.includes('gamma=') &&
+                !['TNT (Trinitrotoluene)', 'C-4 (Composition 4)', 'PETN (Pentaerythritol Tetranitrate)', 'LX-14', 'ANFO (Ammonium Nitrate / Fuel Oil)', 'Tritonal (80% TNT / 20% Al)', 'Pentolite 50/50', 'Semtex 1A'].includes(name)
+            ).concat(['Custom']);
+    }
+}
+
+export function getDefaultPresetForModel(modelName: string): string {
+    const list = getPresetsForConstitutiveModel(modelName);
+    return list.length > 0 ? list[0] : 'Custom';
+}

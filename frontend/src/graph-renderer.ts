@@ -4,7 +4,7 @@ import { Telemetry3DViewport } from './telemetry-3d-viewport.js';
 import { validateSimulationState } from './validation.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
 import { CustomDialog } from './custom-dialog.js';
-import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_CATEGORIES, MPM_MATERIAL_PARAM_INFO } from './mpm-presets.js';
+import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_CATEGORIES, MPM_MATERIAL_PARAM_INFO, getConstitutiveModels, getPresetsForConstitutiveModel, getDefaultPresetForModel } from './mpm-presets.js';
 import { getParameterInfo, getNodeDefinition, getNodeDescription as getMasterNodeDescription, showParameterPopover } from './parameter-definitions.js';
 
 const DEFAULT_QUANTITY_RANGES: Record<string, [number, number]> = {
@@ -1184,12 +1184,15 @@ export class GraphRenderer {
             {
                 name: 'Material',
                 items: [
-                    { label: 'Fluid / Explosive Material (Air / JWL / Ideal Gas)', type: 'Material' },
-                    { label: 'Solid Structural Material (Hypoelastic)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Hypoelastic' } },
-                    { label: 'Solid Structural Material (Johnson-Cook EOS)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Johnson-Cook + Mie-Grüneisen' } },
-                    { label: 'Concrete Material (RHT Model)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'RHT Concrete', preset: 'Standard Structural Concrete C30/37 (30 MPa)' } },
-                    { label: 'Concrete Material (K&C Model)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'Karagozian & Case (K&C)', preset: 'Standard Structural Concrete C30/37 (30 MPa)' } },
-                    { label: 'Concrete Material (CSCM Model)', type: 'MPMMaterialSteel', defaultParams: { material_model: 'CSCM Concrete', preset: 'Standard Structural Concrete C30/37 (30 MPa)' } }
+                    { label: 'Universal Material (Linear Elastic)', type: 'Material', defaultParams: { material_model: 'Linear Elastic' } },
+                    { label: 'CREST-Davis High Explosive (MPM)', type: 'Material', defaultParams: { material_model: 'CREST Reactive Burn', preset: 'PBX 9502 (95% TATB, 5% Kel-F)' } },
+                    { label: 'Solid Structural Material (Hypoelastic)', type: 'Material', defaultParams: { material_model: 'Hypoelastic', preset: 'Structural Steel (A36)' } },
+                    { label: 'Solid Structural Material (Johnson-Cook EOS)', type: 'Material', defaultParams: { material_model: 'Johnson-Cook + Mie-Grüneisen', preset: 'High-Strength Armor Steel (4340)' } },
+                    { label: 'Concrete Material (RHT Model)', type: 'Material', defaultParams: { material_model: 'RHT Concrete', preset: 'Standard Structural Concrete C30/37 (30 MPa)' } },
+                    { label: 'Concrete Material (K&C Model)', type: 'Material', defaultParams: { material_model: 'Karagozian & Case (K&C)', preset: 'Standard Structural Concrete C30/37 (30 MPa)' } },
+                    { label: 'Concrete Material (CSCM Model)', type: 'Material', defaultParams: { material_model: 'CSCM Concrete', preset: 'Standard Structural Concrete C30/37 (30 MPa)' } },
+                    { label: 'Ideal Gas Fluid (Air / Gas)', type: 'Material', defaultParams: { material_model: 'Ideal Gas', preset: 'Air (STP, gamma=1.4)' } },
+                    { label: 'JWL Detonation Gas (CFD)', type: 'Material', defaultParams: { material_model: 'JWL Detonation Gas', preset: 'TNT' } }
                 ]
             },
             {
@@ -1460,12 +1463,107 @@ export class GraphRenderer {
                 right_bc: 'Transmitting'
             };
             case 'Material': return {
-                material_type: 'Air',
-                // Air params
+                material_model: 'Linear Elastic',
+                preset: 'Structural Steel (A36)',
+                density: 7850.0,
+                youngs_modulus: 200.0e9,
+                poissons_ratio: 0.29,
+                yield_stress: 250.0e6,
+                hardening_modulus: 1.0e9,
+                failure_strain: 0.20,
+                tensile_failure_stress: 400.0e6,
+                enable_strain_erosion: false,
+                erosion_strain: 0.20,
+                enable_stress_erosion: false,
+                erosion_stress: 400.0e6,
+                enable_timestep_erosion: false,
+                timestep_erosion_factor: 0.10,
+                jc_A: 250.0e6,
+                jc_B: 510.0e6,
+                jc_n: 0.26,
+                jc_C: 0.014,
+                jc_m: 1.03,
+                T_melt: 1793.0,
+                T_room: 293.0,
+                Cp: 486.0,
+                mg_gamma0: 1.81,
+                mg_c0: 4570.0,
+                mg_s: 1.49,
+                // Davis Solid Reactant
+                davis_c0: 2050.0,
+                davis_s1: 2.12,
+                davis_gamma0: 0.65,
+                davis_cv: 1000.0,
+                davis_t0: 293.0,
+                davis_rho0: 1895.0,
+                // Davis Product Gas
+                davis_a: 2.85,
+                davis_b: 1.10,
+                davis_k: 1.35,
+                davis_vc: 0.65,
+                davis_pc: 12.5e9,
+                davis_q_det: 3.90e6,
+                // CREST Kinetics
+                crest_b1: 1.2e7,
+                crest_c1: 0.67,
+                crest_m1: 2.5,
+                crest_b2: 3.5e6,
+                crest_c2: 0.50,
+                crest_c3: 0.67,
+                crest_m2: 1.5,
+                crest_s0: 100.0,
+                crest_s_threshold: 45.0,
+                // Concrete Base
+                fc: 35.0e6,
+                ft: 3.2e6,
+                G_f: 150.0,
+                moisture_content: 0.0,
+                dif_cap_compression: 2.5,
+                dif_cap_tension: 8.0,
+                // RHT
+                rht_A: 1.60,
+                rht_N: 0.61,
+                rht_B: 0.70,
+                rht_M: 0.80,
+                rht_Q0: 0.680,
+                rht_BQ: 0.0105,
+                rht_D1: 0.04,
+                rht_D2: 1.0,
+                rht_p_crush: 17.0e6,
+                rht_p_lock: 600.0e6,
+                rht_alpha0: 1.22,
+                rht_n_comp: 3.0,
+                rht_betac: 0.032,
+                rht_deltat: 0.036,
+                // K&C
+                kc_auto_generate: true,
+                kc_a0: 11.6e6,
+                kc_a1: 0.45,
+                kc_a2: 4.28e-9,
+                kc_a0y: 5.2e6,
+                kc_a1y: 0.45,
+                kc_a2y: 4.28e-9,
+                kc_a1r: 0.75,
+                kc_a2r: 5.71e-9,
+                kc_b1: 1.60,
+                kc_omega: 0.50,
+                // CSCM
+                cscm_alpha: 14.0e6,
+                cscm_theta: 0.15,
+                cscm_lambda: 10.5e6,
+                cscm_beta: 2.85e-9,
+                cscm_R: 5.0,
+                cscm_X0: 87.5e6,
+                cscm_W: 0.05,
+                cscm_D1: 2.5e-9,
+                cscm_D2: 3.0e-17,
+                directional_crack_band: false,
+                nonlocal_radius: 0.0,
+                // Ideal Gas CFD
                 atm_pressure: 101325.0,
-                atm_temperature: 288.0,
+                atm_temperature: 288.15,
                 gamma: 1.4,
-                // JWL params
+                // JWL CFD
                 composition: 'TNT',
                 rho: 1630,
                 detonation_energy: 4290000,
@@ -1475,7 +1573,6 @@ export class GraphRenderer {
                 jwl_R1: 4.15,
                 jwl_R2: 0.90,
                 jwl_omega: 0.35,
-                // Ideal Gas Charge params
                 ideal_gamma: 1.4,
                 ideal_rho_0: 1630,
                 ideal_e_0: 4290000
@@ -1840,11 +1937,11 @@ export class GraphRenderer {
                 angular_vel_x: 0.0, angular_vel_y: 0.0, angular_vel_z: 0.0
             };
             case 'MPMMaterialSteel': return {
-                material_model: 'Hypoelastic',
+                material_model: 'Linear Elastic',
                 preset: 'Structural Steel (A36)',
                 density: 7850.0,
                 youngs_modulus: 200.0e9,
-                poissons_ratio: 0.26,
+                poissons_ratio: 0.29,
                 yield_stress: 250.0e6,
                 hardening_modulus: 1.0e9,
                 failure_strain: 0.20,
@@ -1866,8 +1963,93 @@ export class GraphRenderer {
                 mg_gamma0: 1.81,
                 mg_c0: 4570.0,
                 mg_s: 1.49,
+                // Davis Solid Reactant
+                davis_c0: 2050.0,
+                davis_s1: 2.12,
+                davis_gamma0: 0.65,
+                davis_cv: 1000.0,
+                davis_t0: 293.0,
+                davis_rho0: 1895.0,
+                // Davis Product Gas
+                davis_a: 2.85,
+                davis_b: 1.10,
+                davis_k: 1.35,
+                davis_vc: 0.65,
+                davis_pc: 12.5e9,
+                davis_q_det: 3.90e6,
+                // CREST Kinetics
+                crest_b1: 1.2e7,
+                crest_c1: 0.67,
+                crest_m1: 2.5,
+                crest_b2: 3.5e6,
+                crest_c2: 0.50,
+                crest_c3: 0.67,
+                crest_m2: 1.5,
+                crest_s0: 100.0,
+                crest_s_threshold: 45.0,
+                // Concrete Base
+                fc: 35.0e6,
+                ft: 3.2e6,
+                G_f: 150.0,
+                moisture_content: 0.0,
+                dif_cap_compression: 2.5,
+                dif_cap_tension: 8.0,
+                // RHT
+                rht_A: 1.60,
+                rht_N: 0.61,
+                rht_B: 0.70,
+                rht_M: 0.80,
+                rht_Q0: 0.680,
+                rht_BQ: 0.0105,
+                rht_D1: 0.04,
+                rht_D2: 1.0,
+                rht_p_crush: 17.0e6,
+                rht_p_lock: 600.0e6,
+                rht_alpha0: 1.22,
+                rht_n_comp: 3.0,
+                rht_betac: 0.032,
+                rht_deltat: 0.036,
+                // K&C
+                kc_auto_generate: true,
+                kc_a0: 11.6e6,
+                kc_a1: 0.45,
+                kc_a2: 4.28e-9,
+                kc_a0y: 5.2e6,
+                kc_a1y: 0.45,
+                kc_a2y: 4.28e-9,
+                kc_a1r: 0.75,
+                kc_a2r: 5.71e-9,
+                kc_b1: 1.60,
+                kc_omega: 0.50,
+                // CSCM
+                cscm_alpha: 14.0e6,
+                cscm_theta: 0.15,
+                cscm_lambda: 10.5e6,
+                cscm_beta: 2.85e-9,
+                cscm_R: 5.0,
+                cscm_X0: 87.5e6,
+                cscm_W: 0.05,
+                cscm_D1: 2.5e-9,
+                cscm_D2: 3.0e-17,
                 directional_crack_band: false,
-                nonlocal_radius: 0.0
+                nonlocal_radius: 0.0,
+                // Ideal Gas CFD
+                atm_pressure: 101325.0,
+                atm_temperature: 288.15,
+                gamma: 1.4,
+                // JWL CFD
+                composition: 'TNT',
+                rho: 1630,
+                detonation_energy: 4290000,
+                det_vel: 6930,
+                jwl_A: 373.77e9,
+                jwl_B: 3.747e9,
+                jwl_R1: 4.15,
+                jwl_R2: 0.90,
+                jwl_omega: 0.35,
+                ideal_gamma: 1.4,
+                ideal_rho_0: 1630,
+                ideal_e_0: 4290000
             };
 
             case 'FEMDomain3D': return {
@@ -4291,15 +4473,15 @@ export class GraphRenderer {
             const dim = node.parameters['dimension'] || '1D';
             form.dataset.renderedDimension = dim.toString();
         }
-        if (node.type === 'Material') {
+        if (node.type === 'Material' || node.type === 'MPMMaterialSteel') {
             const comp = node.parameters['composition'] || 'TNT';
             const matType = node.parameters['material_type'] || 'Air';
+            const matModel = node.parameters['material_model'] || 'Linear Elastic';
+            const preset = node.parameters['preset'] || 'Structural Steel (A36)';
             form.dataset.renderedComposition = comp.toString();
             form.dataset.renderedMaterialType = matType.toString();
-        }
-        if (node.type === 'MPMMaterialSteel') {
-            const matModel = node.parameters['material_model'] || 'Hypoelastic';
             form.dataset.renderedMaterialModel = matModel.toString();
+            form.dataset.renderedPreset = preset.toString();
         }
         if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
             const velScheme = node.parameters['velocity_scheme'] || 'APIC';
@@ -4321,15 +4503,21 @@ export class GraphRenderer {
         }
 
         let paramKeys = Object.keys(node.parameters);
-        if (node.type === 'MPMMaterialSteel') {
+        if (node.type === 'MPMMaterialSteel' || node.type === 'Material') {
             if (!node.parameters['material_model']) {
-                node.parameters['material_model'] = 'Hypoelastic';
+                node.parameters['material_model'] = 'Linear Elastic';
             }
             if (!node.parameters['preset']) {
-                node.parameters['preset'] = 'Structural Steel (A36)';
+                node.parameters['preset'] = getDefaultPresetForModel(node.parameters['material_model']);
             }
             const matModel = node.parameters['material_model'];
-            if (matModel === 'Johnson-Cook + Mie-Grüneisen') {
+            if (matModel === 'Linear Elastic') {
+                paramKeys = [
+                    'material_model', 'preset',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'tensile_failure_stress'
+                ];
+            } else if (matModel === 'Johnson-Cook + Mie-Grüneisen') {
                 paramKeys = [
                     'material_model', 'preset',
                     'density', 'youngs_modulus', 'poissons_ratio',
@@ -4339,6 +4527,16 @@ export class GraphRenderer {
                     'enable_timestep_erosion', 'timestep_erosion_factor',
                     'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
                     'mg_gamma0', 'mg_c0', 'mg_s'
+                ];
+            } else if (matModel === 'CREST Reactive Burn') {
+                paramKeys = [
+                    'material_model', 'preset',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'yield_stress', 'hardening_modulus',
+                    'failure_strain', 'tensile_failure_stress',
+                    'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
+                    'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
+                    'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold'
                 ];
             } else if (matModel === 'RHT Concrete') {
                 paramKeys = [
@@ -4373,6 +4571,18 @@ export class GraphRenderer {
                     'enable_strain_erosion', 'erosion_strain',
                     'enable_stress_erosion', 'erosion_stress',
                     'enable_timestep_erosion', 'timestep_erosion_factor'
+                ];
+            } else if (matModel === 'Ideal Gas') {
+                paramKeys = [
+                    'material_model', 'preset',
+                    'density', 'atm_pressure', 'atm_temperature', 'gamma'
+                ];
+            } else if (matModel === 'JWL Detonation Gas') {
+                paramKeys = [
+                    'material_model', 'preset',
+                    'composition', 'rho', 'detonation_energy', 'det_vel',
+                    'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega',
+                    'ideal_gamma', 'ideal_rho_0', 'ideal_e_0'
                 ];
             } else {
                 paramKeys = [
@@ -4648,12 +4858,7 @@ export class GraphRenderer {
                     currentGridDiv = gridDiv;
                 }
             }
-            if (node.type === 'MPMMaterialSteel') {
-                const matModel = node.parameters['material_model'] || 'Hypoelastic';
-                const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
-                if (matModel === 'Hypoelastic' && jcKeys.includes(key)) continue;
-                if (matModel === 'Johnson-Cook + Mie-Grüneisen' && (key === 'yield_stress' || key === 'hardening_modulus')) continue;
-
+            if (node.type === 'MPMMaterialSteel' || node.type === 'Material') {
                 let sectionTitle: string | null = null;
                 if (key === 'density') sectionTitle = 'ELASTICITY & MASS';
                 else if (key === 'yield_stress') sectionTitle = 'PLASTIC YIELD & HARDENING';
@@ -4661,10 +4866,15 @@ export class GraphRenderer {
                 else if (key === 'enable_strain_erosion') sectionTitle = 'ELEMENT EROSION & DELETION';
                 else if (key === 'jc_A') sectionTitle = 'JOHNSON-COOK VISCOPLASTICITY';
                 else if (key === 'mg_gamma0') sectionTitle = 'MIE-GRÜNEISEN SHOCK EOS';
+                else if (key === 'davis_c0') sectionTitle = 'DAVIS SOLID REACTANT EOS';
+                else if (key === 'davis_a') sectionTitle = 'DAVIS DETONATION PRODUCT EOS';
+                else if (key === 'crest_b1') sectionTitle = 'CREST REACTION KINETICS';
                 else if (key === 'fc') sectionTitle = 'CONCRETE CORE & FRACTURE ENERGY';
                 else if (key === 'rht_A') sectionTitle = 'RHT ENVELOPES & POROUS EOS';
                 else if (key === 'kc_auto_generate' || key === 'kc_a0') sectionTitle = 'K&C 3-SURFACE DAMAGE PLASTICITY';
                 else if (key === 'cscm_alpha') sectionTitle = 'CSCM SMOOTH CAP & DAMAGE';
+                else if (key === 'atm_pressure') sectionTitle = 'IDEAL GAS AMBIENT PROPERTIES';
+                else if (key === 'composition') sectionTitle = 'JWL DETONATION PARAMETERS';
 
                 if (sectionTitle) {
                     const sectionKey = `${node.id}:${sectionTitle}`;
@@ -4722,19 +4932,8 @@ export class GraphRenderer {
                     currentGridDiv = gridDiv;
                 }
             }
-            if (node.type === 'Material') {
-
-                const matType = node.parameters['material_type'] || 'Air';
-                if (matType === 'Air') {
-                    const airKeys = ['material_type', 'atm_pressure', 'atm_temperature', 'gamma'];
-                    if (!airKeys.includes(key)) continue;
-                } else if (matType === 'JWL Charge') {
-                    const jwlKeys = ['material_type', 'composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
-                    if (!jwlKeys.includes(key)) continue;
-                } else if (matType === 'Ideal Gas Charge') {
-                    const igKeys = ['material_type', 'composition', 'ideal_rho_0', 'ideal_e_0'];
-                    if (!igKeys.includes(key)) continue;
-                }
+            if (node.type === 'MPMMaterialSteel' || node.type === 'Material') {
+                // Key visibility strictly governed by paramKeys
             }
             if (node.type === 'MPMObject3D') {
                 const shape = node.parameters['shape_type'] || 'Box';
@@ -4850,8 +5049,7 @@ export class GraphRenderer {
             row.appendChild(label);
 
             const dropdowns: Record<string, string[]> = {
-                'preset': [...MPM_MATERIAL_PRESET_NAMES],
-                'material_model': ['Hypoelastic', 'Johnson-Cook + Mie-Grüneisen', 'RHT Concrete', 'Karagozian & Case (K&C)', 'CSCM Concrete'],
+                'material_model': getConstitutiveModels(),
                 'rebar_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
                 'coupling_scheme': ['Two-Way Staggered', 'Sub-Cycling'],
                 'pressure_integration': ['2x2 Gauss Quadrature', '1-Point Centroid'],
@@ -4929,16 +5127,15 @@ export class GraphRenderer {
                     },
                     key
                 );
-            } else if (dropdowns[key]) {
+            } else if (dropdowns[key] || key === 'preset') {
                 let options: { value: string; label: string; category?: string }[];
                 if (key === 'preset') {
-                    options = MPM_MATERIAL_CATEGORIES.flatMap(group => 
-                        group.presets.map(opt => ({
-                            value: opt,
-                            label: opt,
-                            category: group.category
-                        }))
-                    );
+                    const currentModel = node.parameters['material_model'] || 'Linear Elastic';
+                    const validPresets = getPresetsForConstitutiveModel(currentModel);
+                    options = validPresets.map(opt => ({
+                        value: opt,
+                        label: opt
+                    }));
                 } else {
                     options = dropdowns[key].map(opt => {
                         let label = opt;
@@ -5015,6 +5212,11 @@ export class GraphRenderer {
                             'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
                             'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
                             'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
+                            // Davis & CREST Reactive Burn
+                            'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
+                            'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
+                            'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold',
+                            'initiation_radius', 'booster_overpressure',
                             // VTK ROI & Strides
                             'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride',
                             'nonlocal_radius'

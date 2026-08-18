@@ -539,6 +539,8 @@ __global__ void fem_element_forces_kernel_3d_device(
                     gp_hist_ptr->lambda_gp[g] = cscm_state.kappa;
                     gp_hist_ptr->ep_bar_gp[g] = cscm_state.ep_bar;
                     p_hydro_g = cscm_state.p_hydro;
+                } else if (mat.material_model == MPMMaterialModel::LinearElastic) {
+                    // Pure Hookean linear elasticity - no plastic yielding
                 } else {
                     T s_norm_g = sqrt(
                         gp_hist_ptr->s_dev_gp[g][0][0]*gp_hist_ptr->s_dev_gp[g][0][0] + gp_hist_ptr->s_dev_gp[g][1][1]*gp_hist_ptr->s_dev_gp[g][1][1] + gp_hist_ptr->s_dev_gp[g][2][2]*gp_hist_ptr->s_dev_gp[g][2][2] +
@@ -945,6 +947,8 @@ __global__ void fem_element_forces_kernel_3d_device(
         elem.lambda = cscm_state.kappa;
         elem.ep_bar = cscm_state.ep_bar;
         p_hydro = cscm_state.p_hydro;
+    } else if (mat.material_model == MPMMaterialModel::LinearElastic) {
+        // Pure Hookean linear elasticity - no plastic yielding
     } else {
         T s_norm = sqrt(
             elem.s_dev[0][0]*elem.s_dev[0][0] + elem.s_dev[1][1]*elem.s_dev[1][1] + elem.s_dev[2][2]*elem.s_dev[2][2] +

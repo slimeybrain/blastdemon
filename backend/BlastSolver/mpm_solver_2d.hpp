@@ -11,12 +11,14 @@
 namespace Blast {
 
 enum class MPMMaterialModel {
-    Hypoelastic = 0,
-    HypoelasticSteel = 0, // Alias for backward compatibility
-    JohnsonCookMieGruneisen = 1,
-    RHTConcrete = 2,
-    KCConcrete = 3,
-    CSCMConcrete = 4
+    LinearElastic = 0,
+    Hypoelastic = 1,
+    HypoelasticSteel = 1, // Alias for backward compatibility
+    JohnsonCookMieGruneisen = 2,
+    RHTConcrete = 3,
+    KCConcrete = 4,
+    CSCMConcrete = 5,
+    CRESTReactiveBurn = 6
 };
 
 struct MPMParticle2D {

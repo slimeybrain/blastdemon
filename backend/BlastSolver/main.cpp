@@ -108,9 +108,15 @@ inline bool get_json_bool(const nlohmann::json& j, const std::string& key, bool 
 
 inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
     Blast::MaterialTable3D mat;
-    std::string mat_model_str = obj.value("material_model", "Hypoelastic");
-    if (mat_model_str == "Johnson-Cook + Mie-Grüneisen" || mat_model_str == "Johnson-Cook") {
+    std::string mat_model_str = obj.value("material_model", "Linear Elastic");
+    if (mat_model_str == "Linear Elastic" || mat_model_str == "LinearElastic") {
+        mat.material_model = Blast::MPMMaterialModel::LinearElastic;
+    } else if (mat_model_str == "Hypoelastic" || mat_model_str == "Hypoelastic Steel") {
+        mat.material_model = Blast::MPMMaterialModel::Hypoelastic;
+    } else if (mat_model_str == "Johnson-Cook + Mie-Grüneisen" || mat_model_str == "Johnson-Cook") {
         mat.material_model = Blast::MPMMaterialModel::JohnsonCookMieGruneisen;
+    } else if (mat_model_str == "CREST Reactive Burn" || mat_model_str == "CREST" || mat_model_str == "Davis" || mat_model_str == "CREST (Davis EOS)") {
+        mat.material_model = Blast::MPMMaterialModel::CRESTReactiveBurn;
     } else if (mat_model_str == "RHT Concrete" || mat_model_str == "RHT") {
         mat.material_model = Blast::MPMMaterialModel::RHTConcrete;
     } else if (mat_model_str == "Karagozian & Case (K&C)" || mat_model_str == "K&C" || mat_model_str == "KC Concrete" || mat_model_str == "Karagozian & Case") {
@@ -118,7 +124,7 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
     } else if (mat_model_str == "CSCM Concrete" || mat_model_str == "CSCM") {
         mat.material_model = Blast::MPMMaterialModel::CSCMConcrete;
     } else {
-        mat.material_model = Blast::MPMMaterialModel::Hypoelastic;
+        mat.material_model = Blast::MPMMaterialModel::LinearElastic;
     }
     mat.density = static_cast<float>(get_json_double(obj, "density", 7850.0));
     mat.youngs_modulus = static_cast<float>(get_json_double(obj, "youngs_modulus", 210.0e9));
@@ -148,6 +154,33 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
     mat.mg_s = static_cast<float>(get_json_double(obj, "mg_s", 1.49));
     mat.bulk_viscosity_b1 = static_cast<float>(get_json_double(obj, "bulk_viscosity_b1", 0.06));
     mat.bulk_viscosity_b2 = static_cast<float>(get_json_double(obj, "bulk_viscosity_b2", 1.20));
+
+    // Davis Solid Reactant
+    mat.davis_c0 = static_cast<float>(get_json_double(obj, "davis_c0", 2050.0));
+    mat.davis_s1 = static_cast<float>(get_json_double(obj, "davis_s1", 2.12));
+    mat.davis_gamma0 = static_cast<float>(get_json_double(obj, "davis_gamma0", 0.65));
+    mat.davis_cv = static_cast<float>(get_json_double(obj, "davis_cv", 1000.0));
+    mat.davis_t0 = static_cast<float>(get_json_double(obj, "davis_t0", 293.0));
+    mat.davis_rho0 = static_cast<float>(get_json_double(obj, "davis_rho0", mat.density));
+
+    // Davis Product Gas
+    mat.davis_a = static_cast<float>(get_json_double(obj, "davis_a", 2.85));
+    mat.davis_b = static_cast<float>(get_json_double(obj, "davis_b", 1.10));
+    mat.davis_k = static_cast<float>(get_json_double(obj, "davis_k", 1.35));
+    mat.davis_vc = static_cast<float>(get_json_double(obj, "davis_vc", 0.65));
+    mat.davis_pc = static_cast<float>(get_json_double(obj, "davis_pc", 12.5e9));
+    mat.davis_q_det = static_cast<float>(get_json_double(obj, "davis_q_det", 3.90e6));
+
+    // CREST Reaction Kinetics
+    mat.crest_b1 = static_cast<float>(get_json_double(obj, "crest_b1", 1.2e7));
+    mat.crest_c1 = static_cast<float>(get_json_double(obj, "crest_c1", 0.67));
+    mat.crest_m1 = static_cast<float>(get_json_double(obj, "crest_m1", 2.5));
+    mat.crest_b2 = static_cast<float>(get_json_double(obj, "crest_b2", 3.5e6));
+    mat.crest_c2 = static_cast<float>(get_json_double(obj, "crest_c2", 0.50));
+    mat.crest_c3 = static_cast<float>(get_json_double(obj, "crest_c3", 0.67));
+    mat.crest_m2 = static_cast<float>(get_json_double(obj, "crest_m2", 1.5));
+    mat.crest_s0 = static_cast<float>(get_json_double(obj, "crest_s0", 100.0));
+    mat.crest_s_threshold = static_cast<float>(get_json_double(obj, "crest_s_threshold", 45.0));
 
     // Concrete Base
     mat.fc = static_cast<float>(get_json_double(obj, "fc", 35.0e6));
@@ -6426,32 +6459,48 @@ int main() {
                                 }
                             }
 
+                            Blast::MaterialTable3D parsed_mat = parseMaterialTable3D(obj);
                             if (global_solver_mpm_3d_cuda) {
                                 auto& mat_tables = global_solver_mpm_3d_cuda->getMaterialTables();
                                 if (obj_idx >= 0 && obj_idx < static_cast<int>(mat_tables.size())) {
-                                    auto& mat = mat_tables[obj_idx];
-                                    mat.material_model = mat_model;
-                                    mat.jc_A = jc_A; mat.jc_B = jc_B; mat.jc_n = jc_n; mat.jc_C = jc_C; mat.jc_m = jc_m;
-                                    mat.T_melt = T_melt; mat.T_room = T_room; mat.Cp = Cp;
-                                    mat.mg_gamma0 = mg_gamma0; mat.mg_c0 = mg_c0; mat.mg_s = mg_s;
+                                    mat_tables[obj_idx] = parsed_mat;
                                 }
                                 global_solver_mpm_3d_cuda->uploadMaterialTableToDevice();
                             }
                             if (global_solver_mpm_3d) {
                                 auto& mat_tables = global_solver_mpm_3d->getMaterialTables();
                                 if (obj_idx >= 0 && obj_idx < static_cast<int>(mat_tables.size())) {
-                                    auto& mat = mat_tables[obj_idx];
-                                    mat.material_model = mat_model;
-                                    mat.jc_A = jc_A; mat.jc_B = jc_B; mat.jc_n = jc_n; mat.jc_C = jc_C; mat.jc_m = jc_m;
-                                    mat.T_melt = T_melt; mat.T_room = T_room; mat.Cp = Cp;
-                                    mat.mg_gamma0 = mg_gamma0; mat.mg_c0 = mg_c0; mat.mg_s = mg_s;
+                                    mat_tables[obj_idx] = parsed_mat;
                                 }
                             }
+
+                            bool has_detonator = msg.contains("detonator_x");
+                            float det_x = static_cast<float>(get_json_double(msg, "detonator_x", 0.5));
+                            float det_y = static_cast<float>(get_json_double(msg, "detonator_y", 0.5));
+                            float det_z = static_cast<float>(get_json_double(msg, "detonator_z", 0.5));
+                            float init_rad = static_cast<float>(get_json_double(msg, "initiation_radius", 0.02));
+
                             auto& particles_ref = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles() : global_solver_mpm_3d->getParticles();
                             for (auto& p : particles_ref) {
                                 if (p.object_id == obj_idx) {
-                                    p.temperature = T_room;
+                                    p.temperature = parsed_mat.T_room;
                                     p.e_int = 0.0f;
+                                    p.v_min = 1.0f;
+                                    p.s_shock = 0.0f;
+                                    p.lambda = 0.0f;
+
+                                    if (parsed_mat.material_model == Blast::MPMMaterialModel::CRESTReactiveBurn && has_detonator) {
+                                        float d_x = p.x[0] - det_x;
+                                        float d_y = p.x[1] - det_y;
+                                        float d_z = p.x[2] - det_z;
+                                        float dist = std::sqrt(d_x * d_x + d_y * d_y + d_z * d_z);
+                                        if (dist <= init_rad) {
+                                            p.s_shock = 1.5f * parsed_mat.crest_s_threshold;
+                                            p.lambda = 1.0f;
+                                            p.e_int = parsed_mat.davis_q_det;
+                                            p.v_min = 0.70f;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -6980,10 +7029,33 @@ int main() {
                                     mat_tables[obj_idx] = parsed_mat;
                                 }
                             }
+                            bool has_detonator = msg.contains("detonator_x");
+                            float det_x = static_cast<float>(get_json_double(msg, "detonator_x", 0.5));
+                            float det_y = static_cast<float>(get_json_double(msg, "detonator_y", 0.5));
+                            float det_z = static_cast<float>(get_json_double(msg, "detonator_z", 0.5));
+                            float init_rad = static_cast<float>(get_json_double(msg, "initiation_radius", 0.02));
+
                             auto& particles_ref = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles() : global_solver_mpm_3d->getParticles();
                             for (auto& p : particles_ref) {
                                 if (p.object_id == obj_idx) {
-                                    p.temperature = T_room; p.e_int = 0.0f;
+                                    p.temperature = parsed_mat.T_room;
+                                    p.e_int = 0.0f;
+                                    p.v_min = 1.0f;
+                                    p.s_shock = 0.0f;
+                                    p.lambda = 0.0f;
+
+                                    if (parsed_mat.material_model == Blast::MPMMaterialModel::CRESTReactiveBurn && has_detonator) {
+                                        float d_x = p.x[0] - det_x;
+                                        float d_y = p.x[1] - det_y;
+                                        float d_z = p.x[2] - det_z;
+                                        float dist = std::sqrt(d_x * d_x + d_y * d_y + d_z * d_z);
+                                        if (dist <= init_rad) {
+                                            p.s_shock = 1.5f * parsed_mat.crest_s_threshold;
+                                            p.lambda = 1.0f;
+                                            p.e_int = parsed_mat.davis_q_det;
+                                            p.v_min = 0.70f;
+                                        }
+                                    }
                                 }
                             }
                         }
