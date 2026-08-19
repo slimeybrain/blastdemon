@@ -2609,17 +2609,21 @@ float MPMSolver3DCUDA::computeStepSize(float cfl) {
     int blocks = (static_cast<int>(num_particles) + threads - 1) / threads;
     kernel_compute_max_speed<<<blocks, threads, threads * sizeof(float)>>>(d_soa, static_cast<int>(num_particles), d_max_v_buf, d_material_tables);
 
-    if (d_max_v_pinned) {
+    if (m_step_count == 0 || !d_max_v_pinned) {
+        int result_int = 0;
+        cudaMemcpy(&result_int, d_max_v_buf, sizeof(int), cudaMemcpyDeviceToHost);
+        u_res.i = result_int;
+        if (d_max_v_pinned) {
+            d_max_v_pinned[0] = result_int;
+            d_max_v_pinned[1] = result_int;
+        }
+    } else {
         int buf_idx = m_step_count % 2;
         cudaMemcpyAsync(&d_max_v_pinned[buf_idx], d_max_v_buf, sizeof(int), cudaMemcpyDeviceToHost, 0);
 
-        int prev_idx = (m_step_count > 0) ? ((m_step_count - 1) % 2) : 0;
+        int prev_idx = (m_step_count - 1) % 2;
         int result_int = d_max_v_pinned[prev_idx];
         if (result_int == 0) result_int = init_int;
-        u_res.i = result_int;
-    } else {
-        int result_int = 0;
-        cudaMemcpy(&result_int, d_max_v_buf, sizeof(int), cudaMemcpyDeviceToHost);
         u_res.i = result_int;
     }
 
@@ -2632,7 +2636,6 @@ float MPMSolver3DCUDA::computeStepSize(float cfl) {
     m_cached_dt = std::max(1.0e-8f, cfl * stability_factor * dt_crit);
     m_last_v_max = max_speed;
     m_last_cfl = cfl;
-    m_last_dt = m_cached_dt;
     m_dt_calc_counter++;
     return m_cached_dt;
 }
