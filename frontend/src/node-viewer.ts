@@ -1,10 +1,10 @@
-import { StateManager, getMeshDisplayHTML, getMPMDisplayHTML } from './state-manager.js';
+import { StateManager, getMeshDisplayHTML, getMPMDisplayHTML, syncMPMMaterialParameters } from './state-manager.js';
 import { Node, NodeType } from './types.js';
 import { PropertyEditor } from './property-editor.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
 import { Telemetry3DViewport } from './telemetry-3d-viewport.js';
 import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_CATEGORIES, MPM_MATERIAL_PARAM_INFO, getConstitutiveModels, getPresetsForConstitutiveModel, getDefaultPresetForModel } from './mpm-presets.js';
-import { getParameterInfo, getNodeDefinition, getNodeDescription, showParameterPopover, showNodeDetailsModal } from './parameter-definitions.js';
+import { getParameterInfo, getNodeDefinition, getNodeDescription, showParameterPopover, showNodeDetailsModal, getSolverScope, getSolverBadgeHTML } from './parameter-definitions.js';
 
 export class NodeViewer {
     private container: HTMLElement;
@@ -751,6 +751,7 @@ export class NodeViewer {
 
         let paramKeys = Object.keys(node.parameters);
         if (node.type === 'MPMMaterialSteel' || node.type === 'Material') {
+            syncMPMMaterialParameters(node, node.parameters);
             if (!node.parameters['material_model']) {
                 node.parameters['material_model'] = 'Linear Elastic';
             }
@@ -760,34 +761,39 @@ export class NodeViewer {
             const matModel = node.parameters['material_model'];
             if (matModel === 'Linear Elastic') {
                 paramKeys = [
-                    'material_model', 'preset',
+                    'material_model', 'preset', 'transfer_scheme',
                     'density', 'youngs_modulus', 'poissons_ratio',
-                    'tensile_failure_stress'
+                    'tensile_failure_stress',
+                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
                 ];
             } else if (matModel === 'Johnson-Cook + Mie-Grüneisen') {
                 paramKeys = [
-                    'material_model', 'preset',
+                    'material_model', 'preset', 'transfer_scheme',
                     'density', 'youngs_modulus', 'poissons_ratio',
                     'failure_strain', 'tensile_failure_stress',
                     'enable_strain_erosion', 'erosion_strain',
                     'enable_stress_erosion', 'erosion_stress',
                     'enable_timestep_erosion', 'timestep_erosion_factor',
-                    'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
-                    'mg_gamma0', 'mg_c0', 'mg_s'
+                    'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m',
+                    'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5',
+                    'T_melt', 'T_room', 'Cp',
+                    'mg_gamma0', 'mg_c0', 'mg_s',
+                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
                 ];
             } else if (matModel === 'CREST Reactive Burn') {
                 paramKeys = [
-                    'material_model', 'preset',
+                    'material_model', 'preset', 'transfer_scheme',
                     'density', 'youngs_modulus', 'poissons_ratio',
                     'yield_stress', 'hardening_modulus',
                     'failure_strain', 'tensile_failure_stress',
                     'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
                     'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
-                    'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold'
+                    'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold',
+                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
                 ];
             } else if (matModel === 'RHT Concrete') {
                 paramKeys = [
-                    'material_model', 'preset',
+                    'material_model', 'preset', 'transfer_scheme',
                     'density', 'youngs_modulus', 'poissons_ratio',
                     'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
                     'directional_crack_band', 'nonlocal_radius',
@@ -796,11 +802,12 @@ export class NodeViewer {
                     'enable_stress_erosion', 'erosion_stress',
                     'enable_timestep_erosion', 'timestep_erosion_factor',
                     'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
-                    'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat'
+                    'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
+                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
                 ];
             } else if (matModel === 'Karagozian & Case (K&C)') {
                 paramKeys = [
-                    'material_model', 'preset',
+                    'material_model', 'preset', 'transfer_scheme',
                     'density', 'youngs_modulus', 'poissons_ratio',
                     'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
                     'directional_crack_band', 'nonlocal_radius',
@@ -808,11 +815,12 @@ export class NodeViewer {
                     'enable_strain_erosion', 'erosion_strain',
                     'enable_stress_erosion', 'erosion_stress',
                     'enable_timestep_erosion', 'timestep_erosion_factor',
-                    'kc_auto_generate', 'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega'
+                    'kc_auto_generate', 'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
+                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
                 ];
             } else if (matModel === 'CSCM Concrete') {
                 paramKeys = [
-                    'material_model', 'preset',
+                    'material_model', 'preset', 'transfer_scheme',
                     'density', 'youngs_modulus', 'poissons_ratio',
                     'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
                     'directional_crack_band', 'nonlocal_radius',
@@ -820,7 +828,8 @@ export class NodeViewer {
                     'enable_strain_erosion', 'erosion_strain',
                     'enable_stress_erosion', 'erosion_stress',
                     'enable_timestep_erosion', 'timestep_erosion_factor',
-                    'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2'
+                    'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
+                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
                 ];
             } else if (matModel === 'Ideal Gas') {
                 paramKeys = [
@@ -836,26 +845,27 @@ export class NodeViewer {
                 ];
             } else {
                 paramKeys = [
-                    'material_model', 'preset',
+                    'material_model', 'preset', 'transfer_scheme',
                     'density', 'youngs_modulus', 'poissons_ratio',
                     'yield_stress', 'hardening_modulus',
                     'directional_crack_band', 'nonlocal_radius',
                     'failure_strain', 'tensile_failure_stress',
                     'enable_strain_erosion', 'erosion_strain',
                     'enable_stress_erosion', 'erosion_stress',
-                    'enable_timestep_erosion', 'timestep_erosion_factor'
+                    'enable_timestep_erosion', 'timestep_erosion_factor',
+                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
                 ];
             }
         } else if (node.type === 'MPMDomain2D') {
             const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
-            paramKeys = ['precision', 'transfer_scheme', 'velocity_scheme', 'space_time_scheme', 'smooth_plastic_strain'];
+            paramKeys = ['precision', 'velocity_scheme', 'space_time_scheme', 'smooth_plastic_strain'];
             if (hasFLIP) {
                 paramKeys.push('flip_blend');
             }
             paramKeys.push('ppc', 'cfl');
         } else if (node.type === 'MPMDomain3D') {
             const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
-            paramKeys = ['device', 'precision', 'transfer_scheme', 'velocity_scheme', 'space_time_scheme', 'smooth_plastic_strain'];
+            paramKeys = ['device', 'precision', 'velocity_scheme', 'space_time_scheme', 'smooth_plastic_strain'];
             if (hasFLIP) {
                 paramKeys.push('flip_blend');
             }
@@ -960,12 +970,19 @@ export class NodeViewer {
                 ? `<span style="font-size:9px; color:#00e5ff; font-family:monospace; background:rgba(0,229,255,0.12); padding:1px 4px; border-radius:3px; border:1px solid rgba(0,229,255,0.25);">${paramInfo.unit}</span>` 
                 : '';
 
-            label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline;">` +
+            const solverBadge = (node.type === 'MPMMaterialSteel' || node.type === 'Material')
+                ? getSolverBadgeHTML(paramInfo.solverScope || getSolverScope(key, node.type), false)
+                : '';
+
+            label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline; gap:6px;">` +
                 `<span style="font-weight:600; color:#ddd; display:inline-flex; align-items:center;">` +
                 `${paramInfo.label.toUpperCase()}` +
                 `<span class="param-info-btn" data-param-key="${key}" title="Click or hover for physics & math details">?</span>` +
                 `</span>` +
+                `<div style="display:flex; align-items:center; gap:4px;">` +
+                solverBadge +
                 unitBadge +
+                `</div>` +
                 `</div>` +
                 `<div style="font-size:10px; color:#777; margin-top:1px; margin-bottom:2px;">${paramInfo.shortDesc}</div>`;
 
@@ -1640,7 +1657,7 @@ export class NodeViewer {
                 lbl.style.color = '#aaa';
                 wrap.appendChild(lbl);
 
-                if (key === 'output_dir') {
+                if (key === 'output_dir' || key === 'vtk_dir') {
                     const browseWrap = document.createElement('div');
                     browseWrap.style.display = 'flex';
                     browseWrap.style.gap = '6px';
@@ -2415,7 +2432,8 @@ export class NodeViewer {
             'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
             'failure_strain', 'tensile_failure_stress', 'erosion_strain', 'erosion_stress',
-            'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
+            'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5', 'T_melt', 'T_room', 'Cp',
+            'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
             'mg_gamma0', 'mg_c0', 'mg_s',
             'ppc',
             'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
@@ -2490,7 +2508,9 @@ export class NodeViewer {
             'plot_stride': ['1', '2', '5', '10', '20', '50', '100'],
             'charge_shape': chargeShapeOptions,
             'material_type': ['Air', 'JWL Charge', 'Ideal Gas Charge'],
-            'transfer_scheme': ['BSpline', 'GIMP', 'Standard'],
+            'transfer_scheme': (node.type === 'Material' || node.type === 'MPMMaterialSteel') ? 
+                ['Default', 'BSpline', 'Radial MLS', 'Cubic BSpline', 'GIMP', 'Standard'] : 
+                ['BSpline', 'Radial MLS', 'Cubic BSpline', 'GIMP', 'Standard'],
             'velocity_scheme': ['APIC', 'PIC', 'FLIP'],
             'shape_type': node.type === 'FEMObject3D' ? ['Box', 'Cylinder', 'LS-DYNA File'] : (node.type === 'MPMObject3D' ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle']),
             'coupling_mode': ['TwoWay_Full', 'OneWay_CFD_to_MPM', 'Disabled'],

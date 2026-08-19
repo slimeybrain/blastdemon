@@ -212,7 +212,7 @@ void FEMFSICoupler3D<T>::applyFluidPressureToStructure(T dt) {
             return static_cast<T>(pfield[i + j * nx + k * nx * ny]);
         } else {
             auto cv = m_fv_solver->getCellValues(i, j, k);
-            if (cv.size() >= 5) return static_cast<T>(cv[4]);
+            if (!cv.empty()) return static_cast<T>(cv[0]);
             return static_cast<T>(101325.0f);
         }
     };

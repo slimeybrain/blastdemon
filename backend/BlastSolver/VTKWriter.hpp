@@ -87,6 +87,26 @@ void export_vtu_fem_3d(const std::string& filename, const Blast::FEMSolver3D<T>&
                        bool has_stress = true, bool has_strain = true, bool has_pressure = true,
                        bool has_temp = true, bool has_damage = true, bool has_vel = true, bool has_disp = true);
 
+struct MPMVTKSnapshot3D {
+    int num_particles = 0;
+    bool has_vel = true;
+    bool has_disp = false;
+    bool has_stress = true;
+    bool has_strain = true;
+    bool has_damage = true;
+    bool has_temp = true;
+    std::vector<float> points;      // 3 * num_particles
+    std::vector<float> vel;         // 3 * num_particles
+    std::vector<float> von_mises;   // num_particles
+    std::vector<float> pressure;    // num_particles
+    std::vector<float> ep_bar;      // num_particles
+    std::vector<float> damage;      // num_particles
+    std::vector<float> temp;        // num_particles
+    std::vector<float> obj_id;      // num_particles
+};
+
+void export_vtu_mpm_3d_snapshot(const std::string& filename, const MPMVTKSnapshot3D& snap, const std::string& format = "Binary");
+
 void export_vtu_mpm_3d(const std::string& filename, const std::vector<Blast::MPMParticle3D>& particles, const std::string& format = "Binary",
                        bool has_vel = true, bool has_disp = true, bool has_stress = true,
                        bool has_strain = true, bool has_damage = true, bool has_temp = true);

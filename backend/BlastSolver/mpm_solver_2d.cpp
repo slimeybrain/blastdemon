@@ -1,6 +1,30 @@
 #include "mpm_solver_2d.hpp"
+#include <cstring>
 
 namespace Blast {
+
+static inline uint32_t floatToBits2D(float f) {
+    uint32_t u;
+    std::memcpy(&u, &f, sizeof(float));
+    return u;
+}
+
+static inline float computeWeibullFactor2D(float x, float y, float weibull_modulus, float weibull_scale) {
+    if (weibull_modulus <= 0.001f) return 1.0f;
+    uint32_t ix = floatToBits2D(x);
+    uint32_t iy = floatToBits2D(y);
+    uint32_t seed = (ix * 73856093u) ^ (iy * 19349663u);
+    seed = (seed ^ 61u) ^ (seed >> 16);
+    seed *= 9u;
+    seed = seed ^ (seed >> 4);
+    seed *= 0x27d4eb2du;
+    seed = seed ^ (seed >> 15);
+    float u = std::clamp(static_cast<float>(seed & 0xFFFFu) / 65535.0f, 0.005f, 0.995f);
+    float m_w = weibull_modulus;
+    float eta_w = (weibull_scale > 0.001f) ? weibull_scale : 1.0f;
+    float w = std::pow(-std::log(1.0f - u), 1.0f / m_w) * eta_w;
+    return std::clamp(w, 0.20f, 2.50f);
+}
 
 MPMSolver2D::MPMSolver2D() {
 }
@@ -43,14 +67,70 @@ float MPMSolver2D::evalGIMP_dS(float x_p, float x_i, float h, float l_p) const {
     }
 }
 
+float MPMSolver2D::evalBSpline_S(float x_p, float x_i, float h) const {
+    float q = std::abs(x_p - x_i) / h;
+    if (q < 0.5f) {
+        return 0.75f - q * q;
+    } else if (q < 1.5f) {
+        return 0.5f * (1.5f - q) * (1.5f - q);
+    }
+    return 0.0f;
+}
+
+float MPMSolver2D::evalBSpline_dS(float x_p, float x_i, float h) const {
+    float diff = x_p - x_i;
+    float q = std::abs(diff) / h;
+    float sign = (diff > 0.0f) ? 1.0f : ((diff < 0.0f) ? -1.0f : 0.0f);
+    if (q < 0.5f) {
+        return -2.0f * diff / (h * h);
+    } else if (q < 1.5f) {
+        return -sign * (1.5f - q) / h;
+    }
+    return 0.0f;
+}
+
+float MPMSolver2D::evalCubicBSpline_S(float x_p, float x_i, float h) const {
+    float q = std::abs(x_p - x_i) / h;
+    if (q < 1.0f) {
+        return (4.0f - 6.0f * q * q + 3.0f * q * q * q) / 6.0f;
+    } else if (q < 2.0f) {
+        float term = 2.0f - q;
+        return (term * term * term) / 6.0f;
+    }
+    return 0.0f;
+}
+
+float MPMSolver2D::evalCubicBSpline_dS(float x_p, float x_i, float h) const {
+    float diff = x_p - x_i;
+    float q = std::abs(diff) / h;
+    float sign = (diff > 0.0f) ? 1.0f : ((diff < 0.0f) ? -1.0f : 0.0f);
+    if (q < 1.0f) {
+        return (-12.0f * q + 9.0f * q * q) * sign / (6.0f * h);
+    } else if (q < 2.0f) {
+        float term = 2.0f - q;
+        return -3.0f * term * term * sign / (6.0f * h);
+    }
+    return 0.0f;
+}
+
+float MPMSolver2D::evalWendland_C2(float r, float R_supp) const {
+    if (r >= R_supp) return 0.0f;
+    float q = r / R_supp;
+    float term = 1.0f - q;
+    return (term * term * term * term) * (1.0f + 4.0f * q);
+}
+
 void MPMSolver2D::addRectangleObject(int obj_id, float pos_x, float pos_y, float size_x, float size_y,
                                      float vel_x, float vel_y, float angular_vel, float density, float E, float nu,
-                                     float yield_stress, float hardening, float failure_strain, float tensile_failure_stress, int ppc) {
+                                     float yield_stress, float hardening, float failure_strain, float tensile_failure_stress, int ppc,
+                                     MPMParticleDistribution particle_dist, MPMBoundaryFilling boundary_fill) {
+    (void)boundary_fill;
     int particles_per_dim = static_cast<int>(std::round(std::sqrt(static_cast<float>(ppc))));
     if (particles_per_dim < 1) particles_per_dim = 2;
 
     float p_dx = m_dx / static_cast<float>(particles_per_dim);
-    float p_dy = m_dy / static_cast<float>(particles_per_dim);
+    float p_dy = (particle_dist == MPMParticleDistribution::Hexagonal) ? 
+                 (std::sqrt(3.0f) * 0.5f * p_dx) : (m_dy / static_cast<float>(particles_per_dim));
 
     float min_x = pos_x - 0.5f * size_x;
     float max_x = pos_x + 0.5f * size_x;
@@ -60,8 +140,11 @@ void MPMSolver2D::addRectangleObject(int obj_id, float pos_x, float pos_y, float
     float p_vol = p_dx * p_dy;
     float p_mass = p_vol * density;
 
-    for (float x = min_x + 0.5f * p_dx; x < max_x; x += p_dx) {
-        for (float y = min_y + 0.5f * p_dy; y < max_y; y += p_dy) {
+    int row_idx = 0;
+    for (float y = min_y + 0.5f * p_dy; y < max_y; y += p_dy, ++row_idx) {
+        float x_offset = (particle_dist == MPMParticleDistribution::Hexagonal && (row_idx % 2 == 1)) ? 
+                         0.5f * p_dx : 0.0f;
+        for (float x = min_x + 0.5f * p_dx + x_offset; x < max_x; x += p_dx) {
             MPMParticle2D p{};
             p.x[0] = x;
             p.x[1] = y;
@@ -108,65 +191,105 @@ void MPMSolver2D::addRectangleObject(int obj_id, float pos_x, float pos_y, float
 
 void MPMSolver2D::addCircleObject(int obj_id, float pos_x, float pos_y, float radius,
                                   float vel_x, float vel_y, float angular_vel, float density, float E, float nu,
-                                  float yield_stress, float hardening, float failure_strain, float tensile_failure_stress, int ppc) {
+                                  float yield_stress, float hardening, float failure_strain, float tensile_failure_stress, int ppc,
+                                  MPMParticleDistribution particle_dist, MPMBoundaryFilling boundary_fill) {
     int particles_per_dim = static_cast<int>(std::round(std::sqrt(static_cast<float>(ppc))));
     if (particles_per_dim < 1) particles_per_dim = 2;
 
     float p_dx = m_dx / static_cast<float>(particles_per_dim);
-    float p_dy = m_dy / static_cast<float>(particles_per_dim);
+    float p_dy = (particle_dist == MPMParticleDistribution::Hexagonal) ? 
+                 (std::sqrt(3.0f) * 0.5f * p_dx) : (m_dy / static_cast<float>(particles_per_dim));
 
-    float min_x = pos_x - radius;
-    float max_x = pos_x + radius;
-    float min_y = pos_y - radius;
-    float max_y = pos_y + radius;
+    float min_x = pos_x - radius - p_dx;
+    float max_x = pos_x + radius + p_dx;
+    float min_y = pos_y - radius - p_dy;
+    float max_y = pos_y + radius + p_dy;
 
     float r2 = radius * radius;
-    float p_vol = p_dx * p_dy;
-    float p_mass = p_vol * density;
+    float nominal_vol = p_dx * p_dy;
 
-    for (float x = min_x + 0.5f * p_dx; x < max_x; x += p_dx) {
-        for (float y = min_y + 0.5f * p_dy; y < max_y; y += p_dy) {
-            float rx = x - pos_x;
-            float ry = y - pos_y;
-            if (rx * rx + ry * ry <= r2) {
-                MPMParticle2D p{};
-                p.x[0] = x;
-                p.x[1] = y;
+    int row_idx = 0;
+    for (float y = min_y + 0.5f * p_dy; y < max_y; y += p_dy, ++row_idx) {
+        float x_offset = (particle_dist == MPMParticleDistribution::Hexagonal && (row_idx % 2 == 1)) ? 
+                         0.5f * p_dx : 0.0f;
+        for (float x = min_x + 0.5f * p_dx + x_offset; x < max_x; x += p_dx) {
+            float final_x = x;
+            float final_y = y;
+            float f_vol = 1.0f;
 
-                p.v[0] = vel_x - angular_vel * ry;
-                p.v[1] = vel_y + angular_vel * rx;
-
-                p.B[0][0] = 0.0f;           p.B[0][1] = -angular_vel;
-                p.B[1][0] =  angular_vel;   p.B[1][1] = 0.0f;
-
-                p.lp[0] = 0.5f * p_dx;
-                p.lp[1] = 0.5f * p_dy;
-
-                p.m = p_mass;
-                p.V0 = p_vol;
-                p.V = p_vol;
-
-                p.density = density;
-                p.youngs_modulus = E;
-                p.poissons_ratio = nu;
-                p.yield_stress = yield_stress;
-                p.hardening_modulus = hardening;
-                p.failure_strain = failure_strain;
-                p.tensile_failure_stress = tensile_failure_stress;
-                p.damage = 0.0f;
-                p.has_failed = false;
-
-                p.F[0][0] = 1.0f; p.F[0][1] = 0.0f;
-                p.F[1][0] = 0.0f; p.F[1][1] = 1.0f;
-
-                p.sigma[0][0] = 0.0f; p.sigma[0][1] = 0.0f;
-                p.sigma[1][0] = 0.0f; p.sigma[1][1] = 0.0f;
-
-                p.ep_bar = 0.0f;
-                p.object_id = obj_id;
-
-                m_particles.push_back(p);
+            if (boundary_fill == MPMBoundaryFilling::Partial) {
+                // 3x3 Sub-sampling for partial cell volume fraction
+                int sub_count = 0;
+                float sum_sx = 0.0f, sum_sy = 0.0f;
+                for (int si = -1; si <= 1; ++si) {
+                    float sx = x + (static_cast<float>(si) / 3.0f) * p_dx;
+                    for (int sj = -1; sj <= 1; ++sj) {
+                        float sy = y + (static_cast<float>(sj) / 3.0f) * p_dy;
+                        float dsx = sx - pos_x;
+                        float dsy = sy - pos_y;
+                        if (dsx * dsx + dsy * dsy <= r2) {
+                            sub_count++;
+                            sum_sx += sx;
+                            sum_sy += sy;
+                        }
+                    }
+                }
+                if (sub_count == 0) continue;
+                f_vol = static_cast<float>(sub_count) / 9.0f;
+                if (f_vol < 0.10f) continue;
+                if (sub_count < 9) {
+                    final_x = sum_sx / static_cast<float>(sub_count);
+                    final_y = sum_sy / static_cast<float>(sub_count);
+                }
+            } else {
+                float rx = x - pos_x;
+                float ry = y - pos_y;
+                if (rx * rx + ry * ry > r2) continue;
             }
+
+            float p_vol = f_vol * nominal_vol;
+            float p_mass = p_vol * density;
+
+            MPMParticle2D p{};
+            p.x[0] = final_x;
+            p.x[1] = final_y;
+
+            float rx = final_x - pos_x;
+            float ry = final_y - pos_y;
+
+            p.v[0] = vel_x - angular_vel * ry;
+            p.v[1] = vel_y + angular_vel * rx;
+
+            p.B[0][0] = 0.0f;           p.B[0][1] = -angular_vel;
+            p.B[1][0] =  angular_vel;   p.B[1][1] = 0.0f;
+
+            p.lp[0] = 0.5f * p_dx;
+            p.lp[1] = 0.5f * p_dy;
+
+            p.m = p_mass;
+            p.V0 = p_vol;
+            p.V = p_vol;
+
+            p.density = density;
+            p.youngs_modulus = E;
+            p.poissons_ratio = nu;
+            p.yield_stress = yield_stress;
+            p.hardening_modulus = hardening;
+            p.failure_strain = failure_strain;
+            p.tensile_failure_stress = tensile_failure_stress;
+            p.damage = 0.0f;
+            p.has_failed = false;
+
+            p.F[0][0] = 1.0f; p.F[0][1] = 0.0f;
+            p.F[1][0] = 0.0f; p.F[1][1] = 1.0f;
+
+            p.sigma[0][0] = 0.0f; p.sigma[0][1] = 0.0f;
+            p.sigma[1][0] = 0.0f; p.sigma[1][1] = 0.0f;
+
+            p.ep_bar = 0.0f;
+            p.object_id = obj_id;
+
+            m_particles.push_back(p);
         }
     }
 }
@@ -200,67 +323,215 @@ void MPMSolver2D::particleToGrid() {
         float dev_yy = s_yy + press;
         float vm_stress = std::sqrt(dev_xx * dev_xx + dev_yy * dev_yy + 2.0f * s_xy * s_xy);
 
-        for (int offset_i = -1; offset_i <= 2; ++offset_i) {
-            int i = base_i + offset_i;
-            if (i < 0 || i >= m_nx) continue;
-            float node_x = (static_cast<float>(i) + 0.5f) * m_dx;
+        int eff_scheme = (p.transfer_scheme >= 0) ? p.transfer_scheme : static_cast<int>(m_transfer_scheme);
 
-            float Sx = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
-                       evalGIMP_S(p.x[0], node_x, m_dx, p.lp[0]) :
-                       std::max(0.0f, 1.0f - std::abs(p.x[0] - node_x) / m_dx);
+        if (eff_scheme == static_cast<int>(MPMTransferScheme::RadialMLS)) {
+            // Radial Moving Least Squares MPM (Wendland C2 kernel with Centroid-Centered Linear Completeness)
+            float R_supp = 2.0f * std::max(m_dx, m_dy);
+            float weight_sum = 0.0f;
+            float cx = 0.0f, cy = 0.0f;
 
-            float dSx = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
-                        evalGIMP_dS(p.x[0], node_x, m_dx, p.lp[0]) :
-                        (p.x[0] >= node_x ? -1.0f / m_dx : 1.0f / m_dx);
+            for (int offset_i = -2; offset_i <= 2; ++offset_i) {
+                int i = base_i + offset_i;
+                if (i < 0 || i >= m_nx) continue;
+                float node_x = (static_cast<float>(i) + 0.5f) * m_dx;
 
-            if (std::abs(Sx) < 1.0e-7f) continue;
+                for (int offset_j = -2; offset_j <= 2; ++offset_j) {
+                    int j = base_j + offset_j;
+                    if (j < 0 || j >= m_ny) continue;
+                    float node_y = (static_cast<float>(j) + 0.5f) * m_dy;
 
-            for (int offset_j = -1; offset_j <= 2; ++offset_j) {
-                int j = base_j + offset_j;
-                if (j < 0 || j >= m_ny) continue;
-                float node_y = (static_cast<float>(j) + 0.5f) * m_dy;
+                    float dist_x = node_x - p.x[0];
+                    float dist_y = node_y - p.x[1];
+                    float r = std::sqrt(dist_x * dist_x + dist_y * dist_y);
+                    if (r >= R_supp) continue;
 
-                float Sy = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
-                           evalGIMP_S(p.x[1], node_y, m_dy, p.lp[1]) :
-                           std::max(0.0f, 1.0f - std::abs(p.x[1] - node_y) / m_dy);
+                    float w = evalWendland_C2(r, R_supp);
+                    if (w < 1.0e-7f) continue;
 
-                float dSy = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
-                            evalGIMP_dS(p.x[1], node_y, m_dy, p.lp[1]) :
-                            (p.x[1] >= node_y ? -1.0f / m_dy : 1.0f / m_dy);
+                    weight_sum += w;
+                    cx += w * node_x;
+                    cy += w * node_y;
+                }
+            }
 
-                if (std::abs(Sy) < 1.0e-7f) continue;
+            if (weight_sum <= 1.0e-7f) continue;
+            float inv_w_sum = 1.0f / weight_sum;
+            float xc = cx * inv_w_sum;
+            float yc = cy * inv_w_sum;
 
-                float weight = Sx * Sy;
-                float dN_dx = dSx * Sy;
-                float dN_dy = Sx * dSy;
+            float D[2][2] = {{0.0f, 0.0f}, {0.0f, 0.0f}};
+            for (int offset_i = -2; offset_i <= 2; ++offset_i) {
+                int i = base_i + offset_i;
+                if (i < 0 || i >= m_nx) continue;
+                float node_x = (static_cast<float>(i) + 0.5f) * m_dx;
 
-                int node_idx = i * m_ny + j;
-                auto& node = m_grid[node_idx];
+                for (int offset_j = -2; offset_j <= 2; ++offset_j) {
+                    int j = base_j + offset_j;
+                    if (j < 0 || j >= m_ny) continue;
+                    float node_y = (static_cast<float>(j) + 0.5f) * m_dy;
 
-                // Mass scatter
-                node.m += p.m * weight;
+                    float dist_x = node_x - p.x[0];
+                    float dist_y = node_y - p.x[1];
+                    float r = std::sqrt(dist_x * dist_x + dist_y * dist_y);
+                    if (r >= R_supp) continue;
 
-                // APIC Momentum scatter: p_node += m_p * S * (v_p + w_apic * B_p * dist)
-                float dist_x = node_x - p.x[0];
-                float dist_y = node_y - p.x[1];
+                    float w = evalWendland_C2(r, R_supp);
+                    if (w < 1.0e-7f) continue;
 
-                float w_apic = 1.0f;
-                float v_apic_x = p.v[0] + w_apic * (p.B[0][0] * dist_x + p.B[0][1] * dist_y);
-                float v_apic_y = p.v[1] + w_apic * (p.B[1][0] * dist_x + p.B[1][1] * dist_y);
+                    float dc_x = node_x - xc;
+                    float dc_y = node_y - yc;
 
-                node.p[0] += p.m * weight * v_apic_x;
-                node.p[1] += p.m * weight * v_apic_y;
+                    D[0][0] += w * dc_x * dc_x;
+                    D[0][1] += w * dc_x * dc_y;
+                    D[1][1] += w * dc_y * dc_y;
+                }
+            }
 
-                // Internal Stress Force scatter: f_int += -V_p * sigma_p * dN
-                node.f_int[0] += p.V * (p.sigma[0][0] * dN_dx + p.sigma[0][1] * dN_dy);
-                node.f_int[1] += p.V * (p.sigma[1][0] * dN_dx + p.sigma[1][1] * dN_dy);
+            D[0][0] *= inv_w_sum; D[0][1] *= inv_w_sum;
+            D[1][0] = D[0][1];    D[1][1] *= inv_w_sum;
 
-                // Telemetry scalar field scatter
-                node.von_mises += p.m * weight * vm_stress;
-                node.plastic_strain += p.m * weight * p.ep_bar;
-                node.density += p.m * weight * p.density;
-                node.pressure += p.m * weight * press;
-                node.damage += p.m * weight * p.damage;
+            float D_inv[2][2];
+            float det = D[0][0] * D[1][1] - D[0][1] * D[0][1];
+            if (det > 1.0e-18f) {
+                float inv_det = 1.0f / det;
+                D_inv[0][0] =  D[1][1] * inv_det;
+                D_inv[0][1] = -D[0][1] * inv_det;
+                D_inv[1][0] =  D_inv[0][1];
+                D_inv[1][1] =  D[0][0] * inv_det;
+            } else {
+                float d_iso = 3.6f / (m_dx * m_dx);
+                D_inv[0][0] = d_iso; D_inv[0][1] = 0.0f;
+                D_inv[1][0] = 0.0f;  D_inv[1][1] = d_iso;
+            }
+
+            float s_Dinv[2][2];
+            s_Dinv[0][0] = s_xx * D_inv[0][0] + s_xy * D_inv[1][0];
+            s_Dinv[0][1] = s_xx * D_inv[0][1] + s_xy * D_inv[1][1];
+            s_Dinv[1][0] = s_xy * D_inv[0][0] + s_yy * D_inv[1][0];
+            s_Dinv[1][1] = s_xy * D_inv[0][1] + s_yy * D_inv[1][1];
+
+            for (int offset_i = -2; offset_i <= 2; ++offset_i) {
+                int i = base_i + offset_i;
+                if (i < 0 || i >= m_nx) continue;
+                float node_x = (static_cast<float>(i) + 0.5f) * m_dx;
+
+                for (int offset_j = -2; offset_j <= 2; ++offset_j) {
+                    int j = base_j + offset_j;
+                    if (j < 0 || j >= m_ny) continue;
+                    float node_y = (static_cast<float>(j) + 0.5f) * m_dy;
+
+                    float dist_x = node_x - p.x[0];
+                    float dist_y = node_y - p.x[1];
+                    float r = std::sqrt(dist_x * dist_x + dist_y * dist_y);
+                    if (r >= R_supp) continue;
+
+                    float w = evalWendland_C2(r, R_supp);
+                    if (w < 1.0e-7f) continue;
+
+                    float weight = w * inv_w_sum;
+                    int node_idx = i * m_ny + j;
+                    auto& node = m_grid[node_idx];
+
+                    node.m += p.m * weight;
+
+                    float dc_x = node_x - xc;
+                    float dc_y = node_y - yc;
+
+                    float v_apic_x = p.v[0] + (p.B[0][0] * dc_x + p.B[0][1] * dc_y);
+                    float v_apic_y = p.v[1] + (p.B[1][0] * dc_x + p.B[1][1] * dc_y);
+
+                    node.p[0] += p.m * weight * v_apic_x;
+                    node.p[1] += p.m * weight * v_apic_y;
+
+                    // Affine Internal Stress Force: f_int += -V * weight * (s_Dinv · dc)
+                    node.f_int[0] -= p.V * weight * (s_Dinv[0][0] * dc_x + s_Dinv[0][1] * dc_y);
+                    node.f_int[1] -= p.V * weight * (s_Dinv[1][0] * dc_x + s_Dinv[1][1] * dc_y);
+
+                    node.von_mises += p.m * weight * vm_stress;
+                    node.plastic_strain += p.m * weight * p.ep_bar;
+                    node.density += p.m * weight * p.density;
+                    node.pressure += p.m * weight * press;
+                    node.damage += p.m * weight * p.damage;
+                }
+            }
+        } else {
+            // Standard / GIMP / BSpline / CubicBSpline
+            for (int offset_i = -1; offset_i <= 2; ++offset_i) {
+                int i = base_i + offset_i;
+                if (i < 0 || i >= m_nx) continue;
+                float node_x = (static_cast<float>(i) + 0.5f) * m_dx;
+
+                float Sx = 0.0f, dSx = 0.0f;
+                if (eff_scheme == static_cast<int>(MPMTransferScheme::GIMP)) {
+                    Sx = evalGIMP_S(p.x[0], node_x, m_dx, p.lp[0]);
+                    dSx = evalGIMP_dS(p.x[0], node_x, m_dx, p.lp[0]);
+                } else if (eff_scheme == static_cast<int>(MPMTransferScheme::BSpline)) {
+                    Sx = evalBSpline_S(p.x[0], node_x, m_dx);
+                    dSx = evalBSpline_dS(p.x[0], node_x, m_dx);
+                } else if (eff_scheme == static_cast<int>(MPMTransferScheme::CubicBSpline)) {
+                    Sx = evalCubicBSpline_S(p.x[0], node_x, m_dx);
+                    dSx = evalCubicBSpline_dS(p.x[0], node_x, m_dx);
+                } else {
+                    Sx = std::max(0.0f, 1.0f - std::abs(p.x[0] - node_x) / m_dx);
+                    dSx = (p.x[0] >= node_x ? -1.0f / m_dx : 1.0f / m_dx);
+                }
+
+                if (std::abs(Sx) < 1.0e-7f) continue;
+
+                for (int offset_j = -1; offset_j <= 2; ++offset_j) {
+                    int j = base_j + offset_j;
+                    if (j < 0 || j >= m_ny) continue;
+                    float node_y = (static_cast<float>(j) + 0.5f) * m_dy;
+
+                    float Sy = 0.0f, dSy = 0.0f;
+                    if (eff_scheme == static_cast<int>(MPMTransferScheme::GIMP)) {
+                        Sy = evalGIMP_S(p.x[1], node_y, m_dy, p.lp[1]);
+                        dSy = evalGIMP_dS(p.x[1], node_y, m_dy, p.lp[1]);
+                    } else if (eff_scheme == static_cast<int>(MPMTransferScheme::BSpline)) {
+                        Sy = evalBSpline_S(p.x[1], node_y, m_dy);
+                        dSy = evalBSpline_dS(p.x[1], node_y, m_dy);
+                    } else if (eff_scheme == static_cast<int>(MPMTransferScheme::CubicBSpline)) {
+                        Sy = evalCubicBSpline_S(p.x[1], node_y, m_dy);
+                        dSy = evalCubicBSpline_dS(p.x[1], node_y, m_dy);
+                    } else {
+                        Sy = std::max(0.0f, 1.0f - std::abs(p.x[1] - node_y) / m_dy);
+                        dSy = (p.x[1] >= node_y ? -1.0f / m_dy : 1.0f / m_dy);
+                    }
+
+                    if (std::abs(Sy) < 1.0e-7f) continue;
+
+                    float weight = Sx * Sy;
+                    float dN_dx = dSx * Sy;
+                    float dN_dy = Sx * dSy;
+
+                    int node_idx = i * m_ny + j;
+                    auto& node = m_grid[node_idx];
+
+                    // Mass scatter
+                    node.m += p.m * weight;
+
+                    // APIC Momentum scatter
+                    float dist_x = node_x - p.x[0];
+                    float dist_y = node_y - p.x[1];
+
+                    float v_apic_x = p.v[0] + (p.B[0][0] * dist_x + p.B[0][1] * dist_y);
+                    float v_apic_y = p.v[1] + (p.B[1][0] * dist_x + p.B[1][1] * dist_y);
+
+                    node.p[0] += p.m * weight * v_apic_x;
+                    node.p[1] += p.m * weight * v_apic_y;
+
+                    // Internal Stress Force scatter: f_int += -V_p * sigma_p * dN
+                    node.f_int[0] += p.V * (p.sigma[0][0] * dN_dx + p.sigma[0][1] * dN_dy);
+                    node.f_int[1] += p.V * (p.sigma[1][0] * dN_dx + p.sigma[1][1] * dN_dy);
+
+                    // Telemetry scalar field scatter
+                    node.von_mises += p.m * weight * vm_stress;
+                    node.plastic_strain += p.m * weight * p.ep_bar;
+                    node.density += p.m * weight * p.density;
+                    node.pressure += p.m * weight * press;
+                    node.damage += p.m * weight * p.damage;
+                }
             }
         }
     }
@@ -310,56 +581,48 @@ void MPMSolver2D::particleToGrid() {
 }
 
 void MPMSolver2D::updateGridKinematics(float dt) {
-    // Estimate average particle mass threshold to prevent division by near-zero mass on boundary nodes
     float avg_p_mass = 0.001f;
     if (!m_particles.empty()) {
         avg_p_mass = m_particles[0].m;
     }
-    // Low-mass boundary nodes require effective mass regularization (25% of particle mass)
-    // to prevent spurious acceleration spikes from FSI/internal pressure forces.
-    float m_eff_floor = 0.25f * avg_p_mass;
 
-    for (int j = 0; j < m_ny; ++j) {
-        for (int i = 0; i < m_nx; ++i) {
-            int node_idx = i * m_ny + j;
-            auto& node = m_grid[node_idx];
+    for (int i = 0; i < m_nx; ++i) {
+        for (int j = 0; j < m_ny; ++j) {
+            int idx = i * m_ny + j;
+            auto& node = m_grid[idx];
 
-            if (node.m > 1.0e-14f) {
-                node.v[0] = node.p[0] / node.m;
-                node.v[1] = node.p[1] / node.m;
-                node.v_old[0] = node.v[0];
-                node.v_old[1] = node.v[1];
+            if (node.m <= 1.0e-14f) {
+                node.v[0] = 0.0f;
+                node.v[1] = 0.0f;
+                node.v_old[0] = 0.0f;
+                node.v_old[1] = 0.0f;
+                continue;
+            }
 
-                // Total Force = External (FSI) - Internal
-                float f_tot_x = node.f_ext[0] - node.f_int[0];
-                float f_tot_y = node.f_ext[1] - node.f_int[1];
+            node.v_old[0] = node.p[0] / node.m;
+            node.v_old[1] = node.p[1] / node.m;
 
-                // Smooth mass regularization prevents 1e7 m/s^2 acceleration blowups on fringe nodes
-                float m_eff = std::max(node.m, m_eff_floor);
-                node.v[0] += dt * (f_tot_x / m_eff);
-                node.v[1] += dt * (f_tot_y / m_eff);
+            float m_eff = std::max(node.m, 0.25f * avg_p_mass);
+            float total_fx = -node.f_int[0] + node.f_ext[0];
+            float total_fy = -node.f_int[1] + node.f_ext[1];
 
-                // Clamp node velocity to realistic bounds
-                node.v[0] = std::clamp(node.v[0], -5000.0f, 5000.0f);
-                node.v[1] = std::clamp(node.v[1], -5000.0f, 5000.0f);
+            node.v[0] = node.v_old[0] + dt * (total_fx / m_eff);
+            node.v[1] = node.v_old[1] + dt * (total_fy / m_eff);
 
-                // Apply Domain Boundary Conditions (Sticky/Reflecting Ground Walls)
-                if (i == 0 || i == m_nx - 1) {
-                    node.v[0] = 0.0f;
-                }
-                if (j == 0 || j == m_ny - 1) {
-                    node.v[1] = 0.0f;
-                }
+            // Domain Boundary Conditions (No-Slip Sticky)
+            if (i == 0 || i == m_nx - 1) {
+                node.v[0] = 0.0f;
+                node.v_old[0] = 0.0f;
+            }
+            if (j == 0 || j == m_ny - 1) {
+                node.v[1] = 0.0f;
+                node.v_old[1] = 0.0f;
             }
         }
     }
 }
 
 void MPMSolver2D::gridToParticle(float dt) {
-    float d_scale = (m_transfer_scheme == MPMTransferScheme::BSpline) ? 4.0f : 3.0f;
-    float D_inv_x = d_scale / (m_dx * m_dx);
-    float D_inv_y = d_scale / (m_dy * m_dy);
-
     float max_B = 5000.0f / std::min(m_dx, m_dy);
 
     for (auto& p : m_particles) {
@@ -371,42 +634,220 @@ void MPMSolver2D::gridToParticle(float dt) {
         float v_flip_x = p.v[0];
         float v_flip_y = p.v[1];
         float weight_sum = 0.0f;
-        float ep_grid_sum = 0.0f;
 
-        // Pass 1: Compute PIC interpolated velocity from active nodes
-        for (int offset_i = -1; offset_i <= 2; ++offset_i) {
-            int i = base_i + offset_i;
-            if (i < 0 || i >= m_nx) continue;
-            float node_x = (static_cast<float>(i) + 0.5f) * m_dx;
+        float B_new[2][2] = {{0.0f, 0.0f}, {0.0f, 0.0f}};
+        float L_new[2][2] = {{0.0f, 0.0f}, {0.0f, 0.0f}};
 
-            float Sx = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
-                       evalGIMP_S(p.x[0], node_x, m_dx, p.lp[0]) :
-                       std::max(0.0f, 1.0f - std::abs(p.x[0] - node_x) / m_dx);
+        int eff_scheme = (p.transfer_scheme >= 0) ? p.transfer_scheme : static_cast<int>(m_transfer_scheme);
+        if (eff_scheme == static_cast<int>(MPMTransferScheme::RadialMLS)) {
+            float R_supp = 2.0f * std::max(m_dx, m_dy);
+            float weight_sum_local = 0.0f;
+            float cx = 0.0f, cy = 0.0f;
 
-            if (std::abs(Sx) < 1.0e-7f) continue;
+            for (int offset_i = -2; offset_i <= 2; ++offset_i) {
+                int i = base_i + offset_i;
+                if (i < 0 || i >= m_nx) continue;
+                float node_x = (static_cast<float>(i) + 0.5f) * m_dx;
 
-            for (int offset_j = -1; offset_j <= 2; ++offset_j) {
-                int j = base_j + offset_j;
-                if (j < 0 || j >= m_ny) continue;
-                float node_y = (static_cast<float>(j) + 0.5f) * m_dy;
+                for (int offset_j = -2; offset_j <= 2; ++offset_j) {
+                    int j = base_j + offset_j;
+                    if (j < 0 || j >= m_ny) continue;
+                    float node_y = (static_cast<float>(j) + 0.5f) * m_dy;
 
-                float Sy = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
-                           evalGIMP_S(p.x[1], node_y, m_dy, p.lp[1]) :
-                           std::max(0.0f, 1.0f - std::abs(p.x[1] - node_y) / m_dy);
+                    float dist_x = node_x - p.x[0];
+                    float dist_y = node_y - p.x[1];
+                    float r = std::sqrt(dist_x * dist_x + dist_y * dist_y);
+                    if (r >= R_supp) continue;
 
-                if (std::abs(Sy) < 1.0e-7f) continue;
+                    float w = evalWendland_C2(r, R_supp);
+                    if (w < 1.0e-7f) continue;
 
-                float weight = Sx * Sy;
-                int node_idx = i * m_ny + j;
-                const auto& node = m_grid[node_idx];
+                    weight_sum_local += w;
+                    cx += w * node_x;
+                    cy += w * node_y;
+                }
+            }
 
-                if (node.m > 1.0e-14f) {
-                    v_pic_x += weight * node.v[0];
-                    v_pic_y += weight * node.v[1];
-                    v_flip_x += weight * (node.v[0] - node.v_old[0]);
-                    v_flip_y += weight * (node.v[1] - node.v_old[1]);
-                    ep_grid_sum += weight * node.plastic_strain;
-                    weight_sum += weight;
+            if (weight_sum_local <= 1.0e-7f) {
+                v_pic_x = p.v[0]; v_pic_y = p.v[1];
+            } else {
+                float inv_w_sum = 1.0f / weight_sum_local;
+                float xc = cx * inv_w_sum;
+                float yc = cy * inv_w_sum;
+
+                float D[2][2] = {{0.0f, 0.0f}, {0.0f, 0.0f}};
+                for (int offset_i = -2; offset_i <= 2; ++offset_i) {
+                    int i = base_i + offset_i;
+                    if (i < 0 || i >= m_nx) continue;
+                    float node_x = (static_cast<float>(i) + 0.5f) * m_dx;
+
+                    for (int offset_j = -2; offset_j <= 2; ++offset_j) {
+                        int j = base_j + offset_j;
+                        if (j < 0 || j >= m_ny) continue;
+                        float node_y = (static_cast<float>(j) + 0.5f) * m_dy;
+
+                        float dist_x = node_x - p.x[0];
+                        float dist_y = node_y - p.x[1];
+                        float r = std::sqrt(dist_x * dist_x + dist_y * dist_y);
+                        if (r >= R_supp) continue;
+
+                        float w = evalWendland_C2(r, R_supp);
+                        if (w < 1.0e-7f) continue;
+
+                        float dc_x = node_x - xc;
+                        float dc_y = node_y - yc;
+
+                        D[0][0] += w * dc_x * dc_x;
+                        D[0][1] += w * dc_x * dc_y;
+                        D[1][1] += w * dc_y * dc_y;
+                    }
+                }
+
+                D[0][0] *= inv_w_sum; D[0][1] *= inv_w_sum;
+                D[1][0] = D[0][1];    D[1][1] *= inv_w_sum;
+
+                float D_inv[2][2];
+                float det = D[0][0] * D[1][1] - D[0][1] * D[0][1];
+                if (det > 1.0e-18f) {
+                    float inv_det = 1.0f / det;
+                    D_inv[0][0] =  D[1][1] * inv_det;
+                    D_inv[0][1] = -D[0][1] * inv_det;
+                    D_inv[1][0] =  D_inv[0][1];
+                    D_inv[1][1] =  D[0][0] * inv_det;
+                } else {
+                    float d_iso = 3.6f / (m_dx * m_dx);
+                    D_inv[0][0] = d_iso; D_inv[0][1] = 0.0f;
+                    D_inv[1][0] = 0.0f;  D_inv[1][1] = d_iso;
+                }
+
+                for (int offset_i = -2; offset_i <= 2; ++offset_i) {
+                    int i = base_i + offset_i;
+                    if (i < 0 || i >= m_nx) continue;
+                    float node_x = (static_cast<float>(i) + 0.5f) * m_dx;
+
+                    for (int offset_j = -2; offset_j <= 2; ++offset_j) {
+                        int j = base_j + offset_j;
+                        if (j < 0 || j >= m_ny) continue;
+                        float node_y = (static_cast<float>(j) + 0.5f) * m_dy;
+
+                        float dist_x = node_x - p.x[0];
+                        float dist_y = node_y - p.x[1];
+                        float r = std::sqrt(dist_x * dist_x + dist_y * dist_y);
+                        if (r >= R_supp) continue;
+
+                        float w = evalWendland_C2(r, R_supp);
+                        if (w < 1.0e-7f) continue;
+
+                        float weight = w * inv_w_sum;
+                        int node_idx = i * m_ny + j;
+                        const auto& node = m_grid[node_idx];
+
+                        if (node.m > 1.0e-14f) {
+                            v_pic_x += weight * node.v[0];
+                            v_pic_y += weight * node.v[1];
+                            v_flip_x += weight * (node.v[0] - node.v_old[0]);
+                            v_flip_y += weight * (node.v[1] - node.v_old[1]);
+                            weight_sum += weight;
+
+                            float dc_x = node_x - xc;
+                            float dc_y = node_y - yc;
+
+                            float d_dinv_x = D_inv[0][0] * dc_x + D_inv[0][1] * dc_y;
+                            float d_dinv_y = D_inv[1][0] * dc_x + D_inv[1][1] * dc_y;
+
+                            B_new[0][0] += weight * node.v[0] * d_dinv_x;
+                            B_new[0][1] += weight * node.v[0] * d_dinv_y;
+                            B_new[1][0] += weight * node.v[1] * d_dinv_x;
+                            B_new[1][1] += weight * node.v[1] * d_dinv_y;
+
+                            L_new[0][0] += node.v[0] * weight * d_dinv_x;
+                            L_new[0][1] += node.v[0] * weight * d_dinv_y;
+                            L_new[1][0] += node.v[1] * weight * d_dinv_x;
+                            L_new[1][1] += node.v[1] * weight * d_dinv_y;
+                        }
+                    }
+                }
+            }
+        } else {
+            float d_scale = (eff_scheme == static_cast<int>(MPMTransferScheme::BSpline) ||
+                             eff_scheme == static_cast<int>(MPMTransferScheme::CubicBSpline)) ? 4.0f : 3.0f;
+            float D_inv_x = d_scale / (m_dx * m_dx);
+            float D_inv_y = d_scale / (m_dy * m_dy);
+
+            for (int offset_i = -1; offset_i <= 2; ++offset_i) {
+                int i = base_i + offset_i;
+                if (i < 0 || i >= m_nx) continue;
+                float node_x = (static_cast<float>(i) + 0.5f) * m_dx;
+
+                float Sx = 0.0f, dSx = 0.0f;
+                if (eff_scheme == static_cast<int>(MPMTransferScheme::GIMP)) {
+                    Sx = evalGIMP_S(p.x[0], node_x, m_dx, p.lp[0]);
+                    dSx = evalGIMP_dS(p.x[0], node_x, m_dx, p.lp[0]);
+                } else if (eff_scheme == static_cast<int>(MPMTransferScheme::BSpline)) {
+                    Sx = evalBSpline_S(p.x[0], node_x, m_dx);
+                    dSx = evalBSpline_dS(p.x[0], node_x, m_dx);
+                } else if (eff_scheme == static_cast<int>(MPMTransferScheme::CubicBSpline)) {
+                    Sx = evalCubicBSpline_S(p.x[0], node_x, m_dx);
+                    dSx = evalCubicBSpline_dS(p.x[0], node_x, m_dx);
+                } else {
+                    Sx = std::max(0.0f, 1.0f - std::abs(p.x[0] - node_x) / m_dx);
+                    dSx = (p.x[0] >= node_x ? -1.0f / m_dx : 1.0f / m_dx);
+                }
+
+                if (std::abs(Sx) < 1.0e-7f) continue;
+
+                for (int offset_j = -1; offset_j <= 2; ++offset_j) {
+                    int j = base_j + offset_j;
+                    if (j < 0 || j >= m_ny) continue;
+                    float node_y = (static_cast<float>(j) + 0.5f) * m_dy;
+
+                    float Sy = 0.0f, dSy = 0.0f;
+                    if (eff_scheme == static_cast<int>(MPMTransferScheme::GIMP)) {
+                        Sy = evalGIMP_S(p.x[1], node_y, m_dy, p.lp[1]);
+                        dSy = evalGIMP_dS(p.x[1], node_y, m_dy, p.lp[1]);
+                    } else if (eff_scheme == static_cast<int>(MPMTransferScheme::BSpline)) {
+                        Sy = evalBSpline_S(p.x[1], node_y, m_dy);
+                        dSy = evalBSpline_dS(p.x[1], node_y, m_dy);
+                    } else if (eff_scheme == static_cast<int>(MPMTransferScheme::CubicBSpline)) {
+                        Sy = evalCubicBSpline_S(p.x[1], node_y, m_dy);
+                        dSy = evalCubicBSpline_dS(p.x[1], node_y, m_dy);
+                    } else {
+                        Sy = std::max(0.0f, 1.0f - std::abs(p.x[1] - node_y) / m_dy);
+                        dSy = (p.x[1] >= node_y ? -1.0f / m_dy : 1.0f / m_dy);
+                    }
+
+                    if (std::abs(Sy) < 1.0e-7f) continue;
+
+                    float weight = Sx * Sy;
+                    float dN_dx = dSx * Sy;
+                    float dN_dy = Sx * dSy;
+
+                    int node_idx = i * m_ny + j;
+                    const auto& node = m_grid[node_idx];
+
+                    if (node.m > 1.0e-14f) {
+                        v_pic_x += weight * node.v[0];
+                        v_pic_y += weight * node.v[1];
+                        v_flip_x += weight * (node.v[0] - node.v_old[0]);
+                        v_flip_y += weight * (node.v[1] - node.v_old[1]);
+                        weight_sum += weight;
+
+                        float dist_x = node_x - p.x[0];
+                        float dist_y = node_y - p.x[1];
+
+                        float diff_vx = node.v[0] - p.v[0];
+                        float diff_vy = node.v[1] - p.v[1];
+
+                        B_new[0][0] += weight * diff_vx * dist_x * D_inv_x;
+                        B_new[0][1] += weight * diff_vx * dist_y * D_inv_y;
+                        B_new[1][0] += weight * diff_vy * dist_x * D_inv_x;
+                        B_new[1][1] += weight * diff_vy * dist_y * D_inv_y;
+
+                        L_new[0][0] += diff_vx * dN_dx;
+                        L_new[0][1] += diff_vx * dN_dy;
+                        L_new[1][0] += diff_vy * dN_dx;
+                        L_new[1][1] += diff_vy * dN_dy;
+                    }
                 }
             }
         }
@@ -416,72 +857,13 @@ void MPMSolver2D::gridToParticle(float dt) {
             v_pic_y = p.v[1];
         }
 
-        // Pass 2: Compute APIC affine velocity matrix B_p and L_grad
-        float B_new[2][2] = {{0.0f, 0.0f}, {0.0f, 0.0f}};
-        float L_new[2][2] = {{0.0f, 0.0f}, {0.0f, 0.0f}};
-
-        for (int offset_i = -1; offset_i <= 2; ++offset_i) {
-            int i = base_i + offset_i;
-            if (i < 0 || i >= m_nx) continue;
-            float node_x = (static_cast<float>(i) + 0.5f) * m_dx;
-
-            float Sx = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
-                       evalGIMP_S(p.x[0], node_x, m_dx, p.lp[0]) :
-                       std::max(0.0f, 1.0f - std::abs(p.x[0] - node_x) / m_dx);
-
-            float dSx = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
-                        evalGIMP_dS(p.x[0], node_x, m_dx, p.lp[0]) :
-                        (p.x[0] >= node_x ? -1.0f / m_dx : 1.0f / m_dx);
-
-            if (std::abs(Sx) < 1.0e-7f) continue;
-
-            for (int offset_j = -1; offset_j <= 2; ++offset_j) {
-                int j = base_j + offset_j;
-                if (j < 0 || j >= m_ny) continue;
-                float node_y = (static_cast<float>(j) + 0.5f) * m_dy;
-
-                float Sy = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
-                           evalGIMP_S(p.x[1], node_y, m_dy, p.lp[1]) :
-                           std::max(0.0f, 1.0f - std::abs(p.x[1] - node_y) / m_dy);
-
-                float dSy = (m_transfer_scheme == MPMTransferScheme::GIMP) ?
-                            evalGIMP_dS(p.x[1], node_y, m_dy, p.lp[1]) :
-                            (p.x[1] >= node_y ? -1.0f / m_dy : 1.0f / m_dy);
-
-                if (std::abs(Sy) < 1.0e-7f) continue;
-
-                float weight = Sx * Sy;
-                float dN_dx = dSx * Sy;
-                float dN_dy = Sx * dSy;
-
-                int node_idx = i * m_ny + j;
-                const auto& node = m_grid[node_idx];
-
-                if (node.m > 1.0e-14f) {
-                    float dist_x = node_x - p.x[0];
-                    float dist_y = node_y - p.x[1];
-
-                    float diff_vx = node.v[0] - p.v[0];
-                    float diff_vy = node.v[1] - p.v[1];
-
-                    float w_apic = 1.0f;
-                    B_new[0][0] += w_apic * weight * diff_vx * dist_x * D_inv_x;
-                    B_new[0][1] += w_apic * weight * diff_vx * dist_y * D_inv_y;
-                    B_new[1][0] += w_apic * weight * diff_vy * dist_x * D_inv_x;
-                    B_new[1][1] += w_apic * weight * diff_vy * dist_y * D_inv_y;
-
-                    L_new[0][0] += diff_vx * dN_dx;
-                    L_new[0][1] += diff_vx * dN_dy;
-                    L_new[1][0] += diff_vy * dN_dx;
-                    L_new[1][1] += diff_vy * dN_dy;
-                }
-            }
-        }
-
         float target_vx = v_pic_x;
         float target_vy = v_pic_y;
 
-        if (m_velocity_scheme == MPMVelocityScheme::FLIP) {
+        if (p.has_failed || p.damage >= 1.0f) {
+            target_vx = v_flip_x;
+            target_vy = v_flip_y;
+        } else if (m_velocity_scheme == MPMVelocityScheme::FLIP) {
             float alpha = std::clamp(m_flip_blend, 0.0f, 1.0f);
             target_vx = alpha * v_flip_x + (1.0f - alpha) * v_pic_x;
             target_vy = alpha * v_flip_y + (1.0f - alpha) * v_pic_y;
@@ -601,6 +983,11 @@ void MPMSolver2D::updateStressState(float dt) {
 
         // --- Johnson-Cook Plasticity + Mie-Grüneisen Shock EOS Model ---
         if (p.material_model == MPMMaterialModel::JohnsonCookMieGruneisen) {
+            float w_factor = 1.0f;
+            if (p.weibull_modulus > 0.001f) {
+                w_factor = computeWeibullFactor2D(p.x[0], p.x[1], p.weibull_modulus, p.weibull_scale);
+            }
+
             p.V = std::clamp(p.V * (1.0f + tr_deps), 0.1f * p.V0, 10.0f * p.V0);
             const float J = p.V / (p.V0 > 1.0e-20f ? p.V0 : 1.0e-20f);
             const float mu_vol = (1.0f - J) / J;
@@ -641,7 +1028,7 @@ void MPMSolver2D::updateStressState(float dt) {
 
             float q_trial = std::sqrt(s_xx_trial * s_xx_trial + s_yy_trial * s_yy_trial + 2.0f * s_xy_trial * s_xy_trial);
 
-            // 3. Johnson-Cook Yield Stress
+            // 3. Johnson-Cook Yield Stress with Weibull Flaw Scatter
             float dev_xx = deps_xx - 0.5f * tr_deps;
             float dev_yy = deps_yy - 0.5f * tr_deps;
             float dev_xy = deps_xy;
@@ -649,7 +1036,7 @@ void MPMSolver2D::updateStressState(float dt) {
             float ep_dot_star = std::max(1.0f, deps_eq / (dt > 1e-12f ? dt : 1e-12f));
             float T_star = std::clamp((p.temperature - p.T_room) / (p.T_melt > p.T_room ? p.T_melt - p.T_room : 1.0f), 0.0f, 1.0f);
 
-            float term_strain = p.jc_A + p.jc_B * std::pow(std::max(0.0f, p.ep_bar), p.jc_n);
+            float term_strain = (p.jc_A * w_factor) + p.jc_B * std::pow(std::max(0.0f, p.ep_bar), p.jc_n);
             float term_rate   = 1.0f + p.jc_C * std::log(ep_dot_star);
             float term_temp   = 1.0f - std::pow(T_star, p.jc_m);
             if (term_temp < 0.0f) term_temp = 0.0f;
@@ -681,15 +1068,18 @@ void MPMSolver2D::updateStressState(float dt) {
                 p.temperature = p.T_room + p.e_int / p.Cp;
             }
 
-            // 5. Thermal Re-Welding / Healing Rule:
+            // 5. Thermal Re-Welding / Healing Rule or Damage Accumulation
             if (p.temperature >= 0.80f * p.T_melt && p_hydro > 0.0f) {
                 p.damage = 0.0f;
                 p.has_failed = false;
             } else {
-                float d_plastic = (p.failure_strain > 0.0f) ? std::clamp(p.ep_bar / p.failure_strain, 0.0f, 1.0f) : 0.0f;
+                const float fail_strain_base = (p.failure_strain > 0.0f) ? p.failure_strain * w_factor : 0.0f;
+                const float tensile_fail_base = (p.tensile_failure_stress > 0.0f) ? p.tensile_failure_stress * w_factor : 0.0f;
+
+                float d_plastic = (fail_strain_base > 0.0f) ? std::clamp(p.ep_bar / fail_strain_base, 0.0f, 1.0f) : 0.0f;
                 float tensile_stress = -p_hydro;
-                float d_tensile = (tensile_stress > 0.0f && p.tensile_failure_stress > 0.0f)
-                    ? std::clamp(tensile_stress / p.tensile_failure_stress, 0.0f, 1.0f) : 0.0f;
+                float d_tensile = (tensile_stress > 0.0f && tensile_fail_base > 0.0f)
+                    ? std::clamp(tensile_stress / tensile_fail_base, 0.0f, 1.0f) : 0.0f;
 
                 p.damage = std::max(p.damage, std::max(d_plastic, d_tensile));
                 if (p.damage >= 1.0f) {
@@ -697,7 +1087,29 @@ void MPMSolver2D::updateStressState(float dt) {
                     p.damage = 1.0f;
                     p.B[0][0] = 0.0f; p.B[0][1] = 0.0f;
                     p.B[1][0] = 0.0f; p.B[1][1] = 0.0f;
+
+                    float p_comp = 0.0f;
+                    if (J < 1.0f) {
+                        const float K_intact = E / (2.0f * std::max(1.0e-4f, 1.0f - nu));
+                        const float K_debris = 0.10f * K_intact;
+                        p_comp = K_debris * (1.0f - J) / J;
+                    }
+
+                    p.sigma[0][0] = -p_comp;
+                    p.sigma[1][1] = -p_comp;
+                    p.sigma[0][1] = 0.0f;
+                    p.sigma[1][0] = 0.0f;
+
+                    continue;
                 }
+            }
+
+            if (p.damage > 0.0f) {
+                float soft_factor = std::clamp(1.0f - p.damage, 0.0f, 1.0f);
+                p.sigma[0][0] *= soft_factor;
+                p.sigma[1][1] *= soft_factor;
+                p.sigma[0][1] *= soft_factor;
+                p.sigma[1][0] *= soft_factor;
             }
 
             continue;
@@ -715,6 +1127,11 @@ void MPMSolver2D::updateStressState(float dt) {
         float sig_xx_base = p.sigma[0][0] + rot_xx;
         float sig_yy_base = p.sigma[1][1] + rot_yy;
         float sig_xy_base = p.sigma[0][1] + rot_xy;
+
+        float w_factor = 1.0f;
+        if (p.weibull_modulus > 0.001f) {
+            w_factor = computeWeibullFactor2D(p.x[0], p.x[1], p.weibull_modulus, p.weibull_scale);
+        }
 
         // Lame Elastic Parameters
         float E = p.youngs_modulus;
@@ -735,7 +1152,8 @@ void MPMSolver2D::updateStressState(float dt) {
 
         // Von Mises Equivalent Stress
         float q_trial = std::sqrt(s_xx * s_xx + s_yy * s_yy + 2.0f * s_xy * s_xy);
-        float yield_surf = q_trial - (p.yield_stress + p.hardening_modulus * p.ep_bar);
+        float yield_base = p.yield_stress * w_factor;
+        float yield_surf = q_trial - (yield_base + p.hardening_modulus * p.ep_bar);
 
         if (q_trial > 1.0e-5f && yield_surf > 0.0f) {
             // Radial Return Plastic Correction
@@ -756,18 +1174,15 @@ void MPMSolver2D::updateStressState(float dt) {
             p.sigma[1][0] = sig_xy_trial;
         }
 
-        // Evaluate Material Damage & Failure Criteria
-        float d_plastic = 0.0f;
-        if (p.failure_strain > 0.0f) {
-            d_plastic = std::clamp(p.ep_bar / p.failure_strain, 0.0f, 1.0f);
-        }
+        // Evaluate Material Damage & Failure Criteria with Weibull Scatter
+        float fail_strain_base = (p.failure_strain > 0.0f) ? p.failure_strain * w_factor : 0.0f;
+        float tensile_fail_base = (p.tensile_failure_stress > 0.0f) ? p.tensile_failure_stress * w_factor : 0.0f;
 
+        float d_plastic = (fail_strain_base > 0.0f) ? std::clamp(p.ep_bar / fail_strain_base, 0.0f, 1.0f) : 0.0f;
         float curr_press = -0.5f * (p.sigma[0][0] + p.sigma[1][1]);
         float tensile_stress = -curr_press; // Hydrostatic tension (negative pressure)
-        float d_tensile = 0.0f;
-        if (tensile_stress > 0.0f && p.tensile_failure_stress > 0.0f) {
-            d_tensile = std::clamp(tensile_stress / p.tensile_failure_stress, 0.0f, 1.0f);
-        }
+        float d_tensile = (tensile_stress > 0.0f && tensile_fail_base > 0.0f)
+            ? std::clamp(tensile_stress / tensile_fail_base, 0.0f, 1.0f) : 0.0f;
 
         float target_damage = std::max(d_plastic, d_tensile);
         p.damage = std::max(p.damage, target_damage);
@@ -782,9 +1197,7 @@ void MPMSolver2D::updateStressState(float dt) {
             const float J = p.V / (p.V0 > 1.0e-20f ? p.V0 : 1.0e-20f);
             float p_comp = 0.0f;
             if (J < 1.0f) {
-                const float E_mod    = p.youngs_modulus;
-                const float nu       = p.poissons_ratio;
-                const float K_intact = E_mod / (2.0f * std::max(1.0e-4f, 1.0f - nu));
+                const float K_intact = E / (2.0f * std::max(1.0e-4f, 1.0f - nu));
                 const float K_debris = 0.10f * K_intact;
                 p_comp = K_debris * (1.0f - J) / J;
             }
@@ -798,7 +1211,7 @@ void MPMSolver2D::updateStressState(float dt) {
         }
 
         // Stress Tensor Softening & Degradation
-        float soft_factor = 1.0f - p.damage;
+        float soft_factor = std::clamp(1.0f - p.damage, 0.0f, 1.0f);
         if (soft_factor < 0.0f) soft_factor = 0.0f;
 
         p.sigma[0][0] *= soft_factor;

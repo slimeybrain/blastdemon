@@ -1201,7 +1201,7 @@ __global__ void fem_initial_timestep_erosion_kernel_3d_device(
         }
     }
 
-    if (mat.enable_strain_erosion || erosion_criteria.enable_strain_erosion) {
+    if (mat.enable_strain_erosion || erosion_criteria.enable_strain_erosion || mat.failure_strain > 0.0f || mat.erosion_strain > 0.0f || erosion_criteria.failure_strain > 0.0f) {
         T fail_strain = static_cast<T>(mat.erosion_strain > 0.0f ? mat.erosion_strain : (mat.failure_strain > 0.0f ? mat.failure_strain : erosion_criteria.failure_strain));
         if (fail_strain > static_cast<T>(0.0f) && elem.ep_bar >= fail_strain) {
             newly_eroded = true;

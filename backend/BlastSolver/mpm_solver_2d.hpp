@@ -61,6 +61,10 @@ struct MPMParticle2D {
     float mg_c0{4570.0f};        // Bulk sound speed (m/s)
     float mg_s{1.49f};           // Hugoniot Us-Up slope
 
+    // Weibull Flaw Scatter Parameters
+    float weibull_modulus{0.0f}; // Weibull modulus m_w (0.0 = homogeneous)
+    float weibull_scale{1.0f};   // Weibull scale eta_w (1.0 = baseline)
+
     // Dynamic State Variables
     float e_int{0.0f};           // Specific internal energy (J/kg)
     float temperature{293.0f};   // Current temperature (K)
@@ -70,6 +74,7 @@ struct MPMParticle2D {
     float damage{0.0f};          // Scalar damage D in [0, 1]
     bool has_failed{false};      // Total failure status flag
     int object_id{0};
+    int transfer_scheme{-1};    // -1 = Inherit domain default, otherwise MPMTransferScheme cast
 };
 
 struct MPMGridNode2D {
@@ -89,9 +94,21 @@ struct MPMGridNode2D {
 };
 
 enum class MPMTransferScheme {
-    GIMP,
-    Standard,
-    BSpline
+    Standard = 0,
+    GIMP = 1,
+    BSpline = 2,
+    RadialMLS = 3,
+    CubicBSpline = 4
+};
+
+enum class MPMParticleDistribution {
+    Cartesian = 0,
+    Hexagonal = 1
+};
+
+enum class MPMBoundaryFilling {
+    Stairstepped = 0,
+    Partial = 1
 };
 
 enum class MPMVelocityScheme {
@@ -125,12 +142,16 @@ public:
     void addRectangleObject(int obj_id, float pos_x, float pos_y, float size_x, float size_y,
                             float vel_x, float vel_y, float angular_vel, float density, float E, float nu,
                             float yield_stress, float hardening, float failure_strain = 0.25f,
-                            float tensile_failure_stress = 600.0e6f, int ppc = 4);
+                            float tensile_failure_stress = 600.0e6f, int ppc = 4,
+                            MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
+                            MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped);
 
     void addCircleObject(int obj_id, float pos_x, float pos_y, float radius,
                          float vel_x, float vel_y, float angular_vel, float density, float E, float nu,
                          float yield_stress, float hardening, float failure_strain = 0.25f,
-                         float tensile_failure_stress = 600.0e6f, int ppc = 4);
+                         float tensile_failure_stress = 600.0e6f, int ppc = 4,
+                         MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
+                         MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped);
 
     // Simulation Step: Run 1 step at dt = cfl * dt_critical
     void step(float cfl = 0.6f);
@@ -164,9 +185,14 @@ private:
     void gridToParticle(float dt);
     void updateStressState(float dt);
 
-    // uGIMP Shape Functions (1D & 2D)
+    // Shape Functions & Radial Kernels
     float evalGIMP_S(float x_p, float x_i, float h, float l_p) const;
     float evalGIMP_dS(float x_p, float x_i, float h, float l_p) const;
+    float evalBSpline_S(float x_p, float x_i, float h) const;
+    float evalBSpline_dS(float x_p, float x_i, float h) const;
+    float evalCubicBSpline_S(float x_p, float x_i, float h) const;
+    float evalCubicBSpline_dS(float x_p, float x_i, float h) const;
+    float evalWendland_C2(float r, float R_supp) const;
 
     int m_nx{64};
     int m_ny{64};

@@ -1046,63 +1046,51 @@ void export_vtu_fem_3d(const std::string& filename, const Blast::FEMSolver3D<T>&
 template void export_vtu_fem_3d<float>(const std::string&, const Blast::FEMSolver3D<float>&, const std::string&, bool, bool, bool, bool, bool, bool, bool);
 template void export_vtu_fem_3d<double>(const std::string&, const Blast::FEMSolver3D<double>&, const std::string&, bool, bool, bool, bool, bool, bool, bool);
 
-void export_vtu_mpm_3d(const std::string& filename, const std::vector<Blast::MPMParticle3D>& particles, const std::string& format,
-                       bool has_vel, bool has_disp, bool has_stress,
-                       bool has_strain, bool has_damage, bool has_temp) {
+void export_vtu_mpm_3d_snapshot(const std::string& filename, const MPMVTKSnapshot3D& snap, const std::string& format) {
     std::ofstream out(filename);
     if (!out) return;
 
-    int num_points = static_cast<int>(particles.size());
+    int num_points = snap.num_particles;
     int num_cells = num_points;
-
-    std::vector<float> points(num_points * 3);
-    std::vector<float> vel, disp, von_mises, pressure, ep_bar, damage, temp, obj_id;
-    if (has_vel) vel.resize(num_points * 3);
-    if (has_disp) disp.resize(num_points * 3);
-    if (has_stress) { von_mises.resize(num_points); pressure.resize(num_points); }
-    if (has_strain) ep_bar.resize(num_points);
-    if (has_damage) damage.resize(num_points);
-    if (has_temp) temp.resize(num_points);
-    obj_id.resize(num_points);
+    if (num_points <= 0) return;
 
     std::vector<int32_t> connectivity(num_cells);
     std::vector<int32_t> offsets(num_cells);
     std::vector<uint8_t> types(num_cells, 1); // VTK_VERTEX (1)
-
-    for (int i = 0; i < num_points; ++i) {
-        const auto& p = particles[i];
-        points[i * 3 + 0] = static_cast<float>(p.x[0]);
-        points[i * 3 + 1] = static_cast<float>(p.x[1]);
-        points[i * 3 + 2] = static_cast<float>(p.x[2]);
-
+    for (int i = 0; i < num_cells; ++i) {
         connectivity[i] = i;
         offsets[i] = i + 1;
+    }
 
-        if (has_vel) {
-            vel[i * 3 + 0] = static_cast<float>(p.v[0]);
-            vel[i * 3 + 1] = static_cast<float>(p.v[1]);
-            vel[i * 3 + 2] = static_cast<float>(p.v[2]);
+    std::string points_encoded, conn_encoded, off_encoded, types_encoded;
+    std::string vel_encoded, vm_encoded, p_encoded, ep_encoded, dmg_encoded, temp_encoded, obj_encoded;
+
+    if (format != "ASCII") {
+        #pragma omp parallel sections
+        {
+            #pragma omp section
+            { points_encoded = binary_encode(snap.points); }
+            #pragma omp section
+            { conn_encoded = binary_encode(connectivity); }
+            #pragma omp section
+            { off_encoded = binary_encode(offsets); }
+            #pragma omp section
+            { types_encoded = binary_encode(types); }
+            #pragma omp section
+            { if (snap.has_vel && !snap.vel.empty()) vel_encoded = binary_encode(snap.vel); }
+            #pragma omp section
+            { if (snap.has_stress && !snap.von_mises.empty()) vm_encoded = binary_encode(snap.von_mises); }
+            #pragma omp section
+            { if (snap.has_stress && !snap.pressure.empty()) p_encoded = binary_encode(snap.pressure); }
+            #pragma omp section
+            { if (snap.has_strain && !snap.ep_bar.empty()) ep_encoded = binary_encode(snap.ep_bar); }
+            #pragma omp section
+            { if (snap.has_damage && !snap.damage.empty()) dmg_encoded = binary_encode(snap.damage); }
+            #pragma omp section
+            { if (snap.has_temp && !snap.temp.empty()) temp_encoded = binary_encode(snap.temp); }
+            #pragma omp section
+            { if (!snap.obj_id.empty()) obj_encoded = binary_encode(snap.obj_id); }
         }
-        if (has_disp) {
-            disp[i * 3 + 0] = static_cast<float>(p.v[0]);
-            disp[i * 3 + 1] = static_cast<float>(p.v[1]);
-            disp[i * 3 + 2] = static_cast<float>(p.v[2]);
-        }
-        if (has_stress) {
-            double mean_s = (p.sigma[0][0] + p.sigma[1][1] + p.sigma[2][2]) / 3.0;
-            double s00 = p.sigma[0][0] - mean_s;
-            double s11 = p.sigma[1][1] - mean_s;
-            double s22 = p.sigma[2][2] - mean_s;
-            double s01 = p.sigma[0][1];
-            double s12 = p.sigma[1][2];
-            double s20 = p.sigma[2][0];
-            von_mises[i] = static_cast<float>(std::sqrt(1.5 * (s00*s00 + s11*s11 + s22*s22 + 2.0*(s01*s01 + s12*s12 + s20*s20))));
-            pressure[i] = static_cast<float>(-mean_s);
-        }
-        if (has_strain) ep_bar[i] = static_cast<float>(p.ep_bar);
-        if (has_damage) damage[i] = static_cast<float>(p.damage);
-        if (has_temp) temp[i] = static_cast<float>(p.temperature);
-        obj_id[i] = static_cast<float>(p.object_id);
     }
 
     out << "<?xml version=\"1.0\"?>\n";
@@ -1117,10 +1105,10 @@ void export_vtu_mpm_3d(const std::string& filename, const std::vector<Blast::MPM
     out << "      <Points>\n";
     if (format == "ASCII") {
         out << "        <DataArray type=\"Float32\" Name=\"Points\" NumberOfComponents=\"3\" format=\"ascii\">\n          ";
-        for (float v : points) out << v << " ";
+        for (float v : snap.points) out << v << " ";
         out << "\n        </DataArray>\n";
     } else {
-        out << "        <DataArray type=\"Float32\" Name=\"Points\" NumberOfComponents=\"3\" format=\"binary\">\n          " << binary_encode(points) << "\n        </DataArray>\n";
+        out << "        <DataArray type=\"Float32\" Name=\"Points\" NumberOfComponents=\"3\" format=\"binary\">\n          " << points_encoded << "\n        </DataArray>\n";
     }
     out << "      </Points>\n";
 
@@ -1136,33 +1124,33 @@ void export_vtu_mpm_3d(const std::string& filename, const std::vector<Blast::MPM
         for (uint8_t v : types) out << (int)v << " ";
         out << "\n        </DataArray>\n";
     } else {
-        out << "        <DataArray type=\"Int32\" Name=\"connectivity\" format=\"binary\">\n          " << binary_encode(connectivity) << "\n        </DataArray>\n";
-        out << "        <DataArray type=\"Int32\" Name=\"offsets\" format=\"binary\">\n          " << binary_encode(offsets) << "\n        </DataArray>\n";
-        out << "        <DataArray type=\"UInt8\" Name=\"types\" format=\"binary\">\n          " << binary_encode(types) << "\n        </DataArray>\n";
+        out << "        <DataArray type=\"Int32\" Name=\"connectivity\" format=\"binary\">\n          " << conn_encoded << "\n        </DataArray>\n";
+        out << "        <DataArray type=\"Int32\" Name=\"offsets\" format=\"binary\">\n          " << off_encoded << "\n        </DataArray>\n";
+        out << "        <DataArray type=\"UInt8\" Name=\"types\" format=\"binary\">\n          " << types_encoded << "\n        </DataArray>\n";
     }
     out << "      </Cells>\n";
 
     out << "      <PointData>\n";
-    auto writePointData = [&](const std::string& name, const std::vector<float>& data, int num_comp = 1) {
+    auto writePointData = [&](const std::string& name, const std::vector<float>& data, const std::string& encoded, int num_comp = 1) {
+        if (data.empty()) return;
         if (format == "ASCII") {
             out << "        <DataArray type=\"Float32\" Name=\"" << name << "\" NumberOfComponents=\"" << num_comp << "\" format=\"ascii\">\n          ";
             for (float v : data) out << v << " ";
             out << "\n        </DataArray>\n";
         } else {
-            out << "        <DataArray type=\"Float32\" Name=\"" << name << "\" NumberOfComponents=\"" << num_comp << "\" format=\"binary\">\n          " << binary_encode(data) << "\n        </DataArray>\n";
+            out << "        <DataArray type=\"Float32\" Name=\"" << name << "\" NumberOfComponents=\"" << num_comp << "\" format=\"binary\">\n          " << encoded << "\n        </DataArray>\n";
         }
     };
 
-    if (has_vel) writePointData("Velocity", vel, 3);
-    if (has_disp) writePointData("Displacement", disp, 3);
-    if (has_stress) {
-        writePointData("von_Mises_Stress", von_mises, 1);
-        writePointData("Hydrostatic_Pressure", pressure, 1);
+    if (snap.has_vel) writePointData("Velocity", snap.vel, vel_encoded, 3);
+    if (snap.has_stress) {
+        writePointData("von_Mises_Stress", snap.von_mises, vm_encoded, 1);
+        writePointData("Hydrostatic_Pressure", snap.pressure, p_encoded, 1);
     }
-    if (has_strain) writePointData("Plastic_Strain", ep_bar, 1);
-    if (has_damage) writePointData("Damage", damage, 1);
-    if (has_temp) writePointData("Temperature", temp, 1);
-    writePointData("ObjectID", obj_id, 1);
+    if (snap.has_strain) writePointData("Plastic_Strain", snap.ep_bar, ep_encoded, 1);
+    if (snap.has_damage) writePointData("Damage", snap.damage, dmg_encoded, 1);
+    if (snap.has_temp) writePointData("Temperature", snap.temp, temp_encoded, 1);
+    writePointData("ObjectID", snap.obj_id, obj_encoded, 1);
 
     out << "      </PointData>\n";
     out << "    </Piece>\n";
@@ -1170,6 +1158,60 @@ void export_vtu_mpm_3d(const std::string& filename, const std::vector<Blast::MPM
     out << "</VTKFile>\n";
 
     out.close();
+}
+
+void export_vtu_mpm_3d(const std::string& filename, const std::vector<Blast::MPMParticle3D>& particles, const std::string& format,
+                       bool has_vel, bool has_disp, bool has_stress,
+                       bool has_strain, bool has_damage, bool has_temp) {
+    MPMVTKSnapshot3D snap;
+    snap.num_particles = static_cast<int>(particles.size());
+    snap.has_vel = has_vel;
+    snap.has_disp = has_disp;
+    snap.has_stress = has_stress;
+    snap.has_strain = has_strain;
+    snap.has_damage = has_damage;
+    snap.has_temp = has_temp;
+
+    if (snap.num_particles <= 0) return;
+
+    snap.points.resize(snap.num_particles * 3);
+    if (has_vel) snap.vel.resize(snap.num_particles * 3);
+    if (has_stress) { snap.von_mises.resize(snap.num_particles); snap.pressure.resize(snap.num_particles); }
+    if (has_strain) snap.ep_bar.resize(snap.num_particles);
+    if (has_damage) snap.damage.resize(snap.num_particles);
+    if (has_temp) snap.temp.resize(snap.num_particles);
+    snap.obj_id.resize(snap.num_particles);
+
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < snap.num_particles; ++i) {
+        const auto& p = particles[i];
+        snap.points[i * 3 + 0] = static_cast<float>(p.x[0]);
+        snap.points[i * 3 + 1] = static_cast<float>(p.x[1]);
+        snap.points[i * 3 + 2] = static_cast<float>(p.x[2]);
+
+        if (has_vel) {
+            snap.vel[i * 3 + 0] = static_cast<float>(p.v[0]);
+            snap.vel[i * 3 + 1] = static_cast<float>(p.v[1]);
+            snap.vel[i * 3 + 2] = static_cast<float>(p.v[2]);
+        }
+        if (has_stress) {
+            double mean_s = (p.sigma[0][0] + p.sigma[1][1] + p.sigma[2][2]) / 3.0;
+            double s00 = p.sigma[0][0] - mean_s;
+            double s11 = p.sigma[1][1] - mean_s;
+            double s22 = p.sigma[2][2] - mean_s;
+            double s01 = p.sigma[0][1];
+            double s12 = p.sigma[1][2];
+            double s20 = p.sigma[2][0];
+            snap.von_mises[i] = static_cast<float>(std::sqrt(1.5 * (s00*s00 + s11*s11 + s22*s22 + 2.0*(s01*s01 + s12*s12 + s20*s20))));
+            snap.pressure[i] = static_cast<float>(-mean_s);
+        }
+        if (has_strain) snap.ep_bar[i] = static_cast<float>(p.ep_bar);
+        if (has_damage) snap.damage[i] = static_cast<float>(p.damage);
+        if (has_temp) snap.temp[i] = static_cast<float>(p.temperature);
+        snap.obj_id[i] = static_cast<float>(p.object_id);
+    }
+
+    export_vtu_mpm_3d_snapshot(filename, snap, format);
 }
 
 void append_pvd_timestep(const std::string& pvd_filename, double sim_time, const std::string& relative_vtu_path, const std::string& part) {

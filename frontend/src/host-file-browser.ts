@@ -1107,12 +1107,14 @@ export class HostFileBrowserModal {
 
     private async confirmSelection(): Promise<void> {
         if (this.selectFolderOnly) {
-            const folder = this.fileInput?.value.trim();
+            const folder = this.fileInput?.value.trim() || '';
             let selectedFolder = this.currentPath;
-            if (folder && folder !== '.' && folder !== 'select_dir') {
-                const matched = this.displayedEntries.find(e => e.isDir && e.name === folder);
-                if (matched) {
-                    selectedFolder = this.currentPath === '/' ? `/${matched.name}` : `${this.currentPath}/${matched.name}`;
+            if (folder && folder !== '.' && folder !== 'select_dir' && folder !== 'Current Folder') {
+                if (folder.startsWith('/')) {
+                    selectedFolder = folder;
+                } else {
+                    const cleanFolder = folder.replace(/^\.\//, '');
+                    selectedFolder = this.currentPath === '/' ? `/${cleanFolder}` : `${this.currentPath}/${cleanFolder}`;
                 }
             }
             this.onSelectCallback(selectedFolder);

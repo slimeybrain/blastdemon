@@ -65,7 +65,8 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
         'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
         'failure_strain', 'tensile_failure_stress', 'erosion_strain', 'erosion_stress',
-        'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
+        'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5', 'T_melt', 'T_room', 'Cp',
+        'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
         'mg_gamma0', 'mg_c0', 'mg_s',
         'ppc',
         'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
@@ -667,6 +668,8 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
             });
             const domainPpc = Number(mpmDomain.parameters?.ppc ?? 4);
+            const domainParticleDist = mpmDomain.parameters?.particle_distribution;
+            const domainBoundaryFill = mpmDomain.parameters?.boundary_filling;
             flattenedParams['ppc'] = domainPpc;
 
             const objConns = state.connections.filter(c => c.toNode === mpmDomain.id && c.toPort === 'objects');
@@ -689,6 +692,12 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     }
                     if (objParams['ppc'] === undefined) {
                         objParams['ppc'] = domainPpc;
+                    }
+                    if (domainParticleDist && (objParams['particle_distribution'] === undefined || objParams['particle_distribution'] === 'Cartesian')) {
+                        objParams['particle_distribution'] = domainParticleDist;
+                    }
+                    if (domainBoundaryFill && (objParams['boundary_filling'] === undefined || objParams['boundary_filling'] === 'Stairstepped')) {
+                        objParams['boundary_filling'] = domainBoundaryFill;
                     }
                     mpmObjects.push(objParams);
                 }
@@ -835,6 +844,8 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             }
 
             const domainPpc = Number(mpmDomain.parameters?.ppc ?? 8);
+            const domainParticleDist = mpmDomain.parameters?.particle_distribution;
+            const domainBoundaryFill = mpmDomain.parameters?.boundary_filling;
             flattenedParams['ppc'] = domainPpc;
 
             const objConns = state.connections.filter(c => c.toNode === mpmDomain.id && c.toPort === 'objects');
@@ -865,6 +876,12 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     }
                     if (objParams['ppc'] === undefined) {
                         objParams['ppc'] = domainPpc;
+                    }
+                    if (domainParticleDist && (objParams['particle_distribution'] === undefined || objParams['particle_distribution'] === 'Cartesian')) {
+                        objParams['particle_distribution'] = domainParticleDist;
+                    }
+                    if (domainBoundaryFill && (objParams['boundary_filling'] === undefined || objParams['boundary_filling'] === 'Stairstepped')) {
+                        objParams['boundary_filling'] = domainBoundaryFill;
                     }
                     mpmObjects.push(objParams);
                 }
@@ -1224,6 +1241,8 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             }
 
             const domainPpc = Number(mpmDomain.parameters?.ppc ?? 4);
+            const domainParticleDist = mpmDomain.parameters?.particle_distribution;
+            const domainBoundaryFill = mpmDomain.parameters?.boundary_filling;
             flattenedParams['ppc'] = domainPpc;
 
             const objConns = state.connections.filter(c => c.toNode === mpmDomain.id && c.toPort === 'objects');
@@ -1247,19 +1266,40 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     if (objParams['ppc'] === undefined) {
                         objParams['ppc'] = domainPpc;
                     }
+                    if (domainParticleDist && (objParams['particle_distribution'] === undefined || objParams['particle_distribution'] === 'Cartesian')) {
+                        objParams['particle_distribution'] = domainParticleDist;
+                    }
+                    if (domainBoundaryFill && (objParams['boundary_filling'] === undefined || objParams['boundary_filling'] === 'Stairstepped')) {
+                        objParams['boundary_filling'] = domainBoundaryFill;
+                    }
                     mpmObjects.push(objParams);
                 }
             }
 
-            const detConn = state.connections.find(c => c.toNode === mpmDomain.id && c.toPort === 'detonator');
-            if (detConn) {
-                const detNode = state.nodes.find(n => n.id === detConn.fromNode);
+            const detConns = state.connections.filter(c => c.toNode === mpmDomain.id && c.toPort === 'detonator');
+            const detonators: any[] = [];
+            for (const conn of detConns) {
+                const detNode = state.nodes.find(n => n.id === conn.fromNode);
                 if (detNode && detNode.type === 'DetonatorLocation') {
+                    const detParams: any = {};
                     Object.entries(detNode.parameters).forEach(([key, value]) => {
-                        flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                        detParams[key] = numericKeys.includes(key) ? Number(value) : value;
                     });
+                    detonators.push(detParams);
                 }
             }
+            if (detonators.length > 0) {
+                flattenedParams['detonators'] = detonators;
+                Object.entries(detonators[0]).forEach(([key, value]) => {
+                    flattenedParams[key] = value;
+                });
+            }
+
+            let chosenTransferScheme2D = 'BSpline';
+            if (mpmObjects.length > 0 && mpmObjects[0].transfer_scheme && mpmObjects[0].transfer_scheme !== 'Default') {
+                chosenTransferScheme2D = mpmObjects[0].transfer_scheme;
+            }
+            flattenedParams['transfer_scheme'] = chosenTransferScheme2D;
 
             flattenedParams['mpm_objects'] = mpmObjects;
         }
@@ -1270,72 +1310,94 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
             });
 
-            const meshConn = state.connections.find(c => c.toNode === mpmDomain.id && c.toPort === 'mesh');
-            if (meshConn) {
-                const meshNode = state.nodes.find(n => n.id === meshConn.fromNode);
-                if (meshNode) {
-                    Object.entries(meshNode.parameters).forEach(([key, value]) => {
-                        flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
-                    });
-                    const cellSize = Number(meshNode.parameters?.cell_size ?? 0.01);
-                    const xmin = Number(meshNode.parameters?.xmin ?? 0.0);
-                    const xmax = Number(meshNode.parameters?.xmax ?? 1.0);
-                    const ymin = Number(meshNode.parameters?.ymin ?? 0.0);
-                    const ymax = Number(meshNode.parameters?.ymax ?? 1.0);
-                    const zmin = Number(meshNode.parameters?.zmin ?? 0.0);
-                    const zmax = Number(meshNode.parameters?.zmax ?? 1.0);
-                    flattenedParams['nx'] = Math.round((xmax - xmin) / cellSize);
-                    flattenedParams['ny'] = Math.round((ymax - ymin) / cellSize);
-                    flattenedParams['nz'] = Math.round((zmax - zmin) / cellSize);
-                }
+            let meshConn = state.connections.find(c => c.toNode === mpmDomain.id && c.toPort === 'mesh');
+            let meshNode = meshConn ? state.nodes.find(n => n.id === meshConn.fromNode) : state.nodes.find(n => n.type === 'DomainMesh3D' || n.type === 'DomainMesh2D');
+            if (meshNode) {
+                Object.entries(meshNode.parameters).forEach(([key, value]) => {
+                    flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                });
+                const cellSize = Number(meshNode.parameters?.cell_size ?? 0.01);
+                const xmin = Number(meshNode.parameters?.xmin ?? 0.0);
+                const xmax = Number(meshNode.parameters?.xmax ?? 1.0);
+                const ymin = Number(meshNode.parameters?.ymin ?? 0.0);
+                const ymax = Number(meshNode.parameters?.ymax ?? 1.0);
+                const zmin = Number(meshNode.parameters?.zmin ?? 0.0);
+                const zmax = Number(meshNode.parameters?.zmax ?? 1.0);
+                flattenedParams['nx'] = Math.round((xmax - xmin) / cellSize);
+                flattenedParams['ny'] = Math.round((ymax - ymin) / cellSize);
+                flattenedParams['nz'] = Math.round((zmax - zmin) / cellSize);
             }
 
             const domainPpc = Number(mpmDomain.parameters?.ppc ?? 8);
+            const domainParticleDist = mpmDomain.parameters?.particle_distribution;
+            const domainBoundaryFill = mpmDomain.parameters?.boundary_filling;
             flattenedParams['ppc'] = domainPpc;
-            if (!flattenedParams['device']) flattenedParams['device'] = 'cpu';
+            flattenedParams['device'] = mpmDomain.parameters?.device || 'gpu';
 
-            const objConns = state.connections.filter(c => c.toNode === mpmDomain.id && c.toPort === 'objects');
+            const objConns = state.connections.filter(c => c.toNode === mpmDomain.id && (c.toPort === 'objects' || c.toPort === 'mpm_objects' || c.toPort === 'in'));
+            let targetObjNodes = objConns.map(c => state.nodes.find(n => n.id === c.fromNode)).filter(n => n && n.type === 'MPMObject3D');
+            if (targetObjNodes.length === 0) {
+                targetObjNodes = state.nodes.filter(n => n.type === 'MPMObject3D');
+            }
+
             const mpmObjects: any[] = [];
-            for (const conn of objConns) {
-                const objNode = state.nodes.find(n => n.id === conn.fromNode);
-                if (objNode && objNode.type === 'MPMObject3D') {
-                    const objParams: any = {};
-                    Object.entries(objNode.parameters).forEach(([k, v]) => {
-                        objParams[k] = numericKeys.includes(k) ? Number(v) : v;
-                    });
-                    const stlConn = state.connections.find(c => c.toNode === objNode.id && c.toPort === 'stl');
-                    if (stlConn) {
-                        const stlNode = state.nodes.find(n => n.id === stlConn.fromNode);
-                        if (stlNode && stlNode.type === 'STLGeometry') {
-                            objParams['stl_file'] = stlNode.parameters.stl_file || '';
-                            objParams['shape_type'] = 'STL';
-                        }
-                    }
-                    const matConn = state.connections.find(c => c.toNode === objNode.id && c.toPort === 'material');
-                    if (matConn) {
-                        const matNode = state.nodes.find(n => n.id === matConn.fromNode);
-                        if (matNode) {
-                            Object.entries(matNode.parameters).forEach(([k, v]) => {
-                                objParams[k] = numericKeys.includes(k) ? Number(v) : v;
-                            });
-                        }
-                    }
-                    if (objParams['ppc'] === undefined) {
-                        objParams['ppc'] = domainPpc;
-                    }
-                    mpmObjects.push(objParams);
+            for (const objNode of targetObjNodes) {
+                if (!objNode) continue;
+                const objParams: any = {};
+                Object.entries(objNode.parameters).forEach(([k, v]) => {
+                    objParams[k] = numericKeys.includes(k) ? Number(v) : v;
+                });
+                const stlConn = state.connections.find(c => c.toNode === objNode.id && c.toPort === 'stl');
+                let stlNode = stlConn ? state.nodes.find(n => n.id === stlConn.fromNode) : state.nodes.find(n => n.type === 'STLGeometry');
+                if (stlNode && stlNode.type === 'STLGeometry') {
+                    objParams['stl_file'] = stlNode.parameters.stl_file || '';
+                    objParams['shape_type'] = 'STL';
                 }
+                const matConn = state.connections.find(c => c.toNode === objNode.id && c.toPort === 'material');
+                if (matConn) {
+                    const matNode = state.nodes.find(n => n.id === matConn.fromNode);
+                    if (matNode) {
+                        Object.entries(matNode.parameters).forEach(([k, v]) => {
+                            objParams[k] = numericKeys.includes(k) ? Number(v) : v;
+                        });
+                    }
+                }
+                if (objParams['ppc'] === undefined) {
+                    objParams['ppc'] = domainPpc;
+                }
+                if (domainParticleDist && (objParams['particle_distribution'] === undefined || objParams['particle_distribution'] === 'Cartesian')) {
+                    objParams['particle_distribution'] = domainParticleDist;
+                }
+                if (domainBoundaryFill && (objParams['boundary_filling'] === undefined || objParams['boundary_filling'] === 'Stairstepped')) {
+                    objParams['boundary_filling'] = domainBoundaryFill;
+                }
+                mpmObjects.push(objParams);
             }
 
-            const detConn = state.connections.find(c => c.toNode === mpmDomain.id && c.toPort === 'detonator');
-            if (detConn) {
-                const detNode = state.nodes.find(n => n.id === detConn.fromNode);
-                if (detNode && detNode.type === 'DetonatorLocation3D') {
+            const detConns = state.connections.filter(c => c.toNode === mpmDomain.id && c.toPort === 'detonator');
+            const detonators: any[] = [];
+            for (const conn of detConns) {
+                const detNode = state.nodes.find(n => n.id === conn.fromNode);
+                if (detNode && (detNode.type === 'DetonatorLocation3D' || detNode.type === 'DetonatorLocation')) {
+                    const detParams: any = {};
                     Object.entries(detNode.parameters).forEach(([key, value]) => {
-                        flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                        detParams[key] = numericKeys.includes(key) ? Number(value) : value;
                     });
+                    detonators.push(detParams);
                 }
             }
+            if (detonators.length > 0) {
+                flattenedParams['detonators'] = detonators;
+                Object.entries(detonators[0]).forEach(([key, value]) => {
+                    flattenedParams[key] = value;
+                });
+            }
+
+            let chosenTransferScheme3D = 'BSpline';
+            if (mpmObjects.length > 0 && mpmObjects[0].transfer_scheme && mpmObjects[0].transfer_scheme !== 'Default') {
+                chosenTransferScheme3D = mpmObjects[0].transfer_scheme;
+            }
+            flattenedParams['transfer_scheme'] = chosenTransferScheme3D;
 
             flattenedParams['mpm_objects'] = mpmObjects;
 

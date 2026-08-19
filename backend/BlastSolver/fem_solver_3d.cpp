@@ -2414,6 +2414,9 @@ void FEMSolver3D<T>::evaluateErosionCriteria() {
         }
 
         T heterogeneity = m_physics_params.material_heterogeneity;
+        if (heterogeneity <= static_cast<T>(1.0e-5f) && (mat.failure_strain > static_cast<T>(0.0f) || m_erosion_criteria.failure_strain > static_cast<T>(0.0f))) {
+            heterogeneity = static_cast<T>(0.08f);
+        }
         T het_factor = static_cast<T>(1.0f);
         if (heterogeneity > static_cast<T>(1.0e-5f)) {
             uint32_t user_seed = static_cast<uint32_t>(m_physics_params.random_seed) * 2654435761u;
@@ -2442,7 +2445,7 @@ void FEMSolver3D<T>::evaluateErosionCriteria() {
             }
         }
 
-        if (mat.enable_strain_erosion || m_erosion_criteria.enable_strain_erosion) {
+        if (mat.enable_strain_erosion || m_erosion_criteria.enable_strain_erosion || mat.failure_strain > 0.0f || mat.erosion_strain > 0.0f || m_erosion_criteria.failure_strain > 0.0f) {
             T fail_strain = static_cast<T>(mat.erosion_strain > 0.0f ? mat.erosion_strain : (mat.failure_strain > 0.0f ? mat.failure_strain : m_erosion_criteria.failure_strain));
             fail_strain *= het_factor;
             if (fail_strain > static_cast<T>(0.0f) && ep_bar_effective[e] >= fail_strain) {
@@ -2626,7 +2629,7 @@ void FEMSolver3D<T>::processErodedElementsToMPM() {
     }
 
     if (!new_particles.empty()) {
-        if (m_mpm_solver->getMaterialTables().empty() && !m_material_tables.empty()) {
+        if (m_mpm_solver->getMaterialTables().size() < m_material_tables.size()) {
             m_mpm_solver->getMaterialTables() = m_material_tables;
         }
         m_mpm_solver->addParticlesDirect(new_particles);

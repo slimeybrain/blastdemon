@@ -17,6 +17,16 @@ export interface MPMMaterialParams {
     jc_n: number;
     jc_C: number;
     jc_m: number;
+    jc_d1?: number;
+    jc_d2?: number;
+    jc_d3?: number;
+    jc_d4?: number;
+    jc_d5?: number;
+    transfer_scheme?: string;
+    weibull_modulus?: number;
+    weibull_scale?: number;
+    fracture_toughness?: number;
+    debris_bulk_factor?: number;
     T_melt: number;
     T_room: number;
     Cp: number;
@@ -115,12 +125,15 @@ export interface MPMMaterialParams {
     category: string;
 }
 
+export type SolverScope = 'MPM' | 'FEM' | 'FV' | 'MPM+FEM' | 'MPM+FV' | 'ALL';
+
 export interface MPMMaterialParamInfo {
     key: string;
     label: string;
     shortDesc: string;
     unit?: string;
     section: 'model' | 'elasticity' | 'plasticity' | 'failure' | 'erosion' | 'johnson_cook' | 'mie_gruneisen' | 'davis_reactant' | 'davis_product' | 'crest_kinetics' | 'concrete_base' | 'rht' | 'kc' | 'cscm' | 'ideal_gas' | 'jwl';
+    solverScope?: SolverScope;
     tooltip: string;
 }
 
@@ -130,6 +143,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         label: 'Material Model',
         shortDesc: 'Constitutive formulation',
         section: 'model',
+        solverScope: 'ALL',
         tooltip: 'Selects the constitutive formulation (Hypoelastic linear hardening vs Johnson-Cook + Mie-Grüneisen shock EOS).'
     },
     'preset': {
@@ -137,7 +151,17 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         label: 'Material Preset',
         shortDesc: 'Pre-calibrated empirical parameters',
         section: 'model',
+        solverScope: 'ALL',
         tooltip: 'Loads calibrated material parameters from published shock physics literature.'
+    },
+    'transfer_scheme': {
+        key: 'transfer_scheme',
+        label: 'MPM Transfer Scheme',
+        shortDesc: 'Particle-grid interpolation kernel [MPM ONLY]',
+        unit: 'dim',
+        section: 'model',
+        solverScope: 'MPM',
+        tooltip: 'Selects particle-to-grid (P2G) and grid-to-particle (G2P) shape function kernel (Default/BSpline/Radial MLS/Cubic BSpline/GIMP/Standard).'
     },
     'density': {
         key: 'density',
@@ -145,6 +169,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Solid mass density (ρ₀)',
         unit: 'kg/m³',
         section: 'elasticity',
+        solverScope: 'MPM+FEM',
         tooltip: 'Reference uncompressed solid mass density (rho_0) in kg/m³ for inertia, mass, and shock impedance.'
     },
     'youngs_modulus': {
@@ -153,6 +178,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Elastic tensile stiffness',
         unit: 'Pa',
         section: 'elasticity',
+        solverScope: 'MPM+FEM',
         tooltip: 'Linear elastic tensile modulus E (Pa) - governs elastic stiffness before yielding.'
     },
     'poissons_ratio': {
@@ -161,6 +187,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Lateral contraction ratio',
         unit: 'dim',
         section: 'elasticity',
+        solverScope: 'MPM+FEM',
         tooltip: 'Poisson\'s ratio nu - ratio of transverse contraction to axial extension. Establishes shear modulus G.'
     },
     'yield_stress': {
@@ -169,6 +196,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Static initial yield limit',
         unit: 'Pa',
         section: 'plasticity',
+        solverScope: 'MPM+FEM',
         tooltip: 'Static initial yield stress (Pa) where reversible elastic strain ends and plastic flow begins.'
     },
     'hardening_modulus': {
@@ -177,6 +205,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Linear plastic tangent slope',
         unit: 'Pa',
         section: 'plasticity',
+        solverScope: 'MPM+FEM',
         tooltip: 'Linear plastic tangent slope H (Pa) for work hardening (Stress = Yield_Stress + H * ep).'
     },
     'failure_strain': {
@@ -185,6 +214,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Plastic fracture threshold',
         unit: 'dim',
         section: 'failure',
+        solverScope: 'MPM+FEM',
         tooltip: 'Equivalent plastic strain threshold ep_f where ductile fracture occurs and shear resistance is lost.'
     },
     'tensile_failure_stress': {
@@ -193,14 +223,69 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Hydrodynamic spallation cutoff',
         unit: 'Pa',
         section: 'failure',
+        solverScope: 'MPM+FEM',
         tooltip: 'Maximum allowable hydrostatic tensile stress (Pa) before cavitation / spall rupture occurs.'
+    },
+    'directional_crack_band': {
+        key: 'directional_crack_band',
+        label: 'Directional Crack Band',
+        shortDesc: 'Bažant crack angle projection',
+        section: 'failure',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Scales fracture energy based on principal tensile stress angle, eliminating energy penalty on diagonal cracks.'
+    },
+    'nonlocal_radius': {
+        key: 'nonlocal_radius',
+        label: 'Non-Local Damage Radius (Rc)',
+        shortDesc: 'Fracture process zone width',
+        unit: 'm',
+        section: 'failure',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Averages damage across elements within physical radius Rc (e.g. 0.05m = 50mm for concrete aggregate, 0.0m for steel).'
+    },
+    'weibull_modulus': {
+        key: 'weibull_modulus',
+        label: 'Weibull Modulus (m_w)',
+        shortDesc: 'Flaw shape factor [MPM ONLY]',
+        unit: 'dim',
+        section: 'failure',
+        solverScope: 'MPM',
+        tooltip: 'Dimensionless Weibull shape parameter m_w governing initial material flaw variability across MPM particles (3-15, default 0.0 disabled).'
+    },
+    'weibull_scale': {
+        key: 'weibull_scale',
+        label: 'Weibull Scale (η_w)',
+        shortDesc: 'Flaw scale factor [MPM ONLY]',
+        unit: 'dim',
+        section: 'failure',
+        solverScope: 'MPM',
+        tooltip: 'Dimensionless Weibull scale parameter adjusting the mean initial flaw strength distribution across MPM particles.'
+    },
+    'fracture_toughness': {
+        key: 'fracture_toughness',
+        label: 'Dynamic Fracture Toughness (K_IC)',
+        shortDesc: 'Grady spallation toughness [MPM ONLY]',
+        unit: 'Pa·m^0.5',
+        section: 'failure',
+        solverScope: 'MPM',
+        tooltip: 'Dynamic Mode-I fracture toughness K_IC (Pa·m^0.5) used in Grady dynamic spallation model: sig_spall = (3*rho*c0*K_IC^2 * eps_dot)^(1/3).'
+    },
+    'debris_bulk_factor': {
+        key: 'debris_bulk_factor',
+        label: 'Post-Failure Bulk Modulus Factor',
+        shortDesc: 'Parent post-failure bulk stiffness ratio',
+        unit: 'dim',
+        section: 'failure',
+        solverScope: 'MPM',
+        tooltip: 'Fraction (0.0 to 1.0) of intact bulk modulus retained by failed/fragmented parent material under compressive re-compaction.'
     },
     'enable_strain_erosion': {
         key: 'enable_strain_erosion',
         label: 'Enable Strain Erosion',
-        shortDesc: 'Delete element when plastic strain exceeds threshold',
+        shortDesc: 'Delete element / erode particle upon strain threshold',
         section: 'erosion',
-        tooltip: 'Erode (delete) FEM elements when their accumulated equivalent plastic strain exceeds the erosion strain threshold.'
+        solverScope: 'MPM+FEM',
+        tooltip: 'Erode (delete) FEM elements or MPM particles when equivalent plastic strain exceeds threshold.'
     },
     'erosion_strain': {
         key: 'erosion_strain',
@@ -208,14 +293,16 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Plastic strain erosion cutoff',
         unit: 'dim',
         section: 'erosion',
-        tooltip: 'Equivalent plastic strain threshold ep_bar at or above which the element is eroded and deleted from the active mesh.'
+        solverScope: 'MPM+FEM',
+        tooltip: 'Equivalent plastic strain threshold ep_bar at or above which the element/particle is deleted.'
     },
     'enable_stress_erosion': {
         key: 'enable_stress_erosion',
         label: 'Enable Stress Erosion',
-        shortDesc: 'Delete element under hydrostatic tensile rupture',
+        shortDesc: 'Delete element / particle under tensile rupture',
         section: 'erosion',
-        tooltip: 'Erode (delete) FEM elements when mean tensile stress exceeds the tensile erosion threshold.'
+        solverScope: 'MPM+FEM',
+        tooltip: 'Erode (delete) FEM elements or MPM particles when hydrostatic tensile stress exceeds threshold.'
     },
     'erosion_stress': {
         key: 'erosion_stress',
@@ -223,21 +310,24 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Tensile stress erosion cutoff',
         unit: 'Pa',
         section: 'erosion',
-        tooltip: 'Maximum allowable hydrostatic mean tensile stress (Pa) before element is eroded and deleted.'
+        solverScope: 'MPM+FEM',
+        tooltip: 'Maximum allowable hydrostatic mean tensile stress (Pa) before element/particle is eroded and deleted.'
     },
     'enable_timestep_erosion': {
         key: 'enable_timestep_erosion',
-        label: 'Enable Timestep Erosion',
-        shortDesc: 'Delete distorted elements choking Courant dt',
+        label: 'Enable Timestep Erosion [FEM ONLY]',
+        shortDesc: 'Delete distorted hex elements choking dt',
         section: 'erosion',
-        tooltip: 'Erode highly deformed or inverted elements whose stable Courant time step drops below the fraction threshold of its initial time step.'
+        solverScope: 'FEM',
+        tooltip: 'Erode highly deformed FEM elements whose stable Courant time step drops below the fraction threshold of initial time step.'
     },
     'timestep_erosion_factor': {
         key: 'timestep_erosion_factor',
-        label: 'Timestep Erosion Factor (η)',
+        label: 'Timestep Erosion Factor (η) [FEM ONLY]',
         shortDesc: 'Courant step erosion ratio dt/dt0',
         unit: 'dim',
         section: 'erosion',
+        solverScope: 'FEM',
         tooltip: 'Fraction of initial element time step dt0 below which severe distortion triggers element erosion (default 0.10).'
     },
     'jc_A': {
@@ -246,6 +336,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Quasi-static yield strength (A)',
         unit: 'Pa',
         section: 'johnson_cook',
+        solverScope: 'MPM+FEM',
         tooltip: 'Johnson-Cook base yield strength A (Pa) at reference strain rate and room temperature.'
     },
     'jc_B': {
@@ -254,6 +345,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Strain hardening coefficient (B)',
         unit: 'Pa',
         section: 'johnson_cook',
+        solverScope: 'MPM+FEM',
         tooltip: 'Johnson-Cook strain hardening coefficient B (Pa) in the flow stress term (A + B * ep^n).'
     },
     'jc_n': {
@@ -262,6 +354,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Power-law hardening curvature (n)',
         unit: 'dim',
         section: 'johnson_cook',
+        solverScope: 'MPM+FEM',
         tooltip: 'Johnson-Cook work-hardening exponent n (parabolic hardening when n < 1).'
     },
     'jc_C': {
@@ -270,6 +363,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Dynamic rate sensitivity (C)',
         unit: 'dim',
         section: 'johnson_cook',
+        solverScope: 'MPM+FEM',
         tooltip: 'Johnson-Cook strain rate sensitivity coefficient C - dynamic strengthening under blast rates.'
     },
     'jc_m': {
@@ -278,6 +372,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Softening rate as T → T_melt (m)',
         unit: 'dim',
         section: 'johnson_cook',
+        solverScope: 'MPM+FEM',
         tooltip: 'Johnson-Cook thermal softening exponent m - governs flow stress drop as temperature rises.'
     },
     'T_melt': {
@@ -286,6 +381,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Zero shear strength temperature',
         unit: 'K',
         section: 'johnson_cook',
+        solverScope: 'MPM+FEM',
         tooltip: 'Melting temperature T_melt (K) - yield stress drops to 0 at or above this temperature.'
     },
     'T_room': {
@@ -294,6 +390,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Ambient temperature baseline',
         unit: 'K',
         section: 'johnson_cook',
+        solverScope: 'MPM+FEM',
         tooltip: 'Reference ambient temperature T_room (K) used to calculate homologous temperature T*.'
     },
     'Cp': {
@@ -302,6 +399,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Plastic work to heat conversion',
         unit: 'J/(kg·K)',
         section: 'johnson_cook',
+        solverScope: 'MPM+FEM',
         tooltip: 'Specific heat capacity Cp (J/kg·K) - converts 90% of plastic work into adiabatic heating.'
     },
     'mg_gamma0': {
@@ -310,6 +408,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Thermal pressure coupling (Γ₀)',
         unit: 'dim',
         section: 'mie_gruneisen',
+        solverScope: 'MPM+FEM',
         tooltip: 'Grüneisen parameter Gamma_0 (dimensionless) - couples thermal internal energy to volumetric shock pressure.'
     },
     'mg_c0': {
@@ -318,6 +417,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Zero-pressure shock speed (C₀)',
         unit: 'm/s',
         section: 'mie_gruneisen',
+        solverScope: 'MPM+FEM',
         tooltip: 'Bulk sound speed in uncompressed solid C_0 (m/s) in the shock Hugoniot equation (Us = C_0 + s * Up).'
     },
     'mg_s': {
@@ -326,6 +426,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Shock velocity vs particle velocity slope (s)',
         unit: 'dim',
         section: 'mie_gruneisen',
+        solverScope: 'MPM+FEM',
         tooltip: 'Dimensionless slope s of the shock velocity vs. particle velocity Hugoniot curve (Us = C_0 + s * Up).'
     },
     // Concrete Core & Fracture Energy
@@ -335,6 +436,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Uniaxial compressive strength',
         unit: 'Pa',
         section: 'concrete_base',
+        solverScope: 'MPM+FEM',
         tooltip: 'Uniaxial quasi-static compressive strength fc (Pa).'
     },
     'ft': {
@@ -343,6 +445,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Direct tensile strength',
         unit: 'Pa',
         section: 'concrete_base',
+        solverScope: 'MPM+FEM',
         tooltip: 'Direct tensile cracking strength ft (Pa).'
     },
     'G_f': {
@@ -351,6 +454,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Tensile crack fracture energy',
         unit: 'N/m',
         section: 'concrete_base',
+        solverScope: 'MPM+FEM',
         tooltip: 'Tensile fracture energy G_f (N/m) for mesh-objective crack regularization (Hillerborg model).'
     },
     'moisture_content': {
@@ -359,6 +463,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Water saturation mass fraction',
         unit: 'dim',
         section: 'concrete_base',
+        solverScope: 'MPM+FEM',
         tooltip: 'Pore moisture saturation fraction S_w (0 = dry, 1 = fully saturated) for enhanced acoustic shock speed and pore stiffening.'
     },
     'dif_cap_compression': {
@@ -367,6 +472,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Max compressive rate factor',
         unit: 'dim',
         section: 'concrete_base',
+        solverScope: 'MPM+FEM',
         tooltip: 'Maximum allowable Dynamic Increase Factor (DIF) under extreme strain rate compression.'
     },
     'dif_cap_tension': {
@@ -375,6 +481,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Max tensile rate factor',
         unit: 'dim',
         section: 'concrete_base',
+        solverScope: 'MPM+FEM',
         tooltip: 'Maximum allowable Dynamic Increase Factor (DIF) under extreme strain rate tension.'
     },
     // RHT Model
@@ -384,6 +491,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Failure surface multiplier',
         unit: 'dim',
         section: 'rht',
+        solverScope: 'MPM+FEM',
         tooltip: 'RHT failure surface pre-factor A.'
     },
     'rht_N': {
@@ -392,6 +500,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Failure surface pressure exponent',
         unit: 'dim',
         section: 'rht',
+        solverScope: 'MPM+FEM',
         tooltip: 'RHT failure surface pressure hardening exponent N.'
     },
     'rht_B': {
@@ -400,6 +509,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Residual shear multiplier',
         unit: 'dim',
         section: 'rht',
+        solverScope: 'MPM+FEM',
         tooltip: 'RHT residual friction surface pre-factor B.'
     },
     'rht_M': {
@@ -408,6 +518,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Residual friction exponent',
         unit: 'dim',
         section: 'rht',
+        solverScope: 'MPM+FEM',
         tooltip: 'RHT residual friction pressure exponent M.'
     },
     'rht_Q0': {
@@ -416,6 +527,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Tensile/compressive meridian ratio',
         unit: 'dim',
         section: 'rht',
+        solverScope: 'MPM+FEM',
         tooltip: 'RHT Lode meridian strength ratio Q0 at zero pressure.'
     },
     'rht_BQ': {
@@ -424,6 +536,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Lode angle pressure dependency',
         unit: 'dim',
         section: 'rht',
+        solverScope: 'MPM+FEM',
         tooltip: 'RHT Lode angle dependence factor BQ.'
     },
     'rht_D1': {
@@ -432,6 +545,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Compressive damage growth factor',
         unit: 'dim',
         section: 'rht',
+        solverScope: 'MPM+FEM',
         tooltip: 'RHT damage accumulation parameter D1.'
     },
     'rht_D2': {
@@ -440,6 +554,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Damage pressure confinement factor',
         unit: 'dim',
         section: 'rht',
+        solverScope: 'MPM+FEM',
         tooltip: 'RHT damage confinement exponent D2.'
     },
     'rht_p_crush': {
@@ -448,6 +563,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Porous compaction initiation',
         unit: 'Pa',
         section: 'rht',
+        solverScope: 'MPM+FEM',
         tooltip: 'P-alpha EOS pore crush initiation pressure p_crush (Pa).'
     },
     'rht_p_lock': {
@@ -456,6 +572,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Complete pore closure pressure',
         unit: 'Pa',
         section: 'rht',
+        solverScope: 'MPM+FEM',
         tooltip: 'P-alpha EOS solid lock pressure p_lock (Pa) where porosity reaches 0.'
     },
     'rht_alpha0': {
@@ -464,6 +581,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Initial porous compaction ratio',
         unit: 'dim',
         section: 'rht',
+        solverScope: 'MPM+FEM',
         tooltip: 'P-alpha EOS initial porous ratio alpha0 = rho_solid / rho_porous.'
     },
     'rht_n_comp': {
@@ -472,6 +590,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Porous compaction rate',
         unit: 'dim',
         section: 'rht',
+        solverScope: 'MPM+FEM',
         tooltip: 'P-alpha compaction curvature exponent n_comp.'
     },
     'rht_betac': {
@@ -480,6 +599,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'DIF compressive rate sensitivity',
         unit: 'dim',
         section: 'rht',
+        solverScope: 'MPM+FEM',
         tooltip: 'Compressive DIF strain rate sensitivity slope beta_c.'
     },
     'rht_deltat': {
@@ -488,6 +608,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'DIF tensile rate sensitivity',
         unit: 'dim',
         section: 'rht',
+        solverScope: 'MPM+FEM',
         tooltip: 'Tensile DIF strain rate sensitivity slope delta_t.'
     },
     // K&C Model
@@ -496,6 +617,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         label: 'K&C Auto-Generate Parameters',
         shortDesc: 'Derive surfaces from fc and ft',
         section: 'kc',
+        solverScope: 'MPM+FEM',
         tooltip: 'Automatically computes K&C (MAT_072R3) 3-surface failure envelopes from unconfined compressive strength fc.'
     },
     'kc_a0': {
@@ -504,6 +626,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Maximum failure cohesion',
         unit: 'Pa',
         section: 'kc',
+        solverScope: 'MPM+FEM',
         tooltip: 'K&C maximum yield surface cohesion a0 (Pa).'
     },
     'kc_a1': {
@@ -512,6 +635,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Maximum friction slope',
         unit: 'dim',
         section: 'kc',
+        solverScope: 'MPM+FEM',
         tooltip: 'K&C maximum yield surface pressure slope a1.'
     },
     'kc_a2': {
@@ -520,6 +644,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Maximum pressure curvature',
         unit: '1/Pa',
         section: 'kc',
+        solverScope: 'MPM+FEM',
         tooltip: 'K&C maximum yield surface pressure curvature a2 (1/Pa).'
     },
     'kc_a0y': {
@@ -528,6 +653,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Initial elastic limit cohesion',
         unit: 'Pa',
         section: 'kc',
+        solverScope: 'MPM+FEM',
         tooltip: 'K&C initial yield surface cohesion a0y (Pa).'
     },
     'kc_a1y': {
@@ -536,6 +662,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Initial elastic limit friction',
         unit: 'dim',
         section: 'kc',
+        solverScope: 'MPM+FEM',
         tooltip: 'K&C initial yield surface pressure slope a1y.'
     },
     'kc_a2y': {
@@ -544,6 +671,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Initial yield pressure curvature',
         unit: '1/Pa',
         section: 'kc',
+        solverScope: 'MPM+FEM',
         tooltip: 'K&C initial yield surface pressure curvature a2y (1/Pa).'
     },
     'kc_a1r': {
@@ -552,6 +680,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Residual friction slope',
         unit: 'dim',
         section: 'kc',
+        solverScope: 'MPM+FEM',
         tooltip: 'K&C residual yield surface pressure slope a1r.'
     },
     'kc_a2r': {
@@ -560,6 +689,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Residual pressure curvature',
         unit: '1/Pa',
         section: 'kc',
+        solverScope: 'MPM+FEM',
         tooltip: 'K&C residual yield surface pressure curvature a2r (1/Pa).'
     },
     'kc_b1': {
@@ -568,6 +698,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Post-peak softening parameter',
         unit: 'dim',
         section: 'kc',
+        solverScope: 'MPM+FEM',
         tooltip: 'K&C post-peak damage softening evolution parameter b1.'
     },
     'kc_omega': {
@@ -576,6 +707,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Fractional plastic dilatancy',
         unit: 'dim',
         section: 'kc',
+        solverScope: 'MPM+FEM',
         tooltip: 'K&C fractional dilatancy parameter omega.'
     },
     // CSCM Model
@@ -585,6 +717,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Triaxial compression limit',
         unit: 'Pa',
         section: 'cscm',
+        solverScope: 'MPM+FEM',
         tooltip: 'CSCM shear failure surface intercept alpha (Pa).'
     },
     'cscm_theta': {
@@ -593,6 +726,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'High-pressure friction slope',
         unit: 'dim',
         section: 'cscm',
+        solverScope: 'MPM+FEM',
         tooltip: 'CSCM linear friction angle parameter theta.'
     },
     'cscm_lambda': {
@@ -601,6 +735,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Nonlinear curvature multiplier',
         unit: 'Pa',
         section: 'cscm',
+        solverScope: 'MPM+FEM',
         tooltip: 'CSCM nonlinear shear envelope parameter lambda (Pa).'
     },
     'cscm_beta': {
@@ -609,6 +744,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Pressure curvature decay',
         unit: '1/Pa',
         section: 'cscm',
+        solverScope: 'MPM+FEM',
         tooltip: 'CSCM exponential curvature decay beta (1/Pa).'
     },
     'cscm_R': {
@@ -617,6 +753,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Elliptical hardening cap ratio',
         unit: 'dim',
         section: 'cscm',
+        solverScope: 'MPM+FEM',
         tooltip: 'CSCM elliptical cap aspect ratio R.'
     },
     'cscm_X0': {
@@ -625,6 +762,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Pore crush cap threshold',
         unit: 'Pa',
         section: 'cscm',
+        solverScope: 'MPM+FEM',
         tooltip: 'CSCM initial cap yield position X0 (Pa).'
     },
     'cscm_W': {
@@ -633,6 +771,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Maximum plastic volumetric strain',
         unit: 'dim',
         section: 'cscm',
+        solverScope: 'MPM+FEM',
         tooltip: 'CSCM maximum plastic volume compaction strain W.'
     },
     'cscm_D1': {
@@ -641,6 +780,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Tensile brittle damage growth',
         unit: '1/Pa',
         section: 'cscm',
+        solverScope: 'MPM+FEM',
         tooltip: 'CSCM brittle damage growth parameter D1 (1/Pa).'
     },
     'cscm_D2': {
@@ -649,22 +789,8 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Shear ductile damage growth',
         unit: 'dim',
         section: 'cscm',
+        solverScope: 'MPM+FEM',
         tooltip: 'CSCM ductile damage accumulation parameter D2.'
-    },
-    'directional_crack_band': {
-        key: 'directional_crack_band',
-        label: 'Directional Crack Band',
-        shortDesc: 'Bažant crack angle projection',
-        section: 'failure',
-        tooltip: 'Scales fracture energy based on principal tensile stress angle, eliminating the 41% energy penalty on 45° diagonal cracks in structured hex meshes.'
-    },
-    'nonlocal_radius': {
-        key: 'nonlocal_radius',
-        label: 'Non-Local Damage Radius (Rc)',
-        shortDesc: 'Fracture process zone width',
-        unit: 'm',
-        section: 'failure',
-        tooltip: 'Averages damage across elements within physical radius Rc (e.g. 0.05m = 50mm for concrete aggregate, 0.0m for steel). Prevents 1-element grid-aligned razor cuts and enables natural branching cracks.'
     },
     // Davis Solid Reactant
     'davis_c0': {
@@ -673,6 +799,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Solid HE bulk sound speed',
         unit: 'm/s',
         section: 'davis_reactant',
+        solverScope: 'MPM+FV',
         tooltip: 'Unreacted solid high-explosive bulk acoustic sound speed c0 (m/s).'
     },
     'davis_s1': {
@@ -681,6 +808,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Us-Up linear slope for reactant',
         unit: 'dim',
         section: 'davis_reactant',
+        solverScope: 'MPM+FV',
         tooltip: 'Hugoniot linear shock-particle velocity slope s1 for the unreacted solid phase.'
     },
     'davis_gamma0': {
@@ -689,6 +817,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Solid thermal pressure coupling',
         unit: 'dim',
         section: 'davis_reactant',
+        solverScope: 'MPM+FV',
         tooltip: 'Reference Grüneisen ratio gamma0 for unreacted solid explosive.'
     },
     'davis_cv': {
@@ -697,6 +826,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Solid specific heat capacity',
         unit: 'J/(kg·K)',
         section: 'davis_reactant',
+        solverScope: 'MPM+FV',
         tooltip: 'Specific heat capacity at constant volume for unreacted solid HE (J/(kg·K)).'
     },
     'davis_t0': {
@@ -705,6 +835,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Solid initial temperature',
         unit: 'K',
         section: 'davis_reactant',
+        solverScope: 'MPM+FV',
         tooltip: 'Reference ambient initial temperature T0 (K) for unreacted explosive.'
     },
     'davis_rho0': {
@@ -713,6 +844,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Unreacted reference density',
         unit: 'kg/m³',
         section: 'davis_reactant',
+        solverScope: 'MPM+FV',
         tooltip: 'Reference solid explosive mass density rho0 (kg/m³).'
     },
     // Davis Product Gas
@@ -722,6 +854,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'High-density isentrope exponent',
         unit: 'dim',
         section: 'davis_product',
+        solverScope: 'MPM+FV',
         tooltip: 'High-density non-ideal gas isentrope exponent parameter (a).'
     },
     'davis_b': {
@@ -730,6 +863,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Transition curvature exponent',
         unit: 'dim',
         section: 'davis_product',
+        solverScope: 'MPM+FV',
         tooltip: 'Transition curvature exponent parameter (b) connecting dense fluid to ideal gas.'
     },
     'davis_k': {
@@ -738,6 +872,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Low-density adiabatic exponent (k)',
         unit: 'dim',
         section: 'davis_product',
+        solverScope: 'MPM+FV',
         tooltip: 'Low-density asymptotic adiabatic gas exponent (k = Cp/Cv ≈ 1.30–1.40).'
     },
     'davis_vc': {
@@ -746,6 +881,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Characteristic transition relative volume',
         unit: 'dim',
         section: 'davis_product',
+        solverScope: 'MPM+FV',
         tooltip: 'Characteristic relative volume Vc marking the transition between dense and expanded product states.'
     },
     'davis_pc': {
@@ -754,6 +890,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Characteristic transition pressure',
         unit: 'Pa',
         section: 'davis_product',
+        solverScope: 'MPM+FV',
         tooltip: 'Characteristic transition pressure Pc (Pa) at volume Vc.'
     },
     'davis_q_det': {
@@ -762,6 +899,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Specific chemical heat of reaction',
         unit: 'J/kg',
         section: 'davis_product',
+        solverScope: 'MPM+FV',
         tooltip: 'Specific chemical detonation energy release Q (J/kg) converted into product enthalpy.'
     },
     // CREST Reaction Kinetics
@@ -771,6 +909,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Hot-spot ignition rate constant',
         unit: '1/s',
         section: 'crest_kinetics',
+        solverScope: 'MPM+FV',
         tooltip: 'CREST hot-spot ignition rate multiplier b1 (1/s).'
     },
     'crest_c1': {
@@ -779,6 +918,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Ignition reactant fraction exponent',
         unit: 'dim',
         section: 'crest_kinetics',
+        solverScope: 'MPM+FV',
         tooltip: 'Exponent c1 on the unreacted solid fraction (1 - λ) in the ignition channel.'
     },
     'crest_m1': {
@@ -787,6 +927,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Ignition shock entropy exponent',
         unit: 'dim',
         section: 'crest_kinetics',
+        solverScope: 'MPM+FV',
         tooltip: 'Entropy sensitivity exponent m1 for the hot-spot ignition channel.'
     },
     'crest_b2': {
@@ -795,6 +936,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Main grain-burning rate constant',
         unit: '1/s',
         section: 'crest_kinetics',
+        solverScope: 'MPM+FV',
         tooltip: 'CREST grain-growth burning rate multiplier b2 (1/s).'
     },
     'crest_c2': {
@@ -803,6 +945,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Grain-growth product fraction exponent',
         unit: 'dim',
         section: 'crest_kinetics',
+        solverScope: 'MPM+FV',
         tooltip: 'Exponent c2 on the reacted fraction (λ) representing growing flame surface area.'
     },
     'crest_c3': {
@@ -811,6 +954,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Grain-growth reactant fraction exponent',
         unit: 'dim',
         section: 'crest_kinetics',
+        solverScope: 'MPM+FV',
         tooltip: 'Exponent c3 on the unreacted fraction (1 - λ) in the growth channel.'
     },
     'crest_m2': {
@@ -819,6 +963,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Grain-growth shock entropy exponent',
         unit: 'dim',
         section: 'crest_kinetics',
+        solverScope: 'MPM+FV',
         tooltip: 'Entropy sensitivity exponent m2 for the grain-growth channel.'
     },
     'crest_s0': {
@@ -827,6 +972,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Reference normalization entropy',
         unit: 'J/(kg·K)',
         section: 'crest_kinetics',
+        solverScope: 'MPM+FV',
         tooltip: 'Reference shock entropy scale s0 (J/(kg·K)) used to non-dimensionalize effective shock entropy.'
     },
     'crest_s_threshold': {
@@ -835,6 +981,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Minimum shock entropy to ignite',
         unit: 'J/(kg·K)',
         section: 'crest_kinetics',
+        solverScope: 'MPM+FV',
         tooltip: 'Minimum shock entropy threshold below which no ignition or reaction progress occurs.'
     },
     // Ideal Gas CFD
@@ -844,6 +991,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Background static pressure',
         unit: 'Pa',
         section: 'ideal_gas',
+        solverScope: 'FV',
         tooltip: 'Background atmospheric/fluid static pressure (Pa).'
     },
     'atm_temperature': {
@@ -852,6 +1000,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Background static temperature',
         unit: 'K',
         section: 'ideal_gas',
+        solverScope: 'FV',
         tooltip: 'Background ambient temperature (K).'
     },
     'gamma': {
@@ -860,6 +1009,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Ratio of specific heats Cp/Cv',
         unit: 'dim',
         section: 'ideal_gas',
+        solverScope: 'FV',
         tooltip: 'Specific heat ratio gamma = Cp / Cv (1.40 for diatomic air, 1.667 for noble gases).'
     },
     // JWL CFD
@@ -868,6 +1018,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         label: 'Explosive Composition',
         shortDesc: 'Chemical composition name',
         section: 'jwl',
+        solverScope: 'FV',
         tooltip: 'High explosive chemical formulation identifier.'
     },
     'rho': {
@@ -876,6 +1027,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Unreacted solid density',
         unit: 'kg/m³',
         section: 'jwl',
+        solverScope: 'FV',
         tooltip: 'Unreacted solid explosive density (kg/m³).'
     },
     'detonation_energy': {
@@ -884,6 +1036,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Specific chemical energy release',
         unit: 'J/kg',
         section: 'jwl',
+        solverScope: 'FV',
         tooltip: 'Volumetric chemical detonation energy release E0 (J/kg).'
     },
     'det_vel': {
@@ -892,6 +1045,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'Chapman-Jouguet detonation wave speed',
         unit: 'm/s',
         section: 'jwl',
+        solverScope: 'FV',
         tooltip: 'Chapman-Jouguet steady detonation wave speed D (m/s).'
     },
     'jwl_A': {
@@ -900,6 +1054,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'JWL high-pressure expansion term',
         unit: 'Pa',
         section: 'jwl',
+        solverScope: 'FV',
         tooltip: 'JWL high-pressure expansion coefficient A (Pa).'
     },
     'jwl_B': {
@@ -908,6 +1063,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'JWL mid-pressure expansion term',
         unit: 'Pa',
         section: 'jwl',
+        solverScope: 'FV',
         tooltip: 'JWL mid-pressure expansion coefficient B (Pa).'
     },
     'jwl_R1': {
@@ -916,6 +1072,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'JWL exponential decay rate 1',
         unit: 'dim',
         section: 'jwl',
+        solverScope: 'FV',
         tooltip: 'Non-dimensional high-pressure exponential decay rate R1.'
     },
     'jwl_R2': {
@@ -924,6 +1081,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'JWL exponential decay rate 2',
         unit: 'dim',
         section: 'jwl',
+        solverScope: 'FV',
         tooltip: 'Non-dimensional mid-pressure exponential decay rate R2.'
     },
     'jwl_omega': {
@@ -932,6 +1090,7 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         shortDesc: 'JWL fractional Grüneisen ratio',
         unit: 'dim',
         section: 'jwl',
+        solverScope: 'FV',
         tooltip: 'Fractional Grüneisen ratio omega = Cp/Cv - 1 for product gas.'
     }
 };
@@ -1153,101 +1312,130 @@ export const MPM_MATERIAL_PRESET_NAMES = MPM_MATERIAL_CATEGORIES.flatMap(cat => 
 export type MPMMaterialPresetName = string;
 
 export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
-    // ---------------------------------------------------------
-    // 1. Structural & Military Steels
-    // ---------------------------------------------------------
     'Structural Steel (A36)': {
         density: 7850.0, youngs_modulus: 200.0e9, poissons_ratio: 0.26, yield_stress: 250.0e6, hardening_modulus: 1.0e9, failure_strain: 0.20, tensile_failure_stress: 400.0e6,
-        jc_A: 250.0e6, jc_B: 510.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.03, T_melt: 1793.0, T_room: 293.0, Cp: 486.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        jc_A: 250.0e6, jc_B: 510.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.03, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, fracture_toughness: 50.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        T_melt: 1793.0, T_room: 293.0, Cp: 486.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'ASTM A36 Standard / LLNL Explosives Handbook'
     },
     'Steel S275': {
         density: 7850.0, youngs_modulus: 210.0e9, poissons_ratio: 0.30, yield_stress: 275.0e6, hardening_modulus: 900.0e6, failure_strain: 0.23, tensile_failure_stress: 430.0e6,
-        jc_A: 275.0e6, jc_B: 450.0e6, jc_n: 0.28, jc_C: 0.014, jc_m: 1.00, T_melt: 1773.0, T_room: 293.0, Cp: 475.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        jc_A: 275.0e6, jc_B: 450.0e6, jc_n: 0.28, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, fracture_toughness: 50.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        T_melt: 1773.0, T_room: 293.0, Cp: 475.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'BS EN 10025-2 Standard Structural Steel'
     },
     'Steel S355': {
         density: 7850.0, youngs_modulus: 210.0e9, poissons_ratio: 0.30, yield_stress: 355.0e6, hardening_modulus: 1.0e9, failure_strain: 0.22, tensile_failure_stress: 510.0e6,
-        jc_A: 355.0e6, jc_B: 480.0e6, jc_n: 0.27, jc_C: 0.014, jc_m: 1.00, T_melt: 1773.0, T_room: 293.0, Cp: 475.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        jc_A: 355.0e6, jc_B: 480.0e6, jc_n: 0.27, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, fracture_toughness: 50.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        T_melt: 1773.0, T_room: 293.0, Cp: 475.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'EN 10025-2 European Standard Structural Steel'
     },
     'Steel S460': {
         density: 7850.0, youngs_modulus: 210.0e9, poissons_ratio: 0.30, yield_stress: 460.0e6, hardening_modulus: 1.1e9, failure_strain: 0.19, tensile_failure_stress: 600.0e6,
-        jc_A: 460.0e6, jc_B: 520.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.00, T_melt: 1773.0, T_room: 293.0, Cp: 475.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        jc_A: 460.0e6, jc_B: 520.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, fracture_toughness: 50.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        T_melt: 1773.0, T_room: 293.0, Cp: 475.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'EN 10025-3 High Yield Structural Steel'
     },
     'Steel 1006': {
         density: 7890.0, youngs_modulus: 205.0e9, poissons_ratio: 0.29, yield_stress: 350.0e6, hardening_modulus: 800.0e6, failure_strain: 0.30, tensile_failure_stress: 450.0e6,
-        jc_A: 350.0e6, jc_B: 275.0e6, jc_n: 0.36, jc_C: 0.022, jc_m: 1.00, T_melt: 1811.0, T_room: 293.0, Cp: 452.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        jc_A: 350.0e6, jc_B: 275.0e6, jc_n: 0.36, jc_C: 0.022, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, fracture_toughness: 50.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        T_melt: 1811.0, T_room: 293.0, Cp: 452.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'Bane & Johnson, J. Appl. Mech. (1985)'
     },
     'Steel 1020': {
         density: 7870.0, youngs_modulus: 200.0e9, poissons_ratio: 0.29, yield_stress: 330.0e6, hardening_modulus: 900.0e6, failure_strain: 0.28, tensile_failure_stress: 420.0e6,
-        jc_A: 330.0e6, jc_B: 410.0e6, jc_n: 0.32, jc_C: 0.019, jc_m: 1.00, T_melt: 1790.0, T_room: 293.0, Cp: 486.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        jc_A: 330.0e6, jc_B: 410.0e6, jc_n: 0.32, jc_C: 0.019, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, fracture_toughness: 50.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        T_melt: 1790.0, T_room: 293.0, Cp: 486.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'ASM Metals Handbook Vol. 1'
     },
     'Steel 4340': {
         density: 7830.0, youngs_modulus: 207.0e9, poissons_ratio: 0.29, yield_stress: 792.0e6, hardening_modulus: 1.2e9, failure_strain: 0.25, tensile_failure_stress: 1000.0e6,
-        jc_A: 792.0e6, jc_B: 510.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.03, T_melt: 1793.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        jc_A: 792.0e6, jc_B: 510.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.03, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, fracture_toughness: 50.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        T_melt: 1793.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'Johnson & Cook (1983) 7th Int. Symp. Ballistics'
     },
     'Q1N (HY-80 Naval Steel)': {
         density: 7850.0, youngs_modulus: 205.0e9, poissons_ratio: 0.29, yield_stress: 550.0e6, hardening_modulus: 1.1e9, failure_strain: 0.22, tensile_failure_stress: 700.0e6,
-        jc_A: 550.0e6, jc_B: 600.0e6, jc_n: 0.30, jc_C: 0.015, jc_m: 1.00, T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        jc_A: 550.0e6, jc_B: 600.0e6, jc_n: 0.30, jc_C: 0.015, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, fracture_toughness: 65.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'MIL-S-16216 Naval Submarine Armor Steel'
     },
     'HY-100 Steel': {
         density: 7850.0, youngs_modulus: 205.0e9, poissons_ratio: 0.29, yield_stress: 690.0e6, hardening_modulus: 1.2e9, failure_strain: 0.20, tensile_failure_stress: 820.0e6,
-        jc_A: 690.0e6, jc_B: 650.0e6, jc_n: 0.28, jc_C: 0.015, jc_m: 1.00, T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        jc_A: 690.0e6, jc_B: 650.0e6, jc_n: 0.28, jc_C: 0.015, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, fracture_toughness: 75.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'MIL-S-16216 Submarine Pressure Hull Armor'
     },
     'RHA (Rolled Homogeneous Armor)': {
         density: 7850.0, youngs_modulus: 210.0e9, poissons_ratio: 0.30, yield_stress: 950.0e6, hardening_modulus: 1.3e9, failure_strain: 0.18, tensile_failure_stress: 1100.0e6,
-        jc_A: 950.0e6, jc_B: 720.0e6, jc_n: 0.25, jc_C: 0.012, jc_m: 1.00, T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        jc_A: 950.0e6, jc_B: 720.0e6, jc_n: 0.25, jc_C: 0.012, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 10.0, weibull_scale: 1.0, fracture_toughness: 90.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'MIL-A-12560 Armor Plate Benchmark'
     },
     'Armox 500T': {
         density: 7850.0, youngs_modulus: 210.0e9, poissons_ratio: 0.30, yield_stress: 1250.0e6, hardening_modulus: 1.5e9, failure_strain: 0.15, tensile_failure_stress: 1600.0e6,
-        jc_A: 1250.0e6, jc_B: 840.0e6, jc_n: 0.26, jc_C: 0.005, jc_m: 1.00, T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        jc_A: 1250.0e6, jc_B: 840.0e6, jc_n: 0.26, jc_C: 0.005, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.0, weibull_scale: 1.0, fracture_toughness: 80.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'Borvik et al., Int. J. Impact Eng. (2009)'
     },
     'Armox 600T': {
         density: 7850.0, youngs_modulus: 210.0e9, poissons_ratio: 0.30, yield_stress: 1650.0e6, hardening_modulus: 1.8e9, failure_strain: 0.10, tensile_failure_stress: 2000.0e6,
-        jc_A: 1650.0e6, jc_B: 950.0e6, jc_n: 0.20, jc_C: 0.005, jc_m: 1.00, T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        jc_A: 1650.0e6, jc_B: 950.0e6, jc_n: 0.20, jc_C: 0.005, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 8.5, weibull_scale: 1.0, fracture_toughness: 70.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'SSAB Armox Ultra-High Hardness Armor'
     },
     'Weldox 700E': {
         density: 7850.0, youngs_modulus: 210.0e9, poissons_ratio: 0.30, yield_stress: 700.0e6, hardening_modulus: 1.2e9, failure_strain: 0.16, tensile_failure_stress: 800.0e6,
-        jc_A: 700.0e6, jc_B: 560.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.00, T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        jc_A: 700.0e6, jc_B: 560.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, fracture_toughness: 60.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'Borvik et al., Eur. J. Mech. A (2001)'
     },
     'Weldox 900E': {
         density: 7850.0, youngs_modulus: 210.0e9, poissons_ratio: 0.30, yield_stress: 900.0e6, hardening_modulus: 1.4e9, failure_strain: 0.14, tensile_failure_stress: 1000.0e6,
-        jc_A: 900.0e6, jc_B: 620.0e6, jc_n: 0.24, jc_C: 0.012, jc_m: 1.00, T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        jc_A: 900.0e6, jc_B: 620.0e6, jc_n: 0.24, jc_C: 0.012, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, fracture_toughness: 55.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'Dey et al., Int. J. Solids Struct. (2004)'
     },
     'Stainless Steel 304': {
         density: 7900.0, youngs_modulus: 193.0e9, poissons_ratio: 0.29, yield_stress: 310.0e6, hardening_modulus: 1.0e9, failure_strain: 0.40, tensile_failure_stress: 620.0e6,
-        jc_A: 310.0e6, jc_B: 1000.0e6, jc_n: 0.65, jc_C: 0.070, jc_m: 1.00, T_melt: 1673.0, T_room: 293.0, Cp: 500.0, mg_gamma0: 1.93, mg_c0: 4570.0, mg_s: 1.49,
+        jc_A: 310.0e6, jc_B: 1000.0e6, jc_n: 0.65, jc_C: 0.070, jc_m: 1.00, jc_d1: 0.10, jc_d2: 2.00, jc_d3: -1.50, jc_d4: 0.005, jc_d5: 1.00,
+        weibull_modulus: 11.0, weibull_scale: 1.0, fracture_toughness: 100.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        T_melt: 1673.0, T_room: 293.0, Cp: 500.0, mg_gamma0: 1.93, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'Lee et al., J. Mater. Process. Technol. (2002)'
     },
     'Stainless Steel 316L': {
         density: 7980.0, youngs_modulus: 193.0e9, poissons_ratio: 0.30, yield_stress: 290.0e6, hardening_modulus: 950.0e6, failure_strain: 0.45, tensile_failure_stress: 580.0e6,
-        jc_A: 290.0e6, jc_B: 940.0e6, jc_n: 0.61, jc_C: 0.065, jc_m: 1.00, T_melt: 1650.0, T_room: 293.0, Cp: 500.0, mg_gamma0: 1.93, mg_c0: 4570.0, mg_s: 1.49,
+        jc_A: 290.0e6, jc_B: 940.0e6, jc_n: 0.61, jc_C: 0.065, jc_m: 1.00, jc_d1: 0.10, jc_d2: 2.00, jc_d3: -1.50, jc_d4: 0.005, jc_d5: 1.00,
+        weibull_modulus: 11.0, weibull_scale: 1.0, fracture_toughness: 110.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        T_melt: 1650.0, T_room: 293.0, Cp: 500.0, mg_gamma0: 1.93, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'Follansbee & Kocks, Acta Metall. (1988)'
     },
     'Tool Steel D2': {
         density: 7700.0, youngs_modulus: 210.0e9, poissons_ratio: 0.28, yield_stress: 1600.0e6, hardening_modulus: 2.0e9, failure_strain: 0.10, tensile_failure_stress: 1900.0e6,
-        jc_A: 1600.0e6, jc_B: 900.0e6, jc_n: 0.20, jc_C: 0.010, jc_m: 1.00, T_melt: 1690.0, T_room: 293.0, Cp: 460.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        jc_A: 1600.0e6, jc_B: 900.0e6, jc_n: 0.20, jc_C: 0.010, jc_m: 1.00, jc_d1: 0.02, jc_d2: 1.50, jc_d3: -1.00, jc_d4: 0.001, jc_d5: 0.50,
+        weibull_modulus: 7.0, weibull_scale: 1.0, fracture_toughness: 25.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        T_melt: 1690.0, T_room: 293.0, Cp: 460.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'ASM Specialty Handbook: Tool Materials'
     },
-
-    // ---------------------------------------------------------
-    // 2. Light Alloys & Refractory Metals
-    // ---------------------------------------------------------
     'Aluminum 6061-T6': {
         density: 2700.0, youngs_modulus: 68.9e9, poissons_ratio: 0.33, yield_stress: 324.0e6, hardening_modulus: 400.0e6, failure_strain: 0.17, tensile_failure_stress: 310.0e6,
-        jc_A: 324.0e6, jc_B: 114.0e6, jc_n: 0.42, jc_C: 0.002, jc_m: 1.34, T_melt: 925.0, T_room: 293.0, Cp: 896.0, mg_gamma0: 1.97, mg_c0: 5240.0, mg_s: 1.40,
+        jc_A: 324.0e6, jc_B: 114.0e6, jc_n: 0.42, jc_C: 0.002, jc_m: 1.34, jc_d1: 0.07, jc_d2: 1.25, jc_d3: -1.50, jc_d4: 0.005, jc_d5: 1.60,
+        weibull_modulus: 8.0, weibull_scale: 1.0, fracture_toughness: 29.0e6, debris_bulk_factor: 0.12, transfer_scheme: 'BSpline',
+        T_melt: 925.0, T_room: 293.0, Cp: 896.0, mg_gamma0: 1.97, mg_c0: 5240.0, mg_s: 1.40,
         category: 'Light Alloys & Refractory Metals', reference: 'Lesuer, LLNL Report UCRL-ID-138054 (2000)'
     },
     'Aluminum 7075-T6': {

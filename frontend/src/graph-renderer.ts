@@ -1,11 +1,11 @@
 import { SimulationState, Node, Connection, Port, NodeType } from './types.js';
-import { StateManager, calculateRefinementMeshInfo, getMeshDisplayHTML, getMPMDisplayHTML } from './state-manager.js';
+import { StateManager, calculateRefinementMeshInfo, getMeshDisplayHTML, getMPMDisplayHTML, syncMPMMaterialParameters } from './state-manager.js';
 import { Telemetry3DViewport } from './telemetry-3d-viewport.js';
 import { validateSimulationState } from './validation.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
 import { CustomDialog } from './custom-dialog.js';
 import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_CATEGORIES, MPM_MATERIAL_PARAM_INFO, getConstitutiveModels, getPresetsForConstitutiveModel, getDefaultPresetForModel } from './mpm-presets.js';
-import { getParameterInfo, getNodeDefinition, getNodeDescription as getMasterNodeDescription, showParameterPopover } from './parameter-definitions.js';
+import { getParameterInfo, getNodeDefinition, getNodeDescription as getMasterNodeDescription, showParameterPopover, getSolverScope, getSolverBadgeHTML } from './parameter-definitions.js';
 
 const DEFAULT_QUANTITY_RANGES: Record<string, [number, number]> = {
     pressure: [101325.0, 101325.0 * 100.0],
@@ -436,7 +436,7 @@ export class GraphRenderer {
         const node = state?.nodes.find(n => n.id === nodeId);
         if (!node) return;
 
-        if (node.displayMode === 'compact') return;
+        if (node.displayMode === 'compact' && node.type !== 'Telemetry3DViewport') return;
 
         if (node.type === 'TelemetryText' && Array.isArray(data)) {
             const body = nodeEl.querySelector('.node-body-text') as HTMLElement;
@@ -513,9 +513,14 @@ export class GraphRenderer {
                 const gauges = node.parameters?.gauges || [];
                 const currentChannel = Number(node.parameters?.telemetry_channel ?? 0);
                 const has2D = state?.nodes.some(n => n.type === 'DomainMesh2D') || false;
-                this.drawGaugesChart(canvas, data, gauges, currentChannel, has2D, node.id);
             }
         }
+    }
+
+    public pushFrame(data: ArrayBuffer, modelId?: string): void {
+        this.viewport3Ds.forEach((vp) => {
+            vp.pushFrame(data, modelId);
+        });
     }
 
     private initEventListeners(): void {
@@ -874,7 +879,7 @@ export class GraphRenderer {
                 const state = this.stateManager.getCurrentState();
                 if (state) {
                     const targetNode = state.nodes.find(n => n.id === this.hoveredPort!.nodeId);
-                    const isMultiInput = ((targetNode?.type === 'MPMDomain2D' || targetNode?.type === 'MPMDomain3D' || targetNode?.type === 'FEMDomain3D') && this.hoveredPort!.portId === 'objects')
+                    const isMultiInput = ((targetNode?.type === 'MPMDomain2D' || targetNode?.type === 'MPMDomain3D' || targetNode?.type === 'FEMDomain3D') && (this.hoveredPort!.portId === 'objects' || this.hoveredPort!.portId === 'detonator'))
                         || targetNode?.type === 'TelemetryText'
                         || targetNode?.type === 'TelemetryContour';
 
@@ -1888,7 +1893,8 @@ export class GraphRenderer {
             };
             case 'MPMDomain2D': return {
                 precision: 'single',
-                transfer_scheme: 'BSpline',
+                particle_distribution: 'Cartesian',
+                boundary_filling: 'Stairstepped',
                 velocity_scheme: 'APIC',
                 space_time_scheme: 'Leapfrog',
                 flip_blend: 0.95,
@@ -1897,9 +1903,10 @@ export class GraphRenderer {
                 cfl: 0.6
             };
             case 'MPMDomain3D': return {
-                device: 'cpu',
+                device: 'gpu',
                 precision: 'single',
-                transfer_scheme: 'BSpline',
+                particle_distribution: 'Cartesian',
+                boundary_filling: 'Stairstepped',
                 velocity_scheme: 'APIC',
                 space_time_scheme: 'Leapfrog',
                 flip_blend: 0.95,
@@ -1909,6 +1916,8 @@ export class GraphRenderer {
             };
             case 'MPMObject2D': return {
                 shape_type: 'Rectangle',
+                particle_distribution: 'Cartesian',
+                boundary_filling: 'Stairstepped',
                 pos_x: 0.5,
                 pos_y: 0.5,
                 size_x: 0.2,
@@ -1920,6 +1929,8 @@ export class GraphRenderer {
             };
             case 'MPMObject3D': return {
                 shape_type: 'Box',
+                particle_distribution: 'Cartesian',
+                boundary_filling: 'Stairstepped',
                 pos_x: 0.5, pos_y: 0.5, pos_z: 0.5,
                 size_x: 0.2, size_y: 0.2, size_z: 0.2,
                 radius: 0.1, inner_radius: 0.0, height: 0.2,
@@ -1930,6 +1941,7 @@ export class GraphRenderer {
             case 'MPMMaterialSteel': return {
                 material_model: 'Linear Elastic',
                 preset: 'Structural Steel (A36)',
+                transfer_scheme: 'BSpline',
                 density: 7850.0,
                 youngs_modulus: 200.0e9,
                 poissons_ratio: 0.29,
@@ -1948,6 +1960,15 @@ export class GraphRenderer {
                 jc_n: 0.26,
                 jc_C: 0.014,
                 jc_m: 1.03,
+                jc_d1: 0.0,
+                jc_d2: 0.0,
+                jc_d3: 0.0,
+                jc_d4: 0.0,
+                jc_d5: 0.0,
+                weibull_modulus: 0.0,
+                weibull_scale: 1.0,
+                fracture_toughness: 0.0,
+                debris_bulk_factor: 0.1,
                 T_melt: 1793.0,
                 T_room: 293.0,
                 Cp: 486.0,
@@ -4339,6 +4360,12 @@ export class GraphRenderer {
             return;
         }
         container.style.overflow = 'visible';
+        const state = this.stateManager.getCurrentState();
+        const conn = state?.connections.find(c => c.toNode === node.id);
+        const sourceNode = conn ? state?.nodes.find(n => n.id === conn.fromNode) : null;
+        const is3D = sourceNode 
+            ? (sourceNode.type === 'CFDSolver3D' || sourceNode.type === 'FEMDomain3D' || sourceNode.type === 'MPMDomain3D' || sourceNode.type === 'FSICoupler3D' || sourceNode.type === 'FEMFSICoupler3D') 
+            : (state?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'DomainMesh3D' || n.type === 'FEMDomain3D' || n.type === 'MPMDomain3D') ?? false);
         let form = container.querySelector('.node-params-form') as HTMLFormElement;
         if (form) {
             let needsRebuild = false;
@@ -4382,6 +4409,12 @@ export class GraphRenderer {
             if (node.type === 'FEMDomain3D') {
                 const scheme = node.parameters['integration_scheme'] || 'OnePointFB';
                 if (form.dataset.renderedIntegrationScheme !== scheme.toString()) {
+                    needsRebuild = true;
+                }
+            }
+            if (node.type === 'VTKOutput') {
+                const triggerType = node.parameters['trigger_type'] || 'Step Interval';
+                if (form.dataset.renderedTriggerType !== triggerType.toString() || form.dataset.renderedIs3D !== is3D.toString()) {
                     needsRebuild = true;
                 }
             }
@@ -4491,9 +4524,15 @@ export class GraphRenderer {
             const scheme = node.parameters['integration_scheme'] || 'OnePointFB';
             form.dataset.renderedIntegrationScheme = scheme.toString();
         }
+        if (node.type === 'VTKOutput') {
+            const triggerType = node.parameters['trigger_type'] || 'Step Interval';
+            form.dataset.renderedTriggerType = triggerType.toString();
+            form.dataset.renderedIs3D = is3D.toString();
+        }
 
         let paramKeys = Object.keys(node.parameters);
         if (node.type === 'MPMMaterialSteel' || node.type === 'Material') {
+            syncMPMMaterialParameters(node, node.parameters);
             if (!node.parameters['material_model']) {
                 node.parameters['material_model'] = 'Linear Elastic';
             }
@@ -4503,34 +4542,39 @@ export class GraphRenderer {
             const matModel = node.parameters['material_model'];
             if (matModel === 'Linear Elastic') {
                 paramKeys = [
-                    'material_model', 'preset',
+                    'material_model', 'preset', 'transfer_scheme',
                     'density', 'youngs_modulus', 'poissons_ratio',
-                    'tensile_failure_stress'
+                    'tensile_failure_stress',
+                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
                 ];
             } else if (matModel === 'Johnson-Cook + Mie-Grüneisen') {
                 paramKeys = [
-                    'material_model', 'preset',
+                    'material_model', 'preset', 'transfer_scheme',
                     'density', 'youngs_modulus', 'poissons_ratio',
                     'failure_strain', 'tensile_failure_stress',
                     'enable_strain_erosion', 'erosion_strain',
                     'enable_stress_erosion', 'erosion_stress',
                     'enable_timestep_erosion', 'timestep_erosion_factor',
-                    'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
-                    'mg_gamma0', 'mg_c0', 'mg_s'
+                    'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m',
+                    'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5',
+                    'T_melt', 'T_room', 'Cp',
+                    'mg_gamma0', 'mg_c0', 'mg_s',
+                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
                 ];
             } else if (matModel === 'CREST Reactive Burn') {
                 paramKeys = [
-                    'material_model', 'preset',
+                    'material_model', 'preset', 'transfer_scheme',
                     'density', 'youngs_modulus', 'poissons_ratio',
                     'yield_stress', 'hardening_modulus',
                     'failure_strain', 'tensile_failure_stress',
                     'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
                     'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
-                    'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold'
+                    'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold',
+                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
                 ];
             } else if (matModel === 'RHT Concrete') {
                 paramKeys = [
-                    'material_model', 'preset',
+                    'material_model', 'preset', 'transfer_scheme',
                     'density', 'youngs_modulus', 'poissons_ratio',
                     'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
                     'directional_crack_band', 'nonlocal_radius',
@@ -4538,29 +4582,32 @@ export class GraphRenderer {
                     'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
                     'enable_strain_erosion', 'erosion_strain',
                     'enable_stress_erosion', 'erosion_stress',
-                    'enable_timestep_erosion', 'timestep_erosion_factor'
+                    'enable_timestep_erosion', 'timestep_erosion_factor',
+                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
                 ];
             } else if (matModel === 'Karagozian & Case (K&C)' || matModel === 'Karagozian & Case') {
                 paramKeys = [
-                    'material_model', 'preset',
+                    'material_model', 'preset', 'transfer_scheme',
                     'density', 'youngs_modulus', 'poissons_ratio',
                     'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
                     'directional_crack_band', 'nonlocal_radius',
                     'kc_auto_generate', 'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
                     'enable_strain_erosion', 'erosion_strain',
                     'enable_stress_erosion', 'erosion_stress',
-                    'enable_timestep_erosion', 'timestep_erosion_factor'
+                    'enable_timestep_erosion', 'timestep_erosion_factor',
+                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
                 ];
             } else if (matModel === 'CSCM Concrete') {
                 paramKeys = [
-                    'material_model', 'preset',
+                    'material_model', 'preset', 'transfer_scheme',
                     'density', 'youngs_modulus', 'poissons_ratio',
                     'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
                     'directional_crack_band', 'nonlocal_radius',
                     'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
                     'enable_strain_erosion', 'erosion_strain',
                     'enable_stress_erosion', 'erosion_stress',
-                    'enable_timestep_erosion', 'timestep_erosion_factor'
+                    'enable_timestep_erosion', 'timestep_erosion_factor',
+                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
                 ];
             } else if (matModel === 'Ideal Gas') {
                 paramKeys = [
@@ -4576,30 +4623,35 @@ export class GraphRenderer {
                 ];
             } else {
                 paramKeys = [
-                    'material_model', 'preset',
+                    'material_model', 'preset', 'transfer_scheme',
                     'density', 'youngs_modulus', 'poissons_ratio',
                     'yield_stress', 'hardening_modulus',
                     'directional_crack_band', 'nonlocal_radius',
                     'failure_strain', 'tensile_failure_stress',
                     'enable_strain_erosion', 'erosion_strain',
                     'enable_stress_erosion', 'erosion_stress',
-                    'enable_timestep_erosion', 'timestep_erosion_factor'
+                    'enable_timestep_erosion', 'timestep_erosion_factor',
+                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
                 ];
             }
         } else if (node.type === 'MPMDomain2D') {
             const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
-            paramKeys = ['precision', 'transfer_scheme', 'velocity_scheme', 'space_time_scheme', 'smooth_plastic_strain'];
+            paramKeys = ['precision', 'particle_distribution', 'boundary_filling', 'velocity_scheme', 'space_time_scheme', 'smooth_plastic_strain'];
             if (hasFLIP) {
                 paramKeys.push('flip_blend');
             }
             paramKeys.push('ppc', 'cfl');
         } else if (node.type === 'MPMDomain3D') {
             const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
-            paramKeys = ['device', 'precision', 'transfer_scheme', 'velocity_scheme', 'space_time_scheme', 'smooth_plastic_strain'];
+            paramKeys = ['device', 'precision', 'particle_distribution', 'boundary_filling', 'velocity_scheme', 'space_time_scheme', 'smooth_plastic_strain'];
             if (hasFLIP) {
                 paramKeys.push('flip_blend');
             }
             paramKeys.push('ppc', 'cfl');
+        } else if (node.type === 'MPMObject2D') {
+            paramKeys = ['shape_type', 'particle_distribution', 'boundary_filling', 'pos_x', 'pos_y', 'size_x', 'size_y', 'radius', 'vel_x', 'vel_y', 'angular_vel'];
+        } else if (node.type === 'MPMObject3D') {
+            paramKeys = ['shape_type', 'particle_distribution', 'boundary_filling', 'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'stl_file', 'scale_x', 'scale_y', 'scale_z', 'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z'];
         } else if (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D') {
             paramKeys = paramKeys.filter(k => k !== 'spatial_order' && k !== 'temporal_order');
             const idx = Object.keys(node.parameters).indexOf('spatial_order');
@@ -4711,19 +4763,11 @@ export class GraphRenderer {
 
         let mpmInfoDiv: HTMLDivElement | null = null;
         if (node.type === 'MPMObject3D' || node.type === 'MPMObject2D' || node.type === 'MPMDomain3D' || node.type === 'MPMDomain2D') {
-            const state = this.stateManager.getCurrentState();
             const info = document.createElement('div');
             info.className = 'mpm-info-display';
             info.innerHTML = getMPMDisplayHTML(node, state ?? undefined);
             mpmInfoDiv = info;
         }
-
-        const state = this.stateManager.getCurrentState();
-        const conn = state?.connections.find(c => c.toNode === node.id);
-        const sourceNode = conn ? state?.nodes.find(n => n.id === conn.fromNode) : null;
-        const is3D = sourceNode 
-            ? (sourceNode.type === 'CFDSolver3D' || sourceNode.type === 'FEMDomain3D' || sourceNode.type === 'MPMDomain3D' || sourceNode.type === 'FSICoupler3D' || sourceNode.type === 'FEMFSICoupler3D') 
-            : (state?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'DomainMesh3D' || n.type === 'FEMDomain3D' || n.type === 'MPMDomain3D') ?? false);
 
         let currentGridDiv: HTMLDivElement | null = null;
 
@@ -4850,21 +4894,75 @@ export class GraphRenderer {
             }
             if (node.type === 'MPMMaterialSteel' || node.type === 'Material') {
                 let sectionTitle: string | null = null;
-                if (key === 'density') sectionTitle = 'ELASTICITY & MASS';
-                else if (key === 'yield_stress') sectionTitle = 'PLASTIC YIELD & HARDENING';
-                else if (key === 'failure_strain') sectionTitle = 'CONSTITUTIVE FAILURE & SPALL';
-                else if (key === 'enable_strain_erosion') sectionTitle = 'ELEMENT EROSION & DELETION';
-                else if (key === 'jc_A') sectionTitle = 'JOHNSON-COOK VISCOPLASTICITY';
-                else if (key === 'mg_gamma0') sectionTitle = 'MIE-GRÜNEISEN SHOCK EOS';
-                else if (key === 'davis_c0') sectionTitle = 'DAVIS SOLID REACTANT EOS';
-                else if (key === 'davis_a') sectionTitle = 'DAVIS DETONATION PRODUCT EOS';
-                else if (key === 'crest_b1') sectionTitle = 'CREST REACTION KINETICS';
-                else if (key === 'fc') sectionTitle = 'CONCRETE CORE & FRACTURE ENERGY';
-                else if (key === 'rht_A') sectionTitle = 'RHT ENVELOPES & POROUS EOS';
-                else if (key === 'kc_auto_generate' || key === 'kc_a0') sectionTitle = 'K&C 3-SURFACE DAMAGE PLASTICITY';
-                else if (key === 'cscm_alpha') sectionTitle = 'CSCM SMOOTH CAP & DAMAGE';
-                else if (key === 'atm_pressure') sectionTitle = 'IDEAL GAS AMBIENT PROPERTIES';
-                else if (key === 'composition') sectionTitle = 'JWL DETONATION PARAMETERS';
+                let sectionColor = '#60a5fa';
+                if (key === 'transfer_scheme') {
+                    sectionTitle = 'MPM TRANSFER SCHEME [MPM ONLY]';
+                    sectionColor = '#c084fc';
+                }
+                else if (key === 'density') {
+                    sectionTitle = 'ELASTICITY & MASS [MPM · FEM]';
+                    sectionColor = '#60a5fa';
+                }
+                else if (key === 'yield_stress') {
+                    sectionTitle = 'PLASTIC YIELD & HARDENING [MPM · FEM]';
+                    sectionColor = '#60a5fa';
+                }
+                else if (key === 'failure_strain') {
+                    sectionTitle = 'CONSTITUTIVE FAILURE & SPALL [MPM · FEM]';
+                    sectionColor = '#60a5fa';
+                }
+                else if (key === 'enable_strain_erosion') {
+                    sectionTitle = 'ELEMENT & PARTICLE EROSION [FEM · MPM]';
+                    sectionColor = '#60a5fa';
+                }
+                else if (key === 'jc_A') {
+                    sectionTitle = 'JOHNSON-COOK VISCOPLASTICITY [MPM · FEM]';
+                    sectionColor = '#60a5fa';
+                }
+                else if (key === 'mg_gamma0') {
+                    sectionTitle = 'MIE-GRÜNEISEN SHOCK EOS [MPM · FEM]';
+                    sectionColor = '#60a5fa';
+                }
+                else if (key === 'davis_c0') {
+                    sectionTitle = 'DAVIS SOLID REACTANT EOS [MPM · FV]';
+                    sectionColor = '#22d3ee';
+                }
+                else if (key === 'davis_a') {
+                    sectionTitle = 'DAVIS DETONATION PRODUCT EOS [MPM · FV]';
+                    sectionColor = '#22d3ee';
+                }
+                else if (key === 'crest_b1') {
+                    sectionTitle = 'CREST REACTION KINETICS [MPM · FV]';
+                    sectionColor = '#22d3ee';
+                }
+                else if (key === 'fc') {
+                    sectionTitle = 'CONCRETE CORE & FRACTURE [MPM · FEM]';
+                    sectionColor = '#60a5fa';
+                }
+                else if (key === 'rht_A') {
+                    sectionTitle = 'RHT ENVELOPES & POROUS EOS [MPM · FEM]';
+                    sectionColor = '#60a5fa';
+                }
+                else if (key === 'kc_auto_generate' || key === 'kc_a0') {
+                    sectionTitle = 'K&C 3-SURFACE DAMAGE PLASTICITY [MPM · FEM]';
+                    sectionColor = '#60a5fa';
+                }
+                else if (key === 'cscm_alpha') {
+                    sectionTitle = 'CSCM SMOOTH CAP & DAMAGE [MPM · FEM]';
+                    sectionColor = '#60a5fa';
+                }
+                else if (key === 'weibull_modulus') {
+                    sectionTitle = 'MICROSTRUCTURAL FLAWS & FRAGMENTATION [MPM ONLY]';
+                    sectionColor = '#c084fc';
+                }
+                else if (key === 'atm_pressure') {
+                    sectionTitle = 'IDEAL GAS AMBIENT PROPERTIES [FV ONLY]';
+                    sectionColor = '#fbbf24';
+                }
+                else if (key === 'composition') {
+                    sectionTitle = 'JWL DETONATION PARAMETERS [FV ONLY]';
+                    sectionColor = '#fbbf24';
+                }
 
                 if (sectionTitle) {
                     const sectionKey = `${node.id}:${sectionTitle}`;
@@ -4876,14 +4974,14 @@ export class GraphRenderer {
                     secHeader.style.justifyContent = 'space-between';
                     secHeader.style.fontWeight = 'bold';
                     secHeader.style.fontSize = '9px';
-                    secHeader.style.color = '#ff79c6';
+                    secHeader.style.color = sectionColor;
                     secHeader.style.letterSpacing = '0.5px';
                     secHeader.style.marginTop = '6px';
                     secHeader.style.marginBottom = '2px';
                     secHeader.style.padding = '2px 4px';
-                    secHeader.style.background = 'rgba(255, 121, 198, 0.08)';
+                    secHeader.style.background = `${sectionColor}15`;
                     secHeader.style.borderRadius = '3px';
-                    secHeader.style.border = '1px solid rgba(255, 121, 198, 0.2)';
+                    secHeader.style.border = `1px solid ${sectionColor}35`;
                     secHeader.style.cursor = 'pointer';
                     secHeader.style.userSelect = 'none';
 
@@ -5018,12 +5116,19 @@ export class GraphRenderer {
                 ? `<span style="font-size:8px; color:#00e5ff; font-family:monospace; background:rgba(0,229,255,0.12); padding:0px 3px; border-radius:2px; margin-left:2px; flex-shrink:0;">${paramInfo.unit}</span>` 
                 : '';
 
-            label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline; overflow:hidden;">` +
+            const solverBadge = (node.type === 'MPMMaterialSteel' || node.type === 'Material')
+                ? getSolverBadgeHTML(paramInfo.solverScope || getSolverScope(key, node.type), true)
+                : '';
+
+            label.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline; overflow:hidden; gap:3px;">` +
                 `<span style="font-weight:600; color:#ccc; font-size:9px; white-space:nowrap; text-overflow:ellipsis; overflow:hidden; display:inline-flex; align-items:center;">` +
                 `${labelText}` +
                 `<span class="param-info-btn" data-param-key="${key}" title="Click or hover for physics details" style="width:11px; height:11px; font-size:7.5px; margin-left:3px;">?</span>` +
                 `</span>` +
+                `<div style="display:flex; align-items:center; gap:2px; flex-shrink:0;">` +
+                solverBadge +
                 unitBadge +
+                `</div>` +
                 `</div>`;
 
             const infoBtn = label.querySelector('.param-info-btn') as HTMLElement;
@@ -5089,8 +5194,13 @@ export class GraphRenderer {
                 show_grid: ['true', 'false'],
                 'voxelization_method': ['watertight_floodfill', 'watertight_raycast', 'thin_shell', 'winding_number'],
                 'obstacles_quantity': ['pressure', 'density', 'velocity', 'energy', 'species1', 'species2', 'species3', 'peak_overpressure', 'peak_impulse'],
-                'transfer_scheme': ['BSpline', 'GIMP', 'Standard'],
+                'transfer_scheme': (node.type === 'Material' || node.type === 'MPMMaterialSteel') ? 
+                    ['Default', 'BSpline', 'Radial MLS', 'Cubic BSpline', 'GIMP', 'Standard'] : 
+                    ['BSpline', 'Radial MLS', 'Cubic BSpline', 'GIMP', 'Standard'],
+                'particle_distribution': ['Cartesian', 'Hexagonal'],
+                'boundary_filling': ['Stairstepped', 'Partial'],
                 'velocity_scheme': ['APIC', 'PIC', 'FLIP'],
+                'smooth_plastic_strain': ['Enabled', 'Disabled'],
                 'boundary_condition': ['Free', 'Fixed Base', 'Fixed Entire'],
                 'shape_type': node.type === 'FEMObject3D' ? ['Box', 'Cylinder', 'LS-DYNA File'] : (node.type === 'MPMObject3D' ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle']),
                 'colorbar_source': ['slice', 'mpm', 'obstacles', 'stl'],
@@ -5188,7 +5298,8 @@ export class GraphRenderer {
                             'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
                             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
                             'failure_strain', 'tensile_failure_stress', 'erosion_strain', 'erosion_stress',
-                            'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
+                            'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5', 'T_melt', 'T_room', 'Cp',
+                            'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
                             'mg_gamma0', 'mg_c0', 'mg_s',
                             'ppc',
                             'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
@@ -5620,7 +5731,7 @@ export class GraphRenderer {
                     }
                 });
 
-                if (key === 'stl_file' || key === 'k_file') {
+                if (key === 'stl_file' || key === 'k_file' || key === 'vtk_dir' || key === 'output_dir') {
                     const wrapper = document.createElement('div');
                     wrapper.style.display = 'flex';
                     wrapper.style.gap = '4px';
@@ -5645,11 +5756,13 @@ export class GraphRenderer {
                         const startPath = node.parameters[key] || '';
                         const isK = key === 'k_file';
                         const isStl = key === 'stl_file';
+                        const isDir = key === 'vtk_dir' || key === 'output_dir';
                         const browser = new HostFileBrowserModal(
                             (window as any).networkManager,
                             {
-                                title: isK ? 'Select LS-DYNA Keyword File (*.k, *.key)' : (isStl ? 'Select STL 3D Geometry (*.stl)' : 'Select File (Host)'),
-                                mode: 'open',
+                                title: isK ? 'Select LS-DYNA Keyword File (*.k, *.key)' : (isStl ? 'Select STL 3D Geometry (*.stl)' : 'Select Output Directory (Host)'),
+                                mode: isDir ? 'save' : 'open',
+                                selectFolderOnly: isDir,
                                 filters: isK ? [
                                     { label: 'LS-DYNA Keyword Files (*.k, *.key, *.dyn)', extensions: ['.k', '.key', '.dyn'] },
                                     { label: 'All Files (*.*)', extensions: ['*'] }
@@ -5659,10 +5772,12 @@ export class GraphRenderer {
                                 ] : undefined),
                                 onSelect: (path: string) => {
                                     this.stateManager.updateNodeParameters(node.id, { [key]: path });
-                                    const rand = Math.floor(Math.random() * 1000000);
-                                    const prefix = isK ? 'k_' : 'stl_';
-                                    const simpleHash = prefix + rand.toString(36);
-                                    this.stateManager.updateNodeParameters(node.id, { geometry_hash: simpleHash });
+                                    if (isK || isStl) {
+                                        const rand = Math.floor(Math.random() * 1000000);
+                                        const prefix = isK ? 'k_' : 'stl_';
+                                        const simpleHash = prefix + rand.toString(36);
+                                        this.stateManager.updateNodeParameters(node.id, { geometry_hash: simpleHash });
+                                    }
                                 }
                             }
                         );

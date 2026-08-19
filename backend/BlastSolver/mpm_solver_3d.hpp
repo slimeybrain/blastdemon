@@ -4,13 +4,16 @@
 #include "mpm_solver_2d.hpp"
 #include "constitutive_concrete_models.hpp"
 #include "constitutive_crest_davis.hpp"
+#include "VTKWriter.hpp"
 #include <vector>
+#include <string>
+#include <cmath>
 #include <array>
 
 namespace Blast {
 
 struct MaterialTable3D {
-    MPMMaterialModel material_model{MPMMaterialModel::LinearElastic};
+    MPMMaterialModel material_model{MPMMaterialModel::Hypoelastic};
 
     // Baseline Material Properties
     float density{7850.0f};               // kg/m^3
@@ -128,6 +131,20 @@ struct MaterialTable3D {
     // Directional Crack Band & Non-Local Damage Regularization
     bool directional_crack_band{true};   // Bažant crack band angle normalization against mesh bias
     float nonlocal_radius{0.05f};         // Non-local damage interaction radius (m) (0.05m for concrete, 0.0 for metals)
+
+    // Per-Material Transfer Scheme Override
+    int transfer_scheme{-1};             // -1 = Inherit domain default, otherwise MPMTransferScheme
+
+    // Realistic Fragmentation Physics Parameters
+    float weibull_modulus{0.0f};          // Weibull flaw distribution shape parameter m (0.0 = homogeneous/disabled)
+    float weibull_scale{1.0f};            // Weibull flaw distribution scale factor
+    float fracture_toughness{0.0f};       // Critical stress intensity factor K_IC (Pa m^0.5) for Grady spallation
+    float jc_d1{0.05f};                   // Johnson-Cook damage parameter D1
+    float jc_d2{3.44f};                   // Johnson-Cook damage parameter D2
+    float jc_d3{-2.12f};                  // Johnson-Cook damage parameter D3
+    float jc_d4{0.002f};                  // Johnson-Cook damage parameter D4
+    float jc_d5{0.61f};                   // Johnson-Cook damage parameter D5
+    float debris_bulk_factor{0.10f};      // Residual post-failure debris bulk modulus factor (0.10 * K_intact)
 };
 
 struct MPMParticle3D {
@@ -154,7 +171,9 @@ struct MPMParticle3D {
     float v_min{1.0f};           // Minimum relative volume reached (V_min / V0)
     float s_shock{0.0f};         // Latched peak shock entropy (J/(kg K))
     bool has_failed{false};      // Total failure status flag
+    float weibull_factor{1.0f};   // Persistent intrinsic microstructural flaw factor
     int object_id{0};            // Object / Material Table ID
+    int transfer_scheme{-1};     // -1 = Inherit domain default, otherwise MPMTransferScheme
 };
 
 struct alignas(32) MPMGridNode3D {
@@ -203,14 +222,18 @@ public:
                       float angular_vel_x, float angular_vel_y, float angular_vel_z,
                       float density, float E, float nu,
                       float yield_stress, float hardening, float failure_strain = 0.25f,
-                      float tensile_failure_stress = 600.0e6f, int ppc = 8);
+                      float tensile_failure_stress = 600.0e6f, int ppc = 8,
+                      MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
+                      MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped);
 
     void addSphereObject(int obj_id, float pos_x, float pos_y, float pos_z, float radius,
                          float vel_x, float vel_y, float vel_z,
                          float angular_vel_x, float angular_vel_y, float angular_vel_z,
                          float density, float E, float nu,
                          float yield_stress, float hardening, float failure_strain = 0.25f,
-                         float tensile_failure_stress = 600.0e6f, int ppc = 8);
+                         float tensile_failure_stress = 600.0e6f, int ppc = 8,
+                         MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
+                         MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped);
 
     void addCylinderObject(int obj_id, float pos_x, float pos_y, float pos_z,
                            float radius, float inner_radius, float height,
@@ -218,7 +241,9 @@ public:
                            float angular_vel_x, float angular_vel_y, float angular_vel_z,
                            float density, float E, float nu,
                            float yield_stress, float hardening, float failure_strain = 0.25f,
-                           float tensile_failure_stress = 600.0e6f, int ppc = 8);
+                           float tensile_failure_stress = 600.0e6f, int ppc = 8,
+                           MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
+                           MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped);
 
     void addSTLObject(int obj_id, const std::string& stl_filepath,
                       float pos_x, float pos_y, float pos_z,
@@ -227,7 +252,9 @@ public:
                       float angular_vel_x, float angular_vel_y, float angular_vel_z,
                       float density, float E, float nu,
                       float yield_stress, float hardening, float failure_strain = 0.25f,
-                      float tensile_failure_stress = 600.0e6f, int ppc = 8);
+                      float tensile_failure_stress = 600.0e6f, int ppc = 8,
+                      MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
+                      MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped);
 
     void addParticleDirect(const MPMParticle3D& particle) {
         m_particles.push_back(particle);
@@ -245,6 +272,7 @@ public:
     // Getters & Telemetry
     std::vector<MPMParticle3D>& getParticles() { return m_particles; }
     const std::vector<MPMParticle3D>& getParticles() const { return m_particles; }
+    MPMVTKSnapshot3D extractVTKSnapshot(bool has_vel = true, bool has_stress = true, bool has_strain = true, bool has_damage = true, bool has_temp = true) const;
 
     std::vector<MaterialTable3D>& getMaterialTables() { return m_material_tables; }
     const std::vector<MaterialTable3D>& getMaterialTables() const { return m_material_tables; }
@@ -283,6 +311,11 @@ private:
 
     float evalBSpline_S(float x_p, float x_i, float h) const;
     float evalBSpline_dS(float x_p, float x_i, float h) const;
+
+    float evalCubicBSpline_S(float x_p, float x_i, float h) const;
+    float evalCubicBSpline_dS(float x_p, float x_i, float h) const;
+
+    float evalWendland_C2(float r, float R_supp) const;
 
     int m_nx{32};
     int m_ny{32};

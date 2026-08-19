@@ -25,6 +25,7 @@
 #include <set>
 #include <unordered_map>
 #include <filesystem>
+#include "system_memory_guard.hpp"
 #include "cfd_solver.hpp"
 #include "cfd_solver_2d.hpp"
 #include "cfd_solver_2d_cuda.hpp"
@@ -108,12 +109,12 @@ inline bool get_json_bool(const nlohmann::json& j, const std::string& key, bool 
 
 inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
     Blast::MaterialTable3D mat;
-    std::string mat_model_str = obj.value("material_model", "Linear Elastic");
+    std::string mat_model_str = obj.value("material_model", "Hypoelastic");
     if (mat_model_str == "Linear Elastic" || mat_model_str == "LinearElastic") {
         mat.material_model = Blast::MPMMaterialModel::LinearElastic;
-    } else if (mat_model_str == "Hypoelastic" || mat_model_str == "Hypoelastic Steel") {
+    } else if (mat_model_str == "Hypoelastic" || mat_model_str == "Hypoelastic Steel" || mat_model_str == "HypoelasticSteel") {
         mat.material_model = Blast::MPMMaterialModel::Hypoelastic;
-    } else if (mat_model_str == "Johnson-Cook + Mie-Grüneisen" || mat_model_str == "Johnson-Cook") {
+    } else if (mat_model_str == "Johnson-Cook + Mie-Grüneisen" || mat_model_str == "Johnson-Cook" || mat_model_str == "JohnsonCook") {
         mat.material_model = Blast::MPMMaterialModel::JohnsonCookMieGruneisen;
     } else if (mat_model_str == "CREST Reactive Burn" || mat_model_str == "CREST" || mat_model_str == "Davis" || mat_model_str == "CREST (Davis EOS)") {
         mat.material_model = Blast::MPMMaterialModel::CRESTReactiveBurn;
@@ -124,7 +125,7 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
     } else if (mat_model_str == "CSCM Concrete" || mat_model_str == "CSCM") {
         mat.material_model = Blast::MPMMaterialModel::CSCMConcrete;
     } else {
-        mat.material_model = Blast::MPMMaterialModel::LinearElastic;
+        mat.material_model = Blast::MPMMaterialModel::Hypoelastic;
     }
     mat.density = static_cast<float>(get_json_double(obj, "density", 7850.0));
     mat.youngs_modulus = static_cast<float>(get_json_double(obj, "youngs_modulus", 210.0e9));
@@ -236,6 +237,26 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
     mat.directional_crack_band = get_json_bool(obj, "directional_crack_band", is_concrete);
     mat.nonlocal_radius = static_cast<float>(get_json_double(obj, "nonlocal_radius", is_concrete ? 0.05 : 0.0));
 
+    std::string ts_str = obj.value("transfer_scheme", "Default");
+    int ts_val = -1;
+    if (ts_str == "Radial MLS" || ts_str == "RadialMLS") ts_val = 3;
+    else if (ts_str == "BSpline" || ts_str == "B-Spline") ts_val = 2;
+    else if (ts_str == "Cubic BSpline" || ts_str == "CubicBSpline") ts_val = 4;
+    else if (ts_str == "GIMP") ts_val = 1;
+    else if (ts_str == "Standard") ts_val = 0;
+    mat.transfer_scheme = ts_val;
+
+    // Realistic Fragmentation Parameters Parsing
+    mat.weibull_modulus = static_cast<float>(get_json_double(obj, "weibull_modulus", (mat.failure_strain > 0.0f || mat.material_model == Blast::MPMMaterialModel::JohnsonCookMieGruneisen) ? 8.0 : 0.0));
+    mat.weibull_scale = static_cast<float>(get_json_double(obj, "weibull_scale", 1.0));
+    mat.fracture_toughness = static_cast<float>(get_json_double(obj, "fracture_toughness", 0.0));
+    mat.jc_d1 = static_cast<float>(get_json_double(obj, "jc_d1", 0.05));
+    mat.jc_d2 = static_cast<float>(get_json_double(obj, "jc_d2", 3.44));
+    mat.jc_d3 = static_cast<float>(get_json_double(obj, "jc_d3", -2.12));
+    mat.jc_d4 = static_cast<float>(get_json_double(obj, "jc_d4", 0.002));
+    mat.jc_d5 = static_cast<float>(get_json_double(obj, "jc_d5", 0.61));
+    mat.debris_bulk_factor = static_cast<float>(get_json_double(obj, "debris_bulk_factor", 0.10));
+
     return mat;
 }
 
@@ -314,7 +335,7 @@ double global_dt_1d = 0.0;
 std::atomic<bool> sim2d_running{false};
 std::atomic<bool> sim2d_paused{false};
 std::atomic<int> global_telemetry_stride{1};
-std::atomic<int> global_telemetry_interval_ms{33};
+std::atomic<int> global_telemetry_interval_ms{100};
 std::atomic<bool> sim2d_terminate{false};
 std::atomic<bool> solver2d_initialized{false};
 std::atomic<int> step_progress_2d{0};
@@ -476,6 +497,10 @@ static Blast::MPMTransferScheme parseTransferScheme(const std::string& str) {
         return Blast::MPMTransferScheme::Standard;
     } else if (str == "GIMP") {
         return Blast::MPMTransferScheme::GIMP;
+    } else if (str == "Radial MLS" || str == "RadialMLS") {
+        return Blast::MPMTransferScheme::RadialMLS;
+    } else if (str == "Cubic BSpline" || str == "CubicBSpline") {
+        return Blast::MPMTransferScheme::CubicBSpline;
     } else {
         return Blast::MPMTransferScheme::BSpline;
     }
@@ -891,22 +916,17 @@ void write_vtk_outputs(int step, double time) {
 
     // 3. MPM 3D Particle & Debris Domain
     if (global_vtk_config.export_mpm) {
-        static const std::vector<Blast::MPMParticle3D> empty_particles;
         bool mpm_exported = false;
 
-        auto enqueue_mpm = [&](std::vector<Blast::MPMParticle3D> particles_copy) {
+        auto enqueue_mpm_snap = [&](MPMVTKSnapshot3D snap) {
             std::string rel_filename = global_vtk_config.custom_filename + "_mpm_" + std::to_string(step) + ".vtu";
             std::string filename = out_dir + "/" + rel_filename;
             std::string pvd_filename = out_dir + "/" + global_vtk_config.custom_filename + "_mpm.pvd";
             bool export_pvd = global_vtk_config.export_pvd;
             std::string format = global_vtk_config.vtk_format;
-            auto vtk_cfg = global_vtk_config;
 
-            Blast::AsyncVTKWriter::getInstance().enqueue([filename, particles = std::move(particles_copy), format, vtk_cfg, export_pvd, pvd_filename, time, rel_filename]() {
-                export_vtu_mpm_3d(filename, particles, format,
-                                  vtk_cfg.qty_mpm_vel, vtk_cfg.qty_mpm_disp,
-                                  vtk_cfg.qty_mpm_stress, vtk_cfg.qty_mpm_strain,
-                                  vtk_cfg.qty_mpm_damage, vtk_cfg.qty_mpm_temp);
+            Blast::AsyncVTKWriter::getInstance().enqueue([filename, snap = std::move(snap), format, export_pvd, pvd_filename, time, rel_filename]() {
+                export_vtu_mpm_3d_snapshot(filename, snap, format);
                 if (export_pvd) {
                     append_pvd_timestep(pvd_filename, time, rel_filename);
                 }
@@ -914,17 +934,28 @@ void write_vtk_outputs(int step, double time) {
         };
 
         if (global_solver_mpm_3d_cuda) {
-            global_solver_mpm_3d_cuda->syncParticlesToHost();
-            enqueue_mpm(global_solver_mpm_3d_cuda->getParticles());
+            enqueue_mpm_snap(global_solver_mpm_3d_cuda->extractVTKSnapshot(
+                global_vtk_config.qty_mpm_vel,
+                global_vtk_config.qty_mpm_stress,
+                global_vtk_config.qty_mpm_strain,
+                global_vtk_config.qty_mpm_damage,
+                global_vtk_config.qty_mpm_temp
+            ));
             mpm_exported = true;
         } else if (global_solver_mpm_3d) {
-            enqueue_mpm(global_solver_mpm_3d->getParticles());
+            enqueue_mpm_snap(global_solver_mpm_3d->extractVTKSnapshot(
+                global_vtk_config.qty_mpm_vel,
+                global_vtk_config.qty_mpm_stress,
+                global_vtk_config.qty_mpm_strain,
+                global_vtk_config.qty_mpm_damage,
+                global_vtk_config.qty_mpm_temp
+            ));
             mpm_exported = true;
         }
 
         // If no explicit MPM solver is active but export_mpm is enabled in a 3D model, output empty frame for sync
         if (!mpm_exported && global_solver_3d) {
-            enqueue_mpm(empty_particles);
+            enqueue_mpm_snap(MPMVTKSnapshot3D{});
         }
     }
 
@@ -1876,7 +1907,13 @@ void init_3d_thread_func(nlohmann::json msg) {
         std::unique_ptr<CFDSolver3D> local_solver_3d = nullptr;
         std::string precision = msg.value("precision", "single");
         select_cuda_device(device);
-        if (is_cuda_device(device)) {
+
+        bool is_cuda = is_cuda_device(device);
+        bool is_double = (precision != "single" && precision != "float");
+        auto est = Blast::estimateCFD3DMemory(nx, ny, nz, is_cuda, is_double, is_multimat);
+        Blast::validateMemoryBudget(est.ram_bytes, est.vram_bytes, is_cuda, "3D CFD Solver");
+
+        if (is_cuda) {
             if (precision == "single" || precision == "float") {
                 if (is_multimat) {
                     local_solver_3d = std::make_unique<CFDSolver3DCuda<float, true>>(nx, ny, nz, cellSize, xmin, ymin, zmin);
@@ -2524,11 +2561,13 @@ void worker_mpm_3d_thread_func() {
 
             if (!global_exec_until_end_mpm_3d.load()) {
                 global_target_steps_mpm_3d--;
+                if (global_target_steps_mpm_3d.load() <= 0) done = true;
             }
 
             auto now = std::chrono::steady_clock::now();
             auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_telemetry_time).count();
-            int target_interval_ms = (global_telemetry_interval_ms.load() > 0) ? global_telemetry_interval_ms.load() : static_cast<int>(global_refresh_rate_mpm_3d.load() * 1000.0);
+            int user_interval = (global_telemetry_interval_ms.load() > 0) ? global_telemetry_interval_ms.load() : static_cast<int>(global_refresh_rate_mpm_3d.load() * 1000.0);
+            int target_interval_ms = std::max(100, user_interval);
             bool should_emit = (target_interval_ms > 0) ? (elapsed_ms >= target_interval_ms) : true;
 
             if (should_emit || done) {
@@ -2588,11 +2627,13 @@ void worker_mpm_3d_thread_func() {
 
             if (!global_exec_until_end_mpm_3d.load()) {
                 global_target_steps_mpm_3d--;
+                if (global_target_steps_mpm_3d.load() <= 0) done = true;
             }
 
             auto now = std::chrono::steady_clock::now();
             auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_telemetry_time).count();
-            int target_interval_ms = (global_telemetry_interval_ms.load() > 0) ? global_telemetry_interval_ms.load() : static_cast<int>(global_refresh_rate_mpm_3d.load() * 1000.0);
+            int user_interval = (global_telemetry_interval_ms.load() > 0) ? global_telemetry_interval_ms.load() : static_cast<int>(global_refresh_rate_mpm_3d.load() * 1000.0);
+            int target_interval_ms = std::max(100, user_interval);
             bool should_emit = (target_interval_ms > 0) ? (elapsed_ms >= target_interval_ms) : true;
 
             if (should_emit || done) {
@@ -3897,7 +3938,7 @@ GPUMonitor global_gpu_monitor;
 extern "C" int cudaSetDevice(int device);
 
 bool is_cuda_device(const std::string& device) {
-    return device.rfind("cuda", 0) == 0;
+    return device.rfind("cuda", 0) == 0 || device == "gpu" || device == "GPU" || device == "cuda";
 }
 
 void select_cuda_device(const std::string& device) {
@@ -4528,7 +4569,7 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated, int step) {
     if (!global_solver_mpm_3d && !global_solver_mpm_3d_cuda) return;
 
     if (global_solver_mpm_3d_cuda) {
-        global_solver_mpm_3d_cuda->syncToHost();
+        global_solver_mpm_3d_cuda->downloadSoA2AoS();
     }
 
     double sim_time = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getSimTime() : (global_solver_mpm_3d ? global_solver_mpm_3d->getSimTime() : global_t3d);
@@ -4537,8 +4578,7 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated, int step) {
     float dt = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getLastDt() : global_solver_mpm_3d->getLastDt();
     float cfl = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getLastCFL() : global_solver_mpm_3d->getLastCFL();
     float v_max = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getMaxVelocity() : global_solver_mpm_3d->getMaxVelocity();
-    const auto& particles = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles() : global_solver_mpm_3d->getParticles();
-    const auto& grid = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getGrid() : global_solver_mpm_3d->getGrid();
+    size_t num_particles = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticleCount() : (global_solver_mpm_3d ? global_solver_mpm_3d->getParticles().size() : 0);
     int nx = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getNx() : global_solver_mpm_3d->getNx();
     int ny = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getNy() : global_solver_mpm_3d->getNy();
     int nz = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getNz() : global_solver_mpm_3d->getNz();
@@ -4551,11 +4591,11 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated, int step) {
     if (mpm_vram > 0) {
         snprintf(log_buf, sizeof(log_buf),
                  "Step %d | Time = %.4e s | dt = %.2e s | CFL = %.2f | v_max = %.1f m/s | Particles = %zu (VRAM: %.2f MB)",
-                 current_step, sim_time, dt, cfl, v_max, particles.size(), mpm_vram / (1024.0 * 1024.0));
+                 current_step, sim_time, dt, cfl, v_max, num_particles, mpm_vram / (1024.0 * 1024.0));
     } else {
         snprintf(log_buf, sizeof(log_buf),
                  "Step %d | Time = %.4e s | dt = %.2e s | CFL = %.2f | v_max = %.1f m/s | Particles = %zu",
-                 current_step, sim_time, dt, cfl, v_max, particles.size());
+                 current_step, sim_time, dt, cfl, v_max, num_particles);
     }
     emit_kernel_log("SYSTEM", log_buf, sim_time, "mpm_3d", current_step);
 
@@ -4607,46 +4647,46 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated, int step) {
 
         std::string req_qty = (!s.quantities.empty()) ? s.quantities[0] : "von_mises";
 
-        if (s.axis == "xy") {
-            int k = std::clamp(static_cast<int>(s.offset / dz), 0, nz - 1);
-            sp.w = nx;
-            sp.h = ny;
-            sp.data.resize(nx * ny);
-            for (int j = 0; j < ny; ++j) {
-                for (int i = 0; i < nx; ++i) {
-                    int idx = (i * ny + j) * nz + k;
-                    float val = (idx < (int)grid.size()) ? getMPMGridQuantity(grid[idx], req_qty) : 0.0f;
-                    sp.data[i + j * nx] = val;
-                }
-            }
-        } else if (s.axis == "xz") {
-            int j_slice = std::clamp(static_cast<int>(s.offset / dy), 0, ny - 1);
-            sp.w = nx;
-            sp.h = nz;
-            sp.data.resize(nx * nz);
-            for (int k = 0; k < nz; ++k) {
-                for (int i = 0; i < nx; ++i) {
-                    int idx = (i * ny + j_slice) * nz + k;
-                    float val = (idx < (int)grid.size()) ? getMPMGridQuantity(grid[idx], req_qty) : 0.0f;
-                    sp.data[i + k * nx] = val;
-                }
-            }
-        } else { // "yz" or volume fallback
-            int i_slice = std::clamp(static_cast<int>(s.offset / dx), 0, nx - 1);
-            sp.w = ny;
-            sp.h = nz;
-            sp.data.resize(ny * nz);
-            for (int k = 0; k < nz; ++k) {
+        if (global_solver_mpm_3d_cuda) {
+            if (s.axis == "xy") { sp.w = nx; sp.h = ny; }
+            else if (s.axis == "xz") { sp.w = nx; sp.h = nz; }
+            else { sp.w = ny; sp.h = nz; }
+            global_solver_mpm_3d_cuda->extractSliceToHost(sp.data, s.axis, static_cast<float>(s.offset), req_qty);
+        } else if (global_solver_mpm_3d) {
+            const auto& grid = global_solver_mpm_3d->getGrid();
+            if (s.axis == "xy") {
+                int k = std::clamp(static_cast<int>(s.offset / dz), 0, nz - 1);
+                sp.w = nx; sp.h = ny; sp.data.resize(nx * ny);
                 for (int j = 0; j < ny; ++j) {
-                    int idx = (i_slice * ny + j) * nz + k;
-                    float val = (idx < (int)grid.size()) ? getMPMGridQuantity(grid[idx], req_qty) : 0.0f;
-                    sp.data[j + k * ny] = val;
+                    for (int i = 0; i < nx; ++i) {
+                        int idx = (i * ny + j) * nz + k;
+                        sp.data[i + j * nx] = (idx < (int)grid.size()) ? getMPMGridQuantity(grid[idx], req_qty) : 0.0f;
+                    }
+                }
+            } else if (s.axis == "xz") {
+                int j_slice = std::clamp(static_cast<int>(s.offset / dy), 0, ny - 1);
+                sp.w = nx; sp.h = nz; sp.data.resize(nx * nz);
+                for (int k = 0; k < nz; ++k) {
+                    for (int i = 0; i < nx; ++i) {
+                        int idx = (i * ny + j_slice) * nz + k;
+                        sp.data[i + k * nx] = (idx < (int)grid.size()) ? getMPMGridQuantity(grid[idx], req_qty) : 0.0f;
+                    }
+                }
+            } else {
+                int i_slice = std::clamp(static_cast<int>(s.offset / dx), 0, nx - 1);
+                sp.w = ny; sp.h = nz; sp.data.resize(ny * nz);
+                for (int k = 0; k < nz; ++k) {
+                    for (int j = 0; j < ny; ++j) {
+                        int idx = (i_slice * ny + j) * nz + k;
+                        sp.data[j + k * ny] = (idx < (int)grid.size()) ? getMPMGridQuantity(grid[idx], req_qty) : 0.0f;
+                    }
                 }
             }
         }
         payload->slices.push_back(std::move(sp));
     }
 
+    const auto& particles = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles() : global_solver_mpm_3d->getParticles();
     payload->mpm_particles.reserve(particles.size() * 10);
     for (const auto& p : particles) {
         float s00 = p.sigma[0][0], s11 = p.sigma[1][1], s22 = p.sigma[2][2];
@@ -6164,6 +6204,8 @@ int main() {
                     }
 
                     int domain_ppc = get_json_int(msg, "ppc", 4);
+                    std::string domain_p_dist_str = msg.value("particle_distribution", "Cartesian");
+                    std::string domain_b_fill_str = msg.value("boundary_filling", "Stairstepped");
 
                     if (msg.contains("mpm_objects") && msg["mpm_objects"].is_array()) {
                         int obj_idx = 0;
@@ -6183,6 +6225,18 @@ int main() {
                             float failure_strain = static_cast<float>(get_json_double(obj, "failure_strain", 0.25));
                             float tensile_failure_stress = static_cast<float>(get_json_double(obj, "tensile_failure_stress", 600.0e6));
                             int ppc = get_json_int(obj, "ppc", domain_ppc);
+
+                            std::string p_dist_str = obj.value("particle_distribution", domain_p_dist_str);
+                            Blast::MPMParticleDistribution particle_dist = Blast::MPMParticleDistribution::Cartesian;
+                            if (p_dist_str == "Hexagonal") {
+                                particle_dist = Blast::MPMParticleDistribution::Hexagonal;
+                            }
+
+                            std::string b_fill_str = obj.value("boundary_filling", domain_b_fill_str);
+                            Blast::MPMBoundaryFilling boundary_fill = Blast::MPMBoundaryFilling::Stairstepped;
+                            if (b_fill_str == "Partial") {
+                                boundary_fill = Blast::MPMBoundaryFilling::Partial;
+                            }
 
                             std::string mat_model_str = obj.value("material_model", "Hypoelastic");
                             Blast::MPMMaterialModel mat_model = Blast::MPMMaterialModel::HypoelasticSteel;
@@ -6204,11 +6258,11 @@ int main() {
 
                             if (shape == "Circle") {
                                 float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
-                                global_solver_mpm_2d->addCircleObject(obj_idx, pos_x, pos_y, radius, vel_x, vel_y, angular_vel, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                global_solver_mpm_2d->addCircleObject(obj_idx, pos_x, pos_y, radius, vel_x, vel_y, angular_vel, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
                             } else {
                                 float size_x = static_cast<float>(get_json_double(obj, "size_x", 0.2));
                                 float size_y = static_cast<float>(get_json_double(obj, "size_y", 0.2));
-                                global_solver_mpm_2d->addRectangleObject(obj_idx, pos_x, pos_y, size_x, size_y, vel_x, vel_y, angular_vel, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                global_solver_mpm_2d->addRectangleObject(obj_idx, pos_x, pos_y, size_x, size_y, vel_x, vel_y, angular_vel, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
                             }
 
                             for (auto& p : global_solver_mpm_2d->getParticles()) {
@@ -6325,6 +6379,11 @@ int main() {
                         dz = (zmax - zmin) / static_cast<float>(nz);
                     }
 
+                    bool is_cuda_mpm = is_cuda_device(device);
+                    size_t est_particles = 100000; // Baseline particle estimate
+                    auto est_mpm = Blast::estimateMPM3DMemory(nx, ny, nz, est_particles, is_cuda_mpm);
+                    Blast::validateMemoryBudget(est_mpm.ram_bytes, est_mpm.vram_bytes, is_cuda_mpm, "3D MPM Solver");
+
                     if (global_solver_mpm_3d_cuda) {
                         global_solver_mpm_3d_cuda->initializeGrid(nx, ny, nz, dx, dy, dz, xmin, ymin, zmin);
                     } else {
@@ -6380,6 +6439,8 @@ int main() {
                     }
 
                     int domain_ppc = get_json_int(msg, "ppc", 8);
+                    std::string domain_p_dist_str = msg.value("particle_distribution", "Cartesian");
+                    std::string domain_b_fill_str = msg.value("boundary_filling", "Stairstepped");
 
                     if (msg.contains("mpm_objects") && msg["mpm_objects"].is_array()) {
                         int obj_idx = 0;
@@ -6422,21 +6483,33 @@ int main() {
                             float mg_c0 = static_cast<float>(get_json_double(obj, "mg_c0", 4570.0));
                             float mg_s = static_cast<float>(get_json_double(obj, "mg_s", 1.49));
 
+                            std::string p_dist_str = obj.value("particle_distribution", domain_p_dist_str);
+                            Blast::MPMParticleDistribution particle_dist = Blast::MPMParticleDistribution::Cartesian;
+                            if (p_dist_str == "Hexagonal") {
+                                particle_dist = Blast::MPMParticleDistribution::Hexagonal;
+                            }
+
+                            std::string b_fill_str = obj.value("boundary_filling", domain_b_fill_str);
+                            Blast::MPMBoundaryFilling boundary_fill = Blast::MPMBoundaryFilling::Stairstepped;
+                            if (b_fill_str == "Partial") {
+                                boundary_fill = Blast::MPMBoundaryFilling::Partial;
+                            }
+
                             if (shape == "Sphere") {
                                 float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
                                 if (global_solver_mpm_3d_cuda) {
-                                    global_solver_mpm_3d_cuda->addSphereObject(obj_idx, pos_x, pos_y, pos_z, radius, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                    global_solver_mpm_3d_cuda->addSphereObject(obj_idx, pos_x, pos_y, pos_z, radius, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
                                 } else {
-                                    global_solver_mpm_3d->addSphereObject(obj_idx, pos_x, pos_y, pos_z, radius, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                    global_solver_mpm_3d->addSphereObject(obj_idx, pos_x, pos_y, pos_z, radius, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
                                 }
                             } else if (shape == "Cylinder") {
                                 float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
                                 float inner_radius = static_cast<float>(get_json_double(obj, "inner_radius", 0.0));
                                 float height = static_cast<float>(get_json_double(obj, "height", 0.2));
                                 if (global_solver_mpm_3d_cuda) {
-                                    global_solver_mpm_3d_cuda->addCylinderObject(obj_idx, pos_x, pos_y, pos_z, radius, inner_radius, height, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                    global_solver_mpm_3d_cuda->addCylinderObject(obj_idx, pos_x, pos_y, pos_z, radius, inner_radius, height, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
                                 } else {
-                                    global_solver_mpm_3d->addCylinderObject(obj_idx, pos_x, pos_y, pos_z, radius, inner_radius, height, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                    global_solver_mpm_3d->addCylinderObject(obj_idx, pos_x, pos_y, pos_z, radius, inner_radius, height, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
                                 }
                             } else if (shape == "STL") {
                                 std::string stl_file = obj.contains("stl_file") ? obj["stl_file"].get<std::string>() : "";
@@ -6444,18 +6517,18 @@ int main() {
                                 float scale_y = static_cast<float>(get_json_double(obj, "scale_y", 1.0));
                                 float scale_z = static_cast<float>(get_json_double(obj, "scale_z", 1.0));
                                 if (global_solver_mpm_3d_cuda) {
-                                    global_solver_mpm_3d_cuda->addSTLObject(obj_idx, stl_file, pos_x, pos_y, pos_z, scale_x, scale_y, scale_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                    global_solver_mpm_3d_cuda->addSTLObject(obj_idx, stl_file, pos_x, pos_y, pos_z, scale_x, scale_y, scale_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
                                 } else {
-                                    global_solver_mpm_3d->addSTLObject(obj_idx, stl_file, pos_x, pos_y, pos_z, scale_x, scale_y, scale_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                    global_solver_mpm_3d->addSTLObject(obj_idx, stl_file, pos_x, pos_y, pos_z, scale_x, scale_y, scale_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
                                 }
                             } else {
                                 float size_x = static_cast<float>(get_json_double(obj, "size_x", 0.2));
                                 float size_y = static_cast<float>(get_json_double(obj, "size_y", 0.2));
                                 float size_z = static_cast<float>(get_json_double(obj, "size_z", 0.2));
                                 if (global_solver_mpm_3d_cuda) {
-                                    global_solver_mpm_3d_cuda->addBoxObject(obj_idx, pos_x, pos_y, pos_z, size_x, size_y, size_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                    global_solver_mpm_3d_cuda->addBoxObject(obj_idx, pos_x, pos_y, pos_z, size_x, size_y, size_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
                                 } else {
-                                    global_solver_mpm_3d->addBoxObject(obj_idx, pos_x, pos_y, pos_z, size_x, size_y, size_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                    global_solver_mpm_3d->addBoxObject(obj_idx, pos_x, pos_y, pos_z, size_x, size_y, size_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
                                 }
                             }
 
@@ -6474,34 +6547,55 @@ int main() {
                                 }
                             }
 
-                            bool has_detonator = msg.contains("detonator_x");
-                            float det_x = static_cast<float>(get_json_double(msg, "detonator_x", 0.5));
-                            float det_y = static_cast<float>(get_json_double(msg, "detonator_y", 0.5));
-                            float det_z = static_cast<float>(get_json_double(msg, "detonator_z", 0.5));
-                            float init_rad = static_cast<float>(get_json_double(msg, "detonator_radius", get_json_double(msg, "initiation_radius", 0.02)));
+                            struct DetonatorSpec3D {
+                                float x, y, z, radius;
+                            };
+                            std::vector<DetonatorSpec3D> detonators_3d;
+                            if (msg.contains("detonators") && msg["detonators"].is_array()) {
+                                for (const auto& d : msg["detonators"]) {
+                                    float dx = static_cast<float>(get_json_double(d, "detonator_x", get_json_double(d, "x", 0.5)));
+                                    float dy = static_cast<float>(get_json_double(d, "detonator_y", get_json_double(d, "y", 0.5)));
+                                    float dz = static_cast<float>(get_json_double(d, "detonator_z", get_json_double(d, "z", 0.5)));
+                                    float dr = static_cast<float>(get_json_double(d, "detonator_radius", get_json_double(d, "initiation_radius", 0.02)));
+                                    detonators_3d.push_back({dx, dy, dz, dr});
+                                }
+                            } else if (msg.contains("detonator_x")) {
+                                float dx = static_cast<float>(get_json_double(msg, "detonator_x", 0.5));
+                                float dy = static_cast<float>(get_json_double(msg, "detonator_y", 0.5));
+                                float dz = static_cast<float>(get_json_double(msg, "detonator_z", 0.5));
+                                float dr = static_cast<float>(get_json_double(msg, "detonator_radius", get_json_double(msg, "initiation_radius", 0.02)));
+                                detonators_3d.push_back({dx, dy, dz, dr});
+                            }
 
                             auto& particles_ref = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles() : global_solver_mpm_3d->getParticles();
+                            bool is_explosive = (parsed_mat.material_model == Blast::MPMMaterialModel::CRESTReactiveBurn);
+
                             for (auto& p : particles_ref) {
                                 if (p.object_id == obj_idx) {
                                     p.temperature = parsed_mat.T_room;
-                                    p.e_int = 0.0f;
-                                    p.v_min = 1.0f;
-                                    p.s_shock = 0.0f;
-                                    p.lambda = 0.0f;
 
-                                    if (parsed_mat.material_model == Blast::MPMMaterialModel::CRESTReactiveBurn && has_detonator) {
-                                        float d_x = p.x[0] - det_x;
-                                        float d_y = p.x[1] - det_y;
-                                        float d_z = p.x[2] - det_z;
-                                        float dist = std::sqrt(d_x * d_x + d_y * d_y + d_z * d_z);
-                                        float effective_init_rad = std::max(init_rad, 2.5f * dx);
-                                        if (dist <= effective_init_rad) {
-                                            p.s_shock = 1.5f * parsed_mat.crest_s_threshold;
-                                            p.lambda = 1.0f;
-                                            p.e_int = parsed_mat.davis_q_det;
-                                            p.v_min = 0.70f;
-                                            p.V = 0.70f * p.V0;
-                                            float p_init = (parsed_mat.davis_pc > 1.0e6f) ? parsed_mat.davis_pc : 15.0e9f;
+                                    if (is_explosive && !detonators_3d.empty()) {
+                                        float max_profile_factor = 0.0f;
+                                        for (const auto& det : detonators_3d) {
+                                            float d_x = p.x[0] - det.x;
+                                            float d_y = p.x[1] - det.y;
+                                            float d_z = p.x[2] - det.z;
+                                            float dist = std::sqrt(d_x * d_x + d_y * d_y + d_z * d_z);
+                                            float effective_init_rad = std::max(det.radius, 2.5f * dx);
+                                            if (dist <= 3.0f * effective_init_rad) {
+                                                float pf = std::exp(- (dist * dist) / (effective_init_rad * effective_init_rad));
+                                                if (pf > max_profile_factor) {
+                                                    max_profile_factor = pf;
+                                                }
+                                            }
+                                        }
+                                        if (max_profile_factor > 1.0e-4f) {
+                                            p.s_shock = 1.5f * parsed_mat.crest_s_threshold * max_profile_factor;
+                                            p.lambda = 1.0f * max_profile_factor;
+                                            p.e_int = std::max(parsed_mat.davis_q_det, static_cast<float>(get_json_double(obj, "detonation_energy", 4.29e6))) * max_profile_factor;
+                                            p.v_min = 1.0f - 0.30f * max_profile_factor;
+                                            p.V = p.v_min * p.V0;
+                                            float p_init = ((parsed_mat.davis_pc > 1.0e6f) ? parsed_mat.davis_pc : 15.0e9f) * max_profile_factor;
                                             for (int r = 0; r < 3; ++r) {
                                                 for (int c = 0; c < 3; ++c) {
                                                     p.sigma[r][c] = (r == c) ? -p_init : 0.0f;
@@ -6670,6 +6764,9 @@ int main() {
                     }
 
                     int domain_ppc = get_json_int(msg, "ppc", 4);
+                    std::string domain_p_dist_str = msg.value("particle_distribution", "Cartesian");
+                    std::string domain_b_fill_str = msg.value("boundary_filling", "Stairstepped");
+
                     if (msg.contains("mpm_objects") && msg["mpm_objects"].is_array()) {
                         int obj_idx = 0;
                         for (const auto& obj : msg["mpm_objects"]) {
@@ -6689,13 +6786,25 @@ int main() {
                             float tensile_failure_stress = static_cast<float>(get_json_double(obj, "tensile_failure_stress", 600.0e6));
                             int ppc = get_json_int(obj, "ppc", domain_ppc);
 
+                            std::string p_dist_str = obj.value("particle_distribution", domain_p_dist_str);
+                            Blast::MPMParticleDistribution particle_dist = Blast::MPMParticleDistribution::Cartesian;
+                            if (p_dist_str == "Hexagonal") {
+                                particle_dist = Blast::MPMParticleDistribution::Hexagonal;
+                            }
+
+                            std::string b_fill_str = obj.value("boundary_filling", domain_b_fill_str);
+                            Blast::MPMBoundaryFilling boundary_fill = Blast::MPMBoundaryFilling::Stairstepped;
+                            if (b_fill_str == "Partial") {
+                                boundary_fill = Blast::MPMBoundaryFilling::Partial;
+                            }
+
                             if (shape == "Circle") {
                                 float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
-                                global_solver_mpm_2d->addCircleObject(obj_idx, pos_x, pos_y, radius, vel_x, vel_y, angular_vel, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                global_solver_mpm_2d->addCircleObject(obj_idx, pos_x, pos_y, radius, vel_x, vel_y, angular_vel, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
                             } else {
                                 float size_x = static_cast<float>(get_json_double(obj, "size_x", 0.2));
                                 float size_y = static_cast<float>(get_json_double(obj, "size_y", 0.2));
-                                global_solver_mpm_2d->addRectangleObject(obj_idx, pos_x, pos_y, size_x, size_y, vel_x, vel_y, angular_vel, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                global_solver_mpm_2d->addRectangleObject(obj_idx, pos_x, pos_y, size_x, size_y, vel_x, vel_y, angular_vel, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
                             }
                         }
                     } else {
@@ -6946,6 +7055,9 @@ int main() {
                     else global_solver_mpm_3d->setBoundaryConditions(mpm_bc1, mpm_bc2, mpm_bc3, mpm_bc4, mpm_bc5, mpm_bc6);
 
                     int domain_ppc = get_json_int(msg, "ppc", 8);
+                    std::string domain_p_dist_str = msg.value("particle_distribution", "Cartesian");
+                    std::string domain_b_fill_str = msg.value("boundary_filling", "Stairstepped");
+
                     if (msg.contains("mpm_objects") && msg["mpm_objects"].is_array()) {
                         int obj_idx = 0;
                         for (const auto& obj : msg["mpm_objects"]) {
@@ -6969,6 +7081,18 @@ int main() {
                             float tensile_failure_stress = static_cast<float>(get_json_double(obj, "tensile_failure_stress", 600.0e6));
                             int ppc = get_json_int(obj, "ppc", domain_ppc);
 
+                            std::string p_dist_str = obj.value("particle_distribution", domain_p_dist_str);
+                            Blast::MPMParticleDistribution particle_dist = Blast::MPMParticleDistribution::Cartesian;
+                            if (p_dist_str == "Hexagonal") {
+                                particle_dist = Blast::MPMParticleDistribution::Hexagonal;
+                            }
+
+                            std::string b_fill_str = obj.value("boundary_filling", domain_b_fill_str);
+                            Blast::MPMBoundaryFilling boundary_fill = Blast::MPMBoundaryFilling::Stairstepped;
+                            if (b_fill_str == "Partial") {
+                                boundary_fill = Blast::MPMBoundaryFilling::Partial;
+                            }
+
                             std::string mat_model_str = obj.value("material_model", "Hypoelastic");
                             Blast::MPMMaterialModel mat_model = Blast::MPMMaterialModel::HypoelasticSteel;
                             if (mat_model_str == "Johnson-Cook + Mie-Grüneisen") {
@@ -6989,18 +7113,18 @@ int main() {
                             if (shape == "Sphere") {
                                 float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
                                 if (global_solver_mpm_3d_cuda) {
-                                    global_solver_mpm_3d_cuda->addSphereObject(obj_idx, pos_x, pos_y, pos_z, radius, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                    global_solver_mpm_3d_cuda->addSphereObject(obj_idx, pos_x, pos_y, pos_z, radius, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
                                 } else {
-                                    global_solver_mpm_3d->addSphereObject(obj_idx, pos_x, pos_y, pos_z, radius, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                    global_solver_mpm_3d->addSphereObject(obj_idx, pos_x, pos_y, pos_z, radius, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
                                 }
                             } else if (shape == "Cylinder") {
                                 float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
                                 float inner_radius = static_cast<float>(get_json_double(obj, "inner_radius", 0.0));
                                 float height = static_cast<float>(get_json_double(obj, "height", 0.2));
                                 if (global_solver_mpm_3d_cuda) {
-                                    global_solver_mpm_3d_cuda->addCylinderObject(obj_idx, pos_x, pos_y, pos_z, radius, inner_radius, height, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                    global_solver_mpm_3d_cuda->addCylinderObject(obj_idx, pos_x, pos_y, pos_z, radius, inner_radius, height, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
                                 } else {
-                                    global_solver_mpm_3d->addCylinderObject(obj_idx, pos_x, pos_y, pos_z, radius, inner_radius, height, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                    global_solver_mpm_3d->addCylinderObject(obj_idx, pos_x, pos_y, pos_z, radius, inner_radius, height, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
                                 }
                             } else if (shape == "STL") {
                                 std::string stl_file = obj.contains("stl_file") ? obj["stl_file"].get<std::string>() : "";
@@ -7008,18 +7132,18 @@ int main() {
                                 float scale_y = static_cast<float>(get_json_double(obj, "scale_y", 1.0));
                                 float scale_z = static_cast<float>(get_json_double(obj, "scale_z", 1.0));
                                 if (global_solver_mpm_3d_cuda) {
-                                    global_solver_mpm_3d_cuda->addSTLObject(obj_idx, stl_file, pos_x, pos_y, pos_z, scale_x, scale_y, scale_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                    global_solver_mpm_3d_cuda->addSTLObject(obj_idx, stl_file, pos_x, pos_y, pos_z, scale_x, scale_y, scale_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
                                 } else {
-                                    global_solver_mpm_3d->addSTLObject(obj_idx, stl_file, pos_x, pos_y, pos_z, scale_x, scale_y, scale_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                    global_solver_mpm_3d->addSTLObject(obj_idx, stl_file, pos_x, pos_y, pos_z, scale_x, scale_y, scale_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
                                 }
                             } else {
                                 float size_x = static_cast<float>(get_json_double(obj, "size_x", 0.2));
                                 float size_y = static_cast<float>(get_json_double(obj, "size_y", 0.2));
                                 float size_z = static_cast<float>(get_json_double(obj, "size_z", 0.2));
                                 if (global_solver_mpm_3d_cuda) {
-                                    global_solver_mpm_3d_cuda->addBoxObject(obj_idx, pos_x, pos_y, pos_z, size_x, size_y, size_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                    global_solver_mpm_3d_cuda->addBoxObject(obj_idx, pos_x, pos_y, pos_z, size_x, size_y, size_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
                                 } else {
-                                    global_solver_mpm_3d->addBoxObject(obj_idx, pos_x, pos_y, pos_z, size_x, size_y, size_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc);
+                                    global_solver_mpm_3d->addBoxObject(obj_idx, pos_x, pos_y, pos_z, size_x, size_y, size_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
                                 }
                             }
 
@@ -7037,34 +7161,55 @@ int main() {
                                     mat_tables[obj_idx] = parsed_mat;
                                 }
                             }
-                            bool has_detonator = msg.contains("detonator_x");
-                            float det_x = static_cast<float>(get_json_double(msg, "detonator_x", 0.5));
-                            float det_y = static_cast<float>(get_json_double(msg, "detonator_y", 0.5));
-                            float det_z = static_cast<float>(get_json_double(msg, "detonator_z", 0.5));
-                            float init_rad = static_cast<float>(get_json_double(msg, "detonator_radius", get_json_double(msg, "initiation_radius", 0.02)));
+                            struct DetonatorSpec3D_2 {
+                                float x, y, z, radius;
+                            };
+                            std::vector<DetonatorSpec3D_2> detonators_3d_2;
+                            if (msg.contains("detonators") && msg["detonators"].is_array()) {
+                                for (const auto& d : msg["detonators"]) {
+                                    float dx = static_cast<float>(get_json_double(d, "detonator_x", get_json_double(d, "x", 0.5)));
+                                    float dy = static_cast<float>(get_json_double(d, "detonator_y", get_json_double(d, "y", 0.5)));
+                                    float dz = static_cast<float>(get_json_double(d, "detonator_z", get_json_double(d, "z", 0.5)));
+                                    float dr = static_cast<float>(get_json_double(d, "detonator_radius", get_json_double(d, "initiation_radius", 0.02)));
+                                    detonators_3d_2.push_back({dx, dy, dz, dr});
+                                }
+                            } else if (msg.contains("detonator_x")) {
+                                float dx = static_cast<float>(get_json_double(msg, "detonator_x", 0.5));
+                                float dy = static_cast<float>(get_json_double(msg, "detonator_y", 0.5));
+                                float dz = static_cast<float>(get_json_double(msg, "detonator_z", 0.5));
+                                float dr = static_cast<float>(get_json_double(msg, "detonator_radius", get_json_double(msg, "initiation_radius", 0.02)));
+                                detonators_3d_2.push_back({dx, dy, dz, dr});
+                            }
 
                             auto& particles_ref = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles() : global_solver_mpm_3d->getParticles();
+                            bool is_explosive = (parsed_mat.material_model == Blast::MPMMaterialModel::CRESTReactiveBurn);
+
                             for (auto& p : particles_ref) {
                                 if (p.object_id == obj_idx) {
                                     p.temperature = parsed_mat.T_room;
-                                    p.e_int = 0.0f;
-                                    p.v_min = 1.0f;
-                                    p.s_shock = 0.0f;
-                                    p.lambda = 0.0f;
 
-                                    if (parsed_mat.material_model == Blast::MPMMaterialModel::CRESTReactiveBurn && has_detonator) {
-                                        float d_x = p.x[0] - det_x;
-                                        float d_y = p.x[1] - det_y;
-                                        float d_z = p.x[2] - det_z;
-                                        float dist = std::sqrt(d_x * d_x + d_y * d_y + d_z * d_z);
-                                        float effective_init_rad = std::max(init_rad, 2.5f * dx);
-                                        if (dist <= effective_init_rad) {
-                                            p.s_shock = 1.5f * parsed_mat.crest_s_threshold;
-                                            p.lambda = 1.0f;
-                                            p.e_int = parsed_mat.davis_q_det;
-                                            p.v_min = 0.70f;
-                                            p.V = 0.70f * p.V0;
-                                            float p_init = (parsed_mat.davis_pc > 1.0e6f) ? parsed_mat.davis_pc : 15.0e9f;
+                                    if (is_explosive && !detonators_3d_2.empty()) {
+                                        float max_profile_factor = 0.0f;
+                                        for (const auto& det : detonators_3d_2) {
+                                            float d_x = p.x[0] - det.x;
+                                            float d_y = p.x[1] - det.y;
+                                            float d_z = p.x[2] - det.z;
+                                            float dist = std::sqrt(d_x * d_x + d_y * d_y + d_z * d_z);
+                                            float effective_init_rad = std::max(det.radius, 2.5f * dx);
+                                            if (dist <= 3.0f * effective_init_rad) {
+                                                float pf = std::exp(- (dist * dist) / (effective_init_rad * effective_init_rad));
+                                                if (pf > max_profile_factor) {
+                                                    max_profile_factor = pf;
+                                                }
+                                            }
+                                        }
+                                        if (max_profile_factor > 1.0e-4f) {
+                                            p.s_shock = 1.5f * parsed_mat.crest_s_threshold * max_profile_factor;
+                                            p.lambda = 1.0f * max_profile_factor;
+                                            p.e_int = std::max(parsed_mat.davis_q_det, static_cast<float>(get_json_double(obj, "detonation_energy", 4.29e6))) * max_profile_factor;
+                                            p.v_min = 1.0f - 0.30f * max_profile_factor;
+                                            p.V = p.v_min * p.V0;
+                                            float p_init = ((parsed_mat.davis_pc > 1.0e6f) ? parsed_mat.davis_pc : 15.0e9f) * max_profile_factor;
                                             for (int r = 0; r < 3; ++r) {
                                                 for (int c = 0; c < 3; ++c) {
                                                     p.sigma[r][c] = (r == c) ? -p_init : 0.0f;
@@ -7084,6 +7229,7 @@ int main() {
                     }
 
                     if (global_solver_mpm_3d_cuda) {
+                        global_solver_mpm_3d_cuda->uploadAoS2SoA();
                         global_solver_mpm_3d_cuda->syncToDevice();
                         global_solver_mpm_3d_cuda->syncToHost();
                     } else {
@@ -7156,7 +7302,8 @@ int main() {
                             auto physics_params = fem->getPhysicsParams();
                             physics_params.convert_failed_elements_to_mpm = get_json_bool(msg, "convert_failed_elements_to_mpm", false);
                             physics_params.mpm_particles_per_failed_element = get_json_int(msg, "mpm_particles_per_failed_element", 8);
-                            physics_params.material_heterogeneity = get_json_double(msg, "material_heterogeneity", 0.08);
+                            double w_mod_double = get_json_double(msg, "weibull_modulus", 0.0);
+                            physics_params.material_heterogeneity = (w_mod_double > 0.01) ? (1.0 / w_mod_double) : get_json_double(msg, "material_heterogeneity", 0.08);
                             physics_params.debris_velocity_smoothing = get_json_double(msg, "debris_velocity_smoothing", 0.25);
                             physics_params.debris_clumping = get_json_double(msg, "debris_clumping", 0.40);
                             physics_params.debris_max_clump_size = get_json_int(msg, "debris_max_clump_size", 8);
@@ -7175,9 +7322,9 @@ int main() {
                             }
 
                             Blast::FEMErosionCriteria<double> erosion{};
-                            erosion.enable_strain_erosion = false;
-                            erosion.enable_timestep_erosion = false;
-                            erosion.enable_stress_erosion = false;
+                            erosion.enable_strain_erosion = get_json_bool(msg, "enable_strain_erosion", true);
+                            erosion.enable_timestep_erosion = get_json_bool(msg, "enable_timestep_erosion", false);
+                            erosion.enable_stress_erosion = get_json_bool(msg, "enable_stress_erosion", false);
                             erosion.failure_strain = static_cast<double>(get_json_double(msg, "failure_strain", 0.50));
                             erosion.timestep_erosion_factor = static_cast<double>(get_json_double(msg, "timestep_erosion_factor", 0.10));
                             erosion.min_volume_ratio = static_cast<double>(get_json_double(msg, "min_volume_ratio", 0.02));
@@ -7321,7 +7468,8 @@ int main() {
                             auto physics_params = fem->getPhysicsParams();
                             physics_params.convert_failed_elements_to_mpm = get_json_bool(msg, "convert_failed_elements_to_mpm", false);
                             physics_params.mpm_particles_per_failed_element = get_json_int(msg, "mpm_particles_per_failed_element", 8);
-                            physics_params.material_heterogeneity = static_cast<float>(get_json_double(msg, "material_heterogeneity", 0.08));
+                            double w_mod_float = get_json_double(msg, "weibull_modulus", 0.0);
+                            physics_params.material_heterogeneity = static_cast<float>((w_mod_float > 0.01) ? (1.0 / w_mod_float) : get_json_double(msg, "material_heterogeneity", 0.08));
                             physics_params.debris_velocity_smoothing = static_cast<float>(get_json_double(msg, "debris_velocity_smoothing", 0.25));
                             physics_params.debris_clumping = static_cast<float>(get_json_double(msg, "debris_clumping", 0.40));
                             physics_params.debris_max_clump_size = get_json_int(msg, "debris_max_clump_size", 8);
@@ -7340,9 +7488,9 @@ int main() {
                             }
 
                             Blast::FEMErosionCriteria<float> erosion{};
-                            erosion.enable_strain_erosion = false;
-                            erosion.enable_timestep_erosion = false;
-                            erosion.enable_stress_erosion = false;
+                            erosion.enable_strain_erosion = get_json_bool(msg, "enable_strain_erosion", true);
+                            erosion.enable_timestep_erosion = get_json_bool(msg, "enable_timestep_erosion", false);
+                            erosion.enable_stress_erosion = get_json_bool(msg, "enable_stress_erosion", false);
                             erosion.failure_strain = static_cast<float>(get_json_double(msg, "failure_strain", 0.50));
                             erosion.timestep_erosion_factor = static_cast<float>(get_json_double(msg, "timestep_erosion_factor", 0.10));
                             erosion.min_volume_ratio = static_cast<float>(get_json_double(msg, "min_volume_ratio", 0.02));
@@ -7489,7 +7637,8 @@ int main() {
                             auto physics_params = fem->getPhysicsParams();
                             physics_params.convert_failed_elements_to_mpm = get_json_bool(msg, "convert_failed_elements_to_mpm", false);
                             physics_params.mpm_particles_per_failed_element = get_json_int(msg, "mpm_particles_per_failed_element", 8);
-                            physics_params.material_heterogeneity = get_json_double(msg, "material_heterogeneity", 0.08);
+                            double w_mod_cpu_d = get_json_double(msg, "weibull_modulus", 0.0);
+                            physics_params.material_heterogeneity = (w_mod_cpu_d > 0.01) ? (1.0 / w_mod_cpu_d) : get_json_double(msg, "material_heterogeneity", 0.08);
                             physics_params.debris_velocity_smoothing = get_json_double(msg, "debris_velocity_smoothing", 0.25);
                             physics_params.debris_clumping = get_json_double(msg, "debris_clumping", 0.40);
                             physics_params.debris_max_clump_size = get_json_int(msg, "debris_max_clump_size", 8);
@@ -7505,9 +7654,9 @@ int main() {
                             }
 
                             Blast::FEMErosionCriteria<double> erosion{};
-                            erosion.enable_strain_erosion = false;
-                            erosion.enable_timestep_erosion = false;
-                            erosion.enable_stress_erosion = false;
+                            erosion.enable_strain_erosion = get_json_bool(msg, "enable_strain_erosion", true);
+                            erosion.enable_timestep_erosion = get_json_bool(msg, "enable_timestep_erosion", false);
+                            erosion.enable_stress_erosion = get_json_bool(msg, "enable_stress_erosion", false);
                             erosion.failure_strain = static_cast<double>(get_json_double(msg, "failure_strain", 0.50));
                             erosion.timestep_erosion_factor = static_cast<double>(get_json_double(msg, "timestep_erosion_factor", 0.10));
                             erosion.min_volume_ratio = static_cast<double>(get_json_double(msg, "min_volume_ratio", 0.02));
@@ -7651,7 +7800,8 @@ int main() {
                             auto physics_params = fem->getPhysicsParams();
                             physics_params.convert_failed_elements_to_mpm = get_json_bool(msg, "convert_failed_elements_to_mpm", false);
                             physics_params.mpm_particles_per_failed_element = get_json_int(msg, "mpm_particles_per_failed_element", 8);
-                            physics_params.material_heterogeneity = static_cast<float>(get_json_double(msg, "material_heterogeneity", 0.08));
+                            double w_mod_cpu_f = get_json_double(msg, "weibull_modulus", 0.0);
+                            physics_params.material_heterogeneity = static_cast<float>((w_mod_cpu_f > 0.01) ? (1.0 / w_mod_cpu_f) : get_json_double(msg, "material_heterogeneity", 0.08));
                             physics_params.debris_velocity_smoothing = static_cast<float>(get_json_double(msg, "debris_velocity_smoothing", 0.25));
                             physics_params.debris_clumping = static_cast<float>(get_json_double(msg, "debris_clumping", 0.40));
                             physics_params.debris_max_clump_size = get_json_int(msg, "debris_max_clump_size", 8);
@@ -7667,9 +7817,9 @@ int main() {
                             }
 
                             Blast::FEMErosionCriteria<float> erosion{};
-                            erosion.enable_strain_erosion = false;
-                            erosion.enable_timestep_erosion = false;
-                            erosion.enable_stress_erosion = false;
+                            erosion.enable_strain_erosion = get_json_bool(msg, "enable_strain_erosion", true);
+                            erosion.enable_timestep_erosion = get_json_bool(msg, "enable_timestep_erosion", false);
+                            erosion.enable_stress_erosion = get_json_bool(msg, "enable_stress_erosion", false);
                             erosion.failure_strain = static_cast<float>(get_json_double(msg, "failure_strain", 0.50));
                             erosion.timestep_erosion_factor = static_cast<float>(get_json_double(msg, "timestep_erosion_factor", 0.10));
                             erosion.min_volume_ratio = static_cast<float>(get_json_double(msg, "min_volume_ratio", 0.02));
@@ -8055,7 +8205,8 @@ int main() {
                                 auto physics_params = fem->getPhysicsParams();
                                 physics_params.convert_failed_elements_to_mpm = get_json_bool(msg, "convert_failed_elements_to_mpm", false);
                                 physics_params.mpm_particles_per_failed_element = get_json_int(msg, "mpm_particles_per_failed_element", 8);
-                                physics_params.material_heterogeneity = get_json_double(msg, "material_heterogeneity", 0.08);
+                                double w_mod_fsi_d = get_json_double(msg, "weibull_modulus", 0.0);
+                                physics_params.material_heterogeneity = (w_mod_fsi_d > 0.01) ? (1.0 / w_mod_fsi_d) : get_json_double(msg, "material_heterogeneity", 0.08);
                                 physics_params.debris_velocity_smoothing = get_json_double(msg, "debris_velocity_smoothing", 0.25);
                                 physics_params.debris_clumping = get_json_double(msg, "debris_clumping", 0.40);
                                 physics_params.debris_max_clump_size = get_json_int(msg, "debris_max_clump_size", 8);
@@ -8074,6 +8225,7 @@ int main() {
                                 }
 
                                 Blast::FEMErosionCriteria<double> erosion{};
+                                erosion.enable_strain_erosion = get_json_bool(msg, "enable_strain_erosion", true);
                                 erosion.failure_strain = static_cast<double>(get_json_double(msg, "failure_strain", 0.50));
                                 erosion.timestep_erosion_factor = static_cast<double>(get_json_double(msg, "timestep_erosion_factor", 0.10));
                                 erosion.min_volume_ratio = static_cast<double>(get_json_double(msg, "min_volume_ratio", 0.02));

@@ -4,6 +4,8 @@
  * Physical Units, Governing Equations, and Node-Type Documentation.
  */
 
+export type SolverScope = 'MPM' | 'FEM' | 'FV' | 'MPM+FEM' | 'MPM+FV' | 'ALL';
+
 export interface ParameterDefinition {
     key: string;
     label: string;
@@ -13,6 +15,7 @@ export interface ParameterDefinition {
     detailedDesc: string;
     allowedValues?: string[];
     defaultVal?: any;
+    solverScope?: SolverScope;
 }
 
 export interface NodeDefinition {
@@ -708,7 +711,21 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         label: 'MPM Transfer Kernel',
         category: 'MPM Particle Mechanics',
         shortDesc: 'Particle-grid interpolation shape function',
-        detailedDesc: 'BSpline (quadratic/cubic B-splines - smooth, zero grid-crossing noise), GIMP (Generalized Interpolation Material Point - uses contiguous particle domain box functions), or Standard (Dirac-delta linear interpolation).'
+        detailedDesc: 'Radial MLS (Isotropic Moving Least Squares MPM with Wendland C2 radial kernel - 100% rotationally invariant, zero grid-crossing noise, eliminates cruciform detonation bias), BSpline (quadratic B-splines - smooth), Cubic BSpline (cubic B-splines - extended C2 support), GIMP (Generalized Interpolation Material Point), Standard (Dirac-delta linear interpolation), or Default (Inherit domain transfer scheme).'
+    },
+    'particle_distribution': {
+        key: 'particle_distribution',
+        label: 'Particle Seeding Lattice Pattern',
+        category: 'MPM Particle Discretization',
+        shortDesc: 'Geometric arrangement of initial particle centroids',
+        detailedDesc: 'Cartesian (standard orthogonal grid seeding; prone to directional slip planes) or Hexagonal (2D Triangular / 3D Hexagonal Close-Packed HCP lattice with 12-fold coordination symmetry; eliminates Cartesian grid alignment artifacts).'
+    },
+    'boundary_filling': {
+        key: 'boundary_filling',
+        label: 'Curved Boundary Discretization Mode',
+        category: 'MPM Particle Discretization',
+        shortDesc: 'Volume fractioning and centroid alignment on curved boundaries',
+        detailedDesc: 'Stairstepped (binary inside/outside voxelization) or Partial (sub-voxel cut-cell integration with centroid alignment; guarantees exact analytical volume and mass conservation on curved primitives).'
     },
     'velocity_scheme': {
         key: 'velocity_scheme',
@@ -1033,6 +1050,78 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         category: 'Johnson-Cook Viscoplasticity',
         shortDesc: 'Thermal softening exponent',
         detailedDesc: 'Dimensionless exponent m modeling adiabatic thermal softening as temperature approaches the melting point.'
+    },
+    'jc_d1': {
+        key: 'jc_d1',
+        label: 'Johnson-Cook Fracture D1',
+        unit: 'dim',
+        category: 'Johnson-Cook Damage & Fracture',
+        shortDesc: 'Initial damage strain D1 (Recommended: -0.1 to +0.5, Default: 0.0)',
+        detailedDesc: 'Constant parameter D1 in the Johnson-Cook triaxial fracture strain equation: eps_f = (D1 + D2*exp(D3*eta))*(1 + D4*ln(eps_dot*))*(1 + D5*T*). Typical values: 0.05 for 4340 steel, 0.54 for OFHC copper, 0.07 for 6061-T6 aluminum. Set all D1-D5 to 0.0 to disable Johnson-Cook triaxial damage accumulation.'
+    },
+    'jc_d2': {
+        key: 'jc_d2',
+        label: 'Johnson-Cook Fracture D2',
+        unit: 'dim',
+        category: 'Johnson-Cook Damage & Fracture',
+        shortDesc: 'Triaxiality damage multiplier D2 (Recommended: 0.2 to 5.0)',
+        detailedDesc: 'Exponential triaxiality scaling coefficient D2 in the Johnson-Cook fracture criterion. Typical values: 3.44 for 4340 steel, 4.89 for OFHC copper, 1.25 for 6061-T6 aluminum.'
+    },
+    'jc_d3': {
+        key: 'jc_d3',
+        label: 'Johnson-Cook Fracture D3',
+        unit: 'dim',
+        category: 'Johnson-Cook Damage & Fracture',
+        shortDesc: 'Triaxiality exponent D3 (Recommended: -3.5 to -0.5)',
+        detailedDesc: 'Dimensionless triaxiality exponent D3 governing fracture strain decay under hydrostatic tension (eta = -p/q). Typical values: -2.12 for 4340 steel, -3.03 for OFHC copper, -1.50 for 6061-T6 aluminum.'
+    },
+    'jc_d4': {
+        key: 'jc_d4',
+        label: 'Johnson-Cook Fracture D4',
+        unit: 'dim',
+        category: 'Johnson-Cook Damage & Fracture',
+        shortDesc: 'Strain rate damage coefficient D4 (Recommended: 0.001 to 0.02)',
+        detailedDesc: 'Logarithmic strain rate sensitivity coefficient D4 in the Johnson-Cook fracture model. Typical values: 0.002 for 4340 steel, 0.014 for OFHC copper, 0.005 for 6061-T6 aluminum.'
+    },
+    'jc_d5': {
+        key: 'jc_d5',
+        label: 'Johnson-Cook Fracture D5',
+        unit: 'dim',
+        category: 'Johnson-Cook Damage & Fracture',
+        shortDesc: 'Thermal damage coefficient D5 (Recommended: 0.5 to 4.0)',
+        detailedDesc: 'Thermal softening damage coefficient D5 in the Johnson-Cook fracture model. Typical values: 0.61 for 4340 steel, 1.12 for OFHC copper, 1.60 for 6061-T6 aluminum, 3.87 for Ti-6Al-4V.'
+    },
+    'weibull_modulus': {
+        key: 'weibull_modulus',
+        label: 'Weibull Modulus (m_w)',
+        unit: 'dim',
+        category: 'Material Heterogeneity & Fragmentation',
+        shortDesc: 'Flaw shape m_w (Recommended: 3.0-15.0, Default: 0.0 disabled)',
+        detailedDesc: 'Dimensionless Weibull shape parameter m_w governing initial material flaw variability. Lower values increase microstructural defect scatter for realistic ductile-to-brittle fragmentation. Recommended values: 3.0 to 6.0 for concrete/rock/ceramics, 8.0 to 12.0 for structural steel & aluminum alloys, 15.0+ for ultra-homogeneous metals. Set to 0.0 to disable initial flaw scatter.'
+    },
+    'weibull_scale': {
+        key: 'weibull_scale',
+        label: 'Weibull Scale (eta_w)',
+        unit: 'dim',
+        category: 'Material Heterogeneity & Fragmentation',
+        shortDesc: 'Flaw scale eta_w (Recommended: 0.8-1.2, Default: 1.0)',
+        detailedDesc: 'Dimensionless Weibull scale parameter eta_w adjusting the mean initial flaw strength distribution across MPM particles. Recommended value: 1.0 (baseline characteristic material strength).'
+    },
+    'fracture_toughness': {
+        key: 'fracture_toughness',
+        label: 'Dynamic Fracture Toughness (K_IC)',
+        unit: 'Pa·m^0.5',
+        category: 'Material Heterogeneity & Fragmentation',
+        shortDesc: 'Mode-I toughness K_IC (Recommended: 3e6-140e6 Pa·√m)',
+        detailedDesc: 'Dynamic Mode-I fracture toughness K_IC (Pa·m^0.5). Used in Grady dynamic spallation model: sig_spall = (3*rho*c0*K_IC^2 * eps_dot)^(1/3). Recommended values: 3.0e6 Pa·m^0.5 for concrete/rock, 25.0e6 to 35.0e6 Pa·m^0.5 for aluminum alloys, 50.0e6 to 140.0e6 Pa·m^0.5 for armor steels. Set to 0.0 to disable Grady spallation.'
+    },
+    'debris_bulk_factor': {
+        key: 'debris_bulk_factor',
+        label: 'Post-Failure Bulk Modulus Factor',
+        unit: 'dim',
+        category: 'Material Heterogeneity & Fragmentation',
+        shortDesc: 'Parent material post-failure bulk stiffness ratio (Default: 0.10)',
+        detailedDesc: 'Dimensionless fraction (0.0 to 1.0) of intact bulk modulus retained by completely failed/fragmented parent material when subjected to hydrostatic re-compression (J < 1.0). In the unified parent material framework, particles preserve their parent EOS, density, and shock impedance while using this factor for crushed aggregate re-compaction.'
     },
     'T_melt': {
         key: 'T_melt',
@@ -1389,16 +1478,16 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         key: 'convert_failed_elements_to_mpm',
         label: 'FEM-to-MPM Erosion Conversion',
         category: 'Hybrid Multi-Physics',
-        shortDesc: 'Convert eroded FEM elements into flying MPM debris',
-        detailedDesc: 'Seamlessly converts failed/eroded hexahedral solid elements into active Lagrangian MPM particles, conserving mass, momentum, and debris impact energy.'
+        shortDesc: 'Convert eroded FEM elements into active parent-material MPM particles',
+        detailedDesc: 'Seamlessly converts failed/eroded hexahedral solid elements into active Lagrangian MPM particles of the exact same parent material, preserving parent density, EOS, plastic work, temperature, and kinematic momentum.'
     },
     'mpm_particles_per_failed_element': {
         key: 'mpm_particles_per_failed_element',
         label: 'MPM Particles Per Eroded Element',
         unit: 'particles',
         category: 'Hybrid Multi-Physics',
-        shortDesc: 'Debris particle spawning resolution',
-        detailedDesc: 'Number of discrete MPM particles spawned to represent the fractured volume of one eroded hex element (typically 8 particles).'
+        shortDesc: 'Parent-material particle spawning resolution',
+        detailedDesc: 'Number of discrete MPM particles spawned to represent the fractured volume of one eroded hex element of the parent material (typically 8 particles).'
     },
     'material_heterogeneity': {
         key: 'material_heterogeneity',
@@ -2118,6 +2207,14 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
                 <div class="node-doc-heading">Overview & Role</div>
                 <p>The <strong>MPMDomain2D</strong> node configures the 2D Material Point Method particle solver. Simulates extreme solid deformation, fracture fragmentation, high-velocity projectile penetration, and fluid-structure interaction with zero mesh tangling.</p>
             </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Inputs & Upstream Connections</div>
+                <ul>
+                    <li><strong>Grid (mesh):</strong> Connects from <code>DomainMesh2D</code> to specify the background grid dimensions and cell size.</li>
+                    <li><strong>MPM Objects (objects):</strong> Connects from one or more <code>MPMObject2D</code> nodes.</li>
+                    <li><strong>Detonators (detonator, optional):</strong> Connects from one or more <code>DetonatorLocation</code> nodes for multi-point hot-spot initiation.</li>
+                </ul>
+            </div>
         `
     },
 
@@ -2136,7 +2233,7 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
                 <ul>
                     <li><strong>Grid (mesh):</strong> Connects from <code>DomainMesh3D</code> to specify the background Cartesian grid dimensions, cell size, and boundary conditions.</li>
                     <li><strong>MPM Objects (objects):</strong> Connects from one or more <code>MPMObject3D</code> nodes representing solid bodies, projectiles, or explosive charges.</li>
-                    <li><strong>Detonator (detonator, optional):</strong> Connects from a <code>DetonatorLocation3D</code> node to provide point-source hot-spot ignition for energetic materials utilizing the <strong>CREST Reactive Burn + Davis EOS</strong> model.</li>
+                    <li><strong>Detonators (detonator, optional):</strong> Connects from one or more <code>DetonatorLocation3D</code> nodes to provide multi-point hot-spot ignition for energetic materials utilizing the <strong>CREST Reactive Burn + Davis EOS</strong> model.</li>
                 </ul>
             </div>
             <div class="node-doc-section">
@@ -2279,9 +2376,116 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
 // 3. RETRIEVAL HELPERS & POPOVER MANAGEMENT
 // ============================================================================
 
+export function getSolverScope(key: string, nodeType?: string): SolverScope {
+    const def = PARAMETER_DEFINITIONS[key];
+    if (def && def.solverScope) return def.solverScope;
+
+    // Node-type specific inference
+    if (nodeType === 'FEMDomain3D' || nodeType === 'FEMObject3D' || nodeType === 'LSDynaImporter3D') {
+        return 'FEM';
+    }
+    if (nodeType === 'MPMDomain2D' || nodeType === 'MPMDomain3D' || nodeType === 'MPMObject2D' || nodeType === 'MPMObject3D') {
+        return 'MPM';
+    }
+    if (nodeType === 'CFDSolver' || nodeType === 'CFDSolver2D' || nodeType === 'CFDSolver3D' || 
+        nodeType === 'DomainMesh' || nodeType === 'DomainMesh2D' || nodeType === 'DomainMesh3D' || 
+        nodeType === 'Charge1D' || nodeType === 'Charge2D' || nodeType === 'Charge3D' || 
+        nodeType === 'DetonatorLocation' || nodeType === 'DetonatorLocation3D') {
+        return 'FV';
+    }
+    if (nodeType === 'FSICoupler2D' || nodeType === 'FSICoupler3D') {
+        return 'MPM+FV';
+    }
+    if (nodeType === 'FEMFSICoupler3D') {
+        return 'FEM';
+    }
+
+    // Material parameters key-based mapping
+    const mpmOnlyKeys = ['transfer_scheme', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'];
+    if (mpmOnlyKeys.includes(key)) return 'MPM';
+
+    const femOnlyKeys = [
+        'enable_timestep_erosion', 'timestep_erosion_factor', 'hourglass_coeff', 'contact_penalty_scale', 
+        'friction_static', 'friction_kinetic', 'integration_scheme', 'hourglass_model', 
+        'rebar_formulation', 'mpm_particles_per_failed_element', 'convert_failed_elements_to_mpm', 
+        'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 
+        'random_seed', 'k_file'
+    ];
+    if (femOnlyKeys.includes(key)) return 'FEM';
+
+    const fvOnlyKeys = [
+        'atm_pressure', 'atm_temperature', 'gamma',
+        'composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega',
+        'ideal_gamma', 'ideal_rho_0', 'ideal_e_0', 'material_type'
+    ];
+    if (fvOnlyKeys.includes(key)) return 'FV';
+
+    const mpmFvKeys = [
+        'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
+        'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
+        'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold'
+    ];
+    if (mpmFvKeys.includes(key)) return 'MPM+FV';
+
+    const mpmFemKeys = [
+        'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
+        'failure_strain', 'tensile_failure_stress', 'directional_crack_band', 'nonlocal_radius',
+        'enable_strain_erosion', 'erosion_strain', 'enable_stress_erosion', 'erosion_stress',
+        'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
+        'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5',
+        'mg_gamma0', 'mg_c0', 'mg_s',
+        'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
+        'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
+        'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
+        'kc_auto_generate', 'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
+        'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2'
+    ];
+    if (mpmFemKeys.includes(key)) return 'MPM+FEM';
+
+    if (key === 'material_model' || key === 'preset') return 'ALL';
+
+    return 'ALL';
+}
+
+export function getSolverBadgeHTML(scope: SolverScope, compact = false): string {
+    let cls = 'solver-badge-all';
+    let text = 'ALL';
+    let title = 'Universal parameter: active across all physics engines';
+
+    if (scope === 'MPM') {
+        cls = 'solver-badge-mpm';
+        text = compact ? 'MPM' : 'MPM ONLY';
+        title = 'Material Point Method ONLY (Particle Continuum)';
+    } else if (scope === 'FEM') {
+        cls = 'solver-badge-fem';
+        text = compact ? 'FEM' : 'FEM ONLY';
+        title = 'Finite Element Method ONLY (Solid Elements)';
+    } else if (scope === 'FV') {
+        cls = 'solver-badge-fv';
+        text = compact ? 'FV' : 'FV ONLY';
+        title = 'Finite Volume CFD ONLY (Eulerian Fluid / Gas / JWL)';
+    } else if (scope === 'MPM+FEM') {
+        cls = 'solver-badge-mpm-fem';
+        text = compact ? 'MPM·FEM' : 'MPM · FEM';
+        title = 'Shared: MPM Particle Continuum & FEM Solid Elements';
+    } else if (scope === 'MPM+FV') {
+        cls = 'solver-badge-mpm-fv';
+        text = compact ? 'MPM·FV' : 'MPM · FV';
+        title = 'Shared: MPM Particle Reactive Burn & FV Eulerian Reactive CFD';
+    }
+
+    return `<span class="solver-scope-badge ${cls}" title="${title}">${text}</span>`;
+}
+
 export function getParameterInfo(key: string, nodeType?: string): ParameterDefinition {
+    const scope = getSolverScope(key, nodeType);
+
     if (PARAMETER_DEFINITIONS[key]) {
-        return PARAMETER_DEFINITIONS[key];
+        const def = PARAMETER_DEFINITIONS[key];
+        return {
+            ...def,
+            solverScope: def.solverScope || scope
+        };
     }
     
     // Format fallback for uncatalogued or custom keys
@@ -2293,6 +2497,7 @@ export function getParameterInfo(key: string, nodeType?: string): ParameterDefin
         key: key,
         label: formattedLabel,
         category: 'General Parameter',
+        solverScope: scope,
         shortDesc: `Parameter ${formattedLabel} for ${nodeType || 'node'}`,
         detailedDesc: `Configuration property "${key}" controlling simulation behavior in ${nodeType || 'this node'}.`
     };
@@ -2352,6 +2557,15 @@ export function showParameterPopover(
     closeActiveParameterPopover();
 
     const info = getParameterInfo(key, nodeType);
+    const scope = info.solverScope || getSolverScope(key, nodeType);
+    const badgeHTML = getSolverBadgeHTML(scope, false);
+
+    let scopeDesc = 'Universal parameter: evaluated across all active solvers.';
+    if (scope === 'MPM') scopeDesc = 'Active strictly for Material Point Method (MPM) particle continuum dynamics.';
+    else if (scope === 'FEM') scopeDesc = 'Active strictly for Finite Element Method (FEM) Lagrangian structural elements.';
+    else if (scope === 'FV') scopeDesc = 'Active strictly for Finite Volume (FV) Eulerian fluid / blast gas dynamics.';
+    else if (scope === 'MPM+FEM') scopeDesc = 'Shared solid mechanics formulation: active for both MPM particles and FEM hex elements.';
+    else if (scope === 'MPM+FV') scopeDesc = 'Shared reactive burn formulation: active for both MPM particles and FV Eulerian explosive dynamics.';
 
     const popover = document.createElement('div');
     popover.className = 'param-popover';
@@ -2364,9 +2578,16 @@ export function showParameterPopover(
                 <span class="param-popover-title">${info.label}</span>
                 ${info.unit && info.unit !== 'dim' ? `<span class="param-popover-unit">${info.unit}</span>` : ''}
             </div>
-            ${info.category ? `<div class="param-popover-category">${info.category}</div>` : ''}
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-top:2px;">
+                ${info.category ? `<div class="param-popover-category">${info.category}</div>` : '<div></div>'}
+                ${badgeHTML}
+            </div>
         </div>
         <div class="param-popover-body">
+            <div class="param-popover-scope-row">
+                <span class="param-popover-scope-label">Solver Scope:</span>
+                <span style="font-size:9.5px; color:#ddd;">${scopeDesc}</span>
+            </div>
             <div class="param-popover-short">${info.shortDesc}</div>
             <div class="param-popover-details">${info.detailedDesc}</div>
         </div>

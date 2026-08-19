@@ -3,6 +3,7 @@ import { SimulationState, SimulationStatus, LayoutNode } from './types.js';
 import { NetworkManager } from './NetworkManager.js';
 import { serializeSimulationState, serializeForSolver, serializeToBinary, deserializeFromBinary } from './serialization.js';
 import { LayoutManager } from './layout-manager.js';
+import { estimateGraphMemory } from './memory-validator.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
 import { CustomDialog } from './custom-dialog.js';
 
@@ -750,38 +751,36 @@ function sendView3DConfig(targetId: string) {
     const m = stateManager.getAllModels().find(model => model.id === targetId);
     if (m) {
         const view3DNode = m.nodes.find(n => n.type === 'Telemetry3DViewport');
-        if (view3DNode) {
-            const showObstacles = view3DNode.parameters?.show_obstacles === true;
-            const obstaclesQuantity = view3DNode.parameters?.obstacles_quantity || 'pressure';
-            const showStl = view3DNode.parameters?.show_stl === true;
-            const stlQuantity = view3DNode.parameters?.stl_quantity || 'pressure';
-            
-            const slices = [...(view3DNode.parameters?.slices || [])];
-            if (showObstacles) {
-                slices.push({
-                    axis: 'obstacles',
-                    offset: 0.0,
-                    quantities: [obstaclesQuantity],
-                    stride: 1
-                });
-            }
-            if (showStl) {
-                slices.push({
-                    axis: 'volume',
-                    offset: 0.0,
-                    quantities: [stlQuantity],
-                    stride: 1
-                });
-            }
-            
-            const rate = Number(view3DNode.parameters?.refresh_rate ?? 2.0);
-            networkManager.send({
-                command: "VIEW3D_CONFIG",
-                modelId: targetId,
-                slices,
-                refresh_rate: rate
+        const showObstacles = view3DNode ? (view3DNode.parameters?.show_obstacles === true) : false;
+        const obstaclesQuantity = view3DNode ? (view3DNode.parameters?.obstacles_quantity || 'pressure') : 'pressure';
+        const showStl = view3DNode ? (view3DNode.parameters?.show_stl === true) : false;
+        const stlQuantity = view3DNode ? (view3DNode.parameters?.stl_quantity || 'pressure') : 'pressure';
+        
+        const slices = view3DNode ? [...(view3DNode.parameters?.slices || [])] : [];
+        if (showObstacles) {
+            slices.push({
+                axis: 'obstacles',
+                offset: 0.0,
+                quantities: [obstaclesQuantity],
+                stride: 1
             });
         }
+        if (showStl) {
+            slices.push({
+                axis: 'volume',
+                offset: 0.0,
+                quantities: [stlQuantity],
+                stride: 1
+            });
+        }
+        
+        const rate = Number(view3DNode?.parameters?.refresh_rate ?? 2.0);
+        networkManager.send({
+            command: "VIEW3D_CONFIG",
+            modelId: targetId,
+            slices,
+            refresh_rate: rate
+        });
     }
 }
 
@@ -1175,6 +1174,18 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
     };
     // ── INIT ─────────────────────────────────────────────────────────────────
     if (command === "INIT") {
+        const checkState = stateManager.getSimulationState(modelId);
+        if (checkState) {
+            const memEst = estimateGraphMemory(checkState);
+            if (memEst.riskLevel === 'CRITICAL') {
+                const proceed = confirm(`⚠️ CRITICAL MEMORY WARNING:\n\nThis model allocation is estimated to require ${memEst.summaryText}.\nAllocating extreme model sizes may exceed hardware limits.\n\nDo you want to proceed with allocation?`);
+                if (!proceed) {
+                    console.log(`[MEMORY GUARD] Model initialization for ${modelId} aborted by user.`);
+                    return;
+                }
+            }
+        }
+
         stateManager.setModelProgress(modelId, 0);
         stateManager.setModelSimTime(modelId, 0.0);
 
@@ -1662,6 +1673,7 @@ networkManager.onMessage(async (data) => {
                 layoutManager.components.forEach(comp => {
                     if (comp.type === 'TELEMETRY_3D' && comp.instance) comp.instance.pushFrame(payloadBuffer, modelId);
                     if (comp.type === 'NODE_VIEWER' && comp.instance) comp.instance.pushFrame(payloadBuffer, modelId);
+                    if (comp.type === 'NODE_GRAPH' && comp.instance) comp.instance.pushFrame(payloadBuffer, modelId);
                 });
             }
         }

@@ -73,6 +73,7 @@ export class Telemetry3DViewport {
     private usePerspective: boolean = true;
     private isWorkerBusy: boolean = false;
     private pendingFrame: { buffer: ArrayBuffer, modelId?: string } | null = null;
+    private workerTimer: any = null;
 
     private viewTypeSuffix: string;
     private viewportNodeId: string | null = null;
@@ -149,11 +150,28 @@ export class Telemetry3DViewport {
 
         this.worker.onmessage = (e) => {
             const { type, renderer, min, max } = e.data;
-            if (type === 'renderFrame' || type === 'frameComplete') {
+            if (type === 'renderFrame' || type === 'frameComplete' || type === 'error') {
+                if (this.workerTimer) {
+                    clearTimeout(this.workerTimer);
+                    this.workerTimer = null;
+                }
                 this.isWorkerBusy = false;
                 if (type === 'renderFrame') {
                     this.latestFrameData = e.data.data;
                     this.drawTicks();
+                }
+                if (type === 'error') {
+                    console.error("[ViewportWorker Error]", e.data.message);
+                    const badge = document.getElementById(this.getElId('viewport-renderer-badge'));
+                    if (badge) {
+                        badge.innerHTML = 'ERROR';
+                        badge.style.color = '#ff3333';
+                        badge.style.background = 'rgba(255, 51, 51, 0.2)';
+                    }
+                    if (this.debugOverlay) {
+                        this.debugOverlay.style.color = '#ff3333';
+                        this.debugOverlay.innerHTML = `WORKER ERROR: ${e.data.message}`;
+                    }
                 }
                 if (this.pendingFrame) {
                     const next = this.pendingFrame;
@@ -181,18 +199,6 @@ export class Telemetry3DViewport {
                 }
             } else if (type === 'log') {
                 console.log("[ViewportWorker Log]", e.data.message);
-            } else if (type === 'error') {
-                console.error("[ViewportWorker Error]", e.data.message);
-                const badge = document.getElementById(this.getElId('viewport-renderer-badge'));
-                if (badge) {
-                    badge.innerHTML = 'ERROR';
-                    badge.style.color = '#ff3333';
-                    badge.style.background = 'rgba(255, 51, 51, 0.2)';
-                }
-                if (this.debugOverlay) {
-                    this.debugOverlay.style.color = '#ff3333';
-                    this.debugOverlay.innerHTML = `WORKER ERROR: ${e.data.message}`;
-                }
             } else if (type === 'rangeUpdated') {
                 const vpNode = this.getViewportNode();
                 if (vpNode) {
@@ -5912,22 +5918,60 @@ export class Telemetry3DViewport {
     }
 
     public pushFrame(buffer: ArrayBuffer, modelId?: string) {
-        if (modelId && this.getCurrentModelId() !== modelId) return;
+        if (modelId) {
+            const currentId = this.getCurrentModelId();
+            if (this.viewportNodeId) {
+                if (currentId && currentId !== modelId && this.viewportNodeId !== modelId) {
+                    return;
+                }
+            } else {
+                const activeWs = this.stateManager.getActiveWorkspace();
+                if (activeWs && activeWs.modelIds && !activeWs.modelIds.includes(modelId)) {
+                    return;
+                }
+            }
+        }
         if (this.isWorkerBusy) {
             this.pendingFrame = { buffer, modelId };
             return;
         }
         this.isWorkerBusy = true;
+        if (this.workerTimer) clearTimeout(this.workerTimer);
+        this.workerTimer = setTimeout(() => {
+            if (this.isWorkerBusy) {
+                console.warn("[Telemetry3DViewport] Worker timeout detected, resetting busy flag");
+                this.isWorkerBusy = false;
+                if (this.pendingFrame) {
+                    const next = this.pendingFrame;
+                    this.pendingFrame = null;
+                    this.pushFrame(next.buffer, next.modelId);
+                }
+            }
+        }, 1500);
         this.worker.postMessage({ type: 'frame', data: { buffer } });
     }
 
     public resetSimulationData(modelId?: string) {
-        if (modelId && this.getCurrentModelId() !== modelId) return;
+        if (modelId) {
+            if (this.viewportNodeId) {
+                if (this.getCurrentModelId() !== modelId && this.viewportNodeId !== modelId) return;
+            } else {
+                const activeWs = this.stateManager.getActiveWorkspace();
+                if (activeWs && activeWs.modelIds && !activeWs.modelIds.includes(modelId)) return;
+            }
+        }
         this.worker.postMessage({ type: 'resetSimulationData' });
     }
 
     public updateTelemetry(data: any, modelId?: string) {
-        if (modelId && this.getCurrentModelId() !== modelId) return;
+        if (modelId) {
+            if (this.viewportNodeId) {
+                if (this.getCurrentModelId() !== modelId && this.viewportNodeId !== modelId) return;
+            } else {
+                const activeWs = this.stateManager.getActiveWorkspace();
+                if (activeWs && activeWs.modelIds && !activeWs.modelIds.includes(modelId)) return;
+            }
+        }
         if (data && data.type === 'TELEMETRY_3D') {
             this.hasTelemetryGrid = true;
             const xmin = data.xmin ?? 0.0;

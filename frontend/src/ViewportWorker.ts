@@ -2610,7 +2610,7 @@ async function initContext(canvas: OffscreenCanvas) {
             }
         } catch (e: any) {
             console.warn("[ViewportWorker] Failed to initialize WebGPU, falling back to WebGL.", e);
-            self.postMessage({ type: 'error', message: "WebGPU Init Warning: " + (e.message || String(e)) });
+            self.postMessage({ type: 'log', message: "WebGPU Init Warning: " + (e.message || String(e)) });
         }
     }
 
@@ -2999,12 +2999,21 @@ function getBeamQuantityValue(facetIdx: number, qty: string): number {
 }
 
 function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
-    if (!gl && (!isWebGPU || !gpuDevice)) return;
+    if (!gl && (!isWebGPU || !gpuDevice)) {
+        self.postMessage({ type: 'frameComplete' });
+        return;
+    }
     if (buffer) {
-        if (buffer.byteLength < 24) return;
+        if (buffer.byteLength < 24) {
+            self.postMessage({ type: 'frameComplete' });
+            return;
+        }
         const view = new DataView(buffer);
         const magic = view.getUint32(0, true);
-        if (magic !== 0x46454d33) return;
+        if (magic !== 0x46454d33) {
+            self.postMessage({ type: 'frameComplete' });
+            return;
+        }
         const time = view.getFloat32(4, true);
         const nNodes = view.getUint32(8, true);
         const nFacets = view.getUint32(12, true);
@@ -3013,7 +3022,10 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
 
         const nodeDataBytes = nNodes * nFloatsPerNode * 4;
         const facetDataBytes = nFacets * nFloatsPerFacet * 4;
-        if (24 + nodeDataBytes + facetDataBytes > buffer.byteLength) return;
+        if (24 + nodeDataBytes + facetDataBytes > buffer.byteLength) {
+            self.postMessage({ type: 'frameComplete' });
+            return;
+        }
 
         latestFEMNodesData = new Float32Array(buffer, 24, nNodes * nFloatsPerNode);
         latestFEMFacetsData = new Float32Array(buffer, 24 + nodeDataBytes, nFacets * nFloatsPerFacet);
@@ -3022,6 +3034,7 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
     if (!latestFEMNodesData || !latestFEMFacetsData || latestFEMNodesData.length === 0 || latestFEMFacetsData.length === 0) {
         femSolidCount = 0;
         femWireframeCount = 0;
+        render();
         return;
     }
 
@@ -3391,6 +3404,51 @@ function sampleColormapRGB(v: number, cmapName: string): [number, number, number
     }
 }
 
+function sampleColormapDirect(v: number, cmapName: string, out: Float32Array, offset: number): void {
+    let val = Math.max(0.0, Math.min(1.0, v));
+    if (!isFinite(val)) val = 0.0;
+    switch (cmapName) {
+        case 'plasma': {
+            out[offset] = Math.min(1.0, Math.pow(val, 0.5));
+            out[offset + 1] = Math.max(0, Math.pow(val, 2.0) * 0.85);
+            out[offset + 2] = Math.max(0, Math.cos(val * Math.PI * 0.5));
+            break;
+        }
+        case 'viridis': {
+            out[offset] = Math.max(0, Math.min(1.0, 0.2 + 0.8 * Math.pow(val, 2)));
+            out[offset + 1] = Math.max(0, Math.min(1.0, Math.sin(val * Math.PI * 0.8)));
+            out[offset + 2] = Math.max(0, Math.min(1.0, 0.5 + 0.5 * Math.cos(val * Math.PI)));
+            break;
+        }
+        case 'coolwarm': {
+            out[offset] = val;
+            out[offset + 1] = Math.max(0, 1.0 - Math.abs(val - 0.5) * 2.0);
+            out[offset + 2] = Math.max(0, 1.0 - val);
+            break;
+        }
+        case 'rainbow':
+        case 'jet': {
+            const four = 4.0 * val;
+            out[offset] = Math.min(1.0, Math.max(0.0, Math.min(four - 1.5, -four + 4.5)));
+            out[offset + 1] = Math.min(1.0, Math.max(0.0, Math.min(four - 0.5, -four + 3.5)));
+            out[offset + 2] = Math.min(1.0, Math.max(0.0, Math.min(four + 0.5, -four + 2.5)));
+            break;
+        }
+        case 'grayscale': {
+            out[offset] = val;
+            out[offset + 1] = val;
+            out[offset + 2] = val;
+            break;
+        }
+        default: {
+            out[offset] = Math.min(1.0, Math.pow(val, 0.5));
+            out[offset + 1] = Math.max(0, Math.pow(val, 2.0) * 0.85);
+            out[offset + 2] = Math.max(0, Math.cos(val * Math.PI * 0.5));
+            break;
+        }
+    }
+}
+
 function getParticleQuantityValue(data: Float32Array, idx: number, qty: string): number {
     const base = idx * 13;
     if (qty === 'vonMises' || qty === 'von_mises') return data[base + 6];
@@ -3410,6 +3468,7 @@ function getParticleQuantityValue(data: Float32Array, idx: number, qty: string):
 function updateMPMParticlesGeometry(data?: Float32Array) {
     if (!gl && (!isWebGPU || !gpuDevice)) {
         self.postMessage({ type: 'log', message: 'updateMPMParticlesGeometry failed: gl and WebGPU are null' });
+        self.postMessage({ type: 'frameComplete' });
         return;
     }
     if (data) {
@@ -3418,6 +3477,7 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
     if (!latestMPMParticlesData || latestMPMParticlesData.length === 0) {
         mpmParticlesCount = 0;
         self.postMessage({ type: 'log', message: 'updateMPMParticlesGeometry failed: no latestMPMParticlesData' });
+        render();
         return;
     }
 
@@ -3432,21 +3492,35 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
     const ty = -ymin * sy - 0.5;
     const tz = -zmin * sz - 0.5;
 
-    self.postMessage({
-        type: 'log',
-        message: `updateMPMParticlesGeometry: nParticles = ${nParticles}, size = [${sizeX}, ${sizeY}, ${sizeZ}], min = [${xmin}, ${ymin}, ${zmin}], show = ${showMPMParticles}`
-    });
+    let qtyOffset = 6;
+    let isVelocity = false;
+    if (mpmParticleQuantity === 'plastic_strain' || mpmParticleQuantity === 'plasticStrain') qtyOffset = 7;
+    else if (mpmParticleQuantity === 'density') qtyOffset = 8;
+    else if (mpmParticleQuantity === 'pressure') qtyOffset = 9;
+    else if (mpmParticleQuantity === 'damage') qtyOffset = 10;
+    else if (mpmParticleQuantity === 'has_failed') qtyOffset = 11;
+    else if (mpmParticleQuantity === 'object_id') qtyOffset = 12;
+    else if (mpmParticleQuantity === 'velocity') isVelocity = true;
 
     let minScalar = mpmParticleMinVal;
     let maxScalar = mpmParticleMaxVal;
 
     let empiricalMin = Infinity;
     let empiricalMax = -Infinity;
+
     for (let i = 0; i < nParticles; i++) {
-        const val = getParticleQuantityValue(latestMPMParticlesData, i, mpmParticleQuantity);
+        const base = i * 13;
+        let val = 0.0;
+        if (isVelocity) {
+            const vx = latestMPMParticlesData[base + 3], vy = latestMPMParticlesData[base + 4], vz = latestMPMParticlesData[base + 5];
+            val = Math.sqrt(vx * vx + vy * vy + vz * vz);
+        } else {
+            val = latestMPMParticlesData[base + qtyOffset];
+        }
         if (val < empiricalMin) empiricalMin = val;
         if (val > empiricalMax) empiricalMax = val;
     }
+
     if (!isFinite(empiricalMin) || !isFinite(empiricalMax) || empiricalMax <= empiricalMin) {
         empiricalMin = 0.0;
         empiricalMax = 1.0;
@@ -3465,34 +3539,40 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
     }
     const vertexData = cachedMPMVertexData;
 
+    const useLog = mpmParticleLogScale;
+    const logMin = useLog ? Math.log(Math.max(minScalar, 1e-5)) : 0;
+    const logMax = useLog ? Math.log(Math.max(maxScalar, 1e-5)) : 0;
+    const denom = useLog ? Math.max(1e-9, logMax - logMin) : Math.max(1e-9, maxScalar - minScalar);
+    const cmap = mpmParticleColormap;
+
     for (let i = 0; i < nParticles; i++) {
-        const px = latestMPMParticlesData[i * 13 + 0];
-        const py = latestMPMParticlesData[i * 13 + 1];
-        const pz = latestMPMParticlesData[i * 13 + 2];
-
-        const wx = px * sx + tx;
-        const wy = py * sy + ty;
-        const wz = pz * sz + tz;
-
-        const val = getParticleQuantityValue(latestMPMParticlesData, i, mpmParticleQuantity);
-        let normVal = 0.0;
-        if (mpmParticleLogScale) {
-            const logMin = Math.log(Math.max(minScalar, 1e-5));
-            const logMax = Math.log(Math.max(maxScalar, 1e-5));
-            const logVal = Math.log(Math.max(val, 1e-5));
-            normVal = (logVal - logMin) / (Math.max(1e-9, logMax - logMin));
-        } else {
-            normVal = (val - minScalar) / (Math.max(1e-9, maxScalar - minScalar));
-        }
-        const [r, g, b] = sampleColormapRGB(normVal, mpmParticleColormap);
+        const base = i * 13;
+        const px = latestMPMParticlesData[base + 0];
+        const py = latestMPMParticlesData[base + 1];
+        const pz = latestMPMParticlesData[base + 2];
 
         const vIdx = i * 6;
-        vertexData[vIdx + 0] = wx;
-        vertexData[vIdx + 1] = wy;
-        vertexData[vIdx + 2] = wz;
-        vertexData[vIdx + 3] = r;
-        vertexData[vIdx + 4] = g;
-        vertexData[vIdx + 5] = b;
+        vertexData[vIdx + 0] = px * sx + tx;
+        vertexData[vIdx + 1] = py * sy + ty;
+        vertexData[vIdx + 2] = pz * sz + tz;
+
+        let val = 0.0;
+        if (isVelocity) {
+            const vx = latestMPMParticlesData[base + 3], vy = latestMPMParticlesData[base + 4], vz = latestMPMParticlesData[base + 5];
+            val = Math.sqrt(vx * vx + vy * vy + vz * vz);
+        } else {
+            val = latestMPMParticlesData[base + qtyOffset];
+        }
+
+        let normVal = 0.0;
+        if (useLog) {
+            const logVal = Math.log(Math.max(val, 1e-5));
+            normVal = (logVal - logMin) / denom;
+        } else {
+            normVal = (val - minScalar) / denom;
+        }
+
+        sampleColormapDirect(normVal, cmap, vertexData, vIdx + 3);
     }
 
     const particleBytes = nParticles * 6 * 4;
@@ -4131,6 +4211,7 @@ function padFloatData(src: Float32Array, w: number, h: number): { data: Float32A
 function handleFrame(buffer: ArrayBuffer) {
     if (buffer.byteLength < 16) {
         self.postMessage({ type: 'log', message: `handleFrame failed: buffer size too small (${buffer.byteLength})` });
+        self.postMessage({ type: 'frameComplete' });
         return;
     }
     const view = new DataView(buffer);
@@ -4164,7 +4245,10 @@ function handleFrame(buffer: ArrayBuffer) {
         return;
     }
 
-    if (magic !== 0x43494c53) return; // "SLIC"
+    if (magic !== 0x43494c53) {
+        self.postMessage({ type: 'frameComplete' });
+        return; // "SLIC"
+    }
 
     const time = view.getFloat32(4, true);
     const numSlices = view.getUint32(8, true);
@@ -4485,11 +4569,15 @@ function handleFrame(buffer: ArrayBuffer) {
                 activeSlicesWebGPU[i] = slice;
             }
         });
+        render();
         return;
     }
 
     // WebGL frame processing
-    if (!gl) return;
+    if (!gl) {
+        self.postMessage({ type: 'frameComplete' });
+        return;
+    }
     const activeGl = gl;
     activeGl.activeTexture(activeGl.TEXTURE0);
 
@@ -4585,6 +4673,7 @@ function handleFrame(buffer: ArrayBuffer) {
             activeSlicesWebGL[i] = slice;
         }
     });
+    render();
 }
 
 // 2D Projection helper matrix math
@@ -6526,6 +6615,7 @@ function render() {
             gl.drawArrays(gl.LINES, 0, chargeWireCount);
         }
     }
+    if (gl) gl.flush();
     sendFrameMatrixMessage();
 }
 
@@ -6735,8 +6825,11 @@ self.onmessage = async (e) => {
             }
             render();
         } else if (type === "frame") {
-            handleFrame(data.buffer);
-            render();
+            try {
+                handleFrame(data.buffer);
+            } catch (err: any) {
+                self.postMessage({ type: 'error', message: err.message || String(err) });
+            }
         } else if (type === "setConfig") {
             if (data.hasCFDSolver !== undefined) hasCFDSolver = data.hasCFDSolver;
             if (data.colormap !== undefined) {

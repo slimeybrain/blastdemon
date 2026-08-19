@@ -2,6 +2,7 @@
 #define MPM_SOLVER_3D_CUDA_HPP
 
 #include "mpm_solver_3d.hpp"
+#include "VTKWriter.hpp"
 
 namespace Blast {
 
@@ -22,6 +23,7 @@ struct MPMParticle3DSoA {
     float* lambda{nullptr};
     float* v_min{nullptr};
     float* s_shock{nullptr};
+    float* weibull_factor{nullptr};
     int* has_failed{nullptr};
     int* object_id{nullptr};
 };
@@ -57,14 +59,18 @@ public:
                       float angular_vel_x, float angular_vel_y, float angular_vel_z,
                       float density, float E, float nu,
                       float yield_stress, float hardening, float failure_strain = 0.25f,
-                      float tensile_failure_stress = 600.0e6f, int ppc = 8);
+                      float tensile_failure_stress = 600.0e6f, int ppc = 8,
+                      MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
+                      MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped);
 
     void addSphereObject(int obj_id, float pos_x, float pos_y, float pos_z, float radius,
                          float vel_x, float vel_y, float vel_z,
                          float angular_vel_x, float angular_vel_y, float angular_vel_z,
                          float density, float E, float nu,
                          float yield_stress, float hardening, float failure_strain = 0.25f,
-                         float tensile_failure_stress = 600.0e6f, int ppc = 8);
+                         float tensile_failure_stress = 600.0e6f, int ppc = 8,
+                         MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
+                         MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped);
 
     void addCylinderObject(int obj_id, float pos_x, float pos_y, float pos_z,
                            float radius, float inner_radius, float height,
@@ -72,7 +78,9 @@ public:
                            float angular_vel_x, float angular_vel_y, float angular_vel_z,
                            float density, float E, float nu,
                            float yield_stress, float hardening, float failure_strain = 0.25f,
-                           float tensile_failure_stress = 600.0e6f, int ppc = 8);
+                           float tensile_failure_stress = 600.0e6f, int ppc = 8,
+                           MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
+                           MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped);
 
     void addSTLObject(int obj_id, const std::string& stl_filepath,
                       float pos_x, float pos_y, float pos_z,
@@ -81,7 +89,9 @@ public:
                       float angular_vel_x, float angular_vel_y, float angular_vel_z,
                       float density, float E, float nu,
                       float yield_stress, float hardening, float failure_strain = 0.25f,
-                      float tensile_failure_stress = 600.0e6f, int ppc = 8);
+                      float tensile_failure_stress = 600.0e6f, int ppc = 8,
+                      MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
+                      MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped);
 
     void addParticlesDirect(const std::vector<MPMParticle3D>& particles) {
         if (particles.empty()) return;
@@ -102,6 +112,7 @@ public:
     void syncParticlesToHost();
     void syncGridToHost();
     void syncToDevice();
+    MPMVTKSnapshot3D extractVTKSnapshot(bool has_vel = true, bool has_stress = true, bool has_strain = true, bool has_damage = true, bool has_temp = true);
     void uploadGridToDevice();
     void uploadMaterialTableToDevice();
 
@@ -154,16 +165,20 @@ public:
     MPMTile3D** getDeviceTilePtrs() { return d_tile_ptrs; }
     int* getDeviceTileTable() { return d_tile_table; }
     MaterialTable3D* getDeviceMaterialTables() { return d_material_tables; }
+    // Extract 2D slice directly on GPU to host vector (eliminates 512 MB PCIe downloads)
+    void extractSliceToHost(std::vector<float>& out_slice, const std::string& axis, float offset, const std::string& req_qty = "plastic_strain");
+
     size_t getParticleCount() const { return m_host_particles.size(); }
     size_t getAllocatedVRAM() const;
+
+    void uploadAoS2SoA();
+    void downloadSoA2AoS();
 
 private:
     void allocateDeviceMemory();
     void freeDeviceMemory();
     void allocateSoABuffer(size_t count);
     void freeSoABuffer();
-    void uploadAoS2SoA();
-    void downloadSoA2AoS();
 
     int m_nx{32};
     int m_ny{32};
@@ -205,6 +220,9 @@ private:
     MaterialTable3D* d_material_tables{nullptr};
     size_t m_allocated_material_tables{0};
     float* d_max_v_buf{nullptr};
+    int* d_max_v_pinned{nullptr};
+    float* d_telemetry_slice_buf{nullptr};
+    size_t m_allocated_slice_buf{0};
     // Persistent FSI external force buffer: 3 floats per node (fx, fy, fz)
     float* d_f_ext_fsi{nullptr};
     size_t m_allocated_f_ext_fsi{0};

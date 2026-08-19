@@ -45,9 +45,11 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
         }
     } else {
         const materialKeys = [
+            'transfer_scheme', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
             'failure_strain', 'tensile_failure_stress',
-            'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
+            'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m',
+            'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5', 'T_melt', 'T_room', 'Cp',
             'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
             'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
             'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
@@ -65,6 +67,17 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
             parameters['preset'] = 'Custom';
         }
     }
+
+    if (parameters['transfer_scheme'] === undefined) parameters['transfer_scheme'] = 'BSpline';
+    if (parameters['weibull_modulus'] === undefined) parameters['weibull_modulus'] = 0.0;
+    if (parameters['weibull_scale'] === undefined) parameters['weibull_scale'] = 1.0;
+    if (parameters['fracture_toughness'] === undefined) parameters['fracture_toughness'] = 0.0;
+    if (parameters['jc_d1'] === undefined) parameters['jc_d1'] = 0.0;
+    if (parameters['jc_d2'] === undefined) parameters['jc_d2'] = 0.0;
+    if (parameters['jc_d3'] === undefined) parameters['jc_d3'] = 0.0;
+    if (parameters['jc_d4'] === undefined) parameters['jc_d4'] = 0.0;
+    if (parameters['jc_d5'] === undefined) parameters['jc_d5'] = 0.0;
+    if (parameters['debris_bulk_factor'] === undefined) parameters['debris_bulk_factor'] = 0.1;
 }
 
 export function syncFEMObjectParameters(node: Node, parameters: Record<string, any>, _updatedKey?: string): void {
@@ -336,10 +349,10 @@ export class StateManager {
         }
     }
 
-    createWorkspace() {
+    createWorkspace(): void {
         this.appState.workspaceCounter++;
         const newId = `ws-${Math.random().toString(36).substr(2, 9)}`;
-        const activeWs = this.getActiveWorkspace();
+        const newModel = this.createModel(`Model 1`);
         
         const defaultLayout: LayoutNode = {
             type: 'split',
@@ -399,8 +412,8 @@ export class StateManager {
         const newWorkspace: Workspace = {
             id: newId,
             name: `Workspace ${this.appState.workspaceCounter}`,
-            modelIds: [],
-            activeModelId: null,
+            modelIds: [newModel.id],
+            activeModelId: newModel.id,
             layout: defaultLayout,
             connections: []
         };
@@ -670,7 +683,7 @@ export class StateManager {
         return newId;
     }
 
-    pasteModelFromClipboard(offsetX: number = 100, offsetY: number = 100): Model | null {
+    cloneModelFromClipboard(offsetX: number = 100, offsetY: number = 100): Model | null {
         if (!this.clipboardModel) return null;
 
         const newModelId = `model-${Math.random().toString(36).substr(2, 9)}`;
@@ -685,6 +698,9 @@ export class StateManager {
             counter++;
         }
 
+        const modelCount = Object.keys(this.appState.models).length;
+        const calcOffsetX = offsetX === 100 ? Math.max(100, modelCount * 550) : offsetX;
+
         const tempExistingIds = new Set<string>();
         Object.values(this.appState.models).forEach(model => {
             model.nodes.forEach(n => tempExistingIds.add(n.id));
@@ -697,8 +713,8 @@ export class StateManager {
             return {
                 ...JSON.parse(JSON.stringify(node)),
                 id: newNodeId,
-                x: node.x + offsetX,
-                y: node.y + offsetY
+                x: node.x + calcOffsetX,
+                y: node.y + (offsetY !== 0 ? offsetY : 0)
             };
         });
 
@@ -721,14 +737,23 @@ export class StateManager {
 
         this.appState.models[newModelId] = newModel;
 
-        const activeWs = this.getActiveWorkspace();
-        activeWs.modelIds.push(newModelId);
-        activeWs.activeModelId = newModelId;
-
         // Initialize statuses
         this.modelStatuses.set(newModelId, 'UNINITIALIZED');
         this.modelProgresses.set(newModelId, 0);
         this.modelSimTimes.set(newModelId, 0.0);
+
+        return newModel;
+    }
+
+    pasteModelFromClipboard(offsetX: number = 100, offsetY: number = 100): Model | null {
+        const newModel = this.cloneModelFromClipboard(offsetX, offsetY);
+        if (!newModel) return null;
+
+        const activeWs = this.getActiveWorkspace();
+        if (activeWs) {
+            activeWs.modelIds.push(newModel.id);
+            activeWs.activeModelId = newModel.id;
+        }
 
         this.pushAppState(this.appState);
 
@@ -744,7 +769,8 @@ export class StateManager {
 
     getSimulationState(targetModelId: string | 'all'): SimulationState | null {
         if (targetModelId === 'all') {
-            return this.getCurrentState();
+            const ws = this.getActiveWorkspace();
+            return ws ? this.synthesizeWorkspaceState(ws) : null;
         }
         const model = this.appState.models[targetModelId];
         const ws = this.getActiveWorkspace();
@@ -755,7 +781,6 @@ export class StateManager {
             layout: JSON.parse(JSON.stringify(ws.layout))
         };
     }
-
 
     private synthesizeWorkspaceState(ws: Workspace): SimulationState {
         const nodes: Node[] = [];
@@ -778,12 +803,10 @@ export class StateManager {
         };
     }
 
-
-
     pushAppState(newAppState: AppState, autoSave: boolean = true): void {
         const stateCopy = JSON.parse(JSON.stringify(newAppState)) as AppState;
         
-        // Heal duplicate node IDs to prevent models merging
+        // Heal duplicate node IDs & un-smerge cross-contaminated models
         this.healDuplicateNodeIds(stateCopy);
 
         // Ensure menu bar exists on all layouts
@@ -796,8 +819,6 @@ export class StateManager {
         Object.values(stateCopy.models).forEach(model => {
             constrainAllSlices(model);
         });
-
-
 
         if (this.currentIndex < this.history.length - 1) {
             this.history = this.history.slice(0, this.currentIndex + 1);
@@ -817,91 +838,93 @@ export class StateManager {
 
     pushState(newState: SimulationState, autoSave: boolean = true): void {
         this.healNodes(newState.nodes, newState);
-        // Construct new AppState from the SimulationState
         const appStateCopy = JSON.parse(JSON.stringify(this.appState)) as AppState;
         const ws = appStateCopy.workspaces.find(w => w.id === appStateCopy.activeWorkspaceId);
         if (!ws) return;
 
         ws.layout = JSON.parse(JSON.stringify(newState.layout));
 
-        // Sync nodes and connections back to models and workspace
-        const modelsInWs = ws.modelIds.map(id => appStateCopy.models[id]).filter(m => !!m);
-
-        // Track node membership
-        const nodeToModelMap: Record<string, string> = {};
-        modelsInWs.forEach(model => {
-            model.nodes.forEach(n => {
-                nodeToModelMap[n.id] = model.id;
-            });
-        });
-
-        // Determine which models need to be rebuilt.
-        // We always rebuild the active model, plus any model that has nodes in newState.nodes.
-        const modelsToRebuild = new Set<string>();
-        if (ws.activeModelId) {
-            modelsToRebuild.add(ws.activeModelId);
+        const activeModelId = ws.activeModelId || (ws.modelIds.length > 0 ? ws.modelIds[0] : null);
+        if (!activeModelId) {
+            this.pushAppState(appStateCopy, autoSave);
+            return;
         }
+
+        // Heal duplicate node IDs first so that node IDs are strictly unique across all models
+        this.healDuplicateNodeIds(appStateCopy);
+
+        // Build a mapping of which model owns which existing node ID
+        const nodeOwnerMap = new Map<string, string>();
+        Object.entries(appStateCopy.models).forEach(([mId, model]) => {
+            model.nodes.forEach(n => nodeOwnerMap.set(n.id, mId));
+        });
+
+        // Group incoming nodes by their owner model (or default to activeModel if newly created)
+        const modelNodesMap = new Map<string, Node[]>();
+        ws.modelIds.forEach(mId => {
+            modelNodesMap.set(mId, []);
+        });
+
         newState.nodes.forEach(node => {
-            const mId = nodeToModelMap[node.id];
-            if (mId) {
-                modelsToRebuild.add(mId);
-            }
-        });
-
-        // Clear existing nodes and connections ONLY for models being rebuilt
-        modelsInWs.forEach(model => {
-            if (modelsToRebuild.has(model.id)) {
-                model.nodes = [];
-                model.connections = [];
-            }
-        });
-
-        // Clear only cross-model connections involving rebuilt models
-        ws.connections = ws.connections.filter(conn => {
-            const fromModelId = nodeToModelMap[conn.fromNode];
-            const toModelId = nodeToModelMap[conn.toNode];
-            const involvesRebuilt = (fromModelId && modelsToRebuild.has(fromModelId)) ||
-                                    (toModelId && modelsToRebuild.has(toModelId));
-            return !involvesRebuilt;
-        });
-
-        // Distribute nodes
-        newState.nodes.forEach(node => {
-            let modelId = nodeToModelMap[node.id];
-            if (!modelId || !appStateCopy.models[modelId]) {
-                // New node goes to active model
-                modelId = ws.activeModelId || Object.keys(appStateCopy.models)[0];
-            }
-            if (modelId && appStateCopy.models[modelId]) {
-                appStateCopy.models[modelId].nodes.push(node);
-            }
-        });
-
-        // Distribute connections
-        newState.connections.forEach(conn => {
-            const fromModelId = appStateCopy.models[ws.modelIds.find(id => appStateCopy.models[id].nodes.some(n => n.id === conn.fromNode)) || '']?.id;
-            const toModelId = appStateCopy.models[ws.modelIds.find(id => appStateCopy.models[id].nodes.some(n => n.id === conn.toNode)) || '']?.id;
-
-            if (fromModelId && toModelId && fromModelId === toModelId) {
-                if (modelsToRebuild.has(fromModelId)) {
-                    // Internal connection for a rebuilt model: add it
-                    appStateCopy.models[fromModelId].connections.push(conn);
+            const ownerModelId = nodeOwnerMap.get(node.id) || activeModelId;
+            if (modelNodesMap.has(ownerModelId)) {
+                modelNodesMap.get(ownerModelId)!.push(node);
+            } else if (appStateCopy.models[ownerModelId]) {
+                if (!modelNodesMap.has(ownerModelId)) {
+                    modelNodesMap.set(ownerModelId, []);
                 }
+                modelNodesMap.get(ownerModelId)!.push(node);
             } else {
-                // Cross-model connection: add it if it involves a rebuilt model
-                const involvesRebuilt = (fromModelId && modelsToRebuild.has(fromModelId)) || 
-                                        (toModelId && modelsToRebuild.has(toModelId));
-                if (involvesRebuilt) {
-                    const exists = ws.connections.some(c => 
+                if (modelNodesMap.has(activeModelId)) {
+                    modelNodesMap.get(activeModelId)!.push(node);
+                }
+            }
+        });
+
+        // Update each workspace model's nodes and internal connections
+        const allWorkspaceNodeIds = new Set<string>();
+
+        ws.modelIds.forEach(mId => {
+            const model = appStateCopy.models[mId];
+            if (!model) return;
+
+            const updatedNodes = modelNodesMap.get(mId) || [];
+            if (updatedNodes.length > 0) {
+                model.nodes = updatedNodes;
+                const modelNodeIds = new Set(updatedNodes.map(n => n.id));
+                updatedNodes.forEach(n => allWorkspaceNodeIds.add(n.id));
+
+                // Internal connections
+                model.connections = newState.connections.filter(c => modelNodeIds.has(c.fromNode) && modelNodeIds.has(c.toNode));
+            } else {
+                model.nodes.forEach(n => allWorkspaceNodeIds.add(n.id));
+            }
+        });
+
+        // Cross-model connections within the workspace
+        const wsConnections: Connection[] = [];
+        newState.connections.forEach(conn => {
+            if (allWorkspaceNodeIds.has(conn.fromNode) && allWorkspaceNodeIds.has(conn.toNode)) {
+                // Check if it's already an internal connection of any model
+                const isInternal = ws.modelIds.some(mId => {
+                    const model = appStateCopy.models[mId];
+                    if (!model) return false;
+                    const nodeIds = new Set(model.nodes.map(n => n.id));
+                    return nodeIds.has(conn.fromNode) && nodeIds.has(conn.toNode);
+                });
+                if (!isInternal) {
+                    const exists = wsConnections.some(c =>
                         c.fromNode === conn.fromNode && c.fromPort === conn.fromPort &&
                         c.toNode === conn.toNode && c.toPort === conn.toPort
                     );
                     if (!exists) {
-                        ws.connections.push(conn);
+                        wsConnections.push(conn);
                     }
                 }
             }
         });
+
+        ws.connections = wsConnections;
 
         this.pushAppState(appStateCopy, autoSave);
     }
@@ -1346,6 +1369,15 @@ export class StateManager {
             }
         });
 
+        // Ensure 3D binary particle/mesh frames are also broadcast to all Telemetry3DViewport nodes in the model
+        if (data instanceof ArrayBuffer) {
+            const vpNodes = nodes.filter(n => n.type === 'Telemetry3DViewport');
+            vpNodes.forEach(vpNode => {
+                this.telemetryStore.set(vpNode.id, data);
+                this.notifyTelemetryUpdate(vpNode.id, data);
+            });
+        }
+
         // Also check for virtual gauge nodes connected to the solver in the reverse direction (VirtualGauges3D -> CFDSolver3D)
         const reverseGaugeConnections = connections.filter(e => e.toNode === nodeId);
         reverseGaugeConnections.forEach(connection => {
@@ -1501,7 +1533,10 @@ export class StateManager {
                 this.healDuplicateNodeIds();
                 let anyChanged = false;
                 Object.values(this.appState.models).forEach(model => {
-                    this.healNodes(model.nodes);
+                    if (this.healModelGraph(model)) {
+                        anyChanged = true;
+                    }
+                    this.healNodes(model.nodes, model);
                     if (constrainAllSlices(model)) {
                         anyChanged = true;
                     }
@@ -1546,7 +1581,8 @@ export class StateManager {
                     };
                     // Self-healing for legacy loaded nodes
                     Object.values(this.appState.models).forEach(model => {
-                        this.healNodes(model.nodes);
+                        this.healModelGraph(model);
+                        this.healNodes(model.nodes, model);
                     });
                     this.history = [JSON.parse(JSON.stringify(this.appState))];
                     this.currentIndex = 0;
@@ -1596,18 +1632,45 @@ export class StateManager {
     duplicateWorkspaceLayout(): void {
         const activeWs = this.getActiveWorkspace();
         this.appState.workspaceCounter++;
-        const newId = `ws-${Math.random().toString(36).substr(2, 9)}`;
+        const newWsId = `ws-${Math.random().toString(36).substr(2, 9)}`;
+
+        const newModelIds: string[] = [];
+        let newActiveModelId: string | null = null;
+
+        activeWs.modelIds.forEach(mId => {
+            const originalModel = this.appState.models[mId];
+            if (originalModel) {
+                this.copyModelToClipboard(mId);
+                const clonedModel = this.cloneModelFromClipboard(0, 0);
+                if (clonedModel) {
+                    newModelIds.push(clonedModel.id);
+                    if (activeWs.activeModelId === mId) {
+                        newActiveModelId = clonedModel.id;
+                    }
+                }
+            }
+        });
+
         const duplicatedWs: Workspace = {
-            id: newId,
+            id: newWsId,
             name: `${activeWs.name} (Copy)`,
-            modelIds: [...activeWs.modelIds],
-            activeModelId: activeWs.activeModelId,
+            modelIds: newModelIds.length > 0 ? newModelIds : [...activeWs.modelIds],
+            activeModelId: newActiveModelId || (newModelIds[0] ?? activeWs.activeModelId),
             layout: JSON.parse(JSON.stringify(activeWs.layout)),
             connections: JSON.parse(JSON.stringify(activeWs.connections))
         };
+
         this.appState.workspaces.push(duplicatedWs);
-        this.appState.activeWorkspaceId = newId;
+        this.appState.activeWorkspaceId = newWsId;
         this.pushAppState(this.appState);
+    }
+
+    duplicateModel(modelId?: string): Model | null {
+        const activeWs = this.getActiveWorkspace();
+        const targetModelId = modelId || activeWs.activeModelId;
+        if (!targetModelId) return null;
+        this.copyModelToClipboard(targetModelId);
+        return this.pasteModelFromClipboard(150, 150);
     }
 
     getAppState(): AppState {
@@ -1618,7 +1681,8 @@ export class StateManager {
         this.appState = newAppState;
         this.healDuplicateNodeIds();
         Object.values(this.appState.models).forEach(model => {
-            this.healNodes(model.nodes);
+            this.healModelGraph(model);
+            this.healNodes(model.nodes, model);
         });
         this.pushAppState(this.appState);
     }
@@ -1637,26 +1701,256 @@ export class StateManager {
         return this.getUniqueNodeId(type, existingIds);
     }
 
-    private nodeExistsInAnyModel(nodeId: string, targetAppState: AppState = this.appState): boolean {
-        return Object.values(targetAppState.models).some(m => m.nodes.some(n => n.id === nodeId));
+    public healModelGraph(model: Model): boolean {
+        let changed = false;
+        if (!model || !model.nodes) return false;
+
+        const tempExistingIds = new Set<string>();
+        Object.values(this.appState.models).forEach(m => {
+            m.nodes.forEach(n => tempExistingIds.add(n.id));
+        });
+
+        // 1. If model has MPMDomain3D
+        const mpmDomain3D = model.nodes.find(n => n.type === 'MPMDomain3D');
+        if (mpmDomain3D) {
+            let meshNode = model.nodes.find(n => n.type === 'DomainMesh3D');
+            if (!meshNode) {
+                const meshId = this.getUniqueNodeId('DomainMesh3D', tempExistingIds);
+                meshNode = {
+                    id: meshId,
+                    type: 'DomainMesh3D',
+                    x: mpmDomain3D.x - 280,
+                    y: mpmDomain3D.y - 100,
+                    parameters: {
+                        xmin: -0.1, xmax: 0.5,
+                        ymin: -0.1, ymax: 0.5,
+                        zmin: -0.1, zmax: 0.5,
+                        cell_size: 0.01,
+                        bc_xmin: 'Transmitting', bc_xmax: 'Transmitting',
+                        bc_ymin: 'Transmitting', bc_ymax: 'Transmitting',
+                        bc_zmin: 'Transmitting', bc_zmax: 'Transmitting'
+                    },
+                    inputs: this.getDefaultInputs('DomainMesh3D'),
+                    outputs: this.getDefaultOutputs('DomainMesh3D')
+                };
+                model.nodes.push(meshNode);
+                changed = true;
+            }
+            const hasMeshConn = model.connections.some(c => c.toNode === mpmDomain3D.id && c.toPort === 'mesh');
+            if (!hasMeshConn) {
+                model.connections.push({
+                    fromNode: meshNode.id,
+                    fromPort: 'mesh',
+                    toNode: mpmDomain3D.id,
+                    toPort: 'mesh'
+                });
+                changed = true;
+            }
+
+            let objNode = model.nodes.find(n => n.type === 'MPMObject3D');
+            if (!objNode) {
+                const objId = this.getUniqueNodeId('MPMObject3D', tempExistingIds);
+                objNode = {
+                    id: objId,
+                    type: 'MPMObject3D',
+                    x: mpmDomain3D.x - 280,
+                    y: mpmDomain3D.y + 100,
+                    parameters: {
+                        shape_type: 'Cylinder',
+                        pos_x: 0.0, pos_y: 0.0, pos_z: 0.0,
+                        radius: 0.05, height: 0.2, axis: 'Z',
+                        ppc: 8, particle_distribution: 'Cartesian',
+                        boundary_filling: 'Stairstepped'
+                    },
+                    inputs: this.getDefaultInputs('MPMObject3D'),
+                    outputs: this.getDefaultOutputs('MPMObject3D')
+                };
+                model.nodes.push(objNode);
+                changed = true;
+            }
+            const hasObjConn = model.connections.some(c => c.toNode === mpmDomain3D.id && (c.toPort === 'objects' || c.toPort === 'mpm_objects' || c.toPort === 'in'));
+            if (!hasObjConn) {
+                model.connections.push({
+                    fromNode: objNode.id,
+                    fromPort: 'object',
+                    toNode: mpmDomain3D.id,
+                    toPort: 'objects'
+                });
+                changed = true;
+            }
+
+            let matNode = model.nodes.find(n => n.type === 'MPMMaterialSteel' || n.type === 'Material');
+            if (!matNode) {
+                const matId = this.getUniqueNodeId('MPMMaterialSteel', tempExistingIds);
+                matNode = {
+                    id: matId,
+                    type: 'MPMMaterialSteel',
+                    x: objNode.x - 280,
+                    y: objNode.y,
+                    parameters: {
+                        density: 7850.0,
+                        youngs_modulus: 200.0e9,
+                        poissons_ratio: 0.29,
+                        yield_stress: 400.0e6,
+                        hardening_modulus: 1.0e9,
+                        material_model: 'HypoelasticSteel'
+                    },
+                    inputs: this.getDefaultInputs('MPMMaterialSteel'),
+                    outputs: this.getDefaultOutputs('MPMMaterialSteel')
+                };
+                model.nodes.push(matNode);
+                changed = true;
+            }
+            const hasMatConn = model.connections.some(c => c.toNode === objNode.id && c.toPort === 'material');
+            if (!hasMatConn) {
+                model.connections.push({
+                    fromNode: matNode.id,
+                    fromPort: 'material',
+                    toNode: objNode.id,
+                    toPort: 'material'
+                });
+                changed = true;
+            }
+        }
+
+        // 2. If model has CFDSolver3D
+        const cfdSolver3D = model.nodes.find(n => n.type === 'CFDSolver3D');
+        if (cfdSolver3D) {
+            let meshNode = model.nodes.find(n => n.type === 'DomainMesh3D');
+            if (!meshNode) {
+                const meshId = this.getUniqueNodeId('DomainMesh3D', tempExistingIds);
+                meshNode = {
+                    id: meshId,
+                    type: 'DomainMesh3D',
+                    x: cfdSolver3D.x - 280,
+                    y: cfdSolver3D.y - 120,
+                    parameters: {
+                        xmin: 0.0, xmax: 1.0,
+                        ymin: 0.0, ymax: 1.0,
+                        zmin: 0.0, zmax: 1.0,
+                        cell_size: 0.02,
+                        bc_xmin: 'Transmitting', bc_xmax: 'Transmitting',
+                        bc_ymin: 'Transmitting', bc_ymax: 'Transmitting',
+                        bc_zmin: 'Transmitting', bc_zmax: 'Transmitting'
+                    },
+                    inputs: this.getDefaultInputs('DomainMesh3D'),
+                    outputs: this.getDefaultOutputs('DomainMesh3D')
+                };
+                model.nodes.push(meshNode);
+                changed = true;
+            }
+            const hasMeshConn = model.connections.some(c => c.toNode === cfdSolver3D.id && c.toPort === 'mesh');
+            if (!hasMeshConn) {
+                model.connections.push({
+                    fromNode: meshNode.id,
+                    fromPort: 'mesh',
+                    toNode: cfdSolver3D.id,
+                    toPort: 'mesh'
+                });
+                changed = true;
+            }
+        }
+
+        // 3. If model has CFDSolver2D
+        const cfdSolver2D = model.nodes.find(n => n.type === 'CFDSolver2D');
+        if (cfdSolver2D) {
+            let meshNode = model.nodes.find(n => n.type === 'DomainMesh2D');
+            if (!meshNode) {
+                const meshId = this.getUniqueNodeId('DomainMesh2D', tempExistingIds);
+                meshNode = {
+                    id: meshId,
+                    type: 'DomainMesh2D',
+                    x: cfdSolver2D.x - 280,
+                    y: cfdSolver2D.y - 120,
+                    parameters: {
+                        domain_width: 1.0,
+                        domain_height: 1.0,
+                        cell_size: 0.01,
+                        bc_left: 'Transmitting', bc_right: 'Transmitting',
+                        bc_top: 'Transmitting', bc_bottom: 'Transmitting'
+                    },
+                    inputs: this.getDefaultInputs('DomainMesh2D'),
+                    outputs: this.getDefaultOutputs('DomainMesh2D')
+                };
+                model.nodes.push(meshNode);
+                changed = true;
+            }
+            const hasMeshConn = model.connections.some(c => c.toNode === cfdSolver2D.id && c.toPort === 'mesh');
+            if (!hasMeshConn) {
+                model.connections.push({
+                    fromNode: meshNode.id,
+                    fromPort: 'mesh',
+                    toNode: cfdSolver2D.id,
+                    toPort: 'mesh'
+                });
+                changed = true;
+            }
+        }
+
+        // 4. If model has 1D CFDSolver
+        const cfdSolver1D = model.nodes.find(n => n.type === 'CFDSolver');
+        if (cfdSolver1D) {
+            let meshNode = model.nodes.find(n => n.type === 'DomainMesh');
+            if (!meshNode) {
+                const meshId = this.getUniqueNodeId('DomainMesh', tempExistingIds);
+                meshNode = {
+                    id: meshId,
+                    type: 'DomainMesh',
+                    x: cfdSolver1D.x - 280,
+                    y: cfdSolver1D.y - 120,
+                    parameters: {
+                        domain_radius: 1.0,
+                        cell_size: 0.001,
+                        left_bc: 'Transmitting', right_bc: 'Transmitting'
+                    },
+                    inputs: this.getDefaultInputs('DomainMesh'),
+                    outputs: this.getDefaultOutputs('DomainMesh')
+                };
+                model.nodes.push(meshNode);
+                changed = true;
+            }
+            const hasMeshConn = model.connections.some(c => c.toNode === cfdSolver1D.id && c.toPort === 'mesh');
+            if (!hasMeshConn) {
+                model.connections.push({
+                    fromNode: meshNode.id,
+                    fromPort: 'mesh',
+                    toNode: cfdSolver1D.id,
+                    toPort: 'mesh'
+                });
+                changed = true;
+            }
+        }
+
+        // Clean up connections pointing to non-existent nodes
+        const nodeIds = new Set(model.nodes.map(n => n.id));
+        const validConns = model.connections.filter(c => nodeIds.has(c.fromNode) && nodeIds.has(c.toNode));
+        if (validConns.length !== model.connections.length) {
+            model.connections = validConns;
+            changed = true;
+        }
+
+        return changed;
     }
 
     public healDuplicateNodeIds(targetAppState: AppState = this.appState): void {
         const seenIds = new Set<string>();
+        const allRenames = new Map<string, string>();
+
         Object.values(targetAppState.models).forEach(model => {
-            const modelIdMap = new Map<string, string>(); // oldId -> newId for this specific model
+            const modelIdMap = new Map<string, string>();
 
             model.nodes.forEach(node => {
                 if (seenIds.has(node.id)) {
                     const prefix = node.id.replace(/-\d+$/, '');
                     let index = 1;
                     let newId = `${prefix}-${index}`;
-                    while (seenIds.has(newId) || this.nodeExistsInAnyModel(newId, targetAppState)) {
+                    while (seenIds.has(newId)) {
                         index++;
                         newId = `${prefix}-${index}`;
                     }
                     console.warn(`[HEAL] Renaming duplicate node ID ${node.id} to ${newId} in model "${model.name}"`);
                     modelIdMap.set(node.id, newId);
+                    allRenames.set(node.id, newId);
                     
                     if (this.selectedNodeId === node.id) {
                         this.selectedNodeId = newId;
@@ -1668,7 +1962,6 @@ export class StateManager {
             });
 
             if (modelIdMap.size > 0) {
-                // Update internal connections of this model
                 model.connections.forEach(conn => {
                     if (modelIdMap.has(conn.fromNode)) {
                         conn.fromNode = modelIdMap.get(conn.fromNode)!;
@@ -1677,34 +1970,63 @@ export class StateManager {
                         conn.toNode = modelIdMap.get(conn.toNode)!;
                     }
                 });
-
-                // Update cross-model workspace connections referencing these renamed nodes
-                targetAppState.workspaces.forEach(ws => {
-                    ws.connections.forEach(conn => {
-                        if (modelIdMap.has(conn.fromNode)) {
-                            conn.fromNode = modelIdMap.get(conn.fromNode)!;
-                        }
-                        if (modelIdMap.has(conn.toNode)) {
-                            conn.toNode = modelIdMap.get(conn.toNode)!;
-                        }
-                    });
-
-                    // Walk the layout tree and update targetNodeId references
-                    const updatePanelTargetId = (layoutNode: LayoutNode) => {
-                        if (!layoutNode) return;
-                        if (layoutNode.type === 'panel') {
-                            if (layoutNode.targetNodeId && modelIdMap.has(layoutNode.targetNodeId)) {
-                                console.log(`[HEAL] Updating layout panel ${layoutNode.id} targetNodeId from ${layoutNode.targetNodeId} to ${modelIdMap.get(layoutNode.targetNodeId)}`);
-                                layoutNode.targetNodeId = modelIdMap.get(layoutNode.targetNodeId)!;
-                            }
-                        } else if (layoutNode.type === 'split') {
-                            updatePanelTargetId(layoutNode.firstChild);
-                            updatePanelTargetId(layoutNode.secondChild);
-                        }
-                    };
-                    updatePanelTargetId(ws.layout);
-                });
             }
+        });
+
+        if (allRenames.size > 0) {
+            targetAppState.workspaces.forEach(ws => {
+                ws.connections.forEach(conn => {
+                    if (allRenames.has(conn.fromNode)) {
+                        conn.fromNode = allRenames.get(conn.fromNode)!;
+                    }
+                    if (allRenames.has(conn.toNode)) {
+                        conn.toNode = allRenames.get(conn.toNode)!;
+                    }
+                });
+
+                const updatePanelTargetId = (layoutNode: LayoutNode) => {
+                    if (!layoutNode) return;
+                    if (layoutNode.type === 'panel') {
+                        if (layoutNode.targetNodeId && allRenames.has(layoutNode.targetNodeId)) {
+                            layoutNode.targetNodeId = allRenames.get(layoutNode.targetNodeId)!;
+                        }
+                    } else if (layoutNode.type === 'split') {
+                        updatePanelTargetId(layoutNode.firstChild);
+                        updatePanelTargetId(layoutNode.secondChild);
+                    }
+                };
+                updatePanelTargetId(ws.layout);
+            });
+        }
+
+        this.unSmergeWorkspaceModels(targetAppState);
+    }
+
+    public unSmergeWorkspaceModels(targetAppState: AppState = this.appState): void {
+        const solverTypes = ['CFDSolver', 'CFDSolver2D', 'CFDSolver3D', 'MPMDomain2D', 'MPMDomain3D', 'FEMDomain3D', 'FSICoupler2D', 'FSICoupler3D', 'FEMFSICoupler3D', 'DomainMesh', 'DomainMesh2D', 'DomainMesh3D'];
+
+        Object.values(targetAppState.models).forEach(model => {
+            const seenTypes = new Set<string>();
+            const duplicateIds = new Set<string>();
+
+            model.nodes.forEach(n => {
+                if (solverTypes.includes(n.type)) {
+                    if (seenTypes.has(n.type)) {
+                        duplicateIds.add(n.id);
+                    } else {
+                        seenTypes.add(n.type);
+                    }
+                }
+            });
+
+            if (duplicateIds.size > 0) {
+                console.warn(`[UNSMERGE] Purging ${duplicateIds.size} duplicate solver/mesh nodes from model "${model.name}"`);
+                model.nodes = model.nodes.filter(n => !duplicateIds.has(n.id));
+                model.connections = model.connections.filter(c => !duplicateIds.has(c.fromNode) && !duplicateIds.has(c.toNode));
+            }
+
+            const nodeIdsInModel = new Set(model.nodes.map(n => n.id));
+            model.connections = model.connections.filter(c => nodeIdsInModel.has(c.fromNode) && nodeIdsInModel.has(c.toNode));
         });
     }
 
@@ -2206,7 +2528,8 @@ export class StateManager {
             },
             'MPMDomain2D': {
                 precision: 'single',
-                transfer_scheme: 'BSpline',
+                particle_distribution: 'Cartesian',
+                boundary_filling: 'Stairstepped',
                 velocity_scheme: 'APIC',
                 space_time_scheme: 'Leapfrog',
                 flip_blend: 0.95,
@@ -2215,9 +2538,10 @@ export class StateManager {
                 cfl: 0.6
             },
             'MPMDomain3D': {
-                device: 'cpu',
+                device: 'gpu',
                 precision: 'single',
-                transfer_scheme: 'BSpline',
+                particle_distribution: 'Cartesian',
+                boundary_filling: 'Stairstepped',
                 velocity_scheme: 'APIC',
                 space_time_scheme: 'Leapfrog',
                 flip_blend: 0.95,
@@ -2227,6 +2551,8 @@ export class StateManager {
             },
             'MPMObject2D': {
                 shape_type: 'Rectangle',
+                particle_distribution: 'Cartesian',
+                boundary_filling: 'Stairstepped',
                 pos_x: 0.5,
                 pos_y: 0.5,
                 size_x: 0.2,
@@ -2238,6 +2564,8 @@ export class StateManager {
             },
             'MPMObject3D': {
                 shape_type: 'Box',
+                particle_distribution: 'Cartesian',
+                boundary_filling: 'Stairstepped',
                 pos_x: 0.5, pos_y: 0.5, pos_z: 0.5,
                 size_x: 0.2, size_y: 0.2, size_z: 0.2,
                 radius: 0.1, inner_radius: 0.0, height: 0.2,
@@ -2248,6 +2576,7 @@ export class StateManager {
             'MPMMaterialSteel': {
                 material_model: 'Linear Elastic',
                 preset: 'Structural Steel (A36)',
+                transfer_scheme: 'BSpline',
                 density: 7850.0,
                 youngs_modulus: 200.0e9,
                 poissons_ratio: 0.29,
@@ -2266,6 +2595,15 @@ export class StateManager {
                 jc_n: 0.26,
                 jc_C: 0.014,
                 jc_m: 1.03,
+                jc_d1: 0.0,
+                jc_d2: 0.0,
+                jc_d3: 0.0,
+                jc_d4: 0.0,
+                jc_d5: 0.0,
+                weibull_modulus: 0.0,
+                weibull_scale: 1.0,
+                fracture_toughness: 0.0,
+                debris_bulk_factor: 0.1,
                 T_melt: 1793.0,
                 T_room: 293.0,
                 Cp: 486.0,

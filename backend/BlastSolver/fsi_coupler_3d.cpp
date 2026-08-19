@@ -34,6 +34,18 @@ void FSICoupler3D::applyFluidPressureToSolid(float dt) {
 
     auto& grid = m_mpm_solver->getGrid();
 
+    auto is_fluid = [&](int xi, int yi, int zi) -> bool {
+        if (xi < 0 || xi >= nx || yi < 0 || yi >= ny || zi < 0 || zi >= nz) return false;
+        size_t idx = (static_cast<size_t>(xi) * ny + yi) * nz + zi;
+        return grid[idx].m <= 1.0e-8f;
+    };
+
+    auto get_cell_p = [&](int xi, int yi, int zi) -> float {
+        auto cv = m_cfd_solver->getCellValues(xi, yi, zi);
+        if (!cv.empty() && cv[0] > 0.0f) return cv[0];
+        return 0.0f;
+    };
+
     // Map CFD gas pressure to solid grid nodes external force
     for (int i = 0; i < nx; ++i) {
         for (int j = 0; j < ny; ++j) {
@@ -42,16 +54,17 @@ void FSICoupler3D::applyFluidPressureToSolid(float dt) {
                 auto& node = grid[node_idx];
 
                 if (node.m > 1.0e-8f) {
-                    std::vector<float> cell_vals = m_cfd_solver->getCellValues(i, j, k);
-                    if (cell_vals.size() >= 5) {
-                        float p_gas = cell_vals[4]; // Pressure is index 4 in cell values
-                        if (p_gas > 0.0f) {
-                            // Compute pressure gradient / surface penalty force on solid boundary nodes
-                            node.f_ext[0] += p_gas * cell_area_yz * 0.1f;
-                            node.f_ext[1] += p_gas * cell_area_zx * 0.1f;
-                            node.f_ext[2] += p_gas * cell_area_xy * 0.1f;
-                        }
-                    }
+                    float f_x = 0.0f, f_y = 0.0f, f_z = 0.0f;
+                    if (i > 0 && is_fluid(i-1, j, k)) f_x += get_cell_p(i-1, j, k);
+                    if (i < nx-1 && is_fluid(i+1, j, k)) f_x -= get_cell_p(i+1, j, k);
+                    if (j > 0 && is_fluid(i, j-1, k)) f_y += get_cell_p(i, j-1, k);
+                    if (j < ny-1 && is_fluid(i, j+1, k)) f_y -= get_cell_p(i, j+1, k);
+                    if (k > 0 && is_fluid(i, j, k-1)) f_z += get_cell_p(i, j, k-1);
+                    if (k < nz-1 && is_fluid(i, j, k+1)) f_z -= get_cell_p(i, j, k+1);
+
+                    node.f_ext[0] += f_x * cell_area_yz;
+                    node.f_ext[1] += f_y * cell_area_zx;
+                    node.f_ext[2] += f_z * cell_area_xy;
                 }
             }
         }

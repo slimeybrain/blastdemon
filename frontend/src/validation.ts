@@ -1,4 +1,5 @@
 import { SimulationState, Node, Connection } from './types.js';
+import { estimateNodeMemory } from './memory-validator.js';
 
 export interface NodeStatus {
     state: 'error' | 'warning' | 'valid';
@@ -714,8 +715,8 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             if (!objConn) {
                 addMessage(node.id, 'error', "No MPM Object 2D connected to MPM Domain 2D. At least one MPM Object node is required.");
             }
-            const detConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'detonator');
-            if (detConn) {
+            const detConns = state.connections.filter(c => c.toNode === node.id && c.toPort === 'detonator');
+            for (const detConn of detConns) {
                 const detNode = state.nodes.find(n => n.id === detConn.fromNode);
                 if (!detNode || detNode.type !== 'DetonatorLocation') {
                     const connKey = `${detConn.fromNode}:${detConn.fromPort}->${detConn.toNode}:${detConn.toPort}`;
@@ -734,8 +735,8 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             if (!objConn) {
                 addMessage(node.id, 'error', "No MPM Object 3D connected to MPM Domain 3D. At least one MPM Object node is required.");
             }
-            const detConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'detonator');
-            if (detConn) {
+            const detConns = state.connections.filter(c => c.toNode === node.id && c.toPort === 'detonator');
+            for (const detConn of detConns) {
                 const detNode = state.nodes.find(n => n.id === detConn.fromNode);
                 if (!detNode || detNode.type !== 'DetonatorLocation3D') {
                     const connKey = `${detConn.fromNode}:${detConn.fromPort}->${detConn.toNode}:${detConn.toPort}`;
@@ -1329,6 +1330,10 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                     addMessage(node.id, 'warning', `Parameter '${key.replace(/_/g, ' ').toUpperCase()}' is not provided.`);
                 }
             }
+        }
+        const memEst = estimateNodeMemory(node);
+        if (memEst.riskLevel === 'CRITICAL') {
+            addMessage(node.id, 'warning', `Critical memory footprint (${memEst.summaryText}). Pre-flight validation will enforce safe allocation check.`);
         }
     });
 

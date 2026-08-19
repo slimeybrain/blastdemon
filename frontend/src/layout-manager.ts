@@ -935,10 +935,10 @@ export class LayoutManager {
                 };
                 if (activeWs) collectClaimedModels(activeWs.layout);
 
-                let unclaimedModel = (activeModel && activeModel.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'FSICoupler3D' || n.type === 'MPMDomain3D') && !claimedModelIds.has(activeModel.id)) ? activeModel : null;
+                let unclaimedModel = (activeModel && activeModel.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'FSICoupler3D' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D' || n.type === 'FEMFSICoupler3D') && !claimedModelIds.has(activeModel.id)) ? activeModel : null;
                 if (!unclaimedModel) {
                     unclaimedModel = allModels.find(m =>
-                        m.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'FSICoupler3D' || n.type === 'MPMDomain3D') && !claimedModelIds.has(m.id)
+                        m.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'FSICoupler3D' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D' || n.type === 'FEMFSICoupler3D') && !claimedModelIds.has(m.id)
                     ) || null;
                 }
                 if (unclaimedModel) {
@@ -2055,6 +2055,7 @@ class ExecutionManagerComponent {
         quickBtn.style.display = 'none';
         quickBtn.onclick = (e) => {
             e.stopPropagation();
+            this.stateManager.setActiveModel(model.id);
             const status = this.stateManager.getModelStatus(model.id);
             if (status === 'RUNNING') {
                 document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'PAUSE' } }));
@@ -2125,15 +2126,19 @@ class ExecutionManagerComponent {
         };
 
         const initBtn = createMiniBtn('Init', 'Initialize Solver Process', 'execution-btn-init', () => {
+            this.stateManager.setActiveModel(model.id);
             document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'INIT' } }));
         });
         const playBtn = createMiniBtn('Run', 'Run to Completion', 'execution-btn-run', () => {
+            this.stateManager.setActiveModel(model.id);
             document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'EXEC_ALL' } }));
         });
         const pauseBtn = createMiniBtn('Pause', 'Pause execution', 'execution-btn-pause', () => {
+            this.stateManager.setActiveModel(model.id);
             document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'PAUSE' } }));
         });
         const termBtn = createMiniBtn('Term', 'Terminate Solver & Clear Memory', 'execution-btn-term', () => {
+            this.stateManager.setActiveModel(model.id);
             document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'TERMINATE' } }));
         });
 
@@ -2162,6 +2167,7 @@ class ExecutionManagerComponent {
             btn.title = `Step by ${steps} steps`;
             btn.onclick = (e) => {
                 e.stopPropagation();
+                this.stateManager.setActiveModel(model.id);
                 document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'STEP', steps } }));
             };
             stepGrid.appendChild(btn);

@@ -47,6 +47,7 @@ set_target_properties(Broker PROPERTIES CXX_STANDARD 17)
 
 # Core Solver Library — 1D, 2D, and 3D CPU + CUDA solver components compiled once
 add_library(BlastSolverCore STATIC
+    backend/BlastSolver/system_memory_guard.cpp
     backend/BlastSolver/cfd_solver.cpp
     backend/BlastSolver/cfd_solver_init.cpp
     backend/BlastSolver/cfd_solver_step.cpp
@@ -168,6 +169,9 @@ if(BUILD_TESTS)
     add_test_executable_if_exists(test_fem_3d_mpm_hex_contact backend/BlastSolver/test_fem_3d_mpm_hex_contact.cpp)
     add_test_executable_if_exists(test_fem_3d_mpm_debris_blast_accel backend/BlastSolver/test_fem_3d_mpm_debris_blast_accel.cu)
     add_test_executable_if_exists(test_crest_davis_mpm backend/BlastSolver/test_crest_davis_mpm.cpp)
+    add_test_executable_if_exists(test_user_taylor_anvil backend/BlastSolver/test_user_taylor_anvil.cpp)
+    add_test_executable_if_exists(test_radial_mls_motion backend/BlastSolver/test_radial_mls_motion.cpp)
+    add_test_executable_if_exists(test_memory_guard backend/BlastSolver/test_memory_guard.cpp)
 endif()
 
 

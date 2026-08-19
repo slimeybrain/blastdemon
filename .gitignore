@@ -10,8 +10,14 @@ build/
 *.vtu
 *.vtp
 *.vtk
+*.pvd
 *.k
 *.key
+vtk_output/
+model-*/
+model_*/
+test_cpu_*
+test_cuda_*
 
 # ─── Frontend artifacts ───────────────────────────────────────────────────────
 frontend/dist/
