@@ -2902,6 +2902,7 @@ let chargeWireBuffer: WebGLBuffer | null = null;
 let chargeWireCount: number = 0;
 
 let latestMPMParticlesData: Float32Array | null = null;
+let latestMPMFloatsPerParticle: number = 14;
 let mpmParticlesBuffer: WebGLBuffer | null = null;
 let mpmParticlesCount: number = 0;
 let showMPMParticles: boolean = true;
@@ -3450,7 +3451,8 @@ function sampleColormapDirect(v: number, cmapName: string, out: Float32Array, of
 }
 
 function getParticleQuantityValue(data: Float32Array, idx: number, qty: string): number {
-    const base = idx * 13;
+    const stride = (data.length % 14 === 0) ? 14 : ((data.length % 13 === 0) ? 13 : (latestMPMFloatsPerParticle || 14));
+    const base = idx * stride;
     if (qty === 'vonMises' || qty === 'von_mises') return data[base + 6];
     if (qty === 'plastic_strain' || qty === 'plasticStrain') return data[base + 7];
     if (qty === 'density') return data[base + 8];
@@ -3458,6 +3460,9 @@ function getParticleQuantityValue(data: Float32Array, idx: number, qty: string):
     if (qty === 'damage') return data[base + 10];
     if (qty === 'has_failed') return data[base + 11];
     if (qty === 'object_id') return data[base + 12];
+    if (qty === 'cluster_id' || qty === 'cluster' || qty === 'fragment' || qty === 'fragments') {
+        return (stride >= 14) ? data[base + 13] : data[base + 12];
+    }
     if (qty === 'velocity') {
         const vx = data[base + 3], vy = data[base + 4], vz = data[base + 5];
         return Math.sqrt(vx * vx + vy * vy + vz * vz);
@@ -3481,7 +3486,8 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
         return;
     }
 
-    const nParticles = Math.floor(latestMPMParticlesData.length / 13);
+    const stride = (latestMPMParticlesData.length % 14 === 0) ? 14 : ((latestMPMParticlesData.length % 13 === 0) ? 13 : (latestMPMFloatsPerParticle || 14));
+    const nParticles = Math.floor(latestMPMParticlesData.length / stride);
     const sizeX = getDimX();
     const sizeY = getDimY();
     const sizeZ = getDimZ();
@@ -3494,12 +3500,17 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
 
     let qtyOffset = 6;
     let isVelocity = false;
+    let isFragment = false;
     if (mpmParticleQuantity === 'plastic_strain' || mpmParticleQuantity === 'plasticStrain') qtyOffset = 7;
     else if (mpmParticleQuantity === 'density') qtyOffset = 8;
     else if (mpmParticleQuantity === 'pressure') qtyOffset = 9;
     else if (mpmParticleQuantity === 'damage') qtyOffset = 10;
     else if (mpmParticleQuantity === 'has_failed') qtyOffset = 11;
     else if (mpmParticleQuantity === 'object_id') qtyOffset = 12;
+    else if (mpmParticleQuantity === 'cluster_id' || mpmParticleQuantity === 'cluster' || mpmParticleQuantity === 'fragment' || mpmParticleQuantity === 'fragments') {
+        qtyOffset = (stride >= 14) ? 13 : 12;
+        isFragment = true;
+    }
     else if (mpmParticleQuantity === 'velocity') isVelocity = true;
 
     let minScalar = mpmParticleMinVal;
@@ -3509,7 +3520,7 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
     let empiricalMax = -Infinity;
 
     for (let i = 0; i < nParticles; i++) {
-        const base = i * 13;
+        const base = i * stride;
         let val = 0.0;
         if (isVelocity) {
             const vx = latestMPMParticlesData[base + 3], vy = latestMPMParticlesData[base + 4], vz = latestMPMParticlesData[base + 5];
@@ -3546,7 +3557,7 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
     const cmap = mpmParticleColormap;
 
     for (let i = 0; i < nParticles; i++) {
-        const base = i * 13;
+        const base = i * stride;
         const px = latestMPMParticlesData[base + 0];
         const py = latestMPMParticlesData[base + 1];
         const pz = latestMPMParticlesData[base + 2];
@@ -3564,15 +3575,41 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
             val = latestMPMParticlesData[base + qtyOffset];
         }
 
-        let normVal = 0.0;
-        if (useLog) {
-            const logVal = Math.log(Math.max(val, 1e-5));
-            normVal = (logVal - logMin) / denom;
+        if (isFragment) {
+            const cid = Math.round(val);
+            if (cid <= 0) {
+                vertexData[vIdx + 3] = 0.45;
+                vertexData[vIdx + 4] = 0.45;
+                vertexData[vIdx + 5] = 0.45;
+            } else {
+                const hue = ((cid * 0.618033988749895) % 1.0) * 360;
+                const s = 0.85;
+                const l = 0.55;
+                const c_val = (1 - Math.abs(2 * l - 1)) * s;
+                const x_val = c_val * (1 - Math.abs((hue / 60) % 2 - 1));
+                const m_val = l - c_val / 2;
+                let r1 = 0, g1 = 0, b1 = 0;
+                if (hue < 60) { r1 = c_val; g1 = x_val; b1 = 0; }
+                else if (hue < 120) { r1 = x_val; g1 = c_val; b1 = 0; }
+                else if (hue < 180) { r1 = 0; g1 = c_val; b1 = x_val; }
+                else if (hue < 240) { r1 = 0; g1 = x_val; b1 = c_val; }
+                else if (hue < 300) { r1 = x_val; g1 = 0; b1 = c_val; }
+                else { r1 = c_val; g1 = 0; b1 = x_val; }
+                vertexData[vIdx + 3] = r1 + m_val;
+                vertexData[vIdx + 4] = g1 + m_val;
+                vertexData[vIdx + 5] = b1 + m_val;
+            }
         } else {
-            normVal = (val - minScalar) / denom;
-        }
+            let normVal = 0.0;
+            if (useLog) {
+                const logVal = Math.log(Math.max(val, 1e-5));
+                normVal = (logVal - logMin) / denom;
+            } else {
+                normVal = (val - minScalar) / denom;
+            }
 
-        sampleColormapDirect(normVal, cmap, vertexData, vIdx + 3);
+            sampleColormapDirect(normVal, cmap, vertexData, vIdx + 3);
+        }
     }
 
     const particleBytes = nParticles * 6 * 4;
@@ -4235,6 +4272,7 @@ function handleFrame(buffer: ArrayBuffer) {
             return;
         }
         const floatsPerParticle = view.getUint32(12, true);
+        latestMPMFloatsPerParticle = floatsPerParticle || 14;
         const particleDataStart = 16;
         const totalFloats = numParticles * floatsPerParticle;
         const availableFloats = Math.floor((buffer.byteLength - particleDataStart) / 4);

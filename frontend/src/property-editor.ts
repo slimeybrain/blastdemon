@@ -357,7 +357,8 @@ export class PropertyEditor {
                     'material_model', 'preset', 'transfer_scheme',
                     'density', 'youngs_modulus', 'poissons_ratio',
                     'tensile_failure_stress',
-                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
+                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                    'dem_transition_enabled', 'fragment_distribution', 'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution'
                 ];
             } else if (matModel === 'Johnson-Cook + Mie-Grüneisen') {
                 paramKeys = [
@@ -371,7 +372,8 @@ export class PropertyEditor {
                     'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5',
                     'T_melt', 'T_room', 'Cp',
                     'mg_gamma0', 'mg_c0', 'mg_s',
-                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
+                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                    'dem_transition_enabled', 'fragment_distribution', 'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution'
                 ];
             } else if (matModel === 'CREST Reactive Burn') {
                 paramKeys = [
@@ -396,7 +398,8 @@ export class PropertyEditor {
                     'enable_timestep_erosion', 'timestep_erosion_factor',
                     'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
                     'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
-                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
+                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                    'dem_transition_enabled', 'fragment_distribution', 'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution'
                 ];
             } else if (matModel === 'Karagozian & Case (K&C)') {
                 paramKeys = [
@@ -409,7 +412,8 @@ export class PropertyEditor {
                     'enable_stress_erosion', 'erosion_stress',
                     'enable_timestep_erosion', 'timestep_erosion_factor',
                     'kc_auto_generate', 'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
-                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
+                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                    'dem_transition_enabled', 'fragment_distribution', 'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution'
                 ];
             } else if (matModel === 'CSCM Concrete') {
                 paramKeys = [
@@ -422,7 +426,8 @@ export class PropertyEditor {
                     'enable_stress_erosion', 'erosion_stress',
                     'enable_timestep_erosion', 'timestep_erosion_factor',
                     'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
-                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
+                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                    'dem_transition_enabled', 'fragment_distribution', 'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution'
                 ];
             } else if (matModel === 'Ideal Gas') {
                 paramKeys = [
@@ -447,7 +452,8 @@ export class PropertyEditor {
                     'enable_strain_erosion', 'erosion_strain',
                     'enable_stress_erosion', 'erosion_stress',
                     'enable_timestep_erosion', 'timestep_erosion_factor',
-                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
+                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                    'dem_transition_enabled', 'fragment_distribution', 'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution'
                 ];
             }
         } else if (node.type === 'MPMDomain2D') {
@@ -1839,6 +1845,7 @@ export class PropertyEditor {
             'failure_strain', 'tensile_failure_stress', 'erosion_strain', 'erosion_stress',
             'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5', 'T_melt', 'T_room', 'Cp',
             'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+            'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution',
             'mg_gamma0', 'mg_c0', 'mg_s',
             'ppc',
             'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
@@ -1870,11 +1877,12 @@ export class PropertyEditor {
         const dropdowns: Record<string, string[]> = {
             'preset': dynamicPresets,
             'material_model': getConstitutiveModels(),
+            'fragment_distribution': ['Rosin-Rammler', 'Mott-Grady', 'Lognormal', 'Monodisperse'],
             'rebar_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
             'beam_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
             'beamQuantity': ['plasticStrain', 'vonMises', 'momentOrForce', 'velocity', 'damage'],
             'beamColormap': ['plasma', 'viridis', 'coolwarm', 'rainbow', 'cividis', 'grayscale'],
-            'mpmParticleQuantity': ['vonMises', 'pressure', 'velocity', 'density', 'plastic_strain', 'damage', 'has_failed', 'object_id'],
+            'mpmParticleQuantity': ['vonMises', 'plastic_strain', 'damage', 'cluster_id', 'pressure', 'velocity', 'density', 'has_failed', 'object_id'],
             'mpmParticleColormap': ['plasma', 'viridis', 'coolwarm', 'rainbow', 'cividis', 'grayscale'],
             'femQuantity': ['vonMises', 'plasticStrain', 'pressure', 'velocity', 'damage'],
             'femColormap': ['plasma', 'viridis', 'coolwarm', 'rainbow', 'cividis', 'grayscale'],

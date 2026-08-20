@@ -69,6 +69,38 @@ void FSICoupler3D::applyFluidPressureToSolid(float dt) {
             }
         }
     }
+
+    // Apply blast aerodynamic drag to discrete DEM particles
+    auto& particles = m_mpm_solver->getParticles();
+    for (auto& p : particles) {
+        if (p.state == 1 || p.has_failed) {
+            int ci = std::clamp(static_cast<int>(std::floor((p.x[0] - m_mpm_solver->getXMin()) / dx)), 0, nx - 1);
+            int cj = std::clamp(static_cast<int>(std::floor((p.x[1] - m_mpm_solver->getYMin()) / dy)), 0, ny - 1);
+            int ck = std::clamp(static_cast<int>(std::floor((p.x[2] - m_mpm_solver->getZMin()) / dz)), 0, nz - 1);
+            auto cv = m_cfd_solver->getCellValues(ci, cj, ck);
+            if (cv.size() >= 5) {
+                float rho_gas = cv[1];
+                float u_gas = cv[2];
+                float v_gas = cv[3];
+                float w_gas = cv[4];
+
+                float rel_vx = u_gas - p.v[0];
+                float rel_vy = v_gas - p.v[1];
+                float rel_vz = w_gas - p.v[2];
+                float rel_v = std::sqrt(rel_vx * rel_vx + rel_vy * rel_vy + rel_vz * rel_vz);
+
+                float r_p = (p.contact_radius > 0.0f) ? p.contact_radius : 0.005f;
+                float A_p = 3.14159265f * r_p * r_p;
+                float Cd = 1.2f;
+                float F_drag = 0.5f * Cd * rho_gas * A_p * rel_v;
+
+                float m_p = std::max(1.0e-12f, p.m);
+                p.v[0] += dt * (F_drag * rel_vx) / m_p;
+                p.v[1] += dt * (F_drag * rel_vy) / m_p;
+                p.v[2] += dt * (F_drag * rel_vz) / m_p;
+            }
+        }
+    }
 }
 
 void FSICoupler3D::enforceSolidVelocityOnFluid() {

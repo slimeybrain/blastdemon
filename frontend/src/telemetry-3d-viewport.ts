@@ -893,9 +893,10 @@ export class Telemetry3DViewport {
         const mpmQuantities = [
             { id: 'vonMises', label: '🛡️ Von Mises' },
             { id: 'plastic_strain', label: '🔨 Plastic Strain' },
+            { id: 'damage', label: '💥 Damage' },
+            { id: 'cluster_id', label: '🧩 Fragments' },
             { id: 'density', label: '⚖️ Density' },
             { id: 'pressure', label: '📊 Pressure' },
-            { id: 'damage', label: '💥 Damage' },
             { id: 'has_failed', label: '⚠️ Failure' },
             { id: 'object_id', label: '🆔 Object ID' },
             { id: 'velocity', label: '💨 Speed' }

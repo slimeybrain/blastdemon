@@ -172,6 +172,7 @@ if(BUILD_TESTS)
     add_test_executable_if_exists(test_user_taylor_anvil backend/BlastSolver/test_user_taylor_anvil.cpp)
     add_test_executable_if_exists(test_radial_mls_motion backend/BlastSolver/test_radial_mls_motion.cpp)
     add_test_executable_if_exists(test_memory_guard backend/BlastSolver/test_memory_guard.cpp)
+    add_test_executable_if_exists(test_mpm_dem_fracture backend/BlastSolver/test_mpm_dem_fracture.cpp)
 endif()
 
 

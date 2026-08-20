@@ -67,6 +67,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'failure_strain', 'tensile_failure_stress', 'erosion_strain', 'erosion_stress',
         'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5', 'T_melt', 'T_room', 'Cp',
         'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+        'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution',
         'mg_gamma0', 'mg_c0', 'mg_s',
         'ppc',
         'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',

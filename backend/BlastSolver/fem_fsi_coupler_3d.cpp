@@ -407,7 +407,7 @@ void FEMFSICoupler3D<T>::applyFluidPressureToStructure(T dt) {
                 grad_pz = static_cast<float>(p_C - sample_p_at(p.x[0], p.x[1], zmin + (k - 0.5) * dz)) / static_cast<float>(dz);
             }
 
-            float r_p = (p.lp[0] > 0.0f) ? p.lp[0] : (0.5f * std::cbrt(std::max(1.0e-30f, p.V)));
+            float r_p = (p.contact_radius > 0.0f) ? p.contact_radius : ((p.lp[0] > 0.0f) ? p.lp[0] : (0.5f * std::cbrt(std::max(1.0e-30f, p.V))));
             float A_p = 3.14159265f * r_p * r_p;
             float V_p = (p.V > 0.0f) ? p.V : ((4.0f / 3.0f) * 3.14159265f * r_p * r_p * r_p);
 

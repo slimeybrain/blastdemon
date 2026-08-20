@@ -1123,6 +1123,76 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         shortDesc: 'Parent material post-failure bulk stiffness ratio (Default: 0.10)',
         detailedDesc: 'Dimensionless fraction (0.0 to 1.0) of intact bulk modulus retained by completely failed/fragmented parent material when subjected to hydrostatic re-compression (J < 1.0). In the unified parent material framework, particles preserve their parent EOS, density, and shock impedance while using this factor for crushed aggregate re-compaction.'
     },
+    'dem_transition_enabled': {
+        key: 'dem_transition_enabled',
+        label: 'MPM-to-DEM Dynamic Transition',
+        category: 'Discrete Fracture & DEM Dynamics',
+        shortDesc: 'Transition failed material points into discrete DEM contact grains',
+        detailedDesc: 'When enabled, material points reaching full damage (D >= 1.0) dynamically decouple from the background Eulerian grid and transition into discrete Lagrangian DEM grains. This eliminates grid velocity smoothing across crack interfaces and enables discrete, non-smeared fragment flight with pairwise contact and friction.'
+    },
+    'fragment_distribution': {
+        key: 'fragment_distribution',
+        label: 'Fragment Size Distribution Model',
+        category: 'Discrete Fracture & DEM Dynamics',
+        shortDesc: 'Statistical fragment size model (Rosin-Rammler, Mott-Grady, Lognormal, Monodisperse)',
+        detailedDesc: 'Selects the statistical probability distribution function used to assign physical fragment grain diameters upon fracture. Rosin-Rammler and Mott-Grady capture multi-scale fragments ranging from fine dust/spall to large macro-fragments.'
+    },
+    'fragment_min_size': {
+        key: 'fragment_min_size',
+        label: 'Minimum Fragment Diameter (d_min)',
+        unit: 'm',
+        category: 'Discrete Fracture & DEM Dynamics',
+        shortDesc: 'Smallest fragment grain size (Default: 0.002 m)',
+        detailedDesc: 'Lower bound for the fragment size distribution (m). Represents fine spallation grains and dust with high aerodynamic drag.'
+    },
+    'fragment_max_size': {
+        key: 'fragment_max_size',
+        label: 'Maximum Fragment Diameter (d_max)',
+        unit: 'm',
+        category: 'Discrete Fracture & DEM Dynamics',
+        shortDesc: 'Largest fragment grain size (Default: 0.040 m)',
+        detailedDesc: 'Upper characteristic scale for macro-fragments (m). Governs the size of large structural chunks and casing fragments.'
+    },
+    'fragment_weibull_n': {
+        key: 'fragment_weibull_n',
+        label: 'Fragment Dispersion Exponent (n)',
+        unit: 'dim',
+        category: 'Discrete Fracture & DEM Dynamics',
+        shortDesc: 'Rosin-Rammler / Weibull slope exponent n (Recommended: 1.2 to 2.5)',
+        detailedDesc: 'Shape parameter n of the Rosin-Rammler cumulative mass distribution F(d) = 1 - exp(-(d/d_0)^n). Lower n produces wide multi-modal fragment dispersion with both very fine dust and large chunks; higher n produces more uniform fragment sizing.'
+    },
+    'fragment_clumping_radius': {
+        key: 'fragment_clumping_radius',
+        label: 'Fragment Clumping Radius',
+        unit: 'm',
+        category: 'Discrete Fracture & DEM Dynamics',
+        shortDesc: 'Spatial neighborhood search radius for multi-particle fragment clusters (Default: 0.015 m)',
+        detailedDesc: 'Spatial search radius (m) used to group contiguous failed DEM particles into unified rigid/deformable fragment clusters with shared cluster identifiers.'
+    },
+    'fragment_ejection_jitter': {
+        key: 'fragment_ejection_jitter',
+        label: 'Strain-Energy Kinetic Ejection Jitter',
+        unit: 'dim',
+        category: 'Discrete Fracture & DEM Dynamics',
+        shortDesc: 'Elastic energy to kinetic breakup velocity fraction (Default: 0.35)',
+        detailedDesc: 'Fraction (0.0 to 1.0) of stored elastic strain energy U_e = 0.5 * (sigma : eps_e) instantaneously converted into radial kinetic separation jitter v_kick = jitter * sqrt(2 * U_e / rho) at the moment of fracture.'
+    },
+    'fragment_contact_friction': {
+        key: 'fragment_contact_friction',
+        label: 'Fragment Inter-Grain Friction (mu_dem)',
+        unit: 'dim',
+        category: 'Discrete Fracture & DEM Dynamics',
+        shortDesc: 'Coulomb friction coefficient between colliding fragments (Default: 0.55)',
+        detailedDesc: 'Coulomb sliding friction coefficient between colliding DEM debris grains and against solid boundaries.'
+    },
+    'fragment_restitution': {
+        key: 'fragment_restitution',
+        label: 'Fragment Coefficient of Restitution (e_dem)',
+        unit: 'dim',
+        category: 'Discrete Fracture & DEM Dynamics',
+        shortDesc: 'Normal restitution coefficient for DEM collisions (Default: 0.30)',
+        detailedDesc: 'Normal coefficient of restitution (0.0 = fully plastic energy dissipation, 1.0 = perfectly elastic rebound) for DEM grain-to-grain and grain-to-wall collisions.'
+    },
     'T_melt': {
         key: 'T_melt',
         label: 'Melting Temperature (T_melt)',
@@ -2401,7 +2471,12 @@ export function getSolverScope(key: string, nodeType?: string): SolverScope {
     }
 
     // Material parameters key-based mapping
-    const mpmOnlyKeys = ['transfer_scheme', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'];
+    const mpmOnlyKeys = [
+        'transfer_scheme', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+        'dem_transition_enabled', 'fragment_distribution', 'fragment_min_size', 'fragment_max_size',
+        'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter',
+        'fragment_contact_friction', 'fragment_restitution'
+    ];
     if (mpmOnlyKeys.includes(key)) return 'MPM';
 
     const femOnlyKeys = [

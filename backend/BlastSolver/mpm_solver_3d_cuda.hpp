@@ -24,8 +24,11 @@ struct MPMParticle3DSoA {
     float* v_min{nullptr};
     float* s_shock{nullptr};
     float* weibull_factor{nullptr};
+    float* contact_radius{nullptr};
     int* has_failed{nullptr};
     int* object_id{nullptr};
+    int* state{nullptr};
+    int* cluster_id{nullptr};
 };
 
 // 3D MPM Tile structure matching TILE_SIZE_3D = 8 (512 nodes per block) for CFD-MPM alignment
@@ -93,6 +96,8 @@ public:
                       MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
                       MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped);
 
+    void seedMottGradyFragments(int obj_id);
+
     void addParticlesDirect(const std::vector<MPMParticle3D>& particles) {
         if (particles.empty()) return;
         if (!m_host_particles.empty() && d_soa_buffer && !m_device_dirty) {
@@ -118,6 +123,7 @@ public:
 
     // Clear the active grid regions via particle neighborhood (fast sparse clear)
     void clearGridDevice();
+    void evaluateDEMContactDevice(float dt);
     // Run only the P2G scatter pass on GPU, then sync grid to host for FSI force injection
     void particleToGridOnly();
     // Run P2G scatter pass entirely on GPU, with no host synchronization (high performance FSI)
@@ -136,6 +142,13 @@ public:
         }
         static MaterialTable3D default_mat{};
         return default_mat;
+    }
+    void setMaterialTable(int object_id, const MaterialTable3D& mat) {
+        if (object_id >= static_cast<int>(m_material_tables.size())) {
+            m_material_tables.resize(object_id + 1);
+        }
+        m_material_tables[object_id] = mat;
+        m_device_dirty = true;
     }
 
     const std::vector<MPMParticle3D>& getParticles() const { return m_host_particles; }
@@ -233,6 +246,12 @@ private:
     int m_num_active_nodes{0};
     void allocateActiveNodeBuffers();
     void freeActiveNodeBuffers();
+
+    // Spatial cell linked-list buffers for DEM-DEM and DEM-MPM contact
+    int* d_cell_head{nullptr};
+    int* d_particle_next{nullptr};
+    size_t m_allocated_cell_head{0};
+    size_t m_allocated_particle_next{0};
 
     MPMParticle3D* d_temp_aos_particles{nullptr};
     size_t m_allocated_temp_aos_particles{0};
