@@ -17,12 +17,12 @@ export interface MPMGridContour2D {
     values: Float32Array; // Flattened scalar field values
 }
 
-export type ColorMapType = 'viridis' | 'plasma' | 'jet' | 'coolwarm' | 'grayscale';
+export type ColorMapType = 'rainbow' | 'viridis' | 'plasma' | 'jet' | 'coolwarm' | 'grayscale';
 
 export class MPMRenderer2D {
     private canvas: HTMLCanvasElement;
     private ctx: CanvasRenderingContext2D;
-    private colorMap: ColorMapType = 'plasma';
+    private colorMap: ColorMapType = 'rainbow';
     private particleRadius: number = 3.0;
 
     constructor(canvas: HTMLCanvasElement) {
@@ -44,6 +44,14 @@ export class MPMRenderer2D {
     private sampleColormap(val: number): [number, number, number] {
         const v = Math.max(0.0, Math.min(1.0, val));
         switch (this.colorMap) {
+            case 'rainbow': {
+                // Classic Rainbow palette (Blue -> Cyan -> Green -> Yellow -> Red)
+                const four = 4.0 * v;
+                const r = Math.min(255, Math.max(0, Math.floor(255 * Math.min(four - 1.5, -four + 4.5))));
+                const g = Math.min(255, Math.max(0, Math.floor(255 * Math.min(four - 0.5, -four + 3.5))));
+                const b = Math.min(255, Math.max(0, Math.floor(255 * Math.min(four + 0.5, -four + 2.5))));
+                return [r, g, b];
+            }
             case 'plasma': {
                 // Approximate Plasma palette: (Purple -> Red -> Yellow)
                 const r = Math.min(255, Math.floor(255 * Math.pow(v, 0.5)));
@@ -73,10 +81,16 @@ export class MPMRenderer2D {
                 const b = Math.floor(255 * (1.0 - v));
                 return [r, g, b];
             }
-            case 'grayscale':
-            default: {
+            case 'grayscale': {
                 const c = Math.floor(255 * v);
                 return [c, c, c];
+            }
+            default: {
+                const four = 4.0 * v;
+                const r = Math.min(255, Math.max(0, Math.floor(255 * Math.min(four - 1.5, -four + 4.5))));
+                const g = Math.min(255, Math.max(0, Math.floor(255 * Math.min(four - 0.5, -four + 3.5))));
+                const b = Math.min(255, Math.max(0, Math.floor(255 * Math.min(four + 0.5, -four + 2.5))));
+                return [r, g, b];
             }
         }
     }

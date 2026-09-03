@@ -1,4 +1,4 @@
-import { StateManager } from './state-manager.js';
+import { StateManager, createDefaultWorkstationLayout, prepareModelSavePayload, extractModelResources, resolveResourcePath } from './state-manager.js';
 import { SimulationState, SimulationStatus, LayoutNode } from './types.js';
 import { NetworkManager } from './NetworkManager.js';
 import { serializeSimulationState, serializeForSolver, serializeToBinary, deserializeFromBinary } from './serialization.js';
@@ -6,6 +6,11 @@ import { LayoutManager } from './layout-manager.js';
 import { estimateGraphMemory } from './memory-validator.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
 import { CustomDialog } from './custom-dialog.js';
+import { PlaybackRingBuffer } from './playback-buffer.js';
+import { TransportController, TransportControllerOptions } from './transport-controller.js';
+import { PlatformBridge } from './PlatformBridge.js';
+import { WorkspaceManager } from './workspace-manager.js';
+import { ClusterNodeManager } from './ClusterNodeManager.js';
 
 // Redirect console.error and unhandled errors to WebSocket (once connected)
 const originalConsoleError = console.error;
@@ -72,21 +77,28 @@ const initialState: SimulationState = {
             id: 'node-air', type: 'Material', x: 50, y: 180, displayMode: 'expanded',
             inputs: [], outputs: [{ id: 'out', label: 'Material' }],
             parameters: {
+                material_model: 'Ideal Gas',
+                preset: 'Air (Standard STP, gamma=1.4)',
                 material_type: 'Air',
                 atm_pressure: 101325.0,
-                atm_temperature: 288.0,
-                gamma: 1.4
+                atm_temperature: 288.15,
+                gamma: 1.4,
+                ambient_rho: 1.225,
+                ambient_p: 101325.0,
+                density: 1.225
             }
         },
         {
             id: 'node-material-explosive', type: 'Material', x: 50, y: 310, displayMode: 'expanded',
             inputs: [], outputs: [{ id: 'out', label: 'Material' }],
             parameters: {
+                material_model: 'JWL Detonation Gas',
+                preset: 'TNT (Trinitrotoluene)',
                 material_type: 'JWL Charge',
                 composition: 'TNT',
-                rho: 1630,
-                detonation_energy: 4290000,
-                det_vel: 6930,
+                rho: 1630.0,
+                detonation_energy: 4290000.0,
+                det_vel: 6930.0,
                 jwl_A: 373.77e9,
                 jwl_B: 3.747e9,
                 jwl_R1: 4.15,
@@ -123,69 +135,194 @@ const initialState: SimulationState = {
         { fromNode: 'node-explosive', fromPort: 'out', toNode: 'node-painter', toPort: 'explosive' },
         { fromNode: 'node-painter', fromPort: 'out', toNode: 'node-solver', toPort: 'in' }
     ],
-    layout: {
-        type: 'split',
-        id: 'split-root',
-        direction: 'horizontal',
-        ratio: 0.2,
-        firstChild: {
-            type: 'split',
-            id: 'split-left',
-            direction: 'vertical',
-            ratio: 0.5,
-            firstChild: {
-                type: 'split',
-                id: 'split-menu-outliner',
-                direction: 'vertical',
-                ratio: 0.1,
-                firstChild: {
-                    type: 'panel',
-                    id: 'panel-menu-bar',
-                    panelType: 'MENU_BAR',
-                    targetNodeId: null
-                },
-                secondChild: {
-                    type: 'panel',
-                    id: 'panel-outliner',
-                    panelType: 'OUTLINER',
-                    targetNodeId: null
-                }
-            },
-            secondChild: {
-                type: 'panel',
-                id: 'panel-execution',
-                panelType: 'EXECUTION_MANAGER',
-                targetNodeId: null
-            }
-        },
-        secondChild: {
-            type: 'split',
-            id: 'split-main',
-            direction: 'horizontal',
-            ratio: 0.75,
-            firstChild: {
-                type: 'panel',
-                id: 'panel-graph',
-                panelType: 'NODE_GRAPH',
-                targetNodeId: null
-            },
-            secondChild: {
-                type: 'panel',
-                id: 'panel-properties',
-                panelType: 'PROPERTIES',
-                targetNodeId: null
-            }
-        }
-    }
+    layout: createDefaultWorkstationLayout()
 };
 
 const stateManager = new StateManager(initialState);
 
-// Hydrate from localStorage if available
+// Hydrate from localStorage if available (with auto-migration to Workstation layout)
 const savedState = stateManager.loadWorkspace();
-const activeState = savedState || initialState;
+const activeState = stateManager.getCurrentState() || savedState || initialState;
 
-const layoutManager = new LayoutManager('app-container', stateManager);
+const playbackBuffer = new PlaybackRingBuffer(1000);
+(window as any).playbackBuffer = playbackBuffer;
+
+const platformBridge = PlatformBridge.getInstance();
+(window as any).platformBridge = platformBridge;
+
+let layoutManager: LayoutManager;
+
+function getTransportOptions(container?: HTMLElement): TransportControllerOptions {
+    return {
+        container,
+        playbackBuffer,
+        stateManager,
+        onFrameDispatch: (frame, isLive, source) => {
+            if (layoutManager) {
+                layoutManager.components.forEach(comp => {
+                    if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) {
+                        comp.instance.dispatchFrame(frame, isLive);
+                    }
+                    if (comp.type === 'TRANSPORT_BAR' && comp.instance && comp.instance !== source) {
+                        comp.instance.syncFrameFromExternal?.(frame.index, isLive);
+                    }
+                });
+            }
+        },
+        onPlaybackStateChange: (isPlaying, source) => {
+            if (layoutManager) {
+                layoutManager.components.forEach(comp => {
+                    if (comp.type === 'TRANSPORT_BAR' && comp.instance && comp.instance !== source) {
+                        comp.instance.setExternalPlaybackState?.(isPlaying);
+                    }
+                });
+            }
+        },
+        onCameraSnap: (preset) => {
+            if (layoutManager) {
+                layoutManager.components.forEach(comp => {
+                    if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) comp.instance.snapCamera(preset);
+                    if (comp.type === 'TELEMETRY_3D' && comp.instance) comp.instance.snapCameraPreset?.(preset);
+                });
+            }
+        },
+        onProjectionToggle: (perspective) => {
+            if (layoutManager) {
+                layoutManager.components.forEach(comp => {
+                    if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) comp.instance.setProjection?.(perspective);
+                    if (comp.type === 'TELEMETRY_3D' && comp.instance) comp.instance.setProjection?.(perspective);
+                });
+            }
+        },
+        onSliceToggle: (plane, enabled, offset) => {
+            if (layoutManager) {
+                layoutManager.components.forEach(comp => {
+                    if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) comp.instance.setSlice(plane, enabled, offset);
+                    if (comp.type === 'TELEMETRY_3D' && comp.instance) comp.instance.updateSlicePlane?.(plane, enabled, offset);
+                });
+            }
+        },
+        onSliceConfigChange: (slices) => {
+            if (layoutManager) {
+                layoutManager.components.forEach(comp => {
+                    if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) comp.instance.setSlices?.(slices);
+                    if (comp.type === 'TELEMETRY_3D' && comp.instance) comp.instance.setSlices?.(slices);
+                });
+            }
+        },
+        onColormapChange: (colormap, min, max) => {
+            if (layoutManager) {
+                layoutManager.components.forEach(comp => {
+                    if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) comp.instance.setColormap(colormap, min, max);
+                    if (comp.type === 'TELEMETRY_3D' && comp.instance) comp.instance.setColormap?.(colormap, min, max);
+                });
+            }
+        },
+        onQuantityChange: (quantity) => {
+            if (layoutManager) {
+                layoutManager.components.forEach(comp => {
+                    if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) comp.instance.setQuantity?.(quantity);
+                    if (comp.type === 'TELEMETRY_3D' && comp.instance) comp.instance.setQuantity?.(quantity);
+                });
+            }
+        },
+        onLayerToggle: (layer, active) => {
+            if (layoutManager) {
+                layoutManager.components.forEach(comp => {
+                    if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) comp.instance.setLayerVisibility?.(layer, active);
+                    if (comp.type === 'TELEMETRY_3D' && comp.instance) comp.instance.setLayerVisibility?.(layer, active);
+                });
+            }
+        },
+        onRefreshRateChange: (rate) => {
+            const vpNodes = stateManager.getAllModels().flatMap(m => m.nodes).filter(n => n.type === 'Telemetry3DViewport');
+            vpNodes.forEach(vp => {
+                stateManager.updateNodeParametersInPlace(vp.id, { refresh_rate: rate });
+            });
+            if (layoutManager) {
+                layoutManager.components.forEach(comp => {
+                    if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) comp.instance.setRefreshRate?.(rate);
+                    if (comp.type === 'TELEMETRY_3D' && comp.instance) comp.instance.setRefreshRate?.(rate);
+                });
+            }
+        },
+        onShadingChange: (key, val) => {
+            if (layoutManager) {
+                layoutManager.components.forEach(comp => {
+                    if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) comp.instance.setShadingConfig?.({ [key]: val });
+                    if (comp.type === 'TELEMETRY_3D' && comp.instance) comp.instance.setShadingConfig?.({ [key]: val });
+                });
+            }
+        },
+        onROIChange: (roi) => {
+            if (layoutManager) {
+                layoutManager.components.forEach(comp => {
+                    if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) comp.instance.setROIConfig?.(roi);
+                    if (comp.type === 'TELEMETRY_3D' && comp.instance) comp.instance.setROIConfig?.(roi);
+                });
+            }
+        },
+        onParticleFilterChange: (filter) => {
+            if (layoutManager) {
+                layoutManager.components.forEach(comp => {
+                    if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) comp.instance.setParticleFilter?.(filter);
+                    if (comp.type === 'TELEMETRY_3D' && comp.instance) comp.instance.setParticleFilter?.(filter);
+                });
+            }
+        },
+        onSimCommand: (cmd, extra) => {
+            const modelId = stateManager.getActiveModelId() || undefined;
+            if (cmd === 'REFRESH' as any) {
+                requestAndPlotCurrentState(modelId);
+            } else {
+                executeModelCommand(modelId, cmd, extra || {});
+            }
+        },
+        onManualRefresh: () => {
+            const modelId = stateManager.getActiveModelId() || undefined;
+            requestAndPlotCurrentState(modelId);
+        }
+    };
+}
+
+const createTransportController = (container: HTMLElement) => new TransportController(getTransportOptions(container));
+(window as any).createTransportController = createTransportController;
+
+function getAllTransportControllers(): TransportController[] {
+    const list: TransportController[] = [];
+    if (layoutManager) {
+        layoutManager.components.forEach(comp => {
+            if (comp.type === 'TRANSPORT_BAR' && comp.instance) {
+                list.push(comp.instance);
+            }
+        });
+    }
+    return list;
+}
+
+const transportDispatcher: any = new Proxy({}, {
+    get(_target, prop: string) {
+        const list = getAllTransportControllers();
+        if (list.length > 0 && typeof (list[0] as any)[prop] !== 'function' && prop in list[0]) {
+            return (list[0] as any)[prop];
+        }
+        return (...args: any[]) => {
+            let lastResult: any;
+            for (const tc of list) {
+                const fn = (tc as any)[prop];
+                if (typeof fn === 'function') {
+                    lastResult = fn.apply(tc, args);
+                }
+            }
+            return lastResult;
+        };
+    }
+});
+const transportController = transportDispatcher;
+(window as any).transportController = transportController;
+
+layoutManager = new LayoutManager('app-container', stateManager);
+layoutManager.setTransportControllerFactory(createTransportController);
 
 function getCflFromSolver(modelId: string): number {
     const model = stateManager.getAllModels().find(m => m.id === modelId);
@@ -216,10 +353,40 @@ function getCflFromSolver(modelId: string): number {
     return 0.6;
 }
 
+function getEndTimeFromSolver(modelId: string): number {
+    const model = stateManager.getAllModels().find(m => m.id === modelId);
+    if (!model || !model.nodes) return 1.0;
+
+    // Single Source of Truth: In coupled simulations, the Coupler node owns the authoritative endtime
+    const coupler = model.nodes.find(n => n.type === 'FEMFSICoupler3D' || n.type === 'FSICoupler3D' || n.type === 'FSICoupler2D');
+    if (coupler?.parameters?.endtime !== undefined && !isNaN(Number(coupler.parameters.endtime)) && Number(coupler.parameters.endtime) > 0) {
+        return Number(coupler.parameters.endtime);
+    }
+
+    // Standalone / uncoupled domains
+    const fem = model.nodes.find(n => n.type === 'FEMDomain3D');
+    if (fem?.parameters?.endtime !== undefined && !isNaN(Number(fem.parameters.endtime)) && Number(fem.parameters.endtime) > 0) {
+        return Number(fem.parameters.endtime);
+    }
+
+    const mpm = model.nodes.find(n => n.type === 'MPMDomain3D' || n.type === 'MPMDomain2D');
+    if (mpm?.parameters?.endtime !== undefined && !isNaN(Number(mpm.parameters.endtime)) && Number(mpm.parameters.endtime) > 0) {
+        return Number(mpm.parameters.endtime);
+    }
+
+    const solver = model?.nodes?.find(n => n.type === 'CFDSolver3D' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver');
+    if (solver?.parameters?.endtime !== undefined && !isNaN(Number(solver.parameters.endtime)) && Number(solver.parameters.endtime) > 0) {
+        return Number(solver.parameters.endtime);
+    }
+
+    return 1.0;
+}
+
 (window as any).stateManager = stateManager;
 (window as any).layoutManager = layoutManager;
 
-const networkManager = new NetworkManager('ws://localhost:8080');
+const wsUrl = new URLSearchParams(window.location.search).get('broker') || 'ws://localhost:8080';
+const networkManager = new NetworkManager(wsUrl);
 (window as any).networkManager = networkManager;
 
 networkManager.onOpen(() => {
@@ -290,19 +457,15 @@ document.addEventListener('click', async (e) => {
         if (activeWs.activeModelId) {
             const model = stateManager.getWorkspaceModels().find(m => m.id === activeWs.activeModelId);
             if (model) {
-                const jsonString = JSON.stringify({
-                    name: model.name,
-                    nodes: model.nodes,
-                    connections: model.connections
-                }, null, 2);
-                
                 // If model has a valid host absolute path, save directly
                 if (model.filename && model.filename.includes('/')) {
+                    const prepared = prepareModelSavePayload(model, model.filename);
                     networkManager.send({
                         command: "SAVE_MODEL_FILE",
                         modelId: model.id,
                         filePath: model.filename,
-                        fileContent: jsonString
+                        fileContent: prepared.modelJson,
+                        resources: prepared.resources
                     });
                 } else {
                     // Fall back to Save As
@@ -315,11 +478,13 @@ document.addEventListener('click', async (e) => {
                             { label: 'All Files (*.*)', extensions: ['*'] }
                         ],
                         onSelect: (path) => {
+                            const prepared = prepareModelSavePayload(model, path);
                             networkManager.send({
                                 command: "SAVE_MODEL_FILE",
                                 modelId: model.id,
                                 filePath: path,
-                                fileContent: jsonString
+                                fileContent: prepared.modelJson,
+                                resources: prepared.resources
                             });
                         }
                     });
@@ -336,12 +501,6 @@ document.addEventListener('click', async (e) => {
         if (activeWs.activeModelId) {
             const model = stateManager.getWorkspaceModels().find(m => m.id === activeWs.activeModelId);
             if (model) {
-                const jsonString = JSON.stringify({
-                    name: model.name,
-                    nodes: model.nodes,
-                    connections: model.connections
-                }, null, 2);
-                
                 const browser = new HostFileBrowserModal(networkManager, {
                     title: 'Save Model As (Host)',
                     mode: 'save',
@@ -351,11 +510,13 @@ document.addEventListener('click', async (e) => {
                         { label: 'All Files (*.*)', extensions: ['*'] }
                     ],
                     onSelect: (path) => {
+                        const prepared = prepareModelSavePayload(model, path);
                         networkManager.send({
                             command: "SAVE_MODEL_FILE",
                             modelId: model.id,
                             filePath: path,
-                            fileContent: jsonString
+                            fileContent: prepared.modelJson,
+                            resources: prepared.resources
                         });
                     }
                 });
@@ -521,22 +682,29 @@ document.addEventListener('click', async (e) => {
                         path: dirPath
                     });
 
-                    // 2. Save each model referenced in this workspace to the directory
+                    // 2. Save each model referenced in this workspace to the directory (including external resources)
                     const models = stateManager.getWorkspaceModels();
+                    const savedModelsForWsJson: any[] = [];
+
                     models.forEach(model => {
                         const modelFilename = `${model.name.toLowerCase().replace(/\s+/g, '_')}.json`;
                         const modelPath = `${dirPath}/${modelFilename}`;
-                        const modelJson = JSON.stringify({
-                            name: model.name,
-                            nodes: model.nodes,
-                            connections: model.connections
-                        }, null, 2);
+                        const prepared = prepareModelSavePayload(model, modelPath);
 
                         networkManager.send({
                             command: "SAVE_MODEL_FILE",
                             modelId: `ws-silent-${model.id}`,
                             filePath: modelPath,
-                            fileContent: modelJson
+                            fileContent: prepared.modelJson,
+                            resources: prepared.resources
+                        });
+
+                        savedModelsForWsJson.push({
+                            id: model.id,
+                            name: model.name,
+                            filename: modelPath,
+                            nodes: prepared.clonedModel.nodes,
+                            connections: prepared.clonedModel.connections
                         });
                     });
 
@@ -552,13 +720,7 @@ document.addEventListener('click', async (e) => {
                             modelIds: activeWs.modelIds,
                             activeModelId: activeWs.activeModelId
                         },
-                        models: models.map(m => ({
-                            id: m.id,
-                            name: m.name,
-                            filename: `${dirPath}/${m.name.toLowerCase().replace(/\s+/g, '_')}.json`,
-                            nodes: m.nodes,
-                            connections: m.connections
-                        }))
+                        models: savedModelsForWsJson
                     }, null, 2);
 
                     networkManager.send({
@@ -751,12 +913,16 @@ function sendView3DConfig(targetId: string) {
     const m = stateManager.getAllModels().find(model => model.id === targetId);
     if (m) {
         const view3DNode = m.nodes.find(n => n.type === 'Telemetry3DViewport');
-        const showObstacles = view3DNode ? (view3DNode.parameters?.show_obstacles === true) : false;
+        const carrierNode = m.nodes.find(n => n.type === 'DomainMesh3D' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D' || n.type === 'DomainMesh');
+        const showObstacles = view3DNode ? (view3DNode.parameters?.show_obstacles !== false) : true;
         const obstaclesQuantity = view3DNode ? (view3DNode.parameters?.obstacles_quantity || 'pressure') : 'pressure';
-        const showStl = view3DNode ? (view3DNode.parameters?.show_stl === true) : false;
+        const showStl = view3DNode ? (view3DNode.parameters?.show_stl !== false) : true;
         const stlQuantity = view3DNode ? (view3DNode.parameters?.stl_quantity || 'pressure') : 'pressure';
         
-        const slices = view3DNode ? [...(view3DNode.parameters?.slices || [])] : [];
+        const rawSlices = (view3DNode?.parameters?.slices && view3DNode.parameters.slices.length > 0)
+            ? view3DNode.parameters.slices
+            : (carrierNode?.parameters?.slices || []);
+        const slices = [...rawSlices];
         if (showObstacles) {
             slices.push({
                 axis: 'obstacles',
@@ -780,6 +946,54 @@ function sendView3DConfig(targetId: string) {
             modelId: targetId,
             slices,
             refresh_rate: rate
+        });
+    }
+}
+
+function requestAndPlotCurrentState(targetId?: string) {
+    let resolvedId = targetId || stateManager.getActiveModelId() || undefined;
+    if (!resolvedId) {
+        const all = stateManager.getAllModels();
+        if (all.length > 0) resolvedId = all[0].id;
+    }
+    if (!resolvedId) return;
+    const targetModelId = resolvedId;
+
+    const model = stateManager.getAllModels().find(m => m.id === targetModelId);
+    const is3D = model?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'DomainMesh3D' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D' || n.type === 'FSICoupler3D' || n.type === 'FEMFSICoupler3D');
+
+    if (networkManager.isConnected()) {
+        networkManager.send({
+            command: "REFRESH_STATE",
+            modelId: targetModelId
+        });
+        if (is3D) {
+            sendView3DConfig(targetModelId);
+        } else {
+            sendContourConfig(targetModelId);
+        }
+    }
+
+    // Re-dispatch latest recorded frame if available in buffer
+    const latestFrame = playbackBuffer.getLatestFrame();
+    if (latestFrame && layoutManager) {
+        layoutManager.components.forEach(comp => {
+            if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) {
+                comp.instance.dispatchFrame(latestFrame, true);
+            }
+            if (comp.type === 'TELEMETRY_3D' && comp.instance) {
+                if (latestFrame.sliceBuffer) {
+                    comp.instance.pushFrame(latestFrame.sliceBuffer, latestFrame.modelId);
+                } else if (latestFrame.buffer && latestFrame.buffer !== latestFrame.mpmBuffer && latestFrame.buffer !== latestFrame.femBuffer) {
+                    comp.instance.pushFrame(latestFrame.buffer, latestFrame.modelId);
+                }
+                if (latestFrame.mpmBuffer) {
+                    comp.instance.pushFrame(latestFrame.mpmBuffer, latestFrame.modelId);
+                }
+                if (latestFrame.femBuffer) {
+                    comp.instance.pushFrame(latestFrame.femBuffer, latestFrame.modelId);
+                }
+            }
         });
     }
 }
@@ -912,9 +1126,7 @@ function tryRemapFrom1D(targetModelId: string, pipe: any): boolean {
             p_1d: p_1d,
             ambient_rho: Number(serialized1D.ambient_rho ?? 1.225),
             ambient_p: Number(serialized1D.ambient_p ?? 101325.0),
-            gamma: Number(serialized1D.gamma ?? 1.4),
-            is_ideal_gas: (model?.nodes.find(n => n.type === 'Material')?.parameters?.material_type === 'Ideal Gas Charge' || model?.nodes.find(n => n.type === 'Material')?.parameters?.material_type === 'Ideal Gas' || serialized1D.explosive_type === 'MaterialIdealGas' || serialized1D.init_mode === 'Ideal Gas' || serialized1D.is_ideal_gas === true),
-            composition: serialized1D.composition,
+            is_ideal_gas: (model?.nodes.find(n => n.type === 'Material' && n.parameters?.material_type !== 'Air')?.parameters?.material_type === 'Ideal Gas Charge' || serialized1D.explosive_type === 'MaterialIdealGas' || serialized1D.init_mode === 'Ideal Gas' || serialized1D.is_ideal_gas === true),
             explosive_type: serialized1D.explosive_type,
             rho: serialized1D.rho,
             high_rho: serialized1D.rho,
@@ -1050,9 +1262,9 @@ function tryRemapFrom2D(targetModelId: string, pipe: any): boolean {
         const matNode2D = matConn2D ? model2d?.nodes.find(n => n.id === matConn2D.fromNode) : null;
 
         const matType = matNode2D?.parameters?.material_type ?? 'JWL Charge';
-        const matNode3DLocal = model?.nodes.find(n => n.type === 'Material');
-        const isIdeal3D = (matNode3DLocal?.parameters?.material_type === 'Ideal Gas Charge' || matNode3DLocal?.parameters?.material_type === 'Ideal Gas');
-        const is_ideal_gas = isIdeal3D || (matType === 'Ideal Gas Charge' || matType === 'Ideal Gas' || solver3DNode?.parameters?.init_mode === 'Ideal Gas' || solver3DNode?.parameters?.is_ideal_gas === true);
+        const matNode3DLocal = model?.nodes.find(n => n.type === 'Material' && n.parameters?.material_type !== 'Air');
+        const isIdeal3D = (matNode3DLocal?.parameters?.material_type === 'Ideal Gas Charge' || (matNode3DLocal?.parameters?.material_model === 'Ideal Gas' && matNode3DLocal?.parameters?.material_type !== 'Air'));
+        const is_ideal_gas = isIdeal3D || (matType === 'Ideal Gas Charge' || solver3DNode?.parameters?.init_mode === 'Ideal Gas' || solver3DNode?.parameters?.is_ideal_gas === true);
         const explosive_type = is_ideal_gas ? 'MaterialIdealGas' : 'MaterialExplosive';
         const composition = matNode2D?.parameters?.composition ?? 'TNT';
         const rho = Number(matNode2D?.parameters?.rho ?? 1630.0);
@@ -1130,16 +1342,68 @@ function tryRemapFrom2D(targetModelId: string, pipe: any): boolean {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Command execution
+// Command execution & Workspace Pipeline Engine
 // ─────────────────────────────────────────────────────────────────────────────
 
-function executeModelCommand(modelId: string, command: string, extra: Record<string, any> = {}, fromGlobal: boolean = false) {
-    if (!networkManager.isConnected()) {
-        stateManager.pushTelemetry(modelId, "[ERROR] WebSocket is not connected to the Broker backend.");
-        return;
+const pipelineAutoRunPending = new Map<string, { command: string; extra: Record<string, any> }>();
+
+function executeWorkspacePipeline(): void {
+    const allModels = stateManager.getAllModels();
+    if (allModels.length === 0) return;
+
+    // Find models with no upstream remap dependencies (root stages, typically 1D or standalone)
+    const downstreamTargetIds = new Set<string>();
+    for (const m of allModels) {
+        const pipe = findRemapPipeline(m.id);
+        if (pipe) {
+            downstreamTargetIds.add(m.id);
+        }
     }
 
-    const model    = stateManager.getAllModels().find(m => m.id === modelId);
+    const rootModels = allModels.filter(m => !downstreamTargetIds.has(m.id));
+    const targetDownstreams = allModels.filter(m => downstreamTargetIds.has(m.id));
+
+    // Register all downstream models for auto-run once upstream completes
+    targetDownstreams.forEach(dm => {
+        pipelineAutoRunPending.set(dm.id, { command: "EXEC_ALL", extra: {} });
+    });
+
+    if (rootModels.length > 0) {
+        rootModels.forEach(rm => {
+            console.log(`[Workspace Pipeline] Executing root stage model ${rm.name || rm.id}`);
+            executeModelCommand(rm.id, "INIT", {}, false);
+            executeModelCommand(rm.id, "EXEC_ALL", {}, false);
+        });
+    } else {
+        allModels.forEach(m => {
+            executeModelCommand(m.id, "INIT", {}, false);
+            executeModelCommand(m.id, "EXEC_ALL", {}, false);
+        });
+    }
+}
+
+function executeModelCommand(modelId?: string, command: string = "INIT", extra: Record<string, any> = {}, fromGlobal: boolean = false) {
+    let resolvedId = modelId;
+    if (!resolvedId || resolvedId === 'default' || resolvedId === '0') {
+        resolvedId = stateManager.getActiveModelId() || undefined;
+    }
+    if (!resolvedId) {
+        const all = stateManager.getAllModels();
+        if (all.length > 0) resolvedId = all[0].id;
+    }
+    if (!resolvedId) {
+        console.error("[executeModelCommand] No active model found in stateManager!");
+        return;
+    }
+    const targetModelId = resolvedId;
+
+    if (!networkManager.isConnected()) {
+        const msg = "WebSocket is currently connecting or not connected to the Broker backend.";
+        stateManager.pushTelemetry(targetModelId, "[WARN] " + msg);
+        console.warn("[executeModelCommand]", msg);
+    }
+
+    const model = stateManager.getAllModels().find(m => m.id === targetModelId);
     
     if (model) {
         const solver1Ds = model.nodes.filter(n => n.type === 'CFDSolver');
@@ -1149,7 +1413,7 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
         const isFSICoupled = model.nodes.some(n => n.type === 'FSICoupler2D');
         if (totalSolvers > 1 && !isFSICoupled) {
             const msg = "Multiple solvers detected on the same canvas! BlastDaemon architecture requires exactly ONE solver per model tab (unless coupled via an FSI Coupler node). Please cut and paste your second simulation into a 'New Model'.";
-            stateManager.pushTelemetry(modelId, "[ERROR] " + msg);
+            stateManager.pushTelemetry(targetModelId, "[ERROR] " + msg);
             alert(msg);
             return;
         }
@@ -1163,7 +1427,7 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
     const hasCoupler  = model?.nodes.some(n => n.type === 'FSICoupler2D') || false;
     const hasCoupler3D = model?.nodes.some(n => n.type === 'FSICoupler3D') || false;
     const hasFSI2D    = hasCoupler || (has2D && hasMPM2D);
-    const pipeline = findRemapPipeline(modelId);
+    const pipeline = findRemapPipeline(targetModelId);
     const has3D      = model?.nodes.some(n => n.type === 'CFDSolver3D') || false;
     const hasFSI3D    = hasCoupler3D || (has3D && hasMPM3D);
 
@@ -1174,388 +1438,534 @@ function executeModelCommand(modelId: string, command: string, extra: Record<str
     };
     // ── INIT ─────────────────────────────────────────────────────────────────
     if (command === "INIT") {
-        const checkState = stateManager.getSimulationState(modelId);
+        const checkState = stateManager.getSimulationState(targetModelId);
         if (checkState) {
             const memEst = estimateGraphMemory(checkState);
             if (memEst.riskLevel === 'CRITICAL') {
                 const proceed = confirm(`⚠️ CRITICAL MEMORY WARNING:\n\nThis model allocation is estimated to require ${memEst.summaryText}.\nAllocating extreme model sizes may exceed hardware limits.\n\nDo you want to proceed with allocation?`);
                 if (!proceed) {
-                    console.log(`[MEMORY GUARD] Model initialization for ${modelId} aborted by user.`);
+                    console.log(`[MEMORY GUARD] Model initialization for ${targetModelId} aborted by user.`);
                     return;
                 }
             }
         }
 
-        stateManager.setModelProgress(modelId, 0);
-        stateManager.setModelSimTime(modelId, 0.0);
+        stateManager.setModelProgress(targetModelId, 0);
+        stateManager.setModelSimTime(targetModelId, 0.0);
 
         layoutManager.components.forEach(comp => {
             if (comp.type === 'TELEMETRY_3D' && comp.instance) {
-                comp.instance.resetSimulationData(modelId);
+                comp.instance.resetSimulationData(targetModelId);
+            }
+            if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) {
+                comp.instance.resetSimulationData?.(targetModelId);
+            }
+            if (comp.type === 'NODE_VIEWER' && comp.instance) {
+                comp.instance.resetSimulationData?.(targetModelId);
             }
         });
 
         if (hasFEMFSI3D) {
-            const state = stateManager.getSimulationState(modelId);
+            const state = stateManager.getSimulationState(targetModelId);
             if (state) {
-                const payload = serializeForSolver(state, "INIT_FEM_FSI_3D", modelId, model?.filename);
-                console.log(`Sending INIT_FEM_FSI_3D for 3D FEM FSI model ${modelId}`);
+                const payload = serializeForSolver(state, "INIT_FEM_FSI_3D", targetModelId, model?.filename);
+                console.log(`Sending INIT_FEM_FSI_3D for 3D FEM FSI model ${targetModelId}`);
                 networkManager.send(payload);
-                sendView3DConfig(modelId);
-                stateManager.setModelStatus(modelId, 'INITIALIZED');
+                sendView3DConfig(targetModelId);
+                stateManager.setModelStatus(targetModelId, 'INITIALIZED');
             }
         }
         else if (hasFEM3D) {
-            const state = stateManager.getSimulationState(modelId);
+            const state = stateManager.getSimulationState(targetModelId);
             if (state) {
-                const payload = serializeForSolver(state, "INIT_FEM_3D", modelId, model?.filename);
-                console.log(`Sending INIT_FEM_3D for 3D FEM model ${modelId}`);
+                const payload = serializeForSolver(state, "INIT_FEM_3D", targetModelId, model?.filename);
+                console.log(`Sending INIT_FEM_3D for 3D FEM model ${targetModelId}`);
                 networkManager.send(payload);
-                sendView3DConfig(modelId);
-                stateManager.setModelStatus(modelId, 'INITIALIZED');
+                sendView3DConfig(targetModelId);
+                stateManager.setModelStatus(targetModelId, 'INITIALIZED');
             }
         }
         else if (hasFSI3D) {
-            const state = stateManager.getSimulationState(modelId);
+            const state = stateManager.getSimulationState(targetModelId);
             if (state) {
-                const payload = serializeForSolver(state, "INIT_FSI_3D", modelId, model?.filename);
-                console.log(`Sending INIT_FSI_3D for 3D FSI model ${modelId}`);
+                const payload = serializeForSolver(state, "INIT_FSI_3D", targetModelId, model?.filename);
+                console.log(`Sending INIT_FSI_3D for 3D FSI model ${targetModelId}`);
                 networkManager.send(payload);
-                sendView3DConfig(modelId);
-                stateManager.setModelStatus(modelId, 'INITIALIZED');
+                sendView3DConfig(targetModelId);
+                stateManager.setModelStatus(targetModelId, 'INITIALIZED');
             }
         }
         else if (hasMPM3D) {
-            const state = stateManager.getSimulationState(modelId);
+            const state = stateManager.getSimulationState(targetModelId);
             if (state) {
-                const payload = serializeForSolver(state, "INIT_MPM_3D", modelId, model?.filename);
-                console.log(`Sending INIT_MPM_3D for 3D MPM model ${modelId}`);
+                const payload = serializeForSolver(state, "INIT_MPM_3D", targetModelId, model?.filename);
                 networkManager.send(payload);
-                sendView3DConfig(modelId);
-                stateManager.setModelStatus(modelId, 'INITIALIZED');
+                sendView3DConfig(targetModelId);
+                stateManager.setModelStatus(targetModelId, 'INITIALIZED');
             }
         }
         else if (has3D) {
-            const state = stateManager.getSimulationState(modelId);
+            const state = stateManager.getSimulationState(targetModelId);
             if (state) {
-                const payload = serializeForSolver(state, "INIT_3D", modelId, model?.filename);
-                console.log(`[INIT_3D] Payload for ${modelId}:`, JSON.parse(payload));
+                const payload = serializeForSolver(state, "INIT_3D", targetModelId, model?.filename);
                 networkManager.send(payload);
-                sendView3DConfig(modelId);
+                sendView3DConfig(targetModelId);
                 if (pipeline) {
-                    const success = pipeline.sourceType === '2D' ? tryRemapFrom2D(modelId, pipeline) : tryRemapFrom1D(modelId, pipeline);
+                    const success = pipeline.sourceType === '2D' ? tryRemapFrom2D(targetModelId, pipeline) : tryRemapFrom1D(targetModelId, pipeline);
                     if (success) {
-                        stateManager.setModelStatus(modelId, 'INITIALIZED');
+                        stateManager.setModelStatus(targetModelId, 'INITIALIZED');
                     } else {
-                        stateManager.setModelStatus(modelId, 'UNINITIALIZED');
+                        stateManager.setModelStatus(targetModelId, 'UNINITIALIZED');
                     }
                 } else {
-                    stateManager.setModelStatus(modelId, 'INITIALIZED');
+                    stateManager.setModelStatus(targetModelId, 'INITIALIZED');
                 }
             }
         }
         else if (hasFSI2D) {
-            const state = stateManager.getSimulationState(modelId);
+            const state = stateManager.getSimulationState(targetModelId);
             if (state) {
-                const payload = serializeForSolver(state, "INIT_FSI_2D", modelId, model?.filename);
-                console.log(`Sending INIT_FSI_2D for 2D FSI model ${modelId}`);
+                const payload = serializeForSolver(state, "INIT_FSI_2D", targetModelId, model?.filename);
+                console.log(`Sending INIT_FSI_2D for 2D FSI model ${targetModelId}`);
                 networkManager.send(payload);
-                sendContourConfig(modelId);
-                stateManager.setModelStatus(modelId, 'INITIALIZED');
+                sendContourConfig(targetModelId);
+                stateManager.setModelStatus(targetModelId, 'INITIALIZED');
             }
         }
         else if (hasMPM2D) {
-            const state = stateManager.getSimulationState(modelId);
+            const state = stateManager.getSimulationState(targetModelId);
             if (state) {
-                const payload = serializeForSolver(state, "INIT_MPM", modelId, model?.filename);
-                console.log(`Sending INIT_MPM for MPM 2D model ${modelId}`);
+                const payload = serializeForSolver(state, "INIT_MPM", targetModelId, model?.filename);
+                console.log(`Sending INIT_MPM for MPM 2D model ${targetModelId}`);
                 networkManager.send(payload);
-                sendContourConfig(modelId);
-                stateManager.setModelStatus(modelId, 'INITIALIZED');
+                sendContourConfig(targetModelId);
+                stateManager.setModelStatus(targetModelId, 'INITIALIZED');
             }
         }
         else if (has2D) {
-            const state = stateManager.getSimulationState(modelId);
+            const state = stateManager.getSimulationState(targetModelId);
             if (state) {
-                const payload = serializeForSolver(state, "INIT_2D", modelId, model?.filename);
-                console.log(`Sending INIT_2D for 2D model ${modelId}`);
+                const payload = serializeForSolver(state, "INIT_2D", targetModelId, model?.filename);
+                console.log(`Sending INIT_2D for 2D model ${targetModelId}`);
                 networkManager.send(payload);
-                sendContourConfig(modelId);
+                sendContourConfig(targetModelId);
                 if (pipeline) {
-                    if (tryRemapFrom1D(modelId, pipeline)) {
-                        stateManager.setModelStatus(modelId, 'INITIALIZED');
+                    if (tryRemapFrom1D(targetModelId, pipeline)) {
+                        stateManager.setModelStatus(targetModelId, 'INITIALIZED');
                     } else {
-                        stateManager.setModelStatus(modelId, 'UNINITIALIZED');
+                        stateManager.setModelStatus(targetModelId, 'UNINITIALIZED');
                     }
                 } else {
-                    stateManager.setModelStatus(modelId, 'INITIALIZED');
+                    stateManager.setModelStatus(targetModelId, 'INITIALIZED');
                 }
             }
         } else {
             // Pure 1D model.
-            const state = stateManager.getSimulationState(modelId);
+            const state = stateManager.getSimulationState(targetModelId);
             if (state) {
-                const payload = serializeForSolver(state, "INIT", modelId, model?.filename);
-                console.log(`Sending INIT (1D) for model ${modelId}`);
+                const payload = serializeForSolver(state, "INIT", targetModelId, model?.filename);
+                console.log(`Sending INIT (1D) for model ${targetModelId}`);
                 networkManager.send(payload);
-                stateManager.setModelStatus(modelId, 'INITIALIZED');
+                stateManager.setModelStatus(targetModelId, 'INITIALIZED');
             }
         }
 
     // ── STEP ──────────────────────────────────────────────────────────────────
     } else if (command === "STEP") {
         const steps = extra.steps || 1;
-        const status = stateManager.getModelStatus(modelId);
-        if (status === 'UNINITIALIZED' || status === 'TERMINATED') {
-            const sn = getSolverNode(modelId);
-            if (sn) stateManager.pushTelemetry(sn.id, "[WARNING] Cannot step: solver not initialised. Click Init first.");
-            return;
-        }
-        const cfl = getCflFromSolver(modelId);
-        
-        if (hasFEMFSI3D) {
-            sendView3DConfig(modelId);
-            networkManager.send({ command: "STEP_FEM_FSI_3D", modelId: modelId, steps, cfl });
-        } else if (hasFEM3D) {
-            sendView3DConfig(modelId);
-            const femNode = model?.nodes.find(n => n.type === 'FEMDomain3D');
-            const vpNode = model?.nodes.find(n => n.type === 'Telemetry3DViewport');
-            const femCfl = Number(femNode?.parameters?.cfl ?? 0.3);
-            const refreshRate = Number(vpNode?.parameters?.refresh_rate ?? 0.5);
-            networkManager.send({ command: "STEP_FEM_3D", modelId: modelId, steps, cfl: femCfl, refresh_rate: refreshRate });
-        } else if (hasFSI3D) {
-            sendView3DConfig(modelId);
-            networkManager.send({ command: "STEP_FSI_3D", modelId: modelId, steps, cfl });
-        } else if (hasMPM3D) {
-            sendView3DConfig(modelId);
-            const mpmNode = model?.nodes.find(n => n.type === 'MPMDomain3D');
-            const mpmCfl = Number(mpmNode?.parameters?.cfl ?? 0.3);
-            networkManager.send({ command: "STEP_MPM_3D", modelId: modelId, steps, cfl: mpmCfl });
-        } else if (has3D) {
-            sendView3DConfig(modelId);
-            networkManager.send({ command: "STEP_3D", modelId: modelId, steps, cfl });
-        } else if (hasFSI2D) {
-            sendContourConfig(modelId);
-            networkManager.send({ command: "STEP_FSI_2D", modelId: modelId, steps, cfl });
-        } else if (hasMPM2D) {
-            sendContourConfig(modelId);
-            const mpmNode = model?.nodes.find(n => n.type === 'MPMDomain2D');
-            const mpmCfl = Number(mpmNode?.parameters?.cfl ?? 0.3);
-            networkManager.send({ command: "STEP_MPM", modelId: modelId, steps, cfl: mpmCfl });
-        } else if (pipeline || has2D) {
-            sendContourConfig(modelId);
-            networkManager.send({ command: "STEP_2D", modelId: modelId, steps, cfl });
-        } else {
-            networkManager.send({ command: "STEP",    modelId: modelId, steps, cfl });
-        }
-        stateManager.setModelStatus(modelId, 'RUNNING');
+        const status = stateManager.getModelStatus(targetModelId);
+        const cfl = getCflFromSolver(targetModelId);
+        const endtime = getEndTimeFromSolver(targetModelId);
 
-    // ── EXEC_ALL ──────────────────────────────────────────────────────────────
-    } else if (command === "EXEC_ALL") {
-        const status = stateManager.getModelStatus(modelId);
-        const cfl = getCflFromSolver(modelId);
-
-        if (status === 'UNINITIALIZED' || status === 'TERMINATED') {
+        if (status === 'UNINITIALIZED' || status === 'TERMINATED' || status === 'ERROR') {
             if (hasFEMFSI3D) {
-                const state = stateManager.getSimulationState(modelId);
+                const state = stateManager.getSimulationState(targetModelId);
                 if (state) {
-                    const payload = serializeForSolver(state, "INIT_FEM_FSI_3D", modelId, model?.filename);
-                    console.log(`[Auto-Run] Sending INIT_FEM_FSI_3D for 3D FEM FSI model ${modelId}`);
+                    const payload = serializeForSolver(state, "INIT_FEM_FSI_3D", targetModelId, model?.filename);
+                    console.log(`[Auto-Init Step] Sending INIT_FEM_FSI_3D for 3D FEM FSI model ${targetModelId}`);
                     networkManager.send(payload);
-                    sendView3DConfig(modelId);
-                    networkManager.send({ command: "EXEC_ALL_FEM_FSI_3D", modelId: modelId, cfl });
-                    stateManager.setModelStatus(modelId, 'RUNNING');
+                    sendView3DConfig(targetModelId);
+                    networkManager.send({ command: "STEP_FEM_FSI_3D", modelId: targetModelId, steps, cfl, endtime });
+                    stateManager.setModelStatus(targetModelId, 'RUNNING');
                 }
             } else if (hasFEM3D) {
-                const state = stateManager.getSimulationState(modelId);
+                const state = stateManager.getSimulationState(targetModelId);
                 if (state) {
-                    const payload = serializeForSolver(state, "INIT_FEM_3D", modelId, model?.filename);
-                    console.log(`[Auto-Run] Sending INIT_FEM_3D for 3D FEM model ${modelId}`);
+                    const payload = serializeForSolver(state, "INIT_FEM_3D", targetModelId, model?.filename);
+                    console.log(`[Auto-Init Step] Sending INIT_FEM_3D for 3D FEM model ${targetModelId}`);
                     networkManager.send(payload);
-                    sendView3DConfig(modelId);
+                    sendView3DConfig(targetModelId);
                     const femNode = state.nodes.find(n => n.type === 'FEMDomain3D');
                     const vpNode = state.nodes.find(n => n.type === 'Telemetry3DViewport');
                     const femCfl = Number(femNode?.parameters?.cfl ?? 0.3);
                     const refreshRate = Number(vpNode?.parameters?.refresh_rate ?? 0.5);
-                    networkManager.send({ command: "EXEC_ALL_FEM_3D", modelId: modelId, cfl: femCfl, refresh_rate: refreshRate });
-                    stateManager.setModelStatus(modelId, 'RUNNING');
+                    networkManager.send({ command: "STEP_FEM_3D", modelId: targetModelId, steps, cfl: femCfl, endtime, refresh_rate: refreshRate });
+                    stateManager.setModelStatus(targetModelId, 'RUNNING');
                 }
             } else if (hasFSI3D) {
-                const state = stateManager.getSimulationState(modelId);
+                const state = stateManager.getSimulationState(targetModelId);
                 if (state) {
-                    const payload = serializeForSolver(state, "INIT_FSI_3D", modelId, model?.filename);
-                    console.log(`[Auto-Run] Sending INIT_FSI_3D for 3D FSI model ${modelId}`);
+                    const payload = serializeForSolver(state, "INIT_FSI_3D", targetModelId, model?.filename);
+                    console.log(`[Auto-Init Step] Sending INIT_FSI_3D for 3D FSI model ${targetModelId}`);
                     networkManager.send(payload);
-                    sendView3DConfig(modelId);
-                    networkManager.send({ command: "EXEC_ALL_FSI_3D", modelId: modelId, cfl });
-                    stateManager.setModelStatus(modelId, 'RUNNING');
+                    sendView3DConfig(targetModelId);
+                    networkManager.send({ command: "STEP_FSI_3D", modelId: targetModelId, steps, cfl, endtime });
+                    stateManager.setModelStatus(targetModelId, 'RUNNING');
                 }
             } else if (hasMPM3D) {
-                const state = stateManager.getSimulationState(modelId);
+                const state = stateManager.getSimulationState(targetModelId);
                 if (state) {
-                    const payload = serializeForSolver(state, "INIT_MPM_3D", modelId, model?.filename);
-                    console.log(`[Auto-Run] Sending INIT_MPM_3D for 3D MPM model ${modelId}`);
+                    const payload = serializeForSolver(state, "INIT_MPM_3D", targetModelId, model?.filename);
+                    console.log(`[Auto-Init Step] Sending INIT_MPM_3D for 3D MPM model ${targetModelId}`);
                     networkManager.send(payload);
-                    sendView3DConfig(modelId);
+                    sendView3DConfig(targetModelId);
                     const mpmNode = state.nodes.find(n => n.type === 'MPMDomain3D');
                     const mpmCfl = Number(mpmNode?.parameters?.cfl ?? 0.3);
-                    networkManager.send({ command: "EXEC_ALL_MPM_3D", modelId: modelId, cfl: mpmCfl });
-                    stateManager.setModelStatus(modelId, 'RUNNING');
-                }
-            } else if (has3D) {
-                const state = stateManager.getSimulationState(modelId);
-                if (state) {
-                    const payload = serializeForSolver(state, "INIT_3D", modelId, model?.filename);
-                    console.log(`[INIT_3D] Payload for ${modelId}:`, JSON.parse(payload));
-                    networkManager.send(payload);
-                    sendView3DConfig(modelId);
-                    networkManager.send({ command: "EXEC_ALL_3D", modelId: modelId, cfl });
-                    stateManager.setModelStatus(modelId, 'RUNNING');
-                }
-            } else if (hasFSI2D) {
-                const state = stateManager.getSimulationState(modelId);
-                if (state) {
-                    const payload = serializeForSolver(state, "INIT_FSI_2D", modelId, model?.filename);
-                    console.log(`[Auto-Run] Sending INIT_FSI_2D for 2D FSI model ${modelId}`);
-                    networkManager.send(payload);
-                    sendContourConfig(modelId);
-                    networkManager.send({ command: "EXEC_ALL_FSI_2D", modelId: modelId, cfl });
-                    stateManager.setModelStatus(modelId, 'RUNNING');
-                }
-            } else if (hasMPM2D) {
-                const state = stateManager.getSimulationState(modelId);
-                if (state) {
-                    const payload = serializeForSolver(state, "INIT_MPM", modelId, model?.filename);
-                    console.log(`[Auto-Run] Sending INIT_MPM for MPM model ${modelId}`);
-                    networkManager.send(payload);
-                    sendContourConfig(modelId);
-                    const mpmNode = state.nodes.find(n => n.type === 'MPMDomain2D');
-                    const mpmCfl = Number(mpmNode?.parameters?.cfl ?? 0.3);
-                    networkManager.send({ command: "EXEC_ALL_MPM", modelId: modelId, cfl: mpmCfl });
-                    stateManager.setModelStatus(modelId, 'RUNNING');
+                    networkManager.send({ command: "STEP_MPM_3D", modelId: targetModelId, steps, cfl: mpmCfl, endtime });
+                    stateManager.setModelStatus(targetModelId, 'RUNNING');
                 }
             } else if (pipeline) {
-                // Initialize model from 1D telemetry first, then run
-                const state = stateManager.getSimulationState(modelId);
+                const is3D = model?.nodes.some(n => n.type === 'CFDSolver3D');
+                const state = stateManager.getSimulationState(targetModelId);
                 if (state) {
-                    const payload = serializeForSolver(state, "INIT_2D", modelId, model?.filename);
-                    console.log(`Sending INIT_2D for 2D model ${modelId} in pipeline`);
+                    const cmd = is3D ? "INIT_3D" : "INIT_2D";
+                    const payload = serializeForSolver(state, cmd, targetModelId, model?.filename);
+                    console.log(`[Auto-Init Step Pipeline] Sending ${cmd} for ${is3D ? '3D' : '2D'} model ${targetModelId} in pipeline`);
                     networkManager.send(payload);
-                    sendContourConfig(modelId);
-                    
-                    if (tryRemapFrom1D(modelId, pipeline)) {
-                        networkManager.send({ command: "EXEC_ALL_2D", modelId: modelId, cfl });
-                        stateManager.setModelStatus(modelId, 'RUNNING');
+                    if (is3D) sendView3DConfig(targetModelId); else sendContourConfig(targetModelId);
+
+                    const remapOk = pipeline.sourceType === '2D' ? tryRemapFrom2D(targetModelId, pipeline) : tryRemapFrom1D(targetModelId, pipeline);
+                    if (remapOk) {
+                        const stepCmd = is3D ? "STEP_3D" : "STEP_2D";
+                        networkManager.send({ command: stepCmd, modelId: targetModelId, steps, cfl, endtime });
+                        stateManager.setModelStatus(targetModelId, 'RUNNING');
+                    } else {
+                        pipelineAutoRunPending.set(targetModelId, { command, extra });
                     }
                 }
-            } else if (has2D) {
-                // Standalone 2D model
-                const state = stateManager.getSimulationState(modelId);
+            } else if (has3D) {
+                const state = stateManager.getSimulationState(targetModelId);
                 if (state) {
-                    const payload = serializeForSolver(state, "INIT_2D", modelId, model?.filename);
-                    console.log(`[Auto-Run] Sending INIT_2D for standalone 2D model ${modelId}`);
+                    const payload = serializeForSolver(state, "INIT_3D", targetModelId, model?.filename);
                     networkManager.send(payload);
-                    sendContourConfig(modelId);
-                    networkManager.send({ command: "EXEC_ALL_2D", modelId: modelId, cfl });
-                    stateManager.setModelStatus(modelId, 'RUNNING');
+                    sendView3DConfig(targetModelId);
+                    networkManager.send({ command: "STEP_3D", modelId: targetModelId, steps, cfl, endtime });
+                    stateManager.setModelStatus(targetModelId, 'RUNNING');
+                }
+            } else if (hasFSI2D) {
+                const state = stateManager.getSimulationState(targetModelId);
+                if (state) {
+                    const payload = serializeForSolver(state, "INIT_FSI_2D", targetModelId, model?.filename);
+                    console.log(`[Auto-Init Step] Sending INIT_FSI_2D for 2D FSI model ${targetModelId}`);
+                    networkManager.send(payload);
+                    sendContourConfig(targetModelId);
+                    networkManager.send({ command: "STEP_FSI_2D", modelId: targetModelId, steps, cfl, endtime });
+                    stateManager.setModelStatus(targetModelId, 'RUNNING');
+                }
+            } else if (hasMPM2D) {
+                const state = stateManager.getSimulationState(targetModelId);
+                if (state) {
+                    const payload = serializeForSolver(state, "INIT_MPM", targetModelId, model?.filename);
+                    console.log(`[Auto-Init Step] Sending INIT_MPM for MPM model ${targetModelId}`);
+                    networkManager.send(payload);
+                    sendContourConfig(targetModelId);
+                    const mpmNode = state.nodes.find(n => n.type === 'MPMDomain2D');
+                    const mpmCfl = Number(mpmNode?.parameters?.cfl ?? 0.3);
+                    networkManager.send({ command: "STEP_MPM", modelId: targetModelId, steps, cfl: mpmCfl, endtime });
+                    stateManager.setModelStatus(targetModelId, 'RUNNING');
+                }
+            } else if (has2D) {
+                const state = stateManager.getSimulationState(targetModelId);
+                if (state) {
+                    const payload = serializeForSolver(state, "INIT_2D", targetModelId, model?.filename);
+                    console.log(`[Auto-Init Step] Sending INIT_2D for standalone 2D model ${targetModelId}`);
+                    networkManager.send(payload);
+                    sendContourConfig(targetModelId);
+                    networkManager.send({ command: "STEP_2D", modelId: targetModelId, steps, cfl, endtime });
+                    stateManager.setModelStatus(targetModelId, 'RUNNING');
                 }
             } else {
-                // Pure 1D model
-                const state = stateManager.getSimulationState(modelId);
+                const state = stateManager.getSimulationState(targetModelId);
                 if (state) {
-                    const payload = serializeForSolver(state, "INIT", modelId, model?.filename);
-                    console.log(`[Auto-Run] Sending INIT for standalone 1D model ${modelId}`);
+                    const payload = serializeForSolver(state, "INIT", targetModelId, model?.filename);
+                    console.log(`[Auto-Init Step] Sending INIT for standalone 1D model ${targetModelId}`);
                     networkManager.send(payload);
-                    networkManager.send({ command: "EXEC_ALL", modelId: modelId, cfl });
-                    stateManager.setModelStatus(modelId, 'RUNNING');
+                    networkManager.send({ command: "STEP", modelId: targetModelId, steps, cfl, endtime });
+                    stateManager.setModelStatus(targetModelId, 'RUNNING');
                 }
             }
         } else {
             // Already initialized / paused
             if (hasFEMFSI3D) {
-                sendView3DConfig(modelId);
-                networkManager.send({ command: "EXEC_ALL_FEM_FSI_3D", modelId: modelId, cfl });
+                sendView3DConfig(targetModelId);
+                networkManager.send({ command: "STEP_FEM_FSI_3D", modelId: targetModelId, steps, cfl, endtime });
             } else if (hasFEM3D) {
-                sendView3DConfig(modelId);
+                sendView3DConfig(targetModelId);
                 const femNode = model?.nodes.find(n => n.type === 'FEMDomain3D');
                 const vpNode = model?.nodes.find(n => n.type === 'Telemetry3DViewport');
                 const femCfl = Number(femNode?.parameters?.cfl ?? 0.3);
                 const refreshRate = Number(vpNode?.parameters?.refresh_rate ?? 0.5);
-                networkManager.send({ command: "EXEC_ALL_FEM_3D", modelId: modelId, cfl: femCfl, refresh_rate: refreshRate });
+                networkManager.send({ command: "STEP_FEM_3D", modelId: targetModelId, steps, cfl: femCfl, endtime, refresh_rate: refreshRate });
             } else if (hasFSI3D) {
-                sendView3DConfig(modelId);
-                networkManager.send({ command: "EXEC_ALL_FSI_3D", modelId: modelId, cfl });
+                sendView3DConfig(targetModelId);
+                networkManager.send({ command: "STEP_FSI_3D", modelId: targetModelId, steps, cfl, endtime });
             } else if (hasMPM3D) {
-                sendView3DConfig(modelId);
+                sendView3DConfig(targetModelId);
                 const mpmNode = model?.nodes.find(n => n.type === 'MPMDomain3D');
                 const mpmCfl = Number(mpmNode?.parameters?.cfl ?? 0.3);
-                networkManager.send({ command: "EXEC_ALL_MPM_3D", modelId: modelId, cfl: mpmCfl });
+                networkManager.send({ command: "STEP_MPM_3D", modelId: targetModelId, steps, cfl: mpmCfl, endtime });
             } else if (has3D) {
-                sendView3DConfig(modelId);
-                networkManager.send({ command: "EXEC_ALL_3D", modelId: modelId, cfl });
+                sendView3DConfig(targetModelId);
+                const vtkNode = model?.nodes.find(n => n.type === 'VTKOutput');
+                const vtkParams = vtkNode?.parameters ? { ...vtkNode.parameters } : {};
+                networkManager.send({ command: "STEP_3D", modelId: targetModelId, steps, cfl, endtime, ...vtkParams });
             } else if (hasFSI2D) {
-                sendContourConfig(modelId);
-                networkManager.send({ command: "EXEC_ALL_FSI_2D", modelId: modelId, cfl });
+                sendContourConfig(targetModelId);
+                const vtkNode = model?.nodes.find(n => n.type === 'VTKOutput');
+                const vtkParams = vtkNode?.parameters ? { ...vtkNode.parameters } : {};
+                networkManager.send({ command: "STEP_FSI_2D", modelId: targetModelId, steps, cfl, endtime, ...vtkParams });
             } else if (hasMPM2D) {
-                sendContourConfig(modelId);
+                sendContourConfig(targetModelId);
                 const mpmNode = model?.nodes.find(n => n.type === 'MPMDomain2D');
                 const mpmCfl = Number(mpmNode?.parameters?.cfl ?? 0.3);
-                networkManager.send({ command: "EXEC_ALL_MPM", modelId: modelId, cfl: mpmCfl });
+                networkManager.send({ command: "STEP_MPM", modelId: targetModelId, steps, cfl: mpmCfl, endtime });
             } else if (pipeline || has2D) {
-                sendContourConfig(modelId);
-                networkManager.send({ command: "EXEC_ALL_2D", modelId: modelId, cfl });
+                sendContourConfig(targetModelId);
+                const vtkNode = model?.nodes.find(n => n.type === 'VTKOutput');
+                const vtkParams = vtkNode?.parameters ? { ...vtkNode.parameters } : {};
+                networkManager.send({ command: "STEP_2D", modelId: targetModelId, steps, cfl, endtime, ...vtkParams });
             } else {
-                networkManager.send({ command: "EXEC_ALL",    modelId: modelId, cfl });
+                const vtkNode = model?.nodes.find(n => n.type === 'VTKOutput');
+                const vtkParams = vtkNode?.parameters ? { ...vtkNode.parameters } : {};
+                networkManager.send({ command: "STEP",    modelId: targetModelId, steps, cfl, endtime, ...vtkParams });
             }
-            stateManager.setModelStatus(modelId, 'RUNNING');
+            stateManager.setModelStatus(targetModelId, 'RUNNING');
         }
 
-    // ── PAUSE ─────────────────────────────────────────────────────────────────
-    } else if (command === "PAUSE") {
-        if (hasFEMFSI3D) {
-            networkManager.send({ command: "PAUSE_FEM_FSI_3D", modelId: modelId });
-        } else if (hasFEM3D) {
-            networkManager.send({ command: "PAUSE_FEM_3D", modelId: modelId });
-        } else if (hasFSI3D) {
-            networkManager.send({ command: "PAUSE_FSI_3D", modelId: modelId });
-        } else if (hasMPM3D) {
-            networkManager.send({ command: "PAUSE_MPM_3D", modelId: modelId });
-        } else if (has3D) {
-            networkManager.send({ command: "PAUSE_3D", modelId: modelId });
-        } else if (hasFSI2D) {
-            networkManager.send({ command: "PAUSE_FSI_2D", modelId: modelId });
-        } else if (hasMPM2D) {
-            networkManager.send({ command: "PAUSE_MPM", modelId: modelId });
-        } else if (pipeline || has2D) {
-            networkManager.send({ command: "PAUSE_2D", modelId: modelId });
+    // ── EXEC_ALL ──────────────────────────────────────────────────────────────
+    } else if (command === "EXEC_ALL") {
+        const status = stateManager.getModelStatus(targetModelId);
+        const cfl = getCflFromSolver(targetModelId);
+        const endtime = getEndTimeFromSolver(targetModelId);
+
+        if (status === 'UNINITIALIZED' || status === 'TERMINATED' || status === 'ERROR') {
+            if (hasFEMFSI3D) {
+                const state = stateManager.getSimulationState(targetModelId);
+                if (state) {
+                    const payload = serializeForSolver(state, "INIT_FEM_FSI_3D", targetModelId, model?.filename);
+                    console.log(`[Auto-Run] Sending INIT_FEM_FSI_3D for 3D FEM FSI model ${targetModelId}`);
+                    networkManager.send(payload);
+                    sendView3DConfig(targetModelId);
+                    networkManager.send({ command: "EXEC_ALL_FEM_FSI_3D", modelId: targetModelId, cfl, endtime });
+                    stateManager.setModelStatus(targetModelId, 'RUNNING');
+                }
+            } else if (hasFEM3D) {
+                const state = stateManager.getSimulationState(targetModelId);
+                if (state) {
+                    const payload = serializeForSolver(state, "INIT_FEM_3D", targetModelId, model?.filename);
+                    console.log(`[Auto-Run] Sending INIT_FEM_3D for 3D FEM model ${targetModelId}`);
+                    networkManager.send(payload);
+                    sendView3DConfig(targetModelId);
+                    const femNode = state.nodes.find(n => n.type === 'FEMDomain3D');
+                    const vpNode = state.nodes.find(n => n.type === 'Telemetry3DViewport');
+                    const femCfl = Number(femNode?.parameters?.cfl ?? 0.3);
+                    const refreshRate = Number(vpNode?.parameters?.refresh_rate ?? 0.5);
+                    networkManager.send({ command: "EXEC_ALL_FEM_3D", modelId: targetModelId, cfl: femCfl, endtime, refresh_rate: refreshRate });
+                    stateManager.setModelStatus(targetModelId, 'RUNNING');
+                }
+            } else if (hasFSI3D) {
+                const state = stateManager.getSimulationState(targetModelId);
+                if (state) {
+                    const payload = serializeForSolver(state, "INIT_FSI_3D", targetModelId, model?.filename);
+                    console.log(`[Auto-Run] Sending INIT_FSI_3D for 3D FSI model ${targetModelId}`);
+                    networkManager.send(payload);
+                    sendView3DConfig(targetModelId);
+                    networkManager.send({ command: "EXEC_ALL_FSI_3D", modelId: targetModelId, cfl, endtime });
+                    stateManager.setModelStatus(targetModelId, 'RUNNING');
+                }
+            } else if (hasMPM3D) {
+                const state = stateManager.getSimulationState(targetModelId);
+                if (state) {
+                    const payload = serializeForSolver(state, "INIT_MPM_3D", targetModelId, model?.filename);
+                    console.log(`[Auto-Run] Sending INIT_MPM_3D for 3D MPM model ${targetModelId}`);
+                    networkManager.send(payload);
+                    sendView3DConfig(targetModelId);
+                    const mpmNode = state.nodes.find(n => n.type === 'MPMDomain3D');
+                    const mpmCfl = Number(mpmNode?.parameters?.cfl ?? 0.3);
+                    networkManager.send({ command: "EXEC_ALL_MPM_3D", modelId: targetModelId, cfl: mpmCfl, endtime });
+                    stateManager.setModelStatus(targetModelId, 'RUNNING');
+                }
+            } else if (pipeline) {
+                const is3D = model?.nodes.some(n => n.type === 'CFDSolver3D');
+                const state = stateManager.getSimulationState(targetModelId);
+                if (state) {
+                    const cmd = is3D ? "INIT_3D" : "INIT_2D";
+                    const payload = serializeForSolver(state, cmd, targetModelId, model?.filename);
+                    console.log(`[Auto-Run Pipeline] Sending ${cmd} for ${is3D ? '3D' : '2D'} model ${targetModelId} in pipeline`);
+                    networkManager.send(payload);
+                    if (is3D) sendView3DConfig(targetModelId); else sendContourConfig(targetModelId);
+
+                    const remapOk = pipeline.sourceType === '2D' ? tryRemapFrom2D(targetModelId, pipeline) : tryRemapFrom1D(targetModelId, pipeline);
+                    if (remapOk) {
+                        const execCmd = is3D ? "EXEC_ALL_3D" : "EXEC_ALL_2D";
+                        networkManager.send({ command: execCmd, modelId: targetModelId, cfl, endtime });
+                        stateManager.setModelStatus(targetModelId, 'RUNNING');
+                    } else {
+                        pipelineAutoRunPending.set(targetModelId, { command, extra });
+                    }
+                }
+            } else if (has3D) {
+                const state = stateManager.getSimulationState(targetModelId);
+                if (state) {
+                    const payload = serializeForSolver(state, "INIT_3D", targetModelId, model?.filename);
+                    networkManager.send(payload);
+                    sendView3DConfig(targetModelId);
+                    networkManager.send({ command: "EXEC_ALL_3D", modelId: targetModelId, cfl, endtime });
+                    stateManager.setModelStatus(targetModelId, 'RUNNING');
+                }
+            } else if (hasFSI2D) {
+                const state = stateManager.getSimulationState(targetModelId);
+                if (state) {
+                    const payload = serializeForSolver(state, "INIT_FSI_2D", targetModelId, model?.filename);
+                    console.log(`[Auto-Run] Sending INIT_FSI_2D for 2D FSI model ${targetModelId}`);
+                    networkManager.send(payload);
+                    sendContourConfig(targetModelId);
+                    networkManager.send({ command: "EXEC_ALL_FSI_2D", modelId: targetModelId, cfl, endtime });
+                    stateManager.setModelStatus(targetModelId, 'RUNNING');
+                }
+            } else if (hasMPM2D) {
+                const state = stateManager.getSimulationState(targetModelId);
+                if (state) {
+                    const payload = serializeForSolver(state, "INIT_MPM", targetModelId, model?.filename);
+                    console.log(`[Auto-Run] Sending INIT_MPM for MPM model ${targetModelId}`);
+                    networkManager.send(payload);
+                    sendContourConfig(targetModelId);
+                    const mpmNode = state.nodes.find(n => n.type === 'MPMDomain2D');
+                    const mpmCfl = Number(mpmNode?.parameters?.cfl ?? 0.3);
+                    networkManager.send({ command: "EXEC_ALL_MPM", modelId: targetModelId, cfl: mpmCfl, endtime });
+                    stateManager.setModelStatus(targetModelId, 'RUNNING');
+                }
+            } else if (has2D) {
+                // Standalone 2D model
+                const state = stateManager.getSimulationState(targetModelId);
+                if (state) {
+                    const payload = serializeForSolver(state, "INIT_2D", targetModelId, model?.filename);
+                    console.log(`[Auto-Run] Sending INIT_2D for standalone 2D model ${targetModelId}`);
+                    networkManager.send(payload);
+                    sendContourConfig(targetModelId);
+                    networkManager.send({ command: "EXEC_ALL_2D", modelId: targetModelId, cfl, endtime });
+                    stateManager.setModelStatus(targetModelId, 'RUNNING');
+                }
+            } else {
+                // Pure 1D model
+                const state = stateManager.getSimulationState(targetModelId);
+                if (state) {
+                    const payload = serializeForSolver(state, "INIT", targetModelId, model?.filename);
+                    console.log(`[Auto-Run] Sending INIT for standalone 1D model ${targetModelId}`);
+                    networkManager.send(payload);
+                    networkManager.send({ command: "EXEC_ALL", modelId: targetModelId, cfl, endtime });
+                    stateManager.setModelStatus(targetModelId, 'RUNNING');
+                }
+            }
         } else {
-            networkManager.send({ command: "PAUSE",    modelId: modelId });
+            // Already initialized / paused
+            if (hasFEMFSI3D) {
+                sendView3DConfig(targetModelId);
+                networkManager.send({ command: "EXEC_ALL_FEM_FSI_3D", modelId: targetModelId, cfl, endtime });
+            } else if (hasFEM3D) {
+                sendView3DConfig(targetModelId);
+                const femNode = model?.nodes.find(n => n.type === 'FEMDomain3D');
+                const vpNode = model?.nodes.find(n => n.type === 'Telemetry3DViewport');
+                const femCfl = Number(femNode?.parameters?.cfl ?? 0.3);
+                const refreshRate = Number(vpNode?.parameters?.refresh_rate ?? 0.5);
+                networkManager.send({ command: "EXEC_ALL_FEM_3D", modelId: targetModelId, cfl: femCfl, endtime, refresh_rate: refreshRate });
+            } else if (hasFSI3D) {
+                sendView3DConfig(targetModelId);
+                networkManager.send({ command: "EXEC_ALL_FSI_3D", modelId: targetModelId, cfl, endtime });
+            } else if (hasMPM3D) {
+                sendView3DConfig(targetModelId);
+                const mpmNode = model?.nodes.find(n => n.type === 'MPMDomain3D');
+                const mpmCfl = Number(mpmNode?.parameters?.cfl ?? 0.3);
+                networkManager.send({ command: "EXEC_ALL_MPM_3D", modelId: targetModelId, cfl: mpmCfl, endtime });
+            } else if (has3D) {
+                sendView3DConfig(targetModelId);
+                const vtkNode = model?.nodes.find(n => n.type === 'VTKOutput');
+                const vtkParams = vtkNode?.parameters ? { ...vtkNode.parameters } : {};
+                networkManager.send({ command: "EXEC_ALL_3D", modelId: targetModelId, cfl, endtime, ...vtkParams });
+            } else if (hasFSI2D) {
+                sendContourConfig(targetModelId);
+                const vtkNode = model?.nodes.find(n => n.type === 'VTKOutput');
+                const vtkParams = vtkNode?.parameters ? { ...vtkNode.parameters } : {};
+                networkManager.send({ command: "EXEC_ALL_FSI_2D", modelId: targetModelId, cfl, endtime, ...vtkParams });
+            } else if (hasMPM2D) {
+                sendContourConfig(targetModelId);
+                const mpmNode = model?.nodes.find(n => n.type === 'MPMDomain2D');
+                const mpmCfl = Number(mpmNode?.parameters?.cfl ?? 0.3);
+                networkManager.send({ command: "EXEC_ALL_MPM", modelId: targetModelId, cfl: mpmCfl, endtime });
+            } else if (pipeline || has2D) {
+                sendContourConfig(targetModelId);
+                const vtkNode = model?.nodes.find(n => n.type === 'VTKOutput');
+                const vtkParams = vtkNode?.parameters ? { ...vtkNode.parameters } : {};
+                networkManager.send({ command: "EXEC_ALL_2D", modelId: targetModelId, cfl, endtime, ...vtkParams });
+            } else {
+                const vtkNode = model?.nodes.find(n => n.type === 'VTKOutput');
+                const vtkParams = vtkNode?.parameters ? { ...vtkNode.parameters } : {};
+                networkManager.send({ command: "EXEC_ALL",    modelId: targetModelId, cfl, endtime, ...vtkParams });
+            }
+            stateManager.setModelStatus(targetModelId, 'RUNNING');
         }
-        stateManager.setModelStatus(modelId, 'PAUSED');
+    }
+
+    // ── PAUSE ─────────────────────────────────────────────────────────────────
+    else if (command === "PAUSE") {
+        if (hasFEMFSI3D) {
+            networkManager.send({ command: "PAUSE_FEM_FSI_3D", modelId: targetModelId });
+        } else if (hasFEM3D) {
+            networkManager.send({ command: "PAUSE_FEM_3D", modelId: targetModelId });
+        } else if (hasFSI3D) {
+            networkManager.send({ command: "PAUSE_FSI_3D", modelId: targetModelId });
+        } else if (hasMPM3D) {
+            networkManager.send({ command: "PAUSE_MPM_3D", modelId: targetModelId });
+        } else if (has3D) {
+            networkManager.send({ command: "PAUSE_3D", modelId: targetModelId });
+        } else if (hasFSI2D) {
+            networkManager.send({ command: "PAUSE_FSI_2D", modelId: targetModelId });
+        } else if (hasMPM2D) {
+            networkManager.send({ command: "PAUSE_MPM", modelId: targetModelId });
+        } else if (pipeline || has2D) {
+            networkManager.send({ command: "PAUSE_2D", modelId: targetModelId });
+        } else {
+            networkManager.send({ command: "PAUSE",    modelId: targetModelId });
+        }
+        stateManager.setModelStatus(targetModelId, 'PAUSED');
 
     // ── TERMINATE ─────────────────────────────────────────────────────────────
     } else if (command === "TERMINATE") {
         if (hasFEMFSI3D) {
-            networkManager.send({ command: "TERMINATE_FEM_FSI_3D", modelId: modelId });
+            networkManager.send({ command: "TERMINATE_FEM_FSI_3D", modelId: targetModelId });
         } else if (hasFEM3D) {
-            networkManager.send({ command: "TERMINATE_FEM_3D", modelId: modelId });
+            networkManager.send({ command: "TERMINATE_FEM_3D", modelId: targetModelId });
         } else if (hasFSI3D) {
-            networkManager.send({ command: "TERMINATE_FSI_3D", modelId: modelId });
+            networkManager.send({ command: "TERMINATE_FSI_3D", modelId: targetModelId });
         } else if (hasMPM3D) {
-            networkManager.send({ command: "TERMINATE_MPM_3D", modelId: modelId });
+            networkManager.send({ command: "TERMINATE_MPM_3D", modelId: targetModelId });
         } else if (has3D) {
-            networkManager.send({ command: "TERMINATE_3D", modelId: modelId });
+            networkManager.send({ command: "TERMINATE_3D", modelId: targetModelId });
         } else if (hasFSI2D) {
-            networkManager.send({ command: "TERMINATE_FSI_2D", modelId: modelId });
+            networkManager.send({ command: "TERMINATE_FSI_2D", modelId: targetModelId });
         } else if (pipeline || has2D) {
-            networkManager.send({ command: "TERMINATE_2D", modelId: modelId });
+            networkManager.send({ command: "TERMINATE_2D", modelId: targetModelId });
         } else {
-            networkManager.send({ command: "TERMINATE",    modelId: modelId });
+            networkManager.send({ command: "TERMINATE",    modelId: targetModelId });
         }
-        stateManager.setModelStatus(modelId, 'TERMINATED');
-        stateManager.setModelProgress(modelId, 0);
+    // ── REFRESH ───────────────────────────────────────────────────────────────
+    } else if (command === "REFRESH" || command === "REFRESH_STATE") {
+        requestAndPlotCurrentState(targetModelId);
     }
 }
+
+(window as any).executeModelCommand = executeModelCommand;
+(window as any).executeWorkspacePipeline = executeWorkspacePipeline;
 
 document.addEventListener('model-action', async (e: any) => {
     const { modelId, command, steps } = e.detail;
@@ -1610,6 +2020,9 @@ networkManager.onMessage(async (data) => {
                 }
 
                 layoutManager.components.forEach(comp => {
+                    if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) {
+                        comp.instance.setSTLGeometry?.(vertices, modelId, meshId);
+                    }
                     if (comp.type === 'TELEMETRY_3D' && comp.instance) {
                         comp.instance.setSTLGeometry(vertices, modelId, meshId);
                     }
@@ -1645,6 +2058,9 @@ networkManager.onMessage(async (data) => {
                 const cells = new Int32Array(cellBuffer);
 
                 layoutManager.components.forEach(comp => {
+                    if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) {
+                        comp.instance.setObstaclesGeometry?.(vertices, cells, modelId, meshId);
+                    }
                     if (comp.type === 'TELEMETRY_3D' && comp.instance) {
                         comp.instance.setObstaclesGeometry(vertices, cells, modelId, meshId);
                     }
@@ -1666,16 +2082,19 @@ networkManager.onMessage(async (data) => {
         const model = stateManager.getAllModels().find(m => m.id === modelId);
         const solverNodes = model?.nodes.filter(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D' || n.type === 'MPMDomain2D' || n.type === 'MPMDomain3D' || n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D' || n.type === 'FEMDomain3D' || n.type === 'FEMFSICoupler3D') || [];
         if (solverNodes.length > 0) {
-            solverNodes.forEach(solverNode => {
-                stateManager.pushTelemetry(solverNode.id, payloadBuffer, modelId);
+            stateManager.pushTelemetry(solverNodes[0].id, payloadBuffer, modelId);
+            const curStep = (modelId ? stateManager.getModelStep(modelId) : 0) || 0;
+            const curTime = (modelId ? stateManager.getModelSimTime(modelId) : 0) || 0;
+            const curDt = (modelId ? stateManager.getModelDt(modelId) : 0) || 0;
+            const bufferedFrame = playbackBuffer.addFrame(payloadBuffer, { modelId, step: curStep, time: curTime, metrics: { dt: curDt } });
+            const hasViewport = Array.from(layoutManager.components.values()).some((c: any) => c.type === 'VIEWPORT' || c.type === 'MULTI_VIEW_STAGE');
+            layoutManager.components.forEach(comp => {
+                if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) {
+                    comp.instance.dispatchFrame(bufferedFrame, true);
+                } else if (comp.type === 'TELEMETRY_3D' && comp.instance && !hasViewport) {
+                    comp.instance.pushFrame(payloadBuffer, modelId);
+                }
             });
-            if (model?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'MPMDomain3D' || n.type === 'FSICoupler3D' || n.type === 'FEMDomain3D' || n.type === 'FEMFSICoupler3D')) {
-                layoutManager.components.forEach(comp => {
-                    if (comp.type === 'TELEMETRY_3D' && comp.instance) comp.instance.pushFrame(payloadBuffer, modelId);
-                    if (comp.type === 'NODE_VIEWER' && comp.instance) comp.instance.pushFrame(payloadBuffer, modelId);
-                    if (comp.type === 'NODE_GRAPH' && comp.instance) comp.instance.pushFrame(payloadBuffer, modelId);
-                });
-            }
         }
         return;
     }
@@ -1695,6 +2114,9 @@ networkManager.onMessage(async (data) => {
                 const state = stateManager.getSimulationState(modelId);
                 const vpNodes = state?.nodes.filter(n => n.type === 'Telemetry3DViewport') || [];
                 layoutManager.components.forEach(comp => {
+                    if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) {
+                        comp.instance.setSTLGeometry?.(verts, modelId);
+                    }
                     if (comp.type === 'TELEMETRY_3D' && comp.instance) {
                         comp.instance.setSTLGeometry(verts, modelId);
                     }
@@ -1716,9 +2138,41 @@ networkManager.onMessage(async (data) => {
                     if (comp.type === 'NODE_VIEWER' && comp.instance) {
                         comp.instance.setSTLGeometry(verts, modelId);
                     }
+                    if (comp.type === 'PROPERTY_GRID' && comp.instance) {
+                        comp.instance.updateLiveStats?.();
+                        comp.instance.render?.(true);
+                    }
                 });
             } else {
                 console.error("Broker failed to load STL geometry: " + dataJson.error);
+            }
+            return;
+        }
+
+        if (dataJson.type === 'obstacles_mesh') {
+            if (dataJson.vertices && dataJson.cells) {
+                const verts = new Float32Array(dataJson.vertices);
+                const cells = new Int32Array(dataJson.cells);
+                const modelId = dataJson.modelId;
+                const meshId = dataJson.meshId || 'default';
+                layoutManager.components.forEach(comp => {
+                    if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) {
+                        comp.instance.setObstaclesGeometry?.(verts, cells, modelId, meshId);
+                    }
+                    if (comp.type === 'TELEMETRY_3D' && comp.instance) {
+                        comp.instance.setObstaclesGeometry(verts, cells, modelId, meshId);
+                    }
+                    if (comp.type === 'NODE_VIEWER' && comp.instance) {
+                        comp.instance.setObstaclesGeometry(verts, cells, modelId, meshId);
+                    }
+                    if (comp.type === 'NODE_GRAPH' && comp.instance) {
+                        const state = stateManager.getSimulationState(modelId);
+                        const vpNodes = state?.nodes.filter(n => n.type === 'Telemetry3DViewport') || [];
+                        vpNodes.forEach(vpNode => {
+                            comp.instance.setObstaclesGeometry(vpNode.id, verts, cells, meshId);
+                        });
+                    }
+                });
             }
             return;
         }
@@ -1749,14 +2203,33 @@ networkManager.onMessage(async (data) => {
                             if (n.type === 'VTKOutput' || n.type === 'Telemetry3DViewport') {
                                 stateManager.updateNodeParameters(n.id, { vtk_dir: dirPath });
                             }
+                            if (n.parameters) {
+                                ['stl_file', 'k_file', 'external_file_path', 'file_path'].forEach(key => {
+                                    const val = n.parameters[key];
+                                    if (val && typeof val === 'string' && val.trim() !== '' && val !== 'None specified') {
+                                        const slash = val.lastIndexOf('/');
+                                        const baseName = slash !== -1 ? val.substring(slash + 1) : (val.startsWith('./') ? val.substring(2) : val);
+                                        if (baseName) {
+                                            stateManager.updateNodeParameters(n.id, { [key]: `./${baseName}` });
+                                        }
+                                    }
+                                });
+                            }
                         });
                     }
                 }
                 
+                const resourceSuffix = (dataJson.resourcesCopied && dataJson.resourcesCopied > 0)
+                    ? ` (with ${dataJson.resourcesCopied} external resource${dataJson.resourcesCopied > 1 ? 's' : ''} bundled)`
+                    : '';
+                const warningMsg = (dataJson.resourceErrors && dataJson.resourceErrors.length > 0)
+                    ? `\n\nResource Warnings:\n${dataJson.resourceErrors.join('\n')}`
+                    : '';
+
                 if (isWorkspaceSave) {
-                    await CustomDialog.alert(`Workspace saved successfully to:\n${filePath}`);
+                    await CustomDialog.alert(`Workspace saved successfully to:\n${filePath}${resourceSuffix}${warningMsg}`);
                 } else if (!isSilentSave) {
-                    await CustomDialog.alert(`Model saved successfully to:\n${filePath}`);
+                    await CustomDialog.alert(`Model saved successfully to:\n${filePath}${resourceSuffix}${warningMsg}`);
                 }
             } else {
                 await CustomDialog.alert(`Error saving file:\n${dataJson.error}`);
@@ -1897,6 +2370,8 @@ networkManager.onMessage(async (data) => {
                 }
                 const solverNodes = model.nodes.filter(n => n.type === targetType || n.type === 'FEMDomain3D' || n.type === 'FEMFSICoupler3D' || n.type === 'CFDSolver3D' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver' || n.type === 'MPMDomain3D' || n.type === 'MPMDomain2D' || n.type === 'FSICoupler3D' || n.type === 'FSICoupler2D');
                 solverNodes.forEach(sn => stateManager.pushTelemetry(sn.id, dataJson, modelId));
+                const textNodes = model.nodes.filter(n => n.type === 'TelemetryText');
+                textNodes.forEach(tn => stateManager.pushTelemetry(tn.id, dataJson, modelId));
                 if (dataJson.level === 'ERROR') {
                     stateManager.setModelStatus(modelId, 'ERROR');
                 }
@@ -1960,6 +2435,10 @@ networkManager.onMessage(async (data) => {
                 if (dataJson.step !== undefined) {
                     stateManager.setModelStep(modelId, dataJson.step);
                 }
+                if (dataJson.dt !== undefined) {
+                    stateManager.setModelDt(modelId, dataJson.dt);
+                }
+                transportController.updateExecutionStats(dataJson.step, dataJson.time, dataJson.dt);
                 const currentStatus = stateManager.getModelStatus(modelId);
 
                 if (dataJson.time === 0 && currentStatus === 'UNINITIALIZED') {
@@ -1988,6 +2467,9 @@ networkManager.onMessage(async (data) => {
                 }
                 if (dataJson.type === 'TELEMETRY_3D' || dataJson.type === 'TELEMETRY_FEM_3D') {
                     layoutManager.components.forEach(comp => {
+                        if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance && typeof comp.instance.updateTelemetry === 'function') {
+                            comp.instance.updateTelemetry(dataJson, modelId);
+                        }
                         if (comp.type === 'TELEMETRY_3D') comp.instance.updateTelemetry(dataJson, modelId);
                         if (comp.type === 'NODE_VIEWER' && comp.instance) comp.instance.updateTelemetry(dataJson, modelId);
                     });

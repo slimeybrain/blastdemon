@@ -17,20 +17,30 @@ double global_geometry_ymin = 0.0;
 double global_geometry_zmin = 0.0;
 
 static std::vector<Triangle> read_binary_stl_data(std::ifstream& file, uint32_t num_triangles) {
-    std::vector<Triangle> triangles;
-    triangles.reserve(num_triangles);
+    size_t total_payload_bytes = static_cast<size_t>(num_triangles) * 50;
+    std::vector<char> buffer(total_payload_bytes);
+    file.read(buffer.data(), total_payload_bytes);
+    if (!file && file.gcount() < static_cast<std::streamsize>(total_payload_bytes)) {
+        throw std::runtime_error("Failed to read complete binary STL triangle payload (" +
+                                 std::to_string(file.gcount()) + " / " +
+                                 std::to_string(total_payload_bytes) + " bytes read)");
+    }
+
+    std::vector<Triangle> triangles(num_triangles);
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(static)
+#endif
     for (uint32_t i = 0; i < num_triangles; ++i) {
+        const char* ptr = buffer.data() + static_cast<size_t>(i) * 50;
         float data[12];
-        file.read(reinterpret_cast<char*>(data), 48);
-        uint16_t attr;
-        file.read(reinterpret_cast<char*>(&attr), 2);
-        
+        std::memcpy(data, ptr, 48);
+
         Triangle t;
         t.normal = {data[0], data[1], data[2]};
         t.v0 = {data[3], data[4], data[5]};
         t.v1 = {data[6], data[7], data[8]};
         t.v2 = {data[9], data[10], data[11]};
-        triangles.push_back(t);
+        triangles[i] = t;
     }
     return triangles;
 }
@@ -183,11 +193,14 @@ void voxelize_geometry(
     std::vector<Point3D> accumulated_normals(total_tiles * TILE_CELLS_3D, Point3D{0.0f, 0.0f, 0.0f});
     std::vector<uint8_t> has_boundary(total_tiles * TILE_CELLS_3D, 0);
 
-    for (int i = 0; i < (int)triangles.size(); ++i) {
-        if (terminate_flag && terminate_flag->load()) return;
-        if (progress_callback && (i % 2000 == 0 || i == (int)triangles.size() - 1)) {
-            progress_callback(0.1 + 0.3 * (double)i / std::max(1, (int)triangles.size() - 1));
-        }
+    std::atomic<int> completed_triangles{0};
+    int total_triangles = static_cast<int>(triangles.size());
+
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(dynamic, 1024)
+#endif
+    for (int i = 0; i < total_triangles; ++i) {
+        if (terminate_flag && terminate_flag->load()) continue;
         const auto& tri = triangles[i];
         
         float min_x = std::min({tri.v0.x, tri.v1.x, tri.v2.x});
@@ -214,16 +227,8 @@ void voxelize_geometry(
             N_accum.z = ex1 * ey2 - ey1 * ex2;
         }
 
-        Point3D N_unit = N_accum;
-        float nlen2 = std::sqrt(N_unit.x*N_unit.x + N_unit.y*N_unit.y + N_unit.z*N_unit.z);
-        if (nlen2 > 1e-6f) {
-            N_unit.x /= nlen2; N_unit.y /= nlen2; N_unit.z /= nlen2;
-        } else {
-            N_unit = {1.0f, 0.0f, 0.0f};
-        }
-
-        std::vector<int> updated_cells;
-        updated_cells.reserve(32);
+        int updated_cells[128];
+        int num_updated = 0;
 
         auto add_cell_boundary = [&](int gx, int gy, int gz) {
             if (gx < 0 || gx >= nx || gy < 0 || gy >= ny || gz < 0 || gz >= nz) return;
@@ -237,13 +242,26 @@ void voxelize_geometry(
             int idx = cx + cy * TILE_SIZE_3D + cz * TILE_SIZE_3D * TILE_SIZE_3D;
             int linear_idx = t_idx * TILE_CELLS_3D + idx;
             
-            if (std::find(updated_cells.begin(), updated_cells.end(), linear_idx) == updated_cells.end()) {
-                accumulated_normals[linear_idx].x += N_accum.x;
-                accumulated_normals[linear_idx].y += N_accum.y;
-                accumulated_normals[linear_idx].z += N_accum.z;
-                has_boundary[linear_idx] = 1;
-                updated_cells.push_back(linear_idx);
+            for (int k = 0; k < num_updated; ++k) {
+                if (updated_cells[k] == linear_idx) return;
             }
+            if (num_updated < 128) {
+                updated_cells[num_updated++] = linear_idx;
+            }
+
+            has_boundary[linear_idx] = 1;
+#ifdef _OPENMP
+            #pragma omp atomic
+            accumulated_normals[linear_idx].x += N_accum.x;
+            #pragma omp atomic
+            accumulated_normals[linear_idx].y += N_accum.y;
+            #pragma omp atomic
+            accumulated_normals[linear_idx].z += N_accum.z;
+#else
+            accumulated_normals[linear_idx].x += N_accum.x;
+            accumulated_normals[linear_idx].y += N_accum.y;
+            accumulated_normals[linear_idx].z += N_accum.z;
+#endif
         };
 
         // 1. Mark cells containing the three vertices (stl nodes) of the triangle
@@ -276,7 +294,19 @@ void voxelize_geometry(
                 }
             }
         }
+
+        int comp = ++completed_triangles;
+        if (progress_callback && (comp % 10000 == 0 || comp == total_triangles)) {
+#ifdef _OPENMP
+            if (omp_get_thread_num() == 0) {
+                progress_callback(0.1 + 0.3 * (double)comp / std::max(1, total_triangles));
+            }
+#else
+            progress_callback(0.1 + 0.3 * (double)comp / std::max(1, total_triangles));
+#endif
+        }
     }
+    if (terminate_flag && terminate_flag->load()) return;
 
     std::vector<uint8_t> is_inside(total_tiles * TILE_CELLS_3D, 0);
 

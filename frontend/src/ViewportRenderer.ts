@@ -159,12 +159,12 @@ void main() {
         t = clamp((raw - uMin) / denom, 0.0, 1.0);
     }
     vec3 color;
-    if (uColormap == 1) color = colormap_viridis(t);
-    else if (uColormap == 2) color = colormap_rainbow(t);
+    if (uColormap == 0) color = colormap_plasma(t);
+    else if (uColormap == 1) color = colormap_viridis(t);
     else if (uColormap == 3) color = colormap_coolwarm(t);
     else if (uColormap == 4) color = colormap_cividis(t);
     else if (uColormap == 5) color = colormap_grayscale(t);
-    else color = colormap_plasma(t);
+    else color = colormap_rainbow(t);
     
     vec4 finalColor = vec4(color, uAlpha);
     if (uEnableLighting) {
@@ -357,12 +357,12 @@ void main() {
         t = clamp((raw - uMin) / denom, 0.0, 1.0);
     }
     vec3 color;
-    if (uColormap == 1) color = colormap_viridis(t);
-    else if (uColormap == 2) color = colormap_rainbow(t);
+    if (uColormap == 0) color = colormap_plasma(t);
+    else if (uColormap == 1) color = colormap_viridis(t);
     else if (uColormap == 3) color = colormap_coolwarm(t);
     else if (uColormap == 4) color = colormap_cividis(t);
     else if (uColormap == 5) color = colormap_grayscale(t);
-    else color = colormap_plasma(t);
+    else color = colormap_rainbow(t);
     
     vec4 finalColor = vec4(color, uAlpha);
     if (uEnableLighting) {
@@ -406,13 +406,13 @@ void main() {
 
 function getColormapIndex(name?: string): number {
     switch (name) {
+        case 'plasma': return 0;
         case 'viridis': return 1;
-        case 'rainbow': return 2;
         case 'coolwarm': return 3;
         case 'cividis': return 4;
         case 'grayscale': return 5;
-        case 'plasma':
-        default: return 0;
+        case 'rainbow':
+        default: return 2;
     }
 }
 
@@ -437,7 +437,7 @@ let cameraEyeX = 0.0;
 let cameraEyeY = 0.0;
 let cameraEyeZ = 0.0;
 
-let colormap = 0;
+let colormap = 2;
 let minY = 101325.0;
 let maxY = 1000000.0;
 let autoScale = true;
@@ -453,6 +453,25 @@ let ambientLevel = 0.3;
 let sliceOpacities = [1.0, 1.0, 1.0];
 let slicesConfig: any[] = [];
 
+function canonicalizeQuantity(q: string | undefined | null): string {
+    if (!q) return 'pressure';
+    const s = q.trim();
+    if (s === 'overpressure' || s === 'peak_overpressure' || s === 'peak_pressure' || s === 'pk_press') return 'peak_overpressure';
+    if (s === 'impulse' || s === 'peak_impulse' || s === 'pk_impulse') return 'peak_impulse';
+    if (s === 'species_1' || s === 'species' || s === 'products' || s === 'detonation_products' || s === 'detonation' || s === 'reacted' || s === 'reacted_gas' || s === 'alpha1' || s === 'alpha_1') return 'species1';
+    if (s === 'species_2' || s === 'unreacted' || s === 'unreacted_solid' || s === 'solid_he' || s === 'alpha2' || s === 'alpha_2') return 'species2';
+    if (s === 'species_3' || s === 'air' || s === 'ambient_air' || s === 'alpha3' || s === 'alpha_3') return 'species3';
+    if (s === 'plastic_strain' || s === 'plasticStrain' || s === 'eps_p' || s === 'ep' || s === 'fem_strain' || s === 'mpm_strain') return 'plastic_strain';
+    if (s === 'vonMises' || s === 'von_mises' || s === 'vm_stress' || s === 'stress' || s === 'fem_stress' || s === 'mpm_stress') return 'vonMises';
+    if (s === 'temperature' || s === 'temp' || s === 'fem_temp' || s === 'mpm_temp') return 'temperature';
+    if (s === 'displacement' || s === 'disp' || s === 'fem_disp' || s === 'mpm_disp') return 'displacement';
+    if (s === 'damage' || s === 'fem_damage' || s === 'mpm_damage') return 'damage';
+    if (s === 'has_failed' || s === 'failure' || s === 'failed') return 'has_failed';
+    if (s === 'cluster_id' || s === 'cluster' || s === 'fragment_id' || s === 'fragments') return 'cluster_id';
+    if (s === 'object_id' || s === 'obj_id' || s === 'object') return 'object_id';
+    return s;
+}
+
 const DEFAULT_QUANTITY_RANGES: Record<string, [number, number]> = {
     pressure: [101325.0, 101325.0 * 100.0],
     density: [1.2, 100.0],
@@ -461,9 +480,27 @@ const DEFAULT_QUANTITY_RANGES: Record<string, [number, number]> = {
     species1: [0.0, 1.0],
     species2: [0.0, 1.0],
     species3: [0.0, 1.0],
+    species_1: [0.0, 1.0],
+    species_2: [0.0, 1.0],
+    species_3: [0.0, 1.0],
+    alpha1: [0.0, 1.0],
+    alpha2: [0.0, 1.0],
     solid: [0.0, 1.0],
     overpressure: [0.0, 101325.0 * 99.0],
-    impulse: [0.0, 10000.0]
+    peak_overpressure: [0.0, 101325.0 * 99.0],
+    impulse: [0.0, 10000.0],
+    peak_impulse: [0.0, 10000.0],
+    plastic_strain: [0.0, 1.0],
+    plasticStrain: [0.0, 1.0],
+    vonMises: [0.0, 500.0e6],
+    von_mises: [0.0, 500.0e6],
+    damage: [0.0, 1.0],
+    has_failed: [0.0, 1.0],
+    cluster_id: [0.0, 50.0],
+    object_id: [0.0, 10.0],
+    temperature: [300.0, 3000.0],
+    displacement: [0.0, 0.1],
+    momentOrForce: [0.0, 1000.0]
 };
 
 let bboxBuffer: WebGLBuffer | null = null;
@@ -835,9 +872,10 @@ function handleFrame(buffer: ArrayBuffer) {
         const useAxis = axis;
         const useOffset = zOff;
 
-        const qty = config.quantities?.[0] || 'pressure';
+        const rawQty = config.quantities?.[0] || 'pressure';
+        const qty = canonicalizeQuantity(rawQty);
         const sliceAutoScale = config.auto_scale !== false;
-        const colormapVal = config.colormap || 'plasma';
+        const colormapVal = config.colormap || 'rainbow';
         const logVal = config.log_scale === true;
         const interpVal = config.interpolate === true;
 
@@ -1029,7 +1067,7 @@ function render2D() {
         const sliceMinY = slice.minY ?? minY;
         const sliceMaxY = slice.maxY ?? maxY;
         const sliceLogScale = slice.useLogScale === true;
-        const sliceColormap = slice.colormap || 'plasma';
+        const sliceColormap = slice.colormap || 'rainbow';
 
         for (let i = 0; i < slice.w * slice.h; i++) {
             const val = slice.data[i];
@@ -1049,10 +1087,15 @@ function render2D() {
                 r = Math.round((1.0 - t) * 255);
                 g = Math.round(t * 255);
                 b = Math.round((0.5 + 0.5 * t) * 255);
-            } else { // Plasma
+            } else if (sliceColormap === 'plasma') {
                 r = Math.round(t * 1.5 * 255);
                 g = Math.round(t * t * 255);
                 b = Math.round((1.0 - t) * 255);
+            } else { // Rainbow
+                const four = 4.0 * t;
+                r = Math.min(255, Math.max(0, Math.round(255 * Math.min(four - 1.5, -four + 4.5))));
+                g = Math.min(255, Math.max(0, Math.round(255 * Math.min(four - 0.5, -four + 3.5))));
+                b = Math.min(255, Math.max(0, Math.round(255 * Math.min(four + 0.5, -four + 2.5))));
             }
             imgData.data[i * 4 + 0] = r;
             imgData.data[i * 4 + 1] = g;
@@ -1314,7 +1357,7 @@ function render() {
                             }
                         }
                         activeSlices[i].opacity = config.opacity !== undefined ? config.opacity : 1.0;
-                        activeSlices[i].colormap = config.colormap || 'plasma';
+                        activeSlices[i].colormap = config.colormap || 'rainbow';
                         activeSlices[i].useLogScale = config.log_scale === true;
                         activeSlices[i].interpolate = config.interpolate === true;
                         activeSlices[i].minY = config.min_val;
@@ -1325,7 +1368,7 @@ function render() {
                         if (targetAxis === activeSlices2D[i].axis) {
                             activeSlices2D[i].offset = config.offset;
                         }
-                        activeSlices2D[i].colormap = config.colormap || 'plasma';
+                        activeSlices2D[i].colormap = config.colormap || 'rainbow';
                         activeSlices2D[i].useLogScale = config.log_scale === true;
                         activeSlices2D[i].minY = config.min_val;
                         activeSlices2D[i].maxY = config.max_val;

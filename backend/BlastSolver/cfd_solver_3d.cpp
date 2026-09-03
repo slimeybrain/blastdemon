@@ -1681,9 +1681,9 @@ std::vector<float> CFDSolver3DImpl<RealType, IsMultiMaterial>::extractSlice(cons
         if (qty == "density" || qty == "rho") return (float)s.rho;
         if (qty == "velocity" || qty == "speed") return (float)std::sqrt(s.ux*s.ux + s.uy*s.uy + s.uz*s.uz);
         if (qty == "energy" || qty == "internal_energy") return (float)(s.E / std::max(s.rho, 1e-6));
-        if (qty == "species1" || qty == "alpha1") return (float)s.alpha1;
-        if (qty == "species2" || qty == "alpha2") return (float)s.alpha2;
-        if (qty == "species3") return (float)(1.0 - s.alpha1 - s.alpha2);
+        if (qty == "species1" || qty == "alpha1" || qty == "species_1" || qty == "species" || qty == "products" || qty == "detonation_products" || qty == "detonation" || qty == "reacted" || qty == "reacted_gas" || qty == "he_products" || qty == "alpha_1") return (float)s.alpha1;
+        if (qty == "species2" || qty == "alpha2" || qty == "species_2" || qty == "unreacted" || qty == "unreacted_solid" || qty == "solid_he" || qty == "solid_explosive" || qty == "he_solid" || qty == "alpha_2") return (float)s.alpha2;
+        if (qty == "species3" || qty == "species_3" || qty == "air" || qty == "ambient_air" || qty == "alpha3" || qty == "alpha_3") return (float)(1.0 - s.alpha1 - s.alpha2);
         if (qty == "overpressure" || qty == "peak_overpressure") return (float)s.peak_overpressure;
         if (qty == "impulse" || qty == "peak_impulse") return (float)s.peak_impulse;
         return (float)s.p;
@@ -1725,7 +1725,8 @@ std::vector<float> CFDSolver3DImpl<RealType, IsMultiMaterial>::extractSlice(cons
 
                     if (is_solid(base_gx, base_gy, base_gz)) {
                         bool found = false;
-                        for (int r = 1; r <= 2 && !found; ++r) {
+                        int max_r = std::max(4, stride * 3);
+                        for (int r = 1; r <= max_r && !found; ++r) {
                             for (int dz = -r; dz <= r && !found; ++dz) {
                                 for (int dy = -r; dy <= r && !found; ++dy) {
                                     for (int dx = -r; dx <= r && !found; ++dx) {
@@ -1807,6 +1808,75 @@ std::vector<SlicePayload3D> CFDSolver3DImpl<RealType, IsMultiMaterial>::extractA
 
     results.push_back(std::move(parent_sp));
     return results;
+}
+
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DImpl<RealType, IsMultiMaterial>::captureBulkSnapshot(CFDBulkSnapshot3D& out_snap, bool need_vel, bool need_E, bool need_species) const {
+    size_t N = (size_t)nx * ny * nz;
+    out_snap.nx = nx; out_snap.ny = ny; out_snap.nz = nz;
+    out_snap.cellSize = cellSize;
+    out_snap.xmin = xmin; out_snap.ymin = ymin; out_snap.zmin = zmin;
+    out_snap.has_vel = need_vel;
+    out_snap.has_E = need_E;
+    out_snap.has_species = need_species;
+
+    out_snap.p.resize(N);
+    out_snap.rho.resize(N);
+    out_snap.overpressure.resize(N);
+    out_snap.impulse.resize(N);
+    out_snap.solid.resize(N);
+    if (need_vel) out_snap.vel.resize(N);
+    if (need_E) out_snap.E.resize(N);
+    if (need_species) {
+        out_snap.alpha1.resize(N);
+        out_snap.alpha2.resize(N);
+        out_snap.air.resize(N);
+    }
+
+#ifdef _OPENMP
+    #pragma omp parallel for collapse(3) schedule(static)
+#endif
+    for (int gz = 0; gz < nz; ++gz) {
+        for (int gy = 0; gy < ny; ++gy) {
+            for (int gx = 0; gx < nx; ++gx) {
+                size_t lin_idx = (size_t)gx + (size_t)gy * nx + (size_t)gz * nx * ny;
+                int t = (gx >> 3) + (gy >> 3) * n_tiles_x + (gz >> 3) * n_tiles_x * n_tiles_y;
+                int c = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
+
+                const auto& s = states_pool[t];
+                out_snap.p[lin_idx] = (float)s.p[c];
+                out_snap.rho[lin_idx] = (float)s.rho[c];
+                out_snap.overpressure[lin_idx] = (float)s.peak_overpressure[c];
+                out_snap.impulse[lin_idx] = (float)s.peak_impulse[c];
+
+                if (!geom_pool.empty()) {
+                    out_snap.solid[lin_idx] = geom_pool[t].cells[c].is_boundary ? 1.0f : 0.0f;
+                } else {
+                    out_snap.solid[lin_idx] = 0.0f;
+                }
+
+                if (need_vel) {
+                    RealType ux = s.ux[c], uy = s.uy[c], uz = s.uz[c];
+                    out_snap.vel[lin_idx] = (float)std::sqrt(ux*ux + uy*uy + uz*uz);
+                }
+                if (need_E) {
+                    auto st = sampleState(gx, gy, gz);
+                    out_snap.E[lin_idx] = (float)(st.E / std::max(st.rho, 1e-6));
+                }
+                if (need_species) {
+                    if constexpr (IsMultiMaterial) {
+                        out_snap.alpha1[lin_idx] = (float)s.alpha1[c];
+                        out_snap.alpha2[lin_idx] = (float)s.alpha2[c];
+                        out_snap.air[lin_idx] = (float)(1.0 - s.alpha1[c] - s.alpha2[c]);
+                    } else {
+                        out_snap.alpha1[lin_idx] = 0.0f;
+                        out_snap.alpha2[lin_idx] = 0.0f;
+                        out_snap.air[lin_idx] = 1.0f;
+                    }
+                }
+            }
+        }
+    }
 }
 
 extern void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<MultiMaterialState>& states_1d,

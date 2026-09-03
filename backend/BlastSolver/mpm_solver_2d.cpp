@@ -3,29 +3,6 @@
 
 namespace Blast {
 
-static inline uint32_t floatToBits2D(float f) {
-    uint32_t u;
-    std::memcpy(&u, &f, sizeof(float));
-    return u;
-}
-
-static inline float computeWeibullFactor2D(float x, float y, float weibull_modulus, float weibull_scale) {
-    if (weibull_modulus <= 0.001f) return 1.0f;
-    uint32_t ix = floatToBits2D(x);
-    uint32_t iy = floatToBits2D(y);
-    uint32_t seed = (ix * 73856093u) ^ (iy * 19349663u);
-    seed = (seed ^ 61u) ^ (seed >> 16);
-    seed *= 9u;
-    seed = seed ^ (seed >> 4);
-    seed *= 0x27d4eb2du;
-    seed = seed ^ (seed >> 15);
-    float u = std::clamp(static_cast<float>(seed & 0xFFFFu) / 65535.0f, 0.005f, 0.995f);
-    float m_w = weibull_modulus;
-    float eta_w = (weibull_scale > 0.001f) ? weibull_scale : 1.0f;
-    float w = std::pow(-std::log(1.0f - u), 1.0f / m_w) * eta_w;
-    return std::clamp(w, 0.20f, 2.50f);
-}
-
 MPMSolver2D::MPMSolver2D() {
 }
 
@@ -983,9 +960,10 @@ void MPMSolver2D::updateStressState(float dt) {
 
         // --- Johnson-Cook Plasticity + Mie-Grüneisen Shock EOS Model ---
         if (p.material_model == MPMMaterialModel::JohnsonCookMieGruneisen) {
-            float w_factor = 1.0f;
-            if (p.weibull_modulus > 0.001f) {
-                w_factor = computeWeibullFactor2D(p.x[0], p.x[1], p.weibull_modulus, p.weibull_scale);
+            float w_factor = (p.enable_heterogeneity && p.weibull_factor > 0.001f) ? p.weibull_factor : 1.0f;
+            if (p.enable_heterogeneity && w_factor <= 0.001f && p.weibull_modulus > 0.001f) {
+                p.weibull_factor = computeWeibullFactor2D(p.x[0], p.x[1], p.weibull_modulus, p.weibull_scale);
+                w_factor = p.weibull_factor;
             }
 
             p.V = std::clamp(p.V * (1.0f + tr_deps), 0.1f * p.V0, 10.0f * p.V0);
@@ -1128,9 +1106,10 @@ void MPMSolver2D::updateStressState(float dt) {
         float sig_yy_base = p.sigma[1][1] + rot_yy;
         float sig_xy_base = p.sigma[0][1] + rot_xy;
 
-        float w_factor = 1.0f;
-        if (p.weibull_modulus > 0.001f) {
-            w_factor = computeWeibullFactor2D(p.x[0], p.x[1], p.weibull_modulus, p.weibull_scale);
+        float w_factor = (p.enable_heterogeneity && p.weibull_factor > 0.001f) ? p.weibull_factor : 1.0f;
+        if (p.enable_heterogeneity && w_factor <= 0.001f && p.weibull_modulus > 0.001f) {
+            p.weibull_factor = computeWeibullFactor2D(p.x[0], p.x[1], p.weibull_modulus, p.weibull_scale);
+            w_factor = p.weibull_factor;
         }
 
         // Lame Elastic Parameters
@@ -1143,6 +1122,14 @@ void MPMSolver2D::updateStressState(float dt) {
         float sig_xx_trial = sig_xx_base + lambda * tr_deps + 2.0f * mu * deps_xx;
         float sig_yy_trial = sig_yy_base + lambda * tr_deps + 2.0f * mu * deps_yy;
         float sig_xy_trial = sig_xy_base + 2.0f * mu * deps_xy;
+
+        if (p.material_model == MPMMaterialModel::LinearElastic) {
+            p.sigma[0][0] = sig_xx_trial;
+            p.sigma[1][1] = sig_yy_trial;
+            p.sigma[0][1] = sig_xy_trial;
+            p.sigma[1][0] = sig_xy_trial;
+            continue;
+        }
 
         // Hydrostatic Pressure & Deviatoric Stress
         float press = -0.5f * (sig_xx_trial + sig_yy_trial);

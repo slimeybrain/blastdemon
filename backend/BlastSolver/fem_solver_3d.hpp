@@ -42,7 +42,13 @@ struct BlastPhysicsParams {
     T taylor_quinney_factor{0.9f}; // Fraction of plastic work converted to heat (0.9)
     bool convert_failed_elements_to_mpm{false}; // Global conversion of failed FEM elements to MPM debris
     int mpm_particles_per_failed_element{8};    // Particles generated per failed element (1, 8, or 27)
+    bool enable_heterogeneity{false};           // Global toggle for spatial Weibull flaw scatter (false = homogeneous)
     T material_heterogeneity{0.08f};            // Spatial Weibull material strength variance (0.0 to 0.30)
+    T weibull_modulus{0.0f};                    // Weibull shape modulus m_w (0.0 = use material_heterogeneity)
+    T weibull_scale{1.0f};                      // Weibull scale parameter eta_w
+    bool enable_anisotropy{false};               // Global toggle for directional material anisotropy
+    T anisotropy_ratio{1.0f};                   // Transverse-to-longitudinal strength ratio (1.0 = isotropic)
+    T anisotropy_dir[3]{1.0f, 0.0f, 0.0f};       // Directional orientation unit vector
     T debris_velocity_smoothing{0.25f};         // Inter-element debris birth velocity smoothing factor (0.0 to 1.0)
     T debris_clumping{0.40f};                   // Multi-element aggregate clumping cohesion (0.0 for soil/water, 0.4 concrete, 0.8+ steel)
     int debris_max_clump_size{8};               // Maximum adjacent elements fused into a single fragment boulder/shred (1 to 64)

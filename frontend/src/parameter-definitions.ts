@@ -31,6 +31,15 @@ export interface NodeDefinition {
 // ============================================================================
 
 export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
+    // --- Identification & Hierarchy ---
+    'name': {
+        key: 'name',
+        label: 'Custom Entity Name',
+        category: 'Identification & Hierarchy',
+        shortDesc: 'User-defined custom identifier for the pipeline entity',
+        detailedDesc: 'Custom alphanumeric name displayed across the Pipeline Browser, Visual Node Graph, and Property Inspector. Independent of immutable internal node IDs.'
+    },
+
     // --- Domain & Mesh Discretization ---
     'dimension': {
         key: 'dimension',
@@ -278,10 +287,10 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
     },
     'space_time_scheme': {
         key: 'space_time_scheme',
-        label: 'Space-Time Integration Scheme',
+        label: 'Space-Time Scheme',
         category: 'Solver Numerics',
         shortDesc: 'Coupled spatial-temporal accuracy formulation',
-        detailedDesc: 'For CFD: MUSCL-Hancock (2nd-Order), ADER-2 (2nd-Order Cauchy-Kowalevski single-stage), or ADER-3 (3rd-Order). For MPM: Leapfrog (2nd-Order Symplectic), RK2 (2nd-Order Predictor-Corrector), USL (Update Stress Last), or USF (Update Stress First).'
+        detailedDesc: 'For CFD: MUSCL-Hancock (2nd-Order Space/Time), ADER-2 (2nd-Order Cauchy-Kowalevski single-stage), or ADER-3 (3rd-Order Space/Time). For MPM: Leapfrog (2nd-Order Symplectic), RK2 (2nd-Order Predictor-Corrector), USL (Update Stress Last), or USF (Update Stress First).'
     },
     'device': {
         key: 'device',
@@ -328,6 +337,13 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
     },
 
     // --- Material EOS & Explosives ---
+    'material': {
+        key: 'material',
+        label: 'Material Source',
+        category: 'Material EOS',
+        shortDesc: 'Linked Material node defining thermodynamic and constitutive equation of state',
+        detailedDesc: 'Selects the specific Material node providing equation of state (JWL Detonation Gas, Ideal Gas Blast, Elasticity, Plasticity, or Concrete Failure) to this charge or object entity.'
+    },
     'material_type': {
         key: 'material_type',
         label: 'Material Formulation',
@@ -340,7 +356,7 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         label: 'Explosive Composition',
         category: 'Material EOS',
         shortDesc: 'High-explosive chemical formulation',
-        detailedDesc: 'Selects pre-calibrated Chapman-Jouguet detonation and JWL parameters from LLNL / Demolition range databases (TNT, C-4, Composition B, PBX 9501, ANFO, PETN, RDX, etc., or Custom).'
+        detailedDesc: 'Selects pre-calibrated Chapman-Jouguet detonation and JWL parameters from LLNL / Demolition range databases (TNT, C-4, Composition B, PBX 9501, Nitromethane, ANFO, PETN, RDX, etc., or Custom).'
     },
     'atm_pressure': {
         key: 'atm_pressure',
@@ -681,14 +697,14 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         label: 'STL Mesh Filepath',
         category: 'Boundary Geometry',
         shortDesc: 'Path to 3D triangular surface mesh (.stl)',
-        detailedDesc: 'Absolute or relative filepath to binary/ASCII STL geometry for solid obstacle Immersed Boundary Method (IBM) rasterization.'
+        detailedDesc: 'Absolute or relative filepath to binary/ASCII STL geometry for solid obstacle Immersed Boundary Method (IBM) rasterization. When saving a model, external STL files are automatically copied alongside the model and updated to portable local relative references (e.g. ./mesh.stl).'
     },
     'k_file': {
         key: 'k_file',
         label: 'LS-DYNA Keyword Filepath',
         category: 'Structural Mechanics',
         shortDesc: 'Path to LS-DYNA Keyword file (*.k / *.key)',
-        detailedDesc: 'Filepath to LS-DYNA input deck containing *NODE, *ELEMENT_SOLID, *SECTION, and *MAT keywords for 3D FEM structural simulation.'
+        detailedDesc: 'Filepath to LS-DYNA input deck containing *NODE, *ELEMENT_SOLID, *SECTION, and *MAT keywords for 3D FEM structural simulation. When saving a model, external LS-DYNA decks are automatically copied alongside the model and updated to portable local relative references (e.g. ./structure.k).'
     },
     'geometry_hash': {
         key: 'geometry_hash',
@@ -896,25 +912,94 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
     // --- Solid Constitutive Models & Materials ---
     'material_model': {
         key: 'material_model',
-        label: 'Constitutive Model',
+        label: 'Constitutive Model & Formulation',
         category: 'Material Constitutive',
-        shortDesc: 'Constitutive plasticity / damage formulation',
-        detailedDesc: 'Selects the constitutive formulation: Hypoelastic (linear elastic + von Mises J2 plasticity with isotropic hardening), Johnson-Cook + Mie-Grüneisen (viscoplastic strain-rate & temperature dependent hardening + shock Hugoniot EOS), RHT Concrete (Riedel-Hiermaier-Thoma porous compaction & 3-surface damage), Karagozian & Case (K&C 3-surface damage plasticity), or CSCM Concrete (Continuous Surface Cap Model with smooth failure surface).'
+        shortDesc: 'Universal constitutive formulation or thermodynamic EOS model',
+        detailedDesc: 'Selects the constitutive formulation or thermodynamic EOS: Linear Elastic, Hypoelastic (von Mises J2 plasticity), Johnson-Cook + Mie-Grüneisen (viscoplasticity + shock Hugoniot), Concrete Damage (RHT, K&C, CSCM), CREST Reactive Burn (hot-spot SDT), Ideal Gas (ambient atmospheric air), Ideal Gas Charge (simplified gamma-law blast source), or JWL Detonation Gas (Jones-Wilkins-Lee explosive expansion EOS).'
     },
     'preset': {
         key: 'preset',
         label: 'Material Property Preset',
         category: 'Material Constitutive',
-        shortDesc: 'Pre-calibrated empirical parameters from literature',
-        detailedDesc: 'Loads peer-reviewed, laboratory-calibrated material properties (Structural Steel A36, Armor Steel RHA, Aluminum 6061-T6, Titanium Ti-6Al-4V, C35 Concrete, High-Strength C70 Concrete, Kevlar, Ceramics, Ballistic Gelatin, etc.).'
+        shortDesc: 'Pre-calibrated empirical parameters from literature for the selected model',
+        detailedDesc: 'Loads peer-reviewed, laboratory-calibrated material properties dynamically filtered for the active constitutive formulation: structural & armor steels, light alloys, concrete/masonry grades, soils & geomaterials (marine clay, silty clay, saturated mud/slurry, sand, granite, basalt, sandstone, limestone, shale, ice), soft materials & bio-surrogates (10% & 20% ballistic gelatins, hydrodynamic water, silicone tissue simulant, hydrogel), polymers, ceramics, unreacted explosive solids, CFD ideal gases, and JWL detonation products (or Custom).'
     },
     'density': {
         key: 'density',
-        label: 'Solid Mass Density (ρ₀)',
+        label: 'Mass Density (ρ₀)',
         unit: 'kg/m³',
         category: 'Material Constitutive',
-        shortDesc: 'Uncompressed solid mass density',
-        detailedDesc: 'Reference initial mass density (kg/m³) of the solid material. Governs inertia, stress wave propagation speeds, and acoustic impedance.'
+        shortDesc: 'Reference mass density',
+        detailedDesc: 'Reference initial mass density (kg/m³) of the continuum medium (fluid gas or solid). For Ideal Gas EOS, governed by ρ = p_atm / (R · T_atm). For solid materials, governs inertia, stress wave propagation speeds (c_p, c_s), and dynamic acoustic impedance.'
+    },
+    'ambient_rho': {
+        key: 'ambient_rho',
+        label: 'Ambient Gas Density (ρ_amb)',
+        unit: 'kg/m³',
+        category: 'Atmospheric & Ambient EOS',
+        shortDesc: 'Ambient atmospheric gas density',
+        detailedDesc: 'Thermodynamic equilibrium mass density (kg/m³) of unperturbed ambient air, calculated via ρ = p_atm / (R · T_atm) with R = 287.058 J/(kg·K).'
+    },
+    'ambient_p': {
+        key: 'ambient_p',
+        label: 'Ambient Gas Pressure (p_amb)',
+        unit: 'Pa',
+        category: 'Atmospheric & Ambient EOS',
+        shortDesc: 'Ambient atmospheric static pressure',
+        detailedDesc: 'Thermodynamic equilibrium hydrostatic pressure (Pa) of unperturbed ambient air, identical to atmospheric pressure p_atm (101,325 Pa at STP).'
+    },
+    'enable_heterogeneity': {
+        key: 'enable_heterogeneity',
+        label: 'Material Heterogeneity',
+        category: 'Material Constitutive',
+        shortDesc: 'Enable stochastic spatial strength variation',
+        detailedDesc: 'Applies Weibull or Gaussian stochastic distribution to material yield strength and failure strain across elements to represent aggregate heterogeneity.'
+    },
+    'enable_anisotropy': {
+        key: 'enable_anisotropy',
+        label: 'Transverse Anisotropy',
+        category: 'Material Constitutive',
+        shortDesc: 'Enable directional strength / stiffness anisotropy',
+        detailedDesc: 'Enables transversely isotropic elasticity and directional failure thresholds along a specified material symmetry vector.'
+    },
+    'anisotropy_ratio': {
+        key: 'anisotropy_ratio',
+        label: 'Anisotropy Ratio',
+        unit: 'dim',
+        category: 'Material Constitutive',
+        shortDesc: 'Ratio of longitudinal to transverse directional strength',
+        detailedDesc: 'Ratio of longitudinal along-axis stiffness/strength to transverse cross-axis properties for laminated composites, geological bedding, or reinforced media.'
+    },
+    'anisotropy_axis': {
+        key: 'anisotropy_axis',
+        label: 'Anisotropy Axis',
+        category: 'Material Constitutive',
+        shortDesc: 'Principal alignment axis for material anisotropy',
+        detailedDesc: 'Selects the principal material symmetry vector: X-axis [1,0,0], Y-axis [0,1,0], Z-axis [0,0,1], or Custom user-specified 3D direction vector.'
+    },
+    'anisotropy_dir_x': {
+        key: 'anisotropy_dir_x',
+        label: 'Anisotropy Dir X',
+        unit: 'dim',
+        category: 'Material Constitutive',
+        shortDesc: 'X-component of custom anisotropy orientation vector',
+        detailedDesc: 'Normalized X-component of the principal material symmetry vector for anisotropic constitutive response.'
+    },
+    'anisotropy_dir_y': {
+        key: 'anisotropy_dir_y',
+        label: 'Anisotropy Dir Y',
+        unit: 'dim',
+        category: 'Material Constitutive',
+        shortDesc: 'Y-component of custom anisotropy orientation vector',
+        detailedDesc: 'Normalized Y-component of the principal material symmetry vector for anisotropic constitutive response.'
+    },
+    'anisotropy_dir_z': {
+        key: 'anisotropy_dir_z',
+        label: 'Anisotropy Dir Z',
+        unit: 'dim',
+        category: 'Material Constitutive',
+        shortDesc: 'Z-component of custom anisotropy orientation vector',
+        detailedDesc: 'Normalized Z-component of the principal material symmetry vector for anisotropic constitutive response.'
     },
     'youngs_modulus': {
         key: 'youngs_modulus',
@@ -1735,20 +1820,48 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         shortDesc: 'Display values on log10 scale',
         detailedDesc: 'Applies log10 transformation to color mapping and axes, ideal for spanning 5+ orders of blast overpressure.'
     },
+    'lock_quantity_ranges': {
+        key: 'lock_quantity_ranges',
+        label: 'Lock Unified Field Ranges',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Locks colormap range across all slices and 3D meshes displaying the same field',
+        detailedDesc: 'When enabled (default: true), all visualization elements (orthogonal slicing planes, CAD STL meshes, and obstacle surfaces) displaying the same physical field (e.g. Peak Overpressure) share a unified, synchronized colormap range, colormap, and lin/log transfer function.'
+    },
+    'quantity_log_scales': {
+        key: 'quantity_log_scales',
+        label: 'Per-Field Logarithmic Transfer Maps',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Stores log10 color transfer flags per physical field quantity',
+        detailedDesc: 'Map of physical field quantities to boolean log10 scaling states to guarantee synchronized logarithmic color rendering across all active visual representations.'
+    },
+    'quantity_auto_scales': {
+        key: 'quantity_auto_scales',
+        label: 'Per-Field Auto/Manual Scale Maps',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Stores auto vs manual dynamic scaling flags per physical field quantity',
+        detailedDesc: 'Map of physical field quantities to boolean auto-scaling states to guarantee synchronized automatic or manual scaling across all active visual representations.'
+    },
+    'quantity_colormaps': {
+        key: 'quantity_colormaps',
+        label: 'Per-Field Colormap Palette Maps',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Stores active false-color palette per physical field quantity',
+        detailedDesc: 'Map of physical field quantities to active colormap palettes to guarantee synchronized false-color mapping across all active visual representations.'
+    },
     'colormap': {
         key: 'colormap',
         label: 'Color Palette',
         category: 'Telemetry & Diagnostics',
         shortDesc: 'Visual false-color palette',
-        detailedDesc: 'plasma (perceptually uniform purple-to-yellow), viridis (blue-to-yellow), rainbow, inferno, coolwarm, or magma.'
+        detailedDesc: 'rainbow (classic high-contrast spectrum), plasma (perceptually uniform purple-to-yellow), viridis (blue-to-yellow), coolwarm, cividis, inferno, magma, or grayscale.'
     },
     'refresh_rate': {
         key: 'refresh_rate',
-        label: 'Viewport Refresh Rate',
-        unit: 'Hz',
+        label: 'Viewport Refresh Rate / FPS',
+        unit: 's / FPS',
         category: 'Telemetry & Diagnostics',
-        shortDesc: 'Live 3D viewport update frequency',
-        detailedDesc: 'Target frame update rate (Hz) for streaming 3D slices and structural meshes over the network.'
+        shortDesc: 'Live 3D viewport update frequency and streaming period',
+        detailedDesc: 'Target frame streaming rate (from Max/Uncapped, 1000 FPS down to 0.001 FPS / 1000s period) for live 3D slices, particle data, and structural meshes over the network.'
     },
     'interpolate': {
         key: 'interpolate',
@@ -1756,6 +1869,80 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         category: 'Telemetry & Diagnostics',
         shortDesc: 'Bilinear texture filtering',
         detailedDesc: 'Enables bilinear GPU texture filtering for smooth contour maps instead of pixelated nearest-neighbor cells.'
+    },
+    'lightingEnabled': {
+        key: 'lightingEnabled',
+        label: 'Enable Surface Lighting',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Diffuse and specular surface shading in 3D viewport',
+        detailedDesc: 'Enables real-time directional diffuse (Lambertian) and specular (Blinn-Phong) lighting across 3D CAD boundaries, fluid slices, FEM structures, and MPM particles.'
+    },
+    'ambientLevel': {
+        key: 'ambientLevel',
+        label: 'Ambient Light Level',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Base ambient illumination factor (0.0–1.0)',
+        detailedDesc: 'Sets the baseline omnidirectional ambient light intensity. Modulated by Ambient Occlusion (AO) to create deep crevice shadows and contact darkening.'
+    },
+    'specularIntensity': {
+        key: 'specularIntensity',
+        label: 'Specular Highlight Intensity',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Specular reflection glossiness multiplier',
+        detailedDesc: 'Controls the brightness and glossiness of Blinn-Phong specular highlights reflected off 3D obstacles and particle spheres.'
+    },
+    'aoEnabled': {
+        key: 'aoEnabled',
+        label: 'Screen-Space Ambient Occlusion (SSAO)',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Enable multi-pass SSAO depth crevice shadowing',
+        detailedDesc: 'Enables multi-pass Screen-Space Ambient Occlusion (SSAO) to calculate realistic soft contact shadows, crevice darkening, and inter-object ambient occlusion across 3D geometry.'
+    },
+    'aoRadius': {
+        key: 'aoRadius',
+        label: 'SSAO Sampling Radius',
+        unit: 'm',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'World/view-space hemisphere sampling radius for SSAO',
+        detailedDesc: 'Controls the spatial reach of the hemispherical sampling kernel in view space. Larger radii capture broader ambient shadows across large structures; smaller radii focus on fine cracks and crevices.'
+    },
+    'aoIntensity': {
+        key: 'aoIntensity',
+        label: 'SSAO Shadow Intensity',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Occlusion darkness multiplier and contrast boost',
+        detailedDesc: 'Multiplicative gain applied to the calculated occlusion factor. Higher values produce darker, more dramatic contact shadows in tight corners and cavities.'
+    },
+    'aoBias': {
+        key: 'aoBias',
+        label: 'SSAO Depth Bias Offset',
+        unit: 'm',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Depth comparison bias to prevent self-shadowing acne',
+        detailedDesc: 'Tolerance threshold applied during depth buffer comparison to eliminate false-positive self-occlusion artifacts along flat and planar surfaces.'
+    },
+    'aoSphereImpostor': {
+        key: 'aoSphereImpostor',
+        label: 'Sphere Impostor AO & Depth',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Raytraced 3D particle sphere shading and self-shadowing',
+        detailedDesc: 'Renders MPM particle billboards with raytraced spherical normals, view-space depth displacement, and curvature-based self-ambient occlusion.'
+    },
+    'mpmParticleDiameter': {
+        key: 'mpmParticleDiameter',
+        label: 'MPM Particle Diameter',
+        unit: 'm',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Physical world-space diameter for MPM particle sphere impostors',
+        detailedDesc: 'Sets the physical diameter in meters for Material Point Method (MPM) particle sphere impostors and billboard quads. When non-zero, sphere impostors scale continuously and geometrically with perspective camera distance and zoom. In Auto mode, diameter is automatically derived from the mesh spacing and particle count (Δx / ∛ppc) so that orthogonally adjacent particles in Cartesian meshing touch without overlapping, and particles in close hex packing touch along neighbor contact planes.'
+    },
+    'mpmParticleSize': {
+        key: 'mpmParticleSize',
+        label: 'MPM Particle Point Size',
+        unit: 'px',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Fixed screen-space point size in pixels for point cloud rendering',
+        detailedDesc: 'Sets the fixed screen-space pixel width used when physical particle diameter is set to zero or unscaled screen-space point cloud rendering is selected.'
     },
     'step_interval': {
         key: 'step_interval',
@@ -1829,12 +2016,500 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         shortDesc: 'Write time-series .pvd manifest',
         detailedDesc: 'Generates a .pvd collection index file for one-click animation playback in ParaView.'
     },
+    'export_obstacles': {
+        key: 'export_obstacles',
+        label: 'Export Obstacle Surfaces (STL/CSG)',
+        category: 'VTK Output',
+        shortDesc: 'Write 3D obstacle boundary surfaces and pressures to VTU',
+        detailedDesc: 'Exports the true polygonal boundary shell of solid obstacles (rasterized from STL CAD geometry or analytic CSG primitives) into an unstructured grid VTU dataset with interpolated boundary pressures, overpressures, and impulses.'
+    },
+    'export_stl_faces': {
+        key: 'export_stl_faces',
+        label: 'Export CAD STL Faces',
+        category: 'VTK Output',
+        shortDesc: 'Map and export CFD results directly onto CAD STL triangles',
+        detailedDesc: 'Samples the 3D Eulerian fluid state (pressure, density, peak overpressure, and positive impulse) directly onto the triangular surface facets of the loaded CAD STL geometry, saving smooth building/vehicle geometry to VTU files with a PVD time collection index.'
+    },
+    'stl_outside_domain': {
+        key: 'stl_outside_domain',
+        label: 'Outside Domain Handling',
+        category: 'VTK Output',
+        shortDesc: 'Strategy for CAD STL facets located outside the CFD analysis domain',
+        detailedDesc: 'Specifies how fluid state quantities are populated on CAD STL vertices that lie outside the Eulerian simulation domain. "NaN (No Value)" assigns IEEE 754 quiet NaN, rendering unsimulated geometry with ParaView\'s dedicated NaN Color and preserving true blast scale ranges. "Zero (0.0)" outputs zero for all fields. "Omit Outside Faces" excludes external triangles from the exported VTU mesh entirely.'
+    },
+    'tessellate_stl_faces': {
+        key: 'tessellate_stl_faces',
+        label: 'Tessellate Large Faces to CFD Grid',
+        category: 'VTK Output',
+        shortDesc: 'Subdivide large CAD triangles to CFD cell resolution',
+        detailedDesc: 'When enabled, CAD triangles whose edges exceed the CFD cell size are adaptively subdivided into coplanar triangles via 1-to-4 midpoint bisection during initialization. This guarantees that blast wave pressure gradients across large walls are captured at full grid resolution without losing shock front details. When disabled, raw CAD facets are exported without subdivision.'
+    },
+    'tessellation_max_edge': {
+        key: 'tessellation_max_edge',
+        label: 'Tessellation Max Edge Size',
+        unit: 'm',
+        category: 'VTK Output',
+        shortDesc: 'Maximum allowed triangle edge length for CAD STL export',
+        detailedDesc: 'Specifies the maximum permissible triangle edge length (in meters) for CAD STL surface export. Any triangle with an edge exceeding this threshold is subdivided. When set to 0.0, the CFD grid cell size (cellSize) is automatically used as the threshold.'
+    },
+    'export_cfd_2d': {
+        key: 'export_cfd_2d',
+        label: 'Export 2D CFD Grid',
+        category: 'VTK Output',
+        shortDesc: 'Write 2D Eulerian fluid grid to VTU',
+        detailedDesc: 'Exports the 2D Cartesian or AMR Eulerian fluid mesh cells and selected thermodynamic/kinematic flow variables into VTU datasets with a ParaView PVD collection index.'
+    },
     'roi_enabled': {
         key: 'roi_enabled',
         label: 'Region of Interest (ROI) Cropping',
         category: 'VTK Output',
         shortDesc: 'Crop output volume to bounding box',
         detailedDesc: 'Restricts VTK disk output to cells within specified spatial bounding coordinates, conserving disk I/O.'
+    },
+
+    // --- VTK Physical Field Export Toggles ---
+    'qty_pressure': {
+        key: 'qty_pressure',
+        label: 'Fluid Pressure (p)',
+        unit: 'Pa',
+        category: 'VTK Output Fields',
+        shortDesc: 'Include Eulerian fluid pressure in VTK datasets',
+        detailedDesc: 'Exports cell-centered fluid pressure p [Pa] into VTK unstructured grid datasets.'
+    },
+    'qty_density': {
+        key: 'qty_density',
+        label: 'Fluid Density (ρ)',
+        unit: 'kg/m³',
+        category: 'VTK Output Fields',
+        shortDesc: 'Include Eulerian fluid density in VTK datasets',
+        detailedDesc: 'Exports total fluid mixture density rho [kg/m^3] into VTK output files.'
+    },
+    'qty_velocity': {
+        key: 'qty_velocity',
+        label: 'Velocity Vector (u)',
+        unit: 'm/s',
+        category: 'VTK Output Fields',
+        shortDesc: 'Include fluid velocity vector field in VTK datasets',
+        detailedDesc: 'Exports 3D fluid velocity vector components (ux, uy, uz) [m/s] into VTK datasets.'
+    },
+    'qty_energy': {
+        key: 'qty_energy',
+        label: 'Specific Total Energy (E)',
+        unit: 'J/kg',
+        category: 'VTK Output Fields',
+        shortDesc: 'Include specific total energy in VTK datasets',
+        detailedDesc: 'Exports total specific internal and kinetic energy E [J/kg] into VTK output files.'
+    },
+    'qty_reacted': {
+        key: 'qty_reacted',
+        label: 'Reacted Gas Fraction (α₁)',
+        unit: 'fraction',
+        category: 'VTK Output Fields',
+        shortDesc: 'Include JWL detonation reaction product volume fraction',
+        detailedDesc: 'Exports volume fraction alpha_1 of reacted high-explosive gaseous products into VTK datasets.'
+    },
+    'qty_unreacted': {
+        key: 'qty_unreacted',
+        label: 'Unreacted Solid Fraction (α₂)',
+        unit: 'fraction',
+        category: 'VTK Output Fields',
+        shortDesc: 'Include solid unreacted explosive volume fraction',
+        detailedDesc: 'Exports volume fraction alpha_2 of solid unreacted explosive reactant into VTK datasets.'
+    },
+    'qty_air': {
+        key: 'qty_air',
+        label: 'Ambient Air Fraction (α₃)',
+        unit: 'fraction',
+        category: 'VTK Output Fields',
+        shortDesc: 'Include ambient air volume fraction',
+        detailedDesc: 'Exports volume fraction alpha_3 = 1 - alpha_1 - alpha_2 of ambient air into VTK datasets.'
+    },
+    'qty_overpressure': {
+        key: 'qty_overpressure',
+        label: 'Peak Overpressure (Δp_peak)',
+        unit: 'Pa',
+        category: 'VTK Output Fields',
+        shortDesc: 'Include peak blast overpressure history envelope',
+        detailedDesc: 'Exports cumulative peak blast overpressure envelope delta_p_peak [Pa] recorded across the simulation.'
+    },
+    'qty_impulse': {
+        key: 'qty_impulse',
+        label: 'Positive Specific Impulse (i_pos)',
+        unit: 'Pa·s',
+        category: 'VTK Output Fields',
+        shortDesc: 'Include positive phase specific impulse integral',
+        detailedDesc: 'Exports cumulative positive blast specific impulse integral i_pos = integral(max(0, p - p_0) dt) [Pa·s] into VTK datasets.'
+    },
+    'qty_fem_stress': {
+        key: 'qty_fem_stress',
+        label: 'FEM Cauchy Stress & von Mises',
+        unit: 'Pa',
+        category: 'VTK Output Fields',
+        shortDesc: 'Include solid element stress tensor and von Mises equivalent stress',
+        detailedDesc: 'Exports full Cauchy stress tensor components (sigma_xx, sigma_yy, sigma_zz, sigma_xy, sigma_yz, sigma_zx) and scalar von Mises stress.'
+    },
+    'qty_fem_strain': {
+        key: 'qty_fem_strain',
+        label: 'FEM Equivalent Plastic Strain (ε_p)',
+        unit: 'dim',
+        category: 'VTK Output Fields',
+        shortDesc: 'Include solid element accumulated plastic strain',
+        detailedDesc: 'Exports accumulated scalar equivalent plastic strain eps_p for elastoplastic solid elements.'
+    },
+    'qty_fem_pressure': {
+        key: 'qty_fem_pressure',
+        label: 'FEM Hydrostatic Pressure (p_solid)',
+        unit: 'Pa',
+        category: 'VTK Output Fields',
+        shortDesc: 'Include solid hydrostatic pressure',
+        detailedDesc: 'Exports mean normal hydrostatic pressure p = -trace(sigma)/3 in solid elements.'
+    },
+    'qty_fem_temp': {
+        key: 'qty_fem_temp',
+        label: 'FEM Element Temperature (T)',
+        unit: 'K',
+        category: 'VTK Output Fields',
+        shortDesc: 'Include solid element thermodynamic temperature',
+        detailedDesc: 'Exports dynamic element temperature T [K] resulting from adiabatic plastic work heating.'
+    },
+    'qty_fem_damage': {
+        key: 'qty_fem_damage',
+        label: 'FEM Damage Index (D)',
+        unit: 'fraction',
+        category: 'VTK Output Fields',
+        shortDesc: 'Include scalar damage variable (0 = intact, 1 = fully failed)',
+        detailedDesc: 'Exports constitutive damage state variable D [0..1] indicating material degradation, softening, and crack localization.'
+    },
+    'qty_fem_vel': {
+        key: 'qty_fem_vel',
+        label: 'FEM Nodal Velocity (v_fem)',
+        unit: 'm/s',
+        category: 'VTK Output Fields',
+        shortDesc: 'Include nodal velocity vector in FEM output',
+        detailedDesc: 'Exports nodal velocity vector components (vx, vy, vz) [m/s] on the structural mesh.'
+    },
+    'qty_fem_disp': {
+        key: 'qty_fem_disp',
+        label: 'FEM Nodal Displacement (u_fem)',
+        unit: 'm',
+        category: 'VTK Output Fields',
+        shortDesc: 'Include nodal displacement vector in FEM output',
+        detailedDesc: 'Exports cumulative nodal displacement vector components (dx, dy, dz) [m] relative to undeformed coordinates.'
+    },
+    'qty_mpm_stress': {
+        key: 'qty_mpm_stress',
+        label: 'MPM Particle Stress & von Mises',
+        unit: 'Pa',
+        category: 'VTK Output Fields',
+        shortDesc: 'Include particle stress tensor and von Mises stress',
+        detailedDesc: 'Exports Cauchy stress tensor and von Mises equivalent stress on Lagrangian material points.'
+    },
+    'qty_mpm_strain': {
+        key: 'qty_mpm_strain',
+        label: 'MPM Plastic Strain (ε_p)',
+        unit: 'dim',
+        category: 'VTK Output Fields',
+        shortDesc: 'Include particle accumulated plastic strain',
+        detailedDesc: 'Exports equivalent accumulated plastic strain on Lagrangian MPM debris particles.'
+    },
+    'qty_mpm_damage': {
+        key: 'qty_mpm_damage',
+        label: 'MPM Particle Damage (D)',
+        unit: 'fraction',
+        category: 'VTK Output Fields',
+        shortDesc: 'Include particle scalar damage state',
+        detailedDesc: 'Exports scalar damage index D [0..1] representing micro-cracking and material spall on particles.'
+    },
+    'qty_mpm_temp': {
+        key: 'qty_mpm_temp',
+        label: 'MPM Particle Temperature (T)',
+        unit: 'K',
+        category: 'VTK Output Fields',
+        shortDesc: 'Include particle temperature',
+        detailedDesc: 'Exports thermodynamic temperature T [K] of MPM particles.'
+    },
+    'qty_mpm_vel': {
+        key: 'qty_mpm_vel',
+        label: 'MPM Particle Velocity (v_mpm)',
+        unit: 'm/s',
+        category: 'VTK Output Fields',
+        shortDesc: 'Include particle velocity vector',
+        detailedDesc: 'Exports 3D kinematic velocity vector (vx, vy, vz) [m/s] on Lagrangian material points.'
+    },
+    'qty_mpm_disp': {
+        key: 'qty_mpm_disp',
+        label: 'MPM Particle Displacement (u_mpm)',
+        unit: 'm',
+        category: 'VTK Output Fields',
+        shortDesc: 'Include particle displacement vector',
+        detailedDesc: 'Exports net spatial displacement vector (dx, dy, dz) [m] of particles from their initial seeding positions.'
+    },
+
+    // --- Viewport Charge & Detonator Display ---
+    'show_charge': {
+        key: 'show_charge',
+        label: 'Show Explosive Charge',
+        category: '3D Viewport Rendering',
+        shortDesc: 'Toggles visibility of explosive charge volume in 3D viewport',
+        detailedDesc: 'Controls whether the geometric representation of the explosive charge (sphere, cylinder, or block) is rendered in the 3D viewport canvas.'
+    },
+    'charge_solid': {
+        key: 'charge_solid',
+        label: 'Charge Solid Surface',
+        category: '3D Viewport Rendering',
+        shortDesc: 'Renders filled solid shaded geometry for explosive charge',
+        detailedDesc: 'Enables opaque/translucent volumetric surface shading on the explosive charge entity.'
+    },
+    'charge_wireframe': {
+        key: 'charge_wireframe',
+        label: 'Charge Wireframe Cage',
+        category: '3D Viewport Rendering',
+        shortDesc: 'Renders structural wireframe outline for explosive charge',
+        detailedDesc: 'Enables wireframe mesh lines around the boundary of the charge geometry.'
+    },
+    'charge_lighting': {
+        key: 'charge_lighting',
+        label: 'Charge Directional Lighting',
+        category: '3D Viewport Rendering',
+        shortDesc: 'Applies specular and diffuse shading to charge geometry',
+        detailedDesc: 'Calculates dynamic normals, diffuse reflectance, and specular highlights on the charge surface.'
+    },
+    'charge_opacity': {
+        key: 'charge_opacity',
+        label: 'Charge Surface Opacity',
+        unit: 'ratio',
+        category: '3D Viewport Rendering',
+        shortDesc: 'Alpha opacity level for explosive charge (0.0 - 1.0)',
+        detailedDesc: 'Specifies the blending opacity of the charge volume, allowing interior structures and detonators to remain visible.'
+    },
+    'show_detonators': {
+        key: 'show_detonators',
+        label: 'Show Detonator Points',
+        category: '3D Viewport Rendering',
+        shortDesc: 'Toggles visibility of point ignition / detonator locations',
+        detailedDesc: 'Controls rendering of 3D diamond octahedron detonator markers across the computational domain.'
+    },
+    'detonators_solid': {
+        key: 'detonators_solid',
+        label: 'Detonator Solid Core',
+        category: '3D Viewport Rendering',
+        shortDesc: 'Renders solid shaded core for detonator locations',
+        detailedDesc: 'Enables solid diamond faceted marker rendering for detonator initiation points.'
+    },
+    'detonators_wireframe': {
+        key: 'detonators_wireframe',
+        label: 'Detonator Wireframe Cage',
+        category: '3D Viewport Rendering',
+        shortDesc: 'Renders wireframe outline for detonator markers',
+        detailedDesc: 'Enables crisp wireframe edges and target ring accents around detonator initiation points.'
+    },
+    'detonators_lighting': {
+        key: 'detonators_lighting',
+        label: 'Detonator Specular Lighting',
+        category: '3D Viewport Rendering',
+        shortDesc: 'Enables dynamic lighting highlights on detonator markers',
+        detailedDesc: 'Calculates specular reflectance and surface lighting on 3D detonator geometry.'
+    },
+    'detonators_size': {
+        key: 'detonators_size',
+        label: 'Detonator Marker Scale',
+        unit: 'scale',
+        category: '3D Viewport Rendering',
+        shortDesc: 'Visual scale factor for detonator markers in 3D viewport',
+        detailedDesc: 'Multiplier for the visual marker radius of detonator points in the 3D canvas.'
+    },
+    'detonators_opacity': {
+        key: 'detonators_opacity',
+        label: 'Detonator Marker Opacity',
+        unit: 'ratio',
+        category: '3D Viewport Rendering',
+        shortDesc: 'Alpha opacity level for detonator markers (0.0 - 1.0)',
+        detailedDesc: 'Controls transparency and visibility of detonator ignition markers in the 3D viewport.'
+    },
+
+    // --- Virtual Gauges & Massive External Probes ---
+    'source_mode': {
+        key: 'source_mode',
+        label: 'Probe Source Mode',
+        category: 'Virtual Gauges & Probes',
+        shortDesc: 'Source mode for gauge coordinates: manual placement or external dataset file',
+        detailedDesc: 'Selects between manual in-graph gauge probe coordinates or high-performance external file streaming (CSV, binary coordinates, HDF5, or structural mesh nodes) for millions of probes.'
+    },
+    'external_file_path': {
+        key: 'external_file_path',
+        label: 'External Coordinate File',
+        category: 'Virtual Gauges & Probes',
+        shortDesc: 'File path to external coordinates dataset',
+        detailedDesc: 'Relative or absolute filesystem path to an external coordinate file containing arbitrary probe positions. Loaded directly by BlastSolver via memory mapping.'
+    },
+    'external_file_format': {
+        key: 'external_file_format',
+        label: 'External File Format',
+        category: 'Virtual Gauges & Probes',
+        shortDesc: 'Format of external probe dataset file',
+        detailedDesc: 'Auto-detection or explicit format: CSV (x,y,z), Flat Binary Float32 ([x,y,z] contiguous), or HDF5 dataset.'
+    },
+    'external_probe_count': {
+        key: 'external_probe_count',
+        label: 'External Probe Count',
+        unit: 'count',
+        category: 'Virtual Gauges & Probes',
+        shortDesc: 'Total number of probes in the external dataset',
+        detailedDesc: 'Read-only cached counter of discrete probe coordinates discovered and mapped from the external file.'
+    },
+    'storage_backend': {
+        key: 'storage_backend',
+        label: 'Storage Backend',
+        category: 'Virtual Gauges & Probes',
+        shortDesc: 'Persistence target: HDF5 chunked stream or live WebSocket telemetry',
+        detailedDesc: 'Directs whether probe time histories stream directly to disk via asynchronous chunked HDF5 or stream over WebSockets for lightweight setups (< 50 probes).'
+    },
+    'sampling_stride_steps': {
+        key: 'sampling_stride_steps',
+        label: 'Sampling Step Stride',
+        unit: 'steps',
+        category: 'Virtual Gauges & Probes',
+        shortDesc: 'Sample probes once every N hydrodynamic time steps',
+        detailedDesc: 'Subsampling stride factor along the temporal dimension. Decouples acoustic CFL stability steps (e.g. 0.05 µs) from physical sensor acquisition (e.g. 2.0 µs).'
+    },
+    'external_bounds_min_x': {
+        key: 'external_bounds_min_x',
+        label: 'Bounds Min X',
+        unit: 'm',
+        category: 'Virtual Gauges & Probes',
+        shortDesc: 'Minimum X bounding coordinate of probe dataset',
+        detailedDesc: 'Lower spatial limit of the bounding box enclosing all active probes along the X axis.'
+    },
+    'external_bounds_max_x': {
+        key: 'external_bounds_max_x',
+        label: 'Bounds Max X',
+        unit: 'm',
+        category: 'Virtual Gauges & Probes',
+        shortDesc: 'Maximum X bounding coordinate of probe dataset',
+        detailedDesc: 'Upper spatial limit of the bounding box enclosing all active probes along the X axis.'
+    },
+    'external_bounds_min_y': {
+        key: 'external_bounds_min_y',
+        label: 'Bounds Min Y',
+        unit: 'm',
+        category: 'Virtual Gauges & Probes',
+        shortDesc: 'Minimum Y bounding coordinate of probe dataset',
+        detailedDesc: 'Lower spatial limit of the bounding box enclosing all active probes along the Y axis.'
+    },
+    'external_bounds_max_y': {
+        key: 'external_bounds_max_y',
+        label: 'Bounds Max Y',
+        unit: 'm',
+        category: 'Virtual Gauges & Probes',
+        shortDesc: 'Maximum Y bounding coordinate of probe dataset',
+        detailedDesc: 'Upper spatial limit of the bounding box enclosing all active probes along the Y axis.'
+    },
+    'external_bounds_min_z': {
+        key: 'external_bounds_min_z',
+        label: 'Bounds Min Z',
+        unit: 'm',
+        category: 'Virtual Gauges & Probes',
+        shortDesc: 'Minimum Z bounding coordinate of probe dataset',
+        detailedDesc: 'Lower spatial limit of the bounding box enclosing all active probes along the Z axis.'
+    },
+    'external_bounds_max_z': {
+        key: 'external_bounds_max_z',
+        label: 'Bounds Max Z',
+        unit: 'm',
+        category: 'Virtual Gauges & Probes',
+        shortDesc: 'Maximum Z bounding coordinate of probe dataset',
+        detailedDesc: 'Upper spatial limit of the bounding box enclosing all active probes along the Z axis.'
+    },
+
+    // --- Live Text Telemetry & Diagnostics ---
+    'stream_layout': {
+        key: 'stream_layout',
+        label: 'Stream Layout Mode',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Multi-line page, boxed cards, dual-deck, or monospaced columnar formatting',
+        detailedDesc: 'Selects telemetry display mode: Live Page (In-Place) for a multi-line curses-style dashboard updating in place; Multi-Line Cards for boxed chronological cards; Dual-Deck (Page + Log) for a pinned top page with scrolling diagnostic logs; Columnar (Fixed-Width) for monospaced tables with sticky headers; Ultra-Compact for narrow side panels; or Standard Log for sequential messages.'
+    },
+    'filter_level': {
+        key: 'filter_level',
+        label: 'Terminal Filter Level',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Filters text messages displayed in the terminal stream',
+        detailedDesc: 'Filters the live stream: All shows all step metrics and engine log messages; Metrics Only isolates step performance data; Logs Only shows solver diagnostics and event messages.'
+    },
+    'timestamp_mode': {
+        key: 'timestamp_mode',
+        label: 'Timestamp Format',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Timestamp prefix format on log lines',
+        detailedDesc: 'Configures line prefixes: None for maximal horizontal compactness, Relative (+s.ms) for runtime duration since solver startup, or Clock (HH:MM:SS) for absolute wallclock timestamps.'
+    },
+    'show_timing_breakdown': {
+        key: 'show_timing_breakdown',
+        label: 'Show Phase Timing Breakdown',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Displays separate PHYS, IO, and COM timing columns',
+        detailedDesc: 'Breaks down per-step wallclock time into physics computation kernel time (PHYS), disk I/O and VTK/HDF5 output time (IO), and telemetry serialization/transmission time (COM).'
+    },
+    'show_memory': {
+        key: 'show_memory',
+        label: 'Show Memory Allocation (RAM / VRAM)',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Displays process host RAM and GPU VRAM usage columns',
+        detailedDesc: 'Reports resident process host RAM (RSS) and allocated CUDA GPU VRAM in megabytes or gigabytes.'
+    },
+    'show_wallclock': {
+        key: 'show_wallclock',
+        label: 'Show Cumulative Wallclock',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Displays total elapsed wallclock time column',
+        detailedDesc: 'Shows the cumulative wallclock execution time of the active simulation model in seconds.'
+    },
+    'show_dt': {
+        key: 'show_dt',
+        label: 'Show Timestep (dt)',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Displays current numerical timestep column',
+        detailedDesc: 'Shows the adaptive time step Δt computed from acoustic, hydrodynamic, or Courant-Friedrichs-Lewy (CFL) stability criteria.'
+    },
+    'font_size': {
+        key: 'font_size',
+        label: 'Terminal Font Size',
+        unit: 'px',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Monospaced text font size in pixels (8px - 22px)',
+        detailedDesc: 'Sets the font size for the terminal viewport. Can also be interactively adjusted by holding Ctrl and scrolling the mouse wheel over the terminal or canvas node.'
+    },
+    'buffer_capacity': {
+        key: 'buffer_capacity',
+        label: 'History Buffer Capacity',
+        unit: 'lines',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Maximum rolling history lines preserved in memory (25 - 500)',
+        detailedDesc: 'Limits the rolling line buffer to prevent browser memory exhaustion during extended simulation runs.'
+    },
+    'beamRadius': {
+        key: 'beamRadius',
+        label: 'Beam Outer Tube Radius',
+        unit: 'm',
+        category: '3D Viewport & Visuals',
+        shortDesc: 'Outer radius of visualized 3D structural beam cylinders',
+        detailedDesc: 'Specifies the outer cylinder radius (in meters) used when rendering solid 3D structural beam elements in the WebGPU/HTML5 canvas viewport.'
+    },
+    'rebarRadius': {
+        key: 'rebarRadius',
+        label: 'Rebar Strand Outer Radius',
+        unit: 'm',
+        category: '3D Viewport & Visuals',
+        shortDesc: 'Outer radius of visualized 3D embedded rebar cylinders',
+        detailedDesc: 'Specifies the outer cylinder radius (in meters) used when rendering solid 3D reinforced rebar strands in the WebGPU/HTML5 canvas viewport.'
+    },
+    'viewport_refresh_rate': {
+        key: 'viewport_refresh_rate',
+        label: 'Viewport Refresh Frame Rate',
+        unit: 'Hz',
+        category: '3D Viewport & Visuals',
+        shortDesc: 'Target frame rate for viewport 3D rendering',
+        detailedDesc: 'Sets the target render loop refresh rate (1 to 60 Hz) for the viewport 3D worker thread to balance frame smoothness against GPU compute load.'
     }
 };
 
@@ -2006,11 +2681,36 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
         type: 'TelemetryText',
         title: 'Live Terminal Text Telemetry',
         category: 'Telemetry & Diagnostics',
-        shortDesc: 'Live terminal text stream displaying solver milestones, CFL metrics, and event timelines.',
+        shortDesc: 'Live monospaced columnar text stream with phase timing breakdowns, memory diagnostics, and font controls.',
         fullDescHtml: `
             <div class="node-doc-section">
                 <div class="node-doc-heading">Overview & Role</div>
-                <p>The <strong>TelemetryText</strong> node provides a real-time console log stream from the running solver binary over WebSockets. Outputs iteration milestones, elapsed simulation time, current time-step (Δt), CFL numbers, and warning diagnostics.</p>
+                <p>The <strong>TelemetryText</strong> node provides a real-time console log and metric stream from the running solver binary over WebSockets. It organizes simulation telemetry into clean, fixed-width monospaced columns or compact logs, avoiding untidy mid-word line wraps in narrow panels.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Governing Physics & Formulations</div>
+                <p>Monitors physical integration steps, current simulation time (<em>t_sim</em>), adaptive acoustic/hydrodynamic CFL time steps (<em>Δt</em>), and phase timing breakdowns:</p>
+                <div class="node-doc-code">t_step = t_compute (PHYS) + t_io (IO) + t_comms (COM)</div>
+                <p>Simultaneously monitors host RAM (Resident Set Size) and GPU device VRAM allocation to ensure execution within physical memory limits.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Inputs & Upstream Connections</div>
+                <ul>
+                    <li>Receives telemetry envelopes from <strong>CFDSolver</strong>, <strong>CFDSolver2D</strong>, <strong>CFDSolver3D</strong>, <strong>MPMDomain2D</strong>, <strong>MPMDomain3D</strong>, <strong>FEMDomain3D</strong>, or coupling managers.</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Outputs & Telemetry</div>
+                <p>Renders live columnar tables with sticky header navigation, customizable zoom levels, and filtered message streams.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Key Parameter Tuning Guide</div>
+                <ul>
+                    <li><code>stream_layout</code>: Set to <em>Live Page (In-Place)</em> for a full status dashboard, <em>Multi-Line Cards</em> for boxed blocks, <em>Dual-Deck (Page + Log)</em> for pinned status + events, <em>Columnar (Fixed-Width)</em> for fixed tables, or <em>Ultra-Compact</em> for narrow docks.</li>
+                    <li><code>show_timing_breakdown</code>: Enable to isolate solver bottlenecks across computation (PHYS), disk write (IO), and telemetry packaging (COM).</li>
+                    <li><code>show_memory</code>: Enable to detect particle multiplication or mesh expansion memory growth in RAM and VRAM.</li>
+                    <li><code>font_size</code>: Adjust text size between 8px and 22px, or hold <code>Ctrl</code> and scroll the mouse wheel over the viewport.</li>
+                </ul>
             </div>
         `
     },
@@ -2193,11 +2893,11 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
         type: 'VirtualGauges',
         title: 'Virtual Sensor Gauge Array',
         category: 'Telemetry & Diagnostics',
-        shortDesc: 'Records pressure, overpressure, and impulse time-history at discrete spatial probe coordinates.',
+        shortDesc: 'Records pressure, overpressure, and impulse time-history at discrete spatial probe coordinates or massive external datasets.',
         fullDescHtml: `
             <div class="node-doc-section">
                 <div class="node-doc-heading">Overview & Role</div>
-                <p>The <strong>VirtualGauges</strong> node places numerical sensor probes at discrete spatial coordinates (x, y, z) to record continuous time-history series of blast overpressure, peak positive phase duration, specific impulse, density, and velocity. Supports CSV, ASCII, Binary, and HDF5 export.</p>
+                <p>The <strong>VirtualGauges</strong> node places numerical sensor probes at discrete spatial coordinates (x, y, z) or streams millions of unstructured probes from external files (CSV, binary coordinates, HDF5, or structural mesh nodes). Records continuous time-history series of blast overpressure, peak positive phase duration, specific impulse, density, and velocity. Supports direct asynchronous HDF5 chunked streaming, virtualized windowed UI exploration, and WebGPU point cloud visualization.</p>
             </div>
         `
     },
@@ -2342,19 +3042,6 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
         `
     },
 
-    'MPMMaterialSteel': {
-        type: 'MPMMaterialSteel',
-        title: 'Advanced Solid Constitutive Model',
-        category: 'Solid Constitutive Mechanics',
-        shortDesc: 'Constitutive plasticity, viscoplasticity (Johnson-Cook), concrete damage (RHT/K&C/CSCM), and shock EOS.',
-        fullDescHtml: `
-            <div class="node-doc-section">
-                <div class="node-doc-heading">Overview & Role</div>
-                <p>The <strong>MPMMaterialSteel</strong> node configures advanced continuum constitutive laws for solid materials across both MPM and FEM solvers. Supports Hypoelastic J2 plasticity, Johnson-Cook viscoplasticity with Mie-Grüneisen shock EOS, and advanced 3-surface concrete damage formulations (RHT, K&C, CSCM).</p>
-            </div>
-        `
-    },
-
     'FSICoupler2D': {
         type: 'FSICoupler2D',
         title: '2D Fluid-Structure Interaction Coupler',
@@ -2411,6 +3098,62 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
             <div class="node-doc-section">
                 <div class="node-doc-heading">Overview & Role</div>
                 <p>The <strong>FEMObject3D</strong> node defines a 3D structural body discretized into 8-node hexahedral solid elements. Supports parametric Box and Cylinder generators as well as imported LS-DYNA keyword meshes.</p>
+            </div>
+        `
+    },
+
+    'FEMBeam3D': {
+        type: 'FEMBeam3D',
+        title: '3D FEM Structural Beam Framework',
+        category: 'Lagrangian FEM Structural Dynamics',
+        shortDesc: '3D structural beam elements supporting axial tension/compression, bending moments, and plastic hinge yield.',
+        fullDescHtml: `
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Overview & Role</div>
+                <p>The <strong>FEMBeam3D</strong> node models structural steel and reinforced concrete frame members using 2-node Timoshenko/Euler-Bernoulli beam formulations with 6 degrees of freedom per node. It captures axial, shear, torsional, and bending responses under high-rate blast loading.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Outputs & Telemetry</div>
+                <p>Computes axial force, shear resultant, bending moments (M_y, M_z), and effective plastic strain across integration points.</p>
+            </div>
+        `
+    },
+
+    'FEMRebar3D': {
+        type: 'FEMRebar3D',
+        title: '3D Embedded Rebar Reinforcement',
+        category: 'Lagrangian FEM Structural Dynamics',
+        shortDesc: 'Embedded 1D tension-compression reinforcement steel strands kinematic-coupled to host concrete solid elements.',
+        fullDescHtml: `
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Overview & Role</div>
+                <p>The <strong>FEMRebar3D</strong> node models embedded steel rebar cages inside concrete solid elements without requiring conformal meshing. Bond-slip kinematics and tension-stiffening transfer loads directly between concrete and reinforcement bars.</p>
+            </div>
+        `
+    },
+
+    'Obstacle': {
+        type: 'Obstacle',
+        title: 'Rigid Obstacle Geometry',
+        category: 'CFD Geometry & Boundary Obstacles',
+        shortDesc: 'Immersed boundary geometric obstacle blocking fluid flow and reflecting shock waves.',
+        fullDescHtml: `
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Overview & Role</div>
+                <p>The <strong>Obstacle</strong> node defines rigid constructive solid geometry primitives (boxes, cylinders, spheres) that act as zero-velocity reflecting immersed boundaries in the CFD Eulerian domain.</p>
+            </div>
+        `
+    },
+
+    'Obstacle3D': {
+        type: 'Obstacle3D',
+        title: '3D CSG Obstacle Geometry',
+        category: 'CFD Geometry & Boundary Obstacles',
+        shortDesc: '3D immersed constructive solid geometry obstacle reflecting Eulerian blast waves and sampling surface pressure.',
+        fullDescHtml: `
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Overview & Role</div>
+                <p>The <strong>Obstacle3D</strong> node defines 3D immersed boundary primitives (boxes, cylinders, spheres, wedges) that reflect shock fronts and record surface blast overpressure and impulse histories.</p>
             </div>
         `
     },
@@ -2762,3 +3505,377 @@ export function showNodeDetailsModal(nodeType: string, customTitle?: string): vo
     };
     document.addEventListener('keydown', keyListener);
 }
+
+// ============================================================================
+// 4. SSOT PARAMETER KEYS, GATING & SECTION ACCORDIONS
+// ============================================================================
+
+export interface NodeSectionInfo {
+    title: string;
+    color: string;
+    defaultCollapsed: boolean;
+}
+
+export function getParamKeysForNode(
+    nodeType: string,
+    parameters: Record<string, any>,
+    is3D: boolean = false,
+    isCoupled: boolean = false
+): string[] {
+    let keys: string[] = [];
+
+    if (nodeType === 'Material') {
+        const matModel = parameters['material_model'] || 'Hypoelastic';
+        if (matModel === 'Ideal Gas') {
+            keys = ['material_model', 'preset', 'atm_pressure', 'atm_temperature', 'gamma', 'density'];
+        } else if (matModel === 'JWL Detonation Gas') {
+            keys = ['material_model', 'preset', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
+        } else if (matModel === 'Ideal Gas Charge') {
+            keys = ['material_model', 'preset', 'ideal_rho_0', 'ideal_e_0', 'ideal_gamma'];
+        } else if (matModel === 'Linear Elastic') {
+            keys = [
+                'material_model', 'preset', 'transfer_scheme',
+                'density', 'youngs_modulus', 'poissons_ratio',
+                'tensile_failure_stress',
+                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
+                'dem_transition_enabled', 'fragment_distribution', 'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution'
+            ];
+        } else if (matModel === 'Johnson-Cook + Mie-Grüneisen') {
+            keys = [
+                'material_model', 'preset', 'transfer_scheme',
+                'density', 'youngs_modulus', 'poissons_ratio',
+                'failure_strain', 'tensile_failure_stress',
+                'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m',
+                'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5',
+                'T_melt', 'T_room', 'Cp',
+                'mg_gamma0', 'mg_c0', 'mg_s',
+                'enable_strain_erosion', 'erosion_strain',
+                'enable_stress_erosion', 'erosion_stress',
+                'enable_timestep_erosion', 'timestep_erosion_factor',
+                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
+                'dem_transition_enabled', 'fragment_distribution', 'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution'
+            ];
+        } else if (matModel === 'CREST Reactive Burn') {
+            keys = [
+                'material_model', 'preset', 'transfer_scheme',
+                'density', 'youngs_modulus', 'poissons_ratio',
+                'yield_stress', 'hardening_modulus',
+                'failure_strain', 'tensile_failure_stress',
+                'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
+                'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
+                'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold',
+                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
+            ];
+        } else if (matModel === 'RHT Concrete') {
+            keys = [
+                'material_model', 'preset', 'transfer_scheme',
+                'density', 'youngs_modulus', 'poissons_ratio',
+                'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
+                'directional_crack_band', 'nonlocal_radius',
+                'failure_strain', 'tensile_failure_stress',
+                'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
+                'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
+                'enable_strain_erosion', 'erosion_strain',
+                'enable_stress_erosion', 'erosion_stress',
+                'enable_timestep_erosion', 'timestep_erosion_factor',
+                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
+                'dem_transition_enabled', 'fragment_distribution', 'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution'
+            ];
+        } else if (matModel === 'Karagozian & Case (K&C)' || matModel === 'Karagozian & Case') {
+            keys = [
+                'material_model', 'preset', 'transfer_scheme',
+                'density', 'youngs_modulus', 'poissons_ratio',
+                'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
+                'directional_crack_band', 'nonlocal_radius',
+                'failure_strain', 'tensile_failure_stress',
+                'kc_auto_generate', 'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
+                'enable_strain_erosion', 'erosion_strain',
+                'enable_stress_erosion', 'erosion_stress',
+                'enable_timestep_erosion', 'timestep_erosion_factor',
+                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
+                'dem_transition_enabled', 'fragment_distribution', 'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution'
+            ];
+        } else if (matModel === 'CSCM Concrete') {
+            keys = [
+                'material_model', 'preset', 'transfer_scheme',
+                'density', 'youngs_modulus', 'poissons_ratio',
+                'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
+                'directional_crack_band', 'nonlocal_radius',
+                'failure_strain', 'tensile_failure_stress',
+                'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
+                'enable_strain_erosion', 'erosion_strain',
+                'enable_stress_erosion', 'erosion_stress',
+                'enable_timestep_erosion', 'timestep_erosion_factor',
+                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
+                'dem_transition_enabled', 'fragment_distribution', 'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution'
+            ];
+        } else {
+            // Default Hypoelastic
+            keys = [
+                'material_model', 'preset', 'transfer_scheme',
+                'density', 'youngs_modulus', 'poissons_ratio',
+                'yield_stress', 'hardening_modulus',
+                'failure_strain', 'tensile_failure_stress',
+                'directional_crack_band', 'nonlocal_radius',
+                'enable_strain_erosion', 'erosion_strain',
+                'enable_stress_erosion', 'erosion_stress',
+                'enable_timestep_erosion', 'timestep_erosion_factor',
+                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
+                'dem_transition_enabled', 'fragment_distribution', 'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution'
+            ];
+        }
+    } else if (nodeType === 'DomainMesh') {
+        keys = ['dimension', 'domain_radius', 'cell_size', 'left_bc', 'right_bc'];
+    } else if (nodeType === 'DomainMesh2D') {
+        const isAxisym = parameters['coordinate_system'] === 'Axisymmetric';
+        keys = isAxisym
+            ? ['coordinate_system', 'min_r', 'max_r', 'min_z', 'max_z', 'cell_size', 'nx', 'ny', 'bc_r_min', 'bc_r_max', 'bc_y_min', 'bc_y_max']
+            : ['coordinate_system', 'xmin', 'xmax', 'ymin', 'ymax', 'cell_size', 'nx', 'ny', 'bc_x_min', 'bc_x_max', 'bc_y_min', 'bc_y_max'];
+    } else if (nodeType === 'DomainMesh3D') {
+        keys = ['xmin', 'xmax', 'ymin', 'ymax', 'zmin', 'zmax', 'cell_size', 'nx', 'ny', 'nz', 'bc_x_min', 'bc_x_max', 'bc_y_min', 'bc_y_max', 'bc_z_min', 'bc_z_max'];
+    } else if (nodeType === 'Charge1D') {
+        keys = ['material', 'charge_mass', 'charge_radius'];
+    } else if (nodeType === 'Charge2D') {
+        keys = ['material', 'charge_mass', 'charge_shape', 'charge_r', 'charge_z', 'charge_radius', 'charge_height', 'charge_aspect_ratio'];
+    } else if (nodeType === 'Charge3D') {
+        keys = ['material', 'charge_mass', 'charge_shape', 'charge_x', 'charge_y', 'charge_z', 'charge_radius', 'charge_height', 'charge_lx', 'charge_ly', 'charge_lz', 'charge_rot_x', 'charge_rot_y', 'charge_rot_z'];
+    } else if (nodeType === 'DetonatorLocation') {
+        keys = ['detonator_r', 'detonator_z', 'detonator_radius'];
+    } else if (nodeType === 'DetonatorLocation3D') {
+        keys = ['detonator_x', 'detonator_y', 'detonator_z', 'detonator_radius'];
+    } else if (nodeType === 'CFDSolver3D') {
+        keys = ['device', 'precision', 'init_mode', 'space_time_scheme', 'flux_scheme', 'cfl', 'endtime', 'plot_stride', 'refresh_rate'];
+    } else if (nodeType === 'CFDSolver2D' || nodeType === 'CFDSolver') {
+        keys = ['init_mode', 'space_time_scheme', 'flux_scheme', 'cfl', 'endtime', 'plot_stride', 'refresh_rate'];
+    } else if (nodeType === 'MPMDomain3D') {
+        keys = ['device', 'precision', 'particle_distribution', 'boundary_filling', 'ppc', 'velocity_scheme', 'flip_blend', 'space_time_scheme', 'smooth_plastic_strain', 'cfl', 'endtime'];
+    } else if (nodeType === 'MPMDomain2D') {
+        keys = ['precision', 'particle_distribution', 'boundary_filling', 'ppc', 'velocity_scheme', 'flip_blend', 'space_time_scheme', 'smooth_plastic_strain', 'cfl', 'endtime'];
+    } else if (nodeType === 'MPMObject2D') {
+        keys = ['material', 'shape_type', 'particle_distribution', 'boundary_filling', 'pos_x', 'pos_y', 'size_x', 'size_y', 'radius', 'vel_x', 'vel_y', 'angular_vel'];
+    } else if (nodeType === 'MPMObject3D') {
+        keys = ['material', 'shape_type', 'particle_distribution', 'boundary_filling', 'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'stl_file', 'scale_x', 'scale_y', 'scale_z', 'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z'];
+    } else if (nodeType === 'FEMDomain3D') {
+        keys = [
+            'device', 'precision', 'cfl', 'endtime',
+            'integration_scheme', 'hourglass_model', 'hourglass_coeff',
+            'enable_directional_crack_band', 'enable_nonlocal_damage',
+            'rebar_formulation', 'convert_failed_elements_to_mpm', 'mpm_particles_per_failed_element',
+            'contact_penalty_scale', 'friction_static', 'friction_kinetic',
+            'enable_heterogeneity', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed',
+            'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
+        ];
+    } else if (nodeType === 'FEMObject3D') {
+        keys = [
+            'material', 'mesh_source', 'boundary_condition',
+            'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z',
+            'radius', 'inner_radius', 'height', 'nx', 'ny', 'nz',
+            'k_file', 'scale_x', 'scale_y', 'scale_z',
+            'vel_x', 'vel_y', 'vel_z', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor'
+        ];
+    } else if (nodeType === 'FEMFSICoupler3D') {
+        keys = ['cfl', 'endtime', 'steps', 'coupling_scheme', 'pressure_integration', 'uncovering_method', 'erosion_venting', 'vacuum_density', 'vacuum_pressure'];
+    } else if (nodeType === 'FSICoupler2D' || nodeType === 'FSICoupler3D') {
+        keys = ['cfl', 'endtime'];
+    } else if (nodeType === 'VTKOutput') {
+        keys = [
+            'trigger_type', 'step_interval', 'time_interval', 'vtk_format', 'custom_filename', 'vtk_dir',
+            'export_cfd_2d', 'export_slices', 'export_volumes', 'export_obstacles', 'export_stl_faces', 'stl_outside_domain', 'tessellate_stl_faces', 'tessellation_max_edge', 'export_fem', 'export_mpm', 'export_pvd',
+            'qty_pressure', 'qty_density', 'qty_velocity', 'qty_energy', 'qty_reacted', 'qty_unreacted', 'qty_air', 'qty_overpressure', 'qty_impulse',
+            'qty_fem_stress', 'qty_fem_strain', 'qty_fem_pressure', 'qty_fem_temp', 'qty_fem_damage', 'qty_fem_vel', 'qty_fem_disp',
+            'qty_mpm_stress', 'qty_mpm_strain', 'qty_mpm_damage', 'qty_mpm_temp', 'qty_mpm_vel', 'qty_mpm_disp',
+            'roi_enabled', 'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride'
+        ];
+    } else if (nodeType === 'STLGeometry') {
+        keys = ['stl_file', 'scale_x', 'scale_y', 'scale_z', 'center_x', 'center_y', 'center_z', 'voxelization_method'];
+    } else if (nodeType === 'LSDynaImporter3D') {
+        keys = ['k_file', 'scale_factor'];
+    } else if (nodeType === 'RemapNode' || nodeType === 'Remap1DTo2DNode' || nodeType === 'Remap1DTo3DNode' || nodeType === 'Remap2DTo3DNode') {
+        keys = ['remap_radius', 'trigger_val'];
+    } else if (nodeType === 'VirtualGauges') {
+        keys = ['enable_gauges', 'telemetry_mode', 'refresh_rate'];
+    } else if (nodeType === 'TelemetryText') {
+        keys = [
+            'stream_layout', 'filter_level', 'timestamp_mode',
+            'show_timing_breakdown', 'show_memory', 'show_wallclock', 'show_dt',
+            'font_size', 'buffer_capacity'
+        ];
+    } else {
+        keys = Object.keys(parameters).filter(k => k !== 'spatial_order' && k !== 'temporal_order' && k !== 'gauges' && k !== 'slices' && k !== 'primitives');
+    }
+
+    if (isCoupled && (nodeType === 'CFDSolver' || nodeType === 'CFDSolver2D' || nodeType === 'CFDSolver3D' || nodeType === 'MPMDomain2D' || nodeType === 'MPMDomain3D' || nodeType === 'FEMDomain3D')) {
+        keys = keys.filter(k => k !== 'cfl' && k !== 'endtime');
+    }
+
+    return keys;
+}
+
+export function shouldSkipNodeParameter(
+    key: string,
+    nodeType: string,
+    parameters: Record<string, any>,
+    is3D: boolean = false
+): boolean {
+    if (key === 'gauges' || key === 'slices' || key === 'primitives' || key === 'nr' || key === 'n_cells' || key === 'nz') {
+        if (nodeType !== 'DomainMesh3D' && nodeType !== 'FEMObject3D') {
+            return true;
+        }
+    }
+    if (nodeType === 'VirtualGauges' && key === 'telemetry_channel') return true;
+
+    if (nodeType === 'Material') {
+        if (key === 'erosion_strain' && !parameters['enable_strain_erosion']) return true;
+        if (key === 'erosion_stress' && !parameters['enable_stress_erosion']) return true;
+        if (key === 'timestep_erosion_factor' && !parameters['enable_timestep_erosion']) return true;
+        if (key === 'nonlocal_radius' && !parameters['directional_crack_band']) return true;
+        if ((key === 'weibull_modulus' || key === 'weibull_scale' || key === 'fracture_toughness' || key === 'debris_bulk_factor') && !parameters['enable_heterogeneity']) return true;
+        if ((key === 'anisotropy_ratio' || key === 'anisotropy_axis' || key === 'anisotropy_dir_x' || key === 'anisotropy_dir_y' || key === 'anisotropy_dir_z') && !parameters['enable_anisotropy']) return true;
+        if ((key === 'anisotropy_dir_x' || key === 'anisotropy_dir_y' || key === 'anisotropy_dir_z') && parameters['anisotropy_axis'] !== 'Custom') return true;
+        if (['kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega'].includes(key) && parameters['kc_auto_generate'] !== false) return true;
+        if (['fragment_distribution', 'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution'].includes(key) && !parameters['dem_transition_enabled']) return true;
+    } else if (nodeType === 'Charge2D' || nodeType === 'Charge1D') {
+        const shape = parameters['charge_shape'] || 'Sphere';
+        if ((key === 'charge_height' || key === 'charge_aspect_ratio') && shape !== 'Cylinder') return true;
+    } else if (nodeType === 'Charge3D') {
+        const shape = parameters['charge_shape'] || 'Sphere';
+        if (shape === 'Sphere') {
+            if (['charge_height', 'charge_aspect_ratio', 'charge_lx', 'charge_ly', 'charge_lz', 'charge_rot_x', 'charge_rot_y', 'charge_rot_z'].includes(key)) return true;
+        } else if (shape === 'Cylinder') {
+            if (['charge_lx', 'charge_ly', 'charge_lz'].includes(key)) return true;
+        } else if (shape === 'Block') {
+            if (['charge_radius', 'charge_height', 'charge_aspect_ratio'].includes(key)) return true;
+        }
+    } else if (nodeType === 'MPMDomain2D' || nodeType === 'MPMDomain3D') {
+        if (key === 'flip_blend' && parameters['velocity_scheme'] !== 'FLIP') return true;
+    } else if (nodeType === 'MPMObject2D') {
+        const shape = parameters['shape_type'] || 'Rectangle';
+        if (shape === 'Rectangle' && key === 'radius') return true;
+        if (shape === 'Circle' && (key === 'size_x' || key === 'size_y')) return true;
+    } else if (nodeType === 'MPMObject3D') {
+        const shape = parameters['shape_type'] || 'Box';
+        if (shape === 'Box') {
+            if (['radius', 'inner_radius', 'height', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) return true;
+        } else if (shape === 'Sphere') {
+            if (['size_x', 'size_y', 'size_z', 'inner_radius', 'height', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) return true;
+        } else if (shape === 'Cylinder') {
+            if (['size_x', 'size_y', 'size_z', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) return true;
+        } else if (shape === 'STL') {
+            if (['size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height'].includes(key)) return true;
+        }
+    } else if (nodeType === 'FEMDomain3D') {
+        const scheme = parameters['integration_scheme'] || 'OnePointFB';
+        if ((scheme === 'FullGauss8' || scheme === 'SelectiveReduced') && (key === 'hourglass_model' || key === 'hourglass_coeff')) return true;
+        if (key === 'mpm_particles_per_failed_element' && !parameters['convert_failed_elements_to_mpm']) return true;
+        if (['material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size'].includes(key) && !parameters['enable_heterogeneity']) return true;
+        if (['anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'].includes(key) && !parameters['enable_anisotropy']) return true;
+        if (['anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'].includes(key) && parameters['anisotropy_axis'] !== 'Custom') return true;
+    } else if (nodeType === 'FEMObject3D') {
+        const source = parameters['mesh_source'] || 'Box Generator';
+        if (source === 'Box Generator') {
+            if (['radius', 'inner_radius', 'height', 'k_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) return true;
+        } else if (source === 'Cylinder Generator') {
+            if (['size_x', 'size_y', 'size_z', 'ny', 'k_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) return true;
+        } else if (source === 'LS-DYNA Keyword File') {
+            if (['size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'nx', 'ny', 'nz'].includes(key)) return true;
+        }
+    } else if (nodeType === 'FEMFSICoupler3D') {
+        if ((key === 'vacuum_density' || key === 'vacuum_pressure') && !parameters['erosion_venting']) return true;
+    } else if (nodeType === 'VTKOutput') {
+        const triggerType = parameters['trigger_type'] || 'Step Interval';
+        if ((triggerType === 'Step Interval' || triggerType === 'step') && key === 'time_interval') return true;
+        if ((triggerType === 'Time Interval' || triggerType === 'time') && key === 'step_interval') return true;
+        if (!is3D && (
+            key === 'export_slices' || key === 'export_volumes' || key === 'export_obstacles' || key === 'export_stl_faces' || key === 'stl_outside_domain' || key === 'tessellate_stl_faces' || key === 'tessellation_max_edge' || key === 'export_fem' || key === 'export_mpm' ||
+            key.startsWith('qty_fem_') || key.startsWith('qty_mpm_') ||
+            key.startsWith('roi_') || key === 'volume_stride' || key === 'slice_stride'
+        )) return true;
+        if (is3D && key === 'export_cfd_2d') return true;
+        if ((key === 'stl_outside_domain' || key === 'tessellate_stl_faces') && parameters['export_stl_faces'] === false) return true;
+        if (key === 'tessellation_max_edge' && (!parameters['export_stl_faces'] || !parameters['tessellate_stl_faces'])) return true;
+        if (['roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride'].includes(key) && !parameters['roi_enabled']) return true;
+    } else if (nodeType === 'DomainMesh') {
+        const dim = parameters['dimension'] || '1D';
+        if ((key === 'y_min_bc' || key === 'y_max_bc' || key === 'z_min_bc' || key === 'z_max_bc') && dim === '1D') return true;
+    }
+
+    return false;
+}
+
+export function getNodeSectionInfo(
+    key: string,
+    nodeType: string,
+    parameters: Record<string, any>,
+    is3D: boolean = false
+): NodeSectionInfo | null {
+    if (nodeType === 'Material') {
+        if (key === 'transfer_scheme') return { title: 'MPM TRANSFER SCHEME [MPM ONLY]', color: '#c084fc', defaultCollapsed: false };
+        if (key === 'atm_pressure') return { title: 'AMBIENT THERMODYNAMICS [FV ONLY]', color: '#fbbf24', defaultCollapsed: false };
+        if (key === 'rho') return { title: 'JWL DETONATION STATE [FV ONLY]', color: '#fbbf24', defaultCollapsed: false };
+        if (key === 'jwl_A') return { title: 'JWL EQUATION OF STATE [FV ONLY]', color: '#fbbf24', defaultCollapsed: false };
+        if (key === 'ideal_rho_0') return { title: 'IDEAL GAS BLAST CHARGE [FV ONLY]', color: '#fbbf24', defaultCollapsed: false };
+        if (key === 'density') return { title: 'ELASTICITY & MASS [MPM · FEM]', color: '#60a5fa', defaultCollapsed: false };
+        if (key === 'yield_stress') return { title: 'PLASTIC YIELD & HARDENING [MPM · FEM]', color: '#60a5fa', defaultCollapsed: false };
+        if (key === 'fc') return { title: 'CONCRETE CORE & FRACTURE [MPM · FEM]', color: '#60a5fa', defaultCollapsed: false };
+        if (key === 'failure_strain' || (key === 'tensile_failure_stress' && parameters['material_model'] === 'Linear Elastic')) {
+            return { title: 'CONSTITUTIVE FAILURE & SPALL [MPM · FEM]', color: '#60a5fa', defaultCollapsed: false };
+        }
+        if (key === 'jc_A') return { title: 'JOHNSON-COOK VISCOPLASTICITY [MPM · FEM]', color: '#60a5fa', defaultCollapsed: false };
+        if (key === 'mg_gamma0') return { title: 'MIE-GRÜNEISEN SHOCK EOS [MPM · FEM]', color: '#60a5fa', defaultCollapsed: true };
+        if (key === 'davis_c0') return { title: 'DAVIS SOLID REACTANT EOS [MPM · FV]', color: '#22d3ee', defaultCollapsed: true };
+        if (key === 'davis_a') return { title: 'DAVIS DETONATION PRODUCT EOS [MPM · FV]', color: '#22d3ee', defaultCollapsed: true };
+        if (key === 'crest_b1') return { title: 'CREST REACTION KINETICS [MPM · FV]', color: '#22d3ee', defaultCollapsed: true };
+        if (key === 'rht_A') return { title: 'RHT ENVELOPES & POROUS EOS [MPM · FEM]', color: '#60a5fa', defaultCollapsed: true };
+        if (key === 'kc_auto_generate' || key === 'kc_a0') return { title: 'K&C DAMAGE PLASTICITY [MPM · FEM]', color: '#60a5fa', defaultCollapsed: true };
+        if (key === 'cscm_alpha') return { title: 'CSCM SMOOTH CAP & DAMAGE [MPM · FEM]', color: '#60a5fa', defaultCollapsed: true };
+        if (key === 'enable_strain_erosion') return { title: 'ELEMENT & PARTICLE EROSION [FEM · MPM]', color: '#f59e0b', defaultCollapsed: true };
+        if (key === 'enable_heterogeneity') return { title: 'WEIBULL HETEROGENEITY [MPM · FEM]', color: '#c084fc', defaultCollapsed: true };
+        if (key === 'enable_anisotropy') return { title: 'DIRECTIONAL ANISOTROPY [MPM · FEM]', color: '#38bdf8', defaultCollapsed: true };
+        if (key === 'dem_transition_enabled') return { title: 'STATISTICAL FRAGMENTATION & DEM [MPM]', color: '#f43f5e', defaultCollapsed: true };
+    } else if (nodeType === 'DomainMesh' || nodeType === 'DomainMesh2D' || nodeType === 'DomainMesh3D') {
+        if (key === 'cell_size' || key === 'nx') return { title: 'GRID RESOLUTION', color: '#569cd6', defaultCollapsed: false };
+        if (key === 'left_bc' || key === 'bc_x_min' || key === 'bc_r_min' || key === 'x_min_bc') return { title: 'BOUNDARY CONDITIONS', color: '#569cd6', defaultCollapsed: true };
+    } else if (nodeType === 'Charge1D' || nodeType === 'Charge2D' || nodeType === 'Charge3D') {
+        if (key === 'charge_r' || key === 'charge_x' || key === 'charge_radius') return { title: 'GEOMETRY & POSITIONING', color: '#fbbf24', defaultCollapsed: false };
+    } else if (nodeType === 'CFDSolver' || nodeType === 'CFDSolver2D' || nodeType === 'CFDSolver3D') {
+        if (key === 'space_time_scheme') return { title: 'NUMERICAL INTEGRATION', color: '#569cd6', defaultCollapsed: false };
+        if (key === 'plot_stride') return { title: 'TELEMETRY & REFRESH', color: '#569cd6', defaultCollapsed: true };
+    } else if (nodeType === 'MPMDomain2D' || nodeType === 'MPMDomain3D') {
+        if (key === 'particle_distribution') return { title: 'PARTICLE DISCRETIZATION', color: '#c084fc', defaultCollapsed: false };
+        if (key === 'velocity_scheme') return { title: 'KINEMATICS & TIME STEPPING', color: '#c084fc', defaultCollapsed: false };
+    } else if (nodeType === 'MPMObject2D' || nodeType === 'MPMObject3D') {
+        if (key === 'pos_x' || key === 'size_x' || key === 'radius' || key === 'stl_file') return { title: 'SPATIAL EXTENT & GEOMETRY', color: '#c084fc', defaultCollapsed: false };
+        if (key === 'vel_x') return { title: 'INITIAL VELOCITY & MOTION', color: '#c084fc', defaultCollapsed: true };
+    } else if (nodeType === 'FEMDomain3D') {
+        if (key === 'integration_scheme') return { title: 'ELEMENT FORMULATION', color: '#38bdf8', defaultCollapsed: false };
+        if (key === 'enable_directional_crack_band') return { title: 'DAMAGE REGULARIZATION', color: '#38bdf8', defaultCollapsed: true };
+        if (key === 'rebar_formulation') return { title: 'CONTACT & REBAR', color: '#38bdf8', defaultCollapsed: true };
+        if (key === 'enable_heterogeneity') return { title: 'MICROSTRUCTURE & DEBRIS', color: '#c084fc', defaultCollapsed: true };
+        if (key === 'enable_anisotropy') return { title: 'DIRECTIONAL ANISOTROPY', color: '#38bdf8', defaultCollapsed: true };
+    } else if (nodeType === 'FEMObject3D') {
+        if (key === 'pos_x' || key === 'k_file') return { title: 'GEOMETRY & MESH GENERATION', color: '#38bdf8', defaultCollapsed: false };
+        if (key === 'vel_x') return { title: 'INITIAL VELOCITY & VISCOSITY', color: '#38bdf8', defaultCollapsed: true };
+    } else if (nodeType === 'FEMFSICoupler3D' || nodeType === 'FSICoupler2D' || nodeType === 'FSICoupler3D') {
+        if (key === 'coupling_scheme') return { title: 'FSI INTERFACE FORMULATION', color: '#22d3ee', defaultCollapsed: false };
+        if (key === 'erosion_venting') return { title: 'EROSION VENTING & CAVITY', color: '#22d3ee', defaultCollapsed: true };
+    } else if (nodeType === 'VTKOutput') {
+        if (key === 'export_slices') return { title: 'DOMAINS & TARGETS', color: '#00e5ff', defaultCollapsed: true };
+        if (key === 'qty_pressure') return { title: 'CFD EULERIAN FIELDS', color: '#00e5ff', defaultCollapsed: true };
+        if (key === 'qty_fem_stress') return { title: 'SOLID FEM FIELDS', color: '#00e5ff', defaultCollapsed: true };
+        if (key === 'qty_mpm_stress') return { title: 'SOLID MPM FIELDS', color: '#00e5ff', defaultCollapsed: true };
+        if (key === 'roi_enabled') return { title: 'ROI BOUNDS & STRIDES', color: '#00e5ff', defaultCollapsed: true };
+    } else if (nodeType === 'TelemetryText') {
+        if (key === 'stream_layout') return { title: 'LAYOUT & STREAM DENSITY', color: '#38bdf8', defaultCollapsed: false };
+        if (key === 'show_timing_breakdown') return { title: 'METRIC & TIMING BREAKDOWN COLUMNS', color: '#34d399', defaultCollapsed: false };
+        if (key === 'font_size') return { title: 'TYPOGRAPHY & BUFFER SIZING', color: '#a78bfa', defaultCollapsed: false };
+    }
+    return null;
+}
+

@@ -1259,7 +1259,7 @@ CFDSolver2DAMRCudaImpl<RealType>::CFDSolver2DAMRCudaImpl(int nr, int nz, double 
       bc_z_min(static_cast<CFDSolver2DCuda::BCType>(CFDSolver2D::REFLECTIVE)),
       bc_z_max(static_cast<CFDSolver2DCuda::BCType>(CFDSolver2D::OUTFLOW_RIEMANN)),
       ambient_rho_val(1.225), ambient_p_val(101325.0), detonator_r_coord(0.0), detonator_z_coord(0.0),
-      d_states_pool(nullptr), d_U_pool(nullptr), d_dU_pool(nullptr), allocated_tiles_capacity(0),
+      d_states_pool(nullptr), d_U_pool(nullptr), d_dU_pool(nullptr), d_node_boundary_fluxes(nullptr), allocated_tiles_capacity(0),
       d_active_node_ids(nullptr), d_active_tile_ids(nullptr), active_leaves_count(0),
       d_allocated_node_ids(nullptr), d_allocated_tile_ids(nullptr), allocated_nodes_count(0),
       current_active_capacity(0), current_allocated_capacity(0), current_tree_capacity(0),
@@ -3093,7 +3093,93 @@ size_t CFDSolver2DAMRCudaImpl<RealType>::getAllocatedVRAM() const {
 
 template <typename RealType>
 void CFDSolver2DAMRCudaImpl<RealType>::exportVTK(const std::string& filename) {
-    (void)filename;
+    this->syncPoolsToCPU();
+
+    // 1. Count active leaf cells
+    std::vector<int> leaf_indices;
+    for (int idx = 0; idx < (int)this->amr_nodes.size(); ++idx) {
+        if (this->amr_nodes[idx].is_active) {
+            leaf_indices.push_back(idx);
+        }
+    }
+
+    int num_cells = leaf_indices.size() * 256;
+    int num_points = num_cells * 4;
+
+    std::vector<double> points;
+    points.reserve(num_points * 3);
+
+    std::vector<int32_t> connectivity;
+    connectivity.reserve(num_cells * 4);
+
+    std::vector<int32_t> offsets;
+    offsets.reserve(num_cells);
+
+    std::vector<uint8_t> types(num_cells, 9); // VTK_QUAD
+
+    std::vector<double> rho;
+    rho.reserve(num_cells);
+    std::vector<double> ur;
+    ur.reserve(num_cells);
+    std::vector<double> uz;
+    uz.reserve(num_cells);
+    std::vector<double> p;
+    p.reserve(num_cells);
+    std::vector<double> level;
+    level.reserve(num_cells);
+
+    int cell_global_idx = 0;
+
+    for (int node_idx : leaf_indices) {
+        const auto& node = this->amr_nodes[node_idx];
+        const auto& S = this->states_pool[node.tile_id];
+
+        double factor = 1.0 / (1 << node.level);
+        double dr = this->dr_base * factor;
+        double dz = this->dz_base * factor;
+
+        double tile_r_min = node.r_idx * 16 * dr;
+        double tile_z_min = node.z_idx * 16 * dz;
+
+        for (int i = 0; i < 16; ++i) {
+            double c_rMin = tile_r_min + i * dr;
+            double c_rMax = tile_r_min + (i + 1) * dr;
+            int ti = i + 2;
+
+            for (int j = 0; j < 16; ++j) {
+                double c_zMin = tile_z_min + j * dz;
+                double c_zMax = tile_z_min + (j + 1) * dz;
+                int tj = j + 2;
+                int k = ti * AMR_TILE_DIM + tj;
+
+                // Add 4 corner points
+                points.push_back(c_rMin); points.push_back(c_zMin); points.push_back(0.0);
+                points.push_back(c_rMax); points.push_back(c_zMin); points.push_back(0.0);
+                points.push_back(c_rMax); points.push_back(c_zMax); points.push_back(0.0);
+                points.push_back(c_rMin); points.push_back(c_zMax); points.push_back(0.0);
+
+                // Add connectivity
+                int p0 = cell_global_idx * 4;
+                connectivity.push_back(p0);
+                connectivity.push_back(p0 + 1);
+                connectivity.push_back(p0 + 2);
+                connectivity.push_back(p0 + 3);
+
+                offsets.push_back(p0 + 4);
+
+                // Add cell data
+                rho.push_back((double)S.rho[k]);
+                ur.push_back((double)S.ur[k]);
+                uz.push_back((double)S.uz[k]);
+                p.push_back((double)S.p[k]);
+                level.push_back((double)node.level);
+
+                cell_global_idx++;
+            }
+        }
+    }
+
+    export_vtu_amr_2d(filename, points, connectivity, offsets, types, rho, ur, uz, p, level);
 }
 
 template <typename RealType>

@@ -111,6 +111,48 @@ void export_vtu_mpm_3d(const std::string& filename, const std::vector<Blast::MPM
                        bool has_vel = true, bool has_disp = true, bool has_stress = true,
                        bool has_strain = true, bool has_damage = true, bool has_temp = true);
 
+struct ObstacleSurfaceSnapshot3D {
+    int num_faces = 0;
+    int num_points = 0;
+    std::vector<float> points;          // 3 * num_points
+    std::vector<int32_t> connectivity;  // 4 * num_faces
+    std::vector<int32_t> offsets;       // num_faces
+    std::vector<uint8_t> types;         // num_faces (VTK_QUAD = 9)
+    bool has_p = true;
+    bool has_rho = true;
+    bool has_overpressure = true;
+    bool has_impulse = true;
+    std::vector<float> p;               // num_faces
+    std::vector<float> rho;             // num_faces
+    std::vector<float> overpressure;    // num_faces
+    std::vector<float> impulse;         // num_faces
+};
+
+void export_vtu_obstacle_surface_snapshot(const std::string& filename, const ObstacleSurfaceSnapshot3D& snap, const std::string& format = "Binary");
+
+#include "PrimitiveGeometry.hpp"
+
+struct STLFacesSnapshot3D {
+    int num_faces = 0;
+    int num_points = 0;
+    std::vector<float> points;          // 3 * num_points
+    std::vector<int32_t> connectivity;  // 3 * num_faces
+    std::vector<int32_t> offsets;       // num_faces
+    std::vector<uint8_t> types;         // num_faces (VTK_TRIANGLE = 5)
+    bool has_p = true;
+    bool has_rho = true;
+    bool has_overpressure = true;
+    bool has_impulse = true;
+    std::vector<float> p;               // num_points
+    std::vector<float> rho;             // num_points
+    std::vector<float> overpressure;    // num_points
+    std::vector<float> impulse;         // num_points
+};
+
+void export_vtu_stl_faces_snapshot(const std::string& filename, const STLFacesSnapshot3D& snap, const std::string& format = "Binary");
+
+std::vector<Triangle> subdivide_triangles_to_cell_size(const std::vector<Triangle>& input_triangles, double target_cell_size, int max_depth = 5);
+
 void append_pvd_timestep(const std::string& pvd_filename, double sim_time, const std::string& relative_vtu_path, const std::string& part = "0");
 
 #endif

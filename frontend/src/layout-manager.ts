@@ -6,13 +6,25 @@ import { NodeViewer } from './node-viewer.js';
 import { ResourceManager } from './resource-manager.js';
 import { Telemetry3DViewport } from './telemetry-3d-viewport.js';
 import { CustomDialog } from './custom-dialog.js';
+import { PipelineBrowser } from './pipeline-browser.js';
+import { PropertyGrid } from './property-grid.js';
+import { WorkspaceManager } from './workspace-manager.js';
+import { PlaybackRingBuffer } from './playback-buffer.js';
+import { ClusterNodeManager } from './ClusterNodeManager.js';
+import { TransportController } from './transport-controller.js';
 
 export class LayoutManager {
     private container: HTMLElement;
     private stateManager: StateManager;
     public components: Map<string, any> = new Map();
     private lastState: SimulationState | null = null;
+    private lastActiveModelId: string | null = null;
     private collapseState: Map<string, { collapsed: boolean; orientation: 'h' | 'v' }> = new Map();
+    private transportControllerFactory?: (container: HTMLElement) => TransportController;
+
+    public setTransportControllerFactory(factory: (container: HTMLElement) => TransportController): void {
+        this.transportControllerFactory = factory;
+    }
 
     constructor(containerId: string, stateManager: StateManager) {
         const container = document.getElementById(containerId);
@@ -69,12 +81,9 @@ export class LayoutManager {
     }
 
     public render(state: SimulationState): void {
-        const structFingerprint = this.structuralFingerprint(state.layout);
-        const nodesJson = JSON.stringify(state.nodes.map(n => n.id));
-        const currentStructural = structFingerprint + nodesJson;
-
+        const currentStructural = this.structuralFingerprint(state.layout);
         const lastStructural = this.lastState
-            ? this.structuralFingerprint(this.lastState.layout) + JSON.stringify(this.lastState.nodes.map(n => n.id))
+            ? this.structuralFingerprint(this.lastState.layout)
             : '';
 
         if (currentStructural !== lastStructural) {
@@ -99,9 +108,80 @@ export class LayoutManager {
     }
 
 
+    public notifyLayoutResize(): void {
+        // Immediate DOM resize event
+        window.dispatchEvent(new Event('resize'));
+
+        // Direct notification to component instances
+        this.components.forEach(comp => {
+            if (comp.instance) {
+                if (typeof comp.instance.triggerResize === 'function') {
+                    comp.instance.triggerResize();
+                } else if (typeof comp.instance.resize === 'function') {
+                    comp.instance.resize();
+                } else if (typeof comp.instance.handleResize === 'function') {
+                    comp.instance.handleResize();
+                }
+            }
+        });
+
+        // Frame and timer follow-ups to guarantee zero distortion after CSS flex settling
+        requestAnimationFrame(() => {
+            window.dispatchEvent(new Event('resize'));
+            this.components.forEach(comp => {
+                if (comp.instance && typeof comp.instance.triggerResize === 'function') {
+                    comp.instance.triggerResize();
+                }
+            });
+        });
+
+        setTimeout(() => {
+            window.dispatchEvent(new Event('resize'));
+            this.components.forEach(comp => {
+                if (comp.instance && typeof comp.instance.triggerResize === 'function') {
+                    comp.instance.triggerResize();
+                }
+            });
+        }, 60);
+
+        setTimeout(() => {
+            window.dispatchEvent(new Event('resize'));
+            this.components.forEach(comp => {
+                if (comp.instance && typeof comp.instance.triggerResize === 'function') {
+                    comp.instance.triggerResize();
+                }
+            });
+        }, 200);
+    }
+
+    private isWrapperCollapsedState(wrapper: HTMLElement | null): boolean {
+        if (!wrapper) return false;
+        if (wrapper.dataset.propCollapsed === '1') return true;
+
+        const panelEl = wrapper.querySelector(':scope > .panel') as HTMLElement | null;
+        if (panelEl) {
+            const panelType = wrapper.dataset.panelType;
+            if (panelType === 'MENU_BAR') return false;
+
+            const panelId = wrapper.dataset.panelId;
+            if (!panelId) return false;
+            const state = this.collapseState.get(panelId);
+            return !!(state && state.collapsed);
+        }
+
+        const splitEl = wrapper.querySelector(':scope > .split-container') as HTMLElement | null;
+        if (splitEl) {
+            const innerWrappers = (Array.from(splitEl.children) as HTMLElement[])
+                .filter(el => !el.classList.contains('splitter'));
+            return innerWrappers.length > 0 && innerWrappers.every(w => this.isWrapperCollapsedState(w));
+        }
+
+        return false;
+    }
+
     /**
      * Walk the live DOM and update the flex values of split wrappers to match
-     * the new ratio, without tearing down any elements.
+     * the new ratio, without tearing down any elements or overwriting collapsed states.
      */
     private patchRatios(layout: LayoutNode): void {
         if (layout.type !== 'split') return;
@@ -117,11 +197,20 @@ export class LayoutManager {
                     layout.firstChild.panelType === 'MENU_BAR'
                 );
                 if (!isMenuSplit) {
-                    wrappers[0].style.flex = `${layout.ratio}`;
-                    wrappers[1].style.flex = `${1 - layout.ratio}`;
-                    // Keep dataset in sync so collapse/expand can restore them.
-                    wrappers[0].dataset.originalFlex = wrappers[0].style.flex;
-                    wrappers[1].dataset.originalFlex = wrappers[1].style.flex;
+                    wrappers[0].dataset.originalFlex = `${layout.ratio}`;
+                    wrappers[1].dataset.originalFlex = `${1 - layout.ratio}`;
+
+                    const firstCollapsed = this.isWrapperCollapsedState(wrappers[0]);
+                    const secondCollapsed = this.isWrapperCollapsedState(wrappers[1]);
+
+                    if (!firstCollapsed && !secondCollapsed) {
+                        wrappers[0].style.flex = `${layout.ratio}`;
+                        wrappers[1].style.flex = `${1 - layout.ratio}`;
+                    } else if (firstCollapsed && !secondCollapsed) {
+                        wrappers[1].style.flex = '1';
+                    } else if (!firstCollapsed && secondCollapsed) {
+                        wrappers[0].style.flex = '1';
+                    }
                 }
             }
         }
@@ -169,13 +258,11 @@ export class LayoutManager {
 
         const splitter = document.createElement('div');
         splitter.className = `splitter ${node.direction}`;
-        splitter.style.backgroundColor = '#333';
         if (isMenuSplit) {
             splitter.style.flex = '0 0 1px';
             splitter.style.cursor = 'default';
         } else {
             splitter.style.flex = '0 0 4px';
-            splitter.style.cursor = node.direction === 'horizontal' ? 'col-resize' : 'row-resize';
             this.setupSplitterDrag(splitter, node);
         }
 
@@ -208,31 +295,101 @@ export class LayoutManager {
 
 
     private setupSplitterDrag(splitter: HTMLElement, node: SplitNode): void {
-        const onMouseDown = (e: MouseEvent) => {
+        const onPointerDown = (e: PointerEvent) => {
+            if (e.button !== 0 && e.pointerType === 'mouse') return;
             e.preventDefault();
-            const startPos = node.direction === 'horizontal' ? e.clientX : e.clientY;
-            const startRatio = node.ratio;
-            const parentRect = splitter.parentElement!.getBoundingClientRect();
-            const parentSize = node.direction === 'horizontal' ? parentRect.width : parentRect.height;
+            e.stopPropagation();
 
-            const onMouseMove = (moveEvent: MouseEvent) => {
-                const currentPos = node.direction === 'horizontal' ? moveEvent.clientX : moveEvent.clientY;
-                const delta = currentPos - startPos;
-                const newRatio = startRatio + (delta / parentSize);
-                this.stateManager.setPanelRatio(node.id, newRatio);
+            const splitContainer = splitter.parentElement as HTMLElement | null;
+            if (!splitContainer) return;
+
+            const firstWrapper = splitter.previousElementSibling as HTMLElement | null;
+            const secondWrapper = splitter.nextElementSibling as HTMLElement | null;
+            if (!firstWrapper || !secondWrapper) return;
+
+            const isHorizontal = node.direction === 'horizontal';
+
+            try {
+                splitter.setPointerCapture(e.pointerId);
+            } catch (_) {}
+
+            splitter.classList.add('resizing');
+            splitContainer.classList.add('is-resizing');
+            document.body.classList.add('is-resizing');
+            document.body.classList.add(isHorizontal ? 'resizing-col' : 'resizing-row');
+
+            let lastRatio = node.ratio;
+            let rafId: number | null = null;
+
+            const updateSplit = (clientX: number, clientY: number) => {
+                const rect = splitContainer.getBoundingClientRect();
+                const totalSize = isHorizontal ? rect.width : rect.height;
+                if (totalSize <= 0) return;
+
+                const pos = isHorizontal ? (clientX - rect.left) : (clientY - rect.top);
+                let ratio = pos / totalSize;
+
+                // Enforce minimum panel size of 50px on both sides, clamped between 0.02 and 0.98
+                const minPx = 50;
+                const minRatio = Math.max(0.02, minPx / totalSize);
+                const maxRatio = Math.min(0.98, 1 - (minPx / totalSize));
+                ratio = Math.max(minRatio, Math.min(maxRatio, ratio));
+
+                lastRatio = ratio;
+                node.ratio = ratio;
+
+                // Direct DOM flex update for 60/120fps smoothness
+                firstWrapper.style.flex = `${ratio}`;
+                secondWrapper.style.flex = `${1 - ratio}`;
+                firstWrapper.dataset.originalFlex = `${ratio}`;
+                secondWrapper.dataset.originalFlex = `${1 - ratio}`;
+
+                // Silently update layout state in memory without heavy state clones/broadcasts
+                this.stateManager.setPanelRatioSilent(node.id, ratio);
+                this.notifyLayoutResize();
             };
 
-            const onMouseUp = () => {
-                window.removeEventListener('mousemove', onMouseMove);
-                window.removeEventListener('mouseup', onMouseUp);
-                this.stateManager.commitPanelRatio();
+            const onPointerMove = (me: PointerEvent) => {
+                if (rafId !== null) cancelAnimationFrame(rafId);
+                rafId = requestAnimationFrame(() => {
+                    updateSplit(me.clientX, me.clientY);
+                    rafId = null;
+                });
             };
 
-            window.addEventListener('mousemove', onMouseMove);
-            window.addEventListener('mouseup', onMouseUp);
+            const onPointerUp = (ue: PointerEvent) => {
+                if (rafId !== null) {
+                    cancelAnimationFrame(rafId);
+                    rafId = null;
+                }
+
+                try {
+                    splitter.releasePointerCapture(ue.pointerId);
+                } catch (_) {}
+
+                splitter.removeEventListener('pointermove', onPointerMove);
+                splitter.removeEventListener('pointerup', onPointerUp);
+                splitter.removeEventListener('pointercancel', onPointerUp);
+                splitter.removeEventListener('lostpointercapture', onPointerUp);
+
+                splitter.classList.remove('resizing');
+                splitContainer.classList.remove('is-resizing');
+                document.body.classList.remove('is-resizing', 'resizing-col', 'resizing-row');
+
+                // Final commit with undo history snapshot and storage persist
+                this.stateManager.commitPanelRatio(node.id, lastRatio);
+
+                // Trigger layout resize notifications
+                this.notifyLayoutResize();
+            };
+
+            splitter.addEventListener('pointermove', onPointerMove);
+            splitter.addEventListener('pointerup', onPointerUp);
+            splitter.addEventListener('pointercancel', onPointerUp);
+            splitter.addEventListener('lostpointercapture', onPointerUp);
         };
 
-        splitter.addEventListener('mousedown', onMouseDown);
+        splitter.addEventListener('pointerdown', onPointerDown);
     }
 
     private renderPanel(node: PanelNode, parent: HTMLElement): void {
@@ -278,16 +435,20 @@ export class LayoutManager {
                 return result;
             };
 
+            const isHorizontalSplit = splitContainer ? splitContainer.classList.contains('horizontal') : true;
+
             if (!s.collapsed) {
                 // ── EXPANDED ──
                 header.style.display = '';
                 content.style.display = 'flex';
                 vStrip.style.display = 'none';
-                // Restore this wrapper to its original split ratio
+                
                 parent.style.flex = parent.dataset.originalFlex || '';
+                parent.classList.remove('panel-collapsed-h', 'panel-collapsed-v');
                 panelEl.style.height = '100%';
                 panelEl.style.flex = '1';
-                panelEl.style.width = '';
+                panelEl.style.width = '100%';
+
                 // Restore siblings to their pre-collapse flex values
                 siblingWrappers.forEach(sib => {
                     if (sib.dataset.savedFlex !== undefined) {
@@ -297,78 +458,99 @@ export class LayoutManager {
                 });
                 // Restore adjacent splitters
                 adjacentSplitters().forEach(sp => { sp.style.display = ''; });
-                // Propagate expand upward in both directions to restore parent/grandparent wrappers
-                this.propagateExpandUpward(splitContainer, 'h');
-                this.propagateExpandUpward(splitContainer, 'v');
+                // Propagate expand upward through ancestors
+                this.propagateExpandUpward(splitContainer);
 
             } else if (s.orientation === 'h') {
-                // ── HORIZONTAL COLLAPSE: thin header bar ──
+                // ── HORIZONTAL FOLD: thin header bar (~24px) ──
                 header.style.display = '';
                 content.style.display = 'none';
                 vStrip.style.display = 'none';
                 
                 panelEl.style.height = 'auto';
                 panelEl.style.flex = '0 0 auto';
-                panelEl.style.width = '';
+                panelEl.style.width = '100%';
 
-                const isHorizontalSplit = splitContainer ? splitContainer.classList.contains('horizontal') : true;
                 if (!isHorizontalSplit) {
-                    // Match: parent split is vertical (column), so collapsing height collapses wrapper main axis
+                    // Parent split is vertical (column) - main axis is height!
                     parent.style.flex = '0 0 auto';
+                    parent.classList.add('panel-collapsed-h');
+                    parent.classList.remove('panel-collapsed-v');
                     
-                    // Give uncollapsed siblings all freed space
+                    // Give uncollapsed siblings all freed space in the column
                     siblingWrappers.forEach(sib => {
                         const f = sib.style.flex;
-                        if (f !== '0 0 30px' && f !== '0 0 auto') {
-                            sib.dataset.savedFlex = f;
+                        if (f !== '0 0 28px' && f !== '0 0 30px' && f !== '0 0 auto') {
+                            if (!sib.dataset.savedFlex) sib.dataset.savedFlex = f || sib.dataset.originalFlex || '';
                             sib.style.flex = '1';
                         }
                     });
                     // Hide adjacent splitter
                     adjacentSplitters().forEach(sp => { sp.style.display = 'none'; });
-                    // Propagate upward
+                    // Propagate upward: if all children in the column are collapsed, collapse the column in the grandparent split!
                     this.propagateCollapseUpward(splitContainer, 'h');
                 } else {
-                    // Mismatch: parent split is horizontal (row), keep wrapper width, only collapse panel height
-                    parent.style.flex = parent.dataset.originalFlex || '';
-                    // Check if this collapse propagates a horizontal collapse to ancestors
+                    // Parent split is horizontal (row)
+                    parent.style.flex = '0 0 auto';
+                    parent.classList.add('panel-collapsed-h');
+                    parent.classList.remove('panel-collapsed-v');
                     this.propagateCollapseUpward(splitContainer, 'h');
                 }
 
             } else {
-                // ── VERTICAL COLLAPSE: thin sidebar strip ──
+                // ── VERTICAL DOCK STRIP: thin 28px sidebar strip ──
                 header.style.display = 'none';
                 content.style.display = 'none';
                 vStrip.style.display = 'flex';
                 
                 panelEl.style.flex = '1';
                 panelEl.style.height = '100%';
-                panelEl.style.width = '30px';
+                panelEl.style.width = '28px';
 
-                const isHorizontalSplit = splitContainer ? splitContainer.classList.contains('horizontal') : true;
                 if (isHorizontalSplit) {
-                    // Match: parent split is horizontal (row), so collapsing width collapses wrapper main axis
-                    parent.style.flex = '0 0 30px';
+                    // Parent split is horizontal (row) - main axis is width!
+                    parent.style.flex = '0 0 28px';
+                    parent.classList.add('panel-collapsed-v');
+                    parent.classList.remove('panel-collapsed-h');
                     
-                    // Give uncollapsed siblings all freed space
                     siblingWrappers.forEach(sib => {
                         const f = sib.style.flex;
-                        if (f !== '0 0 30px' && f !== '0 0 auto') {
-                            sib.dataset.savedFlex = f;
+                        if (f !== '0 0 28px' && f !== '0 0 30px' && f !== '0 0 auto') {
+                            if (!sib.dataset.savedFlex) sib.dataset.savedFlex = f || sib.dataset.originalFlex || '';
                             sib.style.flex = '1';
                         }
                     });
-                    // Hide adjacent splitter
                     adjacentSplitters().forEach(sp => { sp.style.display = 'none'; });
-                    // Propagate upward
                     this.propagateCollapseUpward(splitContainer, 'v');
                 } else {
-                    // Mismatch: parent split is vertical (column), keep wrapper height, only collapse panel width
+                    // Panel is in a vertical column, but user clicked vertical collapse (collapse column)
                     parent.style.flex = parent.dataset.originalFlex || '';
-                    // Check if this collapse propagates a vertical collapse to ancestors
+                    parent.classList.add('panel-collapsed-v');
+                    // Collapse all siblings in this column to vertical strips and propagate to grandparent
+                    siblingWrappers.forEach(sib => {
+                        const sibPanelId = sib.dataset.panelId;
+                        if (sibPanelId) {
+                            this.collapseState.set(sibPanelId, { collapsed: true, orientation: 'v' });
+                            const sibPanelEl = sib.querySelector(':scope > .panel') as HTMLElement | null;
+                            const sibHeader = sibPanelEl?.querySelector('.panel-header') as HTMLElement | null;
+                            const sibContent = sibPanelEl?.querySelector('.panel-content') as HTMLElement | null;
+                            const sibStrip = sibPanelEl?.querySelector('.panel-v-strip') as HTMLElement | null;
+                            if (sibHeader) sibHeader.style.display = 'none';
+                            if (sibContent) sibContent.style.display = 'none';
+                            if (sibStrip) sibStrip.style.display = 'flex';
+                            if (sibPanelEl) {
+                                sibPanelEl.style.flex = '1';
+                                sibPanelEl.style.height = '100%';
+                                sibPanelEl.style.width = '28px';
+                            }
+                        }
+                    });
                     this.propagateCollapseUpward(splitContainer, 'v');
                 }
             }
+
+            // Immediately notify all viewports and workers to resize
+            this.notifyLayoutResize();
         };
 
         const header = this.createPanelHeader(node, state, (newState) => {
@@ -379,12 +561,21 @@ export class LayoutManager {
 
         const content = document.createElement('div');
         content.className = 'panel-content';
-        if (node.panelType !== 'NODE_GRAPH' && node.panelType !== 'MENU_BAR') {
+        const hasInternalScroll = node.panelType === 'NODE_GRAPH' ||
+                                  node.panelType === 'VIEWPORT' ||
+                                  node.panelType === 'MULTI_VIEW_STAGE' ||
+                                  node.panelType === 'TELEMETRY_3D' ||
+                                  node.panelType === 'PIPELINE_BROWSER' ||
+                                  node.panelType === 'PROPERTY_GRID';
+        if (!hasInternalScroll && node.panelType !== 'MENU_BAR') {
             content.classList.add('scrollable');
         }
         content.style.flex = '1';
+        content.style.display = 'flex';
         content.style.flexDirection = 'column';
-        if (node.panelType === 'NODE_GRAPH') {
+        content.style.minWidth = '0';
+        content.style.minHeight = '0';
+        if (hasInternalScroll) {
             content.style.overflow = 'hidden';
         } else if (node.panelType === 'MENU_BAR') {
             content.style.overflow = 'visible';
@@ -415,6 +606,7 @@ export class LayoutManager {
         const strip = document.createElement('div');
         strip.className = 'panel-v-strip';
         strip.style.display = 'none'; // hidden until v-collapse is active
+        strip.title = `Click to expand ${node.panelType.replace(/_/g, ' ')}`;
 
         const expandBtn = document.createElement('button');
         expandBtn.textContent = '▶';
@@ -433,44 +625,20 @@ export class LayoutManager {
         return strip;
     }
 
-    private isWrapperCollapsed(wrapper: HTMLElement, dir: 'h' | 'v'): boolean {
-        const panelEl = wrapper.querySelector(':scope > .panel') as HTMLElement | null;
-        if (panelEl) {
-            const panelType = wrapper.dataset.panelType;
-            if (panelType === 'MENU_BAR') return true;
-
-            const panelId = wrapper.dataset.panelId;
-            if (!panelId) return false;
-            const state = this.collapseState.get(panelId);
-            return !!(state && state.collapsed && state.orientation === dir);
-        }
-
-        const splitEl = wrapper.querySelector(':scope > .split-container') as HTMLElement | null;
-        if (splitEl) {
-            const innerWrappers = (Array.from(splitEl.children) as HTMLElement[])
-                .filter(el => !el.classList.contains('splitter'));
-            return innerWrappers.length > 0 && innerWrappers.every(w => this.isWrapperCollapsed(w, dir));
-        }
-
-        return false;
-    }
-
     /**
      * Called after a panel collapses.
-     * Collapses ancestors if all children in their child splits are collapsed in the direction
-     * demanded by the grandparent split. Recurses upward.
+     * Collapses ancestors if all children in their child splits are collapsed. Recurses upward.
      */
     private propagateCollapseUpward(splitEl: HTMLElement | null, dir: 'h' | 'v'): void {
         if (!splitEl) return;
         const outerWrapper = splitEl.parentElement as HTMLElement | null;
-        // Only managed wrappers (created by renderSplit) carry dataset.originalFlex
-        if (!outerWrapper?.dataset.originalFlex) return;
+        if (!outerWrapper || !outerWrapper.dataset.originalFlex) return;
 
-        // Check if all children of splitEl are collapsed in dir
+        // Check if all children of splitEl are collapsed
         const innerWrappers = (Array.from(splitEl.children) as HTMLElement[])
             .filter(el => !el.classList.contains('splitter'));
         const allCollapsed = innerWrappers.length > 0 && innerWrappers.every(
-            w => this.isWrapperCollapsed(w, dir)
+            w => this.isWrapperCollapsedState(w)
         );
         if (!allCollapsed) return;
 
@@ -478,41 +646,38 @@ export class LayoutManager {
         if (!outerSplitEl) return;
 
         const isOuterHorizontal = outerSplitEl.classList.contains('horizontal');
-        const outerMainAxisMatchesDir = (dir === 'v' && isOuterHorizontal) || (dir === 'h' && !isOuterHorizontal);
 
-        if (outerMainAxisMatchesDir) {
-            // Skip if already propagation-collapsed (avoid double-processing)
-            if (!outerWrapper.dataset.propCollapsed) {
-                const outerChildren = Array.from(outerSplitEl.children) as HTMLElement[];
-                const outerIdx = outerChildren.indexOf(outerWrapper);
-                const outerSiblings = outerChildren.filter(
-                    el => !el.classList.contains('splitter') && el !== outerWrapper
-                ) as HTMLElement[];
+        if (!outerWrapper.dataset.propCollapsed) {
+            const outerChildren = Array.from(outerSplitEl.children) as HTMLElement[];
+            const outerIdx = outerChildren.indexOf(outerWrapper);
+            const outerSiblings = outerChildren.filter(
+                el => !el.classList.contains('splitter') && el !== outerWrapper
+            ) as HTMLElement[];
 
-                // Save & collapse the outer wrapper
-                outerWrapper.dataset.propSavedFlex = outerWrapper.style.flex;
-                outerWrapper.dataset.propCollapsed = '1';
-                outerWrapper.style.flex = dir === 'v' ? '0 0 30px' : '0 0 auto';
+            // Save & collapse the outer wrapper along the outer split's axis
+            outerWrapper.dataset.propSavedFlex = outerWrapper.style.flex;
+            outerWrapper.dataset.propCollapsed = '1';
+            outerWrapper.style.flex = isOuterHorizontal ? '0 0 28px' : '0 0 auto';
+            outerWrapper.classList.add(isOuterHorizontal ? 'panel-collapsed-v' : 'panel-collapsed-h');
 
-                // Hide adjacent splitters at the outer level
-                if (outerIdx > 0 && outerChildren[outerIdx - 1].classList.contains('splitter'))
-                    (outerChildren[outerIdx - 1] as HTMLElement).style.display = 'none';
-                if (outerIdx < outerChildren.length - 1 && outerChildren[outerIdx + 1].classList.contains('splitter'))
-                    (outerChildren[outerIdx + 1] as HTMLElement).style.display = 'none';
+            // Hide adjacent splitters at the outer level
+            if (outerIdx > 0 && outerChildren[outerIdx - 1].classList.contains('splitter'))
+                (outerChildren[outerIdx - 1] as HTMLElement).style.display = 'none';
+            if (outerIdx < outerChildren.length - 1 && outerChildren[outerIdx + 1].classList.contains('splitter'))
+                (outerChildren[outerIdx + 1] as HTMLElement).style.display = 'none';
 
-                // Give uncollapsed outer siblings the freed space
-                outerSiblings.forEach(sib => {
-                    const f = sib.style.flex;
-                    if (f !== '0 0 auto' && f !== '0 0 30px') {
-                        sib.dataset.propSibSavedFlex = f;
-                        sib.style.flex = '1';
-                    }
-                });
-            }
+            // Give uncollapsed outer siblings the freed space
+            outerSiblings.forEach(sib => {
+                const f = sib.style.flex;
+                if (f !== '0 0 auto' && f !== '0 0 28px' && f !== '0 0 30px') {
+                    if (!sib.dataset.propSibSavedFlex) sib.dataset.propSibSavedFlex = f || sib.dataset.originalFlex || '';
+                    sib.style.flex = '1';
+                }
+            });
         }
 
-        // Recurse upward in the same collapse direction
-        this.propagateCollapseUpward(outerSplitEl, dir);
+        // Recurse upward
+        this.propagateCollapseUpward(outerSplitEl, isOuterHorizontal ? 'v' : 'h');
     }
 
     /**
@@ -520,7 +685,7 @@ export class LayoutManager {
      * Restores parent wrappers if their child splits contain at least one expanded child.
      * Recurses upward.
      */
-    private propagateExpandUpward(splitEl: HTMLElement | null, dir: 'h' | 'v'): void {
+    private propagateExpandUpward(splitEl: HTMLElement | null): void {
         if (!splitEl) return;
         const outerWrapper = splitEl.parentElement as HTMLElement | null;
         if (!outerWrapper) return;
@@ -528,51 +693,47 @@ export class LayoutManager {
         if (outerWrapper.dataset.propCollapsed) {
             const outerSplitEl = outerWrapper.parentElement as HTMLElement | null;
             if (outerSplitEl) {
-                const isOuterHorizontal = outerSplitEl.classList.contains('horizontal');
-                const outerMainAxisMatchesDir = (dir === 'v' && isOuterHorizontal) || (dir === 'h' && !isOuterHorizontal);
+                // Check if any child wrapper of splitEl is expanded
+                const innerWrappers = (Array.from(splitEl.children) as HTMLElement[])
+                    .filter(el => !el.classList.contains('splitter'));
+                const anyExpanded = innerWrappers.some(
+                    w => !this.isWrapperCollapsedState(w)
+                );
 
-                if (outerMainAxisMatchesDir) {
-                    // Check if any child wrapper of splitEl is NOT collapsed in dir
-                    const innerWrappers = (Array.from(splitEl.children) as HTMLElement[])
-                        .filter(el => !el.classList.contains('splitter'));
-                    const anyExpanded = innerWrappers.some(
-                        w => !this.isWrapperCollapsed(w, dir)
-                    );
+                if (anyExpanded) {
+                    const outerChildren = Array.from(outerSplitEl.children) as HTMLElement[];
+                    const outerIdx = outerChildren.indexOf(outerWrapper);
+                    const outerSiblings = outerChildren.filter(
+                        el => !el.classList.contains('splitter') && el !== outerWrapper
+                    ) as HTMLElement[];
 
-                    if (anyExpanded) {
-                        const outerChildren = Array.from(outerSplitEl.children) as HTMLElement[];
-                        const outerIdx = outerChildren.indexOf(outerWrapper);
-                        const outerSiblings = outerChildren.filter(
-                            el => !el.classList.contains('splitter') && el !== outerWrapper
-                        ) as HTMLElement[];
+                    // Restore the outer wrapper
+                    outerWrapper.style.flex = outerWrapper.dataset.propSavedFlex || outerWrapper.dataset.originalFlex || '';
+                    outerWrapper.classList.remove('panel-collapsed-v', 'panel-collapsed-h');
+                    delete outerWrapper.dataset.propSavedFlex;
+                    delete outerWrapper.dataset.propCollapsed;
 
-                        // Restore the outer wrapper
-                        outerWrapper.style.flex = outerWrapper.dataset.propSavedFlex || outerWrapper.dataset.originalFlex || '';
-                        delete outerWrapper.dataset.propSavedFlex;
-                        delete outerWrapper.dataset.propCollapsed;
+                    // Show adjacent outer splitters
+                    if (outerIdx > 0 && outerChildren[outerIdx - 1].classList.contains('splitter'))
+                        (outerChildren[outerIdx - 1] as HTMLElement).style.display = '';
+                    if (outerIdx < outerChildren.length - 1 && outerChildren[outerIdx + 1].classList.contains('splitter'))
+                        (outerChildren[outerIdx + 1] as HTMLElement).style.display = '';
 
-                        // Show adjacent outer splitters
-                        if (outerIdx > 0 && outerChildren[outerIdx - 1].classList.contains('splitter'))
-                            (outerChildren[outerIdx - 1] as HTMLElement).style.display = '';
-                        if (outerIdx < outerChildren.length - 1 && outerChildren[outerIdx + 1].classList.contains('splitter'))
-                            (outerChildren[outerIdx + 1] as HTMLElement).style.display = '';
+                    // Restore outer sibling flex values
+                    outerSiblings.forEach(sib => {
+                        if (sib.dataset.propSibSavedFlex !== undefined) {
+                            sib.style.flex = sib.dataset.propSibSavedFlex || sib.dataset.originalFlex || '';
+                            delete sib.dataset.propSibSavedFlex;
+                        }
+                    });
 
-                        // Restore outer sibling flex values
-                        outerSiblings.forEach(sib => {
-                            if (sib.dataset.propSibSavedFlex !== undefined) {
-                                sib.style.flex = sib.dataset.propSibSavedFlex || sib.dataset.originalFlex || '';
-                                delete sib.dataset.propSibSavedFlex;
-                            }
-                        });
-
-                        // Recurse upward
-                        this.propagateExpandUpward(outerSplitEl, dir);
-                    }
+                    // Recurse upward
+                    this.propagateExpandUpward(outerSplitEl);
                 }
             }
         } else {
             // Recurse upward to check outer ancestors
-            this.propagateExpandUpward(outerWrapper.parentElement, dir);
+            this.propagateExpandUpward(outerWrapper.parentElement);
         }
     }
 
@@ -597,12 +758,12 @@ export class LayoutManager {
 
         const select = document.createElement('select');
         select.className = 'header-select';
-        const types: PanelType[] = ['OUTLINER', 'NODE_GRAPH', 'PROPERTIES', 'NODE_VIEWER', 'EXECUTION_MANAGER', 'RESOURCE_MANAGER', 'TELEMETRY_3D', 'COMPARE_MODELS'];
+        const types: PanelType[] = ['PIPELINE_BROWSER', 'VIEWPORT', 'PROPERTY_GRID', 'TRANSPORT_BAR', 'OUTLINER', 'NODE_GRAPH', 'PROPERTIES', 'NODE_VIEWER', 'EXECUTION_MANAGER', 'RESOURCE_MANAGER', 'TELEMETRY_3D', 'CLUSTER_MANAGER', 'COMPARE_MODELS'];
         types.forEach(t => {
             const opt = document.createElement('option');
             opt.value = t;
-            opt.textContent = t.replace('_', ' ');
-            if (t === node.panelType) opt.selected = true;
+            opt.textContent = t.replace(/_/g, ' ');
+            if (t === node.panelType || (node.panelType === 'MULTI_VIEW_STAGE' && t === 'VIEWPORT')) opt.selected = true;
             select.appendChild(opt);
         });
         select.onchange = () => this.stateManager.setPanelType(node.id, select.value as PanelType);
@@ -651,10 +812,12 @@ export class LayoutManager {
                         subSelect.appendChild(opt);
                     });
                 } else {
-                    targetNodes.forEach(n => {
+                    const activeModel = this.stateManager.getActiveModel();
+                    const activeNodes = activeModel ? activeModel.nodes : [];
+                    activeNodes.forEach(n => {
                         const opt = document.createElement('option');
                         opt.value = n.id;
-                        opt.textContent = `${n.type}: ${n.id}`;
+                        opt.textContent = `${n.type}: ${n.id.slice(-6)}`;
                         if (n.id === node.targetNodeId) opt.selected = true;
                         subSelect.appendChild(opt);
                     });
@@ -691,6 +854,7 @@ export class LayoutManager {
             const arrangeBtn = document.createElement('button');
             arrangeBtn.dataset.panelId = node.id;
             arrangeBtn.textContent = 'Arrange';
+            arrangeBtn.title = 'Auto-arrange all workspace models into clean non-overlapping layout (or tidy active model)';
             arrangeBtn.className = 'header-button secondary auto-arrange-btn';
             arrangeBtn.style.marginLeft = '4px';
             leftSide.appendChild(arrangeBtn);
@@ -698,6 +862,7 @@ export class LayoutManager {
             const fitBtn = document.createElement('button');
             fitBtn.dataset.panelId = node.id;
             fitBtn.textContent = 'Fit';
+            fitBtn.title = 'Fit all nodes in workspace to viewport';
             fitBtn.className = 'header-button secondary fit-view-btn';
             fitBtn.style.marginLeft = '4px';
             leftSide.appendChild(fitBtn);
@@ -775,35 +940,51 @@ export class LayoutManager {
         // Fold horizontal — collapses to a thin header bar
         const btnCollapseH = document.createElement('button');
         btnCollapseH.className = 'panel-collapse-btn';
-        btnCollapseH.title = state.collapsed && state.orientation === 'h' ? 'Expand Panel' : 'Collapse Horizontal';
+        btnCollapseH.title = state.collapsed && state.orientation === 'h' ? 'Expand Panel (Fold Up/Down)' : 'Collapse Panel (Fold)';
         btnCollapseH.textContent = state.collapsed && state.orientation === 'h' ? '▲' : '▼';
-        btnCollapseH.onclick = () => {
+        btnCollapseH.onclick = (e) => {
+            e.stopPropagation();
             const currentState = this.collapseState.get(node.id) ?? { collapsed: false, orientation: 'h' as 'h' | 'v' };
             const isHCollapsed = currentState.collapsed && currentState.orientation === 'h';
             const newState = isHCollapsed
                 ? { collapsed: false, orientation: 'h' as 'h' | 'v' }
                 : { collapsed: true, orientation: 'h' as 'h' | 'v' };
             btnCollapseH.textContent = newState.collapsed ? '▲' : '▼';
-            btnCollapseH.title = newState.collapsed ? 'Expand Panel' : 'Collapse Horizontal';
-            // Reset the v button if switching from v-collapse
+            btnCollapseH.title = newState.collapsed ? 'Expand Panel (Fold Up/Down)' : 'Collapse Panel (Fold)';
             btnCollapseV.textContent = '◀';
-            btnCollapseV.title = 'Collapse Vertical';
+            btnCollapseV.title = 'Collapse Sidebar to Dock Strip';
             onToggleCollapse?.(newState);
         };
+
         // Fold vertical — collapses to a thin sidebar strip
         const btnCollapseV = document.createElement('button');
         btnCollapseV.className = 'panel-collapse-btn';
-        btnCollapseV.title = 'Collapse Vertical';
-        btnCollapseV.textContent = '◀';
-        btnCollapseV.onclick = () => {
+        btnCollapseV.title = state.collapsed && state.orientation === 'v' ? 'Expand Sidebar' : 'Collapse Sidebar to Dock Strip';
+        btnCollapseV.textContent = state.collapsed && state.orientation === 'v' ? '▶' : '◀';
+        btnCollapseV.onclick = (e) => {
+            e.stopPropagation();
             const currentState = this.collapseState.get(node.id) ?? { collapsed: false, orientation: 'h' as 'h' | 'v' };
             const isVCollapsed = currentState.collapsed && currentState.orientation === 'v';
             const newState = isVCollapsed
                 ? { collapsed: false, orientation: 'v' as 'h' | 'v' }
                 : { collapsed: true, orientation: 'v' as 'h' | 'v' };
-            // When collapsing vertically the header disappears anyway, so no icon update needed
             btnCollapseH.textContent = '▼';
-            btnCollapseH.title = 'Collapse Horizontal';
+            btnCollapseH.title = 'Collapse Panel (Fold)';
+            btnCollapseV.textContent = newState.collapsed ? '▶' : '◀';
+            btnCollapseV.title = newState.collapsed ? 'Expand Sidebar' : 'Collapse Sidebar to Dock Strip';
+            onToggleCollapse?.(newState);
+        };
+
+        // Double click header to quickly toggle collapse/expand
+        header.ondblclick = (e) => {
+            const target = e.target as HTMLElement;
+            if (target && (target.tagName === 'SELECT' || target.tagName === 'BUTTON' || target.tagName === 'INPUT')) return;
+            const currentState = this.collapseState.get(node.id) ?? { collapsed: false, orientation: 'h' as 'h' | 'v' };
+            const newState = currentState.collapsed
+                ? { collapsed: false, orientation: currentState.orientation }
+                : { collapsed: true, orientation: 'h' as 'h' | 'v' };
+            btnCollapseH.textContent = newState.collapsed ? '▲' : '▼';
+            btnCollapseH.title = newState.collapsed ? 'Expand Panel (Fold Up/Down)' : 'Collapse Panel (Fold)';
             onToggleCollapse?.(newState);
         };
 
@@ -841,6 +1022,22 @@ export class LayoutManager {
         }
 
         switch (node.panelType) {
+            case 'PIPELINE_BROWSER':
+                this.renderPipelineBrowser(node, container);
+                break;
+            case 'PROPERTY_GRID':
+                this.renderPropertyGrid(node, container);
+                break;
+            case 'VIEWPORT':
+            case 'MULTI_VIEW_STAGE':
+                this.renderViewport(node, container);
+                break;
+            case 'TRANSPORT_BAR':
+                this.renderTransportBar(node, container);
+                break;
+            case 'CLUSTER_MANAGER':
+                this.renderClusterManager(node, container);
+                break;
             case 'MENU_BAR':
                 this.renderMenuBar(node, container);
                 break;
@@ -872,6 +1069,78 @@ export class LayoutManager {
                 container.innerHTML = `<div style="padding:10px">Panel: ${node.panelType}</div>`;
         }
 
+    }
+
+    private renderPipelineBrowser(node: PanelNode, container: HTMLElement): void {
+        let comp = this.components.get(node.id);
+        if (!comp) {
+            const browser = new PipelineBrowser(container, this.stateManager);
+            comp = { type: 'PIPELINE_BROWSER', instance: browser, container };
+            this.components.set(node.id, comp);
+        } else {
+            comp.container = container;
+            comp.instance.attachTo(container);
+        }
+    }
+
+    private renderPropertyGrid(node: PanelNode, container: HTMLElement): void {
+        let comp = this.components.get(node.id);
+        if (!comp) {
+            const grid = new PropertyGrid(container, this.stateManager);
+            comp = { type: 'PROPERTY_GRID', instance: grid, container };
+            this.components.set(node.id, comp);
+        } else {
+            comp.container = container;
+            comp.instance.attachTo(container);
+        }
+    }
+
+    private renderViewport(node: PanelNode, container: HTMLElement): void {
+        let comp = this.components.get(node.id);
+        if (!comp) {
+            const buffer = (window as any).playbackBuffer || new PlaybackRingBuffer();
+            const stage = new WorkspaceManager(container, this.stateManager, buffer, node.id, node.options);
+            comp = { type: 'VIEWPORT', instance: stage, container };
+            this.components.set(node.id, comp);
+        } else {
+            comp.container = container;
+            comp.instance.attachTo(container);
+        }
+    }
+
+    private renderTransportBar(node: PanelNode, container: HTMLElement): void {
+        let comp = this.components.get(node.id);
+        if (!comp || comp.type !== 'TRANSPORT_BAR') {
+            let transport: TransportController | null = null;
+            if (this.transportControllerFactory) {
+                transport = this.transportControllerFactory(container);
+            } else if ((window as any).createTransportController) {
+                transport = (window as any).createTransportController(container);
+            } else if ((window as any).transportController && typeof (window as any).transportController.attachTo === 'function') {
+                const fallback = (window as any).transportController as TransportController;
+                fallback.attachTo(container);
+                transport = fallback;
+            }
+            if (transport) {
+                comp = { type: 'TRANSPORT_BAR', instance: transport, container };
+                this.components.set(node.id, comp);
+            }
+        } else {
+            comp.container = container;
+            comp.instance.attachTo?.(container);
+        }
+    }
+
+    private renderClusterManager(node: PanelNode, container: HTMLElement): void {
+        let comp = this.components.get(node.id);
+        if (!comp) {
+            const cluster = new ClusterNodeManager(container);
+            comp = { type: 'CLUSTER_MANAGER', instance: cluster, container };
+            this.components.set(node.id, comp);
+        } else {
+            comp.container = container;
+            comp.instance.render();
+        }
     }
     private renderMenuBar(node: PanelNode, container: HTMLElement): void {
         let comp = this.components.get(node.id);
@@ -1040,6 +1309,37 @@ export class LayoutManager {
     }
 
     private renderNodeViewer(node: PanelNode, container: HTMLElement): void {
+        const activeModel = this.stateManager.getActiveModel();
+        const allModels = this.stateManager.getAllModels();
+
+        // Ensure NodeViewer strictly displays nodes for the currently focused/active model
+        if (!node.targetNodeId) {
+            const activeTextNode = activeModel?.nodes.find(n => n.type === 'TelemetryText');
+            const fallbackNode = activeTextNode || (activeModel && activeModel.nodes.length > 0 ? activeModel.nodes[0] : null);
+            if (fallbackNode) {
+                node.targetNodeId = fallbackNode.id;
+                setTimeout(() => {
+                    this.stateManager.setPanelType(node.id, 'NODE_VIEWER', fallbackNode.id);
+                }, 0);
+            }
+        } else {
+            const owningModel = allModels.find(m => m.nodes.some(n => n.id === node.targetNodeId));
+            const targetNode = owningModel?.nodes.find(n => n.id === node.targetNodeId);
+            if (activeModel && owningModel && owningModel.id !== activeModel.id) {
+                // If the target node belongs to another model, switch to matching type or fallback in activeModel
+                const matchingNode = targetNode ? activeModel.nodes.find(n => n.type === targetNode.type) : null;
+                const fallbackNode = matchingNode || activeModel.nodes.find(n => n.type === 'TelemetryText') || (activeModel.nodes.length > 0 ? activeModel.nodes[0] : null);
+                if (fallbackNode) {
+                    node.targetNodeId = fallbackNode.id;
+                    setTimeout(() => {
+                        this.stateManager.setPanelType(node.id, 'NODE_VIEWER', fallbackNode.id);
+                    }, 0);
+                } else {
+                    node.targetNodeId = undefined;
+                }
+            }
+        }
+
         let comp = this.components.get(node.id);
         if (!comp) {
             const viewer = new NodeViewer(container, this.stateManager);
@@ -1048,12 +1348,12 @@ export class LayoutManager {
         } else {
             container.appendChild(comp.instance.container);
         }
-        comp.instance.setNode(node.targetNodeId);
+        comp.instance.setNode(node.targetNodeId || null);
     }
 
     private setSelectedNodeOnAllPropertiesPanels(nodeId: string | null): void {
         this.components.forEach(comp => {
-            if (comp.type === 'PROPERTIES') {
+            if (comp.type === 'PROPERTIES' || comp.type === 'PROPERTY_GRID') {
                 comp.instance.setSelectedNode(nodeId);
             }
         });
@@ -1216,7 +1516,11 @@ class MenuBarComponent {
                     input.style.outline = 'none';
                     input.style.width = '100px';
 
+                    let isCommitted = false;
+
                     const finishRename = () => {
+                        if (isCommitted) return;
+                        isCommitted = true;
                         const newName = input.value.trim();
                         if (newName && wsId) {
                             this.stateManager.renameWorkspace(wsId, newName);
@@ -1227,11 +1531,17 @@ class MenuBarComponent {
 
                     input.addEventListener('blur', finishRename);
                     input.addEventListener('keydown', (ev) => {
+                        ev.stopPropagation();
                         if (ev.key === 'Enter') finishRename();
                         if (ev.key === 'Escape') {
+                            isCommitted = true;
                             nameEl.textContent = oldName;
                         }
                     });
+                    input.addEventListener('keyup', (ev) => ev.stopPropagation());
+                    input.addEventListener('click', (ev) => ev.stopPropagation());
+                    input.addEventListener('dblclick', (ev) => ev.stopPropagation());
+                    input.addEventListener('mousedown', (ev) => ev.stopPropagation());
 
                     nameEl.innerHTML = '';
                     nameEl.appendChild(input);
@@ -1272,7 +1582,6 @@ const NODE_ICONS: Record<string, string> = {
     'VirtualGauges': '⏱️',
     'MPMDomain2D': '🧱',
     'MPMObject2D': '🟥',
-    'MPMMaterialSteel': '⚙️',
     'FSICoupler2D': '🔗'
 };
 
@@ -1454,7 +1763,11 @@ class OutlinerComponent {
                 input.style.outline = 'none';
                 input.style.width = '100px';
 
+                let isCommitted = false;
+
                 const finishRename = () => {
+                    if (isCommitted) return;
+                    isCommitted = true;
                     const newName = input.value.trim();
                     if (newName && newName !== oldName) {
                         this.stateManager.renameModel(model.id, newName);
@@ -1465,11 +1778,17 @@ class OutlinerComponent {
 
                 input.addEventListener('blur', finishRename);
                 input.addEventListener('keydown', (ev) => {
+                    ev.stopPropagation();
                     if (ev.key === 'Enter') finishRename();
                     if (ev.key === 'Escape') {
+                        isCommitted = true;
                         nameSpan.textContent = oldName;
                     }
                 });
+                input.addEventListener('keyup', (ev) => ev.stopPropagation());
+                input.addEventListener('click', (ev) => ev.stopPropagation());
+                input.addEventListener('dblclick', (ev) => ev.stopPropagation());
+                input.addEventListener('mousedown', (ev) => ev.stopPropagation());
 
                 nameSpan.innerHTML = '';
                 nameSpan.appendChild(input);
@@ -1675,6 +1994,7 @@ class ExecutionManagerComponent {
     private viewModeSelect!: HTMLSelectElement;
     private viewMode: 'auto' | 'active' | 'all' = 'auto';
     private collapsedModels: Set<string> = new Set();
+    private targetsUpdatePending: boolean = false;
     
 
     constructor(parent: HTMLElement, stateManager: StateManager) {
@@ -1981,7 +2301,11 @@ class ExecutionManagerComponent {
             input.style.outline = 'none';
             input.style.width = '100px';
 
+            let isCommitted = false;
+
             const finishRename = () => {
+                if (isCommitted) return;
+                isCommitted = true;
                 const newName = input.value.trim();
                 if (newName && newName !== oldName) {
                     this.stateManager.renameModel(model.id, newName);
@@ -1992,11 +2316,17 @@ class ExecutionManagerComponent {
 
             input.addEventListener('blur', finishRename);
             input.addEventListener('keydown', (ev) => {
+                ev.stopPropagation();
                 if (ev.key === 'Enter') finishRename();
                 if (ev.key === 'Escape') {
+                    isCommitted = true;
                     nameSpan.textContent = oldName;
                 }
             });
+            input.addEventListener('keyup', (ev) => ev.stopPropagation());
+            input.addEventListener('click', (ev) => ev.stopPropagation());
+            input.addEventListener('dblclick', (ev) => ev.stopPropagation());
+            input.addEventListener('mousedown', (ev) => ev.stopPropagation());
 
             nameSpan.innerHTML = '';
             nameSpan.appendChild(input);
@@ -2345,35 +2675,28 @@ class ExecutionManagerComponent {
             if (pauseBtn) pauseBtn.style.display = 'inline-flex';
             if (stepRow) stepRow.style.display = 'flex';
 
-            // Initialise button is ALWAYS active when connected
+            // Init, Run, Step, and Term are always active when connected
             if (initBtn) initBtn.disabled = false;
+            if (playBtn) playBtn.disabled = false;
+            if (termBtn) termBtn.disabled = false;
+            stepButtons.forEach(b => b.disabled = false);
 
-            if (status === 'RUNNING') {
-                if (playBtn) playBtn.disabled = false;
-                if (pauseBtn) pauseBtn.disabled = false;
-                if (termBtn) termBtn.disabled = false;
-                stepButtons.forEach(b => b.disabled = false);
-            } else if (status === 'INITIALIZED' || status === 'PAUSED') {
-                if (playBtn) playBtn.disabled = false;
-                if (pauseBtn) pauseBtn.disabled = true;
-                if (termBtn) termBtn.disabled = false;
-                stepButtons.forEach(b => b.disabled = false);
-            } else if (status === 'ERROR') {
-                if (playBtn) playBtn.disabled = false;
-                if (pauseBtn) pauseBtn.disabled = true;
-                if (termBtn) termBtn.disabled = false; // Enabled to allow manual process cleanup
-                stepButtons.forEach(b => b.disabled = true);
-            } else {
-                // Not initialised (UNINITIALIZED or TERMINATED)
-                if (playBtn) playBtn.disabled = false; // Enabled for Auto-Run
-                if (pauseBtn) pauseBtn.disabled = true;
-                if (termBtn) termBtn.disabled = true;
-                stepButtons.forEach(b => b.disabled = true);
-            }
+            // Pause is active when currently running
+            if (pauseBtn) pauseBtn.disabled = (status !== 'RUNNING');
         }
     }
 
     updateTargets() {
+        if (!this.targetsListContainer) return;
+        if (this.targetsUpdatePending) return;
+        this.targetsUpdatePending = true;
+        requestAnimationFrame(() => {
+            this.targetsUpdatePending = false;
+            this.renderTargetsNow();
+        });
+    }
+
+    private renderTargetsNow() {
         if (!this.targetsListContainer) return;
 
         const isConnected = (window as any).networkManager?.isConnected() ?? false;
@@ -2431,6 +2754,7 @@ class CompareModelsComponent {
     
     private stateListener: () => void;
     private telemetryListener: (nodeId: string, data: any) => void;
+    private drawPending: boolean = false;
     
     private chartContainer!: HTMLElement;
     private canvas!: HTMLCanvasElement;
@@ -2512,7 +2836,7 @@ class CompareModelsComponent {
         this.stateManager.onStateChange(this.stateListener);
         
         this.telemetryListener = (nodeId: string, data: any) => {
-            this.draw();
+            this.requestDraw();
         };
         this.stateManager.onTelemetryUpdate(this.telemetryListener);
         
@@ -2535,6 +2859,15 @@ class CompareModelsComponent {
         ro.observe(this.container);
     }
     
+    public requestDraw(): void {
+        if (this.drawPending) return;
+        this.drawPending = true;
+        requestAnimationFrame(() => {
+            this.drawPending = false;
+            this.draw();
+        });
+    }
+
     destroy() {
         this.stateManager.offStateChange(this.stateListener);
         this.stateManager.offTelemetryUpdate(this.telemetryListener);

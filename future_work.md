@@ -474,3 +474,170 @@ The following parameters are designated for integration into the `CFDSolver3D` a
 | `enable_dual_energy` | Vacuum Dual-Energy Formulation | Boolean (`true`) | Activates direct internal energy tracking in low-density zones to prevent EOS noise. |
 | `vacuum_density_threshold` | Vacuum Density Threshold | Number / Float (`0.01 kg/m^3`) | Fluid density threshold below which the dual-energy pressure formulation is engaged. |
 | `uncovering_relaxation_steps`| Cell Uncovering Relaxation Steps | Integer (`4`) | Number of temporal substeps over which freshly uncovered fluid cells blend to equilibrium. |
+
+---
+
+## 6. Underwater Shock (UNDEX) Hydrodynamics, DAA, Explicit Shells, & Similitude Architecture
+
+### 6.1 Problem Statement & Physics Landscape
+
+Underwater shock (UNDEX) interaction with naval hulls and submerged structures presents a complex, multi-scale physical challenge:
+1. **High Impedance & Shock Compressibility:** Water exhibits high acoustic impedance (`ρ_0 · c_0 ≈ 1.5 × 10⁶ kg/(m²·s)`) and non-linear shock compressibility under GPa-level pressures, requiring stiffened liquid equations of state (Modified Tait, Stiffened Gas, Mie-Grüneisen).
+2. **Bulk and Hull Cavitation:** Tensile rarefaction waves from free-surface reflections or rapidly accelerating wet hull plates drop fluid pressure to vapor pressure (`p_vapor ≈ 2.3 kPa`), creating cavitation pockets that subsequently collapse and deliver destructive secondary reload water-hammer shocks.
+3. **Gas Bubble Dynamics & Jetting:** High-pressure detonation product bubbles undergo multi-cycle expansion and contraction (Rayleigh-Plesset dynamics), migrating under buoyancy and boundaries to generate secondary bubble pulses and high-speed axial water jets.
+4. **Thin-Walled Structural Kinematics:** Submarine pressure hulls, surface ship hulls, and internal bulkheads are thin-walled structures requiring 4-node explicit shell elements with through-thickness elastoplasticity and large-rotation co-rotational kinematics.
+
+---
+
+### 6.2 The Dual-Fidelity UNDEX Architecture
+
+BlastDaemon provides a unified dual-fidelity architecture allowing users to run the exact same structural model through either ultra-fast boundary-integral DAA methods or fully coupled 3D multi-material Eulerian CFD:
+
+```
++----------------------------------------------------------------------------------------------------+
+|                                  BLASTDAEMON UNDEX PLATFORM                                        |
++-------------------------------------------------+--------------------------------------------------+
+|      Fast Boundary-Integral DAA Module          |      High-Fidelity 3D Multi-Material CFD/FSI    |
+|           (Zero Fluid Volume Mesh)              |               (3D Eulerian Grid)                 |
++-------------------------------------------------+--------------------------------------------------+
+| - Wet surface boundary integrals                | - 3D Navier-Stokes with Stiffened Gas / Tait EOS |
+| - DAA1, DAA2, DAA-C, & Local Curved DAA         | - Multi-phase cavitation (HEM / Isobaric Cutoff) |
+| - Incident wave from Cole Similitude engine     | - Captures non-spherical bubble jetting & plume  |
+| - > 100x speedup for far/medium standoff        | - Captures direct gas-hull contact & impact      |
+| - Ideal for rapid DOE / Monte Carlo / Surrogates| - Full wave diffraction and free-surface physics |
++-------------------------------------------------+--------------------------------------------------+
+                                                  |
+                                                  v
+                      +---------------------------------------------------------+
+                      |         Unified FEM Structural Shell / Solid Solver     |
+                      |            (Belytschko-Lin-Tsay 4-Node Shells)          |
+                      |          (Plasticity, Buckling, Tearing, Erosion)       |
+                      +---------------------------------------------------------+
+```
+
+---
+
+### 6.3 Doubly Asymptotic Approximation (DAA) Hierarchy & Formulations
+
+DAA bridges the high-frequency acoustic radiation damping limit (Plane Wave Approximation) and the low-frequency virtual fluid added-mass limit without discretizing fluid volume meshes.
+
+#### A. DAA1 (First-Order DAA — Geers 1971)
+First-order differential equation in time for scattered pressure `p_s`:
+```text
+M_f · p_dot_s + ρ_0 · c_0 · A_f · p_s = ρ_0 · c_0 · M_f · u_dot_rel
+```
+* **Early Time (`t → 0`, `ω → ∞`):** Asymptotes to `p_s = ρ_0 · c_0 · u_dot_rel` (Plane Wave Approximation).
+* **Late Time (`t → ∞`, `ω → 0`):** Asymptotes to `A_f · p_s = M_f · u_ddot_structure` (Incompressible Added Mass).
+* **Characteristics:** Unconditionally stable, 1st-order state variable; slightly overdamps intermediate-frequency bending modes.
+
+#### B. DAA2 (Second-Order DAA — Geers 1978, Felippa & Geers 1980)
+Second-order differential equation matching both values and slopes of acoustic impedance:
+```text
+M_f · p_ddot_s + C_f · p_dot_s + K_f · p_s = ρ_0 · c_0 · (M_f · u_ddot_rel + Ω_f · M_f · u_dot_rel)
+```
+where `C_f = ρ_0 · c_0 · A_f + Ω_f · M_f` and `K_f = ρ_0 · c_0 · Ω_f · A_f`.
+* **DAA2c (Curvature-Matched):** Uses local surface curvature to tune `Ω_f`, incorporating spherical/cylindrical radiation damping.
+* **DAA2m (Modal):** Diagonalizes fluid matrices in the structural modal basis for exact low-to-mid frequency mode matching.
+
+#### C. DAA-C (Cavitating Fluid DAA — Geers & DeRuntz 1982 / USA Code)
+Extends DAA to account for Taylor hull cavitation at the wet surface:
+1. **Cavitation Inception:** If total pressure `p_total = p_inc + p_s < p_cav`, clamp `p_total = p_cav` (vapor pressure).
+2. **Gap Tracking:** Integrate cavitation gap kinematics `δ_ddot_cav = a_fluid - a_structure`.
+3. **Closure Impact:** When `δ_cav → 0`, deliver a water-hammer reload impulse `p_reload = ρ_0 · c_0 · (v_fluid - v_structure)`.
+
+#### D. Local Curved DAA (Curved Wave Approximation — CWA)
+Replaces dense global Boundary Element Method (BEM) matrices `M_f` with local facet curvature:
+```text
+M_local ≈ ρ_0 / (κ_1 + κ_2)
+p_s + (M_local / (ρ_0 · c_0)) · p_dot_s = M_local · u_dot_rel
+```
+* **Massive Parallelism:** **`O(N)` computational complexity** with zero global linear matrix solves; evaluates directly on GPU threads.
+
+#### DAA Formulations Comparison
+
+| Formulation | ODE Order | Matrix Complexity | Intermediate Frequencies | Cavitation Support | GPU Parallelism |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Plane Wave (PWA)** | `0` (Algebraic) | Diagonal | Poor (Zero added mass) | No | Instantaneous (`O(N)`) |
+| **DAA1** | `1st` order | Dense `N × N` (BEM) | Over-damped | No | Moderate (`O(N²)` solve) |
+| **DAA2 (DAA2c/m)** | `2nd` order | Dense `N × N` (BEM) | Highly accurate | No | Moderate (`O(N²)` solve) |
+| **DAA-C** | `1st` / `2nd` | Dense + Gap array | Accurate + Reload shock | **Yes** (Taylor gap) | Moderate |
+| **Local Curved DAA** | `1st` / `2nd` | **Diagonal (`O(N)`)** | Accurate for convex bodies | **Yes** (per-facet gap) | **Massive Parallel (`O(N)`)** |
+
+---
+
+### 6.4 Explicit 4-Node Co-Rotational Shell Elements (Belytschko-Lin-Tsay)
+
+Thin-walled submarine pressure hulls, ship bulkheads, and stiffened panels require computationally efficient 4-node explicit shell elements:
+* **Co-Rotational Local Frame:** An element-embedded orthonormal coordinate system rotates with the rigid-body motion, decoupling non-linear rotations from strain calculations.
+* **Mindlin-Reissner Plate Kinematics:** Incorporates transverse shear strain deformation for thick and thin shell regimes.
+* **6 Degrees of Freedom per Node:** 3 translational `(u, v, w)` and 3 rotational `(θ_x, θ_y, θ_z)` DOFs with drilling stiffness stabilization.
+* **Through-Thickness Integration:** 3 to 5 Lobatto integration points across shell thickness for elastoplastic return mapping (von Mises, Johnson-Cook, Cowper-Symonds rate effects).
+* **Hourglass Control:** Flanagan-Belytschko / Belytschko-Bindeman shell perturbation hourglass stiffness.
+* **Symplectic Time Integration:** Advances translational and rotational accelerations via 2nd-order symplectic central difference (`O(dt²)`).
+
+---
+
+### 6.5 UNDEX Similitude & Empirical Cole Scaling Laws
+
+#### 1. Hopkinson-Cranz Scaling Invariants
+For explosive mass `W` (kg TNT) and standoff `R` (m), scaling factor `λ = (W_model / W_prototype)^(1/3)`:
+* Geometric Distance: `λ_R = λ`
+* Time & Decay Constant: `λ_t = λ`
+* Peak Pressure & Material Stress: `λ_P = λ_σ = 1` (Invariant)
+* Particle Velocity & Sound Speed: `λ_v = 1` (Invariant)
+* Acceleration & Strain Rate: `λ_a = λ_eps_dot = 1 / λ`
+* Specific Impulse: `λ_I = λ`
+
+#### 2. Cole Empirical Shock Wave Equations
+Incident spherical shock pressure profile:
+```text
+p_inc(t) = P_max · exp(-(t - t_0) / θ)     for t_0 ≤ t ≤ t_0 + θ
+```
+* **Peak Pressure:** `P_max = K_p · (W^(1/3) / R)^α_p` (MPa)
+* **Decay Constant:** `θ = K_θ · W^(1/3) · (W^(1/3) / R)^α_θ` (ms)
+* **Specific Impulse:** `I = K_i · W^(1/3) · (W^(1/3) / R)^α_i` (kPa·s)
+* **Energy Flux:** `E_shock = K_e · W^(1/3) · (W^(1/3) / R)^α_e` (kJ/m²)
+
+| Explosive Type | `K_p` (MPa) | `α_p` | `K_θ` (ms) | `α_θ` | `K_i` (kPa·s) | `α_i` | `K_e` (kJ/m²) | `α_e` |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **TNT** | `52.4` | `1.13` | `0.084` | `-0.23` | `5.75` | `0.89` | `84.4` | `2.04` |
+| **Pentolite (50/50)** | `56.1` | `1.14` | `0.084` | `-0.22` | `6.52` | `0.91` | `100.2` | `2.06` |
+| **Composition B** | `53.4` | `1.13` | `0.092` | `-0.24` | `6.11` | `0.91` | `95.8` | `2.05` |
+| **HBX-1** | `53.5` | `1.14` | `0.106` | `-0.28` | `7.15` | `0.86` | `111.0` | `2.03` |
+
+#### 3. Willis Gas Bubble Scaling Laws
+* **Maximum First Bubble Radius (Willis):** `R_max = K_r · (W / (d + 10.3))^(1/3)` (m) *(where `d` is depth in meters; `K_r = 3.36` for TNT)*
+* **First Bubble Pulsation Period (Rayleigh-Willis):** `T_bubble = K_t · W^(1/3) / (d + 10.3)^(5/6)` (s) *(where `K_t = 2.11` for TNT)*
+
+---
+
+### 6.6 Verification & Validation (V&V) Benchmarks
+
+1. **Taylor Flat Plate Benchmark (1D Acoustic Shock on Submerged Plate):**
+   * Analytical solution: `v_plate(t) = (2 · P_max) / (ρ_0 · c_0) · [exp(-t / θ) - exp(-t / t_c)] / (1 - t_c / θ)`.
+   * Validates DAA radiation damping, acoustic impedance matching, and high-fidelity CFD FSI.
+2. **Bleich-Sandler Submerged Floating Plate with Cavitation:**
+   * Benchmark for cavitation inception, structural decoupling, and cavitation closure reload water-hammer shock.
+3. **Huang / Geers Submerged Elastic Spherical Shell (1969/1971):**
+   * Closed-form Legendre polynomial modal series solution for submerged spherical shell subjected to an incident step/exponential shock wave.
+4. **Kwon & Fox Submerged Cylindrical Shell UNDEX Benchmark (1993):**
+   * Air-backed, submerged thin-walled aluminum cylinder (Al 6061-T6, `OD = 0.305 m`, `t = 6.35 mm`, `L = 1.067 m`) under side-on explosive standoff blast.
+   * Validates shell element dynamic ovalization modes, circumferential strain histories at 0°, 90°, and 180° generators, and compares DAA boundary loading directly against coupled 3D CFD/FSI.
+5. **Ring-Stiffened Submarine Hull Section:**
+   * Validates shell-to-beam / shell-to-solid stiffener connections under near-field bubble pulsation and standoff shock loading.
+
+---
+
+### 6.7 Planned UI Nodes & Parameter Integration
+
+| Parameter Key | UI Label | Type / Default | Engineering Purpose |
+| :--- | :--- | :--- | :--- |
+| `undex_coupling_method` | UNDEX Method | Enum (`LocalCurvedDAA`, `DAA1_BEM`, `DAA2_Modal`, `HighFidelityCFD`) | Selects between fast boundary-integral DAA and coupled 3D Eulerian CFD. |
+| `charge_explosive_type` | Explosive Material | Enum (`TNT`, `Pentolite`, `CompB`, `HBX1`, `PETN`) | Selects Cole similitude calibration constants. |
+| `charge_mass_kg` | Charge Mass (kg) | Number / Float (`50.0 kg`) | Total TNT-equivalent explosive charge mass. |
+| `charge_standoff_m` | Standoff Distance (m) | Number / Float (`5.0 m`) | Distance from charge center to nearest structural facet. |
+| `charge_depth_m` | Charge Depth (m) | Number / Float (`10.0 m`) | Hydrostatic depth for Rayleigh-Willis bubble period calculations. |
+| `enable_taylor_cavitation` | Hull Cavitation Model | Boolean (`true`) | Activates Taylor hull cavitation decoupling and reload impact pulses in DAA-C. |
+| `cavitation_cutoff_pa` | Cavitation Cut-Off Pressure | Number / Float (`2300.0 Pa`) | Vapor pressure threshold for fluid tensile release. |
+| `shell_integration_points`| Shell Thickness Points | Integer (`5`) | Number of through-thickness Lobatto integration points for elastoplasticity. |
+

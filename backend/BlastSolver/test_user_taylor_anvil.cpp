@@ -104,8 +104,7 @@ void run_test(const std::string& name, Blast::MPMMaterialModel model_type, Blast
 }
 
 int main() {
+    run_test("Variant 1: Linear Elastic (BSpline)", Blast::MPMMaterialModel::LinearElastic, Blast::MPMTransferScheme::BSpline);
     run_test("Variant 3: Johnson-Cook (BSpline)", Blast::MPMMaterialModel::JohnsonCookMieGruneisen, Blast::MPMTransferScheme::BSpline);
-    run_test("Variant 4: Johnson-Cook (CubicBSpline)", Blast::MPMMaterialModel::JohnsonCookMieGruneisen, Blast::MPMTransferScheme::CubicBSpline);
-    run_test("Variant 5: Johnson-Cook (RadialMLS)", Blast::MPMMaterialModel::JohnsonCookMieGruneisen, Blast::MPMTransferScheme::RadialMLS);
     return 0;
 }

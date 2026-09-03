@@ -1,11 +1,12 @@
 import { SimulationState, Node, Connection, Port, NodeType } from './types.js';
-import { StateManager, calculateRefinementMeshInfo, getMeshDisplayHTML, getMPMDisplayHTML, syncMPMMaterialParameters } from './state-manager.js';
+import { StateManager, calculateRefinementMeshInfo, getMeshDisplayHTML, getMPMDisplayHTML, getFEMDisplayHTML, getGeometryDisplayHTML, getCouplerDisplayHTML, getTelemetryDisplayHTML, getTelemetryHeader, syncMPMMaterialParameters, getCompatibleMaterialsForNode } from './state-manager.js';
 import { Telemetry3DViewport } from './telemetry-3d-viewport.js';
 import { validateSimulationState } from './validation.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
 import { CustomDialog } from './custom-dialog.js';
-import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_CATEGORIES, MPM_MATERIAL_PARAM_INFO, getConstitutiveModels, getPresetsForConstitutiveModel, getDefaultPresetForModel } from './mpm-presets.js';
-import { getParameterInfo, getNodeDefinition, getNodeDescription as getMasterNodeDescription, showParameterPopover, getSolverScope, getSolverBadgeHTML } from './parameter-definitions.js';
+import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_PRESETS, MPM_MATERIAL_CATEGORIES, MPM_MATERIAL_PARAM_INFO, getConstitutiveModels, getPresetsForConstitutiveModel, getCategorizedPresetsForModel, getDefaultPresetForModel } from './mpm-presets.js';
+import { EXPLOSIVE_PRESETS } from './property-grid.js';
+import { getParameterInfo, getNodeDefinition, getNodeDescription as getMasterNodeDescription, showParameterPopover, getSolverScope, getSolverBadgeHTML, getParamKeysForNode, shouldSkipNodeParameter, getNodeSectionInfo } from './parameter-definitions.js';
 
 const DEFAULT_QUANTITY_RANGES: Record<string, [number, number]> = {
     pressure: [101325.0, 101325.0 * 100.0],
@@ -17,7 +18,15 @@ const DEFAULT_QUANTITY_RANGES: Record<string, [number, number]> = {
     species3: [0.0, 1.0],
     solid: [0.0, 1.0],
     overpressure: [0.0, 101325.0 * 99.0],
-    impulse: [0.0, 10000.0]
+    impulse: [0.0, 10000.0],
+    peak_overpressure: [0.0, 101325.0 * 99.0],
+    peak_impulse: [0.0, 10000.0],
+    vonMises: [0.0, 500000000.0],
+    plasticStrain: [0.0, 1.0],
+    plastic_strain: [0.0, 1.0],
+    damage: [0.0, 1.0],
+    has_failed: [0.0, 1.0],
+    object_id: [0.0, 10.0]
 };
 
 
@@ -77,12 +86,15 @@ export class GraphRenderer {
     private nodeUserResizing: Set<string> = new Set();
     private lastMouseX: number = 0;
     private lastMouseY: number = 0;
+    /** Cached port offsets { dx, dy } relative to node origin to prevent forced layout thrashing. */
+    private portOffsets: Map<string, { dx: number, dy: number }> = new Map();
     /** Pending requestAnimationFrame handle for deferred wire redraws. */
     private connectionRafId: number | null = null;
 
     private expandedSliceIndices = new Set<string>(); // "nodeId-sliceIdx"
     private collapsedMaterialSections: Set<string> = new Set(); // "nodeId:sectionTitle"
     private initializedVTKSections: Set<string> = new Set();
+    private initializedNodeSections: Set<string> = new Set();
     private gaugesPanelOpen: Map<string, boolean> = new Map();
     private focusedPrimitiveIndexMap: Map<string, number> = new Map();
     private gaugesActiveTab: Map<string, 'list' | 'settings'> = new Map();
@@ -501,9 +513,7 @@ export class GraphRenderer {
         } else if (node.type === 'Telemetry3DViewport' && data) {
             const vp = this.viewport3Ds.get(node.id);
             if (vp) {
-                if (data instanceof ArrayBuffer) {
-                    vp.pushFrame(data);
-                } else {
+                if (!(data instanceof ArrayBuffer)) {
                     vp.updateTelemetry(data);
                 }
             }
@@ -622,135 +632,193 @@ export class GraphRenderer {
             this.updateTransform();
             this.saveViewportState();
         } else if (this.isDraggingWire) {
-            const ctm = this.svg.getScreenCTM();
-            if (ctm) {
-                const pt = new DOMPoint(e.clientX, e.clientY);
-                const worldPoint = pt.matrixTransform(ctm.inverse());
-                this.mouseWorldPosition = { x: worldPoint.x, y: worldPoint.y };
+            this.mouseWorldPosition = { x: worldX, y: worldY };
 
-                // Snapping Logic
-                this.hoveredPort = null;
-                const state = this.stateManager.getCurrentState();
-                if (state) {
-                    for (const node of state.nodes) {
-                        // Skip if the node is the drag source itself (cannot connect a node to itself)
-                        if (node.id === this.dragSourceNodeId) continue;
+            // Spatial snapping: only check input ports on nearby nodes
+            this.hoveredPort = null;
+            const state = this.stateManager.getCurrentState();
+            if (state) {
+                const nearbyNodes = state.nodes.filter(n =>
+                    n.id !== this.dragSourceNodeId &&
+                    Math.abs(n.x - worldX) < 400 &&
+                    Math.abs(n.y - worldY) < 400
+                );
 
-                        const useRepresentative = node.displayMode === 'compact' || node.displayMode === 'full-panel'
-                            || (node.type === 'TelemetryText' && (node.orientation || 'HORIZ') === 'HORIZ');
-                        const inputsToCheck = useRepresentative ? (node.inputs.length > 0 ? [node.inputs[0]] : []) : node.inputs;
-                        for (const input of inputsToCheck) {
-                            // Check compatibility first
-                            if (this.dragSourceNodeId && this.dragSourcePortId) {
-                                const fromNode = state.nodes.find(n => n.id === this.dragSourceNodeId);
-                                if (fromNode && !this.isConnectionCompatible(fromNode, this.dragSourcePortId, node, input.id)) {
-                                    continue;
-                                }
-                            }
-
-                            const pos = this.getPortPosition(node, input.id, true);
-                            if (pos) {
-                                const localDist = Math.sqrt(Math.pow(pos.x - worldPoint.x, 2) + Math.pow(pos.y - worldPoint.y, 2));
-                                const screenDist = localDist * this.zoom;
-                                if (screenDist < 25) { // Snapping threshold of 25 screen pixels
-                                    this.mouseWorldPosition = { x: pos.x, y: pos.y };
-                                    this.hoveredPort = { nodeId: node.id, portId: input.id, isInput: true };
-                                    break;
-                                }
+                for (const node of nearbyNodes) {
+                    const useRepresentative = node.displayMode === 'compact' || node.displayMode === 'full-panel'
+                        || (node.type === 'TelemetryText' && (node.orientation || 'HORIZ') === 'HORIZ');
+                    const inputsToCheck = useRepresentative ? (node.inputs.length > 0 ? [node.inputs[0]] : []) : node.inputs;
+                    for (const input of inputsToCheck) {
+                        // Check compatibility
+                        if (this.dragSourceNodeId && this.dragSourcePortId) {
+                            const fromNode = state.nodes.find(n => n.id === this.dragSourceNodeId);
+                            if (fromNode && !this.isConnectionCompatible(fromNode, this.dragSourcePortId, node, input.id)) {
+                                continue;
                             }
                         }
-                        if (this.hoveredPort) break;
-                    }
-                }
 
-                this.render();
+                        const pos = this.getPortPosition(node, input.id, true);
+                        if (pos) {
+                            const localDist = Math.sqrt(Math.pow(pos.x - worldX, 2) + Math.pow(pos.y - worldY, 2));
+                            const screenDist = localDist * this.zoom;
+                            if (screenDist < 25) { // Snapping threshold of 25 screen pixels
+                                this.mouseWorldPosition = { x: pos.x, y: pos.y };
+                                this.hoveredPort = { nodeId: node.id, portId: input.id, isInput: true };
+                                break;
+                            }
+                        }
+                    }
+                    if (this.hoveredPort) break;
+                }
             }
+
+            this.updateDraggingWirePreview(state);
+            this.renderHoverHighlights();
         } else if (this.isDraggingNode) {
             const state = this.stateManager.getCurrentState();
             if (state) {
-                const rect = this.viewport.getBoundingClientRect();
-                const worldX = (e.clientX - rect.left - this.panX) / this.zoom;
-                const worldY = (e.clientY - rect.top - this.panY) / this.zoom;
-
-                const dx = worldX - this.dragStartWorldX;
-                const dy = worldY - this.dragStartWorldY;
+                const moveDx = worldX - this.dragStartWorldX;
+                const moveDy = worldY - this.dragStartWorldY;
 
                 this.selectedNodeIds.forEach(id => {
                     const startPos = this.draggedNodesStartPositions.get(id);
                     const node = state.nodes.find(n => n.id === id);
                     if (node && startPos) {
-                        let targetX = startPos.x + dx;
-                        let targetY = startPos.y + dy;
+                        let targetX = startPos.x + moveDx;
+                        let targetY = startPos.y + moveDy;
                         if (this.snapToGrid) {
                             targetX = Math.round(targetX / this.gridSpacing) * this.gridSpacing;
                             targetY = Math.round(targetY / this.gridSpacing) * this.gridSpacing;
                         }
-                        node.x = Math.round(targetX);
-                        node.y = Math.round(targetY);
+                        node.x = targetX;
+                        node.y = targetY;
+
+                        const el = this.nodeElements.get(id);
+                        if (el) {
+                            el.style.left = `${node.x}px`;
+                            el.style.top = `${node.y}px`;
+                        }
                     }
                 });
 
-                this.stateManager.updateState(state, false);
+                if (this.connectionRafId === null) {
+                    this.connectionRafId = requestAnimationFrame(() => {
+                        this.connectionRafId = null;
+                        this.updateConnections(state);
+                    });
+                }
             }
         } else if (this.isDraggingModel && this.draggedModelId) {
             const state = this.stateManager.getCurrentState();
             if (state) {
-                const rect = this.viewport.getBoundingClientRect();
-                const worldX = (e.clientX - rect.left - this.panX) / this.zoom;
-                const worldY = (e.clientY - rect.top - this.panY) / this.zoom;
-
-                const dx = worldX - this.dragStartWorldX;
-                const dy = worldY - this.dragStartWorldY;
+                const moveDx = worldX - this.dragStartWorldX;
+                const moveDy = worldY - this.dragStartWorldY;
 
                 this.draggedNodesStartPositions.forEach((startPos, id) => {
                     const node = state.nodes.find(n => n.id === id);
                     if (node) {
-                        let targetX = startPos.x + dx;
-                        let targetY = startPos.y + dy;
+                        let targetX = startPos.x + moveDx;
+                        let targetY = startPos.y + moveDy;
                         if (this.snapToGrid) {
                             targetX = Math.round(targetX / this.gridSpacing) * this.gridSpacing;
                             targetY = Math.round(targetY / this.gridSpacing) * this.gridSpacing;
                         }
-                        node.x = Math.round(targetX);
-                        node.y = Math.round(targetY);
+                        node.x = targetX;
+                        node.y = targetY;
+
+                        const el = this.nodeElements.get(id);
+                        if (el) {
+                            el.style.left = `${node.x}px`;
+                            el.style.top = `${node.y}px`;
+                        }
                     }
                 });
 
-                this.stateManager.updateState(state, false);
+                if (this.connectionRafId === null) {
+                    this.connectionRafId = requestAnimationFrame(() => {
+                        this.connectionRafId = null;
+                        this.updateConnections(state);
+                    });
+                }
             }
         } else {
-            const ctm = this.svg.getScreenCTM();
-            if (ctm) {
-                const pt = new DOMPoint(e.clientX, e.clientY);
-                const worldPoint = pt.matrixTransform(ctm.inverse());
-                const state = this.stateManager.getCurrentState();
-                let found = null;
-                if (state) {
-                    for (const node of state.nodes) {
-                        const useRepresentative = node.displayMode === 'compact' || node.displayMode === 'full-panel'
-                            || (node.type === 'TelemetryText' && (node.orientation || 'HORIZ') === 'HORIZ');
-                        const inputs = useRepresentative ? (node.inputs.length > 0 ? [node.inputs[0]] : []) : node.inputs;
-                        const outputs = useRepresentative ? (node.outputs.length > 0 ? [node.outputs[0]] : []) : node.outputs;
-                        for (const port of [...inputs.map(p => ({...p, isInput: true})), ...outputs.map(p => ({...p, isInput: false}))]) {
-                            const pos = this.getPortPosition(node, port.id, port.isInput);
-                            if (pos) {
-                                const localDist = Math.sqrt(Math.pow(pos.x - worldPoint.x, 2) + Math.pow(pos.y - worldPoint.y, 2));
-                                const screenDist = localDist * this.zoom;
-                                if (screenDist < 20) { // Hover highlighting at 20 screen pixels
-                                    found = { nodeId: node.id, portId: port.id, isInput: port.isInput };
-                                    break;
-                                }
+            // Hover check with bounding box pre-filtering
+            const state = this.stateManager.getCurrentState();
+            let found: { nodeId: string, portId: string, isInput: boolean } | null = null;
+            if (state) {
+                const candidateNode = state.nodes.find(n => {
+                    const el = this.nodeElements.get(n.id);
+                    const w = el ? el.offsetWidth : (n.width || 200);
+                    const h = el ? el.offsetHeight : (n.height || 100);
+                    return (
+                        worldX >= n.x - 30 &&
+                        worldX <= n.x + w + 30 &&
+                        worldY >= n.y - 30 &&
+                        worldY <= n.y + h + 30
+                    );
+                });
+
+                if (candidateNode) {
+                    const useRepresentative = candidateNode.displayMode === 'compact' || candidateNode.displayMode === 'full-panel'
+                        || (candidateNode.type === 'TelemetryText' && (candidateNode.orientation || 'HORIZ') === 'HORIZ');
+                    const inputs = useRepresentative ? (candidateNode.inputs.length > 0 ? [candidateNode.inputs[0]] : []) : candidateNode.inputs;
+                    const outputs = useRepresentative ? (candidateNode.outputs.length > 0 ? [candidateNode.outputs[0]] : []) : candidateNode.outputs;
+                    for (const port of [...inputs.map(p => ({...p, isInput: true})), ...outputs.map(p => ({...p, isInput: false}))]) {
+                        const pos = this.getPortPosition(candidateNode, port.id, port.isInput);
+                        if (pos) {
+                            const localDist = Math.sqrt(Math.pow(pos.x - worldX, 2) + Math.pow(pos.y - worldY, 2));
+                            const screenDist = localDist * this.zoom;
+                            if (screenDist < 20) {
+                                found = { nodeId: candidateNode.id, portId: port.id, isInput: port.isInput };
+                                break;
                             }
                         }
-                        if (found) break;
                     }
                 }
-                if (JSON.stringify(found) !== JSON.stringify(this.hoveredPort)) {
-                    this.hoveredPort = found;
-                    this.render();
-                }
+            }
+            if (JSON.stringify(found) !== JSON.stringify(this.hoveredPort)) {
+                this.hoveredPort = found;
+                this.renderHoverHighlights();
             }
         }
+    }
+
+    private updateDraggingWirePreview(state: SimulationState | null): void {
+        let wirePath = this.svg.querySelector('.dragging-wire-preview') as SVGPathElement;
+        if (!this.isDraggingWire || !this.dragSourceNodeId || !state) {
+            if (wirePath) wirePath.remove();
+            return;
+        }
+
+        const sourceNode = state.nodes.find(n => n.id === this.dragSourceNodeId);
+        if (!sourceNode) return;
+        const fromPos = this.getPortPosition(sourceNode, this.dragSourcePortId!, false);
+        if (!fromPos) return;
+
+        const toPos = this.mouseWorldPosition;
+        const dist = Math.sqrt(Math.pow(toPos.x - fromPos.x, 2) + Math.pow(toPos.y - fromPos.y, 2));
+        const strength = Math.max(dist * 0.5, 50);
+
+        const fromOrient = sourceNode.orientation || 'HORIZ';
+        const cp1X = fromOrient === 'VERT' ? fromPos.x : fromPos.x + strength;
+        const cp1Y = fromOrient === 'VERT' ? fromPos.y + strength : fromPos.y;
+
+        const cp2X = this.layoutOrientation === 'VERT' ? toPos.x : toPos.x - strength;
+        const cp2Y = this.layoutOrientation === 'VERT' ? toPos.y - strength : toPos.y;
+
+        const d = `M ${fromPos.x} ${fromPos.y} C ${cp1X} ${cp1Y}, ${cp2X} ${cp2Y}, ${toPos.x} ${toPos.y}`;
+
+        if (!wirePath) {
+            wirePath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            wirePath.setAttribute('class', 'dragging-wire-preview');
+            wirePath.setAttribute('stroke', '#00f0ff');
+            wirePath.setAttribute('stroke-dasharray', '5,5');
+            wirePath.setAttribute('stroke-width', '2');
+            wirePath.setAttribute('fill', 'none');
+            wirePath.setAttribute('pointer-events', 'none');
+            this.svg.appendChild(wirePath);
+        }
+        wirePath.setAttribute('d', d);
     }
 
     private isConnectionCompatible(fromNode: Node, fromPortId: string, toNode: Node, toPortId: string): boolean {
@@ -823,10 +891,10 @@ export class GraphRenderer {
                 if (toPortId === 'detonator') return fromType === 'DetonatorLocation3D';
                 return false;
             case 'MPMObject2D':
-                if (toPortId === 'material') return fromType === 'MPMMaterialSteel' || fromType === 'Material';
+                if (toPortId === 'material') return fromType === 'Material';
                 return false;
             case 'MPMObject3D':
-                if (toPortId === 'material') return fromType === 'MPMMaterialSteel' || fromType === 'Material';
+                if (toPortId === 'material') return fromType === 'Material';
                 if (toPortId === 'stl') return fromType === 'STLGeometry' || fromType === 'PrimitiveGeometry3D';
                 return false;
             case 'FSICoupler2D':
@@ -842,9 +910,10 @@ export class GraphRenderer {
                 if (toPortId === 'objects') return fromType === 'FEMObject3D' || fromType === 'LSDynaImporter3D';
                 return false;
             case 'FEMObject3D':
-                if (toPortId === 'material') return fromType === 'MPMMaterialSteel' || fromType === 'Material';
+                if (toPortId === 'material') return fromType === 'Material';
                 if (toPortId === 'importer') return fromType === 'LSDynaImporter3D';
                 return false;
+            case 'LSDynaImporter3D': return false;
             case 'FEMFSICoupler3D':
                 if (toPortId === 'cfd_solver' || toPortId === 'cfd') return fromType === 'CFDSolver3D';
                 if (toPortId === 'fem_domain' || toPortId === 'fem' || toPortId === 'fem_solver') return fromType === 'FEMDomain3D';
@@ -863,6 +932,15 @@ export class GraphRenderer {
         if (this.isDraggingNode && this.draggedNodeId) {
             const state = this.stateManager.getCurrentState();
             if (state) {
+                this.selectedNodeIds.forEach(id => {
+                    const node = state.nodes.find(n => n.id === id);
+                    const el = this.nodeElements.get(id);
+                    if (node && el) {
+                        node.x = parseInt(el.style.left, 10) || node.x;
+                        node.y = parseInt(el.style.top, 10) || node.y;
+                    }
+                });
+                this.portOffsets.clear();
                 this.stateManager.pushState(state);
             }
         }
@@ -870,6 +948,15 @@ export class GraphRenderer {
         if (this.isDraggingModel && this.draggedModelId) {
             const state = this.stateManager.getCurrentState();
             if (state) {
+                this.draggedNodesStartPositions.forEach((_, id) => {
+                    const node = state.nodes.find(n => n.id === id);
+                    const el = this.nodeElements.get(id);
+                    if (node && el) {
+                        node.x = parseInt(el.style.left, 10) || node.x;
+                        node.y = parseInt(el.style.top, 10) || node.y;
+                    }
+                });
+                this.portOffsets.clear();
                 this.stateManager.pushState(state);
             }
         }
@@ -906,6 +993,10 @@ export class GraphRenderer {
                             toNode: this.hoveredPort.nodeId,
                             toPort: this.hoveredPort.portId
                         });
+                        if (this.hoveredPort.portId === 'material' && targetNode) {
+                            targetNode.parameters['material'] = this.dragSourceNodeId;
+                            this.stateManager.updateNodeParametersInPlace(targetNode.id, { material: this.dragSourceNodeId });
+                        }
                         this.stateManager.pushState(state);
                     }
                 }
@@ -913,6 +1004,8 @@ export class GraphRenderer {
             this.isDraggingWire = false;
             this.hoveredPort = null;
             this.detachedConnection = null;
+            const wirePreview = this.svg.querySelector('.dragging-wire-preview');
+            if (wirePreview) wirePreview.remove();
             this.render();
         }
 
@@ -1115,6 +1208,15 @@ export class GraphRenderer {
                     menu.remove();
                 };
                 menu.appendChild(copyItem);
+
+                const tidyItem = document.createElement('div');
+                tidyItem.className = 'context-menu-item';
+                tidyItem.innerHTML = `✨ Tidy Up Model Nodes (<b>${model.name}</b>)`;
+                tidyItem.onclick = () => {
+                    menu.remove();
+                    this.tidyUpModel(model.id);
+                };
+                menu.appendChild(tidyItem);
                 hasModelActions = true;
             }
         } else if (this.selectedModelId) {
@@ -1140,6 +1242,15 @@ export class GraphRenderer {
                     menu.remove();
                 };
                 menu.appendChild(copyItem);
+
+                const tidyItem = document.createElement('div');
+                tidyItem.className = 'context-menu-item';
+                tidyItem.innerHTML = `✨ Tidy Up Selected Model (<b>${model.name}</b>)`;
+                tidyItem.onclick = () => {
+                    menu.remove();
+                    this.tidyUpModel(model.id);
+                };
+                menu.appendChild(tidyItem);
                 hasModelActions = true;
             }
         }
@@ -1178,6 +1289,19 @@ export class GraphRenderer {
                 menu.remove();
             };
             menu.appendChild(pasteItem);
+            hasModelActions = true;
+        }
+
+        const wsModels = this.stateManager.getWorkspaceModels();
+        if (wsModels.length > 0) {
+            const arrangeAllItem = document.createElement('div');
+            arrangeAllItem.className = 'context-menu-item';
+            arrangeAllItem.innerHTML = `🌐 Auto-Arrange Entire Workspace (${wsModels.length} models)`;
+            arrangeAllItem.onclick = () => {
+                menu.remove();
+                this.autoArrange();
+            };
+            menu.appendChild(arrangeAllItem);
             hasModelActions = true;
         }
 
@@ -1221,9 +1345,14 @@ export class GraphRenderer {
                     { label: 'Remapper (1D -> 3D)', type: 'Remap1DTo3DNode' },
                     { label: 'Remapper (2D -> 3D)', type: 'Remap2DTo3DNode' },
                     { label: '3D Charge', type: 'Charge3D' },
-                    { label: 'STL Geometry 3D', type: 'STLGeometry' },
-                    { label: 'Primitive Geometry 3D', type: 'PrimitiveGeometry3D' },
                     { label: 'CFD Solver 3D', type: 'CFDSolver3D' }
+                ]
+            },
+            {
+                name: 'Geometry & Obstacles',
+                items: [
+                    { label: 'STL Geometry 3D', type: 'STLGeometry' },
+                    { label: 'Primitive Geometry 3D', type: 'PrimitiveGeometry3D' }
                 ]
             },
             {
@@ -1231,8 +1360,7 @@ export class GraphRenderer {
                 items: [
                     { label: 'MPM Domain 2D', type: 'MPMDomain2D' },
                     { label: 'Detonator Location', type: 'DetonatorLocation' },
-                    { label: 'MPM Object 2D (Primitive)', type: 'MPMObject2D' },
-                    { label: 'FSI Coupler 2D', type: 'FSICoupler2D' }
+                    { label: 'MPM Object 2D (Primitive)', type: 'MPMObject2D' }
                 ]
             },
             {
@@ -1243,8 +1371,7 @@ export class GraphRenderer {
                     { label: 'MPM Object 3D (Box)', type: 'MPMObject3D', defaultParams: { shape_type: 'Box' } },
                     { label: 'MPM Object 3D (Sphere)', type: 'MPMObject3D', defaultParams: { shape_type: 'Sphere' } },
                     { label: 'MPM Object 3D (Cylinder)', type: 'MPMObject3D', defaultParams: { shape_type: 'Cylinder' } },
-                    { label: 'MPM Object 3D (STL Geometry)', type: 'MPMObject3D', defaultParams: { shape_type: 'STL' } },
-                    { label: 'FSI Coupler 3D', type: 'FSICoupler3D' }
+                    { label: 'MPM Object 3D (STL Geometry)', type: 'MPMObject3D', defaultParams: { shape_type: 'STL' } }
                 ]
             },
             {
@@ -1252,7 +1379,14 @@ export class GraphRenderer {
                 items: [
                     { label: 'FEM Domain 3D (Hex8 Explicit)', type: 'FEMDomain3D' },
                     { label: 'FEM Object 3D (Box Mesh)', type: 'FEMObject3D', defaultParams: { mesh_source: 'Box Generator' } },
-                    { label: 'LS-DYNA Importer (.k / .key)', type: 'LSDynaImporter3D' },
+                    { label: 'LS-DYNA Importer (.k / .key)', type: 'LSDynaImporter3D' }
+                ]
+            },
+            {
+                name: 'Multiphysics Couplers',
+                items: [
+                    { label: 'FSI Coupler 2D (CFD-MPM)', type: 'FSICoupler2D' },
+                    { label: 'FSI Coupler 3D (CFD-MPM)', type: 'FSICoupler3D' },
                     { label: 'FEM-CFD FSI Coupler 3D', type: 'FEMFSICoupler3D' }
                 ]
             },
@@ -1450,682 +1584,7 @@ export class GraphRenderer {
     }
 
     private getDefaultParameters(type: NodeType): any {
-        switch (type) {
-            case 'DomainMesh': return {
-                domain_radius: 1.0,
-                cell_size: 0.001,
-                left_bc: 'Transmitting',
-                right_bc: 'Transmitting'
-            };
-            case 'Material': return {
-                material_model: 'Linear Elastic',
-                preset: 'Structural Steel (A36)',
-                density: 7850.0,
-                youngs_modulus: 200.0e9,
-                poissons_ratio: 0.29,
-                yield_stress: 250.0e6,
-                hardening_modulus: 1.0e9,
-                failure_strain: 0.20,
-                tensile_failure_stress: 400.0e6,
-                enable_strain_erosion: false,
-                erosion_strain: 0.20,
-                enable_stress_erosion: false,
-                erosion_stress: 400.0e6,
-                enable_timestep_erosion: false,
-                timestep_erosion_factor: 0.10,
-                jc_A: 250.0e6,
-                jc_B: 510.0e6,
-                jc_n: 0.26,
-                jc_C: 0.014,
-                jc_m: 1.03,
-                T_melt: 1793.0,
-                T_room: 293.0,
-                Cp: 486.0,
-                mg_gamma0: 1.81,
-                mg_c0: 4570.0,
-                mg_s: 1.49,
-                // Davis Solid Reactant
-                davis_c0: 2050.0,
-                davis_s1: 2.12,
-                davis_gamma0: 0.65,
-                davis_cv: 1000.0,
-                davis_t0: 293.0,
-                davis_rho0: 1895.0,
-                // Davis Product Gas
-                davis_a: 2.85,
-                davis_b: 1.10,
-                davis_k: 1.35,
-                davis_vc: 0.65,
-                davis_pc: 12.5e9,
-                davis_q_det: 3.90e6,
-                // CREST Kinetics
-                crest_b1: 1.2e7,
-                crest_c1: 0.67,
-                crest_m1: 2.5,
-                crest_b2: 3.5e6,
-                crest_c2: 0.50,
-                crest_c3: 0.67,
-                crest_m2: 1.5,
-                crest_s0: 15.0,
-                crest_s_threshold: 2.0,
-                // Concrete Base
-                fc: 35.0e6,
-                ft: 3.2e6,
-                G_f: 150.0,
-                moisture_content: 0.0,
-                dif_cap_compression: 2.5,
-                dif_cap_tension: 8.0,
-                // RHT
-                rht_A: 1.60,
-                rht_N: 0.61,
-                rht_B: 0.70,
-                rht_M: 0.80,
-                rht_Q0: 0.680,
-                rht_BQ: 0.0105,
-                rht_D1: 0.04,
-                rht_D2: 1.0,
-                rht_p_crush: 17.0e6,
-                rht_p_lock: 600.0e6,
-                rht_alpha0: 1.22,
-                rht_n_comp: 3.0,
-                rht_betac: 0.032,
-                rht_deltat: 0.036,
-                // K&C
-                kc_auto_generate: true,
-                kc_a0: 11.6e6,
-                kc_a1: 0.45,
-                kc_a2: 4.28e-9,
-                kc_a0y: 5.2e6,
-                kc_a1y: 0.45,
-                kc_a2y: 4.28e-9,
-                kc_a1r: 0.75,
-                kc_a2r: 5.71e-9,
-                kc_b1: 1.60,
-                kc_omega: 0.50,
-                // CSCM
-                cscm_alpha: 14.0e6,
-                cscm_theta: 0.15,
-                cscm_lambda: 10.5e6,
-                cscm_beta: 2.85e-9,
-                cscm_R: 5.0,
-                cscm_X0: 87.5e6,
-                cscm_W: 0.05,
-                cscm_D1: 2.5e-9,
-                cscm_D2: 3.0e-17,
-                directional_crack_band: false,
-                nonlocal_radius: 0.0,
-                // Ideal Gas CFD
-                atm_pressure: 101325.0,
-                atm_temperature: 288.15,
-                gamma: 1.4,
-                // JWL CFD
-                composition: 'TNT',
-                rho: 1630,
-                detonation_energy: 4290000,
-                det_vel: 6930,
-                jwl_A: 373.77e9,
-                jwl_B: 3.747e9,
-                jwl_R1: 4.15,
-                jwl_R2: 0.90,
-                jwl_omega: 0.35,
-                ideal_gamma: 1.4,
-                ideal_rho_0: 1630,
-                ideal_e_0: 4290000
-            };
-            case 'Charge1D': return {
-                charge_mass: 0.853479,
-                charge_radius: 0.05
-            };
-            case 'Charge2D': return {
-                charge_shape: 'Sphere',
-                charge_mass: 0.853479,
-                charge_radius: 0.05,
-                charge_height: 0.1,
-                charge_aspect_ratio: 1.0,
-                charge_r: 0.0,
-                charge_z: 0.1
-            };
-            case 'VirtualGauges': {
-                const state = this.stateManager.getCurrentState();
-                const is3D = state?.nodes.some(n => n.type === 'DomainMesh3D' || n.type === 'CFDSolver3D') || false;
-                return {
-                    enable_gauges: 'Enabled',
-                    gauges: is3D ? [{ id: 'G1', name: 'G1', x: 0.6, y: 0.5, z: 0.5 }] : [],
-                    telemetry_channel: 0,
-                    export_ascii: false,
-                    export_binary: false,
-                    export_hdf5: false,
-                    ascii_delimiter: 'Comma',
-                    ascii_precision: 6,
-                    include_header: true,
-                    output_dir: '',
-                    custom_filename: 'gauges',
-                    qty_pressure: true,
-                    qty_density: true,
-                    qty_velocity: true,
-                    qty_energy: true,
-                    qty_reacted: true,
-                    qty_unreacted: true,
-                    qty_air: true,
-                    qty_overpressure: true,
-                    qty_impulse: true
-                };
-            }
-            case 'CFDSolver': return {
-                init_mode: 'Multi-Material JWL',
-                cfl: 0.6,
-                flux_scheme: 'AUSM+',
-                spatial_order: 2,
-                temporal_order: 4,
-                precision: 'single'
-            };
-            case 'TelemetryGraph': return {
-                telemetry_channel: 0,
-                x_axis_mode: 'radius',
-                plot_stride: 1,
-                min_y: 0,
-                max_y: 1,
-                show_grid: true,
-                colormap: 'plasma'
-            };
-            case 'DomainMesh2D': return {
-                cell_size: 0.005,
-                max_r: 1.0,
-                max_z: 1.0,
-                bc_r_min: 'Reflecting',
-                bc_r_max: 'Terminate',
-                bc_z_min: 'Reflecting',
-                bc_z_max: 'Terminate',
-                coordinate_system: 'Axisymmetric'
-            };
-            case 'DetonatorLocation': return {
-                detonator_r: 0.0,
-                detonator_z: 0.1,
-                detonator_radius: 0.001
-            };
-            case 'DetonatorLocation3D': return {
-                detonator_x: 0.5,
-                detonator_y: 0.5,
-                detonator_z: 0.5,
-                detonator_radius: 0.01
-            };
-            case 'RemapNode':
-            case 'Remap1DTo2DNode': return {
-                explosive_r: 0.0,
-                explosive_z: 0.1,
-                remap_radius: 0.5,
-                trigger_type: 'end',
-                trigger_val: 0.0
-            };
-            case 'Remap1DTo3DNode': return {
-                explosive_x: 0.5,
-                explosive_y: 0.5,
-                explosive_z: 0.5,
-                remap_radius: 0.0,
-                trigger_type: 'end',
-                trigger_val: 0.0
-            };
-            case 'Remap2DTo3DNode': return {
-                explosive_x: 0.5,
-                explosive_y: 0.5,
-                explosive_z: 0.5,
-                remap_radius: 0.5,
-                trigger_type: 'end',
-                trigger_val: 0.0
-            };
-            case 'HardwareConfig': return {
-                device: 'cpu',
-                precision: 'single'
-            };
-            case 'CFDSolver2D': return {
-                init_mode: 'From1D',
-                cfl: 0.6,
-                flux_scheme: 'AUSM+',
-                spatial_order: 2,
-                temporal_order: 4,
-                mesh_type: 'regular',
-                amr_max_levels: 3,
-                amr_threshold: 0.05,
-                amr_coarsen_ratio: 0.2
-            };
-            case 'TelemetryContour': return {
-                telemetry_channel: 0,
-                auto_scale: true,
-                log_scale: false,
-                colormap: 'plasma',
-                min_y: 0,
-                max_y: 1,
-                downsample_stride: 1,
-                refresh_rate: 0.5
-            };
-            case 'VTKOutput': return {
-                trigger_type: 'Step Interval',
-                vtk_dir: './vtk_output',
-                export_slices: true,
-                export_volumes: false,
-                export_fem: true,
-                export_mpm: true,
-                export_pvd: true,
-                custom_filename: 'vtk_output',
-                step_interval: 10,
-                time_interval: 0.0001,
-                vtk_format: 'Binary',
-                qty_pressure: true,
-                qty_density: true,
-                qty_velocity: true,
-                qty_energy: true,
-                qty_reacted: true,
-                qty_unreacted: true,
-                qty_air: true,
-                qty_overpressure: true,
-                qty_impulse: true,
-                qty_fem_stress: true,
-                qty_fem_strain: true,
-                qty_fem_pressure: true,
-                qty_fem_temp: true,
-                qty_fem_damage: true,
-                qty_fem_vel: true,
-                qty_fem_disp: true,
-                qty_mpm_stress: true,
-                qty_mpm_strain: true,
-                qty_mpm_damage: true,
-                qty_mpm_temp: true,
-                qty_mpm_vel: true,
-                qty_mpm_disp: true,
-                roi_enabled: false,
-                roi_xmin: 0.0,
-                roi_xmax: 1.0,
-                roi_ymin: 0.0,
-                roi_ymax: 1.0,
-                roi_zmin: 0.0,
-                roi_zmax: 1.0,
-                volume_stride: 1,
-                slice_stride: 1
-            };
-            case 'DomainMesh3D': return {
-                xmin: 0.0, xmax: 1.0,
-                ymin: 0.0, ymax: 1.0,
-                zmin: 0.0, zmax: 1.0,
-                cell_size: 0.01,
-                bc_x_min: 'Reflecting', bc_x_max: 'Transmitting',
-                bc_y_min: 'Reflecting', bc_y_max: 'Transmitting',
-                bc_z_min: 'Reflecting', bc_z_max: 'Transmitting'
-            };
-            case 'Charge3D': return {
-                charge_shape: 'Sphere',
-                charge_mass: 6.8277,
-                charge_x: 0.5, charge_y: 0.5, charge_z: 0.5,
-                charge_radius: 0.1,
-                charge_height: 0.2,
-                charge_aspect_ratio: 1.0,
-                charge_lx: 0.2, charge_ly: 0.2, charge_lz: 0.2,
-                charge_rot_x: 0.0,
-                charge_rot_y: 0.0,
-                charge_rot_z: 0.0
-            };
-            case 'CFDSolver3D': return {
-                cfl: 0.6,
-                device: 'cpu',
-                init_mode: 'From1D',
-                flux_scheme: 'AUSM+',
-                spatial_order: 2,
-                temporal_order: 4,
-                precision: 'single',
-                telemetry_mode: 'Enabled',
-                telemetry_interval_ms: 100,
-                enable_gauges: 'Enabled',
-                enable_vtk: 'Disabled'
-            };
-            case 'STLGeometry': return {
-                stl_file: '',
-                geometry_hash: '',
-                voxelization_method: 'watertight_floodfill'
-            };
-            case 'Telemetry3DViewport': return {
-                colormap: 'plasma',
-                quantity_colormaps: {
-                    pressure: 'plasma',
-                    density: 'viridis',
-                    velocity: 'rainbow',
-                    energy: 'inferno',
-                    species1: 'magma',
-                    species2: 'coolwarm',
-                    species3: 'plasma',
-                    solid: 'grayscale',
-                    overpressure: 'inferno',
-                    impulse: 'thermal'
-                },
-                quantity_ranges: {
-                    pressure: [101325.0, 1013250.0],
-                    density: [1.2, 100.0],
-                    velocity: [0.0, 1000.0],
-                    energy: [200000.0, 10000000.0],
-                    species1: [0.0, 1.0],
-                    species2: [0.0, 1.0],
-                    species3: [0.0, 1.0],
-                    solid: [0.0, 1.0],
-                    overpressure: [0.0, 101325.0 * 99.0],
-                    impulse: [0.0, 10000.0]
-                },
-                auto_scale: true,
-                log_scale: false,
-                show_color_bar: false,
-                color_bar_position: 'left-center',
-                colorbar_source: 'slice',
-                show_grid: true,
-                grid_meshlines: true,
-                show_grid_box: true,
-                grid_opacity: 1.0,
-                interpolate: false,
-                min_val: 101325.0,
-                max_val: 101325.0 * 10.0,
-                slices: [
-                    { axis: 'xy', offset: 0.5, stride: 1, quantities: ['pressure'], opacity: 1.0, colormap: 'plasma', auto_scale: true, log_scale: false, interpolate: false, min_val: 101325.0, max_val: 101325.0 * 10.0, enabled: true, show_colorbar: false }
-                ],
-                lightingEnabled: true,
-                aoEnabled: true,
-                ambientLevel: 0.3,
-                specularIntensity: 0.4,
-                showMPMParticles: true,
-                mpmParticleSize: 4.0,
-                mpmParticleQuantity: 'vonMises',
-                mpmParticleColormap: 'plasma',
-                mpmParticleAutoScale: true,
-                mpmParticleLogScale: false,
-                mpmParticleShowColorbar: false,
-                mpmParticleOpacity: 1.0,
-                mpmParticleMinVal: 0.0,
-                mpmParticleMaxVal: 500000000.0,
-                showFEMMesh: true,
-                femSolid: true,
-                femWireframe: true,
-                femResults: true,
-                femQuantity: 'vonMises',
-                femColormap: 'plasma',
-                femAutoScale: true,
-                femLogScale: false,
-                femShowColorbar: false,
-                femOpacity: 1.0,
-                femMinVal: 0.0,
-                femMaxVal: 500000000.0,
-                // Beams & 1D Elements Defaults
-                showBeams: true,
-                beamSolid: true,
-                beamWireframe: true,
-                beamRadius: 0.008,
-                beamQuantity: 'plasticStrain',
-                beamColormap: 'plasma',
-                beamAutoScale: true,
-                beamLogScale: false,
-                beamShowColorbar: false,
-                beamMinVal: 0.0,
-                beamMaxVal: 0.05,
-                show_stl: true,
-                stl_colormap: 'plasma',
-                stl_wireframe: false,
-                stl_solids: true,
-                stl_opacity: 0.5,
-                stl_show_results: true,
-                stl_quantity: 'pressure',
-                stl_sampling_mode: 'nearest',
-                stl_auto_scale: true,
-                stl_log_scale: false,
-                stl_show_colorbar: false,
-                refresh_rate: 0.5,
-                show_gauges: true,
-                gauge_size: 1.0,
-                gauge_opacity: 1.0,
-                gauge_quantity: 'pressure',
-                gauge_solid: true,
-                show_obstacles: false,
-                obstacles_colormap: 'plasma',
-                obstacles_gridlines: true,
-                obstacles_solid: true,
-                obstacles_lighting: true,
-                obstacles_opacity: 1.0,
-                obstacles_quantity: 'pressure',
-                obstacles_auto_scale: true,
-                obstacles_log_scale: false,
-                obstacles_show_colorbar: false,
-                obstacles_interpolate: false,
-                obstacles_min_val: 101325.0,
-                obstacles_max_val: 101325.0 * 10.0
-            };
-            case 'MPMDomain2D': return {
-                precision: 'single',
-                particle_distribution: 'Cartesian',
-                boundary_filling: 'Stairstepped',
-                velocity_scheme: 'APIC',
-                space_time_scheme: 'Leapfrog',
-                flip_blend: 0.95,
-                smooth_plastic_strain: true,
-                ppc: 4,
-                cfl: 0.6
-            };
-            case 'MPMDomain3D': return {
-                device: 'gpu',
-                precision: 'single',
-                particle_distribution: 'Cartesian',
-                boundary_filling: 'Stairstepped',
-                velocity_scheme: 'APIC',
-                space_time_scheme: 'Leapfrog',
-                flip_blend: 0.95,
-                smooth_plastic_strain: true,
-                ppc: 8,
-                cfl: 0.6
-            };
-            case 'MPMObject2D': return {
-                shape_type: 'Rectangle',
-                particle_distribution: 'Cartesian',
-                boundary_filling: 'Stairstepped',
-                pos_x: 0.5,
-                pos_y: 0.5,
-                size_x: 0.2,
-                size_y: 0.2,
-                radius: 0.1,
-                vel_x: 0.0,
-                vel_y: 0.0,
-                angular_vel: 0.0
-            };
-            case 'MPMObject3D': return {
-                shape_type: 'Box',
-                particle_distribution: 'Cartesian',
-                boundary_filling: 'Stairstepped',
-                pos_x: 0.5, pos_y: 0.5, pos_z: 0.5,
-                size_x: 0.2, size_y: 0.2, size_z: 0.2,
-                radius: 0.1, inner_radius: 0.0, height: 0.2,
-                stl_file: '', scale_x: 1.0, scale_y: 1.0, scale_z: 1.0,
-                vel_x: 0.0, vel_y: 0.0, vel_z: 0.0,
-                angular_vel_x: 0.0, angular_vel_y: 0.0, angular_vel_z: 0.0
-            };
-            case 'MPMMaterialSteel': return {
-                material_model: 'Linear Elastic',
-                preset: 'Structural Steel (A36)',
-                transfer_scheme: 'BSpline',
-                density: 7850.0,
-                youngs_modulus: 200.0e9,
-                poissons_ratio: 0.29,
-                yield_stress: 250.0e6,
-                hardening_modulus: 1.0e9,
-                failure_strain: 0.20,
-                tensile_failure_stress: 400.0e6,
-                enable_strain_erosion: false,
-                erosion_strain: 0.20,
-                enable_stress_erosion: false,
-                erosion_stress: 400.0e6,
-                enable_timestep_erosion: false,
-                timestep_erosion_factor: 0.10,
-                jc_A: 250.0e6,
-                jc_B: 510.0e6,
-                jc_n: 0.26,
-                jc_C: 0.014,
-                jc_m: 1.03,
-                jc_d1: 0.0,
-                jc_d2: 0.0,
-                jc_d3: 0.0,
-                jc_d4: 0.0,
-                jc_d5: 0.0,
-                weibull_modulus: 0.0,
-                weibull_scale: 1.0,
-                fracture_toughness: 0.0,
-                debris_bulk_factor: 0.1,
-                fragment_distribution: 'Rosin-Rammler',
-                fragment_min_size: 0.002,
-                fragment_max_size: 0.040,
-                fragment_weibull_n: 1.80,
-                fragment_clumping_radius: 0.015,
-                fragment_ejection_jitter: 0.35,
-                fragment_contact_friction: 0.55,
-                fragment_restitution: 0.30,
-                dem_transition_enabled: true,
-                T_melt: 1793.0,
-                T_room: 293.0,
-                Cp: 486.0,
-                mg_gamma0: 1.81,
-                mg_c0: 4570.0,
-                mg_s: 1.49,
-                // Davis Solid Reactant
-                davis_c0: 2050.0,
-                davis_s1: 2.12,
-                davis_gamma0: 0.65,
-                davis_cv: 1000.0,
-                davis_t0: 293.0,
-                davis_rho0: 1895.0,
-                // Davis Product Gas
-                davis_a: 2.85,
-                davis_b: 1.10,
-                davis_k: 1.35,
-                davis_vc: 0.65,
-                davis_pc: 12.5e9,
-                davis_q_det: 3.90e6,
-                // CREST Kinetics
-                crest_b1: 1.2e7,
-                crest_c1: 0.67,
-                crest_m1: 2.5,
-                crest_b2: 3.5e6,
-                crest_c2: 0.50,
-                crest_c3: 0.67,
-                crest_m2: 1.5,
-                crest_s0: 15.0,
-                crest_s_threshold: 2.0,
-                // Concrete Base
-                fc: 35.0e6,
-                ft: 3.2e6,
-                G_f: 150.0,
-                moisture_content: 0.0,
-                dif_cap_compression: 2.5,
-                dif_cap_tension: 8.0,
-                // RHT
-                rht_A: 1.60,
-                rht_N: 0.61,
-                rht_B: 0.70,
-                rht_M: 0.80,
-                rht_Q0: 0.680,
-                rht_BQ: 0.0105,
-                rht_D1: 0.04,
-                rht_D2: 1.0,
-                rht_p_crush: 17.0e6,
-                rht_p_lock: 600.0e6,
-                rht_alpha0: 1.22,
-                rht_n_comp: 3.0,
-                rht_betac: 0.032,
-                rht_deltat: 0.036,
-                // K&C
-                kc_auto_generate: true,
-                kc_a0: 11.6e6,
-                kc_a1: 0.45,
-                kc_a2: 4.28e-9,
-                kc_a0y: 5.2e6,
-                kc_a1y: 0.45,
-                kc_a2y: 4.28e-9,
-                kc_a1r: 0.75,
-                kc_a2r: 5.71e-9,
-                kc_b1: 1.60,
-                kc_omega: 0.50,
-                // CSCM
-                cscm_alpha: 14.0e6,
-                cscm_theta: 0.15,
-                cscm_lambda: 10.5e6,
-                cscm_beta: 2.85e-9,
-                cscm_R: 5.0,
-                cscm_X0: 87.5e6,
-                cscm_W: 0.05,
-                cscm_D1: 2.5e-9,
-                cscm_D2: 3.0e-17,
-                directional_crack_band: false,
-                nonlocal_radius: 0.0,
-                // Ideal Gas CFD
-                atm_pressure: 101325.0,
-                atm_temperature: 288.15,
-                gamma: 1.4,
-                // JWL CFD
-                composition: 'TNT',
-                rho: 1630,
-                detonation_energy: 4290000,
-                det_vel: 6930,
-                jwl_A: 373.77e9,
-                jwl_B: 3.747e9,
-                jwl_R1: 4.15,
-                jwl_R2: 0.90,
-                jwl_omega: 0.35,
-                ideal_gamma: 1.4,
-                ideal_rho_0: 1630,
-                ideal_e_0: 4290000
-            };
-
-            case 'FEMDomain3D': return {
-                device: 'cpu',
-                precision: 'single',
-                integration_scheme: 'OnePointFB',
-                hourglass_model: 'FlanaganBelytschkoStiffness',
-                hourglass_coeff: 0.10,
-                contact_penalty_scale: 0.1,
-                friction_static: 0.3,
-                friction_kinetic: 0.2,
-                convert_failed_elements_to_mpm: false,
-                mpm_particles_per_failed_element: 8,
-                material_heterogeneity: 0.08,
-                debris_velocity_smoothing: 0.50,
-                debris_clumping: 0.60,
-                debris_max_clump_size: 8,
-                random_seed: 42,
-                enable_directional_crack_band: true,
-                enable_nonlocal_damage: true,
-                cfl: 0.6
-            };
-            case 'FEMObject3D': return {
-                shape_type: 'Box',
-                boundary_condition: 'Free',
-                pos_x: 0.0, pos_y: 0.0, pos_z: 0.0,
-                size_x: 1.0, size_y: 1.0, size_z: 1.0,
-                radius: 0.1, inner_radius: 0.0, height: 0.2,
-                nx: 10, ny: 10, nz: 10,
-                vel_x: 0.0, vel_y: 0.0, vel_z: 0.0,
-                k_file: ''
-            };
-            case 'LSDynaImporter3D': return {
-                k_file: '',
-                scale_factor: 1.0
-            };
-            case 'FEMFSICoupler3D': return {
-                cfl: 0.6,
-                coupling_scheme: 'Two-Way Staggered',
-                pressure_integration: '2x2 Gauss Quadrature',
-                uncovering_method: 'Conservative IDW + Vacuum Cavity',
-                erosion_venting: true,
-                vacuum_density: 1.0e-6,
-                vacuum_pressure: 1.0e-2
-            };
-
-            case 'FSICoupler2D': return {
-                cfl: 0.6
-            };
-            case 'FSICoupler3D': return {
-                cfl: 0.6
-            };
-
-            default: return {};
-        }
+        return this.stateManager.getDefaultParameters(type);
     }
 
     private updateTransform(): void {
@@ -2189,9 +1648,6 @@ export class GraphRenderer {
                 this.renderHoverHighlights();
             }
         });
-        
-        // Also perform an immediate synchronous connection update to prevent any frame lag
-        this.updateConnections(state);
     }
 
     private renderHoverHighlights(): void {
@@ -2253,15 +1709,6 @@ export class GraphRenderer {
             case 'MPMDomain3D':      return 'MPM3D';
             case 'MPMObject2D':      return 'MPM OBJ';
             case 'MPMObject3D':      return 'MPM OBJ3D';
-            case 'MPMMaterialSteel': 
-                if (typeof nodeOrType !== 'string') {
-                    const mm = nodeOrType.parameters?.material_model;
-                    if (mm === 'Johnson-Cook + Mie-Grüneisen') return 'MPM J-C';
-                    if (mm === 'RHT Concrete') return 'RHT';
-                    if (mm === 'Karagozian & Case (K&C)' || mm === 'Karagozian & Case') return 'K&C';
-                    if (mm === 'CSCM Concrete') return 'CSCM';
-                }
-                return 'MPM HYPO';
             case 'FSICoupler2D':     return 'FSI 2D';
             case 'FSICoupler3D':     return 'FSI 3D';
             case 'FEMDomain3D':      return 'FEM3D';
@@ -2305,15 +1752,6 @@ export class GraphRenderer {
             case 'MPMDomain3D':      return 'MPM Domain 3D';
             case 'MPMObject2D':      return 'MPM Object 2D';
             case 'MPMObject3D':      return 'MPM Object 3D';
-            case 'MPMMaterialSteel':
-                if (typeof nodeOrType !== 'string') {
-                    const mm = nodeOrType.parameters?.material_model;
-                    if (mm === 'Johnson-Cook + Mie-Grüneisen') return 'Solid Material (Johnson-Cook)';
-                    if (mm === 'RHT Concrete') return 'Concrete (RHT Model)';
-                    if (mm === 'Karagozian & Case (K&C)' || mm === 'Karagozian & Case') return 'Concrete (K&C Model)';
-                    if (mm === 'CSCM Concrete') return 'Concrete (CSCM Model)';
-                }
-                return 'Solid Material (Hypoelastic)';
             case 'FSICoupler2D':     return 'FSI Coupler 2D';
             case 'FSICoupler3D':     return 'FSI Coupler 3D';
             case 'FEMDomain3D':      return 'FEM Domain 3D (Hex8 Explicit)';
@@ -2326,6 +1764,7 @@ export class GraphRenderer {
 
 
     private syncNodes(state: SimulationState): void {
+        this.portOffsets.clear();
         const valResults = this.validateGraph(state);
         const nodeIdsInState = new Set(state.nodes.map(n => n.id));
         for (const [id, el] of this.nodeElements.entries()) {
@@ -2438,7 +1877,46 @@ export class GraphRenderer {
 
                     const titleSpan = document.createElement('span');
                     titleSpan.className = 'node-title-span';
-                    titleSpan.textContent = this.getFullNodeName(node);
+                    titleSpan.textContent = (node.parameters && node.parameters.name) ? String(node.parameters.name) : this.getFullNodeName(node);
+                    titleSpan.title = `${this.getFullNodeName(node)} (ID: ${node.id}) — Double-click to rename`;
+
+                    titleSpan.addEventListener('dblclick', (e) => {
+                        e.stopPropagation();
+                        const input = document.createElement('input');
+                        input.type = 'text';
+                        input.value = node.parameters.name || '';
+                        input.placeholder = this.getFullNodeName(node);
+                        input.className = 'pipeline-rename-input';
+                        input.style.width = '130px';
+                        input.style.display = 'inline-block';
+                        
+                        let isCommitted = false;
+                        const commit = () => {
+                            if (isCommitted) return;
+                            isCommitted = true;
+                            const newName = input.value.trim();
+                            this.stateManager.updateNodeParameters(node.id, { name: newName || undefined });
+                        };
+                        input.addEventListener('blur', commit);
+                        input.addEventListener('keydown', (ev) => {
+                            ev.stopPropagation();
+                            if (ev.key === 'Enter') {
+                                ev.preventDefault();
+                                commit();
+                            } else if (ev.key === 'Escape') {
+                                ev.preventDefault();
+                                isCommitted = true;
+                                titleSpan.textContent = (node.parameters && node.parameters.name) ? String(node.parameters.name) : this.getFullNodeName(node);
+                            }
+                        });
+                        input.addEventListener('keyup', (ev) => ev.stopPropagation());
+                        input.addEventListener('click', (ev) => ev.stopPropagation());
+                        input.addEventListener('dblclick', (ev) => ev.stopPropagation());
+                        titleSpan.innerHTML = '';
+                        titleSpan.appendChild(input);
+                        input.focus();
+                        input.select();
+                    });
 
                     header.appendChild(titleSpan);
 
@@ -2568,6 +2046,13 @@ export class GraphRenderer {
                     footer.className = 'node-footer';
                     footer.appendChild(infoBtn);
                     nodeEl.appendChild(footer);
+
+                    nodeEl.addEventListener('mouseenter', () => {
+                        this.stateManager.setHoveredNode(node.id);
+                    });
+                    nodeEl.addEventListener('mouseleave', () => {
+                        this.stateManager.setHoveredNode(null);
+                    });
 
                     this.container.appendChild(nodeEl);
                     this.nodeElements.set(node.id, nodeEl);
@@ -3006,6 +2491,23 @@ export class GraphRenderer {
             label.textContent = labelText;
             regionsGroup.appendChild(label);
 
+            const tidyBtn = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            tidyBtn.setAttribute('x', (maxX - 55).toString());
+            tidyBtn.setAttribute('y', (minY + 20).toString());
+            tidyBtn.setAttribute('fill', colors.base);
+            tidyBtn.setAttribute('class', 'model-region-tidy-btn');
+            tidyBtn.style.pointerEvents = 'auto';
+            tidyBtn.style.cursor = 'pointer';
+            tidyBtn.style.fontSize = '11px';
+            tidyBtn.style.fontWeight = 'bold';
+            tidyBtn.textContent = '✨ Tidy';
+            tidyBtn.addEventListener('mousedown', (e) => e.stopPropagation());
+            tidyBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.tidyUpModel(model.id);
+            });
+            regionsGroup.appendChild(tidyBtn);
+
             const handleModelMouseDown = (e: MouseEvent) => {
                 if (this.spacePressed || e.button !== 0) return;
                 e.stopPropagation();
@@ -3066,6 +2568,12 @@ export class GraphRenderer {
 
             // Remove connection from state immediately
             state.connections.splice(existingIndex, 1);
+            if (portId === 'material') {
+                const node = state.nodes.find(n => n.id === nodeId);
+                if (node) {
+                    node.parameters['material'] = '';
+                }
+            }
             this.stateManager.pushState(state);
 
             // Start dragging wire from the original output port
@@ -3226,6 +2734,12 @@ export class GraphRenderer {
     }
 
     private getPortPosition(node: Node, portId: string, isInput: boolean): { x: number, y: number } | null {
+        const offsetKey = `${node.id}:${portId}:${isInput}`;
+        const cached = this.portOffsets.get(offsetKey);
+        if (cached) {
+            return { x: node.x + cached.dx, y: node.y + cached.dy };
+        }
+
         // compact, full-panel, and TelemetryText (all HORIZ modes) use representative bullets
         const useRepresentative = node.displayMode === 'compact' || node.displayMode === 'full-panel' || (node.type === 'TelemetryText' && (node.orientation || 'HORIZ') === 'HORIZ');
         const bulletId = useRepresentative
@@ -3236,6 +2750,17 @@ export class GraphRenderer {
         if (bullet) {
             const rect = bullet.getBoundingClientRect();
             if (rect.width > 0 && rect.height > 0) {
+                const nodeEl = this.nodeElements.get(node.id);
+                if (nodeEl) {
+                    const nodeRect = nodeEl.getBoundingClientRect();
+                    if (nodeRect.width > 0 && nodeRect.height > 0) {
+                        const dx = (rect.left + rect.width / 2 - nodeRect.left) / this.zoom;
+                        const dy = (rect.top + rect.height / 2 - nodeRect.top) / this.zoom;
+                        this.portOffsets.set(offsetKey, { dx, dy });
+                        return { x: node.x + dx, y: node.y + dy };
+                    }
+                }
+
                 const centerX = rect.left + rect.width / 2;
                 const centerY = rect.top + rect.height / 2;
 
@@ -3243,6 +2768,9 @@ export class GraphRenderer {
                 if (!ctm) return null;
                 const pt = new DOMPoint(centerX, centerY);
                 const worldPoint = pt.matrixTransform(ctm.inverse());
+                const dx = worldPoint.x - node.x;
+                const dy = worldPoint.y - node.y;
+                this.portOffsets.set(offsetKey, { dx, dy });
                 return { x: worldPoint.x, y: worldPoint.y };
             }
         }
@@ -3253,29 +2781,102 @@ export class GraphRenderer {
         const h = el ? el.offsetHeight : (node.height || 100);
 
         const nodeOrient = node.orientation || 'HORIZ';
+        let fallbackX: number;
+        let fallbackY: number;
         if (nodeOrient === 'HORIZ') {
-            return {
-                x: node.x + (isInput ? 0 : w),
-                y: node.y + h / 2
-            };
+            fallbackX = node.x + (isInput ? 0 : w);
+            fallbackY = node.y + h / 2;
         } else {
-            return {
-                x: node.x + w / 2,
-                y: node.y + (isInput ? 0 : h)
-            };
+            fallbackX = node.x + w / 2;
+            fallbackY = node.y + (isInput ? 0 : h);
         }
+        return { x: fallbackX, y: fallbackY };
     }
 
     private renderTelemetryContent(node: Node, container: HTMLElement): void {
         if (node.type === 'TelemetryText') {
+            const curFont = Number(node.parameters?.font_size ?? 11);
+
+            const FONT_STACK = "'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, Courier, monospace";
+
+            let header = container.querySelector('.node-telemetry-header') as HTMLElement;
+            if (!header) {
+                header = document.createElement('div');
+                header.className = 'node-telemetry-header';
+                header.style.background = '#0b0f19';
+                header.style.color = '#38bdf8';
+                header.style.fontFamily = FONT_STACK;
+                header.style.fontSize = `${curFont}px`;
+                header.style.padding = '4px 8px';
+                header.style.borderBottom = '1px solid #1e293b';
+                header.style.whiteSpace = 'pre';
+                header.style.overflowX = 'hidden';
+                header.style.fontWeight = '500';
+                header.style.letterSpacing = '0px';
+                header.style.fontVariantNumeric = 'tabular-nums';
+                header.style.boxSizing = 'border-box';
+                header.style.userSelect = 'none';
+                container.appendChild(header);
+            }
+            const headerText = getTelemetryHeader(node);
+            header.textContent = headerText;
+            header.style.fontSize = `${curFont}px`;
+            header.style.display = headerText ? 'block' : 'none';
+
             let body = container.querySelector('.node-body-text') as HTMLElement;
             if (!body) {
                 body = document.createElement('div');
                 body.className = 'node-body-text';
                 body.style.flex = '1';
                 body.style.minHeight = '0';
+                body.style.background = '#030712';
+                body.style.color = '#e2e8f0';
+                body.style.fontFamily = FONT_STACK;
+                body.style.fontSize = `${curFont}px`;
+                body.style.padding = '6px 8px';
+                body.style.overflowY = 'auto';
+                body.style.overflowX = 'auto';
+                body.style.whiteSpace = 'pre';
+                body.style.wordBreak = 'normal';
+                body.style.lineHeight = '1.4';
+                body.style.fontWeight = '500';
+                body.style.letterSpacing = '0px';
+                body.style.fontVariantNumeric = 'tabular-nums';
+                body.style.boxSizing = 'border-box';
+
+                // Sync header scroll with body scroll
+                body.addEventListener('scroll', () => {
+                    if (header) header.scrollLeft = body.scrollLeft;
+                });
+
+                // Ctrl + Mouse Wheel Zoom
+                body.addEventListener('wheel', (e: WheelEvent) => {
+                    if (e.ctrlKey || e.metaKey) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const current = Number(node.parameters.font_size ?? 11);
+                        const FONT_SIZES = [8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22];
+                        const curIdx = FONT_SIZES.indexOf(current);
+                        let nextIdx: number;
+                        if (e.deltaY < 0) {
+                            nextIdx = curIdx >= 0 && curIdx < FONT_SIZES.length - 1 ? curIdx + 1 : (curIdx < 0 ? 4 : curIdx);
+                        } else {
+                            nextIdx = curIdx > 0 ? curIdx - 1 : 0;
+                        }
+                        const newSz = FONT_SIZES[nextIdx];
+                        if (newSz !== current) {
+                            node.parameters.font_size = newSz;
+                            this.stateManager.updateNodeParametersInPlace(node.id, { font_size: newSz });
+                            body.style.fontSize = `${newSz}px`;
+                            header.style.fontSize = `${newSz}px`;
+                        }
+                    }
+                }, { passive: false });
+
                 container.appendChild(body);
             }
+            body.style.fontSize = `${curFont}px`;
+
             const logs = this.stateManager.getTelemetry(node.id) || [];
             if (body.children.length !== logs.length) {
                 body.innerHTML = '';
@@ -3283,6 +2884,16 @@ export class GraphRenderer {
                     const lineEl = document.createElement('div');
                     lineEl.className = 'log-line';
                     lineEl.textContent = line;
+                    lineEl.style.whiteSpace = 'pre';
+                    if (line.includes('[ERROR]') || line.includes('[FATAL]')) {
+                        lineEl.style.color = '#f87171';
+                    } else if (line.includes('[WARN]')) {
+                        lineEl.style.color = '#fbbf24';
+                    } else if (line.includes('│')) {
+                        lineEl.style.color = '#e2e8f0';
+                    } else {
+                        lineEl.style.color = '#94a3b8';
+                    }
                     body.appendChild(lineEl);
                 });
                 body.scrollTop = body.scrollHeight;
@@ -3392,10 +3003,10 @@ export class GraphRenderer {
                 this.nodeWorkers.set(node.id, newWorker);
                 newWorker.onmessage = (e) => {
                     if (e.data.type === 'bounds') {
-                        this.stateManager.updateNodeParametersInPlace(node.id, {
-                            min_y: e.data.minY,
-                            max_y: e.data.maxY
-                        });
+                        if (node.parameters) {
+                            node.parameters.min_y = e.data.minY;
+                            node.parameters.max_y = e.data.maxY;
+                        }
                     }
                 };
                 const offscreen = (canvas as any).transferControlToOffscreen();
@@ -3473,24 +3084,76 @@ export class GraphRenderer {
                 }
             }
         } else if (node.type === 'Telemetry3DViewport') {
-            if (!container.querySelector('canvas')) {
-                const existing = this.viewport3Ds.get(node.id);
-                if (existing) {
-                    existing.destroy();
-                    this.viewport3Ds.delete(node.id);
-                }
-                container.innerHTML = '';
-                container.style.padding = '0';
-                container.style.overflow = 'hidden';
-                const wrapper = document.createElement('div');
-                wrapper.style.width = '100%';
-                wrapper.style.height = '100%';
-                wrapper.style.position = 'relative';
-                container.appendChild(wrapper);
-
-                const vp = new Telemetry3DViewport(wrapper, `vp-${node.id}`, this.stateManager, '-graph', node.id);
-                this.viewport3Ds.set(node.id, vp);
+            const existing = this.viewport3Ds.get(node.id);
+            if (existing) {
+                existing.destroy();
+                this.viewport3Ds.delete(node.id);
             }
+            container.innerHTML = '';
+            container.style.padding = '8px';
+            container.style.display = 'flex';
+            container.style.flexDirection = 'column';
+            container.style.gap = '6px';
+            container.style.fontFamily = 'var(--font-mono, monospace)';
+            container.style.fontSize = '11px';
+            container.style.color = '#ccc';
+
+            const slices = node.parameters?.slices || [];
+            const focusedSliceIdx = node.parameters?.focusedSliceIndex ?? 0;
+            const focusedSlice = slices[focusedSliceIdx] || slices[0];
+            const qty = focusedSlice?.quantities?.[0] || 'pressure';
+            const colormap = focusedSlice?.colormap || 'rainbow';
+
+            const infoBox = document.createElement('div');
+            infoBox.style.background = 'rgba(0, 0, 0, 0.4)';
+            infoBox.style.border = '1px solid rgba(255, 255, 255, 0.08)';
+            infoBox.style.borderRadius = '4px';
+            infoBox.style.padding = '6px 8px';
+            infoBox.style.display = 'flex';
+            infoBox.style.flexDirection = 'column';
+            infoBox.style.gap = '4px';
+
+            infoBox.innerHTML = `
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <span style="color:#00f0ff; font-weight:600;">📊 3D Viewport</span>
+                    <span style="color:#888; font-size:10px;">${slices.length} Slice${slices.length === 1 ? '' : 's'}</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; font-size:10px;">
+                    <span style="color:#aaa;">Quantity:</span>
+                    <span style="color:#fff; text-transform:capitalize;">${qty}</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; font-size:10px;">
+                    <span style="color:#aaa;">Colormap:</span>
+                    <span style="color:#fff; text-transform:capitalize;">${colormap}</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; font-size:10px;">
+                    <span style="color:#aaa;">Render:</span>
+                    <span style="color:#00ff66;">Hardware Accelerated</span>
+                </div>
+            `;
+            container.appendChild(infoBox);
+
+            const btnRow = document.createElement('div');
+            btnRow.style.display = 'flex';
+            btnRow.style.gap = '6px';
+            btnRow.style.marginTop = 'auto';
+
+            const inspectBtn = document.createElement('button');
+            inspectBtn.className = 'header-button primary';
+            inspectBtn.style.flex = '1';
+            inspectBtn.style.padding = '4px 6px';
+            inspectBtn.style.fontSize = '10px';
+            inspectBtn.style.cursor = 'pointer';
+            inspectBtn.textContent = '🔍 Inspect in 3D';
+            inspectBtn.title = 'Open and focus this 3D Viewport in the dedicated Viewport panel / Node Viewer';
+            inspectBtn.onclick = (e) => {
+                e.stopPropagation();
+                this.stateManager.setSelectedNode(node.id);
+                this.stateManager.setFocusedViewport(node.id, `vp-${node.id}`);
+            };
+            btnRow.appendChild(inspectBtn);
+
+            container.appendChild(btnRow);
         } else if (node.type === 'TelemetryContour') {
             const state = this.stateManager.getCurrentState();
             const conns = state?.connections.filter(c => c.toNode === node.id) || [];
@@ -3665,14 +3328,14 @@ export class GraphRenderer {
             }
 
             const COLORMAPS = [
+                { value: 'rainbow', label: 'Rainbow' },
                 { value: 'plasma', label: 'Plasma' },
                 { value: 'viridis', label: 'Viridis' },
-                { value: 'rainbow', label: 'Rainbow' },
                 { value: 'coolwarm', label: 'CoolWarm' },
                 { value: 'cividis', label: 'Cividis' },
                 { value: 'grayscale', label: 'Grayscale' }
             ];
-            const currentColorMap = node.parameters?.colormap ?? 'plasma';
+            const currentColorMap = node.parameters?.colormap ?? 'rainbow';
             const currentLogScale = node.parameters?.log_scale === true;
             const autoScale = node.parameters?.auto_scale !== false;
             const minY = node.parameters?.min_y !== undefined ? Number(node.parameters.min_y) : 0;
@@ -4174,10 +3837,10 @@ export class GraphRenderer {
                 
                 newWorker.onmessage = (e) => {
                     if (e.data.type === 'bounds') {
-                        this.stateManager.updateNodeParametersInPlace(node.id, {
-                            min_y: e.data.minY,
-                            max_y: e.data.maxY
-                        });
+                        if (node.parameters) {
+                            node.parameters.min_y = e.data.minY;
+                            node.parameters.max_y = e.data.maxY;
+                        }
                     }
                 };
 
@@ -4380,52 +4043,81 @@ export class GraphRenderer {
             let needsRebuild = false;
             if (node.type === 'DomainMesh') {
                 const dim = node.parameters['dimension'] || '1D';
-                if (form.dataset.renderedDimension !== dim.toString()) {
-                    needsRebuild = true;
-                }
-            }
-            if (node.type === 'Material' || node.type === 'MPMMaterialSteel') {
+                if (form.dataset.renderedDimension !== dim.toString()) needsRebuild = true;
+            } else if (node.type === 'DomainMesh2D') {
+                const cs = node.parameters['coordinate_system'] || 'Axisymmetric';
+                if (form.dataset.renderedCoordinateSystem !== cs.toString()) needsRebuild = true;
+            } else if (node.type === 'Material') {
                 const comp = node.parameters['composition'] || 'TNT';
                 const matType = node.parameters['material_type'] || 'Air';
-                const matModel = node.parameters['material_model'] || 'Linear Elastic';
+                const matModel = node.parameters['material_model'] || 'Hypoelastic';
                 const preset = node.parameters['preset'] || 'Structural Steel (A36)';
+                const eStrain = !!node.parameters['enable_strain_erosion'];
+                const eStress = !!node.parameters['enable_stress_erosion'];
+                const eTime = !!node.parameters['enable_timestep_erosion'];
+                const eHet = !!node.parameters['enable_heterogeneity'];
+                const eAniso = !!node.parameters['enable_anisotropy'];
+                const anisoAxis = node.parameters['anisotropy_axis'] || 'X';
+                const kcAuto = node.parameters['kc_auto_generate'] !== false;
+                const demTrans = !!node.parameters['dem_transition_enabled'];
+                const dCrack = !!node.parameters['directional_crack_band'];
                 if (form.dataset.renderedComposition !== comp.toString() ||
                     form.dataset.renderedMaterialType !== matType.toString() ||
                     form.dataset.renderedMaterialModel !== matModel.toString() ||
-                    form.dataset.renderedPreset !== preset.toString()) {
+                    form.dataset.renderedPreset !== preset.toString() ||
+                    form.dataset.renderedEnableStrainErosion !== eStrain.toString() ||
+                    form.dataset.renderedEnableStressErosion !== eStress.toString() ||
+                    form.dataset.renderedEnableTimestepErosion !== eTime.toString() ||
+                    form.dataset.renderedEnableHeterogeneity !== eHet.toString() ||
+                    form.dataset.renderedEnableAnisotropy !== eAniso.toString() ||
+                    form.dataset.renderedAnisotropyAxis !== anisoAxis.toString() ||
+                    form.dataset.renderedKcAutoGenerate !== kcAuto.toString() ||
+                    form.dataset.renderedDemTransitionEnabled !== demTrans.toString() ||
+                    form.dataset.renderedDirectionalCrackBand !== dCrack.toString()) {
                     needsRebuild = true;
                 }
-            }
-            if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
+            } else if (node.type === 'Charge1D' || node.type === 'Charge2D' || node.type === 'Charge3D') {
+                const shape = node.parameters['charge_shape'] || 'Sphere';
+                if (form.dataset.renderedChargeShape !== shape.toString()) needsRebuild = true;
+            } else if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
                 const velScheme = node.parameters['velocity_scheme'] || 'APIC';
-                if (form.dataset.renderedVelocityScheme !== velScheme.toString()) {
-                    needsRebuild = true;
-                }
-            }
-            if (node.type === 'MPMObject3D' || node.type === 'MPMObject2D') {
+                if (form.dataset.renderedVelocityScheme !== velScheme.toString()) needsRebuild = true;
+            } else if (node.type === 'MPMObject3D' || node.type === 'MPMObject2D') {
                 const shapeType = node.parameters['shape_type'] || (node.type === 'MPMObject3D' ? 'Box' : 'Rectangle');
-                if (form.dataset.renderedShapeType !== shapeType.toString()) {
-                    needsRebuild = true;
-                }
-            }
-            if (node.type === 'FEMObject3D') {
+                if (form.dataset.renderedShapeType !== shapeType.toString()) needsRebuild = true;
+            } else if (node.type === 'FEMObject3D') {
                 const meshSrc = node.parameters['mesh_source'] || 'Box Generator';
                 const shapeType = node.parameters['shape_type'] || 'Box';
-                if (form.dataset.renderedMeshSource !== meshSrc.toString() || form.dataset.renderedShapeType !== shapeType.toString()) {
-                    needsRebuild = true;
-                }
-            }
-            if (node.type === 'FEMDomain3D') {
+                if (form.dataset.renderedMeshSource !== meshSrc.toString() || form.dataset.renderedShapeType !== shapeType.toString()) needsRebuild = true;
+            } else if (node.type === 'FEMDomain3D') {
                 const scheme = node.parameters['integration_scheme'] || 'OnePointFB';
-                if (form.dataset.renderedIntegrationScheme !== scheme.toString()) {
+                const eHet = !!node.parameters['enable_heterogeneity'];
+                const eAniso = !!node.parameters['enable_anisotropy'];
+                const anisoAxis = node.parameters['anisotropy_axis'] || 'X';
+                const convMpm = !!node.parameters['convert_failed_elements_to_mpm'];
+                const eCrack = !!node.parameters['enable_directional_crack_band'];
+                if (form.dataset.renderedIntegrationScheme !== scheme.toString() ||
+                    form.dataset.renderedEnableHeterogeneity !== eHet.toString() ||
+                    form.dataset.renderedEnableAnisotropy !== eAniso.toString() ||
+                    form.dataset.renderedAnisotropyAxis !== anisoAxis.toString() ||
+                    form.dataset.renderedConvertMpm !== convMpm.toString() ||
+                    form.dataset.renderedEnableCrackBand !== eCrack.toString()) {
                     needsRebuild = true;
                 }
-            }
-            if (node.type === 'VTKOutput') {
+            } else if (node.type === 'FEMFSICoupler3D' || node.type === 'FSICoupler2D' || node.type === 'FSICoupler3D') {
+                const eVenting = !!node.parameters['erosion_venting'];
+                if (form.dataset.renderedErosionVenting !== eVenting.toString()) needsRebuild = true;
+            } else if (node.type === 'VTKOutput') {
                 const triggerType = node.parameters['trigger_type'] || 'Step Interval';
-                if (form.dataset.renderedTriggerType !== triggerType.toString() || form.dataset.renderedIs3D !== is3D.toString()) {
+                const roiEnabled = !!node.parameters['roi_enabled'];
+                if (form.dataset.renderedTriggerType !== triggerType.toString() ||
+                    form.dataset.renderedRoiEnabled !== roiEnabled.toString() ||
+                    form.dataset.renderedIs3D !== is3D.toString()) {
                     needsRebuild = true;
                 }
+            } else if (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver') {
+                const initMode = node.parameters['init_mode'] || 'Multi-Material JWL';
+                if (form.dataset.renderedInitMode !== initMode.toString()) needsRebuild = true;
             }
             if (!needsRebuild) {
                 for (const [key, value] of Object.entries(node.parameters)) {
@@ -4456,15 +4148,17 @@ export class GraphRenderer {
 
                 const stsEl = form.querySelector('[data-key="space_time_scheme"]') as HTMLElement;
                 if (stsEl) {
-                    let currentVal = 'Leapfrog (2nd-Order Space/Time)';
-                    if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
-                        currentVal = node.parameters['space_time_scheme'] ?? 'Leapfrog';
-                    } else {
-                        const so = node.parameters['spatial_order'] ?? 2;
-                        const to = node.parameters['temporal_order'] ?? 4;
-                        if (so === 2 && to === 5) currentVal = 'ADER-2 (2nd-Order Space/Time)';
-                        else if (so === 3 && to === 6) currentVal = 'ADER-3 (3rd-Order Space/Time)';
-                        else currentVal = 'MUSCL-Hancock (2nd-Order Space/Time)';
+                    let currentVal = node.parameters['space_time_scheme'];
+                    if (!currentVal) {
+                        if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
+                            currentVal = 'Leapfrog';
+                        } else {
+                            const so = Number(node.parameters['spatial_order'] ?? 2);
+                            const to = Number(node.parameters['temporal_order'] ?? 4);
+                            if (so === 2 && (to === 5 || to === 2)) currentVal = 'ADER-2 (2nd-Order Space/Time)';
+                            else if (so === 3 && (to === 6 || to === 3)) currentVal = 'ADER-3 (3rd-Order Space/Time)';
+                            else currentVal = 'MUSCL-Hancock (2nd-Order Space/Time)';
+                        }
                     }
                     
                     const trigger = stsEl.querySelector('.custom-select-trigger');
@@ -4491,6 +4185,26 @@ export class GraphRenderer {
                     const state = this.stateManager.getCurrentState();
                     mpmInfo.innerHTML = getMPMDisplayHTML(node, state ?? undefined);
                 }
+                const femInfo = form.querySelector('.fem-info-display') as HTMLDivElement;
+                if (femInfo) {
+                    const state = this.stateManager.getCurrentState();
+                    femInfo.innerHTML = getFEMDisplayHTML(node, state ?? undefined);
+                }
+                const geomInfo = form.querySelector('.geom-info-display') as HTMLDivElement;
+                if (geomInfo) {
+                    const state = this.stateManager.getCurrentState();
+                    geomInfo.innerHTML = getGeometryDisplayHTML(node, state ?? undefined);
+                }
+                const couplerInfo = form.querySelector('.coupler-info-display') as HTMLDivElement;
+                if (couplerInfo) {
+                    const state = this.stateManager.getCurrentState();
+                    couplerInfo.innerHTML = getCouplerDisplayHTML(node, state ?? undefined);
+                }
+                const telemetryInfo = form.querySelector('.telemetry-info-display') as HTMLDivElement;
+                if (telemetryInfo) {
+                    const state = this.stateManager.getCurrentState();
+                    telemetryInfo.innerHTML = getTelemetryDisplayHTML(node, state ?? undefined);
+                }
                 return;
             }
         }
@@ -4504,261 +4218,103 @@ export class GraphRenderer {
         if (node.type === 'DomainMesh') {
             const dim = node.parameters['dimension'] || '1D';
             form.dataset.renderedDimension = dim.toString();
-        }
-        if (node.type === 'Material' || node.type === 'MPMMaterialSteel') {
+        } else if (node.type === 'DomainMesh2D') {
+            const cs = node.parameters['coordinate_system'] || 'Axisymmetric';
+            form.dataset.renderedCoordinateSystem = cs.toString();
+        } else if (node.type === 'Material') {
             const comp = node.parameters['composition'] || 'TNT';
             const matType = node.parameters['material_type'] || 'Air';
-            const matModel = node.parameters['material_model'] || 'Linear Elastic';
+            const matModel = node.parameters['material_model'] || 'Hypoelastic';
             const preset = node.parameters['preset'] || 'Structural Steel (A36)';
+            const eStrain = !!node.parameters['enable_strain_erosion'];
+            const eStress = !!node.parameters['enable_stress_erosion'];
+            const eTime = !!node.parameters['enable_timestep_erosion'];
+            const eHet = !!node.parameters['enable_heterogeneity'];
+            const eAniso = !!node.parameters['enable_anisotropy'];
+            const anisoAxis = node.parameters['anisotropy_axis'] || 'X';
+            const kcAuto = node.parameters['kc_auto_generate'] !== false;
+            const demTrans = !!node.parameters['dem_transition_enabled'];
+            const dCrack = !!node.parameters['directional_crack_band'];
             form.dataset.renderedComposition = comp.toString();
             form.dataset.renderedMaterialType = matType.toString();
             form.dataset.renderedMaterialModel = matModel.toString();
             form.dataset.renderedPreset = preset.toString();
-        }
-        if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
+            form.dataset.renderedEnableStrainErosion = eStrain.toString();
+            form.dataset.renderedEnableStressErosion = eStress.toString();
+            form.dataset.renderedEnableTimestepErosion = eTime.toString();
+            form.dataset.renderedEnableHeterogeneity = eHet.toString();
+            form.dataset.renderedEnableAnisotropy = eAniso.toString();
+            form.dataset.renderedAnisotropyAxis = anisoAxis.toString();
+            form.dataset.renderedKcAutoGenerate = kcAuto.toString();
+            form.dataset.renderedDemTransitionEnabled = demTrans.toString();
+            form.dataset.renderedDirectionalCrackBand = dCrack.toString();
+        } else if (node.type === 'Charge1D' || node.type === 'Charge2D' || node.type === 'Charge3D') {
+            const shape = node.parameters['charge_shape'] || 'Sphere';
+            form.dataset.renderedChargeShape = shape.toString();
+        } else if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
             const velScheme = node.parameters['velocity_scheme'] || 'APIC';
             form.dataset.renderedVelocityScheme = velScheme.toString();
-        }
-        if (node.type === 'MPMObject3D' || node.type === 'MPMObject2D') {
+        } else if (node.type === 'MPMObject3D' || node.type === 'MPMObject2D') {
             const shapeType = node.parameters['shape_type'] || (node.type === 'MPMObject3D' ? 'Box' : 'Rectangle');
             form.dataset.renderedShapeType = shapeType.toString();
-        }
-        if (node.type === 'FEMObject3D') {
+        } else if (node.type === 'FEMObject3D') {
             const meshSrc = node.parameters['mesh_source'] || 'Box Generator';
             const shapeType = node.parameters['shape_type'] || 'Box';
             form.dataset.renderedMeshSource = meshSrc.toString();
             form.dataset.renderedShapeType = shapeType.toString();
-        }
-        if (node.type === 'FEMDomain3D') {
-            const scheme = node.parameters['integration_scheme'] || 'OnePointFB';
-            form.dataset.renderedIntegrationScheme = scheme.toString();
-        }
-        if (node.type === 'VTKOutput') {
-            const triggerType = node.parameters['trigger_type'] || 'Step Interval';
-            form.dataset.renderedTriggerType = triggerType.toString();
-            form.dataset.renderedIs3D = is3D.toString();
-        }
-
-        let paramKeys = Object.keys(node.parameters);
-        if (node.type === 'MPMMaterialSteel' || node.type === 'Material') {
-            syncMPMMaterialParameters(node, node.parameters);
-            if (!node.parameters['material_model']) {
-                node.parameters['material_model'] = 'Linear Elastic';
-            }
-            if (!node.parameters['preset']) {
-                node.parameters['preset'] = getDefaultPresetForModel(node.parameters['material_model']);
-            }
-            const matModel = node.parameters['material_model'];
-            if (matModel === 'Linear Elastic') {
-                paramKeys = [
-                    'material_model', 'preset', 'transfer_scheme',
-                    'density', 'youngs_modulus', 'poissons_ratio',
-                    'tensile_failure_stress',
-                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
-                ];
-            } else if (matModel === 'Johnson-Cook + Mie-Grüneisen') {
-                paramKeys = [
-                    'material_model', 'preset', 'transfer_scheme',
-                    'density', 'youngs_modulus', 'poissons_ratio',
-                    'failure_strain', 'tensile_failure_stress',
-                    'enable_strain_erosion', 'erosion_strain',
-                    'enable_stress_erosion', 'erosion_stress',
-                    'enable_timestep_erosion', 'timestep_erosion_factor',
-                    'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m',
-                    'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5',
-                    'T_melt', 'T_room', 'Cp',
-                    'mg_gamma0', 'mg_c0', 'mg_s',
-                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
-                ];
-            } else if (matModel === 'CREST Reactive Burn') {
-                paramKeys = [
-                    'material_model', 'preset', 'transfer_scheme',
-                    'density', 'youngs_modulus', 'poissons_ratio',
-                    'yield_stress', 'hardening_modulus',
-                    'failure_strain', 'tensile_failure_stress',
-                    'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
-                    'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
-                    'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold',
-                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
-                ];
-            } else if (matModel === 'RHT Concrete') {
-                paramKeys = [
-                    'material_model', 'preset', 'transfer_scheme',
-                    'density', 'youngs_modulus', 'poissons_ratio',
-                    'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
-                    'directional_crack_band', 'nonlocal_radius',
-                    'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
-                    'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
-                    'enable_strain_erosion', 'erosion_strain',
-                    'enable_stress_erosion', 'erosion_stress',
-                    'enable_timestep_erosion', 'timestep_erosion_factor',
-                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
-                ];
-            } else if (matModel === 'Karagozian & Case (K&C)' || matModel === 'Karagozian & Case') {
-                paramKeys = [
-                    'material_model', 'preset', 'transfer_scheme',
-                    'density', 'youngs_modulus', 'poissons_ratio',
-                    'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
-                    'directional_crack_band', 'nonlocal_radius',
-                    'kc_auto_generate', 'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
-                    'enable_strain_erosion', 'erosion_strain',
-                    'enable_stress_erosion', 'erosion_stress',
-                    'enable_timestep_erosion', 'timestep_erosion_factor',
-                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
-                ];
-            } else if (matModel === 'CSCM Concrete') {
-                paramKeys = [
-                    'material_model', 'preset', 'transfer_scheme',
-                    'density', 'youngs_modulus', 'poissons_ratio',
-                    'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
-                    'directional_crack_band', 'nonlocal_radius',
-                    'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
-                    'enable_strain_erosion', 'erosion_strain',
-                    'enable_stress_erosion', 'erosion_stress',
-                    'enable_timestep_erosion', 'timestep_erosion_factor',
-                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
-                ];
-            } else if (matModel === 'Ideal Gas') {
-                paramKeys = [
-                    'material_model', 'preset',
-                    'density', 'atm_pressure', 'atm_temperature', 'gamma'
-                ];
-            } else if (matModel === 'JWL Detonation Gas') {
-                paramKeys = [
-                    'material_model', 'preset',
-                    'composition', 'rho', 'detonation_energy', 'det_vel',
-                    'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega',
-                    'ideal_gamma', 'ideal_rho_0', 'ideal_e_0'
-                ];
-            } else {
-                paramKeys = [
-                    'material_model', 'preset', 'transfer_scheme',
-                    'density', 'youngs_modulus', 'poissons_ratio',
-                    'yield_stress', 'hardening_modulus',
-                    'directional_crack_band', 'nonlocal_radius',
-                    'failure_strain', 'tensile_failure_stress',
-                    'enable_strain_erosion', 'erosion_strain',
-                    'enable_stress_erosion', 'erosion_stress',
-                    'enable_timestep_erosion', 'timestep_erosion_factor',
-                    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
-                ];
-            }
-        } else if (node.type === 'MPMDomain2D') {
-            const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
-            paramKeys = ['precision', 'particle_distribution', 'boundary_filling', 'velocity_scheme', 'space_time_scheme', 'smooth_plastic_strain'];
-            if (hasFLIP) {
-                paramKeys.push('flip_blend');
-            }
-            paramKeys.push('ppc', 'cfl');
-        } else if (node.type === 'MPMDomain3D') {
-            const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
-            paramKeys = ['device', 'precision', 'particle_distribution', 'boundary_filling', 'velocity_scheme', 'space_time_scheme', 'smooth_plastic_strain'];
-            if (hasFLIP) {
-                paramKeys.push('flip_blend');
-            }
-            paramKeys.push('ppc', 'cfl');
-        } else if (node.type === 'MPMObject2D') {
-            paramKeys = ['shape_type', 'particle_distribution', 'boundary_filling', 'pos_x', 'pos_y', 'size_x', 'size_y', 'radius', 'vel_x', 'vel_y', 'angular_vel'];
-        } else if (node.type === 'MPMObject3D') {
-            paramKeys = ['shape_type', 'particle_distribution', 'boundary_filling', 'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'stl_file', 'scale_x', 'scale_y', 'scale_z', 'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z'];
-        } else if (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D') {
-            paramKeys = paramKeys.filter(k => k !== 'spatial_order' && k !== 'temporal_order');
-            const idx = Object.keys(node.parameters).indexOf('spatial_order');
-            if (idx !== -1) {
-                paramKeys.splice(idx, 0, 'space_time_scheme');
-            } else {
-                paramKeys.push('space_time_scheme');
-            }
         } else if (node.type === 'FEMDomain3D') {
-            paramKeys = [
-                'device', 'precision', 'cfl',
-                'enable_directional_crack_band', 'enable_nonlocal_damage',
-                'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed',
-                'rebar_formulation', 'convert_failed_elements_to_mpm', 'mpm_particles_per_failed_element',
-                'hourglass_coeff', 'contact_penalty_scale', 'friction_static', 'friction_kinetic',
-                'integration_scheme', 'hourglass_model'
-            ];
-        } else if (node.type === 'FEMObject3D') {
-            paramKeys = [
-                'mesh_source', 'shape_type', 'boundary_condition',
-                'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z',
-                'radius', 'inner_radius', 'height', 'nx', 'ny', 'nz',
-                'vel_x', 'vel_y', 'vel_z', 'bulk_viscosity_b1', 'bulk_viscosity_b2',
-                'timestep_erosion_factor', 'k_file'
-            ];
-        } else if (node.type === 'FEMFSICoupler3D') {
-            paramKeys = [
-                'cfl', 'steps', 'coupling_scheme', 'pressure_integration',
-                'uncovering_method', 'erosion_venting', 'vacuum_density', 'vacuum_pressure'
-            ];
-        } else if (node.type === 'FSICoupler2D' || node.type === 'FSICoupler3D') {
-            paramKeys = ['cfl'];
-        } else if (node.type === 'LSDynaImporter3D') {
-            paramKeys = ['k_file', 'scale_factor'];
+            const scheme = node.parameters['integration_scheme'] || 'OnePointFB';
+            const eHet = !!node.parameters['enable_heterogeneity'];
+            const eAniso = !!node.parameters['enable_anisotropy'];
+            const anisoAxis = node.parameters['anisotropy_axis'] || 'X';
+            const convMpm = !!node.parameters['convert_failed_elements_to_mpm'];
+            const eCrack = !!node.parameters['enable_directional_crack_band'];
+            form.dataset.renderedIntegrationScheme = scheme.toString();
+            form.dataset.renderedEnableHeterogeneity = eHet.toString();
+            form.dataset.renderedEnableAnisotropy = eAniso.toString();
+            form.dataset.renderedAnisotropyAxis = anisoAxis.toString();
+            form.dataset.renderedConvertMpm = convMpm.toString();
+            form.dataset.renderedEnableCrackBand = eCrack.toString();
+        } else if (node.type === 'FEMFSICoupler3D' || node.type === 'FSICoupler2D' || node.type === 'FSICoupler3D') {
+            const eVenting = !!node.parameters['erosion_venting'];
+            form.dataset.renderedErosionVenting = eVenting.toString();
+        } else if (node.type === 'VTKOutput') {
+            const triggerType = node.parameters['trigger_type'] || 'Step Interval';
+            const roiEnabled = !!node.parameters['roi_enabled'];
+            form.dataset.renderedTriggerType = triggerType.toString();
+            form.dataset.renderedRoiEnabled = roiEnabled.toString();
+            form.dataset.renderedIs3D = is3D.toString();
+        } else if (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver') {
+            const initMode = node.parameters['init_mode'] || 'Multi-Material JWL';
+            form.dataset.renderedInitMode = initMode.toString();
         }
 
-        // In coupled simulations, the Coupler node is the single source of truth for CFL.
-        // Suppress redundant CFL fields on sub-domain nodes.
+        if (node.type === 'Material') {
+            syncMPMMaterialParameters(node, node.parameters);
+        }
+
+        // In coupled simulations, the Coupler node is the single source of truth for CFL and endtime.
+        // Suppress redundant CFL/endtime fields on sub-domain nodes.
         let isCoupledModel = false;
-        const allModels = this.stateManager.getAppState().models;
-        for (const m of Object.values(allModels)) {
-            if (m.nodes.some(n => n.id === node.id)) {
+        const allModels = this.stateManager.getAllModels();
+        for (const m of allModels) {
+            if (m.nodes && m.nodes.some(n => n.id === node.id)) {
                 isCoupledModel = m.nodes.some(n => n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D' || n.type === 'FEMFSICoupler3D');
                 break;
             }
         }
-        if (isCoupledModel && (node.type === 'CFDSolver' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver3D' || node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D' || node.type === 'FEMDomain3D')) {
-            paramKeys = paramKeys.filter(k => k !== 'cfl');
+        if (!isCoupledModel) {
+            const activeModel = this.stateManager.getActiveModel();
+            if (activeModel && activeModel.nodes && activeModel.nodes.some(n => n.id === node.id)) {
+                isCoupledModel = activeModel.nodes.some(n => n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D' || n.type === 'FEMFSICoupler3D');
+            }
         }
-        if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D' || node.type === 'RefinementMesh3D') {
-            paramKeys.sort((a, b) => {
-                if (a === 'cell_size') return -1;
-                if (b === 'cell_size') return 1;
-                return 0;
-            });
-        } else if (node.type === 'Charge1D' || node.type === 'Charge2D' || node.type === 'Charge3D') {
-            const chargeOrder = [
-                'charge_mass', 'charge_shape',
-                'charge_r', 'charge_z', 'charge_x', 'charge_y',
-                'charge_radius', 'charge_height', 'charge_aspect_ratio',
-                'charge_lx', 'charge_ly', 'charge_lz',
-                'charge_rot_x', 'charge_rot_y', 'charge_rot_z'
-            ];
-            paramKeys.sort((a, b) => {
-                const idxA = chargeOrder.indexOf(a);
-                const idxB = chargeOrder.indexOf(b);
-                if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-                if (idxA !== -1) return -1;
-                if (idxB !== -1) return 1;
-                return 0;
-            });
-        } else if (node.type === 'VTKOutput') {
-            const vtkOrder = [
-                // General
-                'trigger_type', 'step_interval', 'time_interval', 'vtk_format', 'custom_filename', 'vtk_dir',
-                // Targets
-                'export_slices', 'export_volumes', 'export_fem', 'export_mpm', 'export_pvd',
-                // CFD
-                'qty_pressure', 'qty_density', 'qty_velocity', 'qty_energy', 'qty_reacted', 'qty_unreacted', 'qty_air', 'qty_overpressure', 'qty_impulse',
-                // FEM
-                'qty_fem_stress', 'qty_fem_strain', 'qty_fem_pressure', 'qty_fem_temp', 'qty_fem_damage', 'qty_fem_vel', 'qty_fem_disp',
-                // MPM
-                'qty_mpm_stress', 'qty_mpm_strain', 'qty_mpm_damage', 'qty_mpm_temp', 'qty_mpm_vel', 'qty_mpm_disp',
-                // ROI & Strides
-                'roi_enabled', 'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride'
-            ];
-            paramKeys.sort((a, b) => {
-                const idxA = vtkOrder.indexOf(a);
-                const idxB = vtkOrder.indexOf(b);
-                if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-                if (idxA !== -1) return -1;
-                if (idxB !== -1) return 1;
-                return 0;
-            });
-        }
+
+        const paramKeys = getParamKeysForNode(node.type, node.parameters, is3D, isCoupledModel);
         
+        const nType: string = node.type;
         let gridInfoDiv: HTMLDivElement | null = null;
-        if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D' || node.type === 'RefinementMesh3D') {
+        if (nType === 'DomainMesh' || nType === 'DomainMesh2D' || nType === 'DomainMesh3D' || nType === 'RefinementMesh3D' || nType === 'CFDSolver' || nType === 'CFDSolver2D' || nType === 'CFDSolver3D') {
             const state = this.stateManager.getCurrentState();
             const info = document.createElement('div');
             info.className = 'grid-info-display';
@@ -4771,11 +4327,43 @@ export class GraphRenderer {
         }
 
         let mpmInfoDiv: HTMLDivElement | null = null;
-        if (node.type === 'MPMObject3D' || node.type === 'MPMObject2D' || node.type === 'MPMDomain3D' || node.type === 'MPMDomain2D') {
+        if (nType === 'MPMObject3D' || nType === 'MPMObject2D' || nType === 'MPMDomain3D' || nType === 'MPMDomain2D') {
             const info = document.createElement('div');
             info.className = 'mpm-info-display';
             info.innerHTML = getMPMDisplayHTML(node, state ?? undefined);
             mpmInfoDiv = info;
+        }
+
+        let femInfoDiv: HTMLDivElement | null = null;
+        if (nType === 'FEMObject3D' || nType === 'FEMDomain3D' || nType === 'LSDynaImporter3D') {
+            const info = document.createElement('div');
+            info.className = 'fem-info-display';
+            info.innerHTML = getFEMDisplayHTML(node, state ?? undefined);
+            femInfoDiv = info;
+        }
+
+        let geomInfoDiv: HTMLDivElement | null = null;
+        if (nType === 'STLGeometry' || nType === 'PrimitiveGeometry3D') {
+            const info = document.createElement('div');
+            info.className = 'geom-info-display';
+            info.innerHTML = getGeometryDisplayHTML(node, state ?? undefined);
+            geomInfoDiv = info;
+        }
+
+        let couplerInfoDiv: HTMLDivElement | null = null;
+        if (nType === 'FSICoupler2D' || nType === 'FSICoupler3D' || nType === 'FEMFSICoupler3D') {
+            const info = document.createElement('div');
+            info.className = 'coupler-info-display';
+            info.innerHTML = getCouplerDisplayHTML(node, state ?? undefined);
+            couplerInfoDiv = info;
+        }
+
+        let telemetryInfoDiv: HTMLDivElement | null = null;
+        if (nType === 'VirtualGauges' || nType === 'VTKOutput' || nType === 'Telemetry3DViewport') {
+            const info = document.createElement('div');
+            info.className = 'telemetry-info-display';
+            info.innerHTML = getTelemetryDisplayHTML(node, state ?? undefined);
+            telemetryInfoDiv = info;
         }
 
         let currentGridDiv: HTMLDivElement | null = null;
@@ -4786,281 +4374,84 @@ export class GraphRenderer {
                 if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
                     value = node.parameters['space_time_scheme'] ?? 'Leapfrog';
                 } else {
-                    const so = node.parameters['spatial_order'] ?? 2;
-                    const to = node.parameters['temporal_order'] ?? 4;
-                    if (so === 1 && to === 1) value = 'Euler (1st-Order Space/Time)';
-                    else if (so === 2 && to === 2) value = 'RK2 (2nd-Order Space/Time)';
-                    else if (so === 3 && to === 3) value = 'RK3 (3rd-Order Space/Time)';
-                    else if (so === 2 && to === 4) value = 'MUSCL-Hancock (2nd-Order Space/Time)';
-                    else if (so === 2 && to === 5) value = 'ADER-2 (2nd-Order Space/Time)';
-                    else if (so === 3 && to === 6) value = 'ADER-3 (3rd-Order Space/Time)';
-                    else value = 'MUSCL-Hancock (2nd-Order Space/Time)';
+                    value = node.parameters['space_time_scheme'];
+                    if (!value) {
+                        const so = Number(node.parameters['spatial_order'] ?? 2);
+                        const to = Number(node.parameters['temporal_order'] ?? 4);
+                        if (so === 2 && (to === 5 || to === 2)) value = 'ADER-2 (2nd-Order Space/Time)';
+                        else if (so === 3 && (to === 6 || to === 3)) value = 'ADER-3 (3rd-Order Space/Time)';
+                        else value = 'MUSCL-Hancock (2nd-Order Space/Time)';
+                    }
                 }
             }
             if (value === undefined || value === null) continue;
-            if (key === 'gauges' || key === 'slices' || key === 'primitives') continue;
-            if (key === 'nr' || key === 'n_cells') continue;
-            if (key === 'nz' && node.type === 'DomainMesh2D') continue;
-            if (node.type === 'VTKOutput') {
-                const triggerType = node.parameters['trigger_type'] || 'Step Interval';
-                if ((triggerType === 'Step Interval' || triggerType === 'step') && key === 'time_interval') continue;
-                if ((triggerType === 'Time Interval' || triggerType === 'time') && key === 'step_interval') continue;
-            }
-            if (node.type === 'VTKOutput' && !is3D && (
-                key === 'export_slices' || key === 'export_volumes' || key === 'export_fem' || key === 'export_mpm' ||
-                key.startsWith('qty_fem_') || key.startsWith('qty_mpm_') ||
-                key.startsWith('roi_') || key === 'volume_stride' || key === 'slice_stride'
-            )) continue;
-            if (node.type === 'VirtualGauges' && key === 'telemetry_channel') continue;
-            // DetonatorLocation and DetonatorLocation3D are separate nodes now, showing correct properties
-            if (node.type === 'DomainMesh') {
-                const dim = node.parameters['dimension'] || '1D';
-                if ((key === 'y_min_bc' || key === 'y_max_bc') && dim === '1D') continue;
-                if ((key === 'z_min_bc' || key === 'z_max_bc') && (dim === '1D' || dim === '2D')) continue;
-            }
-            if (node.type === 'FEMDomain3D') {
-                const scheme = node.parameters['integration_scheme'] || 'OnePointFB';
-                if ((scheme === 'FullGauss8' || scheme === 'SelectiveReduced') && (key === 'hourglass_model' || key === 'hourglass_coeff')) continue;
-            }
-            if (node.type === 'FEMObject3D') {
-                if (key === 'shape_type') continue;
-                const source = node.parameters['mesh_source'] || 'Box Generator';
-                if (source === 'Cylinder Generator') {
-                    if (['size_x', 'size_y', 'size_z', 'length', 'ny', 'k_file', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) continue;
-                } else if (source === 'Box Generator') {
-                    if (['radius', 'inner_radius', 'height', 'length', 'k_file', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) continue;
-                } else if (source === 'LS-DYNA Keyword File') {
-                    if (['size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'length', 'nx', 'ny', 'nz', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) continue;
-                }
-            }
-            if (node.type === 'VTKOutput') {
-                let sectionTitle: string | null = null;
-                if (key === 'export_slices') sectionTitle = 'DOMAINS & TARGETS';
-                else if (key === 'qty_pressure') sectionTitle = 'CFD EULERIAN FIELDS';
-                else if (key === 'qty_fem_stress') sectionTitle = 'SOLID FEM FIELDS';
-                else if (key === 'qty_mpm_stress') sectionTitle = 'SOLID MPM FIELDS';
-                else if (key === 'roi_enabled') sectionTitle = 'ROI BOUNDS & STRIDES';
+            if (shouldSkipNodeParameter(key, node.type, node.parameters, is3D)) continue;
 
-                if (sectionTitle) {
-                    const sectionKey = `${node.id}:${sectionTitle}`;
-                    if (!this.collapsedMaterialSections.has(sectionKey) && !this.initializedVTKSections.has(sectionKey)) {
+            const sectionInfo = getNodeSectionInfo(key, node.type, node.parameters, is3D);
+            if (sectionInfo) {
+                const sectionKey = `${node.id}:${sectionInfo.title}`;
+                if (!this.initializedNodeSections.has(sectionKey)) {
+                    this.initializedNodeSections.add(sectionKey);
+                    if (sectionInfo.defaultCollapsed) {
                         this.collapsedMaterialSections.add(sectionKey);
-                        this.initializedVTKSections.add(sectionKey);
                     }
-                    const isCollapsed = this.collapsedMaterialSections.has(sectionKey);
+                }
+                const isCollapsed = this.collapsedMaterialSections.has(sectionKey);
 
-                    const secHeader = document.createElement('div');
-                    secHeader.style.display = 'flex';
-                    secHeader.style.alignItems = 'center';
-                    secHeader.style.justifyContent = 'space-between';
-                    secHeader.style.fontWeight = 'bold';
-                    secHeader.style.fontSize = '9px';
-                    secHeader.style.color = '#00e5ff';
-                    secHeader.style.letterSpacing = '0.5px';
-                    secHeader.style.marginTop = '6px';
-                    secHeader.style.marginBottom = '2px';
-                    secHeader.style.padding = '2px 4px';
-                    secHeader.style.background = 'rgba(0, 229, 255, 0.08)';
-                    secHeader.style.borderRadius = '3px';
-                    secHeader.style.border = '1px solid rgba(0, 229, 255, 0.2)';
-                    secHeader.style.cursor = 'pointer';
-                    secHeader.style.userSelect = 'none';
+                const secHeader = document.createElement('div');
+                secHeader.style.display = 'flex';
+                secHeader.style.alignItems = 'center';
+                secHeader.style.justifyContent = 'space-between';
+                secHeader.style.fontWeight = 'bold';
+                secHeader.style.fontSize = '9px';
+                secHeader.style.color = sectionInfo.color;
+                secHeader.style.letterSpacing = '0.5px';
+                secHeader.style.marginTop = '6px';
+                secHeader.style.marginBottom = '2px';
+                secHeader.style.padding = '2px 4px';
+                secHeader.style.background = `${sectionInfo.color}15`;
+                secHeader.style.borderRadius = '3px';
+                secHeader.style.border = `1px solid ${sectionInfo.color}35`;
+                secHeader.style.cursor = 'pointer';
+                secHeader.style.userSelect = 'none';
 
-                    const titleSpan = document.createElement('span');
-                    titleSpan.textContent = sectionTitle;
+                const titleSpan = document.createElement('span');
+                titleSpan.textContent = sectionInfo.title;
 
-                    const arrowSpan = document.createElement('span');
-                    arrowSpan.textContent = isCollapsed ? '▶' : '▼';
-                    arrowSpan.style.fontSize = '8px';
-                    arrowSpan.style.opacity = '0.8';
+                const arrowSpan = document.createElement('span');
+                arrowSpan.textContent = isCollapsed ? '▶' : '▼';
+                arrowSpan.style.fontSize = '8px';
+                arrowSpan.style.opacity = '0.8';
 
-                    secHeader.appendChild(titleSpan);
-                    secHeader.appendChild(arrowSpan);
-                    form.appendChild(secHeader);
+                secHeader.appendChild(titleSpan);
+                secHeader.appendChild(arrowSpan);
+                form.appendChild(secHeader);
 
-                    const gridDiv = document.createElement('div');
-                    gridDiv.style.display = isCollapsed ? 'none' : 'grid';
-                    gridDiv.style.gridTemplateColumns = '1fr 1fr';
-                    gridDiv.style.gap = '3px 5px';
-                    gridDiv.style.marginBottom = '4px';
-                    form.appendChild(gridDiv);
+                const gridDiv = document.createElement('div');
+                gridDiv.style.display = isCollapsed ? 'none' : 'grid';
+                gridDiv.style.gridTemplateColumns = '1fr 1fr';
+                gridDiv.style.gap = '3px 5px';
+                gridDiv.style.marginBottom = '4px';
+                form.appendChild(gridDiv);
 
-                    secHeader.onclick = (e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        if (this.collapsedMaterialSections.has(sectionKey)) {
-                            this.collapsedMaterialSections.delete(sectionKey);
-                            gridDiv.style.display = 'grid';
-                            arrowSpan.textContent = '▼';
-                        } else {
-                            this.collapsedMaterialSections.add(sectionKey);
-                            gridDiv.style.display = 'none';
-                            arrowSpan.textContent = '▶';
-                        }
-                    };
-                    currentGridDiv = gridDiv;
-                }
-            }
-            if (node.type === 'MPMMaterialSteel' || node.type === 'Material') {
-                let sectionTitle: string | null = null;
-                let sectionColor = '#60a5fa';
-                if (key === 'transfer_scheme') {
-                    sectionTitle = 'MPM TRANSFER SCHEME [MPM ONLY]';
-                    sectionColor = '#c084fc';
-                }
-                else if (key === 'density') {
-                    sectionTitle = 'ELASTICITY & MASS [MPM · FEM]';
-                    sectionColor = '#60a5fa';
-                }
-                else if (key === 'yield_stress') {
-                    sectionTitle = 'PLASTIC YIELD & HARDENING [MPM · FEM]';
-                    sectionColor = '#60a5fa';
-                }
-                else if (key === 'failure_strain') {
-                    sectionTitle = 'CONSTITUTIVE FAILURE & SPALL [MPM · FEM]';
-                    sectionColor = '#60a5fa';
-                }
-                else if (key === 'enable_strain_erosion') {
-                    sectionTitle = 'ELEMENT & PARTICLE EROSION [FEM · MPM]';
-                    sectionColor = '#60a5fa';
-                }
-                else if (key === 'jc_A') {
-                    sectionTitle = 'JOHNSON-COOK VISCOPLASTICITY [MPM · FEM]';
-                    sectionColor = '#60a5fa';
-                }
-                else if (key === 'mg_gamma0') {
-                    sectionTitle = 'MIE-GRÜNEISEN SHOCK EOS [MPM · FEM]';
-                    sectionColor = '#60a5fa';
-                }
-                else if (key === 'davis_c0') {
-                    sectionTitle = 'DAVIS SOLID REACTANT EOS [MPM · FV]';
-                    sectionColor = '#22d3ee';
-                }
-                else if (key === 'davis_a') {
-                    sectionTitle = 'DAVIS DETONATION PRODUCT EOS [MPM · FV]';
-                    sectionColor = '#22d3ee';
-                }
-                else if (key === 'crest_b1') {
-                    sectionTitle = 'CREST REACTION KINETICS [MPM · FV]';
-                    sectionColor = '#22d3ee';
-                }
-                else if (key === 'fc') {
-                    sectionTitle = 'CONCRETE CORE & FRACTURE [MPM · FEM]';
-                    sectionColor = '#60a5fa';
-                }
-                else if (key === 'rht_A') {
-                    sectionTitle = 'RHT ENVELOPES & POROUS EOS [MPM · FEM]';
-                    sectionColor = '#60a5fa';
-                }
-                else if (key === 'kc_auto_generate' || key === 'kc_a0') {
-                    sectionTitle = 'K&C 3-SURFACE DAMAGE PLASTICITY [MPM · FEM]';
-                    sectionColor = '#60a5fa';
-                }
-                else if (key === 'cscm_alpha') {
-                    sectionTitle = 'CSCM SMOOTH CAP & DAMAGE [MPM · FEM]';
-                    sectionColor = '#60a5fa';
-                }
-                else if (key === 'weibull_modulus') {
-                    sectionTitle = 'MICROSTRUCTURAL FLAWS & FRAGMENTATION [MPM ONLY]';
-                    sectionColor = '#c084fc';
-                }
-                else if (key === 'atm_pressure') {
-                    sectionTitle = 'IDEAL GAS AMBIENT PROPERTIES [FV ONLY]';
-                    sectionColor = '#fbbf24';
-                }
-                else if (key === 'composition') {
-                    sectionTitle = 'JWL DETONATION PARAMETERS [FV ONLY]';
-                    sectionColor = '#fbbf24';
-                }
-
-                if (sectionTitle) {
-                    const sectionKey = `${node.id}:${sectionTitle}`;
-                    const isCollapsed = this.collapsedMaterialSections.has(sectionKey);
-
-                    const secHeader = document.createElement('div');
-                    secHeader.style.display = 'flex';
-                    secHeader.style.alignItems = 'center';
-                    secHeader.style.justifyContent = 'space-between';
-                    secHeader.style.fontWeight = 'bold';
-                    secHeader.style.fontSize = '9px';
-                    secHeader.style.color = sectionColor;
-                    secHeader.style.letterSpacing = '0.5px';
-                    secHeader.style.marginTop = '6px';
-                    secHeader.style.marginBottom = '2px';
-                    secHeader.style.padding = '2px 4px';
-                    secHeader.style.background = `${sectionColor}15`;
-                    secHeader.style.borderRadius = '3px';
-                    secHeader.style.border = `1px solid ${sectionColor}35`;
-                    secHeader.style.cursor = 'pointer';
-                    secHeader.style.userSelect = 'none';
-
-                    const titleSpan = document.createElement('span');
-                    titleSpan.textContent = sectionTitle;
-
-                    const arrowSpan = document.createElement('span');
-                    arrowSpan.textContent = isCollapsed ? '▶' : '▼';
-                    arrowSpan.style.fontSize = '8px';
-                    arrowSpan.style.opacity = '0.8';
-
-                    secHeader.appendChild(titleSpan);
-                    secHeader.appendChild(arrowSpan);
-                    form.appendChild(secHeader);
-
-                    const gridDiv = document.createElement('div');
-                    gridDiv.style.display = isCollapsed ? 'none' : 'grid';
-                    gridDiv.style.gridTemplateColumns = '1fr 1fr';
-                    gridDiv.style.gap = '3px 5px';
-                    gridDiv.style.marginBottom = '4px';
-                    form.appendChild(gridDiv);
-
-                    secHeader.onclick = (e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        if (this.collapsedMaterialSections.has(sectionKey)) {
-                            this.collapsedMaterialSections.delete(sectionKey);
-                            gridDiv.style.display = 'grid';
-                            arrowSpan.textContent = '▼';
-                        } else {
-                            this.collapsedMaterialSections.add(sectionKey);
-                            gridDiv.style.display = 'none';
-                            arrowSpan.textContent = '▶';
-                        }
-                    };
-                    currentGridDiv = gridDiv;
-                }
-            }
-            if (node.type === 'MPMMaterialSteel' || node.type === 'Material') {
-                // Key visibility strictly governed by paramKeys
-            }
-            if (node.type === 'MPMObject3D') {
-                const shape = node.parameters['shape_type'] || 'Box';
-                if (shape === 'Box') {
-                    if (['radius', 'inner_radius', 'height', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) continue;
-                } else if (shape === 'Sphere') {
-                    if (['size_x', 'size_y', 'size_z', 'inner_radius', 'height', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) continue;
-                } else if (shape === 'Cylinder') {
-                    if (['size_x', 'size_y', 'size_z', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) continue;
-                } else if (shape === 'STL') {
-                    if (['size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height'].includes(key)) continue;
-                }
-            }
-            if (node.type === 'Charge2D' || node.type === 'Charge1D') {
-                const shape = node.parameters['charge_shape'] || 'Sphere';
-                if ((key === 'charge_height' || key === 'charge_aspect_ratio') && shape !== 'Cylinder') continue;
-            }
-            if (node.type === 'Charge3D') {
-                const shape = node.parameters['charge_shape'] || 'Sphere';
-                if (shape === 'Sphere') {
-                    if (key === 'charge_height' || key === 'charge_aspect_ratio' || key === 'charge_lx' || key === 'charge_ly' || key === 'charge_lz' || key === 'charge_rot_x' || key === 'charge_rot_y' || key === 'charge_rot_z') continue;
-                } else if (shape === 'Cylinder') {
-                    if (key === 'charge_lx' || key === 'charge_ly' || key === 'charge_lz') continue;
-                } else if (shape === 'Block') {
-                    if (key === 'charge_radius' || key === 'charge_height' || key === 'charge_aspect_ratio') continue;
-                }
+                secHeader.onclick = (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (this.collapsedMaterialSections.has(sectionKey)) {
+                        this.collapsedMaterialSections.delete(sectionKey);
+                        gridDiv.style.display = 'grid';
+                        arrowSpan.textContent = '▼';
+                    } else {
+                        this.collapsedMaterialSections.add(sectionKey);
+                        gridDiv.style.display = 'none';
+                        arrowSpan.textContent = '▶';
+                    }
+                };
+                currentGridDiv = gridDiv;
             }
 
             const row = document.createElement('div');
-            row.style.marginBottom = (node.type === 'MPMMaterialSteel' || node.type === 'VTKOutput') && currentGridDiv ? '0px' : '4px';
+            row.style.marginBottom = currentGridDiv ? '0px' : '4px';
             row.style.display = 'flex';
             row.style.flexDirection = 'column';
 
@@ -5081,8 +4472,14 @@ export class GraphRenderer {
                     'time_interval': 'TIME INTV (S)',
                     'custom_filename': 'FILENAME',
                     'vtk_dir': 'OUTPUT DIR',
+                    'export_cfd_2d': '2D CFD GRID',
                     'export_slices': '2D SLICES',
                     'export_volumes': '3D VOLUMES',
+                    'export_obstacles': 'VOXEL BOUNDARY',
+                    'export_stl_faces': 'CAD STL FACES',
+                    'stl_outside_domain': 'OUTSIDE DOMAIN',
+                    'tessellate_stl_faces': 'TESSELLATE',
+                    'tessellation_max_edge': 'MAX EDGE (M)',
                     'export_fem': 'FEM MESH',
                     'export_mpm': 'MPM PARTICLES',
                     'export_pvd': 'PVD INDEX',
@@ -5125,7 +4522,7 @@ export class GraphRenderer {
                 ? `<span style="font-size:8px; color:#00e5ff; font-family:monospace; background:rgba(0,229,255,0.12); padding:0px 3px; border-radius:2px; margin-left:2px; flex-shrink:0;">${paramInfo.unit}</span>` 
                 : '';
 
-            const solverBadge = (node.type === 'MPMMaterialSteel' || node.type === 'Material')
+            const solverBadge = (node.type === 'Material')
                 ? getSolverBadgeHTML(paramInfo.solverScope || getSolverScope(key, node.type), true)
                 : '';
 
@@ -5153,6 +4550,10 @@ export class GraphRenderer {
             row.appendChild(label);
 
             const dropdowns: Record<string, string[]> = {
+                'font_size': ['8', '9', '10', '11', '12', '13', '14', '15', '16', '18', '20', '22'],
+                'stream_layout': ['Live Page (In-Place)', 'Multi-Line Cards', 'Dual-Deck (Page + Log)', 'Columnar (Fixed-Width)', 'Ultra-Compact', 'Standard Log'],
+                'filter_level': ['All', 'Metrics Only', 'Logs Only'],
+                'timestamp_mode': ['None', 'Relative', 'Clock'],
                 'material_model': getConstitutiveModels(),
                 'fragment_distribution': ['Rosin-Rammler', 'Mott-Grady', 'Lognormal', 'Monodisperse'],
                 'rebar_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
@@ -5189,22 +4590,24 @@ export class GraphRenderer {
                 'mesh_source': ['Box Generator', 'Cylinder Generator', 'LS-DYNA Keyword File'],
                 'fsi_algorithm': ['CutCellPenalty', 'ImmersedBoundary', 'DirectMassCoupled'],
                 'trigger_type': node.type === 'VTKOutput' ? ['Step Interval', 'Time Interval'] : ['end', 'time', 'step'],
+                'stl_outside_domain': ['nan', 'zero', 'omit'],
                 // Explosive composition — JWL parameter sets (Ideal Gas uses its own node)
-                'composition': ['Aluminized ANFO', 'Ammonal', 'ANFO', 'Baratol', 'C-4', 'Composition A-3', 'Composition B', 'Composition C-3', 'Cyclotol', 'Heavy ANFO', 'HMX', 'LX-04', 'LX-07', 'LX-10', 'LX-14', 'LX-17', 'Mining Emulsion', 'Octol', 'PBX 9404', 'PBX 9501', 'PBX 9502', 'PE-10', 'PE-12', 'PE-4', 'PE-8', 'Pentolite', 'PETN', 'RDX', 'TATB', 'Tetryl', 'TNT', 'Water Gel', 'Custom'],
+                'composition': ['Aluminized ANFO', 'Ammonal', 'ANFO', 'Baratol', 'C-4', 'Composition A-3', 'Composition B', 'Composition C-3', 'Cyclotol', 'Heavy ANFO', 'HMX', 'LX-04', 'LX-07', 'LX-10', 'LX-14', 'LX-17', 'Mining Emulsion', 'Nitromethane', 'Octol', 'PBX 9404', 'PBX 9501', 'PBX 9502', 'PE-10', 'PE-12', 'PE-4', 'PE-8', 'Pentolite', 'PETN', 'RDX', 'TATB', 'Tetryl', 'TNT', 'Water Gel', 'Custom'],
                 'init_mode': node.type === 'CFDSolver3D' ? ['From1D', 'From2D', 'Multi-Material JWL', 'Ideal Gas'] : ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
                 'flux_scheme': ['AUSM+', 'Rusanov'],
                 'spatial_order': ['1', '2', '3'],
                 'temporal_order': ['1', '2', '3'],
                 'plot_stride': ['1', '2', '5', '10', '20', '50', '100'],
+                'refresh_rate': ['0.016', '0.033', '0.05', '0.1', '0.2', '0.5', '1.0', '2.0', '5.0', '10.0', '20.0', '50.0', '100.0', '1000.0'],
                 charge_shape: node.type === 'Charge3D' ? ['Sphere', 'Cylinder', 'Block'] : ['Sphere', 'Cylinder'],
                 material_type: ['Air', 'JWL Charge', 'Ideal Gas Charge'],
-                colormap: ['plasma', 'viridis'],
+                colormap: ['rainbow', 'plasma', 'viridis', 'turbo', 'inferno', 'coolwarm', 'cividis', 'grayscale'],
                 auto_scale: ['true', 'false'],
                 log_scale: ['true', 'false'],
                 show_grid: ['true', 'false'],
                 'voxelization_method': ['watertight_floodfill', 'watertight_raycast', 'thin_shell', 'winding_number'],
                 'obstacles_quantity': ['pressure', 'density', 'velocity', 'energy', 'species1', 'species2', 'species3', 'peak_overpressure', 'peak_impulse'],
-                'transfer_scheme': (node.type === 'Material' || node.type === 'MPMMaterialSteel') ? 
+                'transfer_scheme': (node.type === 'Material') ? 
                     ['Default', 'BSpline', 'Radial MLS', 'Cubic BSpline', 'GIMP', 'Standard'] : 
                     ['BSpline', 'Radial MLS', 'Cubic BSpline', 'GIMP', 'Standard'],
                 'particle_distribution': ['Cartesian', 'Hexagonal'],
@@ -5213,6 +4616,7 @@ export class GraphRenderer {
                 'smooth_plastic_strain': ['Enabled', 'Disabled'],
                 'boundary_condition': ['Free', 'Fixed Base', 'Fixed Entire'],
                 'shape_type': node.type === 'FEMObject3D' ? ['Box', 'Cylinder', 'LS-DYNA File'] : (node.type === 'MPMObject3D' ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle']),
+                'anisotropy_axis': ['X', 'Y', 'Z', 'Custom'],
                 'colorbar_source': ['slice', 'mpm', 'obstacles', 'stl'],
                 'space_time_scheme': (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') ? 
                     ['Leapfrog', 'RK2', 'USL', 'USF'] : 
@@ -5224,7 +4628,38 @@ export class GraphRenderer {
             };
 
             let inputEl: HTMLElement;
-            if (typeof value === 'boolean') {
+            if (key === 'material') {
+                const state = this.stateManager.getCurrentState();
+                const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+                const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
+                const matNodes = getCompatibleMaterialsForNode(node, candidateNodes);
+                let currentMatId = node.parameters['material'] || '';
+                if (!currentMatId && state) {
+                    const conn = state.connections.find(c => (c.toNode === node.id && c.toPort === 'material') || (c.fromNode === node.id && c.fromPort === 'material'));
+                    if (conn) {
+                        currentMatId = conn.toNode === node.id ? conn.fromNode : conn.toNode;
+                    }
+                }
+                const options = [
+                    { value: '', label: '(None / Disconnected)' },
+                    ...matNodes.map(mat => {
+                        const matSummary = mat.parameters.preset || mat.parameters.composition || mat.parameters.material_type || mat.parameters.material_model || 'Material';
+                        return {
+                            value: mat.id,
+                            label: `${(mat as any).name || mat.parameters?.name || mat.type} [${mat.id.substring(0, 6)}] (${matSummary})`
+                        };
+                    })
+                ];
+                inputEl = this.createCustomDropdown(
+                    options,
+                    currentMatId,
+                    (newVal) => {
+                        this.stateManager.updateNodeParameters(node.id, { material: newVal });
+                        this.syncMaterialConnection(node.id, newVal);
+                    },
+                    key
+                );
+            } else if (typeof value === 'boolean') {
                 const isEnableKey = key.startsWith('enable_') || key.startsWith('smooth_');
                 inputEl = this.createCustomDropdown(
                     [
@@ -5240,18 +4675,55 @@ export class GraphRenderer {
             } else if (dropdowns[key] || key === 'preset') {
                 let options: { value: string; label: string; category?: string }[];
                 if (key === 'preset') {
-                    const currentModel = node.parameters['material_model'] || 'Linear Elastic';
-                    const validPresets = getPresetsForConstitutiveModel(currentModel);
-                    options = validPresets.map(opt => ({
-                        value: opt,
-                        label: opt
-                    }));
+                    const matType = node.parameters['material_type'];
+                    let currentModel = node.parameters['material_model'];
+                    if (matType === 'JWL Charge') {
+                        currentModel = 'JWL Detonation Gas';
+                    } else if (matType === 'Ideal Gas Charge') {
+                        currentModel = 'Ideal Gas Charge';
+                    } else if (matType === 'Air') {
+                        currentModel = 'Ideal Gas';
+                    } else if (!currentModel) {
+                        currentModel = 'Hypoelastic';
+                    }
+                    const categorizedGroups = getCategorizedPresetsForModel(currentModel);
+                    options = [];
+                    categorizedGroups.forEach(group => {
+                        group.presets.forEach(opt => {
+                            options.push({
+                                value: opt,
+                                label: opt,
+                                category: group.category
+                            });
+                        });
+                    });
                 } else {
                     options = dropdowns[key].map(opt => {
                         let label = opt;
-                        if (key === 'device') {
+                        if (key === 'font_size') {
+                            label = `${opt}px`;
+                        } else if (key === 'device') {
                             if (opt === 'cpu') label = 'CPU';
                             else if (opt === 'cuda') label = 'CUDA GPU';
+                        } else if (key === 'refresh_rate') {
+                            if (opt === '0.016') label = '60 FPS (16.6ms / Max)';
+                            else if (opt === '0.033') label = '30 FPS (0.033s / 33.3ms)';
+                            else if (opt === '0.05') label = '20 FPS (0.05s / 50ms)';
+                            else if (opt === '0.1') label = '10 FPS (0.1s / 100ms)';
+                            else if (opt === '0.2') label = '5 FPS (0.2s / 200ms)';
+                            else if (opt === '0.5') label = '2 FPS (0.5s / Default)';
+                            else if (opt === '1.0') label = '1 FPS (1.0s)';
+                            else if (opt === '2.0') label = '0.5 FPS (2.0s)';
+                            else if (opt === '5.0') label = '0.2 FPS (5.0s)';
+                            else if (opt === '10.0') label = '0.1 FPS (10.0s)';
+                            else if (opt === '20.0') label = '0.05 FPS (20.0s)';
+                            else if (opt === '50.0') label = '0.02 FPS (50.0s)';
+                            else if (opt === '100.0') label = '0.01 FPS (100.0s)';
+                            else if (opt === '1000.0') label = '0.001 FPS (1000.0s / 16.7m)';
+                        } else if (key === 'stl_outside_domain') {
+                            if (opt === 'nan') label = 'NaN (No Value)';
+                            else if (opt === 'zero') label = 'Zero (0.0)';
+                            else if (opt === 'omit') label = 'Omit Outside Faces';
                         }
                         return { value: opt, label: label };
                     });
@@ -5268,11 +4740,19 @@ export class GraphRenderer {
                             } else {
                                 let s_order = 2;
                                 let t_order = 4;
-                                if (newVal === 'ADER-2 (2nd-Order Space/Time)') { s_order = 2; t_order = 5; }
-                                else if (newVal === 'ADER-3 (3rd-Order Space/Time)') { s_order = 3; t_order = 6; }
-                                else { s_order = 2; t_order = 4; }
+                                if (newVal === 'ADER-2 (2nd-Order Space/Time)') {
+                                    s_order = 2;
+                                    t_order = (node.type === 'CFDSolver3D') ? 5 : 2;
+                                } else if (newVal === 'ADER-3 (3rd-Order Space/Time)') {
+                                    s_order = 3;
+                                    t_order = (node.type === 'CFDSolver3D') ? 6 : 3;
+                                } else {
+                                    s_order = 2;
+                                    t_order = 4;
+                                }
                                 
                                 this.stateManager.updateNodeParameters(node.id, {
+                                    space_time_scheme: newVal,
                                     spatial_order: s_order,
                                     temporal_order: t_order
                                 });
@@ -5282,9 +4762,9 @@ export class GraphRenderer {
                         const numericKeys = [
                             'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature',
                             'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
-                            'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl',
+                            'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl', 'endtime',
                             'spatial_order', 'temporal_order', 'gamma', 'plot_stride', 'refresh_rate',
-                            'ascii_precision', 'step_interval', 'time_interval', 'downsample_stride',
+                            'ascii_precision', 'step_interval', 'time_interval', 'downsample_stride', 'tessellation_max_edge',
                             'telemetry_channel', 'telemetry_interval_ms', 'vtk_step_interval',
                             // 2D CFD keys
                             'nr', 'nz', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
@@ -5297,26 +4777,28 @@ export class GraphRenderer {
                             'charge_rot_x', 'charge_rot_y', 'charge_rot_z',
                             'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
                             'scale_factor',
-                            'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
-                            'charge_opacity',
+                            'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'aoRadius', 'aoIntensity', 'aoBias', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
+                            'charge_opacity', 'detonators_size', 'detonator_size', 'detonators_opacity', 'detonator_opacity',
                             'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio', 'amr_tile_size',
                             'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'length',
                             'offset', 'stride',
                             // MPM keys
-                            'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'radius', 'inner_radius',
+                            'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'initial_velocity_x', 'initial_velocity_y', 'initial_velocity_z', 'initial_velocity_r', 'radius', 'inner_radius',
                             'scale_x', 'scale_y', 'scale_z',
                             'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
                             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
                             'failure_strain', 'tensile_failure_stress', 'erosion_strain', 'erosion_stress',
                             'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5', 'T_melt', 'T_room', 'Cp',
                             'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                            'anisotropy_ratio', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
                             'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution',
                             'mg_gamma0', 'mg_c0', 'mg_s',
                             'ppc',
-                            'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
+                            'mpmParticleDiameter', 'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
                             // FEM keys
                             'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
                             'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_area', 'beamRadius', 'beam_radius', 'beam_area', 'beamMinVal', 'beamMaxVal',
+                            'rebarRadius', 'viewport_refresh_rate',
                             'femMinVal', 'femMaxVal', 'femOpacity', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',
                             // Concrete Core & Models (RHT, K&C, CSCM)
                             'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
@@ -5331,7 +4813,17 @@ export class GraphRenderer {
                             'initiation_radius', 'booster_overpressure',
                             // VTK ROI & Strides
                             'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride',
-                            'nonlocal_radius'
+                            'nonlocal_radius', 'opacity',
+                            // Virtual Gauges Massive & External Dataset Keys
+                            'sampling_stride_steps', 'external_probe_count',
+                            'external_bounds_min_x', 'external_bounds_max_x',
+                            'external_bounds_min_y', 'external_bounds_max_y',
+                            'external_bounds_min_z', 'external_bounds_max_z',
+                            // TelemetryText Keys
+                            'font_size', 'buffer_capacity',
+                            // Camera & Viewport Navigation Keys
+                            'camera_fov', 'camera_pitch', 'camera_yaw', 'camera_distance',
+                            'target_x', 'target_y', 'target_z'
                         ];
 
                         let castValue: any = newVal;
@@ -5515,6 +5007,16 @@ export class GraphRenderer {
                                     jwl_R2: 1.05,
                                     jwl_omega: 0.15
                                 },
+                                'Nitromethane': {
+                                    rho: 1128,
+                                    detonation_energy: 4480000,
+                                    det_vel: 6280,
+                                    jwl_A: 209.2e9,
+                                    jwl_B: 5.689e9,
+                                    jwl_R1: 4.40,
+                                    jwl_R2: 1.20,
+                                    jwl_omega: 0.30
+                                },
                                 'Octol': {
                                     rho: 1810,
                                     detonation_energy: 5400000,
@@ -5668,14 +5170,85 @@ export class GraphRenderer {
                             };
                             const preset = EXPLOSIVE_PRESETS[newVal];
                             if (preset) {
-                                const matType = node.parameters['material_type'] || 'Air';
+                                const matType = node.parameters['material_type'] || 'JWL Charge';
                                 if (matType === 'Ideal Gas Charge') {
                                     updates['ideal_rho_0'] = preset.rho;
                                     updates['ideal_e_0'] = preset.detonation_energy;
+                                    updates['ideal_gamma'] = 1.4;
                                 } else {
                                     Object.assign(updates, preset);
                                 }
                             }
+                        } else if (node.type === 'Material' && key === 'preset') {
+                            const presetData = MPM_MATERIAL_PRESETS[newVal];
+                            if (presetData) {
+                                Object.assign(updates, presetData);
+                                if (presetData.category === 'Ideal Gas Presets') {
+                                    updates['material_type'] = 'Air';
+                                    updates['material_model'] = 'Ideal Gas';
+                                    if (presetData.atm_pressure !== undefined) {
+                                        updates['ambient_p'] = presetData.atm_pressure;
+                                        const t = presetData.atm_temperature || 288.15;
+                                        const rho = presetData.density ?? (presetData.atm_pressure / (287.058 * t));
+                                        updates['density'] = rho;
+                                        updates['ambient_rho'] = rho;
+                                    }
+                                } else if (presetData.category === 'JWL Detonation Gas Presets') {
+                                    updates['material_type'] = 'JWL Charge';
+                                    updates['material_model'] = 'JWL Detonation Gas';
+                                    if (presetData.composition) updates['composition'] = presetData.composition;
+                                } else if (presetData.category === 'Ideal Gas Blast Presets') {
+                                    updates['material_type'] = 'Ideal Gas Charge';
+                                    updates['material_model'] = 'Ideal Gas Charge';
+                                    if (presetData.composition) updates['composition'] = presetData.composition;
+                                }
+                            }
+                        } else if (node.type === 'Material' && key === 'material_model') {
+                            if (newVal === 'Ideal Gas') {
+                                updates['material_model'] = 'Ideal Gas';
+                                updates['material_type'] = 'Air';
+                                const defPreset = 'Air (Standard STP, gamma=1.4)';
+                                updates['preset'] = defPreset;
+                                const presetData = MPM_MATERIAL_PRESETS[defPreset];
+                                if (presetData) {
+                                    Object.assign(updates, presetData);
+                                    const p = presetData.atm_pressure ?? 101325.0;
+                                    const t = presetData.atm_temperature || 288.15;
+                                    const rho = presetData.density ?? (p / (287.058 * t));
+                                    updates['density'] = rho;
+                                    updates['ambient_rho'] = rho;
+                                    updates['ambient_p'] = p;
+                                }
+                            } else if (newVal === 'JWL Detonation Gas') {
+                                updates['material_model'] = 'JWL Detonation Gas';
+                                updates['material_type'] = 'JWL Charge';
+                                updates['composition'] = 'TNT';
+                                const defPreset = 'TNT (Trinitrotoluene)';
+                                updates['preset'] = defPreset;
+                                const presetData = MPM_MATERIAL_PRESETS[defPreset];
+                                if (presetData) Object.assign(updates, presetData);
+                            } else if (newVal === 'Ideal Gas Charge') {
+                                updates['material_model'] = 'Ideal Gas Charge';
+                                updates['material_type'] = 'Ideal Gas Charge';
+                                updates['composition'] = 'TNT';
+                                const defPreset = 'TNT (Ideal Gas Equivalent)';
+                                updates['preset'] = defPreset;
+                                const presetData = MPM_MATERIAL_PRESETS[defPreset];
+                                if (presetData) Object.assign(updates, presetData);
+                            } else {
+                                delete updates['material_type'];
+                                delete updates['composition'];
+                                const defPreset = getDefaultPresetForModel(newVal);
+                                if (defPreset) {
+                                    updates['preset'] = defPreset;
+                                    const presetData = MPM_MATERIAL_PRESETS[defPreset];
+                                    if (presetData) {
+                                        Object.assign(updates, presetData);
+                                    }
+                                }
+                            }
+                        } else if (node.type === 'Material' && ['rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega', 'ideal_rho_0', 'ideal_e_0', 'ideal_gamma', 'atm_pressure', 'atm_temperature', 'gamma', 'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus'].includes(key)) {
+                            updates['preset'] = 'Custom';
                         }
                         if (node.type === 'STLGeometry' && key === 'voxelization_method') {
                             const rand = Math.floor(Math.random() * 1000000);
@@ -5699,9 +5272,6 @@ export class GraphRenderer {
                 input.style.color = '#ccc';
                 input.style.border = '1px solid #444';
                 input.style.padding = '1px 2px';
-                if (node.type === 'MPMMaterialSteel' && MPM_MATERIAL_PARAM_INFO[key]) {
-                    input.title = MPM_MATERIAL_PARAM_INFO[key].tooltip;
-                }
 
 
                 input.addEventListener('input', () => {
@@ -5712,6 +5282,20 @@ export class GraphRenderer {
                     }
                     if (node.type === 'Material' && ['ideal_rho_0', 'ideal_e_0'].includes(key)) {
                         updates['composition'] = 'Custom';
+                    }
+                    if (node.type === 'Material' && (key === 'atm_pressure' || key === 'atm_temperature')) {
+                        const p = Number(key === 'atm_pressure' ? newVal : (node.parameters['atm_pressure'] ?? 101325.0));
+                        const t = Number(key === 'atm_temperature' ? newVal : (node.parameters['atm_temperature'] ?? 288.15));
+                        const rho = p / (287.058 * t);
+                        updates['density'] = rho;
+                        updates['ambient_rho'] = rho;
+                        updates['ambient_p'] = p;
+                        updates['preset'] = 'Custom';
+                    } else if (node.type === 'Material' && key === 'density' && node.parameters['material_model'] === 'Ideal Gas') {
+                        updates['ambient_rho'] = Number(newVal);
+                        updates['preset'] = 'Custom';
+                    } else if (node.type === 'Material' && ['rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega', 'ideal_rho_0', 'ideal_e_0', 'ideal_gamma', 'atm_pressure', 'atm_temperature', 'gamma', 'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus'].includes(key)) {
+                        updates['preset'] = 'Custom';
                     }
                     
                     const isDynamicCfl = (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver' || node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D' || node.type === 'FEMDomain3D' || node.type === 'FSICoupler2D' || node.type === 'FSICoupler3D' || node.type === 'FEMFSICoupler3D') && key === 'cfl';
@@ -5803,7 +5387,7 @@ export class GraphRenderer {
 
             inputEl.addEventListener('mousedown', (e) => e.stopPropagation());
             row.appendChild(inputEl);
-            if ((node.type === 'MPMMaterialSteel' || node.type === 'VTKOutput') && currentGridDiv) {
+            if (currentGridDiv) {
                 currentGridDiv.appendChild(row);
             } else {
                 form.appendChild(row);
@@ -5814,6 +5398,18 @@ export class GraphRenderer {
         }
         if (mpmInfoDiv) {
             form.appendChild(mpmInfoDiv);
+        }
+        if (femInfoDiv) {
+            form.appendChild(femInfoDiv);
+        }
+        if (geomInfoDiv) {
+            form.appendChild(geomInfoDiv);
+        }
+        if (couplerInfoDiv) {
+            form.appendChild(couplerInfoDiv);
+        }
+        if (telemetryInfoDiv) {
+            form.appendChild(telemetryInfoDiv);
         }
 
         container.appendChild(form);
@@ -5906,57 +5502,62 @@ export class GraphRenderer {
     }
 
 
-    public autoArrange(): void {
-        const state = this.stateManager.getCurrentState();
-        if (!state) return;
+    public layoutModelNodes(model: { id: string, name?: string, nodes: Node[], connections: Connection[] }, state: SimulationState, startX: number, startY: number): { width: number, height: number } {
+        const modelNodes = state.nodes.filter(n => model.nodes.some(mn => mn.id === n.id));
+        if (modelNodes.length === 0) return { width: 0, height: 0 };
 
-        state.nodes.forEach(n => {
+        const modelNodeIds = new Set(modelNodes.map(n => n.id));
+        const internalConnections = state.connections.filter(c => modelNodeIds.has(c.fromNode) && modelNodeIds.has(c.toNode));
+
+        modelNodes.forEach(n => {
             n.orientation = this.layoutOrientation;
         });
 
-        const nodes = state.nodes;
-        const connections = state.connections;
-
         // 1. Assign Ranks (Topological Sort / Layering)
-        const ranks: Map<string, number> = new Map();
-        const inDegree: Map<string, number> = new Map();
+        const ranks = new Map<string, number>();
+        const inDegree = new Map<string, number>();
 
-        nodes.forEach(n => {
-            ranks.set(n.id, 0);
+        // Default base rank by role
+        modelNodes.forEach(n => {
+            let baseRank = 0;
+            const t = n.type;
+            if (t === 'ThePainter' || t.startsWith('Remap')) {
+                baseRank = 1;
+            } else if (t.includes('Solver') || t.includes('Domain') || t.includes('Coupler')) {
+                baseRank = 2;
+            } else if (t.startsWith('Telemetry') || t === 'VirtualGauges' || t === 'VTKOutput') {
+                baseRank = 3;
+            }
+            ranks.set(n.id, baseRank);
             inDegree.set(n.id, 0);
         });
 
-        connections.forEach(c => {
+        internalConnections.forEach(c => {
             inDegree.set(c.toNode, (inDegree.get(c.toNode) || 0) + 1);
         });
 
+        // Topological queue
         const queue: string[] = [];
-        nodes.forEach(n => {
-            if (inDegree.get(n.id) === 0) queue.push(n.id);
+        modelNodes.forEach(n => {
+            if ((inDegree.get(n.id) || 0) === 0) {
+                queue.push(n.id);
+            }
         });
 
         while (queue.length > 0) {
             const uId = queue.shift()!;
             const uRank = ranks.get(uId)!;
 
-            connections.filter(c => c.fromNode === uId).forEach(c => {
+            internalConnections.filter(c => c.fromNode === uId).forEach(c => {
                 const vId = c.toNode;
                 ranks.set(vId, Math.max(ranks.get(vId)!, uRank + 1));
-                inDegree.set(vId, inDegree.get(vId)! - 1);
+                inDegree.set(vId, (inDegree.get(vId) || 1) - 1);
                 if (inDegree.get(vId) === 0) queue.push(vId);
             });
         }
 
-        // Handle cycles by assigning remaining nodes to next rank
-        nodes.forEach(n => {
-            if (inDegree.get(n.id)! > 0) {
-                const maxRank = Math.max(0, ...Array.from(ranks.values()));
-                ranks.set(n.id, maxRank + 1);
-            }
-        });
-
-        // 2. Group by Rank
-        const layers: Map<number, string[]> = new Map();
+        // 2. Group into layers
+        const layers = new Map<number, string[]>();
         ranks.forEach((rank, id) => {
             if (!layers.has(rank)) layers.set(rank, []);
             layers.get(rank)!.push(id);
@@ -5964,42 +5565,179 @@ export class GraphRenderer {
 
         const sortedRanks = Array.from(layers.keys()).sort((a, b) => a - b);
 
-        // 3. Position Nodes
-        const horizontalGap = 300;
-        const verticalGap = 50;
-        const startX = 50;
-        const startY = 50;
-
-        sortedRanks.forEach((rank, layerIndex) => {
-            const nodeIds = layers.get(rank)!;
-
-            // Sort nodes within layer by average predecessor Y position to minimize crossings
-            if (layerIndex > 0) {
-                nodeIds.sort((a, b) => {
-                    const avgA = this.getAveragePredecessorY(a, connections, nodes);
-                    const avgB = this.getAveragePredecessorY(b, connections, nodes);
-                    return avgA - avgB;
-                });
+        // Normalize layers without gaps
+        const normalizedLayers: string[][] = [];
+        sortedRanks.forEach(r => {
+            const ids = layers.get(r);
+            if (ids && ids.length > 0) {
+                normalizedLayers.push(ids);
             }
-
-            let currentY = startY;
-            nodeIds.forEach(id => {
-                const node = nodes.find(n => n.id === id)!;
-
-                if (this.layoutOrientation === 'HORIZ') {
-                    const nodeHeight = this.getNodeEstimatedHeight(node);
-                    node.x = startX + layerIndex * horizontalGap;
-                    node.y = currentY;
-                    currentY += nodeHeight + verticalGap;
-                } else {
-                    const nodeWidth = this.getNodeEstimatedWidth(node);
-                    node.x = currentY;
-                    node.y = startY + layerIndex * horizontalGap;
-                    currentY += nodeWidth + verticalGap;
-                }
-            });
         });
 
+        // 3. Position nodes within layers
+        let currentX = startX;
+        let maxModelHeight = 0;
+        let totalWidth = 0;
+
+        if (this.layoutOrientation === 'HORIZ') {
+            const layerGap = 80;
+            const nodeGap = 35;
+
+            normalizedLayers.forEach((nodeIds, layerIdx) => {
+                // Sort within layer to minimize wire crossings
+                if (layerIdx > 0) {
+                    nodeIds.sort((a, b) => {
+                        const avgA = this.getAveragePredecessorY(a, internalConnections, modelNodes);
+                        const avgB = this.getAveragePredecessorY(b, internalConnections, modelNodes);
+                        return avgA - avgB;
+                    });
+                }
+
+                let maxNodeWidthInLayer = 0;
+                let currentY = startY;
+
+                nodeIds.forEach(id => {
+                    const node = modelNodes.find(n => n.id === id)!;
+                    const w = this.getNodeEstimatedWidth(node);
+                    const h = this.getNodeEstimatedHeight(node);
+                    if (w > maxNodeWidthInLayer) maxNodeWidthInLayer = w;
+
+                    node.x = currentX;
+                    node.y = currentY;
+
+                    currentY += h + nodeGap;
+                });
+
+                const layerHeight = currentY - startY - nodeGap;
+                if (layerHeight > maxModelHeight) maxModelHeight = layerHeight;
+
+                currentX += Math.max(maxNodeWidthInLayer, 180) + layerGap;
+            });
+
+            totalWidth = currentX - startX - layerGap;
+        } else {
+            // VERT layout
+            const layerGap = 80;
+            const nodeGap = 35;
+            let currentY = startY;
+            let maxModelWidth = 0;
+
+            normalizedLayers.forEach((nodeIds) => {
+                let maxNodeHeightInLayer = 0;
+                let layerX = startX;
+
+                nodeIds.forEach(id => {
+                    const node = modelNodes.find(n => n.id === id)!;
+                    const w = this.getNodeEstimatedWidth(node);
+                    const h = this.getNodeEstimatedHeight(node);
+                    if (h > maxNodeHeightInLayer) maxNodeHeightInLayer = h;
+
+                    node.x = layerX;
+                    node.y = currentY;
+
+                    layerX += w + nodeGap;
+                });
+
+                const layerWidth = layerX - startX - nodeGap;
+                if (layerWidth > maxModelWidth) maxModelWidth = layerWidth;
+
+                currentY += Math.max(maxNodeHeightInLayer, 80) + layerGap;
+            });
+
+            totalWidth = maxModelWidth;
+            maxModelHeight = currentY - startY - layerGap;
+        }
+
+        return { width: Math.max(totalWidth, 200), height: Math.max(maxModelHeight, 150) };
+    }
+
+    public tidyUpModel(modelId: string): void {
+        const state = this.stateManager.getCurrentState();
+        if (!state) return;
+        const model = this.stateManager.getAllModels().find(m => m.id === modelId);
+        if (!model || model.nodes.length === 0) return;
+
+        // Find existing top-left of this model
+        let minX = Infinity;
+        let minY = Infinity;
+        model.nodes.forEach(n => {
+            const stateNode = state.nodes.find(sn => sn.id === n.id);
+            if (stateNode) {
+                if (stateNode.x < minX) minX = stateNode.x;
+                if (stateNode.y < minY) minY = stateNode.y;
+            }
+        });
+        if (minX === Infinity || !isFinite(minX)) { minX = 60; minY = 60; }
+
+        this.layoutModelNodes(model, state, minX, minY);
+        this.portOffsets.clear();
+        this.stateManager.pushState(state);
+        this.render();
+    }
+
+    public autoArrange(targetModelId?: string): void {
+        const state = this.stateManager.getCurrentState();
+        if (!state) return;
+
+        const models = this.stateManager.getWorkspaceModels();
+        if (models.length === 0) return;
+
+        if (targetModelId) {
+            this.tidyUpModel(targetModelId);
+            return;
+        }
+
+        if (models.length === 1) {
+            this.layoutModelNodes(models[0], state, 60, 60);
+            this.portOffsets.clear();
+            this.stateManager.pushState(state);
+            this.fitToView();
+            return;
+        }
+
+        // Multi-model workspace arrangement:
+        // First layout each model internally to calculate its bounding dimensions
+        const modelDimensions = new Map<string, { width: number, height: number }>();
+        models.forEach(m => {
+            const dim = this.layoutModelNodes(m, state, 0, 0);
+            modelDimensions.set(m.id, dim);
+        });
+
+        // Determine columns and rows
+        const numModels = models.length;
+        const numCols = numModels <= 2 ? numModels : (numModels <= 6 ? 2 : (numModels <= 12 ? 3 : 4));
+        const numRows = Math.ceil(numModels / numCols);
+
+        const colWidths: number[] = new Array(numCols).fill(0);
+        const rowHeights: number[] = new Array(numRows).fill(0);
+        const MARGIN_X = 140;
+        const MARGIN_Y = 120;
+
+        models.forEach((m, idx) => {
+            const col = idx % numCols;
+            const row = Math.floor(idx / numCols);
+            const dim = modelDimensions.get(m.id) || { width: 350, height: 250 };
+            colWidths[col] = Math.max(colWidths[col], dim.width);
+            rowHeights[row] = Math.max(rowHeights[row], dim.height);
+        });
+
+        // Position each model cleanly in the grid
+        models.forEach((m, idx) => {
+            const col = idx % numCols;
+            const row = Math.floor(idx / numCols);
+            let startX = 60;
+            for (let c = 0; c < col; c++) {
+                startX += colWidths[c] + MARGIN_X;
+            }
+            let startY = 60;
+            for (let r = 0; r < row; r++) {
+                startY += rowHeights[r] + MARGIN_Y;
+            }
+
+            this.layoutModelNodes(m, state, startX, startY);
+        });
+
+        this.portOffsets.clear();
         this.stateManager.pushState(state);
         this.fitToView();
     }
@@ -7840,6 +7578,35 @@ export class GraphRenderer {
         if (vp) {
             vp.setObstaclesGeometry(vertices, cells, undefined, meshId);
         }
+    }
+
+    private syncMaterialConnection(nodeId: string, matId: string): void {
+        const state = this.stateManager.getCurrentState();
+        if (!state) return;
+
+        state.connections = state.connections.filter(c => 
+            !(c.toNode === nodeId && c.toPort === 'material') &&
+            !(c.fromNode === nodeId && c.fromPort === 'material')
+        );
+
+        if (matId) {
+            const matNode = state.nodes.find(n => n.id === matId);
+            if (matNode) {
+                state.connections.push({
+                    fromNode: matId,
+                    fromPort: 'out',
+                    toNode: nodeId,
+                    toPort: 'material'
+                });
+            }
+        }
+
+        const targetModel = this.stateManager.getModelForNode(nodeId) || this.stateManager.getActiveModel();
+        if (targetModel) {
+            this.stateManager.setModelStatus(targetModel.id, 'UNINITIALIZED');
+        }
+        this.stateManager.pushState(state);
+        this.render();
     }
 
     private validateGraph(state: SimulationState): {

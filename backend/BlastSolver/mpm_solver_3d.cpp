@@ -20,11 +20,12 @@ static inline float computeWeibullFactor(float x, float y, float z, float weibul
     seed = seed ^ (seed >> 4);
     seed *= 0x27d4eb2du;
     seed = seed ^ (seed >> 15);
-    float u = std::clamp(static_cast<float>(seed & 0xFFFFu) / 65535.0f, 0.005f, 0.995f);
+    float u = std::clamp(static_cast<float>(seed & 0xFFFFu) / 65535.0f, 0.001f, 0.999f);
     float m_w = weibull_modulus;
     float eta_w = (weibull_scale > 0.001f) ? weibull_scale : 1.0f;
-    float w = std::pow(-std::log(1.0f - u), 1.0f / m_w) * eta_w;
-    return std::clamp(w, 0.20f, 2.50f);
+    float gamma_mean = std::tgamma(1.0f + 1.0f / m_w);
+    float w = (std::pow(-std::log(1.0f - u), 1.0f / m_w) / gamma_mean) * eta_w;
+    return std::clamp(w, 0.10f, 3.0f);
 }
 
 MPMSolver3D::MPMSolver3D() {
@@ -176,7 +177,6 @@ void MPMSolver3D::addBoxObject(int obj_id, float pos_x, float pos_y, float pos_z
     if (failure_strain > 0.0f) {
         mat.enable_strain_erosion = true;
         mat.erosion_strain = failure_strain;
-        if (mat.weibull_modulus <= 0.001f) mat.weibull_modulus = 8.0f;
     }
 
     int layer_k = 0;
@@ -226,8 +226,11 @@ void MPMSolver3D::addBoxObject(int obj_id, float pos_x, float pos_y, float pos_z
                 p.ep_bar = 0.0f;
                 p.object_id = obj_id;
                 p.transfer_scheme = mat.transfer_scheme;
-                float m_w = (mat.weibull_modulus > 0.001f) ? mat.weibull_modulus : 8.0f;
-                p.weibull_factor = computeWeibullFactor(x, y, z, m_w, mat.weibull_scale);
+                if (mat.enable_heterogeneity && mat.weibull_modulus > 0.001f) {
+                    p.weibull_factor = computeWeibullFactor(x, y, z, mat.weibull_modulus, mat.weibull_scale);
+                } else {
+                    p.weibull_factor = 1.0f;
+                }
 
                 m_particles.push_back(p);
             }
@@ -273,7 +276,6 @@ void MPMSolver3D::addSphereObject(int obj_id, float pos_x, float pos_y, float po
     if (failure_strain > 0.0f) {
         mat.enable_strain_erosion = true;
         mat.erosion_strain = failure_strain;
-        if (mat.weibull_modulus <= 0.001f) mat.weibull_modulus = 8.0f;
     }
 
     int layer_k = 0;
@@ -367,8 +369,11 @@ void MPMSolver3D::addSphereObject(int obj_id, float pos_x, float pos_y, float po
                 p.ep_bar = 0.0f;
                 p.object_id = obj_id;
                 p.transfer_scheme = mat.transfer_scheme;
-                float m_w = (mat.weibull_modulus > 0.001f) ? mat.weibull_modulus : 8.0f;
-                p.weibull_factor = computeWeibullFactor(final_x, final_y, final_z, m_w, mat.weibull_scale);
+                if (mat.enable_heterogeneity && mat.weibull_modulus > 0.001f) {
+                    p.weibull_factor = computeWeibullFactor(final_x, final_y, final_z, mat.weibull_modulus, mat.weibull_scale);
+                } else {
+                    p.weibull_factor = 1.0f;
+                }
 
                 m_particles.push_back(p);
             }
@@ -417,7 +422,6 @@ void MPMSolver3D::addCylinderObject(int obj_id, float pos_x, float pos_y, float 
     if (failure_strain > 0.0f) {
         mat.enable_strain_erosion = true;
         mat.erosion_strain = failure_strain;
-        if (mat.weibull_modulus <= 0.001f) mat.weibull_modulus = 8.0f;
     }
 
     int layer_k = 0;
@@ -513,8 +517,11 @@ void MPMSolver3D::addCylinderObject(int obj_id, float pos_x, float pos_y, float 
                 p.ep_bar = 0.0f;
                 p.object_id = obj_id;
                 p.transfer_scheme = mat.transfer_scheme;
-                float m_w = (mat.weibull_modulus > 0.001f) ? mat.weibull_modulus : 8.0f;
-                p.weibull_factor = computeWeibullFactor(final_x, final_y, final_z, m_w, mat.weibull_scale);
+                if (mat.enable_heterogeneity && mat.weibull_modulus > 0.001f) {
+                    p.weibull_factor = computeWeibullFactor(final_x, final_y, final_z, mat.weibull_modulus, mat.weibull_scale);
+                } else {
+                    p.weibull_factor = 1.0f;
+                }
 
                 m_particles.push_back(p);
             }
@@ -622,7 +629,6 @@ void MPMSolver3D::addSTLObject(int obj_id, const std::string& stl_filepath,
     if (failure_strain > 0.0f) {
         mat.enable_strain_erosion = true;
         mat.erosion_strain = failure_strain;
-        if (mat.weibull_modulus <= 0.001f) mat.weibull_modulus = 8.0f;
     }
 
     std::cout << "[INFO] MPMSolver3D::addSTLObject loaded " << triangles.size() << " triangles. Sampling interior particles..." << std::endl;
@@ -705,6 +711,11 @@ void MPMSolver3D::addSTLObject(int obj_id, const std::string& stl_filepath,
                     p.object_id = obj_id;
                     const auto& mat = getMaterialTable(obj_id);
                     p.transfer_scheme = mat.transfer_scheme;
+                    if (mat.enable_heterogeneity && mat.weibull_modulus > 0.001f) {
+                        p.weibull_factor = computeWeibullFactor(x, y, z, mat.weibull_modulus, mat.weibull_scale);
+                    } else {
+                        p.weibull_factor = 1.0f;
+                    }
 
                     m_particles.push_back(p);
                 }
@@ -1996,7 +2007,7 @@ void MPMSolver3D::updateStressState(float dt) {
 
         // --- Johnson-Cook Plasticity + Mie-Grüneisen Shock EOS Model ---
         if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen) {
-            float w_factor = (p.weibull_factor > 0.001f) ? p.weibull_factor : 1.0f;
+            float w_factor = (mat.enable_heterogeneity && p.weibull_factor > 0.001f) ? p.weibull_factor : 1.0f;
 
             p.V = std::clamp(p.V * (1.0f + tr_deps), 0.1f * p.V0, 10.0f * p.V0);
             const float J = p.V / (p.V0 > 1.0e-20f ? p.V0 : 1.0e-20f);
@@ -2072,7 +2083,18 @@ void MPMSolver3D::updateStressState(float dt) {
             float rate_term   = (eps_dot_star > 1.0f) ? (1.0f + C * std::log(eps_dot_star)) : 1.0f;
             float temp_term   = 1.0f - std::pow(T_star, m);
 
-            float jc_yield = strain_term * rate_term * temp_term * w_factor;
+            float aniso_factor = 1.0f;
+            if (mat.enable_anisotropy && std::abs(mat.anisotropy_ratio - 1.0f) > 0.001f) {
+                float ax = mat.anisotropy_dir[0], ay = mat.anisotropy_dir[1], az = mat.anisotropy_dir[2];
+                float sigma_a = ax * (s_trial[0][0]*ax + s_trial[0][1]*ay + s_trial[0][2]*az) +
+                                ay * (s_trial[1][0]*ax + s_trial[1][1]*ay + s_trial[1][2]*az) +
+                                az * (s_trial[2][0]*ax + s_trial[2][1]*ay + s_trial[2][2]*az);
+                float q_norm = (q_trial > 1e-12f) ? q_trial : 1.0f;
+                float xi = std::clamp(std::abs(sigma_a) / q_norm, 0.0f, 1.0f);
+                aniso_factor = 1.0f + (mat.anisotropy_ratio - 1.0f) * (1.0f - xi * xi);
+            }
+
+            float jc_yield = strain_term * rate_term * temp_term * w_factor * aniso_factor;
             jc_yield = std::max(1.0e6f, jc_yield);
 
             // 4. Radial Return Mapping for JC
@@ -2107,8 +2129,8 @@ void MPMSolver3D::updateStressState(float dt) {
                 p.damage = 0.0f;
                 p.has_failed = false;
             } else {
-                const float fail_strain_base = ((mat.erosion_strain > 0.0f) ? mat.erosion_strain : mat.failure_strain) * w_factor;
-                const float tensile_fail_base = ((mat.erosion_stress > 0.0f) ? mat.erosion_stress : mat.tensile_failure_stress) * w_factor;
+                const float fail_strain_base = ((mat.erosion_strain > 0.0f) ? mat.erosion_strain : mat.failure_strain) * w_factor * aniso_factor;
+                const float tensile_fail_base = ((mat.erosion_stress > 0.0f) ? mat.erosion_stress : mat.tensile_failure_stress) * w_factor * aniso_factor;
 
                 float d_plastic = 0.0f;
                 if (mat.enable_strain_erosion && fail_strain_base > 0.0f) {
@@ -2158,8 +2180,8 @@ void MPMSolver3D::updateStressState(float dt) {
             continue;
         }
 
-
-        // Jaumann objective stress rotation: sig_base = sig + (W*sig - sig*W)*dt
+        // --- Concrete / Geotechnical / Generic Hypoelastic Plasticity Models ---
+        // 1. Jaumann Stress Rate Rotation
         float W_sig[3][3] = {}, sig_W[3][3] = {};
         for (int r = 0; r < 3; ++r)
             for (int c = 0; c < 3; ++c)
@@ -2173,14 +2195,13 @@ void MPMSolver3D::updateStressState(float dt) {
             for (int c = 0; c < 3; ++c)
                 sig_base[r][c] = p.sigma[r][c] + (W_sig[r][c] - sig_W[r][c]) * dt;
 
-        // Lame constants
-        const float E_mod  = mat.youngs_modulus;
-        const float nu     = mat.poissons_ratio;
-        const float mu     = E_mod / (2.0f * (1.0f + nu));
-        const float lambda = (E_mod * nu) / ((1.0f + nu) * (1.0f - 2.0f * nu));
-        const float K_bulk = E_mod / (3.0f * (1.0f - 2.0f * nu));
+        // 2. Elastic Trial Stress
+        const float E  = mat.youngs_modulus;
+        const float nu = mat.poissons_ratio;
+        const float mu     = E / (2.0f * (1.0f + nu));
+        const float lambda = (E * nu) / ((1.0f + nu) * (1.0f - 2.0f * nu));
+        const float K_bulk = E / (3.0f * (1.0f - 2.0f * nu));
 
-        // Trial elastic stress update
         float sig_trial[3][3];
         for (int r = 0; r < 3; ++r)
             for (int c = 0; c < 3; ++c) {
@@ -2188,7 +2209,7 @@ void MPMSolver3D::updateStressState(float dt) {
                 if (r == c) sig_trial[r][c] += lambda * tr_deps;
             }
 
-        // Deviatoric stress and pressure
+        // 3. Pressure & Deviatoric Stress
         float press = -(sig_trial[0][0] + sig_trial[1][1] + sig_trial[2][2]) / 3.0f;
         float s[3][3];
         for (int r = 0; r < 3; ++r)
@@ -2203,15 +2224,18 @@ void MPMSolver3D::updateStressState(float dt) {
             for (int c = 0; c < 3; ++c)
                 deps_norm += deps[r][c] * deps[r][c];
         float ep_dot = std::sqrt((2.0f / 3.0f) * deps_norm) / (dt > 1.0e-12f ? dt : 1.0e-12f);
+        float w_factor = (mat.enable_heterogeneity && p.weibull_factor > 0.001f) ? p.weibull_factor : 1.0f;
 
+        // 4. Concrete Core Formulations or Hypoelastic
         if (mat.material_model == MPMMaterialModel::RHTConcrete) {
-            RHTStateVariables<float> rht_state;
+            Blast::ConcreteModels::RHTStateVariables<float> rht_state;
             rht_state.damage = p.damage;
             rht_state.ep_bar = p.ep_bar;
             rht_state.p_hydro = press;
-            updateRHTStress<float>(
+
+            Blast::ConcreteModels::updateRHTStress<float>(
                 s, press, tr_deps, dt, char_len_p, ep_dot,
-                mat.fc, mat.ft, mu, K_bulk,
+                mat.fc * w_factor, mat.ft * w_factor, mu, K_bulk,
                 mat.G_f, mat.moisture_content,
                 mat.rht_A, mat.rht_N,
                 mat.rht_B, mat.rht_M,
@@ -2223,23 +2247,26 @@ void MPMSolver3D::updateStressState(float dt) {
                 mat.dif_cap_compression, mat.dif_cap_tension,
                 rht_state
             );
+
             p.damage = rht_state.damage;
             p.ep_bar = rht_state.ep_bar;
             press = rht_state.p_hydro;
+
             for (int r = 0; r < 3; ++r)
                 for (int c = 0; c < 3; ++c) {
                     p.sigma[r][c] = s[r][c];
                     if (r == c) p.sigma[r][c] -= press;
                 }
         } else if (mat.material_model == MPMMaterialModel::KCConcrete) {
-            KCStateVariables<float> kc_state;
+            Blast::ConcreteModels::KCStateVariables<float> kc_state;
             kc_state.damage = p.damage;
             kc_state.lambda = p.lambda;
             kc_state.ep_bar = p.ep_bar;
             kc_state.p_hydro = press;
-            updateKCStress<float>(
+
+            Blast::ConcreteModels::updateKCStress<float>(
                 s, press, tr_deps, dt, char_len_p, ep_dot,
-                mat.fc, mat.ft, mu, K_bulk,
+                mat.fc * w_factor, mat.ft * w_factor, mu, K_bulk,
                 mat.G_f, mat.moisture_content,
                 mat.kc_auto_generate,
                 mat.kc_a0, mat.kc_a1, mat.kc_a2,
@@ -2249,27 +2276,30 @@ void MPMSolver3D::updateStressState(float dt) {
                 mat.dif_cap_compression, mat.dif_cap_tension,
                 kc_state
             );
+
             p.damage = kc_state.damage;
             p.lambda = kc_state.lambda;
             p.ep_bar = kc_state.ep_bar;
             press = kc_state.p_hydro;
+
             for (int r = 0; r < 3; ++r)
                 for (int c = 0; c < 3; ++c) {
                     p.sigma[r][c] = s[r][c];
                     if (r == c) p.sigma[r][c] -= press;
                 }
         } else if (mat.material_model == MPMMaterialModel::CSCMConcrete) {
-            CSCMStateVariables<float> cscm_state;
+            Blast::ConcreteModels::CSCMStateVariables<float> cscm_state;
             cscm_state.damage = p.damage;
             cscm_state.kappa = p.lambda;
             cscm_state.ep_bar = p.ep_bar;
             cscm_state.p_hydro = press;
-            updateCSCMStress<float>(
+
+            Blast::ConcreteModels::updateCSCMStress<float>(
                 s, press, tr_deps, dt, char_len_p, ep_dot,
-                mat.fc, mat.ft, mu, K_bulk,
+                mat.fc * w_factor, mat.ft * w_factor, mu, K_bulk,
                 mat.G_f,
-                mat.cscm_alpha, mat.cscm_theta,
-                mat.cscm_lambda, mat.cscm_beta,
+                mat.cscm_alpha * w_factor, mat.cscm_theta,
+                mat.cscm_lambda * w_factor, mat.cscm_beta,
                 mat.cscm_R, mat.cscm_X0,
                 mat.cscm_W, mat.cscm_D1,
                 mat.cscm_D2,
@@ -2287,26 +2317,37 @@ void MPMSolver3D::updateStressState(float dt) {
                 }
         } else {
             // Default Hypoelastic J2 Elastoplasticity with Weibull flaw scatter & plastic damage softening
-            float w_factor = (p.weibull_factor > 0.001f) ? p.weibull_factor : 1.0f;
-            if (w_factor <= 0.001f && mat.weibull_modulus > 0.001f) {
+            float w_factor = (mat.enable_heterogeneity && p.weibull_factor > 0.001f) ? p.weibull_factor : 1.0f;
+            if (mat.enable_heterogeneity && w_factor <= 0.001f && mat.weibull_modulus > 0.001f) {
                 w_factor = computeWeibullFactor(p.x[0], p.x[1], p.x[2], mat.weibull_modulus, mat.weibull_scale);
             }
-            const float yield_base = mat.yield_stress * w_factor;
-            const float fail_strain_base = (mat.failure_strain > 0.0f) ? mat.failure_strain * w_factor : 0.0f;
-            const float soft_factor = std::clamp(1.0f - 0.70f * p.damage, 0.10f, 1.0f);
-            const float yield_eff = yield_base * soft_factor + mat.hardening_modulus * p.ep_bar;
 
             float s_s = 0.0f;
             for (int r = 0; r < 3; ++r)
                 for (int c = 0; c < 3; ++c)
                     s_s += s[r][c] * s[r][c];
-            const float q_trial   = std::sqrt(1.5f * s_s);
-            const float yield_surf = q_trial - yield_eff;
+            const float q_trial_hypo = std::sqrt(1.5f * s_s);
 
-            if (q_trial > 1.0e-5f && yield_surf > 0.0f) {
+            float aniso_factor = 1.0f;
+            if (mat.enable_anisotropy && std::abs(mat.anisotropy_ratio - 1.0f) > 0.001f) {
+                float ax = mat.anisotropy_dir[0], ay = mat.anisotropy_dir[1], az = mat.anisotropy_dir[2];
+                float sigma_a = ax * (s[0][0]*ax + s[0][1]*ay + s[0][2]*az) +
+                                ay * (s[1][0]*ax + s[1][1]*ay + s[1][2]*az) +
+                                az * (s[2][0]*ax + s[2][1]*ay + s[2][2]*az);
+                float q_norm = (q_trial_hypo > 1e-12f) ? q_trial_hypo : 1.0f;
+                float xi = std::clamp(std::abs(sigma_a) / q_norm, 0.0f, 1.0f);
+                aniso_factor = 1.0f + (mat.anisotropy_ratio - 1.0f) * (1.0f - xi * xi);
+            }
+            const float yield_base = mat.yield_stress * w_factor;
+            const float fail_strain_base = (mat.failure_strain > 0.0f) ? mat.failure_strain * w_factor * aniso_factor : 0.0f;
+            const float soft_factor = std::clamp(1.0f - 0.70f * p.damage, 0.10f, 1.0f);
+            const float yield_eff = (yield_base * soft_factor + mat.hardening_modulus * p.ep_bar) * aniso_factor;
+            const float yield_surf = q_trial_hypo - yield_eff;
+
+            if (q_trial_hypo > 1.0e-5f && yield_surf > 0.0f) {
                 // Radial return mapping
                 const float delta_ep = yield_surf / (3.0f * mu + mat.hardening_modulus);
-                float scale = 1.0f - (3.0f * mu * delta_ep) / q_trial;
+                float scale = 1.0f - (3.0f * mu * delta_ep) / q_trial_hypo;
                 if (scale < 0.0f) scale = 0.0f;
                 for (int r = 0; r < 3; ++r)
                     for (int c = 0; c < 3; ++c) {
@@ -2322,7 +2363,7 @@ void MPMSolver3D::updateStressState(float dt) {
 
             float d_plastic = 0.0f;
             if (mat.enable_strain_erosion) {
-                float fail_strain = ((mat.erosion_strain > 0.0f) ? mat.erosion_strain : mat.failure_strain) * w_factor;
+                float fail_strain = ((mat.erosion_strain > 0.0f) ? mat.erosion_strain : mat.failure_strain) * w_factor * aniso_factor;
                 if (fail_strain > 0.0f) {
                     d_plastic = std::clamp(p.ep_bar / fail_strain, 0.0f, 1.0f);
                 }
@@ -2330,7 +2371,7 @@ void MPMSolver3D::updateStressState(float dt) {
 
             float d_tensile = 0.0f;
             if (mat.enable_stress_erosion) {
-                float fail_stress = ((mat.erosion_stress > 0.0f) ? mat.erosion_stress : mat.tensile_failure_stress) * w_factor;
+                float fail_stress = ((mat.erosion_stress > 0.0f) ? mat.erosion_stress : mat.tensile_failure_stress) * w_factor * aniso_factor;
                 const float curr_press    = -(p.sigma[0][0] + p.sigma[1][1] + p.sigma[2][2]) / 3.0f;
                 const float tensile_stress = -curr_press;
                 if (tensile_stress > 0.0f && fail_stress > 0.0f) {
@@ -2722,12 +2763,29 @@ void MPMSolver3D::updateFragmentClusters() {
     }
 }
 
+void MPMSolver3D::initMaterialHeterogeneity(int obj_id) {
+    if (obj_id < 0 || obj_id >= static_cast<int>(m_material_tables.size())) return;
+    const auto& mat = m_material_tables[obj_id];
+    for (auto& p : m_particles) {
+        if (p.object_id == obj_id) {
+            if (mat.enable_heterogeneity && mat.weibull_modulus > 0.001f) {
+                p.weibull_factor = computeWeibullFactor(p.x[0], p.x[1], p.x[2], mat.weibull_modulus, mat.weibull_scale);
+            } else {
+                p.weibull_factor = 1.0f;
+            }
+        }
+    }
+    if (mat.fragment_distribution == "Mott-Grady") {
+        seedMottGradyFragments(obj_id);
+    }
+}
+
 void MPMSolver3D::seedMottGradyFragments(int obj_id) {
     if (obj_id < 0 || obj_id >= static_cast<int>(m_material_tables.size())) return;
     const auto& mat = m_material_tables[obj_id];
 
-    // Only seed if fragmentation / Weibull / erosion is enabled
-    if (mat.weibull_modulus <= 0.001f && !mat.enable_strain_erosion && !mat.enable_stress_erosion && mat.failure_strain <= 0.0f) {
+    // Only seed Mott-Grady Voronoi clumping if explicitly configured
+    if (mat.fragment_distribution != "Mott-Grady") {
         return;
     }
 
@@ -2782,9 +2840,10 @@ void MPMSolver3D::seedMottGradyFragments(int obj_id) {
                 float sy = min_y + (static_cast<float>(iy) + 0.5f) * (span_y / static_cast<float>(ny_s)) + jy;
                 float sz = min_z + (static_cast<float>(iz) + 0.5f) * (span_z / static_cast<float>(nz_s)) + jz;
 
-                float u_rand = std::clamp(static_cast<float>((s_hash >> 20) & 0xFF) / 255.0f, 0.05f, 0.95f);
-                float flaw = std::pow(-std::log(1.0f - u_rand), 1.0f / weibull_modulus) * weibull_scale;
-                seeds.push_back({sx, sy, sz, seed_id++, std::clamp(flaw, 0.6f, 1.4f)});
+                float u_rand = std::clamp(static_cast<float>((s_hash >> 20) & 0xFF) / 255.0f, 0.01f, 0.99f);
+                float gamma_mean = std::tgamma(1.0f + 1.0f / weibull_modulus);
+                float flaw = (std::pow(-std::log(1.0f - u_rand), 1.0f / weibull_modulus) / gamma_mean) * weibull_scale;
+                seeds.push_back({sx, sy, sz, seed_id++, std::clamp(flaw, 0.20f, 2.50f)});
             }
         }
     }
@@ -2815,13 +2874,17 @@ void MPMSolver3D::seedMottGradyFragments(int obj_id) {
 
         p.cluster_id = best_seed;
         float boundary_dist = best_d2 - best_d1;
+        float base_w = (mat.enable_heterogeneity && mat.weibull_modulus > 0.001f)
+            ? computeWeibullFactor(p.x[0], p.x[1], p.x[2], mat.weibull_modulus, mat.weibull_scale)
+            : 1.0f;
         if (boundary_dist < crack_band_width) {
-            // Particle is in inter-fragment crack shear band -> weakened so it fractures first!
+            // Particle is in inter-fragment crack shear band -> attenuated so it fractures first along Voronoi seams
             float norm_dist = boundary_dist / crack_band_width;
-            p.weibull_factor = (0.45f + 0.40f * norm_dist) * best_flaw;
+            float atten = 0.50f + 0.50f * norm_dist;
+            p.weibull_factor = base_w * atten * best_flaw;
         } else {
-            // Particle is inside cohesive fragment interior -> high strength so chunk stays intact!
-            p.weibull_factor = (1.30f + 0.20f * std::min(1.0f, boundary_dist / clumping_radius)) * best_flaw;
+            // Particle is inside cohesive fragment interior
+            p.weibull_factor = base_w * best_flaw;
         }
     }
 }

@@ -13,21 +13,21 @@ export interface ValidationResult {
 }
 
 export function isAirMaterial(node: Node | undefined): boolean {
-    if (!node || (node.type !== 'Material' && node.type !== 'MPMMaterialSteel')) return false;
+    if (!node || node.type !== 'Material') return false;
     const model = node.parameters?.material_model;
     const type = node.parameters?.material_type;
     return model === 'Ideal Gas' || type === 'Air';
 }
 
 export function isJWLMaterial(node: Node | undefined): boolean {
-    if (!node || (node.type !== 'Material' && node.type !== 'MPMMaterialSteel')) return false;
+    if (!node || node.type !== 'Material') return false;
     const model = node.parameters?.material_model;
     const type = node.parameters?.material_type;
     return model === 'JWL Detonation Gas' || type === 'JWL Charge';
 }
 
 export function isIdealGasChargeMaterial(node: Node | undefined): boolean {
-    if (!node || (node.type !== 'Material' && node.type !== 'MPMMaterialSteel')) return false;
+    if (!node || node.type !== 'Material') return false;
     const model = node.parameters?.material_model;
     const type = node.parameters?.material_type;
     return model === 'Ideal Gas' || type === 'Ideal Gas Charge';
@@ -84,8 +84,8 @@ export function isParameterRelevant(node: Node, key: string): boolean {
         } else if (shape === 'Block') {
             if (['charge_radius', 'charge_height', 'charge_aspect_ratio'].includes(key)) return false;
         }
-    } else if (node.type === 'Material' || node.type === 'MPMMaterialSteel') {
-        const matModel = node.parameters['material_model'] || 'Linear Elastic';
+    } else if (node.type === 'Material') {
+        const matModel = node.parameters['material_model'] || 'Hypoelastic';
         const airKeys = ['gamma', 'atm_pressure', 'atm_temperature'];
         const jwlKeys = ['composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega', 'ideal_gamma', 'ideal_rho_0', 'ideal_e_0'];
         const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
@@ -225,7 +225,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                         addMessage(expNode.id, 'error', "No Material connected to Charge 1D.");
                     } else {
                         const matNode = state.nodes.find(n => n.id === matConn.fromNode);
-                        if (!matNode || (matNode.type !== 'Material' && matNode.type !== 'MPMMaterialSteel')) {
+                        if (!matNode || matNode.type !== 'Material') {
                             const connKey = `${matConn.fromNode}:${matConn.fromPort}->${matConn.toNode}:${matConn.toPort}`;
                             flawedConnections.set(connKey, "Only Material node can be connected to the Material input of Charge 1D.");
                             addMessage(expNode.id, 'error', "Only Material node can be connected to the Material input of Charge 1D.");
@@ -350,7 +350,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                         addMessage(expNode.id, 'error', "No Material connected to Charge.");
                     } else {
                         const matNode = state.nodes.find(n => n.id === matConn.fromNode);
-                        if (!matNode || (matNode.type !== 'Material' && matNode.type !== 'MPMMaterialSteel')) {
+                        if (!matNode || matNode.type !== 'Material') {
                             const connKey = `${matConn.fromNode}:${matConn.fromPort}->${matConn.toNode}:${matConn.toPort}`;
                             flawedConnections.set(connKey, "Only Material node can be connected to the Material input of Charge.");
                             addMessage(expNode.id, 'error', "Only Material node can be connected to the Material input of Charge.");
@@ -423,7 +423,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                         addMessage(igNode.id, 'error', "No Material connected to Charge.");
                     } else {
                         const matNode = state.nodes.find(n => n.id === matConn.fromNode);
-                        if (!matNode || (matNode.type !== 'Material' && matNode.type !== 'MPMMaterialSteel')) {
+                        if (!matNode || matNode.type !== 'Material') {
                             const connKey = `${matConn.fromNode}:${matConn.fromPort}->${matConn.toNode}:${matConn.toPort}`;
                             flawedConnections.set(connKey, "Only Material node can be connected to the Material input of Charge.");
                             addMessage(igNode.id, 'error', "Only Material node can be connected to the Material input of Charge.");
@@ -572,7 +572,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                         addMessage(chargeNode3D.id, 'error', "No Material connected to Charge 3D.");
                     } else {
                         const matNode = state.nodes.find(n => n.id === matConn.fromNode);
-                        if (!matNode || (matNode.type !== 'Material' && matNode.type !== 'MPMMaterialSteel')) {
+                        if (!matNode || matNode.type !== 'Material') {
                             const connKey = `${matConn.fromNode}:${matConn.fromPort}->${matConn.toNode}:${matConn.toPort}`;
                             flawedConnections.set(connKey, "Only Material node can be connected to the Material input of Charge 3D.");
                             addMessage(chargeNode3D.id, 'error', "Only Material node can be connected to the Material input of Charge 3D.");
@@ -628,7 +628,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                         addMessage(chargeNode3D.id, 'error', "No Material connected to Charge 3D.");
                     } else {
                         const matNode = state.nodes.find(n => n.id === matConn.fromNode);
-                        if (!matNode || (matNode.type !== 'Material' && matNode.type !== 'MPMMaterialSteel')) {
+                        if (!matNode || matNode.type !== 'Material') {
                             const connKey = `${matConn.fromNode}:${matConn.fromPort}->${matConn.toNode}:${matConn.toPort}`;
                             flawedConnections.set(connKey, "Only Material node can be connected to the Material input of Charge 3D.");
                             addMessage(chargeNode3D.id, 'error', "Only Material node can be connected to the Material input of Charge 3D.");
@@ -859,7 +859,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             }
         }
 
-        if (node.type === 'Material' || node.type === 'MPMMaterialSteel') {
+        if (node.type === 'Material') {
             const matModel = node.parameters?.material_model;
             const matType = node.parameters?.material_type;
             if (matModel === 'Ideal Gas' || matType === 'Air') {

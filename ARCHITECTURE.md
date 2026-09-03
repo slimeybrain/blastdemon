@@ -69,6 +69,9 @@ blastdemon/
 │       ├── fsi_coupler_3d.hpp/.cpp           # 3D MPM Fluid-Structure Interaction Coupler
 │       ├── fem_fsi_coupler_3d.hpp/.cpp       # 3D FEM Fluid-Structure Coupler (SAT cut-cell aperture, Gauss quadrature)
 │       ├── fem_fsi_coupler_3d_cuda.hpp/.cu   # 3D FEM Fluid-Structure Coupler (CUDA GPU)
+│       ├── event_engine.hpp                  # In-Situ AST Event Engine & Dynamic CFL Scheduler
+│       ├── batch_sampler.hpp                 # Latin Hypercube (LHS) & DOE Parameter Space Sampler
+│       ├── batch_runner.hpp                  # Multi-Run AI / Neural Surrogate Dataset Generator
 │       ├── materials.hpp                     # Fluid EOS, JWL parameters, Baer-Nunziato mixture, Programmed Burn
 │       ├── constitutive_concrete_models.hpp  # Advanced Concrete Models (RHT, HJC, CSCM / Mat 159, K&C / Mat 72R3)
 │       ├── constitutive_crest_davis.hpp      # CREST Reactive Burn & Davis Solid/Product EOS for High Explosives
@@ -76,9 +79,13 @@ blastdemon/
 │       ├── XDMFWriter.hpp/.cpp               # XDMF XML metadata wrapper for ParaView
 │       ├── VTKWriter.hpp/.cpp                # VTK XML Unstructured Grid (.vtu / .pvd) writer with ZLIB compression
 │       └── AsyncVTKWriter.hpp                # Asynchronous background VTK disk streaming
+│   ├── BlastCLI/                             # Standalone C++20 Multi-Physics Command-Line Interface
+│   │   └── main.cpp                          # Interactive REPL & Headless SLURM/PBS Cluster Batch Runner
+│   └── BlastStudio/                          # Standalone Native Desktop Application Shell
+│       └── main.cpp                          # Embedded Workstation Platform Desktop Binary
 ├── frontend/
 │   ├── index.html                            # App entry shell
-│   ├── styles.css                            # Comprehensive CSS styling & design tokens (~38 KB)
+│   ├── styles.css                            # Comprehensive CSS styling & design tokens (~54 KB)
 │   ├── package.json                          # Dev dependencies: typescript@5, vite@5 only
 │   ├── tsconfig.json                         # Strict TypeScript configuration
 │   └── src/
@@ -88,10 +95,14 @@ blastdemon/
 │       ├── serialization.ts                  # DAG traversal, parameter casting, solver JSON compilation, .blst binary
 │       ├── NetworkManager.ts                 # WebSocket client with reconnection logic and binary dispatch
 │       ├── layout-manager.ts                 # Recursive split-pane dockable layout system
-│       ├── graph-renderer.ts                 # Visual Node Graph infinite SVG/DOM canvas editor
-│       ├── property-editor.ts                # Dynamic Property Inspector with parameter popovers & validation
-│       ├── node-viewer.ts                    # Per-node specialized viewers and parameter inspectors
-│       ├── parameter-definitions.ts          # Master SSOT Parameter & Node Definitions Registry (118 KB)
+│       ├── pipeline-browser.ts               # ParaView-style hierarchical pipeline tree browser
+│       ├── property-grid.ts                  # HyperMesh-style two-column key-value property inspector
+│       ├── workspace-manager.ts              # Viewport (1x1, 1x2, 2x1, 2x2 grid manager)
+│       ├── transport-controller.ts           # Docked bottom transport scrubber & playback toolbar
+│       ├── playback-buffer.ts                # In-memory 60 FPS frame cache & binary search ring buffer
+│       ├── ClusterNodeManager.ts             # Multi-broker cluster orchestration & 30 Hz NVML diagnostics
+│       ├── PlatformBridge.ts                 # Platform abstraction (native desktop shell vs browser)
+│       ├── parameter-definitions.ts          # Master SSOT Parameter & Node Definitions Registry (136 KB)
 │       ├── mpm-presets.ts                    # Solid material & constitutive parameter presets library (131 KB)
 │       ├── host-file-browser.ts              # Interactive host filesystem browser (STL, LS-DYNA, VTK, .blst)
 │       ├── resource-manager.ts               # Hardware telemetry monitor (CPU, RAM, GPU NVML)
@@ -104,6 +115,7 @@ blastdemon/
 │       └── mpm-renderer-3d.ts                # 3D MPM particle viewport binding helper
 ├── CMakeLists.txt                            # CMake build definition (Broker C++17, BlastSolver C++20+CUDA)
 ├── AGENTS.md                                 # Master Agent Directives (Enforced)
+├── BLASTDAEMON_SPECIFICATION.md              # Master CAE Workstation Specification (BD-CAE-SPEC-2026-REV1)
 └── ARCHITECTURE.md                           # Master Architecture Reference Document (This file)
 ```
 
@@ -118,6 +130,8 @@ blastdemon/
 | `Broker` | Executable | C++17 (Forced) | N/A | POSIX sockets, `nlohmann/json.hpp` (header-only) | WebSocket broker & process manager |
 | `BlastSolverCore` | Static Library | C++20 | CUDA 17 (`native`) | OpenMP, ZLIB, HDF5 (C API, optional), NVML (`dlopen`) | Unified multi-physics engine library |
 | `BlastSolver` | Executable | C++20 | CUDA 17 (`native`) | Links `BlastSolverCore` | Worker simulation executable |
+| `blastcli` | Executable | C++20 | CUDA 17 (`native`) | Links `BlastSolverCore` | Standalone multi-physics REPL & headless cluster CLI |
+| `BlastStudio` | Executable | C++20 | N/A | POSIX sockets, `dl` | Standalone native desktop shell |
 | `test_cuda_solver` | Test Executable | C++20 | CUDA 17 (`native`) | Links `BlastSolverCore` | Standalone GPU CFD test harness |
 | `test_fem_3d_...` | Test Executables | C++20 | CUDA 17 (`native`) | Links `BlastSolverCore` | Standalone FEM/FSI/MPM test suite |
 
@@ -201,7 +215,7 @@ The Worker emits a hybrid stream on `stdout`:
 |---|---|
 | `BIN_FRAME <size>\n` | 1D CFD: `uint32 n_cells` + `uint32 n_channels (7)` + `float32[n_cells * 7]` (`p, rho, u, E, alpha1, alpha2, alpha_air`). |
 | `BIN2D_FRAME <size>\n` | 2D CFD: `uint32 nr` + `uint32 nz` + `uint32 n_channels` + `float32[nr * nz * n_channels]` (`p, rho, ur, uz, E, alpha1, alpha2`). |
-| `BIN_FRAME_3D_SLICES <size>\n` | 3D CFD: Structured binary slice packets (orthogonal XY, YZ, XZ planes and cut-planes) extracted by `extractSlice()`. |
+| `BIN_FRAME_3D_SLICES <size>\n` | 3D CFD: Structured binary slice packets (orthogonal X-Normal, Y-Normal, Z-Normal cut-planes) extracted by `extractSlice()`. |
 | `BIN_FRAME_MPM <size>\n` | 2D/3D MPM: `uint32 n_particles` + `uint32 stride` + `float32` particle cloud (`x, y, z, vx, vy, vz, mass, volume, stress_tensor, damage, temperature`). |
 | `BIN_FRAME_FEM <size>\n` | 3D FEM: `uint32 n_nodes` + `uint32 n_elements` + deformed nodal coordinates + element stress/strain/damage arrays. |
 
@@ -584,7 +598,7 @@ Modal file browser communicating with the Broker via `HOST_FILE_LIST` and `HOST_
 | **1D CFD Gas Dynamics** | `DomainMesh`, `Charge1D`, `ThePainter`, `CFDSolver` | 1D Spherical & planar high-explosive detonation and shock wave propagation. |
 | **2D Axisymmetric CFD** | `DomainMesh2D`, `Charge2D`, `DetonatorLocation`, `CFDSolver2D` | 2D Axisymmetric `(r, z)` blast simulation, ground reflection, and Mach stem formation. |
 | **3D Multi-Material CFD** | `DomainMesh3D`, `Charge3D`, `CFDSolver3D` | 3D Cartesian uniform multi-material blast dynamics with JWL and Ideal Gas EOS. |
-| **Lagrangian Solid MPM** | `MPMDomain2D`, `MPMObject2D`, `MPMDomain3D`, `MPMObject3D`, `MPMMaterialSteel` | 2D/3D Material Point Method for extreme deformation, fracture, and fragmentation. |
+| **Lagrangian Solid MPM** | `MPMDomain2D`, `MPMObject2D`, `MPMDomain3D`, `MPMObject3D` | 2D/3D Material Point Method for extreme deformation, fracture, and fragmentation. |
 | **Lagrangian Solid FEM** | `FEMDomain3D`, `FEMObject3D`, `LSDynaImporter3D` | 3D Hexahedral solid structural dynamics with embedded rebar and LS-DYNA import. |
 | **Fluid-Structure Interaction**| `FSICoupler2D`, `FSICoupler3D`, `FEMFSICoupler3D` | Two-way dynamic coupling between Eulerian CFD and Lagrangian MPM / FEM solids. |
 | **Material & EOS Models** | `Material` | Universal material node (Elastic, Johnson-Cook, Concrete, CREST, Ideal Gas, JWL). |

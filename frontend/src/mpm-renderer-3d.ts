@@ -21,10 +21,10 @@ export interface MPMGridContour3D {
     values: Float32Array; // Flattened 3D scalar field values (nx * ny * nz)
 }
 
-export type ColorMapType = 'viridis' | 'plasma' | 'jet' | 'coolwarm' | 'grayscale';
+export type ColorMapType = 'rainbow' | 'viridis' | 'plasma' | 'jet' | 'coolwarm' | 'grayscale';
 
 export class MPMRenderer3D {
-    private colorMap: ColorMapType = 'plasma';
+    private colorMap: ColorMapType = 'rainbow';
 
     public setColormap(map: ColorMapType): void {
         this.colorMap = map;
@@ -36,6 +36,13 @@ export class MPMRenderer3D {
     public sampleColormap(val: number): [number, number, number] {
         const v = Math.max(0.0, Math.min(1.0, val));
         switch (this.colorMap) {
+            case 'rainbow': {
+                const four = 4.0 * v;
+                const r = Math.min(255, Math.max(0, Math.floor(255 * Math.min(four - 1.5, -four + 4.5))));
+                const g = Math.min(255, Math.max(0, Math.floor(255 * Math.min(four - 0.5, -four + 3.5))));
+                const b = Math.min(255, Math.max(0, Math.floor(255 * Math.min(four + 0.5, -four + 2.5))));
+                return [r, g, b];
+            }
             case 'plasma': {
                 const r = Math.min(255, Math.floor(255 * Math.pow(v, 0.5)));
                 const g = Math.floor(255 * Math.pow(v, 2.0) * 0.85);
@@ -61,10 +68,16 @@ export class MPMRenderer3D {
                 const b = Math.floor(255 * (1.0 - v));
                 return [r, g, b];
             }
-            case 'grayscale':
-            default: {
+            case 'grayscale': {
                 const c = Math.floor(255 * v);
                 return [c, c, c];
+            }
+            default: {
+                const four = 4.0 * v;
+                const r = Math.min(255, Math.max(0, Math.floor(255 * Math.min(four - 1.5, -four + 4.5))));
+                const g = Math.min(255, Math.max(0, Math.floor(255 * Math.min(four - 0.5, -four + 3.5))));
+                const b = Math.min(255, Math.max(0, Math.floor(255 * Math.min(four + 0.5, -four + 2.5))));
+                return [r, g, b];
             }
         }
     }

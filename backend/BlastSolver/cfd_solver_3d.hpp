@@ -95,6 +95,30 @@ inline double getEnergy3D(double p, double rho, const CellState3D<IsMultiMateria
     }
 }
 
+struct CFDBulkSnapshot3D {
+    int nx = 0, ny = 0, nz = 0;
+    double cellSize = 0.0;
+    double xmin = 0.0, ymin = 0.0, zmin = 0.0;
+    bool has_vel = false;
+    bool has_E = false;
+    bool has_species = false;
+    // Flat dense fields of size nx * ny * nz
+    std::vector<float> p;
+    std::vector<float> rho;
+    std::vector<float> overpressure;
+    std::vector<float> impulse;
+    std::vector<float> solid;
+    std::vector<float> vel;
+    std::vector<float> E;
+    std::vector<float> alpha1;
+    std::vector<float> alpha2;
+    std::vector<float> air;
+
+    inline int index(int gx, int gy, int gz) const {
+        return gx + gy * nx + gz * nx * ny;
+    }
+};
+
 class CFDSolver3D {
 public:
     virtual ~CFDSolver3D() = default;
@@ -129,6 +153,7 @@ public:
     virtual std::vector<float> sampleGauge(const Gauge3D& gauge) const = 0;
     virtual std::vector<float> extractSlice(const Slice3D& slice) const = 0;
     virtual std::vector<SlicePayload3D> extractAllSlices(const Slice3D& slice) const = 0;
+    virtual void captureBulkSnapshot(CFDBulkSnapshot3D& out_snap, bool need_vel = false, bool need_E = false, bool need_species = false) const = 0;
     virtual void getSliceDimensions(const Slice3D& slice, int& w, int& h, int& depth) const {
         int stride = slice.stride > 0 ? slice.stride : 1;
         depth = 1;
@@ -354,6 +379,7 @@ public:
     std::vector<float> sampleGauge(const Gauge3D& gauge) const override;
     std::vector<float> extractSlice(const Slice3D& slice) const override;
     std::vector<SlicePayload3D> extractAllSlices(const Slice3D& slice) const override;
+    void captureBulkSnapshot(CFDBulkSnapshot3D& out_snap, bool need_vel = false, bool need_E = false, bool need_species = false) const override;
     void getSliceDimensions(const Slice3D& slice, int& w, int& h, int& depth) const override;
     using CFDSolver3D::getSliceDimensions;
     std::vector<float> getCellValues(int i, int j, int k) const override;

@@ -136,9 +136,15 @@ struct MaterialTable3D {
     int transfer_scheme{-1};             // -1 = Inherit domain default, otherwise MPMTransferScheme
 
     // Realistic Fragmentation & DEM Transition Physics Parameters
+    bool enable_heterogeneity{false};     // Enable spatial Weibull flaw scatter (false = homogeneous)
     float weibull_modulus{0.0f};          // Weibull flaw distribution shape parameter m (0.0 = homogeneous/disabled)
     float weibull_scale{1.0f};            // Weibull flaw distribution scale factor
     float fracture_toughness{0.0f};       // Critical stress intensity factor K_IC (Pa m^0.5) for Grady spallation
+
+    // Directional Material Anisotropy & Orientation
+    bool enable_anisotropy{false};        // Enable directional material anisotropy (false = isotropic)
+    float anisotropy_ratio{1.0f};         // Transverse-to-longitudinal yield strength ratio (0.5 to 2.0, 1.0 = isotropic)
+    float anisotropy_dir[3]{1.0f, 0.0f, 0.0f}; // Primary material orientation / rolling / fiber axis vector
     float jc_d1{0.05f};                   // Johnson-Cook damage parameter D1
     float jc_d2{3.44f};                   // Johnson-Cook damage parameter D2
     float jc_d3{-2.12f};                  // Johnson-Cook damage parameter D3
@@ -302,6 +308,7 @@ public:
             m_material_tables.resize(object_id + 1);
         }
         m_material_tables[object_id] = mat;
+        initMaterialHeterogeneity(object_id);
     }
 
     std::vector<MPMGridNode3D>& getGrid() { return m_grid; }
@@ -321,6 +328,7 @@ public:
     void particleToGrid();
     void evaluateDEMContact(float dt);
     void updateFragmentClusters();
+    void initMaterialHeterogeneity(int obj_id);
     void seedMottGradyFragments(int obj_id);
 
 private:

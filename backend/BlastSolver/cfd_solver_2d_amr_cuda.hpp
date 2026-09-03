@@ -71,41 +71,41 @@ private:
     std::vector<int> free_tile_ids;
 
     // GPU-side mirrors
-    AMRPrimitiveTileT<RealType>* d_states_pool;
-    AMRConservativeTileT<RealType>* d_U_pool;
-    AMRConservativeTileT<RealType>* d_dU_pool;
-    AMRFaceFluxT<RealType>* d_node_boundary_fluxes;
-    size_t allocated_tiles_capacity;
+    AMRPrimitiveTileT<RealType>* d_states_pool = nullptr;
+    AMRConservativeTileT<RealType>* d_U_pool = nullptr;
+    AMRConservativeTileT<RealType>* d_dU_pool = nullptr;
+    AMRFaceFluxT<RealType>* d_node_boundary_fluxes = nullptr;
+    size_t allocated_tiles_capacity = 0;
 
     // Active leaf node IDs list on GPU
-    int* d_active_node_ids;
-    int* d_active_tile_ids;
-    int active_leaves_count;
-    int* d_allocated_node_ids;
-    int* d_allocated_tile_ids;
-    int allocated_nodes_count;
-    size_t current_active_capacity;
-    size_t current_allocated_capacity;
-    size_t current_tree_capacity;
+    int* d_active_node_ids = nullptr;
+    int* d_active_tile_ids = nullptr;
+    int active_leaves_count = 0;
+    int* d_allocated_node_ids = nullptr;
+    int* d_allocated_tile_ids = nullptr;
+    int allocated_nodes_count = 0;
+    size_t current_active_capacity = 0;
+    size_t current_allocated_capacity = 0;
+    size_t current_tree_capacity = 0;
 
     // Persistent GPU scratch for restriction and wave speed
-    int* d_level_parent_node_ids;
-    int* d_level_parent_offsets;
-    int* d_level_parent_counts;
-    size_t current_level_parent_capacity;
+    int* d_level_parent_node_ids = nullptr;
+    int* d_level_parent_offsets = nullptr;
+    int* d_level_parent_counts = nullptr;
+    size_t current_level_parent_capacity = 0;
     std::vector<int> h_level_parent_offsets_cached;
     std::vector<int> h_level_parent_counts_cached;
-    float* d_tile_min_dts;
-    float* d_global_min_dt;
-    size_t current_tile_dts_capacity;
+    float* d_tile_min_dts = nullptr;
+    float* d_global_min_dt = nullptr;
+    size_t current_tile_dts_capacity = 0;
     float* d_tile_errors = nullptr;
     size_t current_tile_errors_capacity = 0;
     float* host_pinned_tile_errors = nullptr;
 
-    int adapt_step_counter;
+    int adapt_step_counter = 0;
 
     // GPU tree nodes representation for ghost-cell updates
-    GPUNode2D* d_amr_nodes;
+    GPUNode2D* d_amr_nodes = nullptr;
 
     struct LevelActiveTiles {
         int* d_tile_ids = nullptr;

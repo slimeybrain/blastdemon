@@ -38,6 +38,25 @@ static const int HEX8_EDGES[12][2] = {
 };
 
 template <typename T>
+static inline T computeFEMWeibullFactor(uint32_t seed_base, const BlastPhysicsParams<T>& params) {
+    if (!params.enable_heterogeneity) return static_cast<T>(1.0f);
+    uint32_t seed = seed_base;
+    seed = (seed ^ 61u) ^ (seed >> 16);
+    seed *= 9u;
+    seed = seed ^ (seed >> 4);
+    seed *= 0x27d4eb2du;
+    seed = seed ^ (seed >> 15);
+    float u = std::clamp(static_cast<float>(seed & 0xFFFFu) / 65535.0f, 0.001f, 0.999f);
+    float m_w = (params.weibull_modulus > static_cast<T>(0.001f))
+        ? static_cast<float>(params.weibull_modulus)
+        : ((params.material_heterogeneity > static_cast<T>(1.0e-4f)) ? (1.0f / static_cast<float>(params.material_heterogeneity)) : 8.0f);
+    float eta_w = (params.weibull_scale > static_cast<T>(0.001f)) ? static_cast<float>(params.weibull_scale) : 1.0f;
+    float gamma_mean = std::tgamma(1.0f + 1.0f / m_w);
+    float w = (std::pow(-std::log(1.0f - u), 1.0f / m_w) / gamma_mean) * eta_w;
+    return static_cast<T>(std::clamp(w, 0.10f, 3.0f));
+}
+
+template <typename T>
 FEMSolver3D<T>::FEMSolver3D() {
 #ifdef __CUDACC__
     cudaStreamCreateWithFlags(&m_cuda_stream, cudaStreamNonBlocking);
@@ -642,7 +661,7 @@ void FEMSolver3D<T>::addTruss(int n1, int n2, T area, const MaterialTable3D& mat
         truss_mat.hardening_modulus = 2.0e9f;
         truss_mat.poissons_ratio = 0.30f;
         truss_mat.density = 7850.0f;
-        truss_mat.material_model = MPMMaterialModel::HypoelasticSteel;
+        truss_mat.material_model = MPMMaterialModel::Hypoelastic;
         truss_mat.failure_strain = 0.20f;
     }
 
@@ -702,7 +721,7 @@ void FEMSolver3D<T>::addBeam3D(int n1, int n2, T diameter, const MaterialTable3D
         beam_mat.hardening_modulus = 2.0e9f;
         beam_mat.poissons_ratio = 0.30f;
         beam_mat.density = 7850.0f;
-        beam_mat.material_model = MPMMaterialModel::HypoelasticSteel;
+        beam_mat.material_model = MPMMaterialModel::Hypoelastic;
         beam_mat.failure_strain = 0.20f;
     }
 
@@ -1650,7 +1669,10 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                     thermal_factor_g = static_cast<T>(1.0f) - std::pow(T_star_g, m_exp_g);
                     if (thermal_factor_g < static_cast<T>(0.01f)) thermal_factor_g = static_cast<T>(0.01f);
                 }
-                dynamic_yield_g = std::max(static_cast<T>(1.0e6f), sigma_hard_g * strain_rate_factor_g * thermal_factor_g);
+                uint32_t user_seed_g = static_cast<uint32_t>(m_physics_params.random_seed) * 2654435761u;
+                uint32_t elem_seed_g = user_seed_g ^ (static_cast<uint32_t>(elem.node_ids[0]) * 73856093u) ^ (static_cast<uint32_t>(elem.node_ids[6]) * 19349663u) ^ (static_cast<uint32_t>(e) * 83492791u) ^ (static_cast<uint32_t>(g) * 374761393u);
+                T het_factor_g = computeFEMWeibullFactor(elem_seed_g, m_physics_params);
+                dynamic_yield_g = std::max(static_cast<T>(1.0e6f), sigma_hard_g * strain_rate_factor_g * thermal_factor_g * het_factor_g);
 
                 T L_g[3][3] = {{static_cast<T>(0.0f)}};
                 for (int i = 0; i < 8; ++i) {
@@ -2053,7 +2075,10 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
             thermal_factor = static_cast<T>(1.0f) - std::pow(T_star, m_exp);
             if (thermal_factor < static_cast<T>(0.01f)) thermal_factor = static_cast<T>(0.01f);
         }
-        dynamic_yield = std::max(static_cast<T>(1.0e6f), sigma_hard * strain_rate_factor * thermal_factor);
+        uint32_t user_seed = static_cast<uint32_t>(m_physics_params.random_seed) * 2654435761u;
+        uint32_t elem_seed = user_seed ^ (static_cast<uint32_t>(elem.node_ids[0]) * 73856093u) ^ (static_cast<uint32_t>(elem.node_ids[6]) * 19349663u) ^ (static_cast<uint32_t>(e) * 83492791u);
+        T het_factor = computeFEMWeibullFactor(elem_seed, m_physics_params);
+        dynamic_yield = std::max(static_cast<T>(1.0e6f), sigma_hard * strain_rate_factor * thermal_factor * het_factor);
 
         T dN_dx[8][3];
         for (int i = 0; i < 8; ++i) {
@@ -2413,23 +2438,23 @@ void FEMSolver3D<T>::evaluateErosionCriteria() {
             }
         }
 
-        T heterogeneity = m_physics_params.material_heterogeneity;
-        if (heterogeneity <= static_cast<T>(1.0e-5f) && (mat.failure_strain > static_cast<T>(0.0f) || m_erosion_criteria.failure_strain > static_cast<T>(0.0f))) {
-            heterogeneity = static_cast<T>(0.08f);
-        }
-        T het_factor = static_cast<T>(1.0f);
-        if (heterogeneity > static_cast<T>(1.0e-5f)) {
-            uint32_t user_seed = static_cast<uint32_t>(m_physics_params.random_seed) * 2654435761u;
-            uint32_t seed = user_seed ^ (static_cast<uint32_t>(elem.node_ids[0]) * 73856093u) ^ (static_cast<uint32_t>(elem.node_ids[6]) * 19349663u) ^ (static_cast<uint32_t>(e) * 83492791u);
-            seed = (seed ^ 61u) ^ (seed >> 16);
-            seed *= 9u;
-            seed = seed ^ (seed >> 4);
-            seed *= 0x27d4eb2du;
-            seed = seed ^ (seed >> 15);
-            float u = std::clamp(static_cast<float>(seed & 0xFFFFu) / 65535.0f, 0.001f, 0.999f);
-            // Weibull modulus m = 8 (standard empirical model for rock/concrete fracture heterogeneity)
-            float w = std::pow(-std::log(1.0f - u), 0.125f);
-            het_factor = static_cast<T>(1.0f + static_cast<float>(heterogeneity) * (w - 1.0f));
+        uint32_t user_seed = static_cast<uint32_t>(m_physics_params.random_seed) * 2654435761u;
+        uint32_t elem_seed = user_seed ^ (static_cast<uint32_t>(elem.node_ids[0]) * 73856093u) ^ (static_cast<uint32_t>(elem.node_ids[6]) * 19349663u) ^ (static_cast<uint32_t>(e) * 83492791u);
+        T het_factor = computeFEMWeibullFactor(elem_seed, m_physics_params);
+
+        // Directional Material Anisotropy (Transverse Isotropy)
+        T aniso_factor = static_cast<T>(1.0f);
+        if (m_physics_params.enable_anisotropy && std::abs(m_physics_params.anisotropy_ratio - static_cast<T>(1.0f)) > static_cast<T>(1.0e-4f)) {
+            T ax = m_physics_params.anisotropy_dir[0], ay = m_physics_params.anisotropy_dir[1], az = m_physics_params.anisotropy_dir[2];
+            T s_a = ax * (elem.sigma[0][0]*ax + elem.sigma[0][1]*ay + elem.sigma[0][2]*az) +
+                    ay * (elem.sigma[1][0]*ax + elem.sigma[1][1]*ay + elem.sigma[1][2]*az) +
+                    az * (elem.sigma[2][0]*ax + elem.sigma[2][1]*ay + elem.sigma[2][2]*az);
+            T s_dev_norm = std::sqrt(elem.sigma[0][0]*elem.sigma[0][0] + elem.sigma[1][1]*elem.sigma[1][1] + elem.sigma[2][2]*elem.sigma[2][2] + 
+                                    static_cast<T>(2.0f)*(elem.sigma[0][1]*elem.sigma[0][1] + elem.sigma[1][2]*elem.sigma[1][2] + elem.sigma[2][0]*elem.sigma[2][0]));
+            if (s_dev_norm > static_cast<T>(1.0e-6f)) {
+                T xi = std::clamp(std::abs(s_a) / s_dev_norm, static_cast<T>(0.0f), static_cast<T>(1.0f));
+                aniso_factor = static_cast<T>(1.0f) + (m_physics_params.anisotropy_ratio - static_cast<T>(1.0f)) * (static_cast<T>(1.0f) - xi * xi);
+            }
         }
 
         // Directional Crack Band Normalization (Bažant formulation)
@@ -2447,7 +2472,7 @@ void FEMSolver3D<T>::evaluateErosionCriteria() {
 
         if (mat.enable_strain_erosion || m_erosion_criteria.enable_strain_erosion || mat.failure_strain > 0.0f || mat.erosion_strain > 0.0f || m_erosion_criteria.failure_strain > 0.0f) {
             T fail_strain = static_cast<T>(mat.erosion_strain > 0.0f ? mat.erosion_strain : (mat.failure_strain > 0.0f ? mat.failure_strain : m_erosion_criteria.failure_strain));
-            fail_strain *= het_factor;
+            fail_strain *= (het_factor * aniso_factor);
             if (fail_strain > static_cast<T>(0.0f) && ep_bar_effective[e] >= fail_strain) {
                 newly_eroded = true;
             }
@@ -2456,7 +2481,7 @@ void FEMSolver3D<T>::evaluateErosionCriteria() {
         if (mat.enable_stress_erosion || m_erosion_criteria.enable_stress_erosion) {
             T mean_s = (elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f);
             T fail_stress = static_cast<T>(mat.erosion_stress > 0.0f ? mat.erosion_stress : (mat.tensile_failure_stress > 0.0f ? mat.tensile_failure_stress : m_erosion_criteria.tensile_failure_stress));
-            fail_stress *= het_factor;
+            fail_stress *= (het_factor * aniso_factor);
             if (fail_stress > static_cast<T>(0.0f) && mean_s >= fail_stress) {
                 newly_eroded = true;
             }

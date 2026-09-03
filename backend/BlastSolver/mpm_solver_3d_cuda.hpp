@@ -96,6 +96,7 @@ public:
                       MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
                       MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped);
 
+    void initMaterialHeterogeneity(int obj_id);
     void seedMottGradyFragments(int obj_id);
 
     void addParticlesDirect(const std::vector<MPMParticle3D>& particles) {
@@ -148,7 +149,7 @@ public:
             m_material_tables.resize(object_id + 1);
         }
         m_material_tables[object_id] = mat;
-        m_device_dirty = true;
+        initMaterialHeterogeneity(object_id);
     }
 
     const std::vector<MPMParticle3D>& getParticles() const { return m_host_particles; }

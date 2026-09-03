@@ -1,4 +1,5 @@
 import { Node, SimulationState } from './types.js';
+import { calculateCFDMemory } from './state-manager.js';
 
 export interface MemoryEstimateResult {
     ramBytes: number;
@@ -40,34 +41,16 @@ export function estimateNodeMemory(node: Node): MemoryEstimateResult {
     const params = node.parameters;
     const device = String(params.device || 'cpu').toLowerCase();
     const isCuda = device === 'cuda' || device === 'gpu' || device.includes('cuda');
-    const precision = String(params.precision || 'single').toLowerCase();
-    const isDouble = precision === 'double' || precision === 'float64';
 
-    if (type === 'CFDSolver3D') {
-        const cellSize = Number(params.cell_size) || 0.01;
-        const xmin = Number(params.xmin) || 0;
-        const xmax = Number(params.xmax) || (xmin + 1.0);
-        const ymin = Number(params.ymin) || 0;
-        const ymax = Number(params.ymax) || (ymin + 1.0);
-        const zmin = Number(params.zmin) || 0;
-        const zmax = Number(params.zmax) || (zmin + 1.0);
-
-        const nx = Math.max(1, Math.round((xmax - xmin) / cellSize));
-        const ny = Math.max(1, Math.round((ymax - ymin) / cellSize));
-        const nz = Math.max(1, Math.round((zmax - zmin) / cellSize));
-
-        const ntx = Math.ceil(nx / 8);
-        const nty = Math.ceil(ny / 8);
-        const ntz = Math.ceil(nz / 8);
-        const totalTiles = ntx * nty * ntz;
-
-        const realSize = isDouble ? 8 : 4;
-        const isMultiMat = params.init_mode !== 'Ideal Gas';
-        const numVars = isMultiMat ? 10 : 5;
-        const bytesPerTile = 512 * realSize * (numVars * 2 + 3); // Primitive + Conservative + Geometry + Aux
-
-        ramBytes = totalTiles * bytesPerTile * 1.3;
-        vramBytes = isCuda ? totalTiles * bytesPerTile * 1.5 : 0;
+    if (type === 'CFDSolver3D' || type === 'CFDSolver2D' || type === 'CFDSolver' || type === 'DomainMesh3D' || type === 'DomainMesh2D' || type === 'DomainMesh') {
+        const cfdMem = calculateCFDMemory(node);
+        if (cfdMem.isCpu) {
+            ramBytes = cfdMem.totalBytes;
+            vramBytes = 0;
+        } else {
+            vramBytes = cfdMem.totalBytes;
+            ramBytes = cfdMem.totalBytes * 0.2; // host staging buffer
+        }
     } else if (type === 'MPMDomain3D') {
         const cellSize = Number(params.cell_size) || 0.01;
         const xmin = Number(params.xmin) || 0;

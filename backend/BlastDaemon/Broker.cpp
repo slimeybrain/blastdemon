@@ -295,12 +295,77 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
         resp["modelId"] = modelId;
         resp["filePath"] = filePath;
 
+        std::error_code ec;
+        std::filesystem::path model_p(filePath);
+        if (model_p.has_parent_path()) {
+            std::filesystem::create_directories(model_p.parent_path(), ec);
+        }
+
+        // Process external resources copying if specified
+        int resourcesCopied = 0;
+        nlohmann::json resource_errors = nlohmann::json::array();
+        if (payload.contains("resources") && payload["resources"].is_array()) {
+            for (const auto& res : payload["resources"]) {
+                std::string src = res.value("sourcePath", "");
+                std::string dst = res.value("targetPath", "");
+                if (src.empty() || dst.empty()) continue;
+
+                std::filesystem::path src_p(src);
+                std::filesystem::path dst_p(dst);
+
+                std::error_code src_ec, dst_ec, copy_ec;
+                if (!std::filesystem::exists(src_p, src_ec)) {
+                    std::filesystem::path root_p = std::filesystem::path("/home/chris/antigrav/blastdemon") / src;
+                    if (std::filesystem::exists(root_p, src_ec)) {
+                        src_p = root_p;
+                    } else {
+                        // Strip leading ./ if present
+                        std::string clean_src = (src.rfind("./", 0) == 0) ? src.substr(2) : src;
+                        std::filesystem::path clean_root_p = std::filesystem::path("/home/chris/antigrav/blastdemon") / clean_src;
+                        if (std::filesystem::exists(clean_root_p, src_ec)) {
+                            src_p = clean_root_p;
+                        } else {
+                            std::cerr << "[Broker] [WARN] External resource not found at source: " << src << std::endl;
+                            resource_errors.push_back("Source not found: " + src);
+                            continue;
+                        }
+                    }
+                }
+
+                // If source and destination are identical canonical paths, skip copying
+                auto canon_src = std::filesystem::weakly_canonical(src_p, src_ec);
+                auto canon_dst = std::filesystem::weakly_canonical(dst_p, dst_ec);
+                if (!src_ec && !dst_ec && canon_src == canon_dst) {
+                    std::cout << "[Broker] External resource already in destination: " << dst << std::endl;
+                    resourcesCopied++;
+                    continue;
+                }
+
+                if (dst_p.has_parent_path()) {
+                    std::filesystem::create_directories(dst_p.parent_path(), copy_ec);
+                }
+
+                std::filesystem::copy_file(src_p, dst_p, std::filesystem::copy_options::overwrite_existing, copy_ec);
+                if (copy_ec) {
+                    std::cerr << "[Broker] [ERROR] Failed to copy external resource from " << src << " to " << dst << ": " << copy_ec.message() << std::endl;
+                    resource_errors.push_back("Failed to copy " + src + " to " + dst + ": " + copy_ec.message());
+                } else {
+                    std::cout << "[Broker] Successfully copied external resource to: " << dst << std::endl;
+                    resourcesCopied++;
+                }
+            }
+        }
+        resp["resourcesCopied"] = resourcesCopied;
+        if (!resource_errors.empty()) {
+            resp["resourceErrors"] = resource_errors;
+        }
+
         std::ofstream out(filePath);
         if (out.is_open()) {
             out << fileContent;
             out.close();
             resp["status"] = "success";
-            std::cout << "[Broker] Saved model " << modelId << " to local path: " << filePath << std::endl;
+            std::cout << "[Broker] Saved model " << modelId << " to local path: " << filePath << " (" << resourcesCopied << " resources bundled)" << std::endl;
         } else {
             resp["status"] = "error";
             resp["error"] = "Failed to open file for writing at: " + filePath;
@@ -493,6 +558,15 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
         resp["filePath"] = filePath;
 
         try {
+            std::error_code ec;
+            std::filesystem::path stl_p(filePath);
+            if (!std::filesystem::exists(stl_p, ec)) {
+                std::filesystem::path alt_p = std::filesystem::path("/home/chris/antigrav/blastdemon") / stl_p;
+                if (std::filesystem::exists(alt_p, ec)) {
+                    filePath = alt_p.string();
+                }
+            }
+
             std::ifstream file(filePath, std::ios::binary);
             if (!file.is_open()) {
                 throw std::runtime_error("Failed to open STL file: " + filePath);
@@ -899,7 +973,8 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
                command == "SET_DEVICE" || command == "REMAP" || command == "REMAP_2D" || command == "STEP_2D" || command == "EXEC_ALL_2D" || command == "PAUSE_2D" || command == "RESUME_2D" || command == "TERMINATE_2D" || command == "WRITE_VTK" || command == "CONTOUR_CONFIG" ||
                command == "STEP_3D" || command == "EXEC_ALL_3D" || command == "PAUSE_3D" || command == "TERMINATE_3D" || command == "VIEW3D_CONFIG" || command == "STEP_MPM" || command == "STEP_3D_MPM" || command == "STEP_MPM_3D" || command == "EXEC_ALL_MPM" || command == "EXEC_ALL_3D_MPM" || command == "EXEC_ALL_MPM_3D" || command == "PAUSE_MPM" || command == "PAUSE_3D_MPM" || command == "PAUSE_MPM_3D" || command == "RESUME_MPM" || command == "RESUME_3D_MPM" || command == "RESUME_MPM_3D" || command == "TERMINATE_MPM" || command == "TERMINATE_3D_MPM" || command == "TERMINATE_MPM_3D" ||
                command == "STEP_FSI_2D" || command == "STEP_FSI_3D" || command == "STEP_FSI" || command == "EXEC_ALL_FSI_2D" || command == "EXEC_ALL_FSI_3D" || command == "EXEC_ALL_FSI" || command == "PAUSE_FSI_2D" || command == "PAUSE_FSI_3D" || command == "PAUSE_FSI" || command == "TERMINATE_FSI_2D" || command == "TERMINATE_FSI_3D" || command == "TERMINATE_FSI" ||
-               command == "STEP_FEM_3D" || command == "EXEC_ALL_FEM_3D" || command == "PAUSE_FEM_3D" || command == "TERMINATE_FEM_3D" || command == "STEP_FEM_FSI_3D" || command == "EXEC_ALL_FEM_FSI_3D" || command == "PAUSE_FEM_FSI_3D" || command == "TERMINATE_FEM_FSI_3D") {
+               command == "STEP_FEM_3D" || command == "EXEC_ALL_FEM_3D" || command == "PAUSE_FEM_3D" || command == "TERMINATE_FEM_3D" || command == "STEP_FEM_FSI_3D" || command == "EXEC_ALL_FEM_FSI_3D" || command == "PAUSE_FEM_FSI_3D" || command == "TERMINATE_FEM_FSI_3D" ||
+               command == "REFRESH_STATE" || command == "REFRESH" || command == "POLL_STATE") {
         if (command == "PAUSE" || command == "PAUSE_2D" || command == "PAUSE_3D" || command == "PAUSE_MPM" || command == "PAUSE_3D_MPM" || command == "PAUSE_MPM_3D" || command == "PAUSE_FSI_2D" || command == "PAUSE_FSI_3D" || command == "PAUSE_FSI" || command == "PAUSE_FEM_3D" || command == "PAUSE_FEM_FSI_3D") std::cout << "[DEBUG] PAUSE COMMAND RECEIVED for modelId " << modelId << "\n";
         if (command == "TERMINATE" || command == "TERMINATE_2D" || command == "TERMINATE_3D" || command == "TERMINATE_MPM" || command == "TERMINATE_3D_MPM" || command == "TERMINATE_MPM_3D" || command == "TERMINATE_FSI_2D" || command == "TERMINATE_FSI_3D" || command == "TERMINATE_FSI" || command == "TERMINATE_FEM_3D" || command == "TERMINATE_FEM_FSI_3D") std::cout << "[DEBUG] TERMINATE COMMAND RECEIVED for modelId " << modelId << "\n";
         
@@ -917,7 +992,7 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
             }
 
             if (routed) {
-                if (command == "TERMINATE" || command == "TERMINATE_2D" || command == "TERMINATE_3D" || command == "TERMINATE_MPM" || command == "TERMINATE_3D_MPM" || command == "TERMINATE_MPM_3D" || command == "TERMINATE_FSI_2D" || command == "TERMINATE_FSI") {
+                if (command == "TERMINATE" || command == "TERMINATE_2D" || command == "TERMINATE_3D" || command == "TERMINATE_MPM" || command == "TERMINATE_3D_MPM" || command == "TERMINATE_MPM_3D" || command == "TERMINATE_FSI_2D" || command == "TERMINATE_FSI_3D" || command == "TERMINATE_FSI" || command == "TERMINATE_FEM_3D" || command == "TERMINATE_FEM_FSI_3D" || command == "TERMINATE_3D_FEM") {
                     // Erase ALL entries pointing to the same process (shared 1D/2D process).
                     auto target_proc = active_processes[modelId];
                     std::vector<std::string> to_erase;

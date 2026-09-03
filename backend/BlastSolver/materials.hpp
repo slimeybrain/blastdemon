@@ -101,6 +101,18 @@ namespace MultiMat {
         5.30e6
     };
 
+    // Parameters for Nitromethane (CH3NO2) - LLNL Explosives Handbook
+    const MaterialSet Nitromethane = {
+        // Products (JWL: A=209.2 GPa, B=5.689 GPa, R1=4.40, R2=1.20, omega=0.30, rho0=1128 kg/m3)
+        { 209.2e9, 5.689e9, 4.40, 1.20, 0.30, 1128.0, 1000.0, 300.0 },
+        // Unreacted
+        { 770.0e9 * (1128.0 / 1800.0), -4.8e9 * (1128.0 / 1800.0), 10.5, 1.1, 0.89, 1128.0, 1000.0, 300.0 },
+        // Det Vel (m/s)
+        6280.0,
+        // Detonation Energy (J/kg)
+        4.48e6
+    };
+
     constexpr double MIN_ALPHA = 1e-4;
 
     template <typename RealType>

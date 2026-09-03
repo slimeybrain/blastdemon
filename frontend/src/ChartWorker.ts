@@ -45,18 +45,8 @@ let dragStartMaxY = 1.0;
 // Padding in logical CSS pixels
 const PADDING = 55;
 
-const rAF = typeof requestAnimationFrame !== 'undefined'
-    ? requestAnimationFrame
-    : (cb: Function) => setTimeout(() => cb(Date.now()), 1000 / 60);
-
-let renderRequested = false;
 function requestRender(): void {
-    if (renderRequested) return;
-    renderRequested = true;
-    rAF(() => {
-        renderRequested = false;
-        render();
-    });
+    render();
 }
 
 function applyTransform(): void {

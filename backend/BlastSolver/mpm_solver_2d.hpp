@@ -7,8 +7,33 @@
 #include <iostream>
 #include <algorithm>
 #include <memory>
+#include <cstring>
 
 namespace Blast {
+
+static inline uint32_t floatToBits2D(float f) {
+    uint32_t u;
+    std::memcpy(&u, &f, sizeof(float));
+    return u;
+}
+
+inline float computeWeibullFactor2D(float x, float y, float weibull_modulus, float weibull_scale) {
+    if (weibull_modulus <= 0.001f) return 1.0f;
+    uint32_t ix = floatToBits2D(x);
+    uint32_t iy = floatToBits2D(y);
+    uint32_t seed = (ix * 73856093u) ^ (iy * 19349663u);
+    seed = (seed ^ 61u) ^ (seed >> 16);
+    seed *= 9u;
+    seed = seed ^ (seed >> 4);
+    seed *= 0x27d4eb2du;
+    seed = seed ^ (seed >> 15);
+    float u = std::clamp(static_cast<float>(seed & 0xFFFFu) / 65535.0f, 0.001f, 0.999f);
+    float m_w = weibull_modulus;
+    float eta_w = (weibull_scale > 0.001f) ? weibull_scale : 1.0f;
+    float gamma_mean = std::tgamma(1.0f + 1.0f / m_w);
+    float w = (std::pow(-std::log(1.0f - u), 1.0f / m_w) / gamma_mean) * eta_w;
+    return std::clamp(w, 0.10f, 3.0f);
+}
 
 enum class MPMMaterialModel {
     LinearElastic = 0,
@@ -35,9 +60,9 @@ struct MPMParticle2D {
     float V;            // Current volume
 
     // Material Model Selector
-    MPMMaterialModel material_model{MPMMaterialModel::HypoelasticSteel};
+    MPMMaterialModel material_model{MPMMaterialModel::Hypoelastic};
 
-    // Baseline Material Properties (Steel J2 Elastoplasticity & Fracture/Failure)
+    // Baseline Material Properties (Solid Continuum J2 Elastoplasticity & Fracture/Failure)
     float density{7850.0f};               // kg/m^3 (e.g. 7850)
     float youngs_modulus{210.0e9f};        // Pa (e.g. 210e9)
     float poissons_ratio{0.3f};            // (e.g. 0.3)
@@ -62,8 +87,15 @@ struct MPMParticle2D {
     float mg_s{1.49f};           // Hugoniot Us-Up slope
 
     // Weibull Flaw Scatter Parameters
+    bool enable_heterogeneity{false}; // Enable spatial Weibull flaw scatter (false = homogeneous)
     float weibull_modulus{0.0f}; // Weibull modulus m_w (0.0 = homogeneous)
     float weibull_scale{1.0f};   // Weibull scale eta_w (1.0 = baseline)
+    float weibull_factor{1.0f};  // Pre-computed spatial Weibull strength multiplier (mean-normalized)
+
+    // Directional Material Anisotropy & Orientation
+    bool enable_anisotropy{false};        // Enable directional material anisotropy (false = isotropic)
+    float anisotropy_ratio{1.0f};         // Transverse-to-longitudinal yield strength ratio (0.5 to 2.0, 1.0 = isotropic)
+    float anisotropy_dir[2]{1.0f, 0.0f};  // Primary material orientation / rolling / fiber axis vector
 
     // Dynamic State Variables
     float e_int{0.0f};           // Specific internal energy (J/kg)

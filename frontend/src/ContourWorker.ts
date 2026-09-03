@@ -16,7 +16,7 @@ let displayMax = 1;
 let range = 1;
 let autoScale = true;
 let useLogScale = false;
-let selectedColormap = 'plasma';
+let selectedColormap = 'rainbow';
 let isAxisymmetric = true;
 let chargeInfo: any = null;
 let detonatorInfo: any = null;
@@ -45,18 +45,8 @@ let renderTimeout: any = null;
 let tempCanvas: OffscreenCanvas | null = null;
 let tempCtx: OffscreenCanvasRenderingContext2D | null = null;
 
-const rAF = typeof requestAnimationFrame !== 'undefined'
-    ? requestAnimationFrame
-    : (cb: Function) => setTimeout(() => cb(Date.now()), 1000 / 60);
-
-let renderRequested = false;
 function requestRender(): void {
-    if (renderRequested) return;
-    renderRequested = true;
-    rAF(() => {
-        renderRequested = false;
-        render();
-    });
+    render();
 }
 
 let currentParticles: Float32Array | null = null;
@@ -316,12 +306,12 @@ function getColor(val: number, min: number, max: number): { r: number; g: number
 
     switch (selectedColormap) {
         case 'viridis': return getViridisColor(t);
-        case 'rainbow': return getRainbowColor(t);
+        case 'plasma': return getPlasmaColor(t);
         case 'coolwarm': return getCoolWarmColor(t);
         case 'cividis': return getCividisColor(t);
         case 'grayscale': return getGrayscaleColor(t);
-        case 'plasma':
-        default: return getPlasmaColor(t);
+        case 'rainbow':
+        default: return getRainbowColor(t);
     }
 }
 

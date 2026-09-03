@@ -122,6 +122,16 @@ endif()
 add_executable(BlastSolver backend/BlastSolver/main.cpp)
 target_link_libraries(BlastSolver PRIVATE BlastSolverCore)
 
+# BlastCLI - Standalone C++20 Multi-Physics CLI Runner
+add_executable(blastcli backend/BlastCLI/main.cpp)
+target_include_directories(blastcli PRIVATE backend/BlastSolver/include)
+target_link_libraries(blastcli PRIVATE BlastSolverCore)
+
+# BlastStudio - Standalone Desktop Shell
+add_executable(BlastStudio backend/BlastStudio/main.cpp)
+target_include_directories(BlastStudio PRIVATE backend/BlastSolver/include)
+target_link_libraries(BlastStudio PRIVATE ${CMAKE_DL_LIBS})
+
 # Optional standalone test binaries (default: OFF, build with -DBUILD_TESTS=ON)
 option(BUILD_TESTS "Build standalone test executables" OFF)
 

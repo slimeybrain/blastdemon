@@ -2691,7 +2691,8 @@ __global__ void extract_volume_kernel(const PrimitiveTile3D<RealType, IsMultiMat
             int c_idx = cx + cy * 8 + cz * 64;
             if (geom[t_idx].cells[c_idx].is_boundary) {
                 bool found = false;
-                for (int r = 1; r <= 2 && !found; ++r) {
+                int max_r = max(4, stride * 3);
+                for (int r = 1; r <= max_r && !found; ++r) {
                     for (int dz = -r; dz <= r && !found; ++dz) {
                         for (int dy = -r; dy <= r && !found; ++dy) {
                             for (int dx_c = -r; dx_c <= r && !found; ++dx_c) {
@@ -2718,10 +2719,102 @@ __global__ void extract_volume_kernel(const PrimitiveTile3D<RealType, IsMultiMat
                         }
                     }
                 }
+                if (found) {
+                    GPUCellStateT<RealType, IsMultiMaterial> sC = sample_gpu_raw<RealType, IsMultiMaterial>(states, target_x, target_y, target_z);
+                    data[out_idx] = get_value_by_qty_struct<RealType, IsMultiMaterial>(sC, qty_id);
+                    return;
+                }
             }
         }
         GPUCellStateT<RealType, IsMultiMaterial> sC = sample_state_with_mirror_gpu<RealType, IsMultiMaterial>(states, geom, target_x, target_y, target_z, xmin, ymin, zmin, dx);
         data[out_idx] = get_value_by_qty_struct<RealType, IsMultiMaterial>(sC, qty_id);
+    }
+}
+
+template <typename RealType, bool IsMultiMaterial>
+__global__ void extract_bulk_snapshot_kernel(
+    const PrimitiveTile3D<RealType, IsMultiMaterial>* __restrict__ states,
+    const GeometryTile3D* __restrict__ geom,
+    float* __restrict__ out_p,
+    float* __restrict__ out_rho,
+    float* __restrict__ out_overp,
+    float* __restrict__ out_imp,
+    float* __restrict__ out_solid,
+    float* __restrict__ out_vel,
+    float* __restrict__ out_E,
+    float* __restrict__ out_alpha1,
+    float* __restrict__ out_alpha2,
+    float* __restrict__ out_air,
+    int nx, int ny, int nz,
+    RealType gamma,
+    bool need_vel,
+    bool need_E,
+    bool need_species)
+{
+    int gx = blockIdx.x * blockDim.x + threadIdx.x;
+    int gy = blockIdx.y * blockDim.y + threadIdx.y;
+    int gz = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if (gx >= nx || gy >= ny || gz >= nz) return;
+
+    int ttx = (nx + 7) / 8;
+    int tty = (ny + 7) / 8;
+    int tx = gx / 8;
+    int ty = gy / 8;
+    int tz = gz / 8;
+    int t_idx = tx + ty * ttx + tz * ttx * tty;
+    int cx = gx % 8;
+    int cy = gy % 8;
+    int cz = gz % 8;
+    int c_idx = cx + cy * 8 + cz * 64;
+    size_t lin_idx = (size_t)gx + (size_t)gy * nx + (size_t)gz * nx * ny;
+
+    const auto& tile = states[t_idx];
+
+    out_p[lin_idx] = (float)tile.p[c_idx];
+    out_rho[lin_idx] = (float)tile.rho[c_idx];
+    out_overp[lin_idx] = (float)tile.peak_overpressure[c_idx];
+    out_imp[lin_idx] = (float)tile.peak_impulse[c_idx];
+
+    if (out_solid != nullptr) {
+        if (geom != nullptr) {
+            out_solid[lin_idx] = geom[t_idx].cells[c_idx].is_boundary ? 1.0f : 0.0f;
+        } else {
+            out_solid[lin_idx] = 0.0f;
+        }
+    }
+
+    if (need_vel && out_vel != nullptr) {
+        RealType ux = tile.ux[c_idx];
+        RealType uy = tile.uy[c_idx];
+        RealType uz = tile.uz[c_idx];
+        out_vel[lin_idx] = (float)sqrt((double)(ux * ux + uy * uy + uz * uz));
+    }
+
+    if (need_E && out_E != nullptr) {
+        RealType ux = tile.ux[c_idx];
+        RealType uy = tile.uy[c_idx];
+        RealType uz = tile.uz[c_idx];
+        RealType ke = (RealType)0.5 * tile.rho[c_idx] * (ux * ux + uy * uy + uz * uz);
+        RealType total_E;
+        if constexpr (IsMultiMaterial) {
+            total_E = MultiMat::getMixtureEnergy<RealType>(tile.p[c_idx], tile.rho[c_idx], tile.alpha1[c_idx], tile.alpha2[c_idx], tile.arho1[c_idx], tile.arho2[c_idx], gamma, d_products, d_unreacted) + ke;
+        } else {
+            total_E = tile.p[c_idx] / (gamma - (RealType)1.0) + ke;
+        }
+        out_E[lin_idx] = (float)(total_E / max((RealType)1e-6, tile.rho[c_idx]));
+    }
+
+    if (need_species) {
+        if constexpr (IsMultiMaterial) {
+            if (out_alpha1 != nullptr) out_alpha1[lin_idx] = (float)tile.alpha1[c_idx];
+            if (out_alpha2 != nullptr) out_alpha2[lin_idx] = (float)tile.alpha2[c_idx];
+            if (out_air != nullptr) out_air[lin_idx] = (float)(1.0 - tile.alpha1[c_idx] - tile.alpha2[c_idx]);
+        } else {
+            if (out_alpha1 != nullptr) out_alpha1[lin_idx] = 0.0f;
+            if (out_alpha2 != nullptr) out_alpha2[lin_idx] = 0.0f;
+            if (out_air != nullptr) out_air[lin_idx] = 1.0f;
+        }
     }
 }
 
@@ -4112,9 +4205,13 @@ std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::getCellValues(int
     }
 
     if (d_geom != nullptr) {
-        GeometryTile3D cached_geom_tile;
-        CHECK_CUDA(cudaMemcpy(&cached_geom_tile, (const GeometryTile3D*)d_geom + t_idx, sizeof(GeometryTile3D), cudaMemcpyDeviceToHost));
-        vals[7] = cached_geom_tile.cells[c_idx].is_boundary ? 1.0f : 0.0f;
+        if (!global_geometry_tiles.empty() && t_idx >= 0 && t_idx < (int)global_geometry_tiles.size()) {
+            vals[7] = global_geometry_tiles[t_idx].cells[c_idx].is_boundary ? 1.0f : 0.0f;
+        } else {
+            GeometryTile3D cached_geom_tile;
+            CHECK_CUDA(cudaMemcpy(&cached_geom_tile, (const GeometryTile3D*)d_geom + t_idx, sizeof(GeometryTile3D), cudaMemcpyDeviceToHost));
+            vals[7] = cached_geom_tile.cells[c_idx].is_boundary ? 1.0f : 0.0f;
+        }
     }
     vals[8] = (float)cached_tile.peak_overpressure[c_idx];
     vals[9] = (float)cached_tile.peak_impulse[c_idx];
@@ -4157,10 +4254,10 @@ std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::extractSlice(cons
     if (qty == "density" || qty == "rho") qty_id = 1;
     else if (qty == "velocity" || qty == "speed") qty_id = 2;
     else if (qty == "energy" || qty == "internal_energy") qty_id = 3;
-    else if (qty == "species1" || qty == "alpha1") qty_id = 4;
-    else if (qty == "species2" || qty == "alpha2") qty_id = 5;
-    else if (qty == "species3") qty_id = 6;
-    else if (qty == "solid") qty_id = 7;
+    else if (qty == "species1" || qty == "alpha1" || qty == "species_1" || qty == "species" || qty == "products" || qty == "detonation_products" || qty == "detonation" || qty == "reacted" || qty == "reacted_gas" || qty == "he_products" || qty == "alpha_1") qty_id = 4;
+    else if (qty == "species2" || qty == "alpha2" || qty == "species_2" || qty == "unreacted" || qty == "unreacted_solid" || qty == "solid_he" || qty == "solid_explosive" || qty == "he_solid" || qty == "alpha_2") qty_id = 5;
+    else if (qty == "species3" || qty == "species_3" || qty == "air" || qty == "ambient_air" || qty == "alpha3" || qty == "alpha_3") qty_id = 6;
+    else if (qty == "solid" || qty == "solid_cells") qty_id = 7;
     else if (qty == "overpressure" || qty == "peak_overpressure") qty_id = 8;
     else if (qty == "impulse" || qty == "peak_impulse") qty_id = 9;
 
@@ -4283,6 +4380,101 @@ std::vector<SlicePayload3D> CFDSolver3DCuda<RealType, IsMultiMaterial>::extractA
 
     results.push_back(std::move(parent_sp));
     return results;
+}
+
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DCuda<RealType, IsMultiMaterial>::captureBulkSnapshot(CFDBulkSnapshot3D& out_snap, bool need_vel, bool need_E, bool need_species) const {
+    ensure_paged_in();
+    bind_constants();
+
+    size_t N = (size_t)nx * ny * nz;
+    out_snap.nx = nx; out_snap.ny = ny; out_snap.nz = nz;
+    out_snap.cellSize = cellSize;
+    out_snap.xmin = xmin; out_snap.ymin = ymin; out_snap.zmin = zmin;
+    out_snap.has_vel = need_vel;
+    out_snap.has_E = need_E;
+    out_snap.has_species = need_species;
+
+    out_snap.p.resize(N);
+    out_snap.rho.resize(N);
+    out_snap.overpressure.resize(N);
+    out_snap.impulse.resize(N);
+    out_snap.solid.resize(N);
+    if (need_vel) out_snap.vel.resize(N);
+    if (need_E) out_snap.E.resize(N);
+    if (need_species) {
+        out_snap.alpha1.resize(N);
+        out_snap.alpha2.resize(N);
+        out_snap.air.resize(N);
+    }
+
+    int num_channels = 5 + (need_vel ? 1 : 0) + (need_E ? 1 : 0) + (need_species ? 3 : 0);
+    size_t required_bytes = (size_t)num_channels * N * sizeof(float);
+
+    if (d_slice_buf_capacity < required_bytes) {
+        if (d_slice_buf) cudaFree(d_slice_buf);
+        d_slice_buf_capacity = std::max(required_bytes * 2, static_cast<size_t>(1024 * 1024 * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&d_slice_buf, d_slice_buf_capacity));
+    }
+
+    float* d_base = (float*)d_slice_buf;
+    float* d_p = d_base + 0 * N;
+    float* d_rho = d_base + 1 * N;
+    float* d_overp = d_base + 2 * N;
+    float* d_imp = d_base + 3 * N;
+    float* d_solid = d_base + 4 * N;
+    size_t curr_ch = 5;
+    float* d_vel = nullptr;
+    if (need_vel) { d_vel = d_base + curr_ch * N; curr_ch++; }
+    float* d_E = nullptr;
+    if (need_E) { d_E = d_base + curr_ch * N; curr_ch++; }
+    float* d_alpha1 = nullptr;
+    float* d_alpha2 = nullptr;
+    float* d_air = nullptr;
+    if (need_species) {
+        d_alpha1 = d_base + curr_ch * N; curr_ch++;
+        d_alpha2 = d_base + curr_ch * N; curr_ch++;
+        d_air = d_base + curr_ch * N; curr_ch++;
+    }
+
+    dim3 threads(8, 8, 8);
+    dim3 blocks((nx + 7) / 8, (ny + 7) / 8, (nz + 7) / 8);
+
+    extract_bulk_snapshot_kernel<RealType, IsMultiMaterial><<<blocks, threads>>>(
+        (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+        (const GeometryTile3D*)d_geom,
+        d_p, d_rho, d_overp, d_imp, d_solid,
+        d_vel, d_E, d_alpha1, d_alpha2, d_air,
+        nx, ny, nz,
+        (RealType)gamma,
+        need_vel, need_E, need_species
+    );
+
+    std::vector<float> h_raw_buf(num_channels * N);
+    CHECK_CUDA(cudaMemcpy(h_raw_buf.data(), d_base, required_bytes, cudaMemcpyDeviceToHost));
+
+    std::memcpy(out_snap.p.data(), h_raw_buf.data() + 0 * N, N * sizeof(float));
+    std::memcpy(out_snap.rho.data(), h_raw_buf.data() + 1 * N, N * sizeof(float));
+    std::memcpy(out_snap.overpressure.data(), h_raw_buf.data() + 2 * N, N * sizeof(float));
+    std::memcpy(out_snap.impulse.data(), h_raw_buf.data() + 3 * N, N * sizeof(float));
+    std::memcpy(out_snap.solid.data(), h_raw_buf.data() + 4 * N, N * sizeof(float));
+    size_t h_ch = 5;
+    if (need_vel) {
+        std::memcpy(out_snap.vel.data(), h_raw_buf.data() + h_ch * N, N * sizeof(float));
+        h_ch++;
+    }
+    if (need_E) {
+        std::memcpy(out_snap.E.data(), h_raw_buf.data() + h_ch * N, N * sizeof(float));
+        h_ch++;
+    }
+    if (need_species) {
+        std::memcpy(out_snap.alpha1.data(), h_raw_buf.data() + h_ch * N, N * sizeof(float));
+        h_ch++;
+        std::memcpy(out_snap.alpha2.data(), h_raw_buf.data() + h_ch * N, N * sizeof(float));
+        h_ch++;
+        std::memcpy(out_snap.air.data(), h_raw_buf.data() + h_ch * N, N * sizeof(float));
+        h_ch++;
+    }
 }
 
 template <typename RealType, bool IsMultiMaterial>

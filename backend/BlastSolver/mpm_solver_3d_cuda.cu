@@ -19,11 +19,12 @@ __device__ inline float computeWeibullFactor_dev(float x, float y, float z, floa
     seed = seed ^ (seed >> 4);
     seed *= 0x27d4eb2du;
     seed = seed ^ (seed >> 15);
-    float u = fminf(fmaxf(static_cast<float>(seed & 0xFFFFu) / 65535.0f, 0.005f), 0.995f);
+    float u = fminf(fmaxf(static_cast<float>(seed & 0xFFFFu) / 65535.0f, 0.001f), 0.999f);
     float m_w = weibull_modulus;
     float eta_w = (weibull_scale > 0.001f) ? weibull_scale : 1.0f;
-    float w = powf(-logf(1.0f - u), 1.0f / m_w) * eta_w;
-    return fminf(fmaxf(w, 0.20f), 2.50f);
+    float gamma_mean = tgammaf(1.0f + 1.0f / m_w);
+    float w = (powf(-logf(1.0f - u), 1.0f / m_w) / gamma_mean) * eta_w;
+    return fminf(fmaxf(w, 0.10f), 3.00f);
 }
 
 // CUDA Device Helper Functions
@@ -1672,7 +1673,7 @@ __global__ void kernel_stress_update_3d(MPMParticle3DSoA soa, int num_particles,
 
     // --- Johnson-Cook Plasticity + Mie-Grüneisen Shock EOS Model ---
     if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen) {
-        float w_factor = (soa.weibull_factor && soa.weibull_factor[p_idx] > 0.001f) ? soa.weibull_factor[p_idx] : 1.0f;
+        float w_factor = (mat.enable_heterogeneity && soa.weibull_factor && soa.weibull_factor[p_idx] > 0.001f) ? soa.weibull_factor[p_idx] : 1.0f;
 
         const float J = V_p / (V0_p > 1.0e-20f ? V0_p : 1.0e-20f);
         const float mu_vol = (1.0f - J) / J;
@@ -1727,11 +1728,8 @@ __global__ void kernel_stress_update_3d(MPMParticle3DSoA soa, int num_particles,
                 s_s += s_trial[r][c] * s_trial[r][c];
         const float q_trial = sqrtf(1.5f * s_s);
 
-        float double_contraction = 0.0f;
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c)
-                double_contraction += deps_dev[r][c] * deps_dev[r][c];
-        float deps_eq = sqrtf((2.0f / 3.0f) * double_contraction);
+        float deps_eq = sqrtf(fmaxf(0.0f, (2.0f / 3.0f) * (deps_dev[0][0]*deps_dev[0][0] + deps_dev[1][1]*deps_dev[1][1] + deps_dev[2][2]*deps_dev[2][2] +
+                              2.0f * (deps_dev[0][1]*deps_dev[0][1] + deps_dev[0][2]*deps_dev[0][2] + deps_dev[1][2]*deps_dev[1][2]))));
         float ep_dot_star = fmaxf(1.0f, deps_eq / (dt > 1e-12f ? dt : 1e-12f));
         float T_star = fminf(fmaxf((temperature_p - mat.T_room) / (mat.T_melt > mat.T_room ? mat.T_melt - mat.T_room : 1.0f), 0.0f), 1.0f);
 
@@ -1740,8 +1738,19 @@ __global__ void kernel_stress_update_3d(MPMParticle3DSoA soa, int num_particles,
         float term_temp   = 1.0f - powf(T_star, mat.jc_m);
         if (term_temp < 0.0f) term_temp = 0.0f;
 
+        float aniso_factor = 1.0f;
+        if (mat.enable_anisotropy && fabsf(mat.anisotropy_ratio - 1.0f) > 0.001f) {
+            float ax = mat.anisotropy_dir[0], ay = mat.anisotropy_dir[1], az = mat.anisotropy_dir[2];
+            float sigma_a = ax * (s_trial[0][0]*ax + s_trial[0][1]*ay + s_trial[0][2]*az) +
+                            ay * (s_trial[1][0]*ax + s_trial[1][1]*ay + s_trial[1][2]*az) +
+                            az * (s_trial[2][0]*ax + s_trial[2][1]*ay + s_trial[2][2]*az);
+            float q_norm = (q_trial > 1e-12f) ? q_trial : 1.0f;
+            float xi = fminf(fmaxf(fabsf(sigma_a) / q_norm, 0.0f), 1.0f);
+            aniso_factor = 1.0f + (mat.anisotropy_ratio - 1.0f) * (1.0f - xi * xi);
+        }
+
         float soft_damage = fminf(fmaxf(1.0f - damage_p, 0.05f), 1.0f);
-        float jc_yield = term_strain * term_rate * term_temp * soft_damage;
+        float jc_yield = term_strain * term_rate * term_temp * soft_damage * aniso_factor * w_factor;
         if (T_star >= 1.0f) jc_yield = 0.0f;
 
         float H_jc = (mat.jc_n > 0.0f && ep_bar_p > 1.0e-6f)
@@ -1775,8 +1784,8 @@ __global__ void kernel_stress_update_3d(MPMParticle3DSoA soa, int num_particles,
             soa.temperature[p_idx] = temperature_p;
         }
 
-        const float fail_strain_base = ((mat.erosion_strain > 0.0f) ? mat.erosion_strain : mat.failure_strain) * w_factor;
-        const float tensile_fail_base = ((mat.erosion_stress > 0.0f) ? mat.erosion_stress : mat.tensile_failure_stress) * w_factor;
+        const float fail_strain_base = ((mat.erosion_strain > 0.0f) ? mat.erosion_strain : mat.failure_strain) * w_factor * aniso_factor;
+        const float tensile_fail_base = ((mat.erosion_stress > 0.0f) ? mat.erosion_stress : mat.tensile_failure_stress) * w_factor * aniso_factor;
 
         float d_plastic = 0.0f;
         if (mat.enable_strain_erosion && fail_strain_base > 0.0f) {
@@ -1865,6 +1874,7 @@ __global__ void kernel_stress_update_3d(MPMParticle3DSoA soa, int num_particles,
             deps_norm += deps[r][c] * deps[r][c];
     float ep_dot = sqrtf((2.0f / 3.0f) * deps_norm) / (dt > 1.0e-12f ? dt : 1.0e-12f);
     float lambda_p = soa.lambda ? soa.lambda[p_idx] : 0.0f;
+    float w_factor = (mat.enable_heterogeneity && soa.weibull_factor && soa.weibull_factor[p_idx] > 0.001f) ? soa.weibull_factor[p_idx] : 1.0f;
 
     if (mat.material_model == MPMMaterialModel::RHTConcrete) {
         RHTStateVariables<float> rht_state;
@@ -1873,7 +1883,7 @@ __global__ void kernel_stress_update_3d(MPMParticle3DSoA soa, int num_particles,
         rht_state.p_hydro = press;
         updateRHTStress<float>(
             s, press, tr_deps, dt, char_len_p, ep_dot,
-            mat.fc, mat.ft, mu, K_bulk,
+            mat.fc * w_factor, mat.ft * w_factor, mu, K_bulk,
             mat.G_f, mat.moisture_content,
             mat.rht_A, mat.rht_N,
             mat.rht_B, mat.rht_M,
@@ -1903,7 +1913,7 @@ __global__ void kernel_stress_update_3d(MPMParticle3DSoA soa, int num_particles,
         kc_state.p_hydro = press;
         updateKCStress<float>(
             s, press, tr_deps, dt, char_len_p, ep_dot,
-            mat.fc, mat.ft, mu, K_bulk,
+            mat.fc * w_factor, mat.ft * w_factor, mu, K_bulk,
             mat.G_f, mat.moisture_content,
             mat.kc_auto_generate,
             mat.kc_a0, mat.kc_a1, mat.kc_a2,
@@ -1933,10 +1943,10 @@ __global__ void kernel_stress_update_3d(MPMParticle3DSoA soa, int num_particles,
         cscm_state.p_hydro = press;
         updateCSCMStress<float>(
             s, press, tr_deps, dt, char_len_p, ep_dot,
-            mat.fc, mat.ft, mu, K_bulk,
+            mat.fc * w_factor, mat.ft * w_factor, mu, K_bulk,
             mat.G_f,
-            mat.cscm_alpha, mat.cscm_theta,
-            mat.cscm_lambda, mat.cscm_beta,
+            mat.cscm_alpha * w_factor, mat.cscm_theta,
+            mat.cscm_lambda * w_factor, mat.cscm_beta,
             mat.cscm_R, mat.cscm_X0,
             mat.cscm_W, mat.cscm_D1,
             mat.cscm_D2,
@@ -1957,21 +1967,32 @@ __global__ void kernel_stress_update_3d(MPMParticle3DSoA soa, int num_particles,
             }
     } else {
         // Default Hypoelastic J2 Elastoplasticity with Weibull flaw scatter & plastic damage softening
-        float w_factor = (soa.weibull_factor && soa.weibull_factor[p_idx] > 0.001f) ? soa.weibull_factor[p_idx] : 1.0f;
-        if (w_factor <= 0.001f && mat.weibull_modulus > 0.001f) {
+        float w_factor = (mat.enable_heterogeneity && soa.weibull_factor && soa.weibull_factor[p_idx] > 0.001f) ? soa.weibull_factor[p_idx] : 1.0f;
+        if (mat.enable_heterogeneity && w_factor <= 0.001f && mat.weibull_modulus > 0.001f) {
             w_factor = computeWeibullFactor_dev(soa.x[0][p_idx], soa.x[1][p_idx], soa.x[2][p_idx], mat.weibull_modulus, mat.weibull_scale);
             soa.weibull_factor[p_idx] = w_factor;
         }
-        const float yield_base = mat.yield_stress * w_factor;
-        const float fail_strain_base = ((mat.erosion_strain > 0.0f) ? mat.erosion_strain : mat.failure_strain) * w_factor;
-        const float soft_factor = fminf(fmaxf(1.0f - 0.70f * damage_p, 0.10f), 1.0f);
-        const float yield_eff = yield_base * soft_factor + mat.hardening_modulus * ep_bar_p;
 
         float s_s = 0.0f;
         for (int r = 0; r < 3; ++r)
             for (int c = 0; c < 3; ++c)
                 s_s += s[r][c] * s[r][c];
-        const float q_trial   = sqrtf(1.5f * s_s);
+        const float q_trial = sqrtf(1.5f * s_s);
+
+        float aniso_factor = 1.0f;
+        if (mat.enable_anisotropy && fabsf(mat.anisotropy_ratio - 1.0f) > 0.001f) {
+            float ax = mat.anisotropy_dir[0], ay = mat.anisotropy_dir[1], az = mat.anisotropy_dir[2];
+            float sigma_a = ax * (s[0][0]*ax + s[0][1]*ay + s[0][2]*az) +
+                            ay * (s[1][0]*ax + s[1][1]*ay + s[1][2]*az) +
+                            az * (s[2][0]*ax + s[2][1]*ay + s[2][2]*az);
+            float q_norm = (q_trial > 1e-12f) ? q_trial : 1.0f;
+            float xi = fminf(fmaxf(fabsf(sigma_a) / q_norm, 0.0f), 1.0f);
+            aniso_factor = 1.0f + (mat.anisotropy_ratio - 1.0f) * (1.0f - xi * xi);
+        }
+        const float yield_base = mat.yield_stress * w_factor;
+        const float fail_strain_base = ((mat.erosion_strain > 0.0f) ? mat.erosion_strain : mat.failure_strain) * w_factor * aniso_factor;
+        const float soft_factor = fminf(fmaxf(1.0f - 0.70f * damage_p, 0.10f), 1.0f);
+        const float yield_eff = (yield_base * soft_factor + mat.hardening_modulus * ep_bar_p) * aniso_factor;
         const float yield_surf = q_trial - yield_eff;
 
         if (q_trial > 1.0e-5f && yield_surf > 0.0f) {
@@ -1997,7 +2018,7 @@ __global__ void kernel_stress_update_3d(MPMParticle3DSoA soa, int num_particles,
 
         float d_tensile = 0.0f;
         if (mat.enable_stress_erosion) {
-            float fail_stress = ((mat.erosion_stress > 0.0f) ? mat.erosion_stress : mat.tensile_failure_stress) * w_factor;
+            float fail_stress = ((mat.erosion_stress > 0.0f) ? mat.erosion_stress : mat.tensile_failure_stress) * w_factor * aniso_factor;
             float s00 = soa.sigma[0][0][p_idx], s11 = soa.sigma[1][1][p_idx], s22 = soa.sigma[2][2][p_idx];
             const float curr_press    = -(s00 + s11 + s22) / 3.0f;
             const float tensile_stress = -curr_press;
@@ -3256,6 +3277,19 @@ void MPMSolver3DCUDA::extractSliceToHost(std::vector<float>& out_slice, const st
 
     out_slice.resize(slice_elements);
     cudaMemcpy(out_slice.data(), d_telemetry_slice_buf, slice_elements * sizeof(float), cudaMemcpyDeviceToHost);
+}
+
+void MPMSolver3DCUDA::initMaterialHeterogeneity(int obj_id) {
+    if (!m_host_particles.empty() && d_soa_buffer && !m_device_dirty) {
+        syncParticlesToHost();
+    }
+    Blast::MPMSolver3D cpu_temp;
+    cpu_temp.getMaterialTables() = m_material_tables;
+    cpu_temp.getParticles() = std::move(m_host_particles);
+    cpu_temp.initMaterialHeterogeneity(obj_id);
+    m_host_particles = std::move(cpu_temp.getParticles());
+    m_device_dirty = true;
+    syncToDevice();
 }
 
 void MPMSolver3DCUDA::seedMottGradyFragments(int obj_id) {
